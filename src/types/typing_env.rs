@@ -16,19 +16,19 @@ use crate::{
     hir::function::{FunctionDefinition, ResolvedArgPassing},
     module::{
         FunctionId, ImportFunctionSlot, ImportFunctionSlotId, ImportFunctionTarget, LocalDecl,
-        LocalDeclId, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleId, TypeDefLookupResult,
-        id::Id,
+        LocalDeclId, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleId, TraitId,
+        TypeDefLookupResult, id::Id,
     },
     std::{STD_MODULE_ID, array::array_type as std_array_type},
-    types::r#trait::{TraitMethodIndex, TraitRef},
+    types::r#trait::TraitMethodIndex,
     types::r#type::{Type, TypeInstSubst, TypeVar},
 };
 
 use derive_new::new;
 
 /// A trait method description as result of a lookup in the typing environment.
-/// The tuple contains the trait reference, the method index in the trait, and the method definition.
-pub type TraitMethodDescription<'a> = (TraitRef, TraitMethodIndex, &'a FunctionDefinition);
+/// The tuple contains the trait id, the method index in the trait, and the method definition.
+pub type TraitMethodDescription<'a> = (TraitId, TraitMethodIndex, &'a FunctionDefinition);
 
 pub type GetFunctionData<'a> = (
     &'a FunctionDefinition,

@@ -78,7 +78,7 @@ impl FormatWith<ModuleEnv<'_>> for FunctionId {
                 write!(f, "imported function {module_name}::")?;
                 let function_name = match &slot.target {
                     ImportFunctionTarget::TraitImplMethod { key, index } => {
-                        let name = key.trait_ref().method(*index).0;
+                        let name = env.trait_def(key.trait_id()).method(*index).0;
                         let imp = env
                             .modules
                             .get(module_id)
@@ -418,7 +418,11 @@ impl ModuleFunction {
         f: &mut std::fmt::Formatter,
         env: &ModuleEnv<'_>,
     ) -> std::fmt::Result {
-        let requirements = self.definition.ty_scheme.extra_parameters().requirements;
+        let requirements = self
+            .definition
+            .ty_scheme
+            .extra_parameters(*env)
+            .requirements;
         let requirement_count = requirements.len();
         if requirement_count > 0 {
             writeln!(

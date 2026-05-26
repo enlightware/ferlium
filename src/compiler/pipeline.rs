@@ -158,7 +158,10 @@ pub(crate) fn compile_with_source_id(
         Ok(result) => result,
         Err(error) => {
             // Resolve types in the error, to provide better error messages.
-            let module = new_module_using_std(module_id);
+            let mut module = new_module_using_std(module_id);
+            if let Ok((module_ast, _, arena)) = parse_module_and_expr(src_code, source_id, false) {
+                let _ = module_ast.desugar(&mut module, modules, &arena);
+            }
             let env = ModuleEnv::new(&module, modules);
             let error = CompilationError::resolve_types(error, &env, source_table);
             let path_for_new = module_ref.into_path();

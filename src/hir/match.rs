@@ -16,7 +16,7 @@ use crate::{
         LocalDecl, LocalDeclId, LocalFrameSlot, ProjectionIndex, TypeDefId, TypeDefLookupResult,
         id::Id,
     },
-    std::core::REPR_TRAIT,
+    std::core_traits_names::REPR_TRAIT_NAME,
     types::mutability::MutVal,
     types::r#type::TypeKind,
 };
@@ -86,7 +86,7 @@ impl TypeInference {
         // Generate a repr projection to get a condition_node.ty: Repr<Is = U> type
         let pattern_ty = self.fresh_type_var_ty(); // U
         self.add_pub_constraint(PubTypeConstraint::new_have_trait(
-            REPR_TRAIT.clone(),
+            env.module_env.expect_std_trait_id(REPR_TRAIT_NAME),
             vec![condition_node.ty],
             vec![pattern_ty],
             condition_node.span,

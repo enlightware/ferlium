@@ -6,12 +6,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use std::{
-    fmt::{self, Debug},
-    hash::{Hash, Hasher},
-    ops::Deref,
-    sync::Arc,
-};
+use std::fmt::{self, Debug};
 
 use crate::{FxHashMap, FxHashSet, define_id_type};
 
@@ -27,7 +22,7 @@ use crate::{
     },
     format::{FormatWith, write_with_separator_and_format_fn},
     hir::function::FunctionDefinition,
-    module::{ModuleEnv, ModuleId, TraitImplId, id::Id},
+    module::{ModuleEnv, TraitId, TraitImplId, id::Id},
     types::trait_solver::TraitSolver,
     types::r#type::{Type, TypeInstSubst, TypeVar},
     types::type_like::TypeLike,
@@ -44,7 +39,7 @@ pub trait Deriver: Debug + DynClone + Sync + Send {
     /// Derive an implementation of a trait for the given input types, if possible.
     fn derive_impl(
         &self,
-        trait_ref: &TraitRef,
+        trait_id: TraitId,
         input_types: &[Type],
         span: Location,
         arena: &mut crate::hir::NodeArena,
@@ -122,8 +117,6 @@ pub enum TraitImplPolicy {
 
 #[derive(Debug, Clone)]
 pub struct Trait {
-    /// Module where this trait is defined, when known.
-    pub(crate) module_id: Option<ModuleId>,
     /// Name of the trait, for debugging purposes.
     pub name: Ustr,
     /// Optional documentation for the trait.
@@ -171,6 +164,117 @@ impl TraitValidationError {
 }
 
 impl Trait {
+    pub fn from_trait_data(trait_data: Trait) -> Result<Self, TraitValidationError> {
+        if trait_data.input_type_names.is_empty() {
+            return Err(TraitValidationError::Invalid {
+                trait_name: trait_data.name,
+                kind: InvalidTraitDefinitionKind::MissingInputTypes,
+            });
+        }
+        trait_data.try_validate()?;
+        Ok(trait_data)
+    }
+
+    pub fn new<'a>(
+        name: &str,
+        doc: &str,
+        input_type_names: impl Into<Vec<&'a str>>,
+        output_type_names: impl Into<Vec<&'a str>>,
+        methods: impl Into<Vec<(&'a str, FunctionDefinition)>>,
+    ) -> Self {
+        let input_type_names = input_type_names.into();
+        assert!(
+            !input_type_names.is_empty(),
+            "A trait must have at least one input type."
+        );
+        let methods = methods
+            .into()
+            .into_iter()
+            .map(|(name, def)| (ustr(name), def))
+            .collect();
+        let trait_data = Trait {
+            name: ustr(name),
+            doc: Some(doc.to_string()),
+            input_type_names: input_type_names.into_iter().map(ustr).collect(),
+            output_type_names: output_type_names.into().into_iter().map(ustr).collect(),
+            parent_constraints: Vec::new(),
+            constraints: Vec::new(),
+            methods,
+            associated_consts: Vec::new(),
+            derivers: Vec::new(),
+            impl_policy: TraitImplPolicy::UserImplementable,
+            spans: None,
+        };
+        Self::from_trait_data(trait_data).unwrap()
+    }
+
+    pub fn new_with_self_input_type<'a>(
+        name: &str,
+        doc: &str,
+        output_type_names: impl Into<Vec<&'a str>>,
+        methods: impl Into<Vec<(&'a str, FunctionDefinition)>>,
+    ) -> Self {
+        Self::new(name, doc, ["Self"], output_type_names, methods)
+    }
+
+    pub fn new_with_constraints<'a>(
+        name: &str,
+        doc: &str,
+        input_type_names: impl Into<Vec<&'a str>>,
+        output_type_names: impl Into<Vec<&'a str>>,
+        constraints: impl Into<Vec<PubTypeConstraint>>,
+        methods: impl Into<Vec<(&'a str, FunctionDefinition)>>,
+    ) -> Self {
+        let input_type_names = input_type_names.into();
+        assert!(
+            !input_type_names.is_empty(),
+            "A trait must have at least one input type."
+        );
+        let methods = methods
+            .into()
+            .into_iter()
+            .map(|(name, def)| (ustr(name), def))
+            .collect();
+        let trait_data = Trait {
+            name: ustr(name),
+            doc: Some(doc.to_string()),
+            input_type_names: input_type_names.into_iter().map(ustr).collect(),
+            output_type_names: output_type_names.into().into_iter().map(ustr).collect(),
+            parent_constraints: Vec::new(),
+            constraints: constraints.into(),
+            methods,
+            associated_consts: Vec::new(),
+            derivers: Vec::new(),
+            impl_policy: TraitImplPolicy::UserImplementable,
+            spans: None,
+        };
+        Self::from_trait_data(trait_data).unwrap()
+    }
+
+    pub fn with_associated_consts(
+        mut self,
+        associated_consts: impl Into<Vec<TraitAssociatedConst>>,
+    ) -> Self {
+        self.associated_consts = associated_consts.into();
+        self.validate();
+        self
+    }
+
+    pub fn with_native_impl_only(mut self) -> Self {
+        self.impl_policy = TraitImplPolicy::NativeOnly;
+        self
+    }
+
+    pub fn with_deriver(mut self, deriver: impl Deriver + 'static) -> Self {
+        self.derivers.push(Box::new(deriver));
+        self
+    }
+
+    pub fn with_derivers(mut self, derivers: Vec<Box<dyn Deriver + 'static>>) -> Self {
+        self.derivers = derivers;
+        self
+    }
+
     /// Return the number of input types in this trait.
     pub fn input_type_count(&self) -> u32 {
         self.input_type_names.len() as u32
@@ -430,10 +534,6 @@ impl Trait {
             .map(|(i, ty)| (TypeVar::new(i as u32), *ty))
             .collect::<FxHashMap<_, _>>()
     }
-
-    pub fn module_id(&self) -> Option<ModuleId> {
-        self.module_id
-    }
 }
 
 impl FormatWith<ModuleEnv<'_>> for Trait {
@@ -517,110 +617,55 @@ impl FormatWith<ModuleEnv<'_>> for Trait {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct TraitRef(pub(crate) Arc<Trait>);
+#[cfg(test)]
+mod tests {
+    use crate::{
+        types::{
+            effects::EffType,
+            r#type::{FnType, Type},
+        },
+        ustr,
+    };
 
-impl TraitRef {
-    pub fn from_trait_data(trait_data: Trait) -> Result<Self, TraitValidationError> {
-        if trait_data.input_type_names.is_empty() {
-            return Err(TraitValidationError::Invalid {
-                trait_name: trait_data.name,
-                kind: InvalidTraitDefinitionKind::MissingInputTypes,
-            });
-        }
-        trait_data.try_validate()?;
-        Ok(Self(Arc::new(trait_data)))
-    }
+    use super::*;
 
-    pub fn new<'a>(
-        name: &str,
-        doc: &str,
-        input_type_names: impl Into<Vec<&'a str>>,
-        output_type_names: impl Into<Vec<&'a str>>,
-        methods: impl Into<Vec<(&'a str, FunctionDefinition)>>,
-    ) -> Self {
-        let input_type_names = input_type_names.into();
-        assert!(
-            !input_type_names.is_empty(),
-            "A trait must have at least one input type."
+    #[test]
+    fn construct_multi_parameter_trait() {
+        let fn_ty = FnType::new_by_val(
+            [
+                Type::variable_id(0),
+                Type::variable_id(1),
+                Type::variable_id(2),
+            ],
+            Type::variable_id(3),
+            EffType::empty(),
         );
-        let methods = methods
-            .into()
-            .into_iter()
-            .map(|(name, def)| (ustr(name), def))
-            .collect();
-        let trait_data = Trait {
-            module_id: None,
-            name: ustr(name),
-            doc: Some(doc.to_string()),
-            input_type_names: input_type_names.into_iter().map(ustr).collect(),
-            output_type_names: output_type_names.into().into_iter().map(ustr).collect(),
-            parent_constraints: Vec::new(),
-            constraints: Vec::new(),
-            methods,
-            associated_consts: Vec::new(),
-            derivers: Vec::new(),
-            impl_policy: TraitImplPolicy::UserImplementable,
-            spans: None,
-        };
-        Self::from_trait_data(trait_data).unwrap()
-    }
-
-    pub fn new_with_self_input_type<'a>(
-        name: &str,
-        doc: &str,
-        output_type_names: impl Into<Vec<&'a str>>,
-        methods: impl Into<Vec<(&'a str, FunctionDefinition)>>,
-    ) -> Self {
-        Self::new(name, doc, ["Self"], output_type_names, methods)
-    }
-
-    pub fn new_with_constraints<'a>(
-        name: &str,
-        doc: &str,
-        input_type_names: impl Into<Vec<&'a str>>,
-        output_type_names: impl Into<Vec<&'a str>>,
-        constraints: impl Into<Vec<PubTypeConstraint>>,
-        methods: impl Into<Vec<(&'a str, FunctionDefinition)>>,
-    ) -> Self {
-        let input_type_names = input_type_names.into();
-        assert!(
-            !input_type_names.is_empty(),
-            "A trait must have at least one input type."
+        let trait_def = Trait::new(
+            "Add",
+            "Addition.",
+            ["Lhs", "Rhs", "Output"],
+            ["Result"],
+            [(
+                "add",
+                FunctionDefinition::new_infer_quantifiers(
+                    fn_ty,
+                    ["lhs", "rhs", "output"],
+                    "Add values.",
+                ),
+            )],
         );
-        let methods = methods
-            .into()
-            .into_iter()
-            .map(|(name, def)| (ustr(name), def))
-            .collect();
-        let trait_data = Trait {
-            module_id: None,
-            name: ustr(name),
-            doc: Some(doc.to_string()),
-            input_type_names: input_type_names.into_iter().map(ustr).collect(),
-            output_type_names: output_type_names.into().into_iter().map(ustr).collect(),
-            parent_constraints: Vec::new(),
-            constraints: constraints.into(),
-            methods,
-            associated_consts: Vec::new(),
-            derivers: Vec::new(),
-            impl_policy: TraitImplPolicy::UserImplementable,
-            spans: None,
-        };
-        Self::from_trait_data(trait_data).unwrap()
-    }
 
-    pub fn with_associated_consts(
-        mut self,
-        associated_consts: impl Into<Vec<TraitAssociatedConst>>,
-    ) -> Self {
-        Arc::get_mut(&mut self.0)
-            .expect("trait associated consts must be assigned before sharing the trait reference")
-            .associated_consts = associated_consts.into();
-        self.validate();
-        self
+        assert_eq!(trait_def.name, ustr("Add"));
+        assert_eq!(trait_def.input_type_count(), 3);
+        assert_eq!(trait_def.output_type_count(), 1);
+        assert_eq!(
+            trait_def.method_index(ustr("add")),
+            Some(TraitMethodIndex(0))
+        );
     }
+}
 
+impl Trait {
     pub fn validate_impl_size(&self, input_tys: &[Type], output_tys: &[Type], method_count: usize) {
         self.validate_impl_shape(input_tys, output_tys, 0, method_count)
     }
@@ -664,109 +709,4 @@ impl TraitRef {
             .as_ref()
             .map_or_else(Location::new_synthesized, |spans| spans.span)
     }
-
-    pub fn module_id(&self) -> Option<ModuleId> {
-        self.0.module_id()
-    }
-
-    /// Set the module_id of the trait, which is required before sharing the trait reference across threads.
-    pub fn with_module_id(mut self, module_id: ModuleId) -> Self {
-        Arc::get_mut(&mut self.0)
-            .expect("trait module id must be assigned before sharing the trait reference")
-            .module_id = Some(module_id);
-        self
-    }
-
-    pub fn with_native_impl_only(mut self) -> Self {
-        Arc::get_mut(&mut self.0)
-            .expect(
-                "trait implementation policy must be assigned before sharing the trait reference",
-            )
-            .impl_policy = TraitImplPolicy::NativeOnly;
-        self
-    }
-
-    /// Set the module_id of the trait and a deriver, which is required before sharing the trait reference across threads.
-    pub fn with_module_id_and_deriver(
-        mut self,
-        module_id: ModuleId,
-        deriver: impl Deriver + 'static,
-    ) -> Self {
-        let self_ref = Arc::get_mut(&mut self.0)
-            .expect("trait module id must be assigned before sharing the trait reference");
-        self_ref.module_id = Some(module_id);
-        self_ref.derivers.push(Box::new(deriver));
-        self
-    }
-
-    /// Set the module_id of the trait and derivers, which is required before sharing the trait reference across threads.
-    pub fn with_module_id_and_derivers(
-        mut self,
-        module_id: ModuleId,
-        derivers: Vec<Box<dyn Deriver + 'static>>,
-    ) -> Self {
-        let self_ref = Arc::get_mut(&mut self.0)
-            .expect("trait module id must be assigned before sharing the trait reference");
-        self_ref.module_id = Some(module_id);
-        self_ref.derivers = derivers;
-        self
-    }
-}
-
-impl Deref for TraitRef {
-    type Target = Trait;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl PartialEq for TraitRef {
-    fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
-    }
-}
-
-impl Eq for TraitRef {}
-
-impl Hash for TraitRef {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        std::ptr::hash(Arc::as_ptr(&self.0), state)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    // use std::vec;
-
-    // use crate::{
-    //     effects::EffType,
-    //     std::{
-    //         math::{float_type, int_type},
-    //         string::string_type,
-    //     }, r#type::FnType,
-    // };
-
-    // use super::*;
-
-    // fn trait_add() -> TraitRef {
-    //     let fn_ty = FnType::new_by_val(
-    //         &[Type::variable_id(0), Type::variable_id(1)],
-    //         Type::variable_id(2),
-    //         EffType::empty(),
-    //     );
-    //     TraitRef::new(
-    //         "Add",
-    //         2,
-    //         1,
-    //         [(
-    //             "add",
-    //             FunctionDefinition::new_infer_quantifiers(
-    //                 fn_ty,
-    //                 &["lhs", "rhs"],
-    //                 "test trait method add",
-    //             ),
-    //         )],
-    //     )
-    // }
 }

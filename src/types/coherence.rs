@@ -13,11 +13,11 @@ use crate::{
     hir::NodeArena,
     internal_compilation_error,
     module::{
-        BlanketTraitImplKey, BlanketTraitImplSubKey, ConcreteTraitImplKey, Module, ModuleId,
-        TraitImpl, TraitKey,
+        BlanketTraitImplKey, BlanketTraitImplSubKey, ConcreteTraitImplKey, Module, ModuleEnv,
+        ModuleId, TraitId, TraitImpl, TraitKey,
     },
-    std::value::{NO_DERIVE_VALUE_ATTRIBUTE, VALUE_TRAIT},
-    types::r#trait::{TraitImplPolicy, TraitRef},
+    std::value::{NO_DERIVE_VALUE_ATTRIBUTE, is_value_trait},
+    types::r#trait::TraitImplPolicy,
     types::trait_solver::TraitSolverProbe,
     types::r#type::{Type, TypeKind, TypeVar},
     types::type_inference::unify::{UnifiedTypeInference, UnifiedTypeInferenceSnapshot},
@@ -77,16 +77,18 @@ impl CoherenceTypeUnifier {
 pub(crate) fn check_trait_impl(
     current: &Module,
     others: &Modules,
-    trait_ref: &TraitRef,
+    trait_id: TraitId,
     trait_is_local: bool,
     input_tys: &[Type],
     ty_var_count: u32,
     constraints: &[PubTypeConstraint],
     span: Location,
 ) -> Result<(), InternalCompilationError> {
-    if trait_ref.impl_policy == TraitImplPolicy::NativeOnly {
+    let env = ModuleEnv::new(current, others);
+    let trait_def = env.trait_def(trait_id);
+    if trait_def.impl_policy == TraitImplPolicy::NativeOnly {
         return Err(internal_compilation_error!(TraitImplNativeOnly {
-            trait_ref: trait_ref.clone(),
+            trait_ref: trait_id,
             impl_span: span,
         }));
     }
@@ -103,17 +105,14 @@ pub(crate) fn check_trait_impl(
         ));
     }
 
-    if trait_ref == &*VALUE_TRAIT
-        && current.module_id()
-            != VALUE_TRAIT
-                .module_id()
-                .expect("Value trait must have a module")
+    if is_value_trait(trait_id, trait_def)
+        && current.module_id() != trait_id.module
         && !input_tys
             .iter()
             .any(|&ty| has_local_named_head(current, ty))
     {
         return Err(internal_compilation_error!(TraitImplOrphanRuleViolation {
-            trait_ref: trait_ref.clone(),
+            trait_ref: trait_id,
             input_tys: input_tys.to_vec(),
             impl_span: span,
         }));
@@ -125,31 +124,28 @@ pub(crate) fn check_trait_impl(
             .any(|&ty| has_local_named_head(current, ty))
     {
         return Err(internal_compilation_error!(TraitImplOrphanRuleViolation {
-            trait_ref: trait_ref.clone(),
+            trait_ref: trait_id,
             input_tys: input_tys.to_vec(),
             impl_span: span,
         }));
     }
 
     let new_key = if ty_var_count == 0 {
-        TraitKey::Concrete(ConcreteTraitImplKey::new(
-            trait_ref.clone(),
-            input_tys.to_vec(),
-        ))
+        TraitKey::Concrete(ConcreteTraitImplKey::new(trait_id, input_tys.to_vec()))
     } else {
         TraitKey::Blanket(BlanketTraitImplKey::new(
-            trait_ref.clone(),
+            trait_id,
             BlanketTraitImplSubKey::new(input_tys.to_vec(), ty_var_count, constraints.to_vec()),
         ))
     };
 
     for (key, imp, module_id) in iter_visible_impls(current, others) {
-        if key.trait_ref() != trait_ref {
+        if key.trait_id() != trait_id {
             continue;
         }
         if impls_overlap(current, others, &new_key, &key)? {
             return Err(internal_compilation_error!(OverlappingTraitImpls {
-                trait_ref: trait_ref.clone(),
+                trait_ref: trait_id,
                 input_tys: input_tys.to_vec(),
                 impl_span: span,
                 existing_impl: existing_impl_header(&key, imp, module_id),
@@ -194,10 +190,10 @@ fn iter_visible_impls<'a>(
         .impls
         .blanket()
         .iter()
-        .flat_map(|(trait_ref, blanket_impls)| {
+        .flat_map(|(trait_id, blanket_impls)| {
             blanket_impls.iter().map(|(sub_key, &id)| {
                 (
-                    TraitKey::Blanket(BlanketTraitImplKey::new(trait_ref.clone(), sub_key.clone())),
+                    TraitKey::Blanket(BlanketTraitImplKey::new(*trait_id, sub_key.clone())),
                     current.impls.get_impl_by_local_id(id),
                     None,
                 )
@@ -221,13 +217,10 @@ fn iter_visible_impls<'a>(
                 .impls
                 .blanket()
                 .iter()
-                .flat_map(move |(trait_ref, blanket_impls)| {
+                .flat_map(move |(trait_id, blanket_impls)| {
                     blanket_impls.iter().map(move |(sub_key, &id)| {
                         (
-                            TraitKey::Blanket(BlanketTraitImplKey::new(
-                                trait_ref.clone(),
-                                sub_key.clone(),
-                            )),
+                            TraitKey::Blanket(BlanketTraitImplKey::new(*trait_id, sub_key.clone())),
                             module.impls.get_impl_by_local_id(id),
                             Some(module_id),
                         )
@@ -291,7 +284,7 @@ fn blanket_matches_concrete(
         let mut still_remaining = Vec::new();
         for constraint_idx in remaining_indices {
             let constraint = &blanket.constraints[constraint_idx];
-            let (trait_ref, input_tys, output_tys, _) = ty_inf
+            let (trait_id, input_tys, output_tys, _) = ty_inf
                 .substitute_in_constraint(constraint)
                 .into_have_trait()
                 .expect("Non trait constraint in blanket impl");
@@ -300,7 +293,7 @@ fn blanket_matches_concrete(
                 continue;
             }
             let solved_output_tys: Vec<Type> =
-                match trait_solver.solve_output_types(&trait_ref, &input_tys, span, &mut arena) {
+                match trait_solver.solve_output_types(trait_id, &input_tys, span, &mut arena) {
                     Ok(tys) => tys,
                     Err(_) => return Ok(false),
                 };
@@ -370,7 +363,7 @@ fn constraints_may_be_satisfiable(
     ty_inf: &mut CoherenceTypeUnifier,
     mut pending: Vec<PubTypeConstraint>,
     next_ty_var_index: u32,
-    stack: &mut FxHashSet<(TraitRef, Vec<Type>, Vec<Type>)>,
+    stack: &mut FxHashSet<(TraitId, Vec<Type>, Vec<Type>)>,
 ) -> Result<bool, InternalCompilationError> {
     if pending.is_empty() {
         return Ok(true);
@@ -378,14 +371,14 @@ fn constraints_may_be_satisfiable(
 
     let constraint = pending.pop().unwrap();
     let constraint = ty_inf.substitute_in_constraint(&constraint);
-    let (trait_ref, input_tys, output_tys, _span) = constraint
+    let (trait_id, input_tys, output_tys, _span) = constraint
         .into_have_trait()
         .expect("Non trait constraint in blanket impl overlap check");
     if input_tys.iter().all(Type::is_constant) {
         let mut trait_solver = TraitSolverProbe::from_module(current, others);
         let mut arena = NodeArena::default();
         let solved_output_tys = match trait_solver.solve_output_types(
-            &trait_ref,
+            trait_id,
             &input_tys,
             Location::new_synthesized(),
             &mut arena,
@@ -423,7 +416,7 @@ fn constraints_may_be_satisfiable(
         pending,
         next_ty_var_index,
         stack,
-        &trait_ref,
+        trait_id,
         &input_tys,
         &output_tys,
     )
@@ -436,14 +429,16 @@ fn trait_constraint_may_be_satisfiable(
     ty_inf: &mut CoherenceTypeUnifier,
     pending: Vec<PubTypeConstraint>,
     next_ty_var_index: u32,
-    stack: &mut FxHashSet<(TraitRef, Vec<Type>, Vec<Type>)>,
-    trait_ref: &TraitRef,
+    stack: &mut FxHashSet<(TraitId, Vec<Type>, Vec<Type>)>,
+    trait_id: TraitId,
     input_tys: &[Type],
     output_tys: &[Type],
 ) -> Result<bool, InternalCompilationError> {
-    let derivers_enabled = !value_deriver_disabled_for_input(current, trait_ref, input_tys);
+    let derivers_enabled = !value_deriver_disabled_for_input(current, others, trait_id, input_tys);
+    let env = ModuleEnv::new(current, others);
+    let trait_def = env.trait_def(trait_id);
     if derivers_enabled
-        && !trait_ref.derivers.is_empty()
+        && !trait_def.derivers.is_empty()
         && !input_tys.iter().all(Type::is_constant)
     {
         return constraints_may_be_satisfiable(
@@ -456,13 +451,13 @@ fn trait_constraint_may_be_satisfiable(
         );
     }
 
-    let query = (trait_ref.clone(), input_tys.to_vec(), output_tys.to_vec());
+    let query = (trait_id, input_tys.to_vec(), output_tys.to_vec());
     if !stack.insert(query.clone()) {
         return Ok(true);
     }
 
     for (key, imp, _) in iter_visible_impls(current, others) {
-        if key.trait_ref() != trait_ref {
+        if key.trait_id() != trait_id {
             continue;
         }
 
@@ -501,7 +496,7 @@ fn trait_constraint_may_be_satisfiable(
     }
 
     stack.remove(&query);
-    if !derivers_enabled || trait_ref.derivers.is_empty() {
+    if !derivers_enabled || trait_def.derivers.is_empty() {
         Ok(false)
     } else {
         constraints_may_be_satisfiable(current, others, ty_inf, pending, next_ty_var_index, stack)
@@ -510,10 +505,12 @@ fn trait_constraint_may_be_satisfiable(
 
 fn value_deriver_disabled_for_input(
     current: &Module,
-    trait_ref: &TraitRef,
+    others: &Modules,
+    trait_id: TraitId,
     input_tys: &[Type],
 ) -> bool {
-    if trait_ref != &*VALUE_TRAIT || input_tys.len() != 1 {
+    let env = ModuleEnv::new(current, others);
+    if !is_value_trait(trait_id, env.trait_def(trait_id)) || input_tys.len() != 1 {
         return false;
     }
     let ty_data = input_tys[0].data();
@@ -535,7 +532,7 @@ fn concrete_impl_may_match_constraint(
     ty_inf: &mut CoherenceTypeUnifier,
     pending: Vec<PubTypeConstraint>,
     next_ty_var_index: u32,
-    stack: &mut FxHashSet<(TraitRef, Vec<Type>, Vec<Type>)>,
+    stack: &mut FxHashSet<(TraitId, Vec<Type>, Vec<Type>)>,
     key: &ConcreteTraitImplKey,
     imp: &TraitImpl,
     input_tys: &[Type],
@@ -568,7 +565,7 @@ fn blanket_impl_may_match_constraint(
     ty_inf: &mut CoherenceTypeUnifier,
     mut pending: Vec<PubTypeConstraint>,
     next_ty_var_index: u32,
-    stack: &mut FxHashSet<(TraitRef, Vec<Type>, Vec<Type>)>,
+    stack: &mut FxHashSet<(TraitId, Vec<Type>, Vec<Type>)>,
     key: &BlanketTraitImplKey,
     imp: &TraitImpl,
     input_tys: &[Type],

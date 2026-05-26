@@ -38,9 +38,9 @@ use crate::{
     parser::location::Location,
     std::{
         STD_MODULE_ID,
-        core::{REPR_TRAIT, TRIVIAL_COPY_TRAIT},
+        core_traits_names::{REPR_TRAIT_NAME, TRIVIAL_COPY_TRAIT_NAME, VALUE_TRAIT_NAME},
         math::int_type,
-        value::{VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX, VALUE_TRAIT},
+        value::{VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX, is_value_trait},
     },
     types::{
         effects::{
@@ -48,7 +48,7 @@ use crate::{
             no_effects,
         },
         mutability::{MutType, MutVar, MutVarKey},
-        r#trait::{TraitMethodIndex, TraitRef},
+        r#trait::{Trait, TraitMethodIndex},
         trait_solver::{TraitSolver, TraitSolverProbe},
         r#type::{FnArgType, FnType, TyVarKey, Type, TypeInstSubst, TypeKind, TypeVar},
         type_like::TypeLike,
@@ -58,14 +58,26 @@ use crate::{
     },
 };
 
+fn value_trait_id(env: &TypingEnv<'_>) -> crate::module::TraitId {
+    env.module_env.expect_std_trait_id(VALUE_TRAIT_NAME)
+}
+
+fn repr_trait_id(env: &TypingEnv<'_>) -> crate::module::TraitId {
+    env.module_env.expect_std_trait_id(REPR_TRAIT_NAME)
+}
+
 use super::{
     constraints::{EffectConstraint, MutConstraint, TypeConstraint},
     unify::UnifiedTypeInference,
 };
 
 /// Returns whether a trait method may only be called by compiler-generated HIR.
-fn is_compiler_callable_only_method(trait_ref: &TraitRef, method_index: TraitMethodIndex) -> bool {
-    trait_ref == &*VALUE_TRAIT
+fn is_compiler_callable_only_method(
+    trait_id: crate::module::TraitId,
+    trait_def: &Trait,
+    method_index: TraitMethodIndex,
+) -> bool {
+    is_value_trait(trait_id, trait_def)
         && matches!(
             method_index,
             VALUE_CLONE_METHOD_INDEX | VALUE_DROP_METHOD_INDEX
@@ -73,13 +85,14 @@ fn is_compiler_callable_only_method(trait_ref: &TraitRef, method_index: TraitMet
 }
 
 fn compiler_only_trait_method_use_error(
-    trait_ref: &TraitRef,
+    trait_id: crate::module::TraitId,
+    trait_def: &Trait,
     method_index: TraitMethodIndex,
     span: Location,
 ) -> InternalCompilationError {
     internal_compilation_error!(CompilerOnlyTraitMethodUse {
-        trait_ref: trait_ref.clone(),
-        method_name: trait_ref.method(method_index).0,
+        trait_ref: trait_id,
+        method_name: trait_def.method(method_index).0,
         span,
     })
 }
@@ -185,7 +198,7 @@ impl TypeInference {
         let type_def_data = module_env.type_def(type_def);
         let (payload_ty, _inst_data, subst) = type_def_data
             .payload_scheme(tag)
-            .instantiate_with_fresh_vars(self, use_site, None);
+            .instantiate_with_fresh_vars(self, use_site, None, *module_env);
         let params: Vec<_> = type_def_data
             .shape
             .ty_quantifiers
@@ -356,19 +369,22 @@ impl TypeInference {
             fn_node_id
         } else {
             let capture_env_ty = Type::tuple(capture_tys);
+            let value_trait_id = value_trait_id(env);
             self.add_pub_constraint(PubTypeConstraint::new_have_trait(
-                VALUE_TRAIT.clone(),
+                value_trait_id,
                 vec![capture_env_ty],
                 vec![],
                 span,
             ));
             let captures_value_dictionary = env.ir_arena.alloc(N::new(
                 K::GetTraitDictionary(b(hir::GetTraitDictionary {
-                    trait_ref: VALUE_TRAIT.clone(),
+                    trait_id: value_trait_id,
                     input_tys: vec![capture_env_ty],
                     output_tys: vec![],
                 })),
-                VALUE_TRAIT.get_dictionary_type_for_tys(&[capture_env_ty], &[]),
+                env.module_env
+                    .trait_def(value_trait_id)
+                    .get_dictionary_type_for_tys(&[capture_env_ty], &[]),
                 no_effects(),
                 span,
             ));
@@ -419,42 +435,48 @@ impl TypeInference {
                 else if let Some((_module_name, trait_descr)) =
                     env.module_env.get_trait_method(path)?
                 {
-                    let (trait_ref, method_index, definition) = trait_descr;
-                    if is_compiler_callable_only_method(&trait_ref, method_index) {
+                    let (trait_id, method_index, definition) = trait_descr;
+                    let trait_def = env.module_env.trait_def(trait_id);
+                    if is_compiler_callable_only_method(trait_id, trait_def, method_index) {
                         return Err(compiler_only_trait_method_use_error(
-                            &trait_ref,
+                            trait_id,
+                            trait_def,
                             method_index,
                             expr_span,
                         ));
                     }
+                    let trait_ty_var_count = trait_def.type_var_count();
+                    let trait_input_type_count = trait_def.input_type_count();
+                    let trait_constraints = trait_def.constraints.clone();
                     let (inst_fn_ty, inst_data, subst) =
                         definition.ty_scheme.instantiate_with_fresh_vars(
                             self,
                             expr_span,
-                            Some(trait_ref.type_var_count()),
+                            Some(trait_ty_var_count),
+                            env.module_env,
                         );
                     assert!(
                         inst_data.dicts_req.is_empty(),
                         "Instantiation data for trait method is not supported yet."
                     );
                     let mut mapper = BitmapInstantiationMapper::new(&subst);
-                    trait_ref.constraints.iter().for_each(|constraint| {
+                    trait_constraints.iter().for_each(|constraint| {
                         let mut constraint = constraint.map(&mut mapper);
                         constraint.instantiate_location(expr_span);
                         self.add_pub_constraint(constraint);
                     });
                     let mut trait_tys = continuous_hashmap_to_vec(subst.0).unwrap();
-                    assert_eq!(trait_tys.len(), trait_ref.type_var_count() as usize);
-                    let output_tys = trait_tys.split_off(trait_ref.input_type_count() as usize);
+                    assert_eq!(trait_tys.len(), trait_ty_var_count as usize);
+                    let output_tys = trait_tys.split_off(trait_input_type_count as usize);
                     let input_tys = trait_tys;
                     self.add_pub_constraint(PubTypeConstraint::new_have_trait(
-                        trait_ref.clone(),
+                        trait_id,
                         input_tys.clone(),
                         output_tys.clone(),
                         expr_span,
                     ));
                     let node = K::GetTraitMethod(b(hir::GetTraitMethod {
-                        trait_ref,
+                        trait_id,
                         method_index,
                         method_path: path.clone(),
                         method_span: expr_span,
@@ -470,12 +492,15 @@ impl TypeInference {
                     )
                 }
                 // Retrieve the function from the environment, if it exists
-                else if let Some((definition, function, _module_id, _arg_passing)) =
-                    env.get_function(path)?
+                else if let Some((definition, function, _module_id, _arg_passing)) = env
+                    .get_function(path)?
+                    .map(|(definition, function, module_id, arg_passing)| {
+                        (definition.clone(), function, module_id, arg_passing)
+                    })
                 {
                     let (fn_ty, inst_data, _subst) = definition
                         .ty_scheme
-                        .instantiate_with_fresh_vars(self, expr_span, None);
+                        .instantiate_with_fresh_vars(self, expr_span, None, env.module_env);
                     let node = K::GetFunction(b(hir::GetFunction {
                         function,
                         function_path: path.clone(),
@@ -571,7 +596,7 @@ impl TypeInference {
                     && !initializer_is_known_trivial_copy;
                 if needs_clone && !node_ty.is_function() {
                     self.add_pub_constraint(PubTypeConstraint::new_have_trait(
-                        VALUE_TRAIT.clone(),
+                        value_trait_id(env),
                         vec![node_ty],
                         vec![],
                         expr_span,
@@ -899,7 +924,7 @@ impl TypeInference {
                                 && !place_ty.is_function()
                             {
                                 self.add_pub_constraint(PubTypeConstraint::new_have_trait(
-                                    VALUE_TRAIT.clone(),
+                                    value_trait_id(env),
                                     vec![place_ty],
                                     vec![],
                                     expr_span,
@@ -950,7 +975,7 @@ impl TypeInference {
                     let tuple_ty = self.fresh_type_var_ty(); // U
                     let (index, index_span) = data.index;
                     self.add_pub_constraint(PubTypeConstraint::new_have_trait(
-                        REPR_TRAIT.clone(),
+                        repr_trait_id(env),
                         vec![tuple_node_ty],
                         vec![tuple_ty],
                         index_span,
@@ -1118,7 +1143,7 @@ impl TypeInference {
                     let record_ty = self.fresh_type_var_ty(); // U
                     let (field, field_span) = data.name;
                     self.add_pub_constraint(PubTypeConstraint::new_have_trait(
-                        REPR_TRAIT.clone(),
+                        repr_trait_id(env),
                         vec![record_node_ty],
                         vec![record_ty],
                         field_span,
@@ -1207,12 +1232,15 @@ impl TypeInference {
                         let effects = self.make_dependent_effect([&array_effects, &index_effects]);
                         Self::diverging_prefix_result(nodes, effects)
                     } else {
-                        let (path, (definition, function, _module_id, arg_passing)) =
-                            env.get_std_function(ustr("array_index"), expr_span)?;
+                        let (path, (definition, function, _module_id, arg_passing)) = {
+                            let (path, (definition, function, module_id, arg_passing)) =
+                                env.get_std_function(ustr("array_index"), expr_span)?;
+                            (path, (definition.clone(), function, module_id, arg_passing))
+                        };
                         let returns_place = definition.returns_place;
                         let (inst_fn_ty, inst_data, _subst) = definition
                             .ty_scheme
-                            .instantiate_with_fresh_vars(self, expr_span, None);
+                            .instantiate_with_fresh_vars(self, expr_span, None, env.module_env);
                         self.add_same_type_constraint(
                             inst_fn_ty.ret,
                             expr_span,
@@ -1483,7 +1511,7 @@ impl TypeInference {
             && !ty.is_function()
         {
             self.add_pub_constraint(PubTypeConstraint::new_have_trait(
-                VALUE_TRAIT.clone(),
+                value_trait_id(env),
                 vec![ty],
                 vec![],
                 span,
@@ -1711,7 +1739,7 @@ impl TypeInference {
         let ty = env.ir_arena[value].ty;
         if !ty.is_function() {
             self.add_pub_constraint(PubTypeConstraint::new_have_trait(
-                VALUE_TRAIT.clone(),
+                value_trait_id(env),
                 vec![ty],
                 vec![],
                 span,
@@ -1853,7 +1881,7 @@ impl TypeInference {
         span: Location,
     ) -> LocalDrop {
         if self.node_value_needs_semantic_drop(env, value, ty, span) {
-            self.add_value_constraint_for_unknown_drop(ty, span);
+            self.add_value_constraint_for_unknown_drop(value_trait_id(env), ty, span);
             LocalDrop::Unknown
         } else {
             LocalDrop::Resolved(ResolvedLocalDrop::Skip)
@@ -1880,10 +1908,15 @@ impl TypeInference {
         }
     }
 
-    fn add_value_constraint_for_unknown_drop(&mut self, ty: Type, span: Location) {
+    fn add_value_constraint_for_unknown_drop(
+        &mut self,
+        value_trait_id: crate::module::TraitId,
+        ty: Type,
+        span: Location,
+    ) {
         if !ty.is_function() {
             self.add_pub_constraint(PubTypeConstraint::new_have_trait(
-                VALUE_TRAIT.clone(),
+                value_trait_id,
                 vec![ty],
                 vec![],
                 span,
@@ -2045,14 +2078,19 @@ impl TypeInference {
         // Get the function and its type from the environment.
         Ok(
             if let Some((_module_name, trait_descr)) = env.module_env.get_trait_method(path)? {
-                let (trait_ref, method_index, definition) = trait_descr;
-                if is_compiler_callable_only_method(&trait_ref, method_index) {
+                let (trait_id, method_index, definition) = trait_descr;
+                let trait_def = env.module_env.trait_def(trait_id);
+                if is_compiler_callable_only_method(trait_id, trait_def, method_index) {
                     return Err(compiler_only_trait_method_use_error(
-                        &trait_ref,
+                        trait_id,
+                        trait_def,
                         method_index,
                         path_span,
                     ));
                 }
+                let trait_ty_var_count = trait_def.type_var_count();
+                let trait_input_type_count = trait_def.input_type_count();
+                let trait_constraints = trait_def.constraints.clone();
                 // Validate the number of arguments
                 if definition.ty_scheme.ty.args.len() != args.len() {
                     return Err(internal_compilation_error!(WrongNumberOfArguments {
@@ -2063,16 +2101,20 @@ impl TypeInference {
                     }));
                 }
                 // Instantiate its type scheme
-                let (inst_fn_ty, inst_data, subst) = definition
-                    .ty_scheme
-                    .instantiate_with_fresh_vars(self, path_span, Some(trait_ref.type_var_count()));
+                let (inst_fn_ty, inst_data, subst) =
+                    definition.ty_scheme.instantiate_with_fresh_vars(
+                        self,
+                        path_span,
+                        Some(trait_ty_var_count),
+                        env.module_env,
+                    );
                 assert!(
                     inst_data.dicts_req.is_empty(),
                     "Instantiation data for trait method is not supported yet."
                 );
                 // Instantiate the constraints and add them to our list.
                 let mut mapper = BitmapInstantiationMapper::new(&subst);
-                trait_ref.constraints.iter().for_each(|constraint| {
+                trait_constraints.iter().for_each(|constraint| {
                     let mut constraint = constraint.map(&mut mapper);
                     constraint.instantiate_location(path_span);
                     self.add_pub_constraint(constraint);
@@ -2086,11 +2128,11 @@ impl TypeInference {
                     Self::diverging_prefix_result(nodes, args_effects)
                 } else {
                     let mut trait_tys = continuous_hashmap_to_vec(subst.0).unwrap();
-                    assert_eq!(trait_tys.len(), trait_ref.type_var_count() as usize);
-                    let output_tys = trait_tys.split_off(trait_ref.input_type_count() as usize);
+                    assert_eq!(trait_tys.len(), trait_ty_var_count as usize);
+                    let output_tys = trait_tys.split_off(trait_input_type_count as usize);
                     let input_tys = trait_tys;
                     self.add_pub_constraint(PubTypeConstraint::new_have_trait(
-                        trait_ref.clone(),
+                        trait_id,
                         input_tys.clone(),
                         output_tys,
                         path_span,
@@ -2108,7 +2150,7 @@ impl TypeInference {
                         None,
                     );
                     let call = K::TraitMethodApply(b(hir::TraitMethodApplication {
-                        trait_ref,
+                        trait_id,
                         method_index,
                         method_path: path.clone(),
                         method_span: path_span,
@@ -2127,8 +2169,11 @@ impl TypeInference {
                     );
                     (node, ret_ty, MutType::constant(), combined_effects)
                 }
-            } else if let Some((definition, function, _module_id, arg_passing)) =
-                env.get_function(path)?
+            } else if let Some((definition, function, _module_id, arg_passing)) = env
+                .get_function(path)?
+                .map(|(definition, function, module_id, arg_passing)| {
+                    (definition.clone(), function, module_id, arg_passing)
+                })
             {
                 let returns_place = definition.returns_place;
                 if definition.ty_scheme.ty.args.len() != args.len() {
@@ -2142,7 +2187,7 @@ impl TypeInference {
                 // Instantiate its type scheme
                 let (inst_fn_ty, inst_data, _subst) = definition
                     .ty_scheme
-                    .instantiate_with_fresh_vars(self, path_span, None);
+                    .instantiate_with_fresh_vars(self, path_span, None, env.module_env);
                 // Get argument names if any
                 let argument_names = arguments_unnamed.filter_args(&definition.arg_names);
                 // Get the code and make sure the types of its arguments match the expected types
@@ -2965,7 +3010,12 @@ impl TypeInference {
         let mut trait_solver =
             TraitSolverProbe::from_module(env.module_env.current, env.module_env.modules);
         let result = trait_solver
-            .solve_output_types(&TRIVIAL_COPY_TRAIT, &[ty], span, env.ir_arena)
+            .solve_output_types(
+                env.module_env.expect_std_trait_id(TRIVIAL_COPY_TRAIT_NAME),
+                &[ty],
+                span,
+                env.ir_arena,
+            )
             .is_ok();
         self.trivial_copy_cache.insert(ty, result);
         result

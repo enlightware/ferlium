@@ -30,15 +30,16 @@ use crate::{
         DefKind, DefTable, FunctionCollector, FunctionId, ImportFunctionSlot, ImportFunctionSlotId,
         ImportFunctionTarget, ImportImplSlot, ImportImplSlotId, LocalDecl, LocalDeclId,
         LocalFunctionId, LocalImplId, Module, ModuleEnv, ModuleFunction, ModuleId, TraitDictionary,
-        TraitImpl, TraitImplId, TraitImpls, TraitKey, TypeDefId, build_dictionary_value, id::Id,
+        TraitId, TraitImpl, TraitImplId, TraitImpls, TraitKey, TypeDefId, build_dictionary_value,
+        id::Id,
     },
     std::{
-        core::{REPR_TRAIT, TRIVIAL_COPY_TRAIT},
-        new_module_using_std,
-        value::{VALUE_TRAIT, value_layout_associated_const_values},
+        STD_MODULE_ID,
+        core_traits_names::{REPR_TRAIT_NAME, TRIVIAL_COPY_TRAIT_NAME, VALUE_TRAIT_NAME},
+        value::{is_value_trait, value_layout_associated_const_values},
     },
     types::effects::EffType,
-    types::r#trait::{TraitAssociatedConstIndex, TraitMethodIndex, TraitRef},
+    types::r#trait::{Trait, TraitAssociatedConstIndex, TraitMethodIndex},
     types::r#type::{FnArgType, Type, TypeDef, TypeDefSlot},
     types::type_inference::unify::UnifiedTypeInference,
     types::type_like::{TypeLike, instantiate_types},
@@ -76,6 +77,8 @@ impl<'a> CurrentTypeDefs<'a> {
 pub struct TraitSolver<'a> {
     /// Current module type definitions.
     pub current_type_defs: CurrentTypeDefs<'a>,
+    /// Current module trait definitions.
+    pub current_traits: &'a [Trait],
     /// Current module implementations.
     pub impls: &'a mut TraitImpls,
     /// Current module functions available by name.
@@ -93,7 +96,7 @@ pub struct TraitSolver<'a> {
     pub recursion_depth: usize,
     /// Current stack of trait implementations being solved, for cycle detection.
     #[new(default)]
-    pub solving_stack: FxHashSet<(TraitRef, Vec<Type>)>,
+    pub solving_stack: FxHashSet<(TraitId, Vec<Type>)>,
     /// Partially known trait applications currently being improved, for cycle detection.
     #[new(default)]
     active_improvements: FxHashSet<TraitImprovementKey>,
@@ -106,27 +109,28 @@ pub struct TraitSolver<'a> {
 const TRAIT_SOLVER_RECURSION_LIMIT: usize = 128;
 
 fn materialized_associated_const_values(
-    trait_ref: &TraitRef,
+    trait_id: TraitId,
+    trait_def: &Trait,
     input_tys: &[Type],
     template_values: &[isize],
     span: Location,
     solver: &TraitSolver<'_>,
 ) -> Result<Vec<isize>, InternalCompilationError> {
-    if trait_ref.associated_const_count() == 0 {
+    if trait_def.associated_const_count() == 0 {
         return Ok(Vec::new());
     }
-    if template_values.len() == trait_ref.associated_const_count() {
+    if template_values.len() == trait_def.associated_const_count() {
         return Ok(template_values.to_vec());
     }
     // Temporary special case: blanket impls cannot yet store associated const
     // formulas, so materialized Value dictionaries synthesize layout metadata.
-    if trait_ref == &*VALUE_TRAIT {
+    if is_value_trait(trait_id, trait_def) {
         return Ok(value_layout_associated_const_values(input_tys[0], span, solver)?.into());
     }
     Err(internal_compilation_error!(Internal {
         error: format!(
             "cannot materialize compiler-defined associated consts for trait {}",
-            trait_ref.name
+            trait_def.name
         ),
         span,
     }))
@@ -145,6 +149,7 @@ macro_rules! trait_solver_from_module {
                 $module.module_id(),
                 $module.type_defs.as_slice(),
             ),
+            $module.traits.as_slice(),
             &mut $module.impls,
             current_functions,
             &mut $module.import_fn_slots,
@@ -159,6 +164,7 @@ pub(crate) use trait_solver_from_module;
 /// Scratch overlay for running trait-solver queries without mutating a real module.
 pub(crate) struct TraitSolverProbe<'a> {
     current_type_defs: CurrentTypeDefs<'a>,
+    current_traits: &'a [Trait],
     impls: Cow<'a, TraitImpls>,
     current_functions: FxHashMap<Ustr, LocalFunctionId>,
     import_fn_slots: Vec<ImportFunctionSlot>,
@@ -171,7 +177,7 @@ pub(crate) struct TraitSolverProbe<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct TraitImprovementKey {
-    trait_ref: TraitRef,
+    trait_id: TraitId,
     input_tys: Vec<Type>,
     output_tys: Vec<Type>,
 }
@@ -194,7 +200,7 @@ struct NeverProbe;
 impl TraitOutputQuery for NeverProbe {
     fn solve_output_types_query(
         &mut self,
-        _trait_ref: &TraitRef,
+        _trait_id: TraitId,
         _input_tys: &[Type],
         _fn_span: Location,
         _arena: &mut NodeArena,
@@ -207,7 +213,7 @@ impl TraitOutputQuery for NeverProbe {
     fn improve_trait_application_query(
         &mut self,
         _ty_inf: &mut UnifiedTypeInference,
-        _trait_ref: &TraitRef,
+        _trait_id: TraitId,
         _input_tys: &[Type],
         _output_tys: &[Type],
         _assumptions: ConstraintAssumptions<'_>,
@@ -228,7 +234,7 @@ impl TraitOutputQuery for NeverProbe {
 trait TraitOutputQuery {
     fn solve_output_types_query(
         &mut self,
-        trait_ref: &TraitRef,
+        trait_id: TraitId,
         input_tys: &[Type],
         fn_span: Location,
         arena: &mut NodeArena,
@@ -238,7 +244,7 @@ trait TraitOutputQuery {
     fn improve_trait_application_query(
         &mut self,
         ty_inf: &mut UnifiedTypeInference,
-        trait_ref: &TraitRef,
+        trait_id: TraitId,
         input_tys: &[Type],
         output_tys: &[Type],
         assumptions: ConstraintAssumptions<'_>,
@@ -274,19 +280,19 @@ impl<'solver, 'a> LazyTraitSolverProbe<'solver, 'a> {
 impl TraitOutputQuery for LazyTraitSolverProbe<'_, '_> {
     fn solve_output_types_query(
         &mut self,
-        trait_ref: &TraitRef,
+        trait_id: TraitId,
         input_tys: &[Type],
         fn_span: Location,
         arena: &mut NodeArena,
     ) -> Result<Vec<Type>, InternalCompilationError> {
         self.probe()
-            .solve_output_types_query(trait_ref, input_tys, fn_span, arena)
+            .solve_output_types_query(trait_id, input_tys, fn_span, arena)
     }
 
     fn improve_trait_application_query(
         &mut self,
         ty_inf: &mut UnifiedTypeInference,
-        trait_ref: &TraitRef,
+        trait_id: TraitId,
         input_tys: &[Type],
         output_tys: &[Type],
         assumptions: ConstraintAssumptions<'_>,
@@ -295,7 +301,7 @@ impl TraitOutputQuery for LazyTraitSolverProbe<'_, '_> {
     ) -> Result<TraitImprovementMatch, InternalCompilationError> {
         self.probe().improve_trait_application_query(
             ty_inf,
-            trait_ref,
+            trait_id,
             input_tys,
             output_tys,
             assumptions,
@@ -348,6 +354,7 @@ impl<'a> TraitSolverProbe<'a> {
                 module.module_id(),
                 module.type_defs.as_slice(),
             ),
+            current_traits: module.traits.as_slice(),
             impls: Cow::Borrowed(&module.impls),
             current_functions: current_function_map(&module.def_table),
             import_fn_slots: module.import_fn_slots.clone(),
@@ -366,6 +373,7 @@ impl<'a> TraitSolverProbe<'a> {
             .retain(|_, id| impls.data[id.as_index()].public);
         Self {
             current_type_defs: solver.current_type_defs,
+            current_traits: solver.current_traits,
             impls: Cow::Owned(impls),
             current_functions: solver.current_functions.clone(),
             import_fn_slots: solver.import_fn_slots.clone(),
@@ -385,6 +393,7 @@ impl<'a> TraitSolverProbe<'a> {
         );
         let mut solver = TraitSolver::new(
             self.current_type_defs,
+            self.current_traits,
             self.impls.to_mut(),
             mem::take(&mut self.current_functions),
             &mut self.import_fn_slots,
@@ -407,30 +416,30 @@ impl<'a> TraitSolverProbe<'a> {
 
     pub(crate) fn solve_output_types(
         &mut self,
-        trait_ref: &TraitRef,
+        trait_id: TraitId,
         input_tys: &[Type],
         fn_span: Location,
         arena: &mut NodeArena,
     ) -> Result<Vec<Type>, InternalCompilationError> {
-        self.with_solver(|solver| solver.solve_output_types(trait_ref, input_tys, fn_span, arena))
+        self.with_solver(|solver| solver.solve_output_types(trait_id, input_tys, fn_span, arena))
     }
 }
 
 impl TraitOutputQuery for TraitSolverProbe<'_> {
     fn solve_output_types_query(
         &mut self,
-        trait_ref: &TraitRef,
+        trait_id: TraitId,
         input_tys: &[Type],
         fn_span: Location,
         arena: &mut NodeArena,
     ) -> Result<Vec<Type>, InternalCompilationError> {
-        self.solve_output_types(trait_ref, input_tys, fn_span, arena)
+        self.solve_output_types(trait_id, input_tys, fn_span, arena)
     }
 
     fn improve_trait_application_query(
         &mut self,
         ty_inf: &mut UnifiedTypeInference,
-        trait_ref: &TraitRef,
+        trait_id: TraitId,
         input_tys: &[Type],
         output_tys: &[Type],
         assumptions: ConstraintAssumptions<'_>,
@@ -440,7 +449,7 @@ impl TraitOutputQuery for TraitSolverProbe<'_> {
         self.with_solver(|solver| {
             solver.improve_trait_application_match(
                 ty_inf,
-                trait_ref,
+                trait_id,
                 input_tys,
                 output_tys,
                 assumptions,
@@ -475,7 +484,7 @@ enum TraitImprovementCandidate {
 struct ResolvedTraitConstraint {
     /// Original source order of the constraint in the blanket impl.
     index: usize,
-    trait_ref: TraitRef,
+    trait_id: TraitId,
     input_tys: Vec<Type>,
     output_tys: Vec<Type>,
 }
@@ -528,9 +537,54 @@ enum BlanketImplMatch {
     },
 }
 
+fn trait_def_from_parts<'a>(
+    current_module_id: ModuleId,
+    current_traits: &'a [Trait],
+    others: &'a Modules,
+    id: TraitId,
+) -> &'a Trait {
+    if id.module == current_module_id
+        && let Some(trait_def) = current_traits.get(id.index.as_index())
+    {
+        return trait_def;
+    }
+    others
+        .get(id.module)
+        .and_then(|entry| entry.module())
+        .unwrap_or_else(|| panic!("Trait module #{} is unavailable", id.module))
+        .trait_def(id)
+}
+
 impl<'a> TraitSolver<'a> {
     fn can_use_other_impl(&self, module_id: ModuleId, imp: &TraitImpl) -> bool {
         imp.public || self.private_impl_scope.last().copied() == Some(module_id)
+    }
+
+    pub fn trait_def(&self, id: TraitId) -> &Trait {
+        trait_def_from_parts(
+            self.current_type_defs.module_id,
+            self.current_traits,
+            self.others,
+            id,
+        )
+    }
+
+    pub fn std_trait_id(&self, name: &str) -> TraitId {
+        // The solver only keeps the current module's trait definitions, not its
+        // definition table, so current-std lookups cannot use the symbol table.
+        if self.current_type_defs.module_id == STD_MODULE_ID
+            && let Some((index, _)) = self
+                .current_traits
+                .iter()
+                .enumerate()
+                .find(|(_, trait_def)| trait_def.name == name)
+        {
+            return TraitId::new(
+                STD_MODULE_ID,
+                crate::module::LocalTraitId::from_index(index),
+            );
+        }
+        Module::expect_std_trait_id(self.others, name)
     }
 
     pub fn type_def(&self, id: TypeDefId) -> &TypeDef {
@@ -551,7 +605,12 @@ impl<'a> TraitSolver<'a> {
     ) -> bool {
         ty.is_constant()
             && self
-                .solve_output_types(&TRIVIAL_COPY_TRAIT, &[ty], span, arena)
+                .solve_output_types(
+                    self.std_trait_id(TRIVIAL_COPY_TRAIT_NAME),
+                    &[ty],
+                    span,
+                    arena,
+                )
                 .is_ok()
     }
 
@@ -593,11 +652,11 @@ impl<'a> TraitSolver<'a> {
     ///
     /// This is used by trait improvement to probe whether a partially known
     /// trait application already has a unique matching impl.
-    fn improvement_candidates(&self, trait_ref: &TraitRef) -> Vec<TraitImprovementCandidate> {
+    fn improvement_candidates(&self, trait_id: TraitId) -> Vec<TraitImprovementCandidate> {
         let mut candidates = Vec::new();
 
         for (key, id) in &self.impls.concrete_key_to_id {
-            if &key.trait_ref == trait_ref {
+            if key.trait_id == trait_id {
                 let imp = &self.impls.data[id.as_index()];
                 if !imp.public {
                     continue;
@@ -609,7 +668,7 @@ impl<'a> TraitSolver<'a> {
             }
         }
 
-        if let Some(blankets) = self.impls.blanket_key_to_id.get(trait_ref) {
+        if let Some(blankets) = self.impls.blanket_key_to_id.get(&trait_id) {
             for (sub_key, id) in blankets {
                 let imp = &self.impls.data[id.as_index()];
                 candidates.push(TraitImprovementCandidate::Blanket {
@@ -627,7 +686,7 @@ impl<'a> TraitSolver<'a> {
             };
 
             for (key, id) in &module.impls.concrete_key_to_id {
-                if &key.trait_ref == trait_ref {
+                if key.trait_id == trait_id {
                     let imp = &module.impls.data[id.as_index()];
                     if self.can_use_other_impl(module.module_id(), imp) {
                         candidates.push(TraitImprovementCandidate::Concrete {
@@ -638,7 +697,7 @@ impl<'a> TraitSolver<'a> {
                 }
             }
 
-            if let Some(blankets) = module.impls.blanket_key_to_id.get(trait_ref) {
+            if let Some(blankets) = module.impls.blanket_key_to_id.get(&trait_id) {
                 for (sub_key, id) in blankets {
                     let imp = &module.impls.data[id.as_index()];
                     if self.can_use_other_impl(module.module_id(), imp) {
@@ -777,7 +836,7 @@ impl<'a> TraitSolver<'a> {
     fn improve_trait_application_match(
         &mut self,
         ty_inf: &mut UnifiedTypeInference,
-        trait_ref: &TraitRef,
+        trait_id: TraitId,
         input_tys: &[Type],
         output_tys: &[Type],
         assumptions: ConstraintAssumptions<'_>,
@@ -785,7 +844,7 @@ impl<'a> TraitSolver<'a> {
         arena: &mut NodeArena,
     ) -> Result<TraitImprovementMatch, InternalCompilationError> {
         let key = TraitImprovementKey {
-            trait_ref: trait_ref.clone(),
+            trait_id,
             input_tys: ty_inf.substitute_in_types(input_tys),
             output_tys: ty_inf.substitute_in_types(output_tys),
         };
@@ -794,7 +853,7 @@ impl<'a> TraitSolver<'a> {
         }
         let result = self.improve_trait_application_match_actual(
             ty_inf,
-            trait_ref,
+            trait_id,
             input_tys,
             output_tys,
             assumptions,
@@ -809,14 +868,14 @@ impl<'a> TraitSolver<'a> {
     fn improve_trait_application_match_actual(
         &mut self,
         ty_inf: &mut UnifiedTypeInference,
-        trait_ref: &TraitRef,
+        trait_id: TraitId,
         input_tys: &[Type],
         output_tys: &[Type],
         assumptions: ConstraintAssumptions<'_>,
         fn_span: Location,
         arena: &mut NodeArena,
     ) -> Result<TraitImprovementMatch, InternalCompilationError> {
-        let candidates = self.improvement_candidates(trait_ref);
+        let candidates = self.improvement_candidates(trait_id);
         let original_vars = input_tys
             .iter()
             .chain(output_tys.iter())
@@ -884,7 +943,9 @@ impl<'a> TraitSolver<'a> {
         else {
             // A deriver may become applicable once the remaining variables are
             // fixed, so absence of a visible impl head is not a definite miss.
-            if !trait_ref.derivers.is_empty() && !input_tys.iter().all(Type::is_constant) {
+            if !self.trait_def(trait_id).derivers.is_empty()
+                && !input_tys.iter().all(Type::is_constant)
+            {
                 return Ok(TraitImprovementMatch::Unknown);
             }
             return Ok(TraitImprovementMatch::No);
@@ -945,7 +1006,7 @@ impl<'a> TraitSolver<'a> {
     pub(crate) fn try_improve_trait_application(
         &mut self,
         ty_inf: &mut UnifiedTypeInference,
-        trait_ref: &TraitRef,
+        trait_id: TraitId,
         input_tys: &[Type],
         output_tys: &[Type],
         assumptions: ConstraintAssumptions<'_>,
@@ -955,7 +1016,7 @@ impl<'a> TraitSolver<'a> {
         Ok(matches!(
             self.improve_trait_application_match(
                 ty_inf,
-                trait_ref,
+                trait_id,
                 input_tys,
                 output_tys,
                 assumptions,
@@ -970,14 +1031,14 @@ impl<'a> TraitSolver<'a> {
     /// already in scope for the outer query.
     fn match_assumption(
         ty_inf: &mut UnifiedTypeInference,
-        trait_ref: &TraitRef,
+        trait_id: TraitId,
         input_tys: &[Type],
         output_tys: &[Type],
         assumptions: ConstraintAssumptions<'_>,
     ) -> bool {
         assumptions.iter().any(|assumption| {
             let PubTypeConstraint::HaveTrait {
-                trait_ref: assumption_trait_ref,
+                trait_id: assumption_trait_id,
                 input_tys: assumption_input_tys,
                 output_tys: assumption_output_tys,
                 ..
@@ -985,7 +1046,7 @@ impl<'a> TraitSolver<'a> {
             else {
                 return false;
             };
-            if assumption_trait_ref != trait_ref
+            if *assumption_trait_id != trait_id
                 || assumption_input_tys.len() != input_tys.len()
                 || assumption_output_tys.len() != output_tys.len()
             {
@@ -993,7 +1054,7 @@ impl<'a> TraitSolver<'a> {
             }
 
             let substituted_assumption = ty_inf.substitute_in_constraint(assumption);
-            let Some((ass_trait_ref, ass_input_tys, ass_output_tys, _)) =
+            let Some((ass_trait_id, ass_input_tys, ass_output_tys, _)) =
                 substituted_assumption.as_have_trait()
             else {
                 return false;
@@ -1003,7 +1064,7 @@ impl<'a> TraitSolver<'a> {
             {
                 return false;
             }
-            if ass_trait_ref != trait_ref
+            if *ass_trait_id != trait_id
                 || ass_input_tys.len() != input_tys.len()
                 || ass_output_tys.len() != output_tys.len()
             {
@@ -1121,13 +1182,13 @@ impl<'a> TraitSolver<'a> {
             for (constraint_index, constraint) in old_remaining.iter() {
                 // Re-substitute the constraint on every pass because earlier
                 // solved constraints may have refined the type variables it uses.
-                let (trait_ref, constraint_inputs, constraint_outputs, _span) = ty_inf
+                let (trait_id, constraint_inputs, constraint_outputs, _span) = ty_inf
                     .substitute_in_constraint(constraint)
                     .into_have_trait()
                     .expect("Non trait constraint in blanket impl");
                 if Self::match_assumption(
                     ty_inf,
-                    &trait_ref,
+                    trait_id,
                     &constraint_inputs,
                     &constraint_outputs,
                     assumptions,
@@ -1141,7 +1202,7 @@ impl<'a> TraitSolver<'a> {
                     if has_structured_non_constant_input {
                         match query.improve_trait_application_query(
                             ty_inf,
-                            &trait_ref,
+                            trait_id,
                             &constraint_inputs,
                             &constraint_outputs,
                             assumptions,
@@ -1157,7 +1218,7 @@ impl<'a> TraitSolver<'a> {
                     continue;
                 }
                 let solved_outputs = match query.solve_output_types_query(
-                    &trait_ref,
+                    trait_id,
                     &constraint_inputs,
                     fn_span,
                     arena,
@@ -1181,7 +1242,7 @@ impl<'a> TraitSolver<'a> {
                 }
                 resolved_constraints.push(ResolvedTraitConstraint {
                     index: *constraint_index,
-                    trait_ref,
+                    trait_id,
                     input_tys: constraint_inputs,
                     output_tys: constraint_outputs,
                 });
@@ -1205,7 +1266,7 @@ impl<'a> TraitSolver<'a> {
                     }
                     BlanketConstraintMode::DeferConcreteObligations => {
                         for (constraint_index, constraint) in still_remaining {
-                            let (trait_ref, constraint_inputs, constraint_outputs, _span) = ty_inf
+                            let (trait_id, constraint_inputs, constraint_outputs, _span) = ty_inf
                                 .substitute_in_constraint(&constraint)
                                 .into_have_trait()
                                 .expect("Non trait constraint in blanket impl");
@@ -1214,7 +1275,7 @@ impl<'a> TraitSolver<'a> {
                             }
                             resolved_constraints.push(ResolvedTraitConstraint {
                                 index: constraint_index,
-                                trait_ref,
+                                trait_id,
                                 input_tys: constraint_inputs,
                                 output_tys: constraint_outputs,
                             });
@@ -1263,14 +1324,21 @@ impl<'a> TraitSolver<'a> {
         &mut self,
         code_entry: hir::NodeId,
         locals: Vec<LocalDecl>,
-        trait_ref: &TraitRef,
+        trait_id: TraitId,
         input_types: impl Into<Vec<Type>>,
         output_types: impl Into<Vec<Type>>,
     ) -> LocalImplId {
-        let arg_names = trait_ref.methods[0].1.arg_names.clone();
+        let trait_def = trait_def_from_parts(
+            self.current_type_defs.module_id,
+            self.current_traits,
+            self.others,
+            trait_id,
+        );
+        let arg_names = trait_def.methods[0].1.arg_names.clone();
         let function: Function = b(ScriptFunction::new(code_entry, arg_names));
         self.impls.add_concrete_raw(
-            trait_ref.clone(),
+            trait_id,
+            trait_def,
             input_types.into(),
             output_types.into(),
             [],
@@ -1283,11 +1351,17 @@ impl<'a> TraitSolver<'a> {
     pub fn add_concrete_impl_from_code_entries(
         &mut self,
         code_entries: impl Into<Vec<(hir::NodeId, Vec<LocalDecl>)>>,
-        trait_ref: &TraitRef,
+        trait_id: TraitId,
         input_types: impl Into<Vec<Type>>,
         output_types: impl Into<Vec<Type>>,
     ) -> LocalImplId {
-        let functions = trait_ref
+        let trait_def = trait_def_from_parts(
+            self.current_type_defs.module_id,
+            self.current_traits,
+            self.others,
+            trait_id,
+        );
+        let functions = trait_def
             .methods
             .iter()
             .zip(code_entries.into())
@@ -1300,7 +1374,8 @@ impl<'a> TraitSolver<'a> {
             })
             .collect::<Vec<_>>();
         self.impls.add_concrete_raw(
-            trait_ref.clone(),
+            trait_id,
+            trait_def,
             input_types.into(),
             output_types.into(),
             [],
@@ -1329,19 +1404,25 @@ impl<'a> TraitSolver<'a> {
 
     pub(crate) fn reserve_concrete_impl_from_code_entries(
         &mut self,
-        trait_ref: &TraitRef,
+        trait_id: TraitId,
         input_types: &[Type],
         output_types: &[Type],
         associated_const_values: impl Into<Vec<isize>>,
     ) -> LocalImplId {
         let associated_const_values = associated_const_values.into();
-        trait_ref.validate_impl_shape(
+        let trait_def = trait_def_from_parts(
+            self.current_type_defs.module_id,
+            self.current_traits,
+            self.others,
+            trait_id,
+        );
+        trait_def.validate_impl_shape(
             input_types,
             output_types,
             associated_const_values.len(),
-            trait_ref.methods.len(),
+            trait_def.methods.len(),
         );
-        let definitions = trait_ref.instantiate_for_tys(input_types, output_types);
+        let definitions = trait_def.instantiate_for_tys(input_types, output_types);
         let mut methods = Vec::with_capacity(definitions.len());
         let mut tys = Vec::with_capacity(definitions.len());
 
@@ -1349,7 +1430,7 @@ impl<'a> TraitSolver<'a> {
             let method_index = TraitMethodIndex::from_index(method_index);
             let id = self.fn_collector.next_id();
             let ty = Type::function_type(definition.ty_scheme.ty.clone());
-            let name = trait_ref
+            let name = trait_def
                 .qualified_method_name(method_index, input_types)
                 .into();
             self.fn_collector.push(
@@ -1376,20 +1457,26 @@ impl<'a> TraitSolver<'a> {
             None,
         )
         .with_associated_const_values(associated_const_values);
-        let key = ConcreteTraitImplKey::new(trait_ref.clone(), input_types.to_vec());
+        let key = ConcreteTraitImplKey::new(trait_id, input_types.to_vec());
         self.impls.add_concrete_struct(key, imp)
     }
 
     pub(crate) fn replace_concrete_impl_code_entries(
         &mut self,
         impl_id: LocalImplId,
-        trait_ref: &TraitRef,
+        trait_id: TraitId,
         input_types: &[Type],
         output_types: &[Type],
         code_entries: impl Into<Vec<(hir::NodeId, Vec<LocalDecl>)>>,
     ) {
         let methods = self.impls.data[impl_id.as_index()].methods.clone();
-        let definitions = trait_ref.instantiate_for_tys(input_types, output_types);
+        let trait_def = trait_def_from_parts(
+            self.current_type_defs.module_id,
+            self.current_traits,
+            self.others,
+            trait_id,
+        );
+        let definitions = trait_def.instantiate_for_tys(input_types, output_types);
 
         for ((method_id, definition), (code_entry, locals)) in methods
             .into_iter()
@@ -1450,53 +1537,58 @@ impl<'a> TraitSolver<'a> {
         })
     }
 
-    /// Get the blanket trait implementations for the given trait reference, without performing any solving.
+    /// Get the blanket trait implementations for the given trait id, without performing any solving.
     /// This searches in other modules first, then in the current module.
     fn get_blanket_impls<'s: 'b, 'b>(
         &'s self,
-        trait_ref: &'b TraitRef,
+        trait_id: TraitId,
     ) -> impl Iterator<Item = (Option<ModuleId>, &'b BlanketTraitImpls)> + use<'b> {
         self.impls
             .blanket_key_to_id
-            .get(trait_ref)
+            .get(&trait_id)
             .map(|blankets| (None, blankets))
             .into_iter()
-            .chain(self.others.enumerates().flat_map(|(module_id, entry, _)| {
-                entry.module().and_then(|module| {
-                    module
-                        .impls
-                        .blanket_key_to_id
-                        .get(trait_ref)
-                        .map(|imp| (Some(module_id), imp))
-                })
-            }))
+            .chain(
+                self.others
+                    .enumerates()
+                    .flat_map(move |(module_id, entry, _)| {
+                        entry.module().and_then(|module| {
+                            module
+                                .impls
+                                .blanket_key_to_id
+                                .get(&trait_id)
+                                .map(|imp| (Some(module_id), imp))
+                        })
+                    }),
+            )
     }
 
-    /// Print all known implementations for the given trait reference.
-    fn log_debug_impls(&self, trait_ref: &TraitRef) {
+    /// Print all known implementations for the given trait id.
+    fn log_debug_impls(&self, trait_id: TraitId) {
         log::debug!("In current module:");
-        let fake_current = new_module_using_std(self.others.next_id());
+        let mut fake_current = Module::new(self.current_type_defs.module_id);
+        fake_current.traits = self.current_traits.to_vec();
         let env = ModuleEnv::new(&fake_current, self.others);
-        self.impls.log_debug_impls_headers(trait_ref, env);
+        self.impls.log_debug_impls_headers(trait_id, env);
         for (module_path, entry) in self.others.iter_named() {
             if let Some(module) = &entry.module {
                 let impls = &module.impls;
-                if impls.blanket_key_to_id.contains_key(trait_ref) {
+                if impls.blanket_key_to_id.contains_key(&trait_id) {
                     log::debug!("In module {}:", module_path);
-                    impls.log_debug_impls_headers(trait_ref, env);
+                    impls.log_debug_impls_headers(trait_id, env);
                 }
             }
         }
     }
 
-    /// Get a concrete trait implementation for the given trait reference and input types.
+    /// Get a concrete trait implementation for the given trait id and input types.
     /// If no concrete implementation is found, a matching blanket implementation is searched for.
     /// If matching blanket implementation is found, a derivation is attempted, if available.
     /// Otherwise an error is returned.
     /// This is the trait solver's core function.
     pub fn solve_impl(
         &mut self,
-        trait_ref: &TraitRef,
+        trait_id: TraitId,
         input_tys: &[Type],
         fn_span: Location,
         arena: &mut NodeArena,
@@ -1508,14 +1600,14 @@ impl<'a> TraitSolver<'a> {
         );
 
         // Cycle detection
-        let key = (trait_ref.clone(), input_tys.to_vec());
-        let concrete_key = ConcreteTraitImplKey::new(trait_ref.clone(), input_tys.to_vec());
+        let key = (trait_id, input_tys.to_vec());
+        let concrete_key = ConcreteTraitImplKey::new(trait_id, input_tys.to_vec());
         if let Some(imp) = self.get_concrete_impl(&concrete_key) {
             return Ok(imp);
         }
         if self.solving_stack.contains(&key) {
             return Err(internal_compilation_error!(TraitSolverCycleDetected {
-                trait_ref: trait_ref.clone(),
+                trait_ref: trait_id,
                 input_tys: input_tys.to_vec(),
                 fn_span,
             }));
@@ -1525,7 +1617,7 @@ impl<'a> TraitSolver<'a> {
         if self.recursion_depth > TRAIT_SOLVER_RECURSION_LIMIT {
             return Err(internal_compilation_error!(
                 TraitSolverRecursionLimitExceeded {
-                    trait_ref: trait_ref.clone(),
+                    trait_ref: trait_id,
                     input_tys: input_tys.to_vec(),
                     fn_span,
                 }
@@ -1535,7 +1627,7 @@ impl<'a> TraitSolver<'a> {
         self.recursion_depth += 1;
         self.solving_stack.insert(key.clone());
 
-        let result = self.solve_impl_actual(trait_ref, input_tys, fn_span, arena);
+        let result = self.solve_impl_actual(trait_id, input_tys, fn_span, arena);
 
         self.solving_stack.remove(&key);
         self.recursion_depth -= 1;
@@ -1544,13 +1636,14 @@ impl<'a> TraitSolver<'a> {
 
     fn solve_impl_actual(
         &mut self,
-        trait_ref: &TraitRef,
+        trait_id: TraitId,
         input_tys: &[Type],
         fn_span: Location,
         arena: &mut NodeArena,
     ) -> Result<TraitImplId, InternalCompilationError> {
+        let value_trait_id = self.std_trait_id(VALUE_TRAIT_NAME);
         // Special case for `Repr` trait.
-        if trait_ref == &*REPR_TRAIT {
+        if trait_id == self.std_trait_id(REPR_TRAIT_NAME) {
             let input_ty = input_tys[0];
             let ty_data = input_ty.data();
             let output_ty = if ty_data.is_named() {
@@ -1561,7 +1654,7 @@ impl<'a> TraitSolver<'a> {
             };
 
             // Only search in current module, create a new implementation if not found.
-            let key = ConcreteTraitImplKey::new(trait_ref.clone(), input_tys.to_vec());
+            let key = ConcreteTraitImplKey::new(trait_id, input_tys.to_vec());
             let local_id = if let Some(id) = self.impls.concrete_key_to_id.get(&key) {
                 *id
             } else {
@@ -1580,7 +1673,7 @@ impl<'a> TraitSolver<'a> {
         }
 
         // If a concrete implementation is found, return it.
-        let key = ConcreteTraitImplKey::new(trait_ref.clone(), input_tys.to_vec());
+        let key = ConcreteTraitImplKey::new(trait_id, input_tys.to_vec());
         if let Some(imp) = self.get_concrete_impl(&key) {
             return Ok(imp);
         }
@@ -1588,7 +1681,7 @@ impl<'a> TraitSolver<'a> {
         // No concrete implementation found, search for a matching blanket implementation.
         // We first clone all blanket implementations to avoid borrowing issues.
         let blankets = self
-            .get_blanket_impls(trait_ref)
+            .get_blanket_impls(trait_id)
             .map(|(module_id, blankets)| (module_id, blankets.clone()))
             .collect::<Vec<_>>();
         // Then we iterate over all blanket implementations, trying to unify their input types
@@ -1641,7 +1734,7 @@ impl<'a> TraitSolver<'a> {
                 // Match the blanket implementation and resolve the blanket constraints to a
                 // fixed point before materializing the concrete implementation.
                 let mut ty_inf = UnifiedTypeInference::new_with_ty_vars(imp_ty_var_count);
-                let blanket_constraint_mode = if trait_ref == &*VALUE_TRAIT {
+                let blanket_constraint_mode = if trait_id == value_trait_id {
                     BlanketConstraintMode::DeferConcreteObligations
                 } else {
                     BlanketConstraintMode::RequireAllResolved
@@ -1669,18 +1762,18 @@ impl<'a> TraitSolver<'a> {
                 };
 
                 // Non-Value blanket impls can materialize all constraint dictionaries up front.
-                if trait_ref != &*VALUE_TRAIT {
+                if trait_id != value_trait_id {
                     let mut constraint_dict_ids = Vec::with_capacity(resolved_constraints.len());
                     for resolved_constraint in resolved_constraints {
                         // Marker traits have no runtime dictionary entries.
-                        if !resolved_constraint
-                            .trait_ref
+                        if !self
+                            .trait_def(resolved_constraint.trait_id)
                             .has_runtime_dictionary_entries()
                         {
                             continue;
                         }
                         let dict_id = match self.solve_impl(
-                            &resolved_constraint.trait_ref,
+                            resolved_constraint.trait_id,
                             &resolved_constraint.input_tys,
                             fn_span,
                             arena,
@@ -1706,13 +1799,22 @@ impl<'a> TraitSolver<'a> {
                         &self.impls
                     };
                     let imp = &impls.data[impl_id.as_index()];
-                    let associated_const_values = materialized_associated_const_values(
-                        trait_ref,
-                        input_tys,
-                        &imp.associated_const_values,
-                        fn_span,
-                        self,
-                    )?;
+                    let associated_const_values = {
+                        let trait_def = trait_def_from_parts(
+                            self.current_type_defs.module_id,
+                            self.current_traits,
+                            self.others,
+                            trait_id,
+                        );
+                        materialized_associated_const_values(
+                            trait_id,
+                            trait_def,
+                            input_tys,
+                            &imp.associated_const_values,
+                            fn_span,
+                            self,
+                        )?
+                    };
 
                     // Then collect constraint dictionary info for building thunk nodes later.
                     // Each thunk gets its own arena, so we store (NodeKind, Type) pairs to re-create them.
@@ -1726,11 +1828,15 @@ impl<'a> TraitSolver<'a> {
 
                     // Then, for every function in the blanket implementation, if needed create a thunk function
                     // importing it and closing over the constraint dictionaries.
-                    let trait_key = TraitKey::Blanket(BlanketTraitImplKey::new(
-                        trait_ref.clone(),
-                        sub_key.clone(),
-                    ));
-                    let definitions = trait_ref.instantiate_for_tys(input_tys, &output_tys);
+                    let trait_key =
+                        TraitKey::Blanket(BlanketTraitImplKey::new(trait_id, sub_key.clone()));
+                    let trait_def = trait_def_from_parts(
+                        self.current_type_defs.module_id,
+                        self.current_traits,
+                        self.others,
+                        trait_id,
+                    );
+                    let definitions = trait_def.instantiate_for_tys(input_tys, &output_tys);
                     let gen_functions = imp.methods.clone(); // clone to avoid borrowing issues
                     let mut methods = Vec::with_capacity(gen_functions.len());
                     let mut tys = Vec::with_capacity(gen_functions.len());
@@ -1830,7 +1936,7 @@ impl<'a> TraitSolver<'a> {
                                 ModuleFunction::new_without_debug_info(def, code, None, locals);
                             let name = Ustr::from(&format!(
                                 "{}-thunk",
-                                trait_ref.qualified_method_name(method_index, input_tys)
+                                trait_def.qualified_method_name(method_index, input_tys)
                             ));
                             let id = self.fn_collector.next_id();
                             self.fn_collector.push(name, function);
@@ -1855,7 +1961,7 @@ impl<'a> TraitSolver<'a> {
                         None,
                     )
                     .with_associated_const_values(associated_const_values);
-                    let key = ConcreteTraitImplKey::new(trait_ref.clone(), input_tys.to_vec());
+                    let key = ConcreteTraitImplKey::new(trait_id, input_tys.to_vec());
                     let local_impl_id = self.impls.add_concrete_struct(key, imp);
 
                     if imp_module_id.is_some() {
@@ -1882,16 +1988,25 @@ impl<'a> TraitSolver<'a> {
                         let imp = &self.impls.data[impl_id.as_index()];
                         (imp.associated_const_values.clone(), imp.methods.clone())
                     };
-                let associated_const_values = materialized_associated_const_values(
-                    trait_ref,
-                    input_tys,
-                    &imp_associated_const_values,
-                    fn_span,
-                    self,
-                )?;
+                let associated_const_values = {
+                    let trait_def = trait_def_from_parts(
+                        self.current_type_defs.module_id,
+                        self.current_traits,
+                        self.others,
+                        trait_id,
+                    );
+                    materialized_associated_const_values(
+                        trait_id,
+                        trait_def,
+                        input_tys,
+                        &imp_associated_const_values,
+                        fn_span,
+                        self,
+                    )?
+                };
                 let materialization_snapshot = self.snapshot_derived_impl_state();
                 let local_impl_id = self.reserve_concrete_impl_from_code_entries(
-                    trait_ref,
+                    trait_id,
                     input_tys,
                     &output_tys,
                     associated_const_values,
@@ -1902,14 +2017,14 @@ impl<'a> TraitSolver<'a> {
                 let mut constraint_dict_ids = Vec::with_capacity(resolved_constraints.len());
                 for resolved_constraint in resolved_constraints {
                     // Marker traits have no runtime dictionary entries.
-                    if !resolved_constraint
-                        .trait_ref
+                    if !self
+                        .trait_def(resolved_constraint.trait_id)
                         .has_runtime_dictionary_entries()
                     {
                         continue;
                     }
                     let dict_id = match self.solve_impl(
-                        &resolved_constraint.trait_ref,
+                        resolved_constraint.trait_id,
                         &resolved_constraint.input_tys,
                         fn_span,
                         arena,
@@ -1918,7 +2033,7 @@ impl<'a> TraitSolver<'a> {
                         Err(err) => {
                             log::debug!(
                                 "Blanket impl constraint failed while solving {} for {:?}: {:?}",
-                                resolved_constraint.trait_ref.name,
+                                self.trait_def(resolved_constraint.trait_id).name,
                                 resolved_constraint.input_tys,
                                 err
                             );
@@ -1948,8 +2063,14 @@ impl<'a> TraitSolver<'a> {
                 // Then, for every function in the blanket implementation, if needed create a thunk function
                 // importing it and closing over the constraint dictionaries.
                 let trait_key =
-                    TraitKey::Blanket(BlanketTraitImplKey::new(trait_ref.clone(), sub_key.clone()));
-                let definitions = trait_ref.instantiate_for_tys(input_tys, &output_tys);
+                    TraitKey::Blanket(BlanketTraitImplKey::new(trait_id, sub_key.clone()));
+                let definitions = trait_def_from_parts(
+                    self.current_type_defs.module_id,
+                    self.current_traits,
+                    self.others,
+                    trait_id,
+                )
+                .instantiate_for_tys(input_tys, &output_tys);
                 let code_entries = gen_functions
                     .iter()
                     .zip(definitions)
@@ -2039,7 +2160,7 @@ impl<'a> TraitSolver<'a> {
 
                 self.replace_concrete_impl_code_entries(
                     local_impl_id,
-                    trait_ref,
+                    trait_id,
                     input_tys,
                     &output_tys,
                     code_entries,
@@ -2053,13 +2174,17 @@ impl<'a> TraitSolver<'a> {
         }
 
         // No blanket implementation found, look for a derived implementation.
-        for derive in &trait_ref.derivers {
-            if let Some(impl_id) = derive.derive_impl(trait_ref, input_tys, fn_span, arena, self)? {
+        let (trait_name, derivers) = {
+            let trait_def = self.trait_def(trait_id);
+            (trait_def.name, trait_def.derivers.clone())
+        };
+        for derive in derivers {
+            if let Some(impl_id) = derive.derive_impl(trait_id, input_tys, fn_span, arena, self)? {
                 return Ok(impl_id);
             } else {
                 log::debug!(
                     "Tried derivation for trait {} with input types {:?}, but failed.",
-                    trait_ref.name,
+                    trait_name,
                     input_tys
                 );
             }
@@ -2068,30 +2193,30 @@ impl<'a> TraitSolver<'a> {
         // No matching implementation found.
         log::debug!(
             "No matching impl for trait \"{}\" found. Existing impls:",
-            trait_ref.name
+            trait_name
         );
-        self.log_debug_impls(trait_ref);
+        self.log_debug_impls(trait_id);
         Err(internal_compilation_error!(TraitImplNotFound {
-            trait_ref: trait_ref.clone(),
+            trait_ref: trait_id,
             input_tys: input_tys.to_vec(),
             fn_span,
         }))
     }
 
-    /// Get a specific method implementation for the given trait reference and input types.
+    /// Get a specific method implementation for the given trait id and input types.
     /// If no concrete implementation is found, a matching blanket implementation is searched for.
     /// If matching blanket implementation is found, a derivation is attempted, if available.
     /// Otherwise an error is returned.
     /// This function is implemented using solve_impl.
     pub fn solve_impl_method(
         &mut self,
-        trait_ref: &TraitRef,
+        trait_id: TraitId,
         input_tys: &[Type],
         index: TraitMethodIndex,
         fn_span: Location,
         arena: &mut NodeArena,
     ) -> Result<FunctionId, InternalCompilationError> {
-        let impl_id = self.solve_impl(trait_ref, input_tys, fn_span, arena)?;
+        let impl_id = self.solve_impl(trait_id, input_tys, fn_span, arena)?;
         use TraitImplId::*;
         Ok(match impl_id {
             Local(id) => {
@@ -2107,44 +2232,45 @@ impl<'a> TraitSolver<'a> {
         })
     }
 
-    /// Get the output types for the given trait reference and input types.
+    /// Get the output types for the given trait id and input types.
     /// If no concrete implementation is found, a matching blanket implementation is searched for.
     /// If matching blanket implementation is found, a derivation is attempted, if available.
     /// Otherwise an error is returned.
     /// This function is implemented using solve_impl.
     pub fn solve_output_types(
         &mut self,
-        trait_ref: &TraitRef,
+        trait_id: TraitId,
         input_tys: &[Type],
         fn_span: Location,
         arena: &mut NodeArena,
     ) -> Result<Vec<Type>, InternalCompilationError> {
-        let impl_id = self.solve_impl(trait_ref, input_tys, fn_span, arena)?;
+        let impl_id = self.solve_impl(trait_id, input_tys, fn_span, arena)?;
         Ok(self.get_impl_data_by_id(impl_id).output_tys.clone())
     }
 
     pub fn solve_associated_const(
         &mut self,
-        trait_ref: &TraitRef,
+        trait_id: TraitId,
         input_tys: &[Type],
         associated_const_index: TraitAssociatedConstIndex,
         fn_span: Location,
         arena: &mut NodeArena,
     ) -> Result<isize, InternalCompilationError> {
         assert!(
-            associated_const_index.as_index() < trait_ref.associated_const_count(),
+            associated_const_index.as_index() < self.trait_def(trait_id).associated_const_count(),
             "associated const index {} out of bounds for trait {}",
             associated_const_index,
-            trait_ref.name
+            self.trait_def(trait_id).name
         );
-        let impl_id = self.solve_impl(trait_ref, input_tys, fn_span, arena)?;
+        let impl_id = self.solve_impl(trait_id, input_tys, fn_span, arena)?;
         Ok(self
             .get_impl_data_by_id(impl_id)
             .associated_const_value(associated_const_index)
             .unwrap_or_else(|| {
                 panic!(
                     "implementation of trait {} is missing associated const #{}",
-                    trait_ref.name, associated_const_index
+                    self.trait_def(trait_id).name,
+                    associated_const_index
                 )
             }))
     }
@@ -2294,18 +2420,18 @@ impl<'a> TraitSolver<'a> {
 impl TraitOutputQuery for TraitSolver<'_> {
     fn solve_output_types_query(
         &mut self,
-        trait_ref: &TraitRef,
+        trait_id: TraitId,
         input_tys: &[Type],
         fn_span: Location,
         arena: &mut NodeArena,
     ) -> Result<Vec<Type>, InternalCompilationError> {
-        self.solve_output_types(trait_ref, input_tys, fn_span, arena)
+        self.solve_output_types(trait_id, input_tys, fn_span, arena)
     }
 
     fn improve_trait_application_query(
         &mut self,
         ty_inf: &mut UnifiedTypeInference,
-        trait_ref: &TraitRef,
+        trait_id: TraitId,
         input_tys: &[Type],
         output_tys: &[Type],
         assumptions: ConstraintAssumptions<'_>,
@@ -2314,7 +2440,7 @@ impl TraitOutputQuery for TraitSolver<'_> {
     ) -> Result<TraitImprovementMatch, InternalCompilationError> {
         self.improve_trait_application_match(
             ty_inf,
-            trait_ref,
+            trait_id,
             input_tys,
             output_tys,
             assumptions,

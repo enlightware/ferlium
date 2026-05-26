@@ -25,7 +25,8 @@ use crate::{
         },
         value::{NativeDisplay, Value},
     },
-    module::{BlanketTraitImplSubKey, Module, ModuleFunction, TraitDictionaryId},
+    module::{BlanketTraitImplSubKey, Module, ModuleFunction, TraitDictionaryId, TraitId},
+    std::core_traits_names::VALUE_TRAIT_NAME,
     types::{
         effects::no_effects,
         r#type::{FnType, Type, bare_native_type},
@@ -40,7 +41,7 @@ const SHARED_REF: ResolvedArgPassing =
     });
 const MUTABLE_REF: ResolvedArgPassing = ResolvedArgPassing::MutableRef;
 
-use super::value::{VALUE_TRAIT, native_layout_associated_consts};
+use super::value::native_layout_associated_consts;
 
 /// Fixed-size typed storage block used by the Ferlium `Array<T>` implementation.
 #[derive(Debug)]
@@ -115,9 +116,9 @@ fn buffer_clone(_: &Buffer, _: &mut Value) {
 
 fn buffer_drop(_: &mut Buffer) {}
 
-fn value_constraint(ty: Type) -> Vec<PubTypeConstraint> {
+fn value_constraint(value_trait_id: TraitId, ty: Type) -> Vec<PubTypeConstraint> {
     vec![PubTypeConstraint::new_have_trait(
-        VALUE_TRAIT.clone(),
+        value_trait_id,
         vec![ty],
         vec![],
         Location::new_synthesized(),
@@ -262,7 +263,7 @@ fn buffer_clone_value_into(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalCon
     call_value_clone_to_target(ctx, dictionary, source, target, Location::new_synthesized())
 }
 
-fn buffer_clone_value_into_descr() -> ModuleFunction {
+fn buffer_clone_value_into_descr(value_trait_id: TraitId) -> ModuleFunction {
     let gen0 = Type::variable_id(0);
     native_function(
         FnType::new_mut_resolved(
@@ -274,7 +275,7 @@ fn buffer_clone_value_into_descr() -> ModuleFunction {
             Type::unit(),
             no_effects(),
         ),
-        value_constraint(gen0),
+        value_constraint(value_trait_id, gen0),
         ["source", "target", "target_index"],
         "Clones a value into a buffer slot.",
         ContextNativeFn::new(
@@ -310,7 +311,7 @@ fn buffer_clone_into(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalControlFl
     )
 }
 
-fn buffer_clone_into_descr() -> ModuleFunction {
+fn buffer_clone_into_descr(value_trait_id: TraitId) -> ModuleFunction {
     let gen0 = Type::variable_id(0);
     native_function(
         FnType::new_mut_resolved(
@@ -323,7 +324,7 @@ fn buffer_clone_into_descr() -> ModuleFunction {
             Type::unit(),
             no_effects(),
         ),
-        value_constraint(gen0),
+        value_constraint(value_trait_id, gen0),
         ["source", "source_index", "target", "target_index"],
         "Clones a buffer slot into another buffer slot.",
         ContextNativeFn::new(
@@ -458,7 +459,7 @@ fn buffer_drop_at(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalControlFlowR
     )
 }
 
-fn buffer_drop_at_descr() -> ModuleFunction {
+fn buffer_drop_at_descr(value_trait_id: TraitId) -> ModuleFunction {
     let gen0 = Type::variable_id(0);
     native_function(
         FnType::new_mut_resolved(
@@ -466,7 +467,7 @@ fn buffer_drop_at_descr() -> ModuleFunction {
             Type::unit(),
             no_effects(),
         ),
-        value_constraint(gen0),
+        value_constraint(value_trait_id, gen0),
         ["target", "index"],
         "Drops a value stored in a buffer slot.",
         ContextNativeFn::new(
@@ -478,10 +479,11 @@ fn buffer_drop_at_descr() -> ModuleFunction {
 }
 
 pub fn add_to_module(to: &mut Module) {
+    let value_trait_id = to.expect_std_trait_id_in_current_module(VALUE_TRAIT_NAME);
     to.add_unsafe_bare_native_type_alias_str("Buffer", bare_native_type::<Buffer>());
     let gen0 = Type::variable_id(0);
     to.add_blanket_impl_no_locals(
-        VALUE_TRAIT.clone(),
+        value_trait_id,
         BlanketTraitImplSubKey {
             input_tys: vec![buffer_type(gen0)],
             ty_var_count: 1,
@@ -501,11 +503,14 @@ pub fn add_to_module(to: &mut Module) {
     to.add_private_unsafe_function(ustr("buffer_with_capacity"), buffer_with_capacity_descr());
     to.add_private_unsafe_function(
         ustr("buffer_clone_value_into"),
-        buffer_clone_value_into_descr(),
+        buffer_clone_value_into_descr(value_trait_id),
     );
-    to.add_private_unsafe_function(ustr("buffer_clone_into"), buffer_clone_into_descr());
+    to.add_private_unsafe_function(
+        ustr("buffer_clone_into"),
+        buffer_clone_into_descr(value_trait_id),
+    );
     to.add_private_unsafe_function(ustr("buffer_move"), buffer_move_descr());
     to.add_private_unsafe_function(ustr("buffer_move_into"), buffer_move_into_descr());
     to.add_private_unsafe_function(ustr("buffer_take"), buffer_take_descr());
-    to.add_private_unsafe_function(ustr("buffer_drop_at"), buffer_drop_at_descr());
+    to.add_private_unsafe_function(ustr("buffer_drop_at"), buffer_drop_at_descr(value_trait_id));
 }

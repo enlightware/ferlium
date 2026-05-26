@@ -19,14 +19,14 @@ use crate::{
     hir::value::NativeDisplay,
     module::Module,
     std::{
-        core::TRIVIAL_COPY_TRAIT,
-        core_traits_names::BITS_TRAIT_NAME,
-        default::DEFAULT_TRAIT,
+        core_traits_names::{
+            BITS_TRAIT_NAME, DEFAULT_TRAIT_NAME, TRIVIAL_COPY_TRAIT_NAME, VALUE_TRAIT_NAME,
+        },
         hash::Hasher,
         math::Int,
         string::String,
         value::{
-            VALUE_TRAIT, equal, native_layout_associated_consts, native_value_clone_function,
+            equal, native_layout_associated_consts, native_value_clone_function,
             native_value_drop_function,
         },
     },
@@ -77,6 +77,10 @@ fn hash_bool(value: bool, state: &mut Hasher) {
 }
 
 pub fn add_to_module(to: &mut Module) {
+    let value_trait_id = to.expect_std_trait_id_in_current_module(VALUE_TRAIT_NAME);
+    let bits_trait_id = to.expect_std_trait_id_in_current_module(BITS_TRAIT_NAME);
+    let default_trait_id = to.expect_std_trait_id_in_current_module(DEFAULT_TRAIT_NAME);
+    let trivial_copy_trait_id = to.expect_std_trait_id_in_current_module(TRIVIAL_COPY_TRAIT_NAME);
     // Types
     // Note: bool alias is added in core.rs
 
@@ -84,7 +88,7 @@ pub fn add_to_module(to: &mut Module) {
     use BinaryNativeFnNNN as BinaryFn;
     use UnaryNativeFnNN as UnaryFn;
     to.add_concrete_impl_no_locals(
-        VALUE_TRAIT.clone(),
+        value_trait_id,
         [bool_type()],
         [],
         native_layout_associated_consts::<bool>(),
@@ -96,9 +100,8 @@ pub fn add_to_module(to: &mut Module) {
             native_value_drop_function::<bool>(),
         ],
     );
-    let bits_trait = to.get_trait_str(BITS_TRAIT_NAME).unwrap().clone();
     to.add_native_concrete_impl(
-        bits_trait,
+        bits_trait_id,
         [bool_type()],
         [],
         [
@@ -119,13 +122,13 @@ pub fn add_to_module(to: &mut Module) {
         ],
     );
     to.add_native_concrete_impl(
-        DEFAULT_TRAIT.clone(),
+        default_trait_id,
         [bool_type()],
         [],
         [b(NullaryNativeFnN::new(|| false)) as Function],
     );
     to.add_native_concrete_impl(
-        TRIVIAL_COPY_TRAIT.clone(),
+        trivial_copy_trait_id,
         [bool_type()],
         [],
         Vec::<Function>::new(),

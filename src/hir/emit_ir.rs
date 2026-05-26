@@ -44,20 +44,19 @@ use crate::{
     module::{
         ConcreteTraitImplKey, GENERATED_LAMBDA_PREFIX, LocalAssignmentMode, LocalDecl, LocalDeclId,
         LocalFunctionId, LocalImplId, Module, ModuleEnv, ModuleFunction, ModuleFunctionSpans,
-        ModuleId, TraitImpl, build_dictionary_value, id::Id,
+        ModuleId, TraitId, TraitImpl, build_dictionary_value, id::Id,
     },
     std::{
         STD_MODULE_ID, new_module_using_std,
         value::{
-            VALUE_CLONE_METHOD_INDEX, VALUE_TRAIT,
-            is_function_surface_only_value_trait_application, is_value_trait_for_function_type,
-            value_layout_associated_const_values,
+            VALUE_CLONE_METHOD_INDEX, is_function_surface_only_value_trait_application,
+            is_value_trait, is_value_trait_for_function_type, value_layout_associated_const_values,
         },
     },
     types::coherence::check_trait_impl,
     types::effects::EffType,
     types::mutability::MutType,
-    types::r#trait::TraitRef,
+    types::r#trait::Trait,
     types::trait_solver::{TraitSolver, trait_solver_from_module},
     types::r#type::{FnArgType, FnType, Type, TypeInstSubst, TypeVar},
     types::type_constraints::named_type_constraints_in_types,
@@ -104,19 +103,20 @@ fn insert_inst_data_for_function_and_lambdas(
 }
 
 pub(super) fn emitted_associated_const_values(
-    trait_ref: &TraitRef,
+    trait_id: TraitId,
     input_tys: &[Type],
     ty_var_count: u32,
     span: Location,
     solver: &TraitSolver<'_>,
 ) -> Result<Vec<isize>, InternalCompilationError> {
-    if trait_ref.associated_const_count() == 0 {
+    let trait_def = solver.trait_def(trait_id);
+    if trait_def.associated_const_count() == 0 {
         return Ok(Vec::new());
     }
 
     // Temporary special case: generic source impls cannot yet store associated
     // const formulas, so only Value has compiler-owned layout synthesis here.
-    if trait_ref == &*VALUE_TRAIT {
+    if is_value_trait(trait_id, trait_def) {
         if ty_var_count != 0 {
             return Ok(Vec::new());
         }
@@ -126,7 +126,7 @@ pub(super) fn emitted_associated_const_values(
     Err(internal_compilation_error!(Internal {
         error: format!(
             "cannot emit compiler-defined associated consts for source impl of trait {}",
-            trait_ref.name
+            trait_def.name
         ),
         span,
     }))
@@ -238,14 +238,15 @@ pub fn emit_module(
             let input_tys = for_trait.input_tys();
             let output_tys = for_trait.output_tys();
             let module_env = ModuleEnv::new(&output, others);
-            let Some((trait_module_id, trait_ref)) =
-                module_env.trait_ref_with_module(&Path::single_tuple(imp.trait_name))?
+            let Some((trait_module_id, trait_id)) =
+                module_env.trait_id_with_module(&Path::single_tuple(imp.trait_name))?
             else {
                 continue; // Trait not found; the error will be reported in the main impl loop
             };
-            if input_tys.len() != trait_ref.input_type_count() as usize {
+            let trait_def = module_env.trait_def(trait_id);
+            if input_tys.len() != trait_def.input_type_count() as usize {
                 return Err(internal_compilation_error!(WrongNumberOfArguments {
-                    expected: trait_ref.input_type_count() as usize,
+                    expected: trait_def.input_type_count() as usize,
                     expected_span: imp.trait_name.1,
                     got: input_tys.len(),
                     got_span: imp.span,
@@ -256,22 +257,22 @@ pub fn emit_module(
             if !collect_ty_vars(&stub_tys).is_empty() {
                 continue;
             }
-            if !output_tys.is_empty() && output_tys.len() != trait_ref.output_type_count() as usize
+            if !output_tys.is_empty() && output_tys.len() != trait_def.output_type_count() as usize
             {
                 return Err(internal_compilation_error!(WrongNumberOfArguments {
-                    expected: trait_ref.output_type_count() as usize,
+                    expected: trait_def.output_type_count() as usize,
                     expected_span: imp.trait_name.1,
                     got: output_tys.len(),
                     got_span: for_trait.span,
                 }));
             }
-            if output_tys.is_empty() && trait_ref.output_type_count() != 0 {
+            if output_tys.is_empty() && trait_def.output_type_count() != 0 {
                 continue;
             }
             check_trait_impl(
                 &output,
                 others,
-                &trait_ref,
+                trait_id,
                 trait_module_id.is_none(),
                 &input_tys,
                 0,
@@ -279,7 +280,7 @@ pub fn emit_module(
                 imp.span,
             )?;
             // Pre-allocate placeholder functions for each trait method.
-            let method_defs = trait_ref.instantiate_for_tys(&input_tys, &output_tys);
+            let method_defs = trait_def.instantiate_for_tys(&input_tys, &output_tys);
             let mut method_ids = Vec::with_capacity(method_defs.len());
             for def in method_defs {
                 // Placeholder ModuleFunction that will be replaced later.
@@ -288,11 +289,10 @@ pub fn emit_module(
                 method_ids.push(output.add_function_anonymous(module_fn));
             }
             // Build the trait impl and fill it with placeholders.
-            let public =
-                output.is_trait_impl_exportable(&trait_ref, &input_tys, &output_tys, others);
+            let public = output.is_trait_impl_exportable(trait_id, &input_tys, &output_tys, others);
             let associated_const_values = {
                 let solver = trait_solver_from_module!(output, others);
-                emitted_associated_const_values(&trait_ref, &input_tys, 0, imp.span, &solver)?
+                emitted_associated_const_values(trait_id, &input_tys, 0, imp.span, &solver)?
             };
             let dictionary_value = build_dictionary_value(&method_ids, &associated_const_values);
             let dictionary_ty =
@@ -306,7 +306,7 @@ pub fn emit_module(
                 Some(imp.span),
             )
             .with_associated_const_values(associated_const_values);
-            let key = ConcreteTraitImplKey::new(trait_ref, input_tys.clone());
+            let key = ConcreteTraitImplKey::new(trait_id, input_tys.clone());
             let id = output.impls.add_concrete_struct(key, stub);
             concrete_impl_stubs.insert(
                 imp_idx,
@@ -354,27 +354,29 @@ pub fn emit_module(
     for (imp_idx, imp) in source.impls.iter().enumerate() {
         // Validate the function mapping.
         let module_env = ModuleEnv::new(&output, others);
-        let (trait_module_id, trait_ref) = module_env
-            .trait_ref_with_module(&Path::single_tuple(imp.trait_name))?
+        let (trait_module_id, trait_id) = module_env
+            .trait_id_with_module(&Path::single_tuple(imp.trait_name))?
             .ok_or_else(|| internal_compilation_error!(TraitNotFound(imp.trait_name.1)))?;
+        // Snapshot once per impl emission while later phases mutate the module.
+        let trait_def = module_env.trait_def(trait_id).clone();
 
         // Check that all methods in the impl are part of the trait.
         let mut extra_spans = vec![];
         for func in imp.functions.iter() {
-            if trait_ref.method_index(func.name.0).is_none() {
+            if trait_def.method_index(func.name.0).is_none() {
                 extra_spans.push(func.name.1);
             }
         }
         if !extra_spans.is_empty() {
             return Err(internal_compilation_error!(MethodsNotPartOfTrait {
-                trait_ref: trait_ref.clone(),
+                trait_ref: trait_id,
                 spans: extra_spans,
             }));
         }
 
         // Collect references to functions in the impl, in the order of the trait methods.
         let mut missings = vec![];
-        let functions: Vec<_> = trait_ref
+        let functions: Vec<_> = trait_def
             .methods
             .iter()
             .filter_map(|(name, _)| {
@@ -389,17 +391,18 @@ pub fn emit_module(
             .collect();
         if !missings.is_empty() {
             return Err(internal_compilation_error!(TraitMethodImplsMissing {
-                trait_ref: trait_ref.clone(),
+                trait_ref: trait_id,
                 impl_span: imp.span,
                 missings,
             }));
         }
 
         // Emit the functions.
-        debug_assert_eq!(functions.len(), trait_ref.methods.len());
+        debug_assert_eq!(functions.len(), trait_def.methods.len());
         let functions = || functions.iter().copied();
         let trait_ctx = EmitTraitCtx {
-            trait_ref: trait_ref.clone(),
+            trait_id,
+            trait_def,
             span: imp.span,
             stub_data: concrete_impl_stubs.get(&imp_idx),
             generic_param_count: imp.generic_params.len(),
@@ -435,7 +438,7 @@ pub fn emit_module(
             check_trait_impl(
                 &output,
                 others,
-                &trait_ref,
+                trait_id,
                 trait_module_id.is_none(),
                 &emit_output.input_tys,
                 emit_output.ty_var_count,
@@ -443,20 +446,20 @@ pub fn emit_module(
                 imp.span,
             )?;
             let associated_const_values = emitted_associated_const_values(
-                &trait_ref,
+                trait_id,
                 &emit_output.input_tys,
                 emit_output.ty_var_count,
                 imp.span,
                 &trait_solver_from_module!(output, others),
             )?;
             let public = output.is_trait_impl_exportable(
-                &trait_ref,
+                trait_id,
                 &emit_output.input_tys,
                 &emit_output.output_tys,
                 others,
             );
             output.add_emitted_impl(
-                trait_ref,
+                trait_id,
                 emit_output,
                 associated_const_values,
                 public,
@@ -479,7 +482,8 @@ pub fn emit_module(
 
 /// Context passed to emit_functions when a trait implementation is being emitted.
 struct EmitTraitCtx<'a> {
-    trait_ref: TraitRef,
+    trait_id: TraitId,
+    trait_def: Trait,
     span: Location,
     stub_data: Option<&'a ImplStubData>,
     generic_param_count: usize,
@@ -560,9 +564,9 @@ where
     // If we are emitting a trait implementation, create generics for the trait input and output types
     // and add the constraints from the trait definition to the type inference.
     let trait_output = if let Some(trait_ctx) = &trait_ctx {
-        let trait_ref = &trait_ctx.trait_ref;
-        let input_tys = ty_inf.fresh_type_var_tys(trait_ref.input_type_count() as usize);
-        let output_tys = ty_inf.fresh_type_var_tys(trait_ref.output_type_count() as usize);
+        let trait_def = &trait_ctx.trait_def;
+        let input_tys = ty_inf.fresh_type_var_tys(trait_def.input_type_count() as usize);
+        let output_tys = ty_inf.fresh_type_var_tys(trait_def.output_type_count() as usize);
         let explicit_quantifiers = if trait_ctx.generic_param_count > 0 {
             (0..trait_ctx.generic_param_count)
                 .map(|index| TypeVar::new(index as u32))
@@ -657,10 +661,10 @@ where
                 );
             }
         }
-        for constraint in &trait_ctx.trait_ref.parent_constraints {
+        for constraint in &trait_def.parent_constraints {
             ty_inf.add_pub_constraint(constraint.instantiate_location_cloned(trait_ctx.span));
         }
-        for constraint in &trait_ctx.trait_ref.constraints {
+        for constraint in &trait_def.constraints {
             ty_inf.add_pub_constraint(constraint.instantiate_location_cloned(trait_ctx.span));
         }
         let mut mapper = impl_annotation_subst
@@ -686,7 +690,7 @@ where
     let instantiated_trait_method_defs = match (&trait_ctx, &trait_output) {
         (Some(trait_ctx), Some(trait_output)) => Some(
             trait_ctx
-                .trait_ref
+                .trait_def
                 .instantiate_for_tys(&trait_output.input_tys, &trait_output.output_tys),
         ),
         _ => None,
@@ -720,7 +724,7 @@ where
                     span: *generic_span,
                     reason: format!(
                         "Explicit generic parameters on trait impl methods are not supported yet: method `{}` in impl of trait `{}`",
-                        name.0, trait_ctx.trait_ref.name
+                        name.0, trait_ctx.trait_def.name
                     ),
                 }));
             }
@@ -729,7 +733,7 @@ where
                     span: constraint.use_site(),
                     reason: format!(
                         "Method-local where clauses on trait impl methods are not supported yet: method `{}` in impl of trait `{}`",
-                        name.0, trait_ctx.trait_ref.name
+                        name.0, trait_ctx.trait_def.name
                     ),
                 }));
             }
@@ -783,13 +787,13 @@ where
 
         // If we are emitting a trait implementation, make sure this function conforms to it.
         if let Some(trait_ctx) = &trait_ctx {
-            let index = trait_ctx.trait_ref.method_index(name.0).unwrap();
-            let (method_name, raw_method_def) = trait_ctx.trait_ref.method(index);
+            let index = trait_ctx.trait_def.method_index(name.0).unwrap();
+            let (method_name, raw_method_def) = trait_ctx.trait_def.method(index);
             let instantiated_method_def =
                 &instantiated_trait_method_defs.as_ref().unwrap()[index.as_index()];
             if args.len() != raw_method_def.ty_scheme.ty.args.len() {
                 return Err(internal_compilation_error!(TraitMethodArgCountMismatch {
-                    trait_ref: trait_ctx.trait_ref.clone(),
+                    trait_ref: trait_ctx.trait_id,
                     method_index: index.as_index(),
                     method_name: *method_name,
                     expected: raw_method_def.ty_scheme.ty.args.len(),
@@ -899,8 +903,8 @@ where
         LocalDecl::assign_sequential_slots(&mut locals);
         let cur_locals = (0..locals.len()).map(LocalDeclId::from_index).collect();
         if let Some(trait_ctx) = &trait_ctx
-            && trait_ctx.trait_ref == *VALUE_TRAIT
-            && trait_ctx.trait_ref.method_index(function.name.0) == Some(VALUE_CLONE_METHOD_INDEX)
+            && is_value_trait(trait_ctx.trait_id, &trait_ctx.trait_def)
+            && trait_ctx.trait_def.method_index(function.name.0) == Some(VALUE_CLONE_METHOD_INDEX)
         {
             locals[1].assignment_mode = LocalAssignmentMode::InitializeStorage;
         }
@@ -958,6 +962,8 @@ where
     ty_inf.log_debug_constraints(module_env);
 
     // Resolve local-storage decisions before defaulting so only finalized ownership semantics add `Value`.
+    let value_trait_id =
+        module_env.expect_std_trait_id(crate::std::core_traits_names::VALUE_TRAIT_NAME);
     for id in local_fns.iter() {
         apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| {
             let descr = &mut output.functions[id.as_index()];
@@ -966,6 +972,7 @@ where
                 ir_arena,
                 root,
                 &mut descr.locals,
+                value_trait_id,
             );
         });
     }
@@ -1050,11 +1057,12 @@ where
             let head_quantifiers = collect_ty_vars(&head_tys);
             let head_boundary =
                 ConstraintBoundary::from_seed_ty_vars(head_quantifiers.iter().copied());
+            let module_env = ModuleEnv::new(output, others);
             let remaining_orphans: Vec<_> = head_boundary
                 .inaccessible_constraints(ty_inf.remaining_constraints())
                 .into_iter()
                 .filter(|c| !c.is_type_has_variant())
-                .filter(|c| !is_compiler_provided_value_constraint(c))
+                .filter(|c| !is_compiler_provided_value_constraint(c, module_env))
                 .collect();
             if !remaining_orphans.is_empty() {
                 let fake_current = new_module_using_std(ModuleId(0));
@@ -1084,11 +1092,12 @@ where
         // Validate that each method's effects are a subset of the trait definition's effects,
         // and override them with the trait's effects.
         // This ensures ABI consistency: the calling convention is determined by the trait definition.
-        let trait_ref = &trait_ctx.unwrap().trait_ref;
+        let trait_ctx = trait_ctx.unwrap();
+        let trait_def = &trait_ctx.trait_def;
         for (i, id) in local_fns.iter().enumerate() {
             let i = TraitMethodIndex::from_index(i);
             let descr = &mut output.functions[id.as_index()];
-            let (method_name, trait_method_def) = trait_ref.method(i);
+            let (method_name, trait_method_def) = trait_def.method(i);
             let trait_effects = &trait_method_def.ty_scheme.ty.effects;
             let impl_effects = &descr.definition.ty_scheme.ty.effects;
 
@@ -1096,7 +1105,7 @@ where
             if !impl_effects.is_subset_of(trait_effects) {
                 let span = descr.spans.as_ref().unwrap().span;
                 return Err(internal_compilation_error!(TraitMethodEffectMismatch {
-                    trait_ref: trait_ref.clone(),
+                    trait_ref: trait_ctx.trait_id,
                     method_name: *method_name,
                     expected: trait_effects.clone(),
                     got: impl_effects.clone(),
@@ -1156,7 +1165,10 @@ where
         solver.commit(&mut output.functions, &mut output.def_table);
         // Make sure substitution is not due to constraint processing.
         assert_eq!(subst_size, subst.0.len());
-        let dicts = extra_parameters_from_constraints(&trait_output.constraints);
+        let dicts = extra_parameters_from_constraints(
+            &trait_output.constraints,
+            ModuleEnv::new(output, others),
+        );
 
         // Apply unbound substitution to code and types.
         if !subst.0.is_empty() {
@@ -1206,7 +1218,7 @@ where
             });
 
             // Name the function
-            let name = trait_ref
+            let name = trait_def
                 .qualified_method_name(method_index, &trait_output.input_tys)
                 .into();
             output.name_function(*id, name);
@@ -1266,11 +1278,12 @@ where
             sig_ty_vars = sig_ty_vars.into_iter().unique().collect();
             ty_inf.normalize_remaining_constraints();
             let sig_boundary = ConstraintBoundary::from_seed_ty_vars(sig_ty_vars.iter().copied());
+            let module_env = ModuleEnv::new(output, others);
             let remaining_orphans: Vec<_> = sig_boundary
                 .inaccessible_constraints(ty_inf.remaining_constraints())
                 .into_iter()
                 .filter(|c| !c.is_type_has_variant())
-                .filter(|c| !is_compiler_provided_value_constraint(c))
+                .filter(|c| !is_compiler_provided_value_constraint(c, module_env))
                 .collect();
             if !remaining_orphans.is_empty() {
                 let fake_current = new_module_using_std(ModuleId(0));
@@ -1402,12 +1415,13 @@ where
         }
 
         // Safety check: make sure that there are no unused constraints.
+        let module_env = ModuleEnv::new(output, others);
         let unused_constraints = all_constraints
             .iter()
             .filter(|c| {
                 !used_constraints.contains(&constraint_ptr(c))
                     && !c.is_type_has_variant()
-                    && !is_compiler_provided_value_constraint(c)
+                    && !is_compiler_provided_value_constraint(c, module_env)
             })
             .collect::<Vec<_>>();
         if !unused_constraints.is_empty() {
@@ -1426,7 +1440,10 @@ where
         let mut module_inst_data = FxHashMap::default();
         for id in local_fns.iter() {
             let descr = &output.functions[id.as_index()];
-            let dicts = descr.definition.ty_scheme.extra_parameters();
+            let dicts = descr
+                .definition
+                .ty_scheme
+                .extra_parameters(ModuleEnv::new(output, others));
             insert_inst_data_for_function_and_lambdas(
                 &mut module_inst_data,
                 &associated_lambdas,
@@ -1580,6 +1597,8 @@ fn emit_expr_unsafe_inner(
     ty_inf.log_debug_constraints(module_env);
 
     // Resolve local-storage decisions before defaulting so only finalized ownership semantics add `Value`.
+    let value_trait_id =
+        module_env.expect_std_trait_id(crate::std::core_traits_names::VALUE_TRAIT_NAME);
     for lambda_id in lambda_functions.iter() {
         let descr = module.get_function_by_id_mut(*lambda_id).unwrap();
         let root = descr.get_code_entry().unwrap();
@@ -1587,9 +1606,15 @@ fn emit_expr_unsafe_inner(
             ir_arena,
             root,
             &mut descr.locals,
+            value_trait_id,
         );
     }
-    ty_inf.resolve_local_storage_and_activate_value_constraints(ir_arena, node_id, &mut locals);
+    ty_inf.resolve_local_storage_and_activate_value_constraints(
+        ir_arena,
+        node_id,
+        &mut locals,
+        value_trait_id,
+    );
 
     // Default constraints into the unification tables (pre-substitution).
     // For expressions, iterate defaulting and re-solving to a fixed point.
@@ -1753,7 +1778,7 @@ fn emit_expr_unsafe_inner(
     drop(mapper);
 
     // Do borrow checking and dictionary elaboration.
-    let dicts = ty_scheme.extra_parameters();
+    let dicts = ty_scheme.extra_parameters(ModuleEnv::new(module, others));
     let mut solver = trait_solver_from_module!(module, &others);
     let mut ctx = DictElaborationCtx::new(&dicts, None, &mut solver);
     let local_count = locals.len();
@@ -1881,17 +1906,18 @@ fn constraint_ptr(c: &PubTypeConstraint) -> PubTypeConstraintPtr {
     c as *const PubTypeConstraint
 }
 
-fn is_compiler_provided_value_constraint(c: &PubTypeConstraint) -> bool {
+fn is_compiler_provided_value_constraint(c: &PubTypeConstraint, module_env: ModuleEnv<'_>) -> bool {
     match c {
         PubTypeConstraint::HaveTrait {
-            trait_ref,
+            trait_id,
             input_tys,
             output_tys,
             ..
         } => {
-            is_value_trait_for_function_type(trait_ref, input_tys, output_tys)
+            let trait_def = module_env.trait_def(*trait_id);
+            is_value_trait_for_function_type(*trait_id, trait_def, input_tys, output_tys)
                 || is_function_surface_only_value_trait_application(
-                    trait_ref, input_tys, output_tys,
+                    *trait_id, trait_def, input_tys, output_tys,
                 )
         }
         _ => false,

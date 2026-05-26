@@ -41,12 +41,12 @@ pub fn std_module(source_table: &mut SourceTable) -> Module {
     let mut module = Module::new(STD_MODULE_ID);
     // Built-in or derivable
     value::add_to_module(&mut module);
+    default::add_to_module(&mut module);
+    cast::add_to_module(&mut module);
     core::add_to_module(&mut module);
     hash::add_to_module(&mut module);
-    default::add_to_module(&mut module);
     empty::add_to_module(&mut module);
     flow::add_to_module(&mut module);
-    cast::add_to_module(&mut module);
     module = prelude::declare_traits(module, source_table, STD_MODULE_ID);
     // mem::add_to_module(&mut module);
     logic::add_to_module(&mut module);

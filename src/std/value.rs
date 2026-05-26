@@ -7,7 +7,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use std::{mem, sync::LazyLock};
+use std::mem;
 
 use ustr::ustr;
 
@@ -28,15 +28,16 @@ use crate::{
     internal_compilation_error,
     module::{
         self, ConcreteTraitImplKey, FunctionId, LocalDecl, LocalDeclId, Module, ModuleFunction,
-        ProjectionIndex, TraitImpl, TraitImplId, TraitImpls, id::Id,
+        ProjectionIndex, TraitId, TraitImpl, TraitImplId, TraitImpls, id::Id,
     },
     std::{
-        STD_MODULE_ID, hash::hasher_type, logic::bool_type, math::int_type, string::string_type,
+        STD_MODULE_ID, core_traits_names::VALUE_TRAIT_NAME, hash::hasher_type, logic::bool_type,
+        math::int_type, string::string_type,
     },
     types::effects::EffType,
     types::mutability::{MutType, MutVal},
     types::r#trait::{
-        Deriver, TraitAssociatedConst, TraitAssociatedConstIndex, TraitMethodIndex, TraitRef,
+        Deriver, Trait, TraitAssociatedConst, TraitAssociatedConstIndex, TraitMethodIndex,
     },
     types::trait_solver::TraitSolver,
     types::r#type::{FnArgType, FnType, Type, TypeKind},
@@ -326,11 +327,12 @@ pub(crate) fn is_function_surface_only_value_type(ty: Type) -> bool {
 
 /// Return whether this is `Value` for a type whose unresolved variables occur only inside function types.
 pub(crate) fn is_function_surface_only_value_trait_application(
-    trait_ref: &TraitRef,
+    trait_id: TraitId,
+    trait_def: &Trait,
     input_tys: &[Type],
     output_tys: &[Type],
 ) -> bool {
-    trait_ref == &*VALUE_TRAIT
+    is_value_trait(trait_id, trait_def)
         && input_tys.len() == 1
         && output_tys.is_empty()
         && is_function_surface_only_value_type(input_tys[0])
@@ -338,14 +340,19 @@ pub(crate) fn is_function_surface_only_value_trait_application(
 
 /// Return whether this trait application is `Value` for a function type.
 pub(crate) fn is_value_trait_for_function_type(
-    trait_ref: &TraitRef,
+    trait_id: TraitId,
+    trait_def: &Trait,
     input_tys: &[Type],
     output_tys: &[Type],
 ) -> bool {
-    trait_ref == &*VALUE_TRAIT
+    is_value_trait(trait_id, trait_def)
         && input_tys.len() == 1
         && output_tys.is_empty()
         && input_tys[0].is_function()
+}
+
+pub(crate) fn is_value_trait(trait_id: TraitId, trait_def: &Trait) -> bool {
+    trait_id.module == STD_MODULE_ID && trait_def.name == VALUE_TRAIT_NAME
 }
 
 use FunctionDefinition as Def;
@@ -384,22 +391,29 @@ impl<'s, 'm> ValueBodyCtx<'s, 'm> {
 
     fn value_method_call(
         &mut self,
-        trait_ref: &TraitRef,
+        trait_id: TraitId,
         input_ty: Type,
         method_index: TraitMethodIndex,
         span: Location,
         arena: &mut NodeArena,
         arguments: Vec<NodeId>,
     ) -> Result<(hir::NodeKind, Type), InternalCompilationError> {
-        let definition = trait_ref
-            .instantiate_for_tys(&[input_ty], &[])
-            .into_iter()
-            .nth(method_index.as_index())
-            .expect("Value method index out of bounds");
-        let fn_ty = definition.ty_scheme.ty;
-        let ret_ty = fn_ty.ret;
+        let (fn_ty, ret_ty, method_name, is_function_value) = {
+            let trait_def = self.solver.trait_def(trait_id);
+            let definition = trait_def
+                .instantiate_for_tys(&[input_ty], &[])
+                .into_iter()
+                .nth(method_index.as_index())
+                .expect("Value method index out of bounds");
+            let fn_ty = definition.ty_scheme.ty;
+            let ret_ty = fn_ty.ret;
+            let method_name = trait_def.method(method_index).0;
+            let is_function_value =
+                is_value_trait_for_function_type(trait_id, trait_def, &[input_ty], &[]);
+            (fn_ty, ret_ty, method_name, is_function_value)
+        };
 
-        if is_value_trait_for_function_type(trait_ref, &[input_ty], &[]) {
+        if is_function_value {
             let function = FunctionId::Local(function_value_method(
                 self.solver,
                 method_index,
@@ -437,9 +451,9 @@ impl<'s, 'm> ValueBodyCtx<'s, 'm> {
             return Ok((
                 hir::NodeKind::TraitMethodApply(crate::containers::b(
                     hir::TraitMethodApplication {
-                        trait_ref: trait_ref.clone(),
+                        trait_id,
                         method_index,
-                        method_path: Path::single(trait_ref.method(method_index).0, span),
+                        method_path: Path::single(method_name, span),
                         method_span: span,
                         arguments,
                         arguments_unnamed: UnnamedArg::All,
@@ -454,7 +468,7 @@ impl<'s, 'm> ValueBodyCtx<'s, 'm> {
 
         let function =
             self.solver
-                .solve_impl_method(trait_ref, &[input_ty], method_index, span, arena)?;
+                .solve_impl_method(trait_id, &[input_ty], method_index, span, arena)?;
         let argument_passing = resolved_arg_passing_for_generated_call(
             arena,
             self.solver,
@@ -477,7 +491,7 @@ impl<'s, 'm> ValueBodyCtx<'s, 'm> {
 
 fn value_method_call_node(
     ctx: &mut ValueBodyCtx<'_, '_>,
-    trait_ref: &TraitRef,
+    trait_id: TraitId,
     input_ty: Type,
     method_index: TraitMethodIndex,
     span: Location,
@@ -485,7 +499,7 @@ fn value_method_call_node(
     arguments: Vec<NodeId>,
 ) -> Result<NodeId, InternalCompilationError> {
     let (kind, ty) =
-        ctx.value_method_call(trait_ref, input_ty, method_index, span, arena, arguments)?;
+        ctx.value_method_call(trait_id, input_ty, method_index, span, arena, arguments)?;
     Ok(arena.alloc(hir::Node::new(
         kind,
         ty,
@@ -696,7 +710,7 @@ pub(crate) fn function_value_method_function(
 }
 
 fn derive_value_to_string_body(
-    trait_ref: &TraitRef,
+    trait_id: TraitId,
     input_types: &[Type],
     span: Location,
     arena: &mut NodeArena,
@@ -721,7 +735,7 @@ fn derive_value_to_string_body(
         ($arena:expr, $value:expr, $value_ty:expr) => {
             value_method_call_node(
                 ctx,
-                trait_ref,
+                trait_id,
                 $value_ty,
                 VALUE_TO_STRING_METHOD_INDEX,
                 span,
@@ -1001,7 +1015,7 @@ fn derive_value_to_string_body(
 }
 
 fn derive_value_eq_body(
-    trait_ref: &TraitRef,
+    trait_id: TraitId,
     input_types: &[Type],
     span: Location,
     arena: &mut NodeArena,
@@ -1038,7 +1052,7 @@ fn derive_value_eq_body(
                 );
                 let eq_i = value_method_call_node(
                     ctx,
-                    trait_ref,
+                    trait_id,
                     member_ty,
                     VALUE_EQ_METHOD_INDEX,
                     span,
@@ -1083,7 +1097,7 @@ fn derive_value_eq_body(
                     );
                     value_method_call_node(
                         ctx,
-                        trait_ref,
+                        trait_id,
                         payload_ty,
                         VALUE_EQ_METHOD_INDEX,
                         span,
@@ -1158,7 +1172,7 @@ fn derive_value_eq_body(
                     let load_right = n(arena, load_local(l_right_id), shape_ty);
                     Some(value_method_call_node(
                         ctx,
-                        trait_ref,
+                        trait_id,
                         shape_ty,
                         VALUE_EQ_METHOD_INDEX,
                         span,
@@ -1182,7 +1196,7 @@ fn derive_value_eq_body(
 }
 
 fn derive_value_hash_body(
-    trait_ref: &TraitRef,
+    trait_id: TraitId,
     input_types: &[Type],
     span: Location,
     arena: &mut NodeArena,
@@ -1238,7 +1252,7 @@ fn derive_value_hash_body(
             let state = n($arena, load_local(l_state_id), hasher_ty);
             value_method_call_node(
                 ctx,
-                trait_ref,
+                trait_id,
                 $value_ty,
                 VALUE_HASH_METHOD_INDEX,
                 span,
@@ -1365,7 +1379,7 @@ fn derive_value_hash_body(
 }
 
 fn derive_value_clone_body(
-    trait_ref: &TraitRef,
+    trait_id: TraitId,
     input_types: &[Type],
     arena: &mut NodeArena,
     ctx: &mut ValueBodyCtx<'_, '_>,
@@ -1437,7 +1451,7 @@ fn derive_value_clone_body(
                 );
                 statements.push(value_method_call_node(
                     ctx,
-                    trait_ref,
+                    trait_id,
                     member_ty,
                     VALUE_CLONE_METHOD_INDEX,
                     Location::new_synthesized(),
@@ -1492,7 +1506,7 @@ fn derive_value_clone_body(
                     );
                     statements.push(value_method_call_node(
                         ctx,
-                        trait_ref,
+                        trait_id,
                         payload_ty,
                         VALUE_CLONE_METHOD_INDEX,
                         Location::new_synthesized(),
@@ -1579,7 +1593,7 @@ fn derive_value_clone_body(
 }
 
 fn derive_value_drop_body(
-    trait_ref: &TraitRef,
+    trait_id: TraitId,
     input_types: &[Type],
     arena: &mut NodeArena,
     ctx: &mut ValueBodyCtx<'_, '_>,
@@ -1612,7 +1626,7 @@ fn derive_value_drop_body(
                 );
                 statements.push(value_method_call_node(
                     ctx,
-                    trait_ref,
+                    trait_id,
                     member_ty,
                     VALUE_DROP_METHOD_INDEX,
                     Location::new_synthesized(),
@@ -1642,7 +1656,7 @@ fn derive_value_drop_body(
                     );
                     value_method_call_node(
                         ctx,
-                        trait_ref,
+                        trait_id,
                         payload_ty,
                         VALUE_DROP_METHOD_INDEX,
                         Location::new_synthesized(),
@@ -1726,7 +1740,7 @@ fn derive_value_drop_body(
 }
 
 fn derive_function_value_impl(
-    trait_ref: &TraitRef,
+    trait_id: TraitId,
     input_types: &[Type],
     span: Location,
     arena: &mut NodeArena,
@@ -1734,11 +1748,17 @@ fn derive_function_value_impl(
 ) -> Result<TraitImplId, InternalCompilationError> {
     let associated_const_values =
         value_layout_associated_const_values(input_types[0], span, solver)?;
-    let methods = (0..trait_ref.methods.len())
+    let (method_count, definitions) = {
+        let trait_def = solver.trait_def(trait_id);
+        (
+            trait_def.methods.len(),
+            trait_def.instantiate_for_tys(input_types, &[]),
+        )
+    };
+    let methods = (0..method_count)
         .map(TraitMethodIndex::from_index)
         .map(|method_index| function_value_method(solver, method_index, span, arena))
         .collect::<Result<Vec<_>, _>>()?;
-    let definitions = trait_ref.instantiate_for_tys(input_types, &[]);
     let tys = definitions
         .into_iter()
         .map(|definition| Type::function_type(definition.ty_scheme.ty))
@@ -1754,14 +1774,14 @@ fn derive_function_value_impl(
         None,
     )
     .with_associated_const_values(associated_const_values);
-    let key = ConcreteTraitImplKey::new(trait_ref.clone(), input_types.to_vec());
+    let key = ConcreteTraitImplKey::new(trait_id, input_types.to_vec());
     Ok(TraitImplId::Local(
         solver.impls.add_concrete_struct(key, imp),
     ))
 }
 
 fn derive_structural_value_impl(
-    trait_ref: &TraitRef,
+    trait_id: TraitId,
     input_types: &[Type],
     span: Location,
     arena: &mut NodeArena,
@@ -1793,7 +1813,7 @@ fn derive_structural_value_impl(
 
     if input_types[0].is_function() {
         return Ok(Some(derive_function_value_impl(
-            trait_ref,
+            trait_id,
             input_types,
             span,
             arena,
@@ -1805,7 +1825,7 @@ fn derive_structural_value_impl(
         value_layout_associated_const_values(input_types[0], span, solver)?;
     let snapshot = solver.snapshot_derived_impl_state();
     let impl_id = solver.reserve_concrete_impl_from_code_entries(
-        trait_ref,
+        trait_id,
         input_types,
         &[],
         associated_const_values,
@@ -1813,7 +1833,7 @@ fn derive_structural_value_impl(
     let mut ctx = ValueBodyCtx::concrete(solver);
 
     let Some((eq_root, eq_locals)) =
-        (match derive_value_eq_body(trait_ref, input_types, span, arena, &mut ctx) {
+        (match derive_value_eq_body(trait_id, input_types, span, arena, &mut ctx) {
             Ok(value) => value,
             Err(err) => {
                 ctx.solver.rollback_derived_impl_state(snapshot);
@@ -1825,7 +1845,7 @@ fn derive_structural_value_impl(
         return Ok(None);
     };
     let Some((to_string_root, to_string_locals)) =
-        (match derive_value_to_string_body(trait_ref, input_types, span, arena, &mut ctx) {
+        (match derive_value_to_string_body(trait_id, input_types, span, arena, &mut ctx) {
             Ok(value) => value,
             Err(err) => {
                 ctx.solver.rollback_derived_impl_state(snapshot);
@@ -1837,7 +1857,7 @@ fn derive_structural_value_impl(
         return Ok(None);
     };
     let Some((hash_root, hash_locals)) =
-        (match derive_value_hash_body(trait_ref, input_types, span, arena, &mut ctx) {
+        (match derive_value_hash_body(trait_id, input_types, span, arena, &mut ctx) {
             Ok(value) => value,
             Err(err) => {
                 ctx.solver.rollback_derived_impl_state(snapshot);
@@ -1849,15 +1869,15 @@ fn derive_structural_value_impl(
         return Ok(None);
     };
     let Some((clone_root, clone_locals)) =
-        derive_value_clone_body(trait_ref, input_types, arena, &mut ctx)?
+        derive_value_clone_body(trait_id, input_types, arena, &mut ctx)?
     else {
         ctx.solver.rollback_derived_impl_state(snapshot);
         return Ok(None);
     };
-    let (drop_root, drop_locals) = derive_value_drop_body(trait_ref, input_types, arena, &mut ctx)?;
+    let (drop_root, drop_locals) = derive_value_drop_body(trait_id, input_types, arena, &mut ctx)?;
     ctx.solver.replace_concrete_impl_code_entries(
         impl_id,
-        trait_ref,
+        trait_id,
         input_types,
         &[],
         [
@@ -1872,7 +1892,7 @@ fn derive_structural_value_impl(
 }
 
 pub(crate) fn derive_generic_value_code_entries(
-    trait_ref: &TraitRef,
+    trait_id: TraitId,
     input_types: &[Type],
     span: Location,
     arena: &mut NodeArena,
@@ -1880,21 +1900,21 @@ pub(crate) fn derive_generic_value_code_entries(
 ) -> Result<Option<ValueCodeEntries>, InternalCompilationError> {
     let mut ctx = ValueBodyCtx::generic(solver);
 
-    let Some(eq) = derive_value_eq_body(trait_ref, input_types, span, arena, &mut ctx)? else {
+    let Some(eq) = derive_value_eq_body(trait_id, input_types, span, arena, &mut ctx)? else {
         return Ok(None);
     };
     let Some(to_string) =
-        derive_value_to_string_body(trait_ref, input_types, span, arena, &mut ctx)?
+        derive_value_to_string_body(trait_id, input_types, span, arena, &mut ctx)?
     else {
         return Ok(None);
     };
-    let Some(hash) = derive_value_hash_body(trait_ref, input_types, span, arena, &mut ctx)? else {
+    let Some(hash) = derive_value_hash_body(trait_id, input_types, span, arena, &mut ctx)? else {
         return Ok(None);
     };
-    let Some(clone) = derive_value_clone_body(trait_ref, input_types, arena, &mut ctx)? else {
+    let Some(clone) = derive_value_clone_body(trait_id, input_types, arena, &mut ctx)? else {
         return Ok(None);
     };
-    let drop = derive_value_drop_body(trait_ref, input_types, arena, &mut ctx)?;
+    let drop = derive_value_drop_body(trait_id, input_types, arena, &mut ctx)?;
     Ok(Some(vec![eq, to_string, hash, clone, drop]))
 }
 
@@ -1905,7 +1925,7 @@ struct ValueDeriver;
 impl Deriver for ValueDeriver {
     fn derive_impl(
         &self,
-        trait_ref: &TraitRef,
+        trait_id: TraitId,
         input_types: &[Type],
         span: Location,
         arena: &mut NodeArena,
@@ -1915,11 +1935,11 @@ impl Deriver for ValueDeriver {
         let ty = input_types[0];
         assert!(ty.is_constant());
 
-        derive_structural_value_impl(trait_ref, input_types, span, arena, solver)
+        derive_structural_value_impl(trait_id, input_types, span, arena, solver)
     }
 }
 
-pub static VALUE_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
+pub fn value_trait() -> Trait {
     let var_ty = Type::variable_id(0);
     let binary_fn_ty = FnType::new_by_val([var_ty, var_ty], bool_type(), EffType::empty());
     let unary_to_string_ty = FnType::new_by_val([var_ty], string_type(), EffType::empty());
@@ -1944,7 +1964,7 @@ pub static VALUE_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
         Type::unit(),
         EffType::empty(),
     );
-    let trait_ref = TraitRef::new_with_self_input_type(
+    Trait::new_with_self_input_type(
         "Value",
         "A type that supports semantic equality, string conversion, hashing, and layout metadata.",
         [],
@@ -1994,10 +2014,12 @@ pub static VALUE_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
     .with_associated_consts([
         TraitAssociatedConst::new("SIZE", "Size in bytes."),
         TraitAssociatedConst::new("ALIGN", "Alignment in bytes."),
-    ]);
-    trait_ref.with_module_id_and_deriver(STD_MODULE_ID, ValueDeriver)
-});
+    ])
+    .with_deriver(ValueDeriver)
+}
 
 pub fn add_to_module(to: &mut Module) {
-    to.add_trait(VALUE_TRAIT.clone());
+    let value_trait_id = to.add_trait(value_trait());
+    let value_trait_id = TraitId::new(to.module_id(), value_trait_id);
+    debug_assert_eq!(to.trait_def(value_trait_id).name, VALUE_TRAIT_NAME);
 }

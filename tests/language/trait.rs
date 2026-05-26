@@ -13,12 +13,15 @@ use ferlium::{
     compiler::error::{CompilationErrorImpl, InvalidTraitDefinitionKind},
     format::FormatWith,
     hir::function::{Function, FunctionDefinition, VoidFunction},
-    module::{FunctionCollector, LocalDecl, ModuleId, TraitDictionaryEntry, TraitImpls},
+    module::{
+        FunctionCollector, LocalDecl, LocalTraitId, ModuleId, TraitDictionaryEntry, TraitId,
+        TraitImpls,
+    },
     types::{
         effects::{PrimitiveEffect, effect, no_effects},
         r#trait::{
-            TraitAssociatedConst, TraitAssociatedConstIndex, TraitDictionaryEntryIndex,
-            TraitMethodIndex, TraitRef,
+            Trait, TraitAssociatedConst, TraitAssociatedConstIndex, TraitDictionaryEntryIndex,
+            TraitMethodIndex,
         },
         r#type::{FnType, Type, TypeVar},
     },
@@ -153,8 +156,9 @@ fn user_defined_traits_store_outputs_constraints_and_effects() {
     let module = session.session().expect_fresh_module(module_id);
     let project_trait = module
         .trait_iter()
-        .find(|trait_ref| trait_ref.name == ustr("Project"))
+        .find(|(_, trait_def)| trait_def.name == ustr("Project"))
         .expect("expected user-defined trait to be stored in the module");
+    let project_trait = project_trait.1;
 
     assert_eq!(project_trait.input_type_names, vec![ustr("Self")]);
     assert_eq!(project_trait.output_type_names, vec![ustr("Output")]);
@@ -413,9 +417,11 @@ fn parent_trait_constraints_are_not_trait_use_entailment() {
         .constraints
         .iter()
         .filter_map(|constraint| {
-            constraint
-                .as_have_trait()
-                .map(|(trait_ref, _, _, _)| trait_ref.name)
+            constraint.as_have_trait().map(|(trait_id, _, _, _)| {
+                module
+                    .try_trait_name(*trait_id)
+                    .expect("constraint trait should be defined")
+            })
         })
         .collect::<Vec<_>>();
 
@@ -431,7 +437,7 @@ fn concrete_impl_stores_associated_const_values() {
         ["value"],
         "Returns the value.",
     );
-    let trait_ref = TraitRef::new_with_self_input_type(
+    let trait_def = Trait::new_with_self_input_type(
         "Layout",
         "Compiler-only layout metadata.",
         Vec::<&str>::new(),
@@ -441,11 +447,13 @@ fn concrete_impl_stores_associated_const_values() {
         TraitAssociatedConst::new("SIZE", "Size in bytes."),
         TraitAssociatedConst::new("ALIGN", "Alignment in bytes."),
     ]);
+    let trait_id = TraitId::new(ModuleId(0), LocalTraitId(0));
     let mut impls = TraitImpls::new(ModuleId(0));
     let mut fn_collector = FunctionCollector::new(0);
 
     let impl_id = impls.add_concrete_raw(
-        trait_ref.clone(),
+        trait_id.clone(),
+        &trait_def,
         [Type::unit()],
         [],
         [0, 1],
@@ -455,23 +463,23 @@ fn concrete_impl_stores_associated_const_values() {
     let imp = impls.get_impl_by_local_id(impl_id);
 
     assert_eq!(
-        trait_ref.dictionary_method_index(TraitMethodIndex(0)),
+        trait_def.dictionary_method_index(TraitMethodIndex(0)),
         TraitDictionaryEntryIndex(0)
     );
     assert_eq!(
-        trait_ref.associated_const_index(ustr("SIZE")),
+        trait_def.associated_const_index(ustr("SIZE")),
         Some(TraitAssociatedConstIndex(0))
     );
     assert_eq!(
-        trait_ref.associated_const_index(ustr("ALIGN")),
+        trait_def.associated_const_index(ustr("ALIGN")),
         Some(TraitAssociatedConstIndex(1))
     );
     assert_eq!(
-        trait_ref.dictionary_associated_const_index(TraitAssociatedConstIndex(0)),
+        trait_def.dictionary_associated_const_index(TraitAssociatedConstIndex(0)),
         TraitDictionaryEntryIndex(1)
     );
     assert_eq!(
-        trait_ref.dictionary_associated_const_index(TraitAssociatedConstIndex(1)),
+        trait_def.dictionary_associated_const_index(TraitAssociatedConstIndex(1)),
         TraitDictionaryEntryIndex(2)
     );
     assert_eq!(

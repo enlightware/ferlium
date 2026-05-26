@@ -23,10 +23,10 @@ use crate::{
     module::{
         ConcreteTraitImplKey, ExtraParameterId, FunctionId, LocalClone, LocalDecl, LocalDrop,
         LocalFunctionId, LocalStorage, ModuleEnv, ProjectionIndex, ResolvedLocalClone,
-        ResolvedLocalDrop, TakeLocalValueMode, TraitImpl, TraitImplId, TraitImpls,
+        ResolvedLocalDrop, TakeLocalValueMode, TraitId, TraitImpl, TraitImplId, TraitImpls,
         build_dictionary_value, id::Id,
     },
-    types::r#trait::{TraitDictionaryEntryIndex, TraitMethodIndex, TraitRef},
+    types::r#trait::{TraitDictionaryEntryIndex, TraitMethodIndex},
     types::trait_solver::TraitSolver,
     types::r#type::TypeVar,
     types::type_like::{TypeLike, instantiate_types_in_place},
@@ -45,10 +45,10 @@ use crate::{
         self, Node, NodeArena, NodeId, NodeKind, Project as HirProject, ProjectAt as HirProjectAt,
     },
     std::{
-        core::TRIVIAL_COPY_TRAIT,
+        core_traits_names::{TRIVIAL_COPY_TRAIT_NAME, VALUE_TRAIT_NAME},
         math::int_type,
         value::{
-            VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX, VALUE_TRAIT,
+            VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX,
             is_function_surface_only_value_trait_application, is_function_surface_only_value_type,
             is_value_trait_for_function_type, value_layout_associated_const_values,
         },
@@ -66,7 +66,7 @@ pub enum DictionaryReq {
         field: Ustr,
     },
     TraitImpl {
-        trait_ref: TraitRef,
+        trait_id: TraitId,
         input_tys: Vec<Type>,
         output_tys: Vec<Type>, // stored here for type generation, but not used in comparisons
                                // FIXME: maybe we need a span here for proper error reporting
@@ -78,13 +78,9 @@ impl DictionaryReq {
         Self::FieldIndex { ty, field }
     }
 
-    pub fn new_trait_impl(
-        trait_ref: TraitRef,
-        input_tys: Vec<Type>,
-        output_tys: Vec<Type>,
-    ) -> Self {
+    pub fn new_trait_impl(trait_id: TraitId, input_tys: Vec<Type>, output_tys: Vec<Type>) -> Self {
         Self::TraitImpl {
-            trait_ref,
+            trait_id,
             input_tys,
             output_tys,
         }
@@ -115,24 +111,17 @@ impl DictionaryReq {
         }
     }
 
-    pub fn to_dict_name(&self, i: usize) -> String {
-        use DictionaryReq::*;
-        match self {
-            FieldIndex { field, .. } => format!("_d{i}_{field}"),
-            TraitImpl { trait_ref, .. } => {
-                format!("_d{i}_impl_{}", trait_ref.name)
-            }
-        }
-    }
-
-    pub fn to_dict_type(&self) -> Type {
+    pub fn to_dict_type(&self, trait_solver: &TraitSolver<'_>) -> Type {
         match self {
             DictionaryReq::FieldIndex { .. } => int_type(),
             DictionaryReq::TraitImpl {
-                trait_ref,
+                trait_id,
                 input_tys,
                 output_tys,
-            } => trait_ref.get_dictionary_type_for_tys(input_tys, output_tys),
+                ..
+            } => trait_solver
+                .trait_def(*trait_id)
+                .get_dictionary_type_for_tys(input_tys, output_tys),
         }
     }
 }
@@ -153,12 +142,12 @@ impl PartialEq for DictionaryReq {
             ) => ty1 == ty2 && field1 == field2,
             (
                 TraitImpl {
-                    trait_ref: tr1,
+                    trait_id: tr1,
                     input_tys: in1,
                     ..
                 },
                 TraitImpl {
-                    trait_ref: tr2,
+                    trait_id: tr2,
                     input_tys: in2,
                     ..
                 },
@@ -180,10 +169,11 @@ impl FormatWith<ModuleEnv<'_>> for DictionaryReq {
         match self {
             FieldIndex { ty, field } => write!(f, "{} field {}", ty.format_with(env), field),
             TraitImpl {
-                trait_ref,
+                trait_id,
                 input_tys,
                 output_tys,
-            } => format_have_trait(trait_ref, input_tys, output_tys, f, env),
+                ..
+            } => format_have_trait(*trait_id, input_tys, output_tys, f, env),
         }
     }
 }
@@ -230,17 +220,17 @@ pub fn find_field_dict_index(dicts: &ExtraParameters, var: TypeVar, field: &str)
 
 pub fn find_trait_impl_dict_index(
     dicts: &ExtraParameters,
-    trait_ref: &TraitRef,
+    trait_id: TraitId,
     input_tys: &[Type],
 ) -> Option<usize> {
     dicts.requirements.iter().position(|dict| {
         if let DictionaryReq::TraitImpl {
-            trait_ref: trait_ref2,
+            trait_id: trait_id2,
             input_tys: tys2,
             ..
         } = dict
         {
-            input_tys == tys2 && trait_ref == trait_ref2
+            input_tys == tys2 && trait_id == *trait_id2
         } else {
             false
         }
@@ -249,24 +239,25 @@ pub fn find_trait_impl_dict_index(
 
 /// Build the use-site HIR expression for a generated `Value` dictionary.
 fn value_dictionary_node_kind_from_methods(
-    trait_ref: &TraitRef,
+    trait_id: TraitId,
     input_tys: &[Type],
     span: Location,
     methods: &[LocalFunctionId],
     ctx: &mut DictElaborationCtx<'_, '_, '_>,
 ) -> Result<(NodeKind, Type), InternalCompilationError> {
+    let trait_def = ctx.trait_solver.trait_def(trait_id);
     // This builds compiler-generated `Value` dictionaries. The associated
     // consts are layout metadata, so they are computed from the concrete HIR
     // type rather than read from a source impl.
-    assert_eq!(methods.len(), trait_ref.methods.len());
-    let definitions = trait_ref.instantiate_for_tys(input_tys, &[]);
+    assert_eq!(methods.len(), trait_def.methods.len());
+    let definitions = trait_def.instantiate_for_tys(input_tys, &[]);
     let method_tys = definitions
         .into_iter()
         .map(|definition| Type::function_type(definition.ty_scheme.ty))
         .collect::<Vec<_>>();
     let associated_const_values =
         value_layout_associated_const_values(input_tys[0], span, ctx.trait_solver)?;
-    let ty = trait_ref.get_dictionary_type_for_tys(input_tys, &[]);
+    let ty = trait_def.get_dictionary_type_for_tys(input_tys, &[]);
     let dictionary_ty = TraitImpls::dictionary_ty(method_tys, associated_const_values.len());
     let dictionary_value = build_dictionary_value(methods, &associated_const_values);
     let imp = TraitImpl::new(
@@ -279,7 +270,7 @@ fn value_dictionary_node_kind_from_methods(
     )
     .with_associated_const_values(associated_const_values);
     let impl_id = if input_tys.iter().all(Type::is_constant) {
-        let key = ConcreteTraitImplKey::new(trait_ref.clone(), input_tys.to_vec());
+        let key = ConcreteTraitImplKey::new(trait_id, input_tys.to_vec());
         if let Some(impl_id) = ctx.trait_solver.impls.concrete().get(&key).copied() {
             impl_id
         } else {
@@ -299,71 +290,80 @@ fn value_dictionary_node_kind_from_methods(
 /// Build the compiler-provided `Value` dictionary for a concrete function type.
 fn function_value_dictionary_node_kind(
     arena: &mut NodeArena,
-    trait_ref: &TraitRef,
+    trait_id: TraitId,
     input_tys: &[Type],
     span: Location,
     ctx: &mut DictElaborationCtx<'_, '_, '_>,
 ) -> Result<(NodeKind, Type), InternalCompilationError> {
-    let methods = (0..trait_ref.methods.len())
+    let method_count = ctx.trait_solver.trait_def(trait_id).methods.len();
+    let methods = (0..method_count)
         .map(TraitMethodIndex::from_index)
         .map(|method_index| function_value_method(ctx.trait_solver, method_index, span, arena))
         .collect::<Result<Vec<_>, _>>()?;
-    value_dictionary_node_kind_from_methods(trait_ref, input_tys, span, &methods, ctx)
+    value_dictionary_node_kind_from_methods(trait_id, input_tys, span, &methods, ctx)
 }
 
 /// Build a generated `Value` dictionary for a structural type whose unresolved
 /// type variables appear only inside function types.
 fn generic_derived_value_dictionary_node_kind(
     arena: &mut NodeArena,
-    trait_ref: &TraitRef,
+    trait_id: TraitId,
     input_tys: &[Type],
     span: Location,
     ctx: &mut DictElaborationCtx<'_, '_, '_>,
 ) -> Result<(NodeKind, Type), InternalCompilationError> {
     let methods =
-        generic_value_methods_for_type(ctx.trait_solver, trait_ref, input_tys, span, arena)?;
-    value_dictionary_node_kind_from_methods(trait_ref, input_tys, span, &methods, ctx)
+        generic_value_methods_for_type(ctx.trait_solver, trait_id, input_tys, span, arena)?;
+    value_dictionary_node_kind_from_methods(trait_id, input_tys, span, &methods, ctx)
 }
 
 /// Build the HIR expression that provides the runtime dictionary for a trait requirement.
 fn trait_dictionary_node_kind(
     arena: &mut NodeArena,
-    trait_ref: &TraitRef,
+    trait_id: TraitId,
     input_tys: &[Type],
     output_tys: &[Type],
     span: Location,
     ctx: &mut DictElaborationCtx<'_, '_, '_>,
 ) -> Result<(NodeKind, Type), InternalCompilationError> {
-    if is_value_trait_for_function_type(trait_ref, input_tys, output_tys) {
-        return function_value_dictionary_node_kind(arena, trait_ref, input_tys, span, ctx);
+    let trait_def = ctx.trait_solver.trait_def(trait_id);
+    if is_value_trait_for_function_type(trait_id, trait_def, input_tys, output_tys) {
+        return function_value_dictionary_node_kind(arena, trait_id, input_tys, span, ctx);
     }
-    if is_function_surface_only_value_trait_application(trait_ref, input_tys, output_tys) {
-        return generic_derived_value_dictionary_node_kind(arena, trait_ref, input_tys, span, ctx);
+
+    let trait_def = ctx.trait_solver.trait_def(trait_id);
+    if is_function_surface_only_value_trait_application(trait_id, trait_def, input_tys, output_tys)
+    {
+        return generic_derived_value_dictionary_node_kind(arena, trait_id, input_tys, span, ctx);
     }
+
+    let ty = ctx
+        .trait_solver
+        .trait_def(trait_id)
+        .get_dictionary_type_for_tys(input_tys, output_tys);
 
     let node_kind = if input_tys.iter().all(Type::is_constant) {
         let dictionary = ctx
             .trait_solver
-            .solve_impl(trait_ref, input_tys, span, arena)?;
+            .solve_impl(trait_id, input_tys, span, arena)?;
         NodeKind::GetDictionary(hir::GetDictionary { dictionary })
     } else {
-        let index = find_trait_impl_dict_index(ctx.dicts, trait_ref, input_tys)
+        let index = find_trait_impl_dict_index(ctx.dicts, trait_id, input_tys)
             .expect("Dictionary for trait impl not found, type inference should have failed");
         NodeKind::LoadDictionary(hir::LoadDictionary {
             extra_parameter: ExtraParameterId::from_index(index),
         })
     };
-    let ty = trait_ref.get_dictionary_type_for_tys(input_tys, output_tys);
     Ok((node_kind, ty))
 }
 
 /// Return the method slot and callable type from an already-instantiated dictionary type.
 fn dictionary_method_projection_data(
-    trait_ref: &TraitRef,
+    trait_def: &crate::types::r#trait::Trait,
     dictionary_ty: Type,
     method_index: TraitMethodIndex,
 ) -> (TraitDictionaryEntryIndex, Type) {
-    let entry_index = trait_ref.dictionary_method_index(method_index);
+    let entry_index = trait_def.dictionary_method_index(method_index);
     let function_ty = dictionary_ty
         .data()
         .as_tuple()
@@ -419,10 +419,10 @@ fn extra_args_from_inst_data<'d, 'sr, 'sm>(
                     };
                     (node_kind, int_type())
                 }
-                TraitImpl { trait_ref, input_tys, output_tys, .. } => {
+                TraitImpl { trait_id, input_tys, output_tys, .. } => {
                     let (node_kind, ty) = trait_dictionary_node_kind(
                         arena,
-                        trait_ref,
+                        *trait_id,
                         input_tys,
                         output_tys,
                         span,
@@ -444,6 +444,7 @@ fn extra_args_for_module_function(
     inst_data: &DictionariesReq,
     span: Location,
     dicts: &ExtraParameters,
+    trait_solver: &TraitSolver<'_>,
 ) -> (Vec<NodeId>, Vec<FnArgType>) {
     inst_data
         .iter()
@@ -456,7 +457,7 @@ fn extra_args_for_module_function(
                 .iter()
                 .position(|d| d == dict)
                 .expect("Target dictionary not found in ours");
-            let ty = dict.to_dict_type();
+            let ty = dict.to_dict_type(trait_solver);
             let extra_parameter = ExtraParameterId::from_index(index);
             let kind = match dict {
                 DictionaryReq::TraitImpl { .. } => {
@@ -559,19 +560,22 @@ fn resolve_value_method_dispatch(
         )));
     }
     if is_function_surface_only_value_type(ty) {
+        let value_trait_id = ctx.trait_solver.std_trait_id(VALUE_TRAIT_NAME);
         let methods =
-            generic_value_methods_for_type(ctx.trait_solver, &VALUE_TRAIT, &[ty], span, arena)?;
+            generic_value_methods_for_type(ctx.trait_solver, value_trait_id, &[ty], span, arena)?;
         return Ok(ResolvedValueMethodDispatch::Static(FunctionId::Local(
             methods[usize::from(method_index)],
         )));
     }
     if ty.is_constant() {
+        let value_trait_id = ctx.trait_solver.std_trait_id(VALUE_TRAIT_NAME);
         return Ok(ResolvedValueMethodDispatch::Static(
             ctx.trait_solver
-                .solve_impl_method(&VALUE_TRAIT, &[ty], method_index, span, arena)?,
+                .solve_impl_method(value_trait_id, &[ty], method_index, span, arena)?,
         ));
     }
-    let dict_index = find_trait_impl_dict_index(ctx.dicts, &VALUE_TRAIT, &[ty])
+    let value_trait_id = ctx.trait_solver.std_trait_id(VALUE_TRAIT_NAME);
+    let dict_index = find_trait_impl_dict_index(ctx.dicts, value_trait_id, &[ty])
         .unwrap_or_else(|| panic!("{missing_dictionary_msg}: {ty:?}"));
     Ok(ResolvedValueMethodDispatch::Dictionary(
         ExtraParameterId::from_index(dict_index),
@@ -765,7 +769,7 @@ fn resolve_generated_temp_drop(
         )));
     }
     Ok(ResolvedLocalDrop::Static(trait_solver.solve_impl_method(
-        &VALUE_TRAIT,
+        trait_solver.std_trait_id(VALUE_TRAIT_NAME),
         &[ty],
         VALUE_DROP_METHOD_INDEX,
         span,
@@ -781,7 +785,12 @@ fn generated_type_has_trivial_copy_impl(
 ) -> bool {
     ty.is_constant()
         && trait_solver
-            .solve_output_types(&TRIVIAL_COPY_TRAIT, &[ty], span, arena)
+            .solve_output_types(
+                trait_solver.std_trait_id(TRIVIAL_COPY_TRAIT_NAME),
+                &[ty],
+                span,
+                arena,
+            )
             .is_ok()
 }
 
@@ -794,7 +803,12 @@ fn type_has_concrete_trivial_copy_impl(
     ty.is_constant()
         && ctx
             .trait_solver
-            .solve_output_types(&TRIVIAL_COPY_TRAIT, &[ty], span, arena)
+            .solve_output_types(
+                ctx.trait_solver.std_trait_id(TRIVIAL_COPY_TRAIT_NAME),
+                &[ty],
+                span,
+                arena,
+            )
             .is_ok()
 }
 
@@ -926,7 +940,11 @@ impl Node {
                             let inst_data = &inst_data.requirements;
                             // Yes, build the dictionary requirements for the function.
                             let (extra_args, extra_args_ty) = extra_args_for_module_function(
-                                arena, inst_data, node_span, ctx.dicts,
+                                arena,
+                                inst_data,
+                                node_span,
+                                ctx.dicts,
+                                ctx.trait_solver,
                             );
                             let _ = extra_args_ty;
                             app.extra_arguments.splice(0..0, extra_args);
@@ -953,15 +971,32 @@ impl Node {
                     "Instantiation data for trait method is not supported yet."
                 );
                 let resolved = app.input_tys.iter().all(Type::is_constant);
-                if is_value_trait_for_function_type(&app.trait_ref, &app.input_tys, &[]) {
+                let (is_value_function, is_function_surface_only, argument_names) = {
+                    let trait_def = ctx.trait_solver.trait_def(app.trait_id);
+                    let definition = &trait_def.method(app.method_index).1;
+                    (
+                        is_value_trait_for_function_type(
+                            app.trait_id,
+                            trait_def,
+                            &app.input_tys,
+                            &[],
+                        ),
+                        is_function_surface_only_value_trait_application(
+                            app.trait_id,
+                            trait_def,
+                            &app.input_tys,
+                            &[],
+                        ),
+                        app.arguments_unnamed.filter_args(&definition.arg_names),
+                    )
+                };
+                if is_value_function {
                     let function = FunctionId::Local(function_value_method(
                         ctx.trait_solver,
                         app.method_index,
                         app.method_span,
                         arena,
                     )?);
-                    let definition = &app.trait_ref.method(app.method_index).1;
-                    let argument_names = app.arguments_unnamed.filter_args(&definition.arg_names);
                     let function_path = Some(app.method_path.clone());
                     let function_span = app.method_span;
                     let ty = app.ty.clone();
@@ -980,14 +1015,12 @@ impl Node {
                 } else if resolved {
                     // Fully resolved, look up the trait implementation and replace the function directly.
                     let function = ctx.trait_solver.solve_impl_method(
-                        &app.trait_ref,
+                        app.trait_id,
                         &app.input_tys,
                         app.method_index,
                         app.method_span,
                         arena,
                     )?;
-                    let definition = &app.trait_ref.method(app.method_index).1;
-                    let argument_names = app.arguments_unnamed.filter_args(&definition.arg_names);
                     let function_path = Some(app.method_path.clone());
                     let function_span = app.method_span;
                     let ty = app.ty.clone();
@@ -1003,18 +1036,18 @@ impl Node {
                         inst_data: hir::FnInstData::none(),
                         returns_place: false,
                     }));
-                } else if is_function_surface_only_value_trait_application(
-                    &app.trait_ref,
-                    &app.input_tys,
-                    &[],
-                ) {
+                } else if is_function_surface_only {
                     let function_span = app.method_span;
-                    let dict_ty = app
-                        .trait_ref
-                        .get_dictionary_type_for_tys(&app.input_tys, &[]);
+                    let (dict_ty, entry_index) = {
+                        let trait_def = ctx.trait_solver.trait_def(app.trait_id);
+                        let dict_ty = trait_def.get_dictionary_type_for_tys(&app.input_tys, &[]);
+                        let (entry_index, _) =
+                            dictionary_method_projection_data(trait_def, dict_ty, app.method_index);
+                        (dict_ty, entry_index)
+                    };
                     let (dict_kind, _) = trait_dictionary_node_kind(
                         arena,
-                        &app.trait_ref,
+                        app.trait_id,
                         &app.input_tys,
                         &[],
                         function_span,
@@ -1022,11 +1055,6 @@ impl Node {
                     )?;
                     let dict_id =
                         arena.alloc(Node::new(dict_kind, dict_ty, no_effects(), function_span));
-                    let (entry_index, _) = dictionary_method_projection_data(
-                        &app.trait_ref,
-                        dict_ty,
-                        app.method_index,
-                    );
                     let arguments = mem::take(&mut app.arguments);
                     let ty = app.ty.clone();
                     kind = CallDictionaryMethod(b(hir::CallDictionaryMethod {
@@ -1039,13 +1067,13 @@ impl Node {
                     // Not fully resolved, use the dictionary to look up the trait method.
                     let dict_index = find_trait_impl_dict_index(
                         ctx.dicts,
-                        &app.trait_ref,
+                        app.trait_id,
                         &app.input_tys,
                     )
                     .expect(
                         "Dictionary for trait impl not found, type inference should have failed",
                     );
-                    let dict_ty = ctx.dicts.requirements[dict_index].to_dict_type();
+                    let dict_ty = ctx.dicts.requirements[dict_index].to_dict_type(ctx.trait_solver);
                     let function_span = app.method_span;
                     // Load that dictionary from the correct local variable.
                     let load_dict_id = arena.alloc(Node::new(
@@ -1057,7 +1085,7 @@ impl Node {
                         function_span,
                     ));
                     let (entry_index, _) = dictionary_method_projection_data(
-                        &app.trait_ref,
+                        ctx.trait_solver.trait_def(app.trait_id),
                         dict_ty,
                         app.method_index,
                     );
@@ -1086,7 +1114,11 @@ impl Node {
                                 let inst_data = &inst_data.requirements;
                                 // We have an instantiation, so we need a closure to pass dictionary requirements.
                                 let (captures, _) = extra_args_for_module_function(
-                                    arena, inst_data, node_span, ctx.dicts,
+                                    arena,
+                                    inst_data,
+                                    node_span,
+                                    ctx.dicts,
+                                    ctx.trait_solver,
                                 );
                                 assert!(get_fn.inst_data.dicts_req.is_empty());
                                 let node_effects = arena[node_id].effects.clone();
@@ -1130,11 +1162,16 @@ impl Node {
                     "Instantiation data for trait method is not supported yet."
                 );
                 let resolved = get_method.input_tys.iter().all(Type::is_constant);
-                if is_value_trait_for_function_type(
-                    &get_method.trait_ref,
-                    &get_method.input_tys,
-                    &get_method.output_tys,
-                ) {
+                let is_value_function = {
+                    let trait_def = ctx.trait_solver.trait_def(get_method.trait_id);
+                    is_value_trait_for_function_type(
+                        get_method.trait_id,
+                        trait_def,
+                        &get_method.input_tys,
+                        &get_method.output_tys,
+                    )
+                };
+                if is_value_function {
                     let function = FunctionId::Local(function_value_method(
                         ctx.trait_solver,
                         get_method.method_index,
@@ -1149,7 +1186,7 @@ impl Node {
                     }));
                 } else if resolved {
                     let function = ctx.trait_solver.solve_impl_method(
-                        &get_method.trait_ref,
+                        get_method.trait_id,
                         &get_method.input_tys,
                         get_method.method_index,
                         get_method.method_span,
@@ -1162,12 +1199,22 @@ impl Node {
                         inst_data: hir::FnInstData::none(),
                     }));
                 } else {
-                    let dict_ty = get_method
-                        .trait_ref
-                        .get_dictionary_type_for_tys(&get_method.input_tys, &get_method.output_tys);
+                    let (dict_ty, entry_index) = {
+                        let trait_def = ctx.trait_solver.trait_def(get_method.trait_id);
+                        let dict_ty = trait_def.get_dictionary_type_for_tys(
+                            &get_method.input_tys,
+                            &get_method.output_tys,
+                        );
+                        let (entry_index, _) = dictionary_method_projection_data(
+                            trait_def,
+                            dict_ty,
+                            get_method.method_index,
+                        );
+                        (dict_ty, entry_index)
+                    };
                     let (dict_kind, _) = trait_dictionary_node_kind(
                         arena,
-                        &get_method.trait_ref,
+                        get_method.trait_id,
                         &get_method.input_tys,
                         &get_method.output_tys,
                         get_method.method_span,
@@ -1179,11 +1226,6 @@ impl Node {
                         no_effects(),
                         get_method.method_span,
                     ));
-                    let (entry_index, _) = dictionary_method_projection_data(
-                        &get_method.trait_ref,
-                        dict_ty,
-                        get_method.method_index,
-                    );
                     kind = GetDictionaryMethod(hir::GetDictionaryMethod {
                         dictionary: dict_id,
                         entry_index,
@@ -1192,15 +1234,21 @@ impl Node {
             }
             GetTraitAssociatedConst(get_const) => {
                 let resolved = get_const.input_tys.iter().all(Type::is_constant);
-                if is_value_trait_for_function_type(
-                    &get_const.trait_ref,
-                    &get_const.input_tys,
-                    &get_const.output_tys,
-                ) || is_function_surface_only_value_trait_application(
-                    &get_const.trait_ref,
-                    &get_const.input_tys,
-                    &get_const.output_tys,
-                ) {
+                let is_compiler_value_application = {
+                    let trait_def = ctx.trait_solver.trait_def(get_const.trait_id);
+                    is_value_trait_for_function_type(
+                        get_const.trait_id,
+                        trait_def,
+                        &get_const.input_tys,
+                        &get_const.output_tys,
+                    ) || is_function_surface_only_value_trait_application(
+                        get_const.trait_id,
+                        trait_def,
+                        &get_const.input_tys,
+                        &get_const.output_tys,
+                    )
+                };
+                if is_compiler_value_application {
                     let values = value_layout_associated_const_values(
                         get_const.input_tys[0],
                         node_span,
@@ -1210,7 +1258,7 @@ impl Node {
                     kind = hir::hir_syn::native(value);
                 } else if resolved {
                     let value = ctx.trait_solver.solve_associated_const(
-                        &get_const.trait_ref,
+                        get_const.trait_id,
                         &get_const.input_tys,
                         get_const.associated_const_index,
                         get_const.associated_const_span,
@@ -1220,13 +1268,13 @@ impl Node {
                 } else {
                     let dict_index = find_trait_impl_dict_index(
                         ctx.dicts,
-                        &get_const.trait_ref,
+                        get_const.trait_id,
                         &get_const.input_tys,
                     )
                     .expect(
                         "Dictionary for trait impl not found, type inference should have failed",
                     );
-                    let dict_ty = ctx.dicts.requirements[dict_index].to_dict_type();
+                    let dict_ty = ctx.dicts.requirements[dict_index].to_dict_type(ctx.trait_solver);
                     let load_dict_id = arena.alloc(Node::new(
                         NodeKind::LoadDictionary(hir::LoadDictionary {
                             extra_parameter: ExtraParameterId::from_index(dict_index),
@@ -1237,8 +1285,9 @@ impl Node {
                     ));
                     kind = GetDictionaryAssociatedConst(hir::GetDictionaryAssociatedConst {
                         dictionary: load_dict_id,
-                        entry_index: get_const
-                            .trait_ref
+                        entry_index: ctx
+                            .trait_solver
+                            .trait_def(get_const.trait_id)
                             .dictionary_associated_const_index(get_const.associated_const_index),
                     });
                 }
@@ -1246,7 +1295,7 @@ impl Node {
             GetTraitDictionary(get_dict) => {
                 let (node_kind, _) = trait_dictionary_node_kind(
                     arena,
-                    &get_dict.trait_ref,
+                    get_dict.trait_id,
                     &get_dict.input_tys,
                     &get_dict.output_tys,
                     node_span,
@@ -1413,16 +1462,18 @@ mod tests {
         containers::b,
         hir::GetTraitAssociatedConst,
         hir::function::Function,
-        module::{FunctionCollector, LocalDecl, ModuleId, TraitImpls, id::Id},
+        module::{
+            FunctionCollector, LocalDecl, LocalTraitId, ModuleId, TraitId, TraitImpls, id::Id,
+        },
         types::{
-            r#trait::{TraitAssociatedConst, TraitAssociatedConstIndex, TraitRef},
+            r#trait::{Trait, TraitAssociatedConst, TraitAssociatedConstIndex},
             trait_solver::TraitSolver,
             r#type::Type,
         },
     };
 
-    fn layout_trait() -> TraitRef {
-        TraitRef::new_with_self_input_type(
+    fn layout_trait() -> Trait {
+        Trait::new_with_self_input_type(
             "Layout",
             "Compiler-only layout metadata.",
             Vec::<&str>::new(),
@@ -1435,14 +1486,15 @@ mod tests {
     }
 
     fn get_associated_const_node(
-        trait_ref: TraitRef,
+        trait_id: TraitId,
+        trait_def: &Trait,
         associated_const_index: TraitAssociatedConstIndex,
         input_tys: Vec<Type>,
     ) -> NodeKind {
         NodeKind::GetTraitAssociatedConst(b(GetTraitAssociatedConst {
-            associated_const_name: trait_ref.associated_const(associated_const_index).name,
+            associated_const_name: trait_def.associated_const(associated_const_index).name,
             associated_const_span: Location::new_synthesized(),
-            trait_ref,
+            trait_id,
             associated_const_index,
             input_tys,
             output_tys: vec![],
@@ -1451,12 +1503,15 @@ mod tests {
 
     #[test]
     fn concrete_associated_const_elaborates_to_immediate() {
-        let trait_ref = layout_trait();
+        let traits = vec![layout_trait()];
+        let trait_def = &traits[0];
+        let trait_id = TraitId::new(ModuleId(0), LocalTraitId(0));
         let mut arena = NodeArena::default();
         let span = Location::new_synthesized();
         let node = arena.alloc(Node::new(
             get_associated_const_node(
-                trait_ref.clone(),
+                trait_id,
+                trait_def,
                 TraitAssociatedConstIndex::from_index(0),
                 vec![Type::unit()],
             ),
@@ -1468,7 +1523,8 @@ mod tests {
         let mut impls = TraitImpls::new(ModuleId(0));
         let mut fn_collector = FunctionCollector::new(0);
         impls.add_concrete_raw(
-            trait_ref,
+            trait_id,
+            trait_def,
             [Type::unit()],
             [],
             [8, 4],
@@ -1481,6 +1537,7 @@ mod tests {
         let mut import_impl_slots = Vec::new();
         let mut solver = TraitSolver::new(
             crate::types::trait_solver::CurrentTypeDefs::new(ModuleId(0), &type_defs),
+            &traits,
             &mut impls,
             FxHashMap::default(),
             &mut import_fn_slots,
@@ -1504,13 +1561,16 @@ mod tests {
 
     #[test]
     fn generic_associated_const_elaborates_to_dictionary_associated_const() {
-        let trait_ref = layout_trait();
+        let traits = vec![layout_trait()];
+        let trait_def = &traits[0];
+        let trait_id = TraitId::new(ModuleId(0), LocalTraitId(0));
         let input_ty = Type::variable_id(0);
         let mut arena = NodeArena::default();
         let span = Location::new_synthesized();
         let node = arena.alloc(Node::new(
             get_associated_const_node(
-                trait_ref.clone(),
+                trait_id,
+                trait_def,
                 TraitAssociatedConstIndex::from_index(1),
                 vec![input_ty],
             ),
@@ -1526,6 +1586,7 @@ mod tests {
         let mut import_impl_slots = Vec::new();
         let mut solver = TraitSolver::new(
             crate::types::trait_solver::CurrentTypeDefs::new(ModuleId(0), &type_defs),
+            &traits,
             &mut impls,
             FxHashMap::default(),
             &mut import_fn_slots,
@@ -1535,7 +1596,7 @@ mod tests {
         );
         let dicts = ExtraParameters {
             requirements: vec![DictionaryReq::new_trait_impl(
-                trait_ref,
+                trait_id,
                 vec![input_ty],
                 vec![],
             )],

@@ -15,17 +15,31 @@ use itertools::Itertools;
 
 use crate::{
     format::{FormatWith, FormatWithData, write_with_separator_and_format_fn},
-    module::ModuleEnv,
-    std::value::VALUE_TRAIT,
+    module::{ModuleEnv, TraitId},
     types::{
         effects::EffectsInstSubst,
-        r#trait::TraitRef,
         r#type::{Type, TypeDisplayEnv, TypeInstSubst, TypeVar},
         type_inference::substitution::InstSubst,
         type_like::TypeLike,
         type_scheme::{PubTypeConstraint, TupleConstraint, TypeScheme, VariantConstraint},
     },
 };
+
+pub(crate) trait HasModuleEnv {
+    fn module_env(&self) -> &ModuleEnv<'_>;
+}
+
+impl HasModuleEnv for ModuleEnv<'_> {
+    fn module_env(&self) -> &ModuleEnv<'_> {
+        self
+    }
+}
+
+impl HasModuleEnv for TypeDisplayEnv<'_, '_> {
+    fn module_env(&self) -> &ModuleEnv<'_> {
+        self.module_env
+    }
+}
 
 impl FormatWith<ModuleEnv<'_>> for PubTypeConstraint {
     fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv<'_>) -> std::fmt::Result {
@@ -62,6 +76,7 @@ fn format_pub_type_constraint<Env>(
 ) -> std::fmt::Result
 where
     Type: FormatWith<Env>,
+    Env: HasModuleEnv,
 {
     format_pub_type_constraint_with_style(
         constraint,
@@ -79,6 +94,7 @@ pub(crate) fn format_pub_type_constraint_with_style<Env>(
 ) -> std::fmt::Result
 where
     Type: FormatWith<Env>,
+    Env: HasModuleEnv,
 {
     use PubTypeConstraint::*;
     match constraint {
@@ -125,11 +141,11 @@ where
             }
         }
         HaveTrait {
-            trait_ref,
+            trait_id,
             input_tys,
             output_tys,
             ..
-        } => format_have_trait_with_env(trait_ref, input_tys, output_tys, f, env, style),
+        } => format_have_trait_with_env(*trait_id, input_tys, output_tys, f, env, style),
     }
 }
 
@@ -207,6 +223,7 @@ fn write_aggregated_constraint<Env>(
 ) -> std::fmt::Result
 where
     Type: FormatWith<Env>,
+    Env: HasModuleEnv,
 {
     write!(f, "{}: ", ty.format_with(env))?;
     match constraint {
@@ -248,14 +265,14 @@ where
 
 #[derive(Default)]
 struct DisplayConstraints<'a> {
-    simple_trait_constraints: FxHashMap<Type, Vec<&'a TraitRef>>,
+    simple_trait_constraints: FxHashMap<Type, Vec<TraitId>>,
     other_trait_constraints: Vec<NonUnaryTraitConstraint<'a>>,
     structural_constraints: BTreeMap<Type, AggregatedConstraint>,
 }
 
 #[derive(Clone, Copy)]
 struct NonUnaryTraitConstraint<'a> {
-    trait_ref: &'a TraitRef,
+    trait_id: TraitId,
     input_tys: &'a [Type],
     output_tys: &'a [Type],
 }
@@ -271,7 +288,7 @@ struct ConstraintSortKey {
 enum ConstraintDisplayItem<'a> {
     UnaryTraitGroup {
         input_ty: Type,
-        trait_refs: Vec<&'a TraitRef>,
+        trait_ids: Vec<TraitId>,
     },
     NonUnaryTraitConstraint(NonUnaryTraitConstraint<'a>),
     StructuralConstraint {
@@ -289,8 +306,8 @@ impl<'a> DisplayConstraints<'a> {
         display_constraints
     }
 
-    fn light(constraints: &'a [PubTypeConstraint]) -> Self {
-        let parent_constraints = transitive_parent_constraints(constraints);
+    fn light(constraints: &'a [PubTypeConstraint], env: &ModuleEnv<'_>) -> Self {
+        let parent_constraints = transitive_parent_constraints(constraints, env);
         let mut display_constraints = Self::default();
         for constraint in constraints {
             if is_hidden_light_constraint(constraint) || parent_constraints.contains(constraint) {
@@ -304,7 +321,7 @@ impl<'a> DisplayConstraints<'a> {
     fn push(&mut self, constraint: &'a PubTypeConstraint) {
         match constraint {
             PubTypeConstraint::HaveTrait {
-                trait_ref,
+                trait_id,
                 input_tys,
                 output_tys,
                 ..
@@ -312,16 +329,16 @@ impl<'a> DisplayConstraints<'a> {
                 self.simple_trait_constraints
                     .entry(input_tys[0])
                     .or_default()
-                    .push(trait_ref);
+                    .push(*trait_id);
             }
             PubTypeConstraint::HaveTrait {
-                trait_ref,
+                trait_id,
                 input_tys,
                 output_tys,
                 ..
             } => {
                 self.other_trait_constraints.push(NonUnaryTraitConstraint {
-                    trait_ref,
+                    trait_id: *trait_id,
                     input_tys,
                     output_tys,
                 });
@@ -343,17 +360,18 @@ impl<'a> DisplayConstraints<'a> {
     fn format<Env>(&self, f: &mut std::fmt::Formatter, env: &Env) -> std::fmt::Result
     where
         Type: FormatWith<Env>,
+        Env: HasModuleEnv,
     {
         let mut items = self
             .simple_trait_constraints
             .iter()
-            .map(|(ty, trait_refs)| {
-                let mut trait_refs = trait_refs.clone();
-                trait_refs.sort_by_key(|trait_ref| trait_ref.name);
-                trait_refs.dedup_by_key(|trait_ref| trait_ref.name);
+            .map(|(ty, trait_ids)| {
+                let mut trait_ids = trait_ids.clone();
+                trait_ids.sort_by_key(|trait_id| env.module_env().trait_name(*trait_id));
+                trait_ids.dedup_by_key(|trait_id| env.module_env().trait_name(*trait_id));
                 ConstraintDisplayItem::UnaryTraitGroup {
                     input_ty: *ty,
-                    trait_refs,
+                    trait_ids,
                 }
             })
             .collect::<Vec<_>>();
@@ -385,24 +403,25 @@ impl ConstraintDisplayItem<'_> {
     fn sort_key<Env>(&self, env: &Env) -> ConstraintSortKey
     where
         Type: FormatWith<Env>,
+        Env: HasModuleEnv,
     {
         match self {
             Self::UnaryTraitGroup {
                 input_ty,
-                trait_refs,
+                trait_ids,
             } => constraint_sort_key(
                 0,
                 Some(*input_ty),
-                trait_refs
+                trait_ids
                     .iter()
-                    .map(|trait_ref| trait_ref.name.as_str())
+                    .map(|trait_id| env.module_env().trait_name(*trait_id).as_str())
                     .join(" + "),
                 env,
             ),
             Self::NonUnaryTraitConstraint(constraint) => constraint_sort_key(
                 0,
                 constraint.input_tys.first().copied(),
-                constraint.trait_ref.name.to_string(),
+                env.module_env().trait_name(constraint.trait_id).to_string(),
                 env,
             ),
             Self::StructuralConstraint { ty, constraint } => constraint_sort_key(
@@ -417,22 +436,23 @@ impl ConstraintDisplayItem<'_> {
     fn format<Env>(&self, f: &mut std::fmt::Formatter, env: &Env) -> std::fmt::Result
     where
         Type: FormatWith<Env>,
+        Env: HasModuleEnv,
     {
         match self {
             Self::UnaryTraitGroup {
                 input_ty,
-                trait_refs,
+                trait_ids,
             } => {
                 write!(f, "{}: ", input_ty.format_with(env))?;
                 write_with_separator_and_format_fn(
-                    trait_refs,
+                    trait_ids,
                     " + ",
-                    |trait_ref, f| write!(f, "{}", trait_ref.name),
+                    |trait_id, f| write!(f, "{}", env.module_env().trait_name(*trait_id)),
                     f,
                 )
             }
             Self::NonUnaryTraitConstraint(constraint) => format_have_trait_with_env(
-                constraint.trait_ref,
+                constraint.trait_id,
                 constraint.input_tys,
                 constraint.output_tys,
                 f,
@@ -450,30 +470,35 @@ fn is_hidden_light_constraint(constraint: &PubTypeConstraint) -> bool {
     matches!(
         constraint,
         PubTypeConstraint::HaveTrait {
-            trait_ref,
+            trait_id,
             input_tys,
             output_tys,
             ..
-        } if trait_ref == &*VALUE_TRAIT && input_tys.len() == 1 && output_tys.is_empty()
+        } if trait_id.module == crate::std::STD_MODULE_ID
+            && *trait_id == crate::module::TraitId::new(crate::std::STD_MODULE_ID, crate::module::LocalTraitId(0))
+            && input_tys.len() == 1
+            && output_tys.is_empty()
     )
 }
 
 fn transitive_parent_constraints(
     constraints: &[PubTypeConstraint],
+    env: &ModuleEnv<'_>,
 ) -> FxHashSet<PubTypeConstraint> {
     let mut parent_constraints = FxHashSet::default();
     for constraint in constraints {
-        collect_transitive_parent_constraints(constraint, &mut parent_constraints);
+        collect_transitive_parent_constraints(constraint, env, &mut parent_constraints);
     }
     parent_constraints
 }
 
 fn collect_transitive_parent_constraints(
     constraint: &PubTypeConstraint,
+    env: &ModuleEnv<'_>,
     parent_constraints: &mut FxHashSet<PubTypeConstraint>,
 ) {
     let PubTypeConstraint::HaveTrait {
-        trait_ref,
+        trait_id,
         input_tys,
         output_tys,
         ..
@@ -481,17 +506,18 @@ fn collect_transitive_parent_constraints(
     else {
         return;
     };
-    let subst = trait_constraint_subst(trait_ref, input_tys, output_tys);
-    for parent_constraint in &trait_ref.parent_constraints {
+    let trait_def = env.trait_def(*trait_id);
+    let subst = trait_constraint_subst(trait_def, input_tys, output_tys);
+    for parent_constraint in &trait_def.parent_constraints {
         let parent_constraint = parent_constraint.instantiate_simple(&subst);
         if parent_constraints.insert(parent_constraint.clone()) {
-            collect_transitive_parent_constraints(&parent_constraint, parent_constraints);
+            collect_transitive_parent_constraints(&parent_constraint, env, parent_constraints);
         }
     }
 }
 
 fn trait_constraint_subst(
-    trait_ref: &TraitRef,
+    trait_def: &crate::types::r#trait::Trait,
     input_tys: &[Type],
     output_tys: &[Type],
 ) -> InstSubst {
@@ -499,7 +525,7 @@ fn trait_constraint_subst(
     for (index, ty) in input_tys.iter().enumerate() {
         ty_subst.insert(TypeVar::new(index as u32), *ty);
     }
-    let input_ty_count = trait_ref.input_type_count();
+    let input_ty_count = trait_def.input_type_count();
     for (index, ty) in output_tys.iter().enumerate() {
         ty_subst.insert(TypeVar::new(input_ty_count + index as u32), *ty);
     }
@@ -555,7 +581,9 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
     ) -> std::fmt::Result {
         let constraints = match mode {
             TypeSchemeConstraintRenderMode::Full => DisplayConstraints::full(&self.constraints),
-            TypeSchemeConstraintRenderMode::Light => DisplayConstraints::light(&self.constraints),
+            TypeSchemeConstraintRenderMode::Light => {
+                DisplayConstraints::light(&self.constraints, env.module_env)
+            }
         };
         if constraints.is_empty() {
             return Ok(());
@@ -615,14 +643,14 @@ where
 }
 
 pub fn format_have_trait(
-    trait_ref: &TraitRef,
+    trait_id: TraitId,
     input_tys: &[Type],
     output_tys: &[Type],
     f: &mut std::fmt::Formatter,
     env: &ModuleEnv<'_>,
 ) -> std::fmt::Result {
     format_have_trait_with_env(
-        trait_ref,
+        trait_id,
         input_tys,
         output_tys,
         f,
@@ -632,7 +660,7 @@ pub fn format_have_trait(
 }
 
 fn format_have_trait_with_env<Env>(
-    trait_ref: &TraitRef,
+    trait_id: TraitId,
     input_tys: &[Type],
     output_tys: &[Type],
     f: &mut std::fmt::Formatter,
@@ -641,8 +669,10 @@ fn format_have_trait_with_env<Env>(
 ) -> std::fmt::Result
 where
     Type: FormatWith<Env>,
+    Env: HasModuleEnv,
 {
-    let trait_name = trait_ref.name;
+    let trait_def = env.module_env().trait_def(trait_id);
+    let trait_name = trait_def.name;
     let use_unary_where_clause =
         input_tys.len() == 1 && matches!(style, TypeConstraintRenderStyle::WhereClause);
     if use_unary_where_clause {
@@ -660,7 +690,7 @@ where
                 write!(
                     f,
                     "{} = {}",
-                    trait_ref.input_type_names[index],
+                    trait_def.input_type_names[index],
                     ty.format_with(env)
                 )
             },
@@ -678,7 +708,7 @@ where
                 write!(
                     f,
                     "{} = {}",
-                    trait_ref.output_type_names[index],
+                    trait_def.output_type_names[index],
                     ty.format_with(env)
                 )
             },
@@ -703,6 +733,7 @@ fn format_constraints_consolidated_with_env<Env>(
 ) -> std::fmt::Result
 where
     Type: FormatWith<Env>,
+    Env: HasModuleEnv,
 {
     DisplayConstraints::full(constraints).format(f, env)
 }

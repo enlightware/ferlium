@@ -20,9 +20,9 @@ use ferlium::{
     hir::value::Value,
     module::{ConcreteTraitImplKey, Module, TraitDictionaryEntry},
     std::{
+        core_traits_names::VALUE_TRAIT_NAME,
         option::{none, some},
         std_module,
-        value::VALUE_TRAIT,
     },
     types::effects::{PrimitiveEffect, effect, no_effects},
 };
@@ -32,24 +32,41 @@ use ferlium::std::buffer::Buffer;
 use ferlium::std::logic::bool_type;
 use ferlium::std::math::{Int, float_type, int_type};
 use ferlium::std::string::string_type;
+use ferlium::types::r#trait::Trait;
 use ferlium::types::r#type::{Type, tuple_type};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
 
 fn assert_std_value_layout<T>(module: &Module, ty: Type) {
+    let value_trait_id = module
+        .get_trait_id_str(VALUE_TRAIT_NAME)
+        .expect("std Value trait should be registered");
     assert_value_layout(
         module,
+        value_trait_id,
+        module.trait_def(value_trait_id),
         ty,
         std::mem::size_of::<T>() as isize,
         std::mem::align_of::<T>() as isize,
     );
 }
 
-fn assert_value_layout(module: &Module, ty: Type, size: isize, align: isize) {
-    let size_index = VALUE_TRAIT.associated_const_index(ustr("SIZE")).unwrap();
-    let align_index = VALUE_TRAIT.associated_const_index(ustr("ALIGN")).unwrap();
-    let key = ConcreteTraitImplKey::new(VALUE_TRAIT.clone(), vec![ty]);
+fn assert_value_layout(
+    module: &Module,
+    value_trait_id: ferlium::module::TraitId,
+    value_trait_def: &Trait,
+    ty: Type,
+    size: isize,
+    align: isize,
+) {
+    let size_index = value_trait_def
+        .associated_const_index(ustr("SIZE"))
+        .unwrap();
+    let align_index = value_trait_def
+        .associated_const_index(ustr("ALIGN"))
+        .unwrap();
+    let key = ConcreteTraitImplKey::new(value_trait_id, vec![ty]);
     let impl_id = *module
         .get_concrete_impl_by_key(&key)
         .expect("expected std Value impl");
@@ -60,12 +77,12 @@ fn assert_value_layout(module: &Module, ty: Type, size: isize, align: isize) {
 
     assert_eq!(
         imp.dictionary_value
-            .entry(VALUE_TRAIT.dictionary_associated_const_index(size_index)),
+            .entry(value_trait_def.dictionary_associated_const_index(size_index)),
         TraitDictionaryEntry::AssociatedConst(size)
     );
     assert_eq!(
         imp.dictionary_value
-            .entry(VALUE_TRAIT.dictionary_associated_const_index(align_index)),
+            .entry(value_trait_def.dictionary_associated_const_index(align_index)),
         TraitDictionaryEntry::AssociatedConst(align)
     );
 }
@@ -134,8 +151,11 @@ fn blanket_value_impls_materialize_layout_associated_consts() {
         ExpectedLayout::native::<Int>(),
         ExpectedLayout::native::<Int>(),
     ]);
+    let value_trait_id = session.std_trait(VALUE_TRAIT_NAME);
     assert_value_layout(
         module,
+        value_trait_id,
+        session.session().std_module().trait_def(value_trait_id),
         array_type(int_type()),
         array_layout.size as isize,
         array_layout.align as isize,

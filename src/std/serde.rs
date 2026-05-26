@@ -9,8 +9,6 @@
 
 use ustr::ustr;
 
-use std::sync::Arc;
-
 use crate::{
     Location, cached_ty,
     compiler::error::InternalCompilationError,
@@ -23,29 +21,26 @@ use crate::{
         function::FunctionDefinition,
     },
     module::{
-        self, LocalClone, LocalDeclId, Module, ProjectionIndex, ResolvedLocalClone, TraitImplId,
-        id::Id,
+        self, LocalClone, LocalDeclId, Module, ProjectionIndex, ResolvedLocalClone, TraitId,
+        TraitImplId, id::Id,
     },
     std::{
-        STD_MODULE_ID,
         array::array_type,
+        core_traits_names::{DESERIALIZE_TRAIT_NAME, SERIALIZE_TRAIT_NAME, VALUE_TRAIT_NAME},
         math::int_type,
         string::{string_type, string_value},
-        value::{VALUE_CLONE_METHOD_INDEX, VALUE_TRAIT},
+        value::VALUE_CLONE_METHOD_INDEX,
         variant::variant_object_entry_type,
     },
     types::effects::{EffType, PrimitiveEffect},
     types::mutability::MutVal,
-    types::r#trait::{Deriver, TraitMethodIndex, TraitRef},
+    types::r#trait::{Deriver, Trait, TraitMethodIndex},
     types::trait_solver::TraitSolver,
     types::r#type::{FnType, Type, TypeKind, tuple_type},
     types::type_like::TypeLike,
 };
 
 use super::variant::variant_type;
-
-pub const SERIALIZE_TRAIT_NAME: &str = "Serialize";
-pub const DESERIALIZE_TRAIT_NAME: &str = "Deserialize";
 
 pub const SERIALIZE_FN_NAME: &str = "serialize";
 pub const DESERIALIZE_FN_NAME: &str = "deserialize";
@@ -63,7 +58,7 @@ fn alloc_synth_node(arena: &mut NodeArena, kind: hir::NodeKind, ty: Type) -> Nod
 fn build_serialize_projection(
     arena: &mut NodeArena,
     solver: &mut TraitSolver,
-    trait_ref: &TraitRef,
+    trait_id: TraitId,
     span: Location,
     self_id: LocalDeclId,
     self_ty: Type,
@@ -79,7 +74,7 @@ fn build_serialize_projection(
         member_ty,
     );
     let function =
-        solver.solve_impl_method(trait_ref, &[member_ty], TraitMethodIndex(0), span, arena)?;
+        solver.solve_impl_method(trait_id, &[member_ty], TraitMethodIndex(0), span, arena)?;
     let apply = static_apply_generated(
         arena,
         solver,
@@ -103,7 +98,7 @@ struct AlgebraicTypeSerializeDeriver;
 impl Deriver for AlgebraicTypeSerializeDeriver {
     fn derive_impl(
         &self,
-        trait_ref: &TraitRef,
+        trait_id: TraitId,
         input_types: &[Type],
         span: Location,
         arena: &mut NodeArena,
@@ -140,7 +135,7 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
             let inner_ty = solver.type_def(named.def).instantiated_shape(&named.params);
             // serialize the inner type
             return Ok(Some(solver.solve_impl(
-                trait_ref,
+                trait_id,
                 &[inner_ty],
                 span,
                 arena,
@@ -154,7 +149,7 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
         }
         let snapshot = solver.snapshot_derived_impl_state();
         let impl_id =
-            solver.reserve_concrete_impl_from_code_entries(trait_ref, input_types, &[], []);
+            solver.reserve_concrete_impl_from_code_entries(trait_id, input_types, &[], []);
 
         let locals = vec![local("self", ty)];
         let l_self_id = LocalDeclId::from_index(0);
@@ -188,7 +183,7 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
                 .map(|(index, ty_i)| {
                     // serialize the i-th element
                     build_serialize_projection(
-                        arena, solver, trait_ref, span, l_self_id, ty, index, ty_i,
+                        arena, solver, trait_id, span, l_self_id, ty, index, ty_i,
                     )
                 })
                 .collect::<Result<SVec2<_>, _>>()?;
@@ -232,7 +227,7 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
                 .map(|(index, (name, ty_i))| {
                     let tag = n(arena, native_str(&name), string_type());
                     let payload = build_serialize_projection(
-                        arena, solver, trait_ref, span, l_self_id, ty, index, ty_i,
+                        arena, solver, trait_id, span, l_self_id, ty, index, ty_i,
                     )?;
                     let entry = n(arena, tuple([tag, payload]), variant_object_entry_type());
                     Ok(entry)
@@ -278,7 +273,7 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
                     let array_node = if payload_ty != Type::unit() {
                         // variant with payload
                         let payload_node = build_serialize_projection(
-                            arena, solver, trait_ref, span, l_self_id, ty, 0, payload_ty,
+                            arena, solver, trait_id, span, l_self_id, ty, 0, payload_ty,
                         )?;
                         let data_str = n(arena, native_str("data"), string_type());
                         let payload_entry = n(
@@ -316,7 +311,7 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
         };
         solver.replace_concrete_impl_code_entries(
             impl_id,
-            trait_ref,
+            trait_id,
             input_types,
             &[],
             [(root, locals)],
@@ -330,7 +325,7 @@ struct AlgebraicTypeDeserializeDeriver;
 impl Deriver for AlgebraicTypeDeserializeDeriver {
     fn derive_impl(
         &self,
-        trait_ref: &TraitRef,
+        trait_id: TraitId,
         input_types: &[Type],
         span: Location,
         arena: &mut NodeArena,
@@ -357,7 +352,7 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
         let build_deserialize =
             |arena: &mut NodeArena, solver: &mut TraitSolver, variant: NodeId, ty: Type| {
                 let function =
-                    solver.solve_impl_method(trait_ref, &[ty], TraitMethodIndex(0), span, arena)?;
+                    solver.solve_impl_method(trait_id, &[ty], TraitMethodIndex(0), span, arena)?;
                 let apply = static_apply_generated(
                     arena,
                     solver,
@@ -375,7 +370,7 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
             let inner_ty = solver.type_def(named.def).instantiated_shape(&named.params);
             // deserialize the inner type
             return Ok(Some(solver.solve_impl(
-                trait_ref,
+                trait_id,
                 &[inner_ty],
                 span,
                 arena,
@@ -389,7 +384,7 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
         }
         let snapshot = solver.snapshot_derived_impl_state();
         let impl_id =
-            solver.reserve_concrete_impl_from_code_entries(trait_ref, input_types, &[], []);
+            solver.reserve_concrete_impl_from_code_entries(trait_id, input_types, &[], []);
 
         let mut locals = vec![local("variant", variant_type())];
         let l_variant_id = LocalDeclId::from_index(0);
@@ -411,18 +406,20 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
             let get_array = build_variant_to_array(arena, solver, load_variant)?;
             let variant_ty = variant_type();
             let array_ty = array_type(variant_ty);
+            let value_trait_id = solver.std_trait_id(VALUE_TRAIT_NAME);
+            let variant_value_dictionary_ty = solver
+                .trait_def(value_trait_id)
+                .get_dictionary_type_for_tys(&[variant_ty], &[]);
             let variant_clone =
                 LocalClone::Resolved(ResolvedLocalClone::Static(solver.solve_impl_method(
-                    &VALUE_TRAIT,
+                    value_trait_id,
                     &[variant_ty],
                     VALUE_CLONE_METHOD_INDEX,
                     span,
                     arena,
                 )?));
             let variant_value_dictionary =
-                solver.solve_impl(&VALUE_TRAIT, &[variant_ty], span, arena)?;
-            let variant_value_dictionary_ty =
-                VALUE_TRAIT.get_dictionary_type_for_tys(&[variant_ty], &[]);
+                solver.solve_impl(value_trait_id, &[variant_ty], span, arena)?;
             // store it at 1
             let (store_array, l_array_id) = store_new_local(
                 get_array,
@@ -532,7 +529,7 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                         build_expect_variant_object_entry(arena, solver, load_object, &name)?;
                     // deserialize the name-th element
                     let function = solver.solve_impl_method(
-                        trait_ref,
+                        trait_id,
                         &[ty],
                         TraitMethodIndex(0),
                         span,
@@ -629,7 +626,7 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
         };
         solver.replace_concrete_impl_code_entries(
             impl_id,
-            trait_ref,
+            trait_id,
             input_types,
             &[],
             [(root, locals)],
@@ -644,7 +641,7 @@ pub fn add_to_module(to: &mut Module) {
     use FunctionDefinition as Def;
 
     // Serialize trait
-    let mut serialize_trait = TraitRef::new_with_self_input_type(
+    let serialize_trait = Trait::new_with_self_input_type(
         SERIALIZE_TRAIT_NAME,
         "A type that can be serialized into a variant.",
         [],
@@ -656,15 +653,12 @@ pub fn add_to_module(to: &mut Module) {
                 "Serialize this value into a variant.",
             ),
         )],
-    );
-    Arc::get_mut(&mut serialize_trait.0)
-        .unwrap()
-        .derivers
-        .push(Box::new(AlgebraicTypeSerializeDeriver));
-    to.add_trait(serialize_trait.with_module_id(STD_MODULE_ID));
+    )
+    .with_deriver(AlgebraicTypeSerializeDeriver);
+    to.add_trait(serialize_trait);
 
     // Deserialize trait
-    let mut deserialize_trait = TraitRef::new_with_self_input_type(
+    let deserialize_trait = Trait::new_with_self_input_type(
         DESERIALIZE_TRAIT_NAME,
         "A type that can be deserialized from a variant.",
         [],
@@ -680,12 +674,9 @@ pub fn add_to_module(to: &mut Module) {
                 "Deserialize a variant into a value of this type.",
             ),
         )],
-    );
-    Arc::get_mut(&mut deserialize_trait.0)
-        .unwrap()
-        .derivers
-        .push(Box::new(AlgebraicTypeDeserializeDeriver));
-    to.add_trait(deserialize_trait.with_module_id(STD_MODULE_ID));
+    )
+    .with_deriver(AlgebraicTypeDeserializeDeriver);
+    to.add_trait(deserialize_trait);
 
     // Trait implementations for basic types are in the prelude.
 }

@@ -7,8 +7,6 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use std::sync::LazyLock;
-
 use crate::{
     Location,
     compiler::error::InternalCompilationError,
@@ -17,10 +15,10 @@ use crate::{
         self, NodeArena, NodeId, dictionary_passing::static_apply_generated,
         function::FunctionDefinition,
     },
-    module::{Module, TraitImplId},
-    std::{STD_MODULE_ID, product_value_deriver::ProductValueDeriver},
+    module::{Module, TraitId, TraitImplId},
+    std::product_value_deriver::ProductValueDeriver,
     types::effects::EffType,
-    types::r#trait::{Deriver, TraitMethodIndex, TraitRef},
+    types::r#trait::{Deriver, Trait, TraitMethodIndex},
     types::trait_solver::TraitSolver,
     types::r#type::{FnType, Type, TypeKind},
     types::type_like::TypeLike,
@@ -34,7 +32,7 @@ struct EnumDefaultDeriver;
 impl Deriver for EnumDefaultDeriver {
     fn derive_impl(
         &self,
-        trait_ref: &TraitRef,
+        trait_id: TraitId,
         input_types: &[Type],
         span: Location,
         arena: &mut NodeArena,
@@ -83,7 +81,7 @@ impl Deriver for EnumDefaultDeriver {
             n(arena, variant(default_variant, payload), ty)
         } else {
             let function = solver.solve_impl_method(
-                trait_ref,
+                trait_id,
                 &[payload_ty],
                 TraitMethodIndex(0),
                 span,
@@ -102,14 +100,14 @@ impl Deriver for EnumDefaultDeriver {
         };
 
         Ok(Some(TraitImplId::Local(
-            solver.add_concrete_impl_from_code(root, vec![], trait_ref, input_types, []),
+            solver.add_concrete_impl_from_code(root, vec![], trait_id, input_types, []),
         )))
     }
 }
 
-pub static DEFAULT_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
+pub fn default_trait() -> Trait {
     let var_ty = Type::variable_id(0);
-    let trait_ref = TraitRef::new_with_self_input_type(
+    Trait::new_with_self_input_type(
         "Default",
         "A type with a default value.",
         [],
@@ -121,13 +119,13 @@ pub static DEFAULT_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
                 "Returns the default value for this type.",
             ),
         )],
-    );
-    trait_ref.with_module_id_and_derivers(
-        STD_MODULE_ID,
-        vec![b(EnumDefaultDeriver), b(ProductValueDeriver)],
     )
-});
+    .with_derivers(vec![
+        b(EnumDefaultDeriver) as Box<dyn Deriver>,
+        b(ProductValueDeriver) as Box<dyn Deriver>,
+    ])
+}
 
 pub fn add_to_module(to: &mut Module) {
-    to.add_trait(DEFAULT_TRAIT.clone());
+    to.add_trait(default_trait());
 }

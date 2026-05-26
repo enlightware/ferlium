@@ -12,11 +12,10 @@ use crate::{
     hir::NodeArena,
     internal_compilation_error,
     parser::location::Location,
-    std::core::REPR_TRAIT,
+    std::core_traits_names::{FROM_ITERATOR_TRAIT_NAME, REPR_TRAIT_NAME, VALUE_TRAIT_NAME},
     types::{
         effects::{EffType, EffectVar, EffectVarKey},
         mutability::{MutType, MutVal, MutVar, MutVarKey},
-        r#trait::TraitRef,
         trait_solver::{ConstraintAssumptions, TraitSolver},
         r#type::{FnType, TyVarKey, Type, TypeInstSubst, TypeKind, TypeVar},
         type_like::TypeLike,
@@ -270,8 +269,10 @@ impl UnifiedTypeInference {
                     FxHashMap::default();
                 let mut variants_are: FxHashMap<Type, FxHashMap<Ustr, (Type, Location)>> =
                     FxHashMap::default();
-                let mut have_traits: FxHashMap<(TraitRef, Vec<Type>), (Vec<Type>, Location)> =
-                    FxHashMap::default();
+                let mut have_traits: FxHashMap<
+                    (crate::module::TraitId, Vec<Type>),
+                    (Vec<Type>, Location),
+                > = FxHashMap::default();
                 for constraint in &remaining_constraints {
                     use PubTypeConstraint::*;
                     match constraint {
@@ -411,14 +412,14 @@ impl UnifiedTypeInference {
                             }
                         }
                         HaveTrait {
-                            trait_ref,
+                            trait_id,
                             input_tys,
                             output_tys,
                             span,
                         } => {
                             let input_types = unified_ty_inf.normalize_types(input_tys);
                             let output_types = unified_ty_inf.normalize_types(output_tys);
-                            let key = (trait_ref.clone(), input_types);
+                            let key = (*trait_id, input_types);
                             if let Some(have_trait) = have_traits.get(&key) {
                                 assert_eq!(have_trait.0.len(), output_types.len());
                                 for (expected, actual) in
@@ -951,7 +952,7 @@ impl UnifiedTypeInference {
     #[allow(clippy::too_many_arguments)]
     fn unify_have_trait(
         &mut self,
-        trait_ref: TraitRef,
+        trait_id: crate::module::TraitId,
         input_tys: &[Type],
         output_tys: &[Type],
         span: Location,
@@ -962,12 +963,13 @@ impl UnifiedTypeInference {
     ) -> Result<Option<PubTypeConstraint>, InternalCompilationError> {
         let mut input_tys = self.normalize_types(input_tys);
         let mut output_tys = self.normalize_types(output_tys);
+        let repr_trait_id = trait_solver.std_trait_id(REPR_TRAIT_NAME);
 
         // Look for the special case of a Repr trait constraint where the target
         // is either definitely not a named type or is a tuple, a record or a variant.
         // This is needed to avoid creating functions where tuples and records would
         // unify indirectly through the Repr constraint, which could never be instantiated.
-        if trait_ref == *REPR_TRAIT {
+        if trait_id == repr_trait_id {
             let input_ty = input_tys[0];
             let ty_data = input_ty.data();
             let is_known_non_named_ty = !ty_data.is_named() && !ty_data.is_variable();
@@ -998,7 +1000,7 @@ impl UnifiedTypeInference {
         Ok(if resolved {
             // Fully resolved, validate the trait implementation.
             let impl_output_tys =
-                trait_solver.solve_output_types(&trait_ref, &input_tys, span, arena)?;
+                trait_solver.solve_output_types(trait_id, &input_tys, span, arena)?;
             // Found, unify the output types.
             assert!(output_tys.is_empty() || output_tys.len() == impl_output_tys.len());
             for (cur_ty, exp_ty) in output_tys.iter().zip(impl_output_tys.iter()) {
@@ -1013,7 +1015,7 @@ impl UnifiedTypeInference {
             if has_structured_non_constant_input {
                 let _ = trait_solver.try_improve_trait_application(
                     self,
-                    &trait_ref,
+                    trait_id,
                     &input_tys,
                     &output_tys,
                     assumptions,
@@ -1025,7 +1027,7 @@ impl UnifiedTypeInference {
             }
             if input_tys.iter().all(Type::is_constant) {
                 let impl_output_tys =
-                    trait_solver.solve_output_types(&trait_ref, &input_tys, span, arena)?;
+                    trait_solver.solve_output_types(trait_id, &input_tys, span, arena)?;
                 assert!(output_tys.is_empty() || output_tys.len() == impl_output_tys.len());
                 for (cur_ty, exp_ty) in output_tys.iter().zip(impl_output_tys.iter()) {
                     self.unify_same_type(*cur_ty, span, *exp_ty, span)?;
@@ -1034,7 +1036,7 @@ impl UnifiedTypeInference {
             } else {
                 // Not fully resolved, defer the unification.
                 Some(PubTypeConstraint::new_have_trait(
-                    trait_ref, input_tys, output_tys, span,
+                    trait_id, input_tys, output_tys, span,
                 ))
             }
         })
@@ -1049,7 +1051,8 @@ impl UnifiedTypeInference {
     ) -> Result<Vec<PubTypeConstraint>, InternalCompilationError> {
         let mut new_constraints = Vec::with_capacity(constraints.len());
         let mut ordered_constraints = constraints.iter().copied().enumerate().collect::<Vec<_>>();
-        ordered_constraints.sort_by_key(|(_, constraint)| constraint_solve_priority(constraint));
+        ordered_constraints
+            .sort_by_key(|(_, constraint)| constraint_solve_priority(constraint, trait_solver));
         for (constraint_index, constraint) in ordered_constraints {
             use PubTypeConstraint::*;
             let unified_constraint = match constraint {
@@ -1093,12 +1096,12 @@ impl UnifiedTypeInference {
                     payload_span.use_site,
                 )?,
                 HaveTrait {
-                    trait_ref,
+                    trait_id,
                     input_tys,
                     output_tys,
                     span,
                 } => self.unify_have_trait(
-                    trait_ref.clone(),
+                    *trait_id,
                     input_tys,
                     output_tys,
                     span.use_site,
@@ -1427,22 +1430,28 @@ impl UnifiedTypeInference {
     }
 }
 
-fn constraint_solve_priority(constraint: &PubTypeConstraint) -> u8 {
+fn constraint_solve_priority(constraint: &PubTypeConstraint, trait_solver: &TraitSolver<'_>) -> u8 {
     match constraint {
         PubTypeConstraint::TupleAtIndexIs { .. }
         | PubTypeConstraint::RecordFieldIs { .. }
         | PubTypeConstraint::TypeHasVariant { .. } => 0,
         PubTypeConstraint::HaveTrait {
-            trait_ref,
+            trait_id,
             output_tys,
             ..
-        } if trait_ref == &*REPR_TRAIT || !output_tys.is_empty() => 10,
-        PubTypeConstraint::HaveTrait { trait_ref, .. }
-            if trait_ref.name.as_str() == "FromIterator" =>
+        } if *trait_id == trait_solver.std_trait_id(REPR_TRAIT_NAME) || !output_tys.is_empty() => {
+            10
+        }
+        PubTypeConstraint::HaveTrait { trait_id, .. }
+            if *trait_id == trait_solver.std_trait_id(FROM_ITERATOR_TRAIT_NAME) =>
         {
             20
         }
-        PubTypeConstraint::HaveTrait { trait_ref, .. } if trait_ref.name.as_str() == "Value" => 90,
+        PubTypeConstraint::HaveTrait { trait_id, .. }
+            if *trait_id == trait_solver.std_trait_id(VALUE_TRAIT_NAME) =>
+        {
+            90
+        }
         PubTypeConstraint::HaveTrait { .. } => 50,
     }
 }

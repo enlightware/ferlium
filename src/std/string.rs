@@ -29,15 +29,15 @@ use crate::{
     hir::value::{NativeDisplay, Value},
     module::{Module, ModuleFunction},
     std::{
-        core_traits_names::ORD_TRAIT_NAME,
-        default::DEFAULT_TRAIT,
-        empty::EMPTY_TRAIT,
+        core_traits_names::{
+            DEFAULT_TRAIT_NAME, EMPTY_TRAIT_NAME, ORD_TRAIT_NAME, VALUE_TRAIT_NAME,
+        },
         hash::Hasher,
         logic::bool_type,
         math::{float_type, float_value, int_type, int_value},
         ordering::compare,
         value::{
-            VALUE_TRAIT, native_layout_associated_consts, native_value_clone_function,
+            native_layout_associated_consts, native_value_clone_function,
             native_value_drop_function,
         },
     },
@@ -547,10 +547,14 @@ fn compare_string(lhs: &String, rhs: &String) -> Value {
 }
 
 pub fn add_to_module(to: &mut Module) {
+    let value_trait_id = to.expect_std_trait_id_in_current_module(VALUE_TRAIT_NAME);
+    let ord_trait_id = to.expect_std_trait_id_in_current_module(ORD_TRAIT_NAME);
+    let default_trait_id = to.expect_std_trait_id_in_current_module(DEFAULT_TRAIT_NAME);
+    let empty_trait_id = to.expect_std_trait_id_in_current_module(EMPTY_TRAIT_NAME);
     // Note: string alias is added in core.rs
 
     to.add_concrete_impl_no_locals(
-        VALUE_TRAIT.clone(),
+        value_trait_id,
         [string_type()],
         [],
         native_layout_associated_consts::<String>(),
@@ -563,7 +567,7 @@ pub fn add_to_module(to: &mut Module) {
         ],
     );
     to.add_concrete_impl_no_locals(
-        VALUE_TRAIT.clone(),
+        value_trait_id,
         [string_iter_type()],
         [],
         native_layout_associated_consts::<StringIterator>(),
@@ -576,7 +580,7 @@ pub fn add_to_module(to: &mut Module) {
         ],
     );
     to.add_concrete_impl_no_locals(
-        VALUE_TRAIT.clone(),
+        value_trait_id,
         [string_split_iter_type()],
         [],
         native_layout_associated_consts::<StringSplitIterator>(),
@@ -588,21 +592,20 @@ pub fn add_to_module(to: &mut Module) {
             native_value_drop_function::<StringSplitIterator>(),
         ],
     );
-    let ord_trait = to.get_trait_str(ORD_TRAIT_NAME).unwrap().clone();
     to.add_native_concrete_impl(
-        ord_trait,
+        ord_trait_id,
         [string_type()],
         [],
         [b(BinaryNativeFnRRV::new(compare_string)) as Function],
     );
     to.add_native_concrete_impl(
-        DEFAULT_TRAIT.clone(),
+        default_trait_id,
         [string_type()],
         [],
         [b(NullaryNativeFnN::new(String::default)) as Function],
     );
     to.add_native_concrete_impl(
-        EMPTY_TRAIT.clone(),
+        empty_trait_id,
         [string_type()],
         [],
         [b(NullaryNativeFnN::new(String::default)) as Function],

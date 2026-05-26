@@ -47,7 +47,7 @@ use crate::{
     internal_compilation_error,
     module::id::{Id, NamedIndexed},
     types::{
-        r#trait::TraitRef,
+        r#trait::Trait,
         r#type::{
             LocalTypeAliasId, Type, TypeAliasEntry, TypeAliases, TypeDef, TypeDefSlot,
             TypeDisplayEnv, TypeKind, TypeVar,
@@ -118,6 +118,30 @@ define_id_type!(
     /// ID of a trait definition within a module
     LocalTraitId
 );
+
+/// A fully-qualified reference to a trait definition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, new)]
+pub struct TraitId {
+    pub module: ModuleId,
+    pub index: LocalTraitId,
+}
+
+impl FormatWith<ModuleEnv<'_>> for TraitId {
+    fn fmt_with(&self, f: &mut fmt::Formatter<'_>, env: &ModuleEnv<'_>) -> fmt::Result {
+        let trait_name = env
+            .try_trait_name(*self)
+            .map(|name| name.to_string())
+            .unwrap_or_else(|| format!("#{}", self.index));
+
+        if self.module == env.current.module_id() {
+            write!(f, "{trait_name}")
+        } else if let Some(module_name) = env.modules.get_name(self.module) {
+            write!(f, "{module_name}::{trait_name}")
+        } else {
+            write!(f, "#{}::{trait_name}", self.module)
+        }
+    }
+}
 
 /// All possible kinds of definitions within a module
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumAsInner)]
@@ -216,7 +240,7 @@ pub struct Module {
     // Type system content
     type_aliases: TypeAliases,
     pub(crate) type_defs: TypeDefSlots,
-    traits: Traits,
+    pub(crate) traits: Traits,
     pub(crate) impls: TraitImpls,
 
     /// Arena holding all HIR nodes for all functions in this module.
@@ -715,54 +739,115 @@ impl Module {
     // Trait definitions and implementations
 
     /// Add a trait definition to this module, returning its ID.
-    pub fn add_trait(&mut self, trait_ref: TraitRef) -> LocalTraitId {
-        self.add_trait_with_visibility(trait_ref, Visibility::Public)
+    pub fn add_trait(&mut self, trait_def: Trait) -> LocalTraitId {
+        self.add_trait_with_visibility(trait_def, Visibility::Public)
     }
 
     pub fn add_trait_with_visibility(
         &mut self,
-        mut trait_ref: TraitRef,
+        trait_def: Trait,
         visibility: Visibility,
     ) -> LocalTraitId {
-        if let Some(module_id) = trait_ref.module_id() {
-            assert_eq!(
-                module_id,
-                self.module_id(),
-                "trait {} belongs to module #{module_id}, cannot add it to module #{}",
-                trait_ref.name,
-                self.module_id(),
-            );
-        } else {
-            let local_trait = std::sync::Arc::get_mut(&mut trait_ref.0)
-                .expect("trait module id must be assigned before sharing the trait reference");
-            local_trait.module_id = Some(self.module_id());
-        }
         let id = LocalTraitId::from_index(self.traits.len());
-        self.traits.push(trait_ref.clone());
+        let trait_name = trait_def.name;
+        self.traits.push(trait_def);
         // Trait names are module-level symbols, so they must remain unique.
-        assert!(self.def_table.get_by_name(&trait_ref.name).is_none());
+        assert!(self.def_table.get_by_name(&trait_name).is_none());
         self.def_table
-            .insert(trait_ref.name, Def::new(DefKind::Trait(id), visibility));
+            .insert(trait_name, Def::new(DefKind::Trait(id), visibility));
         id
     }
 
     /// Iterate over all traits defined in this module.
-    pub fn trait_iter(&self) -> impl Iterator<Item = &TraitRef> + '_ {
-        self.traits.iter()
-    }
-
-    /// Look-up a trait definition by name in this module.
-    pub fn get_trait(&self, name: Ustr) -> Option<&TraitRef> {
-        self.get_definition(name).and_then(|def_kind| {
-            def_kind
-                .as_trait()
-                .map(|trait_id| &self.traits[trait_id.as_index()])
+    pub fn trait_iter(&self) -> impl Iterator<Item = (TraitId, &Trait)> + '_ {
+        self.traits.iter().enumerate().map(|(index, trait_def)| {
+            (
+                TraitId::new(self.module_id(), LocalTraitId::from_index(index)),
+                trait_def,
+            )
         })
     }
 
+    /// Look-up a trait definition by name in this module.
+    pub fn get_trait_id(&self, name: Ustr) -> Option<TraitId> {
+        self.get_definition(name).and_then(|def_kind| {
+            def_kind
+                .as_trait()
+                .map(|trait_id| TraitId::new(self.module_id(), *trait_id))
+        })
+    }
+
+    /// Look-up a trait definition by string name in this module.
+    pub fn get_trait_id_str(&self, name: &str) -> Option<TraitId> {
+        self.get_trait_id(ustr(name))
+    }
+
+    /// Look-up a trait definition by string name in this module, panicking if it is missing.
+    pub fn expect_trait_id_str(&self, name: &str) -> TraitId {
+        self.get_trait_id_str(name)
+            .unwrap_or_else(|| panic!("trait `{name}` not found in module #{}", self.module_id()))
+    }
+
+    /// Look-up a std trait while building the std module.
+    pub fn expect_std_trait_id_in_current_module(&self, name: &str) -> TraitId {
+        assert_eq!(
+            self.module_id(),
+            crate::std::STD_MODULE_ID,
+            "std trait lookup in current module requires the std module"
+        );
+        self.expect_trait_id_str(name)
+    }
+
+    /// Look-up a trait by string name in another module.
+    pub fn expect_trait_id_str_in_module(
+        module_id: ModuleId,
+        modules: &Modules,
+        name: &str,
+    ) -> TraitId {
+        modules
+            .get(module_id)
+            .and_then(|entry| entry.module())
+            .and_then(|module| module.get_trait_id_str(name))
+            .unwrap_or_else(|| panic!("trait `{name}` not found in module #{module_id}"))
+    }
+
+    /// Look-up a std trait in the registered std module.
+    pub fn expect_std_trait_id(modules: &Modules, name: &str) -> TraitId {
+        Self::expect_trait_id_str_in_module(crate::std::STD_MODULE_ID, modules, name)
+    }
+
+    /// Look-up a trait definition by name in this module.
+    pub fn get_trait(&self, name: Ustr) -> Option<&Trait> {
+        self.get_trait_id(name).map(|id| self.trait_def(id))
+    }
+
     /// Look-up a trait definition by name in this module, using &str.
-    pub fn get_trait_str(&self, name: &str) -> Option<&TraitRef> {
+    pub fn get_trait_str(&self, name: &str) -> Option<&Trait> {
         self.get_trait(ustr(name))
+    }
+
+    /// Return the trait definition for a trait id owned by this module.
+    pub fn trait_def(&self, id: TraitId) -> &Trait {
+        assert_eq!(id.module, self.module_id());
+        &self.traits[id.index.as_index()]
+    }
+
+    /// Return the trait definition for a trait id owned by this module, if the id is valid.
+    pub fn try_trait_def(&self, id: TraitId) -> Option<&Trait> {
+        (id.module == self.module_id())
+            .then(|| self.traits.get(id.index.as_index()))
+            .flatten()
+    }
+
+    /// Return the trait name for a trait id owned by this module, if the id is valid.
+    pub fn try_trait_name(&self, id: TraitId) -> Option<Ustr> {
+        (id.module == self.module_id())
+            .then(|| {
+                self.traits
+                    .get(id.index.as_index())
+                    .map(|trait_def| trait_def.name)
+            })
+            .flatten()
     }
 
     // Trait implementations
@@ -770,21 +855,21 @@ impl Module {
     /// Add a native concrete trait implementation with no associated const values.
     pub(crate) fn add_native_concrete_impl(
         &mut self,
-        trait_ref: TraitRef,
+        trait_id: TraitId,
         input_tys: impl Into<Vec<Type>>,
         output_tys: impl Into<Vec<Type>>,
         functions: impl Into<Vec<Function>>,
     ) {
-        self.add_concrete_impl_no_locals(trait_ref, input_tys, output_tys, [], functions);
+        self.add_concrete_impl_no_locals(trait_id, input_tys, output_tys, [], functions);
     }
 
     /// Add a concrete trait implementation to this module, with raw functions and no local variables.
     /// The definition will be retrieved by instantiating the trait method definitions with the given types.
-    /// The caller is responsible to ensure that the input and output types match the trait reference
+    /// The caller is responsible to ensure that the input and output types match the trait definition
     /// and that the constraints are satisfied.
     pub fn add_concrete_impl_no_locals(
         &mut self,
-        trait_ref: TraitRef,
+        trait_id: TraitId,
         input_tys: impl Into<Vec<Type>>,
         output_tys: impl Into<Vec<Type>>,
         associated_const_values: impl Into<Vec<isize>>,
@@ -796,7 +881,32 @@ impl Module {
             .map(|f| (f, Vec::new()))
             .collect();
         self.add_concrete_impl(
-            trait_ref,
+            trait_id,
+            input_tys,
+            output_tys,
+            associated_const_values,
+            functions,
+        );
+    }
+
+    /// Add a concrete trait implementation with an explicit trait definition and no local variables.
+    pub fn add_concrete_impl_for_trait_def_no_locals(
+        &mut self,
+        trait_id: TraitId,
+        trait_def: &Trait,
+        input_tys: impl Into<Vec<Type>>,
+        output_tys: impl Into<Vec<Type>>,
+        associated_const_values: impl Into<Vec<isize>>,
+        functions: impl Into<Vec<Function>>,
+    ) {
+        let functions: Vec<_> = functions
+            .into()
+            .into_iter()
+            .map(|f| (f, Vec::new()))
+            .collect();
+        self.add_concrete_impl_for_trait_def(
+            trait_id,
+            trait_def,
             input_tys,
             output_tys,
             associated_const_values,
@@ -806,11 +916,40 @@ impl Module {
 
     /// Add a concrete trait implementation to this module, with raw functions.
     /// The definition will be retrieved by instantiating the trait method definitions with the given types.
-    /// The caller is responsible to ensure that the input and output types match the trait reference
+    /// The caller is responsible to ensure that the input and output types match the trait definition
     /// and that the constraints are satisfied.
     pub fn add_concrete_impl(
         &mut self,
-        trait_ref: TraitRef,
+        trait_id: TraitId,
+        input_tys: impl Into<Vec<Type>>,
+        output_tys: impl Into<Vec<Type>>,
+        associated_const_values: impl Into<Vec<isize>>,
+        functions: impl Into<Vec<(Function, Vec<LocalDecl>)>>,
+    ) {
+        assert_eq!(trait_id.module, self.module_id());
+        let trait_def = &self.traits[trait_id.index.as_index()];
+        // Add the impl, collecting new functions
+        let mut fn_collector = FunctionCollector::new(self.functions.len());
+        self.impls.add_concrete_raw(
+            trait_id,
+            trait_def,
+            input_tys,
+            output_tys,
+            associated_const_values,
+            functions,
+            &mut fn_collector,
+        );
+        self.add_collected_functions(fn_collector);
+    }
+
+    /// Add a concrete trait implementation using an explicit trait definition.
+    ///
+    /// This is needed for tests and setup code that add an implementation of a
+    /// trait owned by another module while constructing a module directly.
+    pub fn add_concrete_impl_for_trait_def(
+        &mut self,
+        trait_id: TraitId,
+        trait_def: &Trait,
         input_tys: impl Into<Vec<Type>>,
         output_tys: impl Into<Vec<Type>>,
         associated_const_values: impl Into<Vec<isize>>,
@@ -819,7 +958,8 @@ impl Module {
         // Add the impl, collecting new functions
         let mut fn_collector = FunctionCollector::new(self.functions.len());
         self.impls.add_concrete_raw(
-            trait_ref,
+            trait_id,
+            trait_def,
             input_tys,
             output_tys,
             associated_const_values,
@@ -831,11 +971,11 @@ impl Module {
 
     /// Add a blanket trait implementation to this module, with raw functions and no local variables.
     /// The definition will be retrieved by instantiating the trait method definitions with the given types.
-    /// The caller is responsible to ensure that the input and output types match the trait reference
+    /// The caller is responsible to ensure that the input and output types match the trait definition
     /// and that the provided constraints are consistent with the trait definition.
     pub fn add_blanket_impl_no_locals(
         &mut self,
-        trait_ref: TraitRef,
+        trait_id: TraitId,
         sub_key: BlanketTraitImplSubKey,
         output_tys: impl Into<Vec<Type>>,
         associated_const_values: impl Into<Vec<isize>>,
@@ -847,7 +987,7 @@ impl Module {
             .map(|f| (f, Vec::new()))
             .collect();
         self.add_blanket_impl(
-            trait_ref,
+            trait_id,
             sub_key,
             output_tys,
             associated_const_values,
@@ -857,20 +997,23 @@ impl Module {
 
     /// Add a blanket trait implementation to this module, with raw functions.
     /// The definition will be retrieved by instantiating the trait method definitions with the given types.
-    /// The caller is responsible to ensure that the input and output types match the trait reference
+    /// The caller is responsible to ensure that the input and output types match the trait definition
     /// and that the provided constraints are consistent with the trait definition.
     pub fn add_blanket_impl(
         &mut self,
-        trait_ref: TraitRef,
+        trait_id: TraitId,
         sub_key: BlanketTraitImplSubKey,
         output_tys: impl Into<Vec<Type>>,
         associated_const_values: impl Into<Vec<isize>>,
         functions: impl Into<Vec<(Function, Vec<LocalDecl>)>>,
     ) {
+        assert_eq!(trait_id.module, self.module_id());
+        let trait_def = &self.traits[trait_id.index.as_index()];
         // Add the impl, collecting new functions
         let mut fn_collector = FunctionCollector::new(self.functions.len());
         self.impls.add_blanket_raw(
-            trait_ref,
+            trait_id,
+            trait_def,
             sub_key,
             output_tys,
             associated_const_values,
@@ -883,7 +1026,7 @@ impl Module {
     /// Add a concrete or blanket trait implementation to this module, using already-added local functions.
     pub(crate) fn add_emitted_impl(
         &mut self,
-        trait_ref: TraitRef,
+        trait_id: TraitId,
         emit_output: EmitTraitOutput,
         associated_const_values: impl Into<Vec<isize>>,
         public: bool,
@@ -904,7 +1047,7 @@ impl Module {
         )
         .with_associated_const_values(associated_const_values);
         if emit_output.ty_var_count == 0 {
-            let key = ConcreteTraitImplKey::new(trait_ref, emit_output.input_tys);
+            let key = ConcreteTraitImplKey::new(trait_id, emit_output.input_tys);
             self.impls.add_concrete_struct(key, imp)
         } else {
             let sub_key = BlanketTraitImplSubKey::new(
@@ -913,7 +1056,7 @@ impl Module {
                 emit_output.constraints,
             );
             self.impls
-                .add_blanket_struct(BlanketTraitImplKey::new(trait_ref, sub_key), imp)
+                .add_blanket_struct(BlanketTraitImplKey::new(trait_id, sub_key), imp)
         }
     }
 
@@ -922,8 +1065,8 @@ impl Module {
         self.impls.concrete().get(key)
     }
 
-    /// Return a set of blanket implementation by their trait reference, if any exist in this module.
-    pub fn get_blanket_impl_by_key(&self, key: &TraitRef) -> Option<&BlanketTraitImpls> {
+    /// Return a set of blanket implementations by their trait id, if any exist in this module.
+    pub fn get_blanket_impl_by_key(&self, key: &TraitId) -> Option<&BlanketTraitImpls> {
         self.impls.blanket().get(key)
     }
 
@@ -1062,11 +1205,11 @@ impl Module {
     /// Return whether a trait can be named from the given module.
     pub fn is_trait_accessible_from(
         &self,
-        trait_ref: &TraitRef,
+        trait_id: TraitId,
         from_module: ModuleId,
         others: &Modules,
     ) -> bool {
-        self.is_trait_visible_by(trait_ref, others, |module, trait_name| {
+        self.is_trait_visible_by(trait_id, others, |module, trait_name| {
             module.is_symbol_accessible_from(trait_name, from_module)
         })
     }
@@ -1100,20 +1243,22 @@ impl Module {
             .is_some_and(Visibility::is_public)
     }
 
-    fn is_trait_public(&self, trait_ref: &TraitRef, others: &Modules) -> bool {
-        self.is_trait_visible_by(trait_ref, others, Module::is_symbol_public)
+    fn is_trait_public(&self, trait_id: TraitId, others: &Modules) -> bool {
+        self.is_trait_visible_by(trait_id, others, Module::is_symbol_public)
     }
 
     fn is_trait_visible_by(
         &self,
-        trait_ref: &TraitRef,
+        trait_id: TraitId,
         others: &Modules,
         is_named_trait_visible: impl Fn(&Module, Ustr) -> bool + Copy,
     ) -> bool {
-        trait_ref
-            .module_id()
-            .and_then(|module_id| self.module_for(module_id, others))
-            .is_some_and(|module| is_named_trait_visible(module, trait_ref.name))
+        self.module_for(trait_id.module, others)
+            .is_some_and(|module| {
+                module
+                    .try_trait_name(trait_id)
+                    .is_some_and(|name| is_named_trait_visible(module, name))
+            })
     }
 
     fn is_trait_constraint_visible_by(
@@ -1149,12 +1294,12 @@ impl Module {
                     && self.is_type_visible_by(*payload_ty, others, is_named_type_visible)
             }
             PubTypeConstraint::HaveTrait {
-                trait_ref,
+                trait_id,
                 input_tys,
                 output_tys,
                 ..
             } => {
-                self.is_trait_visible_by(trait_ref, others, is_named_trait_visible)
+                self.is_trait_visible_by(*trait_id, others, is_named_trait_visible)
                     && input_tys
                         .iter()
                         .chain(output_tys)
@@ -1166,12 +1311,12 @@ impl Module {
     /// Return whether a trait implementation can be exported outside this module.
     pub fn is_trait_impl_exportable(
         &self,
-        trait_ref: &TraitRef,
+        trait_id: TraitId,
         input_tys: &[Type],
         output_tys: &[Type],
         others: &Modules,
     ) -> bool {
-        self.is_trait_public(trait_ref, others)
+        self.is_trait_public(trait_id, others)
             && input_tys
                 .iter()
                 .chain(output_tys)
@@ -1542,12 +1687,12 @@ impl Module {
         let traits = self
             .traits
             .iter()
-            .filter(|trait_ref| self.should_show_symbol(trait_ref.name, show_private_items))
+            .filter(|trait_def| self.should_show_symbol(trait_def.name, show_private_items))
             .collect::<Vec<_>>();
         if !traits.is_empty() {
             writeln!(f, "Traits ({}):\n", traits.len())?;
-            for trait_ref in traits {
-                writeln!(f, "{}", trait_ref.format_with(&env))?;
+            for trait_def in traits {
+                writeln!(f, "{}", trait_def.format_with(&env))?;
             }
             writeln!(f)?;
         }
@@ -1564,7 +1709,7 @@ impl Module {
             } else {
                 DisplayFilter::MethodDefinitions
             };
-            let filter = |_: &TraitRef, id: LocalImplId| {
+            let filter = |_: TraitId, id: LocalImplId| {
                 if show_private_items || self.impls.get_impl_by_local_id(id).public {
                     level
                 } else {

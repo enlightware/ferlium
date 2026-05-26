@@ -4,7 +4,7 @@ use crate::desugar::types::{
 };
 use crate::hir::function::FunctionDefinition;
 use crate::module::Visibility;
-use crate::types::r#trait::{Trait, TraitMethodSpans, TraitRef, TraitSpans, TraitValidationError};
+use crate::types::r#trait::{Trait, TraitMethodSpans, TraitSpans, TraitValidationError};
 
 use super::expr::desugar;
 use super::*;
@@ -865,7 +865,7 @@ impl ast::TraitDefinition {
         self,
         env: &ModuleEnv<'_>,
         modules_used: &mut FxHashSet<ModuleId>,
-    ) -> Result<TraitRef, InternalCompilationError> {
+    ) -> Result<Trait, InternalCompilationError> {
         let generic_params = self
             .input_type_names
             .iter()
@@ -899,8 +899,7 @@ impl ast::TraitDefinition {
             .map(|function| function.desugar(env, &generic_ty_params, modules_used))
             .collect::<Result<Vec<_>, _>>()?;
         let trait_span = self.span;
-        TraitRef::from_trait_data(Trait {
-            module_id: None,
+        Trait::from_trait_data(Trait {
             name: self.name.0,
             doc: self.doc,
             input_type_names,

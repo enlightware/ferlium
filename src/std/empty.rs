@@ -6,22 +6,20 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 
-use std::sync::LazyLock;
-
 use crate::{
     hir::function::FunctionDefinition,
     module::Module,
-    std::{STD_MODULE_ID, product_value_deriver::ProductValueDeriver},
+    std::product_value_deriver::ProductValueDeriver,
     types::effects::EffType,
-    types::r#trait::TraitRef,
+    types::r#trait::Trait,
     types::r#type::{FnType, Type},
 };
 
 use FunctionDefinition as Def;
 
-pub static EMPTY_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
+pub fn empty_trait() -> Trait {
     let var_ty = Type::variable_id(0);
-    let trait_ref = TraitRef::new_with_self_input_type(
+    Trait::new_with_self_input_type(
         "Empty",
         "A type with a canonical empty value, typically used as the identity for concatenation.",
         [],
@@ -33,10 +31,10 @@ pub static EMPTY_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
                 "Returns the empty value for this type.",
             ),
         )],
-    );
-    trait_ref.with_module_id_and_deriver(STD_MODULE_ID, ProductValueDeriver)
-});
+    )
+    .with_deriver(ProductValueDeriver)
+}
 
 pub fn add_to_module(to: &mut Module) {
-    to.add_trait(EMPTY_TRAIT.clone());
+    to.add_trait(empty_trait());
 }

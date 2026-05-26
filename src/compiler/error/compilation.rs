@@ -15,10 +15,8 @@ use crate::{
     ast,
     containers::iterable_to_string,
     format::{FormatWith, write_with_separator, write_with_separator_and_format_fn},
-    module::ModuleId,
-    module::TypeDefId,
+    module::{ModuleId, TraitId, TypeDefId},
     parser::location::{Location, SourceTable},
-    types::r#trait::TraitRef,
     types::type_inference::unify::SubOrSameType,
     types::type_scheme::PubTypeConstraint,
 };
@@ -375,7 +373,7 @@ pub trait Scope: Sized {
     type TypeVar: Debug + Clone;
     type TypeDefId: Debug + Clone;
     type PubTypeConstraint: Debug + Clone;
-    type TraitRef: Debug + Clone;
+    type TraitName: Debug + Clone;
     type TraitImplHeader: Debug + Clone;
     type ValidVariant: Debug + Clone;
 }
@@ -462,7 +460,7 @@ impl Scope for Internal {
     type TypeVar = TypeVar;
     type TypeDefId = TypeDefId;
     type PubTypeConstraint = PubTypeConstraint;
-    type TraitRef = TraitRef;
+    type TraitName = TraitId;
     type TraitImplHeader = InternalTraitImplHeader;
     type ValidVariant = ();
 }
@@ -476,7 +474,7 @@ impl Scope for External {
     type TypeVar = String;
     type TypeDefId = (String, Location);
     type PubTypeConstraint = String;
-    type TraitRef = String;
+    type TraitName = String;
     type TraitImplHeader = ExternalTraitImplHeader;
     type ValidVariant = Vec<String>;
 }
@@ -718,31 +716,31 @@ pub enum CompilationErrorImpl<S: Scope> {
         wildcard_span: Location,
     },
     TraitImplNotFound {
-        trait_ref: S::TraitRef,
+        trait_ref: S::TraitName,
         input_tys: Vec<S::Type>,
         fn_span: Location,
     },
     TraitSolverRecursionLimitExceeded {
-        trait_ref: S::TraitRef,
+        trait_ref: S::TraitName,
         input_tys: Vec<S::Type>,
         fn_span: Location,
     },
     TraitSolverCycleDetected {
-        trait_ref: S::TraitRef,
+        trait_ref: S::TraitName,
         input_tys: Vec<S::Type>,
         fn_span: Location,
     },
     MethodsNotPartOfTrait {
-        trait_ref: S::TraitRef,
+        trait_ref: S::TraitName,
         spans: Vec<Location>,
     },
     TraitMethodImplsMissing {
-        trait_ref: S::TraitRef,
+        trait_ref: S::TraitName,
         impl_span: Location,
         missings: Vec<Ustr>,
     },
     TraitImplOrphanRuleViolation {
-        trait_ref: S::TraitRef,
+        trait_ref: S::TraitName,
         input_tys: Vec<S::Type>,
         impl_span: Location,
     },
@@ -751,18 +749,18 @@ pub enum CompilationErrorImpl<S: Scope> {
         impl_span: Location,
     },
     TraitImplNativeOnly {
-        trait_ref: S::TraitRef,
+        trait_ref: S::TraitName,
         impl_span: Location,
     },
     OverlappingTraitImpls {
-        trait_ref: S::TraitRef,
+        trait_ref: S::TraitName,
         input_tys: Vec<S::Type>,
         impl_span: Location,
         existing_impl: S::TraitImplHeader,
         existing_span: Option<Location>,
     },
     TraitMethodArgCountMismatch {
-        trait_ref: S::TraitRef,
+        trait_ref: S::TraitName,
         method_index: usize,
         method_name: Ustr,
         expected: usize,
@@ -770,14 +768,14 @@ pub enum CompilationErrorImpl<S: Scope> {
         args_span: Location,
     },
     TraitMethodEffectMismatch {
-        trait_ref: S::TraitRef,
+        trait_ref: S::TraitName,
         method_name: Ustr,
         expected: EffType,
         got: EffType,
         span: Location,
     },
     CompilerOnlyTraitMethodUse {
-        trait_ref: S::TraitRef,
+        trait_ref: S::TraitName,
         method_name: Ustr,
         span: Location,
     },
@@ -941,20 +939,21 @@ fn span_to_string(loc: &Location, source_table: &SourceTable) -> String {
 
 fn external_trait_impl_header_from_internal(
     header: InternalTraitImplHeader,
-    trait_ref: &TraitRef,
+    trait_ref: TraitId,
     env: &ModuleEnv<'_>,
 ) -> ExternalTraitImplHeader {
+    let trait_def = env.trait_def(trait_ref);
     ExternalTraitImplHeader {
         input_bindings: header
             .input_tys
             .iter()
-            .zip(trait_ref.input_type_names.iter())
+            .zip(trait_def.input_type_names.iter())
             .map(|(ty, name)| (name.to_string(), ty.format_with(env).to_string()))
             .collect(),
         output_bindings: header
             .output_tys
             .iter()
-            .zip(trait_ref.output_type_names.iter())
+            .zip(trait_def.output_type_names.iter())
             .map(|(ty, name)| (name.to_string(), ty.format_with(env).to_string()))
             .collect(),
         ty_var_count: header.ty_var_count,
@@ -2024,10 +2023,10 @@ impl CompilationError {
                 input_tys,
                 fn_span,
             } => compilation_error!(TraitImplNotFound {
-                trait_ref: trait_ref.name.to_string(),
+                trait_ref: env.trait_name(trait_ref).to_string(),
                 input_tys: input_tys
                     .iter()
-                    .zip(trait_ref.input_type_names.iter())
+                    .zip(env.trait_def(trait_ref).input_type_names.iter())
                     .map(|(ty, name)| format!("{name} = {}", ty.format_with(env)))
                     .collect(),
                 fn_span,
@@ -2037,10 +2036,10 @@ impl CompilationError {
                 input_tys,
                 fn_span,
             } => compilation_error!(TraitSolverRecursionLimitExceeded {
-                trait_ref: trait_ref.name.to_string(),
+                trait_ref: env.trait_name(trait_ref).to_string(),
                 input_tys: input_tys
                     .iter()
-                    .zip(trait_ref.input_type_names.iter())
+                    .zip(env.trait_def(trait_ref).input_type_names.iter())
                     .map(|(ty, name)| format!("{name} = {}", ty.format_with(env)))
                     .collect(),
                 fn_span,
@@ -2050,17 +2049,17 @@ impl CompilationError {
                 input_tys,
                 fn_span,
             } => compilation_error!(TraitSolverCycleDetected {
-                trait_ref: trait_ref.name.to_string(),
+                trait_ref: env.trait_name(trait_ref).to_string(),
                 input_tys: input_tys
                     .iter()
-                    .zip(trait_ref.input_type_names.iter())
+                    .zip(env.trait_def(trait_ref).input_type_names.iter())
                     .map(|(ty, name)| format!("{name} = {}", ty.format_with(env)))
                     .collect(),
                 fn_span,
             }),
             MethodsNotPartOfTrait { trait_ref, spans } => {
                 compilation_error!(MethodsNotPartOfTrait {
-                    trait_ref: trait_ref.name.to_string(),
+                    trait_ref: env.trait_name(trait_ref).to_string(),
                     spans
                 })
             }
@@ -2069,7 +2068,7 @@ impl CompilationError {
                 missings,
                 impl_span,
             } => compilation_error!(TraitMethodImplsMissing {
-                trait_ref: trait_ref.name.to_string(),
+                trait_ref: env.trait_name(trait_ref).to_string(),
                 missings,
                 impl_span,
             }),
@@ -2078,10 +2077,10 @@ impl CompilationError {
                 input_tys,
                 impl_span,
             } => compilation_error!(TraitImplOrphanRuleViolation {
-                trait_ref: trait_ref.name.to_string(),
+                trait_ref: env.trait_name(trait_ref).to_string(),
                 input_tys: input_tys
                     .iter()
-                    .zip(trait_ref.input_type_names.iter())
+                    .zip(env.trait_def(trait_ref).input_type_names.iter())
                     .map(|(ty, name)| format!("{name} = {}", ty.format_with(env)))
                     .collect(),
                 impl_span,
@@ -2097,7 +2096,7 @@ impl CompilationError {
                 trait_ref,
                 impl_span,
             } => compilation_error!(TraitImplNativeOnly {
-                trait_ref: trait_ref.name.to_string(),
+                trait_ref: env.trait_name(trait_ref).to_string(),
                 impl_span,
             }),
             OverlappingTraitImpls {
@@ -2107,16 +2106,16 @@ impl CompilationError {
                 existing_impl,
                 existing_span,
             } => compilation_error!(OverlappingTraitImpls {
-                trait_ref: trait_ref.name.to_string(),
+                trait_ref: env.trait_name(trait_ref).to_string(),
                 input_tys: input_tys
                     .iter()
-                    .zip(trait_ref.input_type_names.iter())
+                    .zip(env.trait_def(trait_ref).input_type_names.iter())
                     .map(|(ty, name)| format!("{name} = {}", ty.format_with(env)))
                     .collect(),
                 impl_span,
                 existing_impl: external_trait_impl_header_from_internal(
                     existing_impl,
-                    &trait_ref,
+                    trait_ref,
                     env
                 ),
                 existing_span,
@@ -2129,7 +2128,7 @@ impl CompilationError {
                 got,
                 args_span,
             } => compilation_error!(TraitMethodArgCountMismatch {
-                trait_ref: trait_ref.name.to_string(),
+                trait_ref: env.trait_name(trait_ref).to_string(),
                 method_name,
                 method_index,
                 expected,
@@ -2143,7 +2142,7 @@ impl CompilationError {
                 got,
                 span,
             } => compilation_error!(TraitMethodEffectMismatch {
-                trait_ref: trait_ref.name.to_string(),
+                trait_ref: env.trait_name(trait_ref).to_string(),
                 method_name,
                 expected,
                 got,
@@ -2154,7 +2153,7 @@ impl CompilationError {
                 method_name,
                 span,
             } => compilation_error!(CompilerOnlyTraitMethodUse {
-                trait_ref: trait_ref.name.to_string(),
+                trait_ref: env.trait_name(trait_ref).to_string(),
                 method_name,
                 span,
             }),

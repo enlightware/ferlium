@@ -14,10 +14,7 @@ use crate::harness::{TestSession, bool, float, int, unit};
 use ferlium::{
     compiler::error::MutabilityMustBeWhat,
     hir::value::Value,
-    std::{
-        core_traits_names::{NUM_TRAIT_NAME, ORD_TRAIT_NAME},
-        value::VALUE_TRAIT,
-    },
+    std::core_traits_names::{NUM_TRAIT_NAME, ORD_TRAIT_NAME, VALUE_TRAIT_NAME},
     types::type_scheme::PubTypeConstraint,
 };
 
@@ -245,18 +242,19 @@ fn explicit_generic_module_functions() {
     assert_eq!(keep.ty_scheme.ty_quantifiers.len(), 1);
     assert_eq!(keep.ty_scheme.constraints.len(), 1);
     let keep_ret_ty = keep.ty_scheme.ty().ret;
+    let value_trait = session.std_trait(VALUE_TRAIT_NAME);
     assert!(
         keep.ty_scheme
             .constraints
             .iter()
             .any(|constraint| match constraint {
                 PubTypeConstraint::HaveTrait {
-                    trait_ref,
+                    trait_id,
                     input_tys,
                     output_tys,
                     ..
                 } =>
-                    trait_ref == &*VALUE_TRAIT
+                    *trait_id == value_trait
                         && input_tys.as_slice() == &[keep_ret_ty]
                         && output_tys.is_empty(),
                 _ => false,
@@ -297,6 +295,7 @@ fn function_where_clauses_are_enforced() {
     assert_eq!(keep_ord.ty_scheme.constraints.len(), 2);
     let keep_ord_ret_ty = keep_ord.ty_scheme.ty().ret;
     let ord_trait = session.std_trait(ORD_TRAIT_NAME);
+    let value_trait = session.std_trait(VALUE_TRAIT_NAME);
     let has_unary_constraint_on_ret = |expected_trait| {
         keep_ord
             .ty_scheme
@@ -304,12 +303,12 @@ fn function_where_clauses_are_enforced() {
             .iter()
             .any(|constraint| match constraint {
                 PubTypeConstraint::HaveTrait {
-                    trait_ref,
+                    trait_id,
                     input_tys,
                     output_tys,
                     ..
                 } => {
-                    trait_ref == expected_trait
+                    trait_id == expected_trait
                         && input_tys.as_slice() == &[keep_ord_ret_ty]
                         && output_tys.is_empty()
                 }
@@ -317,7 +316,7 @@ fn function_where_clauses_are_enforced() {
             })
     };
     assert!(has_unary_constraint_on_ret(&ord_trait));
-    assert!(has_unary_constraint_on_ret(&*VALUE_TRAIT));
+    assert!(has_unary_constraint_on_ret(&value_trait));
 
     session.fail_compilation(indoc! { r#"
         fn keep_ord<T>(value: T) -> T
@@ -927,12 +926,12 @@ fn assert_f_defaults_num_after_dead_suffix(session: &mut TestSession, src: &str)
     );
     match &fn_def.ty_scheme.constraints[0] {
         PubTypeConstraint::HaveTrait {
-            trait_ref,
+            trait_id,
             input_tys,
             output_tys,
             ..
         } => {
-            assert_eq!(*trait_ref, num_trait, "type regression for:\n{src}");
+            assert_eq!(*trait_id, num_trait, "type regression for:\n{src}");
             assert_eq!(
                 input_tys.as_slice(),
                 &[fn_def.ty_scheme.ty().ret],
@@ -977,12 +976,12 @@ fn unreachable_block_suffix_does_not_constrain_return_type() {
     assert_eq!(fn_def.ty_scheme.constraints.len(), 1);
     match &fn_def.ty_scheme.constraints[0] {
         PubTypeConstraint::HaveTrait {
-            trait_ref,
+            trait_id,
             input_tys,
             output_tys,
             ..
         } => {
-            assert_eq!(*trait_ref, num_trait);
+            assert_eq!(*trait_id, num_trait);
             assert_eq!(input_tys.as_slice(), &[fn_def.ty_scheme.ty().ret]);
             assert!(output_tys.is_empty());
         }

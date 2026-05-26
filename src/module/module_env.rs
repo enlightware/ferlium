@@ -11,13 +11,13 @@ use crate::{
     ast::{self, UstrSpan},
     compiler::error::InternalCompilationError,
     module::{
-        Module, ModuleFunction, ModuleId, Modules, TypeDefId,
+        Module, ModuleFunction, ModuleId, Modules, TraitId, TypeDefId,
         id::Id,
         path::Path,
         type_alias_name::{find_generic_alias_name, find_generic_alias_name_with},
     },
     std::STD_MODULE_ID,
-    types::r#trait::{TraitMethodIndex, TraitRef},
+    types::r#trait::{Trait, TraitMethodIndex},
     types::r#type::{BareNativeTypeB, Type, TypeAliasEntry, TypeDef},
     types::typing_env::TraitMethodDescription,
 };
@@ -41,6 +41,10 @@ impl TypeDefLookupResult {
 
 fn unavailable_type_def<T>(id: TypeDefId) -> T {
     panic!("Type definition #{}:{} is unavailable", id.module, id.index)
+}
+
+fn unavailable_trait<T>(id: TraitId) -> T {
+    panic!("Trait #{}:{} is unavailable", id.module, id.index)
 }
 
 #[derive(Clone, Copy, Debug, new)]
@@ -388,29 +392,63 @@ impl<'m> ModuleEnv<'m> {
         })
     }
 
-    /// Get the trait reference associated to a trait name.
-    pub fn get_trait_ref(
-        &'m self,
-        name: UstrSpan,
-    ) -> Result<Option<TraitRef>, InternalCompilationError> {
-        Ok(self
-            .trait_ref_with_module(&ast::Path::single_tuple(name))?
-            .map(|(_, trait_ref)| trait_ref))
+    /// Get the trait definition associated to a trait id.
+    pub fn trait_def(&self, id: TraitId) -> &Trait {
+        self.try_trait_def(id)
+            .unwrap_or_else(|| unavailable_trait(id))
     }
 
-    pub fn trait_ref_with_module(
+    pub fn try_trait_def(&self, id: TraitId) -> Option<&Trait> {
+        if let Some(trait_def) = self.current.try_trait_def(id) {
+            return Some(trait_def);
+        }
+        self.modules
+            .get(id.module)
+            .and_then(|entry| entry.module())
+            .and_then(|module| module.try_trait_def(id))
+    }
+
+    pub fn trait_name(&self, id: TraitId) -> Ustr {
+        self.try_trait_name(id)
+            .unwrap_or_else(|| unavailable_trait(id))
+    }
+
+    pub fn try_trait_name(&self, id: TraitId) -> Option<Ustr> {
+        if let Some(name) = self.current.try_trait_name(id) {
+            return Some(name);
+        }
+        self.modules
+            .get(id.module)
+            .and_then(|entry| entry.module())
+            .and_then(|module| module.try_trait_name(id))
+    }
+
+    pub fn get_trait_id(
+        &'m self,
+        name: UstrSpan,
+    ) -> Result<Option<TraitId>, InternalCompilationError> {
+        Ok(self
+            .trait_id_with_module(&ast::Path::single_tuple(name))?
+            .map(|(_, trait_id)| trait_id))
+    }
+
+    pub fn trait_id_with_module(
         &'m self,
         path: &'m ast::Path,
-    ) -> Result<Option<(Option<ModuleId>, TraitRef)>, InternalCompilationError> {
+    ) -> Result<Option<(Option<ModuleId>, TraitId)>, InternalCompilationError> {
         self.get_module_member(&path.segments, &|name, module| {
-            module.trait_iter().find_map(|trait_ref| {
-                if trait_ref.name == name {
-                    Some(trait_ref.clone())
-                } else {
-                    None
-                }
-            })
+            module.get_trait_id(ustr(name))
         })
+    }
+
+    /// Look up a trait in the registered std module by its fully-qualified module id.
+    pub fn expect_std_trait_id(&self, name: &str) -> TraitId {
+        if self.current.module_id() == crate::std::STD_MODULE_ID {
+            if let Some(id) = self.current.get_trait_id_str(name) {
+                return id;
+            }
+        }
+        Module::expect_std_trait_id(self.modules, name)
     }
 
     /// Get a trait method from the current module, or other ones, return the ID of the module if other.
@@ -430,10 +468,10 @@ impl<'m> ModuleEnv<'m> {
         module: &'m Module,
         require_accessible_trait: bool,
     ) -> Option<TraitMethodDescription<'m>> {
-        module.trait_iter().find_map(|trait_ref| {
+        module.trait_iter().find_map(|(trait_id, trait_def)| {
             if require_accessible_trait
                 && !module.is_trait_accessible_from(
-                    trait_ref,
+                    trait_id,
                     self.current.module_id(),
                     self.modules,
                 )
@@ -441,17 +479,13 @@ impl<'m> ModuleEnv<'m> {
                 return None;
             }
 
-            trait_ref
+            trait_def
                 .methods
                 .iter()
                 .enumerate()
                 .find_map(|(index, function)| {
                     if function.0 == name {
-                        Some((
-                            trait_ref.clone(),
-                            TraitMethodIndex::from_index(index),
-                            &function.1,
-                        ))
+                        Some((trait_id, TraitMethodIndex::from_index(index), &function.1))
                     } else {
                         None
                     }

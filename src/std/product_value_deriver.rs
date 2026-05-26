@@ -12,9 +12,9 @@ use crate::{
     compiler::error::InternalCompilationError,
     containers::SVec2,
     hir::{self, NodeArena, NodeId, dictionary_passing::static_apply_generated},
-    module::TraitImplId,
+    module::{TraitId, TraitImplId},
     types::effects::EffType,
-    types::r#trait::{Deriver, TraitMethodIndex, TraitRef},
+    types::r#trait::{Deriver, TraitMethodIndex},
     types::trait_solver::TraitSolver,
     types::r#type::{Type, TypeKind},
     types::type_like::TypeLike,
@@ -30,7 +30,7 @@ pub(crate) struct ProductValueDeriver;
 impl Deriver for ProductValueDeriver {
     fn derive_impl(
         &self,
-        trait_ref: &TraitRef,
+        trait_id: TraitId,
         input_types: &[Type],
         span: Location,
         arena: &mut NodeArena,
@@ -39,11 +39,12 @@ impl Deriver for ProductValueDeriver {
         use hir::hir_syn::*;
 
         // Validate the trait shape.
-        assert!(trait_ref.input_type_count() == 1);
-        assert!(trait_ref.output_type_count() == 0);
-        assert!(trait_ref.constraints.is_empty());
-        assert!(trait_ref.methods.len() == 1);
-        let constructor = &trait_ref.methods[0].1;
+        let trait_def = solver.trait_def(trait_id);
+        assert!(trait_def.input_type_count() == 1);
+        assert!(trait_def.output_type_count() == 0);
+        assert!(trait_def.constraints.is_empty());
+        assert!(trait_def.methods.len() == 1);
+        let constructor = &trait_def.methods[0].1;
         assert!(constructor.ty_scheme.constraints.is_empty());
         assert!(constructor.ty_scheme.ty.args.is_empty());
         assert!(constructor.ty_scheme.ty.ret == Type::variable_id(0));
@@ -64,7 +65,7 @@ impl Deriver for ProductValueDeriver {
 
         let mut build_member_value = |arena: &mut NodeArena, member_ty| {
             let function = solver.solve_impl_method(
-                trait_ref,
+                trait_id,
                 &[member_ty],
                 TraitMethodIndex(0),
                 span,
@@ -106,7 +107,7 @@ impl Deriver for ProductValueDeriver {
                 let named = named.clone();
                 drop(ty_data);
                 return Ok(Some(solver.solve_impl(
-                    trait_ref,
+                    trait_id,
                     &[solver.type_def(named.def).instantiated_shape(&named.params)],
                     span,
                     arena,
@@ -122,7 +123,7 @@ impl Deriver for ProductValueDeriver {
             TraitImplId::Local(solver.add_concrete_impl_from_code(
                 root,
                 vec![],
-                trait_ref,
+                trait_id,
                 input_types,
                 [],
             ))

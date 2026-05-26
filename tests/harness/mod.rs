@@ -18,8 +18,9 @@ use ferlium::{
         UnaryNativeFnNV, UnaryNativeFnRN, UnaryNativeFnVN, UnaryNativeFnVV,
     },
     hir::value::{NativeDisplay, Value},
-    module::{BlanketTraitImplSubKey, Module, ModuleEnv, ModuleId, Path},
+    module::{BlanketTraitImplSubKey, Module, ModuleEnv, ModuleId, Path, TraitId},
     parse_module_and_expr,
+    std::core_traits_names::{ITERATOR_TRAIT_NAME, VALUE_TRAIT_NAME},
     std::{
         array::{array_type, array_value_from_vec},
         buffer::Buffer,
@@ -27,10 +28,9 @@ use ferlium::{
         math::int_type,
         new_module_using_std,
         string::string_type,
-        value::VALUE_TRAIT,
     },
     types::effects::{PrimitiveEffect, effect, effects, no_effects},
-    types::r#trait::TraitRef,
+    types::r#trait::Trait,
     types::r#type::{
         FnType, Type, TypeDef, TypeDefProductDocs, TypeDefShapeDocs, TypeVar, variant_type,
     },
@@ -304,8 +304,8 @@ macro_rules! assert_val_eq {
     }};
 }
 
-fn test_assoc_trait() -> TraitRef {
-    TraitRef::new_with_self_input_type(
+fn test_assoc_trait() -> Trait {
+    Trait::new_with_self_input_type(
         "TestAssoc",
         "Test-only trait with one associated output type.",
         ["Output"],
@@ -320,8 +320,8 @@ fn test_assoc_trait() -> TraitRef {
     )
 }
 
-fn test_witnessed_project_trait() -> TraitRef {
-    TraitRef::new_with_self_input_type(
+fn test_witnessed_project_trait() -> Trait {
+    Trait::new_with_self_input_type(
         "TestWitnessedProject",
         "Test-only trait used to exercise structured trait improvement on a non-std trait name.",
         ["Output"],
@@ -357,7 +357,7 @@ fn option_type_def() -> TypeDef {
     }
 }
 
-fn map_iterator_type_def(iterator_trait: TraitRef) -> TypeDef {
+fn map_iterator_type_def(iterator_trait: TraitId) -> TypeDef {
     TypeDef {
         name: ustr("MapIterator"),
         doc: None,
@@ -390,7 +390,7 @@ fn map_iterator_type_def(iterator_trait: TraitRef) -> TypeDef {
     }
 }
 
-fn witnessed_type_def(test_assoc_trait: TraitRef) -> TypeDef {
+fn witnessed_type_def(test_assoc_trait: TraitId) -> TypeDef {
     TypeDef {
         name: ustr("Witnessed"),
         doc: None,
@@ -495,17 +495,23 @@ fn tracked_drop_log() -> isize {
     TRACKED_DROPS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-fn testing_module(module_id: ModuleId, iterator_trait: TraitRef) -> Module {
+fn testing_module(
+    module_id: ModuleId,
+    iterator_trait: TraitId,
+    value_trait_id: TraitId,
+    value_trait_def: &Trait,
+) -> Module {
     let mut module = Module::new(module_id);
-    let test_assoc_trait = test_assoc_trait().with_module_id(module_id);
-    let test_witnessed_project_trait = test_witnessed_project_trait().with_module_id(module_id);
+    let test_assoc_trait = test_assoc_trait();
+    let test_witnessed_project_trait = test_witnessed_project_trait();
+    let test_assoc_trait_id = TraitId::new(module_id, module.add_trait(test_assoc_trait));
+    let test_witnessed_project_trait_id =
+        TraitId::new(module_id, module.add_trait(test_witnessed_project_trait));
     let option_type_def = option_type_def();
     let map_iterator_type_def = map_iterator_type_def(iterator_trait);
-    let witnessed_type_def = witnessed_type_def(test_assoc_trait.clone());
-    module.add_trait(test_assoc_trait.clone());
-    module.add_trait(test_witnessed_project_trait.clone());
+    let witnessed_type_def = witnessed_type_def(test_assoc_trait_id);
     module.add_concrete_impl_no_locals(
-        test_assoc_trait.clone(),
+        test_assoc_trait_id,
         [string_type()],
         [int_type()],
         [],
@@ -516,7 +522,7 @@ fn testing_module(module_id: ModuleId, iterator_trait: TraitRef) -> Module {
         ],
     );
     module.add_concrete_impl_no_locals(
-        test_assoc_trait.clone(),
+        test_assoc_trait_id,
         [bool_type()],
         [string_type()],
         [],
@@ -528,7 +534,7 @@ fn testing_module(module_id: ModuleId, iterator_trait: TraitRef) -> Module {
     module.add_type_def(map_iterator_type_def.name, map_iterator_type_def);
     let witnessed_type_def_id = module.add_type_def(witnessed_type_def.name, witnessed_type_def);
     module.add_blanket_impl_no_locals(
-        test_witnessed_project_trait,
+        test_witnessed_project_trait_id,
         BlanketTraitImplSubKey {
             input_tys: vec![Type::named(
                 witnessed_type_def_id,
@@ -536,7 +542,7 @@ fn testing_module(module_id: ModuleId, iterator_trait: TraitRef) -> Module {
             )],
             ty_var_count: 2,
             constraints: vec![PubTypeConstraint::new_have_trait(
-                test_assoc_trait.clone(),
+                test_assoc_trait_id,
                 vec![Type::variable_id(0)],
                 vec![Type::variable_id(1)],
                 Location::new_synthesized(),
@@ -546,8 +552,9 @@ fn testing_module(module_id: ModuleId, iterator_trait: TraitRef) -> Module {
         [],
         [Box::new(UnaryNativeFnVV::new(|_value: &Value| Value::unit())) as Function],
     );
-    module.add_concrete_impl_no_locals(
-        VALUE_TRAIT.clone(),
+    module.add_concrete_impl_for_trait_def_no_locals(
+        value_trait_id,
+        value_trait_def,
         [Type::primitive::<CloneTrackedNative>()],
         [],
         [
@@ -825,13 +832,19 @@ impl TestSession {
         let mut compiler_session = CompilerSession::new();
         let std_iterator_trait = compiler_session
             .std_module()
-            .get_trait_str("Iterator")
-            .expect("std Iterator trait should be registered")
-            .clone();
-        compiler_session.register_module(
-            Path::single_str("testing"),
-            testing_module(compiler_session.modules().next_id(), std_iterator_trait),
+            .get_trait_id_str(ITERATOR_TRAIT_NAME)
+            .expect("std Iterator trait should be registered");
+        let std_value_trait = compiler_session
+            .std_module()
+            .get_trait_id_str(VALUE_TRAIT_NAME)
+            .expect("std Value trait should be registered");
+        let testing_module = testing_module(
+            compiler_session.modules().next_id(),
+            std_iterator_trait,
+            std_value_trait,
+            compiler_session.std_module().trait_def(std_value_trait),
         );
+        compiler_session.register_module(Path::single_str("testing"), testing_module);
         compiler_session.register_module(
             Path::single_str("effects"),
             test_effect_module(compiler_session.modules().next_id()),
@@ -857,10 +870,10 @@ impl TestSession {
         self.session.module_env()
     }
 
-    pub fn std_trait(&self, name: &str) -> TraitRef {
+    pub fn std_trait(&self, name: &str) -> TraitId {
         self.session
             .module_env()
-            .get_trait_ref((ustr(name), Location::new_synthesized()))
+            .get_trait_id((ustr(name), Location::new_synthesized()))
             .expect("standard trait lookup should succeed")
             .unwrap_or_else(|| panic!("Standard trait `{name}` not found"))
     }

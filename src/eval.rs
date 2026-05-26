@@ -14,7 +14,7 @@ use ustr::Ustr;
 
 use crate::module::id::Id;
 use crate::std::array::array_value_from_vec;
-use crate::std::value::{VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX, VALUE_TRAIT};
+use crate::std::value::{VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX};
 use crate::{
     CompilerSession, Location, SourceId, SourceTable,
     compiler::error::RuntimeErrorKind,
@@ -802,11 +802,11 @@ impl BacktraceFrame {
                 use ImportFunctionTarget::*;
                 match &slot.target {
                     TraitImplMethod { key, index } => {
-                        let trait_ref = key.trait_ref();
+                        let trait_def = module.trait_def(key.trait_id());
                         write!(
                             f,
                             "{}",
-                            trait_ref.qualified_method_name(*index, key.input_tys())
+                            trait_def.qualified_method_name(*index, key.input_tys())
                         )?
                     }
                     NamedFunction(fn_name) => write!(f, "{module_path}::{fn_name}")?,
@@ -1313,7 +1313,7 @@ fn call_resolved_value_method(
             call_dictionary_method(
                 ctx,
                 dictionary,
-                VALUE_TRAIT.dictionary_method_index(method_index),
+                TraitDictionaryEntryIndex::from_index(method_index.as_index()),
                 arguments,
                 span,
             )
@@ -1448,7 +1448,7 @@ pub(crate) fn call_value_clone_for_temp(
         call_dictionary_method(
             ctx,
             dictionary,
-            VALUE_TRAIT.dictionary_method_index(VALUE_CLONE_METHOD_INDEX),
+            TraitDictionaryEntryIndex::from_index(VALUE_CLONE_METHOD_INDEX.as_index()),
             arguments,
             span,
         )
@@ -1465,7 +1465,7 @@ pub(crate) fn call_value_clone_to_target(
     discard_call_result(call_dictionary_method(
         ctx,
         dictionary,
-        VALUE_TRAIT.dictionary_method_index(VALUE_CLONE_METHOD_INDEX),
+        TraitDictionaryEntryIndex::from_index(VALUE_CLONE_METHOD_INDEX.as_index()),
         vec![source, ValOrMut::Mut(target.clone())],
         span,
     ))?;
@@ -1514,7 +1514,7 @@ pub(crate) fn call_value_drop_for_temp(
     let result = discard_call_result(call_dictionary_method(
         ctx,
         dictionary,
-        VALUE_TRAIT.dictionary_method_index(VALUE_DROP_METHOD_INDEX),
+        TraitDictionaryEntryIndex::from_index(VALUE_DROP_METHOD_INDEX.as_index()),
         vec![ValOrMut::Mut(target_place.clone())],
         span,
     ));

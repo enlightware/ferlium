@@ -7,24 +7,20 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use std::sync::LazyLock;
-
 use crate::{
     Location,
     compiler::error::InternalCompilationError,
     hir,
     hir::function::FunctionDefinition,
-    module::{LocalClone, LocalDeclId, Module, ResolvedLocalClone, TraitImplId, id::Id},
-    std::{
-        STD_MODULE_ID,
-        value::{VALUE_CLONE_METHOD_INDEX, VALUE_TRAIT},
-    },
+    module::{LocalClone, LocalDeclId, Module, ResolvedLocalClone, TraitId, TraitImplId, id::Id},
+    std::{core_traits_names::VALUE_TRAIT_NAME, value::VALUE_CLONE_METHOD_INDEX},
     types::effects::EffType,
-    types::r#trait::{Deriver, TraitRef},
+    types::r#trait::{Deriver, Trait},
     types::trait_solver::TraitSolver,
     types::r#type::{FnType, Type},
     types::type_like::TypeLike,
 };
+use ustr::ustr;
 
 use FunctionDefinition as Def;
 
@@ -33,7 +29,7 @@ struct SelfCastDeriver;
 impl Deriver for SelfCastDeriver {
     fn derive_impl(
         &self,
-        trait_ref: &TraitRef,
+        trait_id: TraitId,
         input_types: &[Type],
         span: Location,
         arena: &mut hir::NodeArena,
@@ -60,7 +56,7 @@ impl Deriver for SelfCastDeriver {
             span,
         ));
         let clone = solver.solve_impl_method(
-            &VALUE_TRAIT,
+            solver.std_trait_id(VALUE_TRAIT_NAME),
             &[from_ty],
             VALUE_CLONE_METHOD_INDEX,
             span,
@@ -76,7 +72,7 @@ impl Deriver for SelfCastDeriver {
             span,
         ));
         let local_impl_id =
-            solver.add_concrete_impl_from_code(code_id, locals, trait_ref, input_types, []);
+            solver.add_concrete_impl_from_code(code_id, locals, trait_id, input_types, []);
         Ok(Some(TraitImplId::Local(local_impl_id)))
 
         // TODO: optimize away the cast entirely in the compiler
@@ -84,11 +80,11 @@ impl Deriver for SelfCastDeriver {
     }
 }
 
-pub static CAST_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
+pub fn cast_trait() -> Trait {
     let var0_ty = Type::variable_id(0);
     let var1_ty = Type::variable_id(1);
     let unary_fn_ty = FnType::new_by_val([var0_ty], var1_ty, EffType::empty());
-    let cast_trait = TraitRef::new(
+    Trait::new(
         "Cast",
         "Conversion of a value from one type to another.",
         ["From", "To"],
@@ -101,11 +97,12 @@ pub static CAST_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
                 "Casts `value` to the type of `To`.",
             ),
         )],
-    );
-    cast_trait.with_module_id_and_deriver(STD_MODULE_ID, SelfCastDeriver)
-});
+    )
+    .with_deriver(SelfCastDeriver)
+}
 
 pub fn add_to_module(to: &mut Module) {
     // Traits
-    to.add_trait(CAST_TRAIT.clone());
+    let id = to.add_trait(cast_trait());
+    debug_assert_eq!(to.get_trait_id(ustr("Cast")).unwrap().index, id);
 }

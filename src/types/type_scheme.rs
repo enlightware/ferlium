@@ -21,13 +21,9 @@ use crate::{
     format::type_variable_index_to_string_latin,
     hir::dictionary_passing::ExtraParameters,
     parser::location::InstantiableLocation,
-    std::{
-        core::REPR_TRAIT,
-        value::{
-            is_function_surface_only_value_trait_application, is_value_trait_for_function_type,
-        },
+    std::value::{
+        is_function_surface_only_value_trait_application, is_value_trait_for_function_type,
     },
-    types::r#trait::TraitRef,
     types::trait_solver::TraitSolver,
     types::type_inference::unify::UnifiedTypeInference,
     types::type_like::{TypeLike, instantiate_types_in_place},
@@ -41,7 +37,7 @@ use ustr::Ustr;
 use crate::{
     hir::FnInstData,
     hir::dictionary_passing::{DictionaryReq, instantiate_dictionary_requirements},
-    module::ModuleEnv,
+    module::{ModuleEnv, TraitId},
     types::effects::{EffType, EffectVar, EffectsInstSubst},
     types::r#type::{Type, TypeDisplayEnv, TypeInstSubst, TypeVar},
     types::type_inference::{expr::TypeInference, substitution::InstSubst},
@@ -77,7 +73,7 @@ pub enum PubTypeConstraint {
     },
     /// Types have trait
     HaveTrait {
-        trait_ref: TraitRef,
+        trait_id: TraitId,
         input_tys: Vec<Type>,
         output_tys: Vec<Type>,
         span: InstantiableLocation,
@@ -134,15 +130,13 @@ impl PubTypeConstraint {
     }
 
     pub fn new_have_trait(
-        trait_ref: TraitRef,
+        trait_id: TraitId,
         input_tys: Vec<Type>,
         output_tys: Vec<Type>,
         span: Location,
     ) -> Self {
-        assert_eq!(input_tys.len(), trait_ref.input_type_count() as usize);
-        assert_eq!(output_tys.len(), trait_ref.output_type_count() as usize);
         Self::HaveTrait {
-            trait_ref,
+            trait_id,
             input_tys,
             output_tys,
             span: InstantiableLocation::new(span),
@@ -250,23 +244,24 @@ impl PubTypeConstraint {
                 }
             }
             HaveTrait {
-                trait_ref,
+                trait_id,
                 input_tys,
                 output_tys,
                 span,
             } => {
+                let trait_def = trait_solver.trait_def(*trait_id);
                 // Function-related `Value` constraints are compiler-provided, so they
                 // do not need normal trait solving to remain in the scheme.
-                if is_value_trait_for_function_type(trait_ref, input_tys, output_tys)
+                if is_value_trait_for_function_type(*trait_id, trait_def, input_tys, output_tys)
                     || is_function_surface_only_value_trait_application(
-                        trait_ref, input_tys, output_tys,
+                        *trait_id, trait_def, input_tys, output_tys,
                     )
                 {
                     return Ok(None);
                 }
                 if input_tys.iter().all(Type::is_constant) {
                     let got_output_tys = trait_solver.solve_output_types(
-                        trait_ref,
+                        *trait_id,
                         input_tys,
                         span.use_site,
                         arena,
@@ -355,12 +350,12 @@ impl TypeLike for PubTypeConstraint {
                 payload_span: payload_span.clone(),
             },
             HaveTrait {
-                trait_ref,
+                trait_id,
                 input_tys,
                 output_tys,
                 span,
             } => HaveTrait {
-                trait_ref: trait_ref.clone(),
+                trait_id: *trait_id,
                 input_tys: input_tys.iter().map(|ty| ty.map(f)).collect(),
                 output_tys: output_tys.iter().map(|ty| ty.map(f)).collect(),
                 span: span.clone(),
@@ -471,13 +466,13 @@ impl PartialEq for PubTypeConstraint {
             ) => v_ty1 == v_ty2 && tag1 == tag2 && p_ty1 == p_ty2,
             (
                 HaveTrait {
-                    trait_ref: t1,
+                    trait_id: t1,
                     input_tys: i1,
                     output_tys: o1,
                     ..
                 },
                 HaveTrait {
-                    trait_ref: t2,
+                    trait_id: t2,
                     input_tys: i2,
                     output_tys: o2,
                     ..
@@ -523,12 +518,12 @@ impl Hash for PubTypeConstraint {
                 payload_ty.hash(state);
             }
             HaveTrait {
-                trait_ref: r#trait,
+                trait_id,
                 input_tys,
                 output_tys,
                 ..
             } => {
-                r#trait.hash(state);
+                trait_id.hash(state);
                 for ty in input_tys {
                     ty.hash(state);
                 }
@@ -699,6 +694,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
         ty_inf: &mut TypeInference,
         use_site: Location,
         ty_var_count: Option<u32>,
+        env: ModuleEnv<'_>,
     ) -> (Ty, FnInstData, InstSubst) {
         let mut ty_subst = ty_inf.fresh_type_var_subst(&self.ty_quantifiers);
         let eff_subst = ty_inf.fresh_effect_var_subst(&self.eff_quantifiers);
@@ -720,8 +716,10 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
             ty_inf.add_pub_constraint(constraint);
         }
         let ty = self.ty.map(&mut mapper);
-        let dict_req =
-            instantiate_dictionary_requirements(&self.extra_parameters().requirements, &mut mapper);
+        let dict_req = instantiate_dictionary_requirements(
+            &self.extra_parameters(env).requirements,
+            &mut mapper,
+        );
         (ty, FnInstData::new(dict_req), subst)
     }
 
@@ -792,8 +790,8 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
     }
 
     /// Extra functions parameters that must be passed to resolve polymorphism.
-    pub(crate) fn extra_parameters(&self) -> ExtraParameters {
-        extra_parameters_from_constraints(&self.constraints)
+    pub(crate) fn extra_parameters(&self, env: ModuleEnv<'_>) -> ExtraParameters {
+        extra_parameters_from_constraints(&self.constraints, env)
     }
 }
 
@@ -838,9 +836,14 @@ pub(crate) fn normalize_types(tys: &mut [TypeVar]) -> TypeInstSubst {
     ty_subst
 }
 
+fn is_std_trait(env: ModuleEnv<'_>, trait_id: TraitId, name: &str) -> bool {
+    trait_id.module == crate::std::STD_MODULE_ID && env.trait_def(trait_id).name == name
+}
+
 /// Extra functions parameters that must be passed to resolve polymorphism for a list of constraints.
 pub(crate) fn extra_parameters_from_constraints(
     constraints: &[PubTypeConstraint],
+    env: ModuleEnv<'_>,
 ) -> ExtraParameters {
     use PubTypeConstraint::*;
 
@@ -848,13 +851,17 @@ pub(crate) fn extra_parameters_from_constraints(
     let mut repr_map_shallow = FxHashMap::default();
     for constraint in constraints {
         if let HaveTrait {
-            trait_ref,
+            trait_id,
             input_tys,
             output_tys,
             ..
         } = constraint
         {
-            if trait_ref == &*REPR_TRAIT {
+            if is_std_trait(
+                env,
+                *trait_id,
+                crate::std::core_traits_names::REPR_TRAIT_NAME,
+            ) {
                 let input_ty = input_tys.first().unwrap();
                 let output_ty = output_tys.first().unwrap();
                 let in_var = input_ty.data().as_variable().copied();
@@ -893,16 +900,17 @@ pub(crate) fn extra_parameters_from_constraints(
                 }
             }
             HaveTrait {
-                trait_ref,
+                trait_id,
                 input_tys,
                 output_tys,
                 ..
             } => {
+                let trait_def = env.trait_def(*trait_id);
                 // Function-related `Value` dictionaries are synthesized by
                 // dictionary passing instead of being passed as hidden args.
-                if is_value_trait_for_function_type(trait_ref, input_tys, output_tys)
+                if is_value_trait_for_function_type(*trait_id, trait_def, input_tys, output_tys)
                     || is_function_surface_only_value_trait_application(
-                        trait_ref, input_tys, output_tys,
+                        *trait_id, trait_def, input_tys, output_tys,
                     )
                 {
                     return None;
@@ -912,11 +920,11 @@ pub(crate) fn extra_parameters_from_constraints(
                         "Type scheme with trait having only non-variable input types in constraints"
                     )
                 }
-                if !trait_ref.has_runtime_dictionary_entries() {
+                if !trait_def.has_runtime_dictionary_entries() {
                     None // Marker traits have no runtime dictionary entries.
                 } else {
                     Some(DictionaryReq::new_trait_impl(
-                        trait_ref.clone(),
+                        *trait_id,
                         input_tys.clone(),
                         output_tys.clone(),
                     ))

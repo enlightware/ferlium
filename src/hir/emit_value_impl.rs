@@ -19,14 +19,15 @@ use crate::{
     },
     internal_compilation_error,
     module::{LocalFunctionId, Module, ModuleEnv, ModuleFunction, TypeDefId, id::Id},
+    std::core_traits_names::VALUE_TRAIT_NAME,
     std::value::{
-        NO_DERIVE_VALUE_ATTRIBUTE, VALUE_TRAIT, derive_generic_value_code_entries,
+        NO_DERIVE_VALUE_ATTRIBUTE, derive_generic_value_code_entries,
         function_value_method_function, function_value_method_name,
         is_function_surface_only_value_type,
     },
     types::{
         coherence::check_trait_impl,
-        r#trait::{TraitMethodIndex, TraitRef},
+        r#trait::TraitMethodIndex,
         trait_solver::{TraitSolver, trait_solver_from_module},
         r#type::{Type, TypeDef, TypeKind, TypeVar},
         type_constraints::named_type_constraints_in_types,
@@ -61,31 +62,40 @@ pub(crate) fn function_value_method(
 /// Emit generated structural `Value` methods for a non-concrete type shape.
 pub(crate) fn generic_value_methods_for_type(
     solver: &mut TraitSolver<'_>,
-    trait_ref: &TraitRef,
+    trait_id: crate::module::TraitId,
     input_tys: &[Type],
     span: Location,
     arena: &mut NodeArena,
 ) -> Result<Vec<LocalFunctionId>, InternalCompilationError> {
     let Some(code_entries) =
-        derive_generic_value_code_entries(trait_ref, input_tys, span, arena, solver)?
+        derive_generic_value_code_entries(trait_id, input_tys, span, arena, solver)?
     else {
         return Err(internal_compilation_error!(TraitImplNotFound {
-            trait_ref: trait_ref.clone(),
+            trait_ref: trait_id,
             input_tys: input_tys.to_vec(),
             fn_span: span,
         }));
     };
 
-    let definitions = trait_ref.instantiate_for_tys(input_tys, &[]);
+    let (definitions, method_names) = {
+        let trait_def = solver.trait_def(trait_id);
+        let definitions = trait_def.instantiate_for_tys(input_tys, &[]);
+        let method_names = (0..definitions.len())
+            .map(|index| {
+                let method_index = TraitMethodIndex::from_index(index);
+                Ustr::from(&format!(
+                    "{}-generic",
+                    trait_def.qualified_method_name(method_index, input_tys)
+                ))
+            })
+            .collect::<Vec<_>>();
+        (definitions, method_names)
+    };
     let mut methods = Vec::with_capacity(code_entries.len());
     for (method_index, (definition, (code_entry, locals))) in
         definitions.into_iter().zip(code_entries).enumerate()
     {
-        let method_index = TraitMethodIndex::from_index(method_index);
-        let name = Ustr::from(&format!(
-            "{}-generic",
-            trait_ref.qualified_method_name(method_index, input_tys)
-        ));
+        let name = method_names[method_index];
         if let Some(local_id) = solver.current_functions.get(&name).copied() {
             methods.push(local_id);
             continue;
@@ -142,6 +152,7 @@ fn auto_value_constraints(
 ) -> Vec<PubTypeConstraint> {
     let span = type_def.span;
     let params = &type_def.shape.ty_quantifiers;
+    let value_trait_id = env.expect_std_trait_id(VALUE_TRAIT_NAME);
     let mut constraints = IndexSet::new();
 
     for constraint in named_type_constraints_in_types([input_ty], span, env) {
@@ -157,7 +168,7 @@ fn auto_value_constraints(
             continue;
         }
         let constraint =
-            PubTypeConstraint::new_have_trait(VALUE_TRAIT.clone(), vec![member_ty], vec![], span);
+            PubTypeConstraint::new_have_trait(value_trait_id, vec![member_ty], vec![], span);
         constraints.insert(constraint);
     }
 
@@ -165,7 +176,7 @@ fn auto_value_constraints(
 }
 
 fn explicit_value_impl_overlaps_type_def(imp: &ast::DTraitImpl, type_def: TypeDefId) -> bool {
-    if imp.trait_name.0 != VALUE_TRAIT.name {
+    if imp.trait_name.0 != VALUE_TRAIT_NAME {
         return false;
     }
     let Some(for_trait) = &imp.for_trait else {
@@ -185,9 +196,13 @@ fn has_named_head_for_type_def(ty: Type, type_def: TypeDefId) -> bool {
         .is_some_and(|named| named.def == type_def)
 }
 
-fn value_impl_for_type_def_already_exists(output: &Module, type_def: TypeDefId) -> bool {
+fn value_impl_for_type_def_already_exists(
+    output: &Module,
+    value_trait_id: crate::module::TraitId,
+    type_def: TypeDefId,
+) -> bool {
     output.impls.concrete().keys().any(|key| {
-        key.trait_ref == *VALUE_TRAIT
+        key.trait_id == value_trait_id
             && key
                 .input_tys
                 .iter()
@@ -195,7 +210,7 @@ fn value_impl_for_type_def_already_exists(output: &Module, type_def: TypeDefId) 
     }) || output
         .impls
         .blanket()
-        .get(&*VALUE_TRAIT)
+        .get(&value_trait_id)
         .is_some_and(|impls| {
             impls.keys().any(|sub_key| {
                 sub_key
@@ -214,9 +229,10 @@ pub(super) fn emit_auto_value_impls(
     others: &Modules,
     explicit_impls: &[ast::DTraitImpl],
 ) -> Result<(), InternalCompilationError> {
+    let value_trait_id = ModuleEnv::new(output, others).expect_std_trait_id(VALUE_TRAIT_NAME);
     let type_defs = output.type_def_ids().collect::<Vec<_>>();
     for type_def_id in type_defs {
-        if value_impl_for_type_def_already_exists(output, type_def_id) {
+        if value_impl_for_type_def_already_exists(output, value_trait_id, type_def_id) {
             continue;
         }
         if explicit_impls
@@ -250,7 +266,7 @@ pub(super) fn emit_auto_value_impls(
         let associated_const_values = {
             let solver = trait_solver_from_module!(output, others);
             emitted_associated_const_values(
-                &VALUE_TRAIT,
+                value_trait_id,
                 &[input_ty],
                 ty_var_count,
                 type_def_span,
@@ -261,7 +277,7 @@ pub(super) fn emit_auto_value_impls(
         check_trait_impl(
             output,
             others,
-            &VALUE_TRAIT,
+            value_trait_id,
             false,
             &[input_ty],
             ty_var_count,
@@ -272,7 +288,7 @@ pub(super) fn emit_auto_value_impls(
         let Some(code_entries) = ({
             let mut solver = trait_solver_from_module!(output, others);
             let code_entries = derive_generic_value_code_entries(
-                &VALUE_TRAIT,
+                value_trait_id,
                 &[input_ty],
                 type_def_span,
                 ir_arena,
@@ -285,8 +301,19 @@ pub(super) fn emit_auto_value_impls(
         };
 
         let quantifiers = (0..ty_var_count).map(TypeVar::new).collect::<Vec<_>>();
-        let definitions = VALUE_TRAIT.instantiate_for_tys(&[input_ty], &[]);
-        let dicts = extra_parameters_from_constraints(&constraints);
+        let (definitions, method_names) = {
+            let env = ModuleEnv::new(output, others);
+            let trait_def = env.trait_def(value_trait_id);
+            let definitions = trait_def.instantiate_for_tys(&[input_ty], &[]);
+            let method_names = (0..definitions.len())
+                .map(|index| {
+                    let method_index = TraitMethodIndex::from_index(index);
+                    Ustr::from(&trait_def.qualified_method_name(method_index, &[input_ty]))
+                })
+                .collect::<Vec<_>>();
+            (definitions, method_names)
+        };
+        let dicts = extra_parameters_from_constraints(&constraints, ModuleEnv::new(output, others));
         let mut function_ids = Vec::with_capacity(code_entries.len());
 
         for (method_index, (definition, (root, locals))) in
@@ -308,17 +335,12 @@ pub(super) fn emit_auto_value_impls(
             }
             function.refresh_debug_info();
             let id = output.add_function_anonymous(function);
-            output.name_function(
-                id,
-                VALUE_TRAIT
-                    .qualified_method_name(method_index, &[input_ty])
-                    .into(),
-            );
+            output.name_function(id, method_names[usize::from(method_index)]);
             function_ids.push(id);
         }
 
         output.add_emitted_impl(
-            VALUE_TRAIT.clone(),
+            value_trait_id,
             EmitTraitOutput {
                 input_tys: vec![input_ty],
                 output_tys: vec![],

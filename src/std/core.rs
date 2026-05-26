@@ -7,8 +7,6 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use std::sync::LazyLock;
-
 use crate::{
     containers::b,
     hir::function::{
@@ -16,41 +14,40 @@ use crate::{
     },
     module::Module,
     std::{
-        STD_MODULE_ID,
-        default::DEFAULT_TRAIT,
+        core_traits_names::{
+            DEFAULT_TRAIT_NAME, REPR_TRAIT_NAME, TRIVIAL_COPY_TRAIT_NAME, VALUE_TRAIT_NAME,
+        },
         hash::Hasher,
         logic::bool_type,
         math::{float_type, int_type},
         string::string_type,
         value::{
-            VALUE_TRAIT, native_layout_associated_consts, native_value_clone_function,
+            native_layout_associated_consts, native_value_clone_function,
             native_value_drop_function,
         },
     },
-    types::r#trait::TraitRef,
+    types::r#trait::Trait,
     types::r#type::Type,
 };
 
-pub static REPR_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
-    TraitRef::new_with_self_input_type(
+fn repr_trait() -> Trait {
+    Trait::new_with_self_input_type(
         "Repr",
         "Marker trait for types whose value is the same representation as one of another type. Used in Rust-style struct and enums (new types) to allow matches and projections on the underlying representation.",
         ["Is"],
         [],
     )
-    .with_module_id(STD_MODULE_ID)
-});
+}
 
-pub static TRIVIAL_COPY_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
-    TraitRef::new_with_self_input_type(
+fn trivial_copy_trait() -> Trait {
+    Trait::new_with_self_input_type(
         "TrivialCopy",
         "Marker trait for trusted native types that native adapters may pass by value.",
         [],
         [],
     )
     .with_native_impl_only()
-    .with_module_id(STD_MODULE_ID)
-});
+}
 
 fn unit_to_string(_: ()) -> crate::std::string::String {
     crate::std::string::String::new("()")
@@ -75,11 +72,19 @@ pub fn add_to_module(to: &mut Module) {
     to.add_type_alias_str_with_doc("string", string_type(), "An owned UTF-8 string.");
 
     // Add the `Repr` trait
-    to.add_trait(REPR_TRAIT.clone());
-    to.add_trait(TRIVIAL_COPY_TRAIT.clone());
+    let repr_trait_id = to.add_trait(repr_trait());
+    let trivial_copy_trait_id = to.add_trait(trivial_copy_trait());
+    let repr_trait_id = crate::module::TraitId::new(to.module_id(), repr_trait_id);
+    let trivial_copy_trait_id = crate::module::TraitId::new(to.module_id(), trivial_copy_trait_id);
+    debug_assert_eq!(to.trait_def(repr_trait_id).name, REPR_TRAIT_NAME);
+    debug_assert_eq!(
+        to.trait_def(trivial_copy_trait_id).name,
+        TRIVIAL_COPY_TRAIT_NAME
+    );
+    let value_trait_id = to.expect_std_trait_id_in_current_module(VALUE_TRAIT_NAME);
 
     to.add_concrete_impl_no_locals(
-        VALUE_TRAIT.clone(),
+        value_trait_id,
         [Type::unit()],
         [],
         native_layout_associated_consts::<()>(),
@@ -91,14 +96,15 @@ pub fn add_to_module(to: &mut Module) {
             native_value_drop_function::<()>(),
         ],
     );
+    let default_trait_id = to.expect_std_trait_id_in_current_module(DEFAULT_TRAIT_NAME);
     to.add_native_concrete_impl(
-        DEFAULT_TRAIT.clone(),
+        default_trait_id,
         [Type::unit()],
         [],
         [b(NullaryNativeFnN::new(|| ())) as Function],
     );
     to.add_native_concrete_impl(
-        TRIVIAL_COPY_TRAIT.clone(),
+        trivial_copy_trait_id,
         [Type::unit()],
         [],
         Vec::<Function>::new(),

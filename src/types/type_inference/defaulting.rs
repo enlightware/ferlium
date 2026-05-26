@@ -1,15 +1,12 @@
 use std::mem;
 
-use itertools::Itertools;
-use ustr::ustr;
-
 use crate::{
     FxHashMap, FxHashSet,
     compiler::error::InternalCompilationError,
     hir::{self, NodeArena, NodeId, NodeKind},
-    module::{LocalDecl, id::Id},
+    module::{LocalDecl, TraitId, id::Id},
     parser::location::Location,
-    std::{core_traits_names::NUM_TRAIT_NAME, value::VALUE_TRAIT},
+    std::core_traits_names::NUM_TRAIT_NAME,
     types::{
         trait_solver::TraitSolver,
         r#type::{Type, TypeVar},
@@ -18,6 +15,7 @@ use crate::{
         type_scheme::PubTypeConstraint,
     },
 };
+use itertools::Itertools;
 
 use super::{substitution::InstSubst, unify::UnifiedTypeInference};
 
@@ -195,14 +193,15 @@ impl UnifiedTypeInference {
         arena: &NodeArena,
         root: NodeId,
         locals: &mut [LocalDecl],
+        value_trait_id: TraitId,
     ) {
         self.substitute_in_local_decls_in_place(locals);
         for local in &mut *locals {
             if hir::resolve_deferred_local_storage_shape(arena, local) && !local.ty.is_function() {
-                self.add_activated_value_constraint(local.ty, local.scope);
+                self.add_activated_value_constraint(value_trait_id, local.ty, local.scope);
             }
         }
-        self.activate_take_local_value_constraints(arena, root, locals);
+        self.activate_take_local_value_constraints(arena, root, locals, value_trait_id);
     }
 
     fn activate_take_local_value_constraints(
@@ -210,26 +209,31 @@ impl UnifiedTypeInference {
         arena: &NodeArena,
         node_id: NodeId,
         locals: &[LocalDecl],
+        value_trait_id: TraitId,
     ) {
         let node = &arena[node_id];
         if let NodeKind::TakeLocalValue(take) = &node.kind
             && matches!(take.mode, crate::module::TakeLocalValueMode::Unknown)
             && !locals[take.id.as_index()].owns_storage()
         {
-            self.add_activated_value_constraint(node.ty, node.span);
+            self.add_activated_value_constraint(value_trait_id, node.ty, node.span);
         }
         for child in node.kind.child_node_ids() {
-            self.activate_take_local_value_constraints(arena, child, locals);
+            self.activate_take_local_value_constraints(arena, child, locals, value_trait_id);
         }
     }
 
-    fn add_activated_value_constraint(&mut self, ty: Type, span: Location) {
+    fn add_activated_value_constraint(
+        &mut self,
+        value_trait_id: TraitId,
+        ty: Type,
+        span: Location,
+    ) {
         let ty = self.substitute_in_type(ty);
         if ty.is_function() {
             return;
         }
-        let constraint =
-            PubTypeConstraint::new_have_trait(VALUE_TRAIT.clone(), vec![ty], vec![], span);
+        let constraint = PubTypeConstraint::new_have_trait(value_trait_id, vec![ty], vec![], span);
         if !self.remaining_ty_constraints.contains(&constraint) {
             self.remaining_ty_constraints.push(constraint);
         }
@@ -353,12 +357,10 @@ impl UnifiedTypeInference {
         }
 
         use crate::module::ConcreteTraitImplKey;
-        use crate::std::{
-            STD_MODULE_ID,
-            math::{float_type, int_type},
-        };
+        use crate::std::math::{float_type, int_type};
 
         let default_tys = [int_type(), float_type()];
+        let num_trait_id = trait_solver.std_trait_id(NUM_TRAIT_NAME);
 
         // Re-substitute boundary constraints to see the current state of type variables.
         let subst_constraints = self.substitute_in_constraints(constraints);
@@ -368,16 +370,14 @@ impl UnifiedTypeInference {
         let mut num_ty_vars = FxHashSet::<TypeVar>::default();
         for constraint in &subst_constraints {
             if let PubTypeConstraint::HaveTrait {
-                trait_ref,
+                trait_id,
                 input_tys,
                 output_tys,
                 ..
             } = constraint
             {
                 assert!(!input_tys.is_empty());
-                if trait_ref.module_id() == Some(STD_MODULE_ID)
-                    && trait_ref.name == ustr(NUM_TRAIT_NAME)
-                {
+                if *trait_id == num_trait_id {
                     let maybe_ty_var = input_tys[0].data().as_variable().cloned();
                     if let Some(ty_var) = maybe_ty_var {
                         num_ty_vars.insert(ty_var);
@@ -400,7 +400,7 @@ impl UnifiedTypeInference {
         let mut defaulted_ty_vars = FxHashMap::<TypeVar, usize>::default();
         for constraint in &subst_constraints {
             if let PubTypeConstraint::HaveTrait {
-                trait_ref,
+                trait_id,
                 input_tys,
                 output_tys,
                 ..
@@ -419,10 +419,8 @@ impl UnifiedTypeInference {
                     }
                     let mut default_index = defaulted_ty_vars.get(&ty_var).copied().unwrap_or(0);
                     while default_index < default_tys.len() {
-                        let key = ConcreteTraitImplKey::new(
-                            trait_ref.clone(),
-                            vec![default_tys[default_index]],
-                        );
+                        let key =
+                            ConcreteTraitImplKey::new(*trait_id, vec![default_tys[default_index]]);
                         if trait_solver.has_concrete_impl(&key) {
                             break;
                         }
@@ -491,7 +489,7 @@ impl UnifiedTypeInference {
                 }
 
                 let PubTypeConstraint::HaveTrait {
-                    trait_ref,
+                    trait_id,
                     input_tys,
                     output_tys,
                     span,
@@ -520,7 +518,7 @@ impl UnifiedTypeInference {
                     .collect::<Vec<_>>();
                 if inst_input_tys.iter().all(Type::is_constant)
                     && trait_solver
-                        .solve_impl(trait_ref, &inst_input_tys, span.use_site, arena)
+                        .solve_impl(*trait_id, &inst_input_tys, span.use_site, arena)
                         .is_err()
                 {
                     all_satisfied = false;
@@ -592,7 +590,7 @@ impl UnifiedTypeInference {
                 }
                 let inst_c = c.map(&mut mapper);
                 if let PubTypeConstraint::HaveTrait {
-                    trait_ref,
+                    trait_id,
                     input_tys,
                     span,
                     ..
@@ -600,7 +598,7 @@ impl UnifiedTypeInference {
                 {
                     if input_tys.iter().all(Type::is_constant)
                         && trait_solver
-                            .solve_impl(trait_ref, input_tys, span.use_site, arena)
+                            .solve_impl(*trait_id, input_tys, span.use_site, arena)
                             .is_err()
                     {
                         all_satisfied = false;

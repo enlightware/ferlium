@@ -305,10 +305,11 @@ fn desugar_type_constraint(
     modules_used: &mut FxHashSet<ModuleId>,
 ) -> Result<PubTypeConstraint, InternalCompilationError> {
     let trait_span = constraint.trait_name.span().unwrap_or(constraint.span);
-    let Some((module_id, trait_ref)) = env.trait_ref_with_module(&constraint.trait_name)? else {
+    let Some((module_id, trait_id)) = env.trait_id_with_module(&constraint.trait_name)? else {
         return Err(internal_compilation_error!(TraitNotFound(trait_span)));
     };
     record_module_use(module_id, modules_used);
+    let trait_def = env.trait_def(trait_id);
 
     let has_named_inputs = constraint
         .input_types
@@ -319,8 +320,8 @@ fn desugar_type_constraint(
         .iter()
         .any(|input| input.name.is_none());
     let input_tys = if has_positional_inputs && !has_named_inputs {
-        if trait_ref.input_type_count() as usize != constraint.input_types.len() {
-            let expected_count = trait_ref.input_type_count() as usize;
+        if trait_def.input_type_count() as usize != constraint.input_types.len() {
+            let expected_count = trait_def.input_type_count() as usize;
             let kind = if constraint.input_types.len() == 1 {
                 InvalidTraitConstraintKind::ExpectedNamedInputs { expected_count }
             } else {
@@ -354,7 +355,7 @@ fn desugar_type_constraint(
             .iter()
             .map(|input| {
                 let Some(name) = input.name else {
-                    let expected_count = trait_ref.input_type_count() as usize;
+                    let expected_count = trait_def.input_type_count() as usize;
                     return Err(internal_compilation_error!(InvalidTraitConstraint {
                         trait_name: constraint.trait_name.to_string(),
                         kind: InvalidTraitConstraintKind::ExpectedNamedInputs { expected_count },
@@ -374,7 +375,7 @@ fn desugar_type_constraint(
             })
             .collect::<Result<Vec<_>, _>>()?;
         desugar_named_type_bindings(
-            &trait_ref.input_type_names,
+            &trait_def.input_type_names,
             named_inputs,
             TraitConstraintBindingKind::Input,
             &constraint.trait_name,
@@ -383,7 +384,7 @@ fn desugar_type_constraint(
     };
 
     let output_tys = desugar_named_type_bindings(
-        &trait_ref.output_type_names,
+        &trait_def.output_type_names,
         constraint
             .output_types
             .iter()
@@ -406,7 +407,7 @@ fn desugar_type_constraint(
     )?;
 
     Ok(PubTypeConstraint::new_have_trait(
-        trait_ref,
+        trait_id,
         input_tys,
         output_tys,
         constraint.span,
@@ -1010,10 +1011,11 @@ fn desugar_trait_impl_for(
     modules_used: &mut FxHashSet<ModuleId>,
 ) -> Result<ast::DTraitImplFor, InternalCompilationError> {
     let trait_path = ast::Path::single_tuple(trait_name);
-    let Some((module_id, trait_ref)) = env.trait_ref_with_module(&trait_path)? else {
+    let Some((module_id, trait_id)) = env.trait_id_with_module(&trait_path)? else {
         return Err(internal_compilation_error!(TraitNotFound(trait_name.1)));
     };
     record_module_use(module_id, modules_used);
+    let trait_def = env.trait_def(trait_id);
 
     if for_trait.output_types.is_empty()
         && for_trait
@@ -1035,9 +1037,9 @@ fn desugar_trait_impl_for(
                     })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        if input_types.len() != trait_ref.input_type_count() as usize {
+        if input_types.len() != trait_def.input_type_count() as usize {
             return Err(internal_compilation_error!(WrongNumberOfArguments {
-                expected: trait_ref.input_type_count() as usize,
+                expected: trait_def.input_type_count() as usize,
                 expected_span: trait_name.1,
                 got: input_types.len(),
                 got_span: for_trait.span,
@@ -1051,13 +1053,13 @@ fn desugar_trait_impl_for(
     }
 
     let input_types = desugar_named_type_bindings(
-        &trait_ref.input_type_names,
+        &trait_def.input_type_names,
         for_trait
             .input_types
             .into_iter()
             .map(|input| {
                 let Some(name) = input.name else {
-                    let expected_count = trait_ref.input_type_count() as usize;
+                    let expected_count = trait_def.input_type_count() as usize;
                     return Err(internal_compilation_error!(InvalidTraitConstraint {
                         trait_name: trait_path.to_string(),
                         kind: InvalidTraitConstraintKind::ExpectedNamedInputs { expected_count },
@@ -1084,7 +1086,7 @@ fn desugar_trait_impl_for(
         for_trait.span,
     )?;
     let output_types = desugar_named_type_bindings(
-        &trait_ref.output_type_names,
+        &trait_def.output_type_names,
         for_trait
             .output_types
             .into_iter()
@@ -1110,7 +1112,7 @@ fn desugar_trait_impl_for(
     )?;
 
     Ok(ast::DTraitImplFor {
-        input_types: trait_ref
+        input_types: trait_def
             .input_type_names
             .iter()
             .copied()
@@ -1120,7 +1122,7 @@ fn desugar_trait_impl_for(
                 ty,
             })
             .collect(),
-        output_types: trait_ref
+        output_types: trait_def
             .output_type_names
             .iter()
             .copied()

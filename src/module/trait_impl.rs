@@ -20,10 +20,10 @@ use crate::{
     define_id_type,
     format::{FormatWith, write_with_separator_and_format_fn},
     hir::function::Function,
-    module::{LocalDecl, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleId, id::Id},
+    module::{LocalDecl, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleId, TraitId, id::Id},
     parser::location::Location,
     types::r#trait::{
-        TraitAssociatedConstIndex, TraitDictionaryEntryIndex, TraitMethodIndex, TraitRef,
+        Trait, TraitAssociatedConstIndex, TraitDictionaryEntryIndex, TraitMethodIndex,
     },
     types::r#type::{Type, TypeInstSubst, TypeVar, fmt_fn_type_with_arg_names},
     types::type_inference::substitution::InstSubst,
@@ -38,7 +38,7 @@ define_id_type!(
 );
 
 define_id_type!(
-    /// Import slot ID for cross-module trait references
+    /// Import slot ID for cross-module trait implementation dictionaries.
     ImportImplSlotId
 );
 
@@ -95,25 +95,17 @@ pub struct ImportImplSlot {
     pub key: TraitKey,
 }
 
-/// A vector of traits.
-pub type Traits = Vec<TraitRef>;
+/// A vector of trait definitions.
+pub type Traits = Vec<Trait>;
 
-/// A pair of a trait reference and a list of input types forming a key for a concrete trait implementations.
+/// A pair of a trait id and a list of input types forming a key for a concrete trait implementations.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, new)]
 pub struct ConcreteTraitImplKey {
-    /// The trait we are referring to, currently global
-    pub trait_ref: TraitRef,
+    /// The trait being implemented.
+    pub trait_id: TraitId,
     /// The input types of the trait implementation.
     pub input_tys: Vec<Type>,
 }
-
-/* Use this later instead of trait_ref if we want to identify traits
-    by module + name instead of global pointer:
-    /// Module that defines the trait
-    trait_module: Ustr,
-    /// Name of the trait in that module
-    trait_name: Ustr,
-*/
 
 /// A sub-key for looking up blanket implementations for a given trait.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, new)]
@@ -129,8 +121,8 @@ pub struct BlanketTraitImplSubKey {
 /// All necessary information to form a key for a blanket trait implementations.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, new)]
 pub struct BlanketTraitImplKey {
-    /// The trait we are referring to, currently global
-    pub trait_ref: TraitRef,
+    /// The trait being implemented.
+    pub trait_id: TraitId,
     /// The information to distinguish different blanket implementations for the same trait.
     pub sub_key: BlanketTraitImplSubKey,
 }
@@ -151,11 +143,11 @@ impl TraitKey {
             TraitKey::Blanket(key) => &key.sub_key.input_tys,
         }
     }
-    /// Get the trait reference of this key.
-    pub fn trait_ref(&self) -> &TraitRef {
+    /// Get the trait id of this key.
+    pub fn trait_id(&self) -> TraitId {
         match self {
-            TraitKey::Concrete(key) => &key.trait_ref,
-            TraitKey::Blanket(key) => &key.trait_ref,
+            TraitKey::Concrete(key) => key.trait_id,
+            TraitKey::Blanket(key) => key.trait_id,
         }
     }
 }
@@ -285,7 +277,7 @@ pub(crate) enum DisplayFilter {
 
 pub(crate) type ConcreteImpls = FxHashMap<ConcreteTraitImplKey, LocalImplId>;
 pub(crate) type BlanketTraitImpls = FxHashMap<BlanketTraitImplSubKey, LocalImplId>;
-pub(crate) type BlanketImpls = FxHashMap<TraitRef, BlanketTraitImpls>;
+pub(crate) type BlanketImpls = FxHashMap<TraitId, BlanketTraitImpls>;
 
 /// All trait implementations in a module or in a given context.
 #[derive(Clone, Debug, new)]
@@ -303,11 +295,13 @@ pub struct TraitImpls {
 impl TraitImpls {
     /// Add a concrete trait implementation to this module, with raw functions.
     /// The definition will be retrieved by instantiating the trait method definitions with the given types.
-    /// The caller is responsible to ensure that the input and output types match the trait reference
+    /// The caller is responsible to ensure that the input and output types match the trait definition
     /// and that the constraints are satisfied.
+    #[allow(clippy::too_many_arguments)]
     pub fn add_concrete_raw(
         &mut self,
-        trait_ref: TraitRef,
+        trait_id: TraitId,
+        trait_def: &Trait,
         input_tys: impl Into<Vec<Type>>,
         output_tys: impl Into<Vec<Type>>,
         associated_const_values: impl Into<Vec<isize>>,
@@ -318,8 +312,8 @@ impl TraitImpls {
         let output_tys = output_tys.into();
         let associated_const_values = associated_const_values.into();
 
-        // Recover the definitions from the trait reference by instantiating the trait method definitions with the given types.
-        let definitions = trait_ref.instantiate_for_tys(&input_tys, &output_tys);
+        // Recover the definitions from the trait by instantiating the trait method definitions with the given types.
+        let definitions = trait_def.instantiate_for_tys(&input_tys, &output_tys);
 
         // Combine them into module functions.
         let functions: Vec<_> = definitions
@@ -332,7 +326,8 @@ impl TraitImpls {
 
         // Add the impl, collecting new functions.
         self.add_concrete(
-            trait_ref,
+            trait_id,
+            trait_def,
             input_tys,
             output_tys,
             associated_const_values,
@@ -342,11 +337,13 @@ impl TraitImpls {
     }
 
     /// Add a concrete trait implementation, with module functions.
-    /// The caller is responsible to ensure that the input and output types match the trait reference
+    /// The caller is responsible to ensure that the input and output types match the trait definition
     /// and that the constraints are satisfied.
+    #[allow(clippy::too_many_arguments)]
     pub fn add_concrete(
         &mut self,
-        trait_ref: TraitRef,
+        trait_id: TraitId,
+        trait_def: &Trait,
         input_tys: Vec<Type>,
         output_tys: Vec<Type>,
         associated_const_values: impl Into<Vec<isize>>,
@@ -355,7 +352,7 @@ impl TraitImpls {
     ) -> LocalImplId {
         let associated_const_values = associated_const_values.into();
         // Minimal validation
-        trait_ref.validate_impl_shape(
+        trait_def.validate_impl_shape(
             &input_tys,
             &output_tys,
             associated_const_values.len(),
@@ -364,7 +361,7 @@ impl TraitImpls {
 
         // Add to local functions, collect their IDs and build the overall interface hash.
         let namer = |method_index: usize| {
-            trait_ref
+            trait_def
                 .qualified_method_name(TraitMethodIndex::from_index(method_index), &input_tys)
                 .into()
         };
@@ -382,7 +379,7 @@ impl TraitImpls {
             None,
         )
         .with_associated_const_values(associated_const_values);
-        let key = ConcreteTraitImplKey::new(trait_ref, input_tys);
+        let key = ConcreteTraitImplKey::new(trait_id, input_tys);
         self.add_concrete_struct(key, imp)
     }
 
@@ -405,9 +402,11 @@ impl TraitImpls {
         id
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn add_blanket_raw(
         &mut self,
-        trait_ref: TraitRef,
+        trait_id: TraitId,
+        trait_def: &Trait,
         sub_key: BlanketTraitImplSubKey,
         output_tys: impl Into<Vec<Type>>,
         associated_const_values: impl Into<Vec<isize>>,
@@ -417,8 +416,8 @@ impl TraitImpls {
         let output_tys = output_tys.into();
         let associated_const_values = associated_const_values.into();
 
-        // Recover the definitions from the trait reference by instantiating the trait method definitions with the given types.
-        let definitions = trait_ref.instantiate_for_tys(&sub_key.input_tys, &output_tys);
+        // Recover the definitions from the trait by instantiating the trait method definitions with the given types.
+        let definitions = trait_def.instantiate_for_tys(&sub_key.input_tys, &output_tys);
 
         // Combine them into module functions.
         let functions: Vec<_> = definitions
@@ -431,7 +430,8 @@ impl TraitImpls {
 
         // Add the impl, collecting new functions.
         self.add_blanket(
-            trait_ref,
+            trait_id,
+            trait_def,
             sub_key,
             output_tys,
             associated_const_values,
@@ -440,9 +440,11 @@ impl TraitImpls {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn add_blanket(
         &mut self,
-        trait_ref: TraitRef,
+        trait_id: TraitId,
+        trait_def: &Trait,
         sub_key: BlanketTraitImplSubKey,
         output_tys: Vec<Type>,
         associated_const_values: impl Into<Vec<isize>>,
@@ -451,7 +453,7 @@ impl TraitImpls {
     ) -> LocalImplId {
         let associated_const_values = associated_const_values.into();
         // Minimal validation
-        trait_ref.validate_impl_shape(
+        trait_def.validate_impl_shape(
             &sub_key.input_tys,
             &output_tys,
             associated_const_values.len(),
@@ -460,7 +462,7 @@ impl TraitImpls {
 
         // Add to local functions, collect their IDs and build the overall interface hash.
         let namer = |method_index: usize| {
-            trait_ref
+            trait_def
                 .qualified_method_name(
                     TraitMethodIndex::from_index(method_index),
                     &sub_key.input_tys,
@@ -481,7 +483,7 @@ impl TraitImpls {
             None,
         )
         .with_associated_const_values(associated_const_values);
-        let key = BlanketTraitImplKey::new(trait_ref, sub_key);
+        let key = BlanketTraitImplKey::new(trait_id, sub_key);
         self.add_blanket_struct(key, imp)
     }
 
@@ -490,7 +492,7 @@ impl TraitImpls {
         let id = LocalImplId::from_index(self.data.len());
         self.data.push(imp);
         self.blanket_key_to_id
-            .entry(key.trait_ref)
+            .entry(key.trait_id)
             .or_default()
             .insert(key.sub_key, id);
         id
@@ -544,7 +546,7 @@ impl TraitImpls {
             Concrete(key) => self.concrete_key_to_id.get(key).copied(),
             Blanket(key) => self
                 .blanket_key_to_id
-                .get(&key.trait_ref)
+                .get(&key.trait_id)
                 .and_then(|m| m.get(&key.sub_key))
                 .copied(),
         }
@@ -565,11 +567,11 @@ impl TraitImpls {
                 }
             })
             .or_else(|| {
-                self.blanket_key_to_id.iter().find_map(|(trait_ref, map)| {
+                self.blanket_key_to_id.iter().find_map(|(trait_id, map)| {
                     map.iter().find_map(|(sub_key, &val)| {
                         if val == id {
                             Some(TraitKey::Blanket(BlanketTraitImplKey::new(
-                                trait_ref.clone(),
+                                *trait_id,
                                 sub_key.clone(),
                             )))
                         } else {
@@ -592,39 +594,39 @@ impl TraitImpls {
         &self,
         f: &mut std::fmt::Formatter,
         env: &ModuleEnv<'_>,
-        filter: impl Fn(&TraitRef, LocalImplId) -> DisplayFilter,
+        filter: impl Fn(TraitId, LocalImplId) -> DisplayFilter,
     ) -> std::fmt::Result {
         for (key, id) in &self.concrete_key_to_id {
             let imp = self.get_impl_by_local_id(*id);
-            let level = filter(&key.trait_ref, *id);
+            let level = filter(key.trait_id, *id);
             if level == DisplayFilter::Hide {
                 continue;
             }
             let subst = format_concrete_impl_header(key, &imp.output_tys, f, env)?;
             write!(f, " (#{id})")?;
             if level == DisplayFilter::MethodDefinitions {
-                format_impl_fns(&key.trait_ref, subst, imp, false, f, env)?;
+                format_impl_fns(key.trait_id, subst, imp, false, f, env)?;
             } else if level == DisplayFilter::MethodCode {
-                format_impl_fns(&key.trait_ref, subst, imp, true, f, env)?;
+                format_impl_fns(key.trait_id, subst, imp, true, f, env)?;
             }
             writeln!(f)?;
         }
-        for (trait_ref, impls) in &self.blanket_key_to_id {
+        for (trait_id, impls) in &self.blanket_key_to_id {
             for (sub_key, id) in impls {
-                let level = filter(trait_ref, *id);
+                let level = filter(*trait_id, *id);
                 if level == DisplayFilter::Hide {
                     continue;
                 }
                 let imp = self.get_impl_by_local_id(*id);
-                let key = BlanketTraitImplKey::new(trait_ref.clone(), sub_key.clone());
+                let key = BlanketTraitImplKey::new(*trait_id, sub_key.clone());
                 format_blanket_impl_header(&key, &imp.output_tys, f, env)?;
                 write!(f, " (#{id})")?;
                 // For blanket impls, the function types already use the correct type variables,
                 // so we don't need to apply any substitution.
                 if level == DisplayFilter::MethodDefinitions {
-                    format_impl_fns(&key.trait_ref, TypeInstSubst::default(), imp, false, f, env)?;
+                    format_impl_fns(key.trait_id, TypeInstSubst::default(), imp, false, f, env)?;
                 } else if level == DisplayFilter::MethodCode {
-                    format_impl_fns(&key.trait_ref, TypeInstSubst::default(), imp, true, f, env)?;
+                    format_impl_fns(key.trait_id, TypeInstSubst::default(), imp, true, f, env)?;
                 }
                 writeln!(f)?;
             }
@@ -646,9 +648,9 @@ impl TraitImpls {
         Ok(())
     }
 
-    pub fn log_debug_impls_headers(&self, trait_ref: &TraitRef, module_env: ModuleEnv<'_>) {
-        let filter = |tr: &TraitRef, _| {
-            if tr.name == trait_ref.name {
+    pub fn log_debug_impls_headers(&self, trait_id: TraitId, module_env: ModuleEnv<'_>) {
+        let filter = |id: TraitId, _| {
+            if id == trait_id {
                 DisplayFilter::ImplSignature
             } else {
                 DisplayFilter::Hide
@@ -662,7 +664,7 @@ impl TraitImpls {
         id: LocalImplId,
         module_env: ModuleEnv<'_>,
     ) -> String {
-        let filter = |_: &TraitRef, impl_id| {
+        let filter = |_: TraitId, impl_id| {
             if impl_id == id {
                 DisplayFilter::ImplSignature
             } else {
@@ -681,7 +683,7 @@ impl FormatWith<ModuleEnv<'_>> for TraitImpls {
 
 impl<F> FormatWith<(ModuleEnv<'_>, F)> for TraitImpls
 where
-    F: Fn(&TraitRef, LocalImplId) -> DisplayFilter,
+    F: Fn(TraitId, LocalImplId) -> DisplayFilter,
 {
     fn fmt_with(&self, f: &mut fmt::Formatter<'_>, data: &(ModuleEnv<'_>, F)) -> fmt::Result {
         self.fmt_with_filter(f, &data.0, &data.1)
@@ -695,7 +697,7 @@ pub fn format_concrete_impl(
     env: &ModuleEnv<'_>,
 ) -> std::fmt::Result {
     let subst = format_concrete_impl_header(key, &imp.output_tys, f, env)?;
-    format_impl_fns(&key.trait_ref, subst, imp, false, f, env)
+    format_impl_fns(key.trait_id, subst, imp, false, f, env)
 }
 
 pub fn format_blanket_impl(
@@ -707,7 +709,7 @@ pub fn format_blanket_impl(
     format_blanket_impl_header(key, &imp.output_tys, f, env)?;
     // For blanket impls, the function types already use the correct type variables,
     // so we don't need to apply any substitution.
-    format_impl_fns(&key.trait_ref, TypeInstSubst::default(), imp, false, f, env)
+    format_impl_fns(key.trait_id, TypeInstSubst::default(), imp, false, f, env)
 }
 
 pub fn format_impl_header_by_key(
@@ -730,7 +732,7 @@ pub fn format_blanket_impl_header(
     env: &ModuleEnv<'_>,
 ) -> Result<TypeInstSubst, std::fmt::Error> {
     let subst = format_impl_header_expanded(
-        &key.trait_ref,
+        key.trait_id,
         key.sub_key.ty_var_count,
         &key.sub_key.input_tys,
         output_tys,
@@ -751,17 +753,18 @@ pub fn format_concrete_impl_header(
     f: &mut std::fmt::Formatter,
     env: &ModuleEnv<'_>,
 ) -> Result<TypeInstSubst, std::fmt::Error> {
-    format_impl_header_expanded(&key.trait_ref, 0, &key.input_tys, output_tys, f, env)
+    format_impl_header_expanded(key.trait_id, 0, &key.input_tys, output_tys, f, env)
 }
 
 fn format_impl_header_expanded(
-    trait_ref: &TraitRef,
+    trait_id: TraitId,
     ty_var_count: u32,
     input_tys: &[Type],
     output_tys: &[Type],
     f: &mut std::fmt::Formatter,
     env: &ModuleEnv<'_>,
 ) -> Result<TypeInstSubst, std::fmt::Error> {
+    let trait_def = env.trait_def(trait_id);
     write!(f, "impl")?;
     if ty_var_count > 0 {
         fmt_ordered_quantifiers(f, ty_var_count)?;
@@ -770,13 +773,13 @@ fn format_impl_header_expanded(
         write!(
             f,
             " {} for {}",
-            trait_ref.name,
+            trait_def.name,
             input_tys[0].format_with(env)
         )?;
     } else {
-        write!(f, " {} for <", trait_ref.name)?;
+        write!(f, " {} for <", trait_def.name)?;
         write_with_separator_and_format_fn(
-            input_tys.iter().zip(trait_ref.input_type_names.iter()),
+            input_tys.iter().zip(trait_def.input_type_names.iter()),
             ", ",
             |(ty, name), f| write!(f, "{} = {}", name, ty.format_with(env)),
             f,
@@ -784,7 +787,7 @@ fn format_impl_header_expanded(
         if !output_tys.is_empty() {
             write!(f, " |-> ")?;
             write_with_separator_and_format_fn(
-                output_tys.iter().zip(trait_ref.output_type_names.iter()),
+                output_tys.iter().zip(trait_def.output_type_names.iter()),
                 ", ",
                 |(ty, name), f| write!(f, "{} = {}", name, ty.format_with(env)),
                 f,
@@ -803,20 +806,21 @@ fn format_impl_header_expanded(
 }
 
 fn format_impl_fns(
-    trait_ref: &TraitRef,
+    trait_id: TraitId,
     subst: TypeInstSubst,
     imp: &TraitImpl,
     show_code: bool,
     f: &mut std::fmt::Formatter,
     env: &ModuleEnv<'_>,
 ) -> std::fmt::Result {
+    let trait_def = env.trait_def(trait_id);
     let subst = (subst, FxHashMap::default());
     writeln!(f, " {{")?;
     let impl_functions = imp.methods.iter().map(|&id| {
         let function = env.current.get_function_by_id(id).unwrap();
         (function, id)
     });
-    for ((name, _), (function, id)) in trait_ref.methods.iter().zip(impl_functions) {
+    for ((name, _), (function, id)) in trait_def.methods.iter().zip(impl_functions) {
         format_impl_fn(*name, function, id, &subst, show_code, f, env)?;
     }
     writeln!(f, "}}")

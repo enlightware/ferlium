@@ -22,11 +22,9 @@ use crate::{
     hir::function::ArgPassing,
     module::{
         ExtraParameterId, FunctionId, LocalClone, LocalDecl, LocalDeclId, LocalDrop,
-        ProjectionIndex, ResolvedLocalClone, TakeLocalValueMode, TraitImplId, id::Id,
+        ProjectionIndex, ResolvedLocalClone, TakeLocalValueMode, TraitId, TraitImplId, id::Id,
     },
-    types::r#trait::{
-        TraitAssociatedConstIndex, TraitDictionaryEntryIndex, TraitMethodIndex, TraitRef,
-    },
+    types::r#trait::{TraitAssociatedConstIndex, TraitDictionaryEntryIndex, TraitMethodIndex},
     types::type_like::{CastableToType, TypeLike, instantiate_types_in_place},
     types::type_mapper::TypeMapper,
 };
@@ -375,7 +373,7 @@ pub struct StaticApplication {
 /// Call a trait method before dictionary passing resolves it.
 #[derive(Debug, Clone)]
 pub struct TraitMethodApplication {
-    pub trait_ref: TraitRef,
+    pub trait_id: TraitId,
     pub method_index: TraitMethodIndex,
     pub method_path: ast::Path,
     pub method_span: Location,
@@ -386,8 +384,11 @@ pub struct TraitMethodApplication {
     pub inst_data: FnInstData,
 }
 impl TraitMethodApplication {
-    pub fn argument_names(&self) -> &[Ustr] {
-        &self.trait_ref.method(self.method_index).1.arg_names
+    pub fn argument_names<'a>(&self, env: &'a crate::module::ModuleEnv<'_>) -> &'a [Ustr] {
+        &env.trait_def(self.trait_id)
+            .method(self.method_index)
+            .1
+            .arg_names
     }
 }
 
@@ -396,7 +397,7 @@ impl TraitMethodApplication {
 /// Load a trait method as a first-class value before dictionary passing.
 #[derive(Debug, Clone)]
 pub struct GetTraitMethod {
-    pub trait_ref: TraitRef,
+    pub trait_id: TraitId,
     pub method_index: TraitMethodIndex,
     pub method_path: ast::Path,
     pub method_span: Location,
@@ -408,7 +409,7 @@ pub struct GetTraitMethod {
 /// Load a trait associated const before dictionary passing resolves it.
 #[derive(Debug, Clone)]
 pub struct GetTraitAssociatedConst {
-    pub trait_ref: TraitRef,
+    pub trait_id: TraitId,
     pub associated_const_index: TraitAssociatedConstIndex,
     pub associated_const_name: Ustr,
     pub associated_const_span: Location,
@@ -419,7 +420,7 @@ pub struct GetTraitAssociatedConst {
 /// Load a trait dictionary before dictionary passing resolves it.
 #[derive(Debug, Clone)]
 pub struct GetTraitDictionary {
-    pub trait_ref: TraitRef,
+    pub trait_id: TraitId,
     pub input_tys: Vec<Type>,
     pub output_tys: Vec<Type>,
 }
@@ -796,10 +797,11 @@ impl Node {
                 }
             }
             TraitMethodApply(app) => {
-                let method_data = app.trait_ref.method(app.method_index);
+                let trait_def = env.trait_def(app.trait_id);
+                let method_data = trait_def.method(app.method_index);
                 let method_name = method_data.0;
                 let method_def = &method_data.1;
-                let trait_name = app.trait_ref.name;
+                let trait_name = trait_def.name;
                 writeln!(
                     f,
                     "{indent_str}trait method apply {method_name} (from {trait_name})"
@@ -819,15 +821,16 @@ impl Node {
                 writeln!(f, "{indent_str}get {}", get_fn.function.format_with(env))?;
             }
             GetTraitMethod(get_method) => {
-                let method_name = get_method.trait_ref.method(get_method.method_index).0;
-                let trait_name = get_method.trait_ref.name;
+                let trait_def = env.trait_def(get_method.trait_id);
+                let method_name = trait_def.method(get_method.method_index).0;
+                let trait_name = trait_def.name;
                 writeln!(
                     f,
                     "{indent_str}get trait method {method_name} (from {trait_name})"
                 )?;
             }
             GetTraitAssociatedConst(get_const) => {
-                let trait_name = get_const.trait_ref.name;
+                let trait_name = env.trait_def(get_const.trait_id).name;
                 let const_name = get_const.associated_const_name;
                 writeln!(
                     f,
@@ -835,7 +838,7 @@ impl Node {
                 )?;
             }
             GetTraitDictionary(get_dict) => {
-                let trait_name = get_dict.trait_ref.name;
+                let trait_name = env.trait_def(get_dict.trait_id).name;
                 writeln!(f, "{indent_str}get trait dictionary (from {trait_name})")?;
             }
             GetDictionary(get_dict) => {

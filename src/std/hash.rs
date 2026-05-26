@@ -19,11 +19,11 @@ use crate::{
     hir::value::NativeDisplay,
     module::Module,
     std::{
-        cast::CAST_TRAIT,
+        core_traits_names::{CAST_TRAIT_NAME, VALUE_TRAIT_NAME},
         math::int_type,
         string::String,
         value::{
-            VALUE_TRAIT, native_layout_associated_consts, native_value_clone_function,
+            native_layout_associated_consts, native_value_clone_function,
             native_value_drop_function,
         },
     },
@@ -226,6 +226,8 @@ fn equal_hash_value(lhs: &HashValue, rhs: &HashValue) -> bool {
 }
 
 pub fn add_to_module(to: &mut Module) {
+    let value_trait_id = to.expect_std_trait_id_in_current_module(VALUE_TRAIT_NAME);
+    let cast_trait_id = to.expect_std_trait_id_in_current_module(CAST_TRAIT_NAME);
     // Types
     to.add_type_alias_str_with_doc(
         "hash",
@@ -244,7 +246,7 @@ pub fn add_to_module(to: &mut Module) {
     );
 
     to.add_concrete_impl_no_locals(
-        VALUE_TRAIT.clone(),
+        value_trait_id,
         [hash_type()],
         [],
         native_layout_associated_consts::<HashValue>(),
@@ -257,7 +259,7 @@ pub fn add_to_module(to: &mut Module) {
         ],
     );
     to.add_concrete_impl_no_locals(
-        VALUE_TRAIT.clone(),
+        value_trait_id,
         [hasher_type()],
         [],
         native_layout_associated_consts::<Hasher>(),
@@ -270,7 +272,7 @@ pub fn add_to_module(to: &mut Module) {
         ],
     );
     to.add_concrete_impl_no_locals(
-        VALUE_TRAIT.clone(),
+        value_trait_id,
         [unordered_hasher_type()],
         [],
         native_layout_associated_consts::<UnorderedHasher>(),
@@ -283,7 +285,7 @@ pub fn add_to_module(to: &mut Module) {
         ],
     );
     to.add_native_concrete_impl(
-        CAST_TRAIT.clone(),
+        cast_trait_id,
         [hash_type(), int_type()],
         [],
         [b(UnaryNativeFnRN::new(hash_to_int)) as Function],

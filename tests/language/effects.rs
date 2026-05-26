@@ -17,7 +17,7 @@ use ferlium::{
     hir::emit_ir::emit_expr_unsafe,
     module::{LocalImplId, id::Id},
     parse_module_and_expr,
-    std::new_module_using_std,
+    std::{core_traits_names::DESERIALIZE_TRAIT_NAME, new_module_using_std},
     types::effects::*,
 };
 
@@ -290,16 +290,13 @@ fn trait_impl_effect_must_have_at_least_def_effects() {
 	        }
 	    }
     "# };
+    let deserialize_trait = session.std_trait(DESERIALIZE_TRAIT_NAME);
     let module = session.compile_and_get_module(mod_src);
     let deserialize_impl = (0..module.impl_count())
         .map(LocalImplId::from_index)
         .find(|&id| {
-            module
-                .get_impl_trait_key_by_id(id)
-                .unwrap()
-                .trait_ref()
-                .name
-                == ustr("Deserialize")
+            let trait_id = module.get_impl_trait_key_by_id(id).unwrap().trait_id();
+            trait_id == deserialize_trait
         })
         .unwrap();
     let fn_id = module.get_impl_data(deserialize_impl).unwrap().methods[0];

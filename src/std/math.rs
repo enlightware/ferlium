@@ -30,17 +30,15 @@ use crate::{
     hir::value::{NativeDisplay, Value},
     module::Module,
     std::{
-        cast::CAST_TRAIT,
-        core::TRIVIAL_COPY_TRAIT,
         core_traits_names::{
-            BITS_TRAIT_NAME, DIV_TRAIT_NAME, NUM_TRAIT_NAME, ORD_TRAIT_NAME, REAL_TRAIT_NAME,
+            BITS_TRAIT_NAME, CAST_TRAIT_NAME, DEFAULT_TRAIT_NAME, DIV_TRAIT_NAME, NUM_TRAIT_NAME,
+            ORD_TRAIT_NAME, REAL_TRAIT_NAME, TRIVIAL_COPY_TRAIT_NAME, VALUE_TRAIT_NAME,
         },
-        default::DEFAULT_TRAIT,
         hash::Hasher,
         ordering::compare,
         string::String,
         value::{
-            VALUE_TRAIT, equal, native_layout_associated_consts, native_value_clone_function,
+            equal, native_layout_associated_consts, native_value_clone_function,
             native_value_drop_function,
         },
     },
@@ -473,6 +471,15 @@ fn float_to_string(value: &Float) -> String {
 
 pub fn add_to_module(to: &mut Module) {
     use RuntimeErrorKind::*;
+    let value_trait_id = to.expect_std_trait_id_in_current_module(VALUE_TRAIT_NAME);
+    let num_trait_id = to.expect_std_trait_id_in_current_module(NUM_TRAIT_NAME);
+    let bits_trait_id = to.expect_std_trait_id_in_current_module(BITS_TRAIT_NAME);
+    let ord_trait_id = to.expect_std_trait_id_in_current_module(ORD_TRAIT_NAME);
+    let default_trait_id = to.expect_std_trait_id_in_current_module(DEFAULT_TRAIT_NAME);
+    let trivial_copy_trait_id = to.expect_std_trait_id_in_current_module(TRIVIAL_COPY_TRAIT_NAME);
+    let div_trait_id = to.expect_std_trait_id_in_current_module(DIV_TRAIT_NAME);
+    let real_trait_id = to.expect_std_trait_id_in_current_module(REAL_TRAIT_NAME);
+    let cast_trait_id = to.expect_std_trait_id_in_current_module(CAST_TRAIT_NAME);
 
     // Types
     // Note: aliases are added in core.rs
@@ -484,7 +491,7 @@ pub fn add_to_module(to: &mut Module) {
 
     // int
     to.add_concrete_impl_no_locals(
-        VALUE_TRAIT.clone(),
+        value_trait_id,
         [int_type()],
         [],
         native_layout_associated_consts::<Int>(),
@@ -496,9 +503,8 @@ pub fn add_to_module(to: &mut Module) {
             native_value_drop_function::<Int>(),
         ],
     );
-    let num_trait = to.get_trait_str(NUM_TRAIT_NAME).unwrap().clone();
     to.add_native_concrete_impl(
-        num_trait.clone(),
+        num_trait_id,
         [int_type()],
         [],
         [
@@ -511,9 +517,8 @@ pub fn add_to_module(to: &mut Module) {
             b(UnaryFn::new(identity::<Int>)) as Function,
         ],
     );
-    let bits_trait = to.get_trait_str(BITS_TRAIT_NAME).unwrap().clone();
     to.add_native_concrete_impl(
-        bits_trait,
+        bits_trait_id,
         [int_type()],
         [],
         [
@@ -533,21 +538,20 @@ pub fn add_to_module(to: &mut Module) {
             b(BinaryFn::new(test_bit)) as Function,
         ],
     );
-    let ord_trait = to.get_trait_str(ORD_TRAIT_NAME).unwrap().clone();
     to.add_native_concrete_impl(
-        ord_trait.clone(),
+        ord_trait_id,
         [int_type()],
         [],
         [b(BinaryNativeFnNNV::new(compare::<Int>)) as Function],
     );
     to.add_native_concrete_impl(
-        DEFAULT_TRAIT.clone(),
+        default_trait_id,
         [int_type()],
         [],
         [b(NullaryNativeFnN::new(|| 0isize)) as Function],
     );
     to.add_native_concrete_impl(
-        TRIVIAL_COPY_TRAIT.clone(),
+        trivial_copy_trait_id,
         [int_type()],
         [],
         Vec::<Function>::new(),
@@ -615,7 +619,7 @@ pub fn add_to_module(to: &mut Module) {
 
     // float
     to.add_concrete_impl_no_locals(
-        VALUE_TRAIT.clone(),
+        value_trait_id,
         [float_type()],
         [],
         native_layout_associated_consts::<Float>(),
@@ -628,7 +632,7 @@ pub fn add_to_module(to: &mut Module) {
         ],
     );
     to.add_native_concrete_impl(
-        num_trait.clone(),
+        num_trait_id,
         [float_type()],
         [],
         [
@@ -642,21 +646,19 @@ pub fn add_to_module(to: &mut Module) {
         ],
     );
     to.add_native_concrete_impl(
-        ord_trait.clone(),
+        ord_trait_id,
         [float_type()],
         [],
         [b(BinaryNativeFnRRV::new(compare_float)) as Function],
     );
-    let div_trait = to.get_trait_str(DIV_TRAIT_NAME).unwrap().clone();
     to.add_native_concrete_impl(
-        div_trait,
+        div_trait_id,
         [float_type()],
         [],
         [b(BinaryNativeFnRRFN::new(div_float)) as Function],
     );
-    let real_trait = to.get_trait_str(REAL_TRAIT_NAME).unwrap().clone();
     to.add_native_concrete_impl(
-        real_trait,
+        real_trait_id,
         [float_type()],
         [],
         [
@@ -680,7 +682,7 @@ pub fn add_to_module(to: &mut Module) {
         ],
     );
     to.add_native_concrete_impl(
-        DEFAULT_TRAIT.clone(),
+        default_trait_id,
         [float_type()],
         [],
         [b(NullaryNativeFnN::new(|| Float::new(0.0).unwrap())) as Function],
@@ -715,13 +717,13 @@ pub fn add_to_module(to: &mut Module) {
 
     // conversions
     to.add_native_concrete_impl(
-        CAST_TRAIT.clone(),
+        cast_trait_id,
         [int_type(), float_type()],
         [],
         [b(UnaryNativeFnNN::new(saturating_cast_int_to_float::<Int>)) as Function],
     );
     to.add_native_concrete_impl(
-        CAST_TRAIT.clone(),
+        cast_trait_id,
         [float_type(), int_type()],
         [],
         [b(UnaryNativeFnRN::new(saturating_trunc_ref)) as Function],
