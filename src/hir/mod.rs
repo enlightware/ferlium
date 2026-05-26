@@ -57,7 +57,7 @@ pub(crate) fn node_is_place_reference(arena: &NodeArena, node_id: NodeId) -> boo
     match &arena[node_id].kind {
         LoadLocal(_) => true,
         GetTraitMethod(method) => !method.input_tys.iter().all(Type::is_constant),
-        Project(_, _) | FieldAccess(_, _) | ProjectAt(_, _) => true,
+        Project(_) | FieldAccess(_) | ProjectAt(_) => true,
         Apply(app) => app.returns_place,
         StaticApply(app) => app.returns_place,
         _ => false,
@@ -70,8 +70,17 @@ pub(crate) fn place_resolution_may_create_temp(arena: &NodeArena, node_id: NodeI
     match &arena[node_id].kind {
         LoadLocal(_) => false,
         GetTraitMethod(_) => false,
-        Project(base, _) | FieldAccess(base, _) | ProjectAt(base, _) => {
-            !node_is_place_reference(arena, *base) || place_resolution_may_create_temp(arena, *base)
+        Project(project) => {
+            !node_is_place_reference(arena, project.value)
+                || place_resolution_may_create_temp(arena, project.value)
+        }
+        FieldAccess(field_access) => {
+            !node_is_place_reference(arena, field_access.value)
+                || place_resolution_may_create_temp(arena, field_access.value)
+        }
+        ProjectAt(project) => {
+            !node_is_place_reference(arena, project.value)
+                || place_resolution_may_create_temp(arena, project.value)
         }
         Apply(app) if app.returns_place => {
             !node_is_place_reference(arena, app.function)
@@ -325,6 +334,34 @@ pub struct Assignment {
     pub drop: Option<LocalDrop>,
 }
 
+/// Project a tuple-like value at a statically known index.
+#[derive(Debug, Clone, Copy, new)]
+pub struct Project {
+    pub value: NodeId,
+    pub index: ProjectionIndex,
+}
+
+/// Access a record-like value at a statically known field.
+#[derive(Debug, Clone, Copy, new)]
+pub struct FieldAccess {
+    pub value: NodeId,
+    pub field: Ustr,
+}
+
+/// Project a tuple-like value using a hidden field-index parameter.
+#[derive(Debug, Clone, Copy, new)]
+pub struct ProjectAt {
+    pub value: NodeId,
+    pub index: ExtraParameterId,
+}
+
+/// Build a variant value with a tag and payload.
+#[derive(Debug, Clone, Copy, new)]
+pub struct Variant {
+    pub tag: Ustr,
+    pub payload: NodeId,
+}
+
 #[derive(Debug, Clone)]
 pub struct Case {
     pub value: NodeId,
@@ -444,14 +481,12 @@ pub enum NodeKind {
     Block(B<SVec2<NodeId>>),
     Assign(Assignment),
     Tuple(B<SVec2<NodeId>>),
-    Project(NodeId, ProjectionIndex),
+    Project(Project),
     Record(B<SVec2<NodeId>>),
     // Note: this should only exist transiently in the HIR and never be executed
-    FieldAccess(NodeId, Ustr),
-    /// Access a tuple value using a local variable as index, after dictionary passing phase
-    ProjectAt(NodeId, ExtraParameterId),
-    /// Build a variant (tagged union) with a name and a value
-    Variant(Ustr, NodeId),
+    FieldAccess(FieldAccess),
+    ProjectAt(ProjectAt),
+    Variant(Variant),
     /// Extract the tag of a variant as an isize, by casting the pointer to the string
     ExtractTag(NodeId),
     Array(B<SVec2<NodeId>>),
@@ -517,9 +552,10 @@ impl NodeKind {
                 nodes.iter().copied().collect()
             }
             Assign(a) => smallvec![a.place, a.value],
-            Project(n, _) | ProjectAt(n, _) => smallvec![*n],
-            FieldAccess(fa, _) => smallvec![*fa],
-            Variant(_, n) => smallvec![*n],
+            Project(node) => smallvec![node.value],
+            FieldAccess(node) => smallvec![node.value],
+            ProjectAt(node) => smallvec![node.value],
+            Variant(node) => smallvec![node.payload],
             Case(case) => {
                 let mut v: SVec4<NodeId> = SVec4::with_capacity(2 + case.alternatives.len());
                 v.push(case.value);
@@ -874,10 +910,10 @@ impl Node {
                 }
                 writeln!(f, "{indent_str})")?;
             }
-            Project(data, index) => {
+            Project(node) => {
                 writeln!(f, "{indent_str}project")?;
-                format_ind(arena, *data, f, locals, env, spacing, indent + 1)?;
-                writeln!(f, "{indent_str}at {}", index.as_index())?;
+                format_ind(arena, node.value, f, locals, env, spacing, indent + 1)?;
+                writeln!(f, "{indent_str}at {}", node.index.as_index())?;
             }
             Record(nodes) => {
                 let ty_data = self.ty.data();
@@ -903,23 +939,23 @@ impl Node {
                 }
                 writeln!(f, "{indent_str}}}")?;
             }
-            FieldAccess(data, field) => {
+            FieldAccess(node) => {
                 writeln!(f, "{indent_str}access")?;
-                format_ind(arena, *data, f, locals, env, spacing, indent + 1)?;
-                writeln!(f, "{indent_str}at field {}", field)?;
+                format_ind(arena, node.value, f, locals, env, spacing, indent + 1)?;
+                writeln!(f, "{indent_str}at field {}", node.field)?;
             }
-            ProjectAt(data, index) => {
+            ProjectAt(node) => {
                 writeln!(f, "{indent_str}access")?;
-                format_ind(arena, *data, f, locals, env, spacing, indent + 1)?;
+                format_ind(arena, node.value, f, locals, env, spacing, indent + 1)?;
                 writeln!(
                     f,
                     "{indent_str}at field referenced by extra parameter {}",
-                    index.as_index()
+                    node.index.as_index()
                 )?;
             }
-            Variant(tag, payload) => {
-                writeln!(f, "{indent_str}variant with tag: {}", *tag)?;
-                format_ind(arena, *payload, f, locals, env, spacing, indent + 1)?;
+            Variant(node) => {
+                writeln!(f, "{indent_str}variant with tag: {}", node.tag)?;
+                format_ind(arena, node.payload, f, locals, env, spacing, indent + 1)?;
             }
             ExtractTag(node) => {
                 writeln!(f, "{indent_str}extract tag of")?;
@@ -1091,8 +1127,8 @@ impl Node {
                     }
                 }
             }
-            Project(data, _) => {
-                if let Some(ty) = type_at(arena, *data, pos) {
+            Project(node) => {
+                if let Some(ty) = type_at(arena, node.value, pos) {
                     return Some(ty);
                 }
             }
@@ -1103,18 +1139,18 @@ impl Node {
                     }
                 }
             }
-            FieldAccess(data, _) => {
-                if let Some(ty) = type_at(arena, *data, pos) {
+            FieldAccess(node) => {
+                if let Some(ty) = type_at(arena, node.value, pos) {
                     return Some(ty);
                 }
             }
-            ProjectAt(data, _) => {
-                if let Some(ty) = type_at(arena, *data, pos) {
+            ProjectAt(node) => {
+                if let Some(ty) = type_at(arena, node.value, pos) {
                     return Some(ty);
                 }
             }
-            Variant(_, payload) => {
-                if let Some(ty) = type_at(arena, *payload, pos) {
+            Variant(node) => {
+                if let Some(ty) = type_at(arena, node.payload, pos) {
                     return Some(ty);
                 }
             }
@@ -1246,15 +1282,15 @@ impl Node {
             Tuple(nodes) => nodes
                 .iter()
                 .for_each(|&node| unbound_ty_vars(arena, node, result, ignore)),
-            Project(data, _) => unbound_ty_vars(arena, *data, result, ignore),
+            Project(node) => unbound_ty_vars(arena, node.value, result, ignore),
             Record(nodes) => nodes
                 .iter()
                 .for_each(|&node| unbound_ty_vars(arena, node, result, ignore)),
-            FieldAccess(data, _) => unbound_ty_vars(arena, *data, result, ignore),
-            ProjectAt(_, _) => {
+            FieldAccess(node) => unbound_ty_vars(arena, node.value, result, ignore),
+            ProjectAt(_) => {
                 panic!("ProjectAt should not be in the HIR at this point");
             }
-            Variant(_, payload) => unbound_ty_vars(arena, *payload, result, ignore),
+            Variant(node) => unbound_ty_vars(arena, node.payload, result, ignore),
             ExtractTag(node) => unbound_ty_vars(arena, *node, result, ignore),
             Array(nodes) => nodes
                 .iter()

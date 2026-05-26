@@ -1033,12 +1033,12 @@ pub fn eval_node_with_ctx(
         Block(nodes) => eval_block(arena, nodes, ctx, locals),
         Assign(assignment) => eval_assign(arena, node_id, assignment, ctx, locals),
         Tuple(nodes) | Record(nodes) => eval_tuple(arena, nodes, ctx, locals),
-        Project(data, index) => eval_project(arena, node_id, *data, *index, ctx, locals),
-        FieldAccess(_, _) => {
+        Project(node) => eval_project(arena, node_id, node.value, node.index, ctx, locals),
+        FieldAccess(_) => {
             panic!("String projection should not be executed, but transformed to ProjectLocal");
         }
-        ProjectAt(data, index) => eval_project_at(arena, node_id, *data, *index, ctx, locals),
-        Variant(tag, payload) => eval_variant(arena, *tag, *payload, ctx, locals),
+        ProjectAt(node) => eval_project_at(arena, node_id, node.value, node.index, ctx, locals),
+        Variant(node) => eval_variant(arena, node.tag, node.payload, ctx, locals),
         ExtractTag(node) => eval_extract_tag(arena, *node, ctx, locals),
         Array(nodes) => eval_array(arena, nodes, ctx, locals),
         Case(case) => eval_case(arena, case, ctx, locals),
@@ -2366,9 +2366,9 @@ fn place_resolution_depends_on_place_result(arena: &NodeArena, node_id: NodeId) 
     match &arena[node_id].kind {
         NodeKind::Apply(app) => app.returns_place,
         NodeKind::StaticApply(app) => app.returns_place,
-        NodeKind::Project(base, _)
-        | NodeKind::FieldAccess(base, _)
-        | NodeKind::ProjectAt(base, _) => place_resolution_depends_on_place_result(arena, *base),
+        NodeKind::Project(node) => place_resolution_depends_on_place_result(arena, node.value),
+        NodeKind::FieldAccess(node) => place_resolution_depends_on_place_result(arena, node.value),
+        NodeKind::ProjectAt(node) => place_resolution_depends_on_place_result(arena, node.value),
         _ => false,
     }
 }
@@ -2642,22 +2642,22 @@ fn try_eval_node_as_place(
     let node = &arena[node_id];
     use NodeKind::*;
     Ok(ControlFlow::Continue(Some(match &node.kind {
-        Project(node, index) => {
+        Project(node) => {
             let Some(mut place) =
-                eval_or_return!(try_eval_node_as_place(arena, *node, ctx, locals))
+                eval_or_return!(try_eval_node_as_place(arena, node.value, ctx, locals))
             else {
                 return Ok(ControlFlow::Continue(None));
             };
-            place.path.push(index.as_index() as isize);
+            place.path.push(node.index.as_index() as isize);
             place
         }
-        ProjectAt(node, index) => {
+        ProjectAt(node) => {
             let Some(mut place) =
-                eval_or_return!(try_eval_node_as_place(arena, *node, ctx, locals))
+                eval_or_return!(try_eval_node_as_place(arena, node.value, ctx, locals))
             else {
                 return Ok(ControlFlow::Continue(None));
             };
-            let index = field_index_from_extra_parameter(ctx, *index);
+            let index = field_index_from_extra_parameter(ctx, node.index);
             place.path.push(index);
             place
         }
@@ -2708,9 +2708,9 @@ fn try_eval_node_as_place(
 fn node_may_resolve_to_place(arena: &NodeArena, node_id: NodeId) -> bool {
     match &arena[node_id].kind {
         NodeKind::LoadLocal(_) => true,
-        NodeKind::Project(base, _)
-        | NodeKind::FieldAccess(base, _)
-        | NodeKind::ProjectAt(base, _) => node_may_resolve_to_place(arena, *base),
+        NodeKind::Project(node) => node_may_resolve_to_place(arena, node.value),
+        NodeKind::FieldAccess(node) => node_may_resolve_to_place(arena, node.value),
+        NodeKind::ProjectAt(node) => node_may_resolve_to_place(arena, node.value),
         NodeKind::Apply(app) => app.returns_place,
         NodeKind::StaticApply(app) => app.returns_place,
         NodeKind::CloneValue(node)

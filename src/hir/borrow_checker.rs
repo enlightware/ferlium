@@ -36,14 +36,15 @@ impl Path {
         let node = &arena[node_id];
         use NodeKind::*;
         match &node.kind {
-            Project(data, index) => {
-                let mut path = Self::from_node(arena, *data);
-                path.parts.push(PathPart::Projection(index.as_index()));
+            Project(project) => {
+                let mut path = Self::from_node(arena, project.value);
+                path.parts
+                    .push(PathPart::Projection(project.index.as_index()));
                 path
             }
-            FieldAccess(data, field) => {
-                let mut path = Self::from_node(arena, *data);
-                path.parts.push(PathPart::FieldAccess(*field));
+            FieldAccess(field_access) => {
+                let mut path = Self::from_node(arena, field_access.value);
+                path.parts.push(PathPart::FieldAccess(field_access.field));
                 path
             }
             StaticApply(app) if app.returns_place => {
@@ -256,14 +257,14 @@ impl Node {
                     check_borrows(arena, node_id)?;
                 }
             }
-            Project(data, _) => {
-                check_borrows(arena, *data)?;
+            Project(project) => {
+                check_borrows(arena, project.value)?;
             }
-            ProjectAt(_, _) => {
+            ProjectAt(_) => {
                 panic!("ProjectAt should not be in the HIR at this point");
             }
-            Variant(_, payload) => {
-                check_borrows(arena, *payload)?;
+            Variant(variant) => {
+                check_borrows(arena, variant.payload)?;
             }
             ExtractTag(node_id) => {
                 check_borrows(arena, *node_id)?;
@@ -273,8 +274,8 @@ impl Node {
                     check_borrows(arena, node_id)?;
                 }
             }
-            FieldAccess(data, _) => {
-                check_borrows(arena, *data)?;
+            FieldAccess(field_access) => {
+                check_borrows(arena, field_access.value)?;
             }
             Array(nodes) => {
                 for &node_id in nodes.iter() {

@@ -11,7 +11,7 @@ use crate::{
     containers::{IntoSVec2, b},
     hir::function::ArgPassing,
     hir::value::{LiteralNativeValue, LiteralValue},
-    hir::{self, CallArgument, NodeId},
+    hir::{self, CallArgument, NodeId, NodeKind, Project, Variant},
     module::{
         FunctionId, LocalDecl, LocalDeclId, LocalDrop, LocalFrameSlot, ProjectionIndex,
         TakeLocalValueMode, TraitImplId, id::Id,
@@ -24,7 +24,6 @@ use std::str::FromStr;
 use ustr::{Ustr, ustr};
 
 use NodeKind as K;
-use hir::NodeKind;
 
 #[allow(dead_code)]
 pub fn native<T: LiteralNativeValue + 'static>(value: T) -> NodeKind {
@@ -118,7 +117,7 @@ pub fn take_local_value(id: LocalDeclId) -> NodeKind {
 }
 
 pub fn project(tuple: NodeId, index: ProjectionIndex) -> NodeKind {
-    K::Project(tuple, index)
+    K::Project(Project::new(tuple, index))
 }
 
 pub fn extract_tag(variant: NodeId) -> NodeKind {
@@ -126,7 +125,7 @@ pub fn extract_tag(variant: NodeId) -> NodeKind {
 }
 
 pub fn variant(tag: Ustr, payload: NodeId) -> NodeKind {
-    K::Variant(tag, payload)
+    K::Variant(Variant::new(tag, payload))
 }
 
 pub fn tuple(values: impl IntoSVec2<NodeId>) -> NodeKind {

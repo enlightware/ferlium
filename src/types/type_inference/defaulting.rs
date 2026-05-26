@@ -273,7 +273,7 @@ impl UnifiedTypeInference {
         tys: &mut FxHashSet<Type>,
     ) {
         match &arena[node_id].kind {
-            NodeKind::Variant(_, payload) if arena[*payload].ty == Type::unit() => {
+            NodeKind::Variant(variant) if arena[variant.payload].ty == Type::unit() => {
                 tys.insert(arena[node_id].ty);
             }
             kind => kind.child_node_ids().into_iter().for_each(|child_id| {

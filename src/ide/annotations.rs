@@ -389,13 +389,15 @@ fn node_variable_type_annotations<Env>(
         Tuple(nodes) => nodes
             .iter()
             .for_each(|&node| variable_type_annotations(arena, node, result, locals, env)),
-        Project(data, _) => variable_type_annotations(arena, *data, result, locals, env),
+        Project(project) => variable_type_annotations(arena, project.value, result, locals, env),
         Record(nodes) => nodes
             .iter()
             .for_each(|&node| variable_type_annotations(arena, node, result, locals, env)),
-        FieldAccess(data, _) => variable_type_annotations(arena, *data, result, locals, env),
-        ProjectAt(data, _) => variable_type_annotations(arena, *data, result, locals, env),
-        Variant(_, payload) => variable_type_annotations(arena, *payload, result, locals, env),
+        FieldAccess(field_access) => {
+            variable_type_annotations(arena, field_access.value, result, locals, env)
+        }
+        ProjectAt(project) => variable_type_annotations(arena, project.value, result, locals, env),
+        Variant(variant) => variable_type_annotations(arena, variant.payload, result, locals, env),
         ExtractTag(node) => variable_type_annotations(arena, *node, result, locals, env),
         Array(nodes) => nodes
             .iter()
@@ -536,7 +538,7 @@ fn is_adt_constructor_similar_to_arg_name(
     use NodeKind::*;
     let node = &arena[argument];
     let tag = match &node.kind {
-        Variant(tag, _) => *tag,
+        Variant(variant) => variant.tag,
         _ => return false,
     };
     tag.to_snake_case() == arg_name

@@ -41,7 +41,9 @@ use crate::{
     containers::b,
     hir::emit_value_impl::{function_value_method, generic_value_methods_for_type},
     hir::value::LiteralValue,
-    hir::{self, Node, NodeArena, NodeId, NodeKind},
+    hir::{
+        self, Node, NodeArena, NodeId, NodeKind, Project as HirProject, ProjectAt as HirProjectAt,
+    },
     std::{
         core::TRIVIAL_COPY_TRAIT,
         math::int_type,
@@ -1316,18 +1318,18 @@ impl Node {
                     elaborate_dictionaries(arena, node_id, ctx, locals, local_count)?;
                 }
             }
-            Project(data, _) => {
-                elaborate_dictionaries(arena, *data, ctx, locals, local_count)?;
+            Project(project) => {
+                elaborate_dictionaries(arena, project.value, ctx, locals, local_count)?;
             }
             Record(nodes) => {
                 for &node_id in nodes.iter() {
                     elaborate_dictionaries(arena, node_id, ctx, locals, local_count)?;
                 }
             }
-            FieldAccess(data, field) => {
+            FieldAccess(field_access) => {
                 use TypeKind::*;
-                let child_id = *data;
-                let field_name = *field;
+                let child_id = field_access.value;
+                let field_name = field_access.field;
                 elaborate_dictionaries(arena, child_id, ctx, locals, local_count)?;
                 let child_ty = arena[child_id].ty;
                 let ty_data = child_ty.data();
@@ -1348,7 +1350,10 @@ impl Node {
                             .iter()
                             .position(|field| field.0 == field_name)
                             .expect("Field not found in type, type inference should have failed");
-                        kind = Project(child_id, ProjectionIndex::from_index(index));
+                        kind = Project(HirProject::new(
+                            child_id,
+                            ProjectionIndex::from_index(index),
+                        ));
                     }
                     Variable(var) => {
                         // Variable type, it must be in the type scheme, use the dictionary to lookup local variable.
@@ -1357,18 +1362,21 @@ impl Node {
                         let index = find_field_dict_index(ctx.dicts, var, &field_name).unwrap_or_else(
                             || panic!("Dictionary for field \"{field_name}\" in type variable \"{var}\" not found, type inference should have failed"),
                         );
-                        kind = ProjectAt(child_id, ExtraParameterId::from_index(index));
+                        kind = ProjectAt(HirProjectAt::new(
+                            child_id,
+                            ExtraParameterId::from_index(index),
+                        ));
                     }
                     _ => {
                         panic!("FieldAccess should have a record or variable type");
                     }
                 }
             }
-            ProjectAt(_, _) => {
+            ProjectAt(_) => {
                 panic!("ProjectAt should not be present at this stage");
             }
-            Variant(_, payload) => {
-                elaborate_dictionaries(arena, *payload, ctx, locals, local_count)?;
+            Variant(variant) => {
+                elaborate_dictionaries(arena, variant.payload, ctx, locals, local_count)?;
             }
             ExtractTag(node_id) => {
                 elaborate_dictionaries(arena, *node_id, ctx, locals, local_count)?;

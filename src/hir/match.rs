@@ -27,7 +27,7 @@ use crate::{
     compiler::error::InternalCompilationError,
     containers::{SVec2, b},
     hir::value::LiteralValue,
-    hir::{self, LoadLocal, NodeId, NodeKind, StoreLocal},
+    hir::{self, FieldAccess, LoadLocal, NodeId, NodeKind, Project, StoreLocal},
     std::math::int_type,
     types::effects::{EffType, no_effects},
     types::mutability::MutType,
@@ -338,10 +338,10 @@ impl TypeInference {
                                 let load_variant_id_inner =
                                     env.ir_arena.alloc(load_variant_node.clone());
                                 let project_variant_inner_id = env.ir_arena.alloc(N::new(
-                                    K::Project(
+                                    K::Project(Project::new(
                                         load_variant_id_inner,
                                         ProjectionIndex::from_index(0),
-                                    ),
+                                    )),
                                     *variant_inner_ty,
                                     no_effects(),
                                     sp(*expr),
@@ -360,12 +360,15 @@ impl TypeInference {
                                     None
                                 };
                                 let project_inner_kind = if let Some(index) = project_index {
-                                    K::Project(
+                                    K::Project(Project::new(
                                         project_variant_inner_id,
                                         ProjectionIndex::from_index(index),
-                                    )
+                                    ))
                                 } else {
-                                    K::FieldAccess(project_variant_inner_id, bind_var_names[i].0)
+                                    K::FieldAccess(FieldAccess::new(
+                                        project_variant_inner_id,
+                                        bind_var_names[i].0,
+                                    ))
                                 };
                                 let project_inner_id = env.ir_arena.alloc(N::new(
                                     project_inner_kind,

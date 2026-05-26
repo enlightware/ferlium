@@ -24,8 +24,10 @@ use crate::{
     },
     hir::value::LiteralValue,
     hir::{
-        self, CallArgument, NodeArena, NodeId, NodeKind, StoreLocal, node_is_place_reference,
-        place_resolution_may_create_temp, place_result_base_argument_index,
+        self, CallArgument, FieldAccess as HirFieldAccess, NodeArena, NodeId, NodeKind,
+        Project as HirProject, ProjectAt as HirProjectAt, StoreLocal, Variant as HirVariant,
+        node_is_place_reference, place_resolution_may_create_temp,
+        place_result_base_argument_index,
     },
     internal_compilation_error,
     module::{
@@ -507,7 +509,7 @@ impl TypeInference {
                             no_effects(),
                             expr_span,
                         ));
-                        K::Variant(tag, payload)
+                        K::Variant(HirVariant::new(tag, payload))
                     } else {
                         K::Immediate(LiteralValue::new_native(()))
                     };
@@ -536,7 +538,7 @@ impl TypeInference {
                         no_effects(),
                         expr_span,
                     ));
-                    let node = K::Variant(tag, payload);
+                    let node = K::Variant(HirVariant::new(tag, payload));
                     (node, variant_ty, MutType::constant(), no_effects())
                 }
             }
@@ -961,7 +963,10 @@ impl TypeInference {
                         index_span,
                         element_ty,
                     ));
-                    let node = K::Project(tuple_node_id, ProjectionIndex::from_index(index));
+                    let node = K::Project(HirProject::new(
+                        tuple_node_id,
+                        ProjectionIndex::from_index(index),
+                    ));
                     (node, element_ty, tuple_mut, effects)
                 }
             }
@@ -1060,7 +1065,7 @@ impl TypeInference {
                                 effects.clone(),
                                 expr_span,
                             ));
-                            K::Variant(tag, record_node_id)
+                            K::Variant(HirVariant::new(tag, record_node_id))
                         } else {
                             K::Record(b(SVec2::from_vec(nodes)))
                         };
@@ -1095,7 +1100,7 @@ impl TypeInference {
                             payload_span,
                         ),
                     ));
-                    let node = K::Variant(tag, payload_node_id);
+                    let node = K::Variant(HirVariant::new(tag, payload_node_id));
                     (node, variant_ty, MutType::constant(), effects)
                 }
             }
@@ -1126,7 +1131,7 @@ impl TypeInference {
                         field_span,
                         element_ty,
                     ));
-                    let node = K::FieldAccess(record_node_id, field);
+                    let node = K::FieldAccess(HirFieldAccess::new(record_node_id, field));
                     (node, element_ty, record_mut, effects)
                 }
             }
@@ -1731,19 +1736,19 @@ impl TypeInference {
         span: Location,
     ) -> PreparedPlace {
         match env.ir_arena[place].kind.clone() {
-            NodeKind::Project(base, index) => {
-                self.prepare_projection_place(env, place, base, span, |base| {
-                    NodeKind::Project(base, index)
+            NodeKind::Project(project) => {
+                self.prepare_projection_place(env, place, project.value, span, |value| {
+                    NodeKind::Project(HirProject::new(value, project.index))
                 })
             }
-            NodeKind::FieldAccess(base, field) => {
-                self.prepare_projection_place(env, place, base, span, |base| {
-                    NodeKind::FieldAccess(base, field)
+            NodeKind::FieldAccess(field_access) => {
+                self.prepare_projection_place(env, place, field_access.value, span, |value| {
+                    NodeKind::FieldAccess(HirFieldAccess::new(value, field_access.field))
                 })
             }
-            NodeKind::ProjectAt(base, index) => {
-                self.prepare_projection_place(env, place, base, span, |base| {
-                    NodeKind::ProjectAt(base, index)
+            NodeKind::ProjectAt(project) => {
+                self.prepare_projection_place(env, place, project.value, span, |value| {
+                    NodeKind::ProjectAt(HirProjectAt::new(value, project.index))
                 })
             }
             NodeKind::StaticApply(mut app) if app.returns_place => {
@@ -1899,7 +1904,7 @@ impl TypeInference {
         // Avoids cloning the whole `NodeKind` just to satisfy the borrow checker.
         let children: SmallVec<[NodeId; 4]> = match &env.ir_arena[value].kind {
             Immediate(_) | GetFunction(_) => return false,
-            Variant(_, payload) => smallvec![*payload],
+            Variant(variant) => smallvec![variant.payload],
             Tuple(nodes) | Record(nodes) | Array(nodes) => nodes.iter().copied().collect(),
             BuildClosure(closure) => closure.captures.iter().copied().collect(),
             _ => return self.type_needs_semantic_drop(env, ty, span),
@@ -1943,9 +1948,13 @@ impl TypeInference {
     fn place_evaluation_prefix_nodes(&self, arena: &NodeArena, node_id: NodeId) -> Vec<NodeId> {
         match &arena[node_id].kind {
             NodeKind::LoadLocal(_) => Vec::new(),
-            NodeKind::Project(base, _)
-            | NodeKind::FieldAccess(base, _)
-            | NodeKind::ProjectAt(base, _) => self.place_evaluation_prefix_nodes(arena, *base),
+            NodeKind::Project(project) => self.place_evaluation_prefix_nodes(arena, project.value),
+            NodeKind::FieldAccess(field_access) => {
+                self.place_evaluation_prefix_nodes(arena, field_access.value)
+            }
+            NodeKind::ProjectAt(project) => {
+                self.place_evaluation_prefix_nodes(arena, project.value)
+            }
             _ => vec![node_id],
         }
     }
@@ -2233,7 +2242,7 @@ impl TypeInference {
                             effects.clone(),
                             expr_span,
                         ));
-                        K::Variant(tag, inner_node_id)
+                        K::Variant(HirVariant::new(tag, inner_node_id))
                     } else {
                         inner_kind
                     };
@@ -2293,7 +2302,7 @@ impl TypeInference {
                             payload_span,
                         ),
                     ));
-                    let node = K::Variant(tag, payload_node_id);
+                    let node = K::Variant(HirVariant::new(tag, payload_node_id));
                     (node, variant_ty, MutType::constant(), effects)
                 }
             },
@@ -2909,9 +2918,11 @@ fn place_evaluation_depends_on_place_result(arena: &NodeArena, node_id: NodeId) 
     match &arena[node_id].kind {
         Apply(app) => app.returns_place,
         StaticApply(app) => app.returns_place,
-        Project(base, _) | FieldAccess(base, _) | ProjectAt(base, _) => {
-            place_evaluation_depends_on_place_result(arena, *base)
+        Project(project) => place_evaluation_depends_on_place_result(arena, project.value),
+        FieldAccess(field_access) => {
+            place_evaluation_depends_on_place_result(arena, field_access.value)
         }
+        ProjectAt(project) => place_evaluation_depends_on_place_result(arena, project.value),
         _ => false,
     }
 }
@@ -2928,9 +2939,9 @@ fn assignment_initializes_storage(
             env.all_locals[load.id.as_index()].assignment_mode
                 == LocalAssignmentMode::InitializeStorage
         }
-        Project(base, _) | FieldAccess(base, _) | ProjectAt(base, _) => {
-            assignment_initializes_storage(arena, *base, env)
-        }
+        Project(project) => assignment_initializes_storage(arena, project.value, env),
+        FieldAccess(field_access) => assignment_initializes_storage(arena, field_access.value, env),
+        ProjectAt(project) => assignment_initializes_storage(arena, project.value, env),
         _ => false,
     }
 }
