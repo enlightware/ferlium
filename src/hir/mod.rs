@@ -202,6 +202,7 @@ impl UnboundTyCtxs {
 /// A map of unbound type variables to the context of their first appearance
 pub(crate) type UnboundTyVars = IndexMap<TypeVar, UnboundTyCtxs>;
 
+/// Build a runtime closure value from a function and captured values.
 #[derive(Debug, Clone)]
 pub struct BuildClosure {
     pub function: NodeId,
@@ -244,6 +245,7 @@ impl CallArgument {
     }
 }
 
+/// Call a first-class function value.
 #[derive(Debug, Clone)]
 pub struct Application {
     pub function: NodeId,
@@ -271,6 +273,7 @@ pub struct CloneValue {
     pub clone: LocalClone,
 }
 
+/// Call a statically known function.
 #[derive(Debug, Clone)]
 pub struct StaticApplication {
     pub function: FunctionId,
@@ -285,6 +288,7 @@ pub struct StaticApplication {
     pub returns_place: bool,
 }
 
+/// Call a trait method before dictionary passing resolves it.
 #[derive(Debug, Clone)]
 pub struct TraitMethodApplication {
     pub trait_ref: TraitRef,
@@ -303,28 +307,33 @@ impl TraitMethodApplication {
     }
 }
 
+/// Store a value into local storage.
 #[derive(Debug, Clone, Copy)]
 pub struct StoreLocal {
     pub value: NodeId,
     pub id: LocalDeclId,
 }
 
+/// Drop the owned value stored in a local.
 #[derive(Debug, Clone, Copy)]
 pub struct DropLocal {
     pub id: LocalDeclId,
 }
 
+/// Take a local value as an owned result.
 #[derive(Debug, Clone, Copy)]
 pub struct TakeLocalValue {
     pub id: LocalDeclId,
     pub mode: TakeLocalValueMode,
 }
 
+/// Load a local as a place or borrowed value.
 #[derive(Debug, Clone, Copy)]
 pub struct LoadLocal {
     pub id: LocalDeclId,
 }
 
+/// Assign a new value into an existing place.
 #[derive(Debug, Clone, Copy)]
 pub struct Assignment {
     pub place: NodeId,
@@ -362,6 +371,7 @@ pub struct Variant {
     pub payload: NodeId,
 }
 
+/// Branch on a literal value with a default alternative.
 #[derive(Debug, Clone)]
 pub struct Case {
     pub value: NodeId,
@@ -369,6 +379,7 @@ pub struct Case {
     pub default: NodeId,
 }
 
+/// Load a statically known function as a first-class value.
 #[derive(Debug, Clone)]
 pub struct GetFunction {
     pub function: FunctionId,
@@ -377,6 +388,7 @@ pub struct GetFunction {
     pub inst_data: FnInstData,
 }
 
+/// Load a trait method as a first-class value before dictionary passing.
 #[derive(Debug, Clone)]
 pub struct GetTraitMethod {
     pub trait_ref: TraitRef,
@@ -388,6 +400,7 @@ pub struct GetTraitMethod {
     pub inst_data: FnInstData,
 }
 
+/// Load a trait associated const before dictionary passing resolves it.
 #[derive(Debug, Clone)]
 pub struct GetTraitAssociatedConst {
     pub trait_ref: TraitRef,
@@ -398,6 +411,7 @@ pub struct GetTraitAssociatedConst {
     pub output_tys: Vec<Type>,
 }
 
+/// Load a trait dictionary before dictionary passing resolves it.
 #[derive(Debug, Clone)]
 pub struct GetTraitDictionary {
     pub trait_ref: TraitRef,
