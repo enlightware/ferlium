@@ -22,7 +22,7 @@ use crate::{
     hir::function::ArgPassing,
     module::{
         ExtraParameterId, FunctionId, LocalClone, LocalDecl, LocalDeclId, LocalDrop,
-        ProjectionIndex, ResolvedLocalClone, TraitImplId, id::Id,
+        ProjectionIndex, ResolvedLocalClone, TakeLocalValueMode, TraitImplId, id::Id,
     },
     types::r#trait::{TraitAssociatedConstIndex, TraitMethodIndex, TraitRef},
     types::type_like::{CastableToType, TypeLike, instantiate_types_in_place},
@@ -245,8 +245,9 @@ pub struct EnvDrop {
 }
 
 #[derive(Debug, Clone)]
-pub struct EnvMove {
+pub struct TakeLocalValue {
     pub id: LocalDeclId,
+    pub mode: TakeLocalValueMode,
 }
 
 #[derive(Debug, Clone)]
@@ -335,7 +336,7 @@ pub enum NodeKind {
     GetDictionary(GetDictionary),
     EnvStore(EnvStore),
     EnvDrop(EnvDrop),
-    EnvMove(EnvMove),
+    TakeLocalValue(TakeLocalValue),
     EnvLoad(EnvLoad),
     ExtraParameter(ExtraParameterId),
     Return(NodeId),
@@ -372,7 +373,7 @@ impl NodeKind {
             | GetTraitDictionary(_)
             | GetDictionary(_)
             | EnvDrop(_)
-            | EnvMove(_)
+            | TakeLocalValue(_)
             | EnvLoad(_)
             | ExtraParameter(_)
             | SoftBreak
@@ -655,9 +656,24 @@ impl Node {
                     name,
                 )?;
             }
-            EnvMove(node) => {
+            TakeLocalValue(node) => {
                 let local = &locals[node.id.as_index()];
-                writeln!(f, "{indent_str}move {} as \"{}\"", local.slot, local.name.0)?;
+                let mode = match node.mode {
+                    TakeLocalValueMode::Unknown => "unknown",
+                    TakeLocalValueMode::MoveOwned => "move",
+                    TakeLocalValueMode::CloneBorrowed(LocalClone::Unknown) => "unknown clone",
+                    TakeLocalValueMode::CloneBorrowed(LocalClone::Resolved(
+                        ResolvedLocalClone::TrivialCopy,
+                    )) => "trivial copy",
+                    TakeLocalValueMode::CloneBorrowed(LocalClone::Resolved(
+                        ResolvedLocalClone::Static(_) | ResolvedLocalClone::Dictionary(_),
+                    )) => "Value::clone",
+                };
+                writeln!(
+                    f,
+                    "{indent_str}take local {} as \"{}\" with {mode}",
+                    local.slot, local.name.0
+                )?;
             }
             EnvLoad(node) => {
                 let local = &locals[node.id.as_index()];
@@ -856,7 +872,7 @@ impl Node {
                 }
             }
             EnvDrop(_) => {}
-            EnvMove(_) => {}
+            TakeLocalValue(_) => {}
             EnvLoad(_) => {}
             ExtraParameter(_) => {}
             Return(node) => {
@@ -1014,7 +1030,7 @@ impl Node {
             }
             EnvStore(node) => unbound_ty_vars(arena, node.value, result, ignore),
             EnvDrop(_) => {}
-            EnvMove(_) => {}
+            TakeLocalValue(_) => {}
             EnvLoad(_) => {}
             ExtraParameter(_) => {}
             Return(node) => unbound_ty_vars(arena, *node, result, ignore),

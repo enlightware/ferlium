@@ -21,8 +21,9 @@ use crate::{
     },
     module::{
         ConcreteTraitImplKey, ExtraParameterId, FunctionId, LocalClone, LocalDecl, LocalDrop,
-        LocalFunctionId, ModuleEnv, ProjectionIndex, ResolvedLocalClone, ResolvedLocalDrop,
-        TraitImpl, TraitImplId, TraitImpls, build_dictionary_value, id::Id,
+        LocalFunctionId, LocalStorage, ModuleEnv, ProjectionIndex, ResolvedLocalClone,
+        ResolvedLocalDrop, TakeLocalValueMode, TraitImpl, TraitImplId, TraitImpls,
+        build_dictionary_value, id::Id,
     },
     types::r#trait::{TraitDictionaryEntryIndex, TraitMethodIndex, TraitRef},
     types::trait_solver::TraitSolver,
@@ -39,7 +40,10 @@ use crate::{
     containers::b,
     hir::emit_value_impl::{function_value_method, generic_value_methods_for_type},
     hir::value::LiteralValue,
-    hir::{self, Node, NodeArena, NodeId, NodeKind},
+    hir::{
+        self, Node, NodeArena, NodeId, NodeKind, node_is_place_reference,
+        place_resolution_may_create_temp,
+    },
     std::{
         core::TRIVIAL_COPY_TRAIT,
         math::int_type,
@@ -510,25 +514,64 @@ pub fn elaborate_dictionaries<'d, 'sr, 'sm>(
     arena: &mut NodeArena,
     node_id: NodeId,
     ctx: &mut DictElaborationCtx<'d, 'sr, 'sm>,
+    locals: &[LocalDecl],
     local_count: usize,
 ) -> Result<(), InternalCompilationError> {
-    Node::elaborate_dictionaries(arena, node_id, ctx, local_count)
+    Node::elaborate_dictionaries(arena, node_id, ctx, locals, local_count)
 }
 
-/// Resolve local clone/drop placeholders into static calls or hidden dictionary parameters.
-pub fn elaborate_local_value_dispatches<'d, 'sr, 'sm>(
+/// Resolve deferred local ownership and local clone/drop placeholders.
+pub fn elaborate_local_ownership_and_value_dispatches<'d, 'sr, 'sm>(
     arena: &mut NodeArena,
     locals: &mut [LocalDecl],
     ctx: &mut DictElaborationCtx<'d, 'sr, 'sm>,
 ) -> Result<(), InternalCompilationError> {
     for local in locals {
+        if matches!(local.storage, LocalStorage::Deferred(_)) {
+            resolve_local_storage(arena, ctx, local)?;
+        }
+
         if matches!(local.clone, Some(LocalClone::Unknown)) {
             local.clone = Some(resolve_local_clone(arena, ctx, local.ty, local.scope)?);
         }
 
-        if matches!(local.drop, Some(LocalDrop::Unknown)) {
-            local.drop = Some(resolve_local_drop(arena, ctx, local.ty, local.scope)?);
+        let local_ty = local.ty;
+        let local_scope = local.scope;
+        if let Some(drop) = local.local_drop_mut()
+            && matches!(drop, LocalDrop::Unknown)
+        {
+            *drop = resolve_local_drop(arena, ctx, local_ty, local_scope)?;
         }
+    }
+    Ok(())
+}
+
+fn resolve_local_storage(
+    arena: &mut NodeArena,
+    ctx: &mut DictElaborationCtx<'_, '_, '_>,
+    local: &mut LocalDecl,
+) -> Result<(), InternalCompilationError> {
+    let LocalStorage::Deferred(deferred) = local.storage.clone() else {
+        return Ok(());
+    };
+
+    let initializer_is_known_immutable = deferred
+        .initializer_mut_ty
+        .as_resolved()
+        .is_some_and(|mut_ty| !mut_ty.is_mutable());
+    let can_alias_initializer = !deferred.binding_mutable
+        && initializer_is_known_immutable
+        && node_is_place_reference(arena, deferred.initializer)
+        && !place_resolution_may_create_temp(arena, deferred.initializer);
+    if local.ty == Type::never() || can_alias_initializer {
+        local.set_non_owning_storage();
+    } else {
+        if node_is_place_reference(arena, deferred.initializer)
+            && !place_resolution_may_create_temp(arena, deferred.initializer)
+        {
+            local.clone = Some(LocalClone::Unknown);
+        }
+        local.set_owned_storage(resolve_local_drop(arena, ctx, local.ty, local.scope)?);
     }
     Ok(())
 }
@@ -798,6 +841,7 @@ impl Node {
         arena: &mut NodeArena,
         node_id: NodeId,
         ctx: &mut DictElaborationCtx<'d, 'sr, 'sm>,
+        locals: &[LocalDecl],
         local_count: usize,
     ) -> Result<(), InternalCompilationError> {
         use NodeKind::*;
@@ -814,20 +858,20 @@ impl Node {
             BuildClosure(build_closure) => {
                 // Elaborate hidden dictionary/evidence captures first.
                 for &capture_id in &build_closure.dictionary_captures {
-                    elaborate_dictionaries(arena, capture_id, ctx, local_count)?;
+                    elaborate_dictionaries(arena, capture_id, ctx, locals, local_count)?;
                 }
 
                 // Elaborate captures first (they are in outer scope).
                 for &capture_id in &build_closure.captures {
-                    elaborate_dictionaries(arena, capture_id, ctx, local_count)?;
+                    elaborate_dictionaries(arena, capture_id, ctx, locals, local_count)?;
                 }
                 if let Some(dict_id) = build_closure.captures_value_dictionary {
-                    elaborate_dictionaries(arena, dict_id, ctx, local_count)?;
+                    elaborate_dictionaries(arena, dict_id, ctx, locals, local_count)?;
                 }
 
                 // Elaborate the function (it is the closure body/value).
                 let function_id = build_closure.function;
-                elaborate_dictionaries(arena, function_id, ctx, local_count)?;
+                elaborate_dictionaries(arena, function_id, ctx, locals, local_count)?;
 
                 // Optimization: flatten nested BuildClosure
                 // Check if the function is a BuildClosure itself (due to dictionary capturing).
@@ -857,33 +901,33 @@ impl Node {
                 }
             }
             Apply(app) => {
-                elaborate_dictionaries(arena, app.function, ctx, local_count)?;
+                elaborate_dictionaries(arena, app.function, ctx, locals, local_count)?;
                 for &arg_id in &app.arguments {
-                    elaborate_dictionaries(arena, arg_id, ctx, local_count)?;
+                    elaborate_dictionaries(arena, arg_id, ctx, locals, local_count)?;
                 }
                 for (passing, &arg_id) in app.argument_passing.iter_mut().zip(&app.arguments) {
                     resolve_arg_passing(arena, ctx, passing, arg_id, arena[arg_id].ty, node_span)?;
                 }
             }
             FunctionClone(node) => {
-                elaborate_dictionaries(arena, node.source, ctx, local_count)?;
-                elaborate_dictionaries(arena, node.target, ctx, local_count)?;
+                elaborate_dictionaries(arena, node.source, ctx, locals, local_count)?;
+                elaborate_dictionaries(arena, node.target, ctx, locals, local_count)?;
             }
             FunctionDrop(node) => {
-                elaborate_dictionaries(arena, node.target, ctx, local_count)?;
+                elaborate_dictionaries(arena, node.target, ctx, locals, local_count)?;
             }
             CloneValue(node) => {
-                elaborate_dictionaries(arena, node.source, ctx, local_count)?;
+                elaborate_dictionaries(arena, node.source, ctx, locals, local_count)?;
                 if matches!(node.clone, LocalClone::Unknown) {
                     node.clone = resolve_local_clone(arena, ctx, node_ty, node_span)?;
                 }
             }
             StaticApply(app) => {
                 for &arg_id in &app.extra_arguments {
-                    elaborate_dictionaries(arena, arg_id, ctx, local_count)?;
+                    elaborate_dictionaries(arena, arg_id, ctx, locals, local_count)?;
                 }
                 for &arg_id in &app.arguments {
-                    elaborate_dictionaries(arena, arg_id, ctx, local_count)?;
+                    elaborate_dictionaries(arena, arg_id, ctx, locals, local_count)?;
                 }
                 for ((passing, arg_ty), &arg_id) in app
                     .argument_passing
@@ -920,7 +964,7 @@ impl Node {
             }
             TraitMethodApply(app) => {
                 for &arg_id in &app.arguments {
-                    elaborate_dictionaries(arena, arg_id, ctx, local_count)?;
+                    elaborate_dictionaries(arena, arg_id, ctx, locals, local_count)?;
                 }
                 for ((passing, arg_ty), &arg_id) in app
                     .argument_passing
@@ -1249,23 +1293,33 @@ impl Node {
                 // nothing to do
             }
             EnvStore(store) => {
-                elaborate_dictionaries(arena, store.value, ctx, local_count)?;
+                elaborate_dictionaries(arena, store.value, ctx, locals, local_count)?;
             }
             EnvDrop(_) => {}
-            EnvMove(_) => {}
+            TakeLocalValue(node) => {
+                if matches!(node.mode, TakeLocalValueMode::Unknown) {
+                    node.mode = if locals[node.id.as_index()].owns_storage() {
+                        TakeLocalValueMode::MoveOwned
+                    } else {
+                        TakeLocalValueMode::CloneBorrowed(resolve_local_clone(
+                            arena, ctx, node_ty, node_span,
+                        )?)
+                    };
+                }
+            }
             EnvLoad(_) => {}
             ExtraParameter(_) => {}
             Return(node_id) => {
-                elaborate_dictionaries(arena, *node_id, ctx, local_count)?;
+                elaborate_dictionaries(arena, *node_id, ctx, locals, local_count)?;
             }
             Block(nodes) => {
                 for &node_id in nodes.iter() {
-                    elaborate_dictionaries(arena, node_id, ctx, local_count)?;
+                    elaborate_dictionaries(arena, node_id, ctx, locals, local_count)?;
                 }
             }
             Assign(assignment) => {
-                elaborate_dictionaries(arena, assignment.place, ctx, local_count)?;
-                elaborate_dictionaries(arena, assignment.value, ctx, local_count)?;
+                elaborate_dictionaries(arena, assignment.place, ctx, locals, local_count)?;
+                elaborate_dictionaries(arena, assignment.value, ctx, locals, local_count)?;
                 let place_ty = arena[assignment.place].ty;
                 if let Some(drop) = &mut assignment.drop
                     && matches!(drop, LocalDrop::Unknown)
@@ -1275,22 +1329,22 @@ impl Node {
             }
             Tuple(nodes) => {
                 for &node_id in nodes.iter() {
-                    elaborate_dictionaries(arena, node_id, ctx, local_count)?;
+                    elaborate_dictionaries(arena, node_id, ctx, locals, local_count)?;
                 }
             }
             Project(data, _) => {
-                elaborate_dictionaries(arena, *data, ctx, local_count)?;
+                elaborate_dictionaries(arena, *data, ctx, locals, local_count)?;
             }
             Record(nodes) => {
                 for &node_id in nodes.iter() {
-                    elaborate_dictionaries(arena, node_id, ctx, local_count)?;
+                    elaborate_dictionaries(arena, node_id, ctx, locals, local_count)?;
                 }
             }
             FieldAccess(data, field) => {
                 use TypeKind::*;
                 let child_id = *data;
                 let field_name = *field;
-                elaborate_dictionaries(arena, child_id, ctx, local_count)?;
+                elaborate_dictionaries(arena, child_id, ctx, locals, local_count)?;
                 let child_ty = arena[child_id].ty;
                 let ty_data = child_ty.data();
                 let ty_data = if let Some(named) = ty_data.as_named() {
@@ -1330,25 +1384,25 @@ impl Node {
                 panic!("ProjectAt should not be present at this stage");
             }
             Variant(_, payload) => {
-                elaborate_dictionaries(arena, *payload, ctx, local_count)?;
+                elaborate_dictionaries(arena, *payload, ctx, locals, local_count)?;
             }
             ExtractTag(node_id) => {
-                elaborate_dictionaries(arena, *node_id, ctx, local_count)?;
+                elaborate_dictionaries(arena, *node_id, ctx, locals, local_count)?;
             }
             Array(nodes) => {
                 for &node_id in nodes.iter() {
-                    elaborate_dictionaries(arena, node_id, ctx, local_count)?;
+                    elaborate_dictionaries(arena, node_id, ctx, locals, local_count)?;
                 }
             }
             Case(case) => {
-                elaborate_dictionaries(arena, case.value, ctx, local_count)?;
+                elaborate_dictionaries(arena, case.value, ctx, locals, local_count)?;
                 for &(_, alt_id) in case.alternatives.iter() {
-                    elaborate_dictionaries(arena, alt_id, ctx, local_count)?;
+                    elaborate_dictionaries(arena, alt_id, ctx, locals, local_count)?;
                 }
-                elaborate_dictionaries(arena, case.default, ctx, local_count)?;
+                elaborate_dictionaries(arena, case.default, ctx, locals, local_count)?;
             }
             Loop(body_id) => {
-                elaborate_dictionaries(arena, *body_id, ctx, local_count)?;
+                elaborate_dictionaries(arena, *body_id, ctx, locals, local_count)?;
             }
             SoftBreak | Unimplemented => {}
         }
@@ -1448,7 +1502,7 @@ mod tests {
         };
         let mut ctx = DictElaborationCtx::new(&dicts, None, &mut solver);
 
-        elaborate_dictionaries(&mut arena, node, &mut ctx, 0).unwrap();
+        elaborate_dictionaries(&mut arena, node, &mut ctx, &[], 0).unwrap();
 
         let NodeKind::Immediate(immediate) = &arena[node].kind else {
             panic!("expected associated const to elaborate to an immediate");
@@ -1497,7 +1551,7 @@ mod tests {
         };
         let mut ctx = DictElaborationCtx::new(&dicts, None, &mut solver);
 
-        elaborate_dictionaries(&mut arena, node, &mut ctx, 3).unwrap();
+        elaborate_dictionaries(&mut arena, node, &mut ctx, &[], 3).unwrap();
 
         let NodeKind::Project(dictionary_node, index) = arena[node].kind else {
             panic!("expected associated const to elaborate to a dictionary projection");

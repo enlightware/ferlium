@@ -36,7 +36,7 @@ use crate::{
     desugar::desugar_expr_with_empty_ctx,
     format::FormatWith,
     hir::dictionary_passing::{
-        DictElaborationCtx, ExtraParameters, elaborate_local_value_dispatches,
+        DictElaborationCtx, ExtraParameters, elaborate_local_ownership_and_value_dispatches,
     },
     hir::function::{FunctionDefinition, ScriptFunction},
     hir::{self, NodeArena},
@@ -1728,10 +1728,10 @@ fn emit_expr_unsafe_inner(
     let dicts = ty_scheme.extra_parameters();
     let mut solver = trait_solver_from_module!(module, &others);
     let mut ctx = DictElaborationCtx::new(&dicts, None, &mut solver);
-    check_borrows(ir_arena, node_id)?;
     let local_count = locals.len();
-    elaborate_local_value_dispatches(ir_arena, &mut locals, &mut ctx)?;
-    elaborate_dictionaries(ir_arena, node_id, &mut ctx, local_count)?;
+    elaborate_local_ownership_and_value_dispatches(ir_arena, &mut locals, &mut ctx)?;
+    check_borrows(ir_arena, node_id)?;
+    elaborate_dictionaries(ir_arena, node_id, &mut ctx, &locals, local_count)?;
     for lambda_id in lambda_functions.iter() {
         let descr = &mut module.functions[lambda_id.as_index()];
         descr.check_borrows_and_elaborate_dictionaries(ir_arena, &mut ctx)?;

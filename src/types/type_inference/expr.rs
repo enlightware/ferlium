@@ -29,9 +29,9 @@ use crate::{
     },
     internal_compilation_error,
     module::{
-        FunctionId, LocalAssignmentMode, LocalClone, LocalDecl, LocalDeclId, LocalDrop, ModuleEnv,
-        ModuleFunction, ModuleFunctionSpans, ProjectionIndex, ResolvedLocalDrop,
-        TypeDefLookupResult, id::Id,
+        DeferredLocalStorage, FunctionId, LocalAssignmentMode, LocalClone, LocalDecl, LocalDeclId,
+        LocalDrop, ModuleEnv, ModuleFunction, ModuleFunctionSpans, ProjectionIndex,
+        ResolvedLocalDrop, TakeLocalValueMode, TypeDefLookupResult, id::Id,
     },
     parser::location::Location,
     std::{
@@ -540,8 +540,7 @@ impl TypeInference {
                 let mut_val = data.pattern.kind.mut_val;
                 let (node_id, initializer_mut_ty) = self.infer_expr(env, data.expr)?;
                 let node_ty = env.ir_arena[node_id].ty;
-                let initializer_is_borrow =
-                    initializer_needs_mut_binding_clone(env.ir_arena, node_id);
+                let initializer_is_borrow = node_is_place_reference(env.ir_arena, node_id);
                 let initializer_place_needs_temp =
                     place_resolution_may_create_temp(env.ir_arena, node_id);
                 let initializer_is_known_immutable = matches!(
@@ -550,13 +549,20 @@ impl TypeInference {
                 );
                 let initializer_is_known_trivial_copy =
                     self.type_has_concrete_trivial_copy_impl(env, node_ty, expr_span);
-                let needs_clone = (initializer_place_needs_temp
+                let defer_storage = node_ty != Type::never()
+                    && initializer_is_borrow
+                    && !initializer_place_needs_temp
+                    && !mut_val.is_mutable()
+                    && !initializer_is_known_immutable
+                    && !initializer_is_known_trivial_copy;
+                let needs_owned_snapshot = initializer_place_needs_temp
                     || mut_val.is_mutable()
-                    || !initializer_is_known_immutable)
+                    || initializer_is_known_trivial_copy;
+                let needs_clone = needs_owned_snapshot
                     && node_ty != Type::never()
                     && initializer_is_borrow
                     && !initializer_is_known_trivial_copy;
-                if needs_clone && !node_ty.is_function() {
+                if (needs_clone || defer_storage) && !node_ty.is_function() {
                     self.add_pub_constraint(PubTypeConstraint::new_have_trait(
                         VALUE_TRAIT.clone(),
                         vec![node_ty],
@@ -565,6 +571,7 @@ impl TypeInference {
                     ));
                 }
                 let owns_storage = node_ty != Type::never()
+                    && !defer_storage
                     && (needs_clone || !initializer_is_borrow || initializer_is_known_trivial_copy);
                 let mut local = LocalDecl::new(
                     name,
@@ -573,11 +580,17 @@ impl TypeInference {
                     data.ty_ascription,
                     expr_span,
                 );
-                local.owns_storage = owns_storage;
                 if owns_storage {
-                    local.drop = Some(
+                    local.set_owned_storage(
                         self.unresolved_or_skipped_drop_for_value(env, node_id, node_ty, expr_span),
                     );
+                }
+                if defer_storage {
+                    local.set_deferred_storage(DeferredLocalStorage {
+                        initializer: node_id,
+                        initializer_mut_ty,
+                        binding_mutable: mut_val.is_mutable(),
+                    });
                 }
                 if needs_clone && !initializer_place_needs_temp {
                     local.clone = Some(LocalClone::Unknown);
@@ -648,9 +661,9 @@ impl TypeInference {
                 let ty = env.ir_arena[node_id].ty;
                 self.add_same_type_constraint(ty, sp(*expr), outer_ty, outer_span);
                 let effects = env.ir_arena[node_id].effects.clone();
-                let (node_id, moved_local) =
-                    self.move_owned_local_result(env, node_id, 0, expr_span);
-                let node_id = if moved_local.is_some() {
+                let (node_id, taken_local) =
+                    self.take_local_value_result(env, node_id, 0, expr_span);
+                let node_id = if taken_local.is_some() {
                     node_id
                 } else {
                     self.materialize_owned_value(env, node_id, expr_span)
@@ -660,7 +673,7 @@ impl TypeInference {
                     node_id,
                     ty,
                     &effects,
-                    (0, moved_local),
+                    (0, taken_local),
                     expr_span,
                 );
                 let node = K::Return(return_value);
@@ -793,17 +806,17 @@ impl TypeInference {
                     for node in nodes.iter_mut().take(last_index) {
                         *node = self.discard_unused_value(env, *node, expr_span);
                     }
-                    let moved_local = nodes.last_mut().and_then(|last| {
-                        let (moved_node, moved_local) =
-                            self.move_owned_local_result(env, *last, local_decl_count, expr_span);
-                        if moved_local.is_some() {
-                            *last = moved_node;
+                    let taken_local = nodes.last_mut().and_then(|last| {
+                        let (taken_node, taken_local) =
+                            self.take_local_value_result(env, *last, local_decl_count, expr_span);
+                        if taken_local.is_some() {
+                            *last = taken_node;
                         } else {
                             *last = self.materialize_owned_value(env, *last, expr_span);
                         }
-                        moved_local
+                        taken_local
                     });
-                    nodes.extend(self.drop_nodes_for_locals(env, env_size, moved_local, expr_span));
+                    nodes.extend(self.drop_nodes_for_locals(env, env_size, taken_local, expr_span));
                 }
                 // Adjust the lexical scope of the variables declared in the block to end at the end of the block.
                 for local_id in env.cur_locals.iter().skip(env_size) {
@@ -1363,8 +1376,7 @@ impl TypeInference {
             None,
             span,
         );
-        local.owns_storage = true;
-        local.drop = Some(self.unresolved_or_skipped_drop_for_value(env, value, ty, span));
+        local.set_owned_storage(self.unresolved_or_skipped_drop_for_value(env, value, ty, span));
         let id = env.push_local(local);
 
         let value_effects = env.ir_arena[value].effects.clone();
@@ -1527,7 +1539,10 @@ impl TypeInference {
             _ => panic!("store_owned_temp should return an EnvLoad"),
         };
         let result_move = env.ir_arena.alloc(hir::Node::new(
-            NodeKind::EnvMove(hir::EnvMove { id: result_id }),
+            NodeKind::TakeLocalValue(hir::TakeLocalValue {
+                id: result_id,
+                mode: TakeLocalValueMode::MoveOwned,
+            }),
             ty,
             no_effects(),
             span,
@@ -1562,7 +1577,7 @@ impl TypeInference {
             .filter(|(_, local_id)| Some(*local_id) != skip_drop)
             .filter(|(_, local_id)| {
                 let local = &env.all_locals[local_id.as_index()];
-                local.owns_storage && local.drop.is_some()
+                local.may_own_storage()
             })
             .collect::<Vec<_>>();
 
@@ -1604,7 +1619,7 @@ impl TypeInference {
         }
     }
 
-    fn move_owned_local_result(
+    fn take_local_value_result(
         &mut self,
         env: &mut TypingEnv,
         value: NodeId,
@@ -1618,18 +1633,24 @@ impl TypeInference {
         if id.as_index() < min_local_decl_index {
             return (value, None);
         }
-        if !env.all_locals[id.as_index()].owns_storage {
+        let local = &env.all_locals[id.as_index()];
+        if !local.owns_storage() && !local.may_own_storage() {
             return (value, None);
         }
         let ty = env.ir_arena[value].ty;
         let effects = env.ir_arena[value].effects.clone();
-        let move_node = env.ir_arena.alloc(hir::Node::new(
-            NodeKind::EnvMove(hir::EnvMove { id }),
+        let mode = if local.owns_storage() {
+            TakeLocalValueMode::MoveOwned
+        } else {
+            TakeLocalValueMode::Unknown
+        };
+        let take_node = env.ir_arena.alloc(hir::Node::new(
+            NodeKind::TakeLocalValue(hir::TakeLocalValue { id, mode }),
             ty,
             effects,
             span,
         ));
-        (move_node, Some(id))
+        (take_node, Some(id))
     }
 
     pub(crate) fn materialize_owned_value(
@@ -1833,8 +1854,11 @@ impl TypeInference {
             owns_storage.then(|| self.unresolved_or_skipped_drop_for_value(env, value, ty, span));
 
         let local = &mut env.all_locals[local_id.as_index()];
-        local.owns_storage = owns_storage;
-        local.drop = drop;
+        if let Some(drop) = drop {
+            local.set_owned_storage(drop);
+        } else {
+            local.set_non_owning_storage();
+        }
     }
 
     fn add_value_constraint_for_unknown_drop(&mut self, ty: Type, span: Location) {
@@ -2857,10 +2881,6 @@ fn collect_free_variables(
         }
         Literal(_, _) | FormattedString(_) | PropertyPath(_) | SoftBreak | Error => {}
     }
-}
-
-fn initializer_needs_mut_binding_clone(arena: &NodeArena, node_id: NodeId) -> bool {
-    node_is_place_reference(arena, node_id)
 }
 
 fn place_evaluation_depends_on_place_result(arena: &NodeArena, node_id: NodeId) -> bool {

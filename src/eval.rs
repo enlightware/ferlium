@@ -26,7 +26,8 @@ use crate::{
     module::{
         ExtraParameterId, FunctionId, LocalClone, LocalDebugVisibility, LocalDecl, LocalDeclId,
         LocalDrop, LocalFunctionId, ModuleFunction, ModuleId, ProjectionIndex, ResolvedLocalClone,
-        ResolvedLocalDrop, TraitDictionary, TraitDictionaryEntry, TraitDictionaryId, TraitImplId,
+        ResolvedLocalDrop, TakeLocalValueMode, TraitDictionary, TraitDictionaryEntry,
+        TraitDictionaryId, TraitImplId,
     },
     std::buffer,
     types::{
@@ -1017,7 +1018,7 @@ pub fn eval_node_with_ctx(
         }
         EnvStore(node) => eval_env_store(arena, node, arena[id].span, ctx, locals),
         EnvDrop(node) => eval_env_drop(node, arena[id].span, ctx, locals),
-        EnvMove(node) => eval_env_move(node, arena[id].span, ctx, locals),
+        TakeLocalValue(node) => eval_take_local_value(node, arena[id].span, ctx, locals),
         EnvLoad(node) => eval_env_load(arena, id, node, ctx, locals),
         ExtraParameter(_) => {
             panic!("ExtraParameter is hidden evidence and should not be evaluated as a Value")
@@ -1342,10 +1343,10 @@ fn drop_owned_locals_on_error_from(
     span: Location,
 ) -> Result<(), RuntimeError> {
     for (index, local) in locals.iter().enumerate().rev() {
-        if !local.owns_storage {
+        if !local.owns_storage() {
             continue;
         }
-        let Some(drop) = &local.drop else {
+        let Some(drop) = local.local_drop() else {
             continue;
         };
         let id = LocalDeclId::from_index(index);
@@ -2005,7 +2006,7 @@ fn eval_env_store(
         if matches!(&ctx.environment[target_index], ValOrMut::Val(Value::Uninit)) {
             panic!("Value::clone returned without initializing local storage");
         }
-    } else if !locals[node.id.as_index()].owns_storage {
+    } else if !locals[node.id.as_index()].owns_storage() {
         let entry = match eval_or_return!(try_resolve_node_place(arena, node.value, ctx, locals)) {
             Some(place) => {
                 if let Some(dictionary) = try_dictionary_from_place(&place, ctx) {
@@ -2074,7 +2075,7 @@ fn eval_env_drop(
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
-    let Some(drop) = &locals[node.id.as_index()].drop else {
+    let Some(drop) = locals[node.id.as_index()].local_drop() else {
         return cont(Value::unit());
     };
     let target = Place {
@@ -2087,18 +2088,61 @@ fn eval_env_drop(
 }
 
 #[inline(never)]
-fn eval_env_move(
-    node: &hir::EnvMove,
-    _span: Location,
+fn take_owned_local_value(
+    id: LocalDeclId,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
-    let index = local_environment_index(ctx, locals, node.id);
+    let index = local_environment_index(ctx, locals, id);
     match mem::replace(&mut ctx.environment[index], ValOrMut::Val(Value::uninit())) {
         ValOrMut::Val(value) => cont(value),
         ValOrMut::Dictionary(_) => panic!("cannot move out of a trait dictionary metadata local"),
         ValOrMut::Ref(_) => panic!("cannot move out of shared reference storage"),
         ValOrMut::Mut(_) => panic!("cannot move out of a mutable reference local"),
+    }
+}
+
+#[inline(never)]
+fn eval_take_local_value(
+    node: &hir::TakeLocalValue,
+    span: Location,
+    ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
+) -> EvalControlFlowResult {
+    match node.mode {
+        TakeLocalValueMode::Unknown => {
+            panic!("TakeLocalValueMode::Unknown should have been resolved before evaluation")
+        }
+        TakeLocalValueMode::MoveOwned => take_owned_local_value(node.id, ctx, locals),
+        TakeLocalValueMode::CloneBorrowed(LocalClone::Unknown) => {
+            panic!("TakeLocalValue clone mode should have been resolved before evaluation")
+        }
+        TakeLocalValueMode::CloneBorrowed(LocalClone::Resolved(
+            ResolvedLocalClone::TrivialCopy,
+        )) => {
+            let place = Place {
+                target: local_environment_index(ctx, locals, node.id),
+                path: Vec::new(),
+            };
+            cont(copy_trivial_value_from_place(
+                &place,
+                locals[node.id.as_index()].ty,
+                ctx,
+                span,
+            )?)
+        }
+        TakeLocalValueMode::CloneBorrowed(LocalClone::Resolved(clone)) => {
+            let place = Place {
+                target: local_environment_index(ctx, locals, node.id),
+                path: Vec::new(),
+            };
+            place
+                .target_ref(ctx)
+                .map_err(|err| RuntimeError::new(err, Some(span)))?;
+            let value =
+                call_value_clone_dispatch_for_temp(ctx, &clone, ValOrMut::Mut(place), span)?;
+            cont(value)
+        }
     }
 }
 

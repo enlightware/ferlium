@@ -2,7 +2,7 @@
 
 This document records the ownership invariants that SSA lowering should rely on.
 It describes HIR after type inference, borrow checking, and dictionary elaboration.
-At that point all `LocalClone::Unknown` and `LocalDrop::Unknown` placeholders must have been resolved.
+At that point all `LocalStorage::Deferred`, `LocalClone::Unknown`, `LocalDrop::Unknown`, and `TakeLocalValueMode::Unknown` placeholders must have been resolved.
 All call-site `ArgPassing` metadata must also have been resolved.
 
 See `doc/abi.md` for the physical calling convention.
@@ -26,9 +26,8 @@ HIR consumers must handle `Apply` and `StaticApply` with `returns_place` like ot
 | Field | SSA-facing meaning |
 |-------|--------------------|
 | `slot` | Frame slot offset within the local value frame. Extra dictionary/evidence parameters use a separate index space. |
-| `owns_storage` | This local owns storage that may be moved from and whose storage must be reclaimed. Non-owning locals are aliases. |
+| `storage` | Whether this local is a non-owning alias, owns storage with lexical cleanup, or is temporarily deferred until final mutability facts are known. |
 | `clone` | If present, `EnvStore` initializes the local by either a trivial copy or `Value::clone(source, &mut target)`. |
-| `drop` | If present, lexical release ends this local's owned lifetime; the resolved mode either skips semantic drop or calls `Value::drop`. |
 | `assignment_mode` | `InitializeStorage` means assignment writes uninitialized storage and must not drop the previous destination. |
 
 # Owned Materialization
@@ -39,26 +38,29 @@ When the source is a place, HIR must materialize ownership explicitly:
 - Type not yet resolved after HIR construction: emit `CloneValue { source, clone: LocalClone::Unknown }`.
 - Concrete `TrivialCopy` type after dictionary elaboration: resolve to `LocalClone::Resolved(TrivialCopy)`.
 - Non-`TrivialCopy` value type after dictionary elaboration: resolve to a static or dictionary `Value::clone` dispatch.
-- Owned local moved out of its lexical scope: emit `EnvMove { id }` and skip the matching lexical drop.
+- Local consumed as an owned result: emit `TakeLocalValue { id, mode }` and skip the matching lexical drop if it resolves to `MoveOwned`.
+- If local ownership is not known yet, emit `TakeLocalValue { id, mode: Unknown }`, then resolve it to either a move or clone/copy after local storage is known.
 
 Generic types are not treated as `TrivialCopy` for this purpose, even if the function has a `T: TrivialCopy` constraint.
 They use the generic `Value` dictionary path.
 
 Current lowering applies these rules in the main ownership-sensitive contexts:
 
-- `let mut` initialized from a place owns a snapshot, using `CloneValue` with either trivial-copy mode or `Value::clone` mode.
-- A `let` initialized from a mutable place owns a snapshot; during HIR construction, unresolved place mutability is treated conservatively the same way.
+- `let mut` initialized from a place owns a snapshot, using either trivial-copy mode or `Value::clone` mode.
+- A `let` initialized from a mutable place owns a snapshot.
+- A `let` initialized from a place whose mutability is not yet resolved records deferred local storage; after inference it resolves to either an owned snapshot or a non-owning alias.
 - A `let` initialized from a known immutable place may be non-owning.
 - Closure captures are materialized as owned values before `BuildClosure`.
-- Function returns move an owned local with `EnvMove` when returning that local out of the current scope.
+- Function returns use `TakeLocalValue` when returning a local out of the current scope.
 - Function calls use the explicit argument passing rules described below.
 - Projections and place-result calls of non-place bases use explicit owned temporaries when consumed as places; if an owned result is needed, that place is then wrapped in `CloneValue`.
 
 # Drops and Cleanup
 
 Lexical drops are explicit `EnvDrop { id }` nodes generated in reverse local order.
-Locals with owned storage whose lifetime ends receive `EnvDrop` nodes.
-`EnvDrop` applies the resolved `LocalDrop`: `Skip` reclaims only storage, while static and dictionary modes call `Value::drop` before discarding storage.
+Locals with owned or deferred storage whose lifetime ends receive `EnvDrop` nodes.
+After local storage resolution, `EnvDrop` is a no-op for non-owning locals.
+For owned locals it applies the resolved `LocalDrop`: `Skip` reclaims only storage, while static and dictionary modes call `Value::drop` before discarding storage.
 
 Assignments to initialized storage carry an optional `Assignment::drop`.
 If present, the old destination lifetime ends before the new value replaces it; the resolved mode may be `Skip`.

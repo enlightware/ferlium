@@ -760,7 +760,7 @@ fn derive_value_to_string_body(
             )?;
             statements.push(n(arena, push, Type::unit()));
         }
-        let rendered = n(arena, move_local(l_rendered_id), string_type());
+        let rendered = n(arena, take_local_value(l_rendered_id), string_type());
         statements.push(rendered);
         Ok(n(arena, block(statements), string_type()))
     };

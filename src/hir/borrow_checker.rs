@@ -215,7 +215,7 @@ impl Node {
                 check_borrows(arena, node.value)?;
             }
             EnvDrop(_) => {}
-            EnvMove(_) => {}
+            TakeLocalValue(_) => {}
             EnvLoad(_) => {}
             ExtraParameter(_) => {}
             Return(node_id) => {

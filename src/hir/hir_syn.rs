@@ -13,7 +13,8 @@ use crate::{
     hir::value::{LiteralNativeValue, LiteralValue},
     hir::{self, NodeId},
     module::{
-        FunctionId, LocalDecl, LocalDeclId, LocalFrameSlot, ProjectionIndex, TraitImplId, id::Id,
+        FunctionId, LocalDecl, LocalDeclId, LocalDrop, LocalFrameSlot, ProjectionIndex,
+        TakeLocalValueMode, TraitImplId, id::Id,
     },
     std::string::String as FerliumString,
     types::effects::EffType,
@@ -117,7 +118,7 @@ pub fn store_new(
         None,
         Location::new_synthesized(),
     );
-    local.owns_storage = true;
+    local.set_owned_storage(LocalDrop::Unknown);
     local.slot = LocalFrameSlot::from_index(index);
     locals.push(local);
     (K::EnvStore(hir::EnvStore { value, id }), id)
@@ -136,8 +137,11 @@ pub fn load(id: LocalDeclId) -> NodeKind {
     K::EnvLoad(hir::EnvLoad { id })
 }
 
-pub fn move_local(id: LocalDeclId) -> NodeKind {
-    K::EnvMove(hir::EnvMove { id })
+pub fn take_local_value(id: LocalDeclId) -> NodeKind {
+    K::TakeLocalValue(hir::TakeLocalValue {
+        id,
+        mode: TakeLocalValueMode::MoveOwned,
+    })
 }
 
 pub fn project(tuple: NodeId, index: ProjectionIndex) -> NodeKind {

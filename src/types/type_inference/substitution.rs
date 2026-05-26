@@ -5,7 +5,7 @@ use crate::{
     format::FormatWith,
     hir::dictionary_passing::DictionaryReq,
     hir::{self, FnInstData},
-    module::{LocalDecl, ModuleEnv, ModuleFunction},
+    module::{LocalDecl, LocalStorage, ModuleEnv, ModuleFunction},
     types::{
         effects::{EffType, Effect, EffectVar, EffectsInstSubst},
         mutability::{MutType, MutVar},
@@ -100,6 +100,10 @@ impl UnifiedTypeInference {
         substitute_type_fields_in_place(locals, |local| &mut local.ty, &mut SubstituteTypes(self));
         for local in locals {
             local.mut_ty = self.substitute_in_mut_type(local.mut_ty);
+            if let LocalStorage::Deferred(deferred) = &mut local.storage {
+                deferred.initializer_mut_ty =
+                    self.substitute_in_mut_type(deferred.initializer_mut_ty);
+            }
         }
     }
 

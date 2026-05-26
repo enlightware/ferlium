@@ -18,7 +18,7 @@ use crate::{
     format::FormatWith,
     hir::borrow_checker::check_borrows,
     hir::dictionary_passing::{
-        DictElaborationCtx, elaborate_dictionaries, elaborate_local_value_dispatches,
+        DictElaborationCtx, elaborate_dictionaries, elaborate_local_ownership_and_value_dispatches,
     },
     hir::function::{Function, FunctionDefinition},
     hir::{NodeArena, NodeId},
@@ -146,9 +146,9 @@ pub struct LocalDecl {
     /// Span of the type ascription (only for let), if any, and whether it is complete (i.e. not an inferred type)
     pub ty_span: Option<(Location, bool)>,
     pub scope: Location,
-    /// Whether this local owns storage that may be moved from or explicitly dropped by generated HIR.
+    /// Whether this local aliases existing storage or owns storage with lexical cleanup.
     #[new(default)]
-    pub owns_storage: bool,
+    pub storage: LocalStorage,
     /// Slot offset within this function call's local runtime frame.
     #[new(default)]
     pub slot: LocalFrameSlot,
@@ -158,9 +158,6 @@ pub struct LocalDecl {
     /// Clone dispatch used when initializing owned mutable-binding storage.
     #[new(default)]
     pub clone: Option<LocalClone>,
-    /// Drop dispatch used when releasing owned local storage at lexical scope exit.
-    #[new(default)]
-    pub drop: Option<LocalDrop>,
 }
 impl LocalDecl {
     pub fn as_fn_arg_type(&self) -> FnArgType {
@@ -184,6 +181,64 @@ impl LocalDecl {
             local.slot = LocalFrameSlot::from_index(prefix_count + index);
         }
     }
+
+    pub fn owns_storage(&self) -> bool {
+        matches!(self.storage, LocalStorage::Owned { .. })
+    }
+
+    pub fn may_own_storage(&self) -> bool {
+        matches!(
+            self.storage,
+            LocalStorage::Owned { .. } | LocalStorage::Deferred(_)
+        )
+    }
+
+    pub fn local_drop(&self) -> Option<&LocalDrop> {
+        match &self.storage {
+            LocalStorage::Owned { drop } => Some(drop),
+            LocalStorage::NonOwning | LocalStorage::Deferred(_) => None,
+        }
+    }
+
+    pub fn local_drop_mut(&mut self) -> Option<&mut LocalDrop> {
+        match &mut self.storage {
+            LocalStorage::Owned { drop } => Some(drop),
+            LocalStorage::NonOwning | LocalStorage::Deferred(_) => None,
+        }
+    }
+
+    pub fn set_non_owning_storage(&mut self) {
+        self.storage = LocalStorage::NonOwning;
+        self.clone = None;
+    }
+
+    pub fn set_owned_storage(&mut self, drop: LocalDrop) {
+        self.storage = LocalStorage::Owned { drop };
+    }
+
+    pub fn set_deferred_storage(&mut self, deferred: DeferredLocalStorage) {
+        self.storage = LocalStorage::Deferred(deferred);
+    }
+}
+
+/// Whether a local aliases existing storage, owns storage, or must wait for final inference facts.
+#[derive(Debug, Clone, Default)]
+pub enum LocalStorage {
+    /// The local aliases existing storage and does not need lexical cleanup.
+    #[default]
+    NonOwning,
+    /// The local owns storage that is released with the given drop mode.
+    Owned { drop: LocalDrop },
+    /// The local's storage mode depends on final inferred mutability.
+    Deferred(DeferredLocalStorage),
+}
+
+/// Deferred storage decision for a `let` binding initialized from a place.
+#[derive(Debug, Clone, Copy)]
+pub struct DeferredLocalStorage {
+    pub initializer: NodeId,
+    pub initializer_mut_ty: MutType,
+    pub binding_mutable: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -210,6 +265,17 @@ pub enum LocalClone {
     Unknown,
     /// Clone mode has been resolved.
     Resolved(ResolvedLocalClone),
+}
+
+/// How a local should be taken when an owned result is required.
+#[derive(Debug, Clone, Copy)]
+pub enum TakeLocalValueMode {
+    /// Decide after local storage resolution whether taking this local moves or clones.
+    Unknown,
+    /// Move out of an owned local.
+    MoveOwned,
+    /// Clone or copy from a non-owning local alias.
+    CloneBorrowed(LocalClone),
 }
 
 /// Resolved implementation for a local clone/copy operation.
@@ -340,11 +406,11 @@ impl ModuleFunction {
         ctx: &mut DictElaborationCtx<'_, '_, '_>,
     ) -> Result<(), InternalCompilationError> {
         let root = self.get_code_entry().unwrap();
-        check_borrows(arena, root)?;
         LocalDecl::assign_sequential_slots(&mut self.locals);
         let local_count = self.locals.len();
-        elaborate_local_value_dispatches(arena, &mut self.locals, ctx)?;
-        elaborate_dictionaries(arena, root, ctx, local_count)
+        elaborate_local_ownership_and_value_dispatches(arena, &mut self.locals, ctx)?;
+        check_borrows(arena, root)?;
+        elaborate_dictionaries(arena, root, ctx, &self.locals, local_count)
     }
 
     pub(crate) fn fmt_code(

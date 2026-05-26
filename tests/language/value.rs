@@ -7,7 +7,6 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 use test_log::test;
-use ustr::ustr;
 
 use crate::harness::{TestSession, int, string};
 use ferlium::{
@@ -17,7 +16,7 @@ use ferlium::{
         function::{ArgPassing, ResolvedValueArgPassing, SharedRefTempCleanup, ValueArgPassing},
         value::Value,
     },
-    module::{LocalClone, ResolvedLocalClone},
+    module::{LocalClone, ResolvedLocalClone, TakeLocalValueMode},
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -533,19 +532,17 @@ fn inferred_mutable_let_clone_resolves_to_trivial_copy_after_unification() {
 
     let mut compile_session = TestSession::new();
     let module = compile_session.compile_and_get_module(source);
-    let snapshot = module
-        .iter_named_functions()
-        .find_map(|(name, function)| (name == ustr("snapshot")).then_some(function))
-        .expect("snapshot function should be compiled");
     assert!(
-        snapshot.locals.iter().any(|local| {
-            local.name.0 == ustr("copy")
-                && matches!(
-                    local.clone,
-                    Some(LocalClone::Resolved(ResolvedLocalClone::TrivialCopy))
-                )
-        }),
-        "expected inferred mutable let clone to resolve to trivial copy"
+        module.ir_arena.iter().any(|(_, node)| matches!(
+            node.kind,
+            NodeKind::TakeLocalValue(hir::TakeLocalValue {
+                mode: TakeLocalValueMode::CloneBorrowed(LocalClone::Resolved(
+                    ResolvedLocalClone::TrivialCopy
+                )),
+                ..
+            })
+        )),
+        "expected inferred owned materialization to resolve to trivial copy"
     );
 
     let mut run_session = TestSession::new();
