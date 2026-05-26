@@ -24,9 +24,12 @@ The main phases are:
 1. Parse source text into parsed AST.
 2. Validate parsed AST features that are not accepted in user code.
 3. Desugar parsed AST syntax and module declarations.
-4. Resolve symbols and infer types, effects, mutability, and passing strategy while emitting typed HIR for modules and optional top-level expressions.
-5. Run borrow checking over HIR.
-6. Elaborate dictionaries for trait resolution and record field access.
-7. Execute HIR through the current interpreter.
+4. Resolve symbols and emit typed HIR while collecting type, effect, mutability, and trait constraints. Some HIR decisions, such as local storage ownership and value argument passing, may remain explicitly unresolved.
+5. Unify type, effect, and mutability constraints.
+6. Resolve deferred local storage decisions from the unified mutability facts, then activate the `Value` constraints required by finalized ownership and take-local semantics.
+7. Simplify and default remaining trait constraints, then build final type schemes and hidden dictionary/evidence parameter lists.
+8. Run borrow checking over HIR.
+9. Elaborate dictionaries for trait resolution, record field access, value dispatch, and unresolved argument passing.
+10. Execute HIR through the current interpreter.
 
 Future backend work may add bytecode generation and VM execution, or JIT/native code generation.

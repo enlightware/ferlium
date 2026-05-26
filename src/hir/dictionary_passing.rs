@@ -19,6 +19,7 @@ use crate::{
         ArgPassing, ResolvedValueArgPassing, SharedRefTempCleanup, ValueArgPassing,
         resolve_arg_passing_for_call,
     },
+    internal_compilation_error,
     module::{
         ConcreteTraitImplKey, ExtraParameterId, FunctionId, LocalClone, LocalDecl, LocalDrop,
         LocalFunctionId, LocalStorage, ModuleEnv, ProjectionIndex, ResolvedLocalClone,
@@ -40,10 +41,7 @@ use crate::{
     containers::b,
     hir::emit_value_impl::{function_value_method, generic_value_methods_for_type},
     hir::value::LiteralValue,
-    hir::{
-        self, Node, NodeArena, NodeId, NodeKind, node_is_place_reference,
-        place_resolution_may_create_temp,
-    },
+    hir::{self, Node, NodeArena, NodeId, NodeKind},
     std::{
         core::TRIVIAL_COPY_TRAIT,
         math::int_type,
@@ -520,7 +518,7 @@ pub fn elaborate_dictionaries<'d, 'sr, 'sm>(
     Node::elaborate_dictionaries(arena, node_id, ctx, locals, local_count)
 }
 
-/// Resolve deferred local ownership and local clone/drop placeholders.
+/// Resolve any remaining local ownership placeholders and local clone/drop value dispatches.
 pub fn elaborate_local_ownership_and_value_dispatches<'d, 'sr, 'sm>(
     arena: &mut NodeArena,
     locals: &mut [LocalDecl],
@@ -528,7 +526,10 @@ pub fn elaborate_local_ownership_and_value_dispatches<'d, 'sr, 'sm>(
 ) -> Result<(), InternalCompilationError> {
     for local in locals {
         if matches!(local.storage, LocalStorage::Deferred(_)) {
-            resolve_local_storage(arena, ctx, local)?;
+            return Err(internal_compilation_error!(Internal {
+                error: "deferred local storage reached value dispatch elaboration".to_string(),
+                span: local.scope,
+            }));
         }
 
         if matches!(local.clone, Some(LocalClone::Unknown)) {
@@ -542,36 +543,6 @@ pub fn elaborate_local_ownership_and_value_dispatches<'d, 'sr, 'sm>(
         {
             *drop = resolve_local_drop(arena, ctx, local_ty, local_scope)?;
         }
-    }
-    Ok(())
-}
-
-fn resolve_local_storage(
-    arena: &mut NodeArena,
-    ctx: &mut DictElaborationCtx<'_, '_, '_>,
-    local: &mut LocalDecl,
-) -> Result<(), InternalCompilationError> {
-    let LocalStorage::Deferred(deferred) = local.storage.clone() else {
-        return Ok(());
-    };
-
-    let initializer_is_known_immutable = deferred
-        .initializer_mut_ty
-        .as_resolved()
-        .is_some_and(|mut_ty| !mut_ty.is_mutable());
-    let can_alias_initializer = !deferred.binding_mutable
-        && initializer_is_known_immutable
-        && node_is_place_reference(arena, deferred.initializer)
-        && !place_resolution_may_create_temp(arena, deferred.initializer);
-    if local.ty == Type::never() || can_alias_initializer {
-        local.set_non_owning_storage();
-    } else {
-        if node_is_place_reference(arena, deferred.initializer)
-            && !place_resolution_may_create_temp(arena, deferred.initializer)
-        {
-            local.clone = Some(LocalClone::Unknown);
-        }
-        local.set_owned_storage(resolve_local_drop(arena, ctx, local.ty, local.scope)?);
     }
     Ok(())
 }

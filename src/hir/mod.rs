@@ -94,6 +94,38 @@ pub(crate) fn place_resolution_may_create_temp(arena: &NodeArena, node_id: NodeI
     }
 }
 
+/// Resolve a deferred let-binding storage decision once mutability inference is complete.
+pub(crate) fn resolve_deferred_local_storage_shape(
+    arena: &NodeArena,
+    local: &mut LocalDecl,
+) -> bool {
+    let crate::module::LocalStorage::Deferred(deferred) = local.storage.clone() else {
+        return false;
+    };
+
+    let initializer_is_known_immutable = deferred
+        .initializer_mut_ty
+        .as_resolved()
+        .is_some_and(|mut_ty| !mut_ty.is_mutable());
+    let can_alias_initializer = !deferred.binding_mutable
+        && initializer_is_known_immutable
+        && node_is_place_reference(arena, deferred.initializer)
+        && !place_resolution_may_create_temp(arena, deferred.initializer);
+
+    if local.ty == Type::never() || can_alias_initializer {
+        local.set_non_owning_storage();
+        false
+    } else {
+        if node_is_place_reference(arena, deferred.initializer)
+            && !place_resolution_may_create_temp(arena, deferred.initializer)
+        {
+            local.clone = Some(LocalClone::Unknown);
+        }
+        local.set_owned_storage(LocalDrop::Unknown);
+        true
+    }
+}
+
 pub(crate) fn place_result_base_argument_index(
     arena: &NodeArena,
     arguments: &[NodeId],

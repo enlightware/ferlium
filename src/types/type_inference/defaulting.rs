@@ -6,9 +6,10 @@ use ustr::ustr;
 use crate::{
     FxHashMap, FxHashSet,
     compiler::error::InternalCompilationError,
-    hir::{NodeArena, NodeId, NodeKind},
+    hir::{self, NodeArena, NodeId, NodeKind},
+    module::{LocalDecl, id::Id},
     parser::location::Location,
-    std::core_traits_names::NUM_TRAIT_NAME,
+    std::{core_traits_names::NUM_TRAIT_NAME, value::VALUE_TRAIT},
     types::{
         trait_solver::TraitSolver,
         r#type::{Type, TypeVar},
@@ -188,6 +189,52 @@ struct DefaultingProgressKey {
 }
 
 impl UnifiedTypeInference {
+    /// Resolve local ownership decisions and activate the `Value` constraints that are still needed.
+    pub fn resolve_local_storage_and_activate_value_constraints(
+        &mut self,
+        arena: &NodeArena,
+        root: NodeId,
+        locals: &mut [LocalDecl],
+    ) {
+        self.substitute_in_local_decls_in_place(locals);
+        for local in &mut *locals {
+            if hir::resolve_deferred_local_storage_shape(arena, local) && !local.ty.is_function() {
+                self.add_activated_value_constraint(local.ty, local.scope);
+            }
+        }
+        self.activate_take_local_value_constraints(arena, root, locals);
+    }
+
+    fn activate_take_local_value_constraints(
+        &mut self,
+        arena: &NodeArena,
+        id: NodeId,
+        locals: &[LocalDecl],
+    ) {
+        let node = &arena[id];
+        if let NodeKind::TakeLocalValue(take) = &node.kind
+            && matches!(take.mode, crate::module::TakeLocalValueMode::Unknown)
+            && !locals[take.id.as_index()].owns_storage()
+        {
+            self.add_activated_value_constraint(node.ty, node.span);
+        }
+        for child in node.kind.child_node_ids() {
+            self.activate_take_local_value_constraints(arena, child, locals);
+        }
+    }
+
+    fn add_activated_value_constraint(&mut self, ty: Type, span: Location) {
+        let ty = self.substitute_in_type(ty);
+        if ty.is_function() {
+            return;
+        }
+        let constraint =
+            PubTypeConstraint::new_have_trait(VALUE_TRAIT.clone(), vec![ty], vec![], span);
+        if !self.remaining_ty_constraints.contains(&constraint) {
+            self.remaining_ty_constraints.push(constraint);
+        }
+    }
+
     /// Re-solve remaining constraints after defaulting has added new information
     /// to the unification tables. Constraints that are now solvable are removed.
     fn resolve_remaining_constraints_to_fixed_point(

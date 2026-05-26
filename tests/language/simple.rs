@@ -71,6 +71,25 @@ fn raw_identifiers() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn non_owning_deferred_local_storage_does_not_leave_value_constraint() {
+    let mut session = TestSession::new();
+    let module_id = session
+        .compile("fn f(slot) { let copy = slot; () }")
+        .module_id;
+    let module = session.session().expect_fresh_module(module_id);
+    let rendered = module.format_with(session.session().modules()).to_string();
+    assert!(
+        rendered.contains("fn f<A>(slot: A) -> ()"),
+        "expected f to remain unconstrained, got:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("where A: Value"),
+        "unexpected Value constraint from non-owning deferred local storage:\n{rendered}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn binary_literals() {
     let mut session = TestSession::new();
     assert_val_eq!(session.run("0b0"), int(0));

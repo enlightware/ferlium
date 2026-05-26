@@ -954,6 +954,19 @@ where
     ty_inf.log_debug_substitution_tables(module_env);
     ty_inf.log_debug_constraints(module_env);
 
+    // Resolve local-storage decisions before defaulting so only finalized ownership semantics add `Value`.
+    for id in local_fns.iter() {
+        apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| {
+            let descr = &mut output.functions[id.as_index()];
+            let root = descr.get_code_entry().unwrap();
+            ty_inf.resolve_local_storage_and_activate_value_constraints(
+                ir_arena,
+                root,
+                &mut descr.locals,
+            );
+        });
+    }
+
     // Helpers to de-duplicate later phases between trait and normal function emission.
     let substitute_and_canonicalize_functions =
         |output: &mut Module, ir_arena: &mut _, ty_inf: &mut UnifiedTypeInference| {
@@ -1562,6 +1575,18 @@ fn emit_expr_unsafe_inner(
     let module_env = ModuleEnv::new(module, others);
     ty_inf.log_debug_substitution_tables(module_env);
     ty_inf.log_debug_constraints(module_env);
+
+    // Resolve local-storage decisions before defaulting so only finalized ownership semantics add `Value`.
+    for lambda_id in lambda_functions.iter() {
+        let descr = module.get_function_by_id_mut(*lambda_id).unwrap();
+        let root = descr.get_code_entry().unwrap();
+        ty_inf.resolve_local_storage_and_activate_value_constraints(
+            ir_arena,
+            root,
+            &mut descr.locals,
+        );
+    }
+    ty_inf.resolve_local_storage_and_activate_value_constraints(ir_arena, node_id, &mut locals);
 
     // Default constraints into the unification tables (pre-substitution).
     // For expressions, iterate defaulting and re-solving to a fixed point.

@@ -562,7 +562,7 @@ impl TypeInference {
                     && node_ty != Type::never()
                     && initializer_is_borrow
                     && !initializer_is_known_trivial_copy;
-                if (needs_clone || defer_storage) && !node_ty.is_function() {
+                if needs_clone && !node_ty.is_function() {
                     self.add_pub_constraint(PubTypeConstraint::new_have_trait(
                         VALUE_TRAIT.clone(),
                         vec![node_ty],
