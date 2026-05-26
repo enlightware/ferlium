@@ -693,13 +693,12 @@ impl Node {
                 let mode = match node.mode {
                     TakeLocalValueMode::Unknown => "unknown",
                     TakeLocalValueMode::MoveOwned => "move",
-                    TakeLocalValueMode::CloneBorrowed(LocalClone::Unknown) => "unknown clone",
-                    TakeLocalValueMode::CloneBorrowed(LocalClone::Resolved(
-                        ResolvedLocalClone::TrivialCopy,
-                    )) => "trivial copy",
-                    TakeLocalValueMode::CloneBorrowed(LocalClone::Resolved(
+                    TakeLocalValueMode::CloneBorrowed(ResolvedLocalClone::TrivialCopy) => {
+                        "trivial copy"
+                    }
+                    TakeLocalValueMode::CloneBorrowed(
                         ResolvedLocalClone::Static(_) | ResolvedLocalClone::Dictionary(_),
-                    )) => "Value::clone",
+                    ) => "Value::clone",
                 };
                 writeln!(
                     f,

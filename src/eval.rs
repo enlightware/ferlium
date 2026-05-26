@@ -2114,12 +2114,7 @@ fn eval_take_local_value(
             panic!("TakeLocalValueMode::Unknown should have been resolved before evaluation")
         }
         TakeLocalValueMode::MoveOwned => take_owned_local_value(node.id, ctx, locals),
-        TakeLocalValueMode::CloneBorrowed(LocalClone::Unknown) => {
-            panic!("TakeLocalValue clone mode should have been resolved before evaluation")
-        }
-        TakeLocalValueMode::CloneBorrowed(LocalClone::Resolved(
-            ResolvedLocalClone::TrivialCopy,
-        )) => {
+        TakeLocalValueMode::CloneBorrowed(ResolvedLocalClone::TrivialCopy) => {
             let place = Place {
                 target: local_environment_index(ctx, locals, node.id),
                 path: Vec::new(),
@@ -2131,7 +2126,7 @@ fn eval_take_local_value(
                 span,
             )?)
         }
-        TakeLocalValueMode::CloneBorrowed(LocalClone::Resolved(clone)) => {
+        TakeLocalValueMode::CloneBorrowed(clone) => {
             let place = Place {
                 target: local_environment_index(ctx, locals, node.id),
                 path: Vec::new(),

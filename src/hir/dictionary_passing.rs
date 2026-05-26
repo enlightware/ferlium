@@ -612,6 +612,18 @@ fn resolve_local_clone(
     }))
 }
 
+fn resolve_borrowed_take_clone(
+    arena: &mut NodeArena,
+    ctx: &mut DictElaborationCtx<'_, '_, '_>,
+    ty: Type,
+    span: Location,
+) -> Result<ResolvedLocalClone, InternalCompilationError> {
+    let LocalClone::Resolved(clone) = resolve_local_clone(arena, ctx, ty, span)? else {
+        unreachable!("resolve_local_clone always returns a resolved clone mode")
+    };
+    Ok(clone)
+}
+
 fn resolve_local_drop(
     arena: &mut NodeArena,
     ctx: &mut DictElaborationCtx<'_, '_, '_>,
@@ -1272,7 +1284,7 @@ impl Node {
                     node.mode = if locals[node.id.as_index()].owns_storage() {
                         TakeLocalValueMode::MoveOwned
                     } else {
-                        TakeLocalValueMode::CloneBorrowed(resolve_local_clone(
+                        TakeLocalValueMode::CloneBorrowed(resolve_borrowed_take_clone(
                             arena, ctx, node_ty, node_span,
                         )?)
                     };

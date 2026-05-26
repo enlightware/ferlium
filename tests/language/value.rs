@@ -536,9 +536,7 @@ fn inferred_mutable_let_clone_resolves_to_trivial_copy_after_unification() {
         module.ir_arena.iter().any(|(_, node)| matches!(
             node.kind,
             NodeKind::TakeLocalValue(hir::TakeLocalValue {
-                mode: TakeLocalValueMode::CloneBorrowed(LocalClone::Resolved(
-                    ResolvedLocalClone::TrivialCopy
-                )),
+                mode: TakeLocalValueMode::CloneBorrowed(ResolvedLocalClone::TrivialCopy),
                 ..
             })
         )),

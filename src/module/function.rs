@@ -275,7 +275,7 @@ pub enum TakeLocalValueMode {
     /// Move out of an owned local.
     MoveOwned,
     /// Clone or copy from a non-owning local alias.
-    CloneBorrowed(LocalClone),
+    CloneBorrowed(ResolvedLocalClone),
 }
 
 /// Resolved implementation for a local clone/copy operation.
