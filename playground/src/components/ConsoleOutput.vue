@@ -1,11 +1,28 @@
 <script setup lang="ts">
 import { ref } from 'vue';
 
-defineProps<{
-	text: string
-}>();
-
 const highlightableRef = ref<HTMLElement>();
+
+function appendNewlineIfNeeded(element: HTMLElement) {
+	if (element.childNodes.length > 0) {
+		element.appendChild(document.createTextNode("\n"));
+	}
+}
+
+const clear = () => {
+	const element = highlightableRef.value;
+	if (element) {
+		element.innerHTML = "";
+	}
+};
+
+const appendHtml = (html: string) => {
+	const element = highlightableRef.value;
+	if (element) {
+		appendNewlineIfNeeded(element);
+		element.insertAdjacentHTML("beforeend", html);
+	}
+};
 
 const highlight = () => {
 	const element = highlightableRef.value;
@@ -18,6 +35,8 @@ const highlight = () => {
 };
 
 defineExpose({
+	appendHtml,
+	clear,
 	highlight
 });
 </script>
@@ -25,9 +44,11 @@ defineExpose({
 <template>
 	<!-- eslint-disable vue/no-v-html -->
 	<div
+		id="console-output"
 		ref="highlightableRef"
-		v-html="text"
-	/>
+	>
+		Press Run or Ctrl/Cmd+Enter to execute the code.
+	</div>
 </template>
 
 <style scoped>

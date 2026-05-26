@@ -19,7 +19,6 @@ const annotationOptionTitles = [
 ];
 const editor = ref<typeof CodeEditor>();
 const console = ref<typeof ConsoleOutput>();
-const runOutput = ref("Press Run or Ctrl/Cmd+Enter to execute the code.");
 const isRunDisabled = ref(false);
 const annotationMode = ref<AnnotationMode>("light");
 
@@ -35,13 +34,15 @@ function updateAnnotationMode(data: { value: string, index: number }) {
 
 function runCode() {
 	if (editor.value && !isRunDisabled.value) {
+		const consoleOutput = defined(console.value);
+		consoleOutput.clear();
 		const result = editor.value.runCode();
 		if (result !== undefined) {
-			runOutput.value = result.html_message();
+			consoleOutput.appendHtml(result.html_message());
 		} else {
-			runOutput.value = "<span class=\"warning\">No expression to run</span>";
+			consoleOutput.appendHtml("<span class=\"warning\">No expression to run</span>");
 		}
-		defined(console.value).highlight();
+		consoleOutput.highlight();
 	}
 }
 
@@ -97,7 +98,6 @@ onMounted(() => {
 	/>
 	<ConsoleOutput
 		ref="console"
-		:text="runOutput"
 	/>
 </template>
 

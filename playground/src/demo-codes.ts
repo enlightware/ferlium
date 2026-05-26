@@ -119,7 +119,7 @@ fn b(i, f, g) {
     g()
 }
 
-a(3, ||log("hi"), ||log("world"))
+a(3, ||print("hi"), ||print("world"))
 `],
 ['Quicksort', `fn quicksort(a, lo, hi) {
 	if lo >= 0 and lo < hi {

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 
 import { ref, onMounted, watch } from "vue";
-import { Compiler, ErrorData } from "script-api";
+import { PlaygroundCompiler as Compiler, ErrorData } from "script-api";
 
 import { EditorView, keymap, ViewUpdate, scrollPastEnd } from "@codemirror/view";
 import { indentWithTab } from "@codemirror/commands";

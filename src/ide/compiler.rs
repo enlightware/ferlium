@@ -16,6 +16,7 @@ use crate::{
     format::FormatWith,
     hir::hir_syn::local,
     hir::value::{NativeValue, Value},
+    module::Uses,
     run_fn_native,
     types::{
         r#type::{Type, tuple_type},
@@ -39,6 +40,7 @@ use super::{
 pub struct Compiler {
     session: CompilerSession,
     user_module: ModuleAndExpr,
+    uses: Uses,
     char_index_lookup: FxHashMap<SourceId, CharIndexLookup>,
 }
 
@@ -50,21 +52,17 @@ const MODULE_NAME: &str = "ide";
 impl Compiler {
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen(constructor))]
     pub fn new() -> Self {
-        let mut session = CompilerSession::new();
-        let user_module = session
-            .compile("", SRC_NAME, Path::single_str(MODULE_NAME))
-            .unwrap();
-        Self {
-            session,
-            user_module,
-            char_index_lookup: FxHashMap::default(),
-        }
+        Self::new_with_session_and_uses(CompilerSession::new(), Uses::new_with_std())
     }
 
     fn compile_internal(&mut self, src: &str) -> Result<(), CompilationError> {
-        self.user_module = self
-            .session
-            .compile(src, SRC_NAME, Path::single_str(MODULE_NAME))?;
+        self.user_module = self.session.compile_to(
+            src,
+            SRC_NAME,
+            Path::single_str(MODULE_NAME),
+            self.uses.clone(),
+            None,
+        )?;
         Ok(())
     }
 
@@ -354,6 +352,24 @@ impl Compiler {
 
 /// The compiler to be used in the web IDE, non-wasm-available part
 impl Compiler {
+    pub fn new_with_session_and_uses(mut session: CompilerSession, uses: Uses) -> Self {
+        let user_module = session
+            .compile_to(
+                "",
+                SRC_NAME,
+                Path::single_str(MODULE_NAME),
+                uses.clone(),
+                None,
+            )
+            .unwrap();
+        Self {
+            session,
+            user_module,
+            uses,
+            char_index_lookup: FxHashMap::default(),
+        }
+    }
+
     fn char_index_lookup(&mut self, source_id: SourceId) -> &mut CharIndexLookup {
         self.char_index_lookup.entry(source_id).or_insert_with(|| {
             CharIndexLookup::new(

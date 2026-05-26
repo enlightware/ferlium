@@ -17,6 +17,7 @@ log = "0.4"
 wasm-logger = "0.2.0"
 html-escape = "0.2.13"
 ferlium = { path = "../.." }
+web-sys = { version = "0.3.82", features = ["Document", "Element", "Node", "Text", "Window"] }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.42"
