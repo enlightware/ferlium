@@ -208,10 +208,10 @@ impl UnifiedTypeInference {
     fn activate_take_local_value_constraints(
         &mut self,
         arena: &NodeArena,
-        id: NodeId,
+        node_id: NodeId,
         locals: &[LocalDecl],
     ) {
-        let node = &arena[id];
+        let node = &arena[node_id];
         if let NodeKind::TakeLocalValue(take) = &node.kind
             && matches!(take.mode, crate::module::TakeLocalValueMode::Unknown)
             && !locals[take.id.as_index()].owns_storage()
@@ -261,20 +261,20 @@ impl UnifiedTypeInference {
         Ok(())
     }
 
-    pub(crate) fn collect_unit_variant_seed_types(arena: &NodeArena, id: NodeId) -> Vec<Type> {
+    pub(crate) fn collect_unit_variant_seed_types(arena: &NodeArena, node_id: NodeId) -> Vec<Type> {
         let mut tys = FxHashSet::default();
-        Self::collect_unit_variant_seed_types_into(arena, id, &mut tys);
+        Self::collect_unit_variant_seed_types_into(arena, node_id, &mut tys);
         tys.into_iter().collect()
     }
 
     fn collect_unit_variant_seed_types_into(
         arena: &NodeArena,
-        id: NodeId,
+        node_id: NodeId,
         tys: &mut FxHashSet<Type>,
     ) {
-        match &arena[id].kind {
+        match &arena[node_id].kind {
             NodeKind::Variant(_, payload) if arena[*payload].ty == Type::unit() => {
-                tys.insert(arena[id].ty);
+                tys.insert(arena[node_id].ty);
             }
             kind => kind.child_node_ids().into_iter().for_each(|child_id| {
                 Self::collect_unit_variant_seed_types_into(arena, child_id, tys)

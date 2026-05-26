@@ -469,23 +469,23 @@ pub struct Node {
 
 pub fn format_ind(
     arena: &NodeArena,
-    id: NodeId,
+    node_id: NodeId,
     f: &mut std::fmt::Formatter,
     locals: &[LocalDecl],
     env: &ModuleEnv<'_>,
     spacing: usize,
     indent: usize,
 ) -> std::fmt::Result {
-    arena[id].format_ind(arena, f, locals, env, spacing, indent)
+    arena[node_id].format_ind(arena, f, locals, env, spacing, indent)
 }
 
 pub fn type_at(arena: &NodeArena, node_id: NodeId, pos: usize) -> Option<Type> {
     arena[node_id].type_at(arena, pos)
 }
 
-pub(crate) fn all_unbound_ty_vars(arena: &NodeArena, id: NodeId) -> UnboundTyVars {
+pub(crate) fn all_unbound_ty_vars(arena: &NodeArena, node_id: NodeId) -> UnboundTyVars {
     let mut unbound = IndexMap::new();
-    unbound_ty_vars(arena, id, &mut unbound, &[]);
+    unbound_ty_vars(arena, node_id, &mut unbound, &[]);
     unbound
 }
 
@@ -1123,17 +1123,17 @@ impl Node {
 /// Instantiate a node and its children in place with a type mapper.
 pub(crate) fn instantiate_node_in_place<M: TypeMapper>(
     arena: &mut NodeArena,
-    id: NodeId,
+    node_id: NodeId,
     mapper: &mut M,
 ) {
     use NodeKind::*;
     // Instantiate children first
-    let children = arena[id].kind.child_node_ids();
+    let children = arena[node_id].kind.child_node_ids();
     for child in children {
         instantiate_node_in_place(arena, child, mapper);
     }
     // Then modify this node's kind-specific data
-    match &mut arena[id].kind {
+    match &mut arena[node_id].kind {
         StaticApply(app) => {
             app.ty = app.ty.map(mapper);
             app.inst_data.instantiate_in_place(mapper);
@@ -1161,8 +1161,8 @@ pub(crate) fn instantiate_node_in_place<M: TypeMapper>(
         }
         _ => {}
     }
-    arena[id].ty = arena[id].ty.map(mapper);
-    arena[id].effects = mapper.map_effect_type(&arena[id].effects);
+    arena[node_id].ty = arena[node_id].ty.map(mapper);
+    arena[node_id].effects = mapper.map_effect_type(&arena[node_id].effects);
 }
 
 #[derive(new)]

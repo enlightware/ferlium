@@ -32,8 +32,8 @@ struct Path {
 
 impl Path {
     /// Builds a path for this node, assuming it is a place node, panicking otherwise.
-    fn from_node(arena: &NodeArena, id: NodeId) -> Self {
-        let node = &arena[id];
+    fn from_node(arena: &NodeArena, node_id: NodeId) -> Self {
+        let node = &arena[node_id];
         use NodeKind::*;
         match &node.kind {
             Project(data, index) => {
@@ -74,8 +74,8 @@ impl Path {
         path
     }
 
-    fn index_part(arena: &NodeArena, id: NodeId) -> PathPart {
-        if let NodeKind::Immediate(immediate) = &arena[id].kind {
+    fn index_part(arena: &NodeArena, node_id: NodeId) -> PathPart {
+        if let NodeKind::Immediate(immediate) = &arena[node_id].kind {
             let index = *immediate.value.as_primitive_ty::<isize>().unwrap();
             if index >= 0 {
                 return PathPart::IndexStatic(index as usize);
@@ -149,8 +149,8 @@ fn check_arguments(
     Ok(())
 }
 
-pub fn check_borrows(arena: &NodeArena, id: NodeId) -> Result<(), InternalCompilationError> {
-    arena[id].check_borrows(arena)
+pub fn check_borrows(arena: &NodeArena, node_id: NodeId) -> Result<(), InternalCompilationError> {
+    arena[node_id].check_borrows(arena)
 }
 
 impl Node {

@@ -269,14 +269,14 @@ pub(super) fn display_annotations(
 
 fn variable_type_annotations<Env>(
     arena: &NodeArena,
-    id: NodeId,
+    node_id: NodeId,
     result: &mut Vec<(usize, String)>,
     locals: &[LocalDecl],
     env: &Env,
 ) where
     Type: FormatWith<Env>,
 {
-    node_variable_type_annotations(&arena[id], arena, result, locals, env)
+    node_variable_type_annotations(&arena[node_id], arena, result, locals, env)
 }
 
 fn node_variable_type_annotations<Env>(

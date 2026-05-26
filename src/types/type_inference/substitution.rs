@@ -187,16 +187,16 @@ impl UnifiedTypeInference {
         false
     }
 
-    pub fn substitute_in_node(&mut self, arena: &mut hir::NodeArena, id: hir::NodeId) {
-        let children = arena[id].kind.child_node_ids();
+    pub fn substitute_in_node(&mut self, arena: &mut hir::NodeArena, node_id: hir::NodeId) {
+        let children = arena[node_id].kind.child_node_ids();
         for child in children {
             self.substitute_in_node(arena, child);
         }
-        let node = &mut arena[id];
+        let node = &mut arena[node_id];
         node.ty = self.substitute_in_type(node.ty);
         node.effects = SubstituteTypes(self).substitute_effect_type(&node.effects);
         use hir::NodeKind::*;
-        match &mut arena[id].kind {
+        match &mut arena[node_id].kind {
             StaticApply(app) => {
                 self.substitute_in_fn_type_in_place(&mut app.ty);
                 self.substitute_in_fn_inst_data(&mut app.inst_data);

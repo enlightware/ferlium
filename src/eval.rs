@@ -961,32 +961,32 @@ macro_rules! eval_or_return {
 /// Evaluate this node and return the result.
 pub fn eval_node(
     arena: &NodeArena,
-    id: NodeId,
+    node_id: NodeId,
     module_id: ModuleId,
     locals: &[LocalDecl],
     compiler_session: &CompilerSession,
 ) -> EvalControlFlowResult {
     let mut ctx = EvalCtx::new(module_id, compiler_session);
-    eval_node_with_ctx(arena, id, &mut ctx, locals)
+    eval_node_with_ctx(arena, node_id, &mut ctx, locals)
 }
 
 /// Evaluate this node given the environment and return the result.
 pub fn eval_node_with_ctx(
     arena: &NodeArena,
-    id: NodeId,
+    node_id: NodeId,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
     use NodeKind::*;
-    let node = &arena[id];
+    let node = &arena[node_id];
     match &node.kind {
         Immediate(immediate) => cont(immediate.value.clone().into_value()),
         Uninit => cont(Value::uninit()),
         BuildClosure(build_closure) => eval_build_closure(arena, build_closure, ctx, locals),
         Apply(app) => eval_apply(arena, app, node.span, ctx, locals),
-        FunctionClone(node) => eval_function_clone(arena, node, arena[id].span, ctx, locals),
-        FunctionDrop(node) => eval_function_drop(arena, node, arena[id].span, ctx, locals),
-        CloneValue(node) => eval_clone_value(arena, node, arena[id].span, ctx, locals),
+        FunctionClone(node) => eval_function_clone(arena, node, arena[node_id].span, ctx, locals),
+        FunctionDrop(node) => eval_function_drop(arena, node, arena[node_id].span, ctx, locals),
+        CloneValue(node) => eval_clone_value(arena, node, arena[node_id].span, ctx, locals),
         StaticApply(app) => eval_static_apply(arena, app, node.span, ctx, locals),
         TraitMethodApply(_) => {
             panic!(
@@ -1016,22 +1016,22 @@ pub fn eval_node_with_ctx(
             let _ = get_dict;
             panic!("GetDictionary is runtime metadata and should not be evaluated as a Value")
         }
-        StoreLocal(node) => eval_store_local(arena, node, arena[id].span, ctx, locals),
-        DropLocal(node) => eval_drop_local(node, arena[id].span, ctx, locals),
-        TakeLocalValue(node) => eval_take_local_value(node, arena[id].span, ctx, locals),
-        LoadLocal(node) => eval_load_local(arena, id, node, ctx, locals),
+        StoreLocal(node) => eval_store_local(arena, node, arena[node_id].span, ctx, locals),
+        DropLocal(node) => eval_drop_local(node, arena[node_id].span, ctx, locals),
+        TakeLocalValue(node) => eval_take_local_value(node, arena[node_id].span, ctx, locals),
+        LoadLocal(node) => eval_load_local(arena, node_id, node, ctx, locals),
         ExtraParameter(_) => {
             panic!("ExtraParameter is hidden evidence and should not be evaluated as a Value")
         }
         Return(node) => eval_return(arena, *node, ctx, locals),
         Block(nodes) => eval_block(arena, nodes, ctx, locals),
-        Assign(assignment) => eval_assign(arena, id, assignment, ctx, locals),
+        Assign(assignment) => eval_assign(arena, node_id, assignment, ctx, locals),
         Tuple(nodes) | Record(nodes) => eval_tuple(arena, nodes, ctx, locals),
-        Project(data, index) => eval_project(arena, id, *data, *index, ctx, locals),
+        Project(data, index) => eval_project(arena, node_id, *data, *index, ctx, locals),
         FieldAccess(_, _) => {
             panic!("String projection should not be executed, but transformed to ProjectLocal");
         }
-        ProjectAt(data, index) => eval_project_at(arena, id, *data, *index, ctx, locals),
+        ProjectAt(data, index) => eval_project_at(arena, node_id, *data, *index, ctx, locals),
         Variant(tag, payload) => eval_variant(arena, *tag, *payload, ctx, locals),
         ExtractTag(node) => eval_extract_tag(arena, *node, ctx, locals),
         Array(nodes) => eval_array(arena, nodes, ctx, locals),
@@ -2207,7 +2207,7 @@ fn try_copy_trivial_value_from_place(
 #[inline(never)]
 fn eval_load_local(
     arena: &NodeArena,
-    id: NodeId,
+    node_id: NodeId,
     node: &hir::LoadLocal,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
@@ -2221,7 +2221,7 @@ fn eval_load_local(
         &place,
         locals[node.id.as_index()].ty,
         ctx,
-        arena[id].span,
+        arena[node_id].span,
     )?)
 }
 
@@ -2291,7 +2291,7 @@ fn eval_block(
 #[inline(never)]
 fn eval_assign(
     arena: &NodeArena,
-    id: NodeId,
+    node_id: NodeId,
     assignment: &hir::Assignment,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
@@ -2299,7 +2299,7 @@ fn eval_assign(
     // Evaluate left-to-right: place first, then value (matches Rust semantics).
     let place = eval_or_return!(resolve_node_place(arena, assignment.place, ctx, locals));
     let value = eval_or_return!(eval_node_with_ctx(arena, assignment.value, ctx, locals));
-    let span = arena[id].span;
+    let span = arena[node_id].span;
     if let Some(drop) = &assignment.drop
         && !place_contains_uninit(ctx, &place, span)?
         && let Err(err) = call_local_drop_dispatch(ctx, drop, place.clone(), span)
@@ -2326,7 +2326,7 @@ fn eval_tuple(
 #[inline(never)]
 fn eval_project(
     arena: &NodeArena,
-    id: NodeId,
+    node_id: NodeId,
     data: NodeId,
     index: ProjectionIndex,
     ctx: &mut EvalCtx,
@@ -2341,13 +2341,13 @@ fn eval_project(
                 TraitDictionaryEntryIndex::from_index(index),
             ));
         }
-        if !should_evaluate_projection_data_as_value(arena, data, arena[id].ty) {
+        if !should_evaluate_projection_data_as_value(arena, data, arena[node_id].ty) {
             place.path.push(index as isize);
             return cont(copy_trivial_value_from_place(
                 &place,
-                arena[id].ty,
+                arena[node_id].ty,
                 ctx,
-                arena[id].span,
+                arena[node_id].span,
             )?);
         }
     }
@@ -2370,7 +2370,7 @@ fn eval_project(
 #[inline(never)]
 fn eval_project_at(
     arena: &NodeArena,
-    id: NodeId,
+    node_id: NodeId,
     data: NodeId,
     index: ExtraParameterId,
     ctx: &mut EvalCtx,
@@ -2385,13 +2385,13 @@ fn eval_project_at(
                 TraitDictionaryEntryIndex::from_index(index as usize),
             ));
         }
-        if !should_evaluate_projection_data_as_value(arena, data, arena[id].ty) {
+        if !should_evaluate_projection_data_as_value(arena, data, arena[node_id].ty) {
             place.path.push(index);
             return cont(copy_trivial_value_from_place(
                 &place,
-                arena[id].ty,
+                arena[node_id].ty,
                 ctx,
-                arena[id].span,
+                arena[node_id].span,
             )?);
         }
     }
@@ -2524,13 +2524,13 @@ fn eval_loop(
 /// Return this node as a place in the environment.
 pub fn resolve_node_place(
     arena: &NodeArena,
-    id: NodeId,
+    node_id: NodeId,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> Result<ControlFlow<Place>, RuntimeError> {
-    match eval_or_return!(try_resolve_node_place(arena, id, ctx, locals)) {
+    match eval_or_return!(try_resolve_node_place(arena, node_id, ctx, locals)) {
         Some(place) => Ok(ControlFlow::Continue(place)),
-        None => panic!("Cannot resolve a non-place node: {:?}", arena[id].kind),
+        None => panic!("Cannot resolve a non-place node: {:?}", arena[node_id].kind),
     }
 }
 
@@ -2707,11 +2707,11 @@ fn is_direct_interpreter_argument(ty: Type) -> bool {
 
 fn try_resolve_node_place(
     arena: &NodeArena,
-    id: NodeId,
+    node_id: NodeId,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> Result<ControlFlow<Option<Place>>, RuntimeError> {
-    let node = &arena[id];
+    let node = &arena[node_id];
     use NodeKind::*;
     Ok(ControlFlow::Continue(Some(match &node.kind {
         Project(node, index) => {
@@ -2784,8 +2784,8 @@ fn try_resolve_node_place(
     })))
 }
 
-fn node_may_resolve_to_place(arena: &NodeArena, id: NodeId) -> bool {
-    match &arena[id].kind {
+fn node_may_resolve_to_place(arena: &NodeArena, node_id: NodeId) -> bool {
+    match &arena[node_id].kind {
         NodeKind::LoadLocal(_) => true,
         NodeKind::Project(base, _)
         | NodeKind::FieldAccess(base, _)
