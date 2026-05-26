@@ -1294,21 +1294,14 @@ fn clone_value_method_dispatch(clone: &ResolvedLocalClone) -> Option<ResolvedVal
 
 fn call_local_drop_dispatch(
     ctx: &mut EvalCtx,
-    drop: &LocalDrop,
+    drop: ResolvedLocalDrop,
     target: Place,
     span: Location,
 ) -> Result<(), RuntimeError> {
     let dispatch = match drop {
-        LocalDrop::Unknown => {
-            panic!("LocalDrop::Unknown should have been resolved before evaluation")
-        }
-        LocalDrop::Resolved(ResolvedLocalDrop::Skip) => return Ok(()),
-        LocalDrop::Resolved(ResolvedLocalDrop::Static(function)) => {
-            ResolvedValueMethod::Static(*function)
-        }
-        LocalDrop::Resolved(ResolvedLocalDrop::Dictionary(dictionary)) => {
-            ResolvedValueMethod::Dictionary(*dictionary)
-        }
+        ResolvedLocalDrop::Skip => return Ok(()),
+        ResolvedLocalDrop::Static(function) => ResolvedValueMethod::Static(function),
+        ResolvedLocalDrop::Dictionary(dictionary) => ResolvedValueMethod::Dictionary(dictionary),
     };
     discard_call_result(call_resolved_value_method(
         ctx,
@@ -1319,13 +1312,13 @@ fn call_local_drop_dispatch(
     ))
 }
 
-fn call_resolved_local_drop_dispatch(
-    ctx: &mut EvalCtx,
-    drop: ResolvedLocalDrop,
-    target: Place,
-    span: Location,
-) -> Result<(), RuntimeError> {
-    call_local_drop_dispatch(ctx, &LocalDrop::Resolved(drop), target, span)
+fn resolved_local_drop(drop: &LocalDrop) -> ResolvedLocalDrop {
+    match drop {
+        LocalDrop::Unknown => {
+            panic!("LocalDrop::Unknown should have been resolved before evaluation")
+        }
+        LocalDrop::Resolved(drop) => *drop,
+    }
 }
 
 pub(crate) fn drop_frame_owned_locals_on_error(
@@ -1364,7 +1357,7 @@ fn drop_owned_locals_on_error_from(
         if place_contains_uninit(ctx, &target, span)? {
             continue;
         }
-        call_local_drop_dispatch(ctx, drop, target.clone(), span)?;
+        call_local_drop_dispatch(ctx, resolved_local_drop(drop), target.clone(), span)?;
         discard_value_storage_at_place(ctx, &target, span)?;
     }
     Ok(())
@@ -1817,7 +1810,7 @@ impl PreparedCallArgs {
 
     fn drop_temps(&mut self, ctx: &mut EvalCtx, span: Location) -> Result<(), RuntimeError> {
         for (place, drop) in self.temp_drops.iter().rev() {
-            call_resolved_local_drop_dispatch(ctx, *drop, place.clone(), span)?;
+            call_local_drop_dispatch(ctx, *drop, place.clone(), span)?;
         }
         self.temp_drops.clear();
         Ok(())
@@ -2082,7 +2075,7 @@ fn eval_drop_local(
         target: local_environment_index(ctx, locals, node.id),
         path: Vec::new(),
     };
-    call_local_drop_dispatch(ctx, drop, target.clone(), span)?;
+    call_local_drop_dispatch(ctx, resolved_local_drop(drop), target.clone(), span)?;
     discard_value_storage_at_place(ctx, &target, span)?;
     cont(Value::unit())
 }
@@ -2297,7 +2290,8 @@ fn eval_assign(
     let span = arena[node_id].span;
     if let Some(drop) = &assignment.drop
         && !place_contains_uninit(ctx, &place, span)?
-        && let Err(err) = call_local_drop_dispatch(ctx, drop, place.clone(), span)
+        && let Err(err) =
+            call_local_drop_dispatch(ctx, resolved_local_drop(drop), place.clone(), span)
     {
         value.discard_storage();
         return Err(err);
