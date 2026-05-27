@@ -8,6 +8,8 @@ edition = "2024"
 cargo-fuzz = true
 
 [dependencies]
+barkus-core = { git = "https://github.com/DataDog/barkus.git", rev = "7b55ee372cbbd9307bbcea43f2e1ec36e7e199a8", package = "barkus-core" }
+barkus-ebnf = { git = "https://github.com/DataDog/barkus.git", rev = "7b55ee372cbbd9307bbcea43f2e1ec36e7e199a8", package = "barkus-ebnf" }
 ferlium = { path = ".." }
 libfuzzer-sys = "0.4"
 
@@ -21,6 +23,13 @@ bench = false
 [[bin]]
 name = "ide_compile_any"
 path = "fuzz_targets/ide_compile_any.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grammar_ide_compile"
+path = "fuzz_targets/grammar_ide_compile.rs"
 test = false
 doc = false
 bench = false

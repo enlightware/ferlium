@@ -1,0 +1,80 @@
+program = module, [expr];
+
+module = {item};
+
+item = function | struct_def | enum_def | type_alias | use_decl;
+
+function = [visibility], "fn ", ident, generic_params, "(", params, ")", fn_ret, where_clause, " ", block, "\n";
+visibility = "" | "pub ";
+generic_params = "" | "<", ident_list, ">";
+params = "" | param, {", ", param};
+param = ["mut "], ident, [": ", type];
+fn_ret = "" | " -> ", type;
+where_clause = "" | " where ", trait_constraint, {", ", trait_constraint};
+
+struct_def = [visibility], "struct ", type_name, generic_params, struct_body, "\n";
+struct_body = ";\n" | " {", record_type_fields, "}\n" | "(", type_list, ");\n";
+record_type_fields = "" | record_type_field, {", ", record_type_field};
+record_type_field = ident, ": ", type;
+
+enum_def = [visibility], "enum ", type_name, generic_params, " {", enum_variants, "}\n";
+enum_variants = "" | enum_variant, {", ", enum_variant};
+enum_variant = tag_name | tag_name, "(", type_list, ")" | tag_name, " {", record_type_fields, "}";
+
+type_alias = [visibility], "type ", type_name, generic_params, " = ", type, ";\n";
+use_decl = "use ", path, ";\n";
+
+trait_constraint = type, ": ", path | path, "<", type_list, ">";
+
+type = path_type | tuple_type | array_type | record_type | variant_type;
+path_type = path | path, "<", type_list, ">";
+tuple_type = "()" | "(", type_list, ")";
+array_type = "[", type, "]";
+record_type = "{", record_type_fields, "}";
+variant_type = tag_name, " | ", tag_name | tag_name, "(", type_list, ") | ", tag_name;
+type_list = type | type, ", ", type | type, ", ", type, ", ", type;
+
+expr = assignment | if_expr | match_expr | for_expr | lambda | logic_expr;
+assignment = place_expr, " = ", expr | place_expr, " += ", expr;
+place_expr = ident | ident, ".", ident | ident, "[", expr, "]";
+
+logic_expr = compare_expr | compare_expr, " and ", compare_expr | compare_expr, " or ", compare_expr;
+compare_expr = arith_expr | arith_expr, " == ", arith_expr | arith_expr, " != ", arith_expr | arith_expr, " < ", arith_expr;
+arith_expr = call_expr | arith_expr, " + ", call_expr | arith_expr, " - ", call_expr | arith_expr, " * ", call_expr;
+call_expr = suffix_expr | suffix_expr, "(", expr_args, ")" | suffix_expr, "|>", ident, "(", expr_args, ")";
+suffix_expr = atom_expr | suffix_expr, ".", ident | suffix_expr, "[", expr, "]";
+
+atom_expr = literal | ident | path | tuple_expr | array_expr | record_expr | block | "(", expr, ")" | "-", atom_expr | "not ", atom_expr;
+literal = int_lit | bool_lit | string_lit;
+tuple_expr = "()" | "(", expr, ", ", expr_args, ")";
+array_expr = "[", expr_args, "]";
+record_expr = "{", record_fields, "}";
+record_fields = record_field | record_field, ", ", record_field | record_field, ", ", record_field, ", ", record_field;
+record_field = ident, ": ", expr | ident;
+expr_args = "" | expr | expr, ", ", expr | expr, ", ", expr, ", ", expr;
+
+if_expr = "if ", expr, " ", block | "if ", expr, " ", block, " else ", block;
+match_expr = "match ", expr, " {", match_arms, "}";
+match_arms = match_arm | match_arm, ", ", match_arm | match_arm, ", _ => ", expr;
+match_arm = pattern, " => ", expr;
+for_expr = "for ", pattern, " in ", expr, " ", block;
+lambda = "|", params, "| ", expr | "|| ", expr;
+
+block = "{", stmts, expr, "}" | "{", stmts, "}";
+stmts = "" | stmt | stmt, stmt | stmt, stmt, stmt;
+stmt = let_stmt | expr, "; ";
+let_stmt = "let ", pattern, [": ", type], " = ", expr, "; ";
+
+pattern = ident | "mut ", ident | "_" | tag_name | tag_name, "(", pattern_list, ")" | "{", record_pattern_fields, "}";
+pattern_list = "" | pattern | pattern, ", ", pattern | pattern, ", ", pattern, ", ", pattern;
+record_pattern_fields = "" | record_pattern_field | record_pattern_field, ", ", record_pattern_field;
+record_pattern_field = ident | ident, ": ", pattern;
+
+path = ident | ident, "::", ident | ident, "::", ident, "::", ident;
+ident_list = ident | ident, ", ", ident | ident, ", ", ident, ", ", ident;
+ident = "a" | "b" | "c" | "x" | "y" | "z" | "value" | "item" | "result" | "acc" | "main" | "map" | "filter_map";
+type_name = "A" | "B" | "C" | "User" | "Account" | "Result";
+tag_name = "Some" | "None" | "Ok" | "Err" | "Credit" | "Debit";
+int_lit = "0" | "1" | "2" | "3" | "42";
+bool_lit = "true" | "false";
+string_lit = "\"\"" | "\"a\"" | "\"hello\"";
