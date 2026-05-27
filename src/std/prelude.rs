@@ -59,6 +59,7 @@ pub fn add_ferlium_core(to: Module, source_table: &mut SourceTable, module_id: M
             // Comparison operators are needed by the array primitives below.
             prelude!("comparison.fer"),
             // Defines the array type and primitives used by array indexing.
+            // The compiler depends on array being the first type def in std (index 0).
             prelude!("array_type.fer"),
         ],
         "add Ferlium core to module",
