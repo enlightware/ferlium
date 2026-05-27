@@ -1829,6 +1829,13 @@ where
             write!(f, " }}")
         }
         Function(function) => function.fmt_with(f, env),
+        Named(NamedType { def, params: args })
+            if *def == crate::std::array::array_type_def() && args.len() == 1 =>
+        {
+            write!(f, "[")?;
+            args[0].fmt_with(f, env)?;
+            write!(f, "]")
+        }
         Named(NamedType { def, params: args }) => {
             match env.module_env().try_type_def_name(*def) {
                 Some(name) => write!(f, "{name}")?,
@@ -2717,8 +2724,8 @@ mod tests {
         check_format("int", "int");
         check_format("float", "float");
         check_format("string", "string");
-        check_format("[int]", "array<int>");
-        check_format("[float]", "array<float>");
+        check_format("[int]", "[int]");
+        check_format("[float]", "[float]");
         check_format("(bool,)", "(bool,)");
         check_format("(bool, bool)", "(bool, bool)");
         check_format("(bool, (string, int))", "(bool, (string, int))");
@@ -2734,7 +2741,7 @@ mod tests {
         );
         check_format(
             "[[(string, { age: int, name: string, nick: Option<string> })]]",
-            "array<array<(string, { age: int, name: string, nick: Option<string> })>>",
+            "[[(string, { age: int, name: string, nick: Option<string> })]]",
         );
     }
 
