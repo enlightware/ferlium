@@ -310,7 +310,9 @@ impl<'a> DisplayConstraints<'a> {
         let parent_constraints = transitive_parent_constraints(constraints, env);
         let mut display_constraints = Self::default();
         for constraint in constraints {
-            if is_hidden_light_constraint(constraint) || parent_constraints.contains(constraint) {
+            if is_hidden_light_constraint(constraint, env)
+                || parent_constraints.contains(constraint)
+            {
                 continue;
             }
             display_constraints.push(constraint);
@@ -473,7 +475,7 @@ impl ConstraintDisplayItem<'_> {
     }
 }
 
-fn is_hidden_light_constraint(constraint: &PubTypeConstraint) -> bool {
+fn is_hidden_light_constraint(constraint: &PubTypeConstraint, env: &ModuleEnv<'_>) -> bool {
     matches!(
         constraint,
         PubTypeConstraint::HaveTrait {
@@ -482,7 +484,7 @@ fn is_hidden_light_constraint(constraint: &PubTypeConstraint) -> bool {
             output_tys,
             ..
         } if trait_id.module == crate::std::STD_MODULE_ID
-            && *trait_id == crate::module::TraitId::new(crate::std::STD_MODULE_ID, crate::module::LocalTraitId(0))
+            && env.trait_def(*trait_id).name == crate::std::core_traits_names::VALUE_TRAIT_NAME
             && input_tys.len() == 1
             && output_tys.is_empty()
     )
