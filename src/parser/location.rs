@@ -213,7 +213,7 @@ impl FormatWith<SourceTable> for Location {
         match source_table.get_source_entry(source_id) {
             Some(source) => {
                 let position = source.get_line_column(start);
-                let snippet = &source.source()[start..end];
+                let snippet = source.get_snippet(start, end);
                 write!(
                     f,
                     "{}:{}:{}: `{}`",
@@ -267,10 +267,35 @@ impl SourceEntry {
         &self.source
     }
 
+    fn floor_char_boundary(&self, byte_pos: usize) -> usize {
+        let mut byte_pos = byte_pos.min(self.source.len());
+        while !self.source.is_char_boundary(byte_pos) {
+            byte_pos -= 1;
+        }
+        byte_pos
+    }
+
+    fn ceil_char_boundary(&self, byte_pos: usize) -> usize {
+        let mut byte_pos = byte_pos.min(self.source.len());
+        while !self.source.is_char_boundary(byte_pos) {
+            byte_pos += 1;
+        }
+        byte_pos
+    }
+
+    /// Return a source snippet for a byte range, expanding partial UTF-8 scalar
+    /// spans to valid string boundaries.
+    pub fn get_snippet(&self, start: usize, end: usize) -> &str {
+        let start = self.floor_char_boundary(start);
+        let end = self.ceil_char_boundary(end.max(start));
+        &self.source[start..end]
+    }
+
     /// Get the line and column (unicode scalar value) of a byte position in this source entry.
     pub fn get_line_column(&self, byte_pos: usize) -> (usize, usize) {
         let s = &self.source;
         assert!(byte_pos <= s.len(), "byte_pos out of range");
+        let byte_pos = self.floor_char_boundary(byte_pos);
 
         // Binary search to find which line this byte position is on.
         // line_starts contains the byte position of the start of each line.

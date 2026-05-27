@@ -10,7 +10,7 @@
 use ustr::ustr;
 
 use ferlium::hir::value::Value;
-use ferlium::{Path, eval::eval_node};
+use ferlium::{Compiler, Path, eval::eval_node};
 use test_log::test;
 
 use indoc::indoc;
@@ -19,6 +19,24 @@ use crate::harness::{TestSession, int};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn ide_diagnostic_inside_multibyte_char_does_not_panic() {
+    let mut compiler = Compiler::new();
+    let errors = compiler.compile(indoc! { r#"
+        fn
+            let x = [1, 2,ion with unicode: λ ≈ ⇝
+        fn display_name(user) {
+            f"hello {user.name}"
+        } main() {
+            let x = [1, 2, ];
+            x[
+        }
+    "# });
+
+    assert!(errors.is_some());
+}
 
 // Previously, the ModuleParser (used for prelude/module-level code) had an LALR state-merge bug:
 // when an `if` true-branch ended with a block-like expression (e.g. `match`), the parser would

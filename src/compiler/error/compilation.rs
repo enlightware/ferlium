@@ -924,7 +924,7 @@ fn span_to_string(loc: &Location, source_table: &SourceTable) -> String {
     match source_table.get_source_entry(source_id) {
         Some(entry) => {
             let position = entry.get_line_column(start);
-            let snippet = &entry.source()[start..end];
+            let snippet = entry.get_snippet(start, end);
             let source_name = entry.name();
             format!(
                 "`{}` (in {}:{}:{})",
