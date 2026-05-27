@@ -110,6 +110,48 @@ Writing output bindings is optional.
 If you omit them, Ferlium infers them from the method signatures.
 If you write them explicitly, they must agree with the inferred ones.
 
+## Associated constants
+
+Traits may also declare associated constants.
+An associated constant is a named literal value selected through trait resolution:
+
+```ferlium
+trait HasConst<Self> {
+    const C: Self;
+}
+
+impl HasConst for int {
+    const C = 7;
+}
+```
+
+Associated constants are accessed through the trait name:
+
+```ferlium
+# trait HasConst<Self> {
+#     const C: Self;
+# }
+# impl HasConst for int {
+#     const C = 7;
+# }
+HasConst::C
+```
+
+If the trait has an inferred input type, Ferlium infers it from context.
+You can also spell it explicitly:
+
+```ferlium
+# trait HasConst<Self> {
+#     const C: Self;
+# }
+# impl HasConst for int {
+#     const C = 7;
+# }
+HasConst::<int>::C
+```
+
+The `::` before the explicit type arguments keeps this syntax unambiguous with the `<` comparison operator.
+
 ## Coherence
 
 Ferlium uses a strict coherence rule for trait implementations:
