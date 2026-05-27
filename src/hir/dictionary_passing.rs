@@ -642,7 +642,7 @@ fn resolve_arg_passing(
 ) -> Result<(), InternalCompilationError> {
     match passing {
         ArgPassing::MutableRef | ArgPassing::Value(ValueArgPassing::Resolved(_)) => {}
-        ArgPassing::Value(ValueArgPassing::Unknown | ValueArgPassing::SharedRefUnknownDrop) => {
+        ArgPassing::Value(ValueArgPassing::Unknown) => {
             let needs_temp = crate::hir::function::call_argument_may_need_temp(arena, arg);
             *passing = ArgPassing::Value(ValueArgPassing::Resolved(resolve_value_arg_passing(
                 arena, ctx, ty, needs_temp, span,

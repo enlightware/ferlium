@@ -322,7 +322,7 @@ impl ArgPassing {
     pub fn resolved(self) -> Option<ResolvedArgPassing> {
         match self {
             Self::MutableRef => Some(ResolvedArgPassing::MutableRef),
-            Self::Value(ValueArgPassing::Unknown | ValueArgPassing::SharedRefUnknownDrop) => None,
+            Self::Value(ValueArgPassing::Unknown) => None,
             Self::Value(ValueArgPassing::Resolved(passing)) => {
                 Some(ResolvedArgPassing::Value(passing))
             }
@@ -336,7 +336,7 @@ impl ArgPassing {
                 Self::Value(ValueArgPassing::Resolved(ResolvedValueArgPassing::Owned))
             }
             ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef { .. }) => {
-                Self::Value(ValueArgPassing::SharedRefUnknownDrop)
+                Self::Value(ValueArgPassing::Unknown)
             }
         }
     }
@@ -347,8 +347,6 @@ impl ArgPassing {
 pub enum ValueArgPassing {
     /// Decide between owned value and shared reference after type inference.
     Unknown,
-    /// Shared reference is required, but temporary drop dispatch is not resolved yet.
-    SharedRefUnknownDrop,
     /// We know how to pass the argument.
     Resolved(ResolvedValueArgPassing),
 }
