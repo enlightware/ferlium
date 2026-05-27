@@ -17,7 +17,7 @@ use ferlium::{
         FunctionDefinition, NullaryNativeFnN, NullaryNativeFnV, UnaryNativeFnMN, UnaryNativeFnNN,
         UnaryNativeFnNV, UnaryNativeFnRN, UnaryNativeFnVN, UnaryNativeFnVV,
     },
-    hir::value::{NativeDisplay, Value},
+    hir::value::{LiteralValue, NativeDisplay, Value},
     module::{BlanketTraitImplSubKey, Module, ModuleEnv, ModuleId, Path, TraitId},
     parse_module_and_expr,
     std::core_traits_names::{ITERATOR_TRAIT_NAME, VALUE_TRAIT_NAME},
@@ -558,8 +558,8 @@ fn testing_module(
         [Type::primitive::<CloneTrackedNative>()],
         [],
         [
-            std::mem::size_of::<CloneTrackedNative>() as isize,
-            std::mem::align_of::<CloneTrackedNative>() as isize,
+            LiteralValue::new_native(std::mem::size_of::<CloneTrackedNative>() as isize),
+            LiteralValue::new_native(std::mem::align_of::<CloneTrackedNative>() as isize),
         ],
         [
             Box::new(BinaryNativeFnRRN::new(equal_clone_tracked)) as Function,

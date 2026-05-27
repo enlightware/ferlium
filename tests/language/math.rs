@@ -186,6 +186,23 @@ fn float_arithmetic_saturates_to_finite_bounds() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn real() {
     let mut session = TestSession::new();
+    assert_val_eq!(session.run("Real::PI"), float(std::f64::consts::PI));
+    assert_val_eq!(session.run("Real::TAU"), float(std::f64::consts::TAU));
+    assert_val_eq!(session.run("Real::E"), float(std::f64::consts::E));
+    assert_val_eq!(
+        session.run("Real::<float>::PI"),
+        float(std::f64::consts::PI)
+    );
+    assert_val_eq!(
+        session.run("let value: float = Real::PI; value"),
+        float(std::f64::consts::PI)
+    );
+    assert_val_eq!(
+        session.run("fn pi<T>() -> T where T: Real { Real::PI } pi()"),
+        float(std::f64::consts::PI)
+    );
+    assert_val_eq!(session.run("sin(Real::PI / 2.0)"), float(1.0));
+
     assert_val_eq!(session.run("sin(0.0)"), float(0.0));
     assert_val_eq!(session.run("cos(0.0)"), float(1.0));
     assert_val_eq!(session.run("tan(0.0)"), float(0.0));

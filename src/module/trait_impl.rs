@@ -20,6 +20,7 @@ use crate::{
     define_id_type,
     format::{FormatWith, write_with_separator_and_format_fn},
     hir::function::Function,
+    hir::value::LiteralValue,
     module::{LocalDecl, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleId, TraitId, id::Id},
     parser::location::Location,
     types::r#trait::{
@@ -160,18 +161,18 @@ impl TraitKey {
 #[derive(Debug, Clone)]
 pub struct TraitDictionary {
     methods: Vec<LocalFunctionId>,
-    associated_const_values: Vec<isize>,
+    associated_const_values: Vec<LiteralValue>,
 }
 
 /// A projected entry from a runtime trait dictionary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TraitDictionaryEntry {
     Method(LocalFunctionId),
-    AssociatedConst(isize),
+    AssociatedConst(LiteralValue),
 }
 
 impl TraitDictionary {
-    pub fn new(methods: &[LocalFunctionId], associated_const_values: &[isize]) -> Self {
+    pub fn new(methods: &[LocalFunctionId], associated_const_values: &[LiteralValue]) -> Self {
         Self {
             methods: methods.to_vec(),
             associated_const_values: associated_const_values.to_vec(),
@@ -184,7 +185,7 @@ impl TraitDictionary {
             TraitDictionaryEntry::Method(self.methods[index])
         } else {
             TraitDictionaryEntry::AssociatedConst(
-                self.associated_const_values[index - self.methods.len()],
+                self.associated_const_values[index - self.methods.len()].clone(),
             )
         }
     }
@@ -192,7 +193,7 @@ impl TraitDictionary {
 
 pub fn build_dictionary_value(
     methods: &[LocalFunctionId],
-    associated_const_values: &[isize],
+    associated_const_values: &[LiteralValue],
 ) -> TraitDictionary {
     TraitDictionary::new(methods, associated_const_values)
 }
@@ -204,9 +205,9 @@ pub struct TraitImpl {
     pub output_tys: Vec<Type>,
     /// The implemented methods in the module.
     pub methods: Vec<LocalFunctionId>,
-    /// Values for compiler-defined associated consts, in trait declaration order.
+    /// Values for associated consts, in trait declaration order.
     #[new(default)]
-    pub associated_const_values: Vec<isize>,
+    pub associated_const_values: Vec<LiteralValue>,
     /// The runtime dictionary, with methods first and associated const values after them.
     pub dictionary_value: TraitDictionary,
     /// The type of the runtime dictionary.
@@ -221,16 +222,16 @@ pub struct TraitImpl {
 impl TraitImpl {
     pub fn with_associated_const_values(
         mut self,
-        associated_const_values: impl Into<Vec<isize>>,
+        associated_const_values: impl Into<Vec<LiteralValue>>,
     ) -> Self {
         self.associated_const_values = associated_const_values.into();
         self
     }
 
-    pub fn associated_const_value(&self, index: TraitAssociatedConstIndex) -> Option<isize> {
+    pub fn associated_const_value(&self, index: TraitAssociatedConstIndex) -> Option<LiteralValue> {
         self.associated_const_values
             .get(usize::from(index))
-            .copied()
+            .cloned()
     }
 }
 
@@ -304,7 +305,7 @@ impl TraitImpls {
         trait_def: &Trait,
         input_tys: impl Into<Vec<Type>>,
         output_tys: impl Into<Vec<Type>>,
-        associated_const_values: impl Into<Vec<isize>>,
+        associated_const_values: impl Into<Vec<LiteralValue>>,
         functions: impl Into<Vec<(Function, Vec<LocalDecl>)>>,
         fn_collector: &mut FunctionCollector,
     ) -> LocalImplId {
@@ -346,7 +347,7 @@ impl TraitImpls {
         trait_def: &Trait,
         input_tys: Vec<Type>,
         output_tys: Vec<Type>,
-        associated_const_values: impl Into<Vec<isize>>,
+        associated_const_values: impl Into<Vec<LiteralValue>>,
         functions: Vec<ModuleFunction>,
         fn_collector: &mut FunctionCollector,
     ) -> LocalImplId {
@@ -368,7 +369,9 @@ impl TraitImpls {
         let (methods, method_tys) = Self::bundle_module_functions(functions, fn_collector, namer);
 
         // Build and insert the implementation.
-        let dictionary_type = Self::dictionary_ty(method_tys, associated_const_values.len());
+        let associated_const_tys =
+            trait_def.instantiate_associated_const_tys_for_tys(&input_tys, &output_tys);
+        let dictionary_type = Self::dictionary_ty(method_tys, associated_const_tys);
         let dictionary_value = build_dictionary_value(&methods, &associated_const_values);
         let imp = TraitImpl::new(
             output_tys,
@@ -409,7 +412,7 @@ impl TraitImpls {
         trait_def: &Trait,
         sub_key: BlanketTraitImplSubKey,
         output_tys: impl Into<Vec<Type>>,
-        associated_const_values: impl Into<Vec<isize>>,
+        associated_const_values: impl Into<Vec<LiteralValue>>,
         functions: impl Into<Vec<(Function, Vec<LocalDecl>)>>,
         fn_collector: &mut FunctionCollector,
     ) -> LocalImplId {
@@ -447,7 +450,7 @@ impl TraitImpls {
         trait_def: &Trait,
         sub_key: BlanketTraitImplSubKey,
         output_tys: Vec<Type>,
-        associated_const_values: impl Into<Vec<isize>>,
+        associated_const_values: impl Into<Vec<LiteralValue>>,
         functions: Vec<ModuleFunction>,
         fn_collector: &mut FunctionCollector,
     ) -> LocalImplId {
@@ -472,7 +475,9 @@ impl TraitImpls {
         let (methods, method_tys) = Self::bundle_module_functions(functions, fn_collector, namer);
 
         // Build and insert the implementation.
-        let dictionary_type = Self::dictionary_ty(method_tys, associated_const_values.len());
+        let associated_const_tys =
+            trait_def.instantiate_associated_const_tys_for_tys(&sub_key.input_tys, &output_tys);
+        let dictionary_type = Self::dictionary_ty(method_tys, associated_const_tys);
         let dictionary_value = build_dictionary_value(&methods, &associated_const_values);
         let imp = TraitImpl::new(
             output_tys,
@@ -518,11 +523,14 @@ impl TraitImpls {
         (methods, tys)
     }
 
-    pub fn dictionary_ty(method_tys: Vec<Type>, associated_const_count: usize) -> Type {
+    pub fn dictionary_ty(
+        method_tys: Vec<Type>,
+        associated_const_tys: impl IntoIterator<Item = Type>,
+    ) -> Type {
         Type::tuple(
             method_tys
                 .into_iter()
-                .chain((0..associated_const_count).map(|_| Type::primitive::<isize>()))
+                .chain(associated_const_tys)
                 .collect::<Vec<_>>(),
         )
     }

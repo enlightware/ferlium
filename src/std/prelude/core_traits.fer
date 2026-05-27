@@ -42,6 +42,15 @@ pub trait Div<Self>: Num<Self> {
 
 /// A real-valued numeric type supporting elementary mathematical functions.
 pub trait Real<Self>: Div<Self> {
+    /// The circle constant π.
+    const PI: Self;
+
+    /// The full-turn circle constant τ, equal to 2π.
+    const TAU: Self;
+
+    /// Euler's number.
+    const E: Self;
+
     /// Returns the sine of `value`, in radians.
     fn sin(value: Self) -> Self;
 

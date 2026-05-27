@@ -88,21 +88,19 @@ pub struct TraitSpans {
     pub span: Location,
 }
 
-/// A compiler-defined associated const declaration.
-///
-/// Associated consts are intentionally not parsed from Ferlium source yet.
-/// They are currently restricted to Ferlium `int` values, represented as
-/// `isize` in the compiler.
+/// An associated const declaration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraitAssociatedConst {
     pub name: Ustr,
+    pub ty: Type,
     pub doc: Option<String>,
 }
 
 impl TraitAssociatedConst {
-    pub fn new(name: &str, doc: &str) -> Self {
+    pub fn new(name: &str, ty: Type, doc: &str) -> Self {
         Self {
             name: ustr(name),
+            ty,
             doc: (!doc.is_empty()).then(|| doc.to_string()),
         }
     }
@@ -405,6 +403,18 @@ impl Trait {
             }
         }
 
+        // Make sure that associated const types only refer to the input or output type variables.
+        for associated_const in &self.associated_consts {
+            for ty_var in associated_const.ty.inner_ty_vars() {
+                if ty_var.name() >= trait_type_count {
+                    return Err(TraitValidationError::Invalid {
+                        trait_name: self.name,
+                        kind: InvalidTraitDefinitionKind::InvalidConstraintTypeVar { ty_var },
+                    });
+                }
+            }
+        }
+
         // Make sure that all method definitions are valid and refer to the correct type variables.
         for (name, method) in &self.methods {
             for quantifier in &method.ty_scheme.ty_quantifiers {
@@ -492,7 +502,7 @@ impl Trait {
         input_tys: &[Type],
         output_tys: &[Type],
     ) -> Vec<FunctionDefinition> {
-        let ty_subst = self.get_substitution_for_tys(input_tys, output_tys);
+        let ty_subst = self.type_param_subst_for_tys(input_tys, output_tys);
         let inst_subst = (ty_subst, FxHashMap::default());
         let mut mapper = BitmapInstantiationMapper::new(&inst_subst);
         self.methods
@@ -505,28 +515,53 @@ impl Trait {
             .collect::<Vec<_>>()
     }
 
+    /// Instantiate all associated const types of this trait for the given input and output types.
+    pub fn instantiate_associated_const_tys_for_tys(
+        &self,
+        input_tys: &[Type],
+        output_tys: &[Type],
+    ) -> Vec<Type> {
+        let ty_subst = self.type_param_subst_for_tys(input_tys, output_tys);
+        let inst_subst = (ty_subst, FxHashMap::default());
+        let mut mapper = BitmapInstantiationMapper::new(&inst_subst);
+        self.associated_consts
+            .iter()
+            .map(|associated_const| associated_const.ty.map(&mut mapper))
+            .collect()
+    }
+
     /// Get the type of the dictionary for this trait for the given input and output types.
     /// Only the types are substituted, the constraints are not considered.
     pub fn get_dictionary_type_for_tys(&self, input_tys: &[Type], output_tys: &[Type]) -> Type {
-        let ty_subst = self.get_substitution_for_tys(input_tys, output_tys);
+        let ty_subst = self.type_param_subst_for_tys(input_tys, output_tys);
         let inst_subst = (ty_subst, FxHashMap::default());
         let mut mapper = BitmapInstantiationMapper::new(&inst_subst);
+        let method_tys = self
+            .methods
+            .iter()
+            .map(|(_, def)| Type::function_type(def.ty_scheme.ty.map(&mut mapper)))
+            .collect::<Vec<_>>();
+        let associated_const_tys = self
+            .associated_consts
+            .iter()
+            .map(|associated_const| associated_const.ty.map(&mut mapper))
+            .collect::<Vec<_>>();
         Type::tuple(
-            self.methods
-                .iter()
-                .map(|(_, def)| Type::function_type(def.ty_scheme.ty.map(&mut mapper)))
-                .chain(
-                    self.associated_consts
-                        .iter()
-                        .map(|_| Type::primitive::<isize>()),
-                )
+            method_tys
+                .into_iter()
+                .chain(associated_const_tys)
                 .collect::<Vec<_>>(),
         )
     }
 
-    fn get_substitution_for_tys(&self, input_tys: &[Type], output_tys: &[Type]) -> TypeInstSubst {
-        assert!(input_tys.len() == self.input_type_count() as usize);
-        assert!(output_tys.len() == self.output_type_count() as usize);
+    /// Build the type-variable substitution for this trait applied to the given input and output types.
+    pub fn type_param_subst_for_tys(
+        &self,
+        input_tys: &[Type],
+        output_tys: &[Type],
+    ) -> TypeInstSubst {
+        debug_assert_eq!(input_tys.len(), self.input_type_count() as usize);
+        debug_assert_eq!(output_tys.len(), self.output_type_count() as usize);
         input_tys
             .iter()
             .chain(output_tys.iter())

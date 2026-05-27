@@ -51,7 +51,12 @@ modelItem {
 }
 
 TraitDef {
-    visibility kw<'trait'> Identifier traitTypeParams parentConstraints? whereClause? '{' TraitMethod* '}'
+    visibility kw<'trait'> Identifier traitTypeParams parentConstraints? whereClause? '{' TraitItem* '}'
+}
+
+TraitItem {
+    TraitAssociatedConst
+    | TraitMethod
 }
 
 traitTypeParams {
@@ -74,8 +79,21 @@ TraitMethod {
     kw<'fn'> Identifier '(' traitMethodArgs ')' fnRet? fnEffects? ';'
 }
 
+TraitAssociatedConst {
+    kw<'const'> Identifier ':' TypeNoRecordVariant ';'
+}
+
 TraitImpl {
-    kw<'impl'> GenericParams? Identifier (kw<'for'> traitImplForType)? whereClause? '{' Function* '}'
+    kw<'impl'> GenericParams? Identifier (kw<'for'> traitImplForType)? whereClause? '{' TraitImplItem* '}'
+}
+
+TraitImplItem {
+    TraitAssociatedConstImpl
+    | Function
+}
+
+TraitAssociatedConstImpl {
+    kw<'const'> Identifier '=' Literal ';'
 }
 
 traitImplForType {
@@ -583,6 +601,8 @@ PropertyPath {
 }
 
 pathOrStructCtor {
+    Identifier '::' typeArgList '::' Identifier
+    |
     Path !noStruct
     | Path pathBrace !structLiteral
 }

@@ -26,7 +26,7 @@ use crate::{
 
 use super::{
     Desugared, ExprArena, ExprId, ExprVisitor, FormatWithIndent, LetPattern, PLetPattern, Parsed,
-    Path, Pattern, PatternConstraintKind, Phase, UstrSpan, VisitExpr,
+    Path, Pattern, PatternConstraintKind, Phase, TypeSpan, UstrSpan, VisitExpr,
 };
 
 #[derive(Debug, Clone, Copy, new)]
@@ -239,6 +239,13 @@ pub struct PropertyPathData {
     pub name: Ustr,
 }
 
+#[derive(Debug, Clone)]
+pub struct TraitAssociatedConstData<P: Phase> {
+    pub trait_name: Path,
+    pub input_tys: Vec<TypeSpan<P>>,
+    pub name: UstrSpan,
+}
+
 /// The kind-specific part of an expression as an Abstract Syntax Tree.
 #[derive(Debug, Clone, EnumAsInner)]
 pub enum ExprKind<P: Phase> {
@@ -253,6 +260,7 @@ pub enum ExprKind<P: Phase> {
     Block(Vec<ExprId<P>>),
     Assign(B<AssignData<P>>),
     PropertyPath(B<PropertyPathData>),
+    TraitAssociatedConst(B<TraitAssociatedConstData<P>>),
     Tuple(Vec<ExprId<P>>),
     Project(B<ProjectData<P>>),
     Record(RecordFields<P>),
@@ -337,6 +345,18 @@ impl<P: Phase> ExprKind<P> {
     /// Construct a [`PropertyPath`](ExprKind::PropertyPath) expression.
     pub fn property_path(path: Path, name: Ustr) -> Self {
         ExprKind::PropertyPath(b(PropertyPathData { path, name }))
+    }
+
+    pub fn trait_associated_const(
+        trait_name: Path,
+        input_tys: Vec<TypeSpan<P>>,
+        name: UstrSpan,
+    ) -> Self {
+        ExprKind::TraitAssociatedConst(b(TraitAssociatedConstData {
+            trait_name,
+            input_tys,
+            name,
+        }))
     }
 
     /// Construct a [`Tuple`](ExprKind::Tuple) expression.
@@ -597,6 +617,16 @@ impl<P: Phase> FormatWithIndent<P> for Expr<P> {
             }
             SoftBreak => writeln!(f, "{indent_str}SoftBreak"),
             PropertyPath(data) => writeln!(f, "{indent_str}@{}.{}", data.path, data.name),
+            TraitAssociatedConst(data) => {
+                write!(f, "{indent_str}{}::<", data.trait_name)?;
+                for (index, (ty, _)) in data.input_tys.iter().enumerate() {
+                    if index > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", ty.format_with(env))?;
+                }
+                writeln!(f, ">::{}", data.name.0)
+            }
             PatternConstraint(data) => data.format_ind(f, env, arena, indent),
             TypeAscription(data) => {
                 arena[data.expr].format_ind(f, env, arena, indent)?;

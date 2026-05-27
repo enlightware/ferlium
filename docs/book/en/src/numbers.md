@@ -76,6 +76,21 @@ let j = 5.7 as int;
 
 Float-to-int truncates toward zero, and both directions saturate at the target type's bounds rather than wrapping or producing `NaN` or infinity.
 
+## Real constants
+
+The `Real` trait provides common mathematical constants:
+
+```ferlium
+(Real::PI, Real::TAU, Real::E)
+```
+
+`Real::PI` is inferred from context and defaults to `float` when no more specific real type is required.
+You can also spell the type explicitly:
+
+```ferlium
+Real::<float>::PI
+```
+
 ## Division and integer arithmetic
 
 The `/` operator returns a `float`, even on integer operands:

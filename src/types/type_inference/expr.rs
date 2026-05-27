@@ -10,7 +10,7 @@ use crate::{
     FxHashMap, FxHashSet,
     ast::{
         self, DExprArena, DExprId, Desugared, ExprKind, Pattern, PatternConstraintKind,
-        PatternKind, PatternVar, PropertyAccess, RecordField, RecordFields, UnnamedArg,
+        PatternKind, PatternVar, PropertyAccess, RecordField, RecordFields, UnnamedArg, UstrSpan,
     },
     compiler::error::{
         DuplicatedFieldContext, InternalCompilationError, UnsafeFeature, WhatIsNotAProductType,
@@ -18,22 +18,22 @@ use crate::{
     },
     containers::{SVec2, b, continuous_hashmap_to_vec},
     format::FormatWith,
-    hir::function::{
-        ArgPassing, Function, FunctionDefinition, ResolvedArgPassing, ScriptFunction,
-        unresolved_arg_passing_for_args,
-    },
-    hir::value::LiteralValue,
     hir::{
         self, CallArgument, FieldAccess as HirFieldAccess, NodeArena, NodeId, NodeKind,
         Project as HirProject, ProjectAt as HirProjectAt, StoreLocal, Variant as HirVariant,
+        function::{
+            ArgPassing, Function, FunctionDefinition, ResolvedArgPassing, ScriptFunction,
+            unresolved_arg_passing_for_args,
+        },
         node_is_place_reference, place_resolution_may_create_temp,
         place_result_base_argument_index,
+        value::LiteralValue,
     },
     internal_compilation_error,
     module::{
         DeferredLocalStorage, FunctionId, LocalAssignmentMode, LocalClone, LocalDecl, LocalDeclId,
         LocalDrop, ModuleEnv, ModuleFunction, ModuleFunctionSpans, ProjectionIndex,
-        ResolvedLocalDrop, TakeLocalValueMode, TypeDefLookupResult, id::Id,
+        ResolvedLocalDrop, TakeLocalValueMode, TraitId, TypeDefLookupResult, id::Id,
     },
     parser::location::Location,
     std::{
@@ -64,6 +64,16 @@ fn value_trait_id(env: &TypingEnv<'_>) -> crate::module::TraitId {
 
 fn repr_trait_id(env: &TypingEnv<'_>) -> crate::module::TraitId {
     env.module_env.expect_std_trait_id(REPR_TRAIT_NAME)
+}
+
+fn split_inferred_trait_associated_const_path(path: &ast::Path) -> Option<(ast::Path, UstrSpan)> {
+    let [(trait_name, trait_span), associated_const] = path.segments.as_slice() else {
+        return None;
+    };
+    Some((
+        ast::Path::single(*trait_name, *trait_span),
+        *associated_const,
+    ))
 }
 
 use super::{
@@ -138,6 +148,96 @@ impl TypeInference {
 
     pub fn fresh_type_var_tys(&mut self, count: usize) -> Vec<Type> {
         (0..count).map(|_| self.fresh_type_var_ty()).collect()
+    }
+
+    /// Add the instantiated trait and parent constraints implied by a trait expression.
+    fn add_instantiated_trait_assumptions(
+        &mut self,
+        env: &TypingEnv<'_>,
+        trait_id: TraitId,
+        input_tys: &[Type],
+        output_tys: &[Type],
+        span: Location,
+    ) {
+        let trait_def = env.module_env.trait_def(trait_id);
+        let subst = trait_def.type_param_subst_for_tys(input_tys, output_tys);
+        let inst_subst = (subst, FxHashMap::default());
+        let mut mapper = BitmapInstantiationMapper::new(&inst_subst);
+        for constraint in trait_def
+            .parent_constraints
+            .iter()
+            .chain(trait_def.constraints.iter())
+        {
+            let mut constraint = constraint.map(&mut mapper);
+            constraint.instantiate_location(span);
+            let parent = constraint
+                .as_have_trait()
+                .map(|(trait_id, input_tys, output_tys, _)| {
+                    (*trait_id, input_tys.to_vec(), output_tys.to_vec())
+                });
+            self.add_pub_constraint(constraint);
+            if let Some((parent_trait_id, parent_input_tys, parent_output_tys)) = parent {
+                self.add_instantiated_trait_assumptions(
+                    env,
+                    parent_trait_id,
+                    &parent_input_tys,
+                    &parent_output_tys,
+                    span,
+                );
+            }
+        }
+    }
+
+    /// Infer a `Trait::CONST` or `Trait::<T>::CONST` expression.
+    fn infer_trait_associated_const(
+        &mut self,
+        env: &mut TypingEnv,
+        trait_id: TraitId,
+        associated_const_name: UstrSpan,
+        explicit_input_tys: Option<&[crate::ast::TypeSpan<Desugared>]>,
+        expr_span: Location,
+    ) -> Result<(NodeKind, Type, MutType, EffType), InternalCompilationError> {
+        let trait_def = env.module_env.trait_def(trait_id);
+        let Some(associated_const_index) =
+            trait_def.associated_const_index(associated_const_name.0)
+        else {
+            return Err(internal_compilation_error!(InvalidVariantConstructor {
+                span: associated_const_name.1,
+            }));
+        };
+        let input_tys = if let Some(input_tys) = explicit_input_tys {
+            if input_tys.len() != trait_def.input_type_count() as usize {
+                return Err(internal_compilation_error!(WrongNumberOfArguments {
+                    expected: trait_def.input_type_count() as usize,
+                    expected_span: associated_const_name.1,
+                    got: input_tys.len(),
+                    got_span: expr_span,
+                }));
+            }
+            input_tys.iter().map(|(ty, _)| *ty).collect::<Vec<_>>()
+        } else {
+            self.fresh_type_var_tys(trait_def.input_type_count() as usize)
+        };
+        let output_tys = self.fresh_type_var_tys(trait_def.output_type_count() as usize);
+        self.add_pub_constraint(PubTypeConstraint::new_have_trait(
+            trait_id,
+            input_tys.clone(),
+            output_tys.clone(),
+            expr_span,
+        ));
+        self.add_instantiated_trait_assumptions(env, trait_id, &input_tys, &output_tys, expr_span);
+        let associated_const_tys =
+            trait_def.instantiate_associated_const_tys_for_tys(&input_tys, &output_tys);
+        let ty = associated_const_tys[associated_const_index.as_index()];
+        let node = NodeKind::GetTraitAssociatedConst(b(hir::GetTraitAssociatedConst {
+            trait_id,
+            associated_const_index,
+            associated_const_name: associated_const_name.0,
+            associated_const_span: associated_const_name.1,
+            input_tys,
+            output_tys,
+        }));
+        Ok((node, ty, MutType::constant(), no_effects()))
     }
 
     pub fn fresh_mut_var(&mut self) -> MutVar {
@@ -540,6 +640,19 @@ impl TypeInference {
                     };
                     (node, ty, MutType::constant(), EffType::empty())
                 }
+                // Retrieve an inferred trait associated const such as `Real::PI`.
+                else if let Some((trait_name, associated_const_name)) =
+                    split_inferred_trait_associated_const_path(path)
+                    && let Some((_, trait_id)) = env.module_env.trait_id_with_module(&trait_name)?
+                {
+                    self.infer_trait_associated_const(
+                        env,
+                        trait_id,
+                        associated_const_name,
+                        None,
+                        expr_span,
+                    )?
+                }
                 // Otherwise, the name is neither a known variable or function, assume it to be a variant constructor
                 else {
                     // Unresolved structural variants cannot be paths.
@@ -566,6 +679,21 @@ impl TypeInference {
                     let node = K::Variant(HirVariant::new(tag, payload));
                     (node, variant_ty, MutType::constant(), no_effects())
                 }
+            }
+            TraitAssociatedConst(data) => {
+                let Some((_, trait_id)) = env.module_env.trait_id_with_module(&data.trait_name)?
+                else {
+                    return Err(internal_compilation_error!(InvalidVariantConstructor {
+                        span: expr_span,
+                    }));
+                };
+                self.infer_trait_associated_const(
+                    env,
+                    trait_id,
+                    data.name,
+                    Some(&data.input_tys),
+                    expr_span,
+                )?
             }
             Let(data) => {
                 let name = data.pattern.kind.name;
@@ -2953,7 +3081,12 @@ fn collect_free_variables(
             collect_free_variables(data.array, arena, bound, free);
             collect_free_variables(data.index, arena, bound, free);
         }
-        Literal(_, _) | FormattedString(_) | PropertyPath(_) | SoftBreak | Error => {}
+        Literal(_, _)
+        | FormattedString(_)
+        | PropertyPath(_)
+        | TraitAssociatedConst(_)
+        | SoftBreak
+        | Error => {}
     }
 }
 

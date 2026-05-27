@@ -258,7 +258,12 @@ fn value_dictionary_node_kind_from_methods(
     let associated_const_values =
         value_layout_associated_const_values(input_tys[0], span, ctx.trait_solver)?;
     let ty = trait_def.get_dictionary_type_for_tys(input_tys, &[]);
-    let dictionary_ty = TraitImpls::dictionary_ty(method_tys, associated_const_values.len());
+    let associated_const_values = associated_const_values
+        .into_iter()
+        .map(LiteralValue::new_native)
+        .collect::<Vec<_>>();
+    let associated_const_tys = trait_def.instantiate_associated_const_tys_for_tys(input_tys, &[]);
+    let dictionary_ty = TraitImpls::dictionary_ty(method_tys, associated_const_tys);
     let dictionary_value = build_dictionary_value(methods, &associated_const_values);
     let imp = TraitImpl::new(
         Vec::new(),
@@ -1264,7 +1269,7 @@ impl Node {
                         get_const.associated_const_span,
                         arena,
                     )?;
-                    kind = hir::hir_syn::native(value);
+                    kind = hir::NodeKind::Immediate(value);
                 } else {
                     let dict_index = find_trait_impl_dict_index(
                         ctx.dicts,
@@ -1460,8 +1465,8 @@ mod tests {
     use crate::{
         FxHashMap, Location, Modules,
         containers::b,
-        hir::GetTraitAssociatedConst,
         hir::function::Function,
+        hir::{GetTraitAssociatedConst, value::LiteralValue},
         module::{
             FunctionCollector, LocalDecl, LocalTraitId, ModuleId, TraitId, TraitImpls, id::Id,
         },
@@ -1480,8 +1485,8 @@ mod tests {
             Vec::<(&str, crate::hir::function::FunctionDefinition)>::new(),
         )
         .with_associated_consts([
-            TraitAssociatedConst::new("SIZE", "Size in bytes."),
-            TraitAssociatedConst::new("ALIGN", "Alignment in bytes."),
+            TraitAssociatedConst::new("SIZE", Type::primitive::<isize>(), "Size in bytes."),
+            TraitAssociatedConst::new("ALIGN", Type::primitive::<isize>(), "Alignment in bytes."),
         ])
     }
 
@@ -1527,7 +1532,10 @@ mod tests {
             trait_def,
             [Type::unit()],
             [],
-            [8, 4],
+            [
+                LiteralValue::new_native(8isize),
+                LiteralValue::new_native(4isize),
+            ],
             Vec::<(Function, Vec<LocalDecl>)>::new(),
             &mut fn_collector,
         );

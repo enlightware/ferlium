@@ -27,7 +27,7 @@ use crate::{
         BinaryNativeFnRMN, BinaryNativeFnRRFN, BinaryNativeFnRRN, BinaryNativeFnRRV, Function,
         NullaryNativeFnN, UnaryNativeFnNN, UnaryNativeFnRFN, UnaryNativeFnRN,
     },
-    hir::value::{NativeDisplay, Value},
+    hir::value::{LiteralValue, NativeDisplay, Value},
     module::Module,
     std::{
         core_traits_names::{
@@ -657,10 +657,15 @@ pub fn add_to_module(to: &mut Module) {
         [],
         [b(BinaryNativeFnRRFN::new(div_float)) as Function],
     );
-    to.add_native_concrete_impl(
+    to.add_concrete_impl_no_locals(
         real_trait_id,
         [float_type()],
         [],
+        vec![
+            LiteralValue::new_native(Float::new(std::f64::consts::PI).unwrap()),
+            LiteralValue::new_native(Float::new(std::f64::consts::TAU).unwrap()),
+            LiteralValue::new_native(Float::new(std::f64::consts::E).unwrap()),
+        ],
         [
             b(UnaryNativeFnRN::new(sin_float)) as Function,
             b(UnaryNativeFnRN::new(cos_float)) as Function,

@@ -23,7 +23,10 @@ use crate::{
         ValueArgPassing, VoidFunction,
     },
     hir::hir_syn::{get_dictionary, load_local},
-    hir::{self, CallArgument, FnInstData, Node, NodeArena, NodeKind, StaticApplication},
+    hir::{
+        self, CallArgument, FnInstData, Node, NodeArena, NodeKind, StaticApplication,
+        value::LiteralValue,
+    },
     internal_compilation_error,
     module::{
         self, BlanketImpls, BlanketTraitImplKey, BlanketTraitImpls, ConcreteTraitImplKey, Def,
@@ -112,10 +115,10 @@ fn materialized_associated_const_values(
     trait_id: TraitId,
     trait_def: &Trait,
     input_tys: &[Type],
-    template_values: &[isize],
+    template_values: &[LiteralValue],
     span: Location,
     solver: &TraitSolver<'_>,
-) -> Result<Vec<isize>, InternalCompilationError> {
+) -> Result<Vec<LiteralValue>, InternalCompilationError> {
     if trait_def.associated_const_count() == 0 {
         return Ok(Vec::new());
     }
@@ -125,7 +128,12 @@ fn materialized_associated_const_values(
     // Temporary special case: blanket impls cannot yet store associated const
     // formulas, so materialized Value dictionaries synthesize layout metadata.
     if is_value_trait(trait_id, trait_def) {
-        return Ok(value_layout_associated_const_values(input_tys[0], span, solver)?.into());
+        return Ok(
+            value_layout_associated_const_values(input_tys[0], span, solver)?
+                .into_iter()
+                .map(LiteralValue::new_native)
+                .collect(),
+        );
     }
     Err(internal_compilation_error!(Internal {
         error: format!(
@@ -1407,7 +1415,7 @@ impl<'a> TraitSolver<'a> {
         trait_id: TraitId,
         input_types: &[Type],
         output_types: &[Type],
-        associated_const_values: impl Into<Vec<isize>>,
+        associated_const_values: impl Into<Vec<LiteralValue>>,
     ) -> LocalImplId {
         let associated_const_values = associated_const_values.into();
         let trait_def = trait_def_from_parts(
@@ -1446,7 +1454,9 @@ impl<'a> TraitSolver<'a> {
             tys.push(ty);
         }
 
-        let dictionary_ty = TraitImpls::dictionary_ty(tys, associated_const_values.len());
+        let associated_const_tys =
+            trait_def.instantiate_associated_const_tys_for_tys(input_types, output_types);
+        let dictionary_ty = TraitImpls::dictionary_ty(tys, associated_const_tys);
         let dictionary_value = build_dictionary_value(&methods, &associated_const_values);
         let imp = TraitImpl::new(
             output_types.to_vec(),
@@ -1948,8 +1958,9 @@ impl<'a> TraitSolver<'a> {
                     }
 
                     // Build and insert the implementation.
-                    let dictionary_ty =
-                        TraitImpls::dictionary_ty(tys, associated_const_values.len());
+                    let associated_const_tys =
+                        trait_def.instantiate_associated_const_tys_for_tys(input_tys, &output_tys);
+                    let dictionary_ty = TraitImpls::dictionary_ty(tys, associated_const_tys);
                     let dictionary_value =
                         build_dictionary_value(&methods, &associated_const_values);
                     let imp = TraitImpl::new(
@@ -2255,7 +2266,7 @@ impl<'a> TraitSolver<'a> {
         associated_const_index: TraitAssociatedConstIndex,
         fn_span: Location,
         arena: &mut NodeArena,
-    ) -> Result<isize, InternalCompilationError> {
+    ) -> Result<LiteralValue, InternalCompilationError> {
         assert!(
             associated_const_index.as_index() < self.trait_def(trait_id).associated_const_count(),
             "associated const index {} out of bounds for trait {}",

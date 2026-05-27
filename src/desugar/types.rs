@@ -1352,6 +1352,7 @@ impl PTraitImpl {
             trait_name: self.trait_name,
             for_trait,
             where_clause,
+            associated_consts: self.associated_consts,
             functions,
         })
     }

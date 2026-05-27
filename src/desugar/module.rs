@@ -4,7 +4,9 @@ use crate::desugar::types::{
 };
 use crate::hir::function::FunctionDefinition;
 use crate::module::Visibility;
-use crate::types::r#trait::{Trait, TraitMethodSpans, TraitSpans, TraitValidationError};
+use crate::types::r#trait::{
+    Trait, TraitAssociatedConst, TraitMethodSpans, TraitSpans, TraitValidationError,
+};
 
 use super::expr::desugar;
 use super::*;
@@ -898,6 +900,24 @@ impl ast::TraitDefinition {
             .into_iter()
             .map(|function| function.desugar(env, &generic_ty_params, modules_used))
             .collect::<Result<Vec<_>, _>>()?;
+        let associated_consts = self
+            .associated_consts
+            .into_iter()
+            .map(|associated_const| {
+                let ty = associated_const.ty.0.desugar_with_ty_params(
+                    associated_const.ty.1,
+                    false,
+                    env,
+                    &generic_ty_params,
+                    modules_used,
+                )?;
+                Ok(TraitAssociatedConst {
+                    name: associated_const.name.0,
+                    ty,
+                    doc: associated_const.doc,
+                })
+            })
+            .collect::<Result<Vec<_>, InternalCompilationError>>()?;
         let trait_span = self.span;
         Trait::from_trait_data(Trait {
             name: self.name.0,
@@ -907,7 +927,7 @@ impl ast::TraitDefinition {
             parent_constraints,
             constraints,
             methods,
-            associated_consts: vec![],
+            associated_consts,
             derivers: vec![],
             impl_policy: crate::types::r#trait::TraitImplPolicy::UserImplementable,
             spans: Some(spans),

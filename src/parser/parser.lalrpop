@@ -1,5 +1,5 @@
 use crate::{SourceId, Location, LocatedError};
-use crate::ast::{UstrSpan, Path, UseTree, PTypeSpan as TypeSpan, PMutTypeTypeSpan as MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, Pattern, PatternKind as PatK, PatternVar, PLetPattern as LetPattern, LetPatternKind as LetPatK, LetRecordPatternField, MapLiteralEntry, PModuleFunctionArg as ModuleFunctionArg, PModule as Module, PModuleFunction as ModuleFunction, PTraitDefinition as TraitDefinition, TraitMethod, TraitMethodArg, PTraitImpl as TraitImpl, PTraitImplFor as TraitImplForHeader, PTypeConstraint as TypeConstraint, PTypeConstraintInput as TypeConstraintInput, PTypeConstraintOutput as TypeConstraintOutput, PTypeDef as TypeDef, TypeAlias, PType as Type, PFnType as FnType, PFnEffects, PFnArgType as FnArgType, PMutType as MutType, Attribute, MetaItem, UnnamedArg, PExprArena, PExprId};
+use crate::ast::{UstrSpan, Path, UseTree, PTypeSpan as TypeSpan, PMutTypeTypeSpan as MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, Pattern, PatternKind as PatK, PatternVar, PLetPattern as LetPattern, LetPatternKind as LetPatK, LetRecordPatternField, MapLiteralEntry, PModuleFunctionArg as ModuleFunctionArg, PModule as Module, PModuleFunction as ModuleFunction, PTraitDefinition as TraitDefinition, TraitAssociatedConstDecl, TraitAssociatedConstImpl, TraitDefinitionItem, TraitImplItem, TraitMethod, TraitMethodArg, PTraitImpl as TraitImpl, PTraitImplFor as TraitImplForHeader, PTypeConstraint as TypeConstraint, PTypeConstraintInput as TypeConstraintInput, PTypeConstraintOutput as TypeConstraintOutput, PTypeDef as TypeDef, TypeAlias, PType as Type, PFnType as FnType, PFnEffects, PFnArgType as FnArgType, PMutType as MutType, Attribute, MetaItem, UnnamedArg, PExprArena, PExprId};
 use crate::types::effects::PrimitiveEffect;
 use crate::hir::value::LiteralValue;
 use crate::types::r#type::{
@@ -71,7 +71,15 @@ ModuleTraitImpl: Module = {
 }
 
 TraitDefinition: TraitDefinition = {
-    <doc:DOC_COMMENT*> <visibility:Visibility> <l:@L> "trait" <name:Sp<UIdentifier>> <header:TraitDefinitionHeader> <parent_constraints:ParentConstraintList?> <where_clause:WhereClause?> "{" <methods:TraitMethod*> "}" <r:@R> => {
+    <doc:DOC_COMMENT*> <visibility:Visibility> <l:@L> "trait" <name:Sp<UIdentifier>> <header:TraitDefinitionHeader> <parent_constraints:ParentConstraintList?> <where_clause:WhereClause?> "{" <items:TraitItem*> "}" <r:@R> => {
+        let mut associated_consts = Vec::new();
+        let mut methods = Vec::new();
+        for item in items {
+            match item {
+                TraitDefinitionItem::AssociatedConst(associated_const) => associated_consts.push(associated_const),
+                TraitDefinitionItem::Method(method) => methods.push(method),
+            }
+        }
         TraitDefinition {
             visibility,
             name,
@@ -79,11 +87,17 @@ TraitDefinition: TraitDefinition = {
             output_type_names: header.1,
             parent_constraints: parent_constraints.unwrap_or_default(),
             where_clause: where_clause.unwrap_or_default(),
+            associated_consts,
             methods,
             span: span(l, r, source_id),
             doc: parse_doc_comments(doc),
         }
     },
+}
+
+TraitItem: TraitDefinitionItem = {
+    TraitAssociatedConstDecl => TraitDefinitionItem::AssociatedConst(<>),
+    TraitMethod => TraitDefinitionItem::Method(<>),
 }
 
 TraitDefinitionHeader: (Vec<UstrSpan>, Vec<UstrSpan>) = {
@@ -100,26 +114,49 @@ ParentConstraintList: Vec<TypeConstraint> = {
 }
 
 TraitImpl: TraitImpl = {
-    <l:@L> "impl" <generic_params:GenericParams?> <trait_name:Sp<UIdentifier>> <where_clause:WhereClause?> "{" <functions:Function*> "}" <r:@R> => {
+    <l:@L> "impl" <generic_params:GenericParams?> <trait_name:Sp<UIdentifier>> <where_clause:WhereClause?> "{" <items:TraitImplItem*> "}" <r:@R> => {
+        let mut associated_consts = Vec::new();
+        let mut functions = Vec::new();
+        for item in items {
+            match item {
+                TraitImplItem::AssociatedConst(associated_const) => associated_consts.push(associated_const),
+                TraitImplItem::Function(function) => functions.push(function),
+            }
+        }
         TraitImpl {
             generic_params: generic_params.unwrap_or_default(),
             trait_name,
             for_trait: None,
             where_clause: where_clause.unwrap_or_default(),
+            associated_consts,
             functions,
             span: span(l, r, source_id),
         }
     },
-    <l:@L> "impl" <generic_params:GenericParams?> <trait_name:Sp<UIdentifier>> "for" <for_trait:TraitImplForHeader> <where_clause:WhereClause?> "{" <functions:Function*> "}" <r:@R> => {
+    <l:@L> "impl" <generic_params:GenericParams?> <trait_name:Sp<UIdentifier>> "for" <for_trait:TraitImplForHeader> <where_clause:WhereClause?> "{" <items:TraitImplItem*> "}" <r:@R> => {
+        let mut associated_consts = Vec::new();
+        let mut functions = Vec::new();
+        for item in items {
+            match item {
+                TraitImplItem::AssociatedConst(associated_const) => associated_consts.push(associated_const),
+                TraitImplItem::Function(function) => functions.push(function),
+            }
+        }
         TraitImpl {
             generic_params: generic_params.unwrap_or_default(),
             trait_name,
             for_trait: Some(for_trait),
             where_clause: where_clause.unwrap_or_default(),
+            associated_consts,
             functions,
             span: span(l, r, source_id),
         }
     },
+}
+
+TraitImplItem: TraitImplItem = {
+    TraitAssociatedConstImpl => TraitImplItem::AssociatedConst(<>),
+    Function => TraitImplItem::Function(<>),
 }
 
 TraitImplForHeader: TraitImplForHeader = {
@@ -210,6 +247,26 @@ TraitMethod: TraitMethod = {
             effects: effects.map(|(effects, _)| effects).unwrap_or(PFnEffects::ImplicitPure),
             span: span(l, r, source_id),
             doc: parse_doc_comments(doc),
+        },
+}
+
+TraitAssociatedConstDecl: TraitAssociatedConstDecl<crate::ast::Parsed> = {
+    <doc:DOC_COMMENT*> <l:@L> "const" <name:Sp<UIdentifier>> ":" <ty:Sp<Type<"P", "">>> ";" <r:@R> =>
+        TraitAssociatedConstDecl {
+            name,
+            ty,
+            span: span(l, r, source_id),
+            doc: parse_doc_comments(doc),
+        },
+}
+
+TraitAssociatedConstImpl: TraitAssociatedConstImpl = {
+    <l:@L> "const" <name:Sp<UIdentifier>> "=" <value:LiteralValue> ";" <r:@R> =>
+        TraitAssociatedConstImpl {
+            name,
+            value: value.0,
+            ty: value.1,
+            span: span(l, r, source_id),
         },
 }
 
@@ -744,6 +801,8 @@ ParExpr: ExprKind = {
 }
 
 PathOrStructExpr<NoStruct>: ExprKind = {
+    <trait_name:Path> "::" "<" <input_tys:TypeArgList<"">> ">" "::" <name:Sp<UIdentifier>> =>
+        ExprKind::trait_associated_const(trait_name, input_tys, name),
     <p:Path> => ExprKind::identifier(p),
     <p:Path> <l:@L> "{" <items:Sep<PathBraceItem, ",">> "}" <r:@R> if NoStruct != "NoStruct" =>?
         path_brace_expr(p, items, span(l, r, source_id), arena),

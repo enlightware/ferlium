@@ -8,6 +8,7 @@
 //
 pub(crate) mod borrow_checker;
 pub(crate) mod dictionary_passing;
+pub(crate) mod emit_associated_consts;
 pub mod emit_ir;
 pub(crate) mod emit_value_impl;
 pub mod function;

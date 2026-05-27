@@ -540,6 +540,13 @@ pub(super) fn compilation_error_to_data(
                 ),
             )]
         }
+        InvalidTraitAssociatedConstImpl {
+            trait_ref,
+            kind,
+            span,
+        } => {
+            vec![error_data_from_location(span, kind.message(trait_ref))]
+        }
         TraitImplOrphanRuleViolation {
             trait_ref,
             input_tys,

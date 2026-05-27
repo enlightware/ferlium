@@ -10,9 +10,14 @@
 use test_log::test;
 
 use ferlium::{
-    compiler::error::{CompilationErrorImpl, InvalidTraitDefinitionKind},
+    compiler::error::{
+        CompilationErrorImpl, InvalidTraitAssociatedConstImplKind, InvalidTraitDefinitionKind,
+    },
     format::FormatWith,
-    hir::function::{Function, FunctionDefinition, VoidFunction},
+    hir::{
+        function::{Function, FunctionDefinition, VoidFunction},
+        value::LiteralValue,
+    },
     module::{
         FunctionCollector, LocalDecl, LocalTraitId, ModuleId, TraitDictionaryEntry, TraitId,
         TraitImpls,
@@ -444,8 +449,8 @@ fn concrete_impl_stores_associated_const_values() {
         [("identity", method)],
     )
     .with_associated_consts([
-        TraitAssociatedConst::new("SIZE", "Size in bytes."),
-        TraitAssociatedConst::new("ALIGN", "Alignment in bytes."),
+        TraitAssociatedConst::new("SIZE", Type::primitive::<isize>(), "Size in bytes."),
+        TraitAssociatedConst::new("ALIGN", Type::primitive::<isize>(), "Alignment in bytes."),
     ]);
     let trait_id = TraitId::new(ModuleId(0), LocalTraitId(0));
     let mut impls = TraitImpls::new(ModuleId(0));
@@ -456,7 +461,10 @@ fn concrete_impl_stores_associated_const_values() {
         &trait_def,
         [Type::unit()],
         [],
-        [0, 1],
+        [
+            LiteralValue::new_native(0isize),
+            LiteralValue::new_native(1isize),
+        ],
         [(Box::new(VoidFunction) as Function, Vec::<LocalDecl>::new())],
         &mut fn_collector,
     );
@@ -484,11 +492,11 @@ fn concrete_impl_stores_associated_const_values() {
     );
     assert_eq!(
         imp.associated_const_value(TraitAssociatedConstIndex(0)),
-        Some(0)
+        Some(LiteralValue::new_native(0isize))
     );
     assert_eq!(
         imp.associated_const_value(TraitAssociatedConstIndex(1)),
-        Some(1)
+        Some(LiteralValue::new_native(1isize))
     );
     assert_eq!(fn_collector.new_elements.len(), 1);
 
@@ -498,11 +506,11 @@ fn concrete_impl_stores_associated_const_values() {
     ));
     assert_eq!(
         imp.dictionary_value.entry(TraitDictionaryEntryIndex(1)),
-        TraitDictionaryEntry::AssociatedConst(0)
+        TraitDictionaryEntry::AssociatedConst(LiteralValue::new_native(0isize))
     );
     assert_eq!(
         imp.dictionary_value.entry(TraitDictionaryEntryIndex(2)),
-        TraitDictionaryEntry::AssociatedConst(1)
+        TraitDictionaryEntry::AssociatedConst(LiteralValue::new_native(1isize))
     );
 
     let int_ty = Type::primitive::<isize>();
@@ -511,6 +519,132 @@ fn concrete_impl_stores_associated_const_values() {
     assert!(dictionary_tys[0].data().as_function().is_some());
     assert_eq!(dictionary_tys[1], int_ty);
     assert_eq!(dictionary_tys[2], int_ty);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn source_traits_can_define_literal_associated_consts() {
+    let mut session = TestSession::new();
+
+    assert_val_eq!(
+        session.run(indoc! {r#"
+            trait HasConst<Self> {
+                const C: Self;
+                fn id(value: Self) -> Self;
+            }
+
+            impl HasConst for int {
+                const C = 7;
+
+                fn id(value: int) -> int {
+                    value
+                }
+            }
+
+            HasConst::<int>::C
+        "#}),
+        int(7)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn source_trait_impl_rejects_unknown_associated_const() {
+    let mut session = TestSession::new();
+
+    match session
+        .fail_compilation(indoc! {r#"
+            trait HasConst<Self> {
+                const C: Self;
+                fn id(value: Self) -> Self;
+            }
+
+            impl HasConst for int {
+                const D = 7;
+                fn id(value: int) -> int { value }
+            }
+        "#})
+        .into_inner()
+    {
+        CompilationErrorImpl::InvalidTraitAssociatedConstImpl {
+            trait_ref, kind, ..
+        } => {
+            assert_eq!(trait_ref, "HasConst");
+            assert_eq!(
+                kind,
+                InvalidTraitAssociatedConstImplKind::Unknown { name: ustr("D") }
+            );
+        }
+        other => panic!("expected InvalidTraitAssociatedConstImpl, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn source_trait_impl_rejects_duplicate_associated_const() {
+    let mut session = TestSession::new();
+
+    match session
+        .fail_compilation(indoc! {r#"
+            trait HasConst<Self> {
+                const C: Self;
+                fn id(value: Self) -> Self;
+            }
+
+            impl HasConst for int {
+                const C = 7;
+                const C = 8;
+                fn id(value: int) -> int { value }
+            }
+        "#})
+        .into_inner()
+    {
+        CompilationErrorImpl::InvalidTraitAssociatedConstImpl {
+            trait_ref, kind, ..
+        } => {
+            assert_eq!(trait_ref, "HasConst");
+            assert_eq!(
+                kind,
+                InvalidTraitAssociatedConstImplKind::Duplicate { name: ustr("C") }
+            );
+        }
+        other => panic!("expected InvalidTraitAssociatedConstImpl, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn source_trait_impl_rejects_missing_associated_const() {
+    let mut session = TestSession::new();
+
+    match session
+        .fail_compilation(indoc! {r#"
+            trait HasConsts<Self> {
+                const C: Self;
+                const D: Self;
+                fn id(value: Self) -> Self;
+            }
+
+            impl HasConsts for int {
+                const C = 7;
+                fn id(value: int) -> int { value }
+            }
+        "#})
+        .into_inner()
+    {
+        CompilationErrorImpl::InvalidTraitAssociatedConstImpl {
+            trait_ref, kind, ..
+        } => {
+            assert_eq!(trait_ref, "HasConsts");
+            assert_eq!(
+                kind,
+                InvalidTraitAssociatedConstImplKind::Missing {
+                    names: vec![ustr("D")]
+                }
+            );
+        }
+        other => panic!("expected InvalidTraitAssociatedConstImpl, got {other:?}"),
+    }
 }
 
 #[test]

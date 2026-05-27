@@ -17,7 +17,7 @@ use crate::harness::{
 use ferlium::{
     SourceTable,
     compiler::error::{CompilationErrorImpl, RuntimeErrorKind},
-    hir::value::Value,
+    hir::value::{LiteralValue, Value},
     module::{ConcreteTraitImplKey, Module, TraitDictionaryEntry},
     std::{
         core_traits_names::VALUE_TRAIT_NAME,
@@ -72,18 +72,24 @@ fn assert_value_layout(
         .expect("expected std Value impl");
     let imp = module.get_impl_data(impl_id).unwrap();
 
-    assert_eq!(imp.associated_const_value(size_index), Some(size));
-    assert_eq!(imp.associated_const_value(align_index), Some(align));
+    assert_eq!(
+        imp.associated_const_value(size_index),
+        Some(LiteralValue::new_native(size))
+    );
+    assert_eq!(
+        imp.associated_const_value(align_index),
+        Some(LiteralValue::new_native(align))
+    );
 
     assert_eq!(
         imp.dictionary_value
             .entry(value_trait_def.dictionary_associated_const_index(size_index)),
-        TraitDictionaryEntry::AssociatedConst(size)
+        TraitDictionaryEntry::AssociatedConst(LiteralValue::new_native(size))
     );
     assert_eq!(
         imp.dictionary_value
             .entry(value_trait_def.dictionary_associated_const_index(align_index)),
-        TraitDictionaryEntry::AssociatedConst(align)
+        TraitDictionaryEntry::AssociatedConst(LiteralValue::new_native(align))
     );
 }
 

@@ -17,8 +17,10 @@ use crate::{
     compiler::error::LocatedError,
     format::write_with_separator_and_format_fn,
     format::{FormatWith, write_identifier, write_identifier_list, write_with_separator},
+    hir::value::LiteralValue,
     module::{ModuleEnv, Visibility},
     types::mutability::FormatInFnArg,
+    types::r#type::Type,
     types::type_like::TypeLike,
 };
 
@@ -99,6 +101,20 @@ pub struct TraitMethod {
 }
 
 #[derive(Debug, Clone)]
+pub struct TraitAssociatedConstDecl<P: Phase> {
+    pub name: UstrSpan,
+    pub ty: TypeSpan<P>,
+    pub span: Location,
+    pub doc: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum TraitDefinitionItem {
+    AssociatedConst(TraitAssociatedConstDecl<Parsed>),
+    Method(TraitMethod),
+}
+
+#[derive(Debug, Clone)]
 pub struct TraitDefinition {
     pub visibility: Visibility,
     pub name: UstrSpan,
@@ -106,6 +122,7 @@ pub struct TraitDefinition {
     pub output_type_names: Vec<UstrSpan>,
     pub parent_constraints: Vec<PTypeConstraint>,
     pub where_clause: Vec<PTypeConstraint>,
+    pub associated_consts: Vec<TraitAssociatedConstDecl<Parsed>>,
     pub methods: Vec<TraitMethod>,
     pub span: Location,
     pub doc: Option<String>,
@@ -186,6 +203,20 @@ pub type PTraitImplFor = TraitImplFor<Parsed>;
 /// An AST trait implementation header after desugaring
 pub type DTraitImplFor = TraitImplFor<Desugared>;
 
+#[derive(Debug, Clone)]
+pub struct TraitAssociatedConstImpl {
+    pub name: UstrSpan,
+    pub value: LiteralValue,
+    pub ty: Type,
+    pub span: Location,
+}
+
+#[derive(Debug, Clone)]
+pub enum TraitImplItem {
+    AssociatedConst(TraitAssociatedConstImpl),
+    Function(PModuleFunction),
+}
+
 /// A trait implementation
 #[derive(Debug, Clone)]
 pub struct TraitImpl<P: Phase> {
@@ -195,6 +226,7 @@ pub struct TraitImpl<P: Phase> {
     /// When `None`, they are fully inferred from the function signatures.
     pub for_trait: Option<TraitImplFor<P>>,
     pub where_clause: Vec<P::WhereClause>,
+    pub associated_consts: Vec<TraitAssociatedConstImpl>,
     pub functions: Vec<ModuleFunction<P>>,
     pub span: Location,
 }

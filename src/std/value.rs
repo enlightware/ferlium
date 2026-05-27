@@ -62,11 +62,11 @@ pub(crate) const VALUE_ALIGN_ASSOC_CONST_INDEX: TraitAssociatedConstIndex =
     TraitAssociatedConstIndex(1);
 pub(crate) const NO_DERIVE_VALUE_ATTRIBUTE: &str = "no_derive_value";
 
-pub(crate) fn native_layout_associated_consts<T>() -> [isize; 2] {
+pub(crate) fn native_layout_associated_consts<T>() -> Vec<LiteralValue> {
     let mut values = [0; 2];
     values[usize::from(VALUE_SIZE_ASSOC_CONST_INDEX)] = mem::size_of::<T>() as isize;
     values[usize::from(VALUE_ALIGN_ASSOC_CONST_INDEX)] = mem::align_of::<T>() as isize;
-    values
+    values.into_iter().map(LiteralValue::new_native).collect()
 }
 
 pub(crate) fn native_value_clone<T: Clone + NativeValue>(source: &T, target: &mut Value) {
@@ -1746,8 +1746,11 @@ fn derive_function_value_impl(
     arena: &mut NodeArena,
     solver: &mut TraitSolver<'_>,
 ) -> Result<TraitImplId, InternalCompilationError> {
-    let associated_const_values =
-        value_layout_associated_const_values(input_types[0], span, solver)?;
+    let associated_const_values: Vec<LiteralValue> =
+        value_layout_associated_const_values(input_types[0], span, solver)?
+            .into_iter()
+            .map(LiteralValue::new_native)
+            .collect();
     let (method_count, definitions) = {
         let trait_def = solver.trait_def(trait_id);
         (
@@ -1763,7 +1766,10 @@ fn derive_function_value_impl(
         .into_iter()
         .map(|definition| Type::function_type(definition.ty_scheme.ty))
         .collect::<Vec<_>>();
-    let dictionary_ty = TraitImpls::dictionary_ty(tys, associated_const_values.len());
+    let associated_const_tys = solver
+        .trait_def(trait_id)
+        .instantiate_associated_const_tys_for_tys(input_types, &[]);
+    let dictionary_ty = TraitImpls::dictionary_ty(tys, associated_const_tys);
     let dictionary_value = module::build_dictionary_value(&methods, &associated_const_values);
     let imp = TraitImpl::new(
         Vec::new(),
@@ -1821,8 +1827,11 @@ fn derive_structural_value_impl(
         )?));
     }
 
-    let associated_const_values =
-        value_layout_associated_const_values(input_types[0], span, solver)?;
+    let associated_const_values: Vec<LiteralValue> =
+        value_layout_associated_const_values(input_types[0], span, solver)?
+            .into_iter()
+            .map(LiteralValue::new_native)
+            .collect();
     let snapshot = solver.snapshot_derived_impl_state();
     let impl_id = solver.reserve_concrete_impl_from_code_entries(
         trait_id,
@@ -2012,8 +2021,8 @@ pub fn value_trait() -> Trait {
         ],
     )
     .with_associated_consts([
-        TraitAssociatedConst::new("SIZE", "Size in bytes."),
-        TraitAssociatedConst::new("ALIGN", "Alignment in bytes."),
+        TraitAssociatedConst::new("SIZE", Type::primitive::<isize>(), "Size in bytes."),
+        TraitAssociatedConst::new("ALIGN", Type::primitive::<isize>(), "Alignment in bytes."),
     ])
     .with_deriver(ValueDeriver)
 }

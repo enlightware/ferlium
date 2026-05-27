@@ -12,9 +12,8 @@ use crate::{
     compiler::error::InternalCompilationError,
     containers::b,
     hir::{
-        self, NodeArena,
-        dictionary_passing::DictElaborationCtx,
-        emit_ir::{EmitTraitOutput, emitted_associated_const_values},
+        self, NodeArena, dictionary_passing::DictElaborationCtx,
+        emit_associated_consts::emitted_associated_const_values, emit_ir::EmitTraitOutput,
         function::ScriptFunction,
     },
     internal_compilation_error,
@@ -339,6 +338,11 @@ pub(super) fn emit_auto_value_impls(
             function_ids.push(id);
         }
 
+        let associated_const_tys = {
+            let env = ModuleEnv::new(output, others);
+            env.trait_def(value_trait_id)
+                .instantiate_associated_const_tys_for_tys(&[input_ty], &[])
+        };
         output.add_emitted_impl(
             value_trait_id,
             EmitTraitOutput {
@@ -349,6 +353,7 @@ pub(super) fn emit_auto_value_impls(
                 functions: function_ids,
             },
             associated_const_values,
+            associated_const_tys,
             false,
             Some(type_def_span),
         );

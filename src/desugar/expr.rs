@@ -2,6 +2,7 @@ use super::format_string::emit_format_string_ast;
 use super::patterns::{desugar_block_exprs, desugar_let_exprs, desugar_pattern_bindings};
 use super::*;
 use crate::ast::{self, Desugared};
+use crate::containers::b;
 use crate::parser::helpers::ext_b;
 
 /// Desugar a single parsed expression ID into a desugared expression ID.
@@ -176,6 +177,30 @@ pub(crate) fn desugar(
             ExprKind::assign(place, sign_span, value)
         }
         PropertyPath(data) => PropertyPath(data),
+        TraitAssociatedConst(data) => {
+            let data = *data;
+            let input_tys = data
+                .input_tys
+                .into_iter()
+                .map(|(ty, span)| {
+                    Ok((
+                        ty.desugar_with_ty_params(
+                            span,
+                            false,
+                            ctx.module_env,
+                            ctx.generic_ty_params,
+                            modules_used,
+                        )?,
+                        span,
+                    ))
+                })
+                .collect::<Result<Vec<_>, InternalCompilationError>>()?;
+            TraitAssociatedConst(b(crate::ast::TraitAssociatedConstData {
+                trait_name: data.trait_name,
+                input_tys,
+                name: data.name,
+            }))
+        }
         Tuple(elements) => Tuple(desugar_exprs(
             elements,
             ctx,

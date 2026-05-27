@@ -1261,7 +1261,7 @@ fn eval_get_dictionary_associated_const(
     else {
         panic!("attempted to get a non-associated-const dictionary entry as a value");
     };
-    cont(Value::native(value))
+    cont(value.into_value())
 }
 
 fn eval_call_dictionary_method(

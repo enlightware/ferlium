@@ -307,6 +307,33 @@ impl UnsupportedTraitDefinitionKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InvalidTraitAssociatedConstImplKind {
+    Unknown { name: Ustr },
+    Duplicate { name: Ustr },
+    Missing { names: Vec<Ustr> },
+}
+
+impl InvalidTraitAssociatedConstImplKind {
+    pub fn message(&self, trait_name: &str) -> String {
+        use InvalidTraitAssociatedConstImplKind::*;
+        match self {
+            Unknown { name } => {
+                format!("Associated const `{name}` is not part of trait `{trait_name}`")
+            }
+            Duplicate { name } => {
+                format!(
+                    "Associated const `{name}` is implemented more than once for trait `{trait_name}`"
+                )
+            }
+            Missing { names } => format!(
+                "Implementation of trait `{trait_name}` is missing associated consts `{}`",
+                names.iter().join(", ")
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InvalidEnumDefaultAttributeKind {
     MultipleDefaultVariants {
         first_variant: Ustr,
@@ -738,6 +765,11 @@ pub enum CompilationErrorImpl<S: Scope> {
         trait_ref: S::TraitName,
         impl_span: Location,
         missings: Vec<Ustr>,
+    },
+    InvalidTraitAssociatedConstImpl {
+        trait_ref: S::TraitName,
+        kind: InvalidTraitAssociatedConstImplKind,
+        span: Location,
     },
     TraitImplOrphanRuleViolation {
         trait_ref: S::TraitName,
@@ -1431,6 +1463,13 @@ impl FormatWith<SourceTable> for CompilationError {
                     fmt_span(impl_span)
                 )
             }
+            InvalidTraitAssociatedConstImpl {
+                trait_ref,
+                kind,
+                span,
+            } => {
+                write!(f, "{} in {}", kind.message(trait_ref), fmt_span(span))
+            }
             TraitImplOrphanRuleViolation {
                 trait_ref,
                 input_tys,
@@ -2071,6 +2110,15 @@ impl CompilationError {
                 trait_ref: env.trait_name(trait_ref).to_string(),
                 missings,
                 impl_span,
+            }),
+            InvalidTraitAssociatedConstImpl {
+                trait_ref,
+                kind,
+                span,
+            } => compilation_error!(InvalidTraitAssociatedConstImpl {
+                trait_ref: env.trait_name(trait_ref).to_string(),
+                kind,
+                span,
             }),
             TraitImplOrphanRuleViolation {
                 trait_ref,

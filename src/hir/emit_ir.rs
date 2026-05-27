@@ -12,7 +12,11 @@ use crate::{
     FxHashMap, FxHashSet, Modules,
     containers::B,
     hir::{
-        borrow_checker::check_borrows, dictionary_passing::elaborate_dictionaries,
+        borrow_checker::check_borrows,
+        dictionary_passing::elaborate_dictionaries,
+        emit_associated_consts::{
+            SourceAssociatedConstImpl, associated_const_values_for_source_impl,
+        },
         function::VoidFunction,
     },
     module::Uses,
@@ -50,7 +54,7 @@ use crate::{
         STD_MODULE_ID, new_module_using_std,
         value::{
             VALUE_CLONE_METHOD_INDEX, is_function_surface_only_value_trait_application,
-            is_value_trait, is_value_trait_for_function_type, value_layout_associated_const_values,
+            is_value_trait, is_value_trait_for_function_type,
         },
     },
     types::coherence::check_trait_impl,
@@ -100,36 +104,6 @@ fn insert_inst_data_for_function_and_lambdas(
             module_inst_data.insert(*lambda_id, dicts.clone());
         }
     }
-}
-
-pub(super) fn emitted_associated_const_values(
-    trait_id: TraitId,
-    input_tys: &[Type],
-    ty_var_count: u32,
-    span: Location,
-    solver: &TraitSolver<'_>,
-) -> Result<Vec<isize>, InternalCompilationError> {
-    let trait_def = solver.trait_def(trait_id);
-    if trait_def.associated_const_count() == 0 {
-        return Ok(Vec::new());
-    }
-
-    // Temporary special case: generic source impls cannot yet store associated
-    // const formulas, so only Value has compiler-owned layout synthesis here.
-    if is_value_trait(trait_id, trait_def) {
-        if ty_var_count != 0 {
-            return Ok(Vec::new());
-        }
-        return Ok(value_layout_associated_const_values(input_tys[0], span, solver)?.into());
-    }
-
-    Err(internal_compilation_error!(Internal {
-        error: format!(
-            "cannot emit compiler-defined associated consts for source impl of trait {}",
-            trait_def.name
-        ),
-        span,
-    }))
 }
 
 /// Data for a pre-registered stub implementation for `impl Trait for ConcreteType`.
@@ -237,13 +211,21 @@ pub fn emit_module(
         if let Some(for_trait) = &imp.for_trait {
             let input_tys = for_trait.input_tys();
             let output_tys = for_trait.output_tys();
-            let module_env = ModuleEnv::new(&output, others);
-            let Some((trait_module_id, trait_id)) =
-                module_env.trait_id_with_module(&Path::single_tuple(imp.trait_name))?
-            else {
+            let Some((trait_module_id, trait_id, trait_def)) = ({
+                let module_env = ModuleEnv::new(&output, others);
+                module_env
+                    .trait_id_with_module(&Path::single_tuple(imp.trait_name))?
+                    .map(|(trait_module_id, trait_id)| {
+                        (
+                            trait_module_id,
+                            trait_id,
+                            module_env.trait_def(trait_id).clone(),
+                        )
+                    })
+            }) else {
                 continue; // Trait not found; the error will be reported in the main impl loop
             };
-            let trait_def = module_env.trait_def(trait_id);
+            let trait_def = &trait_def;
             if input_tys.len() != trait_def.input_type_count() as usize {
                 return Err(internal_compilation_error!(WrongNumberOfArguments {
                     expected: trait_def.input_type_count() as usize,
@@ -292,11 +274,23 @@ pub fn emit_module(
             let public = output.is_trait_impl_exportable(trait_id, &input_tys, &output_tys, others);
             let associated_const_values = {
                 let solver = trait_solver_from_module!(output, others);
-                emitted_associated_const_values(trait_id, &input_tys, 0, imp.span, &solver)?
+                associated_const_values_for_source_impl(
+                    trait_id,
+                    trait_def,
+                    SourceAssociatedConstImpl {
+                        input_tys: &input_tys,
+                        output_tys: &output_tys,
+                        ty_var_count: 0,
+                        associated_consts: &imp.associated_consts,
+                        span: imp.span,
+                    },
+                    &solver,
+                )?
             };
             let dictionary_value = build_dictionary_value(&method_ids, &associated_const_values);
-            let dictionary_ty =
-                output.computer_dictionary_ty(&method_ids, associated_const_values.len());
+            let associated_const_tys =
+                trait_def.instantiate_associated_const_tys_for_tys(&input_tys, &output_tys);
+            let dictionary_ty = output.computer_dictionary_ty(&method_ids, associated_const_tys);
             let stub = TraitImpl::new(
                 output_tys,
                 method_ids.clone(),
@@ -359,6 +353,7 @@ pub fn emit_module(
             .ok_or_else(|| internal_compilation_error!(TraitNotFound(imp.trait_name.1)))?;
         // Snapshot once per impl emission while later phases mutate the module.
         let trait_def = module_env.trait_def(trait_id).clone();
+        let trait_def_for_consts = trait_def.clone();
 
         // Check that all methods in the impl are part of the trait.
         let mut extra_spans = vec![];
@@ -426,11 +421,13 @@ pub fn emit_module(
                 &emit_output.functions,
                 &output.impls.data[stub_data.id.as_index()].methods
             );
-            let associated_const_count = output.impls.data[stub_data.id.as_index()]
-                .associated_const_values
-                .len();
+            let associated_const_tys = trait_def_for_consts
+                .instantiate_associated_const_tys_for_tys(
+                    &emit_output.input_tys,
+                    &emit_output.output_tys,
+                );
             let new_dictionary_ty =
-                output.computer_dictionary_ty(&emit_output.functions, associated_const_count);
+                output.computer_dictionary_ty(&emit_output.functions, associated_const_tys);
             let impl_data = output.impls.data.get_mut(stub_data.id.as_index()).unwrap();
             assert_eq!(new_dictionary_ty, impl_data.dictionary_ty);
             stub_data.id
@@ -445,11 +442,16 @@ pub fn emit_module(
                 &emit_output.constraints,
                 imp.span,
             )?;
-            let associated_const_values = emitted_associated_const_values(
+            let associated_const_values = associated_const_values_for_source_impl(
                 trait_id,
-                &emit_output.input_tys,
-                emit_output.ty_var_count,
-                imp.span,
+                &trait_def_for_consts,
+                SourceAssociatedConstImpl {
+                    input_tys: &emit_output.input_tys,
+                    output_tys: &emit_output.output_tys,
+                    ty_var_count: emit_output.ty_var_count,
+                    associated_consts: &imp.associated_consts,
+                    span: imp.span,
+                },
                 &trait_solver_from_module!(output, others),
             )?;
             let public = output.is_trait_impl_exportable(
@@ -458,10 +460,16 @@ pub fn emit_module(
                 &emit_output.output_tys,
                 others,
             );
+            let associated_const_tys = trait_def_for_consts
+                .instantiate_associated_const_tys_for_tys(
+                    &emit_output.input_tys,
+                    &emit_output.output_tys,
+                );
             output.add_emitted_impl(
                 trait_id,
                 emit_output,
                 associated_const_values,
+                associated_const_tys,
                 public,
                 Some(imp.span),
             )

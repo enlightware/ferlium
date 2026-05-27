@@ -43,7 +43,7 @@ use crate::{
     compiler::error::{ImportKind, ImportSite, InternalCompilationError},
     define_id_type,
     format::{FormatWith, write_identifier},
-    hir::{self, NodeArena, emit_ir::EmitTraitOutput, function::Function},
+    hir::{self, NodeArena, emit_ir::EmitTraitOutput, function::Function, value::LiteralValue},
     internal_compilation_error,
     module::id::{Id, NamedIndexed},
     types::{
@@ -872,7 +872,7 @@ impl Module {
         trait_id: TraitId,
         input_tys: impl Into<Vec<Type>>,
         output_tys: impl Into<Vec<Type>>,
-        associated_const_values: impl Into<Vec<isize>>,
+        associated_const_values: impl Into<Vec<LiteralValue>>,
         functions: impl Into<Vec<Function>>,
     ) {
         let functions: Vec<_> = functions
@@ -896,7 +896,7 @@ impl Module {
         trait_def: &Trait,
         input_tys: impl Into<Vec<Type>>,
         output_tys: impl Into<Vec<Type>>,
-        associated_const_values: impl Into<Vec<isize>>,
+        associated_const_values: impl Into<Vec<LiteralValue>>,
         functions: impl Into<Vec<Function>>,
     ) {
         let functions: Vec<_> = functions
@@ -923,7 +923,7 @@ impl Module {
         trait_id: TraitId,
         input_tys: impl Into<Vec<Type>>,
         output_tys: impl Into<Vec<Type>>,
-        associated_const_values: impl Into<Vec<isize>>,
+        associated_const_values: impl Into<Vec<LiteralValue>>,
         functions: impl Into<Vec<(Function, Vec<LocalDecl>)>>,
     ) {
         assert_eq!(trait_id.module, self.module_id());
@@ -952,7 +952,7 @@ impl Module {
         trait_def: &Trait,
         input_tys: impl Into<Vec<Type>>,
         output_tys: impl Into<Vec<Type>>,
-        associated_const_values: impl Into<Vec<isize>>,
+        associated_const_values: impl Into<Vec<LiteralValue>>,
         functions: impl Into<Vec<(Function, Vec<LocalDecl>)>>,
     ) {
         // Add the impl, collecting new functions
@@ -978,7 +978,7 @@ impl Module {
         trait_id: TraitId,
         sub_key: BlanketTraitImplSubKey,
         output_tys: impl Into<Vec<Type>>,
-        associated_const_values: impl Into<Vec<isize>>,
+        associated_const_values: impl Into<Vec<LiteralValue>>,
         functions: impl Into<Vec<Function>>,
     ) {
         let functions: Vec<_> = functions
@@ -1004,7 +1004,7 @@ impl Module {
         trait_id: TraitId,
         sub_key: BlanketTraitImplSubKey,
         output_tys: impl Into<Vec<Type>>,
-        associated_const_values: impl Into<Vec<isize>>,
+        associated_const_values: impl Into<Vec<LiteralValue>>,
         functions: impl Into<Vec<(Function, Vec<LocalDecl>)>>,
     ) {
         assert_eq!(trait_id.module, self.module_id());
@@ -1028,13 +1028,14 @@ impl Module {
         &mut self,
         trait_id: TraitId,
         emit_output: EmitTraitOutput,
-        associated_const_values: impl Into<Vec<isize>>,
+        associated_const_values: impl Into<Vec<LiteralValue>>,
+        associated_const_tys: impl IntoIterator<Item = Type>,
         public: bool,
         source_span: Option<Location>,
     ) -> LocalImplId {
         let associated_const_values = associated_const_values.into();
         let dictionary_ty =
-            self.computer_dictionary_ty(&emit_output.functions, associated_const_values.len());
+            self.computer_dictionary_ty(&emit_output.functions, associated_const_tys);
         let dictionary_value =
             build_dictionary_value(&emit_output.functions, &associated_const_values);
         let imp = TraitImpl::new(
@@ -1550,7 +1551,7 @@ impl Module {
     pub(crate) fn computer_dictionary_ty(
         &self,
         function_ids: &[LocalFunctionId],
-        associated_const_count: usize,
+        associated_const_tys: impl IntoIterator<Item = Type>,
     ) -> Type {
         let tys: Vec<_> = function_ids
             .iter()
@@ -1562,7 +1563,7 @@ impl Module {
                 Type::function_type(function.definition.ty_scheme.ty.clone())
             })
             .collect();
-        TraitImpls::dictionary_ty(tys, associated_const_count)
+        TraitImpls::dictionary_ty(tys, associated_const_tys)
     }
 
     fn should_show_symbol(&self, name: Ustr, show_private_items: bool) -> bool {
