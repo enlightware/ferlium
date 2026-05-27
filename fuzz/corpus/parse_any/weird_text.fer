@@ -1,0 +1,5 @@
+fn main() {
+    let s = "emoji: 😀, combining: é, escapes: \n\t\"";
+    // operators and punctuation: ! ? & && | || -> => :: .. ...
+    s
+}

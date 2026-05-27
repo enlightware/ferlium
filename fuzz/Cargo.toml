@@ -1,0 +1,26 @@
+[package]
+name = "ferlium-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+ferlium = { path = ".." }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "parse_any"
+path = "fuzz_targets/parse_any.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ide_compile_any"
+path = "fuzz_targets/ide_compile_any.rs"
+test = false
+doc = false
+bench = false

@@ -1,0 +1,16 @@
+pub struct Account {
+    name: string,
+    amount: int,
+    transactions: [{ kind: Debit | Credit, amount: int }]
+}
+
+fn balance(account) {
+    let mut total = 0;
+    for transaction in account.transactions {
+        match transaction.kind {
+            Credit => total = total + transaction.amount,
+            Debit => total = total - transaction.amount,
+        }
+    };
+    total
+}

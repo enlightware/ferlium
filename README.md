@@ -121,6 +121,10 @@ Its inspirations are:
 
 Install the dependencies once with `make install-deps` (Valgrind + the Gungraun runner), then run `cargo bench`. Gungraun measures instruction counts and other Valgrind-based metrics, which catch small optimisations and regressions reliably even in noisy environments.
 
+### Fuzzing
+
+Crash-oriented fuzz targets live in `fuzz/` and are run explicitly with `cargo-fuzz`; see [doc/fuzzing.md](doc/fuzzing.md).
+
 ### Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for how to contribute.

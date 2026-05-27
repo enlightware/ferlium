@@ -1,0 +1,5 @@
+fn project(value) {
+    value.name
+}
+
+project({ name: "Ada", age: 36 })

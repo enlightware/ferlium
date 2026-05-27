@@ -1,0 +1,4 @@
+/// Documentation with unicode: λ ≈ ⇝
+fn display_name(user) {
+    f"hello {user.name}"
+}

@@ -1,3 +1,6 @@
+# Fuzzing duration in seconds
+FUZZ_TIME ?= 30
+
 install-deps:
 	cargo install cargo-nextest --locked
 	cargo install --version 0.18.2 gungraun-runner
@@ -15,6 +18,16 @@ test-miri:
 
 bench:
 	cargo bench
+
+fuzz-parse:
+	mkdir -p fuzz/corpus-generated/parse_any
+	ASAN_OPTIONS=detect_leaks=0 cargo +nightly fuzz run parse_any fuzz/corpus-generated/parse_any fuzz/corpus/parse_any -- -max_total_time=$(FUZZ_TIME)
+
+fuzz-ide:
+	mkdir -p fuzz/corpus-generated/ide_compile_any
+	ASAN_OPTIONS=detect_leaks=0 cargo +nightly fuzz run ide_compile_any fuzz/corpus-generated/ide_compile_any fuzz/corpus/programs fuzz/corpus/diagnostics -- -max_total_time=$(FUZZ_TIME)
+
+fuzz: fuzz-parse fuzz-ide
 
 repl:
 	RUST_BACKTRACE=1 RUST_LOG=ferlium=debug cargo run --example ferlium

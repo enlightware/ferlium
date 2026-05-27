@@ -1,5 +1,5 @@
 [workspace]
-members = [ ".", "ferlium_macros", "playground/script-api" ]
+members = [ ".", "ferlium_macros", "playground/script-api", "fuzz" ]
 
 [package]
 name = "ferlium"

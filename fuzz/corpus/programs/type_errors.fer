@@ -1,0 +1,8 @@
+fn f(x) {
+    let y = x + 1;
+    string_len(y)
+}
+
+fn g(record) {
+    record.missing.field
+}

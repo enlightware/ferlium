@@ -1,4 +1,7 @@
 /target
+/fuzz/artifacts
+/fuzz/coverage
+/fuzz/corpus-generated
 /scratch
 Cargo.lock
 .codex
