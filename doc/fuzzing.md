@@ -59,3 +59,10 @@ The grammar target ignores invalid decision tapes, very large tapes, and generat
 Panics are left uncaught on purpose: a compiler panic is a fuzz finding.
 
 When a crash is found, minimize it with cargo-fuzz and keep the reduced input as a regression test if it represents a real compiler bug.
+
+Grammar-fuzzer artifacts are Barkus decision tapes, not Ferlium source.
+Decode one before triaging it:
+
+```sh
+cargo run --manifest-path fuzz/Cargo.toml --bin decode_grammar_tape -- fuzz/artifacts/grammar_ide_compile/crash-...
+```

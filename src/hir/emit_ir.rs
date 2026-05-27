@@ -1542,6 +1542,7 @@ fn emit_expr_unsafe_inner(
 
     // Create a list of all available trait implementations.
     let module_env = ModuleEnv::new(module, others);
+    let expr_span = parsed_arena[source].span;
 
     // First desugar the expression.
     let mut modules_used = FxHashSet::default();
@@ -1777,6 +1778,8 @@ fn emit_expr_unsafe_inner(
     }
     drop(mapper);
 
+    validate_safe_expr_type_scheme(&ty_scheme, expr_span)?;
+
     // Do borrow checking and dictionary elaboration.
     let dicts = ty_scheme.extra_parameters(ModuleEnv::new(module, others));
     let mut solver = trait_solver_from_module!(module, &others);
@@ -1814,6 +1817,14 @@ pub fn emit_expr(
     let span = parsed_arena[source].span;
     let CompiledExpr { ty, expr, locals } =
         emit_expr_unsafe(source, parsed_arena, module, others, locals)?;
+    validate_safe_expr_type_scheme(&ty, span)?;
+    Ok(CompiledExpr { ty, expr, locals })
+}
+
+fn validate_safe_expr_type_scheme(
+    ty: &TypeScheme<Type>,
+    span: Location,
+) -> Result<(), InternalCompilationError> {
     let ty_vars = ty.ty.inner_ty_vars();
     if !ty_vars.is_empty() {
         return Err(internal_compilation_error!(UnboundTypeVar {
@@ -1835,7 +1846,7 @@ pub fn emit_expr(
             span,
         }));
     }
-    Ok(CompiledExpr { ty, expr, locals })
+    Ok(())
 }
 
 fn first_unbound_type_in_constraints(

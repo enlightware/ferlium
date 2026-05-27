@@ -241,3 +241,27 @@ fn join_empty_sequence_compiles_repeatedly_in_shared_session() {
             .unwrap_or_else(|error| panic!("Compilation error in {name}: {error:?}"));
     }
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn unresolved_expression_constraints_do_not_reach_dictionary_passing() {
+    let mut session = TestSession::new();
+    session
+        .fail_compilation("[] == 0()")
+        .expect_unbound_ty_var();
+    session
+        .fail_compilation("0() and (a != a)")
+        .expect_unbound_ty_var();
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn broad_generic_alias_does_not_recurse_while_formatting_error() {
+    let mut session = TestSession::new();
+    session
+        .fail_compilation(indoc! { r#"
+            type Account<a> = a;
+            fn b() -> {} {}
+        "# })
+        .expect_type_mismatch("()", "{  }");
+}

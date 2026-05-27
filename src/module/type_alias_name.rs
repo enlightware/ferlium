@@ -103,6 +103,10 @@ pub(crate) fn render_generic_alias_name_with(
     ty: Type,
     format_type: &mut impl FnMut(Type) -> String,
 ) -> Option<GenericAliasName> {
+    if matches!(&*alias.ty.data(), TypeKind::Variable(var) if var.name() < alias.ty_var_count) {
+        return None;
+    }
+
     let mut subst = TypeInstSubst::default();
     match_alias_type(alias.ty, ty, alias.ty_var_count, &mut subst).then(|| {
         let has_unmatched_params =

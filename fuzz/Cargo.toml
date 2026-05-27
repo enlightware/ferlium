@@ -33,3 +33,10 @@ path = "fuzz_targets/grammar_ide_compile.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "decode_grammar_tape"
+path = "src/bin/decode_grammar_tape.rs"
+test = false
+doc = false
+bench = false
