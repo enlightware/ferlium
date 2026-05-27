@@ -137,10 +137,15 @@ fn light_annotations_keep_structural_constraints() {
     "# };
     let mut compiler = compile_source(src);
     let annotations = light_annotation_hints(&mut compiler);
+    let repr_pos = annotations.find("⇝");
+    let field_pos = annotations.find("name");
 
     assert!(
-        annotations.contains("name"),
-        "expected structural field constraint in light annotations, got: {annotations}"
+        repr_pos.is_some()
+            && field_pos.is_some()
+            && repr_pos < field_pos
+            && !annotations.contains("Repr"),
+        "expected compact Repr and structural field constraints in light annotations, got: {annotations}"
     );
 }
 

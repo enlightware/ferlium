@@ -322,6 +322,8 @@ fn age1(d: Person1) { d.age.0 }  // requires exactly Person1
 Ferlium includes an internal marker concept called `Repr` that links a named type to the value representation it exposes. In practice, this is why projections and pattern matching behave uniformly across structural and nominal data, while named types remain distinct during type checking.
 
 You do not write or define `Repr` yourself.
+In IDE annotations, this relationship is shown compactly as `T ⇝ U`, read as "`T` is represented as `U`".
+For example, a constraint like `T ⇝ U, U: { x: int, … }` means that values of type `T` expose a representation `U` on which structural operations such as field access are checked.
 
 ## Algebraic Data Types
 

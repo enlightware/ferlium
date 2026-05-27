@@ -418,14 +418,21 @@ impl ConstraintDisplayItem<'_> {
                     .join(" + "),
                 env,
             ),
-            Self::NonUnaryTraitConstraint(constraint) => constraint_sort_key(
-                0,
-                constraint.input_tys.first().copied(),
-                env.module_env().trait_name(constraint.trait_id).to_string(),
-                env,
-            ),
+            Self::NonUnaryTraitConstraint(constraint) => {
+                let category = if is_repr_trait(env.module_env(), constraint.trait_id) {
+                    1
+                } else {
+                    0
+                };
+                constraint_sort_key(
+                    category,
+                    constraint.input_tys.first().copied(),
+                    env.module_env().trait_name(constraint.trait_id).to_string(),
+                    env,
+                )
+            }
             Self::StructuralConstraint { ty, constraint } => constraint_sort_key(
-                1,
+                2,
                 Some(*ty),
                 aggregated_constraint_sort_name(constraint),
                 env,
@@ -479,6 +486,11 @@ fn is_hidden_light_constraint(constraint: &PubTypeConstraint) -> bool {
             && input_tys.len() == 1
             && output_tys.is_empty()
     )
+}
+
+fn is_repr_trait(env: &ModuleEnv<'_>, trait_id: TraitId) -> bool {
+    trait_id.module == crate::std::STD_MODULE_ID
+        && env.trait_def(trait_id).name == crate::std::core_traits_names::REPR_TRAIT_NAME
 }
 
 fn transitive_parent_constraints(
@@ -672,6 +684,14 @@ where
     Env: HasModuleEnv,
 {
     let trait_def = env.module_env().trait_def(trait_id);
+    if is_repr_trait(env.module_env(), trait_id) && input_tys.len() == 1 && output_tys.len() == 1 {
+        return write!(
+            f,
+            "{} ⇝ {}",
+            input_tys[0].format_with(env),
+            output_tys[0].format_with(env)
+        );
+    }
     let trait_name = trait_def.name;
     let use_unary_where_clause =
         input_tys.len() == 1 && matches!(style, TypeConstraintRenderStyle::WhereClause);
