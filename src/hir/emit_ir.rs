@@ -637,6 +637,80 @@ fn wrap_body_with_call_depth_check_if_recursive(
     ))
 }
 
+struct RecursiveReturnDefaultingInputs<'ctx, I> {
+    ast_functions: I,
+    local_fns: &'ctx [LocalFunctionId],
+    function_explicit_root_tys: &'ctx [Vec<Type>],
+    recursive_function_ids: &'ctx FxHashSet<FunctionId>,
+    associated_lambdas: &'ctx FxHashMap<LocalFunctionId, Vec<LocalFunctionId>>,
+}
+
+fn default_unconstrained_recursive_returns_to_never<'func, I>(
+    output: &mut Module,
+    ir_arena: &mut NodeArena,
+    ty_inf: &mut UnifiedTypeInference,
+    inputs: RecursiveReturnDefaultingInputs<'_, I>,
+) where
+    I: Iterator<Item = &'func DModuleFunction>,
+{
+    for ((function, id), explicit_root_tys) in inputs
+        .ast_functions
+        .zip(inputs.local_fns.iter())
+        .zip(inputs.function_explicit_root_tys.iter())
+    {
+        if !inputs
+            .recursive_function_ids
+            .contains(&FunctionId::Local(*id))
+            || function.ret_ty.is_some()
+        {
+            continue;
+        }
+
+        let descr = &output.functions[id.as_index()];
+        let Some(root) = descr.get_code_entry() else {
+            continue;
+        };
+        if !node_references_any_function(ir_arena, root, inputs.recursive_function_ids) {
+            continue;
+        }
+
+        let fn_ty = ty_inf.substitute_in_fn_type(&descr.definition.ty_scheme.ty);
+        let Some(ret_var) = fn_ty.ret.data().as_variable().copied() else {
+            continue;
+        };
+
+        if fn_ty
+            .args
+            .iter()
+            .any(|arg| arg.ty.contains_any_type_var(ret_var))
+            || explicit_root_tys.iter().any(|ty| {
+                ty_inf
+                    .substitute_in_type(*ty)
+                    .contains_any_type_var(ret_var)
+            })
+            || ty_inf
+                .remaining_constraints()
+                .iter()
+                .any(|constraint| constraint.contains_any_type_var(ret_var))
+        {
+            continue;
+        }
+
+        let subst: (TypeInstSubst, FxHashMap<_, _>) = (
+            FxHashMap::from_iter([(ret_var, Type::never())]),
+            FxHashMap::default(),
+        );
+        let mut mapper = BitmapInstantiationMapper::new(&subst);
+        let function_and_lambdas =
+            std::iter::once(id).chain(inputs.associated_lambdas.get(id).into_iter().flatten());
+        for id in function_and_lambdas {
+            let descr = &mut output.functions[id.as_index()];
+            descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.map(&mut mapper);
+            instantiate_function_descr_in_place(ir_arena, descr, &mut mapper);
+        }
+    }
+}
+
 fn emit_functions<'a, F, I>(
     output: &mut Module,
     ir_arena: &mut NodeArena,
@@ -1420,8 +1494,22 @@ where
         // Substitute everything using ty_inf (single pass, includes all defaults).
         substitute_and_canonicalize_functions(output, ir_arena, &mut ty_inf);
 
-        // Take final substituted constraints.
+        // Recursive-return defaulting inspects the final constraints.
         ty_inf.normalize_remaining_constraints();
+        default_unconstrained_recursive_returns_to_never(
+            output,
+            ir_arena,
+            &mut ty_inf,
+            RecursiveReturnDefaultingInputs {
+                ast_functions: ast_functions(),
+                local_fns: &local_fns,
+                function_explicit_root_tys: &function_explicit_root_tys,
+                recursive_function_ids: &recursive_function_ids,
+                associated_lambdas: &associated_lambdas,
+            },
+        );
+
+        // Take final substituted constraints.
         let all_constraints = ty_inf.take_constraints();
 
         // For each function: filter constraints, check unbounds, finalize type scheme.

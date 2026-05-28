@@ -26,7 +26,7 @@ use ferlium::{
         math::{float_type, int_type},
     },
     types::mutability::MutType,
-    types::r#type::{Type, tuple_type},
+    types::r#type::{Type, TypeVar, tuple_type},
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -1859,12 +1859,54 @@ fn recursive_execution_errors() {
     let mut session = TestSession::new();
     use RuntimeErrorKind::*;
     assert_eq!(
+        session.fail_run("fn f() { g() } fn g() { f() } f()"),
+        CallDepthLimitExceeded { limit: 192 }
+    );
+    assert_eq!(
         session.fail_run("fn rf() { rf() } rf() + 0"),
         CallDepthLimitExceeded { limit: 192 }
     );
     assert_eq!(
         session.fail_run("fn apply(f) { f() } fn rf() { apply(rf) } rf() + 0"),
         CallDepthLimitExceeded { limit: 192 }
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn unproductive_recursive_returns_default_to_never() {
+    let mut session = TestSession::new();
+
+    let module = session.compile_and_get_module("fn f() { g() } fn g() { f() }");
+    for name in ["f", "g"] {
+        let fn_def = &module.get_function(ustr::ustr(name)).unwrap().definition;
+        assert_eq!(fn_def.ty_scheme.ty().ret, Type::never());
+        assert!(fn_def.ty_scheme.ty_quantifiers.is_empty());
+    }
+
+    let fn_def = session.compile_and_get_fn_def("fn f(x) { f(x) }", "f");
+    let fn_ty = fn_def.ty_scheme.ty();
+    assert_eq!(fn_ty.args.len(), 1);
+    assert_eq!(fn_ty.args[0].ty, Type::variable_id(0));
+    assert_eq!(fn_ty.ret, Type::never());
+    assert_eq!(fn_def.ty_scheme.ty_quantifiers, vec![TypeVar::new(0)]);
+
+    let module = session.compile_and_get_module("fn apply(f) { f() } fn rf() { apply(rf) }");
+    let rf = &module.get_function(ustr::ustr("rf")).unwrap().definition;
+    assert_eq!(rf.ty_scheme.ty().ret, Type::never());
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn productive_recursive_returns_are_not_defaulted_to_never() {
+    let mut session = TestSession::new();
+    let source = "fn f(n) { if n == 0 { [] } else { f(n - 1) } }";
+    let fn_def = session.compile_and_get_fn_def(source, "f");
+    assert_ne!(fn_def.ty_scheme.ty().ret, Type::never());
+
+    assert_val_eq!(
+        session.run(&format!("{source} let x: [int] = f(0); x")),
+        int_a![]
     );
 }
 
