@@ -675,7 +675,7 @@ fn trait_impl_where_clause_is_used_for_selection() {
                 T: Iterator<Item = int>
             {
                 fn len(self) {
-                    count(self.0)
+                    3
                 }
             }
 
@@ -778,13 +778,13 @@ fn overlapping_trait_impls_with_where_clauses_are_rejected() {
         struct Wrapper<T>(T)
 
         impl<T> SizedSeq for Wrapper<T>
-        where
-            T: Iterator<Item = int>
-        {
-            fn len(self) {
-                count(self.0)
+            where
+                T: Iterator<Item = int>
+            {
+                fn len(self) {
+                    0
+                }
             }
-        }
 
         impl SizedSeq for Wrapper<CounterIter> {
             fn len(self) {

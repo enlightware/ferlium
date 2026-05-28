@@ -840,7 +840,7 @@ impl PModule {
             |iter| iter.unzip(),
         )?;
         let sccs = find_strongly_connected_components(&fn_dep_graph);
-        let sorted_sccs = topological_sort_sccs(&fn_dep_graph, &sccs);
+        let sorted_sccs = function_sccs(&fn_dep_graph, topological_sort_sccs(&fn_dep_graph, &sccs));
 
         // Desugar trait implementations
         let impls = impls
@@ -860,6 +860,24 @@ impl PModule {
         };
         Ok((module, desugared_arena, sorted_sccs))
     }
+}
+
+fn function_sccs(fn_dep_graph: &[DepGraphNode], sccs: Vec<Vec<usize>>) -> FnSccs {
+    sccs.into_iter()
+        .map(|functions| {
+            let recursive = functions.len() > 1
+                || functions
+                    .first()
+                    .is_some_and(|index| fn_dep_graph[*index].0.contains(index));
+            ast::FunctionScc {
+                functions: functions
+                    .into_iter()
+                    .map(ast::FunctionAstIndex::new)
+                    .collect(),
+                recursive,
+            }
+        })
+        .collect()
 }
 
 impl ast::TraitDefinition {

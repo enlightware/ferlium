@@ -339,7 +339,7 @@ fn recursive_generic_alias_ide_annotations_do_not_leak_borrowed_argument_temps()
     let expected = indoc! { r#"
         type Tree<T> = Leaf(T) | Node(Tree<T>, Tree<T>);
 
-        fn sum<T>(tree: Tree<T>) -> T where T: Num + Value {
+        fn sum<T>(tree: Tree<T>) -> T ! fallible where T: Num + Value {
             match tree {
                 Leaf(v: T) => v,
                 Node(l: Tree<T>, r: Tree<T>) => sum(tree: l) + sum(tree: r)

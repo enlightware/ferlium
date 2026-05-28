@@ -1862,6 +1862,10 @@ fn recursive_execution_errors() {
         session.fail_run("fn rf() { rf() } rf() + 0"),
         CallDepthLimitExceeded { limit: 192 }
     );
+    assert_eq!(
+        session.fail_run("fn apply(f) { f() } fn rf() { apply(rf) } rf() + 0"),
+        CallDepthLimitExceeded { limit: 192 }
+    );
 }
 
 #[test]

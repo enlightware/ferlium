@@ -24,7 +24,7 @@ use ferlium::{
         option::{none, some},
         std_module,
     },
-    types::effects::{PrimitiveEffect, effect, no_effects},
+    types::effects::{PrimitiveEffect, effect, effects},
 };
 
 use ferlium::std::array::array_type;
@@ -747,13 +747,13 @@ fn any_on_arrays() {
         &mut session,
         "fn f() { let a = [(1: int)]; any(a, |v| { v >= 1 }) }",
         "f",
-        no_effects(),
+        effect(Fallible),
     );
     test_mod_for_effects(
         &mut session,
         "fn f() { let a = [(1: int)]; any(a, |v| { effects::read(); v >= 1 }) }",
         "f",
-        effect(Read),
+        effects(&[Fallible, Read]),
     );
 }
 
@@ -771,13 +771,13 @@ fn all_on_arrays() {
         &mut session,
         "fn f() { let a = [(1: int)]; all(a, |v| { v >= 1 }) }",
         "f",
-        no_effects(),
+        effect(Fallible),
     );
     test_mod_for_effects(
         &mut session,
         "fn f() { let a = [(1: int)]; all(a, |v| { effects::read(); v >= 1 }) }",
         "f",
-        effect(Read),
+        effects(&[Fallible, Read]),
     );
 }
 
@@ -942,16 +942,16 @@ fn map() {
         &mut session,
         "fn f() { [0, 1, 2] |> map(|x| x + 1) }",
         "f",
-        no_effects(),
+        effect(Fallible),
     );
     session
         .fail_compilation("fn f() { [0, 1, 2] |> map(|x| { effects::read(); x + 1 }) }")
-        .expect_invalid_effect_dependency(effect(Read), no_effects());
+        .expect_invalid_effect_dependency(effect(Read), effect(Fallible));
     session
         .fail_compilation(
             "fn f() { let ignored = [0, 1, 2] |> iter() |> map(|x| { effects::read(); x + 1 }); () }",
         )
-        .expect_invalid_effect_dependency(effect(Read), no_effects());
+        .expect_invalid_effect_dependency(effect(Read), effect(Fallible));
 }
 
 #[test]
@@ -968,12 +968,12 @@ fn filter() {
     use PrimitiveEffect::*;
     session
         .fail_compilation("fn f() { [0, 1, 2] |> filter(|x| { effects::read(); x > 0 }) }")
-        .expect_invalid_effect_dependency(effect(Read), no_effects());
+        .expect_invalid_effect_dependency(effect(Read), effect(Fallible));
     session
         .fail_compilation(
             "fn f() { let ignored = [0, 1, 2] |> iter() |> filter(|x| { effects::read(); x > 0 }); () }",
         )
-        .expect_invalid_effect_dependency(effect(Read), no_effects());
+        .expect_invalid_effect_dependency(effect(Read), effect(Fallible));
 }
 
 #[test]
@@ -993,12 +993,12 @@ fn filter_map() {
     use PrimitiveEffect::*;
     session
         .fail_compilation("fn f() { [0, 1, 2] |> filter_map(|x| { effects::read(); Some(x) }) }")
-        .expect_invalid_effect_dependency(effect(Read), no_effects());
+        .expect_invalid_effect_dependency(effect(Read), effect(Fallible));
     session
         .fail_compilation(
             "fn f() { let ignored = [0, 1, 2] |> iter() |> filter_map(|x| { effects::read(); Some(x) }); () }",
         )
-        .expect_invalid_effect_dependency(effect(Read), no_effects());
+        .expect_invalid_effect_dependency(effect(Read), effect(Fallible));
 }
 
 #[test]
@@ -1161,6 +1161,7 @@ fn chain() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn reverse() {
     let mut session = TestSession::new();
+    use PrimitiveEffect::*;
 
     assert_val_eq!(
         session.run("let mut values = [1, 2, 3]; reverse(values); values"),
@@ -1179,13 +1180,13 @@ fn reverse() {
         &mut session,
         "fn f() { let mut values = [3, 1, 2]; reverse(values) }",
         "f",
-        no_effects(),
+        effect(Fallible),
     );
     test_mod_for_effects(
         &mut session,
         "fn f() { reversed([3, 1, 2]) }",
         "f",
-        no_effects(),
+        effect(Fallible),
     );
 }
 
@@ -1232,25 +1233,25 @@ fn sort() {
         &mut session,
         "fn f() { let mut values = [3, 1, 2]; sort(values) }",
         "f",
-        no_effects(),
+        effect(Fallible),
     );
     test_mod_for_effects(
         &mut session,
         "fn f() { let mut values = [3, 1, 2]; sort_by(values, |left, right| cmp(left, right)) }",
         "f",
-        no_effects(),
+        effect(Fallible),
     );
     test_mod_for_effects(
         &mut session,
         "fn f() { sorted([3, 1, 2]) }",
         "f",
-        no_effects(),
+        effect(Fallible),
     );
     session
         .fail_compilation(
             "fn f() { let mut values = [1, 2]; sort_by(values, |left, right| { effects::read(); cmp(left, right) }) }",
         )
-        .expect_invalid_effect_dependency(effect(Read), no_effects());
+        .expect_invalid_effect_dependency(effect(Read), effect(Fallible));
 }
 
 #[test]

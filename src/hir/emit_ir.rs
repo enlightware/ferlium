@@ -36,7 +36,7 @@ use crate::{
     compiler::error::{
         AttributeTarget, InternalCompilationError, InvalidAttributeKind, UnsafeFeature,
     },
-    containers::{b, iterable_to_string},
+    containers::{SVec2, b, iterable_to_string},
     desugar::desugar_expr_with_empty_ctx,
     format::FormatWith,
     hir::dictionary_passing::{
@@ -46,9 +46,9 @@ use crate::{
     hir::{self, NodeArena},
     internal_compilation_error,
     module::{
-        ConcreteTraitImplKey, GENERATED_LAMBDA_PREFIX, LocalAssignmentMode, LocalDecl, LocalDeclId,
-        LocalFunctionId, LocalImplId, Module, ModuleEnv, ModuleFunction, ModuleFunctionSpans,
-        ModuleId, TraitId, TraitImpl, build_dictionary_value, id::Id,
+        ConcreteTraitImplKey, FunctionId, GENERATED_LAMBDA_PREFIX, LocalAssignmentMode, LocalDecl,
+        LocalDeclId, LocalFunctionId, LocalImplId, Module, ModuleEnv, ModuleFunction,
+        ModuleFunctionSpans, ModuleId, TraitId, TraitImpl, build_dictionary_value, id::Id,
     },
     std::{
         STD_MODULE_ID, new_module_using_std,
@@ -58,7 +58,7 @@ use crate::{
         },
     },
     types::coherence::check_trait_impl,
-    types::effects::EffType,
+    types::effects::{EffType, PrimitiveEffect, effect},
     types::mutability::MutType,
     types::r#trait::Trait,
     types::trait_solver::{TraitSolver, trait_solver_from_module},
@@ -321,10 +321,19 @@ pub fn emit_module(
 
     // Process each functions' SCC one by one.
     for mut scc in sorted_sccs.into_iter().rev() {
-        scc.sort(); // for compatibility due to bug in effect tracking
+        scc.functions.sort(); // for compatibility due to bug in effect tracking
 
         // Extract functions from the SCC.
-        let functions = || scc.iter().map(|&idx| &source.functions[idx]);
+        let functions = || {
+            scc.functions
+                .iter()
+                .map(|idx| &source.functions[idx.as_index()])
+        };
+        let recursive_function_names = if scc.recursive {
+            functions().map(|function| function.name.0).collect()
+        } else {
+            FxHashSet::default()
+        };
         if log_enabled!(log::Level::Debug) {
             let names = functions().map(|f| f.name.0).collect::<Vec<_>>();
             log::debug!(
@@ -341,6 +350,7 @@ pub fn emit_module(
             &desugared_arena,
             others,
             None,
+            &recursive_function_names,
         )?;
     }
 
@@ -404,6 +414,16 @@ pub fn emit_module(
             for_trait: imp.for_trait.as_ref(),
             impl_constraints: &imp.where_clause,
         };
+        let recursive_function_names = imp
+            .function_sccs
+            .iter()
+            .filter(|scc| scc.recursive)
+            .flat_map(|scc| {
+                scc.functions
+                    .iter()
+                    .map(|index| imp.functions[index.as_index()].name.0)
+            })
+            .collect::<FxHashSet<_>>();
         let emit_output = emit_functions(
             &mut output,
             &mut ir_arena,
@@ -411,6 +431,7 @@ pub fn emit_module(
             &desugared_arena,
             others,
             Some(trait_ctx),
+            &recursive_function_names,
         )?
         .unwrap();
 
@@ -507,27 +528,36 @@ pub(crate) struct EmitTraitOutput {
     pub(crate) functions: Vec<LocalFunctionId>,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct FunctionAttributes {
+    returns_place: bool,
+    no_fuel_check: bool,
+}
+
 fn validate_function_attributes(
     attributes: &[ast::Attribute],
     function_name: Ustr,
     is_std_module: bool,
-) -> Result<bool, InternalCompilationError> {
+) -> Result<FunctionAttributes, InternalCompilationError> {
     let mut returns_place = false;
+    let mut no_fuel_check = false;
+    let known_attributes = [ustr("place_result"), ustr("no_fuel_check")];
     for attribute in attributes {
-        if attribute.path.0 != ustr("place_result") {
+        let attr_name = attribute.path.0;
+        if !known_attributes.contains(&attr_name) {
             continue;
         }
         if !is_std_module {
             return Err(
                 InternalCompilationError::new_unsafe_feature_use_not_allowed(
-                    UnsafeFeature::FunctionAttribute(attribute.path.0),
+                    UnsafeFeature::FunctionAttribute(attr_name),
                     attribute.span,
                 ),
             );
         }
         if !attribute.items.is_empty() {
             return Err(internal_compilation_error!(InvalidAttribute {
-                attribute_name: attribute.path.0,
+                attribute_name: attr_name,
                 target: AttributeTarget::Function {
                     name: function_name,
                 },
@@ -535,9 +565,14 @@ fn validate_function_attributes(
                 span: attribute.span,
             }));
         }
-        if returns_place {
+        let enabled = if attr_name == known_attributes[0] {
+            &mut returns_place
+        } else {
+            &mut no_fuel_check
+        };
+        if *enabled {
             return Err(internal_compilation_error!(InvalidAttribute {
-                attribute_name: attribute.path.0,
+                attribute_name: attr_name,
                 target: AttributeTarget::Function {
                     name: function_name,
                 },
@@ -545,9 +580,61 @@ fn validate_function_attributes(
                 span: attribute.span,
             }));
         }
-        returns_place = true;
+        *enabled = true;
     }
-    Ok(returns_place)
+    Ok(FunctionAttributes {
+        returns_place,
+        no_fuel_check,
+    })
+}
+
+fn node_references_any_function(
+    arena: &NodeArena,
+    node_id: hir::NodeId,
+    targets: &FxHashSet<FunctionId>,
+) -> bool {
+    if targets.is_empty() {
+        return false;
+    }
+    match &arena[node_id].kind {
+        hir::NodeKind::StaticApply(app) if targets.contains(&app.function) => return true,
+        hir::NodeKind::GetFunction(get_fn) if targets.contains(&get_fn.function) => return true,
+        _ => {}
+    }
+    arena[node_id]
+        .kind
+        .child_node_ids()
+        .into_iter()
+        .any(|child| node_references_any_function(arena, child, targets))
+}
+
+fn wrap_body_with_call_depth_check_if_recursive(
+    ty_inf: &mut TypeInference,
+    arena: &mut NodeArena,
+    body_id: hir::NodeId,
+    recursive_function_ids: &FxHashSet<FunctionId>,
+    return_ty: Type,
+    check_span: Location,
+    block_span: Location,
+) -> hir::NodeId {
+    if !node_references_any_function(arena, body_id, recursive_function_ids) {
+        return body_id;
+    }
+
+    let check_id = arena.alloc(hir::Node::new(
+        hir::NodeKind::CheckCallDepth,
+        Type::unit(),
+        effect(PrimitiveEffect::Fallible),
+        check_span,
+    ));
+    let body_effects = arena[body_id].effects.clone();
+    let effects = ty_inf.make_dependent_effect([&arena[check_id].effects, &body_effects]);
+    arena.alloc(hir::Node::new(
+        hir::NodeKind::Block(b(SVec2::from_vec(vec![check_id, body_id]))),
+        return_ty,
+        effects,
+        block_span,
+    ))
 }
 
 fn emit_functions<'a, F, I>(
@@ -557,6 +644,7 @@ fn emit_functions<'a, F, I>(
     desugared_arena: &DExprArena,
     others: &Modules,
     trait_ctx: Option<EmitTraitCtx>,
+    recursive_function_names: &FxHashSet<Ustr>,
 ) -> Result<Option<EmitTraitOutput>, InternalCompilationError>
 where
     I: Iterator<Item = &'a DModuleFunction>,
@@ -708,6 +796,7 @@ where
     let mut local_fns = Vec::new();
     let mut function_annotation_ty_substs = Vec::new();
     let mut function_explicit_root_tys = Vec::new();
+    let mut function_attrs = Vec::new();
     for ast::ModuleFunction {
         visibility,
         name,
@@ -835,8 +924,9 @@ where
             span: *span,
         };
         let ty_scheme = TypeScheme::new_just_type(fn_type);
-        let returns_place =
+        let attrs =
             validate_function_attributes(attributes, name.0, output.module_id() == STD_MODULE_ID)?;
+        let returns_place = attrs.returns_place;
         let definition = FunctionDefinition::new_with_generic_params_and_attributes(
             ty_scheme,
             generic_params.clone(),
@@ -869,6 +959,7 @@ where
         local_fns.push(id);
         function_annotation_ty_substs.push(annotation_ty_subst);
         function_explicit_root_tys.push(explicit_root_tys);
+        function_attrs.push(attrs);
     }
 
     // Associated lambdas and macro to call and id and its associated lambdas
@@ -895,10 +986,20 @@ where
         };
     }
 
+    let recursive_function_ids = ast_functions()
+        .zip(local_fns.iter())
+        .filter_map(|(function, id)| {
+            recursive_function_names
+                .contains(&function.name.0)
+                .then_some(FunctionId::Local(*id))
+        })
+        .collect::<FxHashSet<_>>();
+
     // Second pass, infer types and emit function bodies.
-    for ((function, id), annotation_ty_subst) in ast_functions()
+    for (((function, id), annotation_ty_subst), attrs) in ast_functions()
         .zip(local_fns.iter())
         .zip(function_annotation_ty_substs.iter())
+        .zip(function_attrs.iter())
     {
         let descr = output.get_function_by_id(*id).unwrap();
         let module_env = ModuleEnv::new(output, others);
@@ -925,18 +1026,28 @@ where
             Some((expected_ret_ty, expected_span)),
             (!annotation_ty_subst.is_empty()).then_some(annotation_ty_subst),
             vec![],
+            !attrs.no_fuel_check,
             &mut lambda_functions,
             output.functions.len() as u32,
             desugared_arena,
             ir_arena,
         );
-        let fn_node_id = ty_inf.check_expr(
+        let mut fn_node_id = ty_inf.check_expr(
             &mut ty_env,
             function.body,
             descr.definition.ty_scheme.ty.ret,
             MutType::constant(),
             expected_span,
         )?;
+        fn_node_id = wrap_body_with_call_depth_check_if_recursive(
+            &mut ty_inf,
+            ir_arena,
+            fn_node_id,
+            &recursive_function_ids,
+            descr.definition.ty_scheme.ty.ret,
+            function.name.1,
+            expected_span,
+        );
         lambda_functions.drain(..).for_each(|function| {
             let lambda_id = output.add_function_anonymous(function);
             output.name_function(
@@ -1573,6 +1684,7 @@ fn emit_expr_unsafe_inner(
         None,
         None,
         vec![],
+        true,
         &mut lambda_functions,
         module.functions.len() as u32,
         &desugared_arena,

@@ -130,6 +130,7 @@ TraitImpl: TraitImpl = {
             where_clause: where_clause.unwrap_or_default(),
             associated_consts,
             functions,
+            function_sccs: (),
             span: span(l, r, source_id),
         }
     },
@@ -149,6 +150,7 @@ TraitImpl: TraitImpl = {
             where_clause: where_clause.unwrap_or_default(),
             associated_consts,
             functions,
+            function_sccs: (),
             span: span(l, r, source_id),
         }
     },

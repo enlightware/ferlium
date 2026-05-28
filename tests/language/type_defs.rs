@@ -1700,7 +1700,7 @@ fn generic_trait_impl_for_user_defined_zip_iterator() {
         &mut session,
         &build_zip_iterator_src,
         "build_zip_iterator",
-        "() -> ZipIterator<ArrayIterator<int>, ArrayIterator<string>, int, string>",
+        "() -> ZipIterator<ArrayIterator<int>, ArrayIterator<string>, int, string> ! fallible",
     );
 
     let run_zip_iterator_src = join_src(&[

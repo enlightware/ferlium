@@ -254,7 +254,7 @@ pub struct MapIterator<I, T, O>
 	where I: Iterator<Item = T>
 {
 	iterator: I,
-	mapper: (T) -> O,
+	mapper: ((T) -> O ! fallible),
 }
 
 impl Iterator for MapIterator<I, T, O> {
@@ -270,7 +270,7 @@ impl<I, T, O> Map for <Self = I, Mapped = O |-> Item = T, Output = MapIterator<I
 where
 	I: Iterator<Item = T>
 {
-	fn map(value: I, mapper: (T) -> O) -> MapIterator<I, T, O> {
+	fn map(value: I, mapper: ((T) -> O ! fallible)) -> MapIterator<I, T, O> {
 		MapIterator { iterator: value, mapper }
 	}
 }
@@ -280,7 +280,7 @@ pub struct FilterIterator<I, T>
 	where I: Iterator<Item = T>
 {
 	iterator: I,
-	filter: (T) -> bool,
+	filter: ((T) -> bool ! fallible),
 }
 
 impl Iterator for FilterIterator<I, T> {
@@ -302,7 +302,7 @@ impl<I, T> Filter for <Self = I |-> Item = T, Output = FilterIterator<I, T>>
 where
 	I: Iterator<Item = T>
 {
-	fn filter(value: I, predicate: (T) -> bool) -> FilterIterator<I, T> {
+	fn filter(value: I, predicate: ((T) -> bool ! fallible)) -> FilterIterator<I, T> {
 		FilterIterator { iterator: value, filter: predicate }
 	}
 }
@@ -312,7 +312,7 @@ pub struct FilterMapIterator<I, T, O>
 	where I: Iterator<Item = T>
 {
 	iterator: I,
-	filter_map: (T) -> Option<O>,
+	filter_map: ((T) -> Option<O> ! fallible),
 }
 
 impl Iterator for FilterMapIterator<I, T, O> {
@@ -335,7 +335,7 @@ impl<I, T, O> FilterMap for <Self = I, Mapped = O |-> Item = T, Output = FilterM
 where
 	I: Iterator<Item = T>
 {
-	fn filter_map(value: I, mapper: (T) -> Option<O>) -> FilterMapIterator<I, T, O> {
+	fn filter_map(value: I, mapper: ((T) -> Option<O> ! fallible)) -> FilterMapIterator<I, T, O> {
 		FilterMapIterator { iterator: value, filter_map: mapper }
 	}
 }

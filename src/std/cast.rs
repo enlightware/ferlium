@@ -14,7 +14,7 @@ use crate::{
     hir::function::FunctionDefinition,
     module::{LocalClone, LocalDeclId, Module, ResolvedLocalClone, TraitId, TraitImplId, id::Id},
     std::{core_traits_names::VALUE_TRAIT_NAME, value::VALUE_CLONE_METHOD_INDEX},
-    types::effects::EffType,
+    types::effects::{EffType, PrimitiveEffect},
     types::r#trait::{Deriver, Trait},
     types::trait_solver::TraitSolver,
     types::r#type::{FnType, Type},
@@ -83,7 +83,11 @@ impl Deriver for SelfCastDeriver {
 pub fn cast_trait() -> Trait {
     let var0_ty = Type::variable_id(0);
     let var1_ty = Type::variable_id(1);
-    let unary_fn_ty = FnType::new_by_val([var0_ty], var1_ty, EffType::empty());
+    let unary_fn_ty = FnType::new_by_val(
+        [var0_ty],
+        var1_ty,
+        EffType::single_primitive(PrimitiveEffect::Fallible),
+    );
     Trait::new(
         "Cast",
         "Conversion of a value from one type to another.",

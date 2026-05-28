@@ -25,7 +25,7 @@ pub enum RuntimeErrorKind {
     InvalidArgument(String),
     CallDepthLimitExceeded { limit: usize },
     StackLimitExceeded { limit: usize },
-    // TODO: add execution duration limit exhausted
+    FuelExhausted,
 }
 
 impl Display for RuntimeErrorKind {
@@ -45,6 +45,7 @@ impl Display for RuntimeErrorKind {
             StackLimitExceeded { limit } => {
                 write!(f, "Stack limit exceeded: limit is {limit}")
             }
+            FuelExhausted => write!(f, "Execution fuel exhausted"),
         }
     }
 }

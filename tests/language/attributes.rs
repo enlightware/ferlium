@@ -215,6 +215,27 @@ fn place_result_attribute_is_rejected_in_user_code() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn no_fuel_check_attribute_is_rejected_in_user_code() {
+    let mut session = TestSession::new();
+    match session
+        .fail_compilation(indoc! { r#"
+            #[no_fuel_check]
+            fn f() {}
+        "# })
+        .into_inner()
+    {
+        CompilationErrorImpl::UnsafeFeatureUseNotAllowed { feature, .. } => {
+            assert_eq!(
+                feature,
+                UnsafeFeature::FunctionAttribute(ustr("no_fuel_check"))
+            );
+        }
+        other => panic!("expected unsafe feature error, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn place_result_attribute_is_preserved_as_function_flag_in_std_context() {
     let module = compile_std_module(indoc! { r#"
         #[place_result]

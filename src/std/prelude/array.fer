@@ -1,6 +1,7 @@
 // Arrays
 
 impl<A> Value for [A] where A: Value {
+	#[no_fuel_check]
 	fn eq(left: [A], right: [A]) -> bool {
 		let l = array_len(left);
 		if l != array_len(right) {
@@ -18,6 +19,7 @@ impl<A> Value for [A] where A: Value {
 		}
 	}
 
+	#[no_fuel_check]
 	fn to_string(value: [A]) -> string {
 		let mut rendered = "[";
 		let mut i = 0;
@@ -34,6 +36,7 @@ impl<A> Value for [A] where A: Value {
 		}
 	}
 
+	#[no_fuel_check]
 	fn hash(value: [A], state: &mut hasher) {
 		let l = array_len(value);
 		hasher_write_int(state, l);
@@ -47,6 +50,7 @@ impl<A> Value for [A] where A: Value {
 		}
 	}
 
+	#[no_fuel_check]
 	fn clone(source: [A], target: &mut [A]) {
 		let len = array_len(source);
 		target = array_with_capacity(len);
@@ -61,6 +65,7 @@ impl<A> Value for [A] where A: Value {
 		}
 	}
 
+	#[no_fuel_check]
 	fn drop(target: &mut [A]) {
 		loop {
 			let len = array_len(target);

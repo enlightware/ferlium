@@ -1450,7 +1450,7 @@ impl Node {
             Loop(body_id) => {
                 elaborate_dictionaries(arena, *body_id, ctx, locals, local_count)?;
             }
-            SoftBreak | Unimplemented => {}
+            CheckCallDepth | CheckFuel | SoftBreak | Unimplemented => {}
         }
 
         arena[node_id].kind = kind;

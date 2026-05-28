@@ -203,6 +203,23 @@ pub type PTraitImplFor = TraitImplFor<Parsed>;
 /// An AST trait implementation header after desugaring
 pub type DTraitImplFor = TraitImplFor<Desugared>;
 
+/// Index of a function in an AST-local function list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, new)]
+pub struct FunctionAstIndex(usize);
+
+impl FunctionAstIndex {
+    pub fn as_index(self) -> usize {
+        self.0
+    }
+}
+
+/// A strongly connected component of AST-local functions.
+#[derive(Debug, Clone)]
+pub struct FunctionScc {
+    pub functions: Vec<FunctionAstIndex>,
+    pub recursive: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct TraitAssociatedConstImpl {
     pub name: UstrSpan,
@@ -228,6 +245,7 @@ pub struct TraitImpl<P: Phase> {
     pub where_clause: Vec<P::WhereClause>,
     pub associated_consts: Vec<TraitAssociatedConstImpl>,
     pub functions: Vec<ModuleFunction<P>>,
+    pub function_sccs: P::FunctionSccs,
     pub span: Location,
 }
 

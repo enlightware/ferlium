@@ -43,7 +43,7 @@ where
 	Cast<From = F, To = T>
 {
 	fn cast(array: [F]) -> [T] {
-		map(array, (|element| cast(element): (F) -> T))
+		map(array, (|element| cast(element): ((F) -> T ! fallible)))
 	}
 }
 
@@ -51,7 +51,7 @@ impl<A, B> Map for <Self = [A], Mapped = B |-> Item = A, Output = [B]>
 where
 	A: Value
 {
-	fn map(value: [A], mapper: ((A) -> B !)) -> [B] {
+	fn map(value: [A], mapper: ((A) -> B ! fallible)) -> [B] {
 		from_iter(MapIterator { iterator: ArrayIterator { array: value, index: 0 }, mapper })
 	}
 }
@@ -60,7 +60,7 @@ impl<A> Filter for <Self = [A] |-> Item = A, Output = [A]>
 where
 	A: Value
 {
-	fn filter(value: [A], predicate: ((A) -> bool !)) -> [A] {
+	fn filter(value: [A], predicate: ((A) -> bool ! fallible)) -> [A] {
 		from_iter(FilterIterator { iterator: ArrayIterator { array: value, index: 0 }, filter: predicate })
 	}
 }
@@ -69,7 +69,7 @@ impl<A, B> FilterMap for <Self = [A], Mapped = B |-> Item = A, Output = [B]>
 where
 	A: Value
 {
-	fn filter_map(value: [A], mapper: ((A) -> Option<B> !)) -> [B] {
+	fn filter_map(value: [A], mapper: ((A) -> Option<B> ! fallible)) -> [B] {
 		from_iter(FilterMapIterator { iterator: ArrayIterator { array: value, index: 0 }, filter_map: mapper })
 	}
 }
@@ -293,7 +293,7 @@ where
 
 // Sort for arrays
 
-fn array_merge_ranges_by<A>(source: &mut [A], target: &mut [A], start: int, middle: int, end: int, compare: ((A, A) -> Ordering !)) {
+fn array_merge_ranges_by<A>(source: &mut [A], target: &mut [A], start: int, middle: int, end: int, compare: ((A, A) -> Ordering ! fallible)) {
 	let mut left = start;
 	let mut right = middle;
 
@@ -320,7 +320,7 @@ fn array_merge_ranges_by<A>(source: &mut [A], target: &mut [A], start: int, midd
 	};
 }
 
-fn array_split_merge_by<A>(source: &mut [A], target: &mut [A], start: int, end: int, compare: ((A, A) -> Ordering !)) {
+fn array_split_merge_by<A>(source: &mut [A], target: &mut [A], start: int, end: int, compare: ((A, A) -> Ordering ! fallible)) {
 	if end - start > 1 {
 		let middle = shift_right(start + end, 1);
 		array_split_merge_by(target, source, start, middle, compare);
@@ -330,7 +330,7 @@ fn array_split_merge_by<A>(source: &mut [A], target: &mut [A], start: int, end: 
 }
 
 /// Sorts `value` in place with a stable merge sort using `compare`.
-fn array_merge_sort_by<A>(value: &mut [A], compare: ((A, A) -> Ordering !)) {
+fn array_merge_sort_by<A>(value: &mut [A], compare: ((A, A) -> Ordering ! fallible)) {
 	let size = len(value);
 	if size > 1 {
 		// Use one full-size scratch array and alternate source/target roles recursively.
@@ -340,7 +340,7 @@ fn array_merge_sort_by<A>(value: &mut [A], compare: ((A, A) -> Ordering !)) {
 }
 
 impl<A> SortBy for <Self = [A] |-> Item = A> {
-	fn sort_by(value: &mut [A], compare: ((A, A) -> Ordering !)) {
+	fn sort_by(value: &mut [A], compare: ((A, A) -> Ordering ! fallible)) {
 		array_merge_sort_by(value, compare)
 	}
 }
@@ -355,7 +355,7 @@ where
 }
 
 /// Returns a sorted copy of `value` using `compare`.
-pub fn sorted_by<S, A>(value: S, compare: ((A, A) -> Ordering !)) -> S
+pub fn sorted_by<S, A>(value: S, compare: ((A, A) -> Ordering ! fallible)) -> S
 where
 	SortBy<Self = S |-> Item = A>
 {

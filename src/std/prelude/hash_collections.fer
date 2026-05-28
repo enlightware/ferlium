@@ -156,16 +156,19 @@ impl<V> Value for HashSet<V>
 where
 	V: Value
 {
+	#[no_fuel_check]
 	fn eq(left: HashSet<V>, right: HashSet<V>) -> bool {
-	    hash_collection_eq(left, right, set_contains)
+	    effects_unsafe { hash_collection_eq(left, right, set_contains) }
 	}
 
+	#[no_fuel_check]
 	fn to_string(value: HashSet<V>) -> string {
-	    hash_collection_to_string(value)
+	    effects_unsafe { hash_collection_to_string(value) }
 	}
 
+	#[no_fuel_check]
 	fn hash(value: HashSet<V>, state: &mut hasher) {
-	    hash_collection_hash(value, "hash_set", state)
+	    effects_unsafe { hash_collection_hash(value, "hash_set", state) }
 	}
 
 	fn clone(source: HashSet<V>, target: &mut HashSet<V>) {
@@ -428,16 +431,19 @@ where
 	K: Value,
 	V: Value
 {
+	#[no_fuel_check]
 	fn eq(left: HashMap<K, V>, right: HashMap<K, V>) -> bool {
-	    hash_collection_eq(left, right, hash_map_contains_entry)
+	    effects_unsafe { hash_collection_eq(left, right, hash_map_contains_entry) }
 	}
 
+	#[no_fuel_check]
 	fn to_string(value: HashMap<K, V>) -> string {
-	    hash_collection_to_string(value)
+	    effects_unsafe { hash_collection_to_string(value) }
 	}
 
+	#[no_fuel_check]
 	fn hash(value: HashMap<K, V>, state: &mut hasher) {
-	    hash_collection_hash(value, "hash_map", state)
+	    effects_unsafe { hash_collection_hash(value, "hash_map", state) }
 	}
 
 	fn clone(source: HashMap<K, V>, target: &mut HashMap<K, V>) {

@@ -1317,10 +1317,8 @@ impl PTraitImpl {
             .enumerate()
             .map(|(index, func)| (func.name.0, index))
             .collect::<FxHashMap<_, _>>();
-        let functions = self
-            .functions
-            .into_iter()
-            .map(|f| {
+        let (functions, fn_dep_graph): (_, Vec<_>) = process_results(
+            self.functions.into_iter().map(|f| {
                 f.desugar_with_ty_params(
                     &fn_map,
                     env,
@@ -1329,9 +1327,12 @@ impl PTraitImpl {
                     desugared_arena,
                     modules_used,
                 )
-                .map(|(f, _dep_graph)| f)
-            })
-            .collect::<Result<_, _>>()?;
+            }),
+            |iter| iter.unzip(),
+        )?;
+        let sccs = find_strongly_connected_components(&fn_dep_graph);
+        let function_sccs =
+            local_function_sccs(&fn_dep_graph, topological_sort_sccs(&fn_dep_graph, &sccs));
         let for_trait = self
             .for_trait
             .map(|for_trait| {
@@ -1354,8 +1355,27 @@ impl PTraitImpl {
             where_clause,
             associated_consts: self.associated_consts,
             functions,
+            function_sccs,
         })
     }
+}
+
+fn local_function_sccs(fn_dep_graph: &[DepGraphNode], sccs: Vec<Vec<usize>>) -> FnSccs {
+    sccs.into_iter()
+        .map(|functions| {
+            let recursive = functions.len() > 1
+                || functions
+                    .first()
+                    .is_some_and(|index| fn_dep_graph[*index].0.contains(index));
+            ast::FunctionScc {
+                functions: functions
+                    .into_iter()
+                    .map(ast::FunctionAstIndex::new)
+                    .collect(),
+                recursive,
+            }
+        })
+        .collect()
 }
 
 fn record_module_use(module_id: Option<ModuleId>, modules_used: &mut FxHashSet<ModuleId>) {

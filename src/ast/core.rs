@@ -105,6 +105,7 @@ pub trait Phase: Sized {
     type LetTyAscriptionComplete: Debug + Clone;
     type WhereClause: Debug + Clone + for<'a> FormatWith<ModuleEnv<'a>>;
     type TraitInModule: Debug + Clone;
+    type FunctionSccs: Debug + Clone;
     type TypeAliasInModule: Debug + Clone + for<'a> FormatWith<ModuleEnv<'a>>;
     type TypeDefInModule: Debug + Clone;
 }
@@ -130,6 +131,7 @@ impl Phase for Parsed {
     type LetTyAscriptionComplete = ();
     type WhereClause = TypeConstraint<Self>;
     type TraitInModule = TraitDefinition;
+    type FunctionSccs = ();
     type TypeAliasInModule = TypeAlias;
     type TypeDefInModule = TypeDef<Self>;
 }
@@ -147,6 +149,7 @@ impl Phase for Desugared {
     type LetTyAscriptionComplete = bool;
     type WhereClause = PubTypeConstraint;
     type TraitInModule = Never;
+    type FunctionSccs = Vec<crate::ast::FunctionScc>;
     type TypeAliasInModule = Never;
     type TypeDefInModule = Never;
 }

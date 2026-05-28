@@ -409,6 +409,7 @@ impl TypeInference {
             Some((ret_ty, env.ast_arena[body].span)),
             env.annotation_ty_subst,
             vec![],
+            env.fuel_checks_enabled,
             env.lambda_functions,
             env.base_local_function_index,
             env.ast_arena,
@@ -1455,9 +1456,26 @@ impl TypeInference {
             Loop(body) => {
                 let result_ty = self.fresh_type_var();
                 env.loop_frames.push(LoopFrame::new(result_ty, false));
-                let body_id =
+                let mut body_id =
                     self.check_expr(env, *body, Type::unit(), MutType::constant(), sp(*body))?;
                 let loop_frame = env.loop_frames.pop().unwrap();
+                if env.fuel_checks_enabled {
+                    let check_id = env.ir_arena.alloc(N::new(
+                        K::CheckFuel,
+                        Type::unit(),
+                        effect(PrimitiveEffect::Fallible),
+                        expr_span,
+                    ));
+                    let body_effects = env.ir_arena[body_id].effects.clone();
+                    let effects = self
+                        .make_dependent_effect([&env.ir_arena[check_id].effects, &body_effects]);
+                    body_id = env.ir_arena.alloc(N::new(
+                        K::Block(b(SVec2::from_vec(vec![check_id, body_id]))),
+                        Type::unit(),
+                        effects,
+                        expr_span,
+                    ));
+                }
                 let effects = env.ir_arena[body_id].effects.clone();
                 let ty = if loop_frame.saw_break {
                     Type::variable(loop_frame.result_ty)

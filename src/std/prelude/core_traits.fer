@@ -151,7 +151,7 @@ pub trait Bits<Self> {
 /// An iterator that can produce a sequence of values.
 pub trait Iterator<Self |-> Item> {
 	/// Returns the next item from the iterator, or `None` if the iterator is exhausted.
-	fn next(iterator: &mut Self) -> Option<Item>;
+	fn next(iterator: &mut Self) -> Option<Item> ! fallible;
 }
 
 /// A sequence of elements that can produce an iterator over its elements.
@@ -168,7 +168,7 @@ pub trait FromIterator<Self, Iter>
         Iter: Value
 {
     /// Creates a collection from an iterator.
-    fn from_iter(iterator: Iter) -> Self;
+    fn from_iter(iterator: Iter) -> Self ! fallible;
 }
 
 /// Marker trait that relates a collection family to the collection obtained by replacing its element type.
@@ -177,19 +177,19 @@ pub trait RebindItem<Self, Item |-> Output> {}
 /// Maps a function over a value, producing either a lazy iterator adaptor or an eagerly rebuilt collection depending on the input type.
 pub trait Map<Self, Mapped |-> Item, Output> {
     /// Maps `mapper` over `value`.
-    fn map(value: Self, mapper: (Item) -> Mapped) -> Output;
+    fn map(value: Self, mapper: ((Item) -> Mapped ! fallible)) -> Output ! fallible;
 }
 
 /// Filters a value with a predicate, producing either a lazy iterator adaptor or an eagerly rebuilt collection depending on the input type.
 pub trait Filter<Self |-> Item, Output> {
     /// Keeps only the elements of `value` that satisfy `predicate`.
-    fn filter(value: Self, predicate: (Item) -> bool) -> Output;
+    fn filter(value: Self, predicate: ((Item) -> bool ! fallible)) -> Output ! fallible;
 }
 
 /// Filters and maps a value in one pass, producing either a lazy iterator adaptor or an eagerly rebuilt collection depending on the input type.
 pub trait FilterMap<Self, Mapped |-> Item, Output> {
     /// Applies `mapper` to each element, keeping only `Some` results.
-    fn filter_map(value: Self, mapper: (Item) -> Option<Mapped>) -> Output;
+    fn filter_map(value: Self, mapper: ((Item) -> Option<Mapped> ! fallible)) -> Output ! fallible;
 }
 
 /// A sequence with a known, fixed size.
@@ -201,7 +201,7 @@ pub trait SizedSeq<Self> {
 /// A value that can be concatenated.
 pub trait Concat<Self> {
     /// Concatenates `left` and `right`.
-    fn concat(left: Self, right: Self) -> Self;
+    fn concat(left: Self, right: Self) -> Self ! fallible;
 }
 
 /// A sequence-like value that can be split around a non-empty separator, yielding parts lazily.
@@ -215,23 +215,23 @@ pub trait Split<Self, Separator |-> Part, Iter, Output>
 /// A sequence-like value that can extract a subrange.
 pub trait Slice<Self |-> Output> {
     /// Returns the slice of `value` from `start` to `end` (end-exclusive). Negative indices count from the end.
-    fn slice(value: Self, start: int, end: int) -> Output;
+    fn slice(value: Self, start: int, end: int) -> Output ! fallible;
 }
 
 /// A type that can be checked for the presence of an element.
 pub trait Contains<Self |-> Element> {
     /// Returns true if `container` contains `element`.
-    fn contains(container: Self, element: Element) -> bool;
+    fn contains(container: Self, element: Element) -> bool ! fallible;
 }
 
 /// A container whose elements can be reversed in place.
 pub trait Reverse<Self> {
     /// Reverses the elements of `value` in place.
-    fn reverse(value: &mut Self) -> ();
+    fn reverse(value: &mut Self) -> () ! fallible;
 }
 
 /// A container that can be sorted in place with a custom comparator.
 pub trait SortBy<Self |-> Item> {
     /// Sorts `value` in place using `compare`.
-    fn sort_by(self: &mut Self, comparator: (Item, Item) -> Ordering);
+    fn sort_by(self: &mut Self, comparator: ((Item, Item) -> Ordering ! fallible)) ! fallible;
 }

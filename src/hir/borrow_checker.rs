@@ -292,7 +292,7 @@ impl Node {
             Loop(body) => {
                 check_borrows(arena, *body)?;
             }
-            SoftBreak | Unimplemented => {}
+            CheckCallDepth | CheckFuel | SoftBreak | Unimplemented => {}
         }
         Ok(())
     }

@@ -202,6 +202,8 @@ pub struct EvalCtx<'a> {
     pub call_depth_limit: usize,
     /// maximum number of values in the evaluation environment
     pub stack_limit: usize,
+    /// remaining execution fuel; `None` means fuel checks are disabled
+    pub fuel_remaining: Option<i64>,
     /// a flag to break the evaluation
     pub break_loop: bool,
     /// id of the current module for import slot resolution
@@ -225,6 +227,7 @@ impl<'a> EvalCtx<'a> {
             call_depth: 0,
             call_depth_limit: Self::DEFAULT_CALL_DEPTH_LIMIT,
             stack_limit: Self::DEFAULT_STACK_LIMIT,
+            fuel_remaining: None,
             break_loop: false,
             module_id,
             returns_place: false,
@@ -235,6 +238,42 @@ impl<'a> EvalCtx<'a> {
     /// Get the compiler session.
     pub fn compiler_session(&self) -> &'a CompilerSession {
         self.compiler_session
+    }
+
+    pub fn set_fuel(&mut self, fuel: i64) {
+        self.fuel_remaining = Some(fuel);
+    }
+
+    pub fn disable_fuel(&mut self) {
+        self.fuel_remaining = None;
+    }
+
+    pub fn check_fuel(&mut self, span: Location) -> EvalControlFlowResult {
+        let Some(fuel) = &mut self.fuel_remaining else {
+            return cont(Value::unit());
+        };
+        *fuel -= 1;
+        if *fuel < 0 {
+            Err(RuntimeError::new(
+                RuntimeErrorKind::FuelExhausted,
+                Some(span),
+            ))
+        } else {
+            cont(Value::unit())
+        }
+    }
+
+    pub fn check_call_depth(&mut self, span: Location) -> EvalControlFlowResult {
+        if self.call_depth >= self.call_depth_limit {
+            Err(RuntimeError::new(
+                RuntimeErrorKind::CallDepthLimitExceeded {
+                    limit: self.call_depth_limit,
+                },
+                Some(span),
+            ))
+        } else {
+            cont(Value::unit())
+        }
     }
 
     pub fn pop_environment_entry(&mut self) -> Option<ValOrMut> {
@@ -278,6 +317,7 @@ impl<'a> EvalCtx<'a> {
             call_depth: 0,
             call_depth_limit: Self::DEFAULT_CALL_DEPTH_LIMIT,
             stack_limit: Self::DEFAULT_STACK_LIMIT,
+            fuel_remaining: None,
             break_loop: false,
             module_id: module,
             returns_place: false,
@@ -1014,6 +1054,8 @@ pub fn eval_node_with_ctx(
         GetDictionary(_) | LoadDictionary(_) => {
             panic!("dictionary metadata should not be evaluated as a Value")
         }
+        CheckCallDepth => ctx.check_call_depth(node.span),
+        CheckFuel => ctx.check_fuel(node.span),
         LoadFieldIndex(node) => cont(Value::native(field_index_from_extra_parameter(
             ctx,
             node.extra_parameter,

@@ -487,14 +487,6 @@ impl Callable for ScriptFunction {
             .compiler_session()
             .expect_fresh_module(ctx.module_id)
             .ir_arena;
-        if ctx.call_depth.saturating_add(1) >= ctx.call_depth_limit {
-            return Err(RuntimeError::new(
-                RuntimeErrorKind::CallDepthLimitExceeded {
-                    limit: ctx.call_depth_limit,
-                },
-                Some(arena[self.entry_node_id].span),
-            ));
-        }
         if ctx.environment.len().saturating_add(arg_count) > ctx.stack_limit {
             return Err(RuntimeError::new(
                 RuntimeErrorKind::StackLimitExceeded {

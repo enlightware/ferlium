@@ -648,7 +648,11 @@ pub fn add_to_module(to: &mut Module) {
         [(
             SERIALIZE_FN_NAME,
             Def::new_infer_quantifiers(
-                FnType::new_by_val([var0_ty], variant_type(), EffType::empty()),
+                FnType::new_by_val(
+                    [var0_ty],
+                    variant_type(),
+                    EffType::single_primitive(PrimitiveEffect::Fallible),
+                ),
                 ["self"],
                 "Serialize this value into a variant.",
             ),

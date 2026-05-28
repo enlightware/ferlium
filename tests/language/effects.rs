@@ -132,13 +132,13 @@ fn effects_from_fn_value() {
         &mut session,
         mod_src,
         "a",
-        effect(Write).union(&effect_vars(&[0, 1])),
+        effects(&[Fallible, Write]).union(&effect_vars(&[0, 1])),
     );
     test_mod(
         &mut session,
         mod_src,
         "b",
-        effect(Write).union(&effect_var(0)),
+        effects(&[Fallible, Write]).union(&effect_var(0)),
     );
 
     let mod_src = "fn b(f) { a(f, || effects::write()) } fn a(f, g) { b(f); f(); g(); () } ";
@@ -146,13 +146,13 @@ fn effects_from_fn_value() {
         &mut session,
         mod_src,
         "a",
-        effect(Write).union(&effect_vars(&[0, 1])),
+        effects(&[Fallible, Write]).union(&effect_vars(&[0, 1])),
     );
     test_mod(
         &mut session,
         mod_src,
         "b",
-        effect(Write).union(&effect_var(0)),
+        effects(&[Fallible, Write]).union(&effect_var(0)),
     );
 }
 
@@ -160,12 +160,26 @@ fn effects_from_fn_value() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn effects_in_recursive_fns() {
     let mut session = TestSession::new();
+    use PrimitiveEffect::Fallible;
 
     let mod_src = "fn a(f) { b(f); f() } fn b(f) { a(f) }";
-    test_mod(&mut session, mod_src, "b", effect_var(0));
+    test_mod(
+        &mut session,
+        mod_src,
+        "b",
+        effect(Fallible).union(&effect_var(0)),
+    );
 
     let mod_src = "fn a(f, g) { b(f, g); f() } fn b(f, g) { a(f, g); g() }";
-    test_mod(&mut session, mod_src, "a", effect_vars(&[0, 1]));
+    test_mod(
+        &mut session,
+        mod_src,
+        "a",
+        effect(Fallible).union(&effect_vars(&[0, 1])),
+    );
+
+    let mod_src = "fn apply(f) { f() } fn rf() { apply(rf) }";
+    test_mod(&mut session, mod_src, "rf", effect(Fallible));
 }
 
 #[test]
@@ -254,24 +268,24 @@ fn trait_impl_effect_must_not_have_more_than_def_effects() {
 
     let mut session = TestSession::new();
 
-    // Serialize trait method is not fallible, but implementation calls panic which is fallible.
+    // Pure trait method cannot be implemented with a fallible body.
     session
         .fail_compilation(
             r#"
+        trait Pure<Self> {
+            fn pure(x: Self);
+        }
+
         struct S;
-        impl Serialize {
-            fn serialize(x: S) {
-                if true { std::panic("cannot serialize!") } else { None }
+
+        impl Pure for S {
+            fn pure(x: S) {
+                panic("not pure")
             }
         }
         "#,
         )
-        .expect_trait_method_effect_mismatch(
-            "Serialize",
-            "serialize",
-            &EffType::empty(),
-            &effect(Fallible),
-        );
+        .expect_trait_method_effect_mismatch("Pure", "pure", &EffType::empty(), &effect(Fallible));
 }
 
 #[test]

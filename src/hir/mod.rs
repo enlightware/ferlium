@@ -558,6 +558,12 @@ pub enum NodeKind {
     /// Call a method entry through a trait dictionary.
     CallDictionaryMethod(B<CallDictionaryMethod>),
 
+    // Runtime checks.
+    /// Check the current function call depth against the runtime limit.
+    CheckCallDepth,
+    /// Consume one unit of execution fuel from the runtime context.
+    CheckFuel,
+
     // Control flow.
     /// Evaluate a sequence of nodes.
     Block(NodeIds),
@@ -588,6 +594,8 @@ impl NodeKind {
             | DropLocal(_)
             | TakeLocalValue(_)
             | LoadLocal(_)
+            | CheckCallDepth
+            | CheckFuel
             | SoftBreak
             | Unimplemented => smallvec![],
             BuildClosure(bc) => {
@@ -1061,6 +1069,12 @@ impl Node {
                 writeln!(f, "{indent_str}loop")?;
                 format_ind(arena, *body, f, locals, env, spacing, indent + 1)?;
             }
+            CheckCallDepth => {
+                writeln!(f, "{indent_str}check call depth")?;
+            }
+            CheckFuel => {
+                writeln!(f, "{indent_str}check fuel")?;
+            }
             SoftBreak => {
                 writeln!(f, "{indent_str}soft break")?;
             }
@@ -1261,7 +1275,7 @@ impl Node {
                     return Some(ty);
                 }
             }
-            SoftBreak | Unimplemented => {}
+            CheckCallDepth | CheckFuel | SoftBreak | Unimplemented => {}
         }
 
         // No children has this position, return our type.
@@ -1382,7 +1396,7 @@ impl Node {
             Loop(body) => {
                 unbound_ty_vars(arena, *body, result, ignore);
             }
-            SoftBreak | Unimplemented => {}
+            CheckCallDepth | CheckFuel | SoftBreak | Unimplemented => {}
         }
     }
 

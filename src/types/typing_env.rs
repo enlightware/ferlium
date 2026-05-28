@@ -66,6 +66,8 @@ pub struct TypingEnv<'m> {
     pub(crate) annotation_ty_subst: Option<&'m TypeInstSubst>,
     /// The active loop frames, used for type-checking `soft_break`.
     pub(crate) loop_frames: Vec<LoopFrame>,
+    /// Whether compiler-inserted fuel checks should be emitted for loops.
+    pub(crate) fuel_checks_enabled: bool,
     /// Newly-created module functions from lambdas
     pub(crate) lambda_functions: &'m mut Vec<ModuleFunction>,
     /// The next index for a new module function created from a lambda

@@ -57,7 +57,7 @@ impl crate::graph::Node for DepGraphNode {
     }
 }
 
-pub type FnSccs = Vec<Vec<usize>>;
+pub type FnSccs = Vec<ast::FunctionScc>;
 
 type FnMap = FxHashMap<Ustr, usize>;
 type FnDeps = FxHashSet<usize>;
