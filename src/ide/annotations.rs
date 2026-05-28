@@ -17,7 +17,11 @@ use crate::{
     format::FormatWith,
     hir::{Node, NodeArena, NodeId, NodeKind},
     module::{LocalDecl, ModuleEnv, id::Id},
-    types::{r#type::Type, type_scheme_display::TypeSchemeConstraintRenderMode},
+    types::{
+        effects::{EffType, Effect, PrimitiveEffect},
+        r#type::Type,
+        type_scheme_display::TypeSchemeConstraintRenderMode,
+    },
 };
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
@@ -156,6 +160,10 @@ pub(super) fn display_annotations(
                 ));
             }
         }
+        let displayed_effects = display_effects_with_constraint_mode(
+            &function.definition.ty_scheme.ty.effects,
+            constraint_mode,
+        );
         let byte_src = src.as_bytes();
         let past_args_index = spans.args_span.end_usize();
         let start_space = if past_args_index > 0 && byte_src[past_args_index - 1] == b' ' {
@@ -163,7 +171,7 @@ pub(super) fn display_annotations(
         } else {
             " "
         };
-        let mut annotation = if function.definition.ty_scheme.ty.effects.is_empty() {
+        let mut annotation = if displayed_effects.is_empty() {
             if let Some((ret_span, ty_constant)) = spans.ret_ty {
                 if !ty_constant {
                     let rendered = function
@@ -193,20 +201,16 @@ pub(super) fn display_annotations(
                     .ret
                     .format_with(&type_env)
                     .to_string();
-                let effects = &function.definition.ty_scheme.ty.effects;
                 (src[ret_span.as_range()].trim() != rendered)
-                    .then(|| format!("{start_space}⇨ {rendered} ! {effects}"))
+                    .then(|| format!("{start_space}⇨ {rendered} ! {displayed_effects}"))
             } else {
-                Some(format!(
-                    "{start_space}! {}",
-                    function.definition.ty_scheme.ty.effects
-                ))
+                Some(format!("{start_space}! {displayed_effects}"))
             }
         } else {
             Some(format!(
                 "{start_space}-> {} ! {}",
                 function.definition.ty_scheme.ty.ret.format_with(&type_env),
-                function.definition.ty_scheme.ty.effects
+                displayed_effects
             ))
         };
         if !function.definition.ty_scheme.is_just_type_and_effects() {
@@ -270,6 +274,20 @@ pub(super) fn display_annotations(
     // }
 
     annotations
+}
+
+fn display_effects_with_constraint_mode(
+    effects: &EffType,
+    constraint_mode: TypeSchemeConstraintRenderMode,
+) -> EffType {
+    match constraint_mode {
+        TypeSchemeConstraintRenderMode::Full => effects.clone(),
+        TypeSchemeConstraintRenderMode::Light => effects
+            .iter()
+            .copied()
+            .filter(|effect| *effect != Effect::Primitive(PrimitiveEffect::Fallible))
+            .collect(),
+    }
 }
 
 fn variable_type_annotations<Env>(

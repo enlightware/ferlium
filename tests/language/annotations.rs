@@ -151,6 +151,50 @@ fn light_annotations_keep_structural_constraints() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn light_annotations_hide_fallible_effect() {
+    let src = indoc! { r#"
+        fn get(xs: [int]) {
+            xs[0]
+        }
+    "# };
+    let mut compiler = compile_source(src);
+    let full_annotations = annotation_hints(&mut compiler);
+    let light_annotations = light_annotation_hints(&mut compiler);
+
+    assert!(
+        full_annotations.contains("! fallible"),
+        "expected full annotations to show fallible effect, got: {full_annotations}"
+    );
+    assert!(
+        !light_annotations.contains("fallible"),
+        "expected light annotations to hide fallible effect, got: {light_annotations}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn light_annotations_keep_non_fallible_effects() {
+    let src = indoc! { r#"
+        fn call(f: (() -> int ! read, fallible)) {
+            f()
+        }
+    "# };
+    let mut compiler = compile_source(src);
+    let full_annotations = annotation_hints(&mut compiler);
+    let light_annotations = light_annotation_hints(&mut compiler);
+
+    assert!(
+        full_annotations.contains("! read, fallible"),
+        "expected full annotations to show all effects, got: {full_annotations}"
+    );
+    assert!(
+        light_annotations.contains("! read") && !light_annotations.contains("fallible"),
+        "expected light annotations to keep read and hide fallible, got: {light_annotations}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn ide_annotations_skip_synthesized_function_signature_spans() {
     let src = indoc! { r#"
         fn f(x, y) {
