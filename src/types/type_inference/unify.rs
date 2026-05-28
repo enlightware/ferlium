@@ -793,7 +793,7 @@ impl UnifiedTypeInference {
                     for eff in fn_ty.effects.iter() {
                         if eff.is_primitive() {
                             self.effect_constraints_inv.push(PendingEffectDependency {
-                                source: EffType::single(*eff),
+                                source: EffType::single(eff),
                                 source_span: Location::new_synthesized(),
                                 target: fresh_eff_var,
                                 target_span: Location::new_synthesized(),

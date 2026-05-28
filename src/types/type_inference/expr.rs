@@ -2,7 +2,6 @@ use std::borrow::Borrow;
 
 use derive_new::new;
 use ena::unify::InPlaceUnificationTable;
-use itertools::Itertools;
 use smallvec::{SmallVec, smallvec};
 use ustr::{Ustr, ustr};
 
@@ -2899,22 +2898,16 @@ impl TypeInference {
             return deps[0].borrow().clone();
         }
 
-        // Partition the effects into primitive and unresolved ones.
-        let (primitives, variables) = deps
-            .iter()
-            .flat_map(|eff| eff.borrow().iter())
-            .partition::<FxHashSet<_>, _>(|eff| eff.is_primitive());
+        let mut effects = deps[0].borrow().clone();
+        for effect in &deps[1..] {
+            effects.extend(effect.borrow());
+        }
 
-        // If all effects are primitive, we can just return them.
-        if variables.is_empty() {
-            return EffType::from_iter(primitives);
-        } else if variables.len() == 1 && primitives.is_empty() {
-            // If there is only one variable and no primitive, we can just return it.
-            return EffType::single(*variables.iter().next().unwrap());
+        if !effects.has_variables() || effects.to_single_variable().is_some() {
+            return effects;
         }
 
         // Otherwise, we need to create a new effect variable.
-        let effects = EffType::from_iter(variables.into_iter().chain(primitives).unique());
         let effect_var = self.effect_unification_table.new_key(Some(effects));
         EffType::single_variable(effect_var)
     }
@@ -2989,7 +2982,7 @@ impl TypeMapper for AnnotationTypeMapper<'_, '_> {
                     if effect.is_variable() {
                         Effect::Variable(self.ty_inf.fresh_effect_var())
                     } else {
-                        *effect
+                        effect
                     }
                 })
                 .collect(),

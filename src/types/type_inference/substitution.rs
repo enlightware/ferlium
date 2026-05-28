@@ -429,14 +429,18 @@ impl TypeSubstituer for SubstituteTypes<'_> {
             return substitute_var(var);
         }
 
-        let mut effects = Vec::new();
+        if !eff_ty.has_variables() {
+            return eff_ty.clone();
+        }
+
+        let mut effects = EffType::empty();
         for eff in eff_ty.iter() {
             match eff {
-                Primitive(effect) => effects.push(Primitive(*effect)),
-                Variable(var) => effects.extend(substitute_var(*var)),
+                Primitive(effect) => effects.insert(Primitive(effect)),
+                Variable(var) => effects.extend(&substitute_var(var)),
             }
         }
-        EffType::from_vec(effects)
+        effects
     }
 }
 

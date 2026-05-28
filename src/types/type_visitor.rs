@@ -70,7 +70,7 @@ pub(crate) struct EffectVarsCollector<'a, C: Extend<EffectVar>>(pub(crate) &'a m
 impl<C: Extend<EffectVar>> TypeInnerVisitor for EffectVarsCollector<'_, C> {
     fn visit_eff_ty(&mut self, ty: &EffType) {
         self.0
-            .extend(ty.iter().filter_map(|effect| effect.as_variable()).copied());
+            .extend(ty.iter().filter_map(|effect| effect.as_variable().copied()));
     }
 }
 
@@ -115,7 +115,7 @@ where
     }
     fn visit_eff_ty(&mut self, ty: &EffType) {
         self.effect_vars
-            .extend(ty.iter().filter_map(|effect| effect.as_variable()).copied());
+            .extend(ty.iter().filter_map(|effect| effect.as_variable().copied()));
     }
 }
 

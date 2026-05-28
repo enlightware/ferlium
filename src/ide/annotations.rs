@@ -284,7 +284,6 @@ fn display_effects_with_constraint_mode(
         TypeSchemeConstraintRenderMode::Full => effects.clone(),
         TypeSchemeConstraintRenderMode::Light => effects
             .iter()
-            .copied()
             .filter(|effect| *effect != Effect::Primitive(PrimitiveEffect::Fallible))
             .collect(),
     }
