@@ -80,7 +80,7 @@ impl TypeInference {
         let condition_span = condition_node.span;
         let cond_eff = condition_node.effects.clone();
         if condition_node.ty == Type::never() {
-            return Ok(Self::diverging_prefix_result([condition_node_id], cond_eff));
+            return Ok(self.diverging_prefix_result(env, [condition_node_id], cond_eff));
         }
 
         // Generate a repr projection to get a condition_node.ty: Repr<Is = U> type

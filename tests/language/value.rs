@@ -663,6 +663,99 @@ fn temporary_record_projection_shared_ref_base_is_dropped() {
     assert_val_eq!(session.run(&source), int(55));
 }
 
+// A temporary used as a place base (here an indexed array literal) is dropped when a sibling
+// argument returns before the call.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn array_index_base_temp_is_dropped_when_later_argument_returns() {
+    let mut session = TestSession::new();
+    let source = format!(
+        r#"
+        {}
+        fn combine(value: Probe, other: int) -> int {{
+            value.0 + other
+        }}
+
+        fn run() -> int {{
+            combine([Probe(6)][0], {{ return 8 }})
+        }}
+
+        testing::reset_tracked_drops();
+        run() * 10 + testing::tracked_drop_log()
+        "#,
+        tracked_probe_value_impl()
+    );
+    assert_val_eq!(session.run(&source), int(86));
+}
+
+// A discarded owned temporary is dropped when a later statement returns out of the block.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn discarded_owned_temporary_is_dropped_before_early_return() {
+    let mut session = TestSession::new();
+    let source = format!(
+        r#"
+        {}
+        fn run() -> int {{
+            Probe(6);
+            return 8;
+        }}
+
+        testing::reset_tracked_drops();
+        run() * 10 + testing::tracked_drop_log()
+        "#,
+        tracked_probe_value_impl()
+    );
+    assert_val_eq!(session.run(&source), int(86));
+}
+
+// An owned temporary passed as a call argument is dropped when a later argument returns out of
+// the block before the call runs.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn call_argument_temp_is_dropped_when_later_argument_returns() {
+    let mut session = TestSession::new();
+    let source = format!(
+        r#"
+        {}
+        fn combine(value: Probe, other: int) -> int {{
+            value.0 + other
+        }}
+
+        fn run() -> int {{
+            combine(Probe(6), {{ return 8 }})
+        }}
+
+        testing::reset_tracked_drops();
+        run() * 10 + testing::tracked_drop_log()
+        "#,
+        tracked_probe_value_impl()
+    );
+    assert_val_eq!(session.run(&source), int(86));
+}
+
+// An owned temporary used as an aggregate element is dropped when a later element returns out of
+// the block before the aggregate is built.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn tuple_element_temp_is_dropped_when_later_element_returns() {
+    let mut session = TestSession::new();
+    let source = format!(
+        r#"
+        {}
+        fn run() -> int {{
+            let pair = (Probe(6), {{ return 8 }});
+            pair.1
+        }}
+
+        testing::reset_tracked_drops();
+        run() * 10 + testing::tracked_drop_log()
+        "#,
+        tracked_probe_value_impl()
+    );
+    assert_val_eq!(session.run(&source), int(86));
+}
+
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn lexical_drop_runs_on_runtime_error() {

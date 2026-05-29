@@ -864,7 +864,7 @@ impl TypeInference {
                 let func_effects = env.ir_arena[func_node_id].effects.clone();
                 if env.ir_arena[func_node_id].ty == Type::never() {
                     let effects = self.make_dependent_effect([&func_effects]);
-                    Self::diverging_prefix_result([func_node_id], effects)
+                    self.diverging_prefix_result(env, [func_node_id], effects)
                 } else {
                     // Infer the type and mutability of the arguments and collect their code and constraints
                     let (mut args_nodes, args_tys, args_effects, args_diverge) =
@@ -879,7 +879,7 @@ impl TypeInference {
                                 ))
                                 .collect::<Vec<_>>();
                         let effects = self.make_dependent_effect([&func_effects, &args_effects]);
-                        Self::diverging_prefix_result(nodes, effects)
+                        self.diverging_prefix_result(env, nodes, effects)
                     } else {
                         // Allocate a fresh variable for the return type and effects of the function
                         let ret_ty = self.fresh_type_var_ty();
@@ -954,11 +954,16 @@ impl TypeInference {
                 let local_decl_count = env.all_locals.len();
                 let (mut nodes, types, effects, diverges) =
                     self.infer_exprs_drop_mut_until_never(env, exprs)?;
+                // Statements before the block result are discarded and must run their drop glue.
+                // This holds even when the block diverges: a `return` (or other never-typed tail)
+                // abandons the preceding temporaries, whose `Value::drop` would otherwise be
+                // skipped on the early-exit path (the diverging node is the last one and is left
+                // untouched). Only the block *result* handling below is gated on `!diverges`.
+                let last_index = nodes.len().saturating_sub(1);
+                for node in nodes.iter_mut().take(last_index) {
+                    *node = self.discard_unused_value(env, *node, expr_span);
+                }
                 if !diverges {
-                    let last_index = nodes.len().saturating_sub(1);
-                    for node in nodes.iter_mut().take(last_index) {
-                        *node = self.discard_unused_value(env, *node, expr_span);
-                    }
                     let _taken_local = nodes.last_mut().and_then(|last| {
                         let (taken_node, taken_local) =
                             self.take_local_value_result(env, *last, local_decl_count, expr_span);
@@ -1012,7 +1017,7 @@ impl TypeInference {
                 let place_effects = env.ir_arena[place_id].effects.clone();
                 if env.ir_arena[place_id].ty == Type::never() {
                     let effects = self.make_dependent_effect([&place_effects]);
-                    Self::diverging_prefix_result([place_id], effects)
+                    self.diverging_prefix_result(env, [place_id], effects)
                 } else {
                     self.add_mut_be_at_least_constraint(
                         place_mut,
@@ -1030,7 +1035,7 @@ impl TypeInference {
                         let mut nodes = self.place_evaluation_prefix_nodes(env.ir_arena, place_id);
                         nodes.push(value_id);
                         let effects = self.make_dependent_effect([&place_effects, &value_effects]);
-                        Self::diverging_prefix_result(nodes, effects)
+                        self.diverging_prefix_result(env, nodes, effects)
                     } else {
                         let temp_start_index = env.cur_locals.len();
                         let prepared_place =
@@ -1075,7 +1080,7 @@ impl TypeInference {
                 let (nodes, types, effects, diverges) =
                     self.infer_exprs_drop_mut_until_never(env, exprs)?;
                 if diverges {
-                    Self::diverging_prefix_result(nodes, effects)
+                    self.diverging_prefix_result(env, nodes, effects)
                 } else {
                     let nodes = self.materialize_owned_values(env, nodes, expr_span);
                     let ty = Type::tuple(types);
@@ -1092,7 +1097,7 @@ impl TypeInference {
                 // Note: tuple_node.ty is T
                 let tuple_node_ty = env.ir_arena[tuple_node_id].ty;
                 if tuple_node_ty == Type::never() {
-                    Self::diverging_prefix_result([tuple_node_id], effects)
+                    self.diverging_prefix_result(env, [tuple_node_id], effects)
                 } else {
                     let tuple_ty = self.fresh_type_var_ty(); // U
                     let (index, index_span) = data.index;
@@ -1202,7 +1207,7 @@ impl TypeInference {
                     let (nodes, effects, diverges) =
                         self.check_exprs_until_never(env, &exprs, &expected_tys, expr_span)?;
                     if diverges {
-                        Self::diverging_prefix_result(nodes, effects)
+                        self.diverging_prefix_result(env, nodes, effects)
                     } else {
                         let nodes = self.materialize_owned_values(env, nodes, expr_span);
                         let node = if let Some(tag) = tag {
@@ -1260,7 +1265,7 @@ impl TypeInference {
                 // Note: record_node.ty is T
                 let record_node_ty = env.ir_arena[record_node_id].ty;
                 if record_node_ty == Type::never() {
-                    Self::diverging_prefix_result([record_node_id], effects)
+                    self.diverging_prefix_result(env, [record_node_id], effects)
                 } else {
                     let record_ty = self.fresh_type_var_ty(); // U
                     let (field, field_span) = data.name;
@@ -1298,7 +1303,7 @@ impl TypeInference {
                     let (nodes, types, effects, diverges) =
                         self.infer_exprs_drop_mut_until_never(env, exprs)?;
                     if diverges {
-                        Self::diverging_prefix_result(nodes, effects)
+                        self.diverging_prefix_result(env, nodes, effects)
                     } else {
                         let nodes = self.materialize_owned_values(env, nodes, expr_span);
                         // The element type is the first element's type
@@ -1328,7 +1333,7 @@ impl TypeInference {
                 let array_effects = env.ir_arena[array_node_id].effects.clone();
                 if env.ir_arena[array_node_id].ty == Type::never() {
                     let effects = self.make_dependent_effect([&array_effects]);
-                    Self::diverging_prefix_result([array_node_id], effects)
+                    self.diverging_prefix_result(env, [array_node_id], effects)
                 } else {
                     let array_node_ty = env.ir_arena[array_node_id].ty;
                     self.add_sub_type_constraint(
@@ -1352,7 +1357,7 @@ impl TypeInference {
                             self.place_evaluation_prefix_nodes(env.ir_arena, array_node_id);
                         nodes.push(index_node_id);
                         let effects = self.make_dependent_effect([&array_effects, &index_effects]);
-                        Self::diverging_prefix_result(nodes, effects)
+                        self.diverging_prefix_result(env, nodes, effects)
                     } else {
                         let (path, (definition, function, _module_id, arg_passing)) = {
                             let (path, (definition, function, module_id, arg_passing)) =
@@ -2174,16 +2179,36 @@ impl TypeInference {
         }
     }
 
-    pub(crate) fn diverging_prefix_node(node_ids: impl IntoIterator<Item = NodeId>) -> NodeKind {
-        Self::block(node_ids.into_iter().collect(), Vec::new())
+    pub(crate) fn diverging_prefix_node(
+        &mut self,
+        env: &mut TypingEnv,
+        node_ids: impl IntoIterator<Item = NodeId>,
+    ) -> NodeKind {
+        // The sequence never completes, so every already-evaluated sub-expression is abandoned.
+        // Discard each so owned temporaries run their drop glue before the divergence; the
+        // diverging (never-typed) node itself produces no value and is left untouched.
+        let nodes = node_ids
+            .into_iter()
+            .map(|node_id| {
+                if env.ir_arena[node_id].ty == Type::never() {
+                    node_id
+                } else {
+                    let span = env.ir_arena[node_id].span;
+                    self.discard_unused_value(env, node_id, span)
+                }
+            })
+            .collect();
+        Self::block(nodes, Vec::new())
     }
 
     pub(crate) fn diverging_prefix_result(
+        &mut self,
+        env: &mut TypingEnv,
         node_ids: impl IntoIterator<Item = NodeId>,
         effects: EffType,
     ) -> (NodeKind, Type, MutType, EffType) {
         (
-            Self::diverging_prefix_node(node_ids),
+            self.diverging_prefix_node(env, node_ids),
             Type::never(),
             MutType::constant(),
             effects,
@@ -2253,7 +2278,7 @@ impl TypeInference {
                 if args_diverge {
                     let nodes =
                         self.value_evaluation_prefix_nodes_for_many(env.ir_arena, args_node_ids);
-                    Self::diverging_prefix_result(nodes, args_effects)
+                    self.diverging_prefix_result(env, nodes, args_effects)
                 } else {
                     let mut trait_tys = continuous_hashmap_to_vec(subst.0).unwrap();
                     assert_eq!(trait_tys.len(), trait_ty_var_count as usize);
@@ -2324,7 +2349,7 @@ impl TypeInference {
                 if args_diverge {
                     let nodes =
                         self.value_evaluation_prefix_nodes_for_many(env.ir_arena, args_node_ids);
-                    Self::diverging_prefix_result(nodes, args_effects)
+                    self.diverging_prefix_result(env, nodes, args_effects)
                 } else {
                     // Build and return the function node
                     let ret_ty = inst_fn_ty.ret;
@@ -2400,7 +2425,7 @@ impl TypeInference {
                 let (node_ids, effects, diverges) =
                     self.check_exprs_until_never(env, args, &expected_tys, expr_span)?;
                 if diverges {
-                    Self::diverging_prefix_result(node_ids, effects)
+                    self.diverging_prefix_result(env, node_ids, effects)
                 } else {
                     let node_ids = self.materialize_owned_values(env, node_ids, expr_span);
                     let inner_kind = if node_ids.is_empty() {
@@ -2432,7 +2457,7 @@ impl TypeInference {
                 let (payload_node_ids, payload_types, effects, diverges) =
                     self.infer_exprs_drop_mut_until_never(env, args)?;
                 if diverges {
-                    Self::diverging_prefix_result(payload_node_ids, effects)
+                    self.diverging_prefix_result(env, payload_node_ids, effects)
                 } else {
                     let payload_node_ids =
                         self.materialize_owned_values(env, payload_node_ids, expr_span);
@@ -2516,7 +2541,7 @@ impl TypeInference {
         let (node_ids, types, effects, diverges) =
             self.infer_exprs_drop_mut_until_never(env, &exprs)?;
         if diverges {
-            let payload_node = Self::diverging_prefix_node(node_ids);
+            let payload_node = self.diverging_prefix_node(env, node_ids);
             Ok((payload_node, Type::never(), effects))
         } else {
             let span = Location::fuse(fields.iter().map(|(_, expr)| env.ast_arena[*expr].span))
