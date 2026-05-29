@@ -734,6 +734,58 @@ fn call_argument_temp_is_dropped_when_later_argument_returns() {
     assert_val_eq!(session.run(&source), int(86));
 }
 
+// As above, but the later argument returns at *run time* (a conditional return on a runtime value),
+// so the call is not statically elided and reaches argument evaluation: the already-evaluated
+// temporary must still be dropped when evaluation unwinds out of the call.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn call_argument_temp_is_dropped_when_later_argument_returns_at_runtime() {
+    let mut session = TestSession::new();
+    let source = format!(
+        r#"
+        {}
+        fn combine(value: Probe, other: int) -> int {{
+            value.0 + other
+        }}
+
+        fn run(c: bool) -> int {{
+            combine(Probe(6), if c {{ return 8 }} else {{ 0 }})
+        }}
+
+        testing::reset_tracked_drops();
+        run(true) * 10 + testing::tracked_drop_log()
+        "#,
+        tracked_probe_value_impl()
+    );
+    assert_val_eq!(session.run(&source), int(86));
+}
+
+// As above, but the later argument *errors* at run time rather than returning. The error aborts
+// the script before it can read the drop log, so the log is observed via a follow-up run (the
+// tracked-drop counter is process-global and nextest isolates each test in its own process).
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn call_argument_temp_is_dropped_when_later_argument_errors_at_runtime() {
+    let mut session = TestSession::new();
+    let erroring = format!(
+        r#"
+        {}
+        fn combine(value: Probe, other: int) -> int {{
+            value.0 + other
+        }}
+
+        testing::reset_tracked_drops();
+        combine(Probe(6), [0][1])
+        "#,
+        tracked_probe_value_impl()
+    );
+    assert!(
+        session.try_run(&erroring).is_err(),
+        "expected a runtime out-of-bounds error"
+    );
+    assert_val_eq!(session.run("testing::tracked_drop_log()"), int(6));
+}
+
 // An owned temporary used as an aggregate element is dropped when a later element returns out of
 // the block before the aggregate is built.
 #[test]

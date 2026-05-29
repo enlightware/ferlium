@@ -1907,9 +1907,7 @@ impl PreparedCallArgs {
     }
 
     fn drop_temps(&mut self, ctx: &mut EvalCtx, span: Location) -> Result<(), RuntimeError> {
-        for (place, drop) in self.temp_drops.iter().rev() {
-            call_local_drop_dispatch(ctx, *drop, place.clone(), span)?;
-        }
+        run_temp_drops(ctx, &self.temp_drops, span)?;
         self.temp_drops.clear();
         Ok(())
     }
@@ -1917,6 +1915,18 @@ impl PreparedCallArgs {
     fn take_arguments(&mut self) -> Vec<ValOrMut> {
         std::mem::take(&mut self.arguments)
     }
+}
+
+/// Run `Value::drop` for each materialized shared-ref argument temporary, in reverse order.
+fn run_temp_drops(
+    ctx: &mut EvalCtx,
+    temp_drops: &[(Place, ResolvedLocalDrop)],
+    span: Location,
+) -> Result<(), RuntimeError> {
+    for (place, drop) in temp_drops.iter().rev() {
+        call_local_drop_dispatch(ctx, *drop, place.clone(), span)?;
+    }
+    Ok(())
 }
 
 /// Shared post-call cleanup: drop the argument temporaries, reclaim their storage, then yield the call result.
@@ -2654,17 +2664,21 @@ fn eval_args(
         match result {
             Ok(ControlFlow::Continue(arg)) => results.push(arg),
             Ok(ControlFlow::Return(value)) => {
+                let cleanup = run_temp_drops(ctx, &temp_drops, arena[arg.value].span);
                 for result in results {
                     result.discard_storage();
                 }
                 ctx.truncate_environment_storage(temp_start);
+                cleanup?;
                 return Ok(ControlFlow::Return(value));
             }
             Err(err) => {
+                let cleanup = run_temp_drops(ctx, &temp_drops, arena[arg.value].span);
                 for result in results {
                     result.discard_storage();
                 }
                 ctx.truncate_environment_storage(temp_start);
+                cleanup?;
                 return Err(err);
             }
         }
