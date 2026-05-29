@@ -402,7 +402,10 @@ impl TypeInference {
                                     .collect::<Vec<_>>(),
                             );
                             node_id = env.ir_arena.alloc(N::new(
-                                K::Block(b(SVec2::from_vec(project_node_ids))),
+                                K::Block(b(hir::Block {
+                                    body: b(SVec2::from_vec(project_node_ids)),
+                                    cleanup: Vec::new(),
+                                })),
                                 return_ty,
                                 proj_effects,
                                 sp(*expr),
@@ -478,10 +481,10 @@ impl TypeInference {
             let store_eff = &env.ir_arena[store_variant_node_id].effects;
             let case_node_eff = &env.ir_arena[case_node_id].effects;
             let effects = self.make_dependent_effect([store_eff, case_node_eff]);
-            let node = K::Block(b(SVec2::from_vec(vec![
-                store_variant_node_id,
-                case_node_id,
-            ])));
+            let node = K::Block(b(hir::Block {
+                body: b(SVec2::from_vec(vec![store_variant_node_id, case_node_id])),
+                cleanup: Vec::new(),
+            }));
             (node, case_ret_ty, MutType::constant(), effects)
         } else {
             // Literal patterns, convert optional default to mandatory one

@@ -161,5 +161,8 @@ pub fn case_from_complete_alternatives(
 }
 
 pub fn block(statements: impl IntoSVec2<NodeId>) -> NodeKind {
-    K::Block(b(statements.into_svec2()))
+    K::Block(b(hir::Block {
+        body: b(statements.into_svec2()),
+        cleanup: Vec::new(),
+    }))
 }

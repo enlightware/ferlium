@@ -630,7 +630,10 @@ fn wrap_body_with_call_depth_check_if_recursive(
     let body_effects = arena[body_id].effects.clone();
     let effects = ty_inf.make_dependent_effect([&arena[check_id].effects, &body_effects]);
     arena.alloc(hir::Node::new(
-        hir::NodeKind::Block(b(SVec2::from_vec(vec![check_id, body_id]))),
+        hir::NodeKind::Block(b(hir::Block {
+            body: b(SVec2::from_vec(vec![check_id, body_id])),
+            cleanup: Vec::new(),
+        })),
         return_ty,
         effects,
         block_span,

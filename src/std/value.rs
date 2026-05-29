@@ -541,7 +541,7 @@ fn function_value_clone_root(
     let target = alloc_synth_node(arena, load_local(target_id), ty);
     alloc_synth_node(
         arena,
-        hir::NodeKind::FunctionClone(hir::FunctionClone { source, target }),
+        hir::NodeKind::CloneClosureEnv(hir::CloneClosureEnv { source, target }),
         Type::unit(),
     )
 }
@@ -571,7 +571,7 @@ fn function_value_drop_root(ty: Type, target_id: LocalDeclId, arena: &mut NodeAr
     let target = alloc_synth_node(arena, load_local(target_id), ty);
     alloc_synth_node(
         arena,
-        hir::NodeKind::FunctionDrop(hir::FunctionDrop { target }),
+        hir::NodeKind::DropClosureEnv(hir::DropClosureEnv { target }),
         Type::unit(),
     )
 }

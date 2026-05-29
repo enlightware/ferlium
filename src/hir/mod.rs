@@ -267,12 +267,6 @@ pub struct TakeLocalValue {
     pub mode: TakeLocalValueMode,
 }
 
-/// Drop the owned value stored in a local.
-#[derive(Debug, Clone, Copy)]
-pub struct DropLocal {
-    pub id: LocalDeclId,
-}
-
 /// Assign a new value into an existing place.
 #[derive(Debug, Clone, Copy)]
 pub struct Assignment {
@@ -290,16 +284,28 @@ pub struct CloneValue {
     pub clone: LocalClone,
 }
 
+/// Evaluate a sequence of nodes.
+///
+/// `cleanup` lists the block's cleanup obligations in declaration order.
+/// Cleanup runs in reverse order on exits from the block, but an implementation
+/// must only drop obligations whose storage is live and initialized at that exit.
+#[derive(Debug, Clone)]
+pub struct Block {
+    pub body: NodeIds,
+    /// Locals in declaration order.
+    pub cleanup: Vec<LocalDeclId>,
+}
+
 /// Clone the closure environment of `source` into already allocated `target` storage.
 #[derive(Debug, Clone, Copy)]
-pub struct FunctionClone {
+pub struct CloneClosureEnv {
     pub source: NodeId,
     pub target: NodeId,
 }
 
 /// Drop the owned closure environment stored in `target`.
 #[derive(Debug, Clone, Copy)]
-pub struct FunctionDrop {
+pub struct DropClosureEnv {
     pub target: NodeId,
 }
 
@@ -517,16 +523,14 @@ pub enum NodeKind {
     StoreLocal(StoreLocal),
     /// Take a local value as an owned result.
     TakeLocalValue(TakeLocalValue),
-    /// Drop the owned value stored in a local.
-    DropLocal(DropLocal),
     /// Assign a new value into an existing place.
     Assign(Assignment),
     /// Materialize a value as an owned result, using the cheapest valid copy mode.
     CloneValue(CloneValue),
     /// Clone the closure environment of `source` into already allocated `target` storage.
-    FunctionClone(FunctionClone),
+    CloneClosureEnv(CloneClosureEnv),
     /// Drop the owned closure environment stored in `target`.
-    FunctionDrop(FunctionDrop),
+    DropClosureEnv(DropClosureEnv),
 
     // Calls and function values.
     /// Load a statically known function as a first-class value.
@@ -565,8 +569,8 @@ pub enum NodeKind {
     CheckFuel,
 
     // Control flow.
-    /// Evaluate a sequence of nodes.
-    Block(NodeIds),
+    /// Evaluate a sequence of nodes with optional cleanup on every exit path.
+    Block(B<Block>),
     /// Return from the current function.
     Return(NodeId),
     /// Branch on a literal value with a default alternative.
@@ -591,7 +595,6 @@ impl NodeKind {
             | GetDictionary(_)
             | LoadDictionary(_)
             | LoadFieldIndex(_)
-            | DropLocal(_)
             | TakeLocalValue(_)
             | LoadLocal(_)
             | CheckCallDepth
@@ -612,8 +615,8 @@ impl NodeKind {
                 v.extend(app.arguments.iter().map(|arg| arg.value));
                 v
             }
-            FunctionClone(node) => smallvec![node.source, node.target],
-            FunctionDrop(node) => smallvec![node.target],
+            CloneClosureEnv(node) => smallvec![node.source, node.target],
+            DropClosureEnv(node) => smallvec![node.target],
             CloneValue(node) => smallvec![node.source],
             StaticApply(app) => app
                 .extra_arguments
@@ -631,9 +634,8 @@ impl NodeKind {
             TraitMethodApply(app) => app.arguments.iter().map(|arg| arg.value).collect(),
             StoreLocal(store) => smallvec![store.value],
             Return(node) | ExtractTag(node) | Loop(node) => smallvec![*node],
-            Block(nodes) | Tuple(nodes) | Record(nodes) | Array(nodes) => {
-                nodes.iter().copied().collect()
-            }
+            Block(block) => block.body.iter().copied().collect(),
+            Tuple(nodes) | Record(nodes) | Array(nodes) => nodes.iter().copied().collect(),
             Assign(a) => smallvec![a.place, a.value],
             Project(node) => smallvec![node.value],
             FieldAccess(node) => smallvec![node.value],
@@ -755,14 +757,14 @@ impl Node {
                     writeln!(f, "{indent_str})")?;
                 }
             }
-            FunctionClone(node) => {
-                writeln!(f, "{indent_str}function clone")?;
+            CloneClosureEnv(node) => {
+                writeln!(f, "{indent_str}clone closure env")?;
                 format_ind(arena, node.source, f, locals, env, spacing, indent + 1)?;
                 writeln!(f, "{indent_str}into")?;
                 format_ind(arena, node.target, f, locals, env, spacing, indent + 1)?;
             }
-            FunctionDrop(node) => {
-                writeln!(f, "{indent_str}function drop")?;
+            DropClosureEnv(node) => {
+                writeln!(f, "{indent_str}drop closure env")?;
                 format_ind(arena, node.target, f, locals, env, spacing, indent + 1)?;
             }
             CloneValue(node) => {
@@ -939,17 +941,6 @@ impl Node {
                 )?;
                 format_ind(arena, node.value, f, locals, env, spacing, indent + 1)?;
             }
-            DropLocal(node) => {
-                let local = &locals[node.id.as_index()];
-                let name = local.name.0;
-                writeln!(
-                    f,
-                    "{indent_str}drop {} at {} as \"{}\"",
-                    local.ty.format_with(env),
-                    local.slot,
-                    name,
-                )?;
-            }
             TakeLocalValue(node) => {
                 let local = &locals[node.id.as_index()];
                 let mode = match node.mode {
@@ -976,10 +967,24 @@ impl Node {
                 writeln!(f, "{indent_str}return")?;
                 format_ind(arena, *node, f, locals, env, spacing, indent + 1)?;
             }
-            Block(nodes) => {
+            Block(block) => {
                 writeln!(f, "{indent_str}block {{")?;
-                for &node in nodes.iter() {
+                for &node in block.body.iter() {
                     format_ind(arena, node, f, locals, env, spacing, indent + 1)?;
+                }
+                if !block.cleanup.is_empty() {
+                    writeln!(f, "{indent_str}cleanup [")?;
+                    for id in &block.cleanup {
+                        let local = &locals[id.as_index()];
+                        writeln!(
+                            f,
+                            "{indent_str}⎸ drop {} at {} as \"{}\"",
+                            local.ty.format_with(env),
+                            local.slot,
+                            local.name.0,
+                        )?;
+                    }
+                    writeln!(f, "{indent_str}]")?;
                 }
                 writeln!(f, "{indent_str}}}")?;
             }
@@ -1115,7 +1120,7 @@ impl Node {
                     }
                 }
             }
-            FunctionClone(node) => {
+            CloneClosureEnv(node) => {
                 if let Some(ty) = type_at(arena, node.source, pos) {
                     return Some(ty);
                 }
@@ -1123,7 +1128,7 @@ impl Node {
                     return Some(ty);
                 }
             }
-            FunctionDrop(node) => {
+            DropClosureEnv(node) => {
                 if let Some(ty) = type_at(arena, node.target, pos) {
                     return Some(ty);
                 }
@@ -1188,7 +1193,6 @@ impl Node {
                     return Some(ty);
                 }
             }
-            DropLocal(_) => {}
             TakeLocalValue(_) => {}
             LoadLocal(_) => {}
             Return(node) => {
@@ -1196,8 +1200,8 @@ impl Node {
                     return Some(ty);
                 }
             }
-            Block(nodes) => {
-                for &child in nodes.iter() {
+            Block(block) => {
+                for &child in block.body.iter() {
                     if let Some(ty) = type_at(arena, child, pos) {
                         return Some(ty);
                     }
@@ -1303,11 +1307,11 @@ impl Node {
                     unbound_ty_vars(arena, arg.value, result, ignore);
                 }
             }
-            FunctionClone(node) => {
+            CloneClosureEnv(node) => {
                 unbound_ty_vars(arena, node.source, result, ignore);
                 unbound_ty_vars(arena, node.target, result, ignore);
             }
-            FunctionDrop(node) => unbound_ty_vars(arena, node.target, result, ignore),
+            DropClosureEnv(node) => unbound_ty_vars(arena, node.target, result, ignore),
             CloneValue(node) => unbound_ty_vars(arena, node.source, result, ignore),
             StaticApply(app) => {
                 self.unbound_ty_vars_in_ty(&app.ty, result, ignore);
@@ -1359,11 +1363,11 @@ impl Node {
                 }
             }
             StoreLocal(node) => unbound_ty_vars(arena, node.value, result, ignore),
-            DropLocal(_) => {}
             TakeLocalValue(_) => {}
             LoadLocal(_) => {}
             Return(node) => unbound_ty_vars(arena, *node, result, ignore),
-            Block(nodes) => nodes
+            Block(block) => block
+                .body
                 .iter()
                 .for_each(|&node| unbound_ty_vars(arena, node, result, ignore)),
             Assign(assignment) => {

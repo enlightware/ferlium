@@ -1023,8 +1023,12 @@ pub fn eval_node_with_ctx(
         Uninit => cont(Value::uninit()),
         BuildClosure(build_closure) => eval_build_closure(arena, build_closure, ctx, locals),
         Apply(app) => eval_apply(arena, app, node.span, ctx, locals),
-        FunctionClone(node) => eval_function_clone(arena, node, arena[node_id].span, ctx, locals),
-        FunctionDrop(node) => eval_function_drop(arena, node, arena[node_id].span, ctx, locals),
+        CloneClosureEnv(node) => {
+            eval_clone_closure_env(arena, node, arena[node_id].span, ctx, locals)
+        }
+        DropClosureEnv(node) => {
+            eval_drop_closure_env(arena, node, arena[node_id].span, ctx, locals)
+        }
         CloneValue(node) => eval_clone_value(arena, node, arena[node_id].span, ctx, locals),
         StaticApply(app) => eval_static_apply(arena, app, node.span, ctx, locals),
         TraitMethodApply(_) => {
@@ -1068,11 +1072,10 @@ pub fn eval_node_with_ctx(
             eval_call_dictionary_method(arena, node, arena[node_id].span, ctx, locals)
         }
         StoreLocal(node) => eval_store_local(arena, node, arena[node_id].span, ctx, locals),
-        DropLocal(node) => eval_drop_local(node, arena[node_id].span, ctx, locals),
         TakeLocalValue(node) => eval_take_local_value(node, arena[node_id].span, ctx, locals),
         LoadLocal(node) => eval_load_local(arena, node_id, node, ctx, locals),
         Return(node) => eval_return(arena, *node, ctx, locals),
-        Block(nodes) => eval_block(arena, nodes, ctx, locals),
+        Block(block) => eval_block(arena, block, ctx, locals),
         Assign(assignment) => eval_assign(arena, node_id, assignment, ctx, locals),
         Tuple(nodes) | Record(nodes) => eval_tuple(arena, nodes, ctx, locals),
         Project(node) => eval_project(arena, node_id, node.value, node.index, ctx, locals),
@@ -1630,9 +1633,9 @@ fn local_place(ctx: &EvalCtx, locals: &[LocalDecl], id: LocalDeclId) -> Place {
 }
 
 #[inline(never)]
-fn eval_function_clone(
+fn eval_clone_closure_env(
     arena: &NodeArena,
-    node: &hir::FunctionClone,
+    node: &hir::CloneClosureEnv,
     span: Location,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
@@ -1690,9 +1693,9 @@ fn eval_function_clone(
 }
 
 #[inline(never)]
-fn eval_function_drop(
+fn eval_drop_closure_env(
     arena: &NodeArena,
-    node: &hir::FunctionDrop,
+    node: &hir::DropClosureEnv,
     span: Location,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
@@ -2088,22 +2091,6 @@ fn eval_store_local(
 }
 
 #[inline(never)]
-fn eval_drop_local(
-    node: &hir::DropLocal,
-    span: Location,
-    ctx: &mut EvalCtx,
-    locals: &[LocalDecl],
-) -> EvalControlFlowResult {
-    let Some(drop) = locals[node.id.as_index()].local_drop() else {
-        return cont(Value::unit());
-    };
-    let target = local_place(ctx, locals, node.id);
-    call_local_drop_dispatch(ctx, resolved_local_drop(drop), target.clone(), span)?;
-    discard_value_storage_at_place(ctx, &target, span)?;
-    cont(Value::unit())
-}
-
-#[inline(never)]
 fn take_owned_local_value(
     id: LocalDeclId,
     ctx: &mut EvalCtx,
@@ -2249,9 +2236,74 @@ fn eval_return(
 #[inline(never)]
 fn eval_block(
     arena: &NodeArena,
+    block: &hir::Block,
+    ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
+) -> EvalControlFlowResult {
+    if !block.cleanup.is_empty() {
+        return eval_block_with_cleanup(arena, &block.body, ctx, locals, &block.cleanup);
+    }
+    let nodes = &block.body;
+    let env_size = ctx.environment.len();
+    let mut last_value: Option<Value> = None;
+    for node in nodes.iter() {
+        match eval_node_with_ctx(arena, *node, ctx, locals) {
+            Err(err) => {
+                if let Some(value) = last_value.take() {
+                    value.discard_storage();
+                }
+                ctx.truncate_environment_storage(env_size);
+                return Err(err);
+            }
+            Ok(ControlFlow::Return(val)) => {
+                if let Some(value) = last_value.take() {
+                    value.discard_storage();
+                }
+                ctx.truncate_environment_storage(env_size);
+                return Ok(ControlFlow::Return(val));
+            }
+            Ok(ControlFlow::Continue(val)) => {
+                if let Some(old_value) = last_value.replace(val) {
+                    old_value.discard_storage();
+                }
+            }
+        }
+    }
+    ctx.truncate_environment_storage(env_size);
+    cont(last_value.unwrap_or_else(Value::unit))
+}
+
+fn drop_cleanup_locals(
+    ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
+    drops: &[LocalDeclId],
+    span: Location,
+) -> Result<(), RuntimeError> {
+    for id in drops.iter().rev() {
+        let local = &locals[id.as_index()];
+        let Some(drop) = local.local_drop() else {
+            continue;
+        };
+        let target_index = local_environment_index(ctx, locals, *id);
+        if target_index >= ctx.environment.len() {
+            continue;
+        }
+        let target = local_place(ctx, locals, *id);
+        if place_contains_uninit(ctx, &target, span)? {
+            continue;
+        }
+        call_local_drop_dispatch(ctx, resolved_local_drop(drop), target.clone(), span)?;
+        discard_value_storage_at_place(ctx, &target, span)?;
+    }
+    Ok(())
+}
+
+fn eval_block_with_cleanup(
+    arena: &NodeArena,
     nodes: &[NodeId],
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
+    cleanup_drops: &[LocalDeclId],
 ) -> EvalControlFlowResult {
     let env_size = ctx.environment.len();
     let mut last_value: Option<Value> = None;
@@ -2261,33 +2313,34 @@ fn eval_block(
                 if let Some(value) = last_value.take() {
                     value.discard_storage();
                 }
-                let cleanup =
-                    drop_owned_locals_on_error_from(ctx, locals, env_size, arena[*node].span);
+                let cleanup = drop_cleanup_locals(ctx, locals, cleanup_drops, arena[*node].span);
                 ctx.truncate_environment_storage(env_size);
                 cleanup?;
                 return Err(err);
             }
             Ok(ControlFlow::Return(val)) => {
-                // Early return: clean up environment and propagate.
                 if let Some(value) = last_value.take() {
                     value.discard_storage();
                 }
+                let cleanup = drop_cleanup_locals(ctx, locals, cleanup_drops, arena[*node].span);
                 ctx.truncate_environment_storage(env_size);
+                cleanup?;
                 return Ok(ControlFlow::Return(val));
             }
             Ok(ControlFlow::Continue(val)) => {
-                if !matches!(arena[*node].kind, NodeKind::DropLocal(_)) {
-                    if let Some(old_value) = last_value.replace(val) {
-                        old_value.discard_storage();
-                    }
-                } else {
-                    val.discard_storage();
+                if let Some(old_value) = last_value.replace(val) {
+                    old_value.discard_storage();
                 }
             }
         }
     }
-    // Normal block completion.
+    let span = nodes
+        .last()
+        .map(|node| arena[*node].span)
+        .unwrap_or_else(Location::new_synthesized);
+    let cleanup = drop_cleanup_locals(ctx, locals, cleanup_drops, span);
     ctx.truncate_environment_storage(env_size);
+    cleanup?;
     cont(last_value.unwrap_or_else(Value::unit))
 }
 
@@ -2721,22 +2774,14 @@ fn try_eval_node_as_place(
         {
             return try_eval_node_as_place(arena, node.source, ctx, locals);
         }
-        Block(nodes) => {
-            let Some(place_index) = nodes.iter().rposition(|node| {
-                !matches!(
-                    arena[*node].kind,
-                    NodeKind::DropLocal(_) | NodeKind::StoreLocal(_)
-                )
-            }) else {
-                return Ok(ControlFlow::Continue(None));
-            };
-            if !node_may_resolve_to_place(arena, nodes[place_index]) {
-                return Ok(ControlFlow::Continue(None));
+        Block(block) => {
+            let place = eval_or_return!(try_eval_nodes_as_place(arena, &block.body, ctx, locals));
+            if !block.cleanup.is_empty() {
+                // Place-result helpers may need temporaries to compute the final place.
+                // The returned place must not point into these cleanup locals.
+                drop_cleanup_locals(ctx, locals, &block.cleanup, node.span)?;
             }
-            for &node in &nodes[..place_index] {
-                eval_or_return!(eval_node_with_ctx(arena, node, ctx, locals));
-            }
-            return try_eval_node_as_place(arena, nodes[place_index], ctx, locals);
+            return Ok(ControlFlow::Continue(place));
         }
         LoadLocal(node) => {
             // By using frame_base here, we allow to access parent frames
@@ -2745,6 +2790,27 @@ fn try_eval_node_as_place(
         }
         _ => return Ok(ControlFlow::Continue(None)),
     })))
+}
+
+fn try_eval_nodes_as_place(
+    arena: &NodeArena,
+    nodes: &[NodeId],
+    ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
+) -> Result<ControlFlow<Option<Place>>, RuntimeError> {
+    let Some(place_index) = nodes
+        .iter()
+        .rposition(|node| !matches!(arena[*node].kind, NodeKind::StoreLocal(_)))
+    else {
+        return Ok(ControlFlow::Continue(None));
+    };
+    if !node_may_resolve_to_place(arena, nodes[place_index]) {
+        return Ok(ControlFlow::Continue(None));
+    }
+    for &node in &nodes[..place_index] {
+        eval_or_return!(eval_node_with_ctx(arena, node, ctx, locals));
+    }
+    try_eval_node_as_place(arena, nodes[place_index], ctx, locals)
 }
 
 fn node_may_resolve_to_place(arena: &NodeArena, node_id: NodeId) -> bool {
@@ -2765,17 +2831,16 @@ fn node_may_resolve_to_place(arena: &NodeArena, node_id: NodeId) -> bool {
         {
             node_may_resolve_to_place(arena, node.source)
         }
-        NodeKind::Block(nodes) => nodes
-            .iter()
-            .rposition(|node| {
-                !matches!(
-                    arena[*node].kind,
-                    NodeKind::DropLocal(_) | NodeKind::StoreLocal(_)
-                )
-            })
-            .is_some_and(|place_index| node_may_resolve_to_place(arena, nodes[place_index])),
+        NodeKind::Block(block) => nodes_may_resolve_to_place(arena, &block.body),
         _ => false,
     }
+}
+
+fn nodes_may_resolve_to_place(arena: &NodeArena, nodes: &[NodeId]) -> bool {
+    nodes
+        .iter()
+        .rposition(|node| !matches!(arena[*node].kind, NodeKind::StoreLocal(_)))
+        .is_some_and(|place_index| node_may_resolve_to_place(arena, nodes[place_index]))
 }
 
 #[cfg(test)]

@@ -828,14 +828,8 @@ impl TypeInference {
                 } else {
                     self.materialize_owned_value(env, node_id, expr_span)
                 };
-                let return_value = self.wrap_value_with_scope_drops(
-                    env,
-                    node_id,
-                    ty,
-                    &effects,
-                    (0, taken_local),
-                    expr_span,
-                );
+                let return_value =
+                    self.wrap_value_with_scope_cleanup(env, node_id, ty, &effects, 0, expr_span);
                 let node = K::Return(return_value);
                 (node, Type::never(), MutType::constant(), effects)
             }
@@ -965,7 +959,7 @@ impl TypeInference {
                     for node in nodes.iter_mut().take(last_index) {
                         *node = self.discard_unused_value(env, *node, expr_span);
                     }
-                    let taken_local = nodes.last_mut().and_then(|last| {
+                    let _taken_local = nodes.last_mut().and_then(|last| {
                         let (taken_node, taken_local) =
                             self.take_local_value_result(env, *last, local_decl_count, expr_span);
                         if taken_local.is_some() {
@@ -975,7 +969,6 @@ impl TypeInference {
                         }
                         taken_local
                     });
-                    nodes.extend(self.drop_nodes_for_locals(env, env_size, taken_local, expr_span));
                 }
                 // Adjust the lexical scope of the variables declared in the block to end at the end of the block.
                 for local_id in env.cur_locals.iter().skip(env_size) {
@@ -988,9 +981,10 @@ impl TypeInference {
                         local.scope.source_id(),
                     );
                 }
+                let drops = self.cleanup_locals_for_locals(env, env_size);
                 env.cur_locals.truncate(env_size);
-                let node = K::Block(b(SVec2::from_vec(nodes)));
                 let ty = types.last().copied().unwrap_or(Type::unit());
+                let node = self.block_or_cleanup_scope(nodes, drops);
                 (node, ty, MutType::constant(), effects)
             }
             Assign(data) => {
@@ -1469,7 +1463,7 @@ impl TypeInference {
                     let effects = self
                         .make_dependent_effect([&env.ir_arena[check_id].effects, &body_effects]);
                     body_id = env.ir_arena.alloc(N::new(
-                        K::Block(b(SVec2::from_vec(vec![check_id, body_id]))),
+                        Self::block(vec![check_id, body_id], Vec::new()),
                         Type::unit(),
                         effects,
                         expr_span,
@@ -1675,12 +1669,11 @@ impl TypeInference {
             return call.kind;
         }
 
-        let span = call.span;
         let call = env.ir_arena.alloc(call);
         prefix.push(call);
-        prefix.extend(self.drop_nodes_for_locals(env, temp_start_index, None, span));
+        let drops = self.cleanup_locals_for_locals(env, temp_start_index);
         env.cur_locals.truncate(temp_start_index);
-        NodeKind::Block(b(SVec2::from_vec(prefix)))
+        self.block_or_cleanup_scope(prefix, drops)
     }
 
     fn wrap_unit_with_temp_drops(
@@ -1694,12 +1687,11 @@ impl TypeInference {
             return node.kind;
         }
 
-        let span = node.span;
         let node = env.ir_arena.alloc(node);
         prefix.push(node);
-        prefix.extend(self.drop_nodes_for_locals(env, temp_start_index, None, span));
+        let drops = self.cleanup_locals_for_locals(env, temp_start_index);
         env.cur_locals.truncate(temp_start_index);
-        NodeKind::Block(b(SVec2::from_vec(prefix)))
+        self.block_or_cleanup_scope(prefix, drops)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1741,69 +1733,62 @@ impl TypeInference {
         ));
 
         prefix.push(store_result);
-        prefix.extend(self.drop_nodes_for_locals(env, temp_start_index, Some(result_id), span));
         prefix.push(result_move);
+        let drops = self.cleanup_locals_for_locals(env, temp_start_index);
         env.cur_locals.truncate(temp_start_index);
+        let kind = self.block_or_cleanup_scope(prefix, drops);
 
-        env.ir_arena.alloc(hir::Node::new(
-            NodeKind::Block(b(SVec2::from_vec(prefix))),
-            ty,
-            effects,
-            span,
-        ))
+        env.ir_arena.alloc(hir::Node::new(kind, ty, effects, span))
     }
 
-    fn drop_nodes_for_locals(
+    fn cleanup_locals_for_locals(
         &mut self,
         env: &mut TypingEnv,
         start_index: usize,
-        skip_drop: Option<LocalDeclId>,
-        span: Location,
-    ) -> Vec<NodeId> {
-        let locals_to_drop = env
-            .cur_locals
+    ) -> Vec<LocalDeclId> {
+        env.cur_locals
             .iter()
             .copied()
             .enumerate()
             .skip(start_index)
-            .filter(|(_, local_id)| Some(*local_id) != skip_drop)
             .filter(|(_, local_id)| {
                 let local = &env.all_locals[local_id.as_index()];
                 local.may_own_storage()
             })
-            .collect::<Vec<_>>();
-
-        locals_to_drop
-            .into_iter()
-            .rev()
-            .map(|(_, id)| {
-                env.ir_arena.alloc(hir::Node::new(
-                    NodeKind::DropLocal(hir::DropLocal { id }),
-                    Type::unit(),
-                    no_effects(),
-                    span,
-                ))
-            })
+            .map(|(_, id)| id)
             .collect()
     }
 
-    fn wrap_value_with_scope_drops(
+    fn block_or_cleanup_scope(
+        &mut self,
+        nodes: Vec<NodeId>,
+        cleanup: Vec<LocalDeclId>,
+    ) -> NodeKind {
+        Self::block(nodes, cleanup)
+    }
+
+    fn block(nodes: Vec<NodeId>, cleanup: Vec<LocalDeclId>) -> NodeKind {
+        NodeKind::Block(b(hir::Block {
+            body: b(SVec2::from_vec(nodes)),
+            cleanup,
+        }))
+    }
+
+    fn wrap_value_with_scope_cleanup(
         &mut self,
         env: &mut TypingEnv,
         value: NodeId,
         ty: Type,
         effects: &EffType,
-        drop_scope: (usize, Option<LocalDeclId>),
+        drop_start_index: usize,
         span: Location,
     ) -> NodeId {
-        let mut nodes = Vec::from([value]);
-        let (drop_start_index, skip_drop) = drop_scope;
-        nodes.extend(self.drop_nodes_for_locals(env, drop_start_index, skip_drop, span));
-        if nodes.len() == 1 {
+        let drops = self.cleanup_locals_for_locals(env, drop_start_index);
+        if drops.is_empty() {
             value
         } else {
             env.ir_arena.alloc(hir::Node::new(
-                NodeKind::Block(b(SVec2::from_vec(nodes))),
+                Self::block(vec![value], drops),
                 ty,
                 effects.clone(),
                 span,
@@ -2148,16 +2133,14 @@ impl TypeInference {
             if self.node_value_needs_semantic_drop(env, value, ty, span) {
                 let temp_start_index = env.cur_locals.len();
                 let (store, _) = self.store_owned_temp(env, value, ty, span, ustr("$discard"));
-                let mut nodes = vec![store];
-                nodes.extend(self.drop_nodes_for_locals(env, temp_start_index, None, span));
+                let nodes = vec![store];
+                let drops = self.cleanup_locals_for_locals(env, temp_start_index);
                 env.cur_locals.truncate(temp_start_index);
                 let effects = env.ir_arena[value].effects.clone();
-                return env.ir_arena.alloc(hir::Node::new(
-                    NodeKind::Block(b(SVec2::from_vec(nodes))),
-                    Type::unit(),
-                    effects,
-                    span,
-                ));
+                let kind = self.block_or_cleanup_scope(nodes, drops);
+                return env
+                    .ir_arena
+                    .alloc(hir::Node::new(kind, Type::unit(), effects, span));
             }
             return value;
         }
@@ -2182,7 +2165,7 @@ impl TypeInference {
                     .collect::<Vec<_>>();
                 let effects = self.make_dependent_effect(prefix_effects);
                 env.ir_arena.alloc(hir::Node::new(
-                    NodeKind::Block(b(SVec2::from_vec(prefix))),
+                    Self::block(prefix, Vec::new()),
                     Type::unit(),
                     effects,
                     span,
@@ -2192,7 +2175,7 @@ impl TypeInference {
     }
 
     pub(crate) fn diverging_prefix_node(node_ids: impl IntoIterator<Item = NodeId>) -> NodeKind {
-        NodeKind::Block(b(SVec2::from_vec(node_ids.into_iter().collect())))
+        Self::block(node_ids.into_iter().collect(), Vec::new())
     }
 
     pub(crate) fn diverging_prefix_result(

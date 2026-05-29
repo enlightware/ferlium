@@ -2420,7 +2420,7 @@ fn type_ascription() {
         .ir_arena;
     let root = &arena[body];
     assert!(
-        arena[root.kind.as_block().unwrap()[0]]
+        arena[root.kind.as_block().unwrap().body[0]]
             .kind
             .is_static_apply()
     );
@@ -2431,7 +2431,11 @@ fn type_ascription() {
         .expect_fresh_module(module_and_expr.module_id)
         .ir_arena;
     let root = &arena[body];
-    assert!(arena[root.kind.as_block().unwrap()[0]].kind.is_immediate());
+    assert!(
+        arena[root.kind.as_block().unwrap().body[0]]
+            .kind
+            .is_immediate()
+    );
 }
 
 #[test]

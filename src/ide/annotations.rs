@@ -323,11 +323,11 @@ fn node_variable_type_annotations<Env>(
                 variable_type_annotations(arena, arg.value, result, locals, env);
             }
         }
-        FunctionClone(node) => {
+        CloneClosureEnv(node) => {
             variable_type_annotations(arena, node.source, result, locals, env);
             variable_type_annotations(arena, node.target, result, locals, env);
         }
-        FunctionDrop(node) => {
+        DropClosureEnv(node) => {
             variable_type_annotations(arena, node.target, result, locals, env);
         }
         CloneValue(node) => {
@@ -397,11 +397,11 @@ fn node_variable_type_annotations<Env>(
             }
             variable_type_annotations(arena, node.value, result, locals, env);
         }
-        DropLocal(_) => {}
         TakeLocalValue(_) => {}
         LoadLocal(_) => {}
         Return(node) => variable_type_annotations(arena, *node, result, locals, env),
-        Block(nodes) => nodes
+        Block(block) => block
+            .body
             .iter()
             .for_each(|&node| variable_type_annotations(arena, node, result, locals, env)),
         Assign(assignment) => {

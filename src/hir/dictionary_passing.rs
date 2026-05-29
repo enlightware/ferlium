@@ -897,11 +897,11 @@ impl Node {
                     )?;
                 }
             }
-            FunctionClone(node) => {
+            CloneClosureEnv(node) => {
                 elaborate_dictionaries(arena, node.source, ctx, locals, local_count)?;
                 elaborate_dictionaries(arena, node.target, ctx, locals, local_count)?;
             }
-            FunctionDrop(node) => {
+            DropClosureEnv(node) => {
                 elaborate_dictionaries(arena, node.target, ctx, locals, local_count)?;
             }
             CloneValue(node) => {
@@ -1314,7 +1314,6 @@ impl Node {
             StoreLocal(store) => {
                 elaborate_dictionaries(arena, store.value, ctx, locals, local_count)?;
             }
-            DropLocal(_) => {}
             TakeLocalValue(node) => {
                 if matches!(node.mode, TakeLocalValueMode::Unknown) {
                     node.mode = if locals[node.id.as_index()].owns_storage() {
@@ -1352,8 +1351,8 @@ impl Node {
             Return(node_id) => {
                 elaborate_dictionaries(arena, *node_id, ctx, locals, local_count)?;
             }
-            Block(nodes) => {
-                for &node_id in nodes.iter() {
+            Block(block) => {
+                for &node_id in block.body.iter() {
                     elaborate_dictionaries(arena, node_id, ctx, locals, local_count)?;
                 }
             }

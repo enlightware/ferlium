@@ -192,11 +192,11 @@ impl Node {
                     arena[app.function].span,
                 )?;
             }
-            FunctionClone(node) => {
+            CloneClosureEnv(node) => {
                 check_borrows(arena, node.source)?;
                 check_borrows(arena, node.target)?;
             }
-            FunctionDrop(node) => {
+            DropClosureEnv(node) => {
                 check_borrows(arena, node.target)?;
             }
             CloneValue(node) => {
@@ -237,14 +237,13 @@ impl Node {
             StoreLocal(node) => {
                 check_borrows(arena, node.value)?;
             }
-            DropLocal(_) => {}
             TakeLocalValue(_) => {}
             LoadLocal(_) => {}
             Return(node_id) => {
                 check_borrows(arena, *node_id)?;
             }
-            Block(nodes) => {
-                for &node_id in nodes.iter() {
+            Block(block) => {
+                for &node_id in block.body.iter() {
                     check_borrows(arena, node_id)?;
                 }
             }
