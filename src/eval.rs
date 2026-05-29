@@ -1037,24 +1037,10 @@ pub fn eval_node_with_ctx(
         }
         CloneValue(node) => eval_clone_value(arena, node, arena[node_id].span, ctx, locals),
         StaticApply(app) => eval_static_apply(arena, app, node.span, ctx, locals),
-        TraitMethodApply(_) => {
+        Unresolved(_) => {
             panic!(
-                "Trait function application should not be executed, but transformed to StaticApply"
-            );
-        }
-        GetTraitMethod(_) => {
-            panic!(
-                "Trait function value should not be executed, but transformed to a function value"
-            );
-        }
-        GetTraitAssociatedConst(_) => {
-            panic!(
-                "Trait associated const should not be executed, but transformed to an immediate or dictionary associated const"
-            );
-        }
-        GetTraitDictionary(_) => {
-            panic!(
-                "Trait dictionary should not be executed, but transformed to a concrete dictionary or dictionary load"
+                "unresolved node reached evaluation: trait-method calls, trait-item loads, and \
+                 field access must be lowered away by dictionary passing first"
             );
         }
         GetFunction(get_fn) => {
@@ -1085,9 +1071,6 @@ pub fn eval_node_with_ctx(
         Assign(assignment) => eval_assign(arena, node_id, assignment, ctx, locals),
         Tuple(nodes) | Record(nodes) => eval_tuple(arena, nodes, ctx, locals),
         Project(node) => eval_project(arena, node_id, node.value, node.index, ctx, locals),
-        FieldAccess(_) => {
-            panic!("String projection should not be executed, but transformed to ProjectLocal");
-        }
         ProjectAt(node) => eval_project_at(arena, node_id, node.value, node.index, ctx, locals),
         Variant(node) => eval_variant(arena, node.tag, node.payload, ctx, locals),
         ExtractTag(node) => eval_extract_tag(arena, *node, ctx, locals),

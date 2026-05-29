@@ -449,8 +449,8 @@ impl<'s, 'm> ValueBodyCtx<'s, 'm> {
             )?;
             let arguments = CallArgument::from_values_and_passing(arguments, argument_passing);
             return Ok((
-                hir::NodeKind::TraitMethodApply(crate::containers::b(
-                    hir::TraitMethodApplication {
+                hir::NodeKind::Unresolved(hir::UnresolvedKind::TraitMethodApply(
+                    crate::containers::b(hir::TraitMethodApplication {
                         trait_id,
                         method_index,
                         method_path: Path::single(method_name, span),
@@ -460,7 +460,7 @@ impl<'s, 'm> ValueBodyCtx<'s, 'm> {
                         ty: fn_ty,
                         input_tys: vec![input_ty],
                         inst_data: hir::FnInstData::none(),
-                    },
+                    }),
                 )),
                 ret_ty,
             ));

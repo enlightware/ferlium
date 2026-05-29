@@ -27,7 +27,7 @@ use crate::{
     compiler::error::InternalCompilationError,
     containers::{SVec2, b},
     hir::value::LiteralValue,
-    hir::{self, FieldAccess, LoadLocal, NodeId, NodeKind, Project, StoreLocal},
+    hir::{self, FieldAccess, LoadLocal, NodeId, NodeKind, Project, StoreLocal, UnresolvedKind},
     std::math::int_type,
     types::effects::{EffType, no_effects},
     types::mutability::MutType,
@@ -365,10 +365,10 @@ impl TypeInference {
                                         ProjectionIndex::from_index(index),
                                     ))
                                 } else {
-                                    K::FieldAccess(FieldAccess::new(
+                                    K::Unresolved(UnresolvedKind::FieldAccess(FieldAccess::new(
                                         project_variant_inner_id,
                                         bind_var_names[i].0,
-                                    ))
+                                    )))
                                 };
                                 let project_inner_id = env.ir_arena.alloc(N::new(
                                     project_inner_kind,

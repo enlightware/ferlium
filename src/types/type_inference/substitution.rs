@@ -4,7 +4,7 @@ use crate::{
     FxHashSet,
     format::FormatWith,
     hir::dictionary_passing::DictionaryReq,
-    hir::{self, FnInstData},
+    hir::{self, FnInstData, UnresolvedKind},
     module::{LocalDecl, LocalStorage, ModuleEnv, ModuleFunction},
     types::{
         effects::{EffType, Effect, EffectVar, EffectsInstSubst},
@@ -201,7 +201,7 @@ impl UnifiedTypeInference {
                 self.substitute_in_fn_type_in_place(&mut app.ty);
                 self.substitute_in_fn_inst_data(&mut app.inst_data);
             }
-            TraitMethodApply(app) => {
+            Unresolved(UnresolvedKind::TraitMethodApply(app)) => {
                 self.substitute_in_fn_type_in_place(&mut app.ty);
                 self.substitute_in_types_in_place(&mut app.input_tys);
                 self.substitute_in_fn_inst_data(&mut app.inst_data);
@@ -209,16 +209,16 @@ impl UnifiedTypeInference {
             GetFunction(get_fn) => {
                 self.substitute_in_fn_inst_data(&mut get_fn.inst_data);
             }
-            GetTraitMethod(get_method) => {
+            Unresolved(UnresolvedKind::GetTraitMethod(get_method)) => {
                 self.substitute_in_types_in_place(&mut get_method.input_tys);
                 self.substitute_in_types_in_place(&mut get_method.output_tys);
                 self.substitute_in_fn_inst_data(&mut get_method.inst_data);
             }
-            GetTraitAssociatedConst(get_const) => {
+            Unresolved(UnresolvedKind::GetTraitAssociatedConst(get_const)) => {
                 self.substitute_in_types_in_place(&mut get_const.input_tys);
                 self.substitute_in_types_in_place(&mut get_const.output_tys);
             }
-            GetTraitDictionary(get_dict) => {
+            Unresolved(UnresolvedKind::GetTraitDictionary(get_dict)) => {
                 self.substitute_in_types_in_place(&mut get_dict.input_tys);
                 self.substitute_in_types_in_place(&mut get_dict.output_tys);
             }

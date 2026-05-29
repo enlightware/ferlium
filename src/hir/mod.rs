@@ -61,8 +61,10 @@ pub(crate) fn node_is_place_reference(arena: &NodeArena, node_id: NodeId) -> boo
         // Borrow-like only while still dispatched through a dictionary: a non-constant input
         // type means the method is resolved at runtime; a fully-constant receiver lowers to a
         // freshly produced static function value, which is not a place.
-        GetTraitMethod(method) => !method.input_tys.iter().all(Type::is_constant),
-        Project(_) | FieldAccess(_) | ProjectAt(_) => true,
+        Unresolved(UnresolvedKind::GetTraitMethod(method)) => {
+            !method.input_tys.iter().all(Type::is_constant)
+        }
+        Project(_) | ProjectAt(_) | Unresolved(UnresolvedKind::FieldAccess(_)) => true,
         Apply(app) => app.returns_place,
         StaticApply(app) => app.returns_place,
         _ => false,
@@ -74,12 +76,12 @@ pub(crate) fn place_resolution_may_create_temp(arena: &NodeArena, node_id: NodeI
 
     match &arena[node_id].kind {
         LoadLocal(_) => false,
-        GetTraitMethod(_) => false,
+        Unresolved(UnresolvedKind::GetTraitMethod(_)) => false,
         Project(project) => {
             !node_is_place_reference(arena, project.value)
                 || place_resolution_may_create_temp(arena, project.value)
         }
-        FieldAccess(field_access) => {
+        Unresolved(UnresolvedKind::FieldAccess(field_access)) => {
             !node_is_place_reference(arena, field_access.value)
                 || place_resolution_may_create_temp(arena, field_access.value)
         }
@@ -498,6 +500,22 @@ pub struct Case {
     pub default: NodeId,
 }
 
+/// Node kinds that exist only before dictionary passing lowers them into resolved forms.
+/// They must not survive into evaluation.
+#[derive(Debug, Clone, EnumAsInner)]
+pub enum UnresolvedKind {
+    /// Access a record-like value at a field statically known by name.
+    FieldAccess(FieldAccess),
+    /// Call a trait method by trait id and method index.
+    TraitMethodApply(B<TraitMethodApplication>),
+    /// Load a trait method as a first-class value by trait id and method index.
+    GetTraitMethod(B<GetTraitMethod>),
+    /// Load a trait associated const by trait id and const index.
+    GetTraitAssociatedConst(B<GetTraitAssociatedConst>),
+    /// Load a trait dictionary by trait id and input/output types.
+    GetTraitDictionary(B<GetTraitDictionary>),
+}
+
 /// The kind-specific part of the expression-based execution tree
 #[derive(Debug, Clone, EnumAsInner)]
 pub enum NodeKind {
@@ -524,8 +542,6 @@ pub enum NodeKind {
     // Value access.
     /// Project a tuple-like value at a statically known index.
     Project(Project),
-    /// Access a record-like value at a statically known field.
-    FieldAccess(FieldAccess),
     /// Project a tuple-like value using a hidden field-index parameter.
     ProjectAt(ProjectAt),
     /// Extract the tag of a variant as an isize, by casting the pointer to the string.
@@ -554,16 +570,12 @@ pub enum NodeKind {
     Apply(B<Application>),
     /// Call a statically known function.
     StaticApply(B<StaticApplication>),
-    /// Call a trait method before dictionary passing resolves it.
-    TraitMethodApply(B<TraitMethodApplication>),
+
+    // Nodes valid only before dictionary passing lowers them away.
+    /// Trait-method calls, trait-item loads, and record field access awaiting dictionary passing.
+    Unresolved(UnresolvedKind),
 
     // Trait and evidence operations.
-    /// Load a trait method as a first-class value before dictionary passing.
-    GetTraitMethod(B<GetTraitMethod>),
-    /// Load a trait associated const before dictionary passing resolves it.
-    GetTraitAssociatedConst(B<GetTraitAssociatedConst>),
-    /// Load a trait dictionary before dictionary passing resolves it.
-    GetTraitDictionary(B<GetTraitDictionary>),
     /// Get a trait dictionary selected by static trait resolution.
     GetDictionary(GetDictionary),
     /// Load a trait dictionary from a function hidden argument.
@@ -601,21 +613,9 @@ impl NodeKind {
         use NodeKind::*;
         use smallvec::smallvec;
         match self {
-            Immediate(_)
-            | Uninit
-            | GetFunction(_)
-            | GetTraitMethod(_)
-            | GetTraitAssociatedConst(_)
-            | GetTraitDictionary(_)
-            | GetDictionary(_)
-            | LoadDictionary(_)
-            | LoadFieldIndex(_)
-            | TakeLocalValue(_)
-            | LoadLocal(_)
-            | CheckCallDepth
-            | CheckFuel
-            | SoftBreak
-            | Unimplemented => smallvec![],
+            Immediate(_) | Uninit | GetFunction(_) | GetDictionary(_) | LoadDictionary(_)
+            | LoadFieldIndex(_) | TakeLocalValue(_) | LoadLocal(_) | CheckCallDepth | CheckFuel
+            | SoftBreak | Unimplemented => smallvec![],
             BuildClosure(bc) => {
                 let mut v: SVec4<NodeId> = smallvec![bc.function];
                 v.extend_from_slice(&bc.dictionary_captures);
@@ -646,15 +646,22 @@ impl NodeKind {
                 v.extend(node.arguments.iter().map(|arg| arg.value));
                 v
             }
-            TraitMethodApply(app) => app.arguments.iter().map(|arg| arg.value).collect(),
             StoreLocal(store) => smallvec![store.value],
             Return(node) | ExtractTag(node) | Loop(node) => smallvec![*node],
             Block(block) => block.body.iter().copied().collect(),
             Tuple(nodes) | Record(nodes) | Array(nodes) => nodes.iter().copied().collect(),
             Assign(a) => smallvec![a.place, a.value],
             Project(node) => smallvec![node.value],
-            FieldAccess(node) => smallvec![node.value],
             ProjectAt(node) => smallvec![node.value],
+            Unresolved(unresolved) => match unresolved {
+                UnresolvedKind::GetTraitMethod(_)
+                | UnresolvedKind::GetTraitAssociatedConst(_)
+                | UnresolvedKind::GetTraitDictionary(_) => smallvec![],
+                UnresolvedKind::TraitMethodApply(app) => {
+                    app.arguments.iter().map(|arg| arg.value).collect()
+                }
+                UnresolvedKind::FieldAccess(node) => smallvec![node.value],
+            },
             Variant(node) => smallvec![node.payload],
             Case(case) => {
                 let mut v: SVec4<NodeId> = SVec4::with_capacity(2 + case.alternatives.len());
@@ -822,7 +829,7 @@ impl Node {
                     writeln!(f, "{indent_str})")?;
                 }
             }
-            TraitMethodApply(app) => {
+            Unresolved(UnresolvedKind::TraitMethodApply(app)) => {
                 let trait_def = env.trait_def(app.trait_id);
                 let method_data = trait_def.method(app.method_index);
                 let method_name = method_data.0;
@@ -846,7 +853,7 @@ impl Node {
             GetFunction(get_fn) => {
                 writeln!(f, "{indent_str}get {}", get_fn.function.format_with(env))?;
             }
-            GetTraitMethod(get_method) => {
+            Unresolved(UnresolvedKind::GetTraitMethod(get_method)) => {
                 let trait_def = env.trait_def(get_method.trait_id);
                 let method_name = trait_def.method(get_method.method_index).0;
                 let trait_name = trait_def.name;
@@ -855,7 +862,7 @@ impl Node {
                     "{indent_str}get trait method {method_name} (from {trait_name})"
                 )?;
             }
-            GetTraitAssociatedConst(get_const) => {
+            Unresolved(UnresolvedKind::GetTraitAssociatedConst(get_const)) => {
                 let trait_name = env.trait_def(get_const.trait_id).name;
                 let const_name = get_const.associated_const_name;
                 writeln!(
@@ -863,7 +870,7 @@ impl Node {
                     "{indent_str}get trait associated const {const_name} (from {trait_name})"
                 )?;
             }
-            GetTraitDictionary(get_dict) => {
+            Unresolved(UnresolvedKind::GetTraitDictionary(get_dict)) => {
                 let trait_name = env.trait_def(get_dict.trait_id).name;
                 writeln!(f, "{indent_str}get trait dictionary (from {trait_name})")?;
             }
@@ -1044,7 +1051,7 @@ impl Node {
                 }
                 writeln!(f, "{indent_str}}}")?;
             }
-            FieldAccess(node) => {
+            Unresolved(UnresolvedKind::FieldAccess(node)) => {
                 writeln!(f, "{indent_str}access")?;
                 format_ind(arena, node.value, f, locals, env, spacing, indent + 1)?;
                 writeln!(f, "{indent_str}at field {}", node.field)?;
@@ -1160,7 +1167,7 @@ impl Node {
                     }
                 }
             }
-            TraitMethodApply(app) => {
+            Unresolved(UnresolvedKind::TraitMethodApply(app)) => {
                 for arg in &app.arguments {
                     if let Some(ty) = type_at(arena, arg.value, pos) {
                         return Some(ty);
@@ -1170,14 +1177,12 @@ impl Node {
             GetFunction(_) => {
                 // GetFunction nodes don't contain child expressions with types
             }
-            GetTraitMethod(_) => {
-                // GetTraitMethod nodes don't contain child expressions with types
-            }
-            GetTraitAssociatedConst(_) => {
-                // GetTraitAssociatedConst nodes don't contain child expressions with types
-            }
-            GetTraitDictionary(_) => {
-                // GetTraitDictionary nodes don't contain child expressions with types
+            Unresolved(
+                UnresolvedKind::GetTraitMethod(_)
+                | UnresolvedKind::GetTraitAssociatedConst(_)
+                | UnresolvedKind::GetTraitDictionary(_),
+            ) => {
+                // Trait-item loads don't contain child expressions with types.
             }
             GetDictionary(_) => {
                 // GetDictionary nodes don't contain child expressions with types
@@ -1249,7 +1254,7 @@ impl Node {
                     }
                 }
             }
-            FieldAccess(node) => {
+            Unresolved(UnresolvedKind::FieldAccess(node)) => {
                 if let Some(ty) = type_at(arena, node.value, pos) {
                     return Some(ty);
                 }
@@ -1334,7 +1339,7 @@ impl Node {
                     unbound_ty_vars(arena, arg.value, result, ignore);
                 }
             }
-            TraitMethodApply(app) => {
+            Unresolved(UnresolvedKind::TraitMethodApply(app)) => {
                 self.unbound_ty_vars_in_ty(&app.ty, result, ignore);
                 for arg in &app.arguments {
                     unbound_ty_vars(arena, arg.value, result, ignore);
@@ -1343,8 +1348,8 @@ impl Node {
             GetFunction(_) => {
                 // no need to look into the value's type as it is already in this node's type
             }
-            GetTraitMethod(_) => {}
-            GetTraitAssociatedConst(get_const) => {
+            Unresolved(UnresolvedKind::GetTraitMethod(_)) => {}
+            Unresolved(UnresolvedKind::GetTraitAssociatedConst(get_const)) => {
                 for ty in &get_const.input_tys {
                     self.unbound_ty_vars_in_ty(ty, result, ignore);
                 }
@@ -1352,7 +1357,7 @@ impl Node {
                     self.unbound_ty_vars_in_ty(ty, result, ignore);
                 }
             }
-            GetTraitDictionary(get_dict) => {
+            Unresolved(UnresolvedKind::GetTraitDictionary(get_dict)) => {
                 for ty in &get_dict.input_tys {
                     self.unbound_ty_vars_in_ty(ty, result, ignore);
                 }
@@ -1396,7 +1401,9 @@ impl Node {
             Record(nodes) => nodes
                 .iter()
                 .for_each(|&node| unbound_ty_vars(arena, node, result, ignore)),
-            FieldAccess(node) => unbound_ty_vars(arena, node.value, result, ignore),
+            Unresolved(UnresolvedKind::FieldAccess(node)) => {
+                unbound_ty_vars(arena, node.value, result, ignore)
+            }
             ProjectAt(_) => {
                 panic!("ProjectAt should not be in the HIR at this point");
             }
@@ -1454,7 +1461,7 @@ pub(crate) fn instantiate_node_in_place<M: TypeMapper>(
             app.ty = app.ty.map(mapper);
             app.inst_data.instantiate_in_place(mapper);
         }
-        TraitMethodApply(app) => {
+        Unresolved(UnresolvedKind::TraitMethodApply(app)) => {
             app.ty = app.ty.map(mapper);
             instantiate_types_in_place(&mut app.input_tys, mapper);
             app.inst_data.instantiate_in_place(mapper);
@@ -1462,16 +1469,16 @@ pub(crate) fn instantiate_node_in_place<M: TypeMapper>(
         GetFunction(get_fn) => {
             get_fn.inst_data.instantiate_in_place(mapper);
         }
-        GetTraitMethod(get_method) => {
+        Unresolved(UnresolvedKind::GetTraitMethod(get_method)) => {
             instantiate_types_in_place(&mut get_method.input_tys, mapper);
             instantiate_types_in_place(&mut get_method.output_tys, mapper);
             get_method.inst_data.instantiate_in_place(mapper);
         }
-        GetTraitAssociatedConst(get_const) => {
+        Unresolved(UnresolvedKind::GetTraitAssociatedConst(get_const)) => {
             instantiate_types_in_place(&mut get_const.input_tys, mapper);
             instantiate_types_in_place(&mut get_const.output_tys, mapper);
         }
-        GetTraitDictionary(get_dict) => {
+        Unresolved(UnresolvedKind::GetTraitDictionary(get_dict)) => {
             instantiate_types_in_place(&mut get_dict.input_tys, mapper);
             instantiate_types_in_place(&mut get_dict.output_tys, mapper);
         }

@@ -15,7 +15,7 @@ use heck::ToSnakeCase;
 use crate::{
     CompilerSession, ModuleAndExpr, SourceId, ast,
     format::FormatWith,
-    hir::{Node, NodeArena, NodeId, NodeKind},
+    hir::{Node, NodeArena, NodeId, NodeKind, UnresolvedKind},
     module::{LocalDecl, ModuleEnv, id::Id},
     types::{
         effects::{EffType, Effect, PrimitiveEffect},
@@ -347,19 +347,15 @@ fn node_variable_type_annotations<Env>(
                 variable_type_annotations(arena, arg.value, result, locals, env);
             }
         }
-        TraitMethodApply(_) => {
-            // There is no TraitMethodApply left in the final HIR.
+        Unresolved(
+            UnresolvedKind::TraitMethodApply(_)
+            | UnresolvedKind::GetTraitMethod(_)
+            | UnresolvedKind::GetTraitAssociatedConst(_)
+            | UnresolvedKind::GetTraitDictionary(_),
+        ) => {
+            // Lowered away by dictionary passing; absent from the final HIR.
         }
         GetFunction(_) => {}
-        GetTraitMethod(_) => {
-            // There is no GetTraitMethod left in the final IR.
-        }
-        GetTraitAssociatedConst(_) => {
-            // There is no GetTraitAssociatedConst left in the final IR.
-        }
-        GetTraitDictionary(_) => {
-            // There is no GetTraitDictionary left in the final IR.
-        }
         GetDictionary(_) => {}
         LoadDictionary(_) | LoadFieldIndex(_) => {}
         GetDictionaryMethod(node) => {
@@ -415,7 +411,7 @@ fn node_variable_type_annotations<Env>(
         Record(nodes) => nodes
             .iter()
             .for_each(|&node| variable_type_annotations(arena, node, result, locals, env)),
-        FieldAccess(field_access) => {
+        Unresolved(UnresolvedKind::FieldAccess(field_access)) => {
             variable_type_annotations(arena, field_access.value, result, locals, env)
         }
         ProjectAt(project) => variable_type_annotations(arena, project.value, result, locals, env),

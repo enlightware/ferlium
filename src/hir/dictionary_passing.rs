@@ -43,6 +43,7 @@ use crate::{
     hir::value::LiteralValue,
     hir::{
         self, Node, NodeArena, NodeId, NodeKind, Project as HirProject, ProjectAt as HirProjectAt,
+        UnresolvedKind,
     },
     std::{
         core_traits_names::{TRIVIAL_COPY_TRAIT_NAME, VALUE_TRAIT_NAME},
@@ -957,7 +958,7 @@ impl Node {
                     }
                 }
             }
-            TraitMethodApply(app) => {
+            Unresolved(UnresolvedKind::TraitMethodApply(app)) => {
                 for arg in &app.arguments {
                     elaborate_dictionaries(arena, arg.value, ctx, locals, local_count)?;
                 }
@@ -1161,7 +1162,7 @@ impl Node {
                     }));
                 }
             }
-            GetTraitMethod(get_method) => {
+            Unresolved(UnresolvedKind::GetTraitMethod(get_method)) => {
                 assert!(
                     get_method.inst_data.dicts_req.is_empty(),
                     "Instantiation data for trait method is not supported yet."
@@ -1237,7 +1238,7 @@ impl Node {
                     });
                 }
             }
-            GetTraitAssociatedConst(get_const) => {
+            Unresolved(UnresolvedKind::GetTraitAssociatedConst(get_const)) => {
                 let resolved = get_const.input_tys.iter().all(Type::is_constant);
                 let is_compiler_value_application = {
                     let trait_def = ctx.trait_solver.trait_def(get_const.trait_id);
@@ -1297,7 +1298,7 @@ impl Node {
                     });
                 }
             }
-            GetTraitDictionary(get_dict) => {
+            Unresolved(UnresolvedKind::GetTraitDictionary(get_dict)) => {
                 let (node_kind, _) = trait_dictionary_node_kind(
                     arena,
                     get_dict.trait_id,
@@ -1379,7 +1380,7 @@ impl Node {
                     elaborate_dictionaries(arena, node_id, ctx, locals, local_count)?;
                 }
             }
-            FieldAccess(field_access) => {
+            Unresolved(UnresolvedKind::FieldAccess(field_access)) => {
                 use TypeKind::*;
                 let child_id = field_access.value;
                 let field_name = field_access.field;
@@ -1495,14 +1496,16 @@ mod tests {
         associated_const_index: TraitAssociatedConstIndex,
         input_tys: Vec<Type>,
     ) -> NodeKind {
-        NodeKind::GetTraitAssociatedConst(b(GetTraitAssociatedConst {
-            associated_const_name: trait_def.associated_const(associated_const_index).name,
-            associated_const_span: Location::new_synthesized(),
-            trait_id,
-            associated_const_index,
-            input_tys,
-            output_tys: vec![],
-        }))
+        NodeKind::Unresolved(UnresolvedKind::GetTraitAssociatedConst(b(
+            GetTraitAssociatedConst {
+                associated_const_name: trait_def.associated_const(associated_const_index).name,
+                associated_const_span: Location::new_synthesized(),
+                trait_id,
+                associated_const_index,
+                input_tys,
+                output_tys: vec![],
+            },
+        )))
     }
 
     #[test]
