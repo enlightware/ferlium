@@ -2445,7 +2445,6 @@ fn place_resolution_depends_on_place_result(arena: &NodeArena, node_id: NodeId) 
         NodeKind::Apply(app) => app.returns_place,
         NodeKind::StaticApply(app) => app.returns_place,
         NodeKind::Project(node) => place_resolution_depends_on_place_result(arena, node.value),
-        NodeKind::FieldAccess(node) => place_resolution_depends_on_place_result(arena, node.value),
         NodeKind::ProjectAt(node) => place_resolution_depends_on_place_result(arena, node.value),
         _ => false,
     }
@@ -2816,7 +2815,6 @@ fn node_may_resolve_to_place(arena: &NodeArena, node_id: NodeId) -> bool {
     match &arena[node_id].kind {
         NodeKind::LoadLocal(_) => true,
         NodeKind::Project(node) => node_may_resolve_to_place(arena, node.value),
-        NodeKind::FieldAccess(node) => node_may_resolve_to_place(arena, node.value),
         NodeKind::ProjectAt(node) => node_may_resolve_to_place(arena, node.value),
         NodeKind::Apply(app) => app.returns_place,
         NodeKind::StaticApply(app) => app.returns_place,
