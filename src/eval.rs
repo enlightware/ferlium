@@ -1170,15 +1170,13 @@ fn eval_function_hidden_arg_nodes(
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> Result<ControlFlow<Vec<FunctionHiddenArgValue>>, RuntimeError> {
-    let mut results = Vec::with_capacity(nodes.len());
-    for &node in nodes {
-        match eval_function_hidden_arg_node(arena, node, ctx, locals) {
-            Ok(ControlFlow::Continue(value)) => results.push(value),
-            Ok(ControlFlow::Return(value)) => return Ok(ControlFlow::Return(value)),
-            Err(err) => return Err(err),
-        }
-    }
-    Ok(ControlFlow::Continue(results))
+    // Hidden-argument values are Copy (dictionary ids / field indices) and own no storage.
+    eval_sequence(
+        nodes.iter().copied(),
+        nodes.len(),
+        |_| {},
+        |node| eval_function_hidden_arg_node(arena, node, ctx, locals),
+    )
 }
 
 fn eval_dictionary_metadata_node(
@@ -1328,10 +1326,7 @@ fn eval_call_dictionary_method(
         arguments.take_arguments(),
         span,
     );
-    let cleanup = arguments.drop_temps(ctx, span);
-    ctx.truncate_environment_storage(temp_start);
-    cleanup?;
-    result
+    finish_call(ctx, arguments, temp_start, span, result)
 }
 
 fn discard_call_result(result: EvalControlFlowResult) -> Result<(), RuntimeError> {
@@ -1792,10 +1787,7 @@ fn eval_apply(
     let temp_start = ctx.environment.len();
     let mut arguments = eval_or_return!(eval_args(arena, &app.arguments, &args_ty, ctx, locals));
     let result = ctx.call_function_value(function_value, arguments.take_arguments(), span);
-    let cleanup = arguments.drop_temps(ctx, span);
-    ctx.truncate_environment_storage(temp_start);
-    cleanup?;
-    result
+    finish_call(ctx, arguments, temp_start, span, result)
 }
 
 #[inline(never)]
@@ -1858,10 +1850,7 @@ fn eval_static_apply_with(
         arguments.take_arguments(),
         span,
     );
-    let cleanup = arguments.drop_temps(ctx, span);
-    ctx.truncate_environment_storage(temp_start);
-    cleanup?;
-    result
+    finish_call(ctx, arguments, temp_start, span, result)
 }
 
 /// Argument expression result before final call-frame materialization.
@@ -1930,6 +1919,21 @@ impl PreparedCallArgs {
     }
 }
 
+/// Shared post-call cleanup: drop the argument temporaries, reclaim their storage, then yield the call result.
+/// A cleanup error takes precedence over a successful result.
+fn finish_call(
+    ctx: &mut EvalCtx,
+    mut arguments: PreparedCallArgs,
+    temp_start: usize,
+    span: Location,
+    result: EvalControlFlowResult,
+) -> EvalControlFlowResult {
+    let cleanup = arguments.drop_temps(ctx, span);
+    ctx.truncate_environment_storage(temp_start);
+    cleanup?;
+    result
+}
+
 fn eval_place_result_args(
     arena: &NodeArena,
     args: &[CallArgument],
@@ -1937,26 +1941,13 @@ fn eval_place_result_args(
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> Result<ControlFlow<PreparedCallArgs>, RuntimeError> {
-    let mut results = Vec::with_capacity(args.len());
     assert_eq!(args.len(), args_ty.len());
-    for (arg, ty) in args.iter().zip(args_ty) {
-        let result = eval_call_arg(arena, arg.value, ty.ty, arg.passing, ctx, locals);
-        match result {
-            Ok(ControlFlow::Continue(arg)) => results.push(arg),
-            Ok(ControlFlow::Return(value)) => {
-                for result in results {
-                    result.discard_storage();
-                }
-                return Ok(ControlFlow::Return(value));
-            }
-            Err(err) => {
-                for result in results {
-                    result.discard_storage();
-                }
-                return Err(err);
-            }
-        }
-    }
+    let results = eval_or_return!(eval_sequence(
+        args.iter().zip(args_ty),
+        args.len(),
+        EvaluatedCallArg::discard_storage,
+        |(arg, ty)| eval_call_arg(arena, arg.value, ty.ty, arg.passing, ctx, locals),
+    ));
     let mut arguments = Vec::with_capacity(results.len());
     let mut temp_drops = Vec::new();
     for result in results {
@@ -2551,31 +2542,43 @@ pub fn eval_node_as_place(
     }
 }
 
+/// Evaluate each item in order, collecting the `Continue` values.
+/// On a `Return` or error, `discard` each already-collected value before propagating.
+fn eval_sequence<I, T>(
+    items: impl IntoIterator<Item = I>,
+    capacity: usize,
+    discard: impl Fn(T),
+    mut eval: impl FnMut(I) -> Result<ControlFlow<T>, RuntimeError>,
+) -> Result<ControlFlow<Vec<T>>, RuntimeError> {
+    let mut results = Vec::with_capacity(capacity);
+    for item in items {
+        match eval(item) {
+            Ok(ControlFlow::Continue(value)) => results.push(value),
+            Ok(ControlFlow::Return(value)) => {
+                results.into_iter().for_each(discard);
+                return Ok(ControlFlow::Return(value));
+            }
+            Err(err) => {
+                results.into_iter().for_each(discard);
+                return Err(err);
+            }
+        }
+    }
+    Ok(ControlFlow::Continue(results))
+}
+
 fn eval_nodes(
     arena: &NodeArena,
     nodes: &[NodeId],
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> Result<ControlFlow<Vec<Value>>, RuntimeError> {
-    let mut results = Vec::with_capacity(nodes.len());
-    for &node in nodes {
-        match eval_node_with_ctx(arena, node, ctx, locals) {
-            Ok(ControlFlow::Continue(value)) => results.push(value),
-            Ok(ControlFlow::Return(value)) => {
-                for result in results {
-                    result.discard_storage();
-                }
-                return Ok(ControlFlow::Return(value));
-            }
-            Err(err) => {
-                for result in results {
-                    result.discard_storage();
-                }
-                return Err(err);
-            }
-        }
-    }
-    Ok(ControlFlow::Continue(results))
+    eval_sequence(
+        nodes.iter().copied(),
+        nodes.len(),
+        Value::discard_storage,
+        |node| eval_node_with_ctx(arena, node, ctx, locals),
+    )
 }
 
 fn eval_call_arg(
