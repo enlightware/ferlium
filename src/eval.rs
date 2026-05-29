@@ -219,20 +219,7 @@ impl<'a> EvalCtx<'a> {
     const DEFAULT_STACK_LIMIT: usize = 65_536;
 
     pub fn new(module_id: ModuleId, compiler_session: &'a CompilerSession) -> EvalCtx<'a> {
-        EvalCtx {
-            environment: Vec::new(),
-            frame_base: 0,
-            extra_parameters: Vec::new(),
-            extra_frame_base: 0,
-            call_depth: 0,
-            call_depth_limit: Self::DEFAULT_CALL_DEPTH_LIMIT,
-            stack_limit: Self::DEFAULT_STACK_LIMIT,
-            fuel_remaining: None,
-            break_loop: false,
-            module_id,
-            returns_place: false,
-            compiler_session,
-        }
+        Self::with_environment(module_id, Vec::new(), compiler_session)
     }
 
     /// Get the compiler session.
@@ -274,6 +261,24 @@ impl<'a> EvalCtx<'a> {
         } else {
             cont(Value::unit())
         }
+    }
+
+    /// Error out if growing the evaluation environment to `prospective_len` would reach the stack limit.
+    /// `span` is `None` at call-frame entry, where the call site is attached as a backtrace frame by the caller instead.
+    fn check_stack_limit(
+        &self,
+        prospective_len: usize,
+        span: Option<Location>,
+    ) -> Result<(), RuntimeError> {
+        if prospective_len >= self.stack_limit {
+            return Err(RuntimeError::new(
+                RuntimeErrorKind::StackLimitExceeded {
+                    limit: self.stack_limit,
+                },
+                span,
+            ));
+        }
+        Ok(())
     }
 
     pub fn pop_environment_entry(&mut self) -> Option<ValOrMut> {
@@ -564,6 +569,7 @@ impl<'a> EvalCtx<'a> {
         extra_arguments: Vec<FunctionHiddenArgValue>,
         arguments: Vec<ValOrMut>,
     ) -> EvalControlFlowResult {
+        self.check_stack_limit(self.environment.len(), None)?;
         // Use the new module for the duration of the function call.
         mem::swap(&mut self.module_id, &mut module_id);
 
@@ -1144,7 +1150,7 @@ fn eval_function_hidden_arg_node(
             field_index_from_extra_parameter(ctx, load.extra_parameter),
         )));
     }
-    if let Some(dictionary) = eval_or_return!(try_dictionary_metadata_node(arena, node, ctx)) {
+    if let Some(dictionary) = try_dictionary_metadata_node(arena, node, ctx) {
         return Ok(ControlFlow::Continue(
             FunctionHiddenArgValue::TraitDictionary(dictionary),
         ));
@@ -1180,7 +1186,7 @@ fn eval_dictionary_metadata_node(
     node: NodeId,
     ctx: &mut EvalCtx,
 ) -> Result<ControlFlow<TraitDictionaryId>, RuntimeError> {
-    if let Some(dictionary) = eval_or_return!(try_dictionary_metadata_node(arena, node, ctx)) {
+    if let Some(dictionary) = try_dictionary_metadata_node(arena, node, ctx) {
         return Ok(ControlFlow::Continue(dictionary));
     }
     panic!(
@@ -1192,27 +1198,18 @@ fn eval_dictionary_metadata_node(
 fn try_dictionary_metadata_node(
     arena: &NodeArena,
     node: NodeId,
-    ctx: &mut EvalCtx,
-) -> Result<ControlFlow<Option<TraitDictionaryId>>, RuntimeError> {
+    ctx: &EvalCtx,
+) -> Option<TraitDictionaryId> {
     match &arena[node].kind {
-        NodeKind::GetDictionary(get_dict) => {
-            return Ok(ControlFlow::Continue(Some(
-                ctx.get_dictionary_id(get_dict.dictionary),
-            )));
-        }
-        NodeKind::LoadDictionary(load) => {
-            return match extra_parameter_value(ctx, load.extra_parameter) {
-                FunctionHiddenArgValue::TraitDictionary(dictionary) => {
-                    Ok(ControlFlow::Continue(Some(dictionary)))
-                }
-                FunctionHiddenArgValue::FieldIndex(_) => {
-                    panic!("expected dictionary extra parameter")
-                }
-            };
-        }
-        _ => {}
+        NodeKind::GetDictionary(get_dict) => Some(ctx.get_dictionary_id(get_dict.dictionary)),
+        NodeKind::LoadDictionary(load) => match extra_parameter_value(ctx, load.extra_parameter) {
+            FunctionHiddenArgValue::TraitDictionary(dictionary) => Some(dictionary),
+            FunctionHiddenArgValue::FieldIndex(_) => {
+                panic!("expected dictionary extra parameter")
+            }
+        },
+        _ => None,
     }
-    Ok(ControlFlow::Continue(None))
 }
 
 pub(crate) fn try_dictionary_from_place(place: &Place, ctx: &EvalCtx) -> Option<TraitDictionaryId> {
@@ -1237,7 +1234,6 @@ pub(crate) fn try_dictionary_from_place(place: &Place, ctx: &EvalCtx) -> Option<
 fn dictionary_from_extra_parameter(
     ctx: &EvalCtx,
     extra_parameter: ExtraParameterId,
-    _span: Location,
 ) -> TraitDictionaryId {
     match extra_parameter_value(ctx, extra_parameter) {
         FunctionHiddenArgValue::TraitDictionary(dictionary) => dictionary,
@@ -1354,7 +1350,7 @@ fn call_resolved_value_method(
     match dispatch {
         ResolvedValueMethod::Static(function) => ctx.call_function_id(function, arguments, span),
         ResolvedValueMethod::Dictionary(dict_index) => {
-            let dictionary = dictionary_from_extra_parameter(ctx, dict_index, span);
+            let dictionary = dictionary_from_extra_parameter(ctx, dict_index);
             call_dictionary_method(
                 ctx,
                 dictionary,
@@ -1810,27 +1806,7 @@ fn eval_static_apply(
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
-    let (local_id, module_id) = ctx.get_function_local_id(app.function);
-    let temp_start = ctx.environment.len();
-    let extra_arguments = eval_or_return!(eval_function_hidden_arg_nodes(
-        arena,
-        &app.extra_arguments,
-        ctx,
-        locals,
-    ));
-    let mut arguments =
-        eval_or_return!(eval_args(arena, &app.arguments, &app.ty.args, ctx, locals));
-    let result = ctx.call_resolved_function_with_extra(
-        local_id,
-        module_id,
-        extra_arguments,
-        arguments.take_arguments(),
-        span,
-    );
-    let cleanup = arguments.drop_temps(ctx, span);
-    ctx.truncate_environment_storage(temp_start);
-    cleanup?;
-    result
+    eval_static_apply_with(arena, app, span, ctx, locals, eval_args)
 }
 
 fn eval_place_result_static_apply(
@@ -1840,6 +1816,26 @@ fn eval_place_result_static_apply(
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
+    eval_static_apply_with(arena, app, span, ctx, locals, eval_place_result_args)
+}
+
+/// Strategy for evaluating a static call's visible arguments into a [`PreparedCallArgs`].
+type EvalArgsFn = fn(
+    &NodeArena,
+    &[CallArgument],
+    &[FnArgType],
+    &mut EvalCtx,
+    &[LocalDecl],
+) -> Result<ControlFlow<PreparedCallArgs>, RuntimeError>;
+
+fn eval_static_apply_with(
+    arena: &NodeArena,
+    app: &hir::StaticApplication,
+    span: Location,
+    ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
+    eval_args_fn: EvalArgsFn,
+) -> EvalControlFlowResult {
     let (local_id, module_id) = ctx.get_function_local_id(app.function);
     let temp_start = ctx.environment.len();
     let extra_arguments = eval_or_return!(eval_function_hidden_arg_nodes(
@@ -1848,12 +1844,12 @@ fn eval_place_result_static_apply(
         ctx,
         locals,
     ));
-    let mut arguments = eval_or_return!(eval_place_result_args(
+    let mut arguments = eval_or_return!(eval_args_fn(
         arena,
         &app.arguments,
         &app.ty.args,
         ctx,
-        locals,
+        locals
     ));
     let result = ctx.call_resolved_function_with_extra(
         local_id,
@@ -1994,23 +1990,9 @@ fn eval_store_local(
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
     let local = &locals[node.id.as_index()];
-    if ctx.environment.len() >= ctx.stack_limit {
-        return Err(RuntimeError::new(
-            RuntimeErrorKind::StackLimitExceeded {
-                limit: ctx.stack_limit,
-            },
-            Some(span),
-        ));
-    }
+    ctx.check_stack_limit(ctx.environment.len(), Some(span))?;
     let target_index = local_environment_index(ctx, locals, node.id);
-    if target_index >= ctx.stack_limit {
-        return Err(RuntimeError::new(
-            RuntimeErrorKind::StackLimitExceeded {
-                limit: ctx.stack_limit,
-            },
-            Some(span),
-        ));
-    }
+    ctx.check_stack_limit(target_index, Some(span))?;
     if let Some(clone) = &local.clone {
         ctx.ensure_environment_slot(target_index);
         let target = local_place(ctx, locals, node.id);

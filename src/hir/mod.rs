@@ -58,6 +58,9 @@ pub(crate) fn node_is_place_reference(arena: &NodeArena, node_id: NodeId) -> boo
 
     match &arena[node_id].kind {
         LoadLocal(_) => true,
+        // Borrow-like only while still dispatched through a dictionary: a non-constant input
+        // type means the method is resolved at runtime; a fully-constant receiver lowers to a
+        // freshly produced static function value, which is not a place.
         GetTraitMethod(method) => !method.input_tys.iter().all(Type::is_constant),
         Project(_) | FieldAccess(_) | ProjectAt(_) => true,
         Apply(app) => app.returns_place,
@@ -143,11 +146,23 @@ pub(crate) fn place_result_base_argument_index(
     arena: &NodeArena,
     arguments: &[CallArgument],
 ) -> Option<usize> {
-    arguments
+    let base = arguments
         .iter()
-        .position(|argument| !is_evidence_node(&arena[argument.value].kind))
+        .position(|argument| !is_evidence_node(&arena[argument.value].kind));
+    // The place-producing receiver is the first non-evidence argument; this relies on hidden
+    // evidence arguments forming a contiguous prefix of the argument list. Verify in debug builds.
+    debug_assert!(
+        base.map(|base| arguments[base..]
+            .iter()
+            .all(|argument| !is_evidence_node(&arena[argument.value].kind)))
+            .unwrap_or(true),
+        "evidence arguments must form a contiguous prefix of the argument list"
+    );
+    base
 }
 
+/// Whether `kind` is a hidden evidence argument (trait dictionary or field index) rather than a value argument.
+/// Evidence arguments are expected to form a contiguous prefix of a call's argument list; see [`place_result_base_argument_index`].
 fn is_evidence_node(kind: &NodeKind) -> bool {
     matches!(
         kind,
