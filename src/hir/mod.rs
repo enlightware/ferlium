@@ -588,8 +588,6 @@ pub enum NodeKind<P: HirPhase = Unelaborated> {
     // Internal placeholders.
     /// Compiler-only uninitialized storage used while generated `Value::clone` code fills a target.
     Uninit,
-    /// Placeholder used while temporarily moving a node kind out of the arena.
-    Unimplemented,
 
     // Value construction.
     /// Return a literal value.
@@ -698,8 +696,7 @@ impl NodeKind {
             | LoadLocal(_)
             | CheckCallDepth
             | CheckFuel
-            | SoftBreak
-            | Unimplemented => smallvec![],
+            | SoftBreak => smallvec![],
             BuildClosure(bc) => {
                 let mut v: SVec4<NodeId> = smallvec![bc.function];
                 v.extend_from_slice(&bc.dictionary_captures);
@@ -1296,9 +1293,6 @@ impl<P: HirPhase> Node<P> {
             SoftBreak => {
                 writeln!(f, "{indent_str}soft break")?;
             }
-            Unimplemented => {
-                writeln!(f, "{indent_str}unimplemented")?;
-            }
         };
         write!(f, "{indent_str}↳ {}", self.ty.format_with(env))?;
         if !self.effects.is_empty() {
@@ -1490,7 +1484,7 @@ impl<P: HirPhase> Node<P> {
                     return Some(ty);
                 }
             }
-            CheckCallDepth | CheckFuel | SoftBreak | Unimplemented => {}
+            CheckCallDepth | CheckFuel | SoftBreak => {}
         }
 
         // No children has this position, return our type.
@@ -1613,7 +1607,7 @@ impl Node {
             Loop(body) => {
                 unbound_ty_vars(arena, *body, result, ignore);
             }
-            CheckCallDepth | CheckFuel | SoftBreak | Unimplemented => {}
+            CheckCallDepth | CheckFuel | SoftBreak => {}
         }
     }
 

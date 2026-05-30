@@ -1082,9 +1082,6 @@ pub fn eval_node_with_ctx(
             ctx.break_loop = true;
             cont(Value::unit())
         }
-        Unimplemented => {
-            panic!("Unimplemented HIR node executed!")
-        }
     }
 }
 

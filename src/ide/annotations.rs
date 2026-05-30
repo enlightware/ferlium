@@ -430,7 +430,7 @@ fn node_variable_type_annotations<Env>(
             variable_type_annotations(arena, case.default, result, locals, env);
         }
         Loop(body) => variable_type_annotations(arena, *body, result, locals, env),
-        CheckCallDepth | CheckFuel | SoftBreak | Unimplemented => {}
+        CheckCallDepth | CheckFuel | SoftBreak => {}
     }
 }
 
