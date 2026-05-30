@@ -16,7 +16,7 @@ use crate::{
     CompilerSession, ModuleAndExpr, SourceId, ast,
     format::FormatWith,
     hir::{ENode, ENodeArena, ENodeId, NodeKind},
-    module::{LocalDecl, ModuleEnv, id::Id},
+    module::{ELocalDecl as LocalDecl, ModuleEnv, id::Id},
     types::{
         effects::{EffType, Effect, PrimitiveEffect},
         r#type::Type,

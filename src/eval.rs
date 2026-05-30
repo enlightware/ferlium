@@ -20,13 +20,13 @@ use crate::{
     compiler::error::RuntimeErrorKind,
     format::{FormatWith, write_with_separator},
     hir::function::{
-        ArgPassing, ResolvedArgPassing, ResolvedValueArgPassing, SharedRefTempCleanup, TrivialCopy,
+        ResolvedArgPassing, ResolvedValueArgPassing, SharedRefTempCleanup, TrivialCopy,
     },
     hir::value::{FunctionHiddenArgValue, FunctionValue, NativeValue, Value},
     module::{
-        ExtraParameterId, FunctionId, LocalClone, LocalDebugVisibility, LocalDecl, LocalDeclId,
-        LocalDrop, LocalFunctionId, ModuleFunction, ModuleId, ProjectionIndex, ResolvedLocalClone,
-        ResolvedLocalDrop, TakeLocalValueMode, TraitDictionary, TraitDictionaryEntry,
+        ELocalDecl as LocalDecl, ExtraParameterId, FunctionId, LocalDebugVisibility, LocalDeclId,
+        LocalFunctionId, ModuleFunction, ModuleId, ProjectionIndex, ResolvedLocalClone,
+        ResolvedLocalDrop, ResolvedTakeLocalValueMode, TraitDictionary, TraitDictionaryEntry,
         TraitDictionaryId, TraitImplId,
     },
     std::buffer,
@@ -1377,22 +1377,12 @@ fn call_local_drop_dispatch(
     ))
 }
 
-fn resolved_local_drop(drop: &LocalDrop) -> ResolvedLocalDrop {
-    match drop {
-        LocalDrop::Unknown => {
-            panic!("LocalDrop::Unknown should have been resolved before evaluation")
-        }
-        LocalDrop::Resolved(drop) => *drop,
-    }
+fn resolved_local_drop(drop: &ResolvedLocalDrop) -> ResolvedLocalDrop {
+    *drop
 }
 
-fn resolved_local_clone(clone: &LocalClone) -> ResolvedLocalClone {
-    match clone {
-        LocalClone::Unknown => {
-            panic!("LocalClone::Unknown should have been resolved before evaluation")
-        }
-        LocalClone::Resolved(clone) => *clone,
-    }
+fn resolved_local_clone(clone: &ResolvedLocalClone) -> ResolvedLocalClone {
+    *clone
 }
 
 pub(crate) fn drop_frame_owned_locals_on_error(
@@ -2074,17 +2064,14 @@ fn take_owned_local_value(
 
 #[inline(never)]
 fn eval_take_local_value(
-    node: &hir::TakeLocalValue,
+    node: &hir::TakeLocalValue<hir::Elaborated>,
     span: Location,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
     match node.mode {
-        TakeLocalValueMode::Unknown => {
-            panic!("TakeLocalValueMode::Unknown should have been resolved before evaluation")
-        }
-        TakeLocalValueMode::MoveOwned => take_owned_local_value(node.id, ctx, locals),
-        TakeLocalValueMode::CloneBorrowed(ResolvedLocalClone::TrivialCopy) => {
+        ResolvedTakeLocalValueMode::MoveOwned => take_owned_local_value(node.id, ctx, locals),
+        ResolvedTakeLocalValueMode::CloneBorrowed(ResolvedLocalClone::TrivialCopy) => {
             let place = local_place(ctx, locals, node.id);
             cont(copy_trivial_copy_value_from_place(
                 &place,
@@ -2093,7 +2080,7 @@ fn eval_take_local_value(
                 span,
             )?)
         }
-        TakeLocalValueMode::CloneBorrowed(clone) => {
+        ResolvedTakeLocalValueMode::CloneBorrowed(clone) => {
             let place = local_place(ctx, locals, node.id);
             place
                 .target_ref(ctx)
@@ -2578,13 +2565,10 @@ fn eval_call_arg(
     arena: &ENodeArena,
     arg: ENodeId,
     ty: Type,
-    passing: ArgPassing,
+    passing: ResolvedArgPassing,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> Result<ControlFlow<EvaluatedCallArg>, RuntimeError> {
-    let passing = passing
-        .resolved()
-        .expect("ArgPassing::Unknown should have been resolved before evaluation");
     match passing {
         ResolvedArgPassing::MutableRef => {
             eval_node_as_place(arena, arg, ctx, locals).map(|result| {
@@ -2749,9 +2733,7 @@ fn try_eval_node_as_place(
         CloneValue(node)
             if matches!(
                 node.clone,
-                LocalClone::Resolved(
-                    ResolvedLocalClone::Static(_) | ResolvedLocalClone::Dictionary(_)
-                )
+                ResolvedLocalClone::Static(_) | ResolvedLocalClone::Dictionary(_)
             ) =>
         {
             return try_eval_node_as_place(arena, node.source, ctx, locals);
@@ -2805,9 +2787,7 @@ fn node_may_resolve_to_place(arena: &ENodeArena, node_id: ENodeId) -> bool {
         NodeKind::CloneValue(node)
             if matches!(
                 node.clone,
-                LocalClone::Resolved(
-                    ResolvedLocalClone::Static(_) | ResolvedLocalClone::Dictionary(_)
-                )
+                ResolvedLocalClone::Static(_) | ResolvedLocalClone::Dictionary(_)
             ) =>
         {
             node_may_resolve_to_place(arena, node.source)
@@ -2836,7 +2816,7 @@ mod tests {
         eval::{ControlFlow, EvalCtx, eval_args, eval_nodes},
         hir::{
             CallArgument, ENode, ENodeArena, NodeKind,
-            function::{ArgPassing, ResolvedValueArgPassing, ValueArgPassing},
+            function::{ResolvedArgPassing, ResolvedValueArgPassing},
             value::{LiteralValue, NativeDisplay},
         },
         module::{ModuleId, id::Id},
@@ -2938,15 +2918,11 @@ mod tests {
         let arguments = [
             CallArgument {
                 value: tracked,
-                passing: ArgPassing::Value(ValueArgPassing::Resolved(
-                    ResolvedValueArgPassing::Owned,
-                )),
+                passing: ResolvedArgPassing::Value(ResolvedValueArgPassing::Owned),
             },
             CallArgument {
                 value: return_unit,
-                passing: ArgPassing::Value(ValueArgPassing::Resolved(
-                    ResolvedValueArgPassing::Owned,
-                )),
+                passing: ResolvedArgPassing::Value(ResolvedValueArgPassing::Owned),
             },
         ];
 

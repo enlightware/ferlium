@@ -13,10 +13,10 @@ use ferlium::{
     compiler::error::{CompilationErrorImpl, RuntimeErrorKind},
     hir::{
         self, NodeKind,
-        function::{ArgPassing, ResolvedValueArgPassing, SharedRefTempCleanup, ValueArgPassing},
+        function::{ResolvedArgPassing, ResolvedValueArgPassing, SharedRefTempCleanup},
         value::Value,
     },
-    module::{LocalClone, ResolvedLocalClone, TakeLocalValueMode},
+    module::{ResolvedLocalClone, ResolvedTakeLocalValueMode},
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -204,11 +204,9 @@ fn generated_value_to_string_calls_resolve_temp_cleanup_for_string_pieces() {
                 Some(argument)
                     if matches!(
                         argument.passing,
-                        ArgPassing::Value(ValueArgPassing::Resolved(
-                        ResolvedValueArgPassing::SharedRef {
+                        ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef {
                             temp_cleanup: SharedRefTempCleanup::Drop(_),
-                        },
-                    ))
+                        })
                     ) && matches!(module.ir_arena[argument.value].kind, NodeKind::Immediate(_))
             )
         }),
@@ -492,7 +490,7 @@ fn mutable_concrete_trivial_copy_place_lowers_to_snapshot_copy() {
         module.ir_arena.iter().any(|(_, node)| matches!(
             node.kind,
             NodeKind::CloneValue(hir::CloneValue {
-                clone: LocalClone::Resolved(ResolvedLocalClone::TrivialCopy),
+                clone: ResolvedLocalClone::TrivialCopy,
                 ..
             })
         )),
@@ -502,11 +500,11 @@ fn mutable_concrete_trivial_copy_place_lowers_to_snapshot_copy() {
         !module.ir_arena.iter().any(|(_, node)| matches!(
             node.kind,
             NodeKind::CloneValue(hir::CloneValue {
-                clone: LocalClone::Unknown,
+                clone: ResolvedLocalClone::Static(_) | ResolvedLocalClone::Dictionary(_),
                 ..
             })
         )),
-        "LocalClone::Unknown should not remain after dictionary elaboration"
+        "expected no non-trivial clone for trivial-copy materialization"
     );
 
     let mut run_session = TestSession::new();
@@ -534,7 +532,7 @@ fn inferred_mutable_let_clone_resolves_to_trivial_copy_after_unification() {
         module.ir_arena.iter().any(|(_, node)| matches!(
             node.kind,
             NodeKind::TakeLocalValue(hir::TakeLocalValue {
-                mode: TakeLocalValueMode::CloneBorrowed(ResolvedLocalClone::TrivialCopy),
+                mode: ResolvedTakeLocalValueMode::CloneBorrowed(ResolvedLocalClone::TrivialCopy),
                 ..
             })
         )),
@@ -563,7 +561,7 @@ fn inferred_projection_materialization_resolves_to_trivial_copy_after_unificatio
         module.ir_arena.iter().any(|(_, node)| matches!(
             node.kind,
             NodeKind::CloneValue(hir::CloneValue {
-                clone: LocalClone::Resolved(ResolvedLocalClone::TrivialCopy),
+                clone: ResolvedLocalClone::TrivialCopy,
                 ..
             })
         )),
@@ -573,11 +571,11 @@ fn inferred_projection_materialization_resolves_to_trivial_copy_after_unificatio
         !module.ir_arena.iter().any(|(_, node)| matches!(
             node.kind,
             NodeKind::CloneValue(hir::CloneValue {
-                clone: LocalClone::Unknown,
+                clone: ResolvedLocalClone::Static(_) | ResolvedLocalClone::Dictionary(_),
                 ..
             })
         )),
-        "LocalClone::Unknown should not remain after dictionary elaboration"
+        "expected no non-trivial clone for trivial-copy projected materialization"
     );
 
     let mut run_session = TestSession::new();

@@ -27,8 +27,9 @@ use crate::{
     },
     internal_compilation_error,
     module::{
-        self, ConcreteTraitImplKey, FunctionId, LocalDecl, LocalDeclId, Module, ModuleFunction,
-        ProjectionIndex, TraitId, TraitImpl, TraitImplId, TraitImpls, id::Id,
+        self, ConcreteTraitImplKey, FunctionId, LocalDecl, LocalDeclId, Module,
+        PendingModuleFunction, ProjectionIndex, TraitId, TraitImpl, TraitImplId, TraitImpls,
+        id::Id,
     },
     std::{
         STD_MODULE_ID, core_traits_names::VALUE_TRAIT_NAME, hash::hasher_type, logic::bool_type,
@@ -594,7 +595,7 @@ pub(crate) fn function_value_method_function(
     span: Location,
     arena: &mut NodeArena,
     solver: &mut TraitSolver<'_>,
-) -> Result<ModuleFunction, InternalCompilationError> {
+) -> Result<PendingModuleFunction, InternalCompilationError> {
     use hir::hir_syn::*;
 
     let ty = Type::variable_id(0);
@@ -702,9 +703,12 @@ pub(crate) fn function_value_method_function(
         _ => panic!("function Value method index out of bounds"),
     };
 
-    let code = b(PendingScriptFunction::new(root, definition.arg_names.len())) as Function;
-    Ok(ModuleFunction::new_without_debug_info(
-        definition, code, None, locals,
+    let runtime_arg_count = definition.arg_names.len();
+    Ok(PendingModuleFunction::new(
+        definition,
+        PendingScriptFunction::new(root, runtime_arg_count),
+        None,
+        locals,
     ))
 }
 

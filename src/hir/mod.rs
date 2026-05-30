@@ -22,10 +22,12 @@ use crate::{
     Location,
     ast::{self, UnnamedArg},
     format::FormatWith,
-    hir::function::ArgPassing,
+    hir::function::{PendingArgPassing, ResolvedArgPassing},
     module::{
-        ExtraParameterId, FunctionId, LocalClone, LocalDecl, LocalDeclId, LocalDrop,
-        ProjectionIndex, ResolvedLocalClone, TakeLocalValueMode, TraitId, TraitImplId, id::Id,
+        ExtraParameterId, FunctionId, LocalCloneMetadata, LocalDecl, LocalDeclId,
+        PendingLocalClone, PendingLocalDrop, PendingTakeLocalValueMode, ProjectionIndex,
+        ResolvedLocalClone, ResolvedLocalDrop, ResolvedTakeLocalValueMode,
+        TakeLocalValueModeMetadata, TraitId, TraitImplId, id::Id,
     },
     types::r#trait::{TraitAssociatedConstIndex, TraitDictionaryEntryIndex, TraitMethodIndex},
     types::type_like::{CastableToType, TypeLike, instantiate_types_in_place},
@@ -54,6 +56,16 @@ pub trait HirPhase: Sized + std::fmt::Debug + Clone {
     type GetTraitMethod: HirPayload<Self>;
     type GetTraitAssociatedConst: HirPayload<Self>;
     type GetTraitDictionary: HirPayload<Self>;
+    /// Clone metadata carried by local declarations and clone nodes in this phase.
+    type LocalClone: std::fmt::Debug + Clone + Copy + LocalCloneMetadata;
+    /// Drop metadata carried by local declarations and assignment nodes in this phase.
+    type LocalDrop: std::fmt::Debug + Clone + Copy;
+    /// Take-local mode carried by `TakeLocalValue` nodes in this phase.
+    type TakeLocalValueMode: std::fmt::Debug + Clone + Copy + TakeLocalValueModeMetadata;
+    /// Argument-passing metadata carried by call arguments in this phase.
+    type CallArgPassing: std::fmt::Debug + Clone + Copy;
+    /// Deferred local-storage payload carried by local declarations in this phase.
+    type DeferredLocalStorage: std::fmt::Debug + Clone + Copy;
 }
 
 /// HIR before dictionary passing and final ownership/call elaboration.
@@ -70,6 +82,11 @@ impl HirPhase for Unelaborated {
     type GetTraitMethod = B<GetTraitMethod>;
     type GetTraitAssociatedConst = B<GetTraitAssociatedConst>;
     type GetTraitDictionary = B<GetTraitDictionary>;
+    type LocalClone = PendingLocalClone;
+    type LocalDrop = PendingLocalDrop;
+    type TakeLocalValueMode = PendingTakeLocalValueMode;
+    type CallArgPassing = PendingArgPassing;
+    type DeferredLocalStorage = crate::module::DeferredLocalStorage;
 }
 
 impl HirPhase for Elaborated {
@@ -78,6 +95,11 @@ impl HirPhase for Elaborated {
     type GetTraitMethod = Never;
     type GetTraitAssociatedConst = Never;
     type GetTraitDictionary = Never;
+    type LocalClone = ResolvedLocalClone;
+    type LocalDrop = ResolvedLocalDrop;
+    type TakeLocalValueMode = ResolvedTakeLocalValueMode;
+    type CallArgPassing = ResolvedArgPassing;
+    type DeferredLocalStorage = Never;
 }
 
 /// An index to a node in the HIR arena.
@@ -173,7 +195,7 @@ pub(crate) fn place_resolution_may_create_temp(arena: &NodeArena, node_id: NodeI
 /// Resolve a deferred let-binding storage decision once mutability inference is complete.
 pub(crate) fn resolve_deferred_local_storage_shape(
     arena: &NodeArena,
-    local: &mut LocalDecl,
+    local: &mut LocalDecl<Unelaborated>,
 ) -> bool {
     let crate::module::LocalStorage::Deferred(deferred) = local.storage.clone() else {
         return false;
@@ -195,9 +217,9 @@ pub(crate) fn resolve_deferred_local_storage_shape(
         if node_is_place_reference(arena, deferred.initializer)
             && !place_resolution_may_create_temp(arena, deferred.initializer)
         {
-            local.clone = Some(LocalClone::Unknown);
+            local.clone = Some(PendingLocalClone::Unknown);
         }
-        local.set_owned_storage(LocalDrop::Unknown);
+        local.set_owned_storage(PendingLocalDrop::Unknown);
         true
     }
 }
@@ -337,9 +359,9 @@ pub struct StoreLocal<P: HirPhase = Unelaborated> {
 
 /// Take a local value as an owned result.
 #[derive(Debug, Clone, Copy)]
-pub struct TakeLocalValue {
+pub struct TakeLocalValue<P: HirPhase = Unelaborated> {
     pub id: LocalDeclId,
-    pub mode: TakeLocalValueMode,
+    pub mode: P::TakeLocalValueMode,
 }
 
 /// Assign a new value into an existing place.
@@ -349,14 +371,14 @@ pub struct Assignment<P: HirPhase = Unelaborated> {
     pub value: NodeId<P>,
     /// Dispatch used to drop the old destination value before overwriting it.
     /// `None` is used only when the destination storage is uninitialized.
-    pub drop: Option<LocalDrop>,
+    pub drop: Option<P::LocalDrop>,
 }
 
 /// Materialize a value as an owned result, using the cheapest valid copy mode.
 #[derive(Debug, Clone, Copy)]
 pub struct CloneValue<P: HirPhase = Unelaborated> {
     pub source: NodeId<P>,
-    pub clone: LocalClone,
+    pub clone: P::LocalClone,
 }
 
 /// Evaluate a sequence of nodes.
@@ -390,13 +412,13 @@ pub struct DropClosureEnv<P: HirPhase = Unelaborated> {
 #[derive(Debug, Clone, Copy)]
 pub struct CallArgument<P: HirPhase = Unelaborated> {
     pub value: NodeId<P>,
-    pub passing: ArgPassing,
+    pub passing: P::CallArgPassing,
 }
 
 impl<P: HirPhase> CallArgument<P> {
     pub(crate) fn from_values_and_passing(
         values: Vec<NodeId<P>>,
-        passing: Vec<ArgPassing>,
+        passing: Vec<P::CallArgPassing>,
     ) -> Vec<Self> {
         assert_eq!(values.len(), passing.len());
         values
@@ -408,7 +430,7 @@ impl<P: HirPhase> CallArgument<P> {
 
     pub(crate) fn from_value_slice_and_passing(
         values: &[NodeId<P>],
-        passing: Vec<ArgPassing>,
+        passing: Vec<P::CallArgPassing>,
     ) -> Vec<Self> {
         assert_eq!(values.len(), passing.len());
         values
@@ -597,7 +619,7 @@ pub enum NodeKind<P: HirPhase = Unelaborated> {
     /// Store a value into local storage.
     StoreLocal(StoreLocal<P>),
     /// Take a local value as an owned result.
-    TakeLocalValue(TakeLocalValue),
+    TakeLocalValue(TakeLocalValue<P>),
     /// Assign a new value into an existing place.
     Assign(Assignment<P>),
     /// Materialize a value as an owned result, using the cheapest valid copy mode.
@@ -746,7 +768,7 @@ pub trait HirPayload<P: HirPhase>: std::fmt::Debug + Clone {
         &self,
         arena: &NodeArena<P>,
         f: &mut std::fmt::Formatter,
-        locals: &[LocalDecl],
+        locals: &[LocalDecl<P>],
         env: &ModuleEnv<'_>,
         spacing: usize,
         indent: usize,
@@ -764,7 +786,7 @@ impl<P: HirPhase> HirPayload<P> for Never {
         &self,
         _arena: &NodeArena<P>,
         _f: &mut std::fmt::Formatter,
-        _locals: &[LocalDecl],
+        _locals: &[LocalDecl<P>],
         _env: &ModuleEnv<'_>,
         _spacing: usize,
         _indent: usize,
@@ -783,7 +805,7 @@ impl<P: HirPhase> HirPayload<P> for FieldAccess<P> {
         &self,
         arena: &NodeArena<P>,
         f: &mut std::fmt::Formatter,
-        locals: &[LocalDecl],
+        locals: &[LocalDecl<P>],
         env: &ModuleEnv<'_>,
         spacing: usize,
         indent: usize,
@@ -804,7 +826,7 @@ impl<P: HirPhase> HirPayload<P> for B<TraitMethodApplication<P>> {
         &self,
         arena: &NodeArena<P>,
         f: &mut std::fmt::Formatter,
-        locals: &[LocalDecl],
+        locals: &[LocalDecl<P>],
         env: &ModuleEnv<'_>,
         spacing: usize,
         indent: usize,
@@ -847,7 +869,7 @@ impl<P: HirPhase> HirPayload<P> for B<GetTraitMethod> {
         &self,
         _arena: &NodeArena<P>,
         f: &mut std::fmt::Formatter,
-        _locals: &[LocalDecl],
+        _locals: &[LocalDecl<P>],
         env: &ModuleEnv<'_>,
         _spacing: usize,
         _indent: usize,
@@ -868,7 +890,7 @@ impl<P: HirPhase> HirPayload<P> for B<GetTraitAssociatedConst> {
         &self,
         _arena: &NodeArena<P>,
         f: &mut std::fmt::Formatter,
-        _locals: &[LocalDecl],
+        _locals: &[LocalDecl<P>],
         env: &ModuleEnv<'_>,
         _spacing: usize,
         _indent: usize,
@@ -888,7 +910,7 @@ impl<P: HirPhase> HirPayload<P> for B<GetTraitDictionary> {
         &self,
         _arena: &NodeArena<P>,
         f: &mut std::fmt::Formatter,
-        _locals: &[LocalDecl],
+        _locals: &[LocalDecl<P>],
         env: &ModuleEnv<'_>,
         _spacing: usize,
         _indent: usize,
@@ -903,7 +925,7 @@ pub(crate) fn format_ind<P: HirPhase>(
     arena: &NodeArena<P>,
     node_id: NodeId<P>,
     f: &mut std::fmt::Formatter,
-    locals: &[LocalDecl],
+    locals: &[LocalDecl<P>],
     env: &ModuleEnv<'_>,
     spacing: usize,
     indent: usize,
@@ -939,7 +961,7 @@ impl<P: HirPhase> Node<P> {
         &self,
         arena: &NodeArena<P>,
         f: &mut std::fmt::Formatter,
-        locals: &[LocalDecl],
+        locals: &[LocalDecl<P>],
         env: &ModuleEnv<'_>,
         spacing: usize,
         indent: usize,
@@ -1006,19 +1028,11 @@ impl<P: HirPhase> Node<P> {
                 format_ind(arena, node.target, f, locals, env, spacing, indent + 1)?;
             }
             CloneValue(node) => {
-                match node.clone {
-                    LocalClone::Unknown => {
-                        writeln!(f, "{indent_str}clone value with unknown mode")?;
-                    }
-                    LocalClone::Resolved(ResolvedLocalClone::TrivialCopy) => {
-                        writeln!(f, "{indent_str}clone value with trivial copy")?;
-                    }
-                    LocalClone::Resolved(
-                        ResolvedLocalClone::Static(_) | ResolvedLocalClone::Dictionary(_),
-                    ) => {
-                        writeln!(f, "{indent_str}clone value with Value::clone")?;
-                    }
-                }
+                writeln!(
+                    f,
+                    "{indent_str}clone value with {}",
+                    node.clone.format_label()
+                )?;
                 format_ind(arena, node.source, f, locals, env, spacing, indent + 1)?;
             }
             StaticApply(app) => {
@@ -1151,16 +1165,7 @@ impl<P: HirPhase> Node<P> {
             }
             TakeLocalValue(node) => {
                 let local = &locals[node.id.as_index()];
-                let mode = match node.mode {
-                    TakeLocalValueMode::Unknown => "unknown",
-                    TakeLocalValueMode::MoveOwned => "move",
-                    TakeLocalValueMode::CloneBorrowed(ResolvedLocalClone::TrivialCopy) => {
-                        "trivial copy"
-                    }
-                    TakeLocalValueMode::CloneBorrowed(
-                        ResolvedLocalClone::Static(_) | ResolvedLocalClone::Dictionary(_),
-                    ) => "Value::clone",
-                };
+                let mode = node.mode.format_label();
                 writeln!(
                     f,
                     "{indent_str}take local {} as \"{}\" with {mode}",
@@ -1678,7 +1683,7 @@ pub(crate) fn instantiate_node_in_place<M: TypeMapper>(
 #[derive(new)]
 pub struct ExprDisplay<'a> {
     pub body: ENodeId,
-    pub locals: &'a [LocalDecl],
+    pub locals: &'a [LocalDecl<Elaborated>],
 }
 
 impl FormatWith<ModuleEnv<'_>> for ExprDisplay<'_> {

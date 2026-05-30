@@ -15,13 +15,13 @@ use crate::{
         dictionary::{DictElaborationCtx, find_trait_impl_dict_index},
         emit_value_impl::{function_value_method, generic_value_methods_for_type},
         function::{
-            ArgPassing, ResolvedValueArgPassing, SharedRefTempCleanup, ValueArgPassing,
-            resolve_arg_passing_for_call,
+            PendingArgPassing, PendingValueArgPassing, ResolvedValueArgPassing,
+            SharedRefTempCleanup, resolve_arg_passing_for_call,
         },
     },
     internal_compilation_error,
     module::{
-        ExtraParameterId, FunctionId, LocalClone, LocalDecl, LocalDrop, LocalStorage,
+        ExtraParameterId, FunctionId, LocalDecl, LocalStorage, PendingLocalClone, PendingLocalDrop,
         ResolvedLocalClone, ResolvedLocalDrop, id::Id,
     },
     std::{
@@ -53,8 +53,8 @@ pub fn elaborate_local_ownership_and_value_dispatches<'d, 'sr, 'sm>(
             }));
         }
 
-        if matches!(local.clone, Some(LocalClone::Unknown)) {
-            local.clone = Some(LocalClone::Resolved(resolve_local_clone(
+        if matches!(local.clone, Some(PendingLocalClone::Unknown)) {
+            local.clone = Some(PendingLocalClone::Resolved(resolve_local_clone(
                 arena,
                 ctx,
                 local.ty,
@@ -65,7 +65,7 @@ pub fn elaborate_local_ownership_and_value_dispatches<'d, 'sr, 'sm>(
         let local_ty = local.ty;
         let local_scope = local.scope;
         if let Some(drop) = local.local_drop_mut()
-            && matches!(drop, LocalDrop::Unknown)
+            && matches!(drop, PendingLocalDrop::Unknown)
         {
             *drop = resolve_local_drop(arena, ctx, local_ty, local_scope)?;
         }
@@ -146,9 +146,9 @@ pub(crate) fn resolve_local_drop(
     ctx: &mut DictElaborationCtx<'_, '_, '_>,
     ty: Type,
     span: Location,
-) -> Result<LocalDrop, InternalCompilationError> {
+) -> Result<PendingLocalDrop, InternalCompilationError> {
     if type_has_concrete_trivial_copy_impl(arena, ctx, ty, span) {
-        return Ok(LocalDrop::Resolved(ResolvedLocalDrop::Skip));
+        return Ok(PendingLocalDrop::Resolved(ResolvedLocalDrop::Skip));
     }
     let dispatch = resolve_value_method_dispatch(
         arena,
@@ -158,7 +158,7 @@ pub(crate) fn resolve_local_drop(
         span,
         "Value dictionary for drop not found, type inference should have failed",
     )?;
-    Ok(LocalDrop::Resolved(match dispatch {
+    Ok(PendingLocalDrop::Resolved(match dispatch {
         ResolvedValueMethodDispatch::Static(function) => ResolvedLocalDrop::Static(function),
         ResolvedValueMethodDispatch::Dictionary(dictionary) => {
             ResolvedLocalDrop::Dictionary(dictionary)
@@ -169,18 +169,19 @@ pub(crate) fn resolve_local_drop(
 pub(crate) fn resolve_arg_passing(
     arena: &mut NodeArena,
     ctx: &mut DictElaborationCtx<'_, '_, '_>,
-    passing: &mut ArgPassing,
+    passing: &mut PendingArgPassing,
     arg: NodeId,
     ty: Type,
     span: Location,
 ) -> Result<(), InternalCompilationError> {
     match passing {
-        ArgPassing::MutableRef | ArgPassing::Value(ValueArgPassing::Resolved(_)) => {}
-        ArgPassing::Value(ValueArgPassing::Unknown) => {
+        PendingArgPassing::MutableRef
+        | PendingArgPassing::Value(PendingValueArgPassing::Resolved(_)) => {}
+        PendingArgPassing::Value(PendingValueArgPassing::Unknown) => {
             let needs_temp = crate::hir::function::call_argument_may_need_temp(arena, arg);
-            *passing = ArgPassing::Value(ValueArgPassing::Resolved(resolve_value_arg_passing(
-                arena, ctx, ty, needs_temp, span,
-            )?));
+            *passing = PendingArgPassing::Value(PendingValueArgPassing::Resolved(
+                resolve_value_arg_passing(arena, ctx, ty, needs_temp, span)?,
+            ));
         }
     }
     Ok(())
@@ -213,8 +214,8 @@ fn resolve_temp_drop(
     span: Location,
 ) -> Result<ResolvedLocalDrop, InternalCompilationError> {
     match resolve_local_drop(arena, ctx, ty, span)? {
-        LocalDrop::Resolved(drop) => Ok(drop),
-        LocalDrop::Unknown => unreachable!("resolve_local_drop always resolves"),
+        PendingLocalDrop::Resolved(drop) => Ok(drop),
+        PendingLocalDrop::Unknown => unreachable!("resolve_local_drop always resolves"),
     }
 }
 
@@ -224,7 +225,7 @@ pub(crate) fn resolved_arg_passing_for_generated_call(
     args: &[NodeId],
     arg_tys: &[FnArgType],
     span: Location,
-) -> Result<Vec<ArgPassing>, InternalCompilationError> {
+) -> Result<Vec<PendingArgPassing>, InternalCompilationError> {
     resolve_arg_passing_for_call(
         arena,
         trait_solver,

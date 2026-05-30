@@ -9,12 +9,12 @@
 use crate::{
     Location,
     containers::{IntoSVec2, b},
-    hir::function::ArgPassing,
+    hir::function::PendingArgPassing,
     hir::value::{LiteralNativeValue, LiteralValue},
     hir::{self, CallArgument, NodeId, NodeKind, Project, Variant},
     module::{
-        FunctionId, LocalDecl, LocalDeclId, LocalDrop, LocalFrameSlot, ProjectionIndex,
-        TakeLocalValueMode, TraitImplId, id::Id,
+        FunctionId, LocalDecl, LocalDeclId, LocalFrameSlot, PendingLocalDrop,
+        PendingTakeLocalValueMode, ProjectionIndex, TraitImplId, id::Id,
     },
     std::string::String as FerliumString,
     types::mutability::{MutType, MutVal},
@@ -44,7 +44,7 @@ pub fn static_apply_with_argument_passing(
     function: FunctionId,
     ty: FnType,
     arguments: impl Into<Vec<NodeId>>,
-    argument_passing: Vec<ArgPassing>,
+    argument_passing: Vec<PendingArgPassing>,
     span: Location,
 ) -> NodeKind {
     let arguments = arguments.into();
@@ -90,7 +90,7 @@ pub fn store_new_local(
         None,
         Location::new_synthesized(),
     );
-    local.set_owned_storage(LocalDrop::Unknown);
+    local.set_owned_storage(PendingLocalDrop::Unknown);
     local.slot = LocalFrameSlot::from_index(index);
     locals.push(local);
     (K::StoreLocal(hir::StoreLocal { value, id }), id)
@@ -112,7 +112,7 @@ pub fn load_local(id: LocalDeclId) -> NodeKind {
 pub fn take_local_value(id: LocalDeclId) -> NodeKind {
     K::TakeLocalValue(hir::TakeLocalValue {
         id,
-        mode: TakeLocalValueMode::MoveOwned,
+        mode: PendingTakeLocalValueMode::MoveOwned,
     })
 }
 

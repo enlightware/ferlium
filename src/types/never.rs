@@ -8,7 +8,7 @@
 //
 use std::fmt::Display;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Never {}
 
 impl Display for Never {

@@ -8,17 +8,15 @@
 //
 
 use crate::{
-    FxHashSet, Location, Modules, ast,
+    FxHashMap, FxHashSet, Location, Modules, ast,
     compiler::error::InternalCompilationError,
-    containers::b,
     hir::{
-        self, NodeArena, dictionary::DictElaborationCtx,
-        elaboration::elaborate_generated_functions,
+        NodeArena, dictionary::DictElaborationCtx, elaboration::elaborate_generated_functions,
         emit_associated_consts::emitted_associated_const_values, emit_ir::EmitTraitOutput,
         function::PendingScriptFunction,
     },
     internal_compilation_error,
-    module::{LocalFunctionId, Module, ModuleEnv, ModuleFunction, TypeDefId, id::Id},
+    module::{LocalFunctionId, Module, ModuleEnv, PendingModuleFunction, TypeDefId, id::Id},
     std::core_traits_names::VALUE_TRAIT_NAME,
     std::value::{
         NO_DERIVE_VALUE_ATTRIBUTE, derive_generic_value_code_entries,
@@ -105,11 +103,13 @@ pub(crate) fn generic_value_methods_for_type(
             continue;
         }
 
-        let code: hir::function::Function = b(PendingScriptFunction::new(
-            code_entry,
-            definition.arg_names.len(),
-        ));
-        let function = ModuleFunction::new_without_debug_info(definition, code, None, locals);
+        let runtime_arg_count = definition.arg_names.len();
+        let function = PendingModuleFunction::new(
+            definition,
+            PendingScriptFunction::new(code_entry, runtime_arg_count),
+            None,
+            locals,
+        );
         let id = solver.fn_collector.next_id();
         solver.fn_collector.push(name, function);
         methods.push(id);
@@ -233,6 +233,7 @@ pub(super) fn emit_auto_value_impls(
 ) -> Result<(), InternalCompilationError> {
     let value_trait_id = ModuleEnv::new(output, others).expect_std_trait_id(VALUE_TRAIT_NAME);
     let type_defs = output.type_def_ids().collect::<Vec<_>>();
+    let mut pending_functions = FxHashMap::default();
     for type_def_id in type_defs {
         if value_impl_for_type_def_already_exists(output, value_trait_id, type_def_id) {
             continue;
@@ -296,8 +297,18 @@ pub(super) fn emit_auto_value_impls(
                 ir_arena,
                 &mut solver,
             )?;
-            let generated = solver.commit(&mut output.functions, &mut output.def_table);
-            elaborate_generated_functions(output, ir_arena, others, generated)?;
+            let generated = solver.commit(
+                &mut output.functions,
+                &mut output.def_table,
+                &mut pending_functions,
+            );
+            elaborate_generated_functions(
+                output,
+                ir_arena,
+                others,
+                &mut pending_functions,
+                generated,
+            )?;
             code_entries
         }) else {
             continue;
@@ -326,25 +337,37 @@ pub(super) fn emit_auto_value_impls(
             let mut definition = definition;
             definition.ty_scheme.ty_quantifiers = quantifiers.clone();
             definition.ty_scheme.constraints = constraints.clone();
-            let code = b(PendingScriptFunction::new(root, definition.arg_names.len()))
-                as hir::function::Function;
-            let mut function =
-                ModuleFunction::new_without_debug_info(definition, code, None, locals);
+            let runtime_arg_count = definition.arg_names.len();
+            let function = PendingModuleFunction::new(
+                definition,
+                PendingScriptFunction::new(root, runtime_arg_count),
+                None,
+                locals,
+            );
             {
                 let mut solver = trait_solver_from_module!(output, others);
                 let mut ctx = DictElaborationCtx::new(&dicts, None, &mut solver);
-                function.check_borrows_and_elaborate_hir(
+                let (function, _) = function.check_borrows_and_elaborate_hir(
                     ir_arena,
                     &mut output.ir_arena,
                     &mut ctx,
                 )?;
-                let generated = solver.commit(&mut output.functions, &mut output.def_table);
-                elaborate_generated_functions(output, ir_arena, others, generated)?;
+                let generated = solver.commit(
+                    &mut output.functions,
+                    &mut output.def_table,
+                    &mut pending_functions,
+                );
+                elaborate_generated_functions(
+                    output,
+                    ir_arena,
+                    others,
+                    &mut pending_functions,
+                    generated,
+                )?;
+                let id = output.add_function_anonymous(function);
+                output.name_function(id, method_names[usize::from(method_index)]);
+                function_ids.push(id);
             }
-            function.refresh_debug_info();
-            let id = output.add_function_anonymous(function);
-            output.name_function(id, method_names[usize::from(method_index)]);
-            function_ids.push(id);
         }
 
         let associated_const_tys = {

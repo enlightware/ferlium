@@ -22,9 +22,10 @@ use crate::{
     },
     internal_compilation_error,
     module::{
-        ConcreteTraitImplKey, ExtraParameterId, FunctionId, LocalClone, LocalDecl, LocalDrop,
-        LocalFunctionId, Module, ModuleEnv, ProjectionIndex, TakeLocalValueMode, TraitId,
-        TraitImpl, TraitImplId, TraitImpls, build_dictionary_value, id::Id,
+        ConcreteTraitImplKey, ExtraParameterId, FunctionId, LocalDecl, LocalFunctionId, Module,
+        ModuleEnv, PendingLocalClone, PendingLocalDrop, PendingModuleFunction,
+        PendingTakeLocalValueMode, ProjectionIndex, TraitId, TraitImpl, TraitImplId, TraitImpls,
+        build_dictionary_value, id::Id,
     },
     types::r#trait::{TraitDictionaryEntryIndex, TraitMethodIndex},
     types::trait_solver::{TraitSolver, trait_solver_from_module},
@@ -312,6 +313,7 @@ pub fn elaborate_generated_functions(
     module: &mut Module,
     src: &mut UNodeArena,
     others: &Modules,
+    pending_functions: &mut FxHashMap<LocalFunctionId, PendingModuleFunction>,
     ids: impl IntoIterator<Item = LocalFunctionId>,
 ) -> Result<(), InternalCompilationError> {
     let mut pending = ids.into_iter().collect::<Vec<_>>();
@@ -319,12 +321,11 @@ pub fn elaborate_generated_functions(
     while index < pending.len() {
         let id = pending[index];
         index += 1;
-        if module.functions[id.as_index()]
-            .get_pending_code_entry()
-            .is_none()
-        {
+        let Some(mut function) = pending_functions.remove(&id) else {
             continue;
-        }
+        };
+        function.definition = module.functions[id.as_index()].definition.clone();
+        function.spans = module.functions[id.as_index()].spans.clone();
 
         let dicts = module.functions[id.as_index()]
             .definition
@@ -332,12 +333,14 @@ pub fn elaborate_generated_functions(
             .extra_parameters(ModuleEnv::new(module, others));
         let mut solver = trait_solver_from_module!(module, others);
         let mut ctx = DictElaborationCtx::new(&dicts, None, &mut solver);
-        module.functions[id.as_index()].check_borrows_and_elaborate_hir(
-            src,
-            &mut module.ir_arena,
-            &mut ctx,
-        )?;
-        pending.extend(solver.commit(&mut module.functions, &mut module.def_table));
+        let (elaborated, _) =
+            function.check_borrows_and_elaborate_hir(src, &mut module.ir_arena, &mut ctx)?;
+        module.functions[id.as_index()] = elaborated;
+        pending.extend(solver.commit(
+            &mut module.functions,
+            &mut module.def_table,
+            pending_functions,
+        ));
     }
     Ok(())
 }
@@ -472,7 +475,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
             .map(|arg| {
                 Ok(CallArgument {
                     value: self.elaborate_node(arg.value)?,
-                    passing: arg.passing,
+                    passing: arg.passing.into_elaborated(),
                 })
             })
             .collect()
@@ -554,14 +557,14 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                 target: self.elaborate_node(node.target)?,
             }),
             CloneValue(mut node) => {
-                if matches!(node.clone, LocalClone::Unknown) {
-                    node.clone = LocalClone::Resolved(resolve_local_clone(
+                if matches!(node.clone, PendingLocalClone::Unknown) {
+                    node.clone = PendingLocalClone::Resolved(resolve_local_clone(
                         self.src, self.ctx, node_ty, node_span,
                     )?);
                 }
                 CloneValue(hir::CloneValue {
                     source: self.elaborate_node(node.source)?,
-                    clone: node.clone,
+                    clone: node.clone.into_elaborated(),
                 })
             }
             StaticApply(app) => {
@@ -933,16 +936,19 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                 id: store.id,
             }),
             TakeLocalValue(mut node) => {
-                if matches!(node.mode, TakeLocalValueMode::Unknown) {
+                if matches!(node.mode, PendingTakeLocalValueMode::Unknown) {
                     node.mode = if self.locals[node.id.as_index()].owns_storage() {
-                        TakeLocalValueMode::MoveOwned
+                        PendingTakeLocalValueMode::MoveOwned
                     } else {
-                        TakeLocalValueMode::CloneBorrowed(resolve_local_clone(
+                        PendingTakeLocalValueMode::CloneBorrowed(resolve_local_clone(
                             self.src, self.ctx, node_ty, node_span,
                         )?)
                     };
                 }
-                TakeLocalValue(node)
+                TakeLocalValue(hir::TakeLocalValue {
+                    id: node.id,
+                    mode: node.mode.into_elaborated(),
+                })
             }
             LoadLocal(load) => LoadLocal(load),
             GetDictionaryMethod(node) => GetDictionaryMethod(hir::GetDictionaryMethod {
@@ -984,14 +990,14 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
             Assign(mut assignment) => {
                 let place_ty = self.src[assignment.place].ty;
                 if let Some(drop) = &mut assignment.drop
-                    && matches!(drop, LocalDrop::Unknown)
+                    && matches!(drop, PendingLocalDrop::Unknown)
                 {
                     *drop = resolve_local_drop(self.src, self.ctx, place_ty, node_span)?;
                 }
                 Assign(hir::Assignment {
                     place: self.elaborate_node(assignment.place)?,
                     value: self.elaborate_node(assignment.value)?,
-                    drop: assignment.drop,
+                    drop: assignment.drop.map(|drop| drop.into_elaborated()),
                 })
             }
             Tuple(nodes) => Tuple(b(SVec2::from_vec(

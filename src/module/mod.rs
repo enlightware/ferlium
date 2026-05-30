@@ -392,6 +392,8 @@ impl Module {
 
     /// Add collected functions from a FunctionCollector to this module.
     pub fn add_collected_functions(&mut self, collector: FunctionCollector) {
+        use crate::module::trait_impl::CollectedModuleFunction;
+
         let start_id = self.functions.len();
         let functions =
             collector
@@ -402,7 +404,12 @@ impl Module {
                     let local_id = LocalFunctionId::from_index(start_id + i);
                     self.def_table
                         .insert(name, Def::public(DefKind::Function(local_id)));
-                    function
+                    match function {
+                        CollectedModuleFunction::Final(function) => function,
+                        CollectedModuleFunction::Pending(_) => {
+                            panic!("cannot add pending HIR function directly to a module")
+                        }
+                    }
                 });
         self.functions.extend(functions);
     }

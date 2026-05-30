@@ -21,7 +21,7 @@ use crate::{
         self, CallArgument, FieldAccess as HirFieldAccess, NodeArena, NodeId, NodeKind,
         Project as HirProject, ProjectAt as HirProjectAt, StoreLocal, Variant as HirVariant,
         function::{
-            ArgPassing, Function, FunctionDefinition, PendingScriptFunction, ResolvedArgPassing,
+            FunctionDefinition, PendingArgPassing, PendingScriptFunction, ResolvedArgPassing,
             unresolved_arg_passing_for_args,
         },
         node_is_place_reference, place_resolution_may_create_temp,
@@ -30,9 +30,10 @@ use crate::{
     },
     internal_compilation_error,
     module::{
-        DeferredLocalStorage, FunctionId, LocalAssignmentMode, LocalClone, LocalDecl, LocalDeclId,
-        LocalDrop, ModuleEnv, ModuleFunction, ModuleFunctionSpans, ProjectionIndex,
-        ResolvedLocalDrop, TakeLocalValueMode, TraitId, TypeDefLookupResult, id::Id,
+        DeferredLocalStorage, FunctionId, LocalAssignmentMode, LocalDecl, LocalDeclId, ModuleEnv,
+        ModuleFunctionSpans, PendingLocalClone, PendingLocalDrop, PendingModuleFunction,
+        PendingTakeLocalValueMode, ProjectionIndex, ResolvedLocalDrop, TraitId,
+        TypeDefLookupResult, id::Id,
     },
     parser::location::Location,
     std::{
@@ -441,9 +442,9 @@ impl TypeInference {
             ret_ty: None,
             span,
         };
-        let function = ModuleFunction::new_without_debug_info(
+        let function = PendingModuleFunction::new(
             FunctionDefinition::new(ty_scheme, arg_names, None),
-            b(code) as Function,
+            code,
             Some(spans),
             fn_all_locals,
         );
@@ -749,7 +750,7 @@ impl TypeInference {
                     });
                 }
                 if needs_clone && !initializer_place_needs_temp {
-                    local.clone = Some(LocalClone::Unknown);
+                    local.clone = Some(PendingLocalClone::Unknown);
                 }
                 let value_id = if node_ty != Type::never()
                     && initializer_is_borrow
@@ -1053,7 +1054,7 @@ impl TypeInference {
                                     expr_span,
                                 ));
                             }
-                            Some(LocalDrop::Unknown)
+                            Some(PendingLocalDrop::Unknown)
                         };
                         let combined_effects =
                             self.make_dependent_effect([&value_effects, &place_effects]);
@@ -1590,14 +1591,14 @@ impl TypeInference {
         let mut stores = Vec::new();
         for ((arg, arg_ty), passing) in args.iter_mut().zip(arg_tys).zip(&arg_passing) {
             match passing {
-                ArgPassing::MutableRef => {
+                PendingArgPassing::MutableRef => {
                     if node_is_place_reference(env.ir_arena, *arg) {
                         let prepared = self.prepare_place_for_consumer(env, *arg, span);
                         stores.extend(prepared.prefix);
                         *arg = prepared.place;
                     }
                 }
-                ArgPassing::Value(_) => {
+                PendingArgPassing::Value(_) => {
                     if node_is_place_reference(env.ir_arena, *arg)
                         && place_resolution_may_create_temp(env.ir_arena, *arg)
                     {
@@ -1622,13 +1623,13 @@ impl TypeInference {
         &self,
         arg_tys: &[FnArgType],
         native_arg_passing: Option<&[ResolvedArgPassing]>,
-    ) -> Vec<ArgPassing> {
+    ) -> Vec<PendingArgPassing> {
         if let Some(native_arg_passing) = native_arg_passing {
             assert_eq!(arg_tys.len(), native_arg_passing.len());
             return native_arg_passing
                 .iter()
                 .copied()
-                .map(ArgPassing::from_resolved)
+                .map(PendingArgPassing::from_resolved)
                 .collect();
         }
 
@@ -1640,11 +1641,11 @@ impl TypeInference {
         env: &mut TypingEnv,
         arg: NodeId,
         ty: Type,
-        passing: ArgPassing,
+        passing: PendingArgPassing,
         span: Location,
     ) {
         // A non-place shared-ref argument may need owned temporary storage whose cleanup uses Value::drop.
-        if matches!(passing, ArgPassing::Value(_))
+        if matches!(passing, PendingArgPassing::Value(_))
             && (!node_is_place_reference(env.ir_arena, arg)
                 || place_resolution_may_create_temp(env.ir_arena, arg))
             && !self.type_has_concrete_trivial_copy_impl(env, ty, span)
@@ -1726,7 +1727,7 @@ impl TypeInference {
         let result_move = env.ir_arena.alloc(hir::Node::new(
             NodeKind::TakeLocalValue(hir::TakeLocalValue {
                 id: result_id,
-                mode: TakeLocalValueMode::MoveOwned,
+                mode: PendingTakeLocalValueMode::MoveOwned,
             }),
             ty,
             no_effects(),
@@ -1818,9 +1819,9 @@ impl TypeInference {
         let ty = env.ir_arena[value].ty;
         let effects = env.ir_arena[value].effects.clone();
         let mode = if local.owns_storage() {
-            TakeLocalValueMode::MoveOwned
+            PendingTakeLocalValueMode::MoveOwned
         } else {
-            TakeLocalValueMode::Unknown
+            PendingTakeLocalValueMode::Unknown
         };
         let take_node = env.ir_arena.alloc(hir::Node::new(
             NodeKind::TakeLocalValue(hir::TakeLocalValue { id, mode }),
@@ -1880,7 +1881,7 @@ impl TypeInference {
         env.ir_arena.alloc(hir::Node::new(
             NodeKind::CloneValue(hir::CloneValue {
                 source: value,
-                clone: LocalClone::Unknown,
+                clone: PendingLocalClone::Unknown,
             }),
             ty,
             effects,
@@ -2010,12 +2011,12 @@ impl TypeInference {
         value: NodeId,
         ty: Type,
         span: Location,
-    ) -> LocalDrop {
+    ) -> PendingLocalDrop {
         if self.node_value_needs_semantic_drop(env, value, ty, span) {
             self.add_value_constraint_for_unknown_drop(value_trait_id(env), ty, span);
-            LocalDrop::Unknown
+            PendingLocalDrop::Unknown
         } else {
-            LocalDrop::Resolved(ResolvedLocalDrop::Skip)
+            PendingLocalDrop::Resolved(ResolvedLocalDrop::Skip)
         }
     }
 

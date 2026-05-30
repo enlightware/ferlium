@@ -19,9 +19,12 @@ use ustr::Ustr;
 use crate::{
     define_id_type,
     format::{FormatWith, write_with_separator_and_format_fn},
-    hir::function::Function,
+    hir::function::{Function, FunctionDefinition},
     hir::value::LiteralValue,
-    module::{LocalDecl, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleId, TraitId, id::Id},
+    module::{
+        LocalDecl, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleFunctionSpans, ModuleId,
+        PendingModuleFunction, TraitId, id::Id,
+    },
     parser::location::Location,
     types::r#trait::{
         Trait, TraitAssociatedConstIndex, TraitDictionaryEntryIndex, TraitMethodIndex,
@@ -240,19 +243,45 @@ impl TraitImpl {
 pub struct FunctionCollector {
     pub initial_count: usize,
     #[new(default)]
-    pub new_elements: Vec<(Ustr, ModuleFunction)>,
+    pub new_elements: Vec<(Ustr, CollectedModuleFunction)>,
 }
+
+#[derive(Debug, Clone)]
+pub enum CollectedModuleFunction {
+    Final(ModuleFunction),
+    Pending(PendingModuleFunction),
+}
+
+impl From<ModuleFunction> for CollectedModuleFunction {
+    fn from(function: ModuleFunction) -> Self {
+        Self::Final(function)
+    }
+}
+
+impl From<PendingModuleFunction> for CollectedModuleFunction {
+    fn from(function: PendingModuleFunction) -> Self {
+        Self::Pending(function)
+    }
+}
+
 impl FunctionCollector {
     pub fn next_id(&self) -> LocalFunctionId {
         LocalFunctionId::from_index(self.initial_count + self.new_elements.len())
     }
-    pub fn push(&mut self, name: Ustr, mut function: ModuleFunction) {
-        LocalDecl::assign_sequential_slots(&mut function.locals);
+
+    pub fn push(&mut self, name: Ustr, function: impl Into<CollectedModuleFunction>) {
+        let mut function = function.into();
+        function.assign_local_slots();
         self.new_elements.push((name, function));
     }
 
-    pub(crate) fn replace(&mut self, id: LocalFunctionId, mut function: ModuleFunction) {
-        LocalDecl::assign_sequential_slots(&mut function.locals);
+    pub(crate) fn replace(
+        &mut self,
+        id: LocalFunctionId,
+        function: impl Into<CollectedModuleFunction>,
+    ) {
+        let mut function = function.into();
+        function.assign_local_slots();
         let index = id
             .as_index()
             .checked_sub(self.initial_count)
@@ -265,6 +294,28 @@ impl FunctionCollector {
             .iter()
             .position(|&(fn_name, _)| fn_name == name)
             .map(|i| LocalFunctionId::from_index(self.initial_count + i))
+    }
+}
+
+impl CollectedModuleFunction {
+    pub fn assign_local_slots(&mut self) {
+        match self {
+            Self::Final(function) => function.assign_local_slots(),
+            Self::Pending(function) => function.assign_local_slots(),
+        }
+    }
+
+    pub fn from_code(
+        definition: FunctionDefinition,
+        function: Function,
+        spans: Option<ModuleFunctionSpans>,
+        locals: Vec<LocalDecl>,
+    ) -> Self {
+        if let Some(pending) = function.as_pending_script() {
+            PendingModuleFunction::new(definition, pending.clone(), spans, locals).into()
+        } else {
+            ModuleFunction::new_without_debug_info(definition, function, spans, locals).into()
+        }
     }
 }
 
@@ -321,7 +372,7 @@ impl TraitImpls {
             .into_iter()
             .zip(functions.into())
             .map(|(def, (function, locals))| {
-                ModuleFunction::new_without_debug_info(def, function, None, locals)
+                CollectedModuleFunction::from_code(def, function, None, locals)
             })
             .collect();
 
@@ -348,7 +399,7 @@ impl TraitImpls {
         input_tys: Vec<Type>,
         output_tys: Vec<Type>,
         associated_const_values: impl Into<Vec<LiteralValue>>,
-        functions: Vec<ModuleFunction>,
+        functions: Vec<CollectedModuleFunction>,
         fn_collector: &mut FunctionCollector,
     ) -> LocalImplId {
         let associated_const_values = associated_const_values.into();
@@ -427,7 +478,7 @@ impl TraitImpls {
             .into_iter()
             .zip(functions.into())
             .map(|(def, (function, locals))| {
-                ModuleFunction::new_without_debug_info(def, function, None, locals)
+                CollectedModuleFunction::from_code(def, function, None, locals)
             })
             .collect();
 
@@ -451,7 +502,7 @@ impl TraitImpls {
         sub_key: BlanketTraitImplSubKey,
         output_tys: Vec<Type>,
         associated_const_values: impl Into<Vec<LiteralValue>>,
-        functions: Vec<ModuleFunction>,
+        functions: Vec<CollectedModuleFunction>,
         fn_collector: &mut FunctionCollector,
     ) -> LocalImplId {
         let associated_const_values = associated_const_values.into();
@@ -506,7 +557,7 @@ impl TraitImpls {
     /// Bundle a set of module functions into a local functions,
     /// a cached dictionary value, and the overall interface hash.
     fn bundle_module_functions(
-        functions: Vec<ModuleFunction>,
+        functions: Vec<CollectedModuleFunction>,
         fn_collector: &mut FunctionCollector,
         namer: impl Fn(usize) -> Ustr,
     ) -> (Vec<LocalFunctionId>, Vec<Type>) {
@@ -515,7 +566,7 @@ impl TraitImpls {
             .enumerate()
             .map(|(index, function)| {
                 let id = fn_collector.next_id();
-                let fn_ty = Type::function_type(function.definition.ty_scheme.ty.clone());
+                let fn_ty = Type::function_type(function.definition().ty_scheme.ty.clone());
                 fn_collector.push(namer(index), function);
                 (id, fn_ty)
             })
@@ -680,6 +731,15 @@ impl TraitImpls {
             }
         };
         format!("{}", self.format_with(&(module_env, filter)))
+    }
+}
+
+impl CollectedModuleFunction {
+    pub fn definition(&self) -> &FunctionDefinition {
+        match self {
+            Self::Final(function) => &function.definition,
+            Self::Pending(function) => &function.definition,
+        }
     }
 }
 
@@ -855,7 +915,7 @@ fn format_impl_fn(
         writeln!(f, " (#{id})")?;
     }
     if show_code {
-        function.code.format_ind(f, &function.locals, env, 2, 1)?;
+        function.fmt_code_ind(f, env, 2, 1)?;
     }
     Ok(())
 }

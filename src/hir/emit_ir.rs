@@ -47,9 +47,10 @@ use crate::{
     },
     internal_compilation_error,
     module::{
-        ConcreteTraitImplKey, FunctionId, GENERATED_LAMBDA_PREFIX, LocalAssignmentMode, LocalDecl,
-        LocalDeclId, LocalFunctionId, LocalImplId, Module, ModuleEnv, ModuleFunction,
-        ModuleFunctionSpans, ModuleId, TraitId, TraitImpl, build_dictionary_value, id::Id,
+        ConcreteTraitImplKey, ELocalDecl, FunctionId, GENERATED_LAMBDA_PREFIX, LocalAssignmentMode,
+        LocalDecl, LocalDeclId, LocalFunctionId, LocalImplId, Module, ModuleEnv, ModuleFunction,
+        ModuleFunctionSpans, ModuleId, PendingModuleFunction, TraitId, TraitImpl, UModuleFunction,
+        build_dictionary_value, id::Id,
     },
     std::{
         STD_MODULE_ID, new_module_using_std,
@@ -114,6 +115,28 @@ fn function_and_associated_lambdas<'a>(
     std::iter::once(*id).chain(associated_lambdas.get(id).into_iter().flatten().copied())
 }
 
+type PendingModuleFunctions = FxHashMap<LocalFunctionId, PendingModuleFunction>;
+
+fn add_pending_function_anonymous(
+    module: &mut Module,
+    pending_functions: &mut PendingModuleFunctions,
+    function: UModuleFunction,
+) -> LocalFunctionId {
+    let id = module.add_function_anonymous(function.placeholder());
+    pending_functions.insert(id, function);
+    id
+}
+
+fn set_pending_function(
+    module: &mut Module,
+    pending_functions: &mut PendingModuleFunctions,
+    id: LocalFunctionId,
+    function: UModuleFunction,
+) {
+    module.functions[id.as_index()] = function.placeholder();
+    pending_functions.insert(id, function);
+}
+
 /// Data for a pre-registered stub implementation for `impl Trait for ConcreteType`.
 struct ImplStubData {
     id: LocalImplId,
@@ -123,14 +146,31 @@ struct ImplStubData {
 
 fn instantiate_function_descr_in_place<M: TypeMapper>(
     ir_arena: &mut NodeArena,
-    descr: &mut ModuleFunction,
+    descr: &mut UModuleFunction,
     mapper: &mut M,
 ) {
-    let root = descr.get_pending_code_entry().unwrap();
-    hir::instantiate_node_in_place(ir_arena, root, mapper);
+    hir::instantiate_node_in_place(ir_arena, descr.code.entry_node_id, mapper);
     for local in &mut descr.locals {
         local.ty = local.ty.map(mapper);
     }
+}
+
+fn borrow_check_and_elaborate_pending_function(
+    function_slot: &mut ModuleFunction,
+    dst_arena: &mut hir::ENodeArena,
+    ir_arena: &mut NodeArena,
+    pending_functions: &mut PendingModuleFunctions,
+    ctx: &mut DictElaborationCtx<'_, '_, '_>,
+    id: LocalFunctionId,
+) -> Result<(), InternalCompilationError> {
+    let mut function = pending_functions
+        .remove(&id)
+        .expect("expected pending function body");
+    function.definition = function_slot.definition.clone();
+    function.spans = function_slot.spans.clone();
+    let (elaborated, _) = function.check_borrows_and_elaborate_hir(ir_arena, dst_arena, ctx)?;
+    *function_slot = elaborated;
+    Ok(())
 }
 
 fn refresh_debug_info_for_functions(
@@ -148,6 +188,7 @@ fn refresh_debug_info_for_functions(
 fn default_output_effects_in_functions(
     output: &mut Module,
     ir_arena: &mut NodeArena,
+    pending_functions: &mut PendingModuleFunctions,
     associated_lambdas: &FxHashMap<LocalFunctionId, Vec<LocalFunctionId>>,
     function_ids: &[LocalFunctionId],
 ) {
@@ -174,9 +215,95 @@ fn default_output_effects_in_functions(
         for function_id in function_and_associated_lambdas(&id, associated_lambdas) {
             let descr = &mut output.functions[function_id.as_index()];
             descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.map(&mut mapper);
-            instantiate_function_descr_in_place(ir_arena, descr, &mut mapper);
+            let pending = pending_functions
+                .get_mut(&function_id)
+                .expect("expected pending function body");
+            pending.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.clone();
+            instantiate_function_descr_in_place(ir_arena, pending, &mut mapper);
         }
     }
+}
+
+fn substitute_and_canonicalize_functions(
+    output: &mut Module,
+    ir_arena: &mut NodeArena,
+    pending_functions: &mut PendingModuleFunctions,
+    associated_lambdas: &FxHashMap<LocalFunctionId, Vec<LocalFunctionId>>,
+    local_fns: &[LocalFunctionId],
+    ty_inf: &mut UnifiedTypeInference,
+) {
+    for id in local_fns.iter() {
+        for function_id in function_and_associated_lambdas(id, associated_lambdas) {
+            let descr = pending_functions
+                .get_mut(&function_id)
+                .expect("expected pending function body");
+            ty_inf.substitute_in_pending_module_function(descr, ir_arena);
+            output.functions[function_id.as_index()].definition = descr.definition.clone();
+        }
+
+        // Union duplicated effects from function arguments, and build a substitution
+        // for the fully unioned effects, to remove duplications.
+        let descr = &mut output.functions[id.as_index()];
+        ty_inf.unify_fn_arg_effects(&descr.definition.ty_scheme.ty);
+        let effect_subst: FxHashMap<_, _> = descr
+            .definition
+            .ty_scheme
+            .ty
+            .inner_effect_vars()
+            .iter()
+            .filter_map(|var| {
+                ty_inf
+                    .effect_unioned(*var)
+                    .map(|target| (*var, EffType::single_variable(target)))
+            })
+            .collect();
+        if !effect_subst.is_empty() {
+            let subst = (FxHashMap::default(), effect_subst);
+            let mut mapper = BitmapInstantiationMapper::new(&subst);
+            for function_id in function_and_associated_lambdas(id, associated_lambdas) {
+                let descr = &mut output.functions[function_id.as_index()];
+                descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.map(&mut mapper);
+                let pending = pending_functions
+                    .get_mut(&function_id)
+                    .expect("expected pending function body");
+                pending.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.clone();
+                hir::instantiate_node_in_place(ir_arena, pending.code.entry_node_id, &mut mapper);
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn borrow_check_and_elaborate_dict(
+    output: &mut Module,
+    ir_arena: &mut NodeArena,
+    others: &Modules,
+    pending_functions: &mut PendingModuleFunctions,
+    associated_lambdas: &FxHashMap<LocalFunctionId, Vec<LocalFunctionId>>,
+    dicts: &ExtraParameters,
+    module_inst_data: &FxHashMap<LocalFunctionId, ExtraParameters>,
+    id: &LocalFunctionId,
+) -> Result<(), InternalCompilationError> {
+    let mut solver = trait_solver_from_module!(output, others);
+    let mut ctx = DictElaborationCtx::new(dicts, Some(module_inst_data), &mut solver);
+    for function_id in function_and_associated_lambdas(id, associated_lambdas) {
+        let function_slot = &mut output.functions[function_id.as_index()];
+        borrow_check_and_elaborate_pending_function(
+            function_slot,
+            &mut output.ir_arena,
+            ir_arena,
+            pending_functions,
+            &mut ctx,
+            function_id,
+        )?;
+    }
+    let generated = solver.commit(
+        &mut output.functions,
+        &mut output.def_table,
+        pending_functions,
+    );
+    elaborate_generated_functions(output, ir_arena, others, pending_functions, generated)?;
+    Ok(())
 }
 
 /// Kinds existing data to be used when emitting a new module in [`emit_module`]
@@ -647,6 +774,7 @@ struct RecursiveReturnDefaultingInputs<'ctx, I> {
     function_explicit_root_tys: &'ctx [Vec<Type>],
     recursive_function_ids: &'ctx FxHashSet<FunctionId>,
     associated_lambdas: &'ctx FxHashMap<LocalFunctionId, Vec<LocalFunctionId>>,
+    pending_functions: &'ctx mut PendingModuleFunctions,
 }
 
 fn default_unconstrained_recursive_returns_to_never<'func, I>(
@@ -670,14 +798,15 @@ fn default_unconstrained_recursive_returns_to_never<'func, I>(
             continue;
         }
 
-        let descr = &output.functions[id.as_index()];
-        let Some(root) = descr.get_pending_code_entry() else {
+        let Some(pending) = inputs.pending_functions.get(id) else {
             continue;
         };
+        let root = pending.code.entry_node_id;
         if !node_references_any_function(ir_arena, root, inputs.recursive_function_ids) {
             continue;
         }
 
+        let descr = &output.functions[id.as_index()];
         let fn_ty = ty_inf.substitute_in_fn_type(&descr.definition.ty_scheme.ty);
         let Some(ret_var) = fn_ty.ret.data().as_variable().copied() else {
             continue;
@@ -708,7 +837,12 @@ fn default_unconstrained_recursive_returns_to_never<'func, I>(
         for function_id in function_and_associated_lambdas(id, inputs.associated_lambdas) {
             let descr = &mut output.functions[function_id.as_index()];
             descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.map(&mut mapper);
-            instantiate_function_descr_in_place(ir_arena, descr, &mut mapper);
+            let pending = inputs
+                .pending_functions
+                .get_mut(&function_id)
+                .expect("expected pending function body");
+            pending.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.clone();
+            instantiate_function_descr_in_place(ir_arena, pending, &mut mapper);
         }
     }
 }
@@ -1041,6 +1175,7 @@ where
     // Associated lambdas for functions emitted while lowering closure expressions.
     let mut associated_lambdas: FxHashMap<LocalFunctionId, Vec<LocalFunctionId>> =
         FxHashMap::default();
+    let mut pending_functions = PendingModuleFunctions::default();
 
     let recursive_function_ids = ast_functions()
         .zip(local_fns.iter())
@@ -1105,7 +1240,8 @@ where
             expected_span,
         );
         lambda_functions.drain(..).for_each(|function| {
-            let lambda_id = output.add_function_anonymous(function);
+            let lambda_id =
+                add_pending_function_anonymous(output, &mut pending_functions, function);
             output.name_function(
                 lambda_id,
                 format!("{GENERATED_LAMBDA_PREFIX}{}", lambda_id.as_index()).into(),
@@ -1117,11 +1253,13 @@ where
             &ir_arena[fn_node_id].effects,
             &descr.definition.ty_scheme.ty.effects,
         );
-        descr.code = b(PendingScriptFunction::new(
-            fn_node_id,
-            descr.definition.arg_names.len(),
-        ));
-        descr.locals = locals;
+        let pending = PendingModuleFunction::new(
+            descr.definition.clone(),
+            PendingScriptFunction::new(fn_node_id, descr.definition.arg_names.len()),
+            descr.spans.clone(),
+            locals,
+        );
+        set_pending_function(output, &mut pending_functions, *id, pending);
         output.import_fn_slots.extend(new_import_slots);
         output.type_deps.extend(new_type_deps);
     }
@@ -1131,8 +1269,12 @@ where
     // Third pass, perform the unification.
     let mut solver = trait_solver_from_module!(output, others);
     let mut ty_inf = ty_inf.unify(&mut solver, ir_arena)?;
-    let generated = solver.commit(&mut output.functions, &mut output.def_table);
-    elaborate_generated_functions(output, ir_arena, others, generated)?;
+    let generated = solver.commit(
+        &mut output.functions,
+        &mut output.def_table,
+        &mut pending_functions,
+    );
+    elaborate_generated_functions(output, ir_arena, others, &mut pending_functions, generated)?;
     let module_env = ModuleEnv::new(output, others);
     ty_inf.log_debug_substitution_tables(module_env);
     ty_inf.log_debug_constraints(module_env);
@@ -1142,8 +1284,10 @@ where
         module_env.expect_std_trait_id(crate::std::core_traits_names::VALUE_TRAIT_NAME);
     for id in local_fns.iter() {
         for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
-            let descr = &mut output.functions[function_id.as_index()];
-            let root = descr.get_pending_code_entry().unwrap();
+            let descr = pending_functions
+                .get_mut(&function_id)
+                .expect("expected pending function body");
+            let root = descr.code.entry_node_id;
             ty_inf.resolve_local_storage_and_activate_value_constraints(
                 ir_arena,
                 root,
@@ -1153,56 +1297,6 @@ where
         }
     }
 
-    // Helpers to de-duplicate later phases between trait and normal function emission.
-    let substitute_and_canonicalize_functions =
-        |output: &mut Module, ir_arena: &mut _, ty_inf: &mut UnifiedTypeInference| {
-            for id in local_fns.iter() {
-                for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
-                    let descr = &mut output.functions[function_id.as_index()];
-                    ty_inf.substitute_in_module_function(descr, ir_arena);
-                }
-
-                // Union duplicated effects from function arguments, and build a substitution
-                // for the fully unioned effects, to remove duplications.
-                let descr = &mut output.functions[id.as_index()];
-                ty_inf.unify_fn_arg_effects(&descr.definition.ty_scheme.ty);
-                let effect_subst: FxHashMap<_, _> = descr
-                    .definition
-                    .ty_scheme
-                    .ty
-                    .inner_effect_vars()
-                    .iter()
-                    .filter_map(|var| {
-                        ty_inf
-                            .effect_unioned(*var)
-                            .map(|target| (*var, EffType::single_variable(target)))
-                    })
-                    .collect();
-                if !effect_subst.is_empty() {
-                    let subst = (FxHashMap::default(), effect_subst);
-                    let mut mapper = BitmapInstantiationMapper::new(&subst);
-                    for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
-                        let descr = &mut output.functions[function_id.as_index()];
-                        descr.definition.ty_scheme.ty =
-                            descr.definition.ty_scheme.ty.map(&mut mapper);
-                        let root = descr.get_pending_code_entry().unwrap();
-                        hir::instantiate_node_in_place(ir_arena, root, &mut mapper);
-                    }
-                }
-            }
-        };
-    let borrow_check_and_elaborate_dict =
-        |output: &mut Module, ir_arena: &mut _, dicts, module_inst_data, id| -> Result<_, _> {
-            let mut solver = trait_solver_from_module!(output, &others);
-            let mut ctx = DictElaborationCtx::new(dicts, Some(module_inst_data), &mut solver);
-            for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
-                let descr = &mut output.functions[function_id.as_index()];
-                descr.check_borrows_and_elaborate_hir(ir_arena, &mut output.ir_arena, &mut ctx)?;
-            }
-            let generated = solver.commit(&mut output.functions, &mut output.def_table);
-            elaborate_generated_functions(output, ir_arena, others, generated)?;
-            Ok(())
-        };
     // Fourth pass: default orphan constraints and substitute types.
     if let Some(mut trait_output) = trait_output {
         // Default orphan constraints for the trait implementation into the unification tables.
@@ -1220,8 +1314,18 @@ where
             let scope = DefaultingScope::from_constraints(&orphan_constraints);
             let mut solver = trait_solver_from_module!(output, others);
             ty_inf.resolve_defaults_to_fixed_point(&scope, &mut solver, ir_arena)?;
-            let generated = solver.commit(&mut output.functions, &mut output.def_table);
-            elaborate_generated_functions(output, ir_arena, others, generated)?;
+            let generated = solver.commit(
+                &mut output.functions,
+                &mut output.def_table,
+                &mut pending_functions,
+            );
+            elaborate_generated_functions(
+                output,
+                ir_arena,
+                others,
+                &mut pending_functions,
+                generated,
+            )?;
 
             // Check for remaining orphans.
             ty_inf.normalize_remaining_constraints();
@@ -1253,8 +1357,21 @@ where
         }
 
         // Substitute everything using ty_inf (single pass, includes all defaults).
-        substitute_and_canonicalize_functions(output, ir_arena, &mut ty_inf);
-        default_output_effects_in_functions(output, ir_arena, &associated_lambdas, &local_fns);
+        substitute_and_canonicalize_functions(
+            output,
+            ir_arena,
+            &mut pending_functions,
+            &associated_lambdas,
+            &local_fns,
+            &mut ty_inf,
+        );
+        default_output_effects_in_functions(
+            output,
+            ir_arena,
+            &mut pending_functions,
+            &associated_lambdas,
+            &local_fns,
+        );
 
         // Resolve input and output types.
         ty_inf.substitute_in_types_in_place(&mut trait_output.input_tys);
@@ -1312,8 +1429,11 @@ where
         // Detect unbound type variables in the code and return error if not in unused variants only.
         let mut unbound_subst = FxHashMap::default();
         for id in local_fns.iter() {
-            let descr = &mut output.functions[id.as_index()];
-            let root = descr.get_pending_code_entry().unwrap();
+            let root = pending_functions
+                .get(id)
+                .expect("expected pending function body")
+                .code
+                .entry_node_id;
             let unbound = hir::all_unbound_ty_vars(ir_arena, root);
             let uninstantiated_unbound = check_unbounds(unbound, &quantifiers)?;
             unbound_subst.extend(
@@ -1337,8 +1457,12 @@ where
                     .transpose()
             })
             .collect::<Result<_, _>>()?;
-        let generated = solver.commit(&mut output.functions, &mut output.def_table);
-        elaborate_generated_functions(output, ir_arena, others, generated)?;
+        let generated = solver.commit(
+            &mut output.functions,
+            &mut output.def_table,
+            &mut pending_functions,
+        );
+        elaborate_generated_functions(output, ir_arena, others, &mut pending_functions, generated)?;
         // Make sure substitution is not due to constraint processing.
         assert_eq!(subst_size, subst.0.len());
 
@@ -1351,7 +1475,11 @@ where
                 for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
                     let descr = &mut output.functions[function_id.as_index()];
                     descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.map(&mut mapper);
-                    instantiate_function_descr_in_place(ir_arena, descr, &mut mapper);
+                    let pending = pending_functions
+                        .get_mut(&function_id)
+                        .expect("expected pending function body");
+                    pending.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.clone();
+                    instantiate_function_descr_in_place(ir_arena, pending, &mut mapper);
                 }
             }
         }
@@ -1372,7 +1500,11 @@ where
                 assert!(eff_quantifiers.is_empty());
                 descr.definition.ty_scheme.eff_quantifiers = eff_quantifiers;
                 descr.definition.ty_scheme.constraints = trait_output.constraints.clone();
-                instantiate_function_descr_in_place(ir_arena, descr, &mut mapper);
+                let pending = pending_functions
+                    .get_mut(&function_id)
+                    .expect("expected pending function body");
+                pending.definition = descr.definition.clone();
+                instantiate_function_descr_in_place(ir_arena, pending, &mut mapper);
             }
 
             // Name the function
@@ -1397,7 +1529,16 @@ where
             );
         }
         for id in local_fns.iter() {
-            borrow_check_and_elaborate_dict(output, ir_arena, &dicts, &module_inst_data, id)?;
+            borrow_check_and_elaborate_dict(
+                output,
+                ir_arena,
+                others,
+                &mut pending_functions,
+                &associated_lambdas,
+                &dicts,
+                &module_inst_data,
+                id,
+            )?;
         }
 
         refresh_debug_info_for_functions(output, &associated_lambdas, &local_fns);
@@ -1427,10 +1568,13 @@ where
             // Only functions with no remaining signature boundary can use their body root
             // to seed the narrow unit-constructor fallback.
             let unit_variant_seed_tys = if sig_ty_vars.is_empty() {
-                descr
-                    .get_pending_code_entry()
-                    .map(|root_node| {
-                        UnifiedTypeInference::collect_unit_variant_seed_types(ir_arena, root_node)
+                pending_functions
+                    .get(id)
+                    .map(|function| {
+                        UnifiedTypeInference::collect_unit_variant_seed_types(
+                            ir_arena,
+                            function.code.entry_node_id,
+                        )
                     })
                     .unwrap_or_default()
             } else {
@@ -1439,8 +1583,18 @@ where
             let scope = DefaultingScope::from_constraints(&orphan_constraints)
                 .with_unit_variant_seed_tys(unit_variant_seed_tys);
             ty_inf.resolve_defaults_to_fixed_point(&scope, &mut solver, ir_arena)?;
-            let generated = solver.commit(&mut output.functions, &mut output.def_table);
-            elaborate_generated_functions(output, ir_arena, others, generated)?;
+            let generated = solver.commit(
+                &mut output.functions,
+                &mut output.def_table,
+                &mut pending_functions,
+            );
+            elaborate_generated_functions(
+                output,
+                ir_arena,
+                others,
+                &mut pending_functions,
+                generated,
+            )?;
         }
         for (id, explicit_root_tys) in local_fns.iter().zip(function_explicit_root_tys.iter()) {
             let descr = &output.functions[id.as_index()];
@@ -1476,7 +1630,14 @@ where
         }
 
         // Substitute everything using ty_inf (single pass, includes all defaults).
-        substitute_and_canonicalize_functions(output, ir_arena, &mut ty_inf);
+        substitute_and_canonicalize_functions(
+            output,
+            ir_arena,
+            &mut pending_functions,
+            &associated_lambdas,
+            &local_fns,
+            &mut ty_inf,
+        );
 
         // Recursive-return defaulting inspects the final constraints.
         ty_inf.normalize_remaining_constraints();
@@ -1490,6 +1651,7 @@ where
                 function_explicit_root_tys: &function_explicit_root_tys,
                 recursive_function_ids: &recursive_function_ids,
                 associated_lambdas: &associated_lambdas,
+                pending_functions: &mut pending_functions,
             },
         );
 
@@ -1503,7 +1665,11 @@ where
             .zip(function_explicit_root_tys.iter())
         {
             let descr = &output.functions[id.as_index()];
-            let code_entry = descr.get_pending_code_entry().unwrap();
+            let code_entry = pending_functions
+                .get(id)
+                .expect("expected pending function body")
+                .code
+                .entry_node_id;
 
             // Find constraints related to this function's signature.
             let mut sig_ty_vars = descr.definition.ty_scheme.ty.inner_ty_vars();
@@ -1546,8 +1712,10 @@ where
                 );
                 let mut mapper = BitmapInstantiationMapper::new(&fixup_subst);
                 for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
-                    let descr = &mut output.functions[function_id.as_index()];
-                    instantiate_function_descr_in_place(ir_arena, descr, &mut mapper);
+                    let pending = pending_functions
+                        .get_mut(&function_id)
+                        .expect("expected pending function body");
+                    instantiate_function_descr_in_place(ir_arena, pending, &mut mapper);
                 }
                 quantifiers.retain(|v| !uninstantiated_unbound.contains(v));
             }
@@ -1564,8 +1732,18 @@ where
                         .transpose()
                 })
                 .collect::<Result<_, _>>()?;
-            let generated = solver.commit(&mut output.functions, &mut output.def_table);
-            elaborate_generated_functions(output, ir_arena, others, generated)?;
+            let generated = solver.commit(
+                &mut output.functions,
+                &mut output.def_table,
+                &mut pending_functions,
+            );
+            elaborate_generated_functions(
+                output,
+                ir_arena,
+                others,
+                &mut pending_functions,
+                generated,
+            )?;
 
             // Write the final type scheme.
             let explicit_ty_vars = explicit_ty_vars
@@ -1589,6 +1767,10 @@ where
                     descr.definition.ty_scheme.ty.input_effect_vars();
                 descr.definition.ty_scheme.constraints = constraints.clone();
                 descr.definition.generic_params = function.generic_params.clone();
+                pending_functions
+                    .get_mut(&function_id)
+                    .expect("expected pending function body")
+                    .definition = descr.definition.clone();
             }
 
             // Log dropped constraints.
@@ -1636,7 +1818,11 @@ where
                 // type variables anymore.
                 let subst = descr.definition.ty_scheme.normalize();
                 let mut mapper = BitmapInstantiationMapper::new(&subst);
-                instantiate_function_descr_in_place(ir_arena, descr, &mut mapper);
+                let pending = pending_functions
+                    .get_mut(&function_id)
+                    .expect("expected pending function body");
+                pending.definition = descr.definition.clone();
+                instantiate_function_descr_in_place(ir_arena, pending, &mut mapper);
             }
         }
 
@@ -1657,7 +1843,16 @@ where
         }
         for id in local_fns.iter() {
             let dicts = module_inst_data.get(id).unwrap();
-            borrow_check_and_elaborate_dict(output, ir_arena, dicts, &module_inst_data, id)?;
+            borrow_check_and_elaborate_dict(
+                output,
+                ir_arena,
+                others,
+                &mut pending_functions,
+                &associated_lambdas,
+                dicts,
+                &module_inst_data,
+                id,
+            )?;
         }
 
         refresh_debug_info_for_functions(output, &associated_lambdas, &local_fns);
@@ -1694,7 +1889,7 @@ fn check_unbounds(
 pub struct CompiledExpr {
     pub expr: hir::ENodeId,
     pub ty: TypeScheme<Type>,
-    pub locals: Vec<LocalDecl>,
+    pub locals: Vec<ELocalDecl>,
 }
 
 /// Emit HIR for an expression.
@@ -1742,6 +1937,7 @@ fn emit_expr_unsafe_inner(
     let mut new_import_slots = vec![];
     let mut new_type_deps = FxHashSet::default();
     let mut lambda_functions = vec![];
+    let mut pending_functions = PendingModuleFunctions::default();
     LocalDecl::assign_sequential_slots(&mut locals);
     let cur_locals = (0..locals.len()).map(LocalDeclId::from_index).collect();
     let mut ty_env = TypingEnv::new(
@@ -1766,7 +1962,7 @@ fn emit_expr_unsafe_inner(
     let lambda_functions = lambda_functions
         .drain(..)
         .map(|function| {
-            let id = module.add_function_anonymous(function);
+            let id = add_pending_function_anonymous(module, &mut pending_functions, function);
             module.name_function(
                 id,
                 format!("{GENERATED_LAMBDA_PREFIX}{}", id.as_index()).into(),
@@ -1781,8 +1977,12 @@ fn emit_expr_unsafe_inner(
     // Perform the unification.
     let mut solver = trait_solver_from_module!(module, others);
     let mut ty_inf = ty_inf.unify(&mut solver, ir_arena)?;
-    let generated = solver.commit(&mut module.functions, &mut module.def_table);
-    elaborate_generated_functions(module, ir_arena, others, generated)?;
+    let generated = solver.commit(
+        &mut module.functions,
+        &mut module.def_table,
+        &mut pending_functions,
+    );
+    elaborate_generated_functions(module, ir_arena, others, &mut pending_functions, generated)?;
     let module_env = ModuleEnv::new(module, others);
     ty_inf.log_debug_substitution_tables(module_env);
     ty_inf.log_debug_constraints(module_env);
@@ -1791,8 +1991,10 @@ fn emit_expr_unsafe_inner(
     let value_trait_id =
         module_env.expect_std_trait_id(crate::std::core_traits_names::VALUE_TRAIT_NAME);
     for lambda_id in lambda_functions.iter() {
-        let descr = module.get_function_by_id_mut(*lambda_id).unwrap();
-        let root = descr.get_pending_code_entry().unwrap();
+        let descr = pending_functions
+            .get_mut(lambda_id)
+            .expect("expected pending function body");
+        let root = descr.code.entry_node_id;
         ty_inf.resolve_local_storage_and_activate_value_constraints(
             ir_arena,
             root,
@@ -1819,15 +2021,22 @@ fn emit_expr_unsafe_inner(
             .with_expr_root_ty(node_ty)
             .with_unit_variant_seed_tys(unit_variant_seed_tys);
         ty_inf.resolve_defaults_to_fixed_point(&scope, &mut solver, ir_arena)?;
-        let generated = solver.commit(&mut module.functions, &mut module.def_table);
-        elaborate_generated_functions(module, ir_arena, others, generated)?;
+        let generated = solver.commit(
+            &mut module.functions,
+            &mut module.def_table,
+            &mut pending_functions,
+        );
+        elaborate_generated_functions(module, ir_arena, others, &mut pending_functions, generated)?;
     }
 
     // Substitute everything using ty_inf (single pass, includes all defaults).
     ty_inf.substitute_in_node(ir_arena, node_id);
     for lambda_id in lambda_functions.iter() {
-        let descr = module.get_function_by_id_mut(*lambda_id).unwrap();
-        ty_inf.substitute_in_module_function(descr, ir_arena);
+        let descr = pending_functions
+            .get_mut(lambda_id)
+            .expect("expected pending function body");
+        ty_inf.substitute_in_pending_module_function(descr, ir_arena);
+        module.functions[lambda_id.as_index()].definition = descr.definition.clone();
     }
     ty_inf.substitute_in_local_decls_in_place(&mut locals[initial_local_count..]);
 
@@ -1859,9 +2068,12 @@ fn emit_expr_unsafe_inner(
         for lambda_id in lambda_functions.iter() {
             let descr = &mut module.functions[lambda_id.as_index()];
             descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.map(&mut mapper);
-            let root = descr.get_pending_code_entry().unwrap();
-            hir::instantiate_node_in_place(ir_arena, root, &mut mapper);
-            for local in &mut descr.locals {
+            let pending = pending_functions
+                .get_mut(lambda_id)
+                .expect("expected pending function body");
+            pending.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.clone();
+            hir::instantiate_node_in_place(ir_arena, pending.code.entry_node_id, &mut mapper);
+            for local in &mut pending.locals {
                 local.ty = local.ty.map(&mut mapper);
             }
         }
@@ -1905,9 +2117,12 @@ fn emit_expr_unsafe_inner(
         for lambda_id in lambda_functions.iter() {
             let descr = &mut module.functions[lambda_id.as_index()];
             descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.map(&mut mapper);
-            let root = descr.get_pending_code_entry().unwrap();
-            hir::instantiate_node_in_place(ir_arena, root, &mut mapper);
-            for local in &mut descr.locals {
+            let pending = pending_functions
+                .get_mut(lambda_id)
+                .expect("expected pending function body");
+            pending.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.clone();
+            hir::instantiate_node_in_place(ir_arena, pending.code.entry_node_id, &mut mapper);
+            for local in &mut pending.locals {
                 local.ty = local.ty.map(&mut mapper);
             }
         }
@@ -1921,9 +2136,17 @@ fn emit_expr_unsafe_inner(
         descr.definition.ty_scheme.eff_quantifiers =
             descr.definition.ty_scheme.ty.input_effect_vars();
         descr.definition.ty_scheme.constraints = constraints.clone();
+        pending_functions
+            .get_mut(lambda_id)
+            .expect("expected pending function body")
+            .definition = descr.definition.clone();
     }
-    let generated = solver.commit(&mut module.functions, &mut module.def_table);
-    elaborate_generated_functions(module, ir_arena, others, generated)?;
+    let generated = solver.commit(
+        &mut module.functions,
+        &mut module.def_table,
+        &mut pending_functions,
+    );
+    elaborate_generated_functions(module, ir_arena, others, &mut pending_functions, generated)?;
 
     // Log dropped constraints.
     if log_enabled!(log::Level::Debug) {
@@ -1958,9 +2181,12 @@ fn emit_expr_unsafe_inner(
     for lambda_id in lambda_functions.iter() {
         let descr = &mut module.functions[lambda_id.as_index()];
         descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.map(&mut mapper);
-        let root = descr.get_pending_code_entry().unwrap();
-        hir::instantiate_node_in_place(ir_arena, root, &mut mapper);
-        for local in &mut descr.locals {
+        let pending = pending_functions
+            .get_mut(lambda_id)
+            .expect("expected pending function body");
+        pending.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.clone();
+        hir::instantiate_node_in_place(ir_arena, pending.code.entry_node_id, &mut mapper);
+        for local in &mut pending.locals {
             local.ty = local.ty.map(&mut mapper);
         }
     }
@@ -1981,11 +2207,22 @@ fn emit_expr_unsafe_inner(
     check_borrows(ir_arena, node_id)?;
     let expr = elaborate_hir(ir_arena, node_id, &mut module.ir_arena, &mut ctx, &locals)?.root;
     for lambda_id in lambda_functions.iter() {
-        let descr = &mut module.functions[lambda_id.as_index()];
-        descr.check_borrows_and_elaborate_hir(ir_arena, &mut module.ir_arena, &mut ctx)?;
+        let function_slot = &mut module.functions[lambda_id.as_index()];
+        borrow_check_and_elaborate_pending_function(
+            function_slot,
+            &mut module.ir_arena,
+            ir_arena,
+            &mut pending_functions,
+            &mut ctx,
+            *lambda_id,
+        )?;
     }
-    let generated = solver.commit(&mut module.functions, &mut module.def_table);
-    elaborate_generated_functions(module, ir_arena, others, generated)?;
+    let generated = solver.commit(
+        &mut module.functions,
+        &mut module.def_table,
+        &mut pending_functions,
+    );
+    elaborate_generated_functions(module, ir_arena, others, &mut pending_functions, generated)?;
     assert_eq!(locals.len(), local_count);
     for lambda_id in lambda_functions {
         module.functions[lambda_id.as_index()].refresh_debug_info();
@@ -1994,7 +2231,7 @@ fn emit_expr_unsafe_inner(
     Ok(CompiledExpr {
         expr,
         ty: ty_scheme,
-        locals,
+        locals: locals.into_iter().map(LocalDecl::into_elaborated).collect(),
     })
 }
 

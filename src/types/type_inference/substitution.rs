@@ -5,7 +5,7 @@ use crate::{
     format::FormatWith,
     hir::dictionary::DictionaryReq,
     hir::{self, FnInstData},
-    module::{LocalDecl, LocalStorage, ModuleEnv, ModuleFunction},
+    module::{LocalDecl, LocalStorage, ModuleEnv},
     types::{
         effects::{EffType, Effect, EffectVar, EffectsInstSubst},
         mutability::{MutType, MutVar},
@@ -59,16 +59,14 @@ impl UnifiedTypeInference {
         NormalizeTypes(self).substitute_mut_type(mut_ty)
     }
 
-    pub fn substitute_in_module_function(
+    pub fn substitute_in_pending_module_function(
         &mut self,
-        descr: &mut ModuleFunction,
+        descr: &mut crate::module::PendingModuleFunction,
         arena: &mut crate::hir::NodeArena,
     ) {
         self.substitute_in_fn_type_in_place(&mut descr.definition.ty_scheme.ty);
         self.substitute_in_constraints_in_place(&mut descr.definition.ty_scheme.constraints);
-        if let Some(root) = descr.get_pending_code_entry() {
-            self.substitute_in_node(arena, root);
-        }
+        self.substitute_in_node(arena, descr.code.entry_node_id);
         self.substitute_in_local_decls_in_place(&mut descr.locals);
     }
 

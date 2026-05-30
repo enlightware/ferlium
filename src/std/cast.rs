@@ -12,7 +12,9 @@ use crate::{
     compiler::error::InternalCompilationError,
     hir,
     hir::function::FunctionDefinition,
-    module::{LocalClone, LocalDeclId, Module, ResolvedLocalClone, TraitId, TraitImplId, id::Id},
+    module::{
+        LocalDeclId, Module, PendingLocalClone, ResolvedLocalClone, TraitId, TraitImplId, id::Id,
+    },
     std::{core_traits_names::VALUE_TRAIT_NAME, value::VALUE_CLONE_METHOD_INDEX},
     types::effects::{EffType, PrimitiveEffect},
     types::r#trait::{Deriver, Trait},
@@ -65,7 +67,7 @@ impl Deriver for SelfCastDeriver {
         let code_id = arena.alloc(hir::Node::new(
             hir::NodeKind::CloneValue(hir::CloneValue {
                 source: source_id,
-                clone: LocalClone::Resolved(ResolvedLocalClone::Static(clone)),
+                clone: PendingLocalClone::Resolved(ResolvedLocalClone::Static(clone)),
             }),
             from_ty,
             EffType::empty(),

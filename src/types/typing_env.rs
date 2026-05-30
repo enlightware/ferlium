@@ -16,8 +16,8 @@ use crate::{
     hir::function::{FunctionDefinition, ResolvedArgPassing},
     module::{
         FunctionId, ImportFunctionSlot, ImportFunctionSlotId, ImportFunctionTarget, LocalDecl,
-        LocalDeclId, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleId, TraitId,
-        TypeDefLookupResult, id::Id,
+        LocalDeclId, LocalFunctionId, ModuleEnv, ModuleId, TraitId, TypeDefLookupResult,
+        UModuleFunction, id::Id,
     },
     std::{STD_MODULE_ID, array::array_type as std_array_type},
     types::r#trait::TraitMethodIndex,
@@ -69,7 +69,7 @@ pub struct TypingEnv<'m> {
     /// Whether compiler-inserted fuel checks should be emitted for loops.
     pub(crate) fuel_checks_enabled: bool,
     /// Newly-created module functions from lambdas
-    pub(crate) lambda_functions: &'m mut Vec<ModuleFunction>,
+    pub(crate) lambda_functions: &'m mut Vec<UModuleFunction>,
     /// The next index for a new module function created from a lambda
     pub(crate) base_local_function_index: u32,
     /// The desugared expression arena, used to look up child expression nodes by ID.
@@ -100,7 +100,7 @@ impl<'m> TypingEnv<'m> {
         id
     }
 
-    pub fn collect_lambda_module_function(&mut self, function: ModuleFunction) -> LocalFunctionId {
+    pub fn collect_lambda_module_function(&mut self, function: UModuleFunction) -> LocalFunctionId {
         let base_index = self.base_local_function_index;
         let index = base_index + self.lambda_functions.len() as u32;
         self.lambda_functions.push(function);

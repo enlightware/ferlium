@@ -21,7 +21,7 @@ use crate::{
         value_dispatch::{resolved_arg_passing_for_generated_call, static_apply_generated},
     },
     module::{
-        self, LocalClone, LocalDeclId, Module, ProjectionIndex, ResolvedLocalClone, TraitId,
+        self, LocalDeclId, Module, PendingLocalClone, ProjectionIndex, ResolvedLocalClone, TraitId,
         TraitImplId, id::Id,
     },
     std::{
@@ -411,7 +411,7 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                 .trait_def(value_trait_id)
                 .get_dictionary_type_for_tys(&[variant_ty], &[]);
             let variant_clone =
-                LocalClone::Resolved(ResolvedLocalClone::Static(solver.solve_impl_method(
+                PendingLocalClone::Resolved(ResolvedLocalClone::Static(solver.solve_impl_method(
                     value_trait_id,
                     &[variant_ty],
                     VALUE_CLONE_METHOD_INDEX,

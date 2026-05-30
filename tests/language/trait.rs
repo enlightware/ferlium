@@ -17,8 +17,8 @@ use ferlium::{
     hir::{
         NodeKind,
         function::{
-            ArgPassing, Function, FunctionDefinition, ResolvedValueArgPassing,
-            SharedRefTempCleanup, ValueArgPassing, VoidFunction,
+            Function, FunctionDefinition, ResolvedArgPassing, ResolvedValueArgPassing,
+            SharedRefTempCleanup, VoidFunction,
         },
         value::LiteralValue,
     },
@@ -143,11 +143,9 @@ fn generic_trait_method_function_argument_keeps_source_place_passing() {
                 Some(argument)
                     if matches!(
                         argument.passing,
-                        ArgPassing::Value(ValueArgPassing::Resolved(
-                            ResolvedValueArgPassing::SharedRef {
-                                temp_cleanup: SharedRefTempCleanup::None,
-                            },
-                        ))
+                        ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef {
+                            temp_cleanup: SharedRefTempCleanup::None,
+                        })
                     ) && matches!(
                         module.ir_arena[argument.value].kind,
                         NodeKind::GetDictionaryMethod(_)

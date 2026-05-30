@@ -13,6 +13,7 @@ use ustr::Ustr;
 
 use crate::{
     Location,
+    hir::HirPhase,
     module::{LocalDecl, LocalFrameSlot},
     types::r#type::Type,
 };
@@ -67,7 +68,7 @@ pub struct FunctionDebugInfo {
 }
 
 impl FunctionDebugInfo {
-    pub fn from_locals(locals: &[LocalDecl]) -> Self {
+    pub fn from_locals<P: HirPhase>(locals: &[LocalDecl<P>]) -> Self {
         let locals = locals
             .iter()
             .map(LocalDebugInfo::from_local)
@@ -92,7 +93,7 @@ impl FunctionDebugInfo {
 }
 
 impl LocalDebugInfo {
-    fn from_local(local: &LocalDecl) -> Self {
+    fn from_local<P: HirPhase>(local: &LocalDecl<P>) -> Self {
         let (name, name_span) = local.name;
         let origin = if name.as_str().starts_with('$') || name_span.is_synthesized() {
             LocalDebugOrigin::Internal

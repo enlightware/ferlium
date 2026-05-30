@@ -31,7 +31,7 @@ use crate::{
     format::{FormatWith, write_identifier},
     hir::value::{NativeDisplay, Value},
     hir::{self, ENodeId, NodeArena, NodeId, UNodeId},
-    module::{LocalDecl, ModuleEnv, ModuleFunction, ResolvedLocalDrop},
+    module::{ELocalDecl, ModuleEnv, ModuleFunction, ResolvedLocalDrop, ULocalDecl},
     types::effects::EffType,
     types::r#type::{FnArgType, FnType, Type, fmt_fn_type_with_arg_names},
     types::type_like::TypeLike,
@@ -153,16 +153,16 @@ impl FunctionDefinition {
         &self,
         arg_spans: impl Iterator<Item = Location>,
         scope: Location,
-    ) -> Vec<LocalDecl> {
+    ) -> Vec<ULocalDecl> {
         let mut locals = self
             .ty_scheme
             .ty
             .args
             .iter()
             .zip(self.arg_names.iter().copied().zip(arg_spans))
-            .map(|(arg, name)| LocalDecl::new(name, arg.mut_ty, arg.ty, None, scope))
+            .map(|(arg, name)| ULocalDecl::new(name, arg.mut_ty, arg.ty, None, scope))
             .collect::<Vec<_>>();
-        LocalDecl::assign_sequential_slots(&mut locals);
+        ULocalDecl::assign_sequential_slots(&mut locals);
         locals
     }
 
@@ -246,7 +246,7 @@ pub trait Callable: DynClone {
         &self,
         args: Vec<ValOrMut>,
         ctx: &mut CallCtx,
-        locals: &[LocalDecl],
+        locals: &[ELocalDecl],
     ) -> EvalControlFlowResult;
     fn as_script(&self) -> Option<&ScriptFunction> {
         None
@@ -269,7 +269,7 @@ pub trait Callable: DynClone {
     fn format_ind(
         &self,
         f: &mut std::fmt::Formatter,
-        locals: &[LocalDecl],
+        locals: &[ELocalDecl],
         env: &ModuleEnv<'_>,
         spacing: usize,
         indent: usize,
@@ -315,46 +315,62 @@ impl Drop for CallArgsStorageGuard {
 
 pub type Function = Box<dyn Callable>;
 
-/// How a call argument should be prepared.
+/// Call-argument passing before local ownership/value elaboration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ArgPassing {
+pub enum PendingArgPassing {
     /// Resolve the source expression as a mutable place.
     MutableRef,
     /// Pass a non-mutable value argument.
-    Value(ValueArgPassing),
+    Value(PendingValueArgPassing),
 }
 
-impl ArgPassing {
+impl PendingArgPassing {
     pub fn resolved(self) -> Option<ResolvedArgPassing> {
         match self {
             Self::MutableRef => Some(ResolvedArgPassing::MutableRef),
-            Self::Value(ValueArgPassing::Unknown) => None,
-            Self::Value(ValueArgPassing::Resolved(passing)) => {
+            Self::Value(PendingValueArgPassing::Unknown) => None,
+            Self::Value(PendingValueArgPassing::Resolved(passing)) => {
                 Some(ResolvedArgPassing::Value(passing))
             }
         }
     }
 
+    pub fn into_elaborated(self) -> ResolvedArgPassing {
+        self.resolved()
+            .expect("argument passing should have been resolved before elaboration")
+    }
+
     pub fn from_resolved(passing: ResolvedArgPassing) -> Self {
         match passing {
             ResolvedArgPassing::MutableRef => Self::MutableRef,
-            ResolvedArgPassing::Value(ResolvedValueArgPassing::Owned) => {
-                Self::Value(ValueArgPassing::Resolved(ResolvedValueArgPassing::Owned))
-            }
+            ResolvedArgPassing::Value(ResolvedValueArgPassing::Owned) => Self::Value(
+                PendingValueArgPassing::Resolved(ResolvedValueArgPassing::Owned),
+            ),
             ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef { .. }) => {
-                Self::Value(ValueArgPassing::Unknown)
+                Self::Value(PendingValueArgPassing::Unknown)
             }
         }
     }
 }
 
-/// How a call argument by value should be prepared, possibly unknown.
+/// Value-argument passing before local ownership/value elaboration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ValueArgPassing {
+pub enum PendingValueArgPassing {
     /// Decide between owned value and shared reference after type inference.
     Unknown,
     /// We know how to pass the argument.
     Resolved(ResolvedValueArgPassing),
+}
+
+impl PendingValueArgPassing {
+    pub fn into_elaborated(self) -> ResolvedValueArgPassing {
+        match self {
+            Self::Unknown => {
+                panic!("argument passing should have been resolved before elaboration")
+            }
+            Self::Resolved(passing) => passing,
+        }
+    }
 }
 
 /// How a call argument should be prepared, once resolved.
@@ -384,19 +400,19 @@ pub enum SharedRefTempCleanup {
     Drop(ResolvedLocalDrop),
 }
 
-fn unresolved_arg_passing_for_arg(arg: &FnArgType) -> ArgPassing {
+fn unresolved_arg_passing_for_arg(arg: &FnArgType) -> PendingArgPassing {
     if arg
         .mut_ty
         .as_resolved()
         .is_some_and(|mut_ty| mut_ty.is_mutable())
     {
-        ArgPassing::MutableRef
+        PendingArgPassing::MutableRef
     } else {
-        ArgPassing::Value(ValueArgPassing::Unknown)
+        PendingArgPassing::Value(PendingValueArgPassing::Unknown)
     }
 }
 
-pub fn unresolved_arg_passing_for_args(args: &[FnArgType]) -> Vec<ArgPassing> {
+pub fn unresolved_arg_passing_for_args(args: &[FnArgType]) -> Vec<PendingArgPassing> {
     args.iter().map(unresolved_arg_passing_for_arg).collect()
 }
 
@@ -410,7 +426,7 @@ pub(crate) fn resolve_arg_passing_for_call<E, C>(
     arg_tys: &[FnArgType],
     span: Location,
     resolve_value_arg_passing: ValueArgPassingResolver<C, E>,
-) -> Result<Vec<ArgPassing>, E> {
+) -> Result<Vec<PendingArgPassing>, E> {
     assert_eq!(args.len(), arg_tys.len());
     args.iter()
         .zip(arg_tys)
@@ -420,11 +436,11 @@ pub(crate) fn resolve_arg_passing_for_call<E, C>(
                 .as_resolved()
                 .is_some_and(|mut_ty| mut_ty.is_mutable())
             {
-                return Ok(ArgPassing::MutableRef);
+                return Ok(PendingArgPassing::MutableRef);
             }
             let needs_temp = call_argument_may_need_temp(arena, arg);
             resolve_value_arg_passing(arena, ctx, arg_ty.ty, needs_temp, span)
-                .map(|passing| ArgPassing::Value(ValueArgPassing::Resolved(passing)))
+                .map(|passing| PendingArgPassing::Value(PendingValueArgPassing::Resolved(passing)))
         })
         .collect()
 }
@@ -443,7 +459,7 @@ impl Callable for VoidFunction {
         &self,
         _args: Vec<ValOrMut>,
         _ctx: &mut CallCtx,
-        _locals: &[LocalDecl],
+        _locals: &[ELocalDecl],
     ) -> EvalControlFlowResult {
         Ok(ControlFlow::Continue(Value::unit()))
     }
@@ -451,7 +467,7 @@ impl Callable for VoidFunction {
     fn format_ind(
         &self,
         f: &mut std::fmt::Formatter,
-        _locals: &[LocalDecl],
+        _locals: &[ELocalDecl],
         _env: &ModuleEnv<'_>,
         spacing: usize,
         indent: usize,
@@ -478,7 +494,7 @@ impl Callable for ScriptFunction {
         &self,
         args: Vec<ValOrMut>,
         ctx: &mut CallCtx,
-        locals_arg: &[LocalDecl],
+        locals_arg: &[ELocalDecl],
     ) -> EvalControlFlowResult {
         let args = CallArgsStorageGuard::new(args);
         let arg_count = args.args.len();
@@ -547,7 +563,7 @@ impl Callable for ScriptFunction {
     fn format_ind(
         &self,
         f: &mut std::fmt::Formatter,
-        locals: &[LocalDecl],
+        locals: &[ELocalDecl],
         env: &ModuleEnv<'_>,
         spacing: usize,
         indent: usize,
@@ -577,7 +593,7 @@ impl Callable for PendingScriptFunction {
         &self,
         _args: Vec<ValOrMut>,
         _ctx: &mut CallCtx,
-        _locals: &[LocalDecl],
+        _locals: &[ELocalDecl],
     ) -> EvalControlFlowResult {
         panic!("pending script function reached execution")
     }
@@ -590,7 +606,7 @@ impl Callable for PendingScriptFunction {
     fn format_ind(
         &self,
         f: &mut std::fmt::Formatter,
-        _locals: &[LocalDecl],
+        _locals: &[ELocalDecl],
         _env: &ModuleEnv<'_>,
         spacing: usize,
         indent: usize,
@@ -639,7 +655,7 @@ impl Callable for ContextNativeFn {
         &self,
         args: Vec<ValOrMut>,
         ctx: &mut CallCtx,
-        _locals: &[LocalDecl],
+        _locals: &[ELocalDecl],
     ) -> EvalControlFlowResult {
         (self.function)(ValOrMutArgs::new(args), ctx)
     }
@@ -651,7 +667,7 @@ impl Callable for ContextNativeFn {
     fn format_ind(
         &self,
         f: &mut std::fmt::Formatter,
-        _locals: &[LocalDecl],
+        _locals: &[ELocalDecl],
         _env: &ModuleEnv<'_>,
         spacing: usize,
         indent: usize,
@@ -969,7 +985,7 @@ macro_rules! n_ary_native_fn {
         {
             paste::paste! {
             #[allow(unused_variables)]
-            fn call(&self, args: Vec<ValOrMut>, ctx: &mut CallCtx, _locals: &[LocalDecl]) -> EvalControlFlowResult {
+            fn call(&self, args: Vec<ValOrMut>, ctx: &mut CallCtx, _locals: &[ELocalDecl]) -> EvalControlFlowResult {
                 let args = CallArgsStorageGuard::new(args);
                 // Extract arguments by applying repetition for each ArgExtractor
                 #[allow(unused_variables, unused_mut)]
@@ -993,7 +1009,7 @@ macro_rules! n_ary_native_fn {
             fn format_ind(
                 &self,
                 f: &mut std::fmt::Formatter,
-                _locals: &[LocalDecl],
+                _locals: &[ELocalDecl],
                 _env: &ModuleEnv<'_>,
                 spacing: usize,
                 indent: usize,

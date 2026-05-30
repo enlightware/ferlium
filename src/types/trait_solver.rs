@@ -19,8 +19,8 @@ use crate::{
     compiler::error::InternalCompilationError,
     containers::b,
     hir::function::{
-        ArgPassing, Function, PendingScriptFunction, ResolvedValueArgPassing, SharedRefTempCleanup,
-        ValueArgPassing, VoidFunction,
+        Function, PendingArgPassing, PendingScriptFunction, PendingValueArgPassing,
+        ResolvedValueArgPassing, SharedRefTempCleanup, VoidFunction,
     },
     hir::hir_syn::{get_dictionary, load_local},
     hir::{
@@ -29,12 +29,12 @@ use crate::{
     },
     internal_compilation_error,
     module::{
-        self, BlanketImpls, BlanketTraitImplKey, BlanketTraitImpls, ConcreteTraitImplKey, Def,
-        DefKind, DefTable, FunctionCollector, FunctionId, ImportFunctionSlot, ImportFunctionSlotId,
-        ImportFunctionTarget, ImportImplSlot, ImportImplSlotId, LocalDecl, LocalDeclId,
-        LocalFunctionId, LocalImplId, Module, ModuleEnv, ModuleFunction, ModuleId, TraitDictionary,
-        TraitId, TraitImpl, TraitImplId, TraitImpls, TraitKey, TypeDefId, build_dictionary_value,
-        id::Id,
+        self, BlanketImpls, BlanketTraitImplKey, BlanketTraitImpls, CollectedModuleFunction,
+        ConcreteTraitImplKey, Def, DefKind, DefTable, FunctionCollector, FunctionId,
+        ImportFunctionSlot, ImportFunctionSlotId, ImportFunctionTarget, ImportImplSlot,
+        ImportImplSlotId, LocalDecl, LocalDeclId, LocalFunctionId, LocalImplId, Module, ModuleEnv,
+        ModuleFunction, ModuleId, PendingModuleFunction, TraitDictionary, TraitId, TraitImpl,
+        TraitImplId, TraitImpls, TraitKey, TypeDefId, build_dictionary_value, id::Id,
     },
     std::{
         STD_MODULE_ID,
@@ -627,17 +627,19 @@ impl<'a> TraitSolver<'a> {
         arena: &mut NodeArena,
         arg: &FnArgType,
         span: Location,
-    ) -> ArgPassing {
+    ) -> PendingArgPassing {
         if arg
             .mut_ty
             .as_resolved()
             .is_some_and(|mut_ty| mut_ty.is_mutable())
         {
-            ArgPassing::MutableRef
+            PendingArgPassing::MutableRef
         } else if self.type_has_concrete_trivial_copy_impl(arena, arg.ty, span) {
-            ArgPassing::Value(ValueArgPassing::Resolved(ResolvedValueArgPassing::Owned))
+            PendingArgPassing::Value(PendingValueArgPassing::Resolved(
+                ResolvedValueArgPassing::Owned,
+            ))
         } else {
-            ArgPassing::Value(ValueArgPassing::Resolved(
+            PendingArgPassing::Value(PendingValueArgPassing::Resolved(
                 ResolvedValueArgPassing::SharedRef {
                     temp_cleanup: SharedRefTempCleanup::None,
                 },
@@ -650,7 +652,7 @@ impl<'a> TraitSolver<'a> {
         arena: &mut NodeArena,
         args: &[FnArgType],
         span: Location,
-    ) -> Vec<ArgPassing> {
+    ) -> Vec<PendingArgPassing> {
         args.iter()
             .map(|arg| self.resolved_arg_passing_for_no_temp_arg(arena, arg, span))
             .collect()
@@ -1322,13 +1324,22 @@ impl<'a> TraitSolver<'a> {
         mut self,
         functions: &mut Vec<ModuleFunction>,
         def_table: &mut DefTable,
+        pending_functions: &mut FxHashMap<LocalFunctionId, PendingModuleFunction>,
     ) -> Vec<LocalFunctionId> {
         let mut ids = Vec::with_capacity(self.fn_collector.new_elements.len());
-        for (name, mut function) in self.fn_collector.new_elements.drain(..) {
+        for (name, function) in self.fn_collector.new_elements.drain(..) {
             let id = LocalFunctionId::from_index(functions.len());
             def_table.insert(name, Def::public(DefKind::Function(id)));
-            function.refresh_debug_info();
-            functions.push(function);
+            match function {
+                CollectedModuleFunction::Final(mut function) => {
+                    function.refresh_debug_info();
+                    functions.push(function);
+                }
+                CollectedModuleFunction::Pending(function) => {
+                    functions.push(function.placeholder());
+                    pending_functions.insert(id, function);
+                }
+            }
             ids.push(id);
         }
         ids
@@ -1504,13 +1515,15 @@ impl<'a> TraitSolver<'a> {
             .zip(definitions)
             .zip(code_entries.into())
         {
-            let function = b(PendingScriptFunction::new(
-                code_entry,
-                definition.arg_names.len(),
-            )) as Function;
+            let runtime_arg_count = definition.arg_names.len();
             self.fn_collector.replace(
                 method_id,
-                ModuleFunction::new_without_debug_info(definition, function, None, locals),
+                PendingModuleFunction::new(
+                    definition,
+                    PendingScriptFunction::new(code_entry, runtime_arg_count),
+                    None,
+                    locals,
+                ),
             );
         }
     }
@@ -1953,10 +1966,13 @@ impl<'a> TraitSolver<'a> {
                                 EffType::empty(),
                                 fn_span,
                             ));
-                            let code: Function =
-                                b(PendingScriptFunction::new(apply_id, def.arg_names.len()));
-                            let function =
-                                ModuleFunction::new_without_debug_info(def, code, None, locals);
+                            let runtime_arg_count = def.arg_names.len();
+                            let function = PendingModuleFunction::new(
+                                def,
+                                PendingScriptFunction::new(apply_id, runtime_arg_count),
+                                None,
+                                locals,
+                            );
                             let name = Ustr::from(&format!(
                                 "{}-thunk",
                                 trait_def.qualified_method_name(method_index, input_tys)

@@ -213,7 +213,7 @@ impl UnifiedTypeInference {
     ) {
         let node = &arena[node_id];
         if let NodeKind::TakeLocalValue(take) = &node.kind
-            && matches!(take.mode, crate::module::TakeLocalValueMode::Unknown)
+            && matches!(take.mode, crate::module::PendingTakeLocalValueMode::Unknown)
             && !locals[take.id.as_index()].owns_storage()
         {
             self.add_activated_value_constraint(value_trait_id, node.ty, node.span);
