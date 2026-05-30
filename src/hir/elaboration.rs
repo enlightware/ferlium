@@ -1092,7 +1092,8 @@ mod tests {
         hir::function::Function,
         hir::{GetTraitAssociatedConst, value::LiteralValue},
         module::{
-            FunctionCollector, LocalDecl, LocalTraitId, ModuleId, TraitId, TraitImpls, id::Id,
+            FunctionCollector, LocalDecl, LocalTraitId, ModuleId, PendingFunctionCollector,
+            TraitId, TraitImpls, id::Id,
         },
         types::{
             r#trait::{Trait, TraitAssociatedConst, TraitAssociatedConstIndex},
@@ -1174,7 +1175,7 @@ mod tests {
             FxHashMap::default(),
             &mut import_fn_slots,
             &mut import_impl_slots,
-            FunctionCollector::new(0),
+            PendingFunctionCollector::new(0),
             &modules,
         );
         let dicts = ExtraParameters {
@@ -1225,7 +1226,7 @@ mod tests {
             FxHashMap::default(),
             &mut import_fn_slots,
             &mut import_impl_slots,
-            FunctionCollector::new(0),
+            PendingFunctionCollector::new(0),
             &modules,
         );
         let dicts = ExtraParameters {

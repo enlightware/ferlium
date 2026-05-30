@@ -251,16 +251,10 @@ pub trait Callable: DynClone {
     fn as_script(&self) -> Option<&ScriptFunction> {
         None
     }
-    fn as_pending_script(&self) -> Option<&PendingScriptFunction> {
-        None
-    }
     fn argument_passing(&self) -> Option<&'static [ResolvedArgPassing]> {
         None
     }
     fn as_script_mut(&mut self) -> Option<&mut ScriptFunction> {
-        None
-    }
-    fn as_pending_script_mut(&mut self) -> Option<&mut PendingScriptFunction> {
         None
     }
     fn into_script(self: Box<Self>) -> Option<ScriptFunction> {
@@ -586,34 +580,6 @@ pub struct PendingScriptFunction {
     pub entry_node_id: UNodeId,
     /// Runtime arity to preserve while the entry node still points into the unelaborated arena.
     pub runtime_arg_count: usize,
-}
-
-impl Callable for PendingScriptFunction {
-    fn call(
-        &self,
-        _args: Vec<ValOrMut>,
-        _ctx: &mut CallCtx,
-        _locals: &[ELocalDecl],
-    ) -> EvalControlFlowResult {
-        panic!("pending script function reached execution")
-    }
-    fn as_pending_script(&self) -> Option<&PendingScriptFunction> {
-        Some(self)
-    }
-    fn as_pending_script_mut(&mut self) -> Option<&mut PendingScriptFunction> {
-        Some(self)
-    }
-    fn format_ind(
-        &self,
-        f: &mut std::fmt::Formatter,
-        _locals: &[ELocalDecl],
-        _env: &ModuleEnv<'_>,
-        spacing: usize,
-        indent: usize,
-    ) -> std::fmt::Result {
-        let indent_str = format!("{}{}", "  ".repeat(spacing), "⎸ ".repeat(indent));
-        write!(f, "{indent_str}PendingScriptFunction")
-    }
 }
 
 impl PartialEq for Box<ScriptFunction> {

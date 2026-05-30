@@ -19,8 +19,8 @@ use crate::{
     compiler::error::InternalCompilationError,
     containers::b,
     hir::function::{
-        Function, PendingArgPassing, PendingScriptFunction, PendingValueArgPassing,
-        ResolvedValueArgPassing, SharedRefTempCleanup, VoidFunction,
+        PendingArgPassing, PendingScriptFunction, PendingValueArgPassing, ResolvedValueArgPassing,
+        SharedRefTempCleanup,
     },
     hir::hir_syn::{get_dictionary, load_local},
     hir::{
@@ -29,11 +29,11 @@ use crate::{
     },
     internal_compilation_error,
     module::{
-        self, BlanketImpls, BlanketTraitImplKey, BlanketTraitImpls, CollectedModuleFunction,
-        ConcreteTraitImplKey, Def, DefKind, DefTable, FunctionCollector, FunctionId,
-        ImportFunctionSlot, ImportFunctionSlotId, ImportFunctionTarget, ImportImplSlot,
-        ImportImplSlotId, LocalDecl, LocalDeclId, LocalFunctionId, LocalImplId, Module, ModuleEnv,
-        ModuleFunction, ModuleId, PendingModuleFunction, TraitDictionary, TraitId, TraitImpl,
+        self, BlanketImpls, BlanketTraitImplKey, BlanketTraitImpls, ConcreteTraitImplKey, Def,
+        DefKind, DefTable, FunctionId, ImportFunctionSlot, ImportFunctionSlotId,
+        ImportFunctionTarget, ImportImplSlot, ImportImplSlotId, LocalDecl, LocalDeclId,
+        LocalFunctionId, LocalImplId, Module, ModuleEnv, ModuleFunction, ModuleId,
+        PendingFunctionCollector, PendingModuleFunction, TraitDictionary, TraitId, TraitImpl,
         TraitImplId, TraitImpls, TraitKey, TypeDefId, build_dictionary_value, id::Id,
     },
     std::{
@@ -91,7 +91,7 @@ pub struct TraitSolver<'a> {
     /// Current module trait import slots.
     pub import_impl_slots: &'a mut Vec<ImportImplSlot>,
     /// Collector for newly created current module functions.
-    pub fn_collector: FunctionCollector,
+    pub fn_collector: PendingFunctionCollector,
     /// Other modules available for fetching trait implementations and normal functions (read only).
     pub others: &'a Modules,
     /// Current recursion depth of the trait solver.
@@ -162,7 +162,7 @@ macro_rules! trait_solver_from_module {
             current_functions,
             &mut $module.import_fn_slots,
             &mut $module.import_impl_slots,
-            crate::module::FunctionCollector::new(function_count),
+            crate::module::PendingFunctionCollector::new(function_count),
             $program,
         )
     }};
@@ -177,7 +177,7 @@ pub(crate) struct TraitSolverProbe<'a> {
     current_functions: FxHashMap<Ustr, LocalFunctionId>,
     import_fn_slots: Vec<ImportFunctionSlot>,
     import_impl_slots: Vec<ImportImplSlot>,
-    fn_collector: FunctionCollector,
+    fn_collector: PendingFunctionCollector,
     active_improvements: FxHashSet<TraitImprovementKey>,
     private_impl_scope: Vec<ModuleId>,
     others: &'a Modules,
@@ -367,7 +367,7 @@ impl<'a> TraitSolverProbe<'a> {
             current_functions: current_function_map(&module.def_table),
             import_fn_slots: module.import_fn_slots.clone(),
             import_impl_slots: module.import_impl_slots.clone(),
-            fn_collector: FunctionCollector::new(module.functions.len()),
+            fn_collector: PendingFunctionCollector::new(module.functions.len()),
             active_improvements: FxHashSet::default(),
             private_impl_scope: Vec::new(),
             others,
@@ -397,7 +397,7 @@ impl<'a> TraitSolverProbe<'a> {
         let initial_count = self.fn_collector.initial_count;
         let fn_collector = mem::replace(
             &mut self.fn_collector,
-            FunctionCollector::new(initial_count),
+            PendingFunctionCollector::new(initial_count),
         );
         let mut solver = TraitSolver::new(
             self.current_type_defs,
@@ -417,7 +417,7 @@ impl<'a> TraitSolverProbe<'a> {
         self.current_functions = mem::take(&mut solver.current_functions);
         self.fn_collector = mem::replace(
             &mut solver.fn_collector,
-            FunctionCollector::new(initial_count),
+            PendingFunctionCollector::new(initial_count),
         );
         result
     }
@@ -1317,7 +1317,7 @@ impl<'a> TraitSolver<'a> {
         })
     }
 
-    /// Commit the newly created functions to the module.
+    /// Commit newly created pending functions as module placeholders.
     /// This must be called after trait solving is done,
     /// otherwise the created functions will be lost.
     pub fn commit(
@@ -1330,16 +1330,9 @@ impl<'a> TraitSolver<'a> {
         for (name, function) in self.fn_collector.new_elements.drain(..) {
             let id = LocalFunctionId::from_index(functions.len());
             def_table.insert(name, Def::public(DefKind::Function(id)));
-            match function {
-                CollectedModuleFunction::Final(mut function) => {
-                    function.refresh_debug_info();
-                    functions.push(function);
-                }
-                CollectedModuleFunction::Pending(function) => {
-                    functions.push(function.placeholder());
-                    pending_functions.insert(id, function);
-                }
-            }
+            let function = function.expect("committing a reserved generated function without code");
+            functions.push(function.placeholder());
+            pending_functions.insert(id, function);
             ids.push(id);
         }
         ids
@@ -1360,17 +1353,27 @@ impl<'a> TraitSolver<'a> {
             self.others,
             trait_id,
         );
-        let function: Function = b(PendingScriptFunction::new(
-            code_entry,
-            trait_def.methods[0].1.arg_names.len(),
-        ));
-        self.impls.add_concrete_raw(
+        let input_types = input_types.into();
+        let output_types = output_types.into();
+        let definitions = trait_def.instantiate_for_tys(&input_types, &output_types);
+        let definition = definitions
+            .into_iter()
+            .next()
+            .expect("single-function trait should have one method");
+        let runtime_arg_count = definition.arg_names.len();
+        let function = PendingModuleFunction::new(
+            definition,
+            PendingScriptFunction::new(code_entry, runtime_arg_count),
+            None,
+            locals,
+        );
+        self.impls.add_concrete_pending(
             trait_id,
             trait_def,
-            input_types.into(),
-            output_types.into(),
+            input_types,
+            output_types,
             [],
-            [(function, locals)],
+            vec![function],
             &mut self.fn_collector,
         )
     }
@@ -1389,25 +1392,27 @@ impl<'a> TraitSolver<'a> {
             self.others,
             trait_id,
         );
+        let input_types = input_types.into();
+        let output_types = output_types.into();
         let functions = trait_def
-            .methods
-            .iter()
+            .instantiate_for_tys(&input_types, &output_types)
+            .into_iter()
             .zip(code_entries.into())
-            .map(|((_, definition), (code_entry, locals))| {
-                (
-                    b(PendingScriptFunction::new(
-                        code_entry,
-                        definition.arg_names.len(),
-                    )) as Function,
+            .map(|(definition, (code_entry, locals))| {
+                let runtime_arg_count = definition.arg_names.len();
+                PendingModuleFunction::new(
+                    definition,
+                    PendingScriptFunction::new(code_entry, runtime_arg_count),
+                    None,
                     locals,
                 )
             })
             .collect::<Vec<_>>();
-        self.impls.add_concrete_raw(
+        self.impls.add_concrete_pending(
             trait_id,
             trait_def,
-            input_types.into(),
-            output_types.into(),
+            input_types,
+            output_types,
             [],
             functions,
             &mut self.fn_collector,
@@ -1463,15 +1468,7 @@ impl<'a> TraitSolver<'a> {
             let name = trait_def
                 .qualified_method_name(method_index, input_types)
                 .into();
-            self.fn_collector.push(
-                name,
-                ModuleFunction::new_without_debug_info(
-                    definition,
-                    b(VoidFunction) as Function,
-                    None,
-                    Vec::new(),
-                ),
-            );
+            self.fn_collector.reserve(name);
             methods.push(id);
             tys.push(ty);
         }

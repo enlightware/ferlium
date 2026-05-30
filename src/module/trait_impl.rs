@@ -19,11 +19,11 @@ use ustr::Ustr;
 use crate::{
     define_id_type,
     format::{FormatWith, write_with_separator_and_format_fn},
-    hir::function::{Function, FunctionDefinition},
+    hir::function::Function,
     hir::value::LiteralValue,
     module::{
-        LocalDecl, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleFunctionSpans, ModuleId,
-        PendingModuleFunction, TraitId, id::Id,
+        LocalDecl, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleId, PendingModuleFunction,
+        TraitId, id::Id,
     },
     parser::location::Location,
     types::r#trait::{
@@ -238,30 +238,21 @@ impl TraitImpl {
     }
 }
 
-/// Collects new local functions to be added to a module when adding trait implementations.
+/// Collects final local functions to be added to a module when adding trait implementations.
 #[derive(Clone, Debug, new)]
 pub struct FunctionCollector {
     pub initial_count: usize,
     #[new(default)]
-    pub new_elements: Vec<(Ustr, CollectedModuleFunction)>,
+    pub new_elements: Vec<(Ustr, ModuleFunction)>,
 }
 
-#[derive(Debug, Clone)]
-pub enum CollectedModuleFunction {
-    Final(ModuleFunction),
-    Pending(PendingModuleFunction),
-}
-
-impl From<ModuleFunction> for CollectedModuleFunction {
-    fn from(function: ModuleFunction) -> Self {
-        Self::Final(function)
-    }
-}
-
-impl From<PendingModuleFunction> for CollectedModuleFunction {
-    fn from(function: PendingModuleFunction) -> Self {
-        Self::Pending(function)
-    }
+/// Collects generated HIR functions that must still be elaborated before they are stored in a module.
+#[derive(Clone, Debug, new)]
+pub struct PendingFunctionCollector {
+    pub initial_count: usize,
+    /// `None` marks a reserved slot whose body will be supplied by `replace`.
+    #[new(default)]
+    pub new_elements: Vec<(Ustr, Option<PendingModuleFunction>)>,
 }
 
 impl FunctionCollector {
@@ -269,24 +260,9 @@ impl FunctionCollector {
         LocalFunctionId::from_index(self.initial_count + self.new_elements.len())
     }
 
-    pub fn push(&mut self, name: Ustr, function: impl Into<CollectedModuleFunction>) {
-        let mut function = function.into();
+    pub fn push(&mut self, name: Ustr, mut function: ModuleFunction) {
         function.assign_local_slots();
         self.new_elements.push((name, function));
-    }
-
-    pub(crate) fn replace(
-        &mut self,
-        id: LocalFunctionId,
-        function: impl Into<CollectedModuleFunction>,
-    ) {
-        let mut function = function.into();
-        function.assign_local_slots();
-        let index = id
-            .as_index()
-            .checked_sub(self.initial_count)
-            .expect("cannot replace an already committed function");
-        self.new_elements[index].1 = function;
     }
 
     pub fn get_function(&self, name: Ustr) -> Option<LocalFunctionId> {
@@ -297,25 +273,34 @@ impl FunctionCollector {
     }
 }
 
-impl CollectedModuleFunction {
-    pub fn assign_local_slots(&mut self) {
-        match self {
-            Self::Final(function) => function.assign_local_slots(),
-            Self::Pending(function) => function.assign_local_slots(),
-        }
+impl PendingFunctionCollector {
+    pub fn next_id(&self) -> LocalFunctionId {
+        LocalFunctionId::from_index(self.initial_count + self.new_elements.len())
     }
 
-    pub fn from_code(
-        definition: FunctionDefinition,
-        function: Function,
-        spans: Option<ModuleFunctionSpans>,
-        locals: Vec<LocalDecl>,
-    ) -> Self {
-        if let Some(pending) = function.as_pending_script() {
-            PendingModuleFunction::new(definition, pending.clone(), spans, locals).into()
-        } else {
-            ModuleFunction::new_without_debug_info(definition, function, spans, locals).into()
-        }
+    pub fn push(&mut self, name: Ustr, mut function: PendingModuleFunction) {
+        function.assign_local_slots();
+        self.new_elements.push((name, Some(function)));
+    }
+
+    pub fn reserve(&mut self, name: Ustr) {
+        self.new_elements.push((name, None));
+    }
+
+    pub(crate) fn replace(&mut self, id: LocalFunctionId, mut function: PendingModuleFunction) {
+        function.assign_local_slots();
+        let index = id
+            .as_index()
+            .checked_sub(self.initial_count)
+            .expect("cannot replace an already committed function");
+        self.new_elements[index].1 = Some(function);
+    }
+
+    pub fn get_function(&self, name: Ustr) -> Option<LocalFunctionId> {
+        self.new_elements
+            .iter()
+            .position(|(fn_name, _)| *fn_name == name)
+            .map(|i| LocalFunctionId::from_index(self.initial_count + i))
     }
 }
 
@@ -345,7 +330,7 @@ pub struct TraitImpls {
 }
 
 impl TraitImpls {
-    /// Add a concrete trait implementation to this module, with raw functions.
+    /// Add a concrete trait implementation to this module, with final raw functions.
     /// The definition will be retrieved by instantiating the trait method definitions with the given types.
     /// The caller is responsible to ensure that the input and output types match the trait definition
     /// and that the constraints are satisfied.
@@ -372,7 +357,7 @@ impl TraitImpls {
             .into_iter()
             .zip(functions.into())
             .map(|(def, (function, locals))| {
-                CollectedModuleFunction::from_code(def, function, None, locals)
+                ModuleFunction::new_without_debug_info(def, function, None, locals)
             })
             .collect();
 
@@ -399,7 +384,7 @@ impl TraitImpls {
         input_tys: Vec<Type>,
         output_tys: Vec<Type>,
         associated_const_values: impl Into<Vec<LiteralValue>>,
-        functions: Vec<CollectedModuleFunction>,
+        functions: Vec<ModuleFunction>,
         fn_collector: &mut FunctionCollector,
     ) -> LocalImplId {
         let associated_const_values = associated_const_values.into();
@@ -420,6 +405,52 @@ impl TraitImpls {
         let (methods, method_tys) = Self::bundle_module_functions(functions, fn_collector, namer);
 
         // Build and insert the implementation.
+        let associated_const_tys =
+            trait_def.instantiate_associated_const_tys_for_tys(&input_tys, &output_tys);
+        let dictionary_type = Self::dictionary_ty(method_tys, associated_const_tys);
+        let dictionary_value = build_dictionary_value(&methods, &associated_const_values);
+        let imp = TraitImpl::new(
+            output_tys,
+            methods,
+            dictionary_value,
+            dictionary_type,
+            true,
+            None,
+        )
+        .with_associated_const_values(associated_const_values);
+        let key = ConcreteTraitImplKey::new(trait_id, input_tys);
+        self.add_concrete_struct(key, imp)
+    }
+
+    /// Add a concrete trait implementation whose methods still need HIR elaboration.
+    /// The caller is responsible to provide functions whose definitions match the trait instance.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_concrete_pending(
+        &mut self,
+        trait_id: TraitId,
+        trait_def: &Trait,
+        input_tys: Vec<Type>,
+        output_tys: Vec<Type>,
+        associated_const_values: impl Into<Vec<LiteralValue>>,
+        functions: Vec<PendingModuleFunction>,
+        fn_collector: &mut PendingFunctionCollector,
+    ) -> LocalImplId {
+        let associated_const_values = associated_const_values.into();
+        trait_def.validate_impl_shape(
+            &input_tys,
+            &output_tys,
+            associated_const_values.len(),
+            functions.len(),
+        );
+
+        let namer = |method_index: usize| {
+            trait_def
+                .qualified_method_name(TraitMethodIndex::from_index(method_index), &input_tys)
+                .into()
+        };
+        let (methods, method_tys) =
+            Self::bundle_pending_module_functions(functions, fn_collector, namer);
+
         let associated_const_tys =
             trait_def.instantiate_associated_const_tys_for_tys(&input_tys, &output_tys);
         let dictionary_type = Self::dictionary_ty(method_tys, associated_const_tys);
@@ -478,7 +509,7 @@ impl TraitImpls {
             .into_iter()
             .zip(functions.into())
             .map(|(def, (function, locals))| {
-                CollectedModuleFunction::from_code(def, function, None, locals)
+                ModuleFunction::new_without_debug_info(def, function, None, locals)
             })
             .collect();
 
@@ -502,7 +533,7 @@ impl TraitImpls {
         sub_key: BlanketTraitImplSubKey,
         output_tys: Vec<Type>,
         associated_const_values: impl Into<Vec<LiteralValue>>,
-        functions: Vec<CollectedModuleFunction>,
+        functions: Vec<ModuleFunction>,
         fn_collector: &mut FunctionCollector,
     ) -> LocalImplId {
         let associated_const_values = associated_const_values.into();
@@ -557,7 +588,7 @@ impl TraitImpls {
     /// Bundle a set of module functions into a local functions,
     /// a cached dictionary value, and the overall interface hash.
     fn bundle_module_functions(
-        functions: Vec<CollectedModuleFunction>,
+        functions: Vec<ModuleFunction>,
         fn_collector: &mut FunctionCollector,
         namer: impl Fn(usize) -> Ustr,
     ) -> (Vec<LocalFunctionId>, Vec<Type>) {
@@ -566,7 +597,26 @@ impl TraitImpls {
             .enumerate()
             .map(|(index, function)| {
                 let id = fn_collector.next_id();
-                let fn_ty = Type::function_type(function.definition().ty_scheme.ty.clone());
+                let fn_ty = Type::function_type(function.definition.ty_scheme.ty.clone());
+                fn_collector.push(namer(index), function);
+                (id, fn_ty)
+            })
+            .multiunzip();
+        (methods, tys)
+    }
+
+    /// Bundle a set of pending module functions into local function IDs and interface types.
+    fn bundle_pending_module_functions(
+        functions: Vec<PendingModuleFunction>,
+        fn_collector: &mut PendingFunctionCollector,
+        namer: impl Fn(usize) -> Ustr,
+    ) -> (Vec<LocalFunctionId>, Vec<Type>) {
+        let (methods, tys): (Vec<_>, Vec<_>) = functions
+            .into_iter()
+            .enumerate()
+            .map(|(index, function)| {
+                let id = fn_collector.next_id();
+                let fn_ty = Type::function_type(function.definition.ty_scheme.ty.clone());
                 fn_collector.push(namer(index), function);
                 (id, fn_ty)
             })
@@ -731,15 +781,6 @@ impl TraitImpls {
             }
         };
         format!("{}", self.format_with(&(module_env, filter)))
-    }
-}
-
-impl CollectedModuleFunction {
-    pub fn definition(&self) -> &FunctionDefinition {
-        match self {
-            Self::Final(function) => &function.definition,
-            Self::Pending(function) => &function.definition,
-        }
     }
 }
 
