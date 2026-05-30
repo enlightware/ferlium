@@ -22,8 +22,8 @@ use crate::{
     hir::value::{FunctionValue, LiteralValue, NativeValue, Value, ustr_to_isize},
     hir::{self, CallArgument, NodeArena, NodeId},
     hir::{
-        dictionary_passing::{resolved_arg_passing_for_generated_call, static_apply_generated},
         emit_value_impl::function_value_method,
+        value_dispatch::{resolved_arg_passing_for_generated_call, static_apply_generated},
     },
     internal_compilation_error,
     module::{

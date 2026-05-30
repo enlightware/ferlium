@@ -11,7 +11,7 @@ use crate::{
     Location,
     compiler::error::InternalCompilationError,
     containers::SVec2,
-    hir::{self, NodeArena, NodeId, dictionary_passing::static_apply_generated},
+    hir::{self, NodeArena, NodeId, value_dispatch::static_apply_generated},
     module::{TraitId, TraitImplId},
     types::effects::EffType,
     types::r#trait::{Deriver, TraitMethodIndex},

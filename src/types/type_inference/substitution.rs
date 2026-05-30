@@ -3,7 +3,7 @@ use std::{cell::RefCell, mem};
 use crate::{
     FxHashSet,
     format::FormatWith,
-    hir::dictionary_passing::DictionaryReq,
+    hir::dictionary::DictionaryReq,
     hir::{self, FnInstData},
     module::{LocalDecl, LocalStorage, ModuleEnv, ModuleFunction},
     types::{

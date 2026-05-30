@@ -38,12 +38,13 @@ use crate::{
     containers::{SVec2, b, iterable_to_string},
     desugar::desugar_expr_with_empty_ctx,
     format::FormatWith,
-    hir::dictionary_passing::{
-        DictElaborationCtx, ExtraParameters, elaborate_generated_functions, elaborate_hir,
-        elaborate_local_ownership_and_value_dispatches,
-    },
     hir::function::{FunctionDefinition, PendingScriptFunction},
     hir::{self, NodeArena, UNodeArena},
+    hir::{
+        dictionary::{DictElaborationCtx, ExtraParameters},
+        elaboration::{elaborate_generated_functions, elaborate_hir},
+        value_dispatch::elaborate_local_ownership_and_value_dispatches,
+    },
     internal_compilation_error,
     module::{
         ConcreteTraitImplKey, FunctionId, GENERATED_LAMBDA_PREFIX, LocalAssignmentMode, LocalDecl,

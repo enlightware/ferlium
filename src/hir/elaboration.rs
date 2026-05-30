@@ -4,7 +4,7 @@
 //
 // http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or impled. See the License for the specific language governing permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
 use crate::{FxHashMap, FxHashSet, Modules};
@@ -13,230 +13,45 @@ use std::mem;
 use crate::{
     Location,
     compiler::error::InternalCompilationError,
-    format::FormatWith,
-    hir::function::{
-        ArgPassing, ResolvedValueArgPassing, SharedRefTempCleanup, ValueArgPassing,
-        resolve_arg_passing_for_call,
+    hir::{
+        dictionary::{
+            DictElaborationCtx, DictionariesReq, DictionaryReq, ExtraParameters,
+            find_field_dict_index, find_trait_impl_dict_index,
+        },
+        value_dispatch::{resolve_arg_passing, resolve_local_clone, resolve_local_drop},
     },
     internal_compilation_error,
     module::{
         ConcreteTraitImplKey, ExtraParameterId, FunctionId, LocalClone, LocalDecl, LocalDrop,
-        LocalFunctionId, LocalStorage, Module, ModuleEnv, ProjectionIndex, ResolvedLocalClone,
-        ResolvedLocalDrop, TakeLocalValueMode, TraitId, TraitImpl, TraitImplId, TraitImpls,
-        build_dictionary_value, id::Id,
+        LocalFunctionId, Module, ModuleEnv, ProjectionIndex, TakeLocalValueMode, TraitId,
+        TraitImpl, TraitImplId, TraitImpls, build_dictionary_value, id::Id,
     },
     types::r#trait::{TraitDictionaryEntryIndex, TraitMethodIndex},
     types::trait_solver::{TraitSolver, trait_solver_from_module},
-    types::r#type::TypeVar,
-    types::type_like::{TypeLike, instantiate_types_in_place},
-    types::type_mapper::TypeMapper,
-    types::type_scheme_display::format_have_trait,
 };
-use derive_new::new;
 use itertools::process_results;
-use ustr::Ustr;
 
 use crate::{
     containers::{SVec2, b},
     hir::emit_value_impl::{function_value_method, generic_value_methods_for_type},
     hir::value::LiteralValue,
     hir::{
-        self, CallArgument, ENodeArena, ENodeId, Elaborated, Node, NodeArena, NodeId, NodeKind,
+        self, CallArgument, ENodeArena, ENodeId, Elaborated, Node, NodeArena, NodeKind,
         Project as HirProject, ProjectAt as HirProjectAt, StaticApplication, UNodeArena, UNodeId,
         Unelaborated,
     },
     std::{
-        core_traits_names::{TRIVIAL_COPY_TRAIT_NAME, VALUE_TRAIT_NAME},
         math::int_type,
         value::{
-            VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX,
-            is_function_surface_only_value_trait_application, is_function_surface_only_value_type,
-            is_value_trait_for_function_type, value_layout_associated_const_values,
+            is_function_surface_only_value_trait_application, is_value_trait_for_function_type,
+            value_layout_associated_const_values,
         },
     },
     types::effects::{EffType, no_effects},
     types::mutability::MutType,
-    types::r#type::{FnArgType, FnType, Type, TypeKind},
+    types::r#type::{FnArgType, Type, TypeKind},
+    types::type_like::TypeLike,
 };
-
-/// A dictionary requirement, that will be passed as extra parameter to a function.
-#[derive(Clone, Debug)]
-pub enum DictionaryReq {
-    FieldIndex {
-        ty: Type,
-        field: Ustr,
-    },
-    TraitImpl {
-        trait_id: TraitId,
-        input_tys: Vec<Type>,
-        output_tys: Vec<Type>, // stored here for type generation, but not used in comparisons
-                               // FIXME: maybe we need a span here for proper error reporting
-    },
-}
-
-impl DictionaryReq {
-    pub fn new_field_index(ty: Type, field: Ustr) -> Self {
-        Self::FieldIndex { ty, field }
-    }
-
-    pub fn new_trait_impl(trait_id: TraitId, input_tys: Vec<Type>, output_tys: Vec<Type>) -> Self {
-        Self::TraitImpl {
-            trait_id,
-            input_tys,
-            output_tys,
-        }
-    }
-
-    /// Instantiate self with a caller-supplied mapper.
-    pub(crate) fn instantiate<M: TypeMapper>(&self, mapper: &mut M) -> DictionaryReq {
-        let mut req = self.clone();
-        req.instantiate_in_place(mapper);
-        req
-    }
-
-    /// Instantiate self in place with a caller-supplied mapper.
-    pub(crate) fn instantiate_in_place<M: TypeMapper>(&mut self, mapper: &mut M) {
-        use DictionaryReq::*;
-        match self {
-            FieldIndex { ty, .. } => {
-                *ty = ty.map(mapper);
-            }
-            TraitImpl {
-                input_tys,
-                output_tys,
-                ..
-            } => {
-                instantiate_types_in_place(input_tys, mapper);
-                instantiate_types_in_place(output_tys, mapper);
-            }
-        }
-    }
-
-    pub fn to_dict_type(&self, trait_solver: &TraitSolver<'_>) -> Type {
-        match self {
-            DictionaryReq::FieldIndex { .. } => int_type(),
-            DictionaryReq::TraitImpl {
-                trait_id,
-                input_tys,
-                output_tys,
-                ..
-            } => trait_solver
-                .trait_def(*trait_id)
-                .get_dictionary_type_for_tys(input_tys, output_tys),
-        }
-    }
-}
-
-impl PartialEq for DictionaryReq {
-    fn eq(&self, other: &Self) -> bool {
-        use DictionaryReq::*;
-        match (self, other) {
-            (
-                FieldIndex {
-                    ty: ty1,
-                    field: field1,
-                },
-                FieldIndex {
-                    ty: ty2,
-                    field: field2,
-                },
-            ) => ty1 == ty2 && field1 == field2,
-            (
-                TraitImpl {
-                    trait_id: tr1,
-                    input_tys: in1,
-                    ..
-                },
-                TraitImpl {
-                    trait_id: tr2,
-                    input_tys: in2,
-                    ..
-                },
-            ) => tr1 == tr2 && in1 == in2,
-            _ => false,
-        }
-    }
-}
-
-impl Eq for DictionaryReq {}
-
-impl FormatWith<ModuleEnv<'_>> for DictionaryReq {
-    fn fmt_with(
-        &self,
-        f: &mut std::fmt::Formatter,
-        env: &crate::module::ModuleEnv<'_>,
-    ) -> std::fmt::Result {
-        use DictionaryReq::*;
-        match self {
-            FieldIndex { ty, field } => write!(f, "{} field {}", ty.format_with(env), field),
-            TraitImpl {
-                trait_id,
-                input_tys,
-                output_tys,
-                ..
-            } => format_have_trait(*trait_id, input_tys, output_tys, f, env),
-        }
-    }
-}
-
-pub type DictionariesReq = Vec<DictionaryReq>;
-
-/// Data structure to hold extra parameters for a function.
-#[derive(Clone, Debug)]
-pub struct ExtraParameters {
-    /// The dictionary requirements for the function.
-    /// This is a list of dictionaries that will be passed as extra parameters to the function.
-    pub requirements: Vec<DictionaryReq>,
-    /// A map from type variables to other type variables containing their representation type.
-    /// This is used to resolve type variables when looking up field dict indices.
-    pub repr_map: FxHashMap<TypeVar, TypeVar>,
-}
-
-impl ExtraParameters {
-    pub fn is_empty(&self) -> bool {
-        self.requirements.is_empty()
-    }
-    pub fn len(&self) -> usize {
-        self.requirements.len()
-    }
-}
-
-pub fn find_field_dict_index(dicts: &ExtraParameters, var: TypeVar, field: &str) -> Option<usize> {
-    // Resolve the variable to its representation type if it is a different type variable.
-    let var = dicts.repr_map.get(&var).unwrap_or(&var);
-    let ty = Type::variable(*var);
-    // Find the index of the dictionary that matches the type and field.
-    dicts.requirements.iter().position(|dict| {
-        if let DictionaryReq::FieldIndex {
-            ty: ty2,
-            field: field2,
-        } = &dict
-        {
-            *ty2 == ty && field2 == &field
-        } else {
-            false
-        }
-    })
-}
-
-pub fn find_trait_impl_dict_index(
-    dicts: &ExtraParameters,
-    trait_id: TraitId,
-    input_tys: &[Type],
-) -> Option<usize> {
-    dicts.requirements.iter().position(|dict| {
-        if let DictionaryReq::TraitImpl {
-            trait_id: trait_id2,
-            input_tys: tys2,
-            ..
-        } = dict
-        {
-            input_tys == tys2 && trait_id == *trait_id2
-        } else {
-            false
-        }
-    })
-}
 
 /// Build the use-site HIR expression for a generated `Value` dictionary.
 fn value_dictionary_node_kind_from_methods(
@@ -377,13 +192,6 @@ fn dictionary_method_projection_data(
     (entry_index, function_ty)
 }
 
-pub(crate) fn instantiate_dictionary_requirements<M: TypeMapper>(
-    dicts: &DictionariesReq,
-    mapper: &mut M,
-) -> DictionariesReq {
-    dicts.iter().map(|dict| dict.instantiate(mapper)).collect()
-}
-
 fn extra_arg_kind_from_inst_data(
     inst_data: &hir::FnInstData,
     span: Location,
@@ -475,26 +283,6 @@ fn extra_arg_kind_for_module_function(
             (kind, ty, FnArgType::new(ty, MutType::constant()))
         })
         .collect()
-}
-
-/// The dictionaries for the current module.
-/// This is a map from function pointers to the dictionaries required by the function.
-/// This is necessary as recursive functions in the current modules could not get their
-/// dictionary requirements during type inference as they were not known yet.
-pub type ModuleInstData = FxHashMap<LocalFunctionId, ExtraParameters>;
-
-/// The context for elaborating dictionaries.
-/// All necessary information to perform dictionary elaboration.
-// #[derive(Clone, Copy)]
-#[derive(new)]
-pub struct DictElaborationCtx<'d, 'sr, 'sm> {
-    /// The dictionaries for the current expression being elaborated.
-    pub dicts: &'d ExtraParameters,
-    /// The dictionaries for the current module, if compiling a module.
-    /// None if compiling an expression.
-    pub module_inst_data: Option<&'d ModuleInstData>,
-    /// The trait solver. The borrow lifetime is independent from `dicts`.
-    pub trait_solver: &'sr mut TraitSolver<'sm>,
 }
 
 /// Result of elaborating one unelaborated HIR root into the final HIR arena.
@@ -1286,313 +1074,6 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
             SoftBreak => SoftBreak,
         })
     }
-}
-
-/// Resolve any remaining local ownership placeholders and local clone/drop value dispatches.
-pub fn elaborate_local_ownership_and_value_dispatches<'d, 'sr, 'sm>(
-    arena: &mut NodeArena,
-    locals: &mut [LocalDecl],
-    ctx: &mut DictElaborationCtx<'d, 'sr, 'sm>,
-) -> Result<(), InternalCompilationError> {
-    for local in locals {
-        if matches!(local.storage, LocalStorage::Deferred(_)) {
-            return Err(internal_compilation_error!(Internal {
-                error: "deferred local storage reached value dispatch elaboration".to_string(),
-                span: local.scope,
-            }));
-        }
-
-        if matches!(local.clone, Some(LocalClone::Unknown)) {
-            local.clone = Some(LocalClone::Resolved(resolve_local_clone(
-                arena,
-                ctx,
-                local.ty,
-                local.scope,
-            )?));
-        }
-
-        let local_ty = local.ty;
-        let local_scope = local.scope;
-        if let Some(drop) = local.local_drop_mut()
-            && matches!(drop, LocalDrop::Unknown)
-        {
-            *drop = resolve_local_drop(arena, ctx, local_ty, local_scope)?;
-        }
-    }
-    Ok(())
-}
-
-#[derive(Debug, Clone, Copy)]
-enum ResolvedValueMethodDispatch {
-    Static(FunctionId),
-    Dictionary(ExtraParameterId),
-}
-
-/// Resolve a required `Value` method into either a static function or a runtime dictionary slot.
-fn resolve_value_method_dispatch(
-    arena: &mut NodeArena,
-    ctx: &mut DictElaborationCtx<'_, '_, '_>,
-    ty: Type,
-    method_index: TraitMethodIndex,
-    span: Location,
-    missing_dictionary_msg: &str,
-) -> Result<ResolvedValueMethodDispatch, InternalCompilationError> {
-    if ty.is_function() {
-        return Ok(ResolvedValueMethodDispatch::Static(FunctionId::Local(
-            function_value_method(ctx.trait_solver, method_index, span, arena)?,
-        )));
-    }
-    if is_function_surface_only_value_type(ty) {
-        let value_trait_id = ctx.trait_solver.std_trait_id(VALUE_TRAIT_NAME);
-        let methods =
-            generic_value_methods_for_type(ctx.trait_solver, value_trait_id, &[ty], span, arena)?;
-        return Ok(ResolvedValueMethodDispatch::Static(FunctionId::Local(
-            methods[usize::from(method_index)],
-        )));
-    }
-    if ty.is_constant() {
-        let value_trait_id = ctx.trait_solver.std_trait_id(VALUE_TRAIT_NAME);
-        return Ok(ResolvedValueMethodDispatch::Static(
-            ctx.trait_solver
-                .solve_impl_method(value_trait_id, &[ty], method_index, span, arena)?,
-        ));
-    }
-    let value_trait_id = ctx.trait_solver.std_trait_id(VALUE_TRAIT_NAME);
-    let dict_index = find_trait_impl_dict_index(ctx.dicts, value_trait_id, &[ty])
-        .unwrap_or_else(|| panic!("{missing_dictionary_msg}: {ty:?}"));
-    Ok(ResolvedValueMethodDispatch::Dictionary(
-        ExtraParameterId::from_index(dict_index),
-    ))
-}
-
-fn resolve_local_clone(
-    arena: &mut NodeArena,
-    ctx: &mut DictElaborationCtx<'_, '_, '_>,
-    ty: Type,
-    span: Location,
-) -> Result<ResolvedLocalClone, InternalCompilationError> {
-    if type_has_concrete_trivial_copy_impl(arena, ctx, ty, span) {
-        return Ok(ResolvedLocalClone::TrivialCopy);
-    }
-    let dispatch = resolve_value_method_dispatch(
-        arena,
-        ctx,
-        ty,
-        VALUE_CLONE_METHOD_INDEX,
-        span,
-        "Value dictionary for clone not found, type inference should have failed",
-    )?;
-    Ok(match dispatch {
-        ResolvedValueMethodDispatch::Static(function) => ResolvedLocalClone::Static(function),
-        ResolvedValueMethodDispatch::Dictionary(dictionary) => {
-            ResolvedLocalClone::Dictionary(dictionary)
-        }
-    })
-}
-
-fn resolve_local_drop(
-    arena: &mut NodeArena,
-    ctx: &mut DictElaborationCtx<'_, '_, '_>,
-    ty: Type,
-    span: Location,
-) -> Result<LocalDrop, InternalCompilationError> {
-    if type_has_concrete_trivial_copy_impl(arena, ctx, ty, span) {
-        return Ok(LocalDrop::Resolved(ResolvedLocalDrop::Skip));
-    }
-    let dispatch = resolve_value_method_dispatch(
-        arena,
-        ctx,
-        ty,
-        VALUE_DROP_METHOD_INDEX,
-        span,
-        "Value dictionary for drop not found, type inference should have failed",
-    )?;
-    Ok(LocalDrop::Resolved(match dispatch {
-        ResolvedValueMethodDispatch::Static(function) => ResolvedLocalDrop::Static(function),
-        ResolvedValueMethodDispatch::Dictionary(dictionary) => {
-            ResolvedLocalDrop::Dictionary(dictionary)
-        }
-    }))
-}
-
-fn resolve_arg_passing(
-    arena: &mut NodeArena,
-    ctx: &mut DictElaborationCtx<'_, '_, '_>,
-    passing: &mut ArgPassing,
-    arg: NodeId,
-    ty: Type,
-    span: Location,
-) -> Result<(), InternalCompilationError> {
-    match passing {
-        ArgPassing::MutableRef | ArgPassing::Value(ValueArgPassing::Resolved(_)) => {}
-        ArgPassing::Value(ValueArgPassing::Unknown) => {
-            let needs_temp = crate::hir::function::call_argument_may_need_temp(arena, arg);
-            *passing = ArgPassing::Value(ValueArgPassing::Resolved(resolve_value_arg_passing(
-                arena, ctx, ty, needs_temp, span,
-            )?));
-        }
-    }
-    Ok(())
-}
-
-fn resolve_value_arg_passing(
-    arena: &mut NodeArena,
-    ctx: &mut DictElaborationCtx<'_, '_, '_>,
-    ty: Type,
-    needs_temp: bool,
-    span: Location,
-) -> Result<ResolvedValueArgPassing, InternalCompilationError> {
-    if type_has_concrete_trivial_copy_impl(arena, ctx, ty, span) {
-        Ok(ResolvedValueArgPassing::Owned)
-    } else if !needs_temp {
-        Ok(ResolvedValueArgPassing::SharedRef {
-            temp_cleanup: SharedRefTempCleanup::None,
-        })
-    } else {
-        Ok(ResolvedValueArgPassing::SharedRef {
-            temp_cleanup: SharedRefTempCleanup::Drop(resolve_temp_drop(arena, ctx, ty, span)?),
-        })
-    }
-}
-
-fn resolve_temp_drop(
-    arena: &mut NodeArena,
-    ctx: &mut DictElaborationCtx<'_, '_, '_>,
-    ty: Type,
-    span: Location,
-) -> Result<ResolvedLocalDrop, InternalCompilationError> {
-    match resolve_local_drop(arena, ctx, ty, span)? {
-        LocalDrop::Resolved(drop) => Ok(drop),
-        LocalDrop::Unknown => unreachable!("resolve_local_drop always resolves"),
-    }
-}
-
-pub(crate) fn resolved_arg_passing_for_generated_call(
-    arena: &mut NodeArena,
-    trait_solver: &mut TraitSolver<'_>,
-    args: &[NodeId],
-    arg_tys: &[FnArgType],
-    span: Location,
-) -> Result<Vec<ArgPassing>, InternalCompilationError> {
-    resolve_arg_passing_for_call(
-        arena,
-        trait_solver,
-        args,
-        arg_tys,
-        span,
-        resolve_generated_value_arg_passing,
-    )
-}
-
-/// Build a generated static call whose visible argument passing is resolved from
-/// the final argument types and the actual argument HIR nodes.
-pub(crate) fn static_apply_generated(
-    arena: &mut NodeArena,
-    trait_solver: &mut TraitSolver<'_>,
-    function: FunctionId,
-    arguments: impl IntoIterator<Item = (NodeId, Type)>,
-    ret_ty: Type,
-    span: Location,
-) -> Result<NodeKind, InternalCompilationError> {
-    let (arguments, args_tys): (Vec<_>, Vec<_>) = arguments.into_iter().unzip();
-    let fn_ty = FnType::new_by_val(args_tys, ret_ty, EffType::empty());
-    let argument_passing = resolved_arg_passing_for_generated_call(
-        arena,
-        trait_solver,
-        &arguments,
-        &fn_ty.args,
-        span,
-    )?;
-    Ok(hir::hir_syn::static_apply_with_argument_passing(
-        function,
-        fn_ty,
-        arguments,
-        argument_passing,
-        span,
-    ))
-}
-
-fn resolve_generated_value_arg_passing(
-    arena: &mut NodeArena,
-    trait_solver: &mut TraitSolver<'_>,
-    ty: Type,
-    needs_temp: bool,
-    span: Location,
-) -> Result<ResolvedValueArgPassing, InternalCompilationError> {
-    if generated_type_has_trivial_copy_impl(arena, trait_solver, ty, span) {
-        Ok(ResolvedValueArgPassing::Owned)
-    } else if !needs_temp {
-        Ok(ResolvedValueArgPassing::SharedRef {
-            temp_cleanup: SharedRefTempCleanup::None,
-        })
-    } else {
-        Ok(ResolvedValueArgPassing::SharedRef {
-            temp_cleanup: SharedRefTempCleanup::Drop(resolve_generated_temp_drop(
-                arena,
-                trait_solver,
-                ty,
-                span,
-            )?),
-        })
-    }
-}
-
-fn resolve_generated_temp_drop(
-    arena: &mut NodeArena,
-    trait_solver: &mut TraitSolver<'_>,
-    ty: Type,
-    span: Location,
-) -> Result<ResolvedLocalDrop, InternalCompilationError> {
-    if generated_type_has_trivial_copy_impl(arena, trait_solver, ty, span) {
-        return Ok(ResolvedLocalDrop::Skip);
-    }
-    if is_function_surface_only_value_type(ty) {
-        return Ok(ResolvedLocalDrop::Static(FunctionId::Local(
-            function_value_method(trait_solver, VALUE_DROP_METHOD_INDEX, span, arena)?,
-        )));
-    }
-    Ok(ResolvedLocalDrop::Static(trait_solver.solve_impl_method(
-        trait_solver.std_trait_id(VALUE_TRAIT_NAME),
-        &[ty],
-        VALUE_DROP_METHOD_INDEX,
-        span,
-        arena,
-    )?))
-}
-
-fn generated_type_has_trivial_copy_impl(
-    arena: &mut NodeArena,
-    trait_solver: &mut TraitSolver<'_>,
-    ty: Type,
-    span: Location,
-) -> bool {
-    ty.is_constant()
-        && trait_solver
-            .solve_output_types(
-                trait_solver.std_trait_id(TRIVIAL_COPY_TRAIT_NAME),
-                &[ty],
-                span,
-                arena,
-            )
-            .is_ok()
-}
-
-fn type_has_concrete_trivial_copy_impl(
-    arena: &mut NodeArena,
-    ctx: &mut DictElaborationCtx<'_, '_, '_>,
-    ty: Type,
-    span: Location,
-) -> bool {
-    ty.is_constant()
-        && ctx
-            .trait_solver
-            .solve_output_types(
-                ctx.trait_solver.std_trait_id(TRIVIAL_COPY_TRAIT_NAME),
-                &[ty],
-                span,
-                arena,
-            )
-            .is_ok()
 }
 
 #[cfg(test)]

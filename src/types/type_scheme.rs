@@ -19,7 +19,7 @@ use crate::{
     ast::UstrSpan,
     compiler::error::InternalCompilationError,
     format::type_variable_index_to_string_latin,
-    hir::dictionary_passing::ExtraParameters,
+    hir::dictionary::ExtraParameters,
     parser::location::InstantiableLocation,
     std::value::{
         is_function_surface_only_value_trait_application, is_value_trait_for_function_type,
@@ -36,7 +36,7 @@ use ustr::Ustr;
 
 use crate::{
     hir::FnInstData,
-    hir::dictionary_passing::{DictionaryReq, instantiate_dictionary_requirements},
+    hir::dictionary::{DictionaryReq, instantiate_dictionary_requirements},
     module::{ModuleEnv, TraitId},
     types::effects::{EffType, EffectVar, EffectsInstSubst},
     types::r#type::{Type, TypeDisplayEnv, TypeInstSubst, TypeVar},

@@ -12,10 +12,9 @@ use crate::{
     compiler::error::InternalCompilationError,
     containers::b,
     hir::{
-        self, NodeArena,
-        dictionary_passing::{DictElaborationCtx, elaborate_generated_functions},
-        emit_associated_consts::emitted_associated_const_values,
-        emit_ir::EmitTraitOutput,
+        self, NodeArena, dictionary::DictElaborationCtx,
+        elaboration::elaborate_generated_functions,
+        emit_associated_consts::emitted_associated_const_values, emit_ir::EmitTraitOutput,
         function::PendingScriptFunction,
     },
     internal_compilation_error,

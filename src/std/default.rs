@@ -12,8 +12,8 @@ use crate::{
     compiler::error::InternalCompilationError,
     containers::b,
     hir::{
-        self, NodeArena, NodeId, dictionary_passing::static_apply_generated,
-        function::FunctionDefinition,
+        self, NodeArena, NodeId, function::FunctionDefinition,
+        value_dispatch::static_apply_generated,
     },
     module::{Module, TraitId, TraitImplId},
     std::product_value_deriver::ProductValueDeriver,

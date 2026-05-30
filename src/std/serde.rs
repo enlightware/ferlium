@@ -17,8 +17,8 @@ use crate::{
     hir::value::{LiteralValue, ustr_to_isize},
     hir::{self, CallArgument, NodeArena, NodeId},
     hir::{
-        dictionary_passing::{resolved_arg_passing_for_generated_call, static_apply_generated},
         function::FunctionDefinition,
+        value_dispatch::{resolved_arg_passing_for_generated_call, static_apply_generated},
     },
     module::{
         self, LocalClone, LocalDeclId, Module, ProjectionIndex, ResolvedLocalClone, TraitId,

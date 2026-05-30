@@ -17,12 +17,13 @@ use crate::{
     define_id_type,
     format::FormatWith,
     hir::borrow_checker::check_borrows,
-    hir::dictionary_passing::{
-        DictElaborationCtx, ElaboratedHir, elaborate_hir,
-        elaborate_local_ownership_and_value_dispatches,
-    },
     hir::function::{Function, FunctionDefinition},
     hir::{ENodeArena, ENodeId, NodeId, UNodeArena, UNodeId, function::ScriptFunction},
+    hir::{
+        dictionary::DictElaborationCtx,
+        elaboration::{ElaboratedHir, elaborate_hir},
+        value_dispatch::elaborate_local_ownership_and_value_dispatches,
+    },
     module::{FunctionDebugInfo, ModuleEnv, ModuleId, TraitKey, format_impl_header_by_key, id::Id},
     types::mutability::MutType,
     types::r#trait::TraitMethodIndex,

@@ -7,7 +7,8 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 pub(crate) mod borrow_checker;
-pub(crate) mod dictionary_passing;
+pub(crate) mod dictionary;
+pub(crate) mod elaboration;
 pub(crate) mod emit_associated_consts;
 pub mod emit_ir;
 pub(crate) mod emit_value_impl;
@@ -15,6 +16,7 @@ pub mod function;
 pub(crate) mod hir_syn;
 pub(crate) mod r#match;
 pub mod value;
+pub(crate) mod value_dispatch;
 
 use crate::{
     Location,
@@ -37,7 +39,7 @@ use ustr::Ustr;
 
 use crate::{
     containers::{B, SVec2, SVec4},
-    hir::dictionary_passing::DictionariesReq,
+    hir::dictionary::DictionariesReq,
     hir::value::LiteralValue,
     module::ModuleEnv,
     types::effects::EffType,
