@@ -4,12 +4,11 @@
 //
 // http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or impled. See the License for the specific language governing permissions and limitations under the License.
 //
 
+use crate::{FxHashMap, FxHashSet, Modules};
 use std::mem;
-
-use crate::FxHashMap;
 
 use crate::{
     Location,
@@ -22,12 +21,12 @@ use crate::{
     internal_compilation_error,
     module::{
         ConcreteTraitImplKey, ExtraParameterId, FunctionId, LocalClone, LocalDecl, LocalDrop,
-        LocalFunctionId, LocalStorage, ModuleEnv, ProjectionIndex, ResolvedLocalClone,
+        LocalFunctionId, LocalStorage, Module, ModuleEnv, ProjectionIndex, ResolvedLocalClone,
         ResolvedLocalDrop, TakeLocalValueMode, TraitId, TraitImpl, TraitImplId, TraitImpls,
         build_dictionary_value, id::Id,
     },
     types::r#trait::{TraitDictionaryEntryIndex, TraitMethodIndex},
-    types::trait_solver::TraitSolver,
+    types::trait_solver::{TraitSolver, trait_solver_from_module},
     types::r#type::TypeVar,
     types::type_like::{TypeLike, instantiate_types_in_place},
     types::type_mapper::TypeMapper,
@@ -38,12 +37,13 @@ use itertools::process_results;
 use ustr::Ustr;
 
 use crate::{
-    containers::b,
+    containers::{SVec2, b},
     hir::emit_value_impl::{function_value_method, generic_value_methods_for_type},
     hir::value::LiteralValue,
     hir::{
-        self, Node, NodeArena, NodeId, NodeKind, Project as HirProject, ProjectAt as HirProjectAt,
-        UnresolvedKind,
+        self, CallArgument, ENodeArena, ENodeId, Elaborated, Node, NodeArena, NodeId, NodeKind,
+        Project as HirProject, ProjectAt as HirProjectAt, StaticApplication, UNodeArena, UNodeId,
+        Unelaborated,
     },
     std::{
         core_traits_names::{TRIVIAL_COPY_TRAIT_NAME, VALUE_TRAIT_NAME},
@@ -384,12 +384,12 @@ pub(crate) fn instantiate_dictionary_requirements<M: TypeMapper>(
     dicts.iter().map(|dict| dict.instantiate(mapper)).collect()
 }
 
-fn extra_args_from_inst_data<'d, 'sr, 'sm>(
-    arena: &mut NodeArena,
+fn extra_arg_kind_from_inst_data(
     inst_data: &hir::FnInstData,
     span: Location,
-    ctx: &mut DictElaborationCtx<'d, 'sr, 'sm>,
-) -> Result<(Vec<NodeId>, Vec<FnArgType>), InternalCompilationError> {
+    ctx: &mut DictElaborationCtx<'_, '_, '_>,
+    arena: &mut NodeArena,
+) -> Result<Vec<(NodeKind, Type, FnArgType)>, InternalCompilationError> {
     use NodeKind as K;
     use TypeKind::*;
     process_results(inst_data
@@ -438,20 +438,19 @@ fn extra_args_from_inst_data<'d, 'sr, 'sm>(
                 }
             };
             Ok((
-                arena.alloc(Node::new(node_kind, node_ty, no_effects(), span)),
+                node_kind,
+                node_ty,
                 FnArgType::new(node_ty, MutType::constant()),
             ))
-        }), |iter| iter.unzip()
+        }), |iter| iter.collect()
     )
 }
 
-fn extra_args_for_module_function(
-    arena: &mut NodeArena,
+fn extra_arg_kind_for_module_function(
     inst_data: &DictionariesReq,
-    span: Location,
     dicts: &ExtraParameters,
     trait_solver: &TraitSolver<'_>,
-) -> (Vec<NodeId>, Vec<FnArgType>) {
+) -> Vec<(NodeKind, Type, FnArgType)> {
     inst_data
         .iter()
         .map(|dict| {
@@ -473,12 +472,9 @@ fn extra_args_for_module_function(
                     NodeKind::LoadFieldIndex(hir::LoadFieldIndex { extra_parameter })
                 }
             };
-            (
-                arena.alloc(Node::new(kind, ty, no_effects(), span)),
-                FnArgType::new(ty, MutType::constant()),
-            )
+            (kind, ty, FnArgType::new(ty, MutType::constant()))
         })
-        .unzip()
+        .collect()
 }
 
 /// The dictionaries for the current module.
@@ -501,14 +497,795 @@ pub struct DictElaborationCtx<'d, 'sr, 'sm> {
     pub trait_solver: &'sr mut TraitSolver<'sm>,
 }
 
-pub fn elaborate_dictionaries<'d, 'sr, 'sm>(
-    arena: &mut NodeArena,
-    node_id: NodeId,
+/// Result of elaborating one unelaborated HIR root into the final HIR arena.
+pub struct ElaboratedHir {
+    pub root: ENodeId,
+    pub remap: FxHashMap<UNodeId, ENodeId>,
+}
+
+/// Elaborate a pre-dictionary-passing HIR tree into the final HIR arena.
+pub fn elaborate_hir<'d, 'sr, 'sm>(
+    src: &mut UNodeArena,
+    root: UNodeId,
+    dst: &mut ENodeArena,
     ctx: &mut DictElaborationCtx<'d, 'sr, 'sm>,
     locals: &[LocalDecl],
-    local_count: usize,
+) -> Result<ElaboratedHir, InternalCompilationError> {
+    let mut elaboration = HirElaboration::new(src, dst, ctx, locals);
+    let root = elaboration.elaborate_node(root)?;
+    Ok(ElaboratedHir {
+        root,
+        remap: elaboration.remap,
+    })
+}
+
+/// Finalize generated functions returned by trait-solver commits into the final HIR arena.
+pub fn elaborate_generated_functions(
+    module: &mut Module,
+    src: &mut UNodeArena,
+    others: &Modules,
+    ids: impl IntoIterator<Item = LocalFunctionId>,
 ) -> Result<(), InternalCompilationError> {
-    Node::elaborate_dictionaries(arena, node_id, ctx, locals, local_count)
+    let mut pending = ids.into_iter().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < pending.len() {
+        let id = pending[index];
+        index += 1;
+        if module.functions[id.as_index()]
+            .get_pending_code_entry()
+            .is_none()
+        {
+            continue;
+        }
+
+        let dicts = module.functions[id.as_index()]
+            .definition
+            .ty_scheme
+            .extra_parameters(ModuleEnv::new(module, others));
+        let mut solver = trait_solver_from_module!(module, others);
+        let mut ctx = DictElaborationCtx::new(&dicts, None, &mut solver);
+        module.functions[id.as_index()].check_borrows_and_elaborate_hir(
+            src,
+            &mut module.ir_arena,
+            &mut ctx,
+        )?;
+        pending.extend(solver.commit(&mut module.functions, &mut module.def_table));
+    }
+    Ok(())
+}
+
+/// Stateful worker that appends elaborated HIR nodes while tracking UNodeId-to-ENodeId remaps.
+struct HirElaboration<'a, 'd, 'sr, 'sm> {
+    src: &'a mut UNodeArena,
+    dst: &'a mut ENodeArena,
+    ctx: &'a mut DictElaborationCtx<'d, 'sr, 'sm>,
+    locals: &'a [LocalDecl],
+    remap: FxHashMap<UNodeId, ENodeId>,
+    in_progress: FxHashSet<UNodeId>,
+}
+
+impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
+    fn new(
+        src: &'a mut UNodeArena,
+        dst: &'a mut ENodeArena,
+        ctx: &'a mut DictElaborationCtx<'d, 'sr, 'sm>,
+        locals: &'a [LocalDecl],
+    ) -> Self {
+        Self {
+            src,
+            dst,
+            ctx,
+            locals,
+            remap: FxHashMap::default(),
+            in_progress: FxHashSet::default(),
+        }
+    }
+
+    fn elaborate_node(&mut self, old: UNodeId) -> Result<ENodeId, InternalCompilationError> {
+        if let Some(&new) = self.remap.get(&old) {
+            return Ok(new);
+        }
+        if !self.in_progress.insert(old) {
+            return Err(internal_compilation_error!(Internal {
+                error: "cycle found while elaborating HIR".to_string(),
+                span: self.src[old].span,
+            }));
+        }
+
+        let old_node = &mut self.src[old];
+        let old_ty = old_node.ty;
+        let old_effects = old_node.effects.clone();
+        let old_span = old_node.span;
+        let old_kind = mem::replace(&mut old_node.kind, NodeKind::Unimplemented);
+        let kind = self.elaborate_kind(old_kind, old_ty, &old_effects, old_span)?;
+        let new = self
+            .dst
+            .alloc(Node::<Elaborated>::new(kind, old_ty, old_effects, old_span));
+        self.in_progress.remove(&old);
+        self.remap.insert(old, new);
+        Ok(new)
+    }
+
+    fn elaborate_synthetic_node(
+        &mut self,
+        kind: NodeKind<Unelaborated>,
+        ty: Type,
+        effects: EffType,
+        span: Location,
+    ) -> Result<ENodeId, InternalCompilationError> {
+        let kind = self.elaborate_kind(kind, ty, &effects, span)?;
+        Ok(self.alloc_elaborated_node(kind, ty, effects, span))
+    }
+
+    fn alloc_elaborated_node(
+        &mut self,
+        kind: NodeKind<Elaborated>,
+        ty: Type,
+        effects: EffType,
+        span: Location,
+    ) -> ENodeId {
+        self.dst
+            .alloc(Node::<Elaborated>::new(kind, ty, effects, span))
+    }
+
+    fn elaborate_node_vec(
+        &mut self,
+        nodes: impl IntoIterator<Item = UNodeId>,
+    ) -> Result<Vec<ENodeId>, InternalCompilationError> {
+        let nodes = nodes.into_iter();
+        let (lower, _) = nodes.size_hint();
+        let mut result = Vec::with_capacity(lower);
+        self.elaborate_nodes_into(nodes, &mut result)?;
+        Ok(result)
+    }
+
+    fn elaborate_nodes_into(
+        &mut self,
+        nodes: impl IntoIterator<Item = UNodeId>,
+        dst: &mut Vec<ENodeId>,
+    ) -> Result<(), InternalCompilationError> {
+        for node in nodes {
+            dst.push(self.elaborate_node(node)?);
+        }
+        Ok(())
+    }
+
+    fn elaborate_extra_arg_kinds(
+        &mut self,
+        args: impl IntoIterator<Item = (NodeKind<Unelaborated>, Type, FnArgType)>,
+        span: Location,
+    ) -> Result<(Vec<ENodeId>, Vec<FnArgType>), InternalCompilationError> {
+        let args = args.into_iter();
+        let (lower, _) = args.size_hint();
+        let mut nodes = Vec::with_capacity(lower);
+        let mut arg_tys = Vec::with_capacity(lower);
+        for (kind, ty, arg_ty) in args {
+            nodes.push(self.elaborate_synthetic_node(kind, ty, no_effects(), span)?);
+            arg_tys.push(arg_ty);
+        }
+        Ok((nodes, arg_tys))
+    }
+
+    fn elaborate_extra_args_from_inst_data(
+        &mut self,
+        inst_data: &hir::FnInstData,
+        span: Location,
+    ) -> Result<(Vec<ENodeId>, Vec<FnArgType>), InternalCompilationError> {
+        let args = extra_arg_kind_from_inst_data(inst_data, span, self.ctx, self.src)?;
+        self.elaborate_extra_arg_kinds(args, span)
+    }
+
+    fn elaborate_call_arguments(
+        &mut self,
+        arguments: Vec<CallArgument<Unelaborated>>,
+    ) -> Result<Vec<CallArgument<Elaborated>>, InternalCompilationError> {
+        arguments
+            .into_iter()
+            .map(|arg| {
+                Ok(CallArgument {
+                    value: self.elaborate_node(arg.value)?,
+                    passing: arg.passing,
+                })
+            })
+            .collect()
+    }
+
+    fn elaborate_kind(
+        &mut self,
+        kind: NodeKind<Unelaborated>,
+        node_ty: Type,
+        node_effects: &EffType,
+        node_span: Location,
+    ) -> Result<NodeKind<Elaborated>, InternalCompilationError> {
+        use NodeKind::*;
+
+        Ok(match kind {
+            Immediate(value) => Immediate(value),
+            Uninit => Uninit,
+            Unimplemented => {
+                return Err(internal_compilation_error!(Internal {
+                    error: "temporary HIR placeholder reached elaboration".to_string(),
+                    span: node_span,
+                }));
+            }
+            BuildClosure(build_closure) => {
+                let build_closure = *build_closure;
+                let mut dictionary_captures =
+                    self.elaborate_node_vec(build_closure.dictionary_captures)?;
+                let mut captures = self.elaborate_node_vec(build_closure.captures)?;
+                let mut captures_value_dictionary = build_closure
+                    .captures_value_dictionary
+                    .map(|node| self.elaborate_node(node))
+                    .transpose()?;
+                let function = self.elaborate_node(build_closure.function)?;
+
+                let function = if let BuildClosure(inner) = &self.dst[function].kind {
+                    dictionary_captures.splice(0..0, inner.dictionary_captures.iter().copied());
+                    if !inner.captures.is_empty() && !captures.is_empty() {
+                        panic!("Cannot flatten closures with two owned capture environments yet");
+                    }
+                    if captures.is_empty() {
+                        captures = inner.captures.clone();
+                        captures_value_dictionary = inner.captures_value_dictionary;
+                    }
+                    inner.function
+                } else {
+                    function
+                };
+
+                BuildClosure(b(hir::BuildClosure {
+                    function,
+                    dictionary_captures,
+                    captures,
+                    captures_value_dictionary,
+                }))
+            }
+            Apply(app) => {
+                let mut app = *app;
+                for arg in &mut app.arguments {
+                    resolve_arg_passing(
+                        self.src,
+                        self.ctx,
+                        &mut arg.passing,
+                        arg.value,
+                        self.src[arg.value].ty,
+                        node_span,
+                    )?;
+                }
+                Apply(b(hir::Application {
+                    function: self.elaborate_node(app.function)?,
+                    arguments: self.elaborate_call_arguments(app.arguments)?,
+                    returns_place: app.returns_place,
+                }))
+            }
+            CloneClosureEnv(node) => CloneClosureEnv(hir::CloneClosureEnv {
+                source: self.elaborate_node(node.source)?,
+                target: self.elaborate_node(node.target)?,
+            }),
+            DropClosureEnv(node) => DropClosureEnv(hir::DropClosureEnv {
+                target: self.elaborate_node(node.target)?,
+            }),
+            CloneValue(mut node) => {
+                if matches!(node.clone, LocalClone::Unknown) {
+                    node.clone = LocalClone::Resolved(resolve_local_clone(
+                        self.src, self.ctx, node_ty, node_span,
+                    )?);
+                }
+                CloneValue(hir::CloneValue {
+                    source: self.elaborate_node(node.source)?,
+                    clone: node.clone,
+                })
+            }
+            StaticApply(app) => {
+                let mut app = *app;
+                for (arg, arg_ty) in app.arguments.iter_mut().zip(&app.ty.args) {
+                    resolve_arg_passing(
+                        self.src,
+                        self.ctx,
+                        &mut arg.passing,
+                        arg.value,
+                        arg_ty.ty,
+                        node_span,
+                    )?;
+                }
+                let mut extra_arguments = if !app.inst_data.dicts_req.is_empty() {
+                    self.elaborate_extra_args_from_inst_data(&app.inst_data, app.function_span)?
+                        .0
+                } else if let FunctionId::Local(id) = app.function
+                    && let Some(extra_arg_kinds) = self
+                        .ctx
+                        .module_inst_data
+                        .and_then(|inst_data| inst_data.get(&id))
+                        .map(|inst_data| {
+                            extra_arg_kind_for_module_function(
+                                &inst_data.requirements,
+                                self.ctx.dicts,
+                                self.ctx.trait_solver,
+                            )
+                        })
+                {
+                    self.elaborate_extra_arg_kinds(extra_arg_kinds, node_span)?
+                        .0
+                } else {
+                    Vec::new()
+                };
+                self.elaborate_nodes_into(app.extra_arguments, &mut extra_arguments)?;
+                StaticApply(b(StaticApplication {
+                    function: app.function,
+                    function_path: app.function_path,
+                    function_span: app.function_span,
+                    extra_arguments,
+                    arguments: self.elaborate_call_arguments(app.arguments)?,
+                    argument_names: app.argument_names,
+                    ty: app.ty,
+                    inst_data: app.inst_data,
+                    returns_place: app.returns_place,
+                }))
+            }
+            TraitMethodApply(app) => {
+                let mut app = *app;
+                for (arg, arg_ty) in app.arguments.iter_mut().zip(&app.ty.args) {
+                    resolve_arg_passing(
+                        self.src,
+                        self.ctx,
+                        &mut arg.passing,
+                        arg.value,
+                        arg_ty.ty,
+                        node_span,
+                    )?;
+                }
+                assert!(
+                    app.inst_data.dicts_req.is_empty(),
+                    "Instantiation data for trait method is not supported yet."
+                );
+                let resolved = app.input_tys.iter().all(Type::is_constant);
+                let (is_value_function, is_function_surface_only, argument_names) = {
+                    let trait_def = self.ctx.trait_solver.trait_def(app.trait_id);
+                    let definition = &trait_def.method(app.method_index).1;
+                    (
+                        is_value_trait_for_function_type(
+                            app.trait_id,
+                            trait_def,
+                            &app.input_tys,
+                            &[],
+                        ),
+                        is_function_surface_only_value_trait_application(
+                            app.trait_id,
+                            trait_def,
+                            &app.input_tys,
+                            &[],
+                        ),
+                        app.arguments_unnamed.filter_args(&definition.arg_names),
+                    )
+                };
+                if is_value_function || resolved {
+                    let function = if is_value_function {
+                        FunctionId::Local(function_value_method(
+                            self.ctx.trait_solver,
+                            app.method_index,
+                            app.method_span,
+                            self.src,
+                        )?)
+                    } else {
+                        self.ctx.trait_solver.solve_impl_method(
+                            app.trait_id,
+                            &app.input_tys,
+                            app.method_index,
+                            app.method_span,
+                            self.src,
+                        )?
+                    };
+                    StaticApply(b(hir::StaticApplication {
+                        function,
+                        function_path: Some(app.method_path),
+                        function_span: app.method_span,
+                        extra_arguments: Vec::new(),
+                        arguments: self.elaborate_call_arguments(app.arguments)?,
+                        argument_names,
+                        ty: app.ty,
+                        inst_data: hir::FnInstData::none(),
+                        returns_place: false,
+                    }))
+                } else if is_function_surface_only {
+                    let (dict_ty, entry_index) = {
+                        let trait_def = self.ctx.trait_solver.trait_def(app.trait_id);
+                        let dict_ty = trait_def.get_dictionary_type_for_tys(&app.input_tys, &[]);
+                        let (entry_index, _) =
+                            dictionary_method_projection_data(trait_def, dict_ty, app.method_index);
+                        (dict_ty, entry_index)
+                    };
+                    let (dict_kind, _) = trait_dictionary_node_kind(
+                        self.src,
+                        app.trait_id,
+                        &app.input_tys,
+                        &[],
+                        app.method_span,
+                        self.ctx,
+                    )?;
+                    let dictionary = self.elaborate_synthetic_node(
+                        dict_kind,
+                        dict_ty,
+                        no_effects(),
+                        app.method_span,
+                    )?;
+                    CallDictionaryMethod(b(hir::CallDictionaryMethod {
+                        dictionary,
+                        entry_index,
+                        arguments: self.elaborate_call_arguments(app.arguments)?,
+                        ty: app.ty,
+                    }))
+                } else {
+                    let dict_index = find_trait_impl_dict_index(
+                        self.ctx.dicts,
+                        app.trait_id,
+                        &app.input_tys,
+                    )
+                    .expect(
+                        "Dictionary for trait impl not found, type inference should have failed",
+                    );
+                    let dict_ty =
+                        self.ctx.dicts.requirements[dict_index].to_dict_type(self.ctx.trait_solver);
+                    let dictionary = self.elaborate_synthetic_node(
+                        NodeKind::LoadDictionary(hir::LoadDictionary {
+                            extra_parameter: ExtraParameterId::from_index(dict_index),
+                        }),
+                        dict_ty,
+                        no_effects(),
+                        app.method_span,
+                    )?;
+                    let (entry_index, _) = dictionary_method_projection_data(
+                        self.ctx.trait_solver.trait_def(app.trait_id),
+                        dict_ty,
+                        app.method_index,
+                    );
+                    CallDictionaryMethod(b(hir::CallDictionaryMethod {
+                        dictionary,
+                        entry_index,
+                        arguments: self.elaborate_call_arguments(app.arguments)?,
+                        ty: app.ty,
+                    }))
+                }
+            }
+            GetFunction(get_fn) => {
+                let mut get_fn = *get_fn;
+                let captures = if !get_fn.inst_data.dicts_req.is_empty() {
+                    let (captures, _) =
+                        self.elaborate_extra_args_from_inst_data(&get_fn.inst_data, node_span)?;
+                    get_fn.inst_data.dicts_req.clear();
+                    captures
+                } else if let FunctionId::Local(fn_local_id) = get_fn.function {
+                    if let Some(extra_arg_kinds) = self
+                        .ctx
+                        .module_inst_data
+                        .and_then(|inst_data| inst_data.get(&fn_local_id))
+                        .filter(|inst_data| !inst_data.is_empty())
+                        .map(|inst_data| {
+                            extra_arg_kind_for_module_function(
+                                &inst_data.requirements,
+                                self.ctx.dicts,
+                                self.ctx.trait_solver,
+                            )
+                        })
+                    {
+                        self.elaborate_extra_arg_kinds(extra_arg_kinds, node_span)?
+                            .0
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    Vec::new()
+                };
+                if captures.is_empty() {
+                    GetFunction(b(get_fn))
+                } else {
+                    let function = self.alloc_elaborated_node(
+                        GetFunction(b(get_fn)),
+                        node_ty,
+                        node_effects.clone(),
+                        node_span,
+                    );
+                    BuildClosure(b(hir::BuildClosure {
+                        function,
+                        dictionary_captures: captures,
+                        captures: Vec::new(),
+                        captures_value_dictionary: None,
+                    }))
+                }
+            }
+            GetTraitMethod(get_method) => {
+                assert!(
+                    get_method.inst_data.dicts_req.is_empty(),
+                    "Instantiation data for trait method is not supported yet."
+                );
+                let resolved = get_method.input_tys.iter().all(Type::is_constant);
+                let is_value_function = {
+                    let trait_def = self.ctx.trait_solver.trait_def(get_method.trait_id);
+                    is_value_trait_for_function_type(
+                        get_method.trait_id,
+                        trait_def,
+                        &get_method.input_tys,
+                        &get_method.output_tys,
+                    )
+                };
+                if is_value_function || resolved {
+                    let function = if is_value_function {
+                        FunctionId::Local(function_value_method(
+                            self.ctx.trait_solver,
+                            get_method.method_index,
+                            get_method.method_span,
+                            self.src,
+                        )?)
+                    } else {
+                        self.ctx.trait_solver.solve_impl_method(
+                            get_method.trait_id,
+                            &get_method.input_tys,
+                            get_method.method_index,
+                            get_method.method_span,
+                            self.src,
+                        )?
+                    };
+                    GetFunction(b(hir::GetFunction {
+                        function,
+                        function_path: get_method.method_path,
+                        function_span: get_method.method_span,
+                        inst_data: hir::FnInstData::none(),
+                    }))
+                } else {
+                    let (dict_ty, entry_index) = {
+                        let trait_def = self.ctx.trait_solver.trait_def(get_method.trait_id);
+                        let dict_ty = trait_def.get_dictionary_type_for_tys(
+                            &get_method.input_tys,
+                            &get_method.output_tys,
+                        );
+                        let (entry_index, _) = dictionary_method_projection_data(
+                            trait_def,
+                            dict_ty,
+                            get_method.method_index,
+                        );
+                        (dict_ty, entry_index)
+                    };
+                    let (dict_kind, _) = trait_dictionary_node_kind(
+                        self.src,
+                        get_method.trait_id,
+                        &get_method.input_tys,
+                        &get_method.output_tys,
+                        get_method.method_span,
+                        self.ctx,
+                    )?;
+                    let dictionary = self.elaborate_synthetic_node(
+                        dict_kind,
+                        dict_ty,
+                        no_effects(),
+                        get_method.method_span,
+                    )?;
+                    GetDictionaryMethod(hir::GetDictionaryMethod {
+                        dictionary,
+                        entry_index,
+                    })
+                }
+            }
+            GetTraitAssociatedConst(get_const) => {
+                let resolved = get_const.input_tys.iter().all(Type::is_constant);
+                let is_compiler_value_application = {
+                    let trait_def = self.ctx.trait_solver.trait_def(get_const.trait_id);
+                    is_value_trait_for_function_type(
+                        get_const.trait_id,
+                        trait_def,
+                        &get_const.input_tys,
+                        &get_const.output_tys,
+                    ) || is_function_surface_only_value_trait_application(
+                        get_const.trait_id,
+                        trait_def,
+                        &get_const.input_tys,
+                        &get_const.output_tys,
+                    )
+                };
+                if is_compiler_value_application {
+                    let values = value_layout_associated_const_values(
+                        get_const.input_tys[0],
+                        node_span,
+                        self.ctx.trait_solver,
+                    )?;
+                    Immediate(LiteralValue::new_native(
+                        values[usize::from(get_const.associated_const_index)],
+                    ))
+                } else if resolved {
+                    Immediate(self.ctx.trait_solver.solve_associated_const(
+                        get_const.trait_id,
+                        &get_const.input_tys,
+                        get_const.associated_const_index,
+                        get_const.associated_const_span,
+                        self.src,
+                    )?)
+                } else {
+                    let dict_index = find_trait_impl_dict_index(
+                        self.ctx.dicts,
+                        get_const.trait_id,
+                        &get_const.input_tys,
+                    )
+                    .expect(
+                        "Dictionary for trait impl not found, type inference should have failed",
+                    );
+                    let dict_ty =
+                        self.ctx.dicts.requirements[dict_index].to_dict_type(self.ctx.trait_solver);
+                    let dictionary = self.elaborate_synthetic_node(
+                        NodeKind::LoadDictionary(hir::LoadDictionary {
+                            extra_parameter: ExtraParameterId::from_index(dict_index),
+                        }),
+                        dict_ty,
+                        no_effects(),
+                        get_const.associated_const_span,
+                    )?;
+                    GetDictionaryAssociatedConst(hir::GetDictionaryAssociatedConst {
+                        dictionary,
+                        entry_index: self
+                            .ctx
+                            .trait_solver
+                            .trait_def(get_const.trait_id)
+                            .dictionary_associated_const_index(get_const.associated_const_index),
+                    })
+                }
+            }
+            GetTraitDictionary(get_dict) => {
+                let (node_kind, _) = trait_dictionary_node_kind(
+                    self.src,
+                    get_dict.trait_id,
+                    &get_dict.input_tys,
+                    &get_dict.output_tys,
+                    node_span,
+                    self.ctx,
+                )?;
+                self.elaborate_kind(node_kind, node_ty, node_effects, node_span)?
+            }
+            GetDictionary(get_dict) => GetDictionary(get_dict),
+            LoadDictionary(load) => LoadDictionary(load),
+            LoadFieldIndex(load) => LoadFieldIndex(load),
+            StoreLocal(store) => StoreLocal(hir::StoreLocal {
+                value: self.elaborate_node(store.value)?,
+                id: store.id,
+            }),
+            TakeLocalValue(mut node) => {
+                if matches!(node.mode, TakeLocalValueMode::Unknown) {
+                    node.mode = if self.locals[node.id.as_index()].owns_storage() {
+                        TakeLocalValueMode::MoveOwned
+                    } else {
+                        TakeLocalValueMode::CloneBorrowed(resolve_local_clone(
+                            self.src, self.ctx, node_ty, node_span,
+                        )?)
+                    };
+                }
+                TakeLocalValue(node)
+            }
+            LoadLocal(load) => LoadLocal(load),
+            GetDictionaryMethod(node) => GetDictionaryMethod(hir::GetDictionaryMethod {
+                dictionary: self.elaborate_node(node.dictionary)?,
+                entry_index: node.entry_index,
+            }),
+            GetDictionaryAssociatedConst(node) => {
+                GetDictionaryAssociatedConst(hir::GetDictionaryAssociatedConst {
+                    dictionary: self.elaborate_node(node.dictionary)?,
+                    entry_index: node.entry_index,
+                })
+            }
+            CallDictionaryMethod(call) => {
+                let mut call = *call;
+                for (arg, arg_ty) in call.arguments.iter_mut().zip(&call.ty.args) {
+                    resolve_arg_passing(
+                        self.src,
+                        self.ctx,
+                        &mut arg.passing,
+                        arg.value,
+                        arg_ty.ty,
+                        node_span,
+                    )?;
+                }
+                CallDictionaryMethod(b(hir::CallDictionaryMethod {
+                    dictionary: self.elaborate_node(call.dictionary)?,
+                    entry_index: call.entry_index,
+                    arguments: self.elaborate_call_arguments(call.arguments)?,
+                    ty: call.ty,
+                }))
+            }
+            Return(node) => Return(self.elaborate_node(node)?),
+            Block(block) => Block(b(hir::Block {
+                body: b(SVec2::from_vec(
+                    self.elaborate_node_vec(block.body.iter().copied())?,
+                )),
+                cleanup: block.cleanup,
+            })),
+            Assign(mut assignment) => {
+                let place_ty = self.src[assignment.place].ty;
+                if let Some(drop) = &mut assignment.drop
+                    && matches!(drop, LocalDrop::Unknown)
+                {
+                    *drop = resolve_local_drop(self.src, self.ctx, place_ty, node_span)?;
+                }
+                Assign(hir::Assignment {
+                    place: self.elaborate_node(assignment.place)?,
+                    value: self.elaborate_node(assignment.value)?,
+                    drop: assignment.drop,
+                })
+            }
+            Tuple(nodes) => Tuple(b(SVec2::from_vec(
+                self.elaborate_node_vec(nodes.iter().copied())?,
+            ))),
+            Project(project) => Project(hir::Project {
+                value: self.elaborate_node(project.value)?,
+                index: project.index,
+            }),
+            Record(nodes) => Record(b(SVec2::from_vec(
+                self.elaborate_node_vec(nodes.iter().copied())?,
+            ))),
+            FieldAccess(field_access) => {
+                use TypeKind::*;
+                let child_id = field_access.value;
+                let field_name = field_access.field;
+                let child = self.elaborate_node(child_id)?;
+                let child_ty = self.src[child_id].ty;
+                let ty_data = child_ty.data();
+                let ty_data = if let Some(named) = ty_data.as_named() {
+                    let named = named.clone();
+                    drop(ty_data);
+                    self.ctx
+                        .trait_solver
+                        .type_def(named.def)
+                        .instantiated_shape(&named.params)
+                        .data()
+                } else {
+                    ty_data
+                };
+                match &*ty_data {
+                    Record(record) => {
+                        let index = record
+                            .iter()
+                            .position(|field| field.0 == field_name)
+                            .expect("Field not found in type, type inference should have failed");
+                        Project(HirProject::new(child, ProjectionIndex::from_index(index)))
+                    }
+                    Variable(var) => {
+                        let var = *var;
+                        drop(ty_data);
+                        let index = find_field_dict_index(self.ctx.dicts, var, &field_name)
+                            .unwrap_or_else(
+                                || panic!("Dictionary for field \"{field_name}\" in type variable \"{var}\" not found, type inference should have failed"),
+                            );
+                        ProjectAt(HirProjectAt::new(
+                            child,
+                            ExtraParameterId::from_index(index),
+                        ))
+                    }
+                    _ => {
+                        panic!("FieldAccess should have a record or variable type");
+                    }
+                }
+            }
+            ProjectAt(project) => ProjectAt(hir::ProjectAt {
+                value: self.elaborate_node(project.value)?,
+                index: project.index,
+            }),
+            Variant(variant) => Variant(hir::Variant {
+                tag: variant.tag,
+                payload: self.elaborate_node(variant.payload)?,
+            }),
+            ExtractTag(node) => ExtractTag(self.elaborate_node(node)?),
+            Array(nodes) => Array(b(SVec2::from_vec(
+                self.elaborate_node_vec(nodes.iter().copied())?,
+            ))),
+            Case(case) => Case(b(hir::Case {
+                value: self.elaborate_node(case.value)?,
+                alternatives: case
+                    .alternatives
+                    .into_iter()
+                    .map(|(value, node)| Ok((value, self.elaborate_node(node)?)))
+                    .collect::<Result<_, InternalCompilationError>>()?,
+                default: self.elaborate_node(case.default)?,
+            })),
+            Loop(body) => Loop(self.elaborate_node(body)?),
+            CheckCallDepth => CheckCallDepth,
+            CheckFuel => CheckFuel,
+            SoftBreak => SoftBreak,
+        })
+    }
 }
 
 /// Resolve any remaining local ownership placeholders and local clone/drop value dispatches.
@@ -818,646 +1595,6 @@ fn type_has_concrete_trivial_copy_impl(
             .is_ok()
 }
 
-impl Node {
-    pub fn elaborate_dictionaries<'d, 'sr, 'sm>(
-        arena: &mut NodeArena,
-        node_id: NodeId,
-        ctx: &mut DictElaborationCtx<'d, 'sr, 'sm>,
-        locals: &[LocalDecl],
-        local_count: usize,
-    ) -> Result<(), InternalCompilationError> {
-        use NodeKind::*;
-
-        let node_span = arena[node_id].span;
-        let node_ty = arena[node_id].ty;
-        // Note: node_effects is cloned lazily only in the branch that needs it
-        // (GetFunction), to avoid an unconditional Vec clone on every node.
-        // Put a placeholder in the arena while we are mutating ourself and adding new nodes.
-        let mut kind = mem::replace(&mut arena[node_id].kind, NodeKind::Unimplemented);
-
-        match &mut kind {
-            Immediate(_) | Uninit => {}
-            BuildClosure(build_closure) => {
-                // Elaborate hidden dictionary/evidence captures first.
-                for &capture_id in &build_closure.dictionary_captures {
-                    elaborate_dictionaries(arena, capture_id, ctx, locals, local_count)?;
-                }
-
-                // Elaborate captures first (they are in outer scope).
-                for &capture_id in &build_closure.captures {
-                    elaborate_dictionaries(arena, capture_id, ctx, locals, local_count)?;
-                }
-                if let Some(dict_id) = build_closure.captures_value_dictionary {
-                    elaborate_dictionaries(arena, dict_id, ctx, locals, local_count)?;
-                }
-
-                // Elaborate the function (it is the closure body/value).
-                let function_id = build_closure.function;
-                elaborate_dictionaries(arena, function_id, ctx, locals, local_count)?;
-
-                // Optimization: flatten nested BuildClosure
-                // Check if the function is a BuildClosure itself (due to dictionary capturing).
-                let is_nested = matches!(arena[function_id].kind, NodeKind::BuildClosure(_));
-
-                if is_nested {
-                    // Extract the inner BuildClosure.
-                    let inner_kind =
-                        mem::replace(&mut arena[function_id].kind, NodeKind::Unimplemented);
-                    let inner_build = inner_kind
-                        .into_build_closure()
-                        .expect("is_nested check failed");
-                    // inner_build.captures are the dictionary/evidence captures (should be first)
-                    // build_closure.captures are the variable captures (should be second)
-                    let mut new_dictionary_captures = inner_build.dictionary_captures;
-                    new_dictionary_captures.append(&mut build_closure.dictionary_captures);
-                    build_closure.dictionary_captures = new_dictionary_captures;
-                    if !inner_build.captures.is_empty() && !build_closure.captures.is_empty() {
-                        panic!("Cannot flatten closures with two owned capture environments yet");
-                    }
-                    if build_closure.captures.is_empty() {
-                        build_closure.captures = inner_build.captures;
-                        build_closure.captures_value_dictionary =
-                            inner_build.captures_value_dictionary;
-                    }
-                    build_closure.function = inner_build.function;
-                }
-            }
-            Apply(app) => {
-                elaborate_dictionaries(arena, app.function, ctx, locals, local_count)?;
-                for arg in &app.arguments {
-                    elaborate_dictionaries(arena, arg.value, ctx, locals, local_count)?;
-                }
-                for arg in &mut app.arguments {
-                    resolve_arg_passing(
-                        arena,
-                        ctx,
-                        &mut arg.passing,
-                        arg.value,
-                        arena[arg.value].ty,
-                        node_span,
-                    )?;
-                }
-            }
-            CloneClosureEnv(node) => {
-                elaborate_dictionaries(arena, node.source, ctx, locals, local_count)?;
-                elaborate_dictionaries(arena, node.target, ctx, locals, local_count)?;
-            }
-            DropClosureEnv(node) => {
-                elaborate_dictionaries(arena, node.target, ctx, locals, local_count)?;
-            }
-            CloneValue(node) => {
-                elaborate_dictionaries(arena, node.source, ctx, locals, local_count)?;
-                if matches!(node.clone, LocalClone::Unknown) {
-                    node.clone =
-                        LocalClone::Resolved(resolve_local_clone(arena, ctx, node_ty, node_span)?);
-                }
-            }
-            StaticApply(app) => {
-                for &arg_id in &app.extra_arguments {
-                    elaborate_dictionaries(arena, arg_id, ctx, locals, local_count)?;
-                }
-                for arg in &app.arguments {
-                    elaborate_dictionaries(arena, arg.value, ctx, locals, local_count)?;
-                }
-                for (arg, arg_ty) in app.arguments.iter_mut().zip(&app.ty.args) {
-                    resolve_arg_passing(
-                        arena,
-                        ctx,
-                        &mut arg.passing,
-                        arg.value,
-                        arg_ty.ty,
-                        node_span,
-                    )?;
-                }
-                if !app.inst_data.dicts_req.is_empty() {
-                    // Build the dictionary requirements for the function as evidence arguments.
-                    let span = app.function_span;
-                    let (extra_args, extra_args_ty) =
-                        extra_args_from_inst_data(arena, &app.inst_data, span, ctx)?;
-                    let _ = extra_args_ty;
-                    app.extra_arguments.splice(0..0, extra_args);
-                } else {
-                    // Is the called function part of the current module being compiled?
-                    if let FunctionId::Local(id) = app.function {
-                        if let Some(inst_data) = ctx
-                            .module_inst_data
-                            .and_then(|inst_data| inst_data.get(&id))
-                        {
-                            let inst_data = &inst_data.requirements;
-                            // Yes, build the dictionary requirements for the function.
-                            let (extra_args, extra_args_ty) = extra_args_for_module_function(
-                                arena,
-                                inst_data,
-                                node_span,
-                                ctx.dicts,
-                                ctx.trait_solver,
-                            );
-                            let _ = extra_args_ty;
-                            app.extra_arguments.splice(0..0, extra_args);
-                        }
-                    }
-                }
-            }
-            Unresolved(UnresolvedKind::TraitMethodApply(app)) => {
-                for arg in &app.arguments {
-                    elaborate_dictionaries(arena, arg.value, ctx, locals, local_count)?;
-                }
-                for (arg, arg_ty) in app.arguments.iter_mut().zip(&app.ty.args) {
-                    resolve_arg_passing(
-                        arena,
-                        ctx,
-                        &mut arg.passing,
-                        arg.value,
-                        arg_ty.ty,
-                        node_span,
-                    )?;
-                }
-                assert!(
-                    app.inst_data.dicts_req.is_empty(),
-                    "Instantiation data for trait method is not supported yet."
-                );
-                let resolved = app.input_tys.iter().all(Type::is_constant);
-                let (is_value_function, is_function_surface_only, argument_names) = {
-                    let trait_def = ctx.trait_solver.trait_def(app.trait_id);
-                    let definition = &trait_def.method(app.method_index).1;
-                    (
-                        is_value_trait_for_function_type(
-                            app.trait_id,
-                            trait_def,
-                            &app.input_tys,
-                            &[],
-                        ),
-                        is_function_surface_only_value_trait_application(
-                            app.trait_id,
-                            trait_def,
-                            &app.input_tys,
-                            &[],
-                        ),
-                        app.arguments_unnamed.filter_args(&definition.arg_names),
-                    )
-                };
-                if is_value_function {
-                    let function = FunctionId::Local(function_value_method(
-                        ctx.trait_solver,
-                        app.method_index,
-                        app.method_span,
-                        arena,
-                    )?);
-                    let function_path = Some(app.method_path.clone());
-                    let function_span = app.method_span;
-                    let ty = app.ty.clone();
-                    let arguments = mem::take(&mut app.arguments);
-                    kind = StaticApply(b(hir::StaticApplication {
-                        function,
-                        function_path,
-                        function_span,
-                        extra_arguments: Vec::new(),
-                        arguments,
-                        argument_names,
-                        ty,
-                        inst_data: hir::FnInstData::none(),
-                        returns_place: false,
-                    }));
-                } else if resolved {
-                    // Fully resolved, look up the trait implementation and replace the function directly.
-                    let function = ctx.trait_solver.solve_impl_method(
-                        app.trait_id,
-                        &app.input_tys,
-                        app.method_index,
-                        app.method_span,
-                        arena,
-                    )?;
-                    let function_path = Some(app.method_path.clone());
-                    let function_span = app.method_span;
-                    let ty = app.ty.clone();
-                    let arguments = mem::take(&mut app.arguments);
-                    kind = StaticApply(b(hir::StaticApplication {
-                        function,
-                        function_path,
-                        function_span,
-                        extra_arguments: Vec::new(),
-                        arguments,
-                        argument_names,
-                        ty,
-                        inst_data: hir::FnInstData::none(),
-                        returns_place: false,
-                    }));
-                } else if is_function_surface_only {
-                    let function_span = app.method_span;
-                    let (dict_ty, entry_index) = {
-                        let trait_def = ctx.trait_solver.trait_def(app.trait_id);
-                        let dict_ty = trait_def.get_dictionary_type_for_tys(&app.input_tys, &[]);
-                        let (entry_index, _) =
-                            dictionary_method_projection_data(trait_def, dict_ty, app.method_index);
-                        (dict_ty, entry_index)
-                    };
-                    let (dict_kind, _) = trait_dictionary_node_kind(
-                        arena,
-                        app.trait_id,
-                        &app.input_tys,
-                        &[],
-                        function_span,
-                        ctx,
-                    )?;
-                    let dict_id =
-                        arena.alloc(Node::new(dict_kind, dict_ty, no_effects(), function_span));
-                    let arguments = mem::take(&mut app.arguments);
-                    let ty = app.ty.clone();
-                    kind = CallDictionaryMethod(b(hir::CallDictionaryMethod {
-                        dictionary: dict_id,
-                        entry_index,
-                        arguments,
-                        ty,
-                    }));
-                } else {
-                    // Not fully resolved, use the dictionary to look up the trait method.
-                    let dict_index = find_trait_impl_dict_index(
-                        ctx.dicts,
-                        app.trait_id,
-                        &app.input_tys,
-                    )
-                    .expect(
-                        "Dictionary for trait impl not found, type inference should have failed",
-                    );
-                    let dict_ty = ctx.dicts.requirements[dict_index].to_dict_type(ctx.trait_solver);
-                    let function_span = app.method_span;
-                    // Load that dictionary from the correct local variable.
-                    let load_dict_id = arena.alloc(Node::new(
-                        NodeKind::LoadDictionary(hir::LoadDictionary {
-                            extra_parameter: ExtraParameterId::from_index(dict_index),
-                        }),
-                        dict_ty,
-                        no_effects(),
-                        function_span,
-                    ));
-                    let (entry_index, _) = dictionary_method_projection_data(
-                        ctx.trait_solver.trait_def(app.trait_id),
-                        dict_ty,
-                        app.method_index,
-                    );
-                    let arguments = mem::take(&mut app.arguments);
-                    let ty = app.ty.clone();
-                    kind = CallDictionaryMethod(b(hir::CallDictionaryMethod {
-                        dictionary: load_dict_id,
-                        entry_index,
-                        arguments,
-                        ty,
-                    }));
-                }
-            }
-            GetFunction(get_fn) => {
-                // Is it a function to instantiate?
-                if get_fn.inst_data.dicts_req.is_empty() {
-                    // No instantiation, check if it is a module function
-                    if let FunctionId::Local(fn_local_id) = get_fn.function {
-                        // Is the function part of the current module being compiled?
-                        if let Some(inst_data) = ctx
-                            .module_inst_data
-                            .and_then(|inst_data| inst_data.get(&fn_local_id))
-                        {
-                            // Yes, build the dictionary requirements for the function if it has non-empty inst data
-                            if !inst_data.is_empty() {
-                                let inst_data = &inst_data.requirements;
-                                // We have an instantiation, so we need a closure to pass dictionary requirements.
-                                let (captures, _) = extra_args_for_module_function(
-                                    arena,
-                                    inst_data,
-                                    node_span,
-                                    ctx.dicts,
-                                    ctx.trait_solver,
-                                );
-                                assert!(get_fn.inst_data.dicts_req.is_empty());
-                                let node_effects = arena[node_id].effects.clone();
-                                let original_kind =
-                                    mem::replace(&mut kind, NodeKind::Unimplemented);
-                                let function_id = arena.alloc(Node::new(
-                                    original_kind,
-                                    node_ty,
-                                    node_effects,
-                                    node_span,
-                                ));
-                                kind = BuildClosure(b(hir::BuildClosure {
-                                    function: function_id,
-                                    dictionary_captures: captures,
-                                    captures: Vec::new(),
-                                    captures_value_dictionary: None,
-                                }));
-                            }
-                        }
-                    }
-                } else {
-                    // We have an instantiation, so we need a closure to pass dictionary requirements.
-                    let (captures, _) =
-                        extra_args_from_inst_data(arena, &get_fn.inst_data, node_span, ctx)?;
-                    get_fn.inst_data.dicts_req.clear();
-                    let node_effects = arena[node_id].effects.clone();
-                    let original_kind = mem::replace(&mut kind, NodeKind::Unimplemented);
-                    let function_id =
-                        arena.alloc(Node::new(original_kind, node_ty, node_effects, node_span));
-                    kind = BuildClosure(b(hir::BuildClosure {
-                        function: function_id,
-                        dictionary_captures: captures,
-                        captures: Vec::new(),
-                        captures_value_dictionary: None,
-                    }));
-                }
-            }
-            Unresolved(UnresolvedKind::GetTraitMethod(get_method)) => {
-                assert!(
-                    get_method.inst_data.dicts_req.is_empty(),
-                    "Instantiation data for trait method is not supported yet."
-                );
-                let resolved = get_method.input_tys.iter().all(Type::is_constant);
-                let is_value_function = {
-                    let trait_def = ctx.trait_solver.trait_def(get_method.trait_id);
-                    is_value_trait_for_function_type(
-                        get_method.trait_id,
-                        trait_def,
-                        &get_method.input_tys,
-                        &get_method.output_tys,
-                    )
-                };
-                if is_value_function {
-                    let function = FunctionId::Local(function_value_method(
-                        ctx.trait_solver,
-                        get_method.method_index,
-                        get_method.method_span,
-                        arena,
-                    )?);
-                    kind = GetFunction(b(hir::GetFunction {
-                        function,
-                        function_path: get_method.method_path.clone(),
-                        function_span: get_method.method_span,
-                        inst_data: hir::FnInstData::none(),
-                    }));
-                } else if resolved {
-                    let function = ctx.trait_solver.solve_impl_method(
-                        get_method.trait_id,
-                        &get_method.input_tys,
-                        get_method.method_index,
-                        get_method.method_span,
-                        arena,
-                    )?;
-                    kind = GetFunction(b(hir::GetFunction {
-                        function,
-                        function_path: get_method.method_path.clone(),
-                        function_span: get_method.method_span,
-                        inst_data: hir::FnInstData::none(),
-                    }));
-                } else {
-                    let (dict_ty, entry_index) = {
-                        let trait_def = ctx.trait_solver.trait_def(get_method.trait_id);
-                        let dict_ty = trait_def.get_dictionary_type_for_tys(
-                            &get_method.input_tys,
-                            &get_method.output_tys,
-                        );
-                        let (entry_index, _) = dictionary_method_projection_data(
-                            trait_def,
-                            dict_ty,
-                            get_method.method_index,
-                        );
-                        (dict_ty, entry_index)
-                    };
-                    let (dict_kind, _) = trait_dictionary_node_kind(
-                        arena,
-                        get_method.trait_id,
-                        &get_method.input_tys,
-                        &get_method.output_tys,
-                        get_method.method_span,
-                        ctx,
-                    )?;
-                    let dict_id = arena.alloc(Node::new(
-                        dict_kind,
-                        dict_ty,
-                        no_effects(),
-                        get_method.method_span,
-                    ));
-                    kind = GetDictionaryMethod(hir::GetDictionaryMethod {
-                        dictionary: dict_id,
-                        entry_index,
-                    });
-                }
-            }
-            Unresolved(UnresolvedKind::GetTraitAssociatedConst(get_const)) => {
-                let resolved = get_const.input_tys.iter().all(Type::is_constant);
-                let is_compiler_value_application = {
-                    let trait_def = ctx.trait_solver.trait_def(get_const.trait_id);
-                    is_value_trait_for_function_type(
-                        get_const.trait_id,
-                        trait_def,
-                        &get_const.input_tys,
-                        &get_const.output_tys,
-                    ) || is_function_surface_only_value_trait_application(
-                        get_const.trait_id,
-                        trait_def,
-                        &get_const.input_tys,
-                        &get_const.output_tys,
-                    )
-                };
-                if is_compiler_value_application {
-                    let values = value_layout_associated_const_values(
-                        get_const.input_tys[0],
-                        node_span,
-                        ctx.trait_solver,
-                    )?;
-                    let value = values[usize::from(get_const.associated_const_index)];
-                    kind = hir::hir_syn::native(value);
-                } else if resolved {
-                    let value = ctx.trait_solver.solve_associated_const(
-                        get_const.trait_id,
-                        &get_const.input_tys,
-                        get_const.associated_const_index,
-                        get_const.associated_const_span,
-                        arena,
-                    )?;
-                    kind = hir::NodeKind::Immediate(value);
-                } else {
-                    let dict_index = find_trait_impl_dict_index(
-                        ctx.dicts,
-                        get_const.trait_id,
-                        &get_const.input_tys,
-                    )
-                    .expect(
-                        "Dictionary for trait impl not found, type inference should have failed",
-                    );
-                    let dict_ty = ctx.dicts.requirements[dict_index].to_dict_type(ctx.trait_solver);
-                    let load_dict_id = arena.alloc(Node::new(
-                        NodeKind::LoadDictionary(hir::LoadDictionary {
-                            extra_parameter: ExtraParameterId::from_index(dict_index),
-                        }),
-                        dict_ty,
-                        no_effects(),
-                        get_const.associated_const_span,
-                    ));
-                    kind = GetDictionaryAssociatedConst(hir::GetDictionaryAssociatedConst {
-                        dictionary: load_dict_id,
-                        entry_index: ctx
-                            .trait_solver
-                            .trait_def(get_const.trait_id)
-                            .dictionary_associated_const_index(get_const.associated_const_index),
-                    });
-                }
-            }
-            Unresolved(UnresolvedKind::GetTraitDictionary(get_dict)) => {
-                let (node_kind, _) = trait_dictionary_node_kind(
-                    arena,
-                    get_dict.trait_id,
-                    &get_dict.input_tys,
-                    &get_dict.output_tys,
-                    node_span,
-                    ctx,
-                )?;
-                kind = node_kind;
-            }
-            GetDictionary(_) | LoadDictionary(_) | LoadFieldIndex(_) => {
-                // nothing to do
-            }
-            StoreLocal(store) => {
-                elaborate_dictionaries(arena, store.value, ctx, locals, local_count)?;
-            }
-            TakeLocalValue(node) => {
-                if matches!(node.mode, TakeLocalValueMode::Unknown) {
-                    node.mode = if locals[node.id.as_index()].owns_storage() {
-                        TakeLocalValueMode::MoveOwned
-                    } else {
-                        TakeLocalValueMode::CloneBorrowed(resolve_local_clone(
-                            arena, ctx, node_ty, node_span,
-                        )?)
-                    };
-                }
-            }
-            LoadLocal(_) => {}
-            GetDictionaryMethod(node) => {
-                elaborate_dictionaries(arena, node.dictionary, ctx, locals, local_count)?;
-            }
-            GetDictionaryAssociatedConst(node) => {
-                elaborate_dictionaries(arena, node.dictionary, ctx, locals, local_count)?;
-            }
-            CallDictionaryMethod(call) => {
-                elaborate_dictionaries(arena, call.dictionary, ctx, locals, local_count)?;
-                for arg in &call.arguments {
-                    elaborate_dictionaries(arena, arg.value, ctx, locals, local_count)?;
-                }
-                for (arg, arg_ty) in call.arguments.iter_mut().zip(&call.ty.args) {
-                    resolve_arg_passing(
-                        arena,
-                        ctx,
-                        &mut arg.passing,
-                        arg.value,
-                        arg_ty.ty,
-                        node_span,
-                    )?;
-                }
-            }
-            Return(node_id) => {
-                elaborate_dictionaries(arena, *node_id, ctx, locals, local_count)?;
-            }
-            Block(block) => {
-                for &node_id in block.body.iter() {
-                    elaborate_dictionaries(arena, node_id, ctx, locals, local_count)?;
-                }
-            }
-            Assign(assignment) => {
-                elaborate_dictionaries(arena, assignment.place, ctx, locals, local_count)?;
-                elaborate_dictionaries(arena, assignment.value, ctx, locals, local_count)?;
-                let place_ty = arena[assignment.place].ty;
-                if let Some(drop) = &mut assignment.drop
-                    && matches!(drop, LocalDrop::Unknown)
-                {
-                    *drop = resolve_local_drop(arena, ctx, place_ty, node_span)?;
-                }
-            }
-            Tuple(nodes) => {
-                for &node_id in nodes.iter() {
-                    elaborate_dictionaries(arena, node_id, ctx, locals, local_count)?;
-                }
-            }
-            Project(project) => {
-                elaborate_dictionaries(arena, project.value, ctx, locals, local_count)?;
-            }
-            Record(nodes) => {
-                for &node_id in nodes.iter() {
-                    elaborate_dictionaries(arena, node_id, ctx, locals, local_count)?;
-                }
-            }
-            Unresolved(UnresolvedKind::FieldAccess(field_access)) => {
-                use TypeKind::*;
-                let child_id = field_access.value;
-                let field_name = field_access.field;
-                elaborate_dictionaries(arena, child_id, ctx, locals, local_count)?;
-                let child_ty = arena[child_id].ty;
-                let ty_data = child_ty.data();
-                let ty_data = if let Some(named) = ty_data.as_named() {
-                    let named = named.clone();
-                    drop(ty_data);
-                    ctx.trait_solver
-                        .type_def(named.def)
-                        .instantiated_shape(&named.params)
-                        .data()
-                } else {
-                    ty_data
-                };
-                match &*ty_data {
-                    Record(record) => {
-                        // Known type, get the index from the type and replace the HIR instruction.
-                        let index = record
-                            .iter()
-                            .position(|field| field.0 == field_name)
-                            .expect("Field not found in type, type inference should have failed");
-                        kind = Project(HirProject::new(
-                            child_id,
-                            ProjectionIndex::from_index(index),
-                        ));
-                    }
-                    Variable(var) => {
-                        // Variable type, it must be in the type scheme, use the dictionary to lookup local variable.
-                        let var = *var;
-                        drop(ty_data);
-                        let index = find_field_dict_index(ctx.dicts, var, &field_name).unwrap_or_else(
-                            || panic!("Dictionary for field \"{field_name}\" in type variable \"{var}\" not found, type inference should have failed"),
-                        );
-                        kind = ProjectAt(HirProjectAt::new(
-                            child_id,
-                            ExtraParameterId::from_index(index),
-                        ));
-                    }
-                    _ => {
-                        panic!("FieldAccess should have a record or variable type");
-                    }
-                }
-            }
-            ProjectAt(_) => {
-                panic!("ProjectAt should not be present at this stage");
-            }
-            Variant(variant) => {
-                elaborate_dictionaries(arena, variant.payload, ctx, locals, local_count)?;
-            }
-            ExtractTag(node_id) => {
-                elaborate_dictionaries(arena, *node_id, ctx, locals, local_count)?;
-            }
-            Array(nodes) => {
-                for &node_id in nodes.iter() {
-                    elaborate_dictionaries(arena, node_id, ctx, locals, local_count)?;
-                }
-            }
-            Case(case) => {
-                elaborate_dictionaries(arena, case.value, ctx, locals, local_count)?;
-                for &(_, alt_id) in case.alternatives.iter() {
-                    elaborate_dictionaries(arena, alt_id, ctx, locals, local_count)?;
-                }
-                elaborate_dictionaries(arena, case.default, ctx, locals, local_count)?;
-            }
-            Loop(body_id) => {
-                elaborate_dictionaries(arena, *body_id, ctx, locals, local_count)?;
-            }
-            CheckCallDepth | CheckFuel | SoftBreak | Unimplemented => {}
-        }
-
-        arena[node_id].kind = kind;
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1496,16 +1633,14 @@ mod tests {
         associated_const_index: TraitAssociatedConstIndex,
         input_tys: Vec<Type>,
     ) -> NodeKind {
-        NodeKind::Unresolved(UnresolvedKind::GetTraitAssociatedConst(b(
-            GetTraitAssociatedConst {
-                associated_const_name: trait_def.associated_const(associated_const_index).name,
-                associated_const_span: Location::new_synthesized(),
-                trait_id,
-                associated_const_index,
-                input_tys,
-                output_tys: vec![],
-            },
-        )))
+        NodeKind::GetTraitAssociatedConst(b(GetTraitAssociatedConst {
+            associated_const_name: trait_def.associated_const(associated_const_index).name,
+            associated_const_span: Location::new_synthesized(),
+            trait_id,
+            associated_const_index,
+            input_tys,
+            output_tys: vec![],
+        }))
     }
 
     #[test]
@@ -1561,9 +1696,11 @@ mod tests {
         };
         let mut ctx = DictElaborationCtx::new(&dicts, None, &mut solver);
 
-        elaborate_dictionaries(&mut arena, node, &mut ctx, &[], 0).unwrap();
+        let mut elaborated_arena = ENodeArena::default();
+        let elaborated =
+            elaborate_hir(&mut arena, node, &mut elaborated_arena, &mut ctx, &[]).unwrap();
 
-        let NodeKind::Immediate(immediate) = &arena[node].kind else {
+        let NodeKind::Immediate(immediate) = &elaborated_arena[elaborated.root].kind else {
             panic!("expected associated const to elaborate to an immediate");
         };
         assert_eq!(immediate.as_primitive_ty::<isize>(), Some(&8));
@@ -1614,13 +1751,17 @@ mod tests {
         };
         let mut ctx = DictElaborationCtx::new(&dicts, None, &mut solver);
 
-        elaborate_dictionaries(&mut arena, node, &mut ctx, &[], 3).unwrap();
+        let mut elaborated_arena = ENodeArena::default();
+        let elaborated =
+            elaborate_hir(&mut arena, node, &mut elaborated_arena, &mut ctx, &[]).unwrap();
 
-        let NodeKind::GetDictionaryAssociatedConst(get_const) = arena[node].kind else {
+        let NodeKind::GetDictionaryAssociatedConst(get_const) =
+            &elaborated_arena[elaborated.root].kind
+        else {
             panic!("expected associated const to elaborate to a dictionary associated const");
         };
         assert_eq!(usize::from(get_const.entry_index), 1);
-        let NodeKind::LoadDictionary(load) = &arena[get_const.dictionary].kind else {
+        let NodeKind::LoadDictionary(load) = &elaborated_arena[get_const.dictionary].kind else {
             panic!("expected dictionary associated const source to load a dictionary");
         };
         assert_eq!(load.extra_parameter.as_index(), 0);

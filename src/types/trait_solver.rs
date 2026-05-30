@@ -19,7 +19,7 @@ use crate::{
     compiler::error::InternalCompilationError,
     containers::b,
     hir::function::{
-        ArgPassing, Function, ResolvedValueArgPassing, ScriptFunction, SharedRefTempCleanup,
+        ArgPassing, Function, PendingScriptFunction, ResolvedValueArgPassing, SharedRefTempCleanup,
         ValueArgPassing, VoidFunction,
     },
     hir::hir_syn::{get_dictionary, load_local},
@@ -1318,13 +1318,20 @@ impl<'a> TraitSolver<'a> {
     /// Commit the newly created functions to the module.
     /// This must be called after trait solving is done,
     /// otherwise the created functions will be lost.
-    pub fn commit(mut self, functions: &mut Vec<ModuleFunction>, def_table: &mut DefTable) {
+    pub fn commit(
+        mut self,
+        functions: &mut Vec<ModuleFunction>,
+        def_table: &mut DefTable,
+    ) -> Vec<LocalFunctionId> {
+        let mut ids = Vec::with_capacity(self.fn_collector.new_elements.len());
         for (name, mut function) in self.fn_collector.new_elements.drain(..) {
             let id = LocalFunctionId::from_index(functions.len());
             def_table.insert(name, Def::public(DefKind::Function(id)));
             function.refresh_debug_info();
             functions.push(function);
+            ids.push(id);
         }
+        ids
     }
 
     /// Add a concrete trait implementation from the given code body, for single-function traits.
@@ -1342,8 +1349,10 @@ impl<'a> TraitSolver<'a> {
             self.others,
             trait_id,
         );
-        let arg_names = trait_def.methods[0].1.arg_names.clone();
-        let function: Function = b(ScriptFunction::new(code_entry, arg_names));
+        let function: Function = b(PendingScriptFunction::new(
+            code_entry,
+            trait_def.methods[0].1.arg_names.len(),
+        ));
         self.impls.add_concrete_raw(
             trait_id,
             trait_def,
@@ -1374,9 +1383,11 @@ impl<'a> TraitSolver<'a> {
             .iter()
             .zip(code_entries.into())
             .map(|((_, definition), (code_entry, locals))| {
-                let arg_names = definition.arg_names.clone();
                 (
-                    b(ScriptFunction::new(code_entry, arg_names)) as Function,
+                    b(PendingScriptFunction::new(
+                        code_entry,
+                        definition.arg_names.len(),
+                    )) as Function,
                     locals,
                 )
             })
@@ -1493,8 +1504,10 @@ impl<'a> TraitSolver<'a> {
             .zip(definitions)
             .zip(code_entries.into())
         {
-            let arg_names = definition.arg_names.clone();
-            let function = b(ScriptFunction::new(code_entry, arg_names)) as Function;
+            let function = b(PendingScriptFunction::new(
+                code_entry,
+                definition.arg_names.len(),
+            )) as Function;
             self.fn_collector.replace(
                 method_id,
                 ModuleFunction::new_without_debug_info(definition, function, None, locals),
@@ -1941,7 +1954,7 @@ impl<'a> TraitSolver<'a> {
                                 fn_span,
                             ));
                             let code: Function =
-                                b(ScriptFunction::new(apply_id, def.arg_names.clone()));
+                                b(PendingScriptFunction::new(apply_id, def.arg_names.len()));
                             let function =
                                 ModuleFunction::new_without_debug_info(def, code, None, locals);
                             let name = Ustr::from(&format!(

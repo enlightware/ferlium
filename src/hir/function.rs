@@ -30,7 +30,7 @@ use crate::{
     },
     format::{FormatWith, write_identifier},
     hir::value::{NativeDisplay, Value},
-    hir::{self, NodeArena, NodeId},
+    hir::{self, ENodeId, NodeArena, NodeId, UNodeId},
     module::{LocalDecl, ModuleEnv, ModuleFunction, ResolvedLocalDrop},
     types::effects::EffType,
     types::r#type::{FnArgType, FnType, Type, fmt_fn_type_with_arg_names},
@@ -251,10 +251,16 @@ pub trait Callable: DynClone {
     fn as_script(&self) -> Option<&ScriptFunction> {
         None
     }
+    fn as_pending_script(&self) -> Option<&PendingScriptFunction> {
+        None
+    }
     fn argument_passing(&self) -> Option<&'static [ResolvedArgPassing]> {
         None
     }
     fn as_script_mut(&mut self) -> Option<&mut ScriptFunction> {
+        None
+    }
+    fn as_pending_script_mut(&mut self) -> Option<&mut PendingScriptFunction> {
         None
     }
     fn into_script(self: Box<Self>) -> Option<ScriptFunction> {
@@ -458,8 +464,12 @@ impl Callable for VoidFunction {
 /// A function holding user-defined code.
 #[derive(Debug, Clone, new)]
 pub struct ScriptFunction {
-    pub entry_node_id: NodeId,
-    pub arg_names: Vec<Ustr>,
+    pub entry_node_id: ENodeId,
+    /// Number of ordinary runtime arguments expected by this body.
+    ///
+    /// This includes closure-environment slots prepended when calling a function value, but not
+    /// dictionary/evidence parameters, which are passed separately through the extra-parameter frame.
+    pub runtime_arg_count: usize,
     // pub monomorphised: HashMap<Vec<Type>, hir::Node>,
 }
 
@@ -473,16 +483,15 @@ impl Callable for ScriptFunction {
         let args = CallArgsStorageGuard::new(args);
         let arg_count = args.args.len();
         #[cfg(debug_assertions)]
-        if args.args.len() != self.arg_names.len() {
+        if args.args.len() != self.runtime_arg_count {
             eprintln!(
-                "BUG\ngot {} args: {:?}\nexpected {} from names: {:?}",
+                "BUG\ngot {} runtime args: {:?}\nexpected {}",
                 args.args.len(),
                 args.args,
-                self.arg_names.len(),
-                self.arg_names
+                self.runtime_arg_count,
             );
         }
-        assert_eq!(args.args.len(), self.arg_names.len());
+        assert_eq!(args.args.len(), self.runtime_arg_count);
         let arena = &ctx
             .compiler_session()
             .expect_fresh_module(ctx.module_id)
@@ -552,6 +561,42 @@ impl Callable for ScriptFunction {
             spacing,
             indent,
         )
+    }
+}
+
+/// A script function emitted before HIR elaboration has been finalized.
+#[derive(Debug, Clone, new)]
+pub struct PendingScriptFunction {
+    pub entry_node_id: UNodeId,
+    /// Runtime arity to preserve while the entry node still points into the unelaborated arena.
+    pub runtime_arg_count: usize,
+}
+
+impl Callable for PendingScriptFunction {
+    fn call(
+        &self,
+        _args: Vec<ValOrMut>,
+        _ctx: &mut CallCtx,
+        _locals: &[LocalDecl],
+    ) -> EvalControlFlowResult {
+        panic!("pending script function reached execution")
+    }
+    fn as_pending_script(&self) -> Option<&PendingScriptFunction> {
+        Some(self)
+    }
+    fn as_pending_script_mut(&mut self) -> Option<&mut PendingScriptFunction> {
+        Some(self)
+    }
+    fn format_ind(
+        &self,
+        f: &mut std::fmt::Formatter,
+        _locals: &[LocalDecl],
+        _env: &ModuleEnv<'_>,
+        spacing: usize,
+        indent: usize,
+    ) -> std::fmt::Result {
+        let indent_str = format!("{}{}", "  ".repeat(spacing), "⎸ ".repeat(indent));
+        write!(f, "{indent_str}PendingScriptFunction")
     }
 }
 

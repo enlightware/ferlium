@@ -19,10 +19,9 @@ use crate::{
     format::FormatWith,
     hir::{
         self, CallArgument, FieldAccess as HirFieldAccess, NodeArena, NodeId, NodeKind,
-        Project as HirProject, ProjectAt as HirProjectAt, StoreLocal, UnresolvedKind,
-        Variant as HirVariant,
+        Project as HirProject, ProjectAt as HirProjectAt, StoreLocal, Variant as HirVariant,
         function::{
-            ArgPassing, Function, FunctionDefinition, ResolvedArgPassing, ScriptFunction,
+            ArgPassing, Function, FunctionDefinition, PendingScriptFunction, ResolvedArgPassing,
             unresolved_arg_passing_for_args,
         },
         node_is_place_reference, place_resolution_may_create_temp,
@@ -229,16 +228,14 @@ impl TypeInference {
         let associated_const_tys =
             trait_def.instantiate_associated_const_tys_for_tys(&input_tys, &output_tys);
         let ty = associated_const_tys[associated_const_index.as_index()];
-        let node = NodeKind::Unresolved(UnresolvedKind::GetTraitAssociatedConst(b(
-            hir::GetTraitAssociatedConst {
-                trait_id,
-                associated_const_index,
-                associated_const_name: associated_const_name.0,
-                associated_const_span: associated_const_name.1,
-                input_tys,
-                output_tys,
-            },
-        )));
+        let node = NodeKind::GetTraitAssociatedConst(b(hir::GetTraitAssociatedConst {
+            trait_id,
+            associated_const_index,
+            associated_const_name: associated_const_name.0,
+            associated_const_span: associated_const_name.1,
+            input_tys,
+            output_tys,
+        }));
         Ok((node, ty, MutType::constant(), no_effects()))
     }
 
@@ -395,12 +392,8 @@ impl TypeInference {
             .collect();
 
         // 4. Build environment for typing the function's body.
+        let runtime_arg_count = capture_args.len() + explicit_locals.len();
         let fn_cur_locals = capture_args.into_iter().chain(explicit_locals).collect();
-        let all_arg_names = fn_all_locals
-            .iter()
-            .map(|local| local.name.0)
-            .collect::<Vec<_>>();
-
         // The lambda uses the same HIR arena as the outer function (module's arena).
         let mut inner_env = TypingEnv::new(
             &mut fn_all_locals,
@@ -438,7 +431,7 @@ impl TypeInference {
         let fn_ty = FnType::new(args_ty, ret_ty, effects);
         let fn_ty_wrapper = Type::function_type(fn_ty.clone());
         let arg_names: Vec<_> = args.iter().map(|(name, _)| *name).collect();
-        let code = ScriptFunction::new(code_id, all_arg_names);
+        let code = PendingScriptFunction::new(code_id, runtime_arg_count);
         let ty_scheme = TypeScheme::new_just_type(fn_ty);
         let body_span = env.ast_arena[body].span;
         let spans = ModuleFunctionSpans {
@@ -480,13 +473,11 @@ impl TypeInference {
                 span,
             ));
             let captures_value_dictionary = env.ir_arena.alloc(N::new(
-                K::Unresolved(UnresolvedKind::GetTraitDictionary(b(
-                    hir::GetTraitDictionary {
-                        trait_id: value_trait_id,
-                        input_tys: vec![capture_env_ty],
-                        output_tys: vec![],
-                    },
-                ))),
+                K::GetTraitDictionary(b(hir::GetTraitDictionary {
+                    trait_id: value_trait_id,
+                    input_tys: vec![capture_env_ty],
+                    output_tys: vec![],
+                })),
                 env.module_env
                     .trait_def(value_trait_id)
                     .get_dictionary_type_for_tys(&[capture_env_ty], &[]),
@@ -580,16 +571,15 @@ impl TypeInference {
                         output_tys.clone(),
                         expr_span,
                     ));
-                    let node =
-                        K::Unresolved(UnresolvedKind::GetTraitMethod(b(hir::GetTraitMethod {
-                            trait_id,
-                            method_index,
-                            method_path: path.clone(),
-                            method_span: expr_span,
-                            input_tys,
-                            output_tys,
-                            inst_data,
-                        })));
+                    let node = K::GetTraitMethod(b(hir::GetTraitMethod {
+                        trait_id,
+                        method_index,
+                        method_path: path.clone(),
+                        method_span: expr_span,
+                        input_tys,
+                        output_tys,
+                        inst_data,
+                    }));
                     (
                         node,
                         Type::function_type(inst_fn_ty),
@@ -1289,10 +1279,7 @@ impl TypeInference {
                         field_span,
                         element_ty,
                     ));
-                    let node = K::Unresolved(UnresolvedKind::FieldAccess(HirFieldAccess::new(
-                        record_node_id,
-                        field,
-                    )));
+                    let node = K::FieldAccess(HirFieldAccess::new(record_node_id, field));
                     (node, element_ty, record_mut, effects)
                 }
             }
@@ -1913,13 +1900,11 @@ impl TypeInference {
                     NodeKind::Project(HirProject::new(value, project.index))
                 })
             }
-            NodeKind::Unresolved(UnresolvedKind::FieldAccess(field_access)) => self
-                .prepare_projection_place(env, place, field_access.value, span, |value| {
-                    NodeKind::Unresolved(UnresolvedKind::FieldAccess(HirFieldAccess::new(
-                        value,
-                        field_access.field,
-                    )))
-                }),
+            NodeKind::FieldAccess(field_access) => {
+                self.prepare_projection_place(env, place, field_access.value, span, |value| {
+                    NodeKind::FieldAccess(HirFieldAccess::new(value, field_access.field))
+                })
+            }
             NodeKind::ProjectAt(project) => {
                 self.prepare_projection_place(env, place, project.value, span, |value| {
                     NodeKind::ProjectAt(HirProjectAt::new(value, project.index))
@@ -2128,7 +2113,7 @@ impl TypeInference {
         match &arena[node_id].kind {
             NodeKind::LoadLocal(_) => Vec::new(),
             NodeKind::Project(project) => self.place_evaluation_prefix_nodes(arena, project.value),
-            NodeKind::Unresolved(UnresolvedKind::FieldAccess(field_access)) => {
+            NodeKind::FieldAccess(field_access) => {
                 self.place_evaluation_prefix_nodes(arena, field_access.value)
             }
             NodeKind::ProjectAt(project) => {
@@ -2313,19 +2298,17 @@ impl TypeInference {
                         expr_span,
                         None,
                     );
-                    let call = K::Unresolved(UnresolvedKind::TraitMethodApply(b(
-                        hir::TraitMethodApplication {
-                            trait_id,
-                            method_index,
-                            method_path: path.clone(),
-                            method_span: path_span,
-                            arguments: prepared_arguments.arguments,
-                            arguments_unnamed,
-                            ty: inst_fn_ty,
-                            input_tys,
-                            inst_data,
-                        },
-                    )));
+                    let call = K::TraitMethodApply(b(hir::TraitMethodApplication {
+                        trait_id,
+                        method_index,
+                        method_path: path.clone(),
+                        method_span: path_span,
+                        arguments: prepared_arguments.arguments,
+                        arguments_unnamed,
+                        ty: inst_fn_ty,
+                        input_tys,
+                        inst_data,
+                    }));
                     let call = hir::Node::new(call, ret_ty, combined_effects.clone(), expr_span);
                     let node = self.wrap_call_with_temp_drops(
                         env,
@@ -3129,7 +3112,7 @@ fn place_evaluation_depends_on_place_result(arena: &NodeArena, node_id: NodeId) 
         Apply(app) => app.returns_place,
         StaticApply(app) => app.returns_place,
         Project(project) => place_evaluation_depends_on_place_result(arena, project.value),
-        Unresolved(UnresolvedKind::FieldAccess(field_access)) => {
+        FieldAccess(field_access) => {
             place_evaluation_depends_on_place_result(arena, field_access.value)
         }
         ProjectAt(project) => place_evaluation_depends_on_place_result(arena, project.value),
@@ -3150,9 +3133,7 @@ fn assignment_initializes_storage(
                 == LocalAssignmentMode::InitializeStorage
         }
         Project(project) => assignment_initializes_storage(arena, project.value, env),
-        Unresolved(UnresolvedKind::FieldAccess(field_access)) => {
-            assignment_initializes_storage(arena, field_access.value, env)
-        }
+        FieldAccess(field_access) => assignment_initializes_storage(arena, field_access.value, env),
         ProjectAt(project) => assignment_initializes_storage(arena, project.value, env),
         _ => false,
     }

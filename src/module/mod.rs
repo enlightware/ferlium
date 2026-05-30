@@ -43,7 +43,7 @@ use crate::{
     compiler::error::{ImportKind, ImportSite, InternalCompilationError},
     define_id_type,
     format::{FormatWith, write_identifier},
-    hir::{self, NodeArena, emit_ir::EmitTraitOutput, function::Function, value::LiteralValue},
+    hir::{self, ENodeArena, emit_ir::EmitTraitOutput, function::Function, value::LiteralValue},
     internal_compilation_error,
     module::id::{Id, NamedIndexed},
     types::{
@@ -244,7 +244,7 @@ pub struct Module {
     pub(crate) impls: TraitImpls,
 
     /// Arena holding all HIR nodes for all functions in this module.
-    pub ir_arena: NodeArena,
+    pub ir_arena: ENodeArena,
 }
 
 impl Module {
@@ -262,7 +262,7 @@ impl Module {
             type_defs: TypeDefSlots::default(),
             traits: Traits::new(),
             impls: TraitImpls::new(module_id),
-            ir_arena: NodeArena::default(),
+            ir_arena: ENodeArena::default(),
         }
     }
 
@@ -280,7 +280,7 @@ impl Module {
             type_defs: TypeDefSlots::default(),
             traits: Traits::new(),
             impls: TraitImpls::new(module_id),
-            ir_arena: NodeArena::default(),
+            ir_arena: ENodeArena::default(),
         }
     }
 

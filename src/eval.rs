@@ -37,7 +37,7 @@ use crate::{
 };
 use crate::{
     Modules,
-    hir::{self, CallArgument, NodeArena, NodeId, NodeKind},
+    hir::{self, CallArgument, ENodeArena, ENodeId, Elaborated, NodeKind},
 };
 
 use crate::module::ImportFunctionTarget;
@@ -1005,8 +1005,8 @@ macro_rules! eval_or_return {
 
 /// Evaluate this node and return the result.
 pub fn eval_node(
-    arena: &NodeArena,
-    node_id: NodeId,
+    arena: &ENodeArena,
+    node_id: ENodeId,
     module_id: ModuleId,
     locals: &[LocalDecl],
     compiler_session: &CompilerSession,
@@ -1017,8 +1017,8 @@ pub fn eval_node(
 
 /// Evaluate this node given the environment and return the result.
 pub fn eval_node_with_ctx(
-    arena: &NodeArena,
-    node_id: NodeId,
+    arena: &ENodeArena,
+    node_id: ENodeId,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
@@ -1037,11 +1037,11 @@ pub fn eval_node_with_ctx(
         }
         CloneValue(node) => eval_clone_value(arena, node, arena[node_id].span, ctx, locals),
         StaticApply(app) => eval_static_apply(arena, app, node.span, ctx, locals),
-        Unresolved(_) => {
-            panic!(
-                "unresolved node reached evaluation: trait-method calls, trait-item loads, and \
-                 field access must be lowered away by dictionary passing first"
-            );
+        TraitMethodApply(_)
+        | GetTraitMethod(_)
+        | GetTraitAssociatedConst(_)
+        | GetTraitDictionary(_) => {
+            panic!("unelaborated trait operation should not be executed");
         }
         GetFunction(get_fn) => {
             let (function, module_id) = ctx.get_function_local_id(get_fn.function);
@@ -1071,6 +1071,7 @@ pub fn eval_node_with_ctx(
         Assign(assignment) => eval_assign(arena, node_id, assignment, ctx, locals),
         Tuple(nodes) | Record(nodes) => eval_tuple(arena, nodes, ctx, locals),
         Project(node) => eval_project(arena, node_id, node.value, node.index, ctx, locals),
+        FieldAccess(_) => panic!("field access should not be executed after elaboration"),
         ProjectAt(node) => eval_project_at(arena, node_id, node.value, node.index, ctx, locals),
         Variant(node) => eval_variant(arena, node.tag, node.payload, ctx, locals),
         ExtractTag(node) => eval_extract_tag(arena, *node, ctx, locals),
@@ -1089,8 +1090,8 @@ pub fn eval_node_with_ctx(
 
 #[inline(never)]
 fn eval_build_closure(
-    arena: &NodeArena,
-    build_closure: &hir::BuildClosure,
+    arena: &ENodeArena,
+    build_closure: &hir::BuildClosure<Elaborated>,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
@@ -1123,8 +1124,8 @@ fn eval_build_closure(
 }
 
 fn eval_function_hidden_arg_node(
-    arena: &NodeArena,
-    node: NodeId,
+    arena: &ENodeArena,
+    node: ENodeId,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> Result<ControlFlow<FunctionHiddenArgValue>, RuntimeError> {
@@ -1148,8 +1149,8 @@ fn eval_function_hidden_arg_node(
 }
 
 fn eval_function_hidden_arg_nodes(
-    arena: &NodeArena,
-    nodes: &[NodeId],
+    arena: &ENodeArena,
+    nodes: &[ENodeId],
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> Result<ControlFlow<Vec<FunctionHiddenArgValue>>, RuntimeError> {
@@ -1163,8 +1164,8 @@ fn eval_function_hidden_arg_nodes(
 }
 
 fn eval_dictionary_metadata_node(
-    arena: &NodeArena,
-    node: NodeId,
+    arena: &ENodeArena,
+    node: ENodeId,
     ctx: &mut EvalCtx,
 ) -> Result<ControlFlow<TraitDictionaryId>, RuntimeError> {
     if let Some(dictionary) = try_dictionary_metadata_node(arena, node, ctx) {
@@ -1177,8 +1178,8 @@ fn eval_dictionary_metadata_node(
 }
 
 fn try_dictionary_metadata_node(
-    arena: &NodeArena,
-    node: NodeId,
+    arena: &ENodeArena,
+    node: ENodeId,
     ctx: &EvalCtx,
 ) -> Option<TraitDictionaryId> {
     match &arena[node].kind {
@@ -1259,8 +1260,8 @@ fn call_dictionary_method(
 }
 
 fn eval_get_dictionary_method(
-    arena: &NodeArena,
-    node: &hir::GetDictionaryMethod,
+    arena: &ENodeArena,
+    node: &hir::GetDictionaryMethod<Elaborated>,
     ctx: &mut EvalCtx,
 ) -> EvalControlFlowResult {
     let dictionary = eval_or_return!(eval_dictionary_metadata_node(arena, node.dictionary, ctx));
@@ -1273,8 +1274,8 @@ fn eval_get_dictionary_method(
 }
 
 fn eval_get_dictionary_associated_const(
-    arena: &NodeArena,
-    node: &hir::GetDictionaryAssociatedConst,
+    arena: &ENodeArena,
+    node: &hir::GetDictionaryAssociatedConst<Elaborated>,
     ctx: &mut EvalCtx,
 ) -> EvalControlFlowResult {
     let dictionary = eval_or_return!(eval_dictionary_metadata_node(arena, node.dictionary, ctx));
@@ -1287,8 +1288,8 @@ fn eval_get_dictionary_associated_const(
 }
 
 fn eval_call_dictionary_method(
-    arena: &NodeArena,
-    node: &hir::CallDictionaryMethod,
+    arena: &ENodeArena,
+    node: &hir::CallDictionaryMethod<Elaborated>,
     span: Location,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
@@ -1608,8 +1609,8 @@ fn local_place(ctx: &EvalCtx, locals: &[LocalDecl], id: LocalDeclId) -> Place {
 
 #[inline(never)]
 fn eval_clone_closure_env(
-    arena: &NodeArena,
-    node: &hir::CloneClosureEnv,
+    arena: &ENodeArena,
+    node: &hir::CloneClosureEnv<Elaborated>,
     span: Location,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
@@ -1668,8 +1669,8 @@ fn eval_clone_closure_env(
 
 #[inline(never)]
 fn eval_drop_closure_env(
-    arena: &NodeArena,
-    node: &hir::DropClosureEnv,
+    arena: &ENodeArena,
+    node: &hir::DropClosureEnv<Elaborated>,
     span: Location,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
@@ -1698,8 +1699,8 @@ fn eval_drop_closure_env(
 
 #[inline(never)]
 fn eval_clone_value(
-    arena: &NodeArena,
-    node: &hir::CloneValue,
+    arena: &ENodeArena,
+    node: &hir::CloneValue<Elaborated>,
     span: Location,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
@@ -1740,8 +1741,8 @@ fn eval_clone_value(
 
 #[inline(never)]
 fn eval_apply(
-    arena: &NodeArena,
-    app: &hir::Application,
+    arena: &ENodeArena,
+    app: &hir::Application<Elaborated>,
     span: Location,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
@@ -1775,8 +1776,8 @@ fn eval_apply(
 
 #[inline(never)]
 fn eval_static_apply(
-    arena: &NodeArena,
-    app: &hir::StaticApplication,
+    arena: &ENodeArena,
+    app: &hir::StaticApplication<Elaborated>,
     span: Location,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
@@ -1785,8 +1786,8 @@ fn eval_static_apply(
 }
 
 fn eval_place_result_static_apply(
-    arena: &NodeArena,
-    app: &hir::StaticApplication,
+    arena: &ENodeArena,
+    app: &hir::StaticApplication<Elaborated>,
     span: Location,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
@@ -1796,16 +1797,16 @@ fn eval_place_result_static_apply(
 
 /// Strategy for evaluating a static call's visible arguments into a [`PreparedCallArgs`].
 type EvalArgsFn = fn(
-    &NodeArena,
-    &[CallArgument],
+    &ENodeArena,
+    &[CallArgument<Elaborated>],
     &[FnArgType],
     &mut EvalCtx,
     &[LocalDecl],
 ) -> Result<ControlFlow<PreparedCallArgs>, RuntimeError>;
 
 fn eval_static_apply_with(
-    arena: &NodeArena,
-    app: &hir::StaticApplication,
+    arena: &ENodeArena,
+    app: &hir::StaticApplication<Elaborated>,
     span: Location,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
@@ -1928,8 +1929,8 @@ fn finish_call(
 }
 
 fn eval_place_result_args(
-    arena: &NodeArena,
-    args: &[CallArgument],
+    arena: &ENodeArena,
+    args: &[CallArgument<Elaborated>],
     args_ty: &[FnArgType],
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
@@ -1967,8 +1968,8 @@ fn control_flow_into_place_result(result: ControlFlow<Value>) -> ControlFlow<Pla
 
 #[inline(never)]
 fn eval_store_local(
-    arena: &NodeArena,
-    node: &hir::StoreLocal,
+    arena: &ENodeArena,
+    node: &hir::StoreLocal<Elaborated>,
     span: Location,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
@@ -2166,8 +2167,8 @@ fn try_copy_trivial_copy_value_from_place(
 
 #[inline(never)]
 fn eval_load_local(
-    arena: &NodeArena,
-    node_id: NodeId,
+    arena: &ENodeArena,
+    node_id: ENodeId,
     node: &hir::LoadLocal,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
@@ -2183,8 +2184,8 @@ fn eval_load_local(
 
 #[inline(never)]
 fn eval_return(
-    arena: &NodeArena,
-    node: NodeId,
+    arena: &ENodeArena,
+    node: ENodeId,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
@@ -2201,8 +2202,8 @@ fn eval_return(
 
 #[inline(never)]
 fn eval_block(
-    arena: &NodeArena,
-    block: &hir::Block,
+    arena: &ENodeArena,
+    block: &hir::Block<Elaborated>,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
@@ -2265,8 +2266,8 @@ fn drop_cleanup_locals(
 }
 
 fn eval_block_with_cleanup(
-    arena: &NodeArena,
-    nodes: &[NodeId],
+    arena: &ENodeArena,
+    nodes: &[ENodeId],
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
     cleanup_drops: &[LocalDeclId],
@@ -2312,9 +2313,9 @@ fn eval_block_with_cleanup(
 
 #[inline(never)]
 fn eval_assign(
-    arena: &NodeArena,
-    node_id: NodeId,
-    assignment: &hir::Assignment,
+    arena: &ENodeArena,
+    node_id: ENodeId,
+    assignment: &hir::Assignment<Elaborated>,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
@@ -2336,8 +2337,8 @@ fn eval_assign(
 
 #[inline(never)]
 fn eval_tuple(
-    arena: &NodeArena,
-    nodes: &[NodeId],
+    arena: &ENodeArena,
+    nodes: &[ENodeId],
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
@@ -2348,9 +2349,9 @@ fn eval_tuple(
 
 #[inline(never)]
 fn eval_project(
-    arena: &NodeArena,
-    node_id: NodeId,
-    data: NodeId,
+    arena: &ENodeArena,
+    node_id: ENodeId,
+    data: ENodeId,
     index: ProjectionIndex,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
@@ -2386,9 +2387,9 @@ fn eval_project(
 
 #[inline(never)]
 fn eval_project_at(
-    arena: &NodeArena,
-    node_id: NodeId,
-    data: NodeId,
+    arena: &ENodeArena,
+    node_id: ENodeId,
+    data: ENodeId,
     index: ExtraParameterId,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
@@ -2423,7 +2424,7 @@ fn eval_project_at(
     )
 }
 
-fn place_resolution_depends_on_place_result(arena: &NodeArena, node_id: NodeId) -> bool {
+fn place_resolution_depends_on_place_result(arena: &ENodeArena, node_id: ENodeId) -> bool {
     match &arena[node_id].kind {
         NodeKind::Apply(app) => app.returns_place,
         NodeKind::StaticApply(app) => app.returns_place,
@@ -2435,9 +2436,9 @@ fn place_resolution_depends_on_place_result(arena: &NodeArena, node_id: NodeId) 
 
 #[inline(never)]
 fn eval_variant(
-    arena: &NodeArena,
+    arena: &ENodeArena,
     tag: Ustr,
-    payload: NodeId,
+    payload: ENodeId,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
@@ -2447,8 +2448,8 @@ fn eval_variant(
 
 #[inline(never)]
 fn eval_extract_tag(
-    arena: &NodeArena,
-    node: NodeId,
+    arena: &ENodeArena,
+    node: ENodeId,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
@@ -2467,8 +2468,8 @@ fn eval_extract_tag(
 
 #[inline(never)]
 fn eval_array(
-    arena: &NodeArena,
-    nodes: &[NodeId],
+    arena: &ENodeArena,
+    nodes: &[ENodeId],
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
@@ -2477,8 +2478,8 @@ fn eval_array(
 }
 
 fn eval_case(
-    arena: &NodeArena,
-    case: &hir::Case,
+    arena: &ENodeArena,
+    case: &hir::Case<Elaborated>,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
@@ -2507,8 +2508,8 @@ fn eval_case(
 
 #[inline(never)]
 fn eval_loop(
-    arena: &NodeArena,
-    body: NodeId,
+    arena: &ENodeArena,
+    body: ENodeId,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
@@ -2523,8 +2524,8 @@ fn eval_loop(
 
 /// Evaluate a node that must produce a place in the environment.
 pub fn eval_node_as_place(
-    arena: &NodeArena,
-    node_id: NodeId,
+    arena: &ENodeArena,
+    node_id: ENodeId,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> Result<ControlFlow<Place>, RuntimeError> {
@@ -2560,8 +2561,8 @@ fn eval_sequence<I, T>(
 }
 
 fn eval_nodes(
-    arena: &NodeArena,
-    nodes: &[NodeId],
+    arena: &ENodeArena,
+    nodes: &[ENodeId],
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> Result<ControlFlow<Vec<Value>>, RuntimeError> {
@@ -2574,8 +2575,8 @@ fn eval_nodes(
 }
 
 fn eval_call_arg(
-    arena: &NodeArena,
-    arg: NodeId,
+    arena: &ENodeArena,
+    arg: ENodeId,
     ty: Type,
     passing: ArgPassing,
     ctx: &mut EvalCtx,
@@ -2629,8 +2630,8 @@ fn eval_call_arg(
 }
 
 fn eval_args(
-    arena: &NodeArena,
-    args: &[CallArgument],
+    arena: &ENodeArena,
+    args: &[CallArgument<Elaborated>],
     args_ty: &[FnArgType],
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
@@ -2671,8 +2672,8 @@ fn eval_args(
 }
 
 fn eval_owned_arg(
-    arena: &NodeArena,
-    arg: NodeId,
+    arena: &ENodeArena,
+    arg: ENodeId,
     ty: Type,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
@@ -2694,14 +2695,14 @@ fn eval_owned_arg(
     }
 }
 
-fn is_dictionary_metadata_node(arena: &NodeArena, node: NodeId) -> bool {
+fn is_dictionary_metadata_node(arena: &ENodeArena, node: ENodeId) -> bool {
     matches!(
         arena[node].kind,
         NodeKind::GetDictionary(_) | NodeKind::LoadDictionary(_)
     )
 }
 
-fn is_function_metadata_node(arena: &NodeArena, node: NodeId) -> bool {
+fn is_function_metadata_node(arena: &ENodeArena, node: ENodeId) -> bool {
     matches!(
         arena[node].kind,
         NodeKind::GetFunction(_) | NodeKind::GetDictionaryMethod(_)
@@ -2710,8 +2711,8 @@ fn is_function_metadata_node(arena: &NodeArena, node: NodeId) -> bool {
 
 /// Evaluate a node as a place when the HIR shape permits it.
 fn try_eval_node_as_place(
-    arena: &NodeArena,
-    node_id: NodeId,
+    arena: &ENodeArena,
+    node_id: ENodeId,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> Result<ControlFlow<Option<Place>>, RuntimeError> {
@@ -2774,8 +2775,8 @@ fn try_eval_node_as_place(
 }
 
 fn try_eval_nodes_as_place(
-    arena: &NodeArena,
-    nodes: &[NodeId],
+    arena: &ENodeArena,
+    nodes: &[ENodeId],
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> Result<ControlFlow<Option<Place>>, RuntimeError> {
@@ -2794,7 +2795,7 @@ fn try_eval_nodes_as_place(
     try_eval_node_as_place(arena, nodes[place_index], ctx, locals)
 }
 
-fn node_may_resolve_to_place(arena: &NodeArena, node_id: NodeId) -> bool {
+fn node_may_resolve_to_place(arena: &ENodeArena, node_id: ENodeId) -> bool {
     match &arena[node_id].kind {
         NodeKind::LoadLocal(_) => true,
         NodeKind::Project(node) => node_may_resolve_to_place(arena, node.value),
@@ -2816,7 +2817,7 @@ fn node_may_resolve_to_place(arena: &NodeArena, node_id: NodeId) -> bool {
     }
 }
 
-fn nodes_may_resolve_to_place(arena: &NodeArena, nodes: &[NodeId]) -> bool {
+fn nodes_may_resolve_to_place(arena: &ENodeArena, nodes: &[ENodeId]) -> bool {
     nodes
         .iter()
         .rposition(|node| !matches!(arena[*node].kind, NodeKind::StoreLocal(_)))
@@ -2834,7 +2835,7 @@ mod tests {
         CompilerSession, Location,
         eval::{ControlFlow, EvalCtx, eval_args, eval_nodes},
         hir::{
-            CallArgument, Node, NodeArena, NodeKind,
+            CallArgument, ENode, ENodeArena, NodeKind,
             function::{ArgPassing, ResolvedValueArgPassing, ValueArgPassing},
             value::{LiteralValue, NativeDisplay},
         },
@@ -2874,20 +2875,20 @@ mod tests {
     fn eval_nodes_discards_partial_values_on_return() {
         reset_eval_drop_tracked_count();
         let span = Location::new_synthesized();
-        let mut arena = NodeArena::default();
-        let tracked = arena.alloc(Node::new(
+        let mut arena = ENodeArena::default();
+        let tracked = arena.alloc(ENode::new(
             NodeKind::Immediate(LiteralValue::new_native(EvalDropTracked)),
             Type::primitive::<EvalDropTracked>(),
             EffType::empty(),
             span,
         ));
-        let unit = arena.alloc(Node::new(
+        let unit = arena.alloc(ENode::new(
             NodeKind::Immediate(LiteralValue::new_native(())),
             Type::unit(),
             EffType::empty(),
             span,
         ));
-        let return_unit = arena.alloc(Node::new(
+        let return_unit = arena.alloc(ENode::new(
             NodeKind::Return(unit),
             Type::never(),
             EffType::empty(),
@@ -2909,20 +2910,20 @@ mod tests {
     fn eval_args_discards_partial_values_on_return() {
         reset_eval_drop_tracked_count();
         let span = Location::new_synthesized();
-        let mut arena = NodeArena::default();
-        let tracked = arena.alloc(Node::new(
+        let mut arena = ENodeArena::default();
+        let tracked = arena.alloc(ENode::new(
             NodeKind::Immediate(LiteralValue::new_native(EvalDropTracked)),
             Type::primitive::<EvalDropTracked>(),
             EffType::empty(),
             span,
         ));
-        let unit = arena.alloc(Node::new(
+        let unit = arena.alloc(ENode::new(
             NodeKind::Immediate(LiteralValue::new_native(())),
             Type::unit(),
             EffType::empty(),
             span,
         ));
-        let return_unit = arena.alloc(Node::new(
+        let return_unit = arena.alloc(ENode::new(
             NodeKind::Return(unit),
             Type::never(),
             EffType::empty(),

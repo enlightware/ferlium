@@ -15,7 +15,11 @@ use ferlium::{
     },
     format::FormatWith,
     hir::{
-        function::{Function, FunctionDefinition, VoidFunction},
+        NodeKind,
+        function::{
+            ArgPassing, Function, FunctionDefinition, ResolvedValueArgPassing,
+            SharedRefTempCleanup, ValueArgPassing, VoidFunction,
+        },
         value::LiteralValue,
     },
     module::{
@@ -91,6 +95,66 @@ fn first_class_trait_methods_can_be_passed_as_arguments() {
             apply2(add, 20, 22)
         "#}),
         int(42)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_trait_method_function_argument_keeps_source_place_passing() {
+    let mut session = TestSession::new();
+    let module = session.compile_and_get_module(indoc! {r#"
+        trait Describe<Self> {
+            fn describe(value: Self) -> int;
+        }
+
+        struct Probe(int)
+
+        impl Describe for Probe {
+            fn describe(value: Probe) -> int {
+                value.0
+            }
+        }
+
+        fn apply<T>(f: (T) -> int, value: T) -> int
+        where
+            T: Value
+        {
+            f(value)
+        }
+
+        fn run<T>(value: T) -> int
+        where
+            T: Describe,
+            T: Value
+        {
+            apply(describe, value)
+        }
+
+        run(Probe(42))
+    "#});
+
+    assert!(
+        module.ir_arena.iter().any(|(_, node)| {
+            let NodeKind::StaticApply(app) = &node.kind else {
+                return false;
+            };
+            matches!(
+                app.arguments.first(),
+                Some(argument)
+                    if matches!(
+                        argument.passing,
+                        ArgPassing::Value(ValueArgPassing::Resolved(
+                            ResolvedValueArgPassing::SharedRef {
+                                temp_cleanup: SharedRefTempCleanup::None,
+                            },
+                        ))
+                    ) && matches!(
+                        module.ir_arena[argument.value].kind,
+                        NodeKind::GetDictionaryMethod(_)
+                    )
+            )
+        }),
+        "generic trait method values passed as arguments should use source-place argument passing",
     );
 }
 

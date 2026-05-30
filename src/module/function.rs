@@ -18,10 +18,11 @@ use crate::{
     format::FormatWith,
     hir::borrow_checker::check_borrows,
     hir::dictionary_passing::{
-        DictElaborationCtx, elaborate_dictionaries, elaborate_local_ownership_and_value_dispatches,
+        DictElaborationCtx, ElaboratedHir, elaborate_hir,
+        elaborate_local_ownership_and_value_dispatches,
     },
     hir::function::{Function, FunctionDefinition},
-    hir::{NodeArena, NodeId},
+    hir::{ENodeArena, ENodeId, NodeId, UNodeArena, UNodeId, function::ScriptFunction},
     module::{FunctionDebugInfo, ModuleEnv, ModuleId, TraitKey, format_impl_header_by_key, id::Id},
     types::mutability::MutType,
     types::r#trait::TraitMethodIndex,
@@ -371,8 +372,23 @@ impl ModuleFunction {
             .collect()
     }
 
-    pub fn get_code_entry(&self) -> Option<NodeId> {
+    pub fn get_code_entry(&self) -> Option<ENodeId> {
         self.code.as_script().map(|s| s.entry_node_id)
+    }
+
+    pub(crate) fn get_pending_code_entry(&self) -> Option<UNodeId> {
+        self.code.as_pending_script().map(|s| s.entry_node_id)
+    }
+
+    pub(crate) fn finalize_pending_code(&mut self, entry_node_id: ENodeId) {
+        let pending = self
+            .code
+            .as_pending_script()
+            .expect("finalizing a non-pending function");
+        self.code = Box::new(ScriptFunction::new(
+            entry_node_id,
+            pending.runtime_arg_count,
+        ));
     }
 
     /// Span of the function definition, or synthesized if not available.
@@ -400,17 +416,19 @@ impl ModuleFunction {
         self.definition.gen_locals_no_bounds(arg_locations, scope)
     }
 
-    pub fn check_borrows_and_elaborate_dictionaries(
+    pub fn check_borrows_and_elaborate_hir(
         &mut self,
-        arena: &mut NodeArena,
+        src_arena: &mut UNodeArena,
+        dst_arena: &mut ENodeArena,
         ctx: &mut DictElaborationCtx<'_, '_, '_>,
-    ) -> Result<(), InternalCompilationError> {
-        let root = self.get_code_entry().unwrap();
+    ) -> Result<ElaboratedHir, InternalCompilationError> {
+        let root = self.get_pending_code_entry().unwrap();
         LocalDecl::assign_sequential_slots(&mut self.locals);
-        let local_count = self.locals.len();
-        elaborate_local_ownership_and_value_dispatches(arena, &mut self.locals, ctx)?;
-        check_borrows(arena, root)?;
-        elaborate_dictionaries(arena, root, ctx, &self.locals, local_count)
+        elaborate_local_ownership_and_value_dispatches(src_arena, &mut self.locals, ctx)?;
+        check_borrows(src_arena, root)?;
+        let elaborated = elaborate_hir(src_arena, root, dst_arena, ctx, &self.locals)?;
+        self.finalize_pending_code(elaborated.root);
+        Ok(elaborated)
     }
 
     pub(crate) fn fmt_code(

@@ -15,7 +15,7 @@ use heck::ToSnakeCase;
 use crate::{
     CompilerSession, ModuleAndExpr, SourceId, ast,
     format::FormatWith,
-    hir::{Node, NodeArena, NodeId, NodeKind, UnresolvedKind},
+    hir::{ENode, ENodeArena, ENodeId, NodeKind},
     module::{LocalDecl, ModuleEnv, id::Id},
     types::{
         effects::{EffType, Effect, PrimitiveEffect},
@@ -290,8 +290,8 @@ fn display_effects_with_constraint_mode(
 }
 
 fn variable_type_annotations<Env>(
-    arena: &NodeArena,
-    node_id: NodeId,
+    arena: &ENodeArena,
+    node_id: ENodeId,
     result: &mut Vec<(usize, String)>,
     locals: &[LocalDecl],
     env: &Env,
@@ -302,8 +302,8 @@ fn variable_type_annotations<Env>(
 }
 
 fn node_variable_type_annotations<Env>(
-    node: &Node,
-    arena: &NodeArena,
+    node: &ENode,
+    arena: &ENodeArena,
     result: &mut Vec<(usize, String)>,
     locals: &[LocalDecl],
     env: &Env,
@@ -347,15 +347,19 @@ fn node_variable_type_annotations<Env>(
                 variable_type_annotations(arena, arg.value, result, locals, env);
             }
         }
-        Unresolved(
-            UnresolvedKind::TraitMethodApply(_)
-            | UnresolvedKind::GetTraitMethod(_)
-            | UnresolvedKind::GetTraitAssociatedConst(_)
-            | UnresolvedKind::GetTraitDictionary(_),
-        ) => {
-            // Lowered away by dictionary passing; absent from the final HIR.
+        TraitMethodApply(_) => {
+            // There is no TraitMethodApply left in the final HIR.
         }
         GetFunction(_) => {}
+        GetTraitMethod(_) => {
+            // There is no GetTraitMethod left in the final IR.
+        }
+        GetTraitAssociatedConst(_) => {
+            // There is no GetTraitAssociatedConst left in the final IR.
+        }
+        GetTraitDictionary(_) => {
+            // There is no GetTraitDictionary left in the final IR.
+        }
         GetDictionary(_) => {}
         LoadDictionary(_) | LoadFieldIndex(_) => {}
         GetDictionaryMethod(node) => {
@@ -411,9 +415,7 @@ fn node_variable_type_annotations<Env>(
         Record(nodes) => nodes
             .iter()
             .for_each(|&node| variable_type_annotations(arena, node, result, locals, env)),
-        Unresolved(UnresolvedKind::FieldAccess(field_access)) => {
-            variable_type_annotations(arena, field_access.value, result, locals, env)
-        }
+        FieldAccess(_) => {}
         ProjectAt(project) => variable_type_annotations(arena, project.value, result, locals, env),
         Variant(variant) => variable_type_annotations(arena, variant.payload, result, locals, env),
         ExtractTag(node) => variable_type_annotations(arena, *node, result, locals, env),
@@ -434,11 +436,11 @@ fn node_variable_type_annotations<Env>(
 
 // Essentially implement a similar logic as rust-analyzer's "should_hide_param_name_hint" fn
 fn should_hide_arg_name_hint(
-    arena: &NodeArena,
+    arena: &ENodeArena,
     function_path: &ast::Path,
     arity: usize,
     arg_name: &str,
-    argument: NodeId,
+    argument: ENodeId,
     locals: &[LocalDecl],
 ) -> bool {
     if function_path
@@ -505,8 +507,8 @@ fn is_arg_name_suffix_of_unary_fn_name(function_name: &str, arity: usize, arg_na
 }
 
 fn is_argument_similar_to_arg_name(
-    arena: &NodeArena,
-    argument: NodeId,
+    arena: &ENodeArena,
+    argument: ENodeId,
     arg_name: &str,
     locals: &[LocalDecl],
 ) -> bool {
@@ -549,8 +551,8 @@ fn is_obvious_param(arg_name: &str) -> bool {
 }
 
 fn is_adt_constructor_similar_to_arg_name(
-    arena: &NodeArena,
-    argument: NodeId,
+    arena: &ENodeArena,
+    argument: ENodeId,
     arg_name: &str,
 ) -> bool {
     use NodeKind::*;

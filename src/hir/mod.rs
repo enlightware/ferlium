@@ -41,17 +41,75 @@ use crate::{
     hir::value::LiteralValue,
     module::ModuleEnv,
     types::effects::EffType,
+    types::never::Never,
     types::r#type::{FnType, Type, TypeVar},
 };
 
-/// An index to a node in the HIR arena
-pub type NodeId = Idx<Node>;
+/// A phase of HIR compilation.
+pub trait HirPhase: Sized + std::fmt::Debug + Clone {
+    type FieldAccess: HirPayload<Self>;
+    type TraitMethodApplication: HirPayload<Self>;
+    type GetTraitMethod: HirPayload<Self>;
+    type GetTraitAssociatedConst: HirPayload<Self>;
+    type GetTraitDictionary: HirPayload<Self>;
+}
+
+/// HIR before dictionary passing and final ownership/call elaboration.
+#[derive(Debug, Clone, Default)]
+pub struct Unelaborated;
+
+/// HIR after dictionary passing and final ownership/call elaboration.
+#[derive(Debug, Clone, Default)]
+pub struct Elaborated;
+
+impl HirPhase for Unelaborated {
+    type FieldAccess = FieldAccess<Self>;
+    type TraitMethodApplication = B<TraitMethodApplication<Self>>;
+    type GetTraitMethod = B<GetTraitMethod>;
+    type GetTraitAssociatedConst = B<GetTraitAssociatedConst>;
+    type GetTraitDictionary = B<GetTraitDictionary>;
+}
+
+impl HirPhase for Elaborated {
+    type FieldAccess = Never;
+    type TraitMethodApplication = Never;
+    type GetTraitMethod = Never;
+    type GetTraitAssociatedConst = Never;
+    type GetTraitDictionary = Never;
+}
+
+/// An index to a node in the HIR arena.
+pub type NodeId<P = Unelaborated> = Idx<Node<P>>;
 
 /// A compact ordered list of HIR node IDs.
-pub type NodeIds = B<SVec2<NodeId>>;
+pub type NodeIds<P = Unelaborated> = B<SVec2<NodeId<P>>>;
 
-/// An arena of HIR nodes
-pub type NodeArena = Arena<Node>;
+/// An arena of HIR nodes.
+pub type NodeArena<P = Unelaborated> = Arena<Node<P>>;
+
+/// A HIR node before elaboration.
+pub type UNode = Node<Unelaborated>;
+
+/// A HIR node after elaboration.
+pub type ENode = Node<Elaborated>;
+
+/// A HIR node kind before elaboration.
+pub type UNodeKind = NodeKind<Unelaborated>;
+
+/// A HIR node kind after elaboration.
+pub type ENodeKind = NodeKind<Elaborated>;
+
+/// A HIR node id before elaboration.
+pub type UNodeId = NodeId<Unelaborated>;
+
+/// A HIR node id after elaboration.
+pub type ENodeId = NodeId<Elaborated>;
+
+/// A HIR arena before elaboration.
+pub type UNodeArena = NodeArena<Unelaborated>;
+
+/// A HIR arena after elaboration.
+pub type ENodeArena = NodeArena<Elaborated>;
 
 pub(crate) fn node_is_place_reference(arena: &NodeArena, node_id: NodeId) -> bool {
     use NodeKind::*;
@@ -61,10 +119,8 @@ pub(crate) fn node_is_place_reference(arena: &NodeArena, node_id: NodeId) -> boo
         // Borrow-like only while still dispatched through a dictionary: a non-constant input
         // type means the method is resolved at runtime; a fully-constant receiver lowers to a
         // freshly produced static function value, which is not a place.
-        Unresolved(UnresolvedKind::GetTraitMethod(method)) => {
-            !method.input_tys.iter().all(Type::is_constant)
-        }
-        Project(_) | ProjectAt(_) | Unresolved(UnresolvedKind::FieldAccess(_)) => true,
+        GetTraitMethod(method) => !method.input_tys.iter().all(Type::is_constant),
+        Project(_) | FieldAccess(_) | ProjectAt(_) => true,
         Apply(app) => app.returns_place,
         StaticApply(app) => app.returns_place,
         _ => false,
@@ -76,12 +132,12 @@ pub(crate) fn place_resolution_may_create_temp(arena: &NodeArena, node_id: NodeI
 
     match &arena[node_id].kind {
         LoadLocal(_) => false,
-        Unresolved(UnresolvedKind::GetTraitMethod(_)) => false,
+        GetTraitMethod(_) => false,
         Project(project) => {
             !node_is_place_reference(arena, project.value)
                 || place_resolution_may_create_temp(arena, project.value)
         }
-        Unresolved(UnresolvedKind::FieldAccess(field_access)) => {
+        FieldAccess(field_access) => {
             !node_is_place_reference(arena, field_access.value)
                 || place_resolution_may_create_temp(arena, field_access.value)
         }
@@ -225,40 +281,40 @@ pub(crate) type UnboundTyVars = IndexMap<TypeVar, UnboundTyCtxs>;
 
 /// Build a runtime closure value from a function and captured values.
 #[derive(Debug, Clone)]
-pub struct BuildClosure {
-    pub function: NodeId,
-    pub dictionary_captures: Vec<NodeId>,
-    pub captures: Vec<NodeId>,
-    pub captures_value_dictionary: Option<NodeId>,
+pub struct BuildClosure<P: HirPhase = Unelaborated> {
+    pub function: NodeId<P>,
+    pub dictionary_captures: Vec<NodeId<P>>,
+    pub captures: Vec<NodeId<P>>,
+    pub captures_value_dictionary: Option<NodeId<P>>,
 }
 
 /// Build a variant value with a tag and payload.
 #[derive(Debug, Clone, Copy, new)]
-pub struct Variant {
+pub struct Variant<P: HirPhase = Unelaborated> {
     pub tag: Ustr,
-    pub payload: NodeId,
+    pub payload: NodeId<P>,
 }
 
 // Value access payloads.
 
 /// Project a tuple-like value at a statically known index.
 #[derive(Debug, Clone, Copy, new)]
-pub struct Project {
-    pub value: NodeId,
+pub struct Project<P: HirPhase = Unelaborated> {
+    pub value: NodeId<P>,
     pub index: ProjectionIndex,
 }
 
 /// Access a record-like value at a statically known field.
 #[derive(Debug, Clone, Copy, new)]
-pub struct FieldAccess {
-    pub value: NodeId,
+pub struct FieldAccess<P: HirPhase = Unelaborated> {
+    pub value: NodeId<P>,
     pub field: Ustr,
 }
 
 /// Project a tuple-like value using a hidden field-index parameter.
 #[derive(Debug, Clone, Copy, new)]
-pub struct ProjectAt {
-    pub value: NodeId,
+pub struct ProjectAt<P: HirPhase = Unelaborated> {
+    pub value: NodeId<P>,
     pub index: ExtraParameterId,
 }
 
@@ -272,8 +328,8 @@ pub struct LoadLocal {
 
 /// Store a value into local storage.
 #[derive(Debug, Clone, Copy)]
-pub struct StoreLocal {
-    pub value: NodeId,
+pub struct StoreLocal<P: HirPhase = Unelaborated> {
+    pub value: NodeId<P>,
     pub id: LocalDeclId,
 }
 
@@ -286,9 +342,9 @@ pub struct TakeLocalValue {
 
 /// Assign a new value into an existing place.
 #[derive(Debug, Clone, Copy)]
-pub struct Assignment {
-    pub place: NodeId,
-    pub value: NodeId,
+pub struct Assignment<P: HirPhase = Unelaborated> {
+    pub place: NodeId<P>,
+    pub value: NodeId<P>,
     /// Dispatch used to drop the old destination value before overwriting it.
     /// `None` is used only when the destination storage is uninitialized.
     pub drop: Option<LocalDrop>,
@@ -296,8 +352,8 @@ pub struct Assignment {
 
 /// Materialize a value as an owned result, using the cheapest valid copy mode.
 #[derive(Debug, Clone, Copy)]
-pub struct CloneValue {
-    pub source: NodeId,
+pub struct CloneValue<P: HirPhase = Unelaborated> {
+    pub source: NodeId<P>,
     pub clone: LocalClone,
 }
 
@@ -307,37 +363,37 @@ pub struct CloneValue {
 /// Cleanup runs in reverse order on exits from the block, but an implementation
 /// must only drop obligations whose storage is live and initialized at that exit.
 #[derive(Debug, Clone)]
-pub struct Block {
-    pub body: NodeIds,
+pub struct Block<P: HirPhase = Unelaborated> {
+    pub body: NodeIds<P>,
     /// Locals in declaration order.
     pub cleanup: Vec<LocalDeclId>,
 }
 
 /// Clone the closure environment of `source` into already allocated `target` storage.
 #[derive(Debug, Clone, Copy)]
-pub struct CloneClosureEnv {
-    pub source: NodeId,
-    pub target: NodeId,
+pub struct CloneClosureEnv<P: HirPhase = Unelaborated> {
+    pub source: NodeId<P>,
+    pub target: NodeId<P>,
 }
 
 /// Drop the owned closure environment stored in `target`.
 #[derive(Debug, Clone, Copy)]
-pub struct DropClosureEnv {
-    pub target: NodeId,
+pub struct DropClosureEnv<P: HirPhase = Unelaborated> {
+    pub target: NodeId<P>,
 }
 
 // Calls and function value payloads.
 
 /// A visible call argument together with its resolved or deferred passing mode.
 #[derive(Debug, Clone, Copy)]
-pub struct CallArgument {
-    pub value: NodeId,
+pub struct CallArgument<P: HirPhase = Unelaborated> {
+    pub value: NodeId<P>,
     pub passing: ArgPassing,
 }
 
-impl CallArgument {
+impl<P: HirPhase> CallArgument<P> {
     pub(crate) fn from_values_and_passing(
-        values: Vec<NodeId>,
+        values: Vec<NodeId<P>>,
         passing: Vec<ArgPassing>,
     ) -> Vec<Self> {
         assert_eq!(values.len(), passing.len());
@@ -349,7 +405,7 @@ impl CallArgument {
     }
 
     pub(crate) fn from_value_slice_and_passing(
-        values: &[NodeId],
+        values: &[NodeId<P>],
         passing: Vec<ArgPassing>,
     ) -> Vec<Self> {
         assert_eq!(values.len(), passing.len());
@@ -373,20 +429,20 @@ pub struct GetFunction {
 
 /// Call a first-class function value.
 #[derive(Debug, Clone)]
-pub struct Application {
-    pub function: NodeId,
-    pub arguments: Vec<CallArgument>,
+pub struct Application<P: HirPhase = Unelaborated> {
+    pub function: NodeId<P>,
+    pub arguments: Vec<CallArgument<P>>,
     pub returns_place: bool,
 }
 
 /// Call a statically known function.
 #[derive(Debug, Clone)]
-pub struct StaticApplication {
+pub struct StaticApplication<P: HirPhase = Unelaborated> {
     pub function: FunctionId,
     pub function_path: Option<ast::Path>,
     pub function_span: Location,
-    pub extra_arguments: Vec<NodeId>,
-    pub arguments: Vec<CallArgument>,
+    pub extra_arguments: Vec<NodeId<P>>,
+    pub arguments: Vec<CallArgument<P>>,
     /// Optional source/debug names for visible arguments; same length as `arguments`.
     pub argument_names: Vec<Ustr>,
     pub ty: FnType,
@@ -396,18 +452,18 @@ pub struct StaticApplication {
 
 /// Call a trait method before dictionary passing resolves it.
 #[derive(Debug, Clone)]
-pub struct TraitMethodApplication {
+pub struct TraitMethodApplication<P: HirPhase = Unelaborated> {
     pub trait_id: TraitId,
     pub method_index: TraitMethodIndex,
     pub method_path: ast::Path,
     pub method_span: Location,
-    pub arguments: Vec<CallArgument>,
+    pub arguments: Vec<CallArgument<P>>,
     pub arguments_unnamed: UnnamedArg,
     pub ty: FnType,
     pub input_tys: Vec<Type>,
     pub inst_data: FnInstData,
 }
-impl TraitMethodApplication {
+impl<P: HirPhase> TraitMethodApplication<P> {
     pub fn argument_names<'a>(&self, env: &'a crate::module::ModuleEnv<'_>) -> &'a [Ustr] {
         &env.trait_def(self.trait_id)
             .method(self.method_index)
@@ -469,24 +525,24 @@ pub struct LoadFieldIndex {
 
 /// Look up a method function value from a trait dictionary.
 #[derive(Debug, Clone, Copy)]
-pub struct GetDictionaryMethod {
-    pub dictionary: NodeId,
+pub struct GetDictionaryMethod<P: HirPhase = Unelaborated> {
+    pub dictionary: NodeId<P>,
     pub entry_index: TraitDictionaryEntryIndex,
 }
 
 /// Look up an associated const value from a trait dictionary.
 #[derive(Debug, Clone, Copy)]
-pub struct GetDictionaryAssociatedConst {
-    pub dictionary: NodeId,
+pub struct GetDictionaryAssociatedConst<P: HirPhase = Unelaborated> {
+    pub dictionary: NodeId<P>,
     pub entry_index: TraitDictionaryEntryIndex,
 }
 
 /// Call a method entry through a trait dictionary.
 #[derive(Debug, Clone)]
-pub struct CallDictionaryMethod {
-    pub dictionary: NodeId,
+pub struct CallDictionaryMethod<P: HirPhase = Unelaborated> {
+    pub dictionary: NodeId<P>,
     pub entry_index: TraitDictionaryEntryIndex,
-    pub arguments: Vec<CallArgument>,
+    pub arguments: Vec<CallArgument<P>>,
     pub ty: FnType,
 }
 
@@ -494,31 +550,15 @@ pub struct CallDictionaryMethod {
 
 /// Branch on a literal value with a default alternative.
 #[derive(Debug, Clone)]
-pub struct Case {
-    pub value: NodeId,
-    pub alternatives: Vec<(LiteralValue, NodeId)>,
-    pub default: NodeId,
-}
-
-/// Node kinds that exist only before dictionary passing lowers them into resolved forms.
-/// They must not survive into evaluation.
-#[derive(Debug, Clone, EnumAsInner)]
-pub enum UnresolvedKind {
-    /// Access a record-like value at a field statically known by name.
-    FieldAccess(FieldAccess),
-    /// Call a trait method by trait id and method index.
-    TraitMethodApply(B<TraitMethodApplication>),
-    /// Load a trait method as a first-class value by trait id and method index.
-    GetTraitMethod(B<GetTraitMethod>),
-    /// Load a trait associated const by trait id and const index.
-    GetTraitAssociatedConst(B<GetTraitAssociatedConst>),
-    /// Load a trait dictionary by trait id and input/output types.
-    GetTraitDictionary(B<GetTraitDictionary>),
+pub struct Case<P: HirPhase = Unelaborated> {
+    pub value: NodeId<P>,
+    pub alternatives: Vec<(LiteralValue, NodeId<P>)>,
+    pub default: NodeId<P>,
 }
 
 /// The kind-specific part of the expression-based execution tree
 #[derive(Debug, Clone, EnumAsInner)]
-pub enum NodeKind {
+pub enum NodeKind<P: HirPhase = Unelaborated> {
     // Internal placeholders.
     /// Compiler-only uninitialized storage used while generated `Value::clone` code fills a target.
     Uninit,
@@ -529,53 +569,59 @@ pub enum NodeKind {
     /// Return a literal value.
     Immediate(LiteralValue),
     /// Build a tuple value.
-    Tuple(NodeIds),
+    Tuple(NodeIds<P>),
     /// Build a record value.
-    Record(NodeIds),
+    Record(NodeIds<P>),
     /// Build an array value.
-    Array(NodeIds),
+    Array(NodeIds<P>),
     /// Build a variant value with a tag and payload.
-    Variant(Variant),
+    Variant(Variant<P>),
     /// Build a runtime closure value from a function and captured values.
-    BuildClosure(B<BuildClosure>),
+    BuildClosure(B<BuildClosure<P>>),
 
     // Value access.
     /// Project a tuple-like value at a statically known index.
-    Project(Project),
+    Project(Project<P>),
+    /// Access a record-like value at a statically known field.
+    FieldAccess(P::FieldAccess),
     /// Project a tuple-like value using a hidden field-index parameter.
-    ProjectAt(ProjectAt),
+    ProjectAt(ProjectAt<P>),
     /// Extract the tag of a variant as an isize, by casting the pointer to the string.
-    ExtractTag(NodeId),
+    ExtractTag(NodeId<P>),
 
     // Local storage and ownership.
     /// Load a local as a place or borrowed value.
     LoadLocal(LoadLocal),
     /// Store a value into local storage.
-    StoreLocal(StoreLocal),
+    StoreLocal(StoreLocal<P>),
     /// Take a local value as an owned result.
     TakeLocalValue(TakeLocalValue),
     /// Assign a new value into an existing place.
-    Assign(Assignment),
+    Assign(Assignment<P>),
     /// Materialize a value as an owned result, using the cheapest valid copy mode.
-    CloneValue(CloneValue),
+    CloneValue(CloneValue<P>),
     /// Clone the closure environment of `source` into already allocated `target` storage.
-    CloneClosureEnv(CloneClosureEnv),
+    CloneClosureEnv(CloneClosureEnv<P>),
     /// Drop the owned closure environment stored in `target`.
-    DropClosureEnv(DropClosureEnv),
+    DropClosureEnv(DropClosureEnv<P>),
 
     // Calls and function values.
     /// Load a statically known function as a first-class value.
     GetFunction(B<GetFunction>),
     /// Call a first-class function value.
-    Apply(B<Application>),
+    Apply(B<Application<P>>),
     /// Call a statically known function.
-    StaticApply(B<StaticApplication>),
-
-    // Nodes valid only before dictionary passing lowers them away.
-    /// Trait-method calls, trait-item loads, and record field access awaiting dictionary passing.
-    Unresolved(UnresolvedKind),
+    StaticApply(B<StaticApplication<P>>),
+    /// Call a trait method before dictionary passing resolves it.
+    TraitMethodApply(P::TraitMethodApplication),
 
     // Trait and evidence operations.
+    /// Load a trait method as a first-class value before dictionary passing.
+    GetTraitMethod(P::GetTraitMethod),
+    /// Load a trait associated const before dictionary passing resolves it.
+    GetTraitAssociatedConst(P::GetTraitAssociatedConst),
+    /// Load a trait dictionary before dictionary passing resolves it.
+    GetTraitDictionary(P::GetTraitDictionary),
     /// Get a trait dictionary selected by static trait resolution.
     GetDictionary(GetDictionary),
     /// Load a trait dictionary from a function hidden argument.
@@ -583,11 +629,11 @@ pub enum NodeKind {
     /// Load a structural field index from a function hidden argument.
     LoadFieldIndex(LoadFieldIndex),
     /// Look up a method function value from a trait dictionary.
-    GetDictionaryMethod(GetDictionaryMethod),
+    GetDictionaryMethod(GetDictionaryMethod<P>),
     /// Look up an associated const value from a trait dictionary.
-    GetDictionaryAssociatedConst(GetDictionaryAssociatedConst),
+    GetDictionaryAssociatedConst(GetDictionaryAssociatedConst<P>),
     /// Call a method entry through a trait dictionary.
-    CallDictionaryMethod(B<CallDictionaryMethod>),
+    CallDictionaryMethod(B<CallDictionaryMethod<P>>),
 
     // Runtime checks.
     /// Check the current function call depth against the runtime limit.
@@ -597,13 +643,13 @@ pub enum NodeKind {
 
     // Control flow.
     /// Evaluate a sequence of nodes with optional cleanup on every exit path.
-    Block(B<Block>),
+    Block(B<Block<P>>),
     /// Return from the current function.
-    Return(NodeId),
+    Return(NodeId<P>),
     /// Branch on a literal value with a default alternative.
-    Case(B<Case>),
+    Case(B<Case<P>>),
     /// Loop forever until a return or soft break is reached.
-    Loop(NodeId),
+    Loop(NodeId<P>),
     /// Break out of the nearest loop without returning from the function.
     SoftBreak,
 }
@@ -613,9 +659,21 @@ impl NodeKind {
         use NodeKind::*;
         use smallvec::smallvec;
         match self {
-            Immediate(_) | Uninit | GetFunction(_) | GetDictionary(_) | LoadDictionary(_)
-            | LoadFieldIndex(_) | TakeLocalValue(_) | LoadLocal(_) | CheckCallDepth | CheckFuel
-            | SoftBreak | Unimplemented => smallvec![],
+            Immediate(_)
+            | Uninit
+            | GetFunction(_)
+            | GetTraitMethod(_)
+            | GetTraitAssociatedConst(_)
+            | GetTraitDictionary(_)
+            | GetDictionary(_)
+            | LoadDictionary(_)
+            | LoadFieldIndex(_)
+            | TakeLocalValue(_)
+            | LoadLocal(_)
+            | CheckCallDepth
+            | CheckFuel
+            | SoftBreak
+            | Unimplemented => smallvec![],
             BuildClosure(bc) => {
                 let mut v: SVec4<NodeId> = smallvec![bc.function];
                 v.extend_from_slice(&bc.dictionary_captures);
@@ -646,22 +704,15 @@ impl NodeKind {
                 v.extend(node.arguments.iter().map(|arg| arg.value));
                 v
             }
+            TraitMethodApply(app) => app.arguments.iter().map(|arg| arg.value).collect(),
             StoreLocal(store) => smallvec![store.value],
             Return(node) | ExtractTag(node) | Loop(node) => smallvec![*node],
             Block(block) => block.body.iter().copied().collect(),
             Tuple(nodes) | Record(nodes) | Array(nodes) => nodes.iter().copied().collect(),
             Assign(a) => smallvec![a.place, a.value],
             Project(node) => smallvec![node.value],
+            FieldAccess(node) => smallvec![node.value],
             ProjectAt(node) => smallvec![node.value],
-            Unresolved(unresolved) => match unresolved {
-                UnresolvedKind::GetTraitMethod(_)
-                | UnresolvedKind::GetTraitAssociatedConst(_)
-                | UnresolvedKind::GetTraitDictionary(_) => smallvec![],
-                UnresolvedKind::TraitMethodApply(app) => {
-                    app.arguments.iter().map(|arg| arg.value).collect()
-                }
-                UnresolvedKind::FieldAccess(node) => smallvec![node.value],
-            },
             Variant(node) => smallvec![node.payload],
             Case(case) => {
                 let mut v: SVec4<NodeId> = SVec4::with_capacity(2 + case.alternatives.len());
@@ -676,9 +727,9 @@ impl NodeKind {
 
 /// A node of the expression-based execution tree
 #[derive(Debug, Clone, new)]
-pub struct Node {
+pub struct Node<P: HirPhase = Unelaborated> {
     /// The actual content of this node
-    pub kind: NodeKind,
+    pub kind: NodeKind<P>,
     /// The type of the returned value when this node is evaluated
     pub ty: Type,
     /// The effects of evaluating this node
@@ -687,9 +738,168 @@ pub struct Node {
     pub span: Location,
 }
 
-pub fn format_ind(
-    arena: &NodeArena,
-    node_id: NodeId,
+pub trait HirPayload<P: HirPhase>: std::fmt::Debug + Clone {
+    #[allow(clippy::too_many_arguments)]
+    fn format_ind(
+        &self,
+        arena: &NodeArena<P>,
+        f: &mut std::fmt::Formatter,
+        locals: &[LocalDecl],
+        env: &ModuleEnv<'_>,
+        spacing: usize,
+        indent: usize,
+        indent_str: &str,
+    ) -> std::fmt::Result;
+
+    fn type_at(&self, arena: &NodeArena<P>, pos: usize) -> Option<Type> {
+        let _ = (arena, pos);
+        None
+    }
+}
+
+impl<P: HirPhase> HirPayload<P> for Never {
+    fn format_ind(
+        &self,
+        _arena: &NodeArena<P>,
+        _f: &mut std::fmt::Formatter,
+        _locals: &[LocalDecl],
+        _env: &ModuleEnv<'_>,
+        _spacing: usize,
+        _indent: usize,
+        _indent_str: &str,
+    ) -> std::fmt::Result {
+        match *self {}
+    }
+
+    fn type_at(&self, _arena: &NodeArena<P>, _pos: usize) -> Option<Type> {
+        match *self {}
+    }
+}
+
+impl<P: HirPhase> HirPayload<P> for FieldAccess<P> {
+    fn format_ind(
+        &self,
+        arena: &NodeArena<P>,
+        f: &mut std::fmt::Formatter,
+        locals: &[LocalDecl],
+        env: &ModuleEnv<'_>,
+        spacing: usize,
+        indent: usize,
+        indent_str: &str,
+    ) -> std::fmt::Result {
+        writeln!(f, "{indent_str}access")?;
+        format_ind(arena, self.value, f, locals, env, spacing, indent + 1)?;
+        writeln!(f, "{indent_str}at field {}", self.field)
+    }
+
+    fn type_at(&self, arena: &NodeArena<P>, pos: usize) -> Option<Type> {
+        type_at(arena, self.value, pos)
+    }
+}
+
+impl<P: HirPhase> HirPayload<P> for B<TraitMethodApplication<P>> {
+    fn format_ind(
+        &self,
+        arena: &NodeArena<P>,
+        f: &mut std::fmt::Formatter,
+        locals: &[LocalDecl],
+        env: &ModuleEnv<'_>,
+        spacing: usize,
+        indent: usize,
+        indent_str: &str,
+    ) -> std::fmt::Result {
+        let trait_def = env.trait_def(self.trait_id);
+        let method_data = trait_def.method(self.method_index);
+        let method_name = method_data.0;
+        let method_def = &method_data.1;
+        let trait_name = trait_def.name;
+        writeln!(
+            f,
+            "{indent_str}trait method apply {method_name} (from {trait_name})"
+        )?;
+        if self.arguments.is_empty() {
+            writeln!(f, "{indent_str}to ()")?;
+        } else {
+            writeln!(f, "{indent_str}to (")?;
+            for (name, arg) in method_def.arg_names.iter().zip(self.arguments.iter()) {
+                writeln!(f, "{indent_str}  {name}:")?;
+                format_ind(arena, arg.value, f, locals, env, spacing, indent + 1)?;
+            }
+            writeln!(f, "{indent_str})")?;
+        }
+        Ok(())
+    }
+
+    fn type_at(&self, arena: &NodeArena<P>, pos: usize) -> Option<Type> {
+        for arg in &self.arguments {
+            if let Some(ty) = type_at(arena, arg.value, pos) {
+                return Some(ty);
+            }
+        }
+        None
+    }
+}
+
+impl<P: HirPhase> HirPayload<P> for B<GetTraitMethod> {
+    fn format_ind(
+        &self,
+        _arena: &NodeArena<P>,
+        f: &mut std::fmt::Formatter,
+        _locals: &[LocalDecl],
+        env: &ModuleEnv<'_>,
+        _spacing: usize,
+        _indent: usize,
+        indent_str: &str,
+    ) -> std::fmt::Result {
+        let trait_def = env.trait_def(self.trait_id);
+        let method_name = trait_def.method(self.method_index).0;
+        let trait_name = trait_def.name;
+        writeln!(
+            f,
+            "{indent_str}get trait method {method_name} (from {trait_name})"
+        )
+    }
+}
+
+impl<P: HirPhase> HirPayload<P> for B<GetTraitAssociatedConst> {
+    fn format_ind(
+        &self,
+        _arena: &NodeArena<P>,
+        f: &mut std::fmt::Formatter,
+        _locals: &[LocalDecl],
+        env: &ModuleEnv<'_>,
+        _spacing: usize,
+        _indent: usize,
+        indent_str: &str,
+    ) -> std::fmt::Result {
+        let trait_name = env.trait_def(self.trait_id).name;
+        let const_name = self.associated_const_name;
+        writeln!(
+            f,
+            "{indent_str}get trait associated const {const_name} (from {trait_name})"
+        )
+    }
+}
+
+impl<P: HirPhase> HirPayload<P> for B<GetTraitDictionary> {
+    fn format_ind(
+        &self,
+        _arena: &NodeArena<P>,
+        f: &mut std::fmt::Formatter,
+        _locals: &[LocalDecl],
+        env: &ModuleEnv<'_>,
+        _spacing: usize,
+        _indent: usize,
+        indent_str: &str,
+    ) -> std::fmt::Result {
+        let trait_name = env.trait_def(self.trait_id).name;
+        writeln!(f, "{indent_str}get trait dictionary (from {trait_name})")
+    }
+}
+
+pub(crate) fn format_ind<P: HirPhase>(
+    arena: &NodeArena<P>,
+    node_id: NodeId<P>,
     f: &mut std::fmt::Formatter,
     locals: &[LocalDecl],
     env: &ModuleEnv<'_>,
@@ -699,7 +909,11 @@ pub fn format_ind(
     arena[node_id].format_ind(arena, f, locals, env, spacing, indent)
 }
 
-pub fn type_at(arena: &NodeArena, node_id: NodeId, pos: usize) -> Option<Type> {
+pub(crate) fn type_at<P: HirPhase>(
+    arena: &NodeArena<P>,
+    node_id: NodeId<P>,
+    pos: usize,
+) -> Option<Type> {
     arena[node_id].type_at(arena, pos)
 }
 
@@ -718,10 +932,10 @@ pub(crate) fn unbound_ty_vars(
     arena[node_id].unbound_ty_vars(arena, result, ignore)
 }
 
-impl Node {
-    pub fn format_ind(
+impl<P: HirPhase> Node<P> {
+    pub(crate) fn format_ind(
         &self,
-        arena: &NodeArena,
+        arena: &NodeArena<P>,
         f: &mut std::fmt::Formatter,
         locals: &[LocalDecl],
         env: &ModuleEnv<'_>,
@@ -829,50 +1043,20 @@ impl Node {
                     writeln!(f, "{indent_str})")?;
                 }
             }
-            Unresolved(UnresolvedKind::TraitMethodApply(app)) => {
-                let trait_def = env.trait_def(app.trait_id);
-                let method_data = trait_def.method(app.method_index);
-                let method_name = method_data.0;
-                let method_def = &method_data.1;
-                let trait_name = trait_def.name;
-                writeln!(
-                    f,
-                    "{indent_str}trait method apply {method_name} (from {trait_name})"
-                )?;
-                if app.arguments.is_empty() {
-                    writeln!(f, "{indent_str}to ()")?;
-                } else {
-                    writeln!(f, "{indent_str}to (")?;
-                    for (name, arg) in method_def.arg_names.iter().zip(app.arguments.iter()) {
-                        writeln!(f, "{indent_str}  {name}:")?;
-                        format_ind(arena, arg.value, f, locals, env, spacing, indent + 1)?;
-                    }
-                    writeln!(f, "{indent_str})")?;
-                }
+            TraitMethodApply(app) => {
+                app.format_ind(arena, f, locals, env, spacing, indent, &indent_str)?
             }
             GetFunction(get_fn) => {
                 writeln!(f, "{indent_str}get {}", get_fn.function.format_with(env))?;
             }
-            Unresolved(UnresolvedKind::GetTraitMethod(get_method)) => {
-                let trait_def = env.trait_def(get_method.trait_id);
-                let method_name = trait_def.method(get_method.method_index).0;
-                let trait_name = trait_def.name;
-                writeln!(
-                    f,
-                    "{indent_str}get trait method {method_name} (from {trait_name})"
-                )?;
+            GetTraitMethod(get_method) => {
+                get_method.format_ind(arena, f, locals, env, spacing, indent, &indent_str)?;
             }
-            Unresolved(UnresolvedKind::GetTraitAssociatedConst(get_const)) => {
-                let trait_name = env.trait_def(get_const.trait_id).name;
-                let const_name = get_const.associated_const_name;
-                writeln!(
-                    f,
-                    "{indent_str}get trait associated const {const_name} (from {trait_name})"
-                )?;
+            GetTraitAssociatedConst(get_const) => {
+                get_const.format_ind(arena, f, locals, env, spacing, indent, &indent_str)?;
             }
-            Unresolved(UnresolvedKind::GetTraitDictionary(get_dict)) => {
-                let trait_name = env.trait_def(get_dict.trait_id).name;
-                writeln!(f, "{indent_str}get trait dictionary (from {trait_name})")?;
+            GetTraitDictionary(get_dict) => {
+                get_dict.format_ind(arena, f, locals, env, spacing, indent, &indent_str)?;
             }
             GetDictionary(get_dict) => {
                 writeln!(
@@ -1051,10 +1235,8 @@ impl Node {
                 }
                 writeln!(f, "{indent_str}}}")?;
             }
-            Unresolved(UnresolvedKind::FieldAccess(node)) => {
-                writeln!(f, "{indent_str}access")?;
-                format_ind(arena, node.value, f, locals, env, spacing, indent + 1)?;
-                writeln!(f, "{indent_str}at field {}", node.field)?;
+            FieldAccess(node) => {
+                node.format_ind(arena, f, locals, env, spacing, indent, &indent_str)?;
             }
             ProjectAt(node) => {
                 writeln!(f, "{indent_str}access")?;
@@ -1116,7 +1298,7 @@ impl Node {
         writeln!(f)
     }
 
-    pub fn type_at(&self, arena: &NodeArena, pos: usize) -> Option<Type> {
+    pub(crate) fn type_at(&self, arena: &NodeArena<P>, pos: usize) -> Option<Type> {
         // Early exit if the position is outside the node's span.
         if pos < self.span.start_usize() || pos >= self.span.end_usize() {
             return None;
@@ -1167,22 +1349,22 @@ impl Node {
                     }
                 }
             }
-            Unresolved(UnresolvedKind::TraitMethodApply(app)) => {
-                for arg in &app.arguments {
-                    if let Some(ty) = type_at(arena, arg.value, pos) {
-                        return Some(ty);
-                    }
+            TraitMethodApply(app) => {
+                if let Some(ty) = app.type_at(arena, pos) {
+                    return Some(ty);
                 }
             }
             GetFunction(_) => {
                 // GetFunction nodes don't contain child expressions with types
             }
-            Unresolved(
-                UnresolvedKind::GetTraitMethod(_)
-                | UnresolvedKind::GetTraitAssociatedConst(_)
-                | UnresolvedKind::GetTraitDictionary(_),
-            ) => {
-                // Trait-item loads don't contain child expressions with types.
+            GetTraitMethod(_) => {
+                // GetTraitMethod nodes don't contain child expressions with types
+            }
+            GetTraitAssociatedConst(_) => {
+                // GetTraitAssociatedConst nodes don't contain child expressions with types
+            }
+            GetTraitDictionary(_) => {
+                // GetTraitDictionary nodes don't contain child expressions with types
             }
             GetDictionary(_) => {
                 // GetDictionary nodes don't contain child expressions with types
@@ -1254,8 +1436,8 @@ impl Node {
                     }
                 }
             }
-            Unresolved(UnresolvedKind::FieldAccess(node)) => {
-                if let Some(ty) = type_at(arena, node.value, pos) {
+            FieldAccess(node) => {
+                if let Some(ty) = node.type_at(arena, pos) {
                     return Some(ty);
                 }
             }
@@ -1305,7 +1487,9 @@ impl Node {
         // No children has this position, return our type.
         Some(self.ty)
     }
+}
 
+impl Node {
     pub(crate) fn unbound_ty_vars(
         &self,
         arena: &NodeArena,
@@ -1339,7 +1523,7 @@ impl Node {
                     unbound_ty_vars(arena, arg.value, result, ignore);
                 }
             }
-            Unresolved(UnresolvedKind::TraitMethodApply(app)) => {
+            TraitMethodApply(app) => {
                 self.unbound_ty_vars_in_ty(&app.ty, result, ignore);
                 for arg in &app.arguments {
                     unbound_ty_vars(arena, arg.value, result, ignore);
@@ -1348,8 +1532,8 @@ impl Node {
             GetFunction(_) => {
                 // no need to look into the value's type as it is already in this node's type
             }
-            Unresolved(UnresolvedKind::GetTraitMethod(_)) => {}
-            Unresolved(UnresolvedKind::GetTraitAssociatedConst(get_const)) => {
+            GetTraitMethod(_) => {}
+            GetTraitAssociatedConst(get_const) => {
                 for ty in &get_const.input_tys {
                     self.unbound_ty_vars_in_ty(ty, result, ignore);
                 }
@@ -1357,7 +1541,7 @@ impl Node {
                     self.unbound_ty_vars_in_ty(ty, result, ignore);
                 }
             }
-            Unresolved(UnresolvedKind::GetTraitDictionary(get_dict)) => {
+            GetTraitDictionary(get_dict) => {
                 for ty in &get_dict.input_tys {
                     self.unbound_ty_vars_in_ty(ty, result, ignore);
                 }
@@ -1401,9 +1585,7 @@ impl Node {
             Record(nodes) => nodes
                 .iter()
                 .for_each(|&node| unbound_ty_vars(arena, node, result, ignore)),
-            Unresolved(UnresolvedKind::FieldAccess(node)) => {
-                unbound_ty_vars(arena, node.value, result, ignore)
-            }
+            FieldAccess(node) => unbound_ty_vars(arena, node.value, result, ignore),
             ProjectAt(_) => {
                 panic!("ProjectAt should not be in the HIR at this point");
             }
@@ -1461,7 +1643,7 @@ pub(crate) fn instantiate_node_in_place<M: TypeMapper>(
             app.ty = app.ty.map(mapper);
             app.inst_data.instantiate_in_place(mapper);
         }
-        Unresolved(UnresolvedKind::TraitMethodApply(app)) => {
+        TraitMethodApply(app) => {
             app.ty = app.ty.map(mapper);
             instantiate_types_in_place(&mut app.input_tys, mapper);
             app.inst_data.instantiate_in_place(mapper);
@@ -1469,16 +1651,16 @@ pub(crate) fn instantiate_node_in_place<M: TypeMapper>(
         GetFunction(get_fn) => {
             get_fn.inst_data.instantiate_in_place(mapper);
         }
-        Unresolved(UnresolvedKind::GetTraitMethod(get_method)) => {
+        GetTraitMethod(get_method) => {
             instantiate_types_in_place(&mut get_method.input_tys, mapper);
             instantiate_types_in_place(&mut get_method.output_tys, mapper);
             get_method.inst_data.instantiate_in_place(mapper);
         }
-        Unresolved(UnresolvedKind::GetTraitAssociatedConst(get_const)) => {
+        GetTraitAssociatedConst(get_const) => {
             instantiate_types_in_place(&mut get_const.input_tys, mapper);
             instantiate_types_in_place(&mut get_const.output_tys, mapper);
         }
-        Unresolved(UnresolvedKind::GetTraitDictionary(get_dict)) => {
+        GetTraitDictionary(get_dict) => {
             instantiate_types_in_place(&mut get_dict.input_tys, mapper);
             instantiate_types_in_place(&mut get_dict.output_tys, mapper);
         }
@@ -1493,7 +1675,7 @@ pub(crate) fn instantiate_node_in_place<M: TypeMapper>(
 
 #[derive(new)]
 pub struct ExprDisplay<'a> {
-    pub body: NodeId,
+    pub body: ENodeId,
     pub locals: &'a [LocalDecl],
 }
 

@@ -11,7 +11,7 @@ use ustr::Ustr;
 use crate::{
     Location,
     compiler::error::InternalCompilationError,
-    hir::{CallArgument, Node, NodeArena, NodeId, NodeKind, UnresolvedKind},
+    hir::{CallArgument, Node, NodeArena, NodeId, NodeKind},
     internal_compilation_error,
     module::id::Id,
     types::r#type::FnArgType,
@@ -42,7 +42,7 @@ impl Path {
                     .push(PathPart::Projection(project.index.as_index()));
                 path
             }
-            Unresolved(UnresolvedKind::FieldAccess(field_access)) => {
+            FieldAccess(field_access) => {
                 let mut path = Self::from_node(arena, field_access.value);
                 path.parts.push(PathPart::FieldAccess(field_access.field));
                 path
@@ -208,18 +208,14 @@ impl Node {
                 }
                 check_arguments(&app.ty.args, &app.arguments, arena, app.function_span)?;
             }
-            Unresolved(UnresolvedKind::TraitMethodApply(app)) => {
+            TraitMethodApply(app) => {
                 for arg in &app.arguments {
                     check_borrows(arena, arg.value)?;
                 }
                 check_arguments(&app.ty.args, &app.arguments, arena, app.method_span)?;
             }
             GetFunction(_) => {}
-            Unresolved(
-                UnresolvedKind::GetTraitMethod(_)
-                | UnresolvedKind::GetTraitAssociatedConst(_)
-                | UnresolvedKind::GetTraitDictionary(_),
-            ) => {}
+            GetTraitMethod(_) | GetTraitAssociatedConst(_) | GetTraitDictionary(_) => {}
             GetDictionary(_) => {}
             LoadDictionary(_) | LoadFieldIndex(_) => {}
             GetDictionaryMethod(node) => check_borrows(arena, node.dictionary)?,
@@ -275,7 +271,7 @@ impl Node {
                     check_borrows(arena, node_id)?;
                 }
             }
-            Unresolved(UnresolvedKind::FieldAccess(field_access)) => {
+            FieldAccess(field_access) => {
                 check_borrows(arena, field_access.value)?;
             }
             Array(nodes) => {

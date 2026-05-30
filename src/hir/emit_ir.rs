@@ -13,7 +13,6 @@ use crate::{
     containers::B,
     hir::{
         borrow_checker::check_borrows,
-        dictionary_passing::elaborate_dictionaries,
         emit_associated_consts::{
             SourceAssociatedConstImpl, associated_const_values_for_source_impl,
         },
@@ -40,10 +39,11 @@ use crate::{
     desugar::desugar_expr_with_empty_ctx,
     format::FormatWith,
     hir::dictionary_passing::{
-        DictElaborationCtx, ExtraParameters, elaborate_local_ownership_and_value_dispatches,
+        DictElaborationCtx, ExtraParameters, elaborate_generated_functions, elaborate_hir,
+        elaborate_local_ownership_and_value_dispatches,
     },
-    hir::function::{FunctionDefinition, ScriptFunction},
-    hir::{self, NodeArena},
+    hir::function::{FunctionDefinition, PendingScriptFunction},
+    hir::{self, NodeArena, UNodeArena},
     internal_compilation_error,
     module::{
         ConcreteTraitImplKey, FunctionId, GENERATED_LAMBDA_PREFIX, LocalAssignmentMode, LocalDecl,
@@ -98,12 +98,19 @@ fn insert_inst_data_for_function_and_lambdas(
     id: LocalFunctionId,
     dicts: ExtraParameters,
 ) {
-    module_inst_data.insert(id, dicts.clone());
     if let Some(lambda_ids) = associated_lambdas.get(&id) {
         for lambda_id in lambda_ids {
             module_inst_data.insert(*lambda_id, dicts.clone());
         }
     }
+    module_inst_data.insert(id, dicts);
+}
+
+fn function_and_associated_lambdas<'a>(
+    id: &'a LocalFunctionId,
+    associated_lambdas: &'a FxHashMap<LocalFunctionId, Vec<LocalFunctionId>>,
+) -> impl Iterator<Item = LocalFunctionId> + 'a {
+    std::iter::once(*id).chain(associated_lambdas.get(id).into_iter().flatten().copied())
 }
 
 /// Data for a pre-registered stub implementation for `impl Trait for ConcreteType`.
@@ -118,7 +125,7 @@ fn instantiate_function_descr_in_place<M: TypeMapper>(
     descr: &mut ModuleFunction,
     mapper: &mut M,
 ) {
-    let root = descr.get_code_entry().unwrap();
+    let root = descr.get_pending_code_entry().unwrap();
     hir::instantiate_node_in_place(ir_arena, root, mapper);
     for local in &mut descr.locals {
         local.ty = local.ty.map(mapper);
@@ -131,10 +138,8 @@ fn refresh_debug_info_for_functions(
     local_fns: &[LocalFunctionId],
 ) {
     for id in local_fns {
-        let function_and_lambdas =
-            std::iter::once(id).chain(associated_lambdas.get(id).into_iter().flatten());
-        for id in function_and_lambdas {
-            output.functions[id.as_index()].refresh_debug_info();
+        for function_id in function_and_associated_lambdas(id, associated_lambdas) {
+            output.functions[function_id.as_index()].refresh_debug_info();
         }
     }
 }
@@ -165,9 +170,7 @@ fn default_output_effects_in_functions(
 
         let subst = (FxHashMap::default(), effect_subst);
         let mut mapper = BitmapInstantiationMapper::new(&subst);
-        let function_and_lambdas =
-            std::iter::once(id).chain(associated_lambdas.get(&id).into_iter().flatten().copied());
-        for function_id in function_and_lambdas {
+        for function_id in function_and_associated_lambdas(&id, associated_lambdas) {
             let descr = &mut output.functions[function_id.as_index()];
             descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.map(&mut mapper);
             instantiate_function_descr_in_place(ir_arena, descr, &mut mapper);
@@ -313,9 +316,8 @@ pub fn emit_module(
         }
     }
 
-    // Take the module's HIR node arena out for compilation so it can be passed separately
-    // from the module borrow, then put it back at the end.
-    let mut ir_arena = std::mem::take(&mut output.ir_arena);
+    // Emit into a temporary pre-elaboration arena. The module stores only finalized HIR.
+    let mut ir_arena = UNodeArena::default();
 
     emit_auto_value_impls(&mut output, &mut ir_arena, others, &source.impls)?;
 
@@ -504,8 +506,6 @@ pub fn emit_module(
         log::debug!("Emitted {impl_type} {header}");
     }
 
-    // Restore the HIR arena.
-    output.ir_arena = ir_arena;
     Ok(output)
 }
 
@@ -670,7 +670,7 @@ fn default_unconstrained_recursive_returns_to_never<'func, I>(
         }
 
         let descr = &output.functions[id.as_index()];
-        let Some(root) = descr.get_code_entry() else {
+        let Some(root) = descr.get_pending_code_entry() else {
             continue;
         };
         if !node_references_any_function(ir_arena, root, inputs.recursive_function_ids) {
@@ -704,10 +704,8 @@ fn default_unconstrained_recursive_returns_to_never<'func, I>(
             FxHashMap::default(),
         );
         let mut mapper = BitmapInstantiationMapper::new(&subst);
-        let function_and_lambdas =
-            std::iter::once(id).chain(inputs.associated_lambdas.get(id).into_iter().flatten());
-        for id in function_and_lambdas {
-            let descr = &mut output.functions[id.as_index()];
+        for function_id in function_and_associated_lambdas(id, inputs.associated_lambdas) {
+            let descr = &mut output.functions[function_id.as_index()];
             descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.map(&mut mapper);
             instantiate_function_descr_in_place(ir_arena, descr, &mut mapper);
         }
@@ -1039,29 +1037,9 @@ where
         function_attrs.push(attrs);
     }
 
-    // Associated lambdas and macro to call and id and its associated lambdas
+    // Associated lambdas for functions emitted while lowering closure expressions.
     let mut associated_lambdas: FxHashMap<LocalFunctionId, Vec<LocalFunctionId>> =
         FxHashMap::default();
-    macro_rules! apply_to_function_and_associated_lambdas {
-        ($id:expr, $f:expr) => {
-            $f($id);
-            associated_lambdas
-                .get($id)
-                .into_iter()
-                .flatten()
-                .for_each(|lambda_id| $f(lambda_id));
-        };
-    }
-    macro_rules! try_apply_to_function_and_associated_lambdas {
-        ($id:expr, $f:expr) => {
-            $f($id)?;
-            associated_lambdas
-                .get($id)
-                .into_iter()
-                .flatten()
-                .try_for_each(|lambda_id| $f(lambda_id))?;
-        };
-    }
 
     let recursive_function_ids = ast_functions()
         .zip(local_fns.iter())
@@ -1138,9 +1116,9 @@ where
             &ir_arena[fn_node_id].effects,
             &descr.definition.ty_scheme.ty.effects,
         );
-        descr.code = b(ScriptFunction::new(
+        descr.code = b(PendingScriptFunction::new(
             fn_node_id,
-            descr.definition.arg_names.clone(),
+            descr.definition.arg_names.len(),
         ));
         descr.locals = locals;
         output.import_fn_slots.extend(new_import_slots);
@@ -1152,7 +1130,8 @@ where
     // Third pass, perform the unification.
     let mut solver = trait_solver_from_module!(output, others);
     let mut ty_inf = ty_inf.unify(&mut solver, ir_arena)?;
-    solver.commit(&mut output.functions, &mut output.def_table);
+    let generated = solver.commit(&mut output.functions, &mut output.def_table);
+    elaborate_generated_functions(output, ir_arena, others, generated)?;
     let module_env = ModuleEnv::new(output, others);
     ty_inf.log_debug_substitution_tables(module_env);
     ty_inf.log_debug_constraints(module_env);
@@ -1161,26 +1140,26 @@ where
     let value_trait_id =
         module_env.expect_std_trait_id(crate::std::core_traits_names::VALUE_TRAIT_NAME);
     for id in local_fns.iter() {
-        apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| {
-            let descr = &mut output.functions[id.as_index()];
-            let root = descr.get_code_entry().unwrap();
+        for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
+            let descr = &mut output.functions[function_id.as_index()];
+            let root = descr.get_pending_code_entry().unwrap();
             ty_inf.resolve_local_storage_and_activate_value_constraints(
                 ir_arena,
                 root,
                 &mut descr.locals,
                 value_trait_id,
             );
-        });
+        }
     }
 
     // Helpers to de-duplicate later phases between trait and normal function emission.
     let substitute_and_canonicalize_functions =
         |output: &mut Module, ir_arena: &mut _, ty_inf: &mut UnifiedTypeInference| {
             for id in local_fns.iter() {
-                apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| {
-                    let descr = &mut output.functions[id.as_index()];
+                for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
+                    let descr = &mut output.functions[function_id.as_index()];
                     ty_inf.substitute_in_module_function(descr, ir_arena);
-                });
+                }
 
                 // Union duplicated effects from function arguments, and build a substitution
                 // for the fully unioned effects, to remove duplications.
@@ -1201,13 +1180,13 @@ where
                 if !effect_subst.is_empty() {
                     let subst = (FxHashMap::default(), effect_subst);
                     let mut mapper = BitmapInstantiationMapper::new(&subst);
-                    apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| {
-                        let descr = &mut output.functions[id.as_index()];
+                    for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
+                        let descr = &mut output.functions[function_id.as_index()];
                         descr.definition.ty_scheme.ty =
                             descr.definition.ty_scheme.ty.map(&mut mapper);
-                        let root = descr.get_code_entry().unwrap();
+                        let root = descr.get_pending_code_entry().unwrap();
                         hir::instantiate_node_in_place(ir_arena, root, &mut mapper);
-                    });
+                    }
                 }
             }
         };
@@ -1215,14 +1194,12 @@ where
         |output: &mut Module, ir_arena: &mut _, dicts, module_inst_data, id| -> Result<_, _> {
             let mut solver = trait_solver_from_module!(output, &others);
             let mut ctx = DictElaborationCtx::new(dicts, Some(module_inst_data), &mut solver);
-            try_apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| -> Result<
-                (),
-                InternalCompilationError,
-            > {
-                let descr = &mut output.functions[id.as_index()];
-                descr.check_borrows_and_elaborate_dictionaries(ir_arena, &mut ctx)
-            });
-            solver.commit(&mut output.functions, &mut output.def_table);
+            for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
+                let descr = &mut output.functions[function_id.as_index()];
+                descr.check_borrows_and_elaborate_hir(ir_arena, &mut output.ir_arena, &mut ctx)?;
+            }
+            let generated = solver.commit(&mut output.functions, &mut output.def_table);
+            elaborate_generated_functions(output, ir_arena, others, generated)?;
             Ok(())
         };
     // Fourth pass: default orphan constraints and substitute types.
@@ -1242,7 +1219,8 @@ where
             let scope = DefaultingScope::from_constraints(&orphan_constraints);
             let mut solver = trait_solver_from_module!(output, others);
             ty_inf.resolve_defaults_to_fixed_point(&scope, &mut solver, ir_arena)?;
-            solver.commit(&mut output.functions, &mut output.def_table);
+            let generated = solver.commit(&mut output.functions, &mut output.def_table);
+            elaborate_generated_functions(output, ir_arena, others, generated)?;
 
             // Check for remaining orphans.
             ty_inf.normalize_remaining_constraints();
@@ -1334,7 +1312,7 @@ where
         let mut unbound_subst = FxHashMap::default();
         for id in local_fns.iter() {
             let descr = &mut output.functions[id.as_index()];
-            let root = descr.get_code_entry().unwrap();
+            let root = descr.get_pending_code_entry().unwrap();
             let unbound = hir::all_unbound_ty_vars(ir_arena, root);
             let uninstantiated_unbound = check_unbounds(unbound, &quantifiers)?;
             unbound_subst.extend(
@@ -1358,13 +1336,10 @@ where
                     .transpose()
             })
             .collect::<Result<_, _>>()?;
-        solver.commit(&mut output.functions, &mut output.def_table);
+        let generated = solver.commit(&mut output.functions, &mut output.def_table);
+        elaborate_generated_functions(output, ir_arena, others, generated)?;
         // Make sure substitution is not due to constraint processing.
         assert_eq!(subst_size, subst.0.len());
-        let dicts = extra_parameters_from_constraints(
-            &trait_output.constraints,
-            ModuleEnv::new(output, others),
-        );
 
         // Apply unbound substitution to code and types.
         if !subst.0.is_empty() {
@@ -1372,15 +1347,45 @@ where
             instantiate_types_in_place(&mut trait_output.input_tys, &mut mapper);
             instantiate_types_in_place(&mut trait_output.output_tys, &mut mapper);
             for id in local_fns.iter() {
-                apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| {
-                    let descr = &mut output.functions[id.as_index()];
+                for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
+                    let descr = &mut output.functions[function_id.as_index()];
                     descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.map(&mut mapper);
                     instantiate_function_descr_in_place(ir_arena, descr, &mut mapper);
-                });
+                }
             }
         }
 
-        // Fifth pass, run the borrow checker and elaborate dictionaries.
+        // Fifth pass, normalize the input types, substitute the types in the functions and input/output types.
+        let subst = (normalize_types(&mut quantifiers), FxHashMap::default());
+        let mut mapper = BitmapInstantiationMapper::new(&subst);
+        instantiate_types_in_place(&mut trait_output.input_tys, &mut mapper);
+        instantiate_types_in_place(&mut trait_output.output_tys, &mut mapper);
+        instantiate_types_in_place(&mut trait_output.constraints, &mut mapper);
+        for (method_index, id) in local_fns.iter().enumerate() {
+            let method_index = TraitMethodIndex::from_index(method_index);
+            for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
+                let descr = &mut output.functions[function_id.as_index()];
+                descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.map(&mut mapper);
+                descr.definition.ty_scheme.ty_quantifiers = quantifiers.clone();
+                let eff_quantifiers = descr.definition.ty_scheme.ty.input_effect_vars();
+                assert!(eff_quantifiers.is_empty());
+                descr.definition.ty_scheme.eff_quantifiers = eff_quantifiers;
+                descr.definition.ty_scheme.constraints = trait_output.constraints.clone();
+                instantiate_function_descr_in_place(ir_arena, descr, &mut mapper);
+            }
+
+            // Name the function
+            let name = trait_def
+                .qualified_method_name(method_index, &trait_output.input_tys)
+                .into();
+            output.name_function(*id, name);
+        }
+
+        // Sixth pass, run the borrow checker and elaborate into the final HIR arena.
+        let dicts = extra_parameters_from_constraints(
+            &trait_output.constraints,
+            ModuleEnv::new(output, others),
+        );
         let mut module_inst_data = FxHashMap::default();
         for id in local_fns.iter() {
             insert_inst_data_for_function_and_lambdas(
@@ -1392,32 +1397,6 @@ where
         }
         for id in local_fns.iter() {
             borrow_check_and_elaborate_dict(output, ir_arena, &dicts, &module_inst_data, id)?;
-        }
-
-        // Sixth pass, normalize the input types, substitute the types in the functions and input/output types.
-        let subst = (normalize_types(&mut quantifiers), FxHashMap::default());
-        let mut mapper = BitmapInstantiationMapper::new(&subst);
-        instantiate_types_in_place(&mut trait_output.input_tys, &mut mapper);
-        instantiate_types_in_place(&mut trait_output.output_tys, &mut mapper);
-        instantiate_types_in_place(&mut trait_output.constraints, &mut mapper);
-        for (method_index, id) in local_fns.iter().enumerate() {
-            let method_index = TraitMethodIndex::from_index(method_index);
-            apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| {
-                let descr = &mut output.functions[id.as_index()];
-                descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.map(&mut mapper);
-                descr.definition.ty_scheme.ty_quantifiers = quantifiers.clone();
-                let eff_quantifiers = descr.definition.ty_scheme.ty.input_effect_vars();
-                assert!(eff_quantifiers.is_empty());
-                descr.definition.ty_scheme.eff_quantifiers = eff_quantifiers;
-                descr.definition.ty_scheme.constraints = trait_output.constraints.clone();
-                instantiate_function_descr_in_place(ir_arena, descr, &mut mapper);
-            });
-
-            // Name the function
-            let name = trait_def
-                .qualified_method_name(method_index, &trait_output.input_tys)
-                .into();
-            output.name_function(*id, name);
         }
 
         refresh_debug_info_for_functions(output, &associated_lambdas, &local_fns);
@@ -1448,7 +1427,7 @@ where
             // to seed the narrow unit-constructor fallback.
             let unit_variant_seed_tys = if sig_ty_vars.is_empty() {
                 descr
-                    .get_code_entry()
+                    .get_pending_code_entry()
                     .map(|root_node| {
                         UnifiedTypeInference::collect_unit_variant_seed_types(ir_arena, root_node)
                     })
@@ -1459,7 +1438,8 @@ where
             let scope = DefaultingScope::from_constraints(&orphan_constraints)
                 .with_unit_variant_seed_tys(unit_variant_seed_tys);
             ty_inf.resolve_defaults_to_fixed_point(&scope, &mut solver, ir_arena)?;
-            solver.commit(&mut output.functions, &mut output.def_table);
+            let generated = solver.commit(&mut output.functions, &mut output.def_table);
+            elaborate_generated_functions(output, ir_arena, others, generated)?;
         }
         for (id, explicit_root_tys) in local_fns.iter().zip(function_explicit_root_tys.iter()) {
             let descr = &output.functions[id.as_index()];
@@ -1522,7 +1502,7 @@ where
             .zip(function_explicit_root_tys.iter())
         {
             let descr = &output.functions[id.as_index()];
-            let code_entry = descr.get_code_entry().unwrap();
+            let code_entry = descr.get_pending_code_entry().unwrap();
 
             // Find constraints related to this function's signature.
             let mut sig_ty_vars = descr.definition.ty_scheme.ty.inner_ty_vars();
@@ -1564,10 +1544,10 @@ where
                     FxHashMap::default(),
                 );
                 let mut mapper = BitmapInstantiationMapper::new(&fixup_subst);
-                apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| {
-                    let descr = &mut output.functions[id.as_index()];
+                for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
+                    let descr = &mut output.functions[function_id.as_index()];
                     instantiate_function_descr_in_place(ir_arena, descr, &mut mapper);
-                });
+                }
                 quantifiers.retain(|v| !uninstantiated_unbound.contains(v));
             }
 
@@ -1583,7 +1563,8 @@ where
                         .transpose()
                 })
                 .collect::<Result<_, _>>()?;
-            solver.commit(&mut output.functions, &mut output.def_table);
+            let generated = solver.commit(&mut output.functions, &mut output.def_table);
+            elaborate_generated_functions(output, ir_arena, others, generated)?;
 
             // Write the final type scheme.
             let explicit_ty_vars = explicit_ty_vars
@@ -1600,14 +1581,14 @@ where
                         .filter(|ty_var| !explicit_ty_vars.contains(ty_var)),
                 )
                 .collect();
-            apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| {
-                let descr = &mut output.functions[id.as_index()];
+            for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
+                let descr = &mut output.functions[function_id.as_index()];
                 descr.definition.ty_scheme.ty_quantifiers = quantifiers.clone();
                 descr.definition.ty_scheme.eff_quantifiers =
                     descr.definition.ty_scheme.ty.input_effect_vars();
                 descr.definition.ty_scheme.constraints = constraints.clone();
                 descr.definition.generic_params = function.generic_params.clone();
-            });
+            }
 
             // Log dropped constraints.
             if log_enabled!(log::Level::Debug) {
@@ -1646,7 +1627,19 @@ where
             }));
         }
 
-        // Fifth pass, run the borrow checker and elaborate dictionaries.
+        // Fifth pass, normalize the type schemes, substitute the types in the functions.
+        for id in local_fns.iter() {
+            for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
+                let descr = &mut output.functions[function_id.as_index()];
+                // Note: after that normalization, the functions do not share the same
+                // type variables anymore.
+                let subst = descr.definition.ty_scheme.normalize();
+                let mut mapper = BitmapInstantiationMapper::new(&subst);
+                instantiate_function_descr_in_place(ir_arena, descr, &mut mapper);
+            }
+        }
+
+        // Sixth pass, run the borrow checker and elaborate into the final HIR arena.
         let mut module_inst_data = FxHashMap::default();
         for id in local_fns.iter() {
             let descr = &output.functions[id.as_index()];
@@ -1664,18 +1657,6 @@ where
         for id in local_fns.iter() {
             let dicts = module_inst_data.get(id).unwrap();
             borrow_check_and_elaborate_dict(output, ir_arena, dicts, &module_inst_data, id)?;
-        }
-
-        // Sixth pass, normalize the type schemes, substitute the types in the functions.
-        for id in local_fns.iter() {
-            apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| {
-                let descr = &mut output.functions[id.as_index()];
-                // Note: after that normalization, the functions do not share the same
-                // type variables anymore.
-                let subst = descr.definition.ty_scheme.normalize();
-                let mut mapper = BitmapInstantiationMapper::new(&subst);
-                instantiate_function_descr_in_place(ir_arena, descr, &mut mapper);
-            });
         }
 
         refresh_debug_info_for_functions(output, &associated_lambdas, &local_fns);
@@ -1710,7 +1691,7 @@ fn check_unbounds(
 /// A compiled expression
 #[derive(Debug)]
 pub struct CompiledExpr {
-    pub expr: hir::NodeId,
+    pub expr: hir::ENodeId,
     pub ty: TypeScheme<Type>,
     pub locals: Vec<LocalDecl>,
 }
@@ -1726,12 +1707,8 @@ pub fn emit_expr_unsafe(
     others: &Modules,
     locals: Vec<LocalDecl>,
 ) -> Result<CompiledExpr, InternalCompilationError> {
-    // Take the module's node arena out for compilation, then restore it unconditionally.
-    let mut ir_arena = std::mem::take(&mut module.ir_arena);
-    let result =
-        emit_expr_unsafe_inner(source, parsed_arena, module, others, locals, &mut ir_arena);
-    module.ir_arena = ir_arena;
-    result
+    let mut ir_arena = UNodeArena::default();
+    emit_expr_unsafe_inner(source, parsed_arena, module, others, locals, &mut ir_arena)
 }
 
 fn emit_expr_unsafe_inner(
@@ -1740,7 +1717,7 @@ fn emit_expr_unsafe_inner(
     module: &mut Module,
     others: &Modules,
     mut locals: Vec<LocalDecl>,
-    ir_arena: &mut NodeArena,
+    ir_arena: &mut UNodeArena,
 ) -> Result<CompiledExpr, InternalCompilationError> {
     // Make sure that the locals' types have no type variables in them
     assert!(
@@ -1803,7 +1780,8 @@ fn emit_expr_unsafe_inner(
     // Perform the unification.
     let mut solver = trait_solver_from_module!(module, others);
     let mut ty_inf = ty_inf.unify(&mut solver, ir_arena)?;
-    solver.commit(&mut module.functions, &mut module.def_table);
+    let generated = solver.commit(&mut module.functions, &mut module.def_table);
+    elaborate_generated_functions(module, ir_arena, others, generated)?;
     let module_env = ModuleEnv::new(module, others);
     ty_inf.log_debug_substitution_tables(module_env);
     ty_inf.log_debug_constraints(module_env);
@@ -1813,7 +1791,7 @@ fn emit_expr_unsafe_inner(
         module_env.expect_std_trait_id(crate::std::core_traits_names::VALUE_TRAIT_NAME);
     for lambda_id in lambda_functions.iter() {
         let descr = module.get_function_by_id_mut(*lambda_id).unwrap();
-        let root = descr.get_code_entry().unwrap();
+        let root = descr.get_pending_code_entry().unwrap();
         ty_inf.resolve_local_storage_and_activate_value_constraints(
             ir_arena,
             root,
@@ -1840,7 +1818,8 @@ fn emit_expr_unsafe_inner(
             .with_expr_root_ty(node_ty)
             .with_unit_variant_seed_tys(unit_variant_seed_tys);
         ty_inf.resolve_defaults_to_fixed_point(&scope, &mut solver, ir_arena)?;
-        solver.commit(&mut module.functions, &mut module.def_table);
+        let generated = solver.commit(&mut module.functions, &mut module.def_table);
+        elaborate_generated_functions(module, ir_arena, others, generated)?;
     }
 
     // Substitute everything using ty_inf (single pass, includes all defaults).
@@ -1879,7 +1858,7 @@ fn emit_expr_unsafe_inner(
         for lambda_id in lambda_functions.iter() {
             let descr = &mut module.functions[lambda_id.as_index()];
             descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.map(&mut mapper);
-            let root = descr.get_code_entry().unwrap();
+            let root = descr.get_pending_code_entry().unwrap();
             hir::instantiate_node_in_place(ir_arena, root, &mut mapper);
             for local in &mut descr.locals {
                 local.ty = local.ty.map(&mut mapper);
@@ -1925,7 +1904,7 @@ fn emit_expr_unsafe_inner(
         for lambda_id in lambda_functions.iter() {
             let descr = &mut module.functions[lambda_id.as_index()];
             descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.map(&mut mapper);
-            let root = descr.get_code_entry().unwrap();
+            let root = descr.get_pending_code_entry().unwrap();
             hir::instantiate_node_in_place(ir_arena, root, &mut mapper);
             for local in &mut descr.locals {
                 local.ty = local.ty.map(&mut mapper);
@@ -1942,7 +1921,8 @@ fn emit_expr_unsafe_inner(
             descr.definition.ty_scheme.ty.input_effect_vars();
         descr.definition.ty_scheme.constraints = constraints.clone();
     }
-    solver.commit(&mut module.functions, &mut module.def_table);
+    let generated = solver.commit(&mut module.functions, &mut module.def_table);
+    elaborate_generated_functions(module, ir_arena, others, generated)?;
 
     // Log dropped constraints.
     if log_enabled!(log::Level::Debug) {
@@ -1977,7 +1957,7 @@ fn emit_expr_unsafe_inner(
     for lambda_id in lambda_functions.iter() {
         let descr = &mut module.functions[lambda_id.as_index()];
         descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.map(&mut mapper);
-        let root = descr.get_code_entry().unwrap();
+        let root = descr.get_pending_code_entry().unwrap();
         hir::instantiate_node_in_place(ir_arena, root, &mut mapper);
         for local in &mut descr.locals {
             local.ty = local.ty.map(&mut mapper);
@@ -1998,19 +1978,20 @@ fn emit_expr_unsafe_inner(
     let local_count = locals.len();
     elaborate_local_ownership_and_value_dispatches(ir_arena, &mut locals, &mut ctx)?;
     check_borrows(ir_arena, node_id)?;
-    elaborate_dictionaries(ir_arena, node_id, &mut ctx, &locals, local_count)?;
+    let expr = elaborate_hir(ir_arena, node_id, &mut module.ir_arena, &mut ctx, &locals)?.root;
     for lambda_id in lambda_functions.iter() {
         let descr = &mut module.functions[lambda_id.as_index()];
-        descr.check_borrows_and_elaborate_dictionaries(ir_arena, &mut ctx)?;
+        descr.check_borrows_and_elaborate_hir(ir_arena, &mut module.ir_arena, &mut ctx)?;
     }
-    solver.commit(&mut module.functions, &mut module.def_table);
+    let generated = solver.commit(&mut module.functions, &mut module.def_table);
+    elaborate_generated_functions(module, ir_arena, others, generated)?;
     assert_eq!(locals.len(), local_count);
     for lambda_id in lambda_functions {
         module.functions[lambda_id.as_index()].refresh_debug_info();
     }
 
     Ok(CompiledExpr {
-        expr: node_id,
+        expr,
         ty: ty_scheme,
         locals,
     })

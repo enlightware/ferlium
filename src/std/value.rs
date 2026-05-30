@@ -17,7 +17,7 @@ use crate::{
     compiler::error::InternalCompilationError,
     containers::b,
     hir::function::{
-        BinaryNativeFnRWN, Function, FunctionDefinition, ScriptFunction, UnaryNativeFnMN,
+        BinaryNativeFnRWN, Function, FunctionDefinition, PendingScriptFunction, UnaryNativeFnMN,
     },
     hir::value::{FunctionValue, LiteralValue, NativeValue, Value, ustr_to_isize},
     hir::{self, CallArgument, NodeArena, NodeId},
@@ -449,8 +449,8 @@ impl<'s, 'm> ValueBodyCtx<'s, 'm> {
             )?;
             let arguments = CallArgument::from_values_and_passing(arguments, argument_passing);
             return Ok((
-                hir::NodeKind::Unresolved(hir::UnresolvedKind::TraitMethodApply(
-                    crate::containers::b(hir::TraitMethodApplication {
+                hir::NodeKind::TraitMethodApply(crate::containers::b(
+                    hir::TraitMethodApplication {
                         trait_id,
                         method_index,
                         method_path: Path::single(method_name, span),
@@ -460,7 +460,7 @@ impl<'s, 'm> ValueBodyCtx<'s, 'm> {
                         ty: fn_ty,
                         input_tys: vec![input_ty],
                         inst_data: hir::FnInstData::none(),
-                    }),
+                    },
                 )),
                 ret_ty,
             ));
@@ -702,8 +702,7 @@ pub(crate) fn function_value_method_function(
         _ => panic!("function Value method index out of bounds"),
     };
 
-    let arg_names = definition.arg_names.clone();
-    let code = b(ScriptFunction::new(root, arg_names)) as Function;
+    let code = b(PendingScriptFunction::new(root, definition.arg_names.len())) as Function;
     Ok(ModuleFunction::new_without_debug_info(
         definition, code, None, locals,
     ))

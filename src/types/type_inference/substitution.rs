@@ -4,7 +4,7 @@ use crate::{
     FxHashSet,
     format::FormatWith,
     hir::dictionary_passing::DictionaryReq,
-    hir::{self, FnInstData, UnresolvedKind},
+    hir::{self, FnInstData},
     module::{LocalDecl, LocalStorage, ModuleEnv, ModuleFunction},
     types::{
         effects::{EffType, Effect, EffectVar, EffectsInstSubst},
@@ -66,7 +66,7 @@ impl UnifiedTypeInference {
     ) {
         self.substitute_in_fn_type_in_place(&mut descr.definition.ty_scheme.ty);
         self.substitute_in_constraints_in_place(&mut descr.definition.ty_scheme.constraints);
-        if let Some(root) = descr.get_code_entry() {
+        if let Some(root) = descr.get_pending_code_entry() {
             self.substitute_in_node(arena, root);
         }
         self.substitute_in_local_decls_in_place(&mut descr.locals);
@@ -201,7 +201,7 @@ impl UnifiedTypeInference {
                 self.substitute_in_fn_type_in_place(&mut app.ty);
                 self.substitute_in_fn_inst_data(&mut app.inst_data);
             }
-            Unresolved(UnresolvedKind::TraitMethodApply(app)) => {
+            TraitMethodApply(app) => {
                 self.substitute_in_fn_type_in_place(&mut app.ty);
                 self.substitute_in_types_in_place(&mut app.input_tys);
                 self.substitute_in_fn_inst_data(&mut app.inst_data);
@@ -209,16 +209,16 @@ impl UnifiedTypeInference {
             GetFunction(get_fn) => {
                 self.substitute_in_fn_inst_data(&mut get_fn.inst_data);
             }
-            Unresolved(UnresolvedKind::GetTraitMethod(get_method)) => {
+            GetTraitMethod(get_method) => {
                 self.substitute_in_types_in_place(&mut get_method.input_tys);
                 self.substitute_in_types_in_place(&mut get_method.output_tys);
                 self.substitute_in_fn_inst_data(&mut get_method.inst_data);
             }
-            Unresolved(UnresolvedKind::GetTraitAssociatedConst(get_const)) => {
+            GetTraitAssociatedConst(get_const) => {
                 self.substitute_in_types_in_place(&mut get_const.input_tys);
                 self.substitute_in_types_in_place(&mut get_const.output_tys);
             }
-            Unresolved(UnresolvedKind::GetTraitDictionary(get_dict)) => {
+            GetTraitDictionary(get_dict) => {
                 self.substitute_in_types_in_place(&mut get_dict.input_tys);
                 self.substitute_in_types_in_place(&mut get_dict.output_tys);
             }
