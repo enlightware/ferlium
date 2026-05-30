@@ -11,7 +11,7 @@ use ferlium::{
     compiler::error::{CompilationError, RuntimeErrorKind},
     containers::IntoSVec2,
     eval::{ControlFlow, EvalResult, RuntimeError, eval_node},
-    hir::emit_ir::{CompiledExpr, emit_expr_unsafe},
+    hir::emit_hir::{CompiledExpr, emit_expr_unsafe},
     hir::function::{
         BinaryNativeFnNNV, BinaryNativeFnRMN, BinaryNativeFnRRN, BinaryNativeFnRWN, Function,
         FunctionDefinition, NullaryNativeFnN, NullaryNativeFnV, UnaryNativeFnMN, UnaryNativeFnNN,

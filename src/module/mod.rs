@@ -43,7 +43,7 @@ use crate::{
     compiler::error::{ImportKind, ImportSite, InternalCompilationError},
     define_id_type,
     format::{FormatWith, write_identifier},
-    hir::{self, ENodeArena, emit_ir::EmitTraitOutput, function::Function, value::LiteralValue},
+    hir::{self, ENodeArena, emit_hir::EmitTraitOutput, function::Function, value::LiteralValue},
     internal_compilation_error,
     module::id::{Id, NamedIndexed},
     types::{
@@ -217,7 +217,7 @@ impl ops::IndexMut<usize> for TypeDefSlots {
 
 /// Once-built immutable module bundle containing all compiled module data
 /// Items are conceptually private, but some are pub(crate) for lifetime constraints.
-/// These are only accessed directly by emit_ir and trait_solver, other users should go through accessors,
+/// These are only accessed directly by emit_hir and trait_solver, other users should go through accessors,
 /// with the exception of uses which is also accessed directly by desugar.
 #[derive(Debug, Clone)]
 pub struct Module {

@@ -22,7 +22,7 @@ use crate::{
     define_id_type,
     eval::{EvalCtx, RuntimeError, ValOrMut, eval_node_with_ctx},
     format::FormatWith,
-    hir::emit_ir::{CompiledExpr, EmitModuleFrom, emit_expr, emit_module},
+    hir::emit_hir::{CompiledExpr, EmitModuleFrom, emit_expr, emit_module},
     hir::value::Value,
     hir::{self, hir_syn::local},
     module::{

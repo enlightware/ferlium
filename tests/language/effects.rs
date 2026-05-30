@@ -14,7 +14,7 @@ use ustr::ustr;
 use crate::harness::TestSession;
 use ferlium::{
     compiler::error::{CompilationErrorImpl, UnsafeFeature},
-    hir::emit_ir::emit_expr_unsafe,
+    hir::emit_hir::emit_expr_unsafe,
     module::{LocalImplId, id::Id},
     parse_module_and_expr,
     std::{core_traits_names::DESERIALIZE_TRAIT_NAME, new_module_using_std},
