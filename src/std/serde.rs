@@ -310,6 +310,7 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
             return Ok(None);
         };
         solver.replace_concrete_impl_code_entries(
+            arena,
             impl_id,
             trait_id,
             input_types,
@@ -625,6 +626,7 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
             return Ok(None);
         };
         solver.replace_concrete_impl_code_entries(
+            arena,
             impl_id,
             trait_id,
             input_types,

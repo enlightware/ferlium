@@ -144,7 +144,7 @@ fn emit_expr_unsafe_inner(
         &mut module.def_table,
         &mut pending_functions,
     );
-    elaborate_generated_functions(module, ir_arena, others, &mut pending_functions, generated)?;
+    elaborate_generated_functions(module, others, &mut pending_functions, generated)?;
     let module_env = ModuleEnv::new(module, others);
     ty_inf.log_debug_substitution_tables(module_env);
     ty_inf.log_debug_constraints(module_env);
@@ -156,10 +156,9 @@ fn emit_expr_unsafe_inner(
         let descr = pending_functions
             .get_mut(lambda_id)
             .expect("expected pending function body");
-        let root = descr.code.entry_node_id;
         ty_inf.resolve_local_storage_and_activate_value_constraints(
-            ir_arena,
-            root,
+            &descr.code.arena,
+            descr.code.entry_node_id,
             &mut descr.locals,
             value_trait_id,
         );
@@ -188,7 +187,7 @@ fn emit_expr_unsafe_inner(
             &mut module.def_table,
             &mut pending_functions,
         );
-        elaborate_generated_functions(module, ir_arena, others, &mut pending_functions, generated)?;
+        elaborate_generated_functions(module, others, &mut pending_functions, generated)?;
     }
 
     // Substitute everything using ty_inf (single pass, includes all defaults).
@@ -197,7 +196,7 @@ fn emit_expr_unsafe_inner(
         let descr = pending_functions
             .get_mut(lambda_id)
             .expect("expected pending function body");
-        ty_inf.substitute_in_pending_module_function(descr, ir_arena);
+        ty_inf.substitute_in_pending_module_function(descr);
         module.functions[lambda_id.as_index()].definition = descr.definition.clone();
     }
     ty_inf.substitute_in_local_decls_in_place(&mut locals[initial_local_count..]);
@@ -234,7 +233,11 @@ fn emit_expr_unsafe_inner(
                 .get_mut(lambda_id)
                 .expect("expected pending function body");
             pending.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.clone();
-            hir::instantiate_node_in_place(ir_arena, pending.code.entry_node_id, &mut mapper);
+            hir::instantiate_node_in_place(
+                &mut pending.code.arena,
+                pending.code.entry_node_id,
+                &mut mapper,
+            );
             for local in &mut pending.locals {
                 local.ty = local.ty.map(&mut mapper);
             }
@@ -283,7 +286,11 @@ fn emit_expr_unsafe_inner(
                 .get_mut(lambda_id)
                 .expect("expected pending function body");
             pending.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.clone();
-            hir::instantiate_node_in_place(ir_arena, pending.code.entry_node_id, &mut mapper);
+            hir::instantiate_node_in_place(
+                &mut pending.code.arena,
+                pending.code.entry_node_id,
+                &mut mapper,
+            );
             for local in &mut pending.locals {
                 local.ty = local.ty.map(&mut mapper);
             }
@@ -308,7 +315,7 @@ fn emit_expr_unsafe_inner(
         &mut module.def_table,
         &mut pending_functions,
     );
-    elaborate_generated_functions(module, ir_arena, others, &mut pending_functions, generated)?;
+    elaborate_generated_functions(module, others, &mut pending_functions, generated)?;
 
     // Log dropped constraints.
     if log_enabled!(log::Level::Debug) {
@@ -347,7 +354,11 @@ fn emit_expr_unsafe_inner(
             .get_mut(lambda_id)
             .expect("expected pending function body");
         pending.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.clone();
-        hir::instantiate_node_in_place(ir_arena, pending.code.entry_node_id, &mut mapper);
+        hir::instantiate_node_in_place(
+            &mut pending.code.arena,
+            pending.code.entry_node_id,
+            &mut mapper,
+        );
         for local in &mut pending.locals {
             local.ty = local.ty.map(&mut mapper);
         }
@@ -373,7 +384,6 @@ fn emit_expr_unsafe_inner(
         borrow_check_and_elaborate_pending_function(
             function_slot,
             &mut module.ir_arena,
-            ir_arena,
             &mut pending_functions,
             &mut ctx,
             *lambda_id,
@@ -384,7 +394,7 @@ fn emit_expr_unsafe_inner(
         &mut module.def_table,
         &mut pending_functions,
     );
-    elaborate_generated_functions(module, ir_arena, others, &mut pending_functions, generated)?;
+    elaborate_generated_functions(module, others, &mut pending_functions, generated)?;
     assert_eq!(locals.len(), local_count);
     for lambda_id in lambda_functions {
         module.functions[lambda_id.as_index()].refresh_debug_info();

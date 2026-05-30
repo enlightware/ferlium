@@ -100,7 +100,7 @@ impl Deriver for EnumDefaultDeriver {
         };
 
         Ok(Some(TraitImplId::Local(
-            solver.add_concrete_impl_from_code(root, vec![], trait_id, input_types, []),
+            solver.add_concrete_impl_from_code(arena, root, vec![], trait_id, input_types, []),
         )))
     }
 }

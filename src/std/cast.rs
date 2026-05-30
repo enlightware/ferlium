@@ -74,7 +74,7 @@ impl Deriver for SelfCastDeriver {
             span,
         ));
         let local_impl_id =
-            solver.add_concrete_impl_from_code(code_id, locals, trait_id, input_types, []);
+            solver.add_concrete_impl_from_code(arena, code_id, locals, trait_id, input_types, []);
         Ok(Some(TraitImplId::Local(local_impl_id)))
 
         // TODO: optimize away the cast entirely in the compiler

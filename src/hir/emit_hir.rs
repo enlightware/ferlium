@@ -33,7 +33,7 @@ use crate::{
     compiler::error::InternalCompilationError,
     containers::{b, iterable_to_string},
     format::FormatWith,
-    hir::{self, NodeArena, UNodeArena},
+    hir::{self, UNodeArena},
     hir::{
         dictionary::{DictElaborationCtx, ExtraParameters},
         elaboration::elaborate_generated_functions,
@@ -123,11 +123,10 @@ pub(super) struct ImplStubData {
 }
 
 pub(super) fn instantiate_function_descr_in_place<M: TypeMapper>(
-    ir_arena: &mut NodeArena,
     descr: &mut UModuleFunction,
     mapper: &mut M,
 ) {
-    hir::instantiate_node_in_place(ir_arena, descr.code.entry_node_id, mapper);
+    hir::instantiate_node_in_place(&mut descr.code.arena, descr.code.entry_node_id, mapper);
     for local in &mut descr.locals {
         local.ty = local.ty.map(mapper);
     }
@@ -136,7 +135,6 @@ pub(super) fn instantiate_function_descr_in_place<M: TypeMapper>(
 pub(super) fn borrow_check_and_elaborate_pending_function(
     function_slot: &mut ModuleFunction,
     dst_arena: &mut hir::ENodeArena,
-    ir_arena: &mut NodeArena,
     pending_functions: &mut PendingModuleFunctions,
     ctx: &mut DictElaborationCtx<'_, '_, '_>,
     id: LocalFunctionId,
@@ -146,7 +144,7 @@ pub(super) fn borrow_check_and_elaborate_pending_function(
         .expect("expected pending function body");
     function.definition = function_slot.definition.clone();
     function.spans = function_slot.spans.clone();
-    let (elaborated, _) = function.check_borrows_and_elaborate_hir(ir_arena, dst_arena, ctx)?;
+    let (elaborated, _) = function.check_borrows_and_elaborate_hir(dst_arena, ctx)?;
     *function_slot = elaborated;
     Ok(())
 }
@@ -165,7 +163,6 @@ pub(super) fn refresh_debug_info_for_functions(
 
 pub(super) fn default_output_effects_in_functions(
     output: &mut Module,
-    ir_arena: &mut NodeArena,
     pending_functions: &mut PendingModuleFunctions,
     associated_lambdas: &FxHashMap<LocalFunctionId, Vec<LocalFunctionId>>,
     function_ids: &[LocalFunctionId],
@@ -197,14 +194,13 @@ pub(super) fn default_output_effects_in_functions(
                 .get_mut(&function_id)
                 .expect("expected pending function body");
             pending.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.clone();
-            instantiate_function_descr_in_place(ir_arena, pending, &mut mapper);
+            instantiate_function_descr_in_place(pending, &mut mapper);
         }
     }
 }
 
 pub(super) fn substitute_and_canonicalize_functions(
     output: &mut Module,
-    ir_arena: &mut NodeArena,
     pending_functions: &mut PendingModuleFunctions,
     associated_lambdas: &FxHashMap<LocalFunctionId, Vec<LocalFunctionId>>,
     local_fns: &[LocalFunctionId],
@@ -215,7 +211,7 @@ pub(super) fn substitute_and_canonicalize_functions(
             let descr = pending_functions
                 .get_mut(&function_id)
                 .expect("expected pending function body");
-            ty_inf.substitute_in_pending_module_function(descr, ir_arena);
+            ty_inf.substitute_in_pending_module_function(descr);
             output.functions[function_id.as_index()].definition = descr.definition.clone();
         }
 
@@ -245,7 +241,11 @@ pub(super) fn substitute_and_canonicalize_functions(
                     .get_mut(&function_id)
                     .expect("expected pending function body");
                 pending.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.clone();
-                hir::instantiate_node_in_place(ir_arena, pending.code.entry_node_id, &mut mapper);
+                hir::instantiate_node_in_place(
+                    &mut pending.code.arena,
+                    pending.code.entry_node_id,
+                    &mut mapper,
+                );
             }
         }
     }
@@ -254,7 +254,6 @@ pub(super) fn substitute_and_canonicalize_functions(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn borrow_check_and_elaborate_dict(
     output: &mut Module,
-    ir_arena: &mut NodeArena,
     others: &Modules,
     pending_functions: &mut PendingModuleFunctions,
     associated_lambdas: &FxHashMap<LocalFunctionId, Vec<LocalFunctionId>>,
@@ -269,7 +268,6 @@ pub(super) fn borrow_check_and_elaborate_dict(
         borrow_check_and_elaborate_pending_function(
             function_slot,
             &mut output.ir_arena,
-            ir_arena,
             pending_functions,
             &mut ctx,
             function_id,
@@ -280,7 +278,7 @@ pub(super) fn borrow_check_and_elaborate_dict(
         &mut output.def_table,
         pending_functions,
     );
-    elaborate_generated_functions(output, ir_arena, others, pending_functions, generated)?;
+    elaborate_generated_functions(output, others, pending_functions, generated)?;
     Ok(())
 }
 

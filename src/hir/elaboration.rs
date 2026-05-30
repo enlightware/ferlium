@@ -58,7 +58,7 @@ fn value_dictionary_node_kind_from_methods(
     trait_id: TraitId,
     input_tys: &[Type],
     span: Location,
-    methods: &[LocalFunctionId],
+    methods: Vec<LocalFunctionId>,
     ctx: &mut DictElaborationCtx<'_, '_, '_>,
 ) -> Result<(NodeKind, Type), InternalCompilationError> {
     let trait_def = ctx.trait_solver.trait_def(trait_id);
@@ -80,10 +80,10 @@ fn value_dictionary_node_kind_from_methods(
         .collect::<Vec<_>>();
     let associated_const_tys = trait_def.instantiate_associated_const_tys_for_tys(input_tys, &[]);
     let dictionary_ty = TraitImpls::dictionary_ty(method_tys, associated_const_tys);
-    let dictionary_value = build_dictionary_value(methods, &associated_const_values);
+    let dictionary_value = build_dictionary_value(&methods, &associated_const_values);
     let imp = TraitImpl::new(
         Vec::new(),
-        methods.to_vec(),
+        methods,
         dictionary_value,
         dictionary_ty,
         false,
@@ -110,7 +110,6 @@ fn value_dictionary_node_kind_from_methods(
 
 /// Build the compiler-provided `Value` dictionary for a concrete function type.
 fn function_value_dictionary_node_kind(
-    arena: &mut NodeArena,
     trait_id: TraitId,
     input_tys: &[Type],
     span: Location,
@@ -119,9 +118,9 @@ fn function_value_dictionary_node_kind(
     let method_count = ctx.trait_solver.trait_def(trait_id).methods.len();
     let methods = (0..method_count)
         .map(TraitMethodIndex::from_index)
-        .map(|method_index| function_value_method(ctx.trait_solver, method_index, span, arena))
+        .map(|method_index| function_value_method(ctx.trait_solver, method_index, span))
         .collect::<Result<Vec<_>, _>>()?;
-    value_dictionary_node_kind_from_methods(trait_id, input_tys, span, &methods, ctx)
+    value_dictionary_node_kind_from_methods(trait_id, input_tys, span, methods, ctx)
 }
 
 /// Build a generated `Value` dictionary for a structural type whose unresolved
@@ -135,7 +134,7 @@ fn generic_derived_value_dictionary_node_kind(
 ) -> Result<(NodeKind, Type), InternalCompilationError> {
     let methods =
         generic_value_methods_for_type(ctx.trait_solver, trait_id, input_tys, span, arena)?;
-    value_dictionary_node_kind_from_methods(trait_id, input_tys, span, &methods, ctx)
+    value_dictionary_node_kind_from_methods(trait_id, input_tys, span, methods, ctx)
 }
 
 /// Build the HIR expression that provides the runtime dictionary for a trait requirement.
@@ -149,7 +148,7 @@ fn trait_dictionary_node_kind(
 ) -> Result<(NodeKind, Type), InternalCompilationError> {
     let trait_def = ctx.trait_solver.trait_def(trait_id);
     if is_value_trait_for_function_type(trait_id, trait_def, input_tys, output_tys) {
-        return function_value_dictionary_node_kind(arena, trait_id, input_tys, span, ctx);
+        return function_value_dictionary_node_kind(trait_id, input_tys, span, ctx);
     }
 
     let trait_def = ctx.trait_solver.trait_def(trait_id);
@@ -293,14 +292,14 @@ pub struct ElaboratedHir {
 
 /// Elaborate a pre-dictionary-passing HIR tree into the final HIR arena.
 pub fn elaborate_hir<'d, 'sr, 'sm>(
-    src: &mut UNodeArena,
+    src: &UNodeArena,
     root: UNodeId,
     dst: &mut ENodeArena,
     ctx: &mut DictElaborationCtx<'d, 'sr, 'sm>,
     locals: &[LocalDecl],
 ) -> Result<ElaboratedHir, InternalCompilationError> {
-    let mut elaboration = HirElaboration::new(src, dst, ctx, locals);
-    let root = elaboration.elaborate_node(root)?;
+    let mut elaboration = HirElaboration::new(dst, ctx, locals);
+    let root = elaboration.elaborate_node(src, root)?;
     Ok(ElaboratedHir {
         root,
         remap: elaboration.remap,
@@ -310,7 +309,6 @@ pub fn elaborate_hir<'d, 'sr, 'sm>(
 /// Finalize generated functions returned by trait-solver commits into the final HIR arena.
 pub fn elaborate_generated_functions(
     module: &mut Module,
-    src: &mut UNodeArena,
     others: &Modules,
     pending_functions: &mut FxHashMap<LocalFunctionId, PendingModuleFunction>,
     ids: impl IntoIterator<Item = LocalFunctionId>,
@@ -333,7 +331,7 @@ pub fn elaborate_generated_functions(
         let mut solver = trait_solver_from_module!(module, others);
         let mut ctx = DictElaborationCtx::new(&dicts, None, &mut solver);
         let (elaborated, _) =
-            function.check_borrows_and_elaborate_hir(src, &mut module.ir_arena, &mut ctx)?;
+            function.check_borrows_and_elaborate_hir(&mut module.ir_arena, &mut ctx)?;
         module.functions[id.as_index()] = elaborated;
         pending.extend(solver.commit(
             &mut module.functions,
@@ -346,7 +344,7 @@ pub fn elaborate_generated_functions(
 
 /// Stateful worker that appends elaborated HIR nodes while tracking UNodeId-to-ENodeId remaps.
 struct HirElaboration<'a, 'd, 'sr, 'sm> {
-    src: &'a mut UNodeArena,
+    generated: UNodeArena,
     dst: &'a mut ENodeArena,
     ctx: &'a mut DictElaborationCtx<'d, 'sr, 'sm>,
     locals: &'a [LocalDecl],
@@ -356,13 +354,12 @@ struct HirElaboration<'a, 'd, 'sr, 'sm> {
 
 impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
     fn new(
-        src: &'a mut UNodeArena,
         dst: &'a mut ENodeArena,
         ctx: &'a mut DictElaborationCtx<'d, 'sr, 'sm>,
         locals: &'a [LocalDecl],
     ) -> Self {
         Self {
-            src,
+            generated: UNodeArena::default(),
             dst,
             ctx,
             locals,
@@ -371,22 +368,26 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
         }
     }
 
-    fn elaborate_node(&mut self, old: UNodeId) -> Result<ENodeId, InternalCompilationError> {
+    fn elaborate_node(
+        &mut self,
+        src: &UNodeArena,
+        old: UNodeId,
+    ) -> Result<ENodeId, InternalCompilationError> {
         if let Some(&new) = self.remap.get(&old) {
             return Ok(new);
         }
         if !self.in_progress.insert(old) {
             return Err(internal_compilation_error!(Internal {
                 error: "cycle found while elaborating HIR".to_string(),
-                span: self.src[old].span,
+                span: src[old].span,
             }));
         }
 
-        let old_node = &self.src[old];
+        let old_node = &src[old];
         let old_ty = old_node.ty;
         let old_effects = old_node.effects.clone();
         let old_span = old_node.span;
-        let kind = self.elaborate_source_kind(old, old_ty, &old_effects, old_span)?;
+        let kind = self.elaborate_source_kind(src, old, old_ty, &old_effects, old_span)?;
         let new = self
             .dst
             .alloc(Node::<Elaborated>::new(kind, old_ty, old_effects, old_span));
@@ -440,13 +441,14 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
 
     fn elaborate_node_iter(
         &mut self,
+        src: &UNodeArena,
         nodes: impl IntoIterator<Item = UNodeId>,
     ) -> Result<Vec<ENodeId>, InternalCompilationError> {
         let nodes = nodes.into_iter();
         let (lower, _) = nodes.size_hint();
         let mut result = Vec::with_capacity(lower);
         for node in nodes {
-            result.push(self.elaborate_node(node)?);
+            result.push(self.elaborate_node(src, node)?);
         }
         Ok(result)
     }
@@ -472,40 +474,40 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
         inst_data: &hir::FnInstData,
         span: Location,
     ) -> Result<(Vec<ENodeId>, Vec<FnArgType>), InternalCompilationError> {
-        let args = extra_arg_kind_from_inst_data(inst_data, span, self.ctx, self.src)?;
+        let args = extra_arg_kind_from_inst_data(inst_data, span, self.ctx, &mut self.generated)?;
         self.elaborate_extra_arg_kinds(args, span)
-    }
-
-    fn resolve_call_arguments(
-        &mut self,
-        args: Vec<(UNodeId, PendingArgPassing, Type)>,
-        node_span: Location,
-    ) -> Result<Vec<CallArgument<Unelaborated>>, InternalCompilationError> {
-        let mut arguments = Vec::with_capacity(args.len());
-        for (value, mut passing, arg_ty) in args {
-            resolve_arg_passing(self.src, self.ctx, &mut passing, value, arg_ty, node_span)?;
-            arguments.push(CallArgument { value, passing });
-        }
-        Ok(arguments)
     }
 
     fn elaborate_call_arguments(
         &mut self,
-        arguments: Vec<CallArgument<Unelaborated>>,
+        src: &UNodeArena,
+        arguments: impl IntoIterator<Item = (UNodeId, PendingArgPassing, Type)>,
+        node_span: Location,
     ) -> Result<Vec<CallArgument<Elaborated>>, InternalCompilationError> {
-        arguments
-            .into_iter()
-            .map(|arg| {
-                Ok(CallArgument {
-                    value: self.elaborate_node(arg.value)?,
-                    passing: arg.passing.into_elaborated(),
-                })
-            })
-            .collect()
+        let arguments = arguments.into_iter();
+        let (lower, _) = arguments.size_hint();
+        let mut result = Vec::with_capacity(lower);
+        for (value, mut passing, arg_ty) in arguments {
+            resolve_arg_passing(
+                src,
+                &mut self.generated,
+                self.ctx,
+                &mut passing,
+                value,
+                arg_ty,
+                node_span,
+            )?;
+            result.push(CallArgument {
+                value: self.elaborate_node(src, value)?,
+                passing: passing.into_elaborated(),
+            });
+        }
+        Ok(result)
     }
 
     fn elaborate_source_kind(
         &mut self,
+        src: &UNodeArena,
         old: UNodeId,
         node_ty: Type,
         node_effects: &EffType,
@@ -513,20 +515,20 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
     ) -> Result<NodeKind<Elaborated>, InternalCompilationError> {
         use NodeKind::*;
 
-        Ok(match &self.src[old].kind {
+        Ok(match &src[old].kind {
             Immediate(value) => Immediate(value.clone()),
             Uninit => Uninit,
             BuildClosure(build_closure) => {
                 let captures_value_dictionary = build_closure.captures_value_dictionary;
                 let function = build_closure.function;
-                let dictionary_captures = build_closure.dictionary_captures.to_vec();
-                let captures = build_closure.captures.to_vec();
-                let mut dictionary_captures = self.elaborate_node_iter(dictionary_captures)?;
-                let mut captures = self.elaborate_node_iter(captures)?;
+                let mut dictionary_captures = self
+                    .elaborate_node_iter(src, build_closure.dictionary_captures.iter().copied())?;
+                let mut captures =
+                    self.elaborate_node_iter(src, build_closure.captures.iter().copied())?;
                 let mut captures_value_dictionary = captures_value_dictionary
-                    .map(|node| self.elaborate_node(node))
+                    .map(|node| self.elaborate_node(src, node))
                     .transpose()?;
-                let function = self.elaborate_node(function)?;
+                let function = self.elaborate_node(src, function)?;
 
                 let function = if let BuildClosure(inner) = &self.dst[function].kind {
                     dictionary_captures.splice(0..0, inner.dictionary_captures.iter().copied());
@@ -555,12 +557,10 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                 let source_arguments = app
                     .arguments
                     .iter()
-                    .map(|arg| (arg.value, arg.passing, self.src[arg.value].ty))
-                    .collect::<Vec<_>>();
-                let arguments = self.resolve_call_arguments(source_arguments, node_span)?;
+                    .map(|arg| (arg.value, arg.passing, src[arg.value].ty));
                 Apply(b(hir::Application {
-                    function: self.elaborate_node(function)?,
-                    arguments: self.elaborate_call_arguments(arguments)?,
+                    function: self.elaborate_node(src, function)?,
+                    arguments: self.elaborate_call_arguments(src, source_arguments, node_span)?,
                     returns_place,
                 }))
             }
@@ -568,14 +568,14 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                 let source = node.source;
                 let target = node.target;
                 CloneClosureEnv(hir::CloneClosureEnv {
-                    source: self.elaborate_node(source)?,
-                    target: self.elaborate_node(target)?,
+                    source: self.elaborate_node(src, source)?,
+                    target: self.elaborate_node(src, target)?,
                 })
             }
             DropClosureEnv(node) => {
                 let target = node.target;
                 DropClosureEnv(hir::DropClosureEnv {
-                    target: self.elaborate_node(target)?,
+                    target: self.elaborate_node(src, target)?,
                 })
             }
             CloneValue(node) => {
@@ -583,11 +583,14 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                 let mut clone = node.clone;
                 if matches!(clone, PendingLocalClone::Unknown) {
                     clone = PendingLocalClone::Resolved(resolve_local_clone(
-                        self.src, self.ctx, node_ty, node_span,
+                        &mut self.generated,
+                        self.ctx,
+                        node_ty,
+                        node_span,
                     )?);
                 }
                 CloneValue(hir::CloneValue {
-                    source: self.elaborate_node(source)?,
+                    source: self.elaborate_node(src, source)?,
                     clone: clone.into_elaborated(),
                 })
             }
@@ -603,10 +606,8 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                     .arguments
                     .iter()
                     .zip(&app.ty.args)
-                    .map(|(arg, arg_ty)| (arg.value, arg.passing, arg_ty.ty))
-                    .collect::<Vec<_>>();
-                let source_extra_arguments = app.extra_arguments.to_vec();
-                let arguments = self.resolve_call_arguments(source_arguments, node_span)?;
+                    .map(|(arg, arg_ty)| (arg.value, arg.passing, arg_ty.ty));
+                let source_extra_arguments = app.extra_arguments.iter().copied();
                 let mut extra_arguments = if !inst_data.dicts_req.is_empty() {
                     self.elaborate_extra_args_from_inst_data(&inst_data, function_span)?
                         .0
@@ -628,14 +629,15 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                 } else {
                     Vec::new()
                 };
-                let source_extra_arguments = self.elaborate_node_iter(source_extra_arguments)?;
+                let source_extra_arguments =
+                    self.elaborate_node_iter(src, source_extra_arguments)?;
                 extra_arguments.extend(source_extra_arguments);
                 StaticApply(b(StaticApplication {
                     function,
                     function_path,
                     function_span,
                     extra_arguments,
-                    arguments: self.elaborate_call_arguments(arguments)?,
+                    arguments: self.elaborate_call_arguments(src, source_arguments, node_span)?,
                     argument_names,
                     ty,
                     inst_data,
@@ -651,13 +653,12 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                 let ty = app.ty.clone();
                 let input_tys = app.input_tys.clone();
                 let inst_data = app.inst_data.clone();
-                let source_arguments = app
-                    .arguments
-                    .iter()
-                    .zip(&app.ty.args)
-                    .map(|(arg, arg_ty)| (arg.value, arg.passing, arg_ty.ty))
-                    .collect::<Vec<_>>();
-                let arguments = self.resolve_call_arguments(source_arguments, node_span)?;
+                let source_arguments = || {
+                    app.arguments
+                        .iter()
+                        .zip(&app.ty.args)
+                        .map(|(arg, arg_ty)| (arg.value, arg.passing, arg_ty.ty))
+                };
                 assert!(
                     inst_data.dicts_req.is_empty(),
                     "Instantiation data for trait method is not supported yet."
@@ -683,7 +684,6 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                             self.ctx.trait_solver,
                             method_index,
                             method_span,
-                            self.src,
                         )?)
                     } else {
                         self.ctx.trait_solver.solve_impl_method(
@@ -691,7 +691,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                             &input_tys,
                             method_index,
                             method_span,
-                            self.src,
+                            &mut self.generated,
                         )?
                     };
                     StaticApply(b(hir::StaticApplication {
@@ -699,7 +699,11 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                         function_path: Some(method_path),
                         function_span: method_span,
                         extra_arguments: Vec::new(),
-                        arguments: self.elaborate_call_arguments(arguments)?,
+                        arguments: self.elaborate_call_arguments(
+                            src,
+                            source_arguments(),
+                            node_span,
+                        )?,
                         argument_names,
                         ty,
                         inst_data: hir::FnInstData::none(),
@@ -714,7 +718,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                         (dict_ty, entry_index)
                     };
                     let (dict_kind, _) = trait_dictionary_node_kind(
-                        self.src,
+                        &mut self.generated,
                         trait_id,
                         &input_tys,
                         &[],
@@ -730,7 +734,11 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                     CallDictionaryMethod(b(hir::CallDictionaryMethod {
                         dictionary,
                         entry_index,
-                        arguments: self.elaborate_call_arguments(arguments)?,
+                        arguments: self.elaborate_call_arguments(
+                            src,
+                            source_arguments(),
+                            node_span,
+                        )?,
                         ty,
                     }))
                 } else {
@@ -760,7 +768,11 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                     CallDictionaryMethod(b(hir::CallDictionaryMethod {
                         dictionary,
                         entry_index,
-                        arguments: self.elaborate_call_arguments(arguments)?,
+                        arguments: self.elaborate_call_arguments(
+                            src,
+                            source_arguments(),
+                            node_span,
+                        )?,
                         ty,
                     }))
                 }
@@ -833,7 +845,6 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                             self.ctx.trait_solver,
                             method_index,
                             method_span,
-                            self.src,
                         )?)
                     } else {
                         self.ctx.trait_solver.solve_impl_method(
@@ -841,7 +852,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                             &input_tys,
                             method_index,
                             method_span,
-                            self.src,
+                            &mut self.generated,
                         )?
                     };
                     GetFunction(b(hir::GetFunction {
@@ -860,7 +871,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                         (dict_ty, entry_index)
                     };
                     let (dict_kind, _) = trait_dictionary_node_kind(
-                        self.src,
+                        &mut self.generated,
                         trait_id,
                         &input_tys,
                         &output_tys,
@@ -911,7 +922,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                         &input_tys,
                         associated_const_index,
                         associated_const_span,
-                        self.src,
+                        &mut self.generated,
                     )?)
                 } else {
                     let dict_index = find_trait_impl_dict_index(
@@ -946,7 +957,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                 let input_tys = get_dict.input_tys.clone();
                 let output_tys = get_dict.output_tys.clone();
                 let (node_kind, _) = trait_dictionary_node_kind(
-                    self.src,
+                    &mut self.generated,
                     get_dict.trait_id,
                     &input_tys,
                     &output_tys,
@@ -962,7 +973,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                 let value = store.value;
                 let id = store.id;
                 StoreLocal(hir::StoreLocal {
-                    value: self.elaborate_node(value)?,
+                    value: self.elaborate_node(src, value)?,
                     id,
                 })
             }
@@ -974,7 +985,10 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                         PendingTakeLocalValueMode::MoveOwned
                     } else {
                         PendingTakeLocalValueMode::CloneBorrowed(resolve_local_clone(
-                            self.src, self.ctx, node_ty, node_span,
+                            &mut self.generated,
+                            self.ctx,
+                            node_ty,
+                            node_span,
                         )?)
                     };
                 }
@@ -988,7 +1002,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                 let dictionary = node.dictionary;
                 let entry_index = node.entry_index;
                 GetDictionaryMethod(hir::GetDictionaryMethod {
-                    dictionary: self.elaborate_node(dictionary)?,
+                    dictionary: self.elaborate_node(src, dictionary)?,
                     entry_index,
                 })
             }
@@ -996,7 +1010,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                 let dictionary = node.dictionary;
                 let entry_index = node.entry_index;
                 GetDictionaryAssociatedConst(hir::GetDictionaryAssociatedConst {
-                    dictionary: self.elaborate_node(dictionary)?,
+                    dictionary: self.elaborate_node(src, dictionary)?,
                     entry_index,
                 })
             }
@@ -1008,22 +1022,21 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                     .arguments
                     .iter()
                     .zip(&call.ty.args)
-                    .map(|(arg, arg_ty)| (arg.value, arg.passing, arg_ty.ty))
-                    .collect::<Vec<_>>();
-                let arguments = self.resolve_call_arguments(source_arguments, node_span)?;
+                    .map(|(arg, arg_ty)| (arg.value, arg.passing, arg_ty.ty));
                 CallDictionaryMethod(b(hir::CallDictionaryMethod {
-                    dictionary: self.elaborate_node(dictionary)?,
+                    dictionary: self.elaborate_node(src, dictionary)?,
                     entry_index,
-                    arguments: self.elaborate_call_arguments(arguments)?,
+                    arguments: self.elaborate_call_arguments(src, source_arguments, node_span)?,
                     ty,
                 }))
             }
-            Return(node) => Return(self.elaborate_node(*node)?),
+            Return(node) => Return(self.elaborate_node(src, *node)?),
             Block(block) => {
                 let cleanup = block.cleanup.clone();
-                let body = block.body.iter().copied().collect::<Vec<_>>();
                 Block(b(hir::Block {
-                    body: b(SVec2::from_vec(self.elaborate_node_iter(body)?)),
+                    body: b(SVec2::from_vec(
+                        self.elaborate_node_iter(src, block.body.iter().copied())?,
+                    )),
                     cleanup,
                 }))
             }
@@ -1031,40 +1044,38 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                 let place = assignment.place;
                 let value = assignment.value;
                 let mut drop = assignment.drop;
-                let place_ty = self.src[place].ty;
+                let place_ty = src[place].ty;
                 if let Some(drop) = &mut drop
                     && matches!(drop, PendingLocalDrop::Unknown)
                 {
-                    *drop = resolve_local_drop(self.src, self.ctx, place_ty, node_span)?;
+                    *drop = resolve_local_drop(&mut self.generated, self.ctx, place_ty, node_span)?;
                 }
                 Assign(hir::Assignment {
-                    place: self.elaborate_node(place)?,
-                    value: self.elaborate_node(value)?,
+                    place: self.elaborate_node(src, place)?,
+                    value: self.elaborate_node(src, value)?,
                     drop: drop.map(|drop| drop.into_elaborated()),
                 })
             }
-            Tuple(nodes) => {
-                let nodes = nodes.iter().copied().collect::<Vec<_>>();
-                Tuple(b(SVec2::from_vec(self.elaborate_node_iter(nodes)?)))
-            }
+            Tuple(nodes) => Tuple(b(SVec2::from_vec(
+                self.elaborate_node_iter(src, nodes.iter().copied())?,
+            ))),
             Project(project) => {
                 let value = project.value;
                 let index = project.index;
                 Project(hir::Project {
-                    value: self.elaborate_node(value)?,
+                    value: self.elaborate_node(src, value)?,
                     index,
                 })
             }
-            Record(nodes) => {
-                let nodes = nodes.iter().copied().collect::<Vec<_>>();
-                Record(b(SVec2::from_vec(self.elaborate_node_iter(nodes)?)))
-            }
+            Record(nodes) => Record(b(SVec2::from_vec(
+                self.elaborate_node_iter(src, nodes.iter().copied())?,
+            ))),
             FieldAccess(field_access) => {
                 use TypeKind::*;
                 let child_id = field_access.value;
                 let field_name = field_access.field;
-                let child = self.elaborate_node(child_id)?;
-                let child_ty = self.src[child_id].ty;
+                let child = self.elaborate_node(src, child_id)?;
+                let child_ty = src[child_id].ty;
                 let ty_data = child_ty.data();
                 let ty_data = if let Some(named) = ty_data.as_named() {
                     let named = named.clone();
@@ -1106,38 +1117,32 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                 let value = project.value;
                 let index = project.index;
                 ProjectAt(hir::ProjectAt {
-                    value: self.elaborate_node(value)?,
+                    value: self.elaborate_node(src, value)?,
                     index,
                 })
             }
             Variant(variant) => Variant(hir::Variant {
                 tag: variant.tag,
-                payload: self.elaborate_node(variant.payload)?,
+                payload: self.elaborate_node(src, variant.payload)?,
             }),
-            ExtractTag(node) => ExtractTag(self.elaborate_node(*node)?),
-            Array(nodes) => {
-                let nodes = nodes.iter().copied().collect::<Vec<_>>();
-                Array(b(SVec2::from_vec(self.elaborate_node_iter(nodes)?)))
-            }
+            ExtractTag(node) => ExtractTag(self.elaborate_node(src, *node)?),
+            Array(nodes) => Array(b(SVec2::from_vec(
+                self.elaborate_node_iter(src, nodes.iter().copied())?,
+            ))),
             Case(case) => {
                 let value = case.value;
                 let default = case.default;
-                let source_alternatives = case
-                    .alternatives
-                    .iter()
-                    .map(|(literal, node)| (literal.clone(), *node))
-                    .collect::<Vec<_>>();
-                let mut alternatives = Vec::with_capacity(source_alternatives.len());
-                for (literal, node) in source_alternatives {
-                    alternatives.push((literal, self.elaborate_node(node)?));
+                let mut alternatives = Vec::with_capacity(case.alternatives.len());
+                for (literal, node) in &case.alternatives {
+                    alternatives.push((literal.clone(), self.elaborate_node(src, *node)?));
                 }
                 Case(b(hir::Case {
-                    value: self.elaborate_node(value)?,
+                    value: self.elaborate_node(src, value)?,
                     alternatives,
-                    default: self.elaborate_node(default)?,
+                    default: self.elaborate_node(src, default)?,
                 }))
             }
-            Loop(body) => Loop(self.elaborate_node(*body)?),
+            Loop(body) => Loop(self.elaborate_node(src, *body)?),
             CheckCallDepth => CheckCallDepth,
             CheckFuel => CheckFuel,
             SoftBreak => SoftBreak,
@@ -1248,8 +1253,7 @@ mod tests {
         let mut ctx = DictElaborationCtx::new(&dicts, None, &mut solver);
 
         let mut elaborated_arena = ENodeArena::default();
-        let elaborated =
-            elaborate_hir(&mut arena, node, &mut elaborated_arena, &mut ctx, &[]).unwrap();
+        let elaborated = elaborate_hir(&arena, node, &mut elaborated_arena, &mut ctx, &[]).unwrap();
 
         let NodeKind::Immediate(immediate) = &elaborated_arena[elaborated.root].kind else {
             panic!("expected associated const to elaborate to an immediate");
@@ -1303,8 +1307,7 @@ mod tests {
         let mut ctx = DictElaborationCtx::new(&dicts, None, &mut solver);
 
         let mut elaborated_arena = ENodeArena::default();
-        let elaborated =
-            elaborate_hir(&mut arena, node, &mut elaborated_arena, &mut ctx, &[]).unwrap();
+        let elaborated = elaborate_hir(&arena, node, &mut elaborated_arena, &mut ctx, &[]).unwrap();
 
         let NodeKind::GetDictionaryAssociatedConst(get_const) =
             &elaborated_arena[elaborated.root].kind

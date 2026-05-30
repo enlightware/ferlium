@@ -121,6 +121,7 @@ impl Deriver for ProductValueDeriver {
 
         Ok(root.map(|root| {
             TraitImplId::Local(solver.add_concrete_impl_from_code(
+                arena,
                 root,
                 vec![],
                 trait_id,

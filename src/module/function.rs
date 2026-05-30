@@ -19,7 +19,7 @@ use crate::{
     hir::borrow_checker::check_borrows,
     hir::function::{Function, FunctionDefinition, PendingScriptFunction},
     hir::{
-        ENodeArena, ENodeId, Elaborated, HirPhase, NodeId, UNodeArena, Unelaborated,
+        ENodeArena, ENodeId, Elaborated, HirPhase, NodeId, UNodeArena, UNodeId, Unelaborated,
         function::ScriptFunction,
     },
     hir::{
@@ -493,6 +493,29 @@ impl PendingModuleFunction {
         }
     }
 
+    pub fn new_with_copied_hir(
+        definition: FunctionDefinition,
+        source_arena: &UNodeArena,
+        entry_node_id: UNodeId,
+        runtime_arg_count: usize,
+        spans: Option<ModuleFunctionSpans>,
+        mut locals: Vec<ULocalDecl>,
+    ) -> Self {
+        let (arena, entry_node_id, remap) =
+            crate::hir::clone_hir_tree_with_remap(source_arena, entry_node_id);
+        for local in &mut locals {
+            if let LocalStorage::Deferred(deferred) = &mut local.storage {
+                deferred.initializer = remap[&deferred.initializer];
+            }
+        }
+        Self::new(
+            definition,
+            PendingScriptFunction::new(arena, entry_node_id, runtime_arg_count),
+            spans,
+            locals,
+        )
+    }
+
     pub fn assign_local_slots(&mut self) {
         LocalDecl::assign_sequential_slots(&mut self.locals);
     }
@@ -508,15 +531,18 @@ impl PendingModuleFunction {
 
     pub fn check_borrows_and_elaborate_hir(
         mut self,
-        src_arena: &mut UNodeArena,
         dst_arena: &mut ENodeArena,
         ctx: &mut DictElaborationCtx<'_, '_, '_>,
     ) -> Result<(EModuleFunction, ElaboratedHir), InternalCompilationError> {
         let root = self.code.entry_node_id;
         LocalDecl::assign_sequential_slots(&mut self.locals);
-        elaborate_local_ownership_and_value_dispatches(src_arena, &mut self.locals, ctx)?;
-        check_borrows(src_arena, root)?;
-        let elaborated = elaborate_hir(src_arena, root, dst_arena, ctx, &self.locals)?;
+        elaborate_local_ownership_and_value_dispatches(
+            &mut self.code.arena,
+            &mut self.locals,
+            ctx,
+        )?;
+        check_borrows(&self.code.arena, root)?;
+        let elaborated = elaborate_hir(&self.code.arena, root, dst_arena, ctx, &self.locals)?;
         let locals = self
             .locals
             .into_iter()

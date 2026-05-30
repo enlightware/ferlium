@@ -415,12 +415,8 @@ impl<'s, 'm> ValueBodyCtx<'s, 'm> {
         };
 
         if is_function_value {
-            let function = FunctionId::Local(function_value_method(
-                self.solver,
-                method_index,
-                span,
-                arena,
-            )?);
+            let function =
+                FunctionId::Local(function_value_method(self.solver, method_index, span)?);
             let argument_passing = resolved_arg_passing_for_generated_call(
                 arena,
                 self.solver,
@@ -593,11 +589,11 @@ fn function_value_drop_body(ty: Type, arena: &mut NodeArena) -> (NodeId, Vec<Loc
 pub(crate) fn function_value_method_function(
     method_index: TraitMethodIndex,
     span: Location,
-    arena: &mut NodeArena,
     solver: &mut TraitSolver<'_>,
 ) -> Result<PendingModuleFunction, InternalCompilationError> {
     use hir::hir_syn::*;
 
+    let mut arena = NodeArena::default();
     let ty = Type::variable_id(0);
     let unit_ty = Type::unit();
     let (definition, root, locals) = match method_index {
@@ -609,7 +605,7 @@ pub(crate) fn function_value_method_function(
                 "Compiler-generated function Value equality.",
             );
             let locals = vec![local("left", ty), local("right", ty)];
-            let root = alloc_synth_node(arena, native(false), bool_type());
+            let root = alloc_synth_node(&mut arena, native(false), bool_type());
             (definition, root, locals)
         }
         VALUE_TO_STRING_METHOD_INDEX => {
@@ -620,7 +616,7 @@ pub(crate) fn function_value_method_function(
                 "Compiler-generated function Value string conversion.",
             );
             let locals = vec![local("self", ty)];
-            let root = alloc_synth_node(arena, native_str("<function>"), string_type());
+            let root = alloc_synth_node(&mut arena, native_str("<function>"), string_type());
             (definition, root, locals)
         }
         VALUE_HASH_METHOD_INDEX => {
@@ -654,19 +650,19 @@ pub(crate) fn function_value_method_function(
                     Location::new_synthesized(),
                 ),
             ];
-            let state = alloc_synth_node(arena, load_local(state_id), hasher_ty);
-            let marker = alloc_synth_node(arena, native_str("<function>"), string_type());
+            let state = alloc_synth_node(&mut arena, load_local(state_id), hasher_ty);
+            let marker = alloc_synth_node(&mut arena, native_str("<function>"), string_type());
             let write_kind = static_apply_generated(
-                arena,
+                &mut arena,
                 solver,
                 hasher_write_string,
                 [(state, hasher_ty), (marker, string_type())],
                 unit_ty,
                 span,
             )?;
-            let write = alloc_synth_node(arena, write_kind, unit_ty);
-            let unit = alloc_synth_node(arena, native(()), unit_ty);
-            let root = alloc_synth_node(arena, block([write, unit]), unit_ty);
+            let write = alloc_synth_node(&mut arena, write_kind, unit_ty);
+            let unit = alloc_synth_node(&mut arena, native(()), unit_ty);
+            let root = alloc_synth_node(&mut arena, block([write, unit]), unit_ty);
             (definition, root, locals)
         }
         VALUE_CLONE_METHOD_INDEX => {
@@ -683,7 +679,7 @@ pub(crate) fn function_value_method_function(
                 ["source", "target"],
                 "Compiler-generated function Value clone.",
             );
-            let (root, locals) = function_value_clone_body(ty, arena);
+            let (root, locals) = function_value_clone_body(ty, &mut arena);
             (definition, root, locals)
         }
         VALUE_DROP_METHOD_INDEX => {
@@ -697,7 +693,7 @@ pub(crate) fn function_value_method_function(
                 ["target"],
                 "Compiler-generated function Value drop.",
             );
-            let (root, locals) = function_value_drop_body(ty, arena);
+            let (root, locals) = function_value_drop_body(ty, &mut arena);
             (definition, root, locals)
         }
         _ => panic!("function Value method index out of bounds"),
@@ -706,7 +702,7 @@ pub(crate) fn function_value_method_function(
     let runtime_arg_count = definition.arg_names.len();
     Ok(PendingModuleFunction::new(
         definition,
-        PendingScriptFunction::new(root, runtime_arg_count),
+        PendingScriptFunction::new(arena, root, runtime_arg_count),
         None,
         locals,
     ))
@@ -1746,7 +1742,6 @@ fn derive_function_value_impl(
     trait_id: TraitId,
     input_types: &[Type],
     span: Location,
-    arena: &mut NodeArena,
     solver: &mut TraitSolver<'_>,
 ) -> Result<TraitImplId, InternalCompilationError> {
     let associated_const_values: Vec<LiteralValue> =
@@ -1763,7 +1758,7 @@ fn derive_function_value_impl(
     };
     let methods = (0..method_count)
         .map(TraitMethodIndex::from_index)
-        .map(|method_index| function_value_method(solver, method_index, span, arena))
+        .map(|method_index| function_value_method(solver, method_index, span))
         .collect::<Result<Vec<_>, _>>()?;
     let tys = definitions
         .into_iter()
@@ -1825,7 +1820,6 @@ fn derive_structural_value_impl(
             trait_id,
             input_types,
             span,
-            arena,
             solver,
         )?));
     }
@@ -1888,6 +1882,7 @@ fn derive_structural_value_impl(
     };
     let (drop_root, drop_locals) = derive_value_drop_body(trait_id, input_types, arena, &mut ctx)?;
     ctx.solver.replace_concrete_impl_code_entries(
+        arena,
         impl_id,
         trait_id,
         input_types,

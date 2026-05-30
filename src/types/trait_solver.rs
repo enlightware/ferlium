@@ -19,8 +19,7 @@ use crate::{
     compiler::error::InternalCompilationError,
     containers::b,
     hir::function::{
-        PendingArgPassing, PendingScriptFunction, PendingValueArgPassing, ResolvedValueArgPassing,
-        SharedRefTempCleanup,
+        PendingArgPassing, PendingValueArgPassing, ResolvedValueArgPassing, SharedRefTempCleanup,
     },
     hir::hir_syn::{get_dictionary, load_local},
     hir::{
@@ -1341,6 +1340,7 @@ impl<'a> TraitSolver<'a> {
     /// Add a concrete trait implementation from the given code body, for single-function traits.
     pub fn add_concrete_impl_from_code(
         &mut self,
+        arena: &hir::NodeArena,
         code_entry: hir::NodeId,
         locals: Vec<LocalDecl>,
         trait_id: TraitId,
@@ -1361,9 +1361,11 @@ impl<'a> TraitSolver<'a> {
             .next()
             .expect("single-function trait should have one method");
         let runtime_arg_count = definition.arg_names.len();
-        let function = PendingModuleFunction::new(
+        let function = PendingModuleFunction::new_with_copied_hir(
             definition,
-            PendingScriptFunction::new(code_entry, runtime_arg_count),
+            arena,
+            code_entry,
+            runtime_arg_count,
             None,
             locals,
         );
@@ -1381,6 +1383,7 @@ impl<'a> TraitSolver<'a> {
     /// Add a concrete trait implementation from one code body per trait method.
     pub fn add_concrete_impl_from_code_entries(
         &mut self,
+        arena: &hir::NodeArena,
         code_entries: impl Into<Vec<(hir::NodeId, Vec<LocalDecl>)>>,
         trait_id: TraitId,
         input_types: impl Into<Vec<Type>>,
@@ -1400,9 +1403,11 @@ impl<'a> TraitSolver<'a> {
             .zip(code_entries.into())
             .map(|(definition, (code_entry, locals))| {
                 let runtime_arg_count = definition.arg_names.len();
-                PendingModuleFunction::new(
+                PendingModuleFunction::new_with_copied_hir(
                     definition,
-                    PendingScriptFunction::new(code_entry, runtime_arg_count),
+                    arena,
+                    code_entry,
+                    runtime_arg_count,
                     None,
                     locals,
                 )
@@ -1492,6 +1497,7 @@ impl<'a> TraitSolver<'a> {
 
     pub(crate) fn replace_concrete_impl_code_entries(
         &mut self,
+        arena: &hir::NodeArena,
         impl_id: LocalImplId,
         trait_id: TraitId,
         input_types: &[Type],
@@ -1515,9 +1521,11 @@ impl<'a> TraitSolver<'a> {
             let runtime_arg_count = definition.arg_names.len();
             self.fn_collector.replace(
                 method_id,
-                PendingModuleFunction::new(
+                PendingModuleFunction::new_with_copied_hir(
                     definition,
-                    PendingScriptFunction::new(code_entry, runtime_arg_count),
+                    arena,
+                    code_entry,
+                    runtime_arg_count,
                     None,
                     locals,
                 ),
@@ -1964,9 +1972,11 @@ impl<'a> TraitSolver<'a> {
                                 fn_span,
                             ));
                             let runtime_arg_count = def.arg_names.len();
-                            let function = PendingModuleFunction::new(
+                            let function = PendingModuleFunction::new_with_copied_hir(
                                 def,
-                                PendingScriptFunction::new(apply_id, runtime_arg_count),
+                                arena,
+                                apply_id,
+                                runtime_arg_count,
                                 None,
                                 locals,
                             );
@@ -2196,6 +2206,7 @@ impl<'a> TraitSolver<'a> {
                     .collect::<Vec<_>>();
 
                 self.replace_concrete_impl_code_entries(
+                    arena,
                     local_impl_id,
                     trait_id,
                     input_tys,

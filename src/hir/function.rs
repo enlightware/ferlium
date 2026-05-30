@@ -30,7 +30,7 @@ use crate::{
     },
     format::{FormatWith, write_identifier},
     hir::value::{NativeDisplay, Value},
-    hir::{self, ENodeId, NodeArena, NodeId, UNodeId},
+    hir::{self, ENodeId, NodeArena, NodeId, UNodeArena, UNodeId},
     module::{ELocalDecl, ModuleEnv, ModuleFunction, ResolvedLocalDrop, ULocalDecl},
     types::effects::EffType,
     types::r#type::{FnArgType, FnType, Type, fmt_fn_type_with_arg_names},
@@ -575,11 +575,22 @@ impl Callable for ScriptFunction {
 }
 
 /// A script function emitted before HIR elaboration has been finalized.
-#[derive(Debug, Clone, new)]
+#[derive(Debug, Clone)]
 pub struct PendingScriptFunction {
+    pub arena: UNodeArena,
     pub entry_node_id: UNodeId,
     /// Runtime arity to preserve while the entry node still points into the unelaborated arena.
     pub runtime_arg_count: usize,
+}
+
+impl PendingScriptFunction {
+    pub fn new(arena: UNodeArena, entry_node_id: UNodeId, runtime_arg_count: usize) -> Self {
+        Self {
+            arena,
+            entry_node_id,
+            runtime_arg_count,
+        }
+    }
 }
 
 impl PartialEq for Box<ScriptFunction> {

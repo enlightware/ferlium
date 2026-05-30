@@ -62,11 +62,10 @@ impl UnifiedTypeInference {
     pub fn substitute_in_pending_module_function(
         &mut self,
         descr: &mut crate::module::PendingModuleFunction,
-        arena: &mut crate::hir::NodeArena,
     ) {
         self.substitute_in_fn_type_in_place(&mut descr.definition.ty_scheme.ty);
         self.substitute_in_constraints_in_place(&mut descr.definition.ty_scheme.constraints);
-        self.substitute_in_node(arena, descr.code.entry_node_id);
+        self.substitute_in_node(&mut descr.code.arena, descr.code.entry_node_id);
         self.substitute_in_local_decls_in_place(&mut descr.locals);
     }
 

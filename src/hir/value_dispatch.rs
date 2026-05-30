@@ -90,7 +90,7 @@ fn resolve_value_method_dispatch(
 ) -> Result<ResolvedValueMethodDispatch, InternalCompilationError> {
     if ty.is_function() {
         return Ok(ResolvedValueMethodDispatch::Static(FunctionId::Local(
-            function_value_method(ctx.trait_solver, method_index, span, arena)?,
+            function_value_method(ctx.trait_solver, method_index, span)?,
         )));
     }
     if is_function_surface_only_value_type(ty) {
@@ -167,7 +167,8 @@ pub(crate) fn resolve_local_drop(
 }
 
 pub(crate) fn resolve_arg_passing(
-    arena: &mut NodeArena,
+    source_arena: &NodeArena,
+    generated_arena: &mut NodeArena,
     ctx: &mut DictElaborationCtx<'_, '_, '_>,
     passing: &mut PendingArgPassing,
     arg: NodeId,
@@ -178,9 +179,9 @@ pub(crate) fn resolve_arg_passing(
         PendingArgPassing::MutableRef
         | PendingArgPassing::Value(PendingValueArgPassing::Resolved(_)) => {}
         PendingArgPassing::Value(PendingValueArgPassing::Unknown) => {
-            let needs_temp = crate::hir::function::call_argument_may_need_temp(arena, arg);
+            let needs_temp = crate::hir::function::call_argument_may_need_temp(source_arena, arg);
             *passing = PendingArgPassing::Value(PendingValueArgPassing::Resolved(
-                resolve_value_arg_passing(arena, ctx, ty, needs_temp, span)?,
+                resolve_value_arg_passing(generated_arena, ctx, ty, needs_temp, span)?,
             ));
         }
     }
@@ -300,7 +301,7 @@ fn resolve_generated_temp_drop(
     }
     if is_function_surface_only_value_type(ty) {
         return Ok(ResolvedLocalDrop::Static(FunctionId::Local(
-            function_value_method(trait_solver, VALUE_DROP_METHOD_INDEX, span, arena)?,
+            function_value_method(trait_solver, VALUE_DROP_METHOD_INDEX, span)?,
         )));
     }
     Ok(ResolvedLocalDrop::Static(trait_solver.solve_impl_method(

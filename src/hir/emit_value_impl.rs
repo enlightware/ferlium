@@ -13,7 +13,6 @@ use crate::{
     hir::{
         NodeArena, dictionary::DictElaborationCtx, elaboration::elaborate_generated_functions,
         emit_associated_consts::emitted_associated_const_values, emit_hir::EmitTraitOutput,
-        function::PendingScriptFunction,
     },
     internal_compilation_error,
     module::{LocalFunctionId, Module, ModuleEnv, PendingModuleFunction, TypeDefId, id::Id},
@@ -41,7 +40,6 @@ pub(crate) fn function_value_method(
     solver: &mut TraitSolver<'_>,
     method_index: TraitMethodIndex,
     span: Location,
-    arena: &mut NodeArena,
 ) -> Result<LocalFunctionId, InternalCompilationError> {
     let name = function_value_method_name(method_index);
     if let Some(local_id) = solver.current_functions.get(&name).copied() {
@@ -52,7 +50,7 @@ pub(crate) fn function_value_method(
     }
 
     let local_id = solver.fn_collector.next_id();
-    let function = function_value_method_function(method_index, span, arena, solver)?;
+    let function = function_value_method_function(method_index, span, solver)?;
     solver.fn_collector.push(name, function);
     Ok(local_id)
 }
@@ -104,9 +102,11 @@ pub(crate) fn generic_value_methods_for_type(
         }
 
         let runtime_arg_count = definition.arg_names.len();
-        let function = PendingModuleFunction::new(
+        let function = PendingModuleFunction::new_with_copied_hir(
             definition,
-            PendingScriptFunction::new(code_entry, runtime_arg_count),
+            arena,
+            code_entry,
+            runtime_arg_count,
             None,
             locals,
         );
@@ -302,13 +302,7 @@ pub(super) fn emit_auto_value_impls(
                 &mut output.def_table,
                 &mut pending_functions,
             );
-            elaborate_generated_functions(
-                output,
-                ir_arena,
-                others,
-                &mut pending_functions,
-                generated,
-            )?;
+            elaborate_generated_functions(output, others, &mut pending_functions, generated)?;
             code_entries
         }) else {
             continue;
@@ -338,32 +332,25 @@ pub(super) fn emit_auto_value_impls(
             definition.ty_scheme.ty_quantifiers = quantifiers.clone();
             definition.ty_scheme.constraints = constraints.clone();
             let runtime_arg_count = definition.arg_names.len();
-            let function = PendingModuleFunction::new(
+            let function = PendingModuleFunction::new_with_copied_hir(
                 definition,
-                PendingScriptFunction::new(root, runtime_arg_count),
+                ir_arena,
+                root,
+                runtime_arg_count,
                 None,
                 locals,
             );
             {
                 let mut solver = trait_solver_from_module!(output, others);
                 let mut ctx = DictElaborationCtx::new(&dicts, None, &mut solver);
-                let (function, _) = function.check_borrows_and_elaborate_hir(
-                    ir_arena,
-                    &mut output.ir_arena,
-                    &mut ctx,
-                )?;
+                let (function, _) =
+                    function.check_borrows_and_elaborate_hir(&mut output.ir_arena, &mut ctx)?;
                 let generated = solver.commit(
                     &mut output.functions,
                     &mut output.def_table,
                     &mut pending_functions,
                 );
-                elaborate_generated_functions(
-                    output,
-                    ir_arena,
-                    others,
-                    &mut pending_functions,
-                    generated,
-                )?;
+                elaborate_generated_functions(output, others, &mut pending_functions, generated)?;
                 let id = output.add_function_anonymous(function);
                 output.name_function(id, method_names[usize::from(method_index)]);
                 function_ids.push(id);

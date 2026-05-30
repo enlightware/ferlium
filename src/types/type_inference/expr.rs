@@ -21,7 +21,7 @@ use crate::{
         self, CallArgument, FieldAccess as HirFieldAccess, NodeArena, NodeId, NodeKind,
         Project as HirProject, ProjectAt as HirProjectAt, StoreLocal, Variant as HirVariant,
         function::{
-            FunctionDefinition, PendingArgPassing, PendingScriptFunction, ResolvedArgPassing,
+            FunctionDefinition, PendingArgPassing, ResolvedArgPassing,
             unresolved_arg_passing_for_args,
         },
         node_is_place_reference, place_resolution_may_create_temp,
@@ -427,12 +427,12 @@ impl TypeInference {
 
         let code = &inner_env.ir_arena[code_id];
         let effects = code.effects.clone();
+        drop(inner_env);
 
         // 6. Store and return the function's type.
         let fn_ty = FnType::new(args_ty, ret_ty, effects);
         let fn_ty_wrapper = Type::function_type(fn_ty.clone());
         let arg_names: Vec<_> = args.iter().map(|(name, _)| *name).collect();
-        let code = PendingScriptFunction::new(code_id, runtime_arg_count);
         let ty_scheme = TypeScheme::new_just_type(fn_ty);
         let body_span = env.ast_arena[body].span;
         let spans = ModuleFunctionSpans {
@@ -442,9 +442,11 @@ impl TypeInference {
             ret_ty: None,
             span,
         };
-        let function = PendingModuleFunction::new(
+        let function = PendingModuleFunction::new_with_copied_hir(
             FunctionDefinition::new(ty_scheme, arg_names, None),
-            code,
+            env.ir_arena,
+            code_id,
+            runtime_arg_count,
             Some(spans),
             fn_all_locals,
         );

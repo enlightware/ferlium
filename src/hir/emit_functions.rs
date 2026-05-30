@@ -23,7 +23,7 @@ use crate::{
     },
     containers::{SVec2, b},
     format::FormatWith,
-    hir::function::{FunctionDefinition, PendingScriptFunction, VoidFunction},
+    hir::function::{FunctionDefinition, VoidFunction},
     hir::{self, NodeArena},
     internal_compilation_error,
     module::{
@@ -206,7 +206,6 @@ struct RecursiveReturnDefaultingInputs<'ctx, I> {
 
 fn default_unconstrained_recursive_returns_to_never<'func, I>(
     output: &mut Module,
-    ir_arena: &mut NodeArena,
     ty_inf: &mut UnifiedTypeInference,
     inputs: RecursiveReturnDefaultingInputs<'_, I>,
 ) where
@@ -228,8 +227,11 @@ fn default_unconstrained_recursive_returns_to_never<'func, I>(
         let Some(pending) = inputs.pending_functions.get(id) else {
             continue;
         };
-        let root = pending.code.entry_node_id;
-        if !node_references_any_function(ir_arena, root, inputs.recursive_function_ids) {
+        if !node_references_any_function(
+            &pending.code.arena,
+            pending.code.entry_node_id,
+            inputs.recursive_function_ids,
+        ) {
             continue;
         }
 
@@ -269,7 +271,7 @@ fn default_unconstrained_recursive_returns_to_never<'func, I>(
                 .get_mut(&function_id)
                 .expect("expected pending function body");
             pending.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.clone();
-            instantiate_function_descr_in_place(ir_arena, pending, &mut mapper);
+            instantiate_function_descr_in_place(pending, &mut mapper);
         }
     }
 }
@@ -680,9 +682,11 @@ where
             &ir_arena[fn_node_id].effects,
             &descr.definition.ty_scheme.ty.effects,
         );
-        let pending = PendingModuleFunction::new(
+        let pending = PendingModuleFunction::new_with_copied_hir(
             descr.definition.clone(),
-            PendingScriptFunction::new(fn_node_id, descr.definition.arg_names.len()),
+            ir_arena,
+            fn_node_id,
+            descr.definition.arg_names.len(),
             descr.spans.clone(),
             locals,
         );
@@ -701,7 +705,7 @@ where
         &mut output.def_table,
         &mut pending_functions,
     );
-    elaborate_generated_functions(output, ir_arena, others, &mut pending_functions, generated)?;
+    elaborate_generated_functions(output, others, &mut pending_functions, generated)?;
     let module_env = ModuleEnv::new(output, others);
     ty_inf.log_debug_substitution_tables(module_env);
     ty_inf.log_debug_constraints(module_env);
@@ -714,10 +718,9 @@ where
             let descr = pending_functions
                 .get_mut(&function_id)
                 .expect("expected pending function body");
-            let root = descr.code.entry_node_id;
             ty_inf.resolve_local_storage_and_activate_value_constraints(
-                ir_arena,
-                root,
+                &descr.code.arena,
+                descr.code.entry_node_id,
                 &mut descr.locals,
                 value_trait_id,
             );
@@ -746,13 +749,7 @@ where
                 &mut output.def_table,
                 &mut pending_functions,
             );
-            elaborate_generated_functions(
-                output,
-                ir_arena,
-                others,
-                &mut pending_functions,
-                generated,
-            )?;
+            elaborate_generated_functions(output, others, &mut pending_functions, generated)?;
 
             // Check for remaining orphans.
             ty_inf.normalize_remaining_constraints();
@@ -786,7 +783,6 @@ where
         // Substitute everything using ty_inf (single pass, includes all defaults).
         substitute_and_canonicalize_functions(
             output,
-            ir_arena,
             &mut pending_functions,
             &associated_lambdas,
             &local_fns,
@@ -794,7 +790,6 @@ where
         );
         default_output_effects_in_functions(
             output,
-            ir_arena,
             &mut pending_functions,
             &associated_lambdas,
             &local_fns,
@@ -856,12 +851,10 @@ where
         // Detect unbound type variables in the code and return error if not in unused variants only.
         let mut unbound_subst = FxHashMap::default();
         for id in local_fns.iter() {
-            let root = pending_functions
+            let pending = pending_functions
                 .get(id)
-                .expect("expected pending function body")
-                .code
-                .entry_node_id;
-            let unbound = hir::all_unbound_ty_vars(ir_arena, root);
+                .expect("expected pending function body");
+            let unbound = hir::all_unbound_ty_vars(&pending.code.arena, pending.code.entry_node_id);
             let uninstantiated_unbound = check_unbounds(unbound, &quantifiers)?;
             unbound_subst.extend(
                 uninstantiated_unbound
@@ -889,7 +882,7 @@ where
             &mut output.def_table,
             &mut pending_functions,
         );
-        elaborate_generated_functions(output, ir_arena, others, &mut pending_functions, generated)?;
+        elaborate_generated_functions(output, others, &mut pending_functions, generated)?;
         // Make sure substitution is not due to constraint processing.
         assert_eq!(subst_size, subst.0.len());
 
@@ -906,7 +899,7 @@ where
                         .get_mut(&function_id)
                         .expect("expected pending function body");
                     pending.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.clone();
-                    instantiate_function_descr_in_place(ir_arena, pending, &mut mapper);
+                    instantiate_function_descr_in_place(pending, &mut mapper);
                 }
             }
         }
@@ -931,7 +924,7 @@ where
                     .get_mut(&function_id)
                     .expect("expected pending function body");
                 pending.definition = descr.definition.clone();
-                instantiate_function_descr_in_place(ir_arena, pending, &mut mapper);
+                instantiate_function_descr_in_place(pending, &mut mapper);
             }
 
             // Name the function
@@ -958,7 +951,6 @@ where
         for id in local_fns.iter() {
             borrow_check_and_elaborate_dict(
                 output,
-                ir_arena,
                 others,
                 &mut pending_functions,
                 &associated_lambdas,
@@ -999,7 +991,7 @@ where
                     .get(id)
                     .map(|function| {
                         UnifiedTypeInference::collect_unit_variant_seed_types(
-                            ir_arena,
+                            &function.code.arena,
                             function.code.entry_node_id,
                         )
                     })
@@ -1015,13 +1007,7 @@ where
                 &mut output.def_table,
                 &mut pending_functions,
             );
-            elaborate_generated_functions(
-                output,
-                ir_arena,
-                others,
-                &mut pending_functions,
-                generated,
-            )?;
+            elaborate_generated_functions(output, others, &mut pending_functions, generated)?;
         }
         for (id, explicit_root_tys) in local_fns.iter().zip(function_explicit_root_tys.iter()) {
             let descr = &output.functions[id.as_index()];
@@ -1059,7 +1045,6 @@ where
         // Substitute everything using ty_inf (single pass, includes all defaults).
         substitute_and_canonicalize_functions(
             output,
-            ir_arena,
             &mut pending_functions,
             &associated_lambdas,
             &local_fns,
@@ -1070,7 +1055,6 @@ where
         ty_inf.normalize_remaining_constraints();
         default_unconstrained_recursive_returns_to_never(
             output,
-            ir_arena,
             &mut ty_inf,
             RecursiveReturnDefaultingInputs {
                 ast_functions: ast_functions(),
@@ -1092,11 +1076,9 @@ where
             .zip(function_explicit_root_tys.iter())
         {
             let descr = &output.functions[id.as_index()];
-            let code_entry = pending_functions
+            let pending = pending_functions
                 .get(id)
-                .expect("expected pending function body")
-                .code
-                .entry_node_id;
+                .expect("expected pending function body");
 
             // Find constraints related to this function's signature.
             let mut sig_ty_vars = descr.definition.ty_scheme.ty.inner_ty_vars();
@@ -1125,7 +1107,7 @@ where
             quantifiers = quantifiers.into_iter().unique().collect();
 
             // Check for unbound type variables.
-            let unbound = hir::all_unbound_ty_vars(ir_arena, code_entry);
+            let unbound = hir::all_unbound_ty_vars(&pending.code.arena, pending.code.entry_node_id);
             let uninstantiated_unbound = check_unbounds(unbound, &quantifiers)?;
 
             // Apply unbound→Never fixup if needed.
@@ -1142,7 +1124,7 @@ where
                     let pending = pending_functions
                         .get_mut(&function_id)
                         .expect("expected pending function body");
-                    instantiate_function_descr_in_place(ir_arena, pending, &mut mapper);
+                    instantiate_function_descr_in_place(pending, &mut mapper);
                 }
                 quantifiers.retain(|v| !uninstantiated_unbound.contains(v));
             }
@@ -1164,13 +1146,7 @@ where
                 &mut output.def_table,
                 &mut pending_functions,
             );
-            elaborate_generated_functions(
-                output,
-                ir_arena,
-                others,
-                &mut pending_functions,
-                generated,
-            )?;
+            elaborate_generated_functions(output, others, &mut pending_functions, generated)?;
 
             // Write the final type scheme.
             let explicit_ty_vars = explicit_ty_vars
@@ -1249,7 +1225,7 @@ where
                     .get_mut(&function_id)
                     .expect("expected pending function body");
                 pending.definition = descr.definition.clone();
-                instantiate_function_descr_in_place(ir_arena, pending, &mut mapper);
+                instantiate_function_descr_in_place(pending, &mut mapper);
             }
         }
 
@@ -1272,7 +1248,6 @@ where
             let dicts = module_inst_data.get(id).unwrap();
             borrow_check_and_elaborate_dict(
                 output,
-                ir_arena,
                 others,
                 &mut pending_functions,
                 &associated_lambdas,
