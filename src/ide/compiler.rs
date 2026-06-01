@@ -61,7 +61,6 @@ impl Compiler {
             SRC_NAME,
             Path::single_str(MODULE_NAME),
             self.uses.clone(),
-            None,
         )?;
         Ok(())
     }
@@ -90,11 +89,11 @@ impl Compiler {
             .session
             .expect_compiled_module(self.user_module.module_id);
         if let Some(func) = module
-            .lookup_function(name, self.session.modules())
+            .lookup_function(name, self.session.raw_modules())
             .ok()
             .flatten()
         {
-            let module_env = ModuleEnv::new(module, self.session.modules());
+            let module_env = ModuleEnv::new(module, self.session.raw_modules());
             let ty_scheme = &func.definition.ty_scheme;
             let ty_var_names =
                 ty_scheme.display_ty_var_names_with_source_params(&func.definition.generic_params);
@@ -124,12 +123,12 @@ impl Compiler {
     pub fn run_expr(&mut self) -> Option<ExecutionResult> {
         self.user_module.expr.as_ref().map(|expr| {
             let module_id = self.user_module.module_id;
-            let is_stale = self.session.modules().get(module_id).unwrap().is_stale();
+            let is_stale = self.session.modules().is_stale(module_id).unwrap();
             if is_stale {
                 let module_name = self
                     .session
                     .modules()
-                    .get_name(module_id)
+                    .path(module_id)
                     .map_or("".into(), |path| path.to_string());
                 return ExecutionResult::error(ExecutionErrorData::new(
                     "Stale module".into(),
@@ -177,7 +176,7 @@ impl Compiler {
                                 "{}",
                                 error.format_with(&(
                                     self.session.source_table(),
-                                    self.session.modules()
+                                    self.session.raw_modules()
                                 ))
                             );
                             return ExecutionResult::error(ExecutionErrorData::new(
@@ -186,7 +185,7 @@ impl Compiler {
                         }
                     };
                     let module = self.session.expect_fresh_module(module_id);
-                    let module_env = ModuleEnv::new(module, self.session.modules());
+                    let module_env = ModuleEnv::new(module, self.session.raw_modules());
                     let output = format!("{}: {}", rendered, expr.ty.display(&module_env));
                     ExecutionResult::success(output)
                 }
@@ -194,7 +193,10 @@ impl Compiler {
                     let summary = error.kind.to_string();
                     let complete = format!(
                         "{}",
-                        error.format_with(&(self.session.source_table(), self.session.modules()))
+                        error.format_with(&(
+                            self.session.source_table(),
+                            self.session.raw_modules()
+                        ))
                     );
                     let source_id = self
                         .session
@@ -268,11 +270,7 @@ impl Compiler {
             .session
             .expect_module_entry(self.user_module.module_id)
             .module;
-        for (mod_name, entry) in self.session.modules().iter_named() {
-            let module = match entry.module() {
-                None => continue,
-                Some(module) => module,
-            };
+        for (mod_name, module) in self.session.modules().iter_named_modules() {
             for (sym_name, func) in module.iter_named_functions() {
                 // skip trait methods
                 if !module.is_non_trait_local_function(sym_name) {
@@ -311,16 +309,8 @@ impl Compiler {
             .session
             .expect_module_entry(self.user_module.module_id)
             .module;
-        for (mod_name, entry) in self.session.modules().iter_named() {
-            let module = match entry.module() {
-                None => continue,
-                Some(module) => module,
-            };
+        for (mod_name, module) in self.session.modules().iter_named_modules() {
             for (sym_name, _) in module.iter_named_functions() {
-                let module = match entry.module() {
-                    None => continue,
-                    Some(module) => module,
-                };
                 // skip trait methods
                 if !module.is_non_trait_local_function(sym_name) {
                     continue;
@@ -354,13 +344,7 @@ impl Compiler {
 impl Compiler {
     pub fn new_with_session_and_uses(mut session: CompilerSession, uses: Uses) -> Self {
         let user_module = session
-            .compile_to(
-                "",
-                SRC_NAME,
-                Path::single_str(MODULE_NAME),
-                uses.clone(),
-                None,
-            )
+            .compile_to("", SRC_NAME, Path::single_str(MODULE_NAME), uses.clone())
             .unwrap();
         Self {
             session,

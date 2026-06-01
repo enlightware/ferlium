@@ -16,7 +16,7 @@ use crate::module::id::Id;
 use crate::std::array::array_value_from_vec;
 use crate::std::value::{VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX};
 use crate::{
-    CompilerSession, Location, SourceId, SourceTable,
+    CompilerSession, Location, ModuleRegistry, SourceId, SourceTable,
     compiler::error::RuntimeErrorKind,
     format::{FormatWith, write_with_separator},
     hir::function::{
@@ -884,6 +884,16 @@ impl FormatWith<(&SourceTable, &Modules)> for BacktraceFrame {
     }
 }
 
+impl FormatWith<(&SourceTable, ModuleRegistry<'_>)> for BacktraceFrame {
+    fn fmt_with(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+        data: &(&SourceTable, ModuleRegistry<'_>),
+    ) -> std::fmt::Result {
+        self.fmt_with_suspended_at(f, &(data.0, data.1.raw()), None)
+    }
+}
+
 /// A runtime error that occurred during evaluation and is propagated upwards.
 #[derive(Debug, Clone, new)]
 pub struct RuntimeError {
@@ -974,6 +984,16 @@ impl FormatWith<(&SourceTable, &Modules)> for RuntimeError {
             }
         }
         Ok(())
+    }
+}
+
+impl FormatWith<(&SourceTable, ModuleRegistry<'_>)> for RuntimeError {
+    fn fmt_with(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+        data: &(&SourceTable, ModuleRegistry<'_>),
+    ) -> std::fmt::Result {
+        self.fmt_with(f, &(data.0, data.1.raw()))
     }
 }
 

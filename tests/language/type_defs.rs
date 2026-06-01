@@ -61,14 +61,14 @@ fn run_and_pretty_format(session: &mut TestSession, src: &str) -> String {
     )
     .unwrap()
     .into_value();
-    let env = ferlium::module::ModuleEnv::new(module, session.session().modules());
+    let env = session.session().modules().env_for(module);
     value.display_pretty(&expr.ty.ty, &env).to_string()
 }
 
 fn format_compiled_module(session: &mut TestSession, src: &str) -> String {
     let module_id = session.compile(src).module_id;
     let module = session.session().expect_fresh_module(module_id);
-    module.format_with(session.session().modules()).to_string()
+    module.format_with(&session.session().modules()).to_string()
 }
 
 fn join_src(parts: &[&str]) -> String {

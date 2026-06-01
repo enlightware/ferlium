@@ -38,7 +38,7 @@ use std::{fmt, hash::Hash, ops};
 use ustr::{Ustr, ustr};
 
 use crate::{
-    FxHashMap, FxHashSet, Location, Modules,
+    FxHashMap, FxHashSet, Location, ModuleRegistry, Modules,
     ast::UstrSpan,
     compiler::error::{ImportKind, ImportSite, InternalCompilationError},
     define_id_type,
@@ -54,7 +54,6 @@ use crate::{
             LocalTypeAliasId, Type, TypeAliasEntry, TypeAliases, TypeDef, TypeDefSlot,
             TypeDisplayEnv, TypeKind, TypeVar,
         },
-        type_scheme::PubTypeConstraint,
     },
 };
 
@@ -484,7 +483,7 @@ impl Module {
     }
 
     /// Look-up a function by name in this module or in any of the modules this module uses.
-    pub fn lookup_function<'a>(
+    pub(crate) fn lookup_function<'a>(
         &'a self,
         name: &'a str,
         others: &'a Modules,
@@ -801,7 +800,7 @@ impl Module {
     }
 
     /// Look-up a trait by string name in another module.
-    pub fn expect_trait_id_str_in_module(
+    pub(crate) fn expect_trait_id_str_in_module(
         module_id: ModuleId,
         modules: &Modules,
         name: &str,
@@ -814,7 +813,7 @@ impl Module {
     }
 
     /// Look-up a std trait in the registered std module.
-    pub fn expect_std_trait_id(modules: &Modules, name: &str) -> TraitId {
+    pub(crate) fn expect_std_trait_id(modules: &Modules, name: &str) -> TraitId {
         Self::expect_trait_id_str_in_module(crate::std::STD_MODULE_ID, modules, name)
     }
 
@@ -1144,18 +1143,6 @@ impl Module {
             .is_some_and(|name| self.is_symbol_accessible_from(name, from_module))
     }
 
-    /// Return whether all named types in a type are accessible from the given module.
-    pub fn is_type_accessible_from(
-        &self,
-        ty: Type,
-        from_module: ModuleId,
-        others: &Modules,
-    ) -> bool {
-        self.is_type_visible_by(ty, others, |module, type_def| {
-            module.is_type_def_accessible_from(type_def, from_module)
-        })
-    }
-
     fn module_for<'a>(&'a self, module_id: ModuleId, others: &'a Modules) -> Option<&'a Module> {
         if module_id == self.module_id() {
             return Some(self);
@@ -1206,7 +1193,7 @@ impl Module {
     }
 
     /// Return whether a trait can be named from the given module.
-    pub fn is_trait_accessible_from(
+    pub(crate) fn is_trait_accessible_from(
         &self,
         trait_id: TraitId,
         from_module: ModuleId,
@@ -1215,21 +1202,6 @@ impl Module {
         self.is_trait_visible_by(trait_id, others, |module, trait_name| {
             module.is_symbol_accessible_from(trait_name, from_module)
         })
-    }
-
-    /// Return whether all named items in a trait constraint are accessible from the given module.
-    pub fn is_trait_constraint_accessible_from(
-        &self,
-        constraint: &PubTypeConstraint,
-        from_module: ModuleId,
-        others: &Modules,
-    ) -> bool {
-        self.is_trait_constraint_visible_by(
-            constraint,
-            others,
-            |module, trait_name| module.is_symbol_accessible_from(trait_name, from_module),
-            |module, type_def| module.is_type_def_accessible_from(type_def, from_module),
-        )
     }
 
     fn is_type_public(&self, ty: Type, others: &Modules) -> bool {
@@ -1264,55 +1236,8 @@ impl Module {
             })
     }
 
-    fn is_trait_constraint_visible_by(
-        &self,
-        constraint: &PubTypeConstraint,
-        others: &Modules,
-        is_named_trait_visible: impl Fn(&Module, Ustr) -> bool + Copy,
-        is_named_type_visible: impl Fn(&Module, TypeDefId) -> bool + Copy,
-    ) -> bool {
-        match constraint {
-            PubTypeConstraint::TupleAtIndexIs {
-                tuple_ty,
-                element_ty,
-                ..
-            } => {
-                self.is_type_visible_by(*tuple_ty, others, is_named_type_visible)
-                    && self.is_type_visible_by(*element_ty, others, is_named_type_visible)
-            }
-            PubTypeConstraint::RecordFieldIs {
-                record_ty,
-                element_ty,
-                ..
-            } => {
-                self.is_type_visible_by(*record_ty, others, is_named_type_visible)
-                    && self.is_type_visible_by(*element_ty, others, is_named_type_visible)
-            }
-            PubTypeConstraint::TypeHasVariant {
-                variant_ty,
-                payload_ty,
-                ..
-            } => {
-                self.is_type_visible_by(*variant_ty, others, is_named_type_visible)
-                    && self.is_type_visible_by(*payload_ty, others, is_named_type_visible)
-            }
-            PubTypeConstraint::HaveTrait {
-                trait_id,
-                input_tys,
-                output_tys,
-                ..
-            } => {
-                self.is_trait_visible_by(*trait_id, others, is_named_trait_visible)
-                    && input_tys
-                        .iter()
-                        .chain(output_tys)
-                        .all(|ty| self.is_type_visible_by(*ty, others, is_named_type_visible))
-            }
-        }
-    }
-
     /// Return whether a trait implementation can be exported outside this module.
-    pub fn is_trait_impl_exportable(
+    pub(crate) fn is_trait_impl_exportable(
         &self,
         trait_id: TraitId,
         input_tys: &[Type],
@@ -1357,7 +1282,7 @@ impl Module {
     /// Look-up a member by name in this module or in any of the modules this module uses.
     /// Returns the module name if the member is from another module.
     /// The getter function is used to get the member from a module.
-    pub fn get_member<'a, T>(
+    pub(crate) fn get_member<'a, T>(
         &'a self,
         name: &'a str,
         others: &'a Modules,
@@ -1792,15 +1717,21 @@ impl FormatWith<Modules> for Module {
     }
 }
 
+impl FormatWith<ModuleRegistry<'_>> for Module {
+    fn fmt_with(&self, f: &mut fmt::Formatter<'_>, data: &ModuleRegistry<'_>) -> fmt::Result {
+        self.format_with_modules(f, data.raw(), false, false, true)
+    }
+}
+
 pub struct ShowModuleWithOptions<'a> {
-    pub modules: &'a Modules,
+    pub modules: ModuleRegistry<'a>,
     pub show_details: bool,
     pub show_all_functions: bool,
     pub show_private_items: bool,
 }
 
 impl<'a> ShowModuleWithOptions<'a> {
-    pub fn new(modules: &'a Modules, show_details: bool, show_all_functions: bool) -> Self {
+    pub fn new(modules: ModuleRegistry<'a>, show_details: bool, show_all_functions: bool) -> Self {
         Self {
             modules,
             show_details,
@@ -1809,7 +1740,7 @@ impl<'a> ShowModuleWithOptions<'a> {
         }
     }
 
-    pub fn public(modules: &'a Modules) -> Self {
+    pub fn public(modules: ModuleRegistry<'a>) -> Self {
         Self {
             modules,
             show_details: false,
@@ -1823,7 +1754,7 @@ impl FormatWith<ShowModuleWithOptions<'_>> for Module {
     fn fmt_with(&self, f: &mut fmt::Formatter<'_>, options: &ShowModuleWithOptions) -> fmt::Result {
         self.format_with_modules(
             f,
-            options.modules,
+            options.modules.raw(),
             options.show_details,
             options.show_all_functions,
             options.show_private_items,

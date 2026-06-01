@@ -77,7 +77,7 @@ fn non_owning_deferred_local_storage_does_not_leave_value_constraint() {
         .compile("fn f(slot) { let copy = slot; () }")
         .module_id;
     let module = session.session().expect_fresh_module(module_id);
-    let rendered = module.format_with(session.session().modules()).to_string();
+    let rendered = module.format_with(&session.session().modules()).to_string();
     assert!(
         rendered.contains("fn f<A>(slot: A) -> ()"),
         "expected f to remain unconstrained, got:\n{rendered}"

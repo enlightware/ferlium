@@ -55,7 +55,7 @@ pub(super) fn display_annotations(
         None => return vec![],
         Some(module) => module,
     };
-    let env = ModuleEnv::new(module, session.modules());
+    let env = ModuleEnv::new(module, session.raw_modules());
     let mut annotations = vec![];
 
     // Function and expression bodies.

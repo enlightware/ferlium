@@ -13,7 +13,10 @@ use ustr::ustr;
 
 use crate::harness::TestSession;
 use ferlium::{
-    compiler::error::{CompilationErrorImpl, UnsafeFeature},
+    compiler::{
+        error::{CompilationErrorImpl, UnsafeFeature},
+        test_support::raw_modules,
+    },
     hir::test_support::emit_expr_unsafe,
     module::{LocalImplId, id::Id},
     parse_module_and_expr,
@@ -253,7 +256,7 @@ fn effects_unsafe_erases_effects_in_std_context() {
         expr.expect("expected expression"),
         &arena,
         &mut module,
-        session.session().modules(),
+        raw_modules(session.session()),
         vec![],
     )
     .expect("std-context expression should compile");

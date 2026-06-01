@@ -21,7 +21,6 @@ use crate::{
     types::r#type::{BareNativeTypeB, Type, TypeAliasEntry, TypeDef},
     types::typing_env::TraitMethodDescription,
 };
-use derive_new::new;
 use ustr::{Ustr, ustr};
 
 #[derive(Debug, Clone)]
@@ -47,13 +46,17 @@ fn unavailable_trait<T>(id: TraitId) -> T {
     panic!("Trait #{}:{} is unavailable", id.module, id.index)
 }
 
-#[derive(Clone, Copy, Debug, new)]
+#[derive(Clone, Copy, Debug)]
 pub struct ModuleEnv<'m> {
     pub(crate) current: &'m Module,
     pub(crate) modules: &'m Modules,
 }
 
 impl<'m> ModuleEnv<'m> {
+    pub(crate) fn new(current: &'m Module, modules: &'m Modules) -> Self {
+        Self { current, modules }
+    }
+
     pub fn type_alias_name(&self, ty: Type) -> Option<String> {
         if let Some(name) = self.current.type_aliases.get_name(ty) {
             return Some(name.to_string());

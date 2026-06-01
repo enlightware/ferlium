@@ -92,7 +92,7 @@ pub struct TraitSolver<'a> {
     /// Collector for newly created current module functions.
     pub fn_collector: PendingFunctionCollector,
     /// Other modules available for fetching trait implementations and normal functions (read only).
-    pub others: &'a Modules,
+    pub(crate) others: &'a Modules,
     /// Current recursion depth of the trait solver.
     #[new(default)]
     pub recursion_depth: usize,

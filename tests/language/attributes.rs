@@ -9,7 +9,10 @@
 
 use ferlium::{
     SourceId, ast,
-    compiler::error::{AttributeTarget, CompilationErrorImpl, InvalidAttributeKind, UnsafeFeature},
+    compiler::{
+        error::{AttributeTarget, CompilationErrorImpl, InvalidAttributeKind, UnsafeFeature},
+        test_support::raw_modules,
+    },
     hir::test_support::{EmitModuleFrom, emit_module},
     module::{ModuleId, Uses, id::Id},
     parse_module_and_expr,
@@ -39,7 +42,7 @@ fn compile_std_module(src: &str) -> ferlium::module::Module {
         module_ast,
         &arena,
         module_id,
-        session.session().modules(),
+        raw_modules(session.session()),
         EmitModuleFrom::Uses(Uses::default()),
     )
     .expect("std-context module should compile")
@@ -264,7 +267,7 @@ fn place_result_attribute_rejects_arguments_in_std_context() {
         module_ast,
         &arena,
         module_id,
-        session.session().modules(),
+        raw_modules(session.session()),
         EmitModuleFrom::Uses(Uses::default()),
     )
     .unwrap_err()
@@ -304,7 +307,7 @@ fn place_result_attribute_rejects_duplicates_in_std_context() {
         module_ast,
         &arena,
         module_id,
-        session.session().modules(),
+        raw_modules(session.session()),
         EmitModuleFrom::Uses(Uses::default()),
     )
     .unwrap_err()

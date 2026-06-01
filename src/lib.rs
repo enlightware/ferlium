@@ -26,10 +26,11 @@ pub mod std;
 mod sync;
 pub mod types;
 
+pub(crate) use compiler::Modules;
 pub use compiler::error::{CompilationError, LocatedError};
 pub use compiler::{
     CompilationRevision, CompilerSession, ModuleAndExpr, ModuleDiagnostic, ModuleInfo,
-    ModuleSource, ModuleUpdateResult, Modules, SourceVersion, parse_module_and_expr,
+    ModuleRegistry, ModuleSource, ModuleUpdateResult, SourceVersion, parse_module_and_expr,
 };
 pub(crate) use compiler::{EvalExprError, add_code_to_module};
 pub use ide::Compiler;
@@ -56,7 +57,7 @@ macro_rules! call_fn {
         let __session = $session;
         let __module_id = $module_id;
         let ret_ty = $ret_ty;
-        __session.run_fn(__module_id, $name, move |func, current, others| {
+        __session.run_fn(__module_id, $name, move |func, current, modules| {
             let expected_args = vec![
                 $( $crate::types::r#type::FnArgType::new_by_val($ty) ),*
             ];
@@ -64,7 +65,7 @@ macro_rules! call_fn {
                 || func.definition.ty_scheme.ty.args != expected_args
                 || func.definition.ty_scheme.ty.ret != ret_ty
             {
-                let module_env = $crate::module::ModuleEnv::new(current, others);
+                let module_env = modules.env_for(current);
                 let args_fmt = expected_args
                     .iter()
                     .map(|a| a.ty.format_with(&module_env).to_string())

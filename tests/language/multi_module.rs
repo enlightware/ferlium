@@ -10,6 +10,10 @@ use test_log::test;
 
 use ferlium::{
     CompilerSession, Path,
+    compiler::test_support::{
+        module_compilation_revision, module_diagnostics_len, module_entry_exists,
+        module_has_compiled_version, module_is_stale, module_latest_deps, module_source_version,
+    },
     eval::ValOrMut,
     hir::value::Value,
     module::{ModuleId, id::Id},
@@ -38,11 +42,7 @@ fn compile_module(session: &mut TestSession, name: &str, code: &str) -> ModuleId
 #[track_caller]
 fn assert_fresh(session: &TestSession, id: ModuleId, label: &str) {
     assert!(
-        !session
-            .session()
-            .get_module_entry_by_id(id)
-            .unwrap()
-            .is_stale(),
+        !module_is_stale(session.session(), id).unwrap(),
         "{label} should be fresh"
     );
 }
@@ -51,11 +51,7 @@ fn assert_fresh(session: &TestSession, id: ModuleId, label: &str) {
 #[track_caller]
 fn assert_stale(session: &TestSession, id: ModuleId, label: &str) {
     assert!(
-        session
-            .session()
-            .get_module_entry_by_id(id)
-            .unwrap()
-            .is_stale(),
+        module_is_stale(session.session(), id).unwrap(),
         "{label} should be stale"
     );
 }
@@ -345,12 +341,7 @@ fn cascade_recompile_direct_dep() {
 
     // Verify the module is really compiled (not a phantom fresh entry).
     assert!(
-        session
-            .session()
-            .get_module_entry_by_id(user_id)
-            .unwrap()
-            .module()
-            .is_some(),
+        module_has_compiled_version(session.session(), user_id).unwrap(),
         "user must have a compiled module after cascade recompile"
     );
 
@@ -547,11 +538,11 @@ fn no_infinite_recursion_on_circular_dep() {
     // The session must still be in a consistent state: both entries must still
     // exist and be query-able (no panic, no missing entries).
     assert!(
-        session.session().get_module_entry_by_id(a_id).is_some(),
+        module_entry_exists(session.session(), a_id),
         "a's entry must still exist after rejected circular recompile"
     );
     assert!(
-        session.session().get_module_entry_by_id(b_id).is_some(),
+        module_entry_exists(session.session(), b_id),
         "b's entry must still exist after rejected circular recompile"
     );
 }
@@ -613,9 +604,18 @@ fn module_source_versions_and_compilation_revisions_are_tracked() {
         .expect("initial compile should succeed")
         .module_id;
 
-    let entry = session.get_module_entry_by_id(module_id).unwrap();
-    assert_eq!(entry.source_version().unwrap().as_index(), 0);
-    assert_eq!(entry.compilation_revision().as_index(), 0);
+    assert_eq!(
+        module_source_version(&session, module_id)
+            .unwrap()
+            .as_index(),
+        0
+    );
+    assert_eq!(
+        module_compilation_revision(&session, module_id)
+            .unwrap()
+            .as_index(),
+        0
+    );
 
     let changed = session
         .update_module_source(module_id, "fn val() -> int { 2 }")
@@ -657,19 +657,10 @@ fn failed_module_source_update_records_diagnostics_and_keeps_last_good_module() 
     assert_eq!(update.compilation_revision.as_index(), 1);
     assert!(!update.diagnostics.is_empty());
     assert_eq!(
-        session
-            .get_module_entry_by_id(module_id)
-            .unwrap()
-            .diagnostics()
-            .len(),
+        module_diagnostics_len(&session, module_id).unwrap(),
         update.diagnostics.len()
     );
-    assert!(
-        session
-            .get_module_entry_by_id(module_id)
-            .unwrap()
-            .is_stale()
-    );
+    assert!(module_is_stale(&session, module_id).unwrap());
     assert!(
         session
             .expect_compiled_module(module_id)
@@ -709,10 +700,8 @@ fn dependency_query_apis_report_direct_reverse_and_affected_modules() {
         .module_id;
 
     assert!(
-        session
-            .get_module_entry_by_id(mid_id)
+        module_latest_deps(&session, mid_id)
             .unwrap()
-            .latest_deps()
             .contains(&base_id)
     );
     assert_eq!(session.get_module_reverse_deps(base_id), vec![mid_id]);
@@ -821,10 +810,7 @@ fn eval_expression_in_module_does_not_change_module_source_version() {
         )
         .unwrap()
         .module_id;
-    let source_version = session
-        .get_module_entry_by_id(module_id)
-        .unwrap()
-        .source_version();
+    let source_version = module_source_version(&session, module_id);
 
     session
         .eval_expression_in_module(
@@ -839,11 +825,5 @@ fn eval_expression_in_module_does_not_change_module_source_version() {
         )
         .unwrap();
 
-    assert_eq!(
-        session
-            .get_module_entry_by_id(module_id)
-            .unwrap()
-            .source_version(),
-        source_version
-    );
+    assert_eq!(module_source_version(&session, module_id), source_version);
 }

@@ -6,15 +6,14 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
+use ferlium::hir;
 use ferlium::{FxHashMap, FxHashSet};
-use ferlium::{Modules, hir};
 use std::env;
 use std::io::{self, IsTerminal, Read};
 use std::ops::Deref;
 
 use ariadne::{Label, Source};
 use ferlium::ast;
-use ferlium::ast::{PExprArena, PExprId, PModule};
 use ferlium::compiler::error::{
     CompilationError, CompilationErrorImpl, LocatedError, MutabilityMustBeWhat,
 };
@@ -23,7 +22,7 @@ use ferlium::hir::function::UnaryNativeFnRN;
 use ferlium::ide::{AnnotationData, Compiler as IdeCompiler};
 use ferlium::module::id::Id;
 use ferlium::module::{
-    LocalFunctionId, Module, ModuleEnv, ModuleId, Path, ShowModuleWithOptions, UseData, Uses,
+    LocalFunctionId, Module, ModuleId, Path, ShowModuleWithOptions, UseData, Uses,
 };
 use ferlium::std::new_module_using_std;
 use ferlium::std::string::String as FerliumString;
@@ -493,7 +492,8 @@ fn process_input(
 ) -> Result<ModuleId, i32> {
     // Parse the input once to get the list of symbols this module defines.
     let source_id = session.source_table().next_id();
-    let local_symbols = parse_module_and_expr(input, source_id, false).map_or_else(
+    let parsed = parse_module_and_expr(input, source_id, false);
+    let local_symbols = parsed.as_ref().map_or_else(
         |_| FxHashSet::default(),
         |(module, _, _)| module.own_symbols().map(|(sym, _)| sym).collect(),
     );
@@ -503,11 +503,7 @@ fn process_input(
     for i in 0..fill_use_until {
         let index = fill_use_until - i - 1;
         let mod_name = format!("repl{index}");
-        if let Some(entry) = session
-            .modules()
-            .get_value_by_name(&Path::single_str(&mod_name))
-            && let Some(module) = entry.module()
-        {
+        if let Some((_, module)) = session.modules().get_by_path(&Path::single_str(&mod_name)) {
             for sym in module.own_symbols() {
                 if !local_symbols.contains(&sym)
                     && !reverse_uses.contains_key(&sym)
@@ -536,14 +532,10 @@ fn process_input(
     }
 
     // AST debug output for REPL
-    let next_module_id = session.modules().next_id();
-    let ast_inspector =
-        |module_ast: &PModule, expr_ast: Option<PExprId>, arena: &PExprArena, modules: &Modules| {
-            if !is_repl {
-                return;
-            }
-            let dbg_module = new_module_using_std(next_module_id);
-            let module_env = ModuleEnv::new(&dbg_module, modules);
+    if is_repl {
+        if let Ok((module_ast, expr_ast, arena)) = &parsed {
+            let dbg_module = new_module_using_std(session.modules().next_id());
+            let module_env = session.modules().env_for(&dbg_module);
             if !module_ast.is_empty() {
                 println!(
                     "Module AST:\n{}",
@@ -553,20 +545,15 @@ fn process_input(
             if let Some(expr_ast) = expr_ast {
                 println!(
                     "Expr AST:\n{}",
-                    ast::ExprDisplay::new(expr_ast, arena).format_with(&module_env)
+                    ast::ExprDisplay::new(*expr_ast, arena).format_with(&module_env)
                 );
             }
-        };
+        }
+    }
 
     // Compile the input to a module and an expression (if any)
     let ModuleAndExpr { module_id, expr } = session
-        .compile_to(
-            input,
-            name,
-            Path::single_str(name),
-            uses,
-            Some(&ast_inspector),
-        )
+        .compile_to(input, name, Path::single_str(name), uses)
         .map_err(|e| {
             eprintln!("Compilation error:");
             pretty_print_checking_error(&e, input, session.source_table());
@@ -581,7 +568,7 @@ fn process_input(
             module.format_with(&ShowModuleWithOptions::new(session.modules(), false, false))
         );
         if let Some(expr) = expr.as_ref() {
-            let module_env = ModuleEnv::new(module, session.modules());
+            let module_env = session.modules().env_for(module);
             println!(
                 "Expr HIR:\n{}",
                 hir::ExprDisplay::new(expr.expr, &expr.locals).format_with(&module_env)
@@ -602,7 +589,7 @@ fn process_input(
             Ok(value) => {
                 let value = value.into_value();
                 let module = session.expect_fresh_module(module_id);
-                let module_env = ModuleEnv::new(module, session.modules());
+                let module_env = session.modules().env_for(module);
                 println!(
                     "{}: {}",
                     value.display_pretty(&expr.ty.ty, &module_env),
@@ -689,7 +676,7 @@ fn process_pipe_input(print_module: bool, print_annotations: bool) -> i32 {
         |module_id| {
             if print_module {
                 let module = session.expect_fresh_module(module_id);
-                println!("{}", module.format_with(session.modules()));
+                println!("{}", module.format_with(&session.modules()));
             }
             0
         },
@@ -828,7 +815,7 @@ fn run_interactive_repl() {
                         "module" => {
                             let module_id = if let Some(arg) = args.get(1) {
                                 if let Some(module_id) =
-                                    session.modules().get_id_by_name(&Path::single_str(arg))
+                                    session.modules().id_by_path(&Path::single_str(arg))
                                 {
                                     module_id
                                 } else {
@@ -838,9 +825,9 @@ fn run_interactive_repl() {
                             } else {
                                 last_module
                             };
-                            let module = session.modules().get(module_id).unwrap().module();
+                            let module = session.modules().get(module_id);
                             if let Some(module) = module {
-                                println!("\n{}", module.format_with(session.modules()));
+                                println!("\n{}", module.format_with(&session.modules()));
                             } else {
                                 println!(
                                     "Module never compiled succesfully and is thus not available for inspection."
@@ -853,7 +840,7 @@ fn run_interactive_repl() {
                                 if let Some(arg) = args.get(2) {
                                     let name = *arg;
                                     if let Some(module_id) =
-                                        session.modules().get_id_by_name(&Path::single_str(arg))
+                                        session.modules().id_by_path(&Path::single_str(arg))
                                     {
                                         (module_id, name)
                                     } else {
@@ -863,7 +850,7 @@ fn run_interactive_repl() {
                                 } else {
                                     (last_module, "current")
                                 };
-                            let module = session.modules().get(module_id).unwrap().module();
+                            let module = session.modules().get(module_id);
                             let module = match module {
                                 None => {
                                     println!(
@@ -900,7 +887,7 @@ fn run_interactive_repl() {
                                 println!("Function id {fn_id} not found in module {module_name}.");
                                 continue;
                             };
-                            let env = ModuleEnv::new(&module, session.modules());
+                            let env = session.modules().env_for(module);
                             let fn_name = module
                                 .get_function_name_by_id(fn_id)
                                 .unwrap_or_else(|| ustr("<anonymous function>"));
@@ -910,10 +897,8 @@ fn run_interactive_repl() {
                         "history" => {
                             for i in 0..counter {
                                 let name = format!("repl{i}");
-                                if let Some(entry) = session
-                                    .modules()
-                                    .get_value_by_name(&Path::single_str(&name))
-                                    && let Some(module) = entry.module()
+                                if let Some((_, module)) =
+                                    session.modules().get_by_path(&Path::single_str(&name))
                                 {
                                     println!("{}: {}", name, module.list_stats());
                                 }

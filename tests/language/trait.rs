@@ -248,7 +248,7 @@ fn user_defined_traits_store_outputs_constraints_and_effects() {
     assert_eq!(spans.methods[0].args.len(), 1);
     assert!(spans.methods[0].ret_ty.is_some());
 
-    let rendered = module.format_with(session.session().modules()).to_string();
+    let rendered = module.format_with(&session.session().modules()).to_string();
     assert!(
         rendered.contains("trait Project <Self = A ↦ Output = B>"),
         "expected rendered trait header in module output, got:\n{rendered}"

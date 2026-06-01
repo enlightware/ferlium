@@ -53,7 +53,7 @@ impl ModuleAndExpr {
     }
 }
 
-pub type AstInspectorCb<'a> =
+pub(crate) type AstInspectorCb<'a> =
     &'a dyn Fn(&ast::PModule, Option<ast::PExprId>, &ast::PExprArena, &Modules);
 
 static FIRST_USER_MODULE_ID: ModuleId = ModuleId(2);
@@ -295,9 +295,79 @@ impl ModuleEntry {
     }
 }
 
-/// A set of modules indexed both by name (Path) and by numeric ID (ModuleId).
-/// This is the canonical way to hold a collection of modules in a compilation session.
-pub type Modules = NamedIndexed<Path, ModuleId, ModuleEntry>;
+/// Internal module storage indexed both by path and by numeric ID.
+pub(crate) type Modules = NamedIndexed<Path, ModuleId, ModuleEntry>;
+
+/// Read-only view over the modules stored in a compilation session.
+#[derive(Clone, Copy)]
+pub struct ModuleRegistry<'a> {
+    modules: &'a Modules,
+}
+
+impl<'a> ModuleRegistry<'a> {
+    /// Create a registry view from internal module storage.
+    pub(crate) fn new(modules: &'a Modules) -> Self {
+        Self { modules }
+    }
+
+    /// Return the next module ID that would be assigned by this session.
+    pub fn next_id(self) -> ModuleId {
+        self.modules.next_id()
+    }
+
+    /// Return the compiled module for an ID, if one is available.
+    pub fn get(self, module_id: ModuleId) -> Option<&'a Module> {
+        self.modules.get(module_id)?.module()
+    }
+
+    /// Return whether a module ID is registered in this session.
+    pub fn contains(self, module_id: ModuleId) -> bool {
+        self.modules.get(module_id).is_some()
+    }
+
+    /// Return the path registered for a module ID, if any.
+    pub fn path(self, module_id: ModuleId) -> Option<&'a Path> {
+        self.modules.get_name(module_id)
+    }
+
+    /// Return the module ID currently associated with a path.
+    pub fn id_by_path(self, path: &Path) -> Option<ModuleId> {
+        self.modules.get_id_by_name(path)
+    }
+
+    /// Return the compiled module currently associated with a path.
+    pub fn get_by_path(self, path: &Path) -> Option<(ModuleId, &'a Module)> {
+        let (module_id, entry) = self.modules.get_by_name(path)?;
+        Some((module_id, entry.module()?))
+    }
+
+    /// Iterate over all registered module paths.
+    pub fn iter_paths(self) -> impl Iterator<Item = &'a Path> {
+        self.modules.iter_names()
+    }
+
+    /// Iterate over named modules that currently have compiled module data.
+    pub fn iter_named_modules(self) -> impl Iterator<Item = (&'a Path, &'a Module)> {
+        self.modules
+            .iter_named()
+            .filter_map(|(path, entry)| entry.module().map(|module| (path, module)))
+    }
+
+    /// Return whether a registered module is stale.
+    pub fn is_stale(self, module_id: ModuleId) -> Option<bool> {
+        Some(self.modules.get(module_id)?.is_stale())
+    }
+
+    /// Build a module environment for a compiled module in this registry.
+    pub fn env_for(self, module: &'a Module) -> ModuleEnv<'a> {
+        ModuleEnv::new(module, self.modules)
+    }
+
+    /// Return the raw internal module storage for crate internals.
+    pub(crate) fn raw(self) -> &'a Modules {
+        self.modules
+    }
+}
 
 /// A compilation session, that contains a source table and the standard library.
 #[derive(Debug, Clone)]
@@ -357,14 +427,14 @@ impl CompilerSession {
         &self.source_table
     }
 
-    /// Get all compiled modules for this compilation session.
-    pub fn modules(&self) -> &Modules {
-        &self.modules
+    /// Get a read-only view of modules in this compilation session.
+    pub fn modules(&self) -> ModuleRegistry<'_> {
+        ModuleRegistry::new(&self.modules)
     }
 
-    /// Get a module by its ID, if it exists.
-    pub fn get_module_entry_by_id(&self, id: ModuleId) -> Option<&ModuleEntry> {
-        self.modules.get(id)
+    /// Get the internal module storage for compiler internals.
+    pub(crate) fn raw_modules(&self) -> &Modules {
+        &self.modules
     }
 
     /// List every module registered in this session.
@@ -592,7 +662,7 @@ impl CompilerSession {
             EvalExprError::Runtime(error) => {
                 format!(
                     "{}",
-                    error.format_with(&(self.source_table(), self.modules()))
+                    error.format_with(&(self.source_table(), self.raw_modules()))
                 )
             }
         }
@@ -768,7 +838,7 @@ impl CompilerSession {
                     log::debug!("Expr AST\n{}", ast.format_with(&env));
                 }
             };
-            self.compile_to(
+            self.compile_to_with_ast_inspector(
                 src_code,
                 source_name,
                 module_path,
@@ -776,7 +846,7 @@ impl CompilerSession {
                 Some(&ast_inspector),
             )
         } else {
-            self.compile_to(src_code, source_name, module_path, uses, None)
+            self.compile_to_with_ast_inspector(src_code, source_name, module_path, uses, None)
         }?;
 
         // If debug logging is enabled, display the final HIR, after linking and finalizing pending functions.
@@ -808,6 +878,16 @@ impl CompilerSession {
         source_name: &str,
         module_path: Path,
         uses: Uses,
+    ) -> Result<ModuleAndExpr, CompilationError> {
+        self.compile_to_with_ast_inspector(src_code, source_name, module_path, uses, None)
+    }
+
+    pub(crate) fn compile_to_with_ast_inspector(
+        &mut self,
+        src_code: &str,
+        source_name: &str,
+        module_path: Path,
+        uses: Uses,
         ast_inspector: Option<AstInspectorCb<'_>>,
     ) -> Result<ModuleAndExpr, CompilationError> {
         let src_info = self
@@ -829,8 +909,8 @@ impl CompilerSession {
     }
 
     /// Returns the entry for module_id, or panic if not found.
-    pub fn expect_module_entry(&self, module_id: ModuleId) -> &ModuleEntry {
-        self.modules()
+    pub(crate) fn expect_module_entry(&self, module_id: ModuleId) -> &ModuleEntry {
+        self.raw_modules()
             .get(module_id)
             .unwrap_or_else(|| panic!("Module {module_id} not found"))
     }
@@ -858,10 +938,10 @@ impl CompilerSession {
         &self,
         module_id: ModuleId,
         name: &str,
-        runner: impl FnOnce(&ModuleFunction, &Module, &Modules) -> Result<R, String>,
+        runner: impl FnOnce(&ModuleFunction, &Module, ModuleRegistry<'_>) -> Result<R, String>,
     ) -> Result<R, String> {
         let entry = self
-            .modules()
+            .raw_modules()
             .get(module_id)
             .ok_or_else(|| format!("Module {module_id} not found"))?;
         if entry.stale {
@@ -871,7 +951,7 @@ impl CompilerSession {
         }
         let module = entry.module().unwrap();
         match module.lookup_function(name, &self.modules) {
-            Ok(Some(func)) => runner(func, module, &self.modules),
+            Ok(Some(func)) => runner(func, module, self.modules()),
             Ok(None) => Err(format!("Function {name} not found in module {module_id}")),
             Err(e) => Err(format!("Lookup error for function {name}: {e:?}")),
         }

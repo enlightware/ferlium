@@ -11,7 +11,7 @@
 use indoc::indoc;
 use ustr::ustr;
 
-use ferlium::{format::FormatWith, module::ModuleEnv, std::option::some};
+use ferlium::{format::FormatWith, std::option::some};
 
 use crate::harness::{TestSession, float, int, string};
 
@@ -21,7 +21,7 @@ use wasm_bindgen_test::*;
 fn format_compiled_module(session: &mut TestSession, src: &str) -> String {
     let module_id = session.compile(src).module_id;
     let module = session.session().expect_fresh_module(module_id);
-    module.format_with(session.session().modules()).to_string()
+    module.format_with(&session.session().modules()).to_string()
 }
 
 #[test]
@@ -397,7 +397,7 @@ fn generic_alias_recovery_prefers_current_module_over_imported_modules() {
         .expect("user module should compile")
         .module_id;
     let module = session.session().expect_fresh_module(module_id);
-    let rendered = module.format_with(session.session().modules()).to_string();
+    let rendered = module.format_with(&session.session().modules()).to_string();
 
     assert!(
         rendered.contains("fn id(x: Longer<int>) -> Longer<int>"),
@@ -426,7 +426,7 @@ fn generic_alias_recovery_handles_alias_to_imported_alias() {
         .expect("user module should compile")
         .module_id;
     let module = session.session().expect_fresh_module(module_id);
-    let rendered = module.format_with(session.session().modules()).to_string();
+    let rendered = module.format_with(&session.session().modules()).to_string();
 
     assert!(
         rendered.contains("fn id(x: Longer<int>) -> Longer<int>"),
@@ -600,7 +600,7 @@ fn generic_type_aliases() {
     let entry = module.get_type_alias(ustr("Pair"));
     assert!(entry.is_some());
     assert_eq!(entry.unwrap().param_count(), 2);
-    let rendered = module.format_with(session.session().modules()).to_string();
+    let rendered = module.format_with(&session.session().modules()).to_string();
     assert!(rendered.contains("Pair<A, B>: (A, B)"));
 
     let module_id = session
@@ -613,7 +613,7 @@ fn generic_type_aliases() {
     "# })
         .module_id;
     let module = session.session().expect_fresh_module(module_id);
-    let module_env = ModuleEnv::new(module, session.session().modules());
+    let module_env = session.session().modules().env_for(module);
     let fn_def = module
         .get_function(ustr("func"))
         .unwrap()

@@ -8,7 +8,10 @@
 //
 use ferlium::{
     CompilerSession, FxHashSet, Location, ModuleAndExpr, SourceTable,
-    compiler::error::{CompilationError, RuntimeErrorKind},
+    compiler::{
+        error::{CompilationError, RuntimeErrorKind},
+        test_support::raw_modules,
+    },
     containers::IntoSVec2,
     eval::{ControlFlow, EvalResult, RuntimeError, eval_node},
     hir::function::{
@@ -925,7 +928,7 @@ impl TestSession {
             expr.expect("Expected an expression"),
             &arena,
             &mut module,
-            self.session.modules(),
+            raw_modules(&self.session),
             vec![],
         )
         .unwrap_or_else(|error| panic!("Compilation error: {error:?}"))
