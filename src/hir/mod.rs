@@ -17,7 +17,6 @@ pub(crate) mod emit_value_impl;
 pub mod function;
 pub(crate) mod hir_syn;
 pub(crate) mod r#match;
-pub(crate) mod remap;
 pub mod value;
 pub(crate) mod value_dispatch;
 
@@ -49,8 +48,6 @@ use enum_as_inner::EnumAsInner;
 use indexmap::IndexMap;
 use la_arena::{Arena, Idx};
 use ustr::Ustr;
-
-pub(crate) use remap::clone_hir_tree_with_remap;
 
 use crate::{
     containers::{B, SVec2, SVec4},

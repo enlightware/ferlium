@@ -13,7 +13,8 @@ use crate::{
     hir,
     hir::function::FunctionDefinition,
     module::{
-        LocalDeclId, Module, PendingLocalClone, ResolvedLocalClone, TraitId, TraitImplId, id::Id,
+        LocalDeclId, Module, PendingFunctionBody, PendingLocalClone, ResolvedLocalClone, TraitId,
+        TraitImplId, id::Id,
     },
     std::{core_traits_names::VALUE_TRAIT_NAME, value::VALUE_CLONE_METHOD_INDEX},
     types::effects::{EffType, PrimitiveEffect},
@@ -34,7 +35,7 @@ impl Deriver for SelfCastDeriver {
         trait_id: TraitId,
         input_types: &[Type],
         span: Location,
-        arena: &mut hir::NodeArena,
+        _arena: &mut hir::NodeArena,
         solver: &mut TraitSolver,
     ) -> Result<Option<TraitImplId>, InternalCompilationError> {
         use hir::hir_syn::*;
@@ -49,9 +50,10 @@ impl Deriver for SelfCastDeriver {
 
         // Identity implementation: clone from borrowed argument storage into
         // the returned value.
+        let mut body_arena = hir::NodeArena::default();
         let locals = vec![local("value", from_ty)];
         let id = LocalDeclId::from_index(0);
-        let source_id = arena.alloc(hir::Node::new(
+        let source_id = body_arena.alloc(hir::Node::new(
             load_local(id),
             from_ty,
             EffType::empty(),
@@ -62,9 +64,9 @@ impl Deriver for SelfCastDeriver {
             &[from_ty],
             VALUE_CLONE_METHOD_INDEX,
             span,
-            arena,
+            &mut body_arena,
         )?;
-        let code_id = arena.alloc(hir::Node::new(
+        let code_id = body_arena.alloc(hir::Node::new(
             hir::NodeKind::CloneValue(hir::CloneValue {
                 source: source_id,
                 clone: PendingLocalClone::Resolved(ResolvedLocalClone::Static(clone)),
@@ -73,8 +75,13 @@ impl Deriver for SelfCastDeriver {
             EffType::empty(),
             span,
         ));
-        let local_impl_id =
-            solver.add_concrete_impl_from_code(arena, code_id, locals, trait_id, input_types, []);
+        let local_impl_id = solver.add_concrete_impl_from_code(
+            PendingFunctionBody::new(body_arena, code_id),
+            locals,
+            trait_id,
+            input_types,
+            [],
+        );
         Ok(Some(TraitImplId::Local(local_impl_id)))
 
         // TODO: optimize away the cast entirely in the compiler

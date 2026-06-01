@@ -31,9 +31,9 @@ use crate::{
     internal_compilation_error,
     module::{
         DeferredLocalStorage, FunctionId, LocalAssignmentMode, LocalDecl, LocalDeclId, ModuleEnv,
-        ModuleFunctionSpans, PendingLocalClone, PendingLocalDrop, PendingModuleFunction,
-        PendingTakeLocalValueMode, ProjectionIndex, ResolvedLocalDrop, TraitId,
-        TypeDefLookupResult, id::Id,
+        ModuleFunctionSpans, PendingFunctionBody, PendingLocalClone, PendingLocalDrop,
+        PendingModuleFunction, PendingTakeLocalValueMode, ProjectionIndex, ResolvedLocalDrop,
+        TraitId, TypeDefLookupResult, id::Id,
     },
     parser::location::Location,
     std::{
@@ -395,7 +395,7 @@ impl TypeInference {
         // 4. Build environment for typing the function's body.
         let runtime_arg_count = capture_args.len() + explicit_locals.len();
         let fn_cur_locals = capture_args.into_iter().chain(explicit_locals).collect();
-        // The lambda uses the same HIR arena as the outer function (module's arena).
+        let mut fn_arena = NodeArena::default();
         let mut inner_env = TypingEnv::new(
             &mut fn_all_locals,
             fn_cur_locals,
@@ -409,7 +409,7 @@ impl TypeInference {
             env.lambda_functions,
             env.base_local_function_index,
             env.ast_arena,
-            env.ir_arena,
+            &mut fn_arena,
         );
 
         // 5. Infer the body's type.
@@ -442,10 +442,9 @@ impl TypeInference {
             ret_ty: None,
             span,
         };
-        let function = PendingModuleFunction::new_with_copied_hir(
+        let function = PendingModuleFunction::from_body(
             FunctionDefinition::new(ty_scheme, arg_names, None),
-            env.ir_arena,
-            code_id,
+            PendingFunctionBody::new(fn_arena, code_id),
             runtime_arg_count,
             Some(spans),
             fn_all_locals,

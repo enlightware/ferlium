@@ -23,8 +23,7 @@ use crate::{
     },
     hir::hir_syn::{get_dictionary, load_local},
     hir::{
-        self, CallArgument, FnInstData, Node, NodeArena, NodeKind, StaticApplication,
-        value::LiteralValue,
+        CallArgument, FnInstData, Node, NodeArena, NodeKind, StaticApplication, value::LiteralValue,
     },
     internal_compilation_error,
     module::{
@@ -32,8 +31,9 @@ use crate::{
         DefKind, DefTable, FunctionId, ImportFunctionSlot, ImportFunctionSlotId,
         ImportFunctionTarget, ImportImplSlot, ImportImplSlotId, LocalDecl, LocalDeclId,
         LocalFunctionId, LocalImplId, Module, ModuleEnv, ModuleFunction, ModuleId,
-        PendingFunctionCollector, PendingModuleFunction, TraitDictionary, TraitId, TraitImpl,
-        TraitImplId, TraitImpls, TraitKey, TypeDefId, build_dictionary_value, id::Id,
+        PendingFunctionBody, PendingFunctionCollector, PendingModuleFunction, TraitDictionary,
+        TraitId, TraitImpl, TraitImplId, TraitImpls, TraitKey, TypeDefId, build_dictionary_value,
+        id::Id,
     },
     std::{
         STD_MODULE_ID,
@@ -1338,10 +1338,9 @@ impl<'a> TraitSolver<'a> {
     }
 
     /// Add a concrete trait implementation from the given code body, for single-function traits.
-    pub fn add_concrete_impl_from_code(
+    pub(crate) fn add_concrete_impl_from_code(
         &mut self,
-        arena: &hir::NodeArena,
-        code_entry: hir::NodeId,
+        body: PendingFunctionBody,
         locals: Vec<LocalDecl>,
         trait_id: TraitId,
         input_types: impl Into<Vec<Type>>,
@@ -1361,14 +1360,8 @@ impl<'a> TraitSolver<'a> {
             .next()
             .expect("single-function trait should have one method");
         let runtime_arg_count = definition.arg_names.len();
-        let function = PendingModuleFunction::new_with_copied_hir(
-            definition,
-            arena,
-            code_entry,
-            runtime_arg_count,
-            None,
-            locals,
-        );
+        let function =
+            PendingModuleFunction::from_body(definition, body, runtime_arg_count, None, locals);
         self.impls.add_concrete_pending(
             trait_id,
             trait_def,
@@ -1376,50 +1369,6 @@ impl<'a> TraitSolver<'a> {
             output_types,
             [],
             vec![function],
-            &mut self.fn_collector,
-        )
-    }
-
-    /// Add a concrete trait implementation from one code body per trait method.
-    pub fn add_concrete_impl_from_code_entries(
-        &mut self,
-        arena: &hir::NodeArena,
-        code_entries: impl Into<Vec<(hir::NodeId, Vec<LocalDecl>)>>,
-        trait_id: TraitId,
-        input_types: impl Into<Vec<Type>>,
-        output_types: impl Into<Vec<Type>>,
-    ) -> LocalImplId {
-        let trait_def = trait_def_from_parts(
-            self.current_type_defs.module_id,
-            self.current_traits,
-            self.others,
-            trait_id,
-        );
-        let input_types = input_types.into();
-        let output_types = output_types.into();
-        let functions = trait_def
-            .instantiate_for_tys(&input_types, &output_types)
-            .into_iter()
-            .zip(code_entries.into())
-            .map(|(definition, (code_entry, locals))| {
-                let runtime_arg_count = definition.arg_names.len();
-                PendingModuleFunction::new_with_copied_hir(
-                    definition,
-                    arena,
-                    code_entry,
-                    runtime_arg_count,
-                    None,
-                    locals,
-                )
-            })
-            .collect::<Vec<_>>();
-        self.impls.add_concrete_pending(
-            trait_id,
-            trait_def,
-            input_types,
-            output_types,
-            [],
-            functions,
             &mut self.fn_collector,
         )
     }
@@ -1497,12 +1446,11 @@ impl<'a> TraitSolver<'a> {
 
     pub(crate) fn replace_concrete_impl_code_entries(
         &mut self,
-        arena: &hir::NodeArena,
         impl_id: LocalImplId,
         trait_id: TraitId,
         input_types: &[Type],
         output_types: &[Type],
-        code_entries: impl Into<Vec<(hir::NodeId, Vec<LocalDecl>)>>,
+        code_entries: impl Into<Vec<(PendingFunctionBody, Vec<LocalDecl>)>>,
     ) {
         let methods = self.impls.data[impl_id.as_index()].methods.clone();
         let trait_def = trait_def_from_parts(
@@ -1513,7 +1461,7 @@ impl<'a> TraitSolver<'a> {
         );
         let definitions = trait_def.instantiate_for_tys(input_types, output_types);
 
-        for ((method_id, definition), (code_entry, locals)) in methods
+        for ((method_id, definition), (body, locals)) in methods
             .into_iter()
             .zip(definitions)
             .zip(code_entries.into())
@@ -1521,14 +1469,7 @@ impl<'a> TraitSolver<'a> {
             let runtime_arg_count = definition.arg_names.len();
             self.fn_collector.replace(
                 method_id,
-                PendingModuleFunction::new_with_copied_hir(
-                    definition,
-                    arena,
-                    code_entry,
-                    runtime_arg_count,
-                    None,
-                    locals,
-                ),
+                PendingModuleFunction::from_body(definition, body, runtime_arg_count, None, locals),
             );
         }
     }
@@ -1912,11 +1853,13 @@ impl<'a> TraitSolver<'a> {
                                 Location::new_synthesized(),
                             );
 
-                            // Allocate constraint dictionary nodes into the module arena.
+                            let mut body_arena = NodeArena::default();
+
+                            // Allocate constraint dictionary nodes into the thunk arena.
                             let constraint_dict_nodes: Vec<_> = constraint_dict_infos
                                 .iter()
                                 .map(|(kind, ty)| {
-                                    arena.alloc(Node::new(
+                                    body_arena.alloc(Node::new(
                                         kind.clone(),
                                         *ty,
                                         EffType::empty(),
@@ -1935,7 +1878,7 @@ impl<'a> TraitSolver<'a> {
                                 .enumerate()
                                 .map(|(arg_i, arg_ty)| {
                                     let id = LocalDeclId::from_index(arg_i);
-                                    arena.alloc(Node::new(
+                                    body_arena.alloc(Node::new(
                                         load_local(id),
                                         arg_ty.ty,
                                         EffType::empty(),
@@ -1944,7 +1887,7 @@ impl<'a> TraitSolver<'a> {
                                 })
                                 .collect();
                             let argument_passing = self.resolved_arg_passing_for_no_temp_args(
-                                arena,
+                                &mut body_arena,
                                 &def.ty_scheme.ty.args,
                                 fn_span,
                             );
@@ -1965,17 +1908,16 @@ impl<'a> TraitSolver<'a> {
                                 inst_data: FnInstData::none(),
                                 returns_place: false,
                             }));
-                            let apply_id = arena.alloc(Node::new(
+                            let apply_id = body_arena.alloc(Node::new(
                                 apply,
                                 def.ty_scheme.ty.ret,
                                 EffType::empty(),
                                 fn_span,
                             ));
                             let runtime_arg_count = def.arg_names.len();
-                            let function = PendingModuleFunction::new_with_copied_hir(
+                            let function = PendingModuleFunction::from_body(
                                 def,
-                                arena,
-                                apply_id,
+                                PendingFunctionBody::new(body_arena, apply_id),
                                 runtime_arg_count,
                                 None,
                                 locals,
@@ -2142,11 +2084,13 @@ impl<'a> TraitSolver<'a> {
                             Location::new_synthesized(),
                         );
 
-                        // Allocate constraint dictionary nodes into the module arena.
+                        let mut body_arena = NodeArena::default();
+
+                        // Allocate constraint dictionary nodes into the thunk arena.
                         let constraint_dict_nodes: Vec<_> = constraint_dict_infos
                             .iter()
                             .map(|(kind, ty)| {
-                                arena.alloc(Node::new(
+                                body_arena.alloc(Node::new(
                                     kind.clone(),
                                     *ty,
                                     EffType::empty(),
@@ -2165,7 +2109,7 @@ impl<'a> TraitSolver<'a> {
                             .enumerate()
                             .map(|(arg_i, arg_ty)| {
                                 let id = LocalDeclId::from_index(arg_i);
-                                arena.alloc(Node::new(
+                                body_arena.alloc(Node::new(
                                     load_local(id),
                                     arg_ty.ty,
                                     EffType::empty(),
@@ -2174,7 +2118,7 @@ impl<'a> TraitSolver<'a> {
                             })
                             .collect();
                         let argument_passing = self.resolved_arg_passing_for_no_temp_args(
-                            arena,
+                            &mut body_arena,
                             &def.ty_scheme.ty.args,
                             fn_span,
                         );
@@ -2195,18 +2139,17 @@ impl<'a> TraitSolver<'a> {
                             inst_data: FnInstData::none(),
                             returns_place: false,
                         }));
-                        let apply_id = arena.alloc(Node::new(
+                        let apply_id = body_arena.alloc(Node::new(
                             apply,
                             def.ty_scheme.ty.ret,
                             EffType::empty(),
                             fn_span,
                         ));
-                        (apply_id, locals)
+                        (PendingFunctionBody::new(body_arena, apply_id), locals)
                     })
                     .collect::<Vec<_>>();
 
                 self.replace_concrete_impl_code_entries(
-                    arena,
                     local_impl_id,
                     trait_id,
                     input_tys,

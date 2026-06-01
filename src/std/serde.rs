@@ -21,8 +21,8 @@ use crate::{
         value_dispatch::{resolved_arg_passing_for_generated_call, static_apply_generated},
     },
     module::{
-        self, LocalDeclId, Module, PendingLocalClone, ProjectionIndex, ResolvedLocalClone, TraitId,
-        TraitImplId, id::Id,
+        self, LocalDeclId, Module, PendingFunctionBody, PendingLocalClone, ProjectionIndex,
+        ResolvedLocalClone, TraitId, TraitImplId, id::Id,
     },
     std::{
         array::array_type,
@@ -151,6 +151,8 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
         let impl_id =
             solver.reserve_concrete_impl_from_code_entries(trait_id, input_types, &[], []);
 
+        let mut body_arena = NodeArena::default();
+        let arena = &mut body_arena;
         let locals = vec![local("self", ty)];
         let l_self_id = LocalDeclId::from_index(0);
 
@@ -310,12 +312,11 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
             return Ok(None);
         };
         solver.replace_concrete_impl_code_entries(
-            arena,
             impl_id,
             trait_id,
             input_types,
             &[],
-            [(root, locals)],
+            [(PendingFunctionBody::new(body_arena, root), locals)],
         );
         Ok(Some(TraitImplId::Local(impl_id)))
     }
@@ -387,6 +388,8 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
         let impl_id =
             solver.reserve_concrete_impl_from_code_entries(trait_id, input_types, &[], []);
 
+        let mut body_arena = NodeArena::default();
+        let arena = &mut body_arena;
         let mut locals = vec![local("variant", variant_type())];
         let l_variant_id = LocalDeclId::from_index(0);
         let load_variant = n(arena, load_local(l_variant_id), variant_type());
@@ -626,12 +629,11 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
             return Ok(None);
         };
         solver.replace_concrete_impl_code_entries(
-            arena,
             impl_id,
             trait_id,
             input_types,
             &[],
-            [(root, locals)],
+            [(PendingFunctionBody::new(body_arena, root), locals)],
         );
         Ok(Some(TraitImplId::Local(impl_id)))
     }

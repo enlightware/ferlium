@@ -28,8 +28,8 @@ use crate::{
     internal_compilation_error,
     module::{
         self, ConcreteTraitImplKey, FunctionId, LocalDecl, LocalDeclId, Module,
-        PendingModuleFunction, ProjectionIndex, TraitId, TraitImpl, TraitImplId, TraitImpls,
-        id::Id,
+        PendingFunctionBody, PendingModuleFunction, ProjectionIndex, TraitId, TraitImpl,
+        TraitImplId, TraitImpls, id::Id,
     },
     std::{
         STD_MODULE_ID, core_traits_names::VALUE_TRAIT_NAME, hash::hasher_type, logic::bool_type,
@@ -358,7 +358,7 @@ pub(crate) fn is_value_trait(trait_id: TraitId, trait_def: &Trait) -> bool {
 
 use FunctionDefinition as Def;
 
-pub(crate) type ValueCodeEntries = Vec<(NodeId, Vec<LocalDecl>)>;
+pub(crate) type ValueCodeEntries = Vec<(PendingFunctionBody, Vec<LocalDecl>)>;
 
 struct ValueBodyCtx<'s, 'm> {
     solver: &'s mut TraitSolver<'m>,
@@ -1788,7 +1788,7 @@ fn derive_structural_value_impl(
     trait_id: TraitId,
     input_types: &[Type],
     span: Location,
-    arena: &mut NodeArena,
+    _arena: &mut NodeArena,
     solver: &mut TraitSolver,
 ) -> Result<Option<TraitImplId>, InternalCompilationError> {
     let ty_data = input_types[0].data();
@@ -1838,8 +1838,9 @@ fn derive_structural_value_impl(
     );
     let mut ctx = ValueBodyCtx::concrete(solver);
 
+    let mut eq_arena = NodeArena::default();
     let Some((eq_root, eq_locals)) =
-        (match derive_value_eq_body(trait_id, input_types, span, arena, &mut ctx) {
+        (match derive_value_eq_body(trait_id, input_types, span, &mut eq_arena, &mut ctx) {
             Ok(value) => value,
             Err(err) => {
                 ctx.solver.rollback_derived_impl_state(snapshot);
@@ -1850,20 +1851,33 @@ fn derive_structural_value_impl(
         ctx.solver.rollback_derived_impl_state(snapshot);
         return Ok(None);
     };
-    let Some((to_string_root, to_string_locals)) =
-        (match derive_value_to_string_body(trait_id, input_types, span, arena, &mut ctx) {
-            Ok(value) => value,
-            Err(err) => {
-                ctx.solver.rollback_derived_impl_state(snapshot);
-                return Err(err);
-            }
-        })
-    else {
+    let eq = (PendingFunctionBody::new(eq_arena, eq_root), eq_locals);
+
+    let mut to_string_arena = NodeArena::default();
+    let Some((to_string_root, to_string_locals)) = (match derive_value_to_string_body(
+        trait_id,
+        input_types,
+        span,
+        &mut to_string_arena,
+        &mut ctx,
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            ctx.solver.rollback_derived_impl_state(snapshot);
+            return Err(err);
+        }
+    }) else {
         ctx.solver.rollback_derived_impl_state(snapshot);
         return Ok(None);
     };
+    let to_string = (
+        PendingFunctionBody::new(to_string_arena, to_string_root),
+        to_string_locals,
+    );
+
+    let mut hash_arena = NodeArena::default();
     let Some((hash_root, hash_locals)) =
-        (match derive_value_hash_body(trait_id, input_types, span, arena, &mut ctx) {
+        (match derive_value_hash_body(trait_id, input_types, span, &mut hash_arena, &mut ctx) {
             Ok(value) => value,
             Err(err) => {
                 ctx.solver.rollback_derived_impl_state(snapshot);
@@ -1874,26 +1888,31 @@ fn derive_structural_value_impl(
         ctx.solver.rollback_derived_impl_state(snapshot);
         return Ok(None);
     };
+    let hash = (PendingFunctionBody::new(hash_arena, hash_root), hash_locals);
+
+    let mut clone_arena = NodeArena::default();
     let Some((clone_root, clone_locals)) =
-        derive_value_clone_body(trait_id, input_types, arena, &mut ctx)?
+        derive_value_clone_body(trait_id, input_types, &mut clone_arena, &mut ctx)?
     else {
         ctx.solver.rollback_derived_impl_state(snapshot);
         return Ok(None);
     };
-    let (drop_root, drop_locals) = derive_value_drop_body(trait_id, input_types, arena, &mut ctx)?;
+    let clone = (
+        PendingFunctionBody::new(clone_arena, clone_root),
+        clone_locals,
+    );
+
+    let mut drop_arena = NodeArena::default();
+    let (drop_root, drop_locals) =
+        derive_value_drop_body(trait_id, input_types, &mut drop_arena, &mut ctx)?;
+    let drop = (PendingFunctionBody::new(drop_arena, drop_root), drop_locals);
+
     ctx.solver.replace_concrete_impl_code_entries(
-        arena,
         impl_id,
         trait_id,
         input_types,
         &[],
-        [
-            (eq_root, eq_locals),
-            (to_string_root, to_string_locals),
-            (hash_root, hash_locals),
-            (clone_root, clone_locals),
-            (drop_root, drop_locals),
-        ],
+        [eq, to_string, hash, clone, drop],
     );
     Ok(Some(TraitImplId::Local(impl_id)))
 }
@@ -1902,26 +1921,54 @@ pub(crate) fn derive_generic_value_code_entries(
     trait_id: TraitId,
     input_types: &[Type],
     span: Location,
-    arena: &mut NodeArena,
+    _arena: &mut NodeArena,
     solver: &mut TraitSolver,
 ) -> Result<Option<ValueCodeEntries>, InternalCompilationError> {
     let mut ctx = ValueBodyCtx::generic(solver);
 
-    let Some(eq) = derive_value_eq_body(trait_id, input_types, span, arena, &mut ctx)? else {
-        return Ok(None);
-    };
-    let Some(to_string) =
-        derive_value_to_string_body(trait_id, input_types, span, arena, &mut ctx)?
+    let mut eq_arena = NodeArena::default();
+    let Some((eq_root, eq_locals)) =
+        derive_value_eq_body(trait_id, input_types, span, &mut eq_arena, &mut ctx)?
     else {
         return Ok(None);
     };
-    let Some(hash) = derive_value_hash_body(trait_id, input_types, span, arena, &mut ctx)? else {
+    let eq = (PendingFunctionBody::new(eq_arena, eq_root), eq_locals);
+
+    let mut to_string_arena = NodeArena::default();
+    let Some((to_string_root, to_string_locals)) =
+        derive_value_to_string_body(trait_id, input_types, span, &mut to_string_arena, &mut ctx)?
+    else {
         return Ok(None);
     };
-    let Some(clone) = derive_value_clone_body(trait_id, input_types, arena, &mut ctx)? else {
+    let to_string = (
+        PendingFunctionBody::new(to_string_arena, to_string_root),
+        to_string_locals,
+    );
+
+    let mut hash_arena = NodeArena::default();
+    let Some((hash_root, hash_locals)) =
+        derive_value_hash_body(trait_id, input_types, span, &mut hash_arena, &mut ctx)?
+    else {
         return Ok(None);
     };
-    let drop = derive_value_drop_body(trait_id, input_types, arena, &mut ctx)?;
+    let hash = (PendingFunctionBody::new(hash_arena, hash_root), hash_locals);
+
+    let mut clone_arena = NodeArena::default();
+    let Some((clone_root, clone_locals)) =
+        derive_value_clone_body(trait_id, input_types, &mut clone_arena, &mut ctx)?
+    else {
+        return Ok(None);
+    };
+    let clone = (
+        PendingFunctionBody::new(clone_arena, clone_root),
+        clone_locals,
+    );
+
+    let mut drop_arena = NodeArena::default();
+    let (drop_root, drop_locals) =
+        derive_value_drop_body(trait_id, input_types, &mut drop_arena, &mut ctx)?;
+    let drop = (PendingFunctionBody::new(drop_arena, drop_root), drop_locals);
+
     Ok(Some(vec![eq, to_string, hash, clone, drop]))
 }
 

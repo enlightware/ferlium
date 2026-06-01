@@ -12,7 +12,7 @@ use crate::{
     compiler::error::InternalCompilationError,
     containers::SVec2,
     hir::{self, NodeArena, NodeId, value_dispatch::static_apply_generated},
-    module::{TraitId, TraitImplId},
+    module::{PendingFunctionBody, TraitId, TraitImplId},
     types::effects::EffType,
     types::r#trait::{Deriver, TraitMethodIndex},
     types::trait_solver::TraitSolver,
@@ -54,6 +54,7 @@ impl Deriver for ProductValueDeriver {
         let ty = input_types[0];
         assert!(ty.is_constant());
 
+        let mut body_arena = NodeArena::default();
         let n = |arena: &mut NodeArena, kind: hir::NodeKind, ty: Type| -> NodeId {
             arena.alloc(hir::Node::new(
                 kind,
@@ -90,18 +91,18 @@ impl Deriver for ProductValueDeriver {
                 drop(ty_data);
                 let members = member_tys
                     .into_iter()
-                    .map(|member_ty| build_member_value(arena, member_ty))
+                    .map(|member_ty| build_member_value(&mut body_arena, member_ty))
                     .collect::<Result<SVec2<_>, _>>()?;
-                Some(n(arena, tuple(members), ty))
+                Some(n(&mut body_arena, tuple(members), ty))
             }
             Record(fields) => {
                 let fields = fields.clone();
                 drop(ty_data);
                 let members = fields
                     .into_iter()
-                    .map(|(_, member_ty)| build_member_value(arena, member_ty))
+                    .map(|(_, member_ty)| build_member_value(&mut body_arena, member_ty))
                     .collect::<Result<SVec2<_>, _>>()?;
-                Some(n(arena, record(members), ty))
+                Some(n(&mut body_arena, record(members), ty))
             }
             Named(named) => {
                 let named = named.clone();
@@ -121,8 +122,7 @@ impl Deriver for ProductValueDeriver {
 
         Ok(root.map(|root| {
             TraitImplId::Local(solver.add_concrete_impl_from_code(
-                arena,
-                root,
+                PendingFunctionBody::new(body_arena, root),
                 vec![],
                 trait_id,
                 input_types,

@@ -415,10 +415,10 @@ pub fn emit_module(
         }
     }
 
-    // Emit into a temporary pre-elaboration arena. The module stores only finalized HIR.
-    let mut ir_arena = UNodeArena::default();
+    // Temporary unelaborated HIR arena used by trait solving/defaulting paths.
+    let mut solver_arena = UNodeArena::default();
 
-    emit_auto_value_impls(&mut output, &mut ir_arena, others, &source.impls)?;
+    emit_auto_value_impls(&mut output, &mut solver_arena, others, &source.impls)?;
 
     // Process each functions' SCC one by one.
     for mut scc in sorted_sccs.into_iter().rev() {
@@ -446,7 +446,7 @@ pub fn emit_module(
         // Emit the corresponding functions.
         emit_functions(
             &mut output,
-            &mut ir_arena,
+            &mut solver_arena,
             functions,
             &desugared_arena,
             others,
@@ -527,7 +527,7 @@ pub fn emit_module(
             .collect::<FxHashSet<_>>();
         let emit_output = emit_functions(
             &mut output,
-            &mut ir_arena,
+            &mut solver_arena,
             functions,
             &desugared_arena,
             others,

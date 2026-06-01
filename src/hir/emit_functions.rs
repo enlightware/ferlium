@@ -31,7 +31,7 @@ use crate::{
     module::{
         FunctionId, GENERATED_LAMBDA_PREFIX, LocalAssignmentMode, LocalDecl, LocalDeclId,
         LocalFunctionId, Module, ModuleEnv, ModuleFunction, ModuleFunctionSpans, ModuleId,
-        PendingModuleFunction, TraitId, id::Id,
+        PendingFunctionBody, PendingModuleFunction, TraitId, id::Id,
     },
     std::{
         STD_MODULE_ID, new_module_using_std,
@@ -280,7 +280,7 @@ fn default_unconstrained_recursive_returns_to_never<'func, I>(
 
 pub(super) fn emit_functions<'a, F, I>(
     output: &mut Module,
-    ir_arena: &mut NodeArena,
+    solver_arena: &mut NodeArena,
     ast_functions: F,
     desugared_arena: &DExprArena,
     others: &Modules,
@@ -631,6 +631,7 @@ where
         let expected_span = descr.spans.as_ref().unwrap().args_span;
         let mut lambda_functions = vec![];
         let mut locals = descr.gen_locals_no_bounds();
+        let mut fn_arena = NodeArena::default();
         LocalDecl::assign_sequential_slots(&mut locals);
         let cur_locals = (0..locals.len()).map(LocalDeclId::from_index).collect();
         if let Some(trait_ctx) = &trait_ctx
@@ -652,7 +653,7 @@ where
             &mut lambda_functions,
             output.functions.len() as u32,
             desugared_arena,
-            ir_arena,
+            &mut fn_arena,
         );
         let mut fn_node_id = ty_inf.check_expr(
             &mut ty_env,
@@ -663,7 +664,7 @@ where
         )?;
         fn_node_id = wrap_body_with_call_depth_check_if_recursive(
             &mut ty_inf,
-            ir_arena,
+            &mut fn_arena,
             fn_node_id,
             &recursive_function_ids,
             descr.definition.ty_scheme.ty.ret,
@@ -681,13 +682,12 @@ where
         });
         let descr = output.get_function_by_id_mut(*id).unwrap();
         descr.definition.ty_scheme.ty.effects = ty_inf.unify_effects(
-            &ir_arena[fn_node_id].effects,
+            &fn_arena[fn_node_id].effects,
             &descr.definition.ty_scheme.ty.effects,
         );
-        let pending = PendingModuleFunction::new_with_copied_hir(
+        let pending = PendingModuleFunction::from_body(
             descr.definition.clone(),
-            ir_arena,
-            fn_node_id,
+            PendingFunctionBody::new(fn_arena, fn_node_id),
             descr.definition.arg_names.len(),
             descr.spans.clone(),
             locals,
@@ -701,7 +701,7 @@ where
 
     // Third pass, perform the unification.
     let mut solver = trait_solver_from_module!(output, others);
-    let mut ty_inf = ty_inf.unify(&mut solver, ir_arena)?;
+    let mut ty_inf = ty_inf.unify(&mut solver, solver_arena)?;
     let generated = solver.commit(
         &mut output.functions,
         &mut output.def_table,
@@ -745,7 +745,7 @@ where
                 head_boundary.owned_inaccessible_constraints(ty_inf.remaining_constraints());
             let scope = DefaultingScope::from_constraints(&orphan_constraints);
             let mut solver = trait_solver_from_module!(output, others);
-            ty_inf.resolve_defaults_to_fixed_point(&scope, &mut solver, ir_arena)?;
+            ty_inf.resolve_defaults_to_fixed_point(&scope, &mut solver, solver_arena)?;
             let generated = solver.commit(
                 &mut output.functions,
                 &mut output.def_table,
@@ -875,7 +875,7 @@ where
             .iter()
             .filter_map(|constraint| {
                 constraint
-                    .instantiate_and_drop_if_solved(&mut subst, &mut solver, ir_arena)
+                    .instantiate_and_drop_if_solved(&mut subst, &mut solver, solver_arena)
                     .transpose()
             })
             .collect::<Result<_, _>>()?;
@@ -1003,7 +1003,7 @@ where
             };
             let scope = DefaultingScope::from_constraints(&orphan_constraints)
                 .with_unit_variant_seed_tys(unit_variant_seed_tys);
-            ty_inf.resolve_defaults_to_fixed_point(&scope, &mut solver, ir_arena)?;
+            ty_inf.resolve_defaults_to_fixed_point(&scope, &mut solver, solver_arena)?;
             let generated = solver.commit(
                 &mut output.functions,
                 &mut output.def_table,
@@ -1139,7 +1139,7 @@ where
                 .filter(|c| related_ptrs.contains(&constraint_ptr(c)))
                 .filter_map(|constraint| {
                     constraint
-                        .instantiate_and_drop_if_solved(&mut drop_subst, &mut solver, ir_arena)
+                        .instantiate_and_drop_if_solved(&mut drop_subst, &mut solver, solver_arena)
                         .transpose()
                 })
                 .collect::<Result<_, _>>()?;

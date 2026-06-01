@@ -464,6 +464,26 @@ pub struct PendingModuleFunction {
 /// A module function before HIR elaboration.
 pub type UModuleFunction = PendingModuleFunction;
 
+/// Unelaborated HIR owned by one pending function body.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingFunctionBody {
+    pub(crate) arena: UNodeArena,
+    pub(crate) entry_node_id: UNodeId,
+}
+
+impl PendingFunctionBody {
+    pub(crate) fn new(arena: UNodeArena, entry_node_id: UNodeId) -> Self {
+        Self {
+            arena,
+            entry_node_id,
+        }
+    }
+
+    pub(crate) fn into_script_function(self, runtime_arg_count: usize) -> PendingScriptFunction {
+        PendingScriptFunction::new(self.arena, self.entry_node_id, runtime_arg_count)
+    }
+}
+
 /// A local function inside a module after HIR elaboration.
 #[derive(Debug, Clone)]
 pub struct ModuleFunction {
@@ -493,24 +513,16 @@ impl PendingModuleFunction {
         }
     }
 
-    pub fn new_with_copied_hir(
+    pub(crate) fn from_body(
         definition: FunctionDefinition,
-        source_arena: &UNodeArena,
-        entry_node_id: UNodeId,
+        body: PendingFunctionBody,
         runtime_arg_count: usize,
         spans: Option<ModuleFunctionSpans>,
-        mut locals: Vec<ULocalDecl>,
+        locals: Vec<ULocalDecl>,
     ) -> Self {
-        let (arena, entry_node_id, remap) =
-            crate::hir::clone_hir_tree_with_remap(source_arena, entry_node_id);
-        for local in &mut locals {
-            if let LocalStorage::Deferred(deferred) = &mut local.storage {
-                deferred.initializer = remap[&deferred.initializer];
-            }
-        }
         Self::new(
             definition,
-            PendingScriptFunction::new(arena, entry_node_id, runtime_arg_count),
+            body.into_script_function(runtime_arg_count),
             spans,
             locals,
         )

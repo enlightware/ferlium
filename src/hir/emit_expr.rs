@@ -65,8 +65,15 @@ pub fn emit_expr_unsafe(
     others: &Modules,
     locals: Vec<LocalDecl>,
 ) -> Result<CompiledExpr, InternalCompilationError> {
-    let mut ir_arena = UNodeArena::default();
-    emit_expr_unsafe_inner(source, parsed_arena, module, others, locals, &mut ir_arena)
+    let mut expr_arena = UNodeArena::default();
+    emit_expr_unsafe_inner(
+        source,
+        parsed_arena,
+        module,
+        others,
+        locals,
+        &mut expr_arena,
+    )
 }
 
 fn emit_expr_unsafe_inner(
@@ -75,7 +82,7 @@ fn emit_expr_unsafe_inner(
     module: &mut Module,
     others: &Modules,
     mut locals: Vec<LocalDecl>,
-    ir_arena: &mut UNodeArena,
+    expr_arena: &mut UNodeArena,
 ) -> Result<CompiledExpr, InternalCompilationError> {
     // Make sure that the locals' types have no type variables in them
     assert!(
@@ -115,7 +122,7 @@ fn emit_expr_unsafe_inner(
         &mut lambda_functions,
         module.functions.len() as u32,
         &desugared_arena,
-        ir_arena,
+        expr_arena,
     );
     let mut ty_inf = TypeInference::new_empty();
     let (node_id, _) = ty_inf.infer_expr(&mut ty_env, source)?;
@@ -138,7 +145,7 @@ fn emit_expr_unsafe_inner(
 
     // Perform the unification.
     let mut solver = trait_solver_from_module!(module, others);
-    let mut ty_inf = ty_inf.unify(&mut solver, ir_arena)?;
+    let mut ty_inf = ty_inf.unify(&mut solver, expr_arena)?;
     let generated = solver.commit(
         &mut module.functions,
         &mut module.def_table,
@@ -164,7 +171,7 @@ fn emit_expr_unsafe_inner(
         );
     }
     ty_inf.resolve_local_storage_and_activate_value_constraints(
-        ir_arena,
+        expr_arena,
         node_id,
         &mut locals,
         value_trait_id,
@@ -173,15 +180,15 @@ fn emit_expr_unsafe_inner(
     // Default constraints into the unification tables (pre-substitution).
     // For expressions, iterate defaulting and re-solving to a fixed point.
     {
-        let node_ty = ty_inf.substitute_in_type(ir_arena[node_id].ty);
+        let node_ty = ty_inf.substitute_in_type(expr_arena[node_id].ty);
         let mut solver = trait_solver_from_module!(module, others);
         let orphan_constraints = ty_inf.remaining_constraints().to_vec();
         let unit_variant_seed_tys =
-            UnifiedTypeInference::collect_unit_variant_seed_types(ir_arena, node_id);
+            UnifiedTypeInference::collect_unit_variant_seed_types(expr_arena, node_id);
         let scope = DefaultingScope::from_constraints(&orphan_constraints)
             .with_expr_root_ty(node_ty)
             .with_unit_variant_seed_tys(unit_variant_seed_tys);
-        ty_inf.resolve_defaults_to_fixed_point(&scope, &mut solver, ir_arena)?;
+        ty_inf.resolve_defaults_to_fixed_point(&scope, &mut solver, expr_arena)?;
         let generated = solver.commit(
             &mut module.functions,
             &mut module.def_table,
@@ -191,7 +198,7 @@ fn emit_expr_unsafe_inner(
     }
 
     // Substitute everything using ty_inf (single pass, includes all defaults).
-    ty_inf.substitute_in_node(ir_arena, node_id);
+    ty_inf.substitute_in_node(expr_arena, node_id);
     for lambda_id in lambda_functions.iter() {
         let descr = pending_functions
             .get_mut(lambda_id)
@@ -208,11 +215,11 @@ fn emit_expr_unsafe_inner(
     let all_constraints = ty_inf.take_constraints();
 
     // Compute quantifiers from the node type and remaining constraints.
-    let node_ty = ir_arena[node_id].ty;
+    let node_ty = expr_arena[node_id].ty;
     let mut quantifiers = TypeScheme::list_ty_vars(&node_ty, all_constraints.iter());
 
     // Check for unbound type variables.
-    let unbound = hir::all_unbound_ty_vars(ir_arena, node_id);
+    let unbound = hir::all_unbound_ty_vars(expr_arena, node_id);
     let uninstantiated_unbound = check_unbounds(unbound, &quantifiers)?;
 
     // Apply unbound→Never fixup if needed.
@@ -225,7 +232,7 @@ fn emit_expr_unsafe_inner(
     );
     if !fixup_subst.0.is_empty() {
         let mut mapper = BitmapInstantiationMapper::new(&fixup_subst);
-        hir::instantiate_node_in_place(ir_arena, node_id, &mut mapper);
+        hir::instantiate_node_in_place(expr_arena, node_id, &mut mapper);
         for lambda_id in lambda_functions.iter() {
             let descr = &mut module.functions[lambda_id.as_index()];
             descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.map(&mut mapper);
@@ -255,7 +262,7 @@ fn emit_expr_unsafe_inner(
         .iter()
         .filter_map(|constraint| {
             constraint
-                .instantiate_and_drop_if_solved(&mut drop_subst, &mut solver, ir_arena)
+                .instantiate_and_drop_if_solved(&mut drop_subst, &mut solver, expr_arena)
                 .transpose()
         })
         .collect::<Result<_, _>>()?;
@@ -265,9 +272,11 @@ fn emit_expr_unsafe_inner(
         progress = false;
         let mut new_constraints = Vec::new();
         for constraint in constraints.iter() {
-            if let Some(new_constraint) =
-                constraint.instantiate_and_drop_if_solved(&mut drop_subst, &mut solver, ir_arena)?
-            {
+            if let Some(new_constraint) = constraint.instantiate_and_drop_if_solved(
+                &mut drop_subst,
+                &mut solver,
+                expr_arena,
+            )? {
                 new_constraints.push(new_constraint);
             } else {
                 progress = true;
@@ -278,7 +287,7 @@ fn emit_expr_unsafe_inner(
     quantifiers.retain(|ty_var| !drop_subst.0.contains_key(ty_var));
     if !drop_subst.0.is_empty() {
         let mut mapper = BitmapInstantiationMapper::new(&drop_subst);
-        hir::instantiate_node_in_place(ir_arena, node_id, &mut mapper);
+        hir::instantiate_node_in_place(expr_arena, node_id, &mut mapper);
         for lambda_id in lambda_functions.iter() {
             let descr = &mut module.functions[lambda_id.as_index()];
             descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.map(&mut mapper);
@@ -326,7 +335,7 @@ fn emit_expr_unsafe_inner(
     }
 
     // Normalize the type scheme.
-    let node_ty = ir_arena[node_id].ty;
+    let node_ty = expr_arena[node_id].ty;
     let mut ty_scheme = TypeScheme {
         ty: node_ty,
         eff_quantifiers: node_ty.inner_effect_vars(),
@@ -336,7 +345,7 @@ fn emit_expr_unsafe_inner(
     let mut subst = ty_scheme.normalize();
 
     // Remove output effects of the expression (i.e. not in the type of the expression).
-    for effect in ir_arena[node_id].effects.iter() {
+    for effect in expr_arena[node_id].effects.iter() {
         if let Some(var) = effect.as_variable() {
             if !subst.1.contains_key(var) {
                 subst.1.insert(*var, EffType::empty());
@@ -346,7 +355,7 @@ fn emit_expr_unsafe_inner(
 
     // Substitute the normalized types in the node, effects and locals.
     let mut mapper = BitmapInstantiationMapper::new(&subst);
-    hir::instantiate_node_in_place(ir_arena, node_id, &mut mapper);
+    hir::instantiate_node_in_place(expr_arena, node_id, &mut mapper);
     for lambda_id in lambda_functions.iter() {
         let descr = &mut module.functions[lambda_id.as_index()];
         descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.map(&mut mapper);
@@ -376,9 +385,9 @@ fn emit_expr_unsafe_inner(
     let mut solver = trait_solver_from_module!(module, &others);
     let mut ctx = DictElaborationCtx::new(&dicts, None, &mut solver);
     let local_count = locals.len();
-    elaborate_local_ownership_and_value_dispatches(ir_arena, &mut locals, &mut ctx)?;
-    check_borrows(ir_arena, node_id)?;
-    let expr = elaborate_hir(ir_arena, node_id, &mut module.ir_arena, &mut ctx, &locals)?.root;
+    elaborate_local_ownership_and_value_dispatches(expr_arena, &mut locals, &mut ctx)?;
+    check_borrows(expr_arena, node_id)?;
+    let expr = elaborate_hir(expr_arena, node_id, &mut module.ir_arena, &mut ctx, &locals)?.root;
     for lambda_id in lambda_functions.iter() {
         let function_slot = &mut module.functions[lambda_id.as_index()];
         borrow_check_and_elaborate_pending_function(

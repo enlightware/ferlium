@@ -88,7 +88,7 @@ pub(crate) fn generic_value_methods_for_type(
         (definitions, method_names)
     };
     let mut methods = Vec::with_capacity(code_entries.len());
-    for (method_index, (definition, (code_entry, locals))) in
+    for (method_index, (definition, (body, locals))) in
         definitions.into_iter().zip(code_entries).enumerate()
     {
         let name = method_names[method_index];
@@ -102,14 +102,8 @@ pub(crate) fn generic_value_methods_for_type(
         }
 
         let runtime_arg_count = definition.arg_names.len();
-        let function = PendingModuleFunction::new_with_copied_hir(
-            definition,
-            arena,
-            code_entry,
-            runtime_arg_count,
-            None,
-            locals,
-        );
+        let function =
+            PendingModuleFunction::from_body(definition, body, runtime_arg_count, None, locals);
         let id = solver.fn_collector.next_id();
         solver.fn_collector.push(name, function);
         methods.push(id);
@@ -227,7 +221,7 @@ fn value_impl_for_type_def_already_exists(
 /// an overlapping explicit local `Value` impl.
 pub(super) fn emit_auto_value_impls(
     output: &mut Module,
-    ir_arena: &mut NodeArena,
+    solver_arena: &mut NodeArena,
     others: &Modules,
     explicit_impls: &[ast::DTraitImpl],
 ) -> Result<(), InternalCompilationError> {
@@ -294,7 +288,7 @@ pub(super) fn emit_auto_value_impls(
                 value_trait_id,
                 &[input_ty],
                 type_def_span,
-                ir_arena,
+                solver_arena,
                 &mut solver,
             )?;
             let generated = solver.commit(
@@ -324,7 +318,7 @@ pub(super) fn emit_auto_value_impls(
         let dicts = extra_parameters_from_constraints(&constraints, ModuleEnv::new(output, others));
         let mut function_ids = Vec::with_capacity(code_entries.len());
 
-        for (method_index, (definition, (root, locals))) in
+        for (method_index, (definition, (body, locals))) in
             definitions.into_iter().zip(code_entries).enumerate()
         {
             let method_index = TraitMethodIndex::from_index(method_index);
@@ -332,14 +326,8 @@ pub(super) fn emit_auto_value_impls(
             definition.ty_scheme.ty_quantifiers = quantifiers.clone();
             definition.ty_scheme.constraints = constraints.clone();
             let runtime_arg_count = definition.arg_names.len();
-            let function = PendingModuleFunction::new_with_copied_hir(
-                definition,
-                ir_arena,
-                root,
-                runtime_arg_count,
-                None,
-                locals,
-            );
+            let function =
+                PendingModuleFunction::from_body(definition, body, runtime_arg_count, None, locals);
             {
                 let mut solver = trait_solver_from_module!(output, others);
                 let mut ctx = DictElaborationCtx::new(&dicts, None, &mut solver);

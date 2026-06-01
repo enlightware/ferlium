@@ -15,7 +15,7 @@ use crate::{
         self, NodeArena, NodeId, function::FunctionDefinition,
         value_dispatch::static_apply_generated,
     },
-    module::{Module, TraitId, TraitImplId},
+    module::{Module, PendingFunctionBody, TraitId, TraitImplId},
     std::product_value_deriver::ProductValueDeriver,
     types::effects::EffType,
     types::r#trait::{Deriver, Trait, TraitMethodIndex},
@@ -35,7 +35,7 @@ impl Deriver for EnumDefaultDeriver {
         trait_id: TraitId,
         input_types: &[Type],
         span: Location,
-        arena: &mut NodeArena,
+        _arena: &mut NodeArena,
         solver: &mut TraitSolver,
     ) -> Result<Option<TraitImplId>, InternalCompilationError> {
         use hir::hir_syn::*;
@@ -67,6 +67,7 @@ impl Deriver for EnumDefaultDeriver {
             .expect("default variant must exist on enum type definitions");
         drop(shape_data);
 
+        let mut body_arena = NodeArena::default();
         let n = |arena: &mut NodeArena, kind: hir::NodeKind, ty: Type| -> NodeId {
             arena.alloc(hir::Node::new(
                 kind,
@@ -77,30 +78,36 @@ impl Deriver for EnumDefaultDeriver {
         };
 
         let root = if payload_ty == Type::unit() {
-            let payload = n(arena, native(()), Type::unit());
-            n(arena, variant(default_variant, payload), ty)
+            let payload = n(&mut body_arena, native(()), Type::unit());
+            n(&mut body_arena, variant(default_variant, payload), ty)
         } else {
             let function = solver.solve_impl_method(
                 trait_id,
                 &[payload_ty],
                 TraitMethodIndex(0),
                 span,
-                arena,
+                &mut body_arena,
             )?;
             let payload_kind = static_apply_generated(
-                arena,
+                &mut body_arena,
                 solver,
                 function,
                 std::iter::empty(),
                 payload_ty,
                 span,
             )?;
-            let payload = n(arena, payload_kind, payload_ty);
-            n(arena, variant(default_variant, payload), ty)
+            let payload = n(&mut body_arena, payload_kind, payload_ty);
+            n(&mut body_arena, variant(default_variant, payload), ty)
         };
 
         Ok(Some(TraitImplId::Local(
-            solver.add_concrete_impl_from_code(arena, root, vec![], trait_id, input_types, []),
+            solver.add_concrete_impl_from_code(
+                PendingFunctionBody::new(body_arena, root),
+                vec![],
+                trait_id,
+                input_types,
+                [],
+            ),
         )))
     }
 }
