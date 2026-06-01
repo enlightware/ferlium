@@ -77,7 +77,7 @@ pub(super) fn display_annotations(
                 .ty_scheme
                 .type_display_env(&env, &ty_var_names);
             variable_type_annotations(
-                &module.ir_arena,
+                &module.hir_arena,
                 script_fn.entry_node_id,
                 &mut annotations,
                 &function.locals,
@@ -86,10 +86,10 @@ pub(super) fn display_annotations(
         }
     }
     if let Some(expr) = &module_and_expr.expr {
-        let root_span = module.ir_arena[expr.expr].span;
+        let root_span = module.hir_arena[expr.expr].span;
         if root_span.source_id == source_id {
             variable_type_annotations(
-                &module.ir_arena,
+                &module.hir_arena,
                 expr.expr,
                 &mut annotations,
                 &expr.locals,
@@ -242,7 +242,7 @@ pub(super) fn display_annotations(
 
     // Return type of the expression, if any.
     if let Some(expr) = &module_and_expr.expr {
-        let root_span = module.ir_arena[expr.expr].span;
+        let root_span = module.hir_arena[expr.expr].span;
         annotations.push((
             root_span.end_usize(),
             format!(": {}", expr.ty.display(&env)),

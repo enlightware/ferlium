@@ -53,7 +53,7 @@ fn run_and_pretty_format(session: &mut TestSession, src: &str) -> String {
         .session()
         .expect_fresh_module(module_and_expr.module_id);
     let value = eval_node(
-        &module.ir_arena,
+        &module.hir_arena,
         expr.expr,
         module_and_expr.module_id,
         &expr.locals,

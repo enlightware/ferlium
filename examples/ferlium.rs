@@ -583,7 +583,7 @@ fn process_input(
         let arena = &eval_ctx
             .compiler_session()
             .expect_fresh_module(module_id)
-            .ir_arena;
+            .hir_arena;
         let result = eval_node_with_ctx(arena, expr.expr, &mut eval_ctx, &expr.locals);
         match result {
             Ok(value) => {

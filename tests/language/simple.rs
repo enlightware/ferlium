@@ -1924,7 +1924,7 @@ fn stack_limit_exceeded() {
     let mut ctx = EvalCtx::new(module_and_expr.module_id, session.session());
     ctx.stack_limit = 1;
 
-    let error = eval_node_with_ctx(&module.ir_arena, expr.expr, &mut ctx, &expr.locals)
+    let error = eval_node_with_ctx(&module.hir_arena, expr.expr, &mut ctx, &expr.locals)
         .expect_err("evaluation should exceed the stack limit");
 
     assert_eq!(
@@ -2417,7 +2417,7 @@ fn type_ascription() {
     let arena = &session
         .session()
         .expect_fresh_module(module_and_expr.module_id)
-        .ir_arena;
+        .hir_arena;
     let root = &arena[body];
     assert!(
         arena[root.kind.as_block().unwrap().body[0]]
@@ -2429,7 +2429,7 @@ fn type_ascription() {
     let arena = &session
         .session()
         .expect_fresh_module(module_and_expr.module_id)
-        .ir_arena;
+        .hir_arena;
     let root = &arena[body];
     assert!(
         arena[root.kind.as_block().unwrap().body[0]]

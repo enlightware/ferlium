@@ -134,7 +134,7 @@ fn generic_trait_method_function_argument_keeps_source_place_passing() {
     "#});
 
     assert!(
-        module.ir_arena.iter().any(|(_, node)| {
+        module.hir_arena.iter().any(|(_, node)| {
             let NodeKind::StaticApply(app) = &node.kind else {
                 return false;
             };
@@ -147,7 +147,7 @@ fn generic_trait_method_function_argument_keeps_source_place_passing() {
                             temp_cleanup: SharedRefTempCleanup::None,
                         })
                     ) && matches!(
-                        module.ir_arena[argument.value].kind,
+                        module.hir_arena[argument.value].kind,
                         NodeKind::GetDictionaryMethod(_)
                     )
             )

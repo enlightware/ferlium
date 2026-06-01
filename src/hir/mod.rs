@@ -1692,6 +1692,6 @@ pub struct ExprDisplay<'a> {
 
 impl FormatWith<ModuleEnv<'_>> for ExprDisplay<'_> {
     fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv<'_>) -> std::fmt::Result {
-        format_ind(&env.current.ir_arena, self.body, f, self.locals, env, 0, 0)
+        format_ind(&env.current.hir_arena, self.body, f, self.locals, env, 0, 0)
     }
 }

@@ -139,7 +139,7 @@ impl Compiler {
             let value = {
                 let module = self.session.expect_fresh_module(module_id);
                 eval_node(
-                    &module.ir_arena,
+                    &module.hir_arena,
                     expr.expr,
                     module_id,
                     &expr.locals,

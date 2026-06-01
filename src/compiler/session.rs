@@ -598,7 +598,7 @@ impl CompilerSession {
             let temp_module = self.expect_fresh_module(module.module_id());
             let mut ctx = EvalCtx::with_environment(module.module_id(), environment, self);
             eval_node_with_ctx(
-                &temp_module.ir_arena,
+                &temp_module.hir_arena,
                 compiled.expr,
                 &mut ctx,
                 &compiled.locals,

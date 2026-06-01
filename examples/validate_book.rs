@@ -434,7 +434,7 @@ fn try_compile_and_run(
         .map_err(RunError::Compilation)?;
 
     if let Some(expr) = expr {
-        let arena = &session.expect_fresh_module(module).ir_arena;
+        let arena = &session.expect_fresh_module(module).hir_arena;
         eval_node(arena, expr.expr, module, &expr.locals, session)
             .map(ControlFlow::into_value)
             .map_err(RunError::Runtime)?;

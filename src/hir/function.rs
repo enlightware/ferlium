@@ -505,7 +505,7 @@ impl Callable for ScriptFunction {
         let arena = &ctx
             .compiler_session()
             .expect_fresh_module(ctx.module_id)
-            .ir_arena;
+            .hir_arena;
         if ctx.environment.len().saturating_add(arg_count) > ctx.stack_limit {
             return Err(RuntimeError::new(
                 RuntimeErrorKind::StackLimitExceeded {
@@ -563,7 +563,7 @@ impl Callable for ScriptFunction {
         indent: usize,
     ) -> std::fmt::Result {
         hir::format_ind(
-            &env.current.ir_arena,
+            &env.current.hir_arena,
             self.entry_node_id,
             f,
             locals,

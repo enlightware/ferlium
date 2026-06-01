@@ -331,7 +331,7 @@ pub fn elaborate_generated_functions(
         let mut solver = trait_solver_from_module!(module, others);
         let mut ctx = DictElaborationCtx::new(&dicts, None, &mut solver);
         let (elaborated, _) =
-            function.check_borrows_and_elaborate_hir(&mut module.ir_arena, &mut ctx)?;
+            function.check_borrows_and_elaborate_hir(&mut module.hir_arena, &mut ctx)?;
         module.functions[id.as_index()] = elaborated;
         pending.extend(solver.commit(
             &mut module.functions,

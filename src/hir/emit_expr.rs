@@ -387,12 +387,19 @@ fn emit_expr_unsafe_inner(
     let local_count = locals.len();
     elaborate_local_ownership_and_value_dispatches(expr_arena, &mut locals, &mut ctx)?;
     check_borrows(expr_arena, node_id)?;
-    let expr = elaborate_hir(expr_arena, node_id, &mut module.ir_arena, &mut ctx, &locals)?.root;
+    let expr = elaborate_hir(
+        expr_arena,
+        node_id,
+        &mut module.hir_arena,
+        &mut ctx,
+        &locals,
+    )?
+    .root;
     for lambda_id in lambda_functions.iter() {
         let function_slot = &mut module.functions[lambda_id.as_index()];
         borrow_check_and_elaborate_pending_function(
             function_slot,
-            &mut module.ir_arena,
+            &mut module.hir_arena,
             &mut pending_functions,
             &mut ctx,
             *lambda_id,

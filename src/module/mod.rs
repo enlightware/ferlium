@@ -245,7 +245,7 @@ pub struct Module {
     pub(crate) impls: TraitImpls,
 
     /// Arena holding all HIR nodes for all functions in this module.
-    pub ir_arena: ENodeArena,
+    pub hir_arena: ENodeArena,
 }
 
 impl Module {
@@ -263,7 +263,7 @@ impl Module {
             type_defs: TypeDefSlots::default(),
             traits: Traits::new(),
             impls: TraitImpls::new(module_id),
-            ir_arena: ENodeArena::default(),
+            hir_arena: ENodeArena::default(),
         }
     }
 
@@ -281,7 +281,7 @@ impl Module {
             type_defs: TypeDefSlots::default(),
             traits: Traits::new(),
             impls: TraitImpls::new(module_id),
-            ir_arena: ENodeArena::default(),
+            hir_arena: ENodeArena::default(),
         }
     }
 
@@ -1266,7 +1266,7 @@ impl Module {
             let ty = function
                 .code
                 .as_script()
-                .and_then(|script_fn| hir::type_at(&self.ir_arena, script_fn.entry_node_id, pos));
+                .and_then(|script_fn| hir::type_at(&self.hir_arena, script_fn.entry_node_id, pos));
             if ty.is_some() {
                 return ty;
             }

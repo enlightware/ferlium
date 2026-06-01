@@ -195,7 +195,7 @@ fn generated_value_to_string_calls_resolve_temp_cleanup_for_string_pieces() {
     );
 
     assert!(
-        module.ir_arena.iter().any(|(_, node)| {
+        module.hir_arena.iter().any(|(_, node)| {
             let NodeKind::StaticApply(app) = &node.kind else {
                 return false;
             };
@@ -207,7 +207,7 @@ fn generated_value_to_string_calls_resolve_temp_cleanup_for_string_pieces() {
                         ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef {
                             temp_cleanup: SharedRefTempCleanup::Drop(_),
                         })
-                    ) && matches!(module.ir_arena[argument.value].kind, NodeKind::Immediate(_))
+                    ) && matches!(module.hir_arena[argument.value].kind, NodeKind::Immediate(_))
             )
         }),
         "generated calls passing string literal pieces by shared reference should resolve temp cleanup"
@@ -487,7 +487,7 @@ fn mutable_concrete_trivial_copy_place_lowers_to_snapshot_copy() {
     let mut compile_session = TestSession::new();
     let module = compile_session.compile_and_get_module(source);
     assert!(
-        module.ir_arena.iter().any(|(_, node)| matches!(
+        module.hir_arena.iter().any(|(_, node)| matches!(
             node.kind,
             NodeKind::CloneValue(hir::CloneValue {
                 clone: ResolvedLocalClone::TrivialCopy,
@@ -497,7 +497,7 @@ fn mutable_concrete_trivial_copy_place_lowers_to_snapshot_copy() {
         "expected mutable int place materialization to lower through trivial-copy CloneValue"
     );
     assert!(
-        !module.ir_arena.iter().any(|(_, node)| matches!(
+        !module.hir_arena.iter().any(|(_, node)| matches!(
             node.kind,
             NodeKind::CloneValue(hir::CloneValue {
                 clone: ResolvedLocalClone::Static(_) | ResolvedLocalClone::Dictionary(_),
@@ -529,7 +529,7 @@ fn inferred_mutable_let_clone_resolves_to_trivial_copy_after_unification() {
     let mut compile_session = TestSession::new();
     let module = compile_session.compile_and_get_module(source);
     assert!(
-        module.ir_arena.iter().any(|(_, node)| matches!(
+        module.hir_arena.iter().any(|(_, node)| matches!(
             node.kind,
             NodeKind::TakeLocalValue(hir::TakeLocalValue {
                 mode: ResolvedTakeLocalValueMode::CloneBorrowed(ResolvedLocalClone::TrivialCopy),
@@ -558,7 +558,7 @@ fn inferred_projection_materialization_resolves_to_trivial_copy_after_unificatio
     let mut compile_session = TestSession::new();
     let module = compile_session.compile_and_get_module(source);
     assert!(
-        module.ir_arena.iter().any(|(_, node)| matches!(
+        module.hir_arena.iter().any(|(_, node)| matches!(
             node.kind,
             NodeKind::CloneValue(hir::CloneValue {
                 clone: ResolvedLocalClone::TrivialCopy,
@@ -568,7 +568,7 @@ fn inferred_projection_materialization_resolves_to_trivial_copy_after_unificatio
         "expected projected int place materialization to resolve to trivial-copy CloneValue"
     );
     assert!(
-        !module.ir_arena.iter().any(|(_, node)| matches!(
+        !module.hir_arena.iter().any(|(_, node)| matches!(
             node.kind,
             NodeKind::CloneValue(hir::CloneValue {
                 clone: ResolvedLocalClone::Static(_) | ResolvedLocalClone::Dictionary(_),

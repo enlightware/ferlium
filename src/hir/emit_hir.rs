@@ -262,7 +262,7 @@ pub(super) fn borrow_check_and_elaborate_dict(
         let function_slot = &mut output.functions[function_id.as_index()];
         borrow_check_and_elaborate_pending_function(
             function_slot,
-            &mut output.ir_arena,
+            &mut output.hir_arena,
             pending_functions,
             &mut ctx,
             function_id,

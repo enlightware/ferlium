@@ -958,7 +958,7 @@ impl TestSession {
 
         // Run the expression if any.
         if let Some(expr) = expr {
-            let arena = &self.session.expect_fresh_module(module_id).ir_arena;
+            let arena = &self.session.expect_fresh_module(module_id).hir_arena;
             eval_node(arena, expr.expr, module_id, &expr.locals, &self.session)
                 .map(ControlFlow::into_value)
                 .map_err(Error::Runtime)

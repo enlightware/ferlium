@@ -332,7 +332,7 @@ pub(super) fn emit_auto_value_impls(
                 let mut solver = trait_solver_from_module!(output, others);
                 let mut ctx = DictElaborationCtx::new(&dicts, None, &mut solver);
                 let (function, _) =
-                    function.check_borrows_and_elaborate_hir(&mut output.ir_arena, &mut ctx)?;
+                    function.check_borrows_and_elaborate_hir(&mut output.hir_arena, &mut ctx)?;
                 let generated = solver.commit(
                     &mut output.functions,
                     &mut output.def_table,

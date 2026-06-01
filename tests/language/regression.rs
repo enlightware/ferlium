@@ -218,7 +218,7 @@ fn pretty_print_unknown_variant_with_named_payload_does_not_crash() {
         .session()
         .expect_fresh_module(module_and_expr.module_id);
     let value = eval_node(
-        &module.ir_arena,
+        &module.hir_arena,
         expr.expr,
         module_and_expr.module_id,
         &expr.locals,
