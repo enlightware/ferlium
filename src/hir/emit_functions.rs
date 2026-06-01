@@ -6,15 +6,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use super::emit_hir::{
-    ImplStubData, PendingModuleFunctions, PubTypeConstraintPtr, add_pending_function_anonymous,
-    borrow_check_and_elaborate_dict, constraint_ptr, default_output_effects_in_functions,
-    function_and_associated_lambdas, insert_inst_data_for_function_and_lambdas,
-    instantiate_function_descr_in_place, is_compiler_provided_value_constraint,
-    log_dropped_constraints_module, refresh_debug_info_for_functions, set_pending_function,
-    substitute_and_canonicalize_functions,
-};
-
 use crate::{
     FxHashMap, FxHashSet, Location, Modules,
     ast::{self, DExprArena, DModuleFunction, DModuleFunctionArg},
@@ -23,8 +14,19 @@ use crate::{
     },
     containers::{SVec2, b},
     format::FormatWith,
-    hir::function::{FunctionDefinition, VoidFunction},
     hir::{self, NodeArena},
+    hir::{
+        emit_hir::{
+            ImplStubData, PendingModuleFunctions, PubTypeConstraintPtr,
+            add_pending_function_anonymous, borrow_check_and_elaborate_dict, constraint_ptr,
+            default_output_effects_in_functions, function_and_associated_lambdas,
+            insert_inst_data_for_function_and_lambdas, instantiate_function_descr_in_place,
+            is_compiler_provided_value_constraint, log_dropped_constraints_module,
+            refresh_debug_info_for_functions, set_pending_function,
+            substitute_and_canonicalize_functions,
+        },
+        function::{FunctionDefinition, VoidFunction},
+    },
     internal_compilation_error,
     module::{
         FunctionId, GENERATED_LAMBDA_PREFIX, LocalAssignmentMode, LocalDecl, LocalDeclId,

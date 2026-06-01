@@ -24,7 +24,10 @@ use crate::{
     containers::b,
     format::FormatWith,
     graph,
-    hir::emit_hir::{EmitModuleFrom, emit_expr, emit_module},
+    hir::{
+        emit_expr::emit_expr,
+        emit_hir::{EmitModuleFrom, emit_module},
+    },
     module::{Module, ModuleEnv, ModuleId, Path, Uses, id::Id},
     parser::{self, describe_parse_error},
     std::new_module_using_std,

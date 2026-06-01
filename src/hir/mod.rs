@@ -12,7 +12,7 @@ pub(crate) mod elaboration;
 pub(crate) mod emit_associated_consts;
 pub(crate) mod emit_expr;
 pub(crate) mod emit_functions;
-pub mod emit_hir;
+pub(crate) mod emit_hir;
 pub(crate) mod emit_value_impl;
 pub mod function;
 pub(crate) mod hir_syn;
@@ -20,6 +20,14 @@ pub(crate) mod r#match;
 pub(crate) mod remap;
 pub mod value;
 pub(crate) mod value_dispatch;
+
+pub use emit_expr::CompiledExpr;
+
+#[doc(hidden)]
+pub mod test_support {
+    pub use crate::hir::emit_expr::emit_expr_unsafe;
+    pub use crate::hir::emit_hir::{EmitModuleFrom, emit_module};
+}
 
 use crate::{
     Location,

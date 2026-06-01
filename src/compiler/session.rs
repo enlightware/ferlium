@@ -22,9 +22,13 @@ use crate::{
     define_id_type,
     eval::{EvalCtx, RuntimeError, ValOrMut, eval_node_with_ctx},
     format::FormatWith,
-    hir::emit_hir::{CompiledExpr, EmitModuleFrom, emit_expr, emit_module},
+    hir::CompiledExpr,
     hir::value::Value,
     hir::{self, hir_syn::local},
+    hir::{
+        emit_expr::emit_expr,
+        emit_hir::{EmitModuleFrom, emit_module},
+    },
     module::{
         self, LocalDecl, Module, ModuleEnv, ModuleFunction, ModuleId, Path, Uses,
         id::{Id, NamedIndexed},

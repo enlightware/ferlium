@@ -8,12 +8,6 @@
 //
 use std::mem;
 
-use super::emit_functions::check_unbounds;
-use super::emit_hir::{
-    PendingModuleFunctions, PubTypeConstraintPtr, add_pending_function_anonymous,
-    borrow_check_and_elaborate_pending_function, constraint_ptr, log_dropped_constraints_expr,
-};
-
 use crate::{
     FxHashMap, FxHashSet, Location, Modules,
     ast::{PExprArena, PExprId},
@@ -24,6 +18,12 @@ use crate::{
         borrow_checker::check_borrows,
         dictionary::DictElaborationCtx,
         elaboration::{elaborate_generated_functions, elaborate_hir},
+        emit_functions::check_unbounds,
+        emit_hir::{
+            PendingModuleFunctions, PubTypeConstraintPtr, add_pending_function_anonymous,
+            borrow_check_and_elaborate_pending_function, constraint_ptr,
+            log_dropped_constraints_expr,
+        },
         value_dispatch::elaborate_local_ownership_and_value_dispatches,
     },
     internal_compilation_error,

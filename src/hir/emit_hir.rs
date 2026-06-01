@@ -21,13 +21,6 @@ use crate::{
 use log::log_enabled;
 use ustr::Ustr;
 
-pub use super::emit_expr::{CompiledExpr, emit_expr, emit_expr_unsafe};
-pub(crate) use super::emit_functions::EmitTraitOutput;
-use super::{
-    emit_functions::{EmitTraitCtx, emit_functions},
-    emit_value_impl::emit_auto_value_impls,
-};
-
 use crate::{
     ast::{self, *},
     compiler::error::InternalCompilationError,
@@ -37,6 +30,8 @@ use crate::{
     hir::{
         dictionary::{DictElaborationCtx, ExtraParameters},
         elaboration::elaborate_generated_functions,
+        emit_functions::{EmitTraitCtx, emit_functions},
+        emit_value_impl::emit_auto_value_impls,
     },
     internal_compilation_error,
     module::{

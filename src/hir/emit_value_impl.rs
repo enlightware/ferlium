@@ -12,7 +12,7 @@ use crate::{
     compiler::error::InternalCompilationError,
     hir::{
         NodeArena, dictionary::DictElaborationCtx, elaboration::elaborate_generated_functions,
-        emit_associated_consts::emitted_associated_const_values, emit_hir::EmitTraitOutput,
+        emit_associated_consts::emitted_associated_const_values, emit_functions::EmitTraitOutput,
     },
     internal_compilation_error,
     module::{LocalFunctionId, Module, ModuleEnv, PendingModuleFunction, TypeDefId, id::Id},

@@ -10,7 +10,7 @@
 use ferlium::{
     SourceId, ast,
     compiler::error::{AttributeTarget, CompilationErrorImpl, InvalidAttributeKind, UnsafeFeature},
-    hir::emit_hir::{EmitModuleFrom, emit_module},
+    hir::test_support::{EmitModuleFrom, emit_module},
     module::{ModuleId, Uses, id::Id},
     parse_module_and_expr,
 };

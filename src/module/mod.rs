@@ -43,7 +43,9 @@ use crate::{
     compiler::error::{ImportKind, ImportSite, InternalCompilationError},
     define_id_type,
     format::{FormatWith, write_identifier},
-    hir::{self, ENodeArena, emit_hir::EmitTraitOutput, function::Function, value::LiteralValue},
+    hir::{
+        self, ENodeArena, emit_functions::EmitTraitOutput, function::Function, value::LiteralValue,
+    },
     internal_compilation_error,
     module::id::{Id, NamedIndexed},
     types::{
