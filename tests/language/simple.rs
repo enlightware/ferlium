@@ -882,16 +882,45 @@ fn match_omits_uninhabited_named_enum_variants() {
 fn empty_match_on_uninhabited_named_enum_is_never() {
     let mut session = TestSession::new();
 
-    session.compile_and_get_fn_def(
+    let fn_def = session.compile_and_get_fn_def(
         indoc! { r#"
             enum Never {}
 
-            fn f(n: Never) -> int {
+            fn f(n: Never) {
                 match n {}
             }
         "# },
         "f",
     );
+    assert_eq!(fn_def.ty_scheme.ty().ret, Type::never());
+
+    assert_eq!(
+        session
+            .compile_and_get_fn_def(
+                indoc! { r#"
+                    enum Never {}
+
+                    fn f(n: Never) -> int {
+                        match n {}
+                    }
+                "# },
+                "f",
+            )
+            .ty_scheme
+            .ty()
+            .ret,
+        int_type()
+    );
+
+    session.compile(indoc! { r#"
+        enum Never {}
+
+        fn f(n: Never) {
+            match n {}
+        }
+
+        f
+    "# });
 
     session
         .fail_compilation("match true {}")

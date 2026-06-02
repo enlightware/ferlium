@@ -197,7 +197,7 @@ fn wrap_body_with_call_depth_check_if_recursive(
     ))
 }
 
-struct RecursiveReturnDefaultingInputs<'ctx, I> {
+struct DivergingReturnDefaultingInputs<'ctx, I> {
     ast_functions: I,
     local_fns: &'ctx [LocalFunctionId],
     function_explicit_root_tys: &'ctx [Vec<Type>],
@@ -206,10 +206,10 @@ struct RecursiveReturnDefaultingInputs<'ctx, I> {
     pending_functions: &'ctx mut PendingModuleFunctions,
 }
 
-fn default_unconstrained_recursive_returns_to_never<'func, I>(
+fn default_unconstrained_diverging_returns_to_never<'func, I>(
     output: &mut Module,
     ty_inf: &mut UnifiedTypeInference,
-    inputs: RecursiveReturnDefaultingInputs<'_, I>,
+    inputs: DivergingReturnDefaultingInputs<'_, I>,
 ) where
     I: Iterator<Item = &'func DModuleFunction>,
 {
@@ -218,22 +218,24 @@ fn default_unconstrained_recursive_returns_to_never<'func, I>(
         .zip(inputs.local_fns.iter())
         .zip(inputs.function_explicit_root_tys.iter())
     {
-        if !inputs
-            .recursive_function_ids
-            .contains(&FunctionId::Local(*id))
-            || function.ret_ty.is_some()
-        {
+        if function.ret_ty.is_some() {
             continue;
         }
 
         let Some(pending) = inputs.pending_functions.get(id) else {
             continue;
         };
-        if !node_references_any_function(
-            &pending.code.arena,
-            pending.code.entry_node_id,
-            inputs.recursive_function_ids,
-        ) {
+
+        let body_is_never = pending.code.arena[pending.code.entry_node_id].ty == Type::never();
+        let unproductive_recursive = inputs
+            .recursive_function_ids
+            .contains(&FunctionId::Local(*id))
+            && node_references_any_function(
+                &pending.code.arena,
+                pending.code.entry_node_id,
+                inputs.recursive_function_ids,
+            );
+        if !body_is_never && !unproductive_recursive {
             continue;
         }
 
@@ -1055,10 +1057,10 @@ where
 
         // Recursive-return defaulting inspects the final constraints.
         ty_inf.normalize_remaining_constraints();
-        default_unconstrained_recursive_returns_to_never(
+        default_unconstrained_diverging_returns_to_never(
             output,
             &mut ty_inf,
-            RecursiveReturnDefaultingInputs {
+            DivergingReturnDefaultingInputs {
                 ast_functions: ast_functions(),
                 local_fns: &local_fns,
                 function_explicit_root_tys: &function_explicit_root_tys,
