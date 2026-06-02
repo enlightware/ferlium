@@ -35,6 +35,12 @@ macro_rules! define_id_type {
                 self.0 as usize
             }
         }
+        impl Default for $name {
+            #[inline]
+            fn default() -> Self {
+                Self::from_index(0)
+            }
+        }
         impl std::fmt::Display for $name {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 write!(f, "{}", self.0)

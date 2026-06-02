@@ -51,12 +51,6 @@ define_id_type!(
     LocalFrameSlot
 );
 
-impl Default for LocalFrameSlot {
-    fn default() -> Self {
-        Self::from_index(0)
-    }
-}
-
 /// An identifier for a function
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FunctionId {

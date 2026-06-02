@@ -18,7 +18,7 @@ use crate::{
     containers::{SVec2, b, continuous_hashmap_to_vec},
     format::FormatWith,
     hir::{
-        self, CallArgument, FieldAccess as HirFieldAccess, NodeArena, NodeId, NodeKind,
+        self, CallArgument, FieldAccess as HirFieldAccess, LoopId, NodeArena, NodeId, NodeKind,
         Project as HirProject, ProjectAt as HirProjectAt, StoreLocal, Variant as HirVariant,
         function::{
             FunctionDefinition, PendingArgPassing, ResolvedArgPassing,
@@ -120,6 +120,7 @@ pub struct TypeInference {
     /// Memoised results of `TrivialCopy` solver probes keyed by the queried concrete type.
     /// `TraitSolverProbe::from_module` clones the module's impl table on every call, so this cache avoids re-cloning when the same type is checked repeatedly during a single inference pass.
     trivial_copy_cache: FxHashMap<Type, bool>,
+    next_loop_id: LoopId,
 }
 
 struct PreparedPlace {
@@ -148,6 +149,12 @@ impl TypeInference {
 
     pub fn fresh_type_var_tys(&mut self, count: usize) -> Vec<Type> {
         (0..count).map(|_| self.fresh_type_var_ty()).collect()
+    }
+
+    fn fresh_loop_id(&mut self) -> LoopId {
+        let label = self.next_loop_id;
+        self.next_loop_id = LoopId::from_index(label.as_index() + 1);
+        label
     }
 
     /// Add the instantiated trait and parent constraints implied by a trait expression.
@@ -1450,8 +1457,10 @@ impl TypeInference {
                 unreachable!("this cannot happen as payload is never")
             }
             Loop(body) => {
+                let label = self.fresh_loop_id();
                 let result_ty = self.fresh_type_var();
-                env.loop_frames.push(LoopFrame::new(result_ty, false));
+                env.loop_frames
+                    .push(LoopFrame::new(label, result_ty, false));
                 let mut body_id =
                     self.check_expr(env, *body, Type::unit(), MutType::constant(), sp(*body))?;
                 let loop_frame = env.loop_frames.pop().unwrap();
@@ -1478,22 +1487,46 @@ impl TypeInference {
                 } else {
                     Type::never()
                 };
-                (K::Loop(body_id), ty, MutType::constant(), effects)
+                (
+                    K::Loop(hir::Loop {
+                        label,
+                        body: body_id,
+                    }),
+                    ty,
+                    MutType::constant(),
+                    effects,
+                )
             }
             SoftBreak => {
-                let ty = if let Some(loop_frame) = env.loop_frames.last_mut() {
+                if let Some(loop_frame) = env.loop_frames.last_mut() {
+                    let label = loop_frame.label;
                     loop_frame.saw_break = true;
+                    let value = env.ir_arena.alloc(N::new(
+                        K::Immediate(LiteralValue::new_native(())),
+                        Type::unit(),
+                        no_effects(),
+                        expr_span,
+                    ));
                     self.add_same_type_constraint(
                         Type::variable(loop_frame.result_ty),
                         expr_span,
                         Type::unit(),
                         expr_span,
                     );
-                    Type::never()
+                    (
+                        K::Break(hir::Break { label, value }),
+                        Type::never(),
+                        MutType::constant(),
+                        no_effects(),
+                    )
                 } else {
-                    Type::unit()
-                };
-                (K::SoftBreak, ty, MutType::constant(), no_effects())
+                    (
+                        K::Immediate(LiteralValue::new_native(())),
+                        Type::unit(),
+                        MutType::constant(),
+                        no_effects(),
+                    )
+                }
             }
             PropertyPath(data) => {
                 let fn_path = property_to_fn_path(

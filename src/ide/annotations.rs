@@ -429,8 +429,9 @@ fn node_variable_type_annotations<Env>(
             }
             variable_type_annotations(arena, case.default, result, locals, env);
         }
-        Loop(body) => variable_type_annotations(arena, *body, result, locals, env),
-        CheckCallDepth | CheckFuel | SoftBreak => {}
+        Loop(node) => variable_type_annotations(arena, node.body, result, locals, env),
+        Break(node) => variable_type_annotations(arena, node.value, result, locals, env),
+        CheckCallDepth | CheckFuel | Continue(_) => {}
     }
 }
 

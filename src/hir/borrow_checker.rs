@@ -286,10 +286,13 @@ impl Node {
                 }
                 check_borrows(arena, case.default)?;
             }
-            Loop(body) => {
-                check_borrows(arena, *body)?;
+            Loop(node) => {
+                check_borrows(arena, node.body)?;
             }
-            CheckCallDepth | CheckFuel | SoftBreak => {}
+            Break(node) => {
+                check_borrows(arena, node.value)?;
+            }
+            CheckCallDepth | CheckFuel | Continue(_) => {}
         }
         Ok(())
     }

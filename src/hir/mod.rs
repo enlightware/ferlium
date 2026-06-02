@@ -115,6 +115,11 @@ impl HirPhase for Elaborated {
 /// An index to a node in the HIR arena.
 pub type NodeId<P = Unelaborated> = Idx<Node<P>>;
 
+crate::define_id_type!(
+    /// A unique loop identifier within a function.
+    LoopId
+);
+
 /// A compact ordered list of HIR node IDs.
 pub type NodeIds<P = Unelaborated> = B<SVec2<NodeId<P>>>;
 
@@ -403,6 +408,26 @@ pub struct Block<P: HirPhase = Unelaborated> {
     pub cleanup: Vec<LocalDeclId>,
 }
 
+/// A loop with an explicit label used as the target for loop control flow.
+#[derive(Debug, Clone, Copy, new)]
+pub struct Loop<P: HirPhase = Unelaborated> {
+    pub label: LoopId,
+    pub body: NodeId<P>,
+}
+
+/// A value-carrying break targeting a resolved loop label.
+#[derive(Debug, Clone, Copy, new)]
+pub struct Break<P: HirPhase = Unelaborated> {
+    pub label: LoopId,
+    pub value: NodeId<P>,
+}
+
+/// A continue targeting a resolved loop label.
+#[derive(Debug, Clone, Copy, new)]
+pub struct Continue {
+    pub label: LoopId,
+}
+
 /// Clone the closure environment of `source` into already allocated `target` storage.
 #[derive(Debug, Clone, Copy)]
 pub struct CloneClosureEnv<P: HirPhase = Unelaborated> {
@@ -680,10 +705,12 @@ pub enum NodeKind<P: HirPhase = Unelaborated> {
     Return(NodeId<P>),
     /// Branch on a literal value with a default alternative.
     Case(B<Case<P>>),
-    /// Loop forever until a return or soft break is reached.
-    Loop(NodeId<P>),
-    /// Break out of the nearest loop without returning from the function.
-    SoftBreak,
+    /// Loop forever until a return or break targeting this loop is reached.
+    Loop(Loop<P>),
+    /// Break out of the targeted loop with a result value.
+    Break(Break<P>),
+    /// Continue the targeted loop.
+    Continue(Continue),
 }
 
 impl NodeKind {
@@ -704,7 +731,7 @@ impl NodeKind {
             | LoadLocal(_)
             | CheckCallDepth
             | CheckFuel
-            | SoftBreak => smallvec![],
+            | Continue(_) => smallvec![],
             BuildClosure(bc) => {
                 let mut v: SVec4<NodeId> = smallvec![bc.function];
                 v.extend_from_slice(&bc.dictionary_captures);
@@ -737,7 +764,9 @@ impl NodeKind {
             }
             TraitMethodApply(app) => app.arguments.iter().map(|arg| arg.value).collect(),
             StoreLocal(store) => smallvec![store.value],
-            Return(node) | ExtractTag(node) | Loop(node) => smallvec![*node],
+            Return(node) | ExtractTag(node) => smallvec![*node],
+            Loop(node) => smallvec![node.body],
+            Break(node) => smallvec![node.value],
             Block(block) => block.body.iter().copied().collect(),
             Tuple(nodes) | Record(nodes) | Array(nodes) => nodes.iter().copied().collect(),
             Assign(a) => smallvec![a.place, a.value],
@@ -1288,18 +1317,22 @@ impl<P: HirPhase> Node<P> {
                 writeln!(f, "{indent_str}default")?;
                 format_ind(arena, case.default, f, locals, env, spacing, indent + 1)?;
             }
-            Loop(body) => {
-                writeln!(f, "{indent_str}loop")?;
-                format_ind(arena, *body, f, locals, env, spacing, indent + 1)?;
+            Loop(node) => {
+                writeln!(f, "{indent_str}loop {}", node.label)?;
+                format_ind(arena, node.body, f, locals, env, spacing, indent + 1)?;
+            }
+            Break(node) => {
+                writeln!(f, "{indent_str}break {}", node.label)?;
+                format_ind(arena, node.value, f, locals, env, spacing, indent + 1)?;
+            }
+            Continue(node) => {
+                writeln!(f, "{indent_str}continue {}", node.label)?;
             }
             CheckCallDepth => {
                 writeln!(f, "{indent_str}check call depth")?;
             }
             CheckFuel => {
                 writeln!(f, "{indent_str}check fuel")?;
-            }
-            SoftBreak => {
-                writeln!(f, "{indent_str}soft break")?;
             }
         };
         write!(f, "{indent_str}↳ {}", self.ty.format_with(env))?;
@@ -1487,12 +1520,17 @@ impl<P: HirPhase> Node<P> {
                     return Some(ty);
                 }
             }
-            Loop(body) => {
-                if let Some(ty) = type_at(arena, *body, pos) {
+            Loop(node) => {
+                if let Some(ty) = type_at(arena, node.body, pos) {
                     return Some(ty);
                 }
             }
-            CheckCallDepth | CheckFuel | SoftBreak => {}
+            Break(node) => {
+                if let Some(ty) = type_at(arena, node.value, pos) {
+                    return Some(ty);
+                }
+            }
+            CheckCallDepth | CheckFuel | Continue(_) => {}
         }
 
         // No children has this position, return our type.
@@ -1612,10 +1650,13 @@ impl Node {
                 });
                 unbound_ty_vars(arena, case.default, result, ignore);
             }
-            Loop(body) => {
-                unbound_ty_vars(arena, *body, result, ignore);
+            Loop(node) => {
+                unbound_ty_vars(arena, node.body, result, ignore);
             }
-            CheckCallDepth | CheckFuel | SoftBreak => {}
+            Break(node) => {
+                unbound_ty_vars(arena, node.value, result, ignore);
+            }
+            CheckCallDepth | CheckFuel | Continue(_) => {}
         }
     }
 

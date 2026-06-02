@@ -12,8 +12,8 @@ use crate::{
     FxHashSet, Location,
     ast::{self, DExprArena},
     compiler::error::{InternalCompilationError, UnsafeFeature},
-    hir::NodeArena,
     hir::function::{FunctionDefinition, ResolvedArgPassing},
+    hir::{LoopId, NodeArena},
     module::{
         FunctionId, ImportFunctionSlot, ImportFunctionSlotId, ImportFunctionTarget, LocalDecl,
         LocalDeclId, LocalFunctionId, ModuleEnv, ModuleId, TraitId, TypeDefLookupResult,
@@ -40,9 +40,9 @@ pub type GetFunctionWithPathData<'a> = (ast::Path, GetFunctionData<'a>);
 
 #[derive(Debug, new)]
 pub struct LoopFrame {
+    pub(crate) label: LoopId,
     pub(crate) result_ty: TypeVar,
     pub(crate) saw_break: bool,
-    // pub(crate) label: Option<Ustr>,
 }
 
 /// A typing environment, mapping local variable names to types.

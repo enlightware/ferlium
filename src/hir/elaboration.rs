@@ -1142,10 +1142,17 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                     default: self.elaborate_node(src, default)?,
                 }))
             }
-            Loop(body) => Loop(self.elaborate_node(src, *body)?),
+            Loop(node) => Loop(hir::Loop {
+                label: node.label,
+                body: self.elaborate_node(src, node.body)?,
+            }),
+            Break(node) => Break(hir::Break {
+                label: node.label,
+                value: self.elaborate_node(src, node.value)?,
+            }),
+            Continue(node) => Continue(hir::Continue { label: node.label }),
             CheckCallDepth => CheckCallDepth,
             CheckFuel => CheckFuel,
-            SoftBreak => SoftBreak,
         })
     }
 }

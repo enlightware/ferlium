@@ -37,7 +37,7 @@ use crate::{
 };
 use crate::{
     Modules,
-    hir::{self, CallArgument, ENodeArena, ENodeId, Elaborated, NodeKind},
+    hir::{self, CallArgument, ENodeArena, ENodeId, Elaborated, LoopId, NodeKind},
 };
 
 use crate::module::ImportFunctionTarget;
@@ -204,8 +204,6 @@ pub struct EvalCtx<'a> {
     pub stack_limit: usize,
     /// remaining execution fuel; `None` means fuel checks are disabled
     pub fuel_remaining: Option<i64>,
-    /// a flag to break the evaluation
-    pub break_loop: bool,
     /// id of the current module for import slot resolution
     pub module_id: ModuleId,
     /// whether the current function returns a place result
@@ -323,7 +321,6 @@ impl<'a> EvalCtx<'a> {
             call_depth_limit: Self::DEFAULT_CALL_DEPTH_LIMIT,
             stack_limit: Self::DEFAULT_STACK_LIMIT,
             fuel_remaining: None,
-            break_loop: false,
             module_id: module,
             returns_place: false,
             compiler_session,
@@ -502,7 +499,9 @@ impl<'a> EvalCtx<'a> {
             let result = match (result, drop_result) {
                 (Ok(result), Ok(_)) => Ok(result),
                 (Ok(result), Err(err)) => {
-                    result.into_value().discard_storage();
+                    if let Some(value) = result.into_transfer_value() {
+                        value.discard_storage();
+                    }
                     Err(err)
                 }
                 (Err(err), _) => Err(err),
@@ -793,20 +792,39 @@ impl FormatWith<EvalCtx<'_>> for Place {
 pub enum ControlFlow<V> {
     Continue(V),
     Return(Value),
+    Break { label: LoopId, value: Value },
+    LoopContinue { label: LoopId },
 }
 impl<V> ControlFlow<V> {
     fn map_continue<U>(self, f: impl FnOnce(V) -> U) -> ControlFlow<U> {
         match self {
             ControlFlow::Continue(value) => ControlFlow::Continue(f(value)),
             ControlFlow::Return(value) => ControlFlow::Return(value),
+            ControlFlow::Break { label, value } => ControlFlow::Break { label, value },
+            ControlFlow::LoopContinue { label } => ControlFlow::LoopContinue { label },
+        }
+    }
+
+    fn into_transfer_value(self) -> Option<Value> {
+        match self {
+            ControlFlow::Continue(_) | ControlFlow::LoopContinue { .. } => None,
+            ControlFlow::Return(value) | ControlFlow::Break { value, .. } => Some(value),
         }
     }
 }
+
+fn unreachable_continue<T, U>(_: T) -> U {
+    unreachable!("continue value is handled before propagating control transfer")
+}
+
 impl ControlFlow<Value> {
     pub fn into_value(self) -> Value {
         match self {
             ControlFlow::Continue(value) => value,
             ControlFlow::Return(value) => value,
+            ControlFlow::Break { .. } | ControlFlow::LoopContinue { .. } => {
+                panic!("loop control escaped its target loop")
+            }
         }
     }
 }
@@ -1018,6 +1036,8 @@ macro_rules! eval_or_return {
     ($expr:expr) => {
         match $expr? {
             ControlFlow::Return(val) => return Ok(ControlFlow::Return(val)),
+            ControlFlow::Break { label, value } => return Ok(ControlFlow::Break { label, value }),
+            ControlFlow::LoopContinue { label } => return Ok(ControlFlow::LoopContinue { label }),
             ControlFlow::Continue(val) => val,
         }
     };
@@ -1097,11 +1117,15 @@ pub fn eval_node_with_ctx(
         ExtractTag(node) => eval_extract_tag(arena, *node, ctx, locals),
         Array(nodes) => eval_array(arena, nodes, ctx, locals),
         Case(case) => eval_case(arena, case, ctx, locals),
-        Loop(body) => eval_loop(arena, *body, ctx, locals),
-        SoftBreak => {
-            ctx.break_loop = true;
-            cont(Value::unit())
+        Loop(node) => eval_loop(arena, node.label, node.body, ctx, locals),
+        Break(node) => {
+            let value = eval_or_return!(eval_node_with_ctx(arena, node.value, ctx, locals));
+            Ok(ControlFlow::Break {
+                label: node.label,
+                value,
+            })
         }
+        Continue(node) => Ok(ControlFlow::LoopContinue { label: node.label }),
     }
 }
 
@@ -1970,6 +1994,8 @@ fn control_flow_into_place_result(result: ControlFlow<Value>) -> ControlFlow<Pla
     match result {
         ControlFlow::Continue(value) => ControlFlow::Continue(value_into_place_result(value)),
         ControlFlow::Return(value) => ControlFlow::Return(value),
+        ControlFlow::Break { label, value } => ControlFlow::Break { label, value },
+        ControlFlow::LoopContinue { label } => ControlFlow::LoopContinue { label },
     }
 }
 
@@ -2196,12 +2222,14 @@ fn eval_return(
     if ctx.returns_place {
         let place = match eval_node_as_place(arena, node, ctx, locals)? {
             ControlFlow::Continue(place) => place,
-            ControlFlow::Return(value) => return Ok(ControlFlow::Return(value)),
+            transfer => return Ok(transfer.map_continue(unreachable_continue)),
         };
         let place = place.resolved(ctx);
         return ret(Value::native(PlaceResult::new(place)));
     }
-    ret(eval_node_with_ctx(arena, node, ctx, locals)?.into_value())
+    ret(eval_or_return!(eval_node_with_ctx(
+        arena, node, ctx, locals
+    )))
 }
 
 #[inline(never)]
@@ -2226,17 +2254,17 @@ fn eval_block(
                 ctx.truncate_environment_storage(env_size);
                 return Err(err);
             }
-            Ok(ControlFlow::Return(val)) => {
-                if let Some(value) = last_value.take() {
-                    value.discard_storage();
-                }
-                ctx.truncate_environment_storage(env_size);
-                return Ok(ControlFlow::Return(val));
-            }
             Ok(ControlFlow::Continue(val)) => {
                 if let Some(old_value) = last_value.replace(val) {
                     old_value.discard_storage();
                 }
+            }
+            Ok(transfer) => {
+                if let Some(value) = last_value.take() {
+                    value.discard_storage();
+                }
+                ctx.truncate_environment_storage(env_size);
+                return Ok(transfer);
             }
         }
     }
@@ -2289,19 +2317,19 @@ fn eval_block_with_cleanup(
                 cleanup?;
                 return Err(err);
             }
-            Ok(ControlFlow::Return(val)) => {
+            Ok(ControlFlow::Continue(val)) => {
+                if let Some(old_value) = last_value.replace(val) {
+                    old_value.discard_storage();
+                }
+            }
+            Ok(transfer) => {
                 if let Some(value) = last_value.take() {
                     value.discard_storage();
                 }
                 let cleanup = drop_cleanup_locals(ctx, locals, cleanup_drops, arena[*node].span);
                 ctx.truncate_environment_storage(env_size);
                 cleanup?;
-                return Ok(ControlFlow::Return(val));
-            }
-            Ok(ControlFlow::Continue(val)) => {
-                if let Some(old_value) = last_value.replace(val) {
-                    old_value.discard_storage();
-                }
+                return Ok(transfer);
             }
         }
     }
@@ -2513,17 +2541,40 @@ fn eval_case(
 #[inline(never)]
 fn eval_loop(
     arena: &ENodeArena,
+    label: LoopId,
     body: ENodeId,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
-    let break_loop = ctx.break_loop;
-    ctx.break_loop = false;
-    while !ctx.break_loop {
-        eval_or_return!(eval_node_with_ctx(arena, body, ctx, locals));
+    loop {
+        match eval_node_with_ctx(arena, body, ctx, locals)? {
+            ControlFlow::Continue(value) => value.discard_storage(),
+            ControlFlow::Return(value) => return Ok(ControlFlow::Return(value)),
+            ControlFlow::Break {
+                label: break_label,
+                value,
+            } if break_label == label => return cont(value),
+            ControlFlow::Break {
+                label: break_label,
+                value,
+            } => {
+                return Ok(ControlFlow::Break {
+                    label: break_label,
+                    value,
+                });
+            }
+            ControlFlow::LoopContinue {
+                label: continue_label,
+            } if continue_label == label => {}
+            ControlFlow::LoopContinue {
+                label: continue_label,
+            } => {
+                return Ok(ControlFlow::LoopContinue {
+                    label: continue_label,
+                });
+            }
+        }
     }
-    ctx.break_loop = break_loop;
-    cont(Value::unit())
 }
 
 /// Evaluate a node that must produce a place in the environment.
@@ -2551,9 +2602,9 @@ fn eval_sequence<I, T>(
     for item in items {
         match eval(item) {
             Ok(ControlFlow::Continue(value)) => results.push(value),
-            Ok(ControlFlow::Return(value)) => {
+            Ok(transfer) => {
                 results.into_iter().for_each(discard);
-                return Ok(ControlFlow::Return(value));
+                return Ok(transfer.map_continue(unreachable_continue));
             }
             Err(err) => {
                 results.into_iter().for_each(discard);
@@ -2610,7 +2661,7 @@ fn eval_call_arg(
                             .map_continue(|value| EvaluatedCallArg::SharedTemp(value, temp_cleanup))
                     })
                 }
-                Ok(ControlFlow::Return(value)) => Ok(ControlFlow::Return(value)),
+                Ok(transfer) => Ok(transfer.map_continue(unreachable_continue)),
                 Err(err) => Err(err),
             }
         }
@@ -2647,14 +2698,14 @@ fn eval_args(
             .map(|result| result.map_continue(|arg| arg.materialize(ctx, &mut temp_drops)));
         match result {
             Ok(ControlFlow::Continue(arg)) => results.push(arg),
-            Ok(ControlFlow::Return(value)) => {
+            Ok(transfer) => {
                 let cleanup = run_temp_drops(ctx, &temp_drops, arena[arg.value].span);
                 for result in results {
                     result.discard_storage();
                 }
                 ctx.truncate_environment_storage(temp_start);
                 cleanup?;
-                return Ok(ControlFlow::Return(value));
+                return Ok(transfer.map_continue(unreachable_continue));
             }
             Err(err) => {
                 let cleanup = run_temp_drops(ctx, &temp_drops, arena[arg.value].span);
@@ -2691,7 +2742,7 @@ fn eval_owned_arg(
         }
         Ok(ControlFlow::Continue(None)) => eval_node_with_ctx(arena, arg, ctx, locals)
             .map(|result| result.map_continue(ValOrMut::Val)),
-        Ok(ControlFlow::Return(value)) => Ok(ControlFlow::Return(value)),
+        Ok(transfer) => Ok(transfer.map_continue(unreachable_continue)),
         Err(err) => Err(err),
     }
 }
@@ -2830,9 +2881,10 @@ mod tests {
 
     use crate::{
         CompilerSession, Location,
-        eval::{ControlFlow, EvalCtx, eval_args, eval_nodes},
+        containers::{SVec2, b},
+        eval::{ControlFlow, EvalCtx, eval_args, eval_node, eval_nodes},
         hir::{
-            CallArgument, ENode, ENodeArena, NodeKind,
+            self, CallArgument, ENode, ENodeArena, LoopId, NodeKind,
             function::{ResolvedArgPassing, ResolvedValueArgPassing},
             value::{LiteralValue, NativeDisplay},
         },
@@ -2904,6 +2956,176 @@ mod tests {
     }
 
     #[test]
+    fn block_discards_previous_value_on_break() {
+        reset_eval_drop_tracked_count();
+        let span = Location::new_synthesized();
+        let label = LoopId::from_index(0);
+        let mut arena = ENodeArena::default();
+        let tracked = arena.alloc(ENode::new(
+            NodeKind::Immediate(LiteralValue::new_native(EvalDropTracked)),
+            Type::primitive::<EvalDropTracked>(),
+            EffType::empty(),
+            span,
+        ));
+        let unit = arena.alloc(ENode::new(
+            NodeKind::Immediate(LiteralValue::new_native(())),
+            Type::unit(),
+            EffType::empty(),
+            span,
+        ));
+        let break_node = arena.alloc(ENode::new(
+            NodeKind::Break(hir::Break { label, value: unit }),
+            Type::never(),
+            EffType::empty(),
+            span,
+        ));
+        let block = arena.alloc(ENode::new(
+            NodeKind::Block(b(hir::Block {
+                body: b(SVec2::from_vec(vec![tracked, break_node])),
+                cleanup: Vec::new(),
+            })),
+            Type::never(),
+            EffType::empty(),
+            span,
+        ));
+        let session = CompilerSession::new();
+        let result = eval_node(&arena, block, ModuleId::from_index(0), &[], &session).unwrap();
+        let ControlFlow::Break { value, .. } = result else {
+            panic!("expected block to propagate break");
+        };
+
+        assert_eq!(eval_drop_tracked_count(), 1);
+        value.discard_storage();
+    }
+
+    #[test]
+    fn loop_consumes_break_with_value() {
+        let span = Location::new_synthesized();
+        let label = LoopId::from_index(0);
+        let mut arena = ENodeArena::default();
+        let value = arena.alloc(ENode::new(
+            NodeKind::Immediate(LiteralValue::new_native(7isize)),
+            Type::primitive::<isize>(),
+            EffType::empty(),
+            span,
+        ));
+        let break_node = arena.alloc(ENode::new(
+            NodeKind::Break(hir::Break { label, value }),
+            Type::never(),
+            EffType::empty(),
+            span,
+        ));
+        let loop_node = arena.alloc(ENode::new(
+            NodeKind::Loop(hir::Loop {
+                label,
+                body: break_node,
+            }),
+            Type::primitive::<isize>(),
+            EffType::empty(),
+            span,
+        ));
+        let session = CompilerSession::new();
+        let result = eval_node(&arena, loop_node, ModuleId::from_index(0), &[], &session).unwrap();
+        let ControlFlow::Continue(value) = result else {
+            panic!("expected loop to consume targeted break");
+        };
+
+        assert_eq!(value.as_primitive_ty::<isize>().copied(), Some(7));
+    }
+
+    #[test]
+    fn inner_loop_propagates_break_targeting_outer_loop() {
+        let span = Location::new_synthesized();
+        let outer = LoopId::from_index(0);
+        let inner = LoopId::from_index(1);
+        let mut arena = ENodeArena::default();
+        let value = arena.alloc(ENode::new(
+            NodeKind::Immediate(LiteralValue::new_native(9isize)),
+            Type::primitive::<isize>(),
+            EffType::empty(),
+            span,
+        ));
+        let break_outer = arena.alloc(ENode::new(
+            NodeKind::Break(hir::Break {
+                label: outer,
+                value,
+            }),
+            Type::never(),
+            EffType::empty(),
+            span,
+        ));
+        let inner_loop = arena.alloc(ENode::new(
+            NodeKind::Loop(hir::Loop {
+                label: inner,
+                body: break_outer,
+            }),
+            Type::never(),
+            EffType::empty(),
+            span,
+        ));
+        let outer_loop = arena.alloc(ENode::new(
+            NodeKind::Loop(hir::Loop {
+                label: outer,
+                body: inner_loop,
+            }),
+            Type::primitive::<isize>(),
+            EffType::empty(),
+            span,
+        ));
+        let session = CompilerSession::new();
+        let result = eval_node(&arena, outer_loop, ModuleId::from_index(0), &[], &session).unwrap();
+        let ControlFlow::Continue(value) = result else {
+            panic!("expected outer loop to consume break propagated through inner loop");
+        };
+
+        assert_eq!(value.as_primitive_ty::<isize>().copied(), Some(9));
+    }
+
+    #[test]
+    fn break_value_transfer_happens_before_break_is_emitted() {
+        let span = Location::new_synthesized();
+        let label = LoopId::from_index(0);
+        let mut arena = ENodeArena::default();
+        let unit = arena.alloc(ENode::new(
+            NodeKind::Immediate(LiteralValue::new_native(())),
+            Type::unit(),
+            EffType::empty(),
+            span,
+        ));
+        let return_unit = arena.alloc(ENode::new(
+            NodeKind::Return(unit),
+            Type::never(),
+            EffType::empty(),
+            span,
+        ));
+        let break_node = arena.alloc(ENode::new(
+            NodeKind::Break(hir::Break {
+                label,
+                value: return_unit,
+            }),
+            Type::never(),
+            EffType::empty(),
+            span,
+        ));
+        let loop_node = arena.alloc(ENode::new(
+            NodeKind::Loop(hir::Loop {
+                label,
+                body: break_node,
+            }),
+            Type::never(),
+            EffType::empty(),
+            span,
+        ));
+        let session = CompilerSession::new();
+        let result = eval_node(&arena, loop_node, ModuleId::from_index(0), &[], &session).unwrap();
+        let ControlFlow::Return(value) = result else {
+            panic!("expected return in break value to propagate before break");
+        };
+
+        assert!(value.as_primitive_ty::<()>().is_some());
+    }
+
+    #[test]
     fn eval_args_discards_partial_values_on_return() {
         reset_eval_drop_tracked_count();
         let span = Location::new_synthesized();
@@ -2946,6 +3168,56 @@ mod tests {
         let result = eval_args(&arena, &arguments, &arg_tys, &mut ctx, &[]).unwrap();
         let ControlFlow::Return(value) = result else {
             panic!("expected eval_args to propagate return");
+        };
+
+        assert_eq!(eval_drop_tracked_count(), 1);
+        value.discard_storage();
+    }
+
+    #[test]
+    fn eval_args_discards_partial_values_on_break() {
+        reset_eval_drop_tracked_count();
+        let span = Location::new_synthesized();
+        let label = LoopId::from_index(0);
+        let mut arena = ENodeArena::default();
+        let tracked = arena.alloc(ENode::new(
+            NodeKind::Immediate(LiteralValue::new_native(EvalDropTracked)),
+            Type::primitive::<EvalDropTracked>(),
+            EffType::empty(),
+            span,
+        ));
+        let unit = arena.alloc(ENode::new(
+            NodeKind::Immediate(LiteralValue::new_native(())),
+            Type::unit(),
+            EffType::empty(),
+            span,
+        ));
+        let break_node = arena.alloc(ENode::new(
+            NodeKind::Break(hir::Break { label, value: unit }),
+            Type::never(),
+            EffType::empty(),
+            span,
+        ));
+        let session = CompilerSession::new();
+        let mut ctx = EvalCtx::new(ModuleId::from_index(0), &session);
+        let arg_tys = [
+            FnArgType::new_by_val(Type::primitive::<EvalDropTracked>()),
+            FnArgType::new_by_val(Type::unit()),
+        ];
+        let arguments = [
+            CallArgument {
+                value: tracked,
+                passing: ResolvedArgPassing::Value(ResolvedValueArgPassing::Owned),
+            },
+            CallArgument {
+                value: break_node,
+                passing: ResolvedArgPassing::Value(ResolvedValueArgPassing::Owned),
+            },
+        ];
+
+        let result = eval_args(&arena, &arguments, &arg_tys, &mut ctx, &[]).unwrap();
+        let ControlFlow::Break { value, .. } = result else {
+            panic!("expected eval_args to propagate break");
         };
 
         assert_eq!(eval_drop_tracked_count(), 1);
