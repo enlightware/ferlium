@@ -67,6 +67,8 @@ fn effects_in_mod() {
     test_mod(&mut session, mod_src, "t2", effect(Read));
     let mod_src = "fn rw() { effects::write(); effects::read() } fn o() { ((rw, ).0)() } ";
     test_mod(&mut session, mod_src, "o", effects(&[Read, Write]));
+    let mod_src = "fn exits_loop() { loop { break } }";
+    test_mod(&mut session, mod_src, "exits_loop", effect(Fallible));
 }
 
 #[test]
@@ -80,6 +82,11 @@ fn effects_in_expr() {
         &mut session,
         "let a = |f| f(); a(|| effects::write())",
         effect(Write),
+    );
+    test_expr(
+        &mut session,
+        "loop { break effects::read() }",
+        effects(&[Fallible, Read]),
     );
 }
 

@@ -545,6 +545,38 @@ impl Display for UnsafeFeature {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoopControlKind {
+    Break,
+    Continue,
+}
+
+impl Display for LoopControlKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Break => write!(f, "break"),
+            Self::Continue => write!(f, "continue"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvalidLoopControlKind {
+    OutsideLoop,
+    UnknownLabel { label: Ustr },
+}
+
+impl InvalidLoopControlKind {
+    pub fn message(&self, control: LoopControlKind) -> String {
+        match self {
+            Self::OutsideLoop => format!("{control} can only be used inside a loop"),
+            Self::UnknownLabel { label } => {
+                format!("{control} targets unknown loop label `{label}`")
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, EnumAsInner)]
 pub enum InfiniteTypeKind<S: Scope> {
     TypeVariableCycle { ty_var: S::TypeVar, ty: S::Type },
@@ -813,6 +845,11 @@ pub enum CompilationErrorImpl<S: Scope> {
     },
     UnsafeFeatureUseNotAllowed {
         feature: UnsafeFeature,
+        span: Location,
+    },
+    InvalidLoopControl {
+        control: LoopControlKind,
+        kind: InvalidLoopControlKind,
         span: Location,
     },
     IdentifierBoundMoreThanOnceInAPattern {
@@ -1585,6 +1622,13 @@ impl FormatWith<SourceTable> for CompilationError {
                     fmt_span(span)
                 )
             }
+            InvalidLoopControl {
+                control,
+                kind,
+                span,
+            } => {
+                write!(f, "{} in {}", kind.message(*control), fmt_span(span))
+            }
             IdentifierBoundMoreThanOnceInAPattern {
                 first_occurrence,
                 pattern_span,
@@ -2208,6 +2252,15 @@ impl CompilationError {
             UnsafeFeatureUseNotAllowed { feature, span } => {
                 compilation_error!(UnsafeFeatureUseNotAllowed { feature, span })
             }
+            InvalidLoopControl {
+                control,
+                kind,
+                span,
+            } => compilation_error!(InvalidLoopControl {
+                control,
+                kind,
+                span,
+            }),
             IdentifierBoundMoreThanOnceInAPattern {
                 first_occurrence,
                 second_occurrence,

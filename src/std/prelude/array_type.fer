@@ -85,7 +85,7 @@ fn array_ensure_capacity<A>(array: &mut [A], len: int)
 			buffer_move_into(array.data, array_physical_index_unchecked(array, i), new_data, i);
 			i += 1;
 		} else {
-			soft_break;
+			break;
 		};
 	};
 	buffer_move(new_data, array.data);

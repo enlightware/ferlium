@@ -143,6 +143,95 @@ fn lexical_drops_run_in_reverse_order() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn lexical_drop_runs_on_loop_break() {
+    let mut session = TestSession::new();
+    let source = format!(
+        r#"
+        {}
+        testing::reset_tracked_drops();
+        loop {{
+            let first = Probe(1);
+            let second = Probe(2);
+            break;
+        }};
+        testing::tracked_drop_log()
+        "#,
+        tracked_probe_value_impl()
+    );
+    assert_val_eq!(session.run(&source), int(21));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn lexical_drop_runs_on_loop_continue() {
+    let mut session = TestSession::new();
+    let source = format!(
+        r#"
+        {}
+        testing::reset_tracked_drops();
+        let mut i = 0;
+        loop {{
+            let owned = Probe(i + 1);
+            i += 1;
+            if i < 3 {{ continue }};
+            break;
+        }};
+        testing::tracked_drop_log()
+        "#,
+        tracked_probe_value_impl()
+    );
+    assert_val_eq!(session.run(&source), int(123));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn lexical_drop_runs_on_outer_loop_break() {
+    let mut session = TestSession::new();
+    let source = format!(
+        r#"
+        {}
+        testing::reset_tracked_drops();
+        'outer: loop {{
+            let outer = Probe(1);
+            loop {{
+                let inner = Probe(2);
+                break 'outer;
+            }}
+        }};
+        testing::tracked_drop_log()
+        "#,
+        tracked_probe_value_impl()
+    );
+    assert_val_eq!(session.run(&source), int(21));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn lexical_drop_runs_on_outer_loop_continue() {
+    let mut session = TestSession::new();
+    let source = format!(
+        r#"
+        {}
+        testing::reset_tracked_drops();
+        let mut i = 0;
+        'outer: loop {{
+            let outer = Probe(i + 1);
+            i += 1;
+            loop {{
+                let inner = Probe(i + 4);
+                if i < 3 {{ continue 'outer }};
+                break 'outer;
+            }}
+        }};
+        testing::tracked_drop_log()
+        "#,
+        tracked_probe_value_impl()
+    );
+    assert_val_eq!(session.run(&source), int(516273));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn closure_drop_drops_captured_values() {
     let mut session = TestSession::new();
     let source = format!(

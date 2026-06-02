@@ -12,8 +12,8 @@ use crate::{
         PatternKind, PatternVar, PropertyAccess, RecordField, RecordFields, UnnamedArg, UstrSpan,
     },
     compiler::error::{
-        DuplicatedFieldContext, InternalCompilationError, UnsafeFeature, WhatIsNotAProductType,
-        WhichProductTypeIsNot,
+        DuplicatedFieldContext, InternalCompilationError, InvalidLoopControlKind, LoopControlKind,
+        UnsafeFeature, WhatIsNotAProductType, WhichProductTypeIsNot,
     },
     containers::{SVec2, b, continuous_hashmap_to_vec},
     format::FormatWith,
@@ -107,6 +107,18 @@ fn compiler_only_trait_method_use_error(
     })
 }
 
+fn loop_control_error(
+    control: LoopControlKind,
+    kind: InvalidLoopControlKind,
+    span: Location,
+) -> InternalCompilationError {
+    internal_compilation_error!(InvalidLoopControl {
+        control,
+        kind,
+        span,
+    })
+}
+
 /// The type inference status, containing the unification table and the constraints
 #[derive(Default, Debug)]
 pub struct TypeInference {
@@ -155,6 +167,33 @@ impl TypeInference {
         let label = self.next_loop_id;
         self.next_loop_id = LoopId::from_index(label.as_index() + 1);
         label
+    }
+
+    fn resolve_loop_frame(
+        loop_frames: &[LoopFrame],
+        source_label: Option<UstrSpan>,
+        span: Location,
+        control: LoopControlKind,
+    ) -> Result<usize, InternalCompilationError> {
+        match source_label {
+            Some(label) => loop_frames
+                .iter()
+                .rposition(|frame| {
+                    frame
+                        .source_label
+                        .is_some_and(|frame_label| frame_label.0 == label.0)
+                })
+                .ok_or_else(|| {
+                    loop_control_error(
+                        control,
+                        InvalidLoopControlKind::UnknownLabel { label: label.0 },
+                        label.1,
+                    )
+                }),
+            None => loop_frames.len().checked_sub(1).ok_or_else(|| {
+                loop_control_error(control, InvalidLoopControlKind::OutsideLoop, span)
+            }),
+        }
     }
 
     /// Add the instantiated trait and parent constraints implied by a trait expression.
@@ -1456,13 +1495,18 @@ impl TypeInference {
             ForLoop(_for_loop) => {
                 unreachable!("this cannot happen as payload is never")
             }
-            Loop(body) => {
+            Loop(data) => {
                 let label = self.fresh_loop_id();
                 let result_ty = self.fresh_type_var();
                 env.loop_frames
-                    .push(LoopFrame::new(label, result_ty, false));
-                let mut body_id =
-                    self.check_expr(env, *body, Type::unit(), MutType::constant(), sp(*body))?;
+                    .push(LoopFrame::new(label, data.label, result_ty, false));
+                let mut body_id = self.check_expr(
+                    env,
+                    data.body,
+                    Type::unit(),
+                    MutType::constant(),
+                    sp(data.body),
+                )?;
                 let loop_frame = env.loop_frames.pop().unwrap();
                 if env.fuel_checks_enabled {
                     let check_id = env.ir_arena.alloc(N::new(
@@ -1497,10 +1541,26 @@ impl TypeInference {
                     effects,
                 )
             }
-            SoftBreak => {
-                if let Some(loop_frame) = env.loop_frames.last_mut() {
-                    let label = loop_frame.label;
-                    loop_frame.saw_break = true;
+            Break(data) => {
+                let loop_frame_index = Self::resolve_loop_frame(
+                    &env.loop_frames,
+                    data.label,
+                    expr_span,
+                    LoopControlKind::Break,
+                )?;
+                let loop_frame = &mut env.loop_frames[loop_frame_index];
+                let label = loop_frame.label;
+                let result_ty = loop_frame.result_ty;
+                loop_frame.saw_break = true;
+                let value = if let Some(value) = data.value {
+                    self.check_expr(
+                        env,
+                        value,
+                        Type::variable(result_ty),
+                        MutType::constant(),
+                        sp(value),
+                    )?
+                } else {
                     let value = env.ir_arena.alloc(N::new(
                         K::Immediate(LiteralValue::new_native(())),
                         Type::unit(),
@@ -1508,25 +1568,35 @@ impl TypeInference {
                         expr_span,
                     ));
                     self.add_same_type_constraint(
-                        Type::variable(loop_frame.result_ty),
+                        Type::variable(result_ty),
                         expr_span,
                         Type::unit(),
                         expr_span,
                     );
-                    (
-                        K::Break(hir::Break { label, value }),
-                        Type::never(),
-                        MutType::constant(),
-                        no_effects(),
-                    )
-                } else {
-                    (
-                        K::Immediate(LiteralValue::new_native(())),
-                        Type::unit(),
-                        MutType::constant(),
-                        no_effects(),
-                    )
-                }
+                    value
+                };
+                let effects = env.ir_arena[value].effects.clone();
+                (
+                    K::Break(hir::Break { label, value }),
+                    Type::never(),
+                    MutType::constant(),
+                    effects,
+                )
+            }
+            Continue(data) => {
+                let loop_frame_index = Self::resolve_loop_frame(
+                    &env.loop_frames,
+                    data.label,
+                    expr_span,
+                    LoopControlKind::Continue,
+                )?;
+                let label = env.loop_frames[loop_frame_index].label;
+                (
+                    K::Continue(hir::Continue { label }),
+                    Type::never(),
+                    MutType::constant(),
+                    no_effects(),
+                )
             }
             PropertyPath(data) => {
                 let fn_path = property_to_fn_path(
@@ -3114,8 +3184,16 @@ fn collect_free_variables(
         Project(data) => collect_free_variables(data.expr, arena, bound, free),
         FieldAccess(data) => collect_free_variables(data.expr, arena, bound, free),
         TypeAscription(data) => collect_free_variables(data.expr, arena, bound, free),
-        Return(expr) | Loop(expr) => {
+        Return(expr) => {
             collect_free_variables(*expr, arena, bound, free);
+        }
+        Loop(data) => {
+            collect_free_variables(data.body, arena, bound, free);
+        }
+        Break(data) => {
+            if let Some(value) = data.value {
+                collect_free_variables(value, arena, bound, free);
+            }
         }
         Record(fields) => {
             for (_, expr) in fields {
@@ -3135,7 +3213,7 @@ fn collect_free_variables(
         | FormattedString(_)
         | PropertyPath(_)
         | TraitAssociatedConst(_)
-        | SoftBreak
+        | Continue(_)
         | Error => {}
     }
 }

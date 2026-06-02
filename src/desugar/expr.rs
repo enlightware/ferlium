@@ -390,8 +390,8 @@ pub(crate) fn desugar(
                     ))
                 }
             };
-            let soft_break =
-                desugared_arena.alloc(DExpr::new(ExprKind::soft_break(), body_end_span));
+            let break_ =
+                desugared_arena.alloc(DExpr::new(ExprKind::break_(None, None), body_end_span));
             let it_match = desugared_arena.alloc(DExpr::new(
                 ExprKind::match_(
                     it_next,
@@ -411,24 +411,28 @@ pub(crate) fn desugar(
                                 PatternKind::empty_tuple_variant((ustr("None"), body_end_span)),
                                 body_end_span,
                             ),
-                            soft_break,
+                            break_,
                         ),
                     ],
                     None,
                 ),
                 body_span,
             ));
-            let loop_id = desugared_arena.alloc(DExpr::new(ExprKind::loop_(it_match), body_span));
+            let loop_id =
+                desugared_arena.alloc(DExpr::new(ExprKind::loop_(None, it_match), body_span));
             Block(vec![it_store, loop_id])
         }
-        Loop(body) => ExprKind::loop_(desugar(
-            body,
-            ctx,
-            parsed_arena,
-            desugared_arena,
-            modules_used,
-        )?),
-        SoftBreak => SoftBreak,
+        Loop(data) => ExprKind::loop_(
+            data.label,
+            desugar(data.body, ctx, parsed_arena, desugared_arena, modules_used)?,
+        ),
+        Break(data) => ExprKind::break_(
+            data.label,
+            data.value
+                .map(|value| desugar(value, ctx, parsed_arena, desugared_arena, modules_used))
+                .transpose()?,
+        ),
+        Continue(data) => ExprKind::continue_(data.label),
         PatternConstraint(_) => {
             unreachable!("pattern constraints are introduced during desugaring")
         }

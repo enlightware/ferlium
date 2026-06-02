@@ -10,7 +10,7 @@ use ustr::{Ustr, ustr};
 
 use crate::{
     FxHashSet, Location,
-    ast::{self, DExprArena},
+    ast::{self, DExprArena, UstrSpan},
     compiler::error::{InternalCompilationError, UnsafeFeature},
     hir::function::{FunctionDefinition, ResolvedArgPassing},
     hir::{LoopId, NodeArena},
@@ -41,6 +41,7 @@ pub type GetFunctionWithPathData<'a> = (ast::Path, GetFunctionData<'a>);
 #[derive(Debug, new)]
 pub struct LoopFrame {
     pub(crate) label: LoopId,
+    pub(crate) source_label: Option<UstrSpan>,
     pub(crate) result_ty: TypeVar,
     pub(crate) saw_break: bool,
 }
@@ -64,7 +65,7 @@ pub struct TypingEnv<'m> {
     pub(crate) expected_return_ty: Option<(Type, Location)>,
     /// The substitution to use for explicit generic type parameters in current annotations.
     pub(crate) annotation_ty_subst: Option<&'m TypeInstSubst>,
-    /// The active loop frames, used for type-checking `soft_break`.
+    /// The active loop frames, used for type-checking loop control flow.
     pub(crate) loop_frames: Vec<LoopFrame>,
     /// Whether compiler-inserted fuel checks should be emitted for loops.
     pub(crate) fuel_checks_enabled: bool,

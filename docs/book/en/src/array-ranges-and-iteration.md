@@ -177,6 +177,8 @@ for n in [1, 2, 3] {
 count
 ```
 
+For unconditional loops and labeled `break` or `continue`, see [Control Flow and Pattern Matching](./control-flow.md).
+
 ## What comes next
 
 The next chapter introduces user-defined types, so you can give names to your own product and sum types instead of relying only on arrays, tuples, and records.

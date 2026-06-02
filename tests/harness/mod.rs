@@ -8,10 +8,7 @@
 //
 use ferlium::{
     CompilerSession, FxHashSet, Location, ModuleAndExpr, SourceTable,
-    compiler::{
-        error::{CompilationError, RuntimeErrorKind},
-        test_support::raw_modules,
-    },
+    compiler::error::{CompilationError, RuntimeErrorKind},
     containers::IntoSVec2,
     eval::{ControlFlow, EvalResult, RuntimeError, eval_node},
     hir::function::{
@@ -20,16 +17,13 @@ use ferlium::{
         UnaryNativeFnNV, UnaryNativeFnRN, UnaryNativeFnVN, UnaryNativeFnVV,
     },
     hir::value::{LiteralValue, NativeDisplay, Value},
-    hir::{CompiledExpr, test_support::emit_expr_unsafe},
     module::{BlanketTraitImplSubKey, Module, ModuleEnv, ModuleId, Path, TraitId},
-    parse_module_and_expr,
     std::core_traits_names::{ITERATOR_TRAIT_NAME, VALUE_TRAIT_NAME},
     std::{
         array::{array_type, array_value_from_vec},
         buffer::Buffer,
         logic::bool_type,
         math::int_type,
-        new_module_using_std,
         string::string_type,
     },
     types::effects::{PrimitiveEffect, effect, effects, no_effects},
@@ -916,22 +910,6 @@ impl TestSession {
     pub fn compile(&mut self, src: &str) -> ModuleAndExpr {
         self.try_compile(src)
             .unwrap_or_else(|error| panic!("Compilation error: {error:?}"))
-    }
-
-    /// Compile an expression with unstable features enabled.
-    pub fn compile_unstable_expr(&mut self, src: &str) -> CompiledExpr {
-        let source_id = self.session.source_table().next_id();
-        let (_module, expr, arena) = parse_module_and_expr(src, source_id, true)
-            .unwrap_or_else(|errors| panic!("Parsing error: {errors:?}"));
-        let mut module = new_module_using_std(self.session.modules().next_id());
-        emit_expr_unsafe(
-            expr.expect("Expected an expression"),
-            &arena,
-            &mut module,
-            raw_modules(&self.session),
-            vec![],
-        )
-        .unwrap_or_else(|error| panic!("Compilation error: {error:?}"))
     }
 
     /// Compile and get the module of the src

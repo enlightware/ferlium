@@ -125,7 +125,7 @@ pub fn fold(seq, init, f) {
 			Some(element) => {
 				acc = f(acc, element);
 			},
-			None => soft_break,
+			None => break,
 		}
 	};
 	acc
@@ -149,7 +149,7 @@ pub fn try_fold(seq, init, f) {
 					}
 				}
 			},
-			None => soft_break,
+			None => break,
 		}
 	};
 	Continue(acc)
@@ -212,7 +212,7 @@ pub fn find(seq, predicate) -> Option<_> {
 					return Some(element);
 				}
 			},
-			None => soft_break,
+			None => break,
 		}
 	};
 	None
@@ -230,7 +230,7 @@ pub fn position(seq, predicate) -> Option<int> {
 				};
 				index = index + 1;
 			},
-			None => soft_break,
+			None => break,
 		}
 	};
 	None

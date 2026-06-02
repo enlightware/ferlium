@@ -112,6 +112,7 @@ pub(crate) fn diagnostics_from_error(
             impl_span: span, ..
         }
         | UnsafeFeatureUseNotAllowed { span, .. }
+        | InvalidLoopControl { span, .. }
         | Unsupported { span, .. }
         | ReturnOutsideFunction { span }
         | CircularImportDependency { span, .. }

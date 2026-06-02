@@ -115,6 +115,50 @@ let f = |x| {
 f(true)
 ```
 
+## Loop expressions
+
+Use `loop` when the stopping condition lives inside the body.
+A `break` exits the loop, and `continue` skips to the next iteration.
+
+```ferlium
+let mut n = 0;
+loop {
+    n += 1;
+    if n < 3 { continue };
+    break n
+}
+```
+
+A `loop` is an expression.
+Its result type comes from the values passed to `break`; a bare `break` is the same as `break ()`.
+
+```ferlium
+let answer = loop {
+    break 42
+};
+```
+
+If a loop has no reachable `break`, its type is `never`.
+
+### Loop labels
+
+Labels let `break` and `continue` target an outer loop directly:
+
+```ferlium
+let mut outer = 0;
+let mut inner = 0;
+'outer: loop {
+    outer += 1;
+    if outer == 3 { break inner };
+    loop {
+        inner += 1;
+        continue 'outer
+    }
+}
+```
+
+The label is written before the target loop, followed by `:`, and reused after `break` or `continue`.
+
 ## What comes next
 
 Later chapters expand pattern matching to structured data and more powerful patterns. For now, you can use literals and `_` to write clear, type-safe control flow.

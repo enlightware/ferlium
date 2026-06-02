@@ -16,7 +16,8 @@ use crate::harness::{
 };
 use ferlium::{
     compiler::error::{
-        CompilationErrorImpl, DuplicatedVariantContext, MutabilityMustBeWhat, RuntimeErrorKind,
+        CompilationErrorImpl, DuplicatedVariantContext, InvalidLoopControlKind, LoopControlKind,
+        MutabilityMustBeWhat, RuntimeErrorKind,
     },
     eval::{EvalCtx, eval_node_with_ctx},
     format::FormatWith,
@@ -2165,11 +2166,121 @@ fn never_type() {
 fn loop_types() {
     let mut session = TestSession::new();
 
-    let expr = session.compile_unstable_expr("loop {}");
+    let expr = session.compile("loop {}").expr.unwrap();
     assert_eq!(expr.ty.ty, Type::never());
 
-    let expr = session.compile_unstable_expr("loop { soft_break }");
+    let expr = session.compile("loop { break }").expr.unwrap();
     assert_eq!(expr.ty.ty, Type::unit());
+
+    let expr = session.compile("loop { break 42 }").expr.unwrap();
+    assert_eq!(expr.ty.ty, Type::primitive::<isize>());
+
+    let expr = session.compile("loop { continue }").expr.unwrap();
+    assert_eq!(expr.ty.ty, Type::never());
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn loop_break_and_continue() {
+    let mut session = TestSession::new();
+    assert_val_eq!(session.run("loop { break 42 }"), int(42));
+    assert_val_eq!(
+        session.run("let mut i = 0; loop { i += 1; if i < 3 { continue }; break i }"),
+        int(3)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn labeled_loop_break_and_continue_target_outer_loop() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run("'outer: loop { loop { break 'outer 42 }; break 0 }"),
+        int(42)
+    );
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            let mut outer = 0;
+            let mut inner = 0;
+            'outer: loop {
+                outer += 1;
+                if outer == 3 { break inner };
+                loop {
+                    inner += 1;
+                    continue 'outer
+                }
+            }
+        "#}),
+        int(2)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn break_value_preserves_expression_precedence() {
+    let mut session = TestSession::new();
+    assert_val_eq!(session.run("loop { break 1 + 2 * 3 }"), int(7));
+    assert_val_eq!(
+        session.run("loop { break 1 + 2 == 3 and true }"),
+        bool(true)
+    );
+    assert_val_eq!(
+        session.run("let mut value = 0; loop { break value = 2 }; value"),
+        int(2)
+    );
+    assert_val_eq!(
+        session.run("loop { break if false { 1 } else { 2 } + 3 }"),
+        int(5)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn loop_control_must_target_enclosing_loop() {
+    let mut session = TestSession::new();
+    for (source, control, kind) in [
+        (
+            "break 1",
+            LoopControlKind::Break,
+            InvalidLoopControlKind::OutsideLoop,
+        ),
+        (
+            "break; 0",
+            LoopControlKind::Break,
+            InvalidLoopControlKind::OutsideLoop,
+        ),
+        (
+            "continue; 0",
+            LoopControlKind::Continue,
+            InvalidLoopControlKind::OutsideLoop,
+        ),
+        (
+            "loop { break 'missing 1 }",
+            LoopControlKind::Break,
+            InvalidLoopControlKind::UnknownLabel {
+                label: ustr::ustr("missing"),
+            },
+        ),
+        (
+            "loop { continue 'missing }",
+            LoopControlKind::Continue,
+            InvalidLoopControlKind::UnknownLabel {
+                label: ustr::ustr("missing"),
+            },
+        ),
+    ] {
+        match session.fail_compilation(source).into_inner() {
+            CompilationErrorImpl::InvalidLoopControl {
+                control: actual_control,
+                kind: actual_kind,
+                ..
+            } => {
+                assert_eq!(actual_control, control);
+                assert_eq!(actual_kind, kind);
+            }
+            other => panic!("expected invalid loop-control error, got {other:?}"),
+        }
+    }
 }
 
 #[test]

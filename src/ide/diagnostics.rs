@@ -662,6 +662,11 @@ pub(super) fn compilation_error_to_data(
             span,
             format!("Unsafe feature `{feature}` cannot be used in this context"),
         )],
+        InvalidLoopControl {
+            control,
+            kind,
+            span,
+        } => vec![error_data_from_location(span, kind.message(*control))],
         IdentifierBoundMoreThanOnceInAPattern {
             first_occurrence,
             second_occurrence,

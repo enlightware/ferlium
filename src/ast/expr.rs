@@ -182,6 +182,26 @@ pub struct IndexData<P: Phase> {
     pub index: ExprId<P>,
 }
 
+/// Data for the [`ExprKind::Loop`] variant: optional source label and body.
+#[derive(Debug, Clone, Copy, new)]
+pub struct LoopData<P: Phase> {
+    pub label: Option<UstrSpan>,
+    pub body: ExprId<P>,
+}
+
+/// Data for the [`ExprKind::Break`] variant: optional target label and result value.
+#[derive(Debug, Clone, Copy, new)]
+pub struct BreakData<P: Phase> {
+    pub label: Option<UstrSpan>,
+    pub value: Option<ExprId<P>>,
+}
+
+/// Data for the [`ExprKind::Continue`] variant: optional target label.
+#[derive(Debug, Clone, Copy, new)]
+pub struct ContinueData {
+    pub label: Option<UstrSpan>,
+}
+
 /// Data for the [`ExprKind::Match`] variant: pattern matching
 #[derive(Debug, Clone)]
 pub struct MatchData<P: Phase> {
@@ -273,8 +293,9 @@ pub enum ExprKind<P: Phase> {
     EffectsUnsafe(ExprId<P>),
     Match(B<MatchData<P>>),
     ForLoop(P::ForLoop),
-    Loop(ExprId<P>),
-    SoftBreak,
+    Loop(LoopData<P>),
+    Break(BreakData<P>),
+    Continue(ContinueData),
     PatternConstraint(P::PatternConstraint),
     TypeAscription(B<TypeAscriptionData<P>>),
     Error,
@@ -428,13 +449,18 @@ impl<P: Phase> ExprKind<P> {
     }
 
     /// Construct a [`Loop`](ExprKind::Loop) expression.
-    pub fn loop_(body: ExprId<P>) -> Self {
-        ExprKind::Loop(body)
+    pub fn loop_(label: Option<UstrSpan>, body: ExprId<P>) -> Self {
+        ExprKind::Loop(LoopData { label, body })
     }
 
-    /// Construct a [`SoftBreak`](ExprKind::SoftBreak) expression.
-    pub fn soft_break() -> Self {
-        ExprKind::SoftBreak
+    /// Construct a [`Break`](ExprKind::Break) expression.
+    pub fn break_(label: Option<UstrSpan>, value: Option<ExprId<P>>) -> Self {
+        ExprKind::Break(BreakData { label, value })
+    }
+
+    /// Construct a [`Continue`](ExprKind::Continue) expression.
+    pub fn continue_(label: Option<UstrSpan>) -> Self {
+        ExprKind::Continue(ContinueData { label })
     }
 
     /// Construct a [`TypeAscription`](ExprKind::TypeAscription) expression.
@@ -611,11 +637,32 @@ impl<P: Phase> FormatWithIndent<P> for Expr<P> {
                 Ok(())
             }
             ForLoop(for_loop) => for_loop.format_ind(f, env, arena, indent),
-            Loop(body) => {
-                writeln!(f, "{indent_str}loop")?;
-                arena[*body].format_ind(f, env, arena, indent + 1)
+            Loop(data) => {
+                if let Some(label) = data.label {
+                    writeln!(f, "{indent_str}'{}: loop", label.0)?;
+                } else {
+                    writeln!(f, "{indent_str}loop")?;
+                }
+                arena[data.body].format_ind(f, env, arena, indent + 1)
             }
-            SoftBreak => writeln!(f, "{indent_str}SoftBreak"),
+            Break(data) => {
+                write!(f, "{indent_str}Break")?;
+                if let Some(label) = data.label {
+                    write!(f, " '{}'", label.0)?;
+                }
+                writeln!(f)?;
+                if let Some(value) = data.value {
+                    arena[value].format_ind(f, env, arena, indent + 1)?;
+                }
+                Ok(())
+            }
+            Continue(data) => {
+                write!(f, "{indent_str}Continue")?;
+                if let Some(label) = data.label {
+                    write!(f, " '{}'", label.0)?;
+                }
+                writeln!(f)
+            }
             PropertyPath(data) => writeln!(f, "{indent_str}@{}.{}", data.path, data.name),
             TraitAssociatedConst(data) => {
                 write!(f, "{indent_str}{}::<", data.trait_name)?;
@@ -686,7 +733,12 @@ impl<P: Phase> VisitExpr<P> for Expr<P> {
             }
             ForLoop(for_loop) => for_loop.visit(visitor, arena),
             Return(expr) => arena[*expr].visit(visitor, arena),
-            Loop(body) => arena[*body].visit(visitor, arena),
+            Loop(data) => arena[data.body].visit(visitor, arena),
+            Break(data) => {
+                if let Some(value) = data.value {
+                    arena[value].visit(visitor, arena);
+                }
+            }
             PatternConstraint(data) => data.visit(visitor, arena),
             TypeAscription(data) => arena[data.expr].visit(visitor, arena),
             _ => {}
@@ -745,11 +797,5 @@ impl<P: Phase> ExprVisitor<P> for ErrorCollector {
 #[derive(Default)]
 pub(crate) struct UnstableCollector(pub(crate) Vec<Location>);
 impl<P: Phase> ExprVisitor<P> for UnstableCollector {
-    fn visit_start(&mut self, expr: &Expr<P>) {
-        use ExprKind::*;
-        match expr.kind {
-            SoftBreak | Loop(_) => self.0.push(expr.span),
-            _ => {}
-        }
-    }
+    fn visit_start(&mut self, _expr: &Expr<P>) {}
 }

@@ -680,6 +680,8 @@ pub Expr = {
 TopExpr<NoStruct> = {
     AssignExpr<NoStruct>,
     ReturnExpr<NoStruct>,
+    BreakExpr<NoStruct>,
+    ContinueExpr,
     AbstractExpr<NoStruct>,
     PipeExpr<NoStruct>,
 }
@@ -783,7 +785,6 @@ AtomExpr<NoStruct> = {
     TupleExpr,
     ArrayExpr,
     RecordExpr,
-    SoftBreakExpr,
     StmtLikeExpr,
     BrokenExpr,
 }
@@ -850,6 +851,7 @@ MatchExpr: ExprKind = {
 }
 
 MatchArg: (Pattern, PExprId) = {
+    <p:Pattern> "=>" <e:Es<BreakNoValueExpr>> => (p, e),
     <p:Pattern> "=>" <e:Expr> => (p, e),
 }
 
@@ -987,15 +989,25 @@ PropertyPath: (Path, Ustr) = {
 }
 
 LoopExpr: ExprKind = {
-    "loop" <b:Es<BranchBlock>> => ExprKind::loop_(b),
+    <label:(<LoopLabel> ":")?> "loop" <b:Es<BranchBlock>> => ExprKind::loop_(label, b),
 }
 
 EffectsUnsafeExpr: ExprKind = {
     "effects_unsafe" <e:Es<Block>> => ExprKind::effects_unsafe(e),
 }
 
-SoftBreakExpr: ExprKind = {
-    "soft_break" => ExprKind::SoftBreak,
+BreakExpr<NoStruct>: ExprKind = {
+    "break" <label:LoopLabel?> <value:Es<TopExpr<NoStruct>>> => {
+        ExprKind::break_(label, Some(value))
+    },
+}
+
+BreakNoValueExpr: ExprKind = {
+    "break" <label:LoopLabel?> => ExprKind::break_(label, None),
+}
+
+ContinueExpr: ExprKind = {
+    "continue" <label:LoopLabel?> => ExprKind::continue_(label),
 }
 
 // BranchBlock is used as the body/branch of control-flow expressions (if, for, loop).
@@ -1009,6 +1021,7 @@ BranchBlock: ExprKind = {
 }
 
 Block: ExprKind = {
+    "{" <e:Stmts> <r:Es<BreakNoValueExpr>> "}" => ExprKind::block(ext_b(e, r)),
     "{" <e:Stmts> <r:Expr> "}" => ExprKind::block(ext_b(e, r)),
     "{" <e:Stmts> <r:Loc<"}">> => ExprKind::block(ext_b(e, unit_literal_expr(r, arena))),
 }
@@ -1018,6 +1031,7 @@ Stmts = { Stmt* }
 
 Stmt = {
     Es<LetStmt>,
+    BreakStmt,
     ExprStmt,
 }
 
@@ -1034,6 +1048,10 @@ LetStmt: ExprKind = {
         };
         ExprKind::let_(pattern, e, ty_span_and_complete)
     }
+}
+
+BreakStmt: PExprId = {
+    <e:Es<BreakNoValueExpr>> ";" => e,
 }
 
 BindingLetPattern<Id>: LetPattern = {
@@ -1212,6 +1230,10 @@ UIdentifier: Ustr = {
 
 Identifier: &'input str = r"[\p{L}_][\p{L}\p{N}_]*" => <>;
 RawIdentifier: &'input str = r"r#[\p{L}_][\p{L}\p{N}_]*" => <>;
+
+LoopLabel: UstrSpan = {
+    <l:@L> <label:r"'[\p{L}_][\p{L}\p{N}_]*"> <r:@R> => (ustr(&label[1..]), span(l + 1, r, source_id)),
+}
 
 UnitLiteral: (LiteralValue, IrType) = {
     "(" ")" => literal_value(())
