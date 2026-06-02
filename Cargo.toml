@@ -42,7 +42,7 @@ dyn-hash = "0.2.0"
 derive-new = "0.7.0"
 enum-as-inner = "0.6.0"
 itertools = "0.14.0"
-ustr = { git = "https://github.com/enlightware/ustr.git", branch = "script" }
+ustr = "1.1.0"
 smallvec = "1.13.1"
 nonmax = "=0.5.5"
 ordered-float = "5.0.0"
