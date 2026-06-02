@@ -163,6 +163,47 @@ fn lexical_drop_runs_on_loop_break() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn discarded_owned_temporary_is_dropped_before_break() {
+    let mut session = TestSession::new();
+    let source = format!(
+        r#"
+        {}
+        testing::reset_tracked_drops();
+        loop {{
+            Probe(1);
+            break;
+        }};
+        testing::tracked_drop_log()
+        "#,
+        tracked_probe_value_impl()
+    );
+    assert_val_eq!(session.run(&source), int(1));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn call_argument_temp_is_dropped_when_later_argument_breaks() {
+    let mut session = TestSession::new();
+    let source = format!(
+        r#"
+        {}
+        fn combine(value: Probe, other: int) -> int {{
+            value.0 + other
+        }}
+
+        testing::reset_tracked_drops();
+        let observed = loop {{
+            combine(Probe(6), break 8)
+        }};
+        observed * 10 + testing::tracked_drop_log()
+        "#,
+        tracked_probe_value_impl()
+    );
+    assert_val_eq!(session.run(&source), int(86));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn lexical_drop_runs_on_loop_continue() {
     let mut session = TestSession::new();
     let source = format!(

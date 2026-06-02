@@ -2188,6 +2188,10 @@ fn loop_break_and_continue() {
         session.run("let mut i = 0; loop { i += 1; if i < 3 { continue }; break i }"),
         int(3)
     );
+    assert_val_eq!(
+        session.run("fn run() -> int { loop { break return 7 } } run()"),
+        int(7)
+    );
 }
 
 #[test]
