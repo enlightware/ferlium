@@ -799,6 +799,109 @@ fn match_expr() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn match_omits_uninhabited_named_enum_variants() {
+    let mut session = TestSession::new();
+
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            enum Never {}
+            enum E {
+                A(int),
+                B(Never),
+            }
+
+            fn f(e: E) -> int {
+                match e {
+                    E::A(x) => x,
+                }
+            }
+
+            f(E::A(42))
+        "# }),
+        int(42)
+    );
+
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            enum Never {}
+            enum E {
+                A(int),
+                B(Never),
+            }
+
+            fn f(e: E) -> int {
+                match e {
+                    E::A(x) => x,
+                    _ => 0,
+                }
+            }
+
+            f(E::A(42))
+        "# }),
+        int(42)
+    );
+
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            enum Never {}
+            enum E {
+                A(int),
+                B(Never),
+            }
+
+            fn f(e: E) -> int {
+                match e {
+                    E::A(x) => x,
+                    E::B(_n) => panic("impossible"),
+                }
+            }
+
+            f(E::A(42))
+        "# }),
+        int(42)
+    );
+
+    session
+        .fail_compilation(indoc! { r#"
+            enum E {
+                A(int),
+                B(bool),
+            }
+
+            fn f(e: E) -> int {
+                match e {
+                    E::A(x) => x,
+                }
+            }
+        "# })
+        .expect_type_mismatch("A (int) | B (bool)", "A (int)");
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn empty_match_on_uninhabited_named_enum_is_never() {
+    let mut session = TestSession::new();
+
+    session.compile_and_get_fn_def(
+        indoc! { r#"
+            enum Never {}
+
+            fn f(n: Never) -> int {
+                match n {}
+            }
+        "# },
+        "f",
+    );
+
+    session
+        .fail_compilation("match true {}")
+        .into_inner()
+        .into_empty_match_body()
+        .unwrap();
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn match_tuples() {
     let mut session = TestSession::new();
     assert_val_eq!(

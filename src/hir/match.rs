@@ -37,10 +37,80 @@ use crate::{
     types::typing_env::TypingEnv,
 };
 
+fn is_definitely_uninhabited(ty: Type, env: &TypingEnv) -> bool {
+    fn go(ty: Type, env: &TypingEnv, seen: &mut Vec<Type>) -> bool {
+        if seen.contains(&ty) {
+            return false;
+        }
+        let kind = {
+            let data = ty.data();
+            match &*data {
+                TypeKind::Never => return true,
+                TypeKind::Variable(_) | TypeKind::Native(_) | TypeKind::Function(_) => {
+                    return false;
+                }
+                _ => data.clone(),
+            }
+        };
+
+        seen.push(ty);
+        let result = match kind {
+            TypeKind::Tuple(fields) => fields.into_iter().any(|ty| go(ty, env, seen)),
+            TypeKind::Record(fields) => fields.into_iter().any(|(_, ty)| go(ty, env, seen)),
+            TypeKind::Variant(variants) => variants
+                .into_iter()
+                .all(|(_, payload)| go(payload, env, seen)),
+            TypeKind::Named(named) => go(named.instantiated_shape(&env.module_env), env, seen),
+            TypeKind::Never
+            | TypeKind::Variable(_)
+            | TypeKind::Native(_)
+            | TypeKind::Function(_) => unreachable!(),
+        };
+        seen.pop();
+        result
+    }
+
+    go(ty, env, &mut Vec::new())
+}
+
 impl TypeInference {
     fn fresh_named_type_instance(&mut self, type_def: TypeDefId, env: &TypingEnv) -> Type {
         let param_count = env.module_env.type_def(type_def).param_count();
         Type::named(type_def, self.fresh_type_var_tys(param_count))
+    }
+
+    fn named_enum_variant_tys_with_uninhabited_omissions(
+        &self,
+        condition_ty: Type,
+        covered_payloads: &FxHashMap<ustr::Ustr, Type>,
+        env: &TypingEnv,
+    ) -> Option<Vec<(ustr::Ustr, Type)>> {
+        let condition_data = condition_ty.data();
+        let named = match &*condition_data {
+            TypeKind::Named(named) => named.clone(),
+            _ => return None,
+        };
+        drop(condition_data);
+        let shape = named.instantiated_shape(&env.module_env);
+
+        let shape_data = shape.data();
+        let variants = match &*shape_data {
+            TypeKind::Variant(variants) => variants.clone(),
+            _ => return None,
+        };
+        drop(shape_data);
+
+        let mut result = Vec::with_capacity(variants.len());
+        for (tag, payload) in variants {
+            if let Some(covered_payload) = covered_payloads.get(&tag) {
+                result.push((tag, *covered_payload));
+            } else if is_definitely_uninhabited(payload, env) {
+                result.push((tag, payload));
+            } else {
+                return None;
+            }
+        }
+        Some(result)
     }
 
     pub(crate) fn infer_match(
@@ -66,6 +136,12 @@ impl TypeInference {
                 let effects = node.effects.clone();
                 return Ok((kind, ty, mut_ty, effects));
             } else {
+                let (condition_node_id, _) = self.infer_expr(env, cond_expr)?;
+                let condition_node = &env.ir_arena[condition_node_id];
+                let cond_eff = condition_node.effects.clone();
+                if is_definitely_uninhabited(condition_node.ty, env) {
+                    return Ok(self.diverging_prefix_result(env, [condition_node_id], cond_eff));
+                }
                 return Err(internal_compilation_error!(EmptyMatchBody {
                     span: match_span
                 }));
@@ -79,7 +155,7 @@ impl TypeInference {
         let condition_ty = condition_node.ty;
         let condition_span = condition_node.span;
         let cond_eff = condition_node.effects.clone();
-        if condition_node.ty == Type::never() {
+        if is_definitely_uninhabited(condition_node.ty, env) {
             return Ok(self.diverging_prefix_result(env, [condition_node_id], cond_eff));
         }
 
@@ -445,6 +521,14 @@ impl TypeInference {
                 // No default, compute a full variant type.
                 let variant_inner_tys: Vec<_> =
                     types.into_iter().map(|(tag, _, ty)| (tag, ty)).collect();
+                let covered_payloads = FxHashMap::from_iter(variant_inner_tys.iter().copied());
+                let variant_inner_tys = self
+                    .named_enum_variant_tys_with_uninhabited_omissions(
+                        condition_ty,
+                        &covered_payloads,
+                        env,
+                    )
+                    .unwrap_or(variant_inner_tys);
                 let variant_ty = Type::variant(variant_inner_tys);
                 self.add_sub_type_constraint(
                     pattern_ty,
