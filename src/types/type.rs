@@ -2675,7 +2675,7 @@ mod tests {
         std::{
             array::array_type,
             logic::bool_type,
-            math::{Int, float_type, int_type},
+            math::{Int, int_type},
             string::string_type,
         },
     };
@@ -3045,55 +3045,19 @@ mod tests {
     }
 
     #[test]
-    fn variant_unfolding_interning() {
-        // This is the CRITICAL test for the equirecursive type bug
-        // We manually construct an "unfolded" version of the Variant type
-        // and verify it interns to the same canonical Variant type
+    fn data_value_type_is_named_std_type() {
+        use crate::std::data_value::{data_value_type, data_value_type_def};
 
-        use crate::std::variant::variant_type;
+        let mut source_table = crate::parser::location::SourceTable::default();
+        crate::std::std_module(&mut source_table);
 
-        let canonical_variant = variant_type();
-
-        // Now manually construct what looks like an "unfolded" Variant
-        // This simulates what happens during type unification when we have:
-        //   B ⊇ Array([A])
-        //   B ≤ Variant
-        // After unifying A → Variant, we get B as an unfolded structure
-
-        let int = int_type();
-        let float = float_type();
-        let bool = bool_type();
-        let string = string_type();
-
-        // Manually build: Array([Variant]) | Bool(bool) | Float(float) | Int(int) | None | Object(...) | String(string)
-        let unfolded = TypeKind::Variant(vec![
-            (ustr("Array"), Type::tuple([array_type(canonical_variant)])),
-            (ustr("Bool"), Type::tuple([bool])),
-            (ustr("Float"), Type::tuple([float])),
-            (ustr("Int"), Type::tuple([int])),
-            (ustr("None"), Type::unit()),
-            (
-                ustr("Object"),
-                Type::tuple([array_type(Type::tuple([string, canonical_variant]))]),
-            ),
-            (ustr("String"), Type::tuple([string])),
-        ]);
-
-        let unfolded_type = store_type(unfolded);
-
-        println!("Canonical Variant: {:?}", canonical_variant);
-        println!("Unfolded type:     {:?}", unfolded_type);
-        println!("Are they equal?    {}", canonical_variant == unfolded_type);
-
-        // THIS IS THE KEY ASSERTION
-        // The interning system should recognize that unfolded_type is structurally
-        // equivalent to canonical_variant (they represent the same equirecursive type)
-        // and return the same Type reference
-        assert_eq!(
-            canonical_variant, unfolded_type,
-            "Unfolded Variant should intern to the same canonical Variant type. \
-             This is the core issue with equirecursive type handling."
-        );
+        let data_value = data_value_type();
+        let ty_data = data_value.data();
+        let TypeKind::Named(named) = &*ty_data else {
+            panic!("DataValue should be a named std type, got {data_value:?}");
+        };
+        assert_eq!(named.def, data_value_type_def());
+        assert!(named.params.is_empty());
     }
 
     #[test]

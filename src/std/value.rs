@@ -41,7 +41,7 @@ use crate::{
         Deriver, Trait, TraitAssociatedConst, TraitAssociatedConstIndex, TraitMethodIndex,
     },
     types::trait_solver::TraitSolver,
-    types::r#type::{FnArgType, FnType, Type, TypeKind},
+    types::r#type::{FnArgType, FnType, Type, TypeKind, tuple_type},
     types::type_like::TypeLike,
 };
 
@@ -526,6 +526,56 @@ fn alloc_synth_node(arena: &mut NodeArena, kind: hir::NodeKind, ty: Type) -> Nod
     ))
 }
 
+fn variant_payload_storage_type(payload_ty: Type) -> Type {
+    if payload_ty == Type::unit() {
+        return payload_ty;
+    }
+    let payload_data = payload_ty.data();
+    let stores_payload_directly =
+        matches!(&*payload_data, TypeKind::Tuple(_) | TypeKind::Record(_));
+    drop(payload_data);
+    if stores_payload_directly {
+        payload_ty
+    } else {
+        tuple_type([payload_ty])
+    }
+}
+
+fn variant_payload_project(
+    arena: &mut NodeArena,
+    variant_value: NodeId,
+    payload_ty: Type,
+) -> NodeId {
+    let storage_ty = variant_payload_storage_type(payload_ty);
+    let storage = alloc_synth_node(
+        arena,
+        hir::hir_syn::project(variant_value, ProjectionIndex::from_index(0)),
+        storage_ty,
+    );
+    if storage_ty == payload_ty {
+        storage
+    } else {
+        alloc_synth_node(
+            arena,
+            hir::hir_syn::project(storage, ProjectionIndex::from_index(0)),
+            payload_ty,
+        )
+    }
+}
+
+fn variant_payload_storage_node(
+    arena: &mut NodeArena,
+    payload: NodeId,
+    payload_ty: Type,
+) -> NodeId {
+    let storage_ty = variant_payload_storage_type(payload_ty);
+    if storage_ty == payload_ty {
+        payload
+    } else {
+        alloc_synth_node(arena, hir::hir_syn::tuple([payload]), storage_ty)
+    }
+}
+
 fn function_value_clone_root(
     ty: Type,
     source_id: LocalDeclId,
@@ -847,11 +897,7 @@ fn derive_value_to_string_body(
                     string_lit(arena, tag.as_str())
                 } else {
                     let self_value = n(arena, load_local(l_self_id), ty);
-                    let payload = n(
-                        arena,
-                        project(self_value, ProjectionIndex::from_index(0)),
-                        payload_ty,
-                    );
+                    let payload = variant_payload_project(arena, self_value, payload_ty);
                     let payload_str = build_to_string!(arena, payload, payload_ty)?;
                     if payload_ty.data().is_tuple() {
                         build_string_block(
@@ -951,11 +997,7 @@ fn derive_value_to_string_body(
                             string_lit(arena, &format!("{}::{}", type_name, tag))
                         } else {
                             let self_value = n(arena, load_local(l_self_id), ty);
-                            let payload = n(
-                                arena,
-                                project(self_value, ProjectionIndex::from_index(0)),
-                                payload_ty,
-                            );
+                            let payload = variant_payload_project(arena, self_value, payload_ty);
                             let payload_str = build_to_string!(arena, payload, payload_ty)?;
                             if payload_ty.data().is_tuple() {
                                 build_string_block(
@@ -1083,17 +1125,9 @@ fn derive_value_eq_body(
                     n($arena, native(true), bool_ty)
                 } else {
                     let load_left_v = n($arena, load_local(l_left_id), ty);
-                    let left_payload = n(
-                        $arena,
-                        project(load_left_v, ProjectionIndex::from_index(0)),
-                        payload_ty,
-                    );
+                    let left_payload = variant_payload_project($arena, load_left_v, payload_ty);
                     let load_right_v = n($arena, load_local(l_right_id), ty);
-                    let right_payload = n(
-                        $arena,
-                        project(load_right_v, ProjectionIndex::from_index(0)),
-                        payload_ty,
-                    );
+                    let right_payload = variant_payload_project($arena, load_right_v, payload_ty);
                     value_method_call_node(
                         ctx,
                         trait_id,
@@ -1289,11 +1323,7 @@ fn derive_value_hash_body(
                 let mut statements = vec![build_write_string($arena, ctx.solver, tag.as_str())?];
                 if payload_ty != Type::unit() {
                     let self_value = n($arena, load_local(l_self_id), ty);
-                    let payload = n(
-                        $arena,
-                        project(self_value, ProjectionIndex::from_index(0)),
-                        payload_ty,
-                    );
+                    let payload = variant_payload_project($arena, self_value, payload_ty);
                     statements.push(build_hash_value!($arena, payload, payload_ty)?);
                 }
                 statements.push(n($arena, native(()), unit_ty));
@@ -1475,7 +1505,8 @@ fn derive_value_clone_body(
                     n($arena, variant(tag, payload), ty)
                 } else {
                     let uninit_payload = n($arena, hir::NodeKind::Uninit, payload_ty);
-                    n($arena, variant(tag, uninit_payload), ty)
+                    let payload = variant_payload_storage_node($arena, uninit_payload, payload_ty);
+                    n($arena, variant(tag, payload), ty)
                 };
                 let init_target = n(
                     $arena,
@@ -1492,17 +1523,9 @@ fn derive_value_clone_body(
                     let mut statements = Vec::with_capacity(3);
                     statements.push(init_target);
                     let source = n($arena, load_local(source_id), ty);
-                    let source_payload = n(
-                        $arena,
-                        project(source, ProjectionIndex::from_index(0)),
-                        payload_ty,
-                    );
+                    let source_payload = variant_payload_project($arena, source, payload_ty);
                     let target = n($arena, load_local(target_id), ty);
-                    let target_payload = n(
-                        $arena,
-                        project(target, ProjectionIndex::from_index(0)),
-                        payload_ty,
-                    );
+                    let target_payload = variant_payload_project($arena, target, payload_ty);
                     statements.push(value_method_call_node(
                         ctx,
                         trait_id,
@@ -1648,11 +1671,7 @@ fn derive_value_drop_body(
                     n($arena, native(()), Type::unit())
                 } else {
                     let target = n($arena, load_local(target_id), ty);
-                    let target_payload = n(
-                        $arena,
-                        project(target, ProjectionIndex::from_index(0)),
-                        payload_ty,
-                    );
+                    let target_payload = variant_payload_project($arena, target, payload_ty);
                     value_method_call_node(
                         ctx,
                         trait_id,

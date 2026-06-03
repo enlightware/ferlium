@@ -19,6 +19,7 @@ mod effects;
 mod math;
 mod multi_module;
 mod regression;
+mod serde;
 mod simple;
 mod std;
 mod r#trait;

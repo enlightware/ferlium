@@ -18,6 +18,8 @@ pub mod buffer;
 pub mod cast;
 pub mod core;
 pub mod core_traits_names;
+mod data_text;
+pub mod data_value;
 pub mod default;
 pub mod empty;
 pub mod flow;
@@ -33,7 +35,6 @@ mod product_value_deriver;
 pub mod serde;
 pub mod string;
 pub mod value;
-pub mod variant;
 
 pub(crate) static STD_MODULE_ID: ModuleId = ModuleId(0);
 
@@ -54,10 +55,11 @@ pub fn std_module(source_table: &mut SourceTable) -> Module {
     buffer::add_to_module(&mut module);
     string::add_to_module(&mut module);
     module = prelude::add_ferlium_core(module, source_table, STD_MODULE_ID);
-    variant::add_to_module(&mut module);
+    data_value::set_data_value_type_def(data_value::find_data_value_type_def(&module));
     serde::add_to_module(&mut module);
     json::add_to_module(&mut module);
-    prelude::add_ferlium_prelude(module, source_table, STD_MODULE_ID)
+    data_text::add_to_module(&mut module);
+    prelude::add_ferlium_serialization_prelude(module, source_table, STD_MODULE_ID)
 }
 
 pub fn new_module_using_std(module_id: ModuleId) -> Module {

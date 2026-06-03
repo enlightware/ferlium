@@ -16,20 +16,40 @@ use std::{
 use super::string::String as Str;
 use crate::{
     compiler::error::RuntimeErrorKind,
-    hir::function::UnaryNativeFnRFV,
+    hir::function::{UnaryNativeFnRFV, UnaryNativeFnRN},
     hir::value::Value,
-    module::Module,
+    module::{Module, Visibility},
     std::{
         array::array_value_from_vec,
+        data_value::data_value_type,
         math::{float_value, int_value},
         string::{string_type, string_value},
-        variant::variant_type,
     },
-    types::effects::{PrimitiveEffect, effect},
+    types::effects::{PrimitiveEffect, effect, no_effects},
 };
 use enum_as_inner::EnumAsInner;
 use json_event_parser::ReaderJsonParser;
 use ustr::ustr;
+
+fn escape_json_string(input: &Str) -> Str {
+    let mut output = String::new();
+    output.push('"');
+    for ch in input.as_ref().chars() {
+        match ch {
+            '"' => output.push_str("\\\""),
+            '\\' => output.push_str("\\\\"),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            '\u{08}' => output.push_str("\\b"),
+            '\u{0c}' => output.push_str("\\f"),
+            ch if ch.is_control() => output.push_str(&format!("\\u{:04x}", ch as u32)),
+            ch => output.push(ch),
+        }
+    }
+    output.push('"');
+    Str::new(&output)
+}
 
 fn next_event<R: Read>(
     reader: &'_ mut ReaderJsonParser<R>,
@@ -54,7 +74,7 @@ fn parse_json_stream<R: Read>(
     let event = next_event(reader)?;
     use json_event_parser::JsonEvent::*;
     let value = match event {
-        Null => Value::unit_variant(ustr("None")),
+        Null => Value::unit_variant(ustr("Null")),
         Boolean(b) => variant("Bool", Value::native(b)),
         Number(n) => {
             if let Ok(i) = n.parse::<isize>() {
@@ -126,14 +146,26 @@ fn parse_json(input: &Str) -> Result<Value, RuntimeErrorKind> {
 }
 
 pub fn add_to_module(to: &mut Module) {
+    to.add_function_with_visibility(
+        ustr("escape_json_string"),
+        UnaryNativeFnRN::description_with_ty(
+            escape_json_string,
+            ["value"],
+            "Escapes a string as a JSON string literal.",
+            string_type(),
+            string_type(),
+            no_effects(),
+        ),
+        Visibility::Module,
+    );
     to.add_function(
         ustr("parse_json"),
         UnaryNativeFnRFV::description_with_ty(
             parse_json,
             ["json"],
-            "Parses a JSON into a variant.",
+            "Parses JSON into a data value.",
             string_type(),
-            variant_type(),
+            data_value_type(),
             effect(PrimitiveEffect::Fallible),
         ),
     );

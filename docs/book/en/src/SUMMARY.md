@@ -33,6 +33,7 @@
 - [Unordered Collections](./unordered-collections.md)
 - [Numbers](./numbers.md)
 - [Bitwise Operations](./bitwise-operations.md)
+- [Serialization](./serialization.md)
 
 # Effects and Execution
 

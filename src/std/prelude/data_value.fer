@@ -1,0 +1,15 @@
+/// A dynamic data value used by serialization codecs.
+pub enum DataValue {
+	Null,
+	Unit,
+	Bool(bool),
+	Int(int),
+	Float(float),
+	String(string),
+	Array([DataValue]),
+	Tuple([DataValue]),
+	Object([(string, DataValue)]),
+	Set([DataValue]),
+	Map([(DataValue, DataValue)]),
+	EnumVariant { name: string, payload: DataValue },
+}

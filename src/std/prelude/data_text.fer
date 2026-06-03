@@ -1,0 +1,157 @@
+fn is_data_text_identifier_start(ch: string) -> bool {
+	ch == "_" or ("a" <= ch and ch <= "z") or ("A" <= ch and ch <= "Z")
+}
+
+fn is_data_text_identifier_continue(ch: string) -> bool {
+	is_data_text_identifier_start(ch) or ("0" <= ch and ch <= "9")
+}
+
+fn is_data_text_identifier(value: string) -> bool {
+	let mut chars = iter(value);
+	match next(chars) {
+		Some(first) => {
+			if not is_data_text_identifier_start(first) {
+				return false;
+			};
+			loop {
+				match next(chars) {
+					Some(ch) => {
+						if not is_data_text_identifier_continue(ch) {
+							return false;
+						}
+					},
+					None => return true,
+				}
+			}
+		},
+		None => false,
+	}
+}
+
+fn data_text_join_sequence(values: [DataValue], open: string, close: string) -> string {
+	let mut result = open;
+	for i in 0..array_len(values) {
+		if i > 0 {
+			string_push_str(result, ", ");
+		};
+		string_push_str(result, to_data_text(values[i]));
+	};
+	string_push_str(result, close);
+	result
+}
+
+fn data_text_join_keyword_sequence(keyword: string, values: [DataValue]) -> string {
+	let mut result = keyword;
+	string_push_str(result, " {");
+	if array_len(values) > 0 {
+		string_push_str(result, " ");
+		for i in 0..array_len(values) {
+			if i > 0 {
+				string_push_str(result, ", ");
+			};
+			string_push_str(result, to_data_text(values[i]));
+		};
+		string_push_str(result, " ");
+	};
+	string_push_str(result, "}");
+	result
+}
+
+fn data_value_tuple_to_text(values: [DataValue]) -> string {
+	let mut result = "(";
+	for i in 0..array_len(values) {
+		if i > 0 {
+			string_push_str(result, ", ");
+		};
+		string_push_str(result, to_data_text(values[i]));
+	};
+	if array_len(values) == 1 {
+		string_push_str(result, ",");
+	};
+	string_push_str(result, ")");
+	result
+}
+
+/// Convert a DataValue to Ferlium data text.
+pub fn to_data_text(v: DataValue) -> string {
+	match (v) {
+		DataValue::Null => "null",
+		DataValue::Unit => "()",
+		DataValue::Bool(b) => if b { "true" } else { "false" },
+		DataValue::Int(i) => to_string(i),
+		DataValue::Float(f) => to_string(f),
+		DataValue::String(s) => escape_data_text_string(s),
+		DataValue::Array(a) => data_text_join_sequence(a, "[", "]"),
+		DataValue::Tuple(a) => data_value_tuple_to_text(a),
+		DataValue::Object(o) => {
+			let mut result = "{";
+			for i in 0..array_len(o) {
+				if i > 0 {
+					string_push_str(result, ", ");
+				};
+				let entry = o[i];
+				let name = entry.0;
+				if is_data_text_identifier(name) {
+					string_push_str(result, name);
+				} else {
+					string_push_str(result, escape_data_text_string(name));
+				};
+				string_push_str(result, ": ");
+				string_push_str(result, to_data_text(entry.1));
+			};
+			string_push_str(result, "}");
+			result
+		},
+		DataValue::Set(a) => data_text_join_keyword_sequence("set", a),
+		DataValue::Map(m) => {
+			let mut result = "map {";
+			if array_len(m) > 0 {
+				string_push_str(result, " ");
+				for i in 0..array_len(m) {
+					if i > 0 {
+						string_push_str(result, ", ");
+					};
+					let entry = m[i];
+					string_push_str(result, to_data_text(entry.0));
+					string_push_str(result, " => ");
+					string_push_str(result, to_data_text(entry.1));
+				};
+				string_push_str(result, " ");
+			};
+			string_push_str(result, "}");
+			result
+		},
+		DataValue::EnumVariant { name, payload } => {
+			if not is_data_text_identifier(name) {
+				panic(f"Cannot render enum variant name `{name}` as data text");
+			};
+			let mut result = name;
+			if payload != DataValue::Unit {
+				string_push_str(result, "(");
+				match (payload) {
+					DataValue::Tuple(values) => {
+						for i in 0..array_len(values) {
+							if i > 0 {
+								string_push_str(result, ", ");
+							};
+							string_push_str(result, to_data_text(values[i]));
+						}
+					},
+					_ => string_push_str(result, to_data_text(payload)),
+				};
+				string_push_str(result, ")");
+			};
+			result
+		},
+	}
+}
+
+/// Encode a value to Ferlium data text. The value must implement the Serialize trait.
+pub fn data_text_encode(v) -> string {
+	to_data_text(serialize(v))
+}
+
+/// Decode Ferlium data text to a value of any type that implements the Deserialize trait.
+pub fn data_text_decode(s) {
+	deserialize(parse_data_text(s))
+}

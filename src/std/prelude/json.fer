@@ -1,32 +1,64 @@
-/// Convert a Variant to a JSON string.
-pub fn to_json(v: Variant) -> string {
+fn sequence_to_json(a: [DataValue]) -> string {
+	let mut result = "[";
+	for i in 0..array_len(a) {
+		string_push_str(result, to_json(a[i]));
+		if i < array_len(a) - 1 {
+			string_push_str(result, ",");
+		}
+	};
+	string_push_str(result, "]");
+	result
+}
+
+/// Convert a DataValue to a JSON string.
+pub fn to_json(v: DataValue) -> string {
 	match (v) {
-		None => "null",
-		Bool(b) => if b { "true" } else { "false" },
-		Int(i) => to_string(i),
-		Float(f) => to_string(f),
-		String(s) => f"\"{s}\"",
-		Array(a) => {
+		DataValue::Null => "null",
+		DataValue::Unit => "null",
+		DataValue::Bool(b) => if b { "true" } else { "false" },
+		DataValue::Int(i) => to_string(i),
+		DataValue::Float(f) => to_string(f),
+		DataValue::String(s) => escape_json_string(s),
+		DataValue::Array(a) => sequence_to_json(a),
+		DataValue::Tuple(a) => sequence_to_json(a),
+		DataValue::Object(o) => {
+			let mut result = "{";
+			for i in 0..array_len(o) {
+				let entry = o[i];
+				let name = entry.0;
+				let value = to_json(entry.1);
+				string_push_str(result, escape_json_string(name));
+				string_push_str(result, f":{value}");
+				if i < array_len(o) - 1 {
+					string_push_str(result, ",");
+				}
+			};
+			string_push_str(result, "}");
+			result
+		},
+		DataValue::Set(a) => sequence_to_json(a),
+		DataValue::Map(m) => {
 			let mut result = "[";
-			for i in 0..array_len(a) {
-				string_push_str(result, to_json(a[i]));
-				if i < array_len(a) - 1 {
+			for i in 0..array_len(m) {
+				let entry = m[i];
+				string_push_str(result, "[");
+				string_push_str(result, to_json(entry.0));
+				string_push_str(result, ",");
+				string_push_str(result, to_json(entry.1));
+				string_push_str(result, "]");
+				if i < array_len(m) - 1 {
 					string_push_str(result, ",");
 				}
 			};
 			string_push_str(result, "]");
 			result
 		},
-		Object(o) => {
-			let mut result = "{";
-			for i in 0..array_len(o) {
-				let entry = o[i];
-				let name = entry.0;
-				let value = to_json(entry.1);
-				string_push_str(result, f"\"{name}\":{value}");
-				if i < array_len(o) - 1 {
-					string_push_str(result, ",");
-				}
+		DataValue::EnumVariant { name, payload } => {
+			let mut result = "{\"type\":";
+			string_push_str(result, to_json(DataValue::String(name)));
+			if payload != DataValue::Unit {
+				string_push_str(result, ",\"data\":");
+				string_push_str(result, to_json(payload));
 			};
 			string_push_str(result, "}");
 			result

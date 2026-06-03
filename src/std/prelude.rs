@@ -51,6 +51,8 @@ pub fn declare_traits(to: Module, source_table: &mut SourceTable, module_id: Mod
 }
 
 pub fn add_ferlium_core(to: Module, source_table: &mut SourceTable, module_id: ModuleId) -> Module {
+    // The prelude code is split into multiple files to allow dependencies between
+    // trait implementations while keeping std construction as one ordered step.
     add_chunks(
         to,
         source_table,
@@ -61,31 +63,37 @@ pub fn add_ferlium_core(to: Module, source_table: &mut SourceTable, module_id: M
             // Defines the array type and primitives used by array indexing.
             // The compiler depends on array being the first type def in std (index 0).
             prelude!("array_type.fer"),
+            // Core trait implementations.
+            prelude!("core_impls.fer"),
+            // Defines the Ferlium Array implementation.
+            prelude!("array.fer"),
+            // These functions depend on array iterator being available.
+            prelude!("core_impls_dependent.fer"),
+            // HashSet and HashMap are ordinary collection types; serde impls are loaded later.
+            prelude!("hash_collections.fer"),
+            // DataValue is the serialization data model; native serde registration follows it.
+            prelude!("data_value.fer"),
         ],
         "add Ferlium core to module",
     )
 }
 
-pub fn add_ferlium_prelude(
+pub fn add_ferlium_serialization_prelude(
     to: Module,
     source_table: &mut SourceTable,
     module_id: ModuleId,
 ) -> Module {
-    // The prelude code is split into multiple parts
-    // to allow dependencies between trait implementations.
     let codes = [
-        // Then most of the core traits and generic iterator adaptors.
-        prelude!("core_impls.fer"),
-        // Defines the Ferlium Array implementation.
-        prelude!("array.fer"),
-        // Array serde depends on the array Value blanket impl being visible.
-        prelude!("array_serde.fer"),
-        // These functions depend on array iterator being available.
-        prelude!("core_impls_dependent.fer"),
-        // Keep hash-based containers isolated so they can be toggled during step-by-step debugging.
-        prelude!("hash_collections.fer"),
-        // Json depends on expect_variant_object_entry being available.
+        prelude!("serde_impl.fer"),
+        // Json depends on data-value object helpers being available.
         prelude!("json.fer"),
+        prelude!("data_text.fer"),
     ];
-    add_chunks(to, source_table, module_id, codes, "add prelude to module")
+    add_chunks(
+        to,
+        source_table,
+        module_id,
+        codes,
+        "add serialization prelude to module",
+    )
 }

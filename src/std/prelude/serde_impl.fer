@@ -1,0 +1,277 @@
+// Serde support for DataValue and standard library types
+
+/// Downcasts a data value to unit, panicking if it is not unit-like.
+pub fn data_value_to_unit(v: DataValue) -> () {
+	match (v) {
+		DataValue::Unit => (),
+		DataValue::Null => (),
+		DataValue::Array(a) => {
+			if array_len(a) == 0 {
+				()
+			} else {
+				panic("Expected array of size 0")
+			}
+		},
+		_ => panic("Expected Unit, Null, or Array data value of size 0")
+	}
+}
+
+/// Downcasts a data value to a bool, panicking if it is not a bool.
+pub fn data_value_to_bool(v: DataValue) {
+	match (v) {
+		DataValue::Bool(b) => b,
+		_ => panic("Expected Bool data value")
+	}
+}
+
+/// Downcasts a data value to an int, panicking if it is not an int or a float.
+pub fn data_value_to_int(v: DataValue) {
+	match (v) {
+		DataValue::Int(i) => i,
+		DataValue::Float(f) => round(f),
+		_ => panic("Expected Int data value")
+	}
+}
+
+/// Downcasts a data value to a float, panicking if it is not a float or int.
+pub fn data_value_to_float(v: DataValue) {
+	match (v) {
+		DataValue::Float(f) => f,
+		DataValue::Int(i) => from_int(i),
+		_ => panic("Expected Float or Int data value")
+	}
+}
+
+/// Downcasts a data value to a string, panicking if it is not a string.
+pub fn data_value_to_string(v: DataValue) {
+	match (v) {
+		DataValue::String(s) => s,
+		_ => panic("Expected String data value")
+	}
+}
+
+/// Downcasts a data value to an array, panicking if it is not an array.
+pub fn data_value_to_array(v: DataValue) {
+	match (v) {
+		DataValue::Array(a) => a,
+		_ => panic("Expected Array data value")
+	}
+}
+
+/// Downcasts a data value to a tuple payload, panicking if it is not a tuple.
+pub fn data_value_to_tuple(v: DataValue) {
+	match (v) {
+		DataValue::Tuple(a) => a,
+		DataValue::Array(a) => a,
+		_ => panic("Expected Tuple or Array data value")
+	}
+}
+
+/// Downcasts a data value to an object payload, panicking if it is not an object.
+pub fn data_value_to_object(v: DataValue) {
+	match (v) {
+		DataValue::Object(o) => o,
+		_ => panic("Expected Object data value")
+	}
+}
+
+/// Downcasts a data value to an enum variant payload.
+pub fn data_value_to_enum_variant(v: DataValue) -> {name: string, payload: DataValue} {
+	match (v) {
+		DataValue::EnumVariant { name, payload } => { name, payload },
+		DataValue::Object(o) => {
+			{
+				name: data_value_to_string(expect_data_value_object_entry(o, "type")),
+				payload: match get_data_value_object_entry(o, "data") {
+					Some(value) => value,
+					None => DataValue::Unit,
+				}
+			}
+		},
+		_ => panic("Expected EnumVariant or adjacent-tagged Object data value")
+	}
+}
+
+/// Gets an entry from a data object by name, returning None if not found.
+pub fn get_data_value_object_entry(entries: [(string, DataValue)], name: string) -> Option<DataValue> {
+	for entry in entries {
+		if entry.0 == name {
+			return Some(entry.1);
+		}
+	};
+	None
+}
+
+/// Gets an entry from a data object by name, panicking if not found.
+pub fn expect_data_value_object_entry(entries: [(string, DataValue)], name: string) -> DataValue {
+	for entry in entries {
+		if entry.0 == name {
+			return entry.1;
+		}
+	};
+	panic(f"Data object key \"{name}\" not found")
+}
+
+impl Serialize for <Self = DataValue> {
+	fn serialize(v: DataValue) {
+		v
+	}
+}
+impl Deserialize for <Self = DataValue> {
+	fn deserialize(v) -> DataValue {
+		v
+	}
+}
+
+impl Serialize for <Self = ()> {
+	fn serialize(v: ()) {
+		DataValue::Unit
+	}
+}
+impl Deserialize for <Self = ()> {
+	fn deserialize(v) -> () {
+		data_value_to_unit(v)
+	}
+}
+impl Serialize for <Self = bool> {
+	fn serialize(v: bool) {
+		DataValue::Bool(v)
+	}
+}
+impl Deserialize for <Self = bool> {
+	fn deserialize(v) -> bool {
+		data_value_to_bool(v)
+	}
+}
+impl Serialize for <Self = int> {
+	fn serialize(v: int) {
+		DataValue::Int(v)
+	}
+}
+impl Deserialize for <Self = int> {
+	fn deserialize(v) -> int {
+		data_value_to_int(v)
+	}
+}
+impl Serialize for <Self = float> {
+	fn serialize(v: float) {
+		DataValue::Float(v)
+	}
+}
+impl Deserialize for <Self = float> {
+	fn deserialize(v) -> float {
+		data_value_to_float(v)
+	}
+}
+impl Serialize for <Self = string> {
+	fn serialize(v: string) {
+		DataValue::String(v)
+	}
+}
+impl Deserialize for <Self = string> {
+	fn deserialize(v) -> string {
+		data_value_to_string(v)
+	}
+}
+
+impl<A> Serialize for [A]
+where
+	A: Serialize,
+	A: Value
+{
+	fn serialize(a: [A]) {
+		let mut result = array_with_capacity(array_len(a));
+		for value in a {
+			array_append(result, serialize(value));
+		};
+		DataValue::Array(result)
+	}
+}
+
+impl Deserialize {
+	fn deserialize(a) {
+		match (a) {
+			DataValue::Array(a) => {
+				let mut result = array_with_capacity(array_len(a));
+				for i in 0..array_len(a) {
+					array_append(result, deserialize(a[i]));
+				};
+				result
+			},
+			_ => panic("Expected Array data value")
+		}
+	}
+}
+
+impl<V> Serialize for HashSet<V>
+where
+	V: Serialize,
+	V: Value
+{
+	fn serialize(collection: HashSet<V>) {
+		let mut result = [];
+		for value in collection {
+			array_append(result, serialize(value));
+		};
+		DataValue::Set(result)
+	}
+}
+
+impl<V> Deserialize for HashSet<V>
+where
+	V: Value
+{
+	fn deserialize(data) -> HashSet<V> {
+		let values = match data {
+			DataValue::Set(values) => values,
+			DataValue::Array(values) => values,
+			_ => panic("Expected Set or Array data value")
+		};
+		let mut result = hash_set_new();
+		for value in values {
+			set_insert(result, deserialize(value));
+		};
+		result
+	}
+}
+
+impl<K, V> Serialize for HashMap<K, V>
+where
+	K: Serialize,
+	K: Value,
+	V: Serialize,
+	V: Value
+{
+	fn serialize(collection: HashMap<K, V>) {
+		let mut result = [];
+		for entry in collection {
+			array_append(result, (serialize(entry.0), serialize(entry.1)));
+		};
+		DataValue::Map(result)
+	}
+}
+
+impl<K, V> Deserialize for HashMap<K, V>
+where
+	K: Value,
+	V: Value
+{
+	fn deserialize(data) -> HashMap<K, V> {
+		let mut result = hash_map_new();
+		match data {
+			DataValue::Map(entries) => {
+				for entry in entries {
+					map_insert(result, deserialize(entry.0), deserialize(entry.1));
+				}
+			},
+			DataValue::Array(entries) => {
+				for entry in entries {
+					let pair = data_value_to_tuple(entry);
+					map_insert(result, deserialize(pair[0]), deserialize(pair[1]));
+				}
+			},
+			_ => panic("Expected Map or Array data value")
+		};
+		result
+	}
+}

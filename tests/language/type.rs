@@ -13,10 +13,10 @@ use ferlium::{
     hir::value::Value,
     std::{
         array::array_type,
+        data_value,
         logic::bool_type,
         math::{float_type, int_type},
         string::string_type,
-        variant,
     },
     types::effects::{EffType, PrimitiveEffect, effect, effects},
     types::r#type::{FnType, Type, record_type, tuple_type, variant_type},
@@ -512,40 +512,37 @@ fn ret_type_overloading() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn returning_variant_is_properly_unified() {
+fn returning_data_value_array_is_properly_unified() {
     let mut session = TestSession::new();
-    // Test the Variant type which had the original issue
-    // This tests deeply nested recursive variant structures
     let module = session.compile_and_get_module(indoc! { r#"
-        fn make_variant_array() -> Variant {
-            Array([])
+        fn make_data_value_array() -> DataValue {
+            DataValue::Array([])
         }
     "# });
 
     let fn_def = &module
-        .get_function(ustr("make_variant_array"))
+        .get_function(ustr("make_data_value_array"))
         .unwrap()
         .definition;
     assert_eq!(
         fn_def.ty_scheme.ty().ret,
-        variant::variant_type(),
-        "Expected return type to be Variant"
+        data_value::data_value_type(),
+        "Expected return type to be DataValue"
     );
 }
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn variant_type_alias_in_function_signature() {
+fn data_value_type_in_function_signature() {
     let mut session = TestSession::new();
-    // Test that the Variant type alias is preserved in function signatures
-    // This reproduces the issue where Variant appears unfolded in function types
+    // Test that DataValue is preserved in function signatures instead of appearing unfolded.
     let module_id = session
         .compile(indoc! { r#"
-        fn process_variant(v: Variant) -> Variant {
+        fn process_data_value(v: DataValue) -> DataValue {
             v
         }
 
-        fn process_variant_array(entries: [(string, Variant)]) -> Variant {
+        fn process_data_value_entries(entries: [(string, DataValue)]) -> DataValue {
             entries[0].1
         }
     "# })
@@ -554,7 +551,7 @@ fn variant_type_alias_in_function_signature() {
     // Check first function
     let module = session.session().expect_fresh_module(module_id);
     let fn_def1 = &module
-        .get_function(ustr("process_variant"))
+        .get_function(ustr("process_data_value"))
         .unwrap()
         .definition;
     let sig1 = fn_def1
@@ -563,12 +560,11 @@ fn variant_type_alias_in_function_signature() {
         .clone()
         .format_with(&session.std_module_env())
         .to_string();
-    println!("process_variant signature: {}", sig1);
 
-    // The signature should contain "Variant", not the unfolded type
+    // The signature should contain "DataValue", not the unfolded type.
     assert!(
-        sig1.contains("Variant"),
-        "Expected 'Variant' in signature, got: {}",
+        sig1.contains("DataValue"),
+        "Expected 'DataValue' in signature, got: {}",
         sig1
     );
     assert!(
@@ -579,7 +575,7 @@ fn variant_type_alias_in_function_signature() {
 
     // Check second function
     let fn_def2 = &module
-        .get_function(ustr("process_variant_array"))
+        .get_function(ustr("process_data_value_entries"))
         .unwrap()
         .definition;
     let sig2 = fn_def2
@@ -587,40 +583,26 @@ fn variant_type_alias_in_function_signature() {
         .ty()
         .format_with(&session.std_module_env())
         .to_string();
-    println!("process_variant_array signature: {}", sig2);
 
-    // Debug: Check what type is actually in the tuple
     let arg_ty = fn_def2.ty_scheme.ty().args[0].ty;
-    println!("Argument type: {:?}", arg_ty);
     let arg_ty_data = arg_ty.data();
     if let Some(arr) = arg_ty_data.as_native() {
-        println!("Array element type: {:?}", arr.arguments[0]);
         let elem_data = arr.arguments[0].data();
         if let Some(tup) = elem_data.as_tuple() {
-            println!("Tuple element 0 (string): {:?}", tup[0]);
-            println!("Tuple element 1 (should be Variant): {:?}", tup[1]);
-            println!("Canonical variant_type(): {:?}", variant::variant_type());
-            println!("Are they equal? {}", tup[1] == variant::variant_type());
-
-            // Verify that the Variant type is correctly identified as world 1
             assert_eq!(
                 tup[1],
-                variant::variant_type(),
-                "Tuple element should be the canonical Variant type from world 1"
+                data_value::data_value_type(),
+                "Tuple element should be the canonical DataValue type from std"
             );
-
-            // Dump world 1 to show the canonical Variant
-            println!("\n=== Dumping world 1 (canonical Variant) ===");
-            ferlium::types::r#type::dump_type_world(1, &session.std_module_env());
         } else {
             panic!("Expected array element to be a tuple");
         }
     }
 
-    // The signature should contain "Variant", not the unfolded type
+    // The signature should contain "DataValue", not the unfolded type.
     assert!(
-        sig2.contains("Variant"),
-        "Expected 'Variant' in signature, got: {}",
+        sig2.contains("DataValue"),
+        "Expected 'DataValue' in signature, got: {}",
         sig2
     );
     assert!(
@@ -828,8 +810,8 @@ fn overlapping_blanket_trait_impls_are_rejected() {
 fn recursive_variant_value_derivation() {
     let mut session = TestSession::new();
     let code = indoc! { r#"
-        fn buggy(s: string) -> Variant {
-            (deserialize(parse_json(s)) : Variant)
+        fn buggy(s: string) -> DataValue {
+            (deserialize(parse_json(s)) : DataValue)
         }
     "# };
     session.compile(code);
