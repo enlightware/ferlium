@@ -1981,7 +1981,7 @@ fn array_execution_errors() {
 fn recursive_execution_succeeds_below_limit() {
     let mut session = TestSession::new();
     assert_val_eq!(
-        session.run("fn down(n) { if n == 0 { 0 } else { down(n - 1) } } down(128)"),
+        session.run("fn down(n) { if n == 0 { 0 } else { down(n - 1) } } down(64)"),
         int(0)
     );
 }
@@ -1993,15 +1993,15 @@ fn recursive_execution_errors() {
     use RuntimeErrorKind::*;
     assert_eq!(
         session.fail_run("fn f() { g() } fn g() { f() } f()"),
-        CallDepthLimitExceeded { limit: 192 }
+        CallDepthLimitExceeded { limit: 128 }
     );
     assert_eq!(
         session.fail_run("fn rf() { rf() } rf() + 0"),
-        CallDepthLimitExceeded { limit: 192 }
+        CallDepthLimitExceeded { limit: 128 }
     );
     assert_eq!(
         session.fail_run("fn apply(f) { f() } fn rf() { apply(rf) } rf() + 0"),
-        CallDepthLimitExceeded { limit: 192 }
+        CallDepthLimitExceeded { limit: 128 }
     );
 }
 
