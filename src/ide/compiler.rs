@@ -12,7 +12,7 @@ use std::sync::LazyLock;
 use crate::{
     CompilationError, CompilerSession, EvalExprError, FxHashMap, FxHashSet, ModuleAndExpr,
     ModuleEnv, Path, SourceId, call_fn,
-    eval::{ValOrMut, eval_node},
+    eval::{DEFAULT_INTERACTIVE_FUEL_LIMIT, EvalCtx, ValOrMut, eval_node_with_ctx},
     format::FormatWith,
     hir::hir_syn::local,
     hir::value::{NativeValue, Value},
@@ -42,6 +42,7 @@ pub struct Compiler {
     user_module: ModuleAndExpr,
     uses: Uses,
     char_index_lookup: FxHashMap<SourceId, CharIndexLookup>,
+    execution_fuel_limit: Option<i64>,
 }
 
 const SRC_NAME: &str = "<ide>";
@@ -120,6 +121,14 @@ impl Compiler {
             .map(str::to_string)
     }
 
+    pub fn set_execution_fuel_limit(&mut self, fuel_limit: u32) {
+        self.execution_fuel_limit = Some(i64::from(fuel_limit));
+    }
+
+    pub fn disable_execution_fuel_limit(&mut self) {
+        self.execution_fuel_limit = None;
+    }
+
     pub fn run_expr(&mut self) -> Option<ExecutionResult> {
         self.user_module.expr.as_ref().map(|expr| {
             let module_id = self.user_module.module_id;
@@ -138,23 +147,20 @@ impl Compiler {
             }
             let value = {
                 let module = self.session.expect_fresh_module(module_id);
-                eval_node(
-                    &module.hir_arena,
-                    expr.expr,
-                    module_id,
-                    &expr.locals,
-                    &self.session,
-                )
+                let mut ctx = EvalCtx::new(module_id, &self.session);
+                ctx.set_fuel_limit(self.execution_fuel_limit);
+                eval_node_with_ctx(&module.hir_arena, expr.expr, &mut ctx, &expr.locals)
             };
             match value {
                 Ok(value) => {
                     let value = value.into_value();
-                    let rendered = match self.session.eval_expr_with_locals(
+                    let rendered = match self.session.eval_expr_with_locals_with_fuel(
                         "<ide:to_string>",
                         "to_string(value)",
                         module_id,
                         vec![local("value", expr.ty.ty)],
                         vec![ValOrMut::Val(value)],
+                        self.execution_fuel_limit,
                     ) {
                         Ok(rendered) => {
                             let rendered = rendered
@@ -351,6 +357,7 @@ impl Compiler {
             user_module,
             uses,
             char_index_lookup: FxHashMap::default(),
+            execution_fuel_limit: Some(DEFAULT_INTERACTIVE_FUEL_LIMIT),
         }
     }
 
@@ -466,6 +473,17 @@ mod tests {
             .run_fn_unit_o::<isize>("main")
             .expect("Execution failed");
         assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn run_expr_respects_execution_fuel_limit() {
+        let mut compiler = build("loop { continue }");
+        compiler.set_execution_fuel_limit(2);
+
+        let result = compiler.run_expr().expect("expression should exist");
+        let error = result.error_content().expect("execution should fail");
+
+        assert_eq!(error.summary, "Execution fuel exhausted");
     }
 
     #[test]

@@ -42,6 +42,8 @@ use crate::{
 
 use crate::module::ImportFunctionTarget;
 
+pub const DEFAULT_INTERACTIVE_FUEL_LIMIT: i64 = 100_000;
+
 /// Either a value or a unique mutable reference to a value.
 /// This allows to implement the mutable value semantics.
 #[derive(Debug, EnumAsInner)]
@@ -227,6 +229,10 @@ impl<'a> EvalCtx<'a> {
 
     pub fn set_fuel(&mut self, fuel: i64) {
         self.fuel_remaining = Some(fuel);
+    }
+
+    pub fn set_fuel_limit(&mut self, fuel_limit: Option<i64>) {
+        self.fuel_remaining = fuel_limit;
     }
 
     pub fn disable_fuel(&mut self) {

@@ -35,7 +35,7 @@ use rustyline::DefaultEditor;
 use rustyline::{config::Configurer, error::ReadlineError};
 use ustr::ustr;
 
-use ferlium::eval::{EvalCtx, eval_node_with_ctx};
+use ferlium::eval::{DEFAULT_INTERACTIVE_FUEL_LIMIT, EvalCtx, eval_node_with_ctx};
 
 /// A wrapper around location to implement ariadne::Span
 #[derive(Debug, Clone, Copy)]
@@ -453,6 +453,9 @@ fn print_help() {
     println!("Available commands:");
     println!("\\help: Shows this help message.");
     println!(
+        "\\fuel N|off: Shows or sets the execution fuel limit (default {DEFAULT_INTERACTIVE_FUEL_LIMIT})."
+    );
+    println!(
         "\\module MOD_NAME?: Shows a module by name, or the current module if no name is given."
     );
     println!(
@@ -489,6 +492,7 @@ fn process_input(
     fill_use_until: usize,
     session: &mut CompilerSession,
     is_repl: bool,
+    fuel_limit: Option<i64>,
 ) -> Result<ModuleId, i32> {
     // Parse the input once to get the list of symbols this module defines.
     let source_id = session.source_table().next_id();
@@ -580,6 +584,7 @@ fn process_input(
     if let Some(expr) = expr {
         // Evaluate expression
         let mut eval_ctx = EvalCtx::new(module_id, session);
+        eval_ctx.set_fuel_limit(fuel_limit);
         let arena = &eval_ctx
             .compiler_session()
             .expect_fresh_module(module_id)
@@ -671,7 +676,7 @@ fn process_pipe_input(print_module: bool, print_annotations: bool) -> i32 {
     let mut session = CompilerSession::new();
 
     // Process the input
-    process_input("<stdin>", &input, 0, &mut session, false).map_or_else(
+    process_input("<stdin>", &input, 0, &mut session, false, None).map_or_else(
         |code| code,
         |module_id| {
             if print_module {
@@ -785,6 +790,7 @@ fn run_interactive_repl() {
     // Last module that compiled successfully, start with the std module.
     let mut last_module = ModuleId::from_index(0);
     let mut counter: usize = 0;
+    let mut fuel_limit = Some(DEFAULT_INTERACTIVE_FUEL_LIMIT);
 
     // REPL loop
     println!("Ferlium REPL - Type \\help for help.");
@@ -806,12 +812,43 @@ fn run_interactive_repl() {
                 }
                 if let Some(command) = line.strip_prefix('\\') {
                     // a meta command
-                    let args: Vec<_> = command.split(" ").collect();
+                    let args: Vec<_> = command.split_whitespace().collect();
+                    if args.is_empty() {
+                        println!("Unknown command \"{command}\". Type \\help for help.");
+                        continue;
+                    }
                     let store = match args[0] {
                         "help" => {
                             print_help();
                             true
                         }
+                        "fuel" => match args.get(1).copied() {
+                            None => {
+                                match fuel_limit {
+                                    Some(limit) => println!("Execution fuel limit: {limit}"),
+                                    None => println!("Execution fuel limit: off"),
+                                }
+                                true
+                            }
+                            Some("off" | "none" | "unlimited") => {
+                                fuel_limit = None;
+                                println!("Execution fuel limit disabled.");
+                                true
+                            }
+                            Some(value) => match value.parse::<i64>() {
+                                Ok(limit) if limit >= 0 => {
+                                    fuel_limit = Some(limit);
+                                    println!("Execution fuel limit: {limit}");
+                                    true
+                                }
+                                _ => {
+                                    println!(
+                                        "Invalid fuel limit \"{value}\". Use a non-negative integer or off."
+                                    );
+                                    false
+                                }
+                            },
+                        },
                         "module" => {
                             let module_id = if let Some(arg) = args.get(1) {
                                 if let Some(module_id) =
@@ -934,7 +971,7 @@ fn run_interactive_repl() {
 
         // Process the input using the shared function
         let name = &format!("repl{counter}");
-        let result = process_input(&name, &src, counter, &mut session, true);
+        let result = process_input(&name, &src, counter, &mut session, true, fuel_limit);
         if let Ok(module) = result {
             last_module = module;
         }

@@ -547,6 +547,7 @@ impl CompilerSession {
         module: &Module,
         locals: Vec<LocalDecl>,
         environment: Vec<ValOrMut>,
+        fuel_limit: Option<i64>,
     ) -> Result<(Value, Type), EvalExprError> {
         let source_id = self
             .source_table
@@ -597,6 +598,7 @@ impl CompilerSession {
         let result = {
             let temp_module = self.expect_fresh_module(module.module_id());
             let mut ctx = EvalCtx::with_environment(module.module_id(), environment, self);
+            ctx.set_fuel_limit(fuel_limit);
             eval_node_with_ctx(
                 &temp_module.hir_arena,
                 compiled.expr,
@@ -629,8 +631,36 @@ impl CompilerSession {
         environment: Vec<ValOrMut>,
     ) -> Result<Value, EvalExprError> {
         let module = self.expect_fresh_module(module_id).clone();
-        self.eval_expr_with_locals_in_module(source_name, source, &module, locals, environment)
-            .map(|(value, _ty)| value)
+        self.eval_expr_with_locals_in_module(
+            source_name,
+            source,
+            &module,
+            locals,
+            environment,
+            None,
+        )
+        .map(|(value, _ty)| value)
+    }
+
+    pub(crate) fn eval_expr_with_locals_with_fuel(
+        &mut self,
+        source_name: &str,
+        source: &str,
+        module_id: ModuleId,
+        locals: Vec<LocalDecl>,
+        environment: Vec<ValOrMut>,
+        fuel_limit: Option<i64>,
+    ) -> Result<Value, EvalExprError> {
+        let module = self.expect_fresh_module(module_id).clone();
+        self.eval_expr_with_locals_in_module(
+            source_name,
+            source,
+            &module,
+            locals,
+            environment,
+            fuel_limit,
+        )
+        .map(|(value, _ty)| value)
     }
 
     /// Compile and evaluate a Ferlium expression in an existing module context.
@@ -650,8 +680,15 @@ impl CompilerSession {
             .into_iter()
             .map(|(name, ty, value)| (local(name, ty), value))
             .unzip();
-        self.eval_expr_with_locals_in_module(source_name, source, &module, locals, environment)
-            .map_err(|error| self.format_eval_expr_error(error))
+        self.eval_expr_with_locals_in_module(
+            source_name,
+            source,
+            &module,
+            locals,
+            environment,
+            None,
+        )
+        .map_err(|error| self.format_eval_expr_error(error))
     }
 
     fn format_eval_expr_error(&self, error: EvalExprError) -> String {
