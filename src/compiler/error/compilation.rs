@@ -770,6 +770,10 @@ pub enum CompilationErrorImpl<S: Scope> {
         ctx_span: Location,
         ctx: DuplicatedVariantContext,
     },
+    VariantNameConflictsWithType {
+        name: Ustr,
+        span: Location,
+    },
     RecordWildcardPatternNotAtEnd {
         pattern_span: Location,
         wildcard_span: Location,
@@ -1433,6 +1437,13 @@ impl FormatWith<SourceTable> for CompilationError {
                     fmt_span(ctx_span)
                 )
             }
+            VariantNameConflictsWithType { name, span } => {
+                write!(
+                    f,
+                    "Variant name `{name}` conflicts with a type name in {}",
+                    fmt_span(span)
+                )
+            }
             RecordWildcardPatternNotAtEnd { pattern_span, .. } => {
                 write!(
                     f,
@@ -2092,6 +2103,9 @@ impl CompilationError {
                 ctx_span,
                 ctx
             }),
+            VariantNameConflictsWithType { name, span } => {
+                compilation_error!(VariantNameConflictsWithType { name, span })
+            }
             RecordWildcardPatternNotAtEnd {
                 pattern_span,
                 wildcard_span,

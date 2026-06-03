@@ -216,6 +216,21 @@ impl<'a, 'm> RecursiveTypeBuilder<'a, 'm> {
         Ok(FnType::new(args, ret, effects))
     }
 
+    fn variant_name_conflicts_with_type(
+        &self,
+        name: Ustr,
+        span: Location,
+    ) -> Result<bool, InternalCompilationError> {
+        if self.generic_ty_params.contains_key(&name)
+            || self.aliases.contains_key(&name)
+            || self.type_defs.contains_key(&name)
+        {
+            return Ok(true);
+        }
+
+        variant_name_resolves_as_type(name, span, self.env, self.modules_used)
+    }
+
     fn desugar_type(
         &mut self,
         ty: &ast::PType,
@@ -248,6 +263,14 @@ impl<'a, 'm> RecursiveTypeBuilder<'a, 'm> {
                                 },
                             }))
                         } else {
+                            if self.variant_name_conflicts_with_type(*name, *name_span)? {
+                                return Err(internal_compilation_error!(
+                                    VariantNameConflictsWithType {
+                                        name: *name,
+                                        span: *name_span,
+                                    }
+                                ));
+                            }
                             seen.insert(name, *name_span);
                             Ok((*name, self.desugar_type(ty, *ty_span, false, None)?))
                         }
@@ -676,6 +699,21 @@ impl ast::PType {
                                     },
                                 }))
                             } else {
+                                if generic_ty_params.contains_key(name)
+                                    || variant_name_resolves_as_type(
+                                        *name,
+                                        *name_span,
+                                        env,
+                                        modules_used,
+                                    )?
+                                {
+                                    return Err(internal_compilation_error!(
+                                        VariantNameConflictsWithType {
+                                            name: *name,
+                                            span: *name_span,
+                                        }
+                                    ));
+                                }
                                 seen.insert(name, *name_span);
                                 Ok((
                                     *name,
@@ -758,6 +796,17 @@ impl ast::PType {
             )?),
         })
     }
+}
+
+fn variant_name_resolves_as_type(
+    name: Ustr,
+    span: Location,
+    env: &ModuleEnv<'_>,
+    modules_used: &FxHashSet<ModuleId>,
+) -> Result<bool, InternalCompilationError> {
+    let mut probe_modules_used = modules_used.clone();
+    let path = ast::Path::single(name, span);
+    resolve_type_path(&path, env, &mut probe_modules_used).map(|resolved| resolved.is_some())
 }
 
 impl PTypeDef {

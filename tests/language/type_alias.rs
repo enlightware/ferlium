@@ -11,7 +11,7 @@
 use indoc::indoc;
 use ustr::ustr;
 
-use ferlium::{format::FormatWith, std::option::some};
+use ferlium::{compiler::error::CompilationErrorImpl, format::FormatWith, std::option::some};
 
 use crate::harness::{TestSession, float, int, string};
 
@@ -22,6 +22,16 @@ fn format_compiled_module(session: &mut TestSession, src: &str) -> String {
     let module_id = session.compile(src).module_id;
     let module = session.session().expect_fresh_module(module_id);
     module.format_with(&session.session().modules()).to_string()
+}
+
+fn assert_variant_name_conflicts_with_type(src: &str, expected_name: &str) {
+    let mut session = TestSession::new();
+    match session.fail_compilation(src).into_inner() {
+        CompilationErrorImpl::VariantNameConflictsWithType { name, .. } => {
+            assert_eq!(name, ustr(expected_name));
+        }
+        error => panic!("expected VariantNameConflictsWithType, got {error:?}"),
+    }
 }
 
 #[test]
@@ -125,6 +135,19 @@ fn type_aliases() {
         fn dummy() -> int { 0 }
     "# });
     assert!(module.get_type_alias(ustr("MyInt")).is_some());
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn variant_alias_names_cannot_conflict_with_type_names() {
+    assert_variant_name_conflicts_with_type("type T = bool | int;", "bool");
+    assert_variant_name_conflicts_with_type("type T = bool(int) | string(float);", "bool");
+    assert_variant_name_conflicts_with_type("type T<A> = A | None;", "A");
+    assert_variant_name_conflicts_with_type("type A = int; type T = A | None;", "A");
+    assert_variant_name_conflicts_with_type("let value: bool | int = bool; value", "bool");
+
+    let mut session = TestSession::new();
+    session.compile("type T = Bool(bool) | Int(int); fn f() -> T { Bool(true) }");
 }
 
 #[test]

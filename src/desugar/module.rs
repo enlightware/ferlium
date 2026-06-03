@@ -116,6 +116,29 @@ impl NamedTypeData {
         }
     }
 
+    fn reject_variant_name_conflicts_with_local_types(
+        &self,
+        ty_names: &FxHashMap<Ustr, usize>,
+    ) -> Result<(), InternalCompilationError> {
+        match self {
+            NamedTypeData::Alias(alias) => {
+                reject_variant_name_conflicts_in_type(&alias.ty.0, ty_names)?;
+            }
+            NamedTypeData::Def(def) => {
+                reject_variant_name_conflicts_in_type(&def.shape, ty_names)?;
+                for constraint in &def.where_clause {
+                    for input in &constraint.input_types {
+                        reject_variant_name_conflicts_in_type(&input.ty.0, ty_names)?;
+                    }
+                    for output in &constraint.output_types {
+                        reject_variant_name_conflicts_in_type(&output.ty.0, ty_names)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Lowers this non-recursive named type after its local dependencies have been inserted.
     fn desugar_acyclic(
         &self,
@@ -155,6 +178,52 @@ impl NamedTypeData {
             ),
         })
     }
+}
+
+fn reject_variant_name_conflicts_in_type(
+    ty: &ast::PType,
+    ty_names: &FxHashMap<Ustr, usize>,
+) -> Result<(), InternalCompilationError> {
+    use ast::PType::*;
+    match ty {
+        AppliedPath { args, .. } => {
+            for (arg, _) in args {
+                reject_variant_name_conflicts_in_type(arg, ty_names)?;
+            }
+        }
+        Variant(variants) => {
+            for ((name, name_span), (payload, _)) in variants {
+                if ty_names.contains_key(name) {
+                    return Err(internal_compilation_error!(VariantNameConflictsWithType {
+                        name: *name,
+                        span: *name_span,
+                    }));
+                }
+                reject_variant_name_conflicts_in_type(payload, ty_names)?;
+            }
+        }
+        Tuple(elements) => {
+            for (element, _) in elements {
+                reject_variant_name_conflicts_in_type(element, ty_names)?;
+            }
+        }
+        Record(fields) => {
+            for (_, (field, _)) in fields {
+                reject_variant_name_conflicts_in_type(field, ty_names)?;
+            }
+        }
+        Array(inner) => {
+            reject_variant_name_conflicts_in_type(&inner.0, ty_names)?;
+        }
+        Function(fn_type) => {
+            for arg in &fn_type.args {
+                reject_variant_name_conflicts_in_type(&arg.ty.0, ty_names)?;
+            }
+            reject_variant_name_conflicts_in_type(&fn_type.ret.0, ty_names)?;
+        }
+        Never | Unit | Resolved(_) | Infer | Path(_) => {}
+    }
+    Ok(())
 }
 
 /// Returns whether `args` is exactly `<T, U, ...>` for the current declaration's parameters.
@@ -472,6 +541,7 @@ fn validate_type_cycle(
 /// edges by index, and `sccs` is the SCC partition used for dependency-ordered
 /// desugaring and recursive-cycle handling.
 struct NamedTypeGraph {
+    ty_names: FxHashMap<Ustr, usize>,
     ty_refs: Vec<NamedTypeData>,
     ty_dep_graph: Vec<DepGraphNode>,
     sccs: Vec<Vec<usize>>,
@@ -485,10 +555,15 @@ impl NamedTypeGraph {
         others: &Modules,
     ) -> Result<FxHashSet<ModuleId>, InternalCompilationError> {
         let NamedTypeGraph {
+            ty_names,
             ty_refs,
             ty_dep_graph,
             sccs,
         } = self;
+
+        for ty_ref in &ty_refs {
+            ty_ref.reject_variant_name_conflicts_with_local_types(&ty_names)?;
+        }
 
         // Process SCCs in dependency order. The graph edge direction points from a
         // declaration to the declarations it mentions, so we reverse the topological
@@ -579,6 +654,7 @@ fn build_named_type_graph(
     }
 
     Ok(NamedTypeGraph {
+        ty_names,
         ty_refs,
         ty_dep_graph,
         sccs,

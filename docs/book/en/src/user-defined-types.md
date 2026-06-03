@@ -116,6 +116,17 @@ type Shape = Circle(float) | Rectangle { width: float, height: float };
 let a: Shape = Circle(5.0);
 ```
 
+The `|` syntax separates variant alternatives, not arbitrary value types.
+Each alternative needs its own tag name:
+
+```ferlium
+// Wrong: bool and int are type names, not variant tags.
+type Value = bool | int;
+
+// Right: Bool and Int are tags carrying bool and int payloads.
+type Value = Bool(bool) | Int(int);
+```
+
 ### Inference with sum types
 
 Inference works with sum types as well.

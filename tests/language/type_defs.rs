@@ -618,6 +618,16 @@ fn define_enum_types() {
             .3,
         DuplicatedVariantContext::Variant
     );
+
+    match session
+        .fail_compilation("enum Invalid { bool(int) }")
+        .into_inner()
+    {
+        CompilationErrorImpl::VariantNameConflictsWithType { name, .. } => {
+            assert_eq!(name, ustr("bool"));
+        }
+        error => panic!("expected VariantNameConflictsWithType, got {error:?}"),
+    }
 }
 
 #[test]

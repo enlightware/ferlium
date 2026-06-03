@@ -468,6 +468,14 @@ pub(super) fn compilation_error_to_data(
                 error_data_from_location(second_occurrence, text),
             ]
         }
+        VariantNameConflictsWithType { name, span } => {
+            vec![error_data_from_location(
+                span,
+                format!(
+                    "Variant name `{name}` conflicts with a type name. Variant alternatives introduce tags, not value-type union members. Use a distinct tag name with the type as payload, for example `TagName({name})`."
+                ),
+            )]
+        }
         RecordWildcardPatternNotAtEnd { pattern_span, .. } => {
             vec![error_data_from_location(
                 pattern_span,

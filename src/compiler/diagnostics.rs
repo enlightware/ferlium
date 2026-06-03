@@ -105,6 +105,7 @@ pub(crate) fn diagnostics_from_error(
         | UnboundTypeVar { span, .. }
         | UnresolvedConstraints { span, .. }
         | InvalidVariantConstructor { span }
+        | VariantNameConflictsWithType { span, .. }
         | EmptyMatchBody { span }
         | NonExhaustivePattern { span, .. }
         | TypeValuesCannotBeEnumerated { span, .. }
