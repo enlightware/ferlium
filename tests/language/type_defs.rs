@@ -44,25 +44,25 @@ fn parse_type_ast(src: &str) -> ast::PType {
         .0
 }
 
-fn run_and_pretty_format(session: &mut TestSession, src: &str) -> String {
+fn run_and_format(session: &mut TestSession, src: &str) -> String {
     let module_and_expr = session.compile(src);
     let expr = module_and_expr
         .expr
-        .expect("expected an expression to evaluate in pretty-print regression");
-    let module = session
-        .session()
-        .expect_fresh_module(module_and_expr.module_id);
-    let value = eval_node(
-        &module.hir_arena,
-        expr.expr,
-        module_and_expr.module_id,
-        &expr.locals,
-        session.session(),
-    )
-    .unwrap()
-    .into_value();
-    let env = session.session().modules().env_for(module);
-    value.display_pretty(&expr.ty.ty, &env).to_string()
+        .expect("expected an expression to evaluate in formatting regression");
+    let value = {
+        let compiler_session = session.session();
+        let module = compiler_session.expect_fresh_module(module_and_expr.module_id);
+        eval_node(
+            &module.hir_arena,
+            expr.expr,
+            module_and_expr.module_id,
+            &expr.locals,
+            compiler_session,
+        )
+        .unwrap()
+        .into_value()
+    };
+    session.value_to_string(module_and_expr.module_id, value, expr.ty.ty)
 }
 
 fn format_compiled_module(session: &mut TestSession, src: &str) -> String {
@@ -1993,7 +1993,7 @@ fn compiled_aliases_and_type_defs_preserve_source_generic_names() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn pretty_print_user_defined_generic_enum_values() {
+fn value_to_string_user_defined_generic_enum_values() {
     let mut session = TestSession::new();
     let src = join_src(&[
         option_type_def_src(),
@@ -2002,10 +2002,7 @@ fn pretty_print_user_defined_generic_enum_values() {
         "# },
     ]);
 
-    assert_eq!(
-        run_and_pretty_format(&mut session, &src),
-        "Option::Some (32)"
-    );
+    assert_eq!(run_and_format(&mut session, &src), "Option::Some (32)");
 }
 
 #[test]

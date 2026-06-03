@@ -207,75 +207,49 @@ fn never_in_if_branches_after_value_branch() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn pretty_print_unknown_variant_with_named_payload_does_not_crash() {
-    let mut session = TestSession::new();
-    let module_and_expr =
-        session.compile("[1, 2, 3] |> iter() |> map(|x| x as float) |> missing_collect()");
-    let expr = module_and_expr
-        .expr
-        .expect("expected an expression for the pretty-print regression");
-    let module = session
-        .session()
-        .expect_fresh_module(module_and_expr.module_id);
-    let value = eval_node(
-        &module.hir_arena,
-        expr.expr,
-        module_and_expr.module_id,
-        &expr.locals,
-        session.session(),
-    )
-    .unwrap()
-    .into_value();
-    let env = session.session().modules().env_for(module);
-    let formatted = value.display_pretty(&expr.ty.ty, &env).to_string();
-    assert!(formatted.starts_with("missing_collect (MapIterator { "));
-}
-
-#[test]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn pretty_print_arrays_by_logical_contents() {
+fn value_to_string_arrays_by_logical_contents() {
     let mut session = TestSession::new();
     let module_and_expr = session.compile("[{ a: 1 }, { a: 2 }]");
     let expr = module_and_expr
         .expr
-        .expect("expected an expression for the pretty-print regression");
-    let module = session
-        .session()
-        .expect_fresh_module(module_and_expr.module_id);
-    let value = eval_node(
-        &module.hir_arena,
-        expr.expr,
-        module_and_expr.module_id,
-        &expr.locals,
-        session.session(),
-    )
-    .unwrap()
-    .into_value();
-    let env = session.session().modules().env_for(module);
+        .expect("expected an expression for the formatting regression");
+    let value = {
+        let compiler_session = session.session();
+        let module = compiler_session.expect_fresh_module(module_and_expr.module_id);
+        eval_node(
+            &module.hir_arena,
+            expr.expr,
+            module_and_expr.module_id,
+            &expr.locals,
+            compiler_session,
+        )
+        .unwrap()
+        .into_value()
+    };
     assert_eq!(
-        value.display_pretty(&expr.ty.ty, &env).to_string(),
+        session.value_to_string(module_and_expr.module_id, value, expr.ty.ty),
         "[{ a: 1 }, { a: 2 }]"
     );
 
     let module_and_expr = session.compile("[[1, 2], [3, 4]]");
     let expr = module_and_expr
         .expr
-        .expect("expected an expression for the pretty-print regression");
-    let module = session
-        .session()
-        .expect_fresh_module(module_and_expr.module_id);
-    let value = eval_node(
-        &module.hir_arena,
-        expr.expr,
-        module_and_expr.module_id,
-        &expr.locals,
-        session.session(),
-    )
-    .unwrap()
-    .into_value();
-    let env = session.session().modules().env_for(module);
+        .expect("expected an expression for the formatting regression");
+    let value = {
+        let compiler_session = session.session();
+        let module = compiler_session.expect_fresh_module(module_and_expr.module_id);
+        eval_node(
+            &module.hir_arena,
+            expr.expr,
+            module_and_expr.module_id,
+            &expr.locals,
+            compiler_session,
+        )
+        .unwrap()
+        .into_value()
+    };
     assert_eq!(
-        value.display_pretty(&expr.ty.ty, &env).to_string(),
+        session.value_to_string(module_and_expr.module_id, value, expr.ty.ty),
         "[[1, 2], [3, 4]]"
     );
 }

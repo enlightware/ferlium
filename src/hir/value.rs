@@ -21,8 +21,7 @@ use ustr::Ustr;
 use crate::{
     containers::{B, IntoSVec2, SVec2, b},
     format::{write_with_separator, write_with_separator_and_format_fn},
-    module::{LocalFunctionId, ModuleEnv, ModuleId, TraitDictionaryId},
-    types::r#type::{NativeType, Type, TypeKind},
+    module::{LocalFunctionId, ModuleId, TraitDictionaryId},
 };
 
 // Support for primitive values
@@ -32,15 +31,6 @@ pub trait NativeDisplay {
     /// Format the native value, without type information.
     fn fmt_repr(&self, f: &mut fmt::Formatter) -> fmt::Result;
 
-    /// Format the native value, given its type information.
-    fn fmt_pretty(
-        &self,
-        f: &mut fmt::Formatter,
-        _ty: &NativeType,
-        _env: &ModuleEnv<'_>,
-    ) -> fmt::Result {
-        self.fmt_repr(f)
-    }
     /// Format the native value when converted to a string.
     fn fmt_in_to_string(&self, f: &mut fmt::Formatter) -> fmt::Result {
         self.fmt_repr(f)
@@ -514,222 +504,6 @@ impl Value {
         }
         format!("{}", FormatInToString(self))
     }
-
-    /// Format this value in an indented representation for debugging.
-    /// As no type information is provided, the internal representation is used.
-    pub fn format_ind_repr(
-        &self,
-        f: &mut std::fmt::Formatter,
-        _env: &ModuleEnv<'_>,
-        spacing: usize,
-        indent: usize,
-    ) -> std::fmt::Result {
-        let indent_str = format!("{}{}", "  ".repeat(spacing), "⎸ ".repeat(indent));
-        use Value::*;
-        match self {
-            Uninit => writeln!(f, "{indent_str}<uninitialized>"),
-            Native(value) => {
-                write!(f, "{indent_str}")?;
-                value.fmt_repr(f)?;
-                writeln!(f)
-            }
-            Variant(variant) => {
-                if variant.value.is_unit() {
-                    writeln!(f, "{indent_str}{}", variant.tag)
-                } else {
-                    writeln!(f, "{indent_str}{} ", variant.tag)?;
-                    variant.value.format_ind_repr(f, _env, spacing, indent + 1)
-                }
-            }
-            Tuple(tuple) => {
-                writeln!(f, "{indent_str}(")?;
-                for element in tuple.iter() {
-                    element.format_ind_repr(f, _env, spacing, indent + 1)?;
-                }
-                writeln!(f, "{indent_str})")
-            }
-            Function(fv) => {
-                if fv.hidden_args.is_empty() && fv.closure_env_len == 0 {
-                    writeln!(f, "function {} in {}", fv.function_id, fv.module_id)
-                } else {
-                    writeln!(
-                        f,
-                        "closure of function {} in {} with {} evidence captures and captured values [",
-                        fv.function_id,
-                        fv.module_id,
-                        fv.hidden_args.len()
-                    )?;
-                    for captured in fv.closure_env_values() {
-                        captured.format_ind_repr(f, _env, spacing + 1, indent + 1)?;
-                    }
-                    writeln!(f, "{indent_str}]")
-                }
-            }
-        }
-    }
-
-    /// Display this value in a pretty-printed way according to the provided type and module environment.
-    /// This means that records will be displayed with their field names, named types with their names, etc.
-    pub fn display_pretty<'a>(&'a self, ty: &'a Type, env: &'a ModuleEnv<'a>) -> PrettyPrint<'a> {
-        PrettyPrint {
-            value: self,
-            ty,
-            env,
-        }
-    }
-
-    pub(crate) fn display_pretty_env<'a>(
-        &'a self,
-        ty: &'a Type,
-        env: &'a ModuleEnv<'a>,
-    ) -> PrettyPrint<'a> {
-        PrettyPrint {
-            value: self,
-            ty,
-            env,
-        }
-    }
-
-    fn fmt_pretty(
-        &self,
-        f: &mut std::fmt::Formatter<'_>,
-        ty: Type,
-        env: &ModuleEnv<'_>,
-    ) -> std::fmt::Result {
-        if matches!(self, Value::Uninit) {
-            panic!("attempted to pretty-print an uninitialized value");
-        }
-
-        use TypeKind::*;
-        let ty_data = ty.data();
-        match &*ty_data {
-            Variable(type_var) => panic!(
-                "Cannot pretty-print value with uninstantiated type variable: {:?}",
-                type_var
-            ),
-            Native(ty) => {
-                let ty = ty.clone();
-                drop(ty_data);
-                self.as_native().unwrap().fmt_pretty(f, &ty, env)
-            }
-            Variant(types) => {
-                let variant = self.as_variant().unwrap();
-                let inner_ty = types.iter().find(|(tag, _)| *tag == variant.tag).unwrap().1;
-                drop(ty_data);
-                if variant.value.is_tuple() {
-                    write!(
-                        f,
-                        "{} {}",
-                        variant.tag,
-                        variant.value.display_pretty_env(&inner_ty, env)
-                    )
-                } else if variant.value.is_unit() {
-                    write!(f, "{}", variant.tag)
-                } else {
-                    write!(
-                        f,
-                        "{}({})",
-                        variant.tag,
-                        variant.value.display_pretty_env(&inner_ty, env)
-                    )
-                }
-            }
-            Tuple(tuple) => {
-                let tuple = tuple.clone();
-                drop(ty_data);
-                let data = self.as_tuple().unwrap();
-                write!(f, "(")?;
-                write_with_separator(
-                    data.iter()
-                        .zip(tuple.iter())
-                        .map(|(item, ty)| item.display_pretty_env(ty, env)),
-                    ", ",
-                    f,
-                )?;
-                write!(f, ")")
-            }
-            Record(fields) => {
-                let fields = fields.clone();
-                drop(ty_data);
-                let data = self.as_tuple().unwrap();
-                write!(f, "{{ ")?;
-                write_with_separator(
-                    data.iter().zip(fields.iter()).map(|(item, (name, ty))| {
-                        format!("{}: {}", name, item.display_pretty_env(ty, env))
-                    }),
-                    ", ",
-                    f,
-                )?;
-                write!(f, " }}")
-            }
-            Function(_) => {
-                use Value::*;
-                match self {
-                    Function(_) => self.format_as_string_repr(f),
-                    _ => panic!("Value of type Function expected"),
-                }
-            }
-            Named(named_type) => {
-                let named_type = named_type.clone();
-                drop(ty_data);
-                if named_type.def == crate::std::array_type::array_type_def() {
-                    return self.fmt_array_pretty(f, named_type.params[0], env);
-                }
-                let type_def = env.type_def(named_type.def);
-                let shape = type_def.instantiated_shape(&named_type.params);
-                let separator = if shape.data().is_variant() { "::" } else { " " };
-                write!(
-                    f,
-                    "{}{}{}",
-                    type_def.name,
-                    separator,
-                    self.display_pretty(&shape, env)
-                )
-            }
-            Never => panic!("A value of type Never cannot exist"),
-        }
-    }
-
-    fn fmt_array_pretty(
-        &self,
-        f: &mut std::fmt::Formatter<'_>,
-        element_ty: Type,
-        env: &ModuleEnv<'_>,
-    ) -> std::fmt::Result {
-        let fields = self
-            .as_tuple()
-            .expect("array values should use tuple storage");
-        let capacity = *fields[0]
-            .as_primitive_ty::<isize>()
-            .expect("array capacity should be an int");
-        let buffer = fields[1]
-            .as_primitive_ty::<crate::std::buffer::Buffer>()
-            .expect("array data should be a buffer");
-        let len = *fields[2]
-            .as_primitive_ty::<isize>()
-            .expect("array length should be an int");
-        let start = *fields[3]
-            .as_primitive_ty::<isize>()
-            .expect("array start should be an int");
-
-        write!(f, "[")?;
-        for logical_index in 0..len {
-            if logical_index > 0 {
-                write!(f, ", ")?;
-            }
-            let physical_index = start + logical_index;
-            let physical_index = if physical_index >= capacity {
-                physical_index - capacity
-            } else {
-                physical_index
-            };
-            let element = buffer
-                .get(physical_index as usize)
-                .expect("array element should be in buffer");
-            write!(f, "{}", element.display_pretty_env(&element_ty, env))?;
-        }
-        write!(f, "]")
-    }
 }
 
 /// Take the value at `index` out of `values`, discarding the storage of every other element.
@@ -745,18 +519,6 @@ fn take_nth_discarding_rest(values: B<SVec2<Value>>, index: usize) -> Option<Val
         }
     }
     result
-}
-
-pub struct PrettyPrint<'a> {
-    value: &'a Value,
-    ty: &'a Type,
-    env: &'a ModuleEnv<'a>,
-}
-
-impl<'a> std::fmt::Display for PrettyPrint<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.value.fmt_pretty(f, *self.ty, self.env)
-    }
 }
 
 /// A literal value is a native value that can be hashed.

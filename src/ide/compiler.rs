@@ -42,7 +42,7 @@ pub struct Compiler {
     user_module: ModuleAndExpr,
     uses: Uses,
     char_index_lookup: FxHashMap<SourceId, CharIndexLookup>,
-    execution_fuel_limit: Option<i64>,
+    execution_fuel_limit: Option<usize>,
 }
 
 const SRC_NAME: &str = "<ide>";
@@ -122,7 +122,7 @@ impl Compiler {
     }
 
     pub fn set_execution_fuel_limit(&mut self, fuel_limit: u32) {
-        self.execution_fuel_limit = Some(i64::from(fuel_limit));
+        self.execution_fuel_limit = Some(fuel_limit as usize);
     }
 
     pub fn disable_execution_fuel_limit(&mut self) {

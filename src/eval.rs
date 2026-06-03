@@ -42,7 +42,7 @@ use crate::{
 
 use crate::module::ImportFunctionTarget;
 
-pub const DEFAULT_INTERACTIVE_FUEL_LIMIT: i64 = 100_000;
+pub const DEFAULT_INTERACTIVE_FUEL_LIMIT: usize = 100_000;
 
 /// Either a value or a unique mutable reference to a value.
 /// This allows to implement the mutable value semantics.
@@ -205,7 +205,7 @@ pub struct EvalCtx<'a> {
     /// maximum number of values in the evaluation environment
     pub stack_limit: usize,
     /// remaining execution fuel; `None` means fuel checks are disabled
-    pub fuel_remaining: Option<i64>,
+    pub fuel_remaining: Option<usize>,
     /// id of the current module for import slot resolution
     pub module_id: ModuleId,
     /// whether the current function returns a place result
@@ -227,11 +227,11 @@ impl<'a> EvalCtx<'a> {
         self.compiler_session
     }
 
-    pub fn set_fuel(&mut self, fuel: i64) {
+    pub fn set_fuel(&mut self, fuel: usize) {
         self.fuel_remaining = Some(fuel);
     }
 
-    pub fn set_fuel_limit(&mut self, fuel_limit: Option<i64>) {
+    pub fn set_fuel_limit(&mut self, fuel_limit: Option<usize>) {
         self.fuel_remaining = fuel_limit;
     }
 
@@ -243,13 +243,13 @@ impl<'a> EvalCtx<'a> {
         let Some(fuel) = &mut self.fuel_remaining else {
             return cont(Value::unit());
         };
-        *fuel -= 1;
-        if *fuel < 0 {
+        if *fuel == 0 {
             Err(RuntimeError::new(
                 RuntimeErrorKind::FuelExhausted,
                 Some(span),
             ))
         } else {
+            *fuel -= 1;
             cont(Value::unit())
         }
     }

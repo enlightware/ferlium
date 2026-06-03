@@ -492,7 +492,7 @@ fn process_input(
     fill_use_until: usize,
     session: &mut CompilerSession,
     is_repl: bool,
-    fuel_limit: Option<i64>,
+    fuel_limit: Option<usize>,
 ) -> Result<ModuleId, i32> {
     // Parse the input once to get the list of symbols this module defines.
     let source_id = session.source_table().next_id();
@@ -583,23 +583,30 @@ fn process_input(
     // If there's an expression, evaluate it
     if let Some(expr) = expr {
         // Evaluate expression
-        let mut eval_ctx = EvalCtx::new(module_id, session);
-        eval_ctx.set_fuel_limit(fuel_limit);
-        let arena = &eval_ctx
-            .compiler_session()
-            .expect_fresh_module(module_id)
-            .hir_arena;
-        let result = eval_node_with_ctx(arena, expr.expr, &mut eval_ctx, &expr.locals);
+        let result = {
+            let mut eval_ctx = EvalCtx::new(module_id, session);
+            eval_ctx.set_fuel_limit(fuel_limit);
+            let arena = &eval_ctx
+                .compiler_session()
+                .expect_fresh_module(module_id)
+                .hir_arena;
+            eval_node_with_ctx(arena, expr.expr, &mut eval_ctx, &expr.locals)
+        };
         match result {
             Ok(value) => {
                 let value = value.into_value();
+                let rendered = match session
+                    .value_to_string_with_fuel(module_id, value, expr.ty.ty, fuel_limit)
+                {
+                    Ok(rendered) => rendered,
+                    Err(error) => {
+                        eprintln!("Formatting error:\n{error}");
+                        return Err(2);
+                    }
+                };
                 let module = session.expect_fresh_module(module_id);
                 let module_env = session.modules().env_for(module);
-                println!(
-                    "{}: {}",
-                    value.display_pretty(&expr.ty.ty, &module_env),
-                    expr.ty.display(&module_env)
-                );
+                println!("{}: {}", rendered, expr.ty.display(&module_env));
             }
             Err(error) => {
                 eprintln!(
@@ -835,8 +842,8 @@ fn run_interactive_repl() {
                                 println!("Execution fuel limit disabled.");
                                 true
                             }
-                            Some(value) => match value.parse::<i64>() {
-                                Ok(limit) if limit >= 0 => {
+                            Some(value) => match value.parse::<usize>() {
+                                Ok(limit) => {
                                     fuel_limit = Some(limit);
                                     println!("Execution fuel limit: {limit}");
                                     true

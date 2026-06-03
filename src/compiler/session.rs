@@ -20,7 +20,7 @@ use crate::{
     },
     containers::b,
     define_id_type,
-    eval::{EvalCtx, RuntimeError, ValOrMut, eval_node_with_ctx},
+    eval::{DEFAULT_INTERACTIVE_FUEL_LIMIT, EvalCtx, RuntimeError, ValOrMut, eval_node_with_ctx},
     format::FormatWith,
     hir::CompiledExpr,
     hir::value::Value,
@@ -547,7 +547,7 @@ impl CompilerSession {
         module: &Module,
         locals: Vec<LocalDecl>,
         environment: Vec<ValOrMut>,
-        fuel_limit: Option<i64>,
+        fuel_limit: Option<usize>,
     ) -> Result<(Value, Type), EvalExprError> {
         let source_id = self
             .source_table
@@ -649,7 +649,7 @@ impl CompilerSession {
         module_id: ModuleId,
         locals: Vec<LocalDecl>,
         environment: Vec<ValOrMut>,
-        fuel_limit: Option<i64>,
+        fuel_limit: Option<usize>,
     ) -> Result<Value, EvalExprError> {
         let module = self.expect_fresh_module(module_id).clone();
         self.eval_expr_with_locals_in_module(
@@ -716,12 +716,24 @@ impl CompilerSession {
         value: Value,
         ty: Type,
     ) -> Result<String, String> {
-        match self.eval_expr_with_locals(
+        self.value_to_string_with_fuel(module_id, value, ty, Some(DEFAULT_INTERACTIVE_FUEL_LIMIT))
+    }
+
+    /// Render a value by evaluating Ferlium's `to_string(value)` with an optional fuel limit.
+    pub fn value_to_string_with_fuel(
+        &mut self,
+        module_id: ModuleId,
+        value: Value,
+        ty: Type,
+        fuel_limit: Option<usize>,
+    ) -> Result<String, String> {
+        match self.eval_expr_with_locals_with_fuel(
             "<value_to_string>",
             "to_string(value)",
             module_id,
             vec![local("value", ty)],
             vec![ValOrMut::Val(value)],
+            fuel_limit,
         ) {
             Ok(rendered) => rendered
                 .into_primitive_ty::<crate::std::string::String>()

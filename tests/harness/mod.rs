@@ -867,6 +867,12 @@ impl TestSession {
         self.session.module_env()
     }
 
+    pub fn value_to_string(&mut self, module_id: ModuleId, value: Value, ty: Type) -> String {
+        self.session
+            .value_to_string(module_id, value, ty)
+            .expect("value formatting should succeed")
+    }
+
     pub fn std_trait(&self, name: &str) -> TraitId {
         self.session
             .module_env()
