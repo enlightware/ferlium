@@ -80,3 +80,7 @@ Data text supports:
 
 It does not support operators, function calls, bindings, control flow, imports, or string interpolation.
 The expected target type guides deserialization.
+
+## What comes next
+
+The next chapter introduces effects, showing how Ferlium tracks reading, writing, and failure alongside ordinary values.

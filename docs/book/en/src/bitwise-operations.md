@@ -106,4 +106,4 @@ This lets generic code over `Bits` work uniformly on both types without special 
 
 ## What comes next
 
-The next chapter introduces effects, showing how Ferlium tracks reading, writing, and failure alongside ordinary values.
+The next chapter shows how Ferlium values can be converted to JSON and plain text, through (de)serialization.
