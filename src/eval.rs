@@ -213,7 +213,7 @@ pub struct EvalCtx<'a> {
 }
 
 impl<'a> EvalCtx<'a> {
-    const DEFAULT_CALL_DEPTH_LIMIT: usize = 192;
+    const DEFAULT_CALL_DEPTH_LIMIT: usize = 128;
     const DEFAULT_STACK_LIMIT: usize = 65_536;
 
     pub fn new(module_id: ModuleId, compiler_session: &'a CompilerSession) -> EvalCtx<'a> {
