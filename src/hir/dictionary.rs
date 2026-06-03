@@ -177,7 +177,7 @@ pub fn find_field_dict_index(dicts: &ExtraParameters, var: TypeVar, field: &str)
             field: field2,
         } = &dict
         {
-            *ty2 == ty && field2 == &field
+            *ty2 == ty && field2 == field
         } else {
             false
         }
