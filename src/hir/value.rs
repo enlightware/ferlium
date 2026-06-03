@@ -672,6 +672,9 @@ impl Value {
             Named(named_type) => {
                 let named_type = named_type.clone();
                 drop(ty_data);
+                if named_type.def == crate::std::array_type::array_type_def() {
+                    return self.fmt_array_pretty(f, named_type.params[0], env);
+                }
                 let type_def = env.type_def(named_type.def);
                 let shape = type_def.instantiated_shape(&named_type.params);
                 let separator = if shape.data().is_variant() { "::" } else { " " };
@@ -685,6 +688,47 @@ impl Value {
             }
             Never => panic!("A value of type Never cannot exist"),
         }
+    }
+
+    fn fmt_array_pretty(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+        element_ty: Type,
+        env: &ModuleEnv<'_>,
+    ) -> std::fmt::Result {
+        let fields = self
+            .as_tuple()
+            .expect("array values should use tuple storage");
+        let capacity = *fields[0]
+            .as_primitive_ty::<isize>()
+            .expect("array capacity should be an int");
+        let buffer = fields[1]
+            .as_primitive_ty::<crate::std::buffer::Buffer>()
+            .expect("array data should be a buffer");
+        let len = *fields[2]
+            .as_primitive_ty::<isize>()
+            .expect("array length should be an int");
+        let start = *fields[3]
+            .as_primitive_ty::<isize>()
+            .expect("array start should be an int");
+
+        write!(f, "[")?;
+        for logical_index in 0..len {
+            if logical_index > 0 {
+                write!(f, ", ")?;
+            }
+            let physical_index = start + logical_index;
+            let physical_index = if physical_index >= capacity {
+                physical_index - capacity
+            } else {
+                physical_index
+            };
+            let element = buffer
+                .get(physical_index as usize)
+                .expect("array element should be in buffer");
+            write!(f, "{}", element.display_pretty_env(&element_ty, env))?;
+        }
+        write!(f, "]")
     }
 }
 

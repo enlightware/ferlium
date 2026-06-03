@@ -233,6 +233,55 @@ fn pretty_print_unknown_variant_with_named_payload_does_not_crash() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn pretty_print_arrays_by_logical_contents() {
+    let mut session = TestSession::new();
+    let module_and_expr = session.compile("[{ a: 1 }, { a: 2 }]");
+    let expr = module_and_expr
+        .expr
+        .expect("expected an expression for the pretty-print regression");
+    let module = session
+        .session()
+        .expect_fresh_module(module_and_expr.module_id);
+    let value = eval_node(
+        &module.hir_arena,
+        expr.expr,
+        module_and_expr.module_id,
+        &expr.locals,
+        session.session(),
+    )
+    .unwrap()
+    .into_value();
+    let env = session.session().modules().env_for(module);
+    assert_eq!(
+        value.display_pretty(&expr.ty.ty, &env).to_string(),
+        "[{ a: 1 }, { a: 2 }]"
+    );
+
+    let module_and_expr = session.compile("[[1, 2], [3, 4]]");
+    let expr = module_and_expr
+        .expr
+        .expect("expected an expression for the pretty-print regression");
+    let module = session
+        .session()
+        .expect_fresh_module(module_and_expr.module_id);
+    let value = eval_node(
+        &module.hir_arena,
+        expr.expr,
+        module_and_expr.module_id,
+        &expr.locals,
+        session.session(),
+    )
+    .unwrap()
+    .into_value();
+    let env = session.session().modules().env_for(module);
+    assert_eq!(
+        value.display_pretty(&expr.ty.ty, &env).to_string(),
+        "[[1, 2], [3, 4]]"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn join_empty_sequence_compiles_repeatedly_in_shared_session() {
     let mut session = ferlium::CompilerSession::new();
     for name in ["repl0", "repl1", "repl2"] {
