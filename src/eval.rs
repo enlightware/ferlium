@@ -791,24 +791,36 @@ impl FormatWith<EvalCtx<'_>> for Place {
 #[derive(Debug)]
 pub enum ControlFlow<V> {
     Continue(V),
+    Transfer(ControlTransfer),
+}
+
+#[derive(Debug)]
+pub enum ControlTransfer {
     Return(Value),
     Break { label: LoopId, value: Value },
-    LoopContinue { label: LoopId },
+    Continue { label: LoopId },
 }
 impl<V> ControlFlow<V> {
     fn map_continue<U>(self, f: impl FnOnce(V) -> U) -> ControlFlow<U> {
         match self {
             ControlFlow::Continue(value) => ControlFlow::Continue(f(value)),
-            ControlFlow::Return(value) => ControlFlow::Return(value),
-            ControlFlow::Break { label, value } => ControlFlow::Break { label, value },
-            ControlFlow::LoopContinue { label } => ControlFlow::LoopContinue { label },
+            ControlFlow::Transfer(transfer) => ControlFlow::Transfer(transfer),
         }
     }
 
     fn into_transfer_value(self) -> Option<Value> {
         match self {
-            ControlFlow::Continue(_) | ControlFlow::LoopContinue { .. } => None,
-            ControlFlow::Return(value) | ControlFlow::Break { value, .. } => Some(value),
+            ControlFlow::Continue(_) => None,
+            ControlFlow::Transfer(transfer) => transfer.into_value(),
+        }
+    }
+}
+
+impl ControlTransfer {
+    fn into_value(self) -> Option<Value> {
+        match self {
+            ControlTransfer::Return(value) | ControlTransfer::Break { value, .. } => Some(value),
+            ControlTransfer::Continue { .. } => None,
         }
     }
 }
@@ -821,8 +833,10 @@ impl ControlFlow<Value> {
     pub fn into_value(self) -> Value {
         match self {
             ControlFlow::Continue(value) => value,
-            ControlFlow::Return(value) => value,
-            ControlFlow::Break { .. } | ControlFlow::LoopContinue { .. } => {
+            ControlFlow::Transfer(ControlTransfer::Return(value)) => value,
+            ControlFlow::Transfer(
+                ControlTransfer::Break { .. } | ControlTransfer::Continue { .. },
+            ) => {
                 panic!("loop control escaped its target loop")
             }
         }
@@ -1026,7 +1040,7 @@ pub fn cont(value: Value) -> EvalControlFlowResult {
 }
 
 pub fn ret(value: Value) -> EvalControlFlowResult {
-    Ok(ControlFlow::Return(value))
+    Ok(ControlFlow::Transfer(ControlTransfer::Return(value)))
 }
 
 /// Helper macro to evaluate a node and propagate Return, or extract Continue value.
@@ -1035,10 +1049,8 @@ pub fn ret(value: Value) -> EvalControlFlowResult {
 macro_rules! eval_or_return {
     ($expr:expr) => {
         match $expr? {
-            ControlFlow::Return(val) => return Ok(ControlFlow::Return(val)),
-            ControlFlow::Break { label, value } => return Ok(ControlFlow::Break { label, value }),
-            ControlFlow::LoopContinue { label } => return Ok(ControlFlow::LoopContinue { label }),
             ControlFlow::Continue(val) => val,
+            ControlFlow::Transfer(transfer) => return Ok(ControlFlow::Transfer(transfer)),
         }
     };
 }
@@ -1120,12 +1132,14 @@ pub fn eval_node_with_ctx(
         Loop(node) => eval_loop(arena, node.label, node.body, ctx, locals),
         Break(node) => {
             let value = eval_or_return!(eval_node_with_ctx(arena, node.value, ctx, locals));
-            Ok(ControlFlow::Break {
+            Ok(ControlFlow::Transfer(ControlTransfer::Break {
                 label: node.label,
                 value,
-            })
+            }))
         }
-        Continue(node) => Ok(ControlFlow::LoopContinue { label: node.label }),
+        Continue(node) => Ok(ControlFlow::Transfer(ControlTransfer::Continue {
+            label: node.label,
+        })),
     }
 }
 
@@ -1993,9 +2007,7 @@ fn value_into_place_result(value: Value) -> Place {
 fn control_flow_into_place_result(result: ControlFlow<Value>) -> ControlFlow<Place> {
     match result {
         ControlFlow::Continue(value) => ControlFlow::Continue(value_into_place_result(value)),
-        ControlFlow::Return(value) => ControlFlow::Return(value),
-        ControlFlow::Break { label, value } => ControlFlow::Break { label, value },
-        ControlFlow::LoopContinue { label } => ControlFlow::LoopContinue { label },
+        ControlFlow::Transfer(transfer) => ControlFlow::Transfer(transfer),
     }
 }
 
@@ -2549,29 +2561,31 @@ fn eval_loop(
     loop {
         match eval_node_with_ctx(arena, body, ctx, locals)? {
             ControlFlow::Continue(value) => value.discard_storage(),
-            ControlFlow::Return(value) => return Ok(ControlFlow::Return(value)),
-            ControlFlow::Break {
+            ControlFlow::Transfer(ControlTransfer::Return(value)) => {
+                return Ok(ControlFlow::Transfer(ControlTransfer::Return(value)));
+            }
+            ControlFlow::Transfer(ControlTransfer::Break {
                 label: break_label,
                 value,
-            } if break_label == label => return cont(value),
-            ControlFlow::Break {
+            }) if break_label == label => return cont(value),
+            ControlFlow::Transfer(ControlTransfer::Break {
                 label: break_label,
                 value,
-            } => {
-                return Ok(ControlFlow::Break {
+            }) => {
+                return Ok(ControlFlow::Transfer(ControlTransfer::Break {
                     label: break_label,
                     value,
-                });
+                }));
             }
-            ControlFlow::LoopContinue {
+            ControlFlow::Transfer(ControlTransfer::Continue {
                 label: continue_label,
-            } if continue_label == label => {}
-            ControlFlow::LoopContinue {
+            }) if continue_label == label => {}
+            ControlFlow::Transfer(ControlTransfer::Continue {
                 label: continue_label,
-            } => {
-                return Ok(ControlFlow::LoopContinue {
+            }) => {
+                return Ok(ControlFlow::Transfer(ControlTransfer::Continue {
                     label: continue_label,
-                });
+                }));
             }
         }
     }
@@ -2882,7 +2896,7 @@ mod tests {
     use crate::{
         CompilerSession, Location,
         containers::{SVec2, b},
-        eval::{ControlFlow, EvalCtx, eval_args, eval_node, eval_nodes},
+        eval::{ControlFlow, ControlTransfer, EvalCtx, eval_args, eval_node, eval_nodes},
         hir::{
             self, CallArgument, ENode, ENodeArena, LoopId, NodeKind,
             function::{ResolvedArgPassing, ResolvedValueArgPassing},
@@ -2947,7 +2961,7 @@ mod tests {
         let mut ctx = EvalCtx::new(ModuleId::from_index(0), &session);
 
         let result = eval_nodes(&arena, &[tracked, return_unit], &mut ctx, &[]).unwrap();
-        let ControlFlow::Return(value) = result else {
+        let ControlFlow::Transfer(ControlTransfer::Return(value)) = result else {
             panic!("expected eval_nodes to propagate return");
         };
 
@@ -2990,7 +3004,7 @@ mod tests {
         ));
         let session = CompilerSession::new();
         let result = eval_node(&arena, block, ModuleId::from_index(0), &[], &session).unwrap();
-        let ControlFlow::Break { value, .. } = result else {
+        let ControlFlow::Transfer(ControlTransfer::Break { value, .. }) = result else {
             panic!("expected block to propagate break");
         };
 
@@ -3035,7 +3049,7 @@ mod tests {
         ));
         let session = CompilerSession::new();
         let result = eval_node(&arena, loop_node, ModuleId::from_index(0), &[], &session).unwrap();
-        let ControlFlow::Return(value) = result else {
+        let ControlFlow::Transfer(ControlTransfer::Return(value)) = result else {
             panic!("expected return in break value to propagate before break");
         };
 
@@ -3083,7 +3097,7 @@ mod tests {
         ];
 
         let result = eval_args(&arena, &arguments, &arg_tys, &mut ctx, &[]).unwrap();
-        let ControlFlow::Return(value) = result else {
+        let ControlFlow::Transfer(ControlTransfer::Return(value)) = result else {
             panic!("expected eval_args to propagate return");
         };
 
@@ -3133,7 +3147,7 @@ mod tests {
         ];
 
         let result = eval_args(&arena, &arguments, &arg_tys, &mut ctx, &[]).unwrap();
-        let ControlFlow::Break { value, .. } = result else {
+        let ControlFlow::Transfer(ControlTransfer::Break { value, .. }) = result else {
             panic!("expected eval_args to propagate break");
         };
 

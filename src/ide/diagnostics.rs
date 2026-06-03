@@ -536,7 +536,10 @@ pub(super) fn compilation_error_to_data(
                 format!(
                     "Implementation of trait `{}` is missing methods: `{}`",
                     trait_ref,
-                    missings.iter().map(|m| m.as_ref()).join(", "),
+                    missings
+                        .iter()
+                        .map(<ustr::Ustr as AsRef<str>>::as_ref)
+                        .join(", "),
                 ),
             )]
         }
