@@ -40,7 +40,7 @@ pub fn data_value_type() -> Type {
     Type::named(data_value_type_def(), [])
 }
 
-pub fn data_value_object_entry_type() -> Type {
+pub fn data_value_record_entry_type() -> Type {
     Type::tuple([string_type(), data_value_type()])
 }
 

@@ -121,7 +121,7 @@ fn parse_json_stream<R: Read>(
                 let tuple = Value::tuple([string_value(key.as_ref()), value]);
                 fields.push(tuple);
             }
-            variant("Object", array_value_from_vec(fields))
+            variant("Record", array_value_from_vec(fields))
         }
         EndObject => return Ok(ParseResult::EndObject),
         ObjectKey(s) => return Ok(ParseResult::Key(Str::from_str(&s).unwrap())),

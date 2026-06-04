@@ -51,15 +51,12 @@ fn serde_serialize() {
     // variants
     assert_val_eq!(
         session.run("serialize(None)"),
-        Value::raw_variant(
-            ustr("EnumVariant"),
-            tuple!(string("None"), variant_0("Unit"))
-        )
+        Value::raw_variant(ustr("Variant"), tuple!(string("None"), variant_0("Unit")))
     );
     assert_val_eq!(
         session.run("serialize(Some(1.0))"),
         Value::raw_variant(
-            ustr("EnumVariant"),
+            ustr("Variant"),
             tuple!(
                 string("Some"),
                 variant_t1("Tuple", array![variant_t1("Float", float(1.0))])
@@ -95,14 +92,14 @@ fn serde_serialize() {
     assert_val_eq!(
         session.run("serialize({a: 1, })"),
         variant_t1(
-            "Object",
+            "Record",
             array![tuple!(string("a"), variant_t1("Int", int(1)))]
         )
     );
     assert_val_eq!(
         session.run("serialize({a: 1, b: 2})"),
         variant_t1(
-            "Object",
+            "Record",
             array![
                 tuple!(string("a"), variant_t1("Int", int(1))),
                 tuple!(string("b"), variant_t1("Int", int(2)))
@@ -112,7 +109,7 @@ fn serde_serialize() {
     assert_val_eq!(
         session.run("serialize({a: 1, b: 2.0, c: true})"),
         variant_t1(
-            "Object",
+            "Record",
             array![
                 tuple!(string("a"), variant_t1("Int", int(1))),
                 tuple!(string("b"), variant_t1("Float", float(2.))),
@@ -285,7 +282,7 @@ fn json_serialization_roundtrip() {
     );
     assert_val_eq!(
         session.run(
-            r#"to_json(DataValue::Object([("quoted key", DataValue::String("hello \"world\"\n"))]))"#
+            r#"to_json(DataValue::Record([("quoted key", DataValue::String("hello \"world\"\n"))]))"#
         ),
         string(r#"{"quoted key":"hello \"world\"\n"}"#)
     );
@@ -472,12 +469,12 @@ fn data_text_codec_source_like_shapes() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn data_value_enum_variant_record_payload_is_direct() {
+fn data_value_variant_record_payload_is_direct() {
     let mut session = TestSession::new();
 
     assert_val_eq!(
         session.run(indoc! { r#"
-            let value = DataValue::EnumVariant {
+            let value = DataValue::Variant {
                 name: "Some",
                 payload: DataValue::String("hello"),
             };
@@ -488,7 +485,7 @@ fn data_value_enum_variant_record_payload_is_direct() {
     assert_val_eq!(
         session.run(indoc! { r#"
             {
-                let value = DataValue::EnumVariant {
+                let value = DataValue::Variant {
                     name: "Some",
                     payload: DataValue::String("hello"),
                 };

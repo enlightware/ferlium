@@ -8,8 +8,8 @@ pub enum DataValue {
 	String(string),
 	Array([DataValue]),
 	Tuple([DataValue]),
-	Object([(string, DataValue)]),
+	Record([(string, DataValue)]),
 	Set([DataValue]),
 	Map([(DataValue, DataValue)]),
-	EnumVariant { name: string, payload: DataValue },
+	Variant { name: string, payload: DataValue },
 }

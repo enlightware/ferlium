@@ -67,33 +67,33 @@ pub fn data_value_to_tuple(v: DataValue) {
 	}
 }
 
-/// Downcasts a data value to an object payload, panicking if it is not an object.
-pub fn data_value_to_object(v: DataValue) {
+/// Downcasts a data value to a record payload, panicking if it is not a record.
+pub fn data_value_to_record(v: DataValue) {
 	match (v) {
-		DataValue::Object(o) => o,
-		_ => panic("Expected Object data value")
+		DataValue::Record(o) => o,
+		_ => panic("Expected Record data value")
 	}
 }
 
-/// Downcasts a data value to an enum variant payload.
-pub fn data_value_to_enum_variant(v: DataValue) -> {name: string, payload: DataValue} {
+/// Downcasts a data value to a variant payload.
+pub fn data_value_to_variant(v: DataValue) -> {name: string, payload: DataValue} {
 	match (v) {
-		DataValue::EnumVariant { name, payload } => { name, payload },
-		DataValue::Object(o) => {
+		DataValue::Variant { name, payload } => { name, payload },
+		DataValue::Record(o) => {
 			{
-				name: data_value_to_string(expect_data_value_object_entry(o, "type")),
-				payload: match get_data_value_object_entry(o, "data") {
+				name: data_value_to_string(expect_data_value_record_entry(o, "type")),
+				payload: match get_data_value_record_entry(o, "data") {
 					Some(value) => value,
 					None => DataValue::Unit,
 				}
 			}
 		},
-		_ => panic("Expected EnumVariant or adjacent-tagged Object data value")
+		_ => panic("Expected Variant or adjacent-tagged Record data value")
 	}
 }
 
-/// Gets an entry from a data object by name, returning None if not found.
-pub fn get_data_value_object_entry(entries: [(string, DataValue)], name: string) -> Option<DataValue> {
+/// Gets an entry from a data record by name, returning None if not found.
+pub fn get_data_value_record_entry(entries: [(string, DataValue)], name: string) -> Option<DataValue> {
 	for entry in entries {
 		if entry.0 == name {
 			return Some(entry.1);
@@ -102,14 +102,14 @@ pub fn get_data_value_object_entry(entries: [(string, DataValue)], name: string)
 	None
 }
 
-/// Gets an entry from a data object by name, panicking if not found.
-pub fn expect_data_value_object_entry(entries: [(string, DataValue)], name: string) -> DataValue {
+/// Gets an entry from a data record by name, panicking if not found.
+pub fn expect_data_value_record_entry(entries: [(string, DataValue)], name: string) -> DataValue {
 	for entry in entries {
 		if entry.0 == name {
 			return entry.1;
 		}
 	};
-	panic(f"Data object key \"{name}\" not found")
+	panic(f"Data record field \"{name}\" not found")
 }
 
 impl Serialize for <Self = DataValue> {

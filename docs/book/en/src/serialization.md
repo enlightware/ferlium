@@ -21,16 +21,16 @@ DataValue::Float(1.5)
 DataValue::String("hello")
 DataValue::Array([DataValue::Int(1), DataValue::Int(2)])
 DataValue::Tuple([DataValue::Int(1), DataValue::String("x")])
-DataValue::Object([("host", DataValue::String("localhost"))])
+DataValue::Record([("host", DataValue::String("localhost"))])
 DataValue::Set([DataValue::String("a"), DataValue::String("b")])
 DataValue::Map([(DataValue::String("a"), DataValue::Int(1))])
-DataValue::EnumVariant { name: "Some", payload: DataValue::Tuple([DataValue::Int(1)]) }
+DataValue::Variant { name: "Some", payload: DataValue::Tuple([DataValue::Int(1)]) }
 ```
 
 `Null` represents external null data, such as JSON `null`.
 `Unit` represents the Ferlium value `()`.
 
-Arrays, tuples, objects, sets, maps, and enum variants keep distinct shapes in `DataValue`.
+Arrays, tuples, records, sets, maps, and variants keep distinct shapes in `DataValue`.
 JSON may still encode several of these as arrays or objects because JSON has fewer data shapes.
 
 ## JSON
@@ -47,7 +47,7 @@ JSON input maps to `DataValue` as follows:
 - `null` becomes `Null`
 - booleans, numbers, and strings become `Bool`, `Int` or `Float`, and `String`
 - arrays become `Array`
-- objects become `Object`
+- objects become `Record`
 
 Maps are encoded to JSON as arrays of key-value pairs.
 This keeps the representation valid even when keys are not strings.
@@ -72,8 +72,8 @@ Data text supports:
 - `null`, `()`, booleans, numbers, and strings
 - arrays: `[1, 2, 3]`
 - tuples: `(1, "x")`
-- objects: `{ host: "localhost", port: 8080 }`
-- enum variants: `None`, `Some(1)`
+- records: `{ host: "localhost", port: 8080 }`
+- variants: `None`, `Some(1)`
 - sets: `set { 1, 2, 3 }`
 - maps: `map { "a" => 1, "b" => 2 }`
 - comments and trailing commas

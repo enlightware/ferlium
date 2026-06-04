@@ -37,7 +37,7 @@ fn data_array_variant(tag: &str, values: Vec<Value>) -> Value {
     data_variant(tag, array_value_from_vec(values))
 }
 
-fn data_object_entry(name: &str, value: Value) -> Value {
+fn data_record_entry(name: &str, value: Value) -> Value {
     Value::tuple([string_value(name), value])
 }
 
@@ -45,9 +45,9 @@ fn data_map_entry(key: Value, value: Value) -> Value {
     Value::tuple([key, value])
 }
 
-fn data_enum_variant(name: &str, payload: Value) -> Value {
+fn data_variant_value(name: &str, payload: Value) -> Value {
     let record = Value::tuple([string_value(name), payload]);
-    Value::raw_variant(ustr("EnumVariant"), record)
+    Value::raw_variant(ustr("Variant"), record)
 }
 
 fn escape_string(value: &str) -> String {
@@ -68,10 +68,10 @@ fn escape_string(value: &str) -> String {
     output
 }
 
-fn is_object_data(value: &Value) -> bool {
+fn is_record_data(value: &Value) -> bool {
     value
         .as_variant()
-        .is_some_and(|variant| variant.tag.as_str() == "Object")
+        .is_some_and(|variant| variant.tag.as_str() == "Record")
 }
 
 fn escape_data_text_string(input: &Str) -> Str {
@@ -220,7 +220,7 @@ impl<'a> Parser<'a> {
             self.skip_ws_and_comments()?;
             self.expect_char(':')?;
             let value = self.parse_value()?;
-            entries.push(data_object_entry(&name, value));
+            entries.push(data_record_entry(&name, value));
             self.skip_ws_and_comments()?;
             if self.consume_char(',') {
                 continue;
@@ -228,7 +228,7 @@ impl<'a> Parser<'a> {
             self.expect_char('}')?;
             break;
         }
-        Ok(data_array_variant("Object", entries))
+        Ok(data_array_variant("Record", entries))
     }
 
     fn parse_sequence(&mut self, open: char, close: char) -> Result<Vec<Value>, RuntimeErrorKind> {
@@ -271,7 +271,7 @@ impl<'a> Parser<'a> {
                 if self.consume_char('(') {
                     self.skip_ws_and_comments()?;
                     if self.consume_char(')') {
-                        return Ok(data_enum_variant(&ident, data_unit_variant("Unit")));
+                        return Ok(data_variant_value(&ident, data_unit_variant("Unit")));
                     }
                     let mut args = Vec::new();
                     loop {
@@ -287,14 +287,14 @@ impl<'a> Parser<'a> {
                         self.expect_char(')')?;
                         break;
                     }
-                    let payload = if args.len() == 1 && is_object_data(&args[0]) {
+                    let payload = if args.len() == 1 && is_record_data(&args[0]) {
                         args.pop().expect("single argument exists")
                     } else {
                         data_array_variant("Tuple", args)
                     };
-                    Ok(data_enum_variant(&ident, payload))
+                    Ok(data_variant_value(&ident, payload))
                 } else {
-                    Ok(data_enum_variant(&ident, data_unit_variant("Unit")))
+                    Ok(data_variant_value(&ident, data_unit_variant("Unit")))
                 }
             }
         }

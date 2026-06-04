@@ -83,7 +83,7 @@ pub fn to_data_text(v: DataValue) -> string {
 		DataValue::String(s) => escape_data_text_string(s),
 		DataValue::Array(a) => data_text_join_sequence(a, "[", "]"),
 		DataValue::Tuple(a) => data_value_tuple_to_text(a),
-		DataValue::Object(o) => {
+		DataValue::Record(o) => {
 			let mut result = "{";
 			for i in 0..array_len(o) {
 				if i > 0 {
@@ -121,7 +121,7 @@ pub fn to_data_text(v: DataValue) -> string {
 			string_push_str(result, "}");
 			result
 		},
-		DataValue::EnumVariant { name, payload } => {
+		DataValue::Variant { name, payload } => {
 			if not is_data_text_identifier(name) {
 				panic(f"Cannot render enum variant name `{name}` as data text");
 			};

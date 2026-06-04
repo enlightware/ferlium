@@ -21,7 +21,7 @@ pub fn to_json(v: DataValue) -> string {
 		DataValue::String(s) => escape_json_string(s),
 		DataValue::Array(a) => sequence_to_json(a),
 		DataValue::Tuple(a) => sequence_to_json(a),
-		DataValue::Object(o) => {
+		DataValue::Record(o) => {
 			let mut result = "{";
 			for i in 0..array_len(o) {
 				let entry = o[i];
@@ -53,7 +53,7 @@ pub fn to_json(v: DataValue) -> string {
 			string_push_str(result, "]");
 			result
 		},
-		DataValue::EnumVariant { name, payload } => {
+		DataValue::Variant { name, payload } => {
 			let mut result = "{\"type\":";
 			string_push_str(result, to_json(DataValue::String(name)));
 			if payload != DataValue::Unit {

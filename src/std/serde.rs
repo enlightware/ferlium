@@ -27,7 +27,7 @@ use crate::{
     std::{
         array::array_type,
         core_traits_names::{DESERIALIZE_TRAIT_NAME, SERIALIZE_TRAIT_NAME, VALUE_TRAIT_NAME},
-        data_value::data_value_object_entry_type,
+        data_value::data_value_record_entry_type,
         math::int_type,
         string::{string_type, string_value},
         value::VALUE_CLONE_METHOD_INDEX,
@@ -86,7 +86,7 @@ fn build_serialize_projection(
     Ok(alloc_synth_node(arena, apply, data_value_type()))
 }
 
-fn object_payload_type() -> Type {
+fn record_payload_type() -> Type {
     cached_ty!(|| {
         let element_ty = tuple_type([string_type(), data_value_type()]);
         array_type(element_ty)
@@ -195,7 +195,7 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
             Example source code for serialization of a record:
             impl Serialize {
                 fn serialize(r: {a: _, b: _}) {
-                    Object([
+                    Record([
                         (
                             String("a"),
                             serialize(r.0)
@@ -209,7 +209,7 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
             }
 
             Example corresponding HIR:
-            DataValue with tag: Object
+            DataValue with tag: Record
                 build tuple (
                     build array [
                         build tuple (
@@ -231,19 +231,19 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
                     let payload = build_serialize_projection(
                         arena, solver, trait_id, span, l_self_id, ty, index, ty_i,
                     )?;
-                    let entry = n(arena, tuple([tag, payload]), data_value_object_entry_type());
+                    let entry = n(arena, tuple([tag, payload]), data_value_record_entry_type());
                     Ok(entry)
                 })
                 .collect::<Result<SVec2<_>, _>>()?;
-            Some(build_serialize_to_seq(arena, nodes, "Object"))
+            Some(build_serialize_to_seq(arena, nodes, "Record"))
         } else if let TypeKind::Variant(variants) = ty_data {
             // Store Ferlium enum variants explicitly in the serialization data model.
             /*
             impl Serialize {
                 fn serialize(v: Variant1 | Variant2(_)) {
                     match v {
-                        Variant1 => EnumVariant({ name: "Variant1", payload: Unit }),
-                        Variant2(x) => EnumVariant({ name: "Variant2", payload: serialize(x) }),
+                        Variant1 => Variant({ name: "Variant1", payload: Unit }),
+                        Variant2(x) => Variant({ name: "Variant2", payload: serialize(x) }),
                     }
                 }
             }
@@ -272,7 +272,7 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
                     let enum_record = n(arena, record([name_node, payload_node]), enum_record_ty);
                     let code = n(
                         arena,
-                        variant(ustr("EnumVariant"), enum_record),
+                        variant(ustr("Variant"), enum_record),
                         data_value_type(),
                     );
                     let tag_value = LiteralValue::new_native(ustr_to_isize(tag));
@@ -485,36 +485,36 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
             Example source code for deserialization of a record:
             impl Deserialize {
                 fn deserialize(data: DataValue) -> {a: _, b: _} {
-                    let o = std::data_value_to_object(data);
+                    let o = std::data_value_to_record(data);
                     {
-                        a: deserialize(std::expect_data_value_object_entry(o, "a")),
-                        b: deserialize(std::expect_data_value_object_entry(o, "b")),
+                        a: deserialize(std::expect_data_value_record_entry(o, "a")),
+                        b: deserialize(std::expect_data_value_record_entry(o, "b")),
                     }
                 }
             }
             */
-            // extract the object payload from the data value
-            let get_object = build_data_value_to_object(arena, solver, load_data_value)?;
-            let object_ty = object_payload_type();
+            // Extract the record payload from the data value.
+            let get_record = build_data_value_to_record(arena, solver, load_data_value)?;
+            let record_ty = record_payload_type();
             // store it at 1
-            let (store_object, l_object_id) = store_new_local(
-                get_object,
+            let (store_record, l_record_id) = store_new_local(
+                get_record,
                 1,
-                "object",
+                "record",
                 MutVal::constant(),
-                object_ty,
+                record_ty,
                 &mut locals,
             );
-            let store_object = n(arena, store_object, Type::unit());
+            let store_record = n(arena, store_record, Type::unit());
             // build deserialization of each field
             let build_elements = fields
                 .into_iter()
                 .map(|(name, ty)| {
-                    // get the object payload
-                    let load_object = n(arena, load_local(l_object_id), object_payload_type());
-                    // get the name-th element out of the object array
+                    // get the record payload
+                    let load_record = n(arena, load_local(l_record_id), record_payload_type());
+                    // get the name-th element out of the record array
                     let get_entry =
-                        build_expect_data_value_object_entry(arena, solver, load_object, &name)?;
+                        build_expect_data_value_record_entry(arena, solver, load_record, &name)?;
                     // deserialize the name-th element
                     let function = solver.solve_impl_method(
                         trait_id,
@@ -537,47 +537,42 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
             // build the record node
             let build_record = n(arena, record(build_elements), ty);
             // assemble the final node
-            Some(n(arena, block([store_object, build_record]), ty))
+            Some(n(arena, block([store_record, build_record]), ty))
         } else if let TypeKind::Variant(variants) = ty_data {
             // Deserialize explicit enum variant data, while the helper also accepts the
-            // adjacent-tagged object shape produced by the JSON codec.
+            // adjacent-tagged record shape produced by the JSON codec.
             /*
             impl Deserialize {
                 fn deserialize(data: DataValue) -> Variant1 | Variant2(x) {
-                    let enum_variant = std::data_value_to_enum_variant(data);
-                    match enum_variant.name {
+                    let variant = std::data_value_to_variant(data);
+                    match variant.name {
                         "Variant1" => Variant1,
                         "Variant2" => {
-                            Variant2(deserialize(enum_variant.payload))
+                            Variant2(deserialize(variant.payload))
                         },
                         _ => panic!("Unknown enum variant tag")
                     }
                 }
             }
             */
-            // extract the enum variant payload
-            let get_enum_variant =
-                build_data_value_to_enum_variant(arena, solver, load_data_value)?;
-            let enum_data_value_ty = enum_variant_payload_type();
+            // extract the variant payload
+            let get_variant = build_data_value_to_variant(arena, solver, load_data_value)?;
+            let variant_data_value_ty = variant_payload_type();
             // store it at 1
-            let (store_enum_variant, l_enum_variant_id) = store_new_local(
-                get_enum_variant,
+            let (store_variant, l_variant_id) = store_new_local(
+                get_variant,
                 1,
-                "enum_variant",
+                "variant",
                 MutVal::constant(),
-                enum_data_value_ty,
+                variant_data_value_ty,
                 &mut locals,
             );
-            let store_enum_variant = n(arena, store_enum_variant, Type::unit());
-            // Load the enum variant name from local 1.
-            let load_enum_variant_id = n(
-                arena,
-                load_local(l_enum_variant_id),
-                enum_variant_payload_type(),
-            );
+            let store_variant = n(arena, store_variant, Type::unit());
+            // Load the variant name from local 1.
+            let load_variant_id = n(arena, load_local(l_variant_id), variant_payload_type());
             let get_name = n(
                 arena,
-                project(load_enum_variant_id, ProjectionIndex::from_index(0)),
+                project(load_variant_id, ProjectionIndex::from_index(0)),
                 string_type(),
             );
             // Build the data extraction for each enum alternative.
@@ -589,17 +584,11 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                         .expect("enum variant tag strings should always lower to literal values");
                     let build_variant = if payload_ty != Type::unit() {
                         // variant with payload
-                        let load_enum_variant_for_payload = n(
-                            arena,
-                            load_local(l_enum_variant_id),
-                            enum_variant_payload_type(),
-                        );
+                        let load_variant_for_payload =
+                            n(arena, load_local(l_variant_id), variant_payload_type());
                         let get_data = n(
                             arena,
-                            project(
-                                load_enum_variant_for_payload,
-                                ProjectionIndex::from_index(1),
-                            ),
+                            project(load_variant_for_payload, ProjectionIndex::from_index(1)),
                             data_value_type(),
                         );
                         let deserialize = build_deserialize(arena, solver, get_data, payload_ty)?;
@@ -616,7 +605,7 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
             let panic_node = build_panic(arena, solver, "Unknown enum variant tag")?;
             let match_type = n(arena, case(get_name, variant_cases, panic_node), ty);
             // assemble the final node
-            Some(n(arena, block([store_enum_variant, match_type]), ty))
+            Some(n(arena, block([store_variant, match_type]), ty))
         } else {
             None // deserialization of rest not yet supported
         };
@@ -725,7 +714,7 @@ fn build_data_value_to_tuple(
     )
 }
 
-fn build_data_value_to_object(
+fn build_data_value_to_record(
     arena: &mut NodeArena,
     solver: &mut TraitSolver,
     data_value_node: NodeId,
@@ -733,20 +722,20 @@ fn build_data_value_to_object(
     build_data_value_to_x(
         arena,
         solver,
-        "object",
-        object_payload_type(),
+        "record",
+        record_payload_type(),
         data_value_node,
     )
 }
 
-fn enum_variant_payload_type() -> Type {
+fn variant_payload_type() -> Type {
     Type::record(vec![
         (ustr("name"), string_type()),
         (ustr("payload"), data_value_type()),
     ])
 }
 
-fn build_data_value_to_enum_variant(
+fn build_data_value_to_variant(
     arena: &mut NodeArena,
     solver: &mut TraitSolver,
     data_value_node: NodeId,
@@ -754,8 +743,8 @@ fn build_data_value_to_enum_variant(
     build_data_value_to_x(
         arena,
         solver,
-        "enum_variant",
-        enum_variant_payload_type(),
+        "variant",
+        variant_payload_type(),
         data_value_node,
     )
 }
@@ -790,8 +779,8 @@ fn build_data_value_to_x(
     Ok(n(arena, apply, ret_ty))
 }
 
-// Build a node that gets an entry from a data-value object payload [(string, DataValue)].
-fn build_expect_data_value_object_entry(
+// Build a node that gets an entry from a data-value record payload [(string, DataValue)].
+fn build_expect_data_value_record_entry(
     arena: &mut NodeArena,
     solver: &mut TraitSolver,
     fields: NodeId,
@@ -813,7 +802,7 @@ fn build_expect_data_value_object_entry(
     let function = solver.get_function(
         span,
         &module::Path::single_str("std"),
-        ustr("expect_data_value_object_entry"),
+        ustr("expect_data_value_record_entry"),
     )?;
     let apply = static_apply_generated(
         arena,
