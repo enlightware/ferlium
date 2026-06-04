@@ -13,7 +13,7 @@ use ustr::ustr;
 
 use ferlium::{compiler::error::CompilationErrorImpl, format::FormatWith, std::option::some};
 
-use crate::harness::{TestSession, float, int, string};
+use crate::harness::{TestSession, float, int, string, variant_t1, variant_tn};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
@@ -148,6 +148,50 @@ fn variant_alias_names_cannot_conflict_with_type_names() {
 
     let mut session = TestSession::new();
     session.compile("type T = Bool(bool) | Int(int); fn f() -> T { Bool(true) }");
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn recursive_variant_alias_constructors_default_nested_payloads() {
+    let mut session = TestSession::new();
+    let expected_tree = || {
+        variant_tn(
+            "Node",
+            [
+                variant_t1("Leaf", int(1)),
+                variant_tn(
+                    "Node",
+                    [variant_t1("Leaf", int(2)), variant_t1("Leaf", int(3))],
+                ),
+            ],
+        )
+    };
+
+    let tree_src = indoc! { r#"
+        type Tree<T> = Leaf(T) | Node(Tree<T>, Tree<T>);
+
+        Node(
+            Leaf(1),
+            Node(
+                Leaf(2),
+                Leaf(3)
+            )
+        )
+    "# };
+    assert_val_eq!(session.run(tree_src), expected_tree());
+
+    let inferred_ascription_src = indoc! { r#"
+        type Tree<T> = Leaf(T) | Node(Tree<T>, Tree<T>);
+
+        (Node(
+            Leaf(1),
+            Node(
+                Leaf(2),
+                Leaf(3)
+            )
+        ): _)
+    "# };
+    assert_val_eq!(session.run(inferred_ascription_src), expected_tree());
 }
 
 #[test]

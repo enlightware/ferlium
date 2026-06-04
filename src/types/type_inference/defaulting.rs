@@ -604,6 +604,9 @@ impl UnifiedTypeInference {
                         all_satisfied = false;
                         break;
                     }
+                } else {
+                    all_satisfied = false;
+                    break;
                 }
             }
 
