@@ -111,6 +111,26 @@ impl DictionaryReq {
                 .get_dictionary_type_for_tys(input_tys, output_tys, output_effs),
         }
     }
+
+    /// Returns the type of the dictionary value satisfying this requirement,
+    /// resolving traits through `env`.
+    pub fn to_dict_type_in_env(&self, env: &ModuleEnv<'_>) -> Type {
+        match self {
+            DictionaryReq::ProjectionSubscript { subscript_ty, .. } => {
+                Type::subscript_type(subscript_ty.clone())
+            }
+            DictionaryReq::TraitImpl {
+                trait_id,
+                input_tys,
+                output_tys,
+                output_effs,
+            } => env.trait_def(*trait_id).get_dictionary_type_for_tys(
+                input_tys,
+                output_tys,
+                output_effs,
+            ),
+        }
+    }
 }
 
 impl PartialEq for DictionaryReq {

@@ -1,111 +1,218 @@
 use std::fmt;
 
-use itertools::Itertools;
+use ordered_float::NotNan;
 use ustr::Ustr;
 
-use crate::{module::{LocalFunctionId, ModuleId}, ssa};
+use crate::types::r#type::Type;
+use crate::{
+    module::{LocalFunctionId, ModuleId, SubscriptId, TraitDictionaryId},
+    ssa,
+};
 
 /// A value in the SSA form of Ferlium.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Value {
+    /// A constant boolean
+    Boolean(bool),
 
-  /// A constant boolean
-  Boolean(bool),
+    /// A symbolic trait dictionary, identified by the canonical handle of the impl that satisfies
+    /// it. The dictionary is kept symbolic (an interned id) rather than materialized into a tuple of
+    /// method function values and associated consts; the SSA interpreter dispatches through it via
+    /// `DictArg::Interned`, and a later tuple-lowering pass (for a real backend) rebuilds the witness
+    /// table from the impl arena exactly as `Emitter::lower_dictionary` did. A *forwarded* dictionary
+    /// (one a generic function received as an extra parameter) is instead represented by the
+    /// `Parameter` slot it arrives in, not by this variant.
+    Dictionary(TraitDictionaryId),
 
-  /// A dictionary value
-  Dictionary(Vec<ssa::Value>),
+    /// A symbolic first-class subscript (projection evidence), identified by the id of the
+    /// subscript it references. Like a dictionary it is kept symbolic rather than materialized: the
+    /// SSA interpreter resolves members through it via `subscript_member`, and a later lowering
+    /// pass (for a real backend) materializes it as a member-table value. A *forwarded* subscript
+    /// (one a generic function received as an extra parameter) is instead represented by the
+    /// `Parameter` slot it arrives in, not by this variant.
+    Subscript(SubscriptId),
 
-  /// A reference to a lowered function.
-  Function(FunctionReference),
+    /// A constant finite float (`float`), represented as an `f64` that is never NaN.
+    Float(NotNan<f64>),
 
-  /// A constant integer.
-  Integer(Box<Integer>),
+    /// A reference to a lowered function.
+    Function(FunctionReference),
 
-  /// The `i`-th parameter of a function.
-  Parameter(usize),
+    /// A constant integer.
+    Integer(Box<Integer>),
 
-  /// The register assigned by an instruction.
-  Register(ssa::InstructionIdentity),
+    /// The `i`-th parameter of a function.
+    Parameter(usize),
 
-  /// A unit value.
-  Unit,
+    /// The register assigned by an instruction.
+    Register(ssa::InstructionIdentity),
 
+    /// A unit value.
+    Unit,
+
+    /// A constant string value.
+    String(crate::std::string::String),
+
+    /// A constant literal value (a scalar or a composite tuple/record), used as a `match` pattern.
+    /// Scalars also have dedicated variants above; this carries whole composite patterns — e.g.
+    /// `(true, true)` — that have no single scalar form, so a `match` can compare the whole scrutinee
+    /// against the whole pattern structurally (mirroring the HIR interpreter's `LiteralValue`
+    /// equality) instead of decomposing it.
+    Literal(crate::containers::B<crate::hir::value::LiteralValue>),
+
+    /// An uninitialized value of type `T`.
+    Uninit(ShownType),
 }
 
 impl fmt::Display for Value {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    match self {
-      Value::Boolean(i) => write!(f, "i1 {}", *i as u8),
-      Value::Dictionary(i) => {
-        write!(f, "({})", i.iter().map(|v| format!("{}", v)).join(", "))
-      },
-      Value::Function(i) => write!(f, "{}", i.representation),
-      Value::Integer(i) => i.fmt(f),
-      Value::Parameter(i) => write!(f, "%p{}", i),
-      Value::Register(i) => write!(f, "%r{}", i.raw()),
-      Value::Unit => write!(f, "()")
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Value::Boolean(i) => write!(f, "i1 {}", *i as u8),
+            Value::Dictionary(id) => {
+                write!(f, "dict(m{}:i{})", id.module_id, id.impl_id)
+            }
+            Value::Subscript(id) => {
+                write!(f, "subscript(m{}:s{})", id.module, id.subscript)
+            }
+            Value::Float(x) => write!(f, "float {}", x.into_inner()),
+            Value::Function(i) => write!(f, "{}", i.name),
+            Value::Integer(i) => i.fmt(f),
+            Value::Parameter(i) => write!(f, "%p{}", i),
+            Value::Register(i) => write!(f, "%r{}", i.raw()),
+            Value::Unit => write!(f, "()"),
+            Value::Uninit(t) => write!(f, "Uninit<{}>", t.name),
+            Value::String(s) => write!(f, "\"{}\"", s),
+            Value::Literal(lit) => write!(f, "{}", lit),
+        }
     }
-  }
 }
 
 /// A function reference, represented as its reference, and its representation
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct FunctionReference {
-  /// The string representation of `self`.
-  pub representation: Ustr,
+    /// The qualified name of `self`.
+    pub name: Ustr,
 
-  /// The module id in which the function is defined.
-  pub module: ModuleId,
+    /// The module id in which the function is defined.
+    pub module: ModuleId,
 
-  /// The LocalFunctionId in the module in which the function is declared.
-  pub identity: LocalFunctionId,
+    /// The LocalFunctionId in the module in which the function is declared.
+    pub identity: LocalFunctionId,
+}
+
+/// A type identity along with the type's string representation.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct ShownType {
+    /// The type's identity.
+    pub ty: Type,
+
+    /// The string representation of `ty`.
+    pub name: String,
+}
+
+/// The width of an SSA integer constant.
+///
+/// Keeping the pointer-sized case symbolic (rather than baking in 32 or 64) makes the SSA IR target
+/// independent: `PointerSized` represents `int`/`isize`/`usize`, whose physical width is resolved by
+/// the backend profile (see `doc/abi.md`).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum IntWidth {
+    /// A fixed bit width, e.g. `i8`, `i32`, `u64`.
+    FixedSize(i16),
+
+    /// A pointer-sized width (`int`/`isize`/`usize`), resolved per backend profile.
+    PointerSized,
 }
 
 /// A constant integer, represented as a two's complement value.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Integer {
-  /// The bit pattern of the value. Only the `bit_width` least significant bits are relevant.
-  pub bits: u64,
+    /// The bit pattern of the value. Only the `width` least significant bits are relevant.
+    pub bits: u64,
 
-  /// The number of bits in the representation of `self`.
-  pub bit_width: u8,
+    /// The width of the representation of `self`.
+    pub width: IntWidth,
 
-  /// `true` iff the representation of `self` is signed.
-  pub signed: bool,
+    /// `true` iff the representation of `self` is signed.
+    pub signed: bool,
 }
 
 impl Integer {
-  pub fn from_isize(value: isize) -> Self {
-    Self {
-      bits: isize::cast_unsigned(value) as u64,
-      bit_width: 32,
-      signed: true,
+    pub fn from_isize(value: isize) -> Self {
+        Self {
+            bits: isize::cast_unsigned(value) as u64,
+            width: IntWidth::PointerSized,
+            signed: true,
+        }
     }
-  }
 
-  pub fn from_u32(value: u32) -> Self {
-    Self {
-      bits: value.into(),
-      bit_width: 32,
-      signed: false,
+    pub fn from_u32(value: u32) -> Self {
+        Self {
+            bits: value.into(),
+            width: IntWidth::FixedSize(32),
+            signed: false,
+        }
     }
-  }
 
-  pub fn from_i32(value: i32) -> Self {
-    Self {
-      bits: i32::cast_unsigned(value).into(),
-      bit_width: 32,
-      signed: true,
+    pub fn from_i32(value: i32) -> Self {
+        Self {
+            bits: i32::cast_unsigned(value).into(),
+            width: IntWidth::FixedSize(32),
+            signed: true,
+        }
     }
-  }
+
+    /// Interprets `self` as a two's-complement integer and returns its value as an `isize`.
+    ///
+    /// Only the low `width` bits of `bits` are significant; a signed value is sign-extended from
+    /// that width. This is the bridge used by the SSA interpreter, which represents every integer
+    /// as the host `isize` (matching the HIR runtime representation of `int`).
+    pub fn to_isize(&self) -> isize {
+        match self.width {
+            IntWidth::PointerSized => self.bits as i64 as isize,
+            IntWidth::FixedSize(w) => {
+                let w = w as u32;
+                if self.signed && w < 64 {
+                    let shift = 64 - w;
+                    (((self.bits << shift) as i64) >> shift) as isize
+                } else {
+                    self.bits as isize
+                }
+            }
+        }
+    }
 }
 
 impl fmt::Display for Integer {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    if self.signed {
-      write!(f, "i{} {}", self.bit_width, u64::cast_signed(self.bits))
-    } else {
-      write!(f, "u{} {}", self.bit_width, self.bits)
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.width {
+            IntWidth::FixedSize(bits) => {
+                if self.signed {
+                    write!(f, "i{} {}", bits, self.to_isize())
+                } else {
+                    write!(f, "u{} {}", bits, self.bits)
+                }
+            }
+            IntWidth::PointerSized => {
+                if self.signed {
+                    write!(f, "int {}", self.to_isize())
+                } else {
+                    write!(f, "uint {}", self.bits)
+                }
+            }
+        }
     }
-  }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Integer;
+
+    #[test]
+    fn display_sign_extends_fixed_width_integers() {
+        assert_eq!(Integer::from_i32(-1).to_string(), "i32 -1");
+        assert_eq!(Integer::from_i32(7).to_string(), "i32 7");
+        assert_eq!(Integer::from_u32(u32::MAX).to_string(), "u32 4294967295");
+        assert_eq!(Integer::from_isize(-5).to_string(), "int -5");
+    }
 }

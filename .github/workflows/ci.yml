@@ -47,7 +47,12 @@ jobs:
           locked: true
 
       - name: Run local tests
+        # The dual-backend suite runs every snippet through both interpreters; at the 128-frame
+        # call-depth limit the unoptimized interpreters need more than the default test-thread
+        # stack on macOS.
         run: cargo nextest run
+        env:
+          RUST_MIN_STACK: "8388608"
 
   wasm:
     name: WASM tests (${{ matrix.browser }})

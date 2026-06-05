@@ -1,2 +1,8 @@
 [env]
 RUST_TEST_THREADS = "1"
+
+# The dual-backend test suite runs every snippet through both the HIR tree-walking interpreter
+# and the SSA reference interpreter; at the 128-frame call-depth limit the (unoptimized)
+# interpreters need more than the 1 MiB default wasm shadow stack.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=-zstack-size=4194304"]

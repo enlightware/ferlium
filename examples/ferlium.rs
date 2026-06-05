@@ -646,7 +646,7 @@ fn process_input(
     let print_ssa: bool = env::args().any(|arg| arg == "--print-ssa");
 
     if print_ssa {
-        let ssa = session.emit_ssa(name, input);
+        let ssa = session.emit_ssa_module(module_id);
         println!("{}", ssa);
     }
 
