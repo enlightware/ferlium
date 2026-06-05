@@ -1410,7 +1410,7 @@ enum ResolvedValueMethod {
 
 fn clone_value_method_dispatch(clone: &ResolvedLocalClone) -> Option<ResolvedValueMethod> {
     match clone {
-        ResolvedLocalClone::TrivialCopy => None,
+        ResolvedLocalClone::TrivialCopy(_) => None,
         ResolvedLocalClone::Static(function) => Some(ResolvedValueMethod::Static(*function)),
         ResolvedLocalClone::Dictionary(dictionary) => {
             Some(ResolvedValueMethod::Dictionary(*dictionary))
@@ -1758,7 +1758,7 @@ fn eval_clone_value(
 ) -> EvalControlFlowResult {
     let clone = resolved_local_clone(&node.clone);
 
-    if matches!(clone, ResolvedLocalClone::TrivialCopy) {
+    if matches!(clone, ResolvedLocalClone::TrivialCopy(_)) {
         let temp_start = ctx.environment.len();
         let place = eval_or_return!(eval_node_as_place(arena, node.source, ctx, locals));
         let result = copy_trivial_copy_value_from_place(&place, arena[node.source].ty, ctx, span);
@@ -2033,7 +2033,7 @@ fn eval_store_local(
         ctx.ensure_environment_slot(target_index);
         let target = local_place(ctx, locals, node.id);
         let clone = resolved_local_clone(clone);
-        if matches!(clone, ResolvedLocalClone::TrivialCopy) {
+        if matches!(clone, ResolvedLocalClone::TrivialCopy(_)) {
             let value =
                 match eval_or_return!(try_eval_node_as_place(arena, node.value, ctx, locals)) {
                     Some(place) => copy_trivial_copy_value_from_place(&place, local.ty, ctx, span)?,
@@ -2132,7 +2132,7 @@ fn eval_take_local_value(
 ) -> EvalControlFlowResult {
     match node.mode {
         ResolvedTakeLocalValueMode::MoveOwned => take_owned_local_value(node.id, ctx, locals),
-        ResolvedTakeLocalValueMode::CloneBorrowed(ResolvedLocalClone::TrivialCopy) => {
+        ResolvedTakeLocalValueMode::CloneBorrowed(ResolvedLocalClone::TrivialCopy(_)) => {
             let place = local_place(ctx, locals, node.id);
             cont(copy_trivial_copy_value_from_place(
                 &place,
@@ -2685,7 +2685,7 @@ fn eval_call_arg(
                 Err(err) => Err(err),
             }
         }
-        ResolvedArgPassing::Value(ResolvedValueArgPassing::Owned)
+        ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy(_))
             if is_dictionary_metadata_node(arena, arg) =>
         {
             eval_dictionary_metadata_node(arena, arg, ctx).map(|result| {
@@ -2694,8 +2694,8 @@ fn eval_call_arg(
                 })
             })
         }
-        ResolvedArgPassing::Value(ResolvedValueArgPassing::Owned) => {
-            eval_owned_arg(arena, arg, ty, ctx, locals)
+        ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy(_)) => {
+            eval_trivial_copy_arg(arena, arg, ty, ctx, locals)
                 .map(|result| result.map_continue(EvaluatedCallArg::Ready))
         }
     }
@@ -2743,7 +2743,7 @@ fn eval_args(
     )))
 }
 
-fn eval_owned_arg(
+fn eval_trivial_copy_arg(
     arena: &ENodeArena,
     arg: ENodeId,
     ty: Type,
@@ -2908,7 +2908,7 @@ mod tests {
             function::{ResolvedArgPassing, ResolvedValueArgPassing},
             value::{LiteralValue, NativeDisplay},
         },
-        module::{ModuleId, id::Id},
+        module::{ModuleId, ResolvedValueLayout, id::Id},
         types::{
             effects::EffType,
             r#type::{FnArgType, Type},
@@ -2934,6 +2934,14 @@ mod tests {
 
     fn reset_eval_drop_tracked_count() {
         EVAL_DROP_TRACKED_COUNT.store(0, Ordering::Relaxed);
+    }
+
+    fn unit_layout() -> ResolvedValueLayout {
+        ResolvedValueLayout::native::<()>()
+    }
+
+    fn eval_drop_tracked_layout() -> ResolvedValueLayout {
+        ResolvedValueLayout::native::<EvalDropTracked>()
     }
 
     fn eval_drop_tracked_count() -> usize {
@@ -3094,11 +3102,15 @@ mod tests {
         let arguments = [
             CallArgument {
                 value: tracked,
-                passing: ResolvedArgPassing::Value(ResolvedValueArgPassing::Owned),
+                passing: ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy(
+                    eval_drop_tracked_layout(),
+                )),
             },
             CallArgument {
                 value: return_unit,
-                passing: ResolvedArgPassing::Value(ResolvedValueArgPassing::Owned),
+                passing: ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy(
+                    unit_layout(),
+                )),
             },
         ];
 
@@ -3144,11 +3156,15 @@ mod tests {
         let arguments = [
             CallArgument {
                 value: tracked,
-                passing: ResolvedArgPassing::Value(ResolvedValueArgPassing::Owned),
+                passing: ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy(
+                    eval_drop_tracked_layout(),
+                )),
             },
             CallArgument {
                 value: break_node,
-                passing: ResolvedArgPassing::Value(ResolvedValueArgPassing::Owned),
+                passing: ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy(
+                    unit_layout(),
+                )),
             },
         ];
 

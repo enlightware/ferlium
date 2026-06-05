@@ -25,7 +25,7 @@ use crate::{
         ResolvedLocalClone, ResolvedLocalDrop, id::Id,
     },
     std::{
-        core_traits_names::{TRIVIAL_COPY_TRAIT_NAME, VALUE_TRAIT_NAME},
+        core_traits_names::VALUE_TRAIT_NAME,
         value::{
             VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX, is_function_surface_only_value_type,
         },
@@ -122,8 +122,11 @@ pub(crate) fn resolve_local_clone(
     ty: Type,
     span: Location,
 ) -> Result<ResolvedLocalClone, InternalCompilationError> {
-    if type_has_concrete_trivial_copy_impl(arena, ctx, ty, span) {
-        return Ok(ResolvedLocalClone::TrivialCopy);
+    if let Some(layout) = ctx
+        .trait_solver
+        .solve_concrete_trivial_copy_layout(arena, ty, span)?
+    {
+        return Ok(ResolvedLocalClone::TrivialCopy(layout));
     }
     let dispatch = resolve_value_method_dispatch(
         arena,
@@ -147,7 +150,11 @@ pub(crate) fn resolve_local_drop(
     ty: Type,
     span: Location,
 ) -> Result<PendingLocalDrop, InternalCompilationError> {
-    if type_has_concrete_trivial_copy_impl(arena, ctx, ty, span) {
+    if ctx
+        .trait_solver
+        .solve_concrete_trivial_copy_layout(arena, ty, span)?
+        .is_some()
+    {
         return Ok(PendingLocalDrop::Resolved(ResolvedLocalDrop::Skip));
     }
     let dispatch = resolve_value_method_dispatch(
@@ -195,8 +202,11 @@ fn resolve_value_arg_passing(
     needs_temp: bool,
     span: Location,
 ) -> Result<ResolvedValueArgPassing, InternalCompilationError> {
-    if type_has_concrete_trivial_copy_impl(arena, ctx, ty, span) {
-        Ok(ResolvedValueArgPassing::Owned)
+    if let Some(layout) = ctx
+        .trait_solver
+        .solve_concrete_trivial_copy_layout(arena, ty, span)?
+    {
+        Ok(ResolvedValueArgPassing::TrivialCopy(layout))
     } else if !needs_temp {
         Ok(ResolvedValueArgPassing::SharedRef {
             temp_cleanup: SharedRefTempCleanup::None,
@@ -233,7 +243,7 @@ pub(crate) fn resolved_arg_passing_for_generated_call(
         args,
         arg_tys,
         span,
-        resolve_generated_value_arg_passing,
+        resolve_generated_trivial_copy_or_shared_ref_arg_passing,
     )
 }
 
@@ -265,15 +275,15 @@ pub(crate) fn static_apply_generated(
     ))
 }
 
-fn resolve_generated_value_arg_passing(
+fn resolve_generated_trivial_copy_or_shared_ref_arg_passing(
     arena: &mut NodeArena,
     trait_solver: &mut TraitSolver<'_>,
     ty: Type,
     needs_temp: bool,
     span: Location,
 ) -> Result<ResolvedValueArgPassing, InternalCompilationError> {
-    if generated_type_has_trivial_copy_impl(arena, trait_solver, ty, span) {
-        Ok(ResolvedValueArgPassing::Owned)
+    if let Some(layout) = trait_solver.solve_concrete_trivial_copy_layout(arena, ty, span)? {
+        Ok(ResolvedValueArgPassing::TrivialCopy(layout))
     } else if !needs_temp {
         Ok(ResolvedValueArgPassing::SharedRef {
             temp_cleanup: SharedRefTempCleanup::None,
@@ -296,7 +306,10 @@ fn resolve_generated_temp_drop(
     ty: Type,
     span: Location,
 ) -> Result<ResolvedLocalDrop, InternalCompilationError> {
-    if generated_type_has_trivial_copy_impl(arena, trait_solver, ty, span) {
+    if trait_solver
+        .solve_concrete_trivial_copy_layout(arena, ty, span)?
+        .is_some()
+    {
         return Ok(ResolvedLocalDrop::Skip);
     }
     if is_function_surface_only_value_type(ty) {
@@ -311,39 +324,4 @@ fn resolve_generated_temp_drop(
         span,
         arena,
     )?))
-}
-
-fn generated_type_has_trivial_copy_impl(
-    arena: &mut NodeArena,
-    trait_solver: &mut TraitSolver<'_>,
-    ty: Type,
-    span: Location,
-) -> bool {
-    ty.is_constant()
-        && trait_solver
-            .solve_output_types(
-                trait_solver.std_trait_id(TRIVIAL_COPY_TRAIT_NAME),
-                &[ty],
-                span,
-                arena,
-            )
-            .is_ok()
-}
-
-fn type_has_concrete_trivial_copy_impl(
-    arena: &mut NodeArena,
-    ctx: &mut DictElaborationCtx<'_, '_, '_>,
-    ty: Type,
-    span: Location,
-) -> bool {
-    ty.is_constant()
-        && ctx
-            .trait_solver
-            .solve_output_types(
-                ctx.trait_solver.std_trait_id(TRIVIAL_COPY_TRAIT_NAME),
-                &[ty],
-                span,
-                arena,
-            )
-            .is_ok()
 }

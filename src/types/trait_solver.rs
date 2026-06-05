@@ -31,14 +31,17 @@ use crate::{
         DefKind, DefTable, FunctionId, ImportFunctionSlot, ImportFunctionSlotId,
         ImportFunctionTarget, ImportImplSlot, ImportImplSlotId, LocalDecl, LocalDeclId,
         LocalFunctionId, LocalImplId, Module, ModuleEnv, ModuleFunction, ModuleId,
-        PendingFunctionBody, PendingFunctionCollector, PendingModuleFunction, TraitDictionary,
-        TraitId, TraitImpl, TraitImplId, TraitImpls, TraitKey, TypeDefId, build_dictionary_value,
-        id::Id,
+        PendingFunctionBody, PendingFunctionCollector, PendingModuleFunction, ResolvedValueLayout,
+        TraitDictionary, TraitId, TraitImpl, TraitImplId, TraitImpls, TraitKey, TypeDefId,
+        build_dictionary_value, id::Id,
     },
     std::{
         STD_MODULE_ID,
         core_traits_names::{REPR_TRAIT_NAME, TRIVIAL_COPY_TRAIT_NAME, VALUE_TRAIT_NAME},
-        value::{is_value_trait, value_layout_associated_const_values},
+        value::{
+            VALUE_ALIGN_ASSOC_CONST_INDEX, VALUE_SIZE_ASSOC_CONST_INDEX, is_value_trait,
+            value_layout_associated_const_values,
+        },
     },
     types::effects::EffType,
     types::r#trait::{Trait, TraitAssociatedConstIndex, TraitMethodIndex},
@@ -604,21 +607,43 @@ impl<'a> TraitSolver<'a> {
         })
     }
 
-    fn type_has_concrete_trivial_copy_impl(
+    pub(crate) fn solve_concrete_trivial_copy_layout(
         &mut self,
         arena: &mut NodeArena,
         ty: Type,
         span: Location,
-    ) -> bool {
-        ty.is_constant()
-            && self
-                .solve_output_types(
-                    self.std_trait_id(TRIVIAL_COPY_TRAIT_NAME),
-                    &[ty],
-                    span,
-                    arena,
-                )
-                .is_ok()
+    ) -> Result<Option<ResolvedValueLayout>, InternalCompilationError> {
+        if !ty.is_constant() {
+            return Ok(None);
+        }
+        if self
+            .solve_impl(
+                self.std_trait_id(TRIVIAL_COPY_TRAIT_NAME),
+                &[ty],
+                span,
+                arena,
+            )
+            .is_err()
+        {
+            return Ok(None);
+        }
+        // `TrivialCopy` is marker-only, so selecting its impl proves that a
+        // representation copy is valid but does not itself carry layout data.
+        // The layout is synthesized structurally from the same concrete type.
+        Ok(Some(self.resolved_value_layout(ty, span)?))
+    }
+
+    fn resolved_value_layout(
+        &self,
+        ty: Type,
+        span: Location,
+    ) -> Result<ResolvedValueLayout, InternalCompilationError> {
+        let values = value_layout_associated_const_values(ty, span, self)?;
+        let size = u32::try_from(values[usize::from(VALUE_SIZE_ASSOC_CONST_INDEX)])
+            .expect("Value layout size should fit in u32");
+        let align = u32::try_from(values[usize::from(VALUE_ALIGN_ASSOC_CONST_INDEX)])
+            .expect("Value layout alignment should fit in u32");
+        Ok(ResolvedValueLayout { size, align })
     }
 
     fn resolved_arg_passing_for_no_temp_arg(
@@ -626,23 +651,23 @@ impl<'a> TraitSolver<'a> {
         arena: &mut NodeArena,
         arg: &FnArgType,
         span: Location,
-    ) -> PendingArgPassing {
+    ) -> Result<PendingArgPassing, InternalCompilationError> {
         if arg
             .mut_ty
             .as_resolved()
             .is_some_and(|mut_ty| mut_ty.is_mutable())
         {
-            PendingArgPassing::MutableRef
-        } else if self.type_has_concrete_trivial_copy_impl(arena, arg.ty, span) {
-            PendingArgPassing::Value(PendingValueArgPassing::Resolved(
-                ResolvedValueArgPassing::Owned,
-            ))
+            Ok(PendingArgPassing::MutableRef)
+        } else if let Some(layout) = self.solve_concrete_trivial_copy_layout(arena, arg.ty, span)? {
+            Ok(PendingArgPassing::Value(PendingValueArgPassing::Resolved(
+                ResolvedValueArgPassing::TrivialCopy(layout),
+            )))
         } else {
-            PendingArgPassing::Value(PendingValueArgPassing::Resolved(
+            Ok(PendingArgPassing::Value(PendingValueArgPassing::Resolved(
                 ResolvedValueArgPassing::SharedRef {
                     temp_cleanup: SharedRefTempCleanup::None,
                 },
-            ))
+            )))
         }
     }
 
@@ -651,7 +676,7 @@ impl<'a> TraitSolver<'a> {
         arena: &mut NodeArena,
         args: &[FnArgType],
         span: Location,
-    ) -> Vec<PendingArgPassing> {
+    ) -> Result<Vec<PendingArgPassing>, InternalCompilationError> {
         args.iter()
             .map(|arg| self.resolved_arg_passing_for_no_temp_arg(arena, arg, span))
             .collect()
@@ -1890,7 +1915,7 @@ impl<'a> TraitSolver<'a> {
                                 &mut body_arena,
                                 &def.ty_scheme.ty.args,
                                 fn_span,
-                            );
+                            )?;
                             let arguments = CallArgument::from_values_and_passing(
                                 argument_values,
                                 argument_passing,
@@ -2121,7 +2146,7 @@ impl<'a> TraitSolver<'a> {
                             &mut body_arena,
                             &def.ty_scheme.ty.args,
                             fn_span,
-                        );
+                        )?;
                         let arguments = CallArgument::from_values_and_passing(
                             argument_values,
                             argument_passing,
@@ -2145,9 +2170,9 @@ impl<'a> TraitSolver<'a> {
                             EffType::empty(),
                             fn_span,
                         ));
-                        (PendingFunctionBody::new(body_arena, apply_id), locals)
+                        Ok((PendingFunctionBody::new(body_arena, apply_id), locals))
                     })
-                    .collect::<Vec<_>>();
+                    .collect::<Result<Vec<_>, InternalCompilationError>>()?;
 
                 self.replace_concrete_impl_code_entries(
                     local_impl_id,

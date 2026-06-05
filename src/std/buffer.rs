@@ -25,7 +25,10 @@ use crate::{
         },
         value::{NativeDisplay, Value},
     },
-    module::{BlanketTraitImplSubKey, Module, ModuleFunction, TraitDictionaryId, TraitId},
+    module::{
+        BlanketTraitImplSubKey, Module, ModuleFunction, ResolvedValueLayout, TraitDictionaryId,
+        TraitId,
+    },
     std::core_traits_names::VALUE_TRAIT_NAME,
     types::{
         effects::no_effects,
@@ -34,7 +37,9 @@ use crate::{
     },
 };
 
-const OWNED: ResolvedArgPassing = ResolvedArgPassing::Value(ResolvedValueArgPassing::Owned);
+const TRIVIAL_COPY_INT: ResolvedArgPassing = ResolvedArgPassing::Value(
+    ResolvedValueArgPassing::TrivialCopy(ResolvedValueLayout::native::<isize>()),
+);
 const SHARED_REF: ResolvedArgPassing =
     ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef {
         temp_cleanup: SharedRefTempCleanup::None,
@@ -216,7 +221,7 @@ fn buffer_slot_descr() -> ModuleFunction {
         ),
         Box::new(ContextNativeFn::new(
             "buffer_slot",
-            &[MUTABLE_REF, OWNED],
+            &[MUTABLE_REF, TRIVIAL_COPY_INT],
             buffer_slot,
         )),
         None,
@@ -237,7 +242,7 @@ fn buffer_with_capacity_descr() -> ModuleFunction {
         "Creates fixed-size uninitialized storage.",
         ContextNativeFn::new(
             "buffer_with_capacity",
-            &[OWNED],
+            &[TRIVIAL_COPY_INT],
             |mut args: ValOrMutArgs, _ctx: &mut EvalCtx| {
                 let capacity = args
                     .next()
@@ -280,7 +285,7 @@ fn buffer_clone_value_into_descr(value_trait_id: TraitId) -> ModuleFunction {
         "Clones a value into a buffer slot.",
         ContextNativeFn::new(
             "buffer_clone_value_into",
-            &[SHARED_REF, SHARED_REF, MUTABLE_REF, OWNED],
+            &[SHARED_REF, SHARED_REF, MUTABLE_REF, TRIVIAL_COPY_INT],
             buffer_clone_value_into,
         ),
     )
@@ -329,7 +334,13 @@ fn buffer_clone_into_descr(value_trait_id: TraitId) -> ModuleFunction {
         "Clones a buffer slot into another buffer slot.",
         ContextNativeFn::new(
             "buffer_clone_into",
-            &[SHARED_REF, SHARED_REF, OWNED, MUTABLE_REF, OWNED],
+            &[
+                SHARED_REF,
+                SHARED_REF,
+                TRIVIAL_COPY_INT,
+                MUTABLE_REF,
+                TRIVIAL_COPY_INT,
+            ],
             buffer_clone_into,
         ),
     )
@@ -378,7 +389,7 @@ fn buffer_move_into_descr() -> ModuleFunction {
         "Moves a buffer slot into another buffer slot.",
         ContextNativeFn::new(
             "buffer_move_into",
-            &[MUTABLE_REF, OWNED, MUTABLE_REF, OWNED],
+            &[MUTABLE_REF, TRIVIAL_COPY_INT, MUTABLE_REF, TRIVIAL_COPY_INT],
             buffer_move_into,
         ),
     )
@@ -438,7 +449,7 @@ fn buffer_take_descr() -> ModuleFunction {
         [],
         ["source", "index"],
         "Moves a value out of a buffer slot.",
-        ContextNativeFn::new("buffer_take", &[MUTABLE_REF, OWNED], buffer_take),
+        ContextNativeFn::new("buffer_take", &[MUTABLE_REF, TRIVIAL_COPY_INT], buffer_take),
     )
 }
 
@@ -472,7 +483,7 @@ fn buffer_drop_at_descr(value_trait_id: TraitId) -> ModuleFunction {
         "Drops a value stored in a buffer slot.",
         ContextNativeFn::new(
             "buffer_drop_at",
-            &[SHARED_REF, MUTABLE_REF, OWNED],
+            &[SHARED_REF, MUTABLE_REF, TRIVIAL_COPY_INT],
             buffer_drop_at,
         ),
     )

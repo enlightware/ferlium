@@ -31,7 +31,9 @@ use crate::{
     format::{FormatWith, write_identifier},
     hir::value::{NativeDisplay, Value},
     hir::{self, ENodeId, NodeArena, NodeId, UNodeArena, UNodeId},
-    module::{ELocalDecl, ModuleEnv, ModuleFunction, ResolvedLocalDrop, ULocalDecl},
+    module::{
+        ELocalDecl, ModuleEnv, ModuleFunction, ResolvedLocalDrop, ResolvedValueLayout, ULocalDecl,
+    },
     types::effects::EffType,
     types::r#type::{FnArgType, FnType, Type, fmt_fn_type_with_arg_names},
     types::type_like::TypeLike,
@@ -337,8 +339,8 @@ impl PendingArgPassing {
     pub fn from_resolved(passing: ResolvedArgPassing) -> Self {
         match passing {
             ResolvedArgPassing::MutableRef => Self::MutableRef,
-            ResolvedArgPassing::Value(ResolvedValueArgPassing::Owned) => Self::Value(
-                PendingValueArgPassing::Resolved(ResolvedValueArgPassing::Owned),
+            ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy(layout)) => Self::Value(
+                PendingValueArgPassing::Resolved(ResolvedValueArgPassing::TrivialCopy(layout)),
             ),
             ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef { .. }) => {
                 Self::Value(PendingValueArgPassing::Unknown)
@@ -379,8 +381,8 @@ pub enum ResolvedArgPassing {
 /// How a call argument by value should be prepared, once resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolvedValueArgPassing {
-    /// Evaluate the source expression to an owned value.
-    Owned,
+    /// Copy a concrete `TrivialCopy` argument by representation.
+    TrivialCopy(ResolvedValueLayout),
     /// Keep a place as a shared borrow when possible, falling back to a temporary owned value.
     SharedRef { temp_cleanup: SharedRefTempCleanup },
 }
@@ -768,7 +770,9 @@ impl ArgExtractor for &'_ mut Value {
 
 impl<T: TrivialCopy> ArgExtractor for NatVal<T> {
     type Output<'a> = T;
-    const PASSING: ResolvedArgPassing = ResolvedArgPassing::Value(ResolvedValueArgPassing::Owned);
+    const PASSING: ResolvedArgPassing = ResolvedArgPassing::Value(
+        ResolvedValueArgPassing::TrivialCopy(ResolvedValueLayout::native::<T>()),
+    );
     fn extract<'m>(
         arg: &'m ValOrMut,
         ctx: &'m mut CallCtx,
@@ -1051,7 +1055,8 @@ mod tests {
     use crate::{
         CompilerSession,
         eval::ControlFlow,
-        module::{ModuleId, id::Id},
+        hir::{CallArgument, Elaborated, NodeId},
+        module::{ModuleId, ResolvedValueLayout, id::Id},
     };
 
     use super::*;
@@ -1074,6 +1079,30 @@ mod tests {
     }
 
     fn observe_value(_: &Value) {}
+
+    #[test]
+    fn resolved_argument_passing_layout_payload_stays_compact() {
+        assert_eq!(size_of::<ResolvedValueLayout>(), 8);
+        assert!(
+            size_of::<ResolvedValueLayout>() <= size_of::<SharedRefTempCleanup>(),
+            "owned layout payload should fit within the existing shared-ref cleanup payload"
+        );
+        assert_eq!(
+            size_of::<ResolvedValueArgPassing>(),
+            size_of::<SharedRefTempCleanup>() + size_of::<u32>(),
+            "ResolvedValueArgPassing should be one discriminant plus the largest existing payload"
+        );
+        assert_eq!(
+            size_of::<ResolvedArgPassing>(),
+            size_of::<ResolvedValueArgPassing>(),
+            "ResolvedArgPassing should stay within the resolved value-passing size"
+        );
+        assert_eq!(
+            size_of::<CallArgument<Elaborated>>(),
+            size_of::<NodeId<Elaborated>>() + size_of::<ResolvedArgPassing>(),
+            "CallArgument should not gain padding beyond its node id and passing mode"
+        );
+    }
 
     #[test]
     fn generated_native_wrapper_discards_owned_argument_storage() {

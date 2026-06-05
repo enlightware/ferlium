@@ -16,7 +16,10 @@ use ferlium::{
         function::{ResolvedArgPassing, ResolvedValueArgPassing, SharedRefTempCleanup},
         value::Value,
     },
-    module::{ResolvedLocalClone, ResolvedLocalDrop, ResolvedTakeLocalValueMode, id::Id},
+    module::{
+        ResolvedLocalClone, ResolvedLocalDrop, ResolvedTakeLocalValueMode, ResolvedValueLayout,
+        id::Id,
+    },
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -675,6 +678,44 @@ fn generic_owned_argument_from_mutable_place_uses_value_clone_and_owns_snapshot(
     assert_val_eq!(session.run(&source), int(35235));
 }
 
+fn int_value_layout() -> ResolvedValueLayout {
+    ResolvedValueLayout {
+        size: std::mem::size_of::<isize>() as u32,
+        align: std::mem::align_of::<isize>() as u32,
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn concrete_trivial_copy_call_argument_carries_layout() {
+    let mut session = TestSession::new();
+    let module = session.compile_and_get_module(
+        r#"
+        fn id(value: int) -> int {
+            value
+        }
+
+        id(1)
+        "#,
+    );
+
+    assert!(
+        module.hir_arena.iter().any(|(_, node)| {
+            let NodeKind::StaticApply(app) = &node.kind else {
+                return false;
+            };
+            app.arguments.iter().any(|argument| {
+                matches!(
+                    argument.passing,
+                    ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy(layout))
+                        if layout == int_value_layout()
+                )
+            })
+        }),
+        "expected concrete int call argument to carry trivial-copy layout"
+    );
+}
+
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn mutable_concrete_trivial_copy_place_lowers_to_snapshot_copy() {
@@ -696,11 +737,11 @@ fn mutable_concrete_trivial_copy_place_lowers_to_snapshot_copy() {
         module.hir_arena.iter().any(|(_, node)| matches!(
             node.kind,
             NodeKind::CloneValue(hir::CloneValue {
-                clone: ResolvedLocalClone::TrivialCopy,
+                clone: ResolvedLocalClone::TrivialCopy(layout),
                 ..
-            })
+            }) if layout == int_value_layout()
         )),
-        "expected mutable int place materialization to lower through trivial-copy CloneValue"
+        "expected mutable int place materialization to lower through trivial-copy CloneValue with int layout"
     );
     assert!(
         !module.hir_arena.iter().any(|(_, node)| matches!(
@@ -738,11 +779,13 @@ fn inferred_mutable_let_clone_resolves_to_trivial_copy_after_unification() {
         module.hir_arena.iter().any(|(_, node)| matches!(
             node.kind,
             NodeKind::TakeLocalValue(hir::TakeLocalValue {
-                mode: ResolvedTakeLocalValueMode::CloneBorrowed(ResolvedLocalClone::TrivialCopy),
+                mode: ResolvedTakeLocalValueMode::CloneBorrowed(
+                    ResolvedLocalClone::TrivialCopy(layout)
+                ),
                 ..
-            })
+            }) if layout == int_value_layout()
         )),
-        "expected inferred owned materialization to resolve to trivial copy"
+        "expected inferred owned materialization to resolve to trivial copy with int layout"
     );
 
     let mut run_session = TestSession::new();
@@ -767,11 +810,11 @@ fn inferred_projection_materialization_resolves_to_trivial_copy_after_unificatio
         module.hir_arena.iter().any(|(_, node)| matches!(
             node.kind,
             NodeKind::CloneValue(hir::CloneValue {
-                clone: ResolvedLocalClone::TrivialCopy,
+                clone: ResolvedLocalClone::TrivialCopy(layout),
                 ..
-            })
+            }) if layout == int_value_layout()
         )),
-        "expected projected int place materialization to resolve to trivial-copy CloneValue"
+        "expected projected int place materialization to resolve to trivial-copy CloneValue with int layout"
     );
     assert!(
         !module.hir_arena.iter().any(|(_, node)| matches!(
