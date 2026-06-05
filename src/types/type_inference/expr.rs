@@ -2174,7 +2174,7 @@ impl TypeInference {
         let children: SmallVec<[NodeId; 4]> = match &env.ir_arena[value].kind {
             Immediate(_) | GetFunction(_) => return false,
             Variant(variant) => smallvec![variant.payload],
-            Tuple(nodes) | Record(nodes) | Array(nodes) => nodes.iter().copied().collect(),
+            Tuple(nodes) | Record(nodes) => nodes.iter().copied().collect(),
             BuildClosure(closure) => closure.captures.iter().copied().collect(),
             _ => return self.type_needs_semantic_drop(env, ty, span),
         };

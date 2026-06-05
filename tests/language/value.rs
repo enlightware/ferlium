@@ -16,7 +16,7 @@ use ferlium::{
         function::{ResolvedArgPassing, ResolvedValueArgPassing, SharedRefTempCleanup},
         value::Value,
     },
-    module::{ResolvedLocalClone, ResolvedTakeLocalValueMode},
+    module::{ResolvedLocalClone, ResolvedLocalDrop, ResolvedTakeLocalValueMode, id::Id},
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -341,6 +341,82 @@ fn generated_value_to_string_calls_resolve_temp_cleanup_for_string_pieces() {
             )
         }),
         "generated calls passing string literal pieces by shared reference should resolve temp cleanup"
+    );
+}
+
+fn expression_cleanup_drop_modes(
+    session: &mut TestSession,
+    source: &str,
+) -> Vec<ResolvedLocalDrop> {
+    let module_and_expr = session.compile(source);
+    let compiled_expr = module_and_expr
+        .expr
+        .expect("source should compile to a root expression");
+    let module = session
+        .session()
+        .expect_fresh_module(module_and_expr.module_id);
+
+    module
+        .hir_arena
+        .iter()
+        .filter_map(|(_, node)| match &node.kind {
+            NodeKind::Block(block) => Some(block),
+            _ => None,
+        })
+        .flat_map(|block| &block.cleanup)
+        .filter_map(|local_id| {
+            compiled_expr
+                .locals
+                .get(local_id.as_index())?
+                .local_drop()
+                .copied()
+        })
+        .collect()
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn discarded_array_literal_with_immediate_elements_uses_semantic_drop() {
+    let mut session = TestSession::new();
+
+    let drops = expression_cleanup_drop_modes(&mut session, r#"{ ["hello", "world"]; () }"#);
+
+    assert!(
+        drops
+            .iter()
+            .any(|drop| !matches!(drop, ResolvedLocalDrop::Skip)),
+        "discarded array literals must run semantic Value::drop before storage release"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn discarded_tuple_literal_with_immediate_elements_still_skips_semantic_drop() {
+    let mut session = TestSession::new();
+
+    let drops = expression_cleanup_drop_modes(&mut session, r#"{ ("hello", "world"); () }"#);
+
+    assert!(
+        drops.is_empty()
+            || drops
+                .iter()
+                .all(|drop| matches!(drop, ResolvedLocalDrop::Skip)),
+        "tuple storage release recursively reclaims inline elements, so immediate-only tuples do not need semantic drop"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn indexed_array_literal_owned_temp_uses_semantic_drop() {
+    let mut session = TestSession::new();
+
+    let drops = expression_cleanup_drop_modes(&mut session, r#"["hello", "world"][0]"#);
+
+    assert!(
+        drops
+            .iter()
+            .any(|drop| !matches!(drop, ResolvedLocalDrop::Skip)),
+        "owned temporaries synthesized for array literals must run semantic Value::drop"
     );
 }
 
