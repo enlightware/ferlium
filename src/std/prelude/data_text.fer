@@ -85,19 +85,23 @@ pub fn to_data_text(v: DataValue) -> string {
 		DataValue::Tuple(a) => data_value_tuple_to_text(a),
 		DataValue::Record(o) => {
 			let mut result = "{";
-			for i in 0..array_len(o) {
-				if i > 0 {
-					string_push_str(result, ", ");
+			if array_len(o) > 0 {
+				string_push_str(result, " ");
+				for i in 0..array_len(o) {
+					if i > 0 {
+						string_push_str(result, ", ");
+					};
+					let entry = o[i];
+					let name = entry.0;
+					if is_data_text_identifier(name) {
+						string_push_str(result, name);
+					} else {
+						string_push_str(result, escape_data_text_string(name));
+					};
+					string_push_str(result, ": ");
+					string_push_str(result, to_data_text(entry.1));
 				};
-				let entry = o[i];
-				let name = entry.0;
-				if is_data_text_identifier(name) {
-					string_push_str(result, name);
-				} else {
-					string_push_str(result, escape_data_text_string(name));
-				};
-				string_push_str(result, ": ");
-				string_push_str(result, to_data_text(entry.1));
+				string_push_str(result, " ");
 			};
 			string_push_str(result, "}");
 			result

@@ -429,7 +429,11 @@ fn data_text_codec_source_like_shapes() {
     );
     assert_val_eq!(
         session.run(r#"to_data_text(parse_data_text("{\"host-name\": \"localhost\"}"))"#),
-        string(r#"{"host-name": "localhost"}"#)
+        string(r#"{ "host-name": "localhost" }"#)
+    );
+    assert_val_eq!(
+        session.run(r#"to_data_text(parse_data_text("{enabled: true, port: 8080}"))"#),
+        string(r#"{ enabled: true, port: 8080 }"#)
     );
     assert_val_eq!(
         session.run(r#"to_data_text(parse_data_text("\"hello\\nworld\""))"#),
