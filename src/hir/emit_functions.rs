@@ -42,7 +42,7 @@ use crate::{
         mutability::MutType,
         r#trait::{Trait, TraitMethodIndex},
         trait_solver::{TraitSolver, trait_solver_from_module},
-        r#type::{FnArgType, FnType, Type, TypeInstSubst, TypeVar},
+        r#type::{FnArgType, FnReturnConvention, FnType, Type, TypeInstSubst, TypeVar},
         type_constraints::named_type_constraints_in_types,
         type_inference::{
             defaulting::{ConstraintBoundary, DefaultingScope},
@@ -522,8 +522,20 @@ where
         for constraint in where_clause {
             ty_inf.add_pub_constraint(constraint.map(&mut mapper));
         }
+        let attrs =
+            validate_function_attributes(attributes, name.0, output.module_id() == STD_MODULE_ID)?;
         let effects = ty_inf.fresh_effect_var_ty();
-        let fn_type = FnType::new(args_ty, ret_ty_ty, effects.clone());
+        let return_convention = if attrs.returns_place {
+            FnReturnConvention::Place
+        } else {
+            FnReturnConvention::Value
+        };
+        let fn_type = FnType::new_with_return_convention(
+            args_ty,
+            ret_ty_ty,
+            effects.clone(),
+            return_convention,
+        );
 
         // If we are emitting a trait implementation, make sure this function conforms to it.
         if let Some(trait_ctx) = &trait_ctx {
@@ -567,16 +579,12 @@ where
             span: *span,
         };
         let ty_scheme = TypeScheme::new_just_type(fn_type);
-        let attrs =
-            validate_function_attributes(attributes, name.0, output.module_id() == STD_MODULE_ID)?;
-        let returns_place = attrs.returns_place;
         let definition = FunctionDefinition::new_with_generic_params_and_attributes(
             ty_scheme,
             generic_params.clone(),
             arg_names,
             doc.clone(),
             attributes.clone(),
-            returns_place,
         );
         let descr = ModuleFunction::new_without_debug_info(
             definition,
@@ -594,7 +602,7 @@ where
             placeholder_id
         } else if trait_ctx.is_some() {
             output.add_function_anonymous(descr)
-        } else if returns_place {
+        } else if attrs.returns_place {
             output.add_private_unsafe_function(name.0, descr)
         } else {
             output.add_function_with_visibility(name.0, descr, *visibility)
@@ -649,6 +657,7 @@ where
             &mut new_type_deps,
             module_env,
             Some((expected_ret_ty, expected_span)),
+            descr.definition.ty_scheme.ty.return_convention,
             (!annotation_ty_subst.is_empty()).then_some(annotation_ty_subst),
             vec![],
             !attrs.no_fuel_check,

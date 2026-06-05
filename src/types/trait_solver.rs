@@ -1931,7 +1931,6 @@ impl<'a> TraitSolver<'a> {
                                 arguments,
                                 ty: def.ty_scheme.ty.clone(),
                                 inst_data: FnInstData::none(),
-                                returns_place: false,
                             }));
                             let apply_id = body_arena.alloc(Node::new(
                                 apply,
@@ -2162,7 +2161,6 @@ impl<'a> TraitSolver<'a> {
                             arguments,
                             ty: def.ty_scheme.ty.clone(),
                             inst_data: FnInstData::none(),
-                            returns_place: false,
                         }));
                         let apply_id = body_arena.alloc(Node::new(
                             apply,

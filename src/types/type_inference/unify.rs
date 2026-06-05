@@ -676,6 +676,15 @@ impl UnifiedTypeInference {
                         sub_or_same,
                     }));
                 }
+                if cur.return_convention != exp.return_convention {
+                    return Err(internal_compilation_error!(TypeMismatch {
+                        current_ty,
+                        current_span,
+                        expected_ty,
+                        expected_span,
+                        sub_or_same,
+                    }));
+                }
                 for ((index, cur_arg), exp_arg) in cur.args.iter().enumerate().zip(exp.args.iter())
                 {
                     // Contravariance of argument types.
@@ -804,10 +813,11 @@ impl UnifiedTypeInference {
                         }
                     }
                     // Create a new function type with the fresh effect variable
-                    let new_fn_ty = FnType::new(
+                    let new_fn_ty = FnType::new_with_return_convention(
                         fn_ty.args.clone(),
                         fn_ty.ret,
                         EffType::single_variable(fresh_eff_var),
+                        fn_ty.return_convention,
                     );
                     Type::function_type(new_fn_ty)
                 } else {

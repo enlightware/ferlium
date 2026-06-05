@@ -35,7 +35,7 @@ use crate::{
         ELocalDecl, ModuleEnv, ModuleFunction, ResolvedLocalDrop, ResolvedValueLayout, ULocalDecl,
     },
     types::effects::EffType,
-    types::r#type::{FnArgType, FnType, Type, fmt_fn_type_with_arg_names},
+    types::r#type::{FnArgType, FnReturnConvention, FnType, Type, fmt_fn_type_with_arg_names},
     types::type_like::TypeLike,
     types::type_mapper::TypeMapper,
     types::type_scheme::{PubTypeConstraint, TypeScheme},
@@ -50,7 +50,6 @@ pub struct FunctionDefinition {
     pub arg_names: Vec<Ustr>,
     pub doc: Option<String>,
     pub attributes: Vec<Attribute>,
-    pub returns_place: bool,
 }
 
 impl FunctionDefinition {
@@ -61,7 +60,6 @@ impl FunctionDefinition {
             arg_names,
             doc,
             attributes: vec![],
-            returns_place: false,
         }
     }
 
@@ -77,7 +75,6 @@ impl FunctionDefinition {
             arg_names,
             doc,
             attributes: vec![],
-            returns_place: false,
         }
     }
 
@@ -87,7 +84,6 @@ impl FunctionDefinition {
         arg_names: Vec<Ustr>,
         doc: Option<String>,
         attributes: Vec<Attribute>,
-        returns_place: bool,
     ) -> Self {
         Self {
             ty_scheme,
@@ -95,7 +91,6 @@ impl FunctionDefinition {
             arg_names,
             doc,
             attributes,
-            returns_place,
         }
     }
 
@@ -111,7 +106,6 @@ impl FunctionDefinition {
             arg_names,
             doc: Some(String::from(doc)),
             attributes: vec![],
-            returns_place: false,
         }
     }
 
@@ -131,8 +125,15 @@ impl FunctionDefinition {
             arg_names,
             doc: Some(String::from(doc)),
             attributes: vec![],
-            returns_place: false,
         }
+    }
+
+    pub fn return_convention(&self) -> FnReturnConvention {
+        self.ty_scheme.ty.return_convention
+    }
+
+    pub fn returns_place(&self) -> bool {
+        self.return_convention().returns_place()
     }
 
     /// The signature of the function is the type scheme and the argument names.
@@ -228,7 +229,6 @@ impl TypeLike for FunctionDefinition {
             arg_names: self.arg_names.clone(),
             doc: self.doc.clone(),
             attributes: self.attributes.clone(),
-            returns_place: self.returns_place,
         }
     }
 }

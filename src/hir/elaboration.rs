@@ -553,15 +553,16 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
             }
             Apply(app) => {
                 let function = app.function;
-                let returns_place = app.returns_place;
+                let ty = app.ty.clone();
                 let source_arguments = app
                     .arguments
                     .iter()
-                    .map(|arg| (arg.value, arg.passing, src[arg.value].ty));
+                    .zip(&app.ty.args)
+                    .map(|(arg, arg_ty)| (arg.value, arg.passing, arg_ty.ty));
                 Apply(b(hir::Application {
                     function: self.elaborate_node(src, function)?,
                     arguments: self.elaborate_call_arguments(src, source_arguments, node_span)?,
-                    returns_place,
+                    ty,
                 }))
             }
             CloneClosureEnv(node) => {
@@ -601,7 +602,6 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                 let argument_names = app.argument_names.clone();
                 let ty = app.ty.clone();
                 let inst_data = app.inst_data.clone();
-                let returns_place = app.returns_place;
                 let source_arguments = app
                     .arguments
                     .iter()
@@ -641,7 +641,6 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                     argument_names,
                     ty,
                     inst_data,
-                    returns_place,
                 }))
             }
             TraitMethodApply(app) => {
@@ -707,7 +706,6 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                         argument_names,
                         ty,
                         inst_data: hir::FnInstData::none(),
-                        returns_place: false,
                     }))
                 } else if is_function_surface_only {
                     let (dict_ty, entry_index) = {

@@ -18,6 +18,7 @@ use ferlium::{
     SourceTable,
     compiler::error::{CompilationErrorImpl, RuntimeErrorKind},
     hir::value::{LiteralValue, Value},
+    hir::{ENodeArena, ENodeId, NodeKind},
     module::{ConcreteTraitImplKey, Module, TraitDictionaryEntry},
     std::{
         core_traits_names::VALUE_TRAIT_NAME,
@@ -350,6 +351,58 @@ fn array_index_function_is_std_internal() {
             other => panic!("expected hidden std function to be rejected, got {other:?}"),
         }
     }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn array_index_return_preserves_place_tail() {
+    fn find_return_value(arena: &ENodeArena, node: ENodeId) -> Option<ENodeId> {
+        match &arena[node].kind {
+            NodeKind::Return(value) => Some(*value),
+            NodeKind::Block(block) => block
+                .body
+                .iter()
+                .find_map(|node| find_return_value(arena, *node)),
+            _ => None,
+        }
+    }
+
+    fn tail_node(arena: &ENodeArena, node: ENodeId) -> ENodeId {
+        match &arena[node].kind {
+            NodeKind::Block(block) => block
+                .body
+                .last()
+                .copied()
+                .map_or(node, |tail| tail_node(arena, tail)),
+            _ => node,
+        }
+    }
+
+    fn is_place_reference(arena: &ENodeArena, node: ENodeId) -> bool {
+        match &arena[node].kind {
+            NodeKind::LoadLocal(_) | NodeKind::Project(_) | NodeKind::ProjectAt(_) => true,
+            NodeKind::Apply(app) => app.ty.returns_place(),
+            NodeKind::StaticApply(app) => app.ty.returns_place(),
+            NodeKind::Block(block) => block
+                .body
+                .last()
+                .is_some_and(|tail| is_place_reference(arena, *tail)),
+            _ => false,
+        }
+    }
+
+    let mut source_table = SourceTable::default();
+    let module = std_module(&mut source_table);
+    let array_index = module.get_function(ustr("array_index")).unwrap();
+    assert!(array_index.definition.ty_scheme.ty.returns_place());
+    let entry = array_index.get_code_entry().unwrap();
+    let return_value = find_return_value(&module.hir_arena, entry).unwrap();
+    assert!(is_place_reference(&module.hir_arena, return_value));
+    let tail = tail_node(&module.hir_arena, return_value);
+    assert!(
+        !matches!(module.hir_arena[tail].kind, NodeKind::CloneValue(_)),
+        "array_index place return should not materialize its place tail with CloneValue"
+    );
 }
 
 #[test]

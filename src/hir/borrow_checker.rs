@@ -47,11 +47,21 @@ impl Path {
                 path.parts.push(PathPart::FieldAccess(field_access.field));
                 path
             }
-            StaticApply(app) if app.returns_place => {
+            StaticApply(app) if app.ty.returns_place() => {
                 Self::from_place_result_arguments(arena, &app.arguments)
             }
-            Apply(app) if app.returns_place => {
+            Apply(app) if app.ty.returns_place() => {
                 Self::from_place_result_arguments(arena, &app.arguments)
+            }
+            TraitMethodApply(app) if app.ty.returns_place() => {
+                Self::from_place_result_arguments(arena, &app.arguments)
+            }
+            Block(block) => {
+                let tail = block
+                    .body
+                    .last()
+                    .expect("place block should have a tail expression");
+                Self::from_node(arena, *tail)
             }
             LoadLocal(node) => Path {
                 variable: node.id.as_index(),

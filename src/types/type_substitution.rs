@@ -299,7 +299,7 @@ fn map_fn_type_rec(
         .collect();
     let ret = map_type_rec(fn_ty.ret, mapper, output, seen);
     let effects = mapper.map_effect_type(&fn_ty.effects);
-    FnType::new(args, ret, effects)
+    FnType::new_with_return_convention(args, ret, effects, fn_ty.return_convention)
 }
 
 fn substitute_types_rec(
@@ -331,5 +331,5 @@ fn substitute_fn_type_rec(
         .collect();
     let ret = substitute_type_rec(fn_ty.ret, substituer, output, seen);
     let effects = substituer.substitute_effect_type(&fn_ty.effects);
-    FnType::new(args, ret, effects)
+    FnType::new_with_return_convention(args, ret, effects, fn_ty.return_convention)
 }

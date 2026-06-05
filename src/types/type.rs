@@ -375,15 +375,57 @@ where
     arg.ty.fmt_with(f, env)
 }
 
+/// How a function call yields its result.
+///
+/// `Place` is a call-result convention, not a first-class reference type. The
+/// return value still has type `ret`; the convention only controls whether the
+/// immediate call result may be consumed as a place before being materialized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+pub enum FnReturnConvention {
+    #[default]
+    Value,
+    Place,
+}
+
+impl FnReturnConvention {
+    pub fn returns_place(self) -> bool {
+        matches!(self, Self::Place)
+    }
+}
+
 /// The type of a function
-#[derive(Debug, Clone, PartialEq, Eq, Hash, new)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FnType {
     pub args: Vec<FnArgType>,
     pub ret: Type,
     pub effects: EffType,
+    pub return_convention: FnReturnConvention,
 }
 
 impl FnType {
+    pub fn new(args: Vec<FnArgType>, ret: Type, effects: EffType) -> Self {
+        Self {
+            args,
+            ret,
+            effects,
+            return_convention: FnReturnConvention::Value,
+        }
+    }
+
+    pub fn new_with_return_convention(
+        args: Vec<FnArgType>,
+        ret: Type,
+        effects: EffType,
+        return_convention: FnReturnConvention,
+    ) -> Self {
+        Self {
+            args,
+            ret,
+            effects,
+            return_convention,
+        }
+    }
+
     pub fn new_mut_resolved(
         args: impl IntoIterator<Item = (Type, bool)>,
         ret: Type,
@@ -396,6 +438,7 @@ impl FnType {
                 .collect(),
             ret,
             effects,
+            return_convention: FnReturnConvention::Value,
         }
     }
 
@@ -410,7 +453,12 @@ impl FnType {
                 .collect(),
             ret,
             effects,
+            return_convention: FnReturnConvention::Value,
         }
+    }
+
+    pub fn returns_place(&self) -> bool {
+        self.return_convention.returns_place()
     }
 
     pub fn as_locals_no_bound<'a>(
@@ -432,6 +480,7 @@ impl FnType {
     fn local_cmp(&self, other: &Self) -> Ordering {
         compare_by(&self.args, &other.args, FnArgType::local_cmp)
             .then(self.ret.local_cmp(&other.ret))
+            .then(self.return_convention.cmp(&other.return_convention))
     }
 }
 
@@ -457,6 +506,7 @@ impl TypeLike for FnType {
                 .collect(),
             ret: self.ret.map(f),
             effects: f.map_effect_type(&self.effects),
+            return_convention: self.return_convention,
         }
     }
 
@@ -503,6 +553,9 @@ where
         arg.fmt_with(f, env)?;
     }
     write!(f, ") -> ")?;
+    if function.returns_place() {
+        write!(f, "place ")?;
+    }
     function.ret.fmt_with(f, env)?;
     if function.effects.is_empty() {
         Ok(())
@@ -530,6 +583,9 @@ where
         arg_ty.fmt_with(f, env)?;
     }
     write!(f, ") -> ")?;
+    if fn_ty.returns_place() {
+        write!(f, "place ")?;
+    }
     fn_ty.ret.fmt_with(f, env)?;
     if fn_ty.effects.is_empty() {
         Ok(())
@@ -1867,7 +1923,11 @@ impl Ord for TypeKind {
             (Variant(a), Variant(b)) => a.cmp(b),
             (Tuple(a), Tuple(b)) => a.cmp(b),
             (Record(a), Record(b)) => a.cmp(b),
-            (Function(a), Function(b)) => a.args.cmp(&b.args).then_with(|| a.ret.cmp(&b.ret)),
+            (Function(a), Function(b)) => a
+                .args
+                .cmp(&b.args)
+                .then_with(|| a.ret.cmp(&b.ret))
+                .then_with(|| a.return_convention.cmp(&b.return_convention)),
             _ => self.rank().cmp(&other.rank()),
         }
     }
@@ -2042,7 +2102,9 @@ fn types_could_match(a: &TypeKind, b: &TypeKind) -> bool {
         (TypeKind::Variant(a), TypeKind::Variant(b)) => {
             a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.0 == y.0)
         }
-        (TypeKind::Function(_), TypeKind::Function(_)) => true, // Could compare arity, but skip for now
+        (TypeKind::Function(a), TypeKind::Function(b)) => {
+            a.return_convention == b.return_convention
+        } // Could compare arity, but skip for now
         (TypeKind::Native(a), TypeKind::Native(b)) => {
             a.bare_ty == b.bare_ty && a.arguments.len() == b.arguments.len()
         }

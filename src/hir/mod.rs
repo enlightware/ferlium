@@ -160,8 +160,13 @@ pub(crate) fn node_is_place_reference(arena: &NodeArena, node_id: NodeId) -> boo
         // freshly produced static function value, which is not a place.
         GetTraitMethod(method) => !method.input_tys.iter().all(Type::is_constant),
         Project(_) | FieldAccess(_) | ProjectAt(_) => true,
-        Apply(app) => app.returns_place,
-        StaticApply(app) => app.returns_place,
+        Apply(app) => app.ty.returns_place(),
+        StaticApply(app) => app.ty.returns_place(),
+        TraitMethodApply(app) => app.ty.returns_place(),
+        Block(block) => block
+            .body
+            .last()
+            .is_some_and(|node| node_is_place_reference(arena, *node)),
         _ => false,
     }
 }
@@ -184,7 +189,7 @@ pub(crate) fn place_resolution_may_create_temp(arena: &NodeArena, node_id: NodeI
             !node_is_place_reference(arena, project.value)
                 || place_resolution_may_create_temp(arena, project.value)
         }
-        Apply(app) if app.returns_place => {
+        Apply(app) if app.ty.returns_place() => {
             !node_is_place_reference(arena, app.function)
                 || place_resolution_may_create_temp(arena, app.function)
                 || place_result_base_argument_index(arena, &app.arguments).is_some_and(
@@ -195,7 +200,7 @@ pub(crate) fn place_resolution_may_create_temp(arena: &NodeArena, node_id: NodeI
                     .iter()
                     .any(|arg| place_resolution_may_create_temp(arena, arg.value))
         }
-        StaticApply(app) if app.returns_place => {
+        StaticApply(app) if app.ty.returns_place() => {
             place_result_base_argument_index(arena, &app.arguments).is_some_and(|base_index| {
                 !node_is_place_reference(arena, app.arguments[base_index].value)
             }) || app
@@ -203,6 +208,19 @@ pub(crate) fn place_resolution_may_create_temp(arena: &NodeArena, node_id: NodeI
                 .iter()
                 .any(|arg| place_resolution_may_create_temp(arena, arg.value))
         }
+        TraitMethodApply(app) if app.ty.returns_place() => {
+            place_result_base_argument_index(arena, &app.arguments).is_some_and(|base_index| {
+                !node_is_place_reference(arena, app.arguments[base_index].value)
+            }) || app
+                .arguments
+                .iter()
+                .any(|arg| place_resolution_may_create_temp(arena, arg.value))
+        }
+        Block(block) => block.body.iter().any(|node| {
+            place_resolution_may_create_temp(arena, *node)
+                || node_is_place_reference(arena, *node)
+                    && block.body.last().is_some_and(|last| last != node)
+        }),
         _ => false,
     }
 }
@@ -491,7 +509,7 @@ pub struct GetFunction {
 pub struct Application<P: HirPhase = Unelaborated> {
     pub function: NodeId<P>,
     pub arguments: Vec<CallArgument<P>>,
-    pub returns_place: bool,
+    pub ty: FnType,
 }
 
 /// Call a statically known function.
@@ -506,7 +524,6 @@ pub struct StaticApplication<P: HirPhase = Unelaborated> {
     pub argument_names: Vec<Ustr>,
     pub ty: FnType,
     pub inst_data: FnInstData,
-    pub returns_place: bool,
 }
 
 /// Call a trait method before dictionary passing resolves it.
@@ -1555,6 +1572,7 @@ impl Node {
                 // no need to look into the value's type as it is already in this node's type
             }
             Apply(app) => {
+                self.unbound_ty_vars_in_ty(&app.ty, result, ignore);
                 unbound_ty_vars(arena, app.function, result, ignore);
                 for arg in &app.arguments {
                     unbound_ty_vars(arena, arg.value, result, ignore);
@@ -1691,6 +1709,9 @@ pub(crate) fn instantiate_node_in_place<M: TypeMapper>(
     }
     // Then modify this node's kind-specific data
     match &mut arena[node_id].kind {
+        Apply(app) => {
+            app.ty = app.ty.map(mapper);
+        }
         StaticApply(app) => {
             app.ty = app.ty.map(mapper);
             app.inst_data.instantiate_in_place(mapper);

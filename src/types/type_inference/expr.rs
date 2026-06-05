@@ -50,7 +50,9 @@ use crate::{
         mutability::{MutType, MutVar, MutVarKey},
         r#trait::{Trait, TraitMethodIndex},
         trait_solver::{TraitSolver, TraitSolverProbe},
-        r#type::{FnArgType, FnType, TyVarKey, Type, TypeInstSubst, TypeKind, TypeVar},
+        r#type::{
+            FnArgType, FnReturnConvention, FnType, TyVarKey, Type, TypeInstSubst, TypeKind, TypeVar,
+        },
         type_like::TypeLike,
         type_mapper::{BitmapInstantiationMapper, TypeMapper},
         type_scheme::{PubTypeConstraint, TypeScheme},
@@ -449,6 +451,9 @@ impl TypeInference {
             env.new_type_deps,
             env.module_env,
             Some((ret_ty, env.ast_arena[body].span)),
+            expected_fn_ty
+                .as_ref()
+                .map_or(FnReturnConvention::Value, |fn_ty| fn_ty.return_convention),
             env.annotation_ty_subst,
             vec![],
             env.fuel_checks_enabled,
@@ -861,19 +866,32 @@ impl TypeInference {
                         }));
                     }
                 };
-                let node_id = self.infer_expr_drop_mut(env, *expr)?;
+                let node_id = if env.expected_return_convention.returns_place() {
+                    self.infer_expr_as_place_return(env, *expr)?
+                } else {
+                    self.infer_expr_drop_mut(env, *expr)?
+                };
                 let ty = env.ir_arena[node_id].ty;
                 self.add_same_type_constraint(ty, sp(*expr), outer_ty, outer_span);
                 let effects = env.ir_arena[node_id].effects.clone();
-                let (node_id, taken_local) =
-                    self.take_local_value_result(env, node_id, 0, expr_span);
-                let node_id = if taken_local.is_some() {
-                    node_id
+                let return_value = if env.expected_return_convention.returns_place() {
+                    if ty != Type::never() && !node_is_place_reference(env.ir_arena, node_id) {
+                        return Err(internal_compilation_error!(Unsupported {
+                            span: sp(*expr),
+                            reason: "addressor return expression must be a place".into(),
+                        }));
+                    }
+                    self.wrap_value_with_scope_cleanup(env, node_id, ty, &effects, 0, expr_span)
                 } else {
-                    self.materialize_owned_value(env, node_id, expr_span)
+                    let (node_id, taken_local) =
+                        self.take_local_value_result(env, node_id, 0, expr_span);
+                    let node_id = if taken_local.is_some() {
+                        node_id
+                    } else {
+                        self.materialize_owned_value(env, node_id, expr_span)
+                    };
+                    self.wrap_value_with_scope_cleanup(env, node_id, ty, &effects, 0, expr_span)
                 };
-                let return_value =
-                    self.wrap_value_with_scope_cleanup(env, node_id, ty, &effects, 0, expr_span);
                 let node = K::Return(return_value);
                 (node, Type::never(), MutType::constant(), effects)
             }
@@ -928,12 +946,18 @@ impl TypeInference {
                         // Allocate a fresh variable for the return type and effects of the function
                         let ret_ty = self.fresh_type_var_ty();
                         let call_effects = self.fresh_effect_var_ty();
+                        let return_convention = match &*env.ir_arena[func_node_id].ty.data() {
+                            TypeKind::Function(fn_ty) => fn_ty.return_convention,
+                            _ => FnReturnConvention::Value,
+                        };
                         // Build the function type
-                        let func_ty = Type::function_type(FnType::new(
+                        let app_ty = FnType::new_with_return_convention(
                             args_tys.clone(),
                             ret_ty,
                             call_effects.clone(),
-                        ));
+                            return_convention,
+                        );
+                        let func_ty = Type::function_type(app_ty.clone());
                         self.add_sub_type_constraint(
                             env.ir_arena[func_node_id].ty,
                             sp(data.func),
@@ -978,7 +1002,7 @@ impl TypeInference {
                         let call = K::Apply(b(hir::Application {
                             function,
                             arguments: prepared_arguments.arguments,
-                            returns_place: false,
+                            ty: app_ty,
                         }));
                         let call =
                             hir::Node::new(call, ret_ty, combined_effects.clone(), expr_span);
@@ -1020,20 +1044,9 @@ impl TypeInference {
                     });
                 }
                 // Adjust the lexical scope of the variables declared in the block to end at the end of the block.
-                for local_id in env.cur_locals.iter().skip(env_size) {
-                    let local = &mut env.all_locals[local_id.as_index()];
-                    assert_eq!(local.scope.source_id(), expr_span.source_id());
-                    assert!(local.scope.end() <= expr_span.end());
-                    local.scope = Location::new(
-                        local.scope.start(),
-                        expr_span.end(),
-                        local.scope.source_id(),
-                    );
-                }
-                let drops = self.cleanup_locals_for_locals(env, env_size);
-                env.cur_locals.truncate(env_size);
+                Self::extend_local_scopes_to_span_end(env, env_size, expr_span);
                 let ty = types.last().copied().unwrap_or(Type::unit());
-                let node = self.block_or_cleanup_scope(nodes, drops);
+                let node = self.close_block_scope(env, env_size, nodes);
                 (node, ty, MutType::constant(), effects)
             }
             Assign(data) => {
@@ -1276,7 +1289,8 @@ impl TypeInference {
                     }
                     // If it is not a known type def, assume it to be a variant constructor.
                     let (record_node, record_ty, effects) = self.infer_record(env, &fields)?;
-                    let record_span = Location::fuse(fields.iter().map(|(n, _)| n.1)).unwrap();
+                    let record_span =
+                        Location::fuse(fields.iter().map(|(n, _)| n.1)).unwrap_or(expr_span);
                     let payload_node_id = env.ir_arena.alloc(N::new(
                         record_node,
                         record_ty,
@@ -1408,7 +1422,6 @@ impl TypeInference {
                                 env.get_std_function(ustr("array_index"), expr_span)?;
                             (path, (definition.clone(), function, module_id, arg_passing))
                         };
-                        let returns_place = definition.returns_place;
                         let (inst_fn_ty, inst_data, _subst) = definition
                             .ty_scheme
                             .instantiate_with_fresh_vars(self, expr_span, None, env.module_env);
@@ -1454,7 +1467,6 @@ impl TypeInference {
                             argument_names: vec![ustr("array"), ustr("index")],
                             ty: inst_fn_ty,
                             inst_data,
-                            returns_place,
                         }));
                         (node, element_ty, array_expr_mut, combined_effects)
                     }
@@ -1471,14 +1483,8 @@ impl TypeInference {
                 }
 
                 let (inner_node_id, inner_mut_ty) = self.infer_expr(env, *expr)?;
-                let inner_node = env.ir_arena[inner_node_id].clone();
                 return Ok((
-                    env.ir_arena.alloc(N::new(
-                        inner_node.kind,
-                        inner_node.ty,
-                        no_effects(),
-                        expr_span,
-                    )),
+                    self.strip_effects_from_node(env, inner_node_id, expr_span),
                     inner_mut_ty,
                 ));
             }
@@ -1646,6 +1652,66 @@ impl TypeInference {
         expr: DExprId,
     ) -> Result<NodeId, InternalCompilationError> {
         Ok(self.infer_expr(env, expr)?.0)
+    }
+
+    fn infer_expr_as_place_return(
+        &mut self,
+        env: &mut TypingEnv,
+        expr: DExprId,
+    ) -> Result<NodeId, InternalCompilationError> {
+        let expr_span = env.ast_arena[expr].span;
+        match env.ast_arena[expr].kind.clone() {
+            ExprKind::EffectsUnsafe(inner) => {
+                if env.current_module_id() != STD_MODULE_ID {
+                    return Err(
+                        InternalCompilationError::new_unsafe_feature_use_not_allowed(
+                            UnsafeFeature::EffectsUnsafe,
+                            expr_span,
+                        ),
+                    );
+                }
+
+                let inner_node_id = self.infer_expr_as_place_return(env, inner)?;
+                Ok(self.strip_effects_from_node(env, inner_node_id, expr_span))
+            }
+            ExprKind::Block(exprs) => {
+                assert!(!exprs.is_empty());
+                let env_size = env.cur_locals.len();
+                let tail_expr = *exprs.last().expect("non-empty block should have a tail");
+                let mut nodes = Vec::with_capacity(exprs.len());
+                for expr in &exprs[..exprs.len() - 1] {
+                    let node = self.infer_expr_drop_mut(env, *expr)?;
+                    let node = self.discard_unused_value(env, node, expr_span);
+                    let diverges = env.ir_arena[node].ty == Type::never();
+                    nodes.push(node);
+                    if diverges {
+                        break;
+                    }
+                }
+                if nodes
+                    .last()
+                    .is_none_or(|node| env.ir_arena[*node].ty != Type::never())
+                {
+                    nodes.push(self.infer_expr_as_place_return(env, tail_expr)?);
+                }
+
+                Self::extend_local_scopes_to_span_end(env, env_size, expr_span);
+                let ty = nodes
+                    .last()
+                    .map_or(Type::unit(), |node| env.ir_arena[*node].ty);
+                let effects = self.make_dependent_effect(
+                    nodes
+                        .iter()
+                        .map(|node| env.ir_arena[*node].effects.clone())
+                        .collect::<Vec<_>>(),
+                );
+                let kind = self.close_block_scope(env, env_size, nodes);
+                Ok(env
+                    .ir_arena
+                    .alloc(hir::Node::new(kind, ty, effects, expr_span)))
+            }
+            _ => self.infer_expr_drop_mut(env, expr),
+        }
     }
 
     fn store_owned_temp(
@@ -1865,6 +1931,44 @@ impl TypeInference {
             .collect()
     }
 
+    fn close_block_scope(
+        &mut self,
+        env: &mut TypingEnv,
+        env_size: usize,
+        nodes: Vec<NodeId>,
+    ) -> NodeKind {
+        let drops = self.cleanup_locals_for_locals(env, env_size);
+        env.cur_locals.truncate(env_size);
+        self.block_or_cleanup_scope(nodes, drops)
+    }
+
+    fn extend_local_scopes_to_span_end(env: &mut TypingEnv, start_index: usize, span: Location) {
+        let local_ids = env
+            .cur_locals
+            .iter()
+            .copied()
+            .skip(start_index)
+            .collect::<Vec<_>>();
+        for local_id in local_ids {
+            let local = &mut env.all_locals[local_id.as_index()];
+            assert_eq!(local.scope.source_id(), span.source_id());
+            assert!(local.scope.end() <= span.end());
+            local.scope = Location::new(local.scope.start(), span.end(), local.scope.source_id());
+        }
+    }
+
+    fn strip_effects_from_node(
+        &mut self,
+        env: &mut TypingEnv,
+        node_id: NodeId,
+        span: Location,
+    ) -> NodeId {
+        let kind = env.ir_arena[node_id].kind.clone();
+        let ty = env.ir_arena[node_id].ty;
+        env.ir_arena
+            .alloc(hir::Node::new(kind, ty, no_effects(), span))
+    }
+
     fn block_or_cleanup_scope(
         &mut self,
         nodes: Vec<NodeId>,
@@ -2015,7 +2119,7 @@ impl TypeInference {
                     NodeKind::ProjectAt(HirProjectAt::new(value, project.index))
                 })
             }
-            NodeKind::StaticApply(mut app) if app.returns_place => {
+            NodeKind::StaticApply(mut app) if app.ty.returns_place() => {
                 if let Some(base_index) =
                     place_result_base_argument_index(env.ir_arena, &app.arguments)
                 {
@@ -2035,7 +2139,27 @@ impl TypeInference {
                     }
                 }
             }
-            NodeKind::Apply(mut app) if app.returns_place => {
+            NodeKind::TraitMethodApply(mut app) if app.ty.returns_place() => {
+                if let Some(base_index) =
+                    place_result_base_argument_index(env.ir_arena, &app.arguments)
+                {
+                    let mut prepared = self.prepare_place_base_for_projection(
+                        env,
+                        app.arguments[base_index].value,
+                        span,
+                    );
+                    app.arguments[base_index].value = prepared.place;
+                    prepared.place =
+                        self.rebuild_place_node(env, place, NodeKind::TraitMethodApply(app));
+                    prepared
+                } else {
+                    PreparedPlace {
+                        prefix: Vec::new(),
+                        place,
+                    }
+                }
+            }
+            NodeKind::Apply(mut app) if app.ty.returns_place() => {
                 if let Some(base_index) =
                     place_result_base_argument_index(env.ir_arena, &app.arguments)
                 {
@@ -2429,7 +2553,6 @@ impl TypeInference {
                     (definition.clone(), function, module_id, arg_passing)
                 })
             {
-                let returns_place = definition.returns_place;
                 if definition.ty_scheme.ty.args.len() != args.len() {
                     return Err(internal_compilation_error!(WrongNumberOfArguments {
                         expected: definition.ty_scheme.ty.args.len(),
@@ -2475,7 +2598,6 @@ impl TypeInference {
                         argument_names,
                         ty: inst_fn_ty,
                         inst_data,
-                        returns_place,
                     }));
                     let call = hir::Node::new(call, ret_ty, combined_effects.clone(), expr_span);
                     let node = self.wrap_call_with_temp_drops(
@@ -3222,13 +3344,18 @@ fn place_evaluation_depends_on_place_result(arena: &NodeArena, node_id: NodeId) 
     use NodeKind::*;
 
     match &arena[node_id].kind {
-        Apply(app) => app.returns_place,
-        StaticApply(app) => app.returns_place,
+        Apply(app) => app.ty.returns_place(),
+        StaticApply(app) => app.ty.returns_place(),
+        TraitMethodApply(app) => app.ty.returns_place(),
         Project(project) => place_evaluation_depends_on_place_result(arena, project.value),
         FieldAccess(field_access) => {
             place_evaluation_depends_on_place_result(arena, field_access.value)
         }
         ProjectAt(project) => place_evaluation_depends_on_place_result(arena, project.value),
+        Block(block) => block
+            .body
+            .last()
+            .is_some_and(|node| place_evaluation_depends_on_place_result(arena, *node)),
         _ => false,
     }
 }

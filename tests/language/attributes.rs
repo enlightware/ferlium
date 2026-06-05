@@ -239,13 +239,13 @@ fn no_fuel_check_attribute_is_rejected_in_user_code() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn place_result_attribute_is_preserved_as_function_flag_in_std_context() {
+fn place_result_attribute_sets_function_type_convention_in_std_context() {
     let module = compile_std_module(indoc! { r#"
         #[place_result]
         fn f() {}
     "# });
     let definition = &module.get_function(ustr("f")).unwrap().definition;
-    assert!(definition.returns_place);
+    assert!(definition.returns_place());
 }
 
 #[test]

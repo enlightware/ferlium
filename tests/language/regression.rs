@@ -38,6 +38,13 @@ fn ide_diagnostic_inside_multibyte_char_does_not_panic() {
     assert!(errors.is_some());
 }
 
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn ide_empty_record_style_variant_constructor_does_not_panic() {
+    let mut compiler = Compiler::new();
+    let _ = compiler.compile("fMi {}\n");
+}
+
 // Previously, the ModuleParser (used for prelude/module-level code) had an LALR state-merge bug:
 // when an `if` true-branch ended with a block-like expression (e.g. `match`), the parser would
 // enter the expression-reduction chain (Sp<CastExpr<"">>) instead of producing Sp<Block>, causing

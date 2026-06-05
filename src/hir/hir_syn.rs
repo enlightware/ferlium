@@ -60,7 +60,6 @@ pub fn static_apply_with_argument_passing(
         arguments,
         ty,
         inst_data: hir::FnInstData::none(),
-        returns_place: false,
     }))
 }
 

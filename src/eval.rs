@@ -584,7 +584,7 @@ impl<'a> EvalCtx<'a> {
         let locals = &function_data.locals;
         let previous_returns_place = mem::replace(
             &mut self.returns_place,
-            function_data.definition.returns_place,
+            function_data.definition.returns_place(),
         );
         let is_script = function_data.code.as_script().is_some();
         let old_extra_frame_base = is_script.then_some(self.extra_frame_base);
@@ -2476,10 +2476,14 @@ fn eval_project_at(
 
 fn place_resolution_depends_on_place_result(arena: &ENodeArena, node_id: ENodeId) -> bool {
     match &arena[node_id].kind {
-        NodeKind::Apply(app) => app.returns_place,
-        NodeKind::StaticApply(app) => app.returns_place,
+        NodeKind::Apply(app) => app.ty.returns_place(),
+        NodeKind::StaticApply(app) => app.ty.returns_place(),
         NodeKind::Project(node) => place_resolution_depends_on_place_result(arena, node.value),
         NodeKind::ProjectAt(node) => place_resolution_depends_on_place_result(arena, node.value),
+        NodeKind::Block(block) => block
+            .body
+            .last()
+            .is_some_and(|node| place_resolution_depends_on_place_result(arena, *node)),
         _ => false,
     }
 }
@@ -2810,11 +2814,11 @@ fn try_eval_node_as_place(
             place.path.push(index);
             place
         }
-        Apply(app) if app.returns_place => {
+        Apply(app) if app.ty.returns_place() => {
             let result = eval_apply(arena, app, node.span, ctx, locals)?;
             return Ok(control_flow_into_place_result(result).map_continue(Some));
         }
-        StaticApply(app) if app.returns_place => {
+        StaticApply(app) if app.ty.returns_place() => {
             let result = eval_place_result_static_apply(arena, app, node.span, ctx, locals)?;
             return Ok(control_flow_into_place_result(result).map_continue(Some));
         }
@@ -2870,8 +2874,8 @@ fn node_may_resolve_to_place(arena: &ENodeArena, node_id: ENodeId) -> bool {
         NodeKind::LoadLocal(_) => true,
         NodeKind::Project(node) => node_may_resolve_to_place(arena, node.value),
         NodeKind::ProjectAt(node) => node_may_resolve_to_place(arena, node.value),
-        NodeKind::Apply(app) => app.returns_place,
-        NodeKind::StaticApply(app) => app.returns_place,
+        NodeKind::Apply(app) => app.ty.returns_place(),
+        NodeKind::StaticApply(app) => app.ty.returns_place(),
         NodeKind::CloneValue(node)
             if matches!(
                 node.clone,

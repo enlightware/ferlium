@@ -32,7 +32,7 @@ use crate::{
     std::core_traits_names::VALUE_TRAIT_NAME,
     types::{
         effects::no_effects,
-        r#type::{FnType, Type, bare_native_type},
+        r#type::{FnArgType, FnReturnConvention, FnType, Type, bare_native_type},
         type_scheme::{PubTypeConstraint, TypeScheme},
     },
 };
@@ -205,10 +205,14 @@ fn buffer_slot(mut args: ValOrMutArgs, _ctx: &mut EvalCtx) -> EvalControlFlowRes
 
 fn buffer_slot_descr() -> ModuleFunction {
     let gen0 = Type::variable_id(0);
-    let ty = FnType::new_mut_resolved(
-        [(buffer_type(gen0), false), (super::math::int_type(), false)],
+    let ty = FnType::new_with_return_convention(
+        vec![
+            FnArgType::new_by_val(buffer_type(gen0)),
+            FnArgType::new_by_val(super::math::int_type()),
+        ],
         gen0,
         no_effects(),
+        FnReturnConvention::Place,
     );
     ModuleFunction::new(
         FunctionDefinition::new_with_generic_params_and_attributes(
@@ -217,7 +221,6 @@ fn buffer_slot_descr() -> ModuleFunction {
             vec![ustr("buffer"), ustr("index")],
             Some(String::from("Returns the place for a buffer slot.")),
             Vec::new(),
-            true,
         ),
         Box::new(ContextNativeFn::new(
             "buffer_slot",

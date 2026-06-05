@@ -36,7 +36,7 @@ use crate::{
     types::mutability::MutVal,
     types::r#trait::{Deriver, Trait, TraitMethodIndex},
     types::trait_solver::TraitSolver,
-    types::r#type::{FnType, Type, TypeKind, tuple_type},
+    types::r#type::{FnArgType, FnReturnConvention, FnType, Type, TypeKind, tuple_type},
     types::type_like::TypeLike,
 };
 
@@ -442,8 +442,15 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                         ustr("array_index"),
                     )?;
                     let arguments = vec![get_array, index_node];
-                    let ty =
-                        FnType::new_by_val([array_ty, int_type()], data_value_ty, EffType::empty());
+                    let ty = FnType::new_with_return_convention(
+                        vec![
+                            FnArgType::new_by_val(array_ty),
+                            FnArgType::new_by_val(int_type()),
+                        ],
+                        data_value_ty,
+                        EffType::empty(),
+                        FnReturnConvention::Place,
+                    );
                     let argument_passing = resolved_arg_passing_for_generated_call(
                         arena, solver, &arguments, &ty.args, span,
                     )?;
@@ -460,7 +467,6 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                             argument_names: vec![ustr("array"), ustr("index")],
                             ty,
                             inst_data: hir::FnInstData::none(),
-                            returns_place: true,
                         })),
                         data_value_ty,
                     );
