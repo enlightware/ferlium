@@ -1355,9 +1355,30 @@ fn eval_call_dictionary_method(
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
+    eval_call_dictionary_method_with(arena, node, span, ctx, locals, eval_args)
+}
+
+fn eval_place_result_call_dictionary_method(
+    arena: &ENodeArena,
+    node: &hir::CallDictionaryMethod<Elaborated>,
+    span: Location,
+    ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
+) -> EvalControlFlowResult {
+    eval_call_dictionary_method_with(arena, node, span, ctx, locals, eval_place_result_args)
+}
+
+fn eval_call_dictionary_method_with(
+    arena: &ENodeArena,
+    node: &hir::CallDictionaryMethod<Elaborated>,
+    span: Location,
+    ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
+    eval_args_fn: EvalArgsFn,
+) -> EvalControlFlowResult {
     let dictionary = eval_or_return!(eval_dictionary_metadata_node(arena, node.dictionary, ctx));
     let temp_start = ctx.environment.len();
-    let mut arguments = eval_or_return!(eval_args(
+    let mut arguments = eval_or_return!(eval_args_fn(
         arena,
         &node.arguments,
         &node.ty.args,
@@ -2478,6 +2499,7 @@ fn place_resolution_depends_on_place_result(arena: &ENodeArena, node_id: ENodeId
     match &arena[node_id].kind {
         NodeKind::Apply(app) => app.ty.returns_place(),
         NodeKind::StaticApply(app) => app.ty.returns_place(),
+        NodeKind::CallDictionaryMethod(call) => call.ty.returns_place(),
         NodeKind::Project(node) => place_resolution_depends_on_place_result(arena, node.value),
         NodeKind::ProjectAt(node) => place_resolution_depends_on_place_result(arena, node.value),
         NodeKind::Block(block) => block
@@ -2822,6 +2844,11 @@ fn try_eval_node_as_place(
             let result = eval_place_result_static_apply(arena, app, node.span, ctx, locals)?;
             return Ok(control_flow_into_place_result(result).map_continue(Some));
         }
+        CallDictionaryMethod(call) if call.ty.returns_place() => {
+            let result =
+                eval_place_result_call_dictionary_method(arena, call, node.span, ctx, locals)?;
+            return Ok(control_flow_into_place_result(result).map_continue(Some));
+        }
         CloneValue(node)
             if matches!(
                 node.clone,
@@ -2876,6 +2903,7 @@ fn node_may_resolve_to_place(arena: &ENodeArena, node_id: ENodeId) -> bool {
         NodeKind::ProjectAt(node) => node_may_resolve_to_place(arena, node.value),
         NodeKind::Apply(app) => app.ty.returns_place(),
         NodeKind::StaticApply(app) => app.ty.returns_place(),
+        NodeKind::CallDictionaryMethod(call) => call.ty.returns_place(),
         NodeKind::CloneValue(node)
             if matches!(
                 node.clone,

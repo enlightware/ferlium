@@ -948,7 +948,11 @@ impl TypeInference {
                         let call_effects = self.fresh_effect_var_ty();
                         let return_convention = match &*env.ir_arena[func_node_id].ty.data() {
                             TypeKind::Function(fn_ty) => fn_ty.return_convention,
-                            _ => FnReturnConvention::Value,
+                            _ => {
+                                // First-class place-returning functions are not supported yet:
+                                // unresolved dynamic callees are inferred as value-returning calls.
+                                FnReturnConvention::Value
+                            }
                         };
                         // Build the function type
                         let app_ty = FnType::new_with_return_convention(
@@ -2159,6 +2163,26 @@ impl TypeInference {
                     }
                 }
             }
+            NodeKind::CallDictionaryMethod(mut call) if call.ty.returns_place() => {
+                if let Some(base_index) =
+                    place_result_base_argument_index(env.ir_arena, &call.arguments)
+                {
+                    let mut prepared = self.prepare_place_base_for_projection(
+                        env,
+                        call.arguments[base_index].value,
+                        span,
+                    );
+                    call.arguments[base_index].value = prepared.place;
+                    prepared.place =
+                        self.rebuild_place_node(env, place, NodeKind::CallDictionaryMethod(call));
+                    prepared
+                } else {
+                    PreparedPlace {
+                        prefix: Vec::new(),
+                        place,
+                    }
+                }
+            }
             NodeKind::Apply(mut app) if app.ty.returns_place() => {
                 if let Some(base_index) =
                     place_result_base_argument_index(env.ir_arena, &app.arguments)
@@ -3347,6 +3371,7 @@ fn place_evaluation_depends_on_place_result(arena: &NodeArena, node_id: NodeId) 
         Apply(app) => app.ty.returns_place(),
         StaticApply(app) => app.ty.returns_place(),
         TraitMethodApply(app) => app.ty.returns_place(),
+        CallDictionaryMethod(call) => call.ty.returns_place(),
         Project(project) => place_evaluation_depends_on_place_result(arena, project.value),
         FieldAccess(field_access) => {
             place_evaluation_depends_on_place_result(arena, field_access.value)

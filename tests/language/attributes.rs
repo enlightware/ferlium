@@ -10,7 +10,10 @@
 use ferlium::{
     SourceId, ast,
     compiler::{
-        error::{AttributeTarget, CompilationErrorImpl, InvalidAttributeKind, UnsafeFeature},
+        error::{
+            AttributeTarget, CompilationErrorImpl, InternalCompilationError, InvalidAttributeKind,
+            UnsafeFeature,
+        },
         test_support::raw_modules,
     },
     hir::test_support::{EmitModuleFrom, emit_module},
@@ -46,6 +49,22 @@ fn compile_std_module(src: &str) -> ferlium::module::Module {
         EmitModuleFrom::Uses(Uses::default()),
     )
     .expect("std-context module should compile")
+}
+
+fn compile_std_module_error(src: &str) -> InternalCompilationError {
+    let session = TestSession::new();
+    let source_id = session.source_table().next_id();
+    let (module_ast, _, arena) =
+        parse_module_and_expr(src, source_id, true).expect("std-context module should parse");
+    let module_id = ModuleId(0);
+    emit_module(
+        module_ast,
+        &arena,
+        module_id,
+        raw_modules(session.session()),
+        EmitModuleFrom::Uses(Uses::default()),
+    )
+    .unwrap_err()
 }
 
 #[test]
@@ -242,7 +261,9 @@ fn no_fuel_check_attribute_is_rejected_in_user_code() {
 fn place_result_attribute_sets_function_type_convention_in_std_context() {
     let module = compile_std_module(indoc! { r#"
         #[place_result]
-        fn f() {}
+        fn f<A>(array: [A]) -> A {
+            return array[0];
+        }
     "# });
     let definition = &module.get_function(ustr("f")).unwrap().definition;
     assert!(definition.returns_place());
@@ -284,6 +305,114 @@ fn place_result_attribute_rejects_arguments_in_std_context() {
             assert_eq!(kind, InvalidAttributeKind::HasArguments);
         }
         other => panic!("expected invalid attribute error, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn place_result_attribute_rejects_owned_local_return_root_in_std_context() {
+    match compile_std_module_error(indoc! { r#"
+        #[place_result]
+        fn f<A>(x: A) -> A {
+            let y = x;
+            return y;
+        }
+    "# })
+    .into_inner()
+    {
+        CompilationErrorImpl::Unsupported { reason, .. } => {
+            assert!(reason.contains("addressor rooted in the base parameter"));
+        }
+        other => panic!("expected unsupported addressor root error, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn place_result_attribute_rejects_addressor_rooted_in_owned_local_in_std_context() {
+    match compile_std_module_error(indoc! { r#"
+        #[place_result]
+        fn f<A>(array: [A]) -> A {
+            let local = array;
+            return local[0];
+        }
+    "# })
+    .into_inner()
+    {
+        CompilationErrorImpl::Unsupported { reason, .. } => {
+            assert!(reason.contains("addressor rooted in the base parameter"));
+        }
+        other => panic!("expected unsupported addressor root error, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn place_result_attribute_rejects_addressor_rooted_in_non_base_parameter_in_std_context() {
+    match compile_std_module_error(indoc! { r#"
+        #[place_result]
+        fn f<A>(first: [A], array: [A]) -> A {
+            return array[0];
+        }
+    "# })
+    .into_inner()
+    {
+        CompilationErrorImpl::Unsupported { reason, .. } => {
+            assert!(reason.contains("addressor rooted in the base parameter"));
+        }
+        other => panic!("expected unsupported addressor root error, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn place_result_attribute_rejects_generic_parameter_return_root_in_std_context() {
+    match compile_std_module_error(indoc! { r#"
+        #[place_result]
+        fn f<A>(x: A) -> A {
+            return x;
+        }
+    "# })
+    .into_inner()
+    {
+        CompilationErrorImpl::Unsupported { reason, .. } => {
+            assert!(reason.contains("addressor rooted in the base parameter"));
+        }
+        other => panic!("expected unsupported addressor root error, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn place_result_attribute_rejects_implicit_tail_return_in_std_context() {
+    match compile_std_module_error(indoc! { r#"
+        #[place_result]
+        fn f<A>(array: [A]) -> A {
+            array[0]
+        }
+    "# })
+    .into_inner()
+    {
+        CompilationErrorImpl::Unsupported { reason, .. } => {
+            assert!(reason.contains("must return explicitly"));
+        }
+        other => panic!("expected unsupported addressor root error, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn place_result_attribute_rejects_empty_body_in_std_context() {
+    match compile_std_module_error(indoc! { r#"
+        #[place_result]
+        fn f() {}
+    "# })
+    .into_inner()
+    {
+        CompilationErrorImpl::Unsupported { reason, .. } => {
+            assert!(reason.contains("must return explicitly"));
+        }
+        other => panic!("expected unsupported place_result body error, got {other:?}"),
     }
 }
 

@@ -13,8 +13,8 @@ use crate::{
     compiler::error::InternalCompilationError,
     hir::{CallArgument, Node, NodeArena, NodeId, NodeKind},
     internal_compilation_error,
-    module::id::Id,
-    types::r#type::FnArgType,
+    module::{LocalDeclId, id::Id},
+    types::r#type::{FnArgType, Type},
 };
 
 enum PathPart {
@@ -56,12 +56,14 @@ impl Path {
             TraitMethodApply(app) if app.ty.returns_place() => {
                 Self::from_place_result_arguments(arena, &app.arguments)
             }
+            CallDictionaryMethod(call) if call.ty.returns_place() => {
+                Self::from_place_result_arguments(arena, &call.arguments)
+            }
             Block(block) => {
                 let tail = block
-                    .body
-                    .last()
+                    .tail_node()
                     .expect("place block should have a tail expression");
-                Self::from_node(arena, *tail)
+                Self::from_node(arena, tail)
             }
             LoadLocal(node) => Path {
                 variable: node.id.as_index(),
@@ -169,6 +171,114 @@ fn check_arguments(
 
 pub fn check_borrows(arena: &NodeArena, node_id: NodeId) -> Result<(), InternalCompilationError> {
     arena[node_id].check_borrows(arena)
+}
+
+pub fn check_place_return_roots(
+    arena: &NodeArena,
+    node_id: NodeId,
+    base_parameter_index: Option<usize>,
+) -> Result<(), InternalCompilationError> {
+    check_place_return_roots_in_node(arena, node_id, base_parameter_index)
+}
+
+fn check_place_return_roots_in_node(
+    arena: &NodeArena,
+    node_id: NodeId,
+    base_parameter_index: Option<usize>,
+) -> Result<(), InternalCompilationError> {
+    let node = &arena[node_id];
+    if let NodeKind::Return(value) = &node.kind {
+        check_place_return_root(arena, *value, base_parameter_index)?;
+    }
+    for child in node.kind.child_node_ids() {
+        check_place_return_roots_in_node(arena, child, base_parameter_index)?;
+    }
+    Ok(())
+}
+
+fn check_place_return_root(
+    arena: &NodeArena,
+    node_id: NodeId,
+    base_parameter_index: Option<usize>,
+) -> Result<(), InternalCompilationError> {
+    if arena[node_id].ty == Type::never() {
+        return Ok(());
+    }
+
+    let Some(origin) = returned_place_origin(arena, node_id) else {
+        return Err(internal_compilation_error!(Unsupported {
+            span: arena[node_id].span,
+            reason: "addressor return expression must be rooted in caller storage".into(),
+        }));
+    };
+
+    match origin {
+        PlaceOrigin::Addressor(local_id) if Some(local_id.as_index()) == base_parameter_index => {
+            Ok(())
+        }
+        PlaceOrigin::Direct(_) | PlaceOrigin::Addressor(_) => {
+            Err(internal_compilation_error!(Unsupported {
+                span: arena[node_id].span,
+                reason:
+                    "addressor return expression must come from an addressor rooted in the base parameter"
+                        .into(),
+            }))
+        }
+    }
+}
+
+// Very conservative first addressor rule: a Ferlium place-result function can
+// only return a place produced by another addressor call, and that call must be
+// rooted in this function's base/receiver parameter: the first visible
+// source-level parameter, after hidden closure captures if any. This is
+// intentionally sound but limiting; later addressor forms should extend this
+// provenance model rather than weaken the escape check.
+#[derive(Clone, Copy)]
+enum PlaceOrigin {
+    /// A direct local place or projection rooted in a local.
+    Direct(LocalDeclId),
+    /// A place produced by an addressor call whose base is rooted in a local.
+    Addressor(LocalDeclId),
+}
+
+impl PlaceOrigin {
+    fn local(self) -> LocalDeclId {
+        match self {
+            Self::Direct(local) | Self::Addressor(local) => local,
+        }
+    }
+}
+
+fn returned_place_origin(arena: &NodeArena, node_id: NodeId) -> Option<PlaceOrigin> {
+    let node = &arena[node_id];
+    use NodeKind::*;
+    match &node.kind {
+        LoadLocal(load) => Some(PlaceOrigin::Direct(load.id)),
+        Project(project) => returned_place_origin(arena, project.value),
+        FieldAccess(field_access) => returned_place_origin(arena, field_access.value),
+        ProjectAt(project) => returned_place_origin(arena, project.value),
+        StaticApply(app) if app.ty.returns_place() => addressor_base_origin(arena, &app.arguments),
+        Apply(app) if app.ty.returns_place() => addressor_base_origin(arena, &app.arguments),
+        TraitMethodApply(app) if app.ty.returns_place() => {
+            addressor_base_origin(arena, &app.arguments)
+        }
+        CallDictionaryMethod(call) if call.ty.returns_place() => {
+            addressor_base_origin(arena, &call.arguments)
+        }
+        Block(block) => block
+            .body
+            .last()
+            .and_then(|tail| returned_place_origin(arena, *tail)),
+        _ => None,
+    }
+}
+
+fn addressor_base_origin(arena: &NodeArena, arguments: &[CallArgument]) -> Option<PlaceOrigin> {
+    let base_index = arguments
+        .iter()
+        .position(|argument| !is_evidence_node(&arena[argument.value].kind))?;
+    returned_place_origin(arena, arguments[base_index].value)
+        .map(|origin| PlaceOrigin::Addressor(origin.local()))
 }
 
 impl Node {

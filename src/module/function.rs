@@ -16,7 +16,7 @@ use crate::{
     containers::b,
     define_id_type,
     format::FormatWith,
-    hir::borrow_checker::check_borrows,
+    hir::borrow_checker::{check_borrows, check_place_return_roots},
     hir::function::{Function, FunctionDefinition, PendingScriptFunction},
     hir::{
         ENodeArena, ENodeId, Elaborated, HirPhase, NodeId, UNodeArena, UNodeId, Unelaborated,
@@ -27,6 +27,7 @@ use crate::{
         elaboration::{ElaboratedHir, elaborate_hir},
         value_dispatch::elaborate_local_ownership_and_value_dispatches,
     },
+    internal_compilation_error,
     module::{FunctionDebugInfo, ModuleEnv, ModuleId, TraitKey, format_impl_header_by_key, id::Id},
     types::mutability::MutType,
     types::r#trait::TraitMethodIndex,
@@ -563,6 +564,29 @@ impl PendingModuleFunction {
             &mut self.locals,
             ctx,
         )?;
+        if self.definition.returns_place() {
+            if self.code.arena[root].ty != Type::never() {
+                return Err(internal_compilation_error!(Unsupported {
+                    span: self.code.arena[root].span,
+                    reason: "place_result functions must return explicitly".into(),
+                }));
+            }
+            let visible_arg_count = self.definition.arg_names.len();
+            let base_parameter_index = if visible_arg_count == 0 {
+                None
+            } else {
+                // This assumes runtime_arg_count includes every hidden runtime
+                // local allocated before visible parameters. Dictionary/bound
+                // evidence is not stored in this locals prefix today.
+                Some(
+                    self.code
+                        .runtime_arg_count
+                        .checked_sub(visible_arg_count)
+                        .expect("runtime argument count should include visible arguments"),
+                )
+            };
+            check_place_return_roots(&self.code.arena, root, base_parameter_index)?;
+        }
         check_borrows(&self.code.arena, root)?;
         let elaborated = elaborate_hir(&self.code.arena, root, dst_arena, ctx, &self.locals)?;
         let locals = self

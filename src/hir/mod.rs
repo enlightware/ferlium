@@ -163,10 +163,10 @@ pub(crate) fn node_is_place_reference(arena: &NodeArena, node_id: NodeId) -> boo
         Apply(app) => app.ty.returns_place(),
         StaticApply(app) => app.ty.returns_place(),
         TraitMethodApply(app) => app.ty.returns_place(),
+        CallDictionaryMethod(call) => call.ty.returns_place(),
         Block(block) => block
-            .body
-            .last()
-            .is_some_and(|node| node_is_place_reference(arena, *node)),
+            .tail_node()
+            .is_some_and(|node| node_is_place_reference(arena, node)),
         _ => false,
     }
 }
@@ -216,11 +216,24 @@ pub(crate) fn place_resolution_may_create_temp(arena: &NodeArena, node_id: NodeI
                 .iter()
                 .any(|arg| place_resolution_may_create_temp(arena, arg.value))
         }
-        Block(block) => block.body.iter().any(|node| {
-            place_resolution_may_create_temp(arena, *node)
-                || node_is_place_reference(arena, *node)
-                    && block.body.last().is_some_and(|last| last != node)
-        }),
+        CallDictionaryMethod(call) if call.ty.returns_place() => {
+            place_result_base_argument_index(arena, &call.arguments).is_some_and(|base_index| {
+                !node_is_place_reference(arena, call.arguments[base_index].value)
+            }) || call
+                .arguments
+                .iter()
+                .any(|arg| place_resolution_may_create_temp(arena, arg.value))
+        }
+        Block(block) => {
+            let tail = block.tail_node();
+            block.body.iter().any(|node| {
+                place_resolution_may_create_temp(arena, *node)
+                    // A non-tail place expression forces a temp: only the block tail
+                    // can be exposed as the block's resulting place.
+                    || node_is_place_reference(arena, *node)
+                        && tail.is_some_and(|tail| tail != *node)
+            })
+        }
         _ => false,
     }
 }
@@ -424,6 +437,12 @@ pub struct Block<P: HirPhase = Unelaborated> {
     pub body: NodeIds<P>,
     /// Locals in declaration order.
     pub cleanup: Vec<LocalDeclId>,
+}
+
+impl<P: HirPhase> Block<P> {
+    pub(crate) fn tail_node(&self) -> Option<NodeId<P>> {
+        self.body.last().copied()
+    }
 }
 
 /// A loop with an explicit label used as the target for loop control flow.
