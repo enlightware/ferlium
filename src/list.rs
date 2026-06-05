@@ -127,7 +127,7 @@ impl<T> List<T> {
       self.head_offset = self.free_offset;
       self.tail_offset = self.free_offset;
       self.free_offset = self.storage[new_offset].next;
-      self.storage[new_offset].assign(!1, !1, x);
+      self.storage[new_offset].assign(!0, !0, x);
       Address::new(new_offset)
     }
     // Regular insertion.
@@ -554,4 +554,22 @@ mod tests {
     xs.insert_after(a, "c");
     assert!(xs.iter().eq(vec!["a", "c", "b"].iter()));
   }
+
+  #[test]
+  fn test_append_after_emptied() {
+    let mut xs = List::<&str>::new();
+
+    let a = xs.append("a");
+    xs.remove(a);
+    assert!(xs.is_empty());
+
+    // Re-using an emptied bucket must restore the `!0` neighbor sentinels so that a later
+    // removal does not index out of bounds.
+    let b = xs.append("b");
+    assert!(xs.iter().eq(vec!["b"].iter()));
+
+    xs.remove(b); // crash
+    assert!(xs.is_empty());
+  }
+
 }
