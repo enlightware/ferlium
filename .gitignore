@@ -2,7 +2,7 @@
 /fuzz/artifacts
 /fuzz/coverage
 /fuzz/corpus-generated
-/fuzz-*.log
+/fuzz/logs
 /scratch
 Cargo.lock
 .codex
