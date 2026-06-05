@@ -16,7 +16,6 @@ pub use diagnostics::ModuleDiagnostic;
 pub use error::*;
 pub(crate) use pipeline::add_code_to_module;
 pub use pipeline::parse_module_and_expr;
-pub(crate) use session::EvalExprError;
 pub(crate) use session::Modules;
 pub use session::{
     CompilationRevision, CompilerSession, ModuleAndExpr, ModuleInfo, ModuleRegistry, ModuleSource,

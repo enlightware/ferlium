@@ -19,7 +19,7 @@ use crate::{
     hir::value::NativeDisplay,
     module::Module,
     std::{
-        core_traits_names::{CAST_TRAIT_NAME, VALUE_TRAIT_NAME},
+        core_traits_names::{CAST_TRAIT_NAME, INSPECT_TRAIT_NAME, VALUE_TRAIT_NAME},
         math::int_type,
         string::String,
         value::{
@@ -227,6 +227,7 @@ fn equal_hash_value(lhs: &HashValue, rhs: &HashValue) -> bool {
 
 pub fn add_to_module(to: &mut Module) {
     let value_trait_id = to.expect_std_trait_id_in_current_module(VALUE_TRAIT_NAME);
+    let inspect_trait_id = to.expect_std_trait_id_in_current_module(INSPECT_TRAIT_NAME);
     let cast_trait_id = to.expect_std_trait_id_in_current_module(CAST_TRAIT_NAME);
     // Types
     to.add_type_alias_str_with_doc(
@@ -259,6 +260,13 @@ pub fn add_to_module(to: &mut Module) {
         ],
     );
     to.add_concrete_impl_no_locals(
+        inspect_trait_id,
+        [hash_type()],
+        [],
+        [],
+        [b(UnaryNativeFnRN::new(hash_value_to_string)) as Function],
+    );
+    to.add_concrete_impl_no_locals(
         value_trait_id,
         [hasher_type()],
         [],
@@ -272,6 +280,13 @@ pub fn add_to_module(to: &mut Module) {
         ],
     );
     to.add_concrete_impl_no_locals(
+        inspect_trait_id,
+        [hasher_type()],
+        [],
+        [],
+        [b(UnaryNativeFnRN::new(hasher_to_string)) as Function],
+    );
+    to.add_concrete_impl_no_locals(
         value_trait_id,
         [unordered_hasher_type()],
         [],
@@ -283,6 +298,13 @@ pub fn add_to_module(to: &mut Module) {
             native_value_clone_function::<UnorderedHasher>(),
             native_value_drop_function::<UnorderedHasher>(),
         ],
+    );
+    to.add_concrete_impl_no_locals(
+        inspect_trait_id,
+        [unordered_hasher_type()],
+        [],
+        [],
+        [b(UnaryNativeFnRN::new(unordered_hasher_to_string)) as Function],
     );
     to.add_native_concrete_impl(
         cast_trait_id,

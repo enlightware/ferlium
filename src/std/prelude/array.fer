@@ -79,6 +79,24 @@ impl<A> Value for [A] where A: Value {
 	}
 }
 
+impl<A> Inspect for [A] where A: Inspect {
+	fn inspect(value: [A]) -> string {
+		let mut rendered = "[";
+		let mut i = 0;
+		loop {
+			if i >= array_len(value) {
+				string_push_str(rendered, "]");
+				return rendered;
+			};
+			if i > 0 {
+				string_push_str(rendered, ", ");
+			};
+			string_push_str(rendered, inspect(value[i]));
+			i += 1;
+		}
+	}
+}
+
 /// Return the last element of an array, or None if the array is empty.
 pub fn array_peek_back<A>(array: [A]) -> Option<A>
 where

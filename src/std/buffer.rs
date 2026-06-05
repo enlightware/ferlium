@@ -29,7 +29,7 @@ use crate::{
         BlanketTraitImplSubKey, Module, ModuleFunction, ResolvedValueLayout, TraitDictionaryId,
         TraitId,
     },
-    std::core_traits_names::VALUE_TRAIT_NAME,
+    std::core_traits_names::{INSPECT_TRAIT_NAME, VALUE_TRAIT_NAME},
     types::{
         effects::no_effects,
         r#type::{FnArgType, FnReturnConvention, FnType, Type, bare_native_type},
@@ -494,6 +494,7 @@ fn buffer_drop_at_descr(value_trait_id: TraitId) -> ModuleFunction {
 
 pub fn add_to_module(to: &mut Module) {
     let value_trait_id = to.expect_std_trait_id_in_current_module(VALUE_TRAIT_NAME);
+    let inspect_trait_id = to.expect_std_trait_id_in_current_module(INSPECT_TRAIT_NAME);
     to.add_unsafe_bare_native_type_alias_str("Buffer", bare_native_type::<Buffer>());
     let gen0 = Type::variable_id(0);
     to.add_blanket_impl_no_locals(
@@ -512,6 +513,17 @@ pub fn add_to_module(to: &mut Module) {
             Box::new(BinaryNativeFnRWN::new(buffer_clone)) as Function,
             Box::new(UnaryNativeFnMN::new(buffer_drop)) as Function,
         ],
+    );
+    to.add_blanket_impl_no_locals(
+        inspect_trait_id,
+        BlanketTraitImplSubKey {
+            input_tys: vec![buffer_type(gen0)],
+            ty_var_count: 1,
+            constraints: vec![],
+        },
+        [],
+        [],
+        [Box::new(UnaryNativeFnRN::new(buffer_to_string)) as Function],
     );
     to.add_private_unsafe_function(ustr("buffer_slot"), buffer_slot_descr());
     to.add_private_unsafe_function(ustr("buffer_with_capacity"), buffer_with_capacity_descr());

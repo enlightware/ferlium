@@ -20,7 +20,8 @@ use crate::{
     module::Module,
     std::{
         core_traits_names::{
-            BITS_TRAIT_NAME, DEFAULT_TRAIT_NAME, TRIVIAL_COPY_TRAIT_NAME, VALUE_TRAIT_NAME,
+            BITS_TRAIT_NAME, DEFAULT_TRAIT_NAME, INSPECT_TRAIT_NAME, TRIVIAL_COPY_TRAIT_NAME,
+            VALUE_TRAIT_NAME,
         },
         hash::Hasher,
         math::Int,
@@ -78,6 +79,7 @@ fn hash_bool(value: bool, state: &mut Hasher) {
 
 pub fn add_to_module(to: &mut Module) {
     let value_trait_id = to.expect_std_trait_id_in_current_module(VALUE_TRAIT_NAME);
+    let inspect_trait_id = to.expect_std_trait_id_in_current_module(INSPECT_TRAIT_NAME);
     let bits_trait_id = to.expect_std_trait_id_in_current_module(BITS_TRAIT_NAME);
     let default_trait_id = to.expect_std_trait_id_in_current_module(DEFAULT_TRAIT_NAME);
     let trivial_copy_trait_id = to.expect_std_trait_id_in_current_module(TRIVIAL_COPY_TRAIT_NAME);
@@ -99,6 +101,13 @@ pub fn add_to_module(to: &mut Module) {
             native_value_clone_function::<bool>(),
             native_value_drop_function::<bool>(),
         ],
+    );
+    to.add_concrete_impl_no_locals(
+        inspect_trait_id,
+        [bool_type()],
+        [],
+        [],
+        [b(UnaryFn::new(|value: bool| String::new(&value.to_string()))) as Function],
     );
     to.add_native_concrete_impl(
         bits_trait_id,

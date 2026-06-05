@@ -10,11 +10,10 @@
 use std::sync::LazyLock;
 
 use crate::{
-    CompilationError, CompilerSession, EvalExprError, FxHashMap, FxHashSet, ModuleAndExpr,
-    ModuleEnv, Path, SourceId, call_fn,
-    eval::{DEFAULT_INTERACTIVE_FUEL_LIMIT, EvalCtx, ValOrMut, eval_node_with_ctx},
+    CompilationError, CompilerSession, FxHashMap, FxHashSet, ModuleAndExpr, ModuleEnv, Path,
+    SourceId, call_fn,
+    eval::{DEFAULT_INTERACTIVE_FUEL_LIMIT, EvalCtx, eval_node_with_ctx},
     format::FormatWith,
-    hir::hir_syn::local,
     hir::value::{NativeValue, Value},
     module::Uses,
     run_fn_native,
@@ -154,39 +153,17 @@ impl Compiler {
             match value {
                 Ok(value) => {
                     let value = value.into_value();
-                    let rendered = match self.session.eval_expr_with_locals_with_fuel(
-                        "<ide:to_string>",
-                        "to_string(value)",
+                    let rendered = match self.session.value_to_inspect_text_with_fuel(
                         module_id,
-                        vec![local("value", expr.ty.ty)],
-                        vec![ValOrMut::Val(value)],
+                        value,
+                        expr.ty.ty,
                         self.execution_fuel_limit,
                     ) {
-                        Ok(rendered) => {
-                            let rendered = rendered
-                                .into_primitive_ty::<crate::std::string::String>()
-                                .expect("to_string(value) must return a Ferlium string");
-                            rendered.to_string()
-                        }
-                        Err(EvalExprError::Compilation(error)) => {
+                        Ok(rendered) => rendered,
+                        Err(error) => {
                             let summary = "Formatting error".to_string();
-                            let complete =
-                                format!("{}", error.format_with(self.session.source_table()));
                             return ExecutionResult::error(ExecutionErrorData::new(
-                                summary, complete, None,
-                            ));
-                        }
-                        Err(EvalExprError::Runtime(error)) => {
-                            let summary = "Formatting error".to_string();
-                            let complete = format!(
-                                "{}",
-                                error.format_with(&(
-                                    self.session.source_table(),
-                                    self.session.raw_modules()
-                                ))
-                            );
-                            return ExecutionResult::error(ExecutionErrorData::new(
-                                summary, complete, None,
+                                summary, error, None,
                             ));
                         }
                     };
@@ -484,6 +461,61 @@ mod tests {
         let error = result.error_content().expect("execution should fail");
 
         assert_eq!(error.summary, "Execution fuel exhausted");
+    }
+
+    #[test]
+    fn run_expr_array_inspect_respects_execution_fuel_limit() {
+        let mut compiler = build(
+            r#"
+            struct Bad(int)
+
+            impl Inspect for Bad {
+                fn inspect(value: Bad) -> string {
+                    loop {}
+                }
+            }
+
+            [Bad(1)]
+            "#,
+        );
+        compiler.set_execution_fuel_limit(8);
+
+        let result = compiler.run_expr().expect("expression should exist");
+        let error = result.error_content().expect("formatting should fail");
+
+        assert_eq!(error.summary, "Formatting error");
+        assert!(error.complete.contains("Execution fuel exhausted"));
+    }
+
+    #[test]
+    fn run_expr_inspects_strings_with_quotes() {
+        let mut compiler = build(r#""hello""#);
+
+        let result = compiler.run_expr().expect("expression should exist");
+
+        assert_eq!(result.html_message(), r#""hello": string"#);
+    }
+
+    #[test]
+    fn run_expr_inspect_preserves_named_types() {
+        let mut compiler =
+            build(r#"struct Person { name: string, age: int } Person { name: "Alice", age: 30 }"#);
+
+        let result = compiler.run_expr().expect("expression should exist");
+
+        assert_eq!(
+            result.html_message(),
+            r#"Person { age: 30, name: "Alice" }: Person"#
+        );
+    }
+
+    #[test]
+    fn run_expr_renders_functions_opaquely() {
+        let mut compiler = build("|| 1");
+
+        let result = compiler.run_expr().expect("expression should exist");
+
+        assert_eq!(result.html_message(), "&lt;function&gt;: () -&gt; int");
     }
 
     #[test]

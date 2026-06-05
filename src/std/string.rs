@@ -30,7 +30,8 @@ use crate::{
     module::{Module, ModuleFunction},
     std::{
         core_traits_names::{
-            DEFAULT_TRAIT_NAME, EMPTY_TRAIT_NAME, ORD_TRAIT_NAME, VALUE_TRAIT_NAME,
+            DEFAULT_TRAIT_NAME, EMPTY_TRAIT_NAME, INSPECT_TRAIT_NAME, ORD_TRAIT_NAME,
+            VALUE_TRAIT_NAME,
         },
         hash::Hasher,
         logic::bool_type,
@@ -546,8 +547,27 @@ fn compare_string(lhs: &String, rhs: &String) -> Value {
     compare(lhs, rhs)
 }
 
+fn inspect_string(value: &String) -> String {
+    let mut output = std::string::String::new();
+    output.push('"');
+    for ch in value.as_ref().chars() {
+        match ch {
+            '"' => output.push_str("\\\""),
+            '\\' => output.push_str("\\\\"),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            ch if ch.is_control() => output.push_str(&format!("\\u{{{:x}}}", ch as u32)),
+            ch => output.push(ch),
+        }
+    }
+    output.push('"');
+    String::new(&output)
+}
+
 pub fn add_to_module(to: &mut Module) {
     let value_trait_id = to.expect_std_trait_id_in_current_module(VALUE_TRAIT_NAME);
+    let inspect_trait_id = to.expect_std_trait_id_in_current_module(INSPECT_TRAIT_NAME);
     let ord_trait_id = to.expect_std_trait_id_in_current_module(ORD_TRAIT_NAME);
     let default_trait_id = to.expect_std_trait_id_in_current_module(DEFAULT_TRAIT_NAME);
     let empty_trait_id = to.expect_std_trait_id_in_current_module(EMPTY_TRAIT_NAME);
@@ -567,6 +587,13 @@ pub fn add_to_module(to: &mut Module) {
         ],
     );
     to.add_concrete_impl_no_locals(
+        inspect_trait_id,
+        [string_type()],
+        [],
+        [],
+        [b(UnaryNativeFnRN::new(inspect_string)) as Function],
+    );
+    to.add_concrete_impl_no_locals(
         value_trait_id,
         [string_iter_type()],
         [],
@@ -580,6 +607,13 @@ pub fn add_to_module(to: &mut Module) {
         ],
     );
     to.add_concrete_impl_no_locals(
+        inspect_trait_id,
+        [string_iter_type()],
+        [],
+        [],
+        [b(UnaryNativeFnRN::new(string_iterator_to_string)) as Function],
+    );
+    to.add_concrete_impl_no_locals(
         value_trait_id,
         [string_split_iter_type()],
         [],
@@ -591,6 +625,13 @@ pub fn add_to_module(to: &mut Module) {
             native_value_clone_function::<StringSplitIterator>(),
             native_value_drop_function::<StringSplitIterator>(),
         ],
+    );
+    to.add_concrete_impl_no_locals(
+        inspect_trait_id,
+        [string_split_iter_type()],
+        [],
+        [],
+        [b(UnaryNativeFnRN::new(string_split_iterator_to_string)) as Function],
     );
     to.add_native_concrete_impl(
         ord_trait_id,

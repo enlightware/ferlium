@@ -596,7 +596,7 @@ fn process_input(
             Ok(value) => {
                 let value = value.into_value();
                 let rendered = match session
-                    .value_to_string_with_fuel(module_id, value, expr.ty.ty, fuel_limit)
+                    .value_to_inspect_text_with_fuel(module_id, value, expr.ty.ty, fuel_limit)
                 {
                     Ok(rendered) => rendered,
                     Err(error) => {

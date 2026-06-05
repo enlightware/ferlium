@@ -8,6 +8,7 @@
 //
 
 pub const VALUE_TRAIT_NAME: &str = "Value";
+pub const INSPECT_TRAIT_NAME: &str = "Inspect";
 pub const REPR_TRAIT_NAME: &str = "Repr";
 pub const TRIVIAL_COPY_TRAIT_NAME: &str = "TrivialCopy";
 pub const CAST_TRAIT_NAME: &str = "Cast";

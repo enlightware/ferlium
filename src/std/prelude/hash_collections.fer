@@ -181,6 +181,15 @@ where
 	fn drop(target: &mut HashSet<V>) {}
 }
 
+impl<V> Inspect for HashSet<V>
+where
+	V: Inspect
+{
+	fn inspect(value: HashSet<V>) -> string {
+		hash_collection_inspect(value)
+	}
+}
+
 // Hash maps
 
 struct HashMapEntry<K, V>
@@ -224,6 +233,19 @@ where
 	}
 
 	fn drop(target: &mut HashMapEntry<K, V>) {}
+}
+
+impl<K, V> Inspect for HashMapEntry<K, V>
+where
+	K: Inspect,
+	V: Inspect
+{
+	fn inspect(value: HashMapEntry<K, V>) -> string {
+		let mut rendered = inspect(value.key);
+		string_push_str(rendered, " => ");
+		string_push_str(rendered, inspect(value.value));
+		rendered
+	}
 }
 
 /// A map storing unique, unordered key-value pairs of types `K` and `V`.
@@ -456,6 +478,16 @@ where
 	fn drop(target: &mut HashMap<K, V>) {}
 }
 
+impl<K, V> Inspect for HashMap<K, V>
+where
+	K: Inspect,
+	V: Inspect
+{
+	fn inspect(value: HashMap<K, V>) -> string {
+		hash_collection_inspect(value)
+	}
+}
+
 // Common hash collection machinery functions
 
 fn hash_collection_bucket_index(slot_hash: hash, capacity: int) -> int {
@@ -564,6 +596,21 @@ fn hash_collection_to_string(collection) -> string {
 			first = false;
 		};
 		string_push_str(rendered, to_string(element));
+	};
+	string_push_str(rendered, " }");
+	rendered
+}
+
+fn hash_collection_inspect(collection) -> string {
+    let mut rendered = "{ ";
+	let mut first = true;
+	for element in collection {
+		if not first {
+			string_push_str(rendered, ", ");
+		} else {
+			first = false;
+		};
+		string_push_str(rendered, inspect(element));
 	};
 	string_push_str(rendered, " }");
 	rendered

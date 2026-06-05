@@ -27,12 +27,12 @@ mod sync;
 pub mod types;
 
 pub(crate) use compiler::Modules;
+pub(crate) use compiler::add_code_to_module;
 pub use compiler::error::{CompilationError, LocatedError};
 pub use compiler::{
     CompilationRevision, CompilerSession, ModuleAndExpr, ModuleDiagnostic, ModuleInfo,
     ModuleRegistry, ModuleSource, ModuleUpdateResult, SourceVersion, parse_module_and_expr,
 };
-pub(crate) use compiler::{EvalExprError, add_code_to_module};
 pub use ide::Compiler;
 pub use module::{ModuleEnv, Path};
 pub use parser::location::{Location, SourceId, SourceTable};

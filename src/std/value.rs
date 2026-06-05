@@ -32,10 +32,14 @@ use crate::{
         TraitImplId, TraitImpls, id::Id,
     },
     std::{
-        STD_MODULE_ID, core_traits_names::VALUE_TRAIT_NAME, hash::hasher_type, logic::bool_type,
-        math::int_type, string::string_type,
+        STD_MODULE_ID,
+        core_traits_names::{INSPECT_TRAIT_NAME, VALUE_TRAIT_NAME},
+        hash::hasher_type,
+        logic::bool_type,
+        math::int_type,
+        string::string_type,
     },
-    types::effects::EffType,
+    types::effects::{EffType, PrimitiveEffect},
     types::mutability::{MutType, MutVal},
     types::r#trait::{
         Deriver, Trait, TraitAssociatedConst, TraitAssociatedConstIndex, TraitMethodIndex,
@@ -61,6 +65,7 @@ pub(crate) const VALUE_SIZE_ASSOC_CONST_INDEX: TraitAssociatedConstIndex =
     TraitAssociatedConstIndex(0);
 pub(crate) const VALUE_ALIGN_ASSOC_CONST_INDEX: TraitAssociatedConstIndex =
     TraitAssociatedConstIndex(1);
+pub(crate) const INSPECT_METHOD_INDEX: TraitMethodIndex = TraitMethodIndex(0);
 pub(crate) const NO_DERIVE_VALUE_ATTRIBUTE: &str = "no_derive_value";
 
 pub(crate) fn native_layout_associated_consts<T>() -> Vec<LiteralValue> {
@@ -398,7 +403,7 @@ impl<'s, 'm> ValueBodyCtx<'s, 'm> {
         span: Location,
         arena: &mut NodeArena,
         arguments: Vec<NodeId>,
-    ) -> Result<(hir::NodeKind, Type), InternalCompilationError> {
+    ) -> Result<(hir::NodeKind, Type, EffType), InternalCompilationError> {
         let (fn_ty, ret_ty, method_name, is_function_value) = {
             let trait_def = self.solver.trait_def(trait_id);
             let definition = trait_def
@@ -417,6 +422,7 @@ impl<'s, 'm> ValueBodyCtx<'s, 'm> {
         if is_function_value {
             let function =
                 FunctionId::Local(function_value_method(self.solver, method_index, span)?);
+            let effects = fn_ty.effects.clone();
             let argument_passing = resolved_arg_passing_for_generated_call(
                 arena,
                 self.solver,
@@ -433,10 +439,12 @@ impl<'s, 'm> ValueBodyCtx<'s, 'm> {
                     span,
                 ),
                 ret_ty,
+                effects,
             ));
         }
 
         if self.emit_generic_trait_calls && !input_ty.is_constant() {
+            let effects = fn_ty.effects.clone();
             let argument_passing = resolved_arg_passing_for_generated_call(
                 arena,
                 self.solver,
@@ -460,6 +468,7 @@ impl<'s, 'm> ValueBodyCtx<'s, 'm> {
                     },
                 )),
                 ret_ty,
+                effects,
             ));
         }
 
@@ -473,6 +482,7 @@ impl<'s, 'm> ValueBodyCtx<'s, 'm> {
             &fn_ty.args,
             span,
         )?;
+        let effects = fn_ty.effects.clone();
         Ok((
             hir::hir_syn::static_apply_with_argument_passing(
                 function,
@@ -482,6 +492,7 @@ impl<'s, 'm> ValueBodyCtx<'s, 'm> {
                 span,
             ),
             ret_ty,
+            effects,
         ))
     }
 }
@@ -495,12 +506,12 @@ fn value_method_call_node(
     arena: &mut NodeArena,
     arguments: Vec<NodeId>,
 ) -> Result<NodeId, InternalCompilationError> {
-    let (kind, ty) =
+    let (kind, ty, effects) =
         ctx.value_method_call(trait_id, input_ty, method_index, span, arena, arguments)?;
     Ok(arena.alloc(hir::Node::new(
         kind,
         ty,
-        EffType::empty(),
+        effects,
         Location::new_synthesized(),
     )))
 }
@@ -758,8 +769,9 @@ pub(crate) fn function_value_method_function(
     ))
 }
 
-fn derive_value_to_string_body(
+fn derive_structural_text_body(
     trait_id: TraitId,
+    method_index: TraitMethodIndex,
     input_types: &[Type],
     span: Location,
     arena: &mut NodeArena,
@@ -780,13 +792,13 @@ fn derive_value_to_string_body(
     )?;
 
     let string_lit = |arena: &mut NodeArena, text: &str| n(arena, native_str(text), string_type());
-    macro_rules! build_to_string {
+    macro_rules! build_text {
         ($arena:expr, $value:expr, $value_ty:expr) => {
             value_method_call_node(
                 ctx,
                 trait_id,
                 $value_ty,
-                VALUE_TO_STRING_METHOD_INDEX,
+                method_index,
                 span,
                 $arena,
                 vec![$value],
@@ -849,7 +861,7 @@ fn derive_value_to_string_body(
                     project(load_self, ProjectionIndex::from_index(index)),
                     member_ty,
                 );
-                let member_str = build_to_string!(arena, member, member_ty)?;
+                let member_str = build_text!(arena, member, member_ty)?;
                 pieces.push(member_str);
             }
             pieces.push(string_lit(arena, ")"));
@@ -875,7 +887,7 @@ fn derive_value_to_string_body(
                     project(load_self, ProjectionIndex::from_index(index)),
                     member_ty,
                 );
-                let member_str = build_to_string!(arena, member, member_ty)?;
+                let member_str = build_text!(arena, member, member_ty)?;
                 pieces.push(member_str);
             }
             pieces.push(string_lit(arena, " }"));
@@ -898,7 +910,7 @@ fn derive_value_to_string_body(
                 } else {
                     let self_value = n(arena, load_local(l_self_id), ty);
                     let payload = variant_payload_project(arena, self_value, payload_ty);
-                    let payload_str = build_to_string!(arena, payload, payload_ty)?;
+                    let payload_str = build_text!(arena, payload, payload_ty)?;
                     if payload_ty.data().is_tuple() {
                         build_string_block(
                             arena,
@@ -949,7 +961,7 @@ fn derive_value_to_string_body(
                             project(load_self, ProjectionIndex::from_index(index)),
                             member_ty,
                         );
-                        pieces.push(build_to_string!(arena, member, member_ty)?);
+                        pieces.push(build_text!(arena, member, member_ty)?);
                     }
                     pieces.push(string_lit(arena, ")"));
                     build_string_block(
@@ -975,7 +987,7 @@ fn derive_value_to_string_body(
                             project(load_self, ProjectionIndex::from_index(index)),
                             member_ty,
                         );
-                        pieces.push(build_to_string!(arena, member, member_ty)?);
+                        pieces.push(build_text!(arena, member, member_ty)?);
                     }
                     pieces.push(string_lit(arena, " }"));
                     build_string_block(
@@ -998,7 +1010,7 @@ fn derive_value_to_string_body(
                         } else {
                             let self_value = n(arena, load_local(l_self_id), ty);
                             let payload = variant_payload_project(arena, self_value, payload_ty);
-                            let payload_str = build_to_string!(arena, payload, payload_ty)?;
+                            let payload_str = build_text!(arena, payload, payload_ty)?;
                             if payload_ty.data().is_tuple() {
                                 build_string_block(
                                     arena,
@@ -1030,7 +1042,7 @@ fn derive_value_to_string_body(
                 _ => {
                     drop(shape_data);
                     let load_self = n(arena, load_local(l_self_id), shape_ty);
-                    let payload_str = build_to_string!(arena, load_self, shape_ty)?;
+                    let payload_str = build_text!(arena, load_self, shape_ty)?;
                     build_string_block(
                         arena,
                         ctx.solver,
@@ -1053,6 +1065,78 @@ fn derive_value_to_string_body(
     };
 
     Ok(root)
+}
+
+fn derive_value_to_string_body(
+    trait_id: TraitId,
+    input_types: &[Type],
+    span: Location,
+    arena: &mut NodeArena,
+    ctx: &mut ValueBodyCtx<'_, '_>,
+) -> Result<Option<(NodeId, Vec<crate::module::LocalDecl>)>, InternalCompilationError> {
+    derive_structural_text_body(
+        trait_id,
+        VALUE_TO_STRING_METHOD_INDEX,
+        input_types,
+        span,
+        arena,
+        ctx,
+    )
+}
+
+fn derive_inspect_body(
+    trait_id: TraitId,
+    input_types: &[Type],
+    span: Location,
+    arena: &mut NodeArena,
+    ctx: &mut ValueBodyCtx<'_, '_>,
+) -> Result<Option<(NodeId, Vec<crate::module::LocalDecl>)>, InternalCompilationError> {
+    derive_structural_text_body(
+        trait_id,
+        INSPECT_METHOD_INDEX,
+        input_types,
+        span,
+        arena,
+        ctx,
+    )
+}
+
+#[derive(Debug, Clone)]
+struct InspectDeriver;
+
+impl Deriver for InspectDeriver {
+    fn derive_impl(
+        &self,
+        trait_id: TraitId,
+        input_types: &[Type],
+        span: Location,
+        _arena: &mut NodeArena,
+        solver: &mut TraitSolver,
+    ) -> Result<Option<TraitImplId>, InternalCompilationError> {
+        assert!(input_types.len() == 1);
+        let ty = input_types[0];
+        assert!(ty.is_constant());
+
+        let snapshot = solver.snapshot_derived_impl_state();
+        let impl_id =
+            solver.reserve_concrete_impl_from_code_entries(trait_id, input_types, &[], []);
+        let mut body_arena = NodeArena::default();
+        let mut ctx = ValueBodyCtx::concrete(solver);
+        let Some((root, locals)) =
+            derive_inspect_body(trait_id, input_types, span, &mut body_arena, &mut ctx)?
+        else {
+            ctx.solver.rollback_derived_impl_state(snapshot);
+            return Ok(None);
+        };
+        ctx.solver.replace_concrete_impl_code_entries(
+            impl_id,
+            trait_id,
+            input_types,
+            &[],
+            [(PendingFunctionBody::new(body_arena, root), locals)],
+        );
+        Ok(Some(TraitImplId::Local(impl_id)))
+    }
 }
 
 fn derive_value_eq_body(
@@ -2091,8 +2175,34 @@ pub fn value_trait() -> Trait {
     .with_deriver(ValueDeriver)
 }
 
+pub fn inspect_trait() -> Trait {
+    let var_ty = Type::variable_id(0);
+    let inspect_ty = FnType::new_by_val(
+        [var_ty],
+        string_type(),
+        EffType::single_primitive(PrimitiveEffect::Fallible),
+    );
+    Trait::new_with_self_input_type(
+        INSPECT_TRAIT_NAME,
+        "A type that can render values for interactive inspection and debugging.",
+        [],
+        [(
+            "inspect",
+            FunctionDefinition::new_infer_quantifiers(
+                inspect_ty,
+                ["value"],
+                "Returns an inspection representation of `value`.",
+            ),
+        )],
+    )
+    .with_deriver(InspectDeriver)
+}
+
 pub fn add_to_module(to: &mut Module) {
     let value_trait_id = to.add_trait(value_trait());
     let value_trait_id = TraitId::new(to.module_id(), value_trait_id);
     debug_assert_eq!(to.trait_def(value_trait_id).name, VALUE_TRAIT_NAME);
+    let inspect_trait_id = to.add_trait(inspect_trait());
+    let inspect_trait_id = TraitId::new(to.module_id(), inspect_trait_id);
+    debug_assert_eq!(to.trait_def(inspect_trait_id).name, INSPECT_TRAIT_NAME);
 }

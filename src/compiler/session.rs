@@ -20,7 +20,7 @@ use crate::{
     },
     containers::b,
     define_id_type,
-    eval::{DEFAULT_INTERACTIVE_FUEL_LIMIT, EvalCtx, RuntimeError, ValOrMut, eval_node_with_ctx},
+    eval::{DEFAULT_INTERACTIVE_FUEL_LIMIT, EvalCtx, ValOrMut, eval_node_with_ctx},
     format::FormatWith,
     hir::CompiledExpr,
     hir::value::Value,
@@ -385,7 +385,7 @@ pub struct CompilerSession {
 #[derive(Debug, Clone)]
 pub(crate) enum EvalExprError {
     Compilation(CompilationError),
-    Runtime(RuntimeError),
+    FormattedRuntime(String),
 }
 
 impl CompilerSession {
@@ -599,14 +599,20 @@ impl CompilerSession {
             let temp_module = self.expect_fresh_module(module.module_id());
             let mut ctx = EvalCtx::with_environment(module.module_id(), environment, self);
             ctx.set_fuel_limit(fuel_limit);
-            eval_node_with_ctx(
+            match eval_node_with_ctx(
                 &temp_module.hir_arena,
                 compiled.expr,
                 &mut ctx,
                 &compiled.locals,
             )
             .map(|value| value.into_value())
-            .map_err(EvalExprError::Runtime)
+            {
+                Ok(value) => Ok(value),
+                Err(error) => Err(EvalExprError::FormattedRuntime(format!(
+                    "{}",
+                    error.format_with(&(self.source_table(), self.raw_modules()))
+                ))),
+            }
         };
 
         let entry = self
@@ -696,20 +702,11 @@ impl CompilerSession {
             EvalExprError::Compilation(error) => {
                 format!("{}", error.format_with(self.source_table()))
             }
-            EvalExprError::Runtime(error) => {
-                format!(
-                    "{}",
-                    error.format_with(&(self.source_table(), self.raw_modules()))
-                )
-            }
+            EvalExprError::FormattedRuntime(error) => error,
         }
     }
 
     /// Render a value by evaluating Ferlium's `to_string(value)` in `module_id`.
-    ///
-    /// This is the same semantic formatting path used by the IDE execution
-    /// view. The concrete value type is required so trait-based `to_string`
-    /// resolution happens through the compiler.
     pub fn value_to_string(
         &mut self,
         module_id: ModuleId,
@@ -739,6 +736,45 @@ impl CompilerSession {
                 .into_primitive_ty::<crate::std::string::String>()
                 .map(|rendered| rendered.to_string())
                 .ok_or_else(|| "to_string(value) did not return a string".to_string()),
+            Err(error) => Err(self.format_eval_expr_error(error)),
+        }
+    }
+
+    /// Render a value for interactive inspection by evaluating `inspect(value)`.
+    pub fn value_to_inspect_text(
+        &mut self,
+        module_id: ModuleId,
+        value: Value,
+        ty: Type,
+    ) -> Result<String, String> {
+        self.value_to_inspect_text_with_fuel(
+            module_id,
+            value,
+            ty,
+            Some(DEFAULT_INTERACTIVE_FUEL_LIMIT),
+        )
+    }
+
+    /// Render a value for interactive inspection with an optional fuel limit.
+    pub fn value_to_inspect_text_with_fuel(
+        &mut self,
+        module_id: ModuleId,
+        value: Value,
+        ty: Type,
+        fuel_limit: Option<usize>,
+    ) -> Result<String, String> {
+        match self.eval_expr_with_locals_with_fuel(
+            "<value_to_inspect_text>",
+            "inspect(value)",
+            module_id,
+            vec![local("value", ty)],
+            vec![ValOrMut::Val(value)],
+            fuel_limit,
+        ) {
+            Ok(rendered) => rendered
+                .into_primitive_ty::<crate::std::string::String>()
+                .map(|rendered| rendered.to_string())
+                .ok_or_else(|| "inspect(value) did not return a string".to_string()),
             Err(error) => Err(self.format_eval_expr_error(error)),
         }
     }
