@@ -64,7 +64,7 @@ impl<T> List<T> {
     }
   }
 
-  ///s Returns the position that immediately follows `a`, if any.
+  /// Returns the position that immediately follows `a`, if any.
   pub fn address_after(&self, a: Address) -> Option<Address> {
     assert!(self.in_bounds(a));
     if a == self.last_address() {
@@ -99,7 +99,7 @@ impl<T> List<T> {
     }
   }
 
-  /// Reserves enough space to store the `additional` new elements in `self` without allocating new
+  /// Reserves enough space to store `k` additional elements in `self` without reallocating its
   /// storage.
   pub fn reserve(&mut self, k: usize) {
     let n = self.storage.len();
