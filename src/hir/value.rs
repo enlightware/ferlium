@@ -20,7 +20,7 @@ use ustr::Ustr;
 
 use crate::{
     containers::{B, IntoSVec2, SVec2, b},
-    format::{write_with_separator, write_with_separator_and_format_fn},
+    format::write_with_separator,
     module::{LocalFunctionId, ModuleId, TraitDictionaryId},
 };
 
@@ -443,66 +443,6 @@ impl Value {
             Self::Native(value) => value.as_mut().as_mut_any().downcast_mut::<T>(),
             _ => None,
         }
-    }
-
-    pub fn format_as_string_repr(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use Value::*;
-        match self {
-            Uninit => write!(f, "<uninitialized>"),
-            Native(value) => value.fmt_in_to_string(f),
-            Variant(variant) => {
-                if variant.value.is_tuple() {
-                    write!(f, "{}", variant.tag)?;
-                    variant.value.format_as_string_repr(f)
-                } else {
-                    write!(f, "{}(", variant.tag)?;
-                    variant.value.format_as_string_repr(f)?;
-                    write!(f, ")")
-                }
-            }
-            Tuple(tuple) => {
-                write!(f, "(")?;
-                write_with_separator_and_format_fn(
-                    tuple.iter(),
-                    ", ",
-                    Value::format_as_string_repr,
-                    f,
-                )?;
-                write!(f, ")")
-            }
-            Function(fv) => {
-                if fv.hidden_args.is_empty() && fv.closure_env_len == 0 {
-                    write!(f, "function {} in {}", fv.function_id, fv.module_id)
-                } else {
-                    write!(
-                        f,
-                        "closure of function {} in {} with {} evidence captures and captured values [",
-                        fv.function_id,
-                        fv.module_id,
-                        fv.hidden_args.len()
-                    )?;
-                    write_with_separator_and_format_fn(
-                        fv.closure_env_values(),
-                        ", ",
-                        Value::format_as_string_repr,
-                        f,
-                    )?;
-                    write!(f, "]")
-                }
-            }
-        }
-    }
-
-    /// Convert this value into a string representation.
-    /// As no type information is provided, the internal representation is used.
-    pub fn to_string_repr(&self) -> String {
-        struct FormatInToString<'a>(pub &'a Value);
-        impl fmt::Display for FormatInToString<'_> {
-            fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                self.0.format_as_string_repr(f)
-            }
-        }
-        format!("{}", FormatInToString(self))
     }
 }
 

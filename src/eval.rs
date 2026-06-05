@@ -163,16 +163,9 @@ impl Drop for ValOrMutArgs {
 impl FormatWith<EvalCtx<'_>> for ValOrMut {
     fn fmt_with(&self, f: &mut std::fmt::Formatter<'_>, data: &EvalCtx<'_>) -> std::fmt::Result {
         match self {
-            ValOrMut::Val(value) => {
-                write!(f, "value ")?;
-                value.format_as_string_repr(f)
-            }
+            ValOrMut::Val(_) => write!(f, "value"),
             ValOrMut::Dictionary(_) => write!(f, "dictionary metadata"),
-            ValOrMut::Ref(value) => {
-                write!(f, "ref. ")?;
-                // SAFETY: see `ValOrMut::as_primitive`.
-                unsafe { &**value }.format_as_string_repr(f)
-            }
+            ValOrMut::Ref(_) => write!(f, "ref. value"),
             ValOrMut::Mut(place) => {
                 write!(f, "mut. ref. {}", place.format_with(data))
             }

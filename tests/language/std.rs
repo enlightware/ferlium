@@ -12,7 +12,8 @@ use ustr::ustr;
 use crate::effects::test_mod as test_mod_for_effects;
 
 use crate::harness::{
-    TestSession, assert_some_value_eq, bool, float, int, string, unit, variant_0, variant_t1,
+    TestSession, assert_some_value_eq, bool, float, int, string, unit, value_to_string_repr,
+    variant_0, variant_t1,
 };
 use ferlium::{
     SourceTable,
@@ -1719,7 +1720,7 @@ fn hashing() {
         bool(true)
     );
 
-    let mut run_hash = |src| session.run(src).to_string_repr();
+    let mut run_hash = |src| value_to_string_repr(&session.run(src));
 
     let ordered_12 = run_hash(
         "let mut h = hasher_new(); hasher_write_int(h, 1); hasher_write_int(h, 2); hasher_finish(h)",

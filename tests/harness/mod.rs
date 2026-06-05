@@ -33,7 +33,7 @@ use ferlium::{
     },
     types::type_scheme::{PubTypeConstraint, TypeScheme},
 };
-use std::{cell::RefCell, sync::atomic::AtomicIsize};
+use std::{cell::RefCell, fmt, sync::atomic::AtomicIsize};
 use ustr::ustr;
 
 #[derive(Debug)]
@@ -43,6 +43,72 @@ pub enum Error {
 }
 
 pub type CompileRunResult = Result<Value, Error>;
+
+fn write_values_with_separator<'a>(
+    values: impl IntoIterator<Item = &'a Value>,
+    separator: &str,
+    f: &mut fmt::Formatter<'_>,
+) -> fmt::Result {
+    let mut first = true;
+    for value in values {
+        if first {
+            first = false;
+        } else {
+            write!(f, "{separator}")?;
+        }
+        format_value_as_string_repr(value, f)?;
+    }
+    Ok(())
+}
+
+fn format_value_as_string_repr(value: &Value, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match value {
+        Value::Uninit => write!(f, "<uninitialized>"),
+        Value::Native(value) => value.fmt_in_to_string(f),
+        Value::Variant(variant) => {
+            if variant.value.is_tuple() {
+                write!(f, "{}", variant.tag)?;
+                format_value_as_string_repr(&variant.value, f)
+            } else {
+                write!(f, "{}(", variant.tag)?;
+                format_value_as_string_repr(&variant.value, f)?;
+                write!(f, ")")
+            }
+        }
+        Value::Tuple(tuple) => {
+            write!(f, "(")?;
+            write_values_with_separator(tuple.iter(), ", ", f)?;
+            write!(f, ")")
+        }
+        Value::Function(fv) => {
+            if fv.hidden_args.is_empty() && fv.closure_env_len == 0 {
+                write!(f, "function {} in {}", fv.function_id, fv.module_id)
+            } else {
+                write!(
+                    f,
+                    "closure of function {} in {} with {} evidence captures and captured values [",
+                    fv.function_id,
+                    fv.module_id,
+                    fv.hidden_args.len()
+                )?;
+                write_values_with_separator(fv.closure_env_values(), ", ", f)?;
+                write!(f, "]")
+            }
+        }
+    }
+}
+
+pub(crate) fn value_to_string_repr(value: &Value) -> String {
+    struct FormatValue<'a>(&'a Value);
+
+    impl fmt::Display for FormatValue<'_> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            format_value_as_string_repr(self.0, f)
+        }
+    }
+
+    FormatValue(value).to_string()
+}
 
 fn compare_native_values(actual: &Value, expected: &Value, path: &str) -> Result<(), String> {
     if actual.as_primitive_ty::<()>().is_some() && expected.as_primitive_ty::<()>().is_some() {
@@ -116,8 +182,8 @@ fn compare_native_values(actual: &Value, expected: &Value, path: &str) -> Result
 
     Err(format!(
         "{path}: unsupported native comparison between {} and {}",
-        actual.to_string_repr(),
-        expected.to_string_repr()
+        value_to_string_repr(actual),
+        value_to_string_repr(expected)
     ))
 }
 
@@ -197,13 +263,13 @@ pub(crate) fn compare_values(actual: &Value, expected: &Value, path: &str) -> Re
         }
         (Value::Tuple(_), Value::Native(_)) => Err(format!(
             "{path}: expected {}, got {}",
-            expected.to_string_repr(),
-            actual.to_string_repr()
+            value_to_string_repr(expected),
+            value_to_string_repr(actual)
         )),
         (Value::Native(_), Value::Tuple(_)) => Err(format!(
             "{path}: expected {}, got {}",
-            expected.to_string_repr(),
-            actual.to_string_repr()
+            value_to_string_repr(expected),
+            value_to_string_repr(actual)
         )),
         (Value::Native(_), Value::Native(_)) => compare_native_values(actual, expected, path),
         (Value::Variant(actual), Value::Variant(expected)) => {
@@ -259,8 +325,8 @@ pub(crate) fn compare_values(actual: &Value, expected: &Value, path: &str) -> Re
         }
         _ => Err(format!(
             "{path}: expected {}, got {}",
-            expected.to_string_repr(),
-            actual.to_string_repr()
+            value_to_string_repr(expected),
+            value_to_string_repr(actual)
         )),
     }
 }
@@ -269,8 +335,8 @@ pub fn assert_value_eq(actual: &Value, expected: &Value) {
     if let Err(message) = compare_values(actual, expected, "value") {
         panic!(
             "Value assertion failed: {message}\nactual: {}\nexpected: {}",
-            actual.to_string_repr(),
-            expected.to_string_repr()
+            value_to_string_repr(actual),
+            value_to_string_repr(expected)
         );
     }
 }
@@ -288,8 +354,8 @@ macro_rules! assert_val_eq {
         if let Err(message) = $crate::harness::compare_values(&actual, &expected, "value") {
             panic!(
                 "Value assertion failed: {message}\nactual: {}\nexpected: {}\n{}",
-                actual.to_string_repr(),
-                expected.to_string_repr(),
+                $crate::harness::value_to_string_repr(&actual),
+                $crate::harness::value_to_string_repr(&expected),
                 format_args!($($arg)+),
             );
         }
@@ -970,7 +1036,7 @@ impl TestSession {
         match self.try_run(src) {
             Ok(value) => panic!(
                 "Expected runtime error, got value: {}",
-                value.to_string_repr()
+                value_to_string_repr(&value)
             ),
             Err(error) => error.kind(),
         }
@@ -981,7 +1047,7 @@ impl TestSession {
         match self.try_compile_and_run(src) {
             Ok(value) => panic!(
                 "Expected compilation error, got value: {}",
-                value.to_string_repr()
+                value_to_string_repr(&value)
             ),
             Err(error) => match error {
                 Error::Compilation(error) => error,
