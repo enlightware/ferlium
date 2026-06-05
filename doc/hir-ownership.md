@@ -11,7 +11,7 @@ This document is about source-level ownership semantics and the HIR operations t
 # Values, Places, and Locals
 
 A HIR expression either produces an owned value or denotes a place in existing storage.
-Place-like nodes include `LoadLocal`, projections (`Project`, `ProjectAt`, field projections before elaboration), and `Apply` / `StaticApply` nodes whose function definition has `returns_place`.
+Place-like nodes include `LoadLocal`, projections (`Project`, `ProjectAt`, field projections before elaboration), and place-result `Apply` / `StaticApply` nodes.
 SSA must not treat every `LoadLocal` as an owned read: ownership transfer, clone, and copy are explicit HIR operations.
 
 When a place-producing projection or call needs a non-place base, HIR generation stores that base in an explicit owned temporary local first.
@@ -19,7 +19,9 @@ The consumer then uses a normal place rooted at that temporary, and ordinary `Dr
 
 Std-only functions marked with `#[place_result]` are place-like nodes.
 The attribute also marks the function unsafe, so user source cannot call or bind it directly.
-HIR consumers must handle `Apply` and `StaticApply` with `returns_place` like other place references when a place is required, or first materialize them with `CloneValue` when an owned value is required.
+HIR consumers must handle place-result calls like other place references when a place is required, or first materialize them with `CloneValue` when an owned value is required.
+The returned place is an expression-local capability, not a storable reference value.
+HIR must not store a raw place in a local, aggregate, closure capture, or normal value return.
 
 `LocalDecl` is the ownership metadata for a local:
 
@@ -36,7 +38,7 @@ When a context needs an owned value and the source is already an owned value, HI
 When the source is a place, HIR must materialize ownership explicitly:
 
 - Type not yet resolved after HIR construction: emit `CloneValue { source, clone: LocalClone::Unknown }`.
-- Concrete `TrivialCopy` type after dictionary elaboration: resolve to `LocalClone::Resolved(TrivialCopy)`.
+- Concrete `TrivialCopy` type after dictionary elaboration: resolve to `LocalClone::Resolved(TrivialCopy(layout))`.
 - Non-`TrivialCopy` value type after dictionary elaboration: resolve to a static or dictionary `Value::clone` dispatch.
 - Local consumed as an owned result: emit `TakeLocalValue { id, mode }` and skip the matching lexical drop if it resolves to `MoveOwned`.
 - If local ownership is not known yet, emit `TakeLocalValue { id, mode: Unknown }`, then resolve it to either a move or clone/copy after local storage is known.
@@ -53,6 +55,7 @@ Current lowering applies these rules in the main ownership-sensitive contexts:
 - Closure captures are materialized as owned values before `BuildClosure`.
 - Function returns use `TakeLocalValue` when returning a local out of the current scope.
 - Function calls use the explicit argument passing rules described below.
+- Assignment targets may consume projections and place-result calls directly as places, subject to the usual mutability checks.
 - Projections and place-result calls of non-place bases use explicit owned temporaries when consumed as places; if an owned result is needed, that place is then wrapped in `CloneValue`.
 
 # Drops and Cleanup
@@ -80,7 +83,7 @@ Before dictionary elaboration, `Unknown` means the final type is needed to choos
 
 `LocalClone` resolves to one of:
 
-- `TrivialCopy`, which copies the value representation without `Value::clone`.
+- `TrivialCopy(ResolvedValueLayout)`, which copies the value representation without `Value::clone`.
 - `Static(FunctionId)`, which calls a concrete generated or user-provided `Value::clone`.
 - `Dictionary(ExtraParameterId)`, which loads `Value::clone` from a hidden dictionary parameter.
 
@@ -116,7 +119,7 @@ Dispatch sites are:
 HIR call nodes store source-level argument passing decisions:
 
 - `MutableRef`: resolve the argument as a mutable place.
-- `Value(Owned)`: evaluate or copy the argument as an owned value.
+- `Value(TrivialCopy(layout))`: copy a concrete `TrivialCopy` argument by representation.
 - `Value(SharedRef)`: pass a shared reference to existing storage when possible, or materialize an owned temporary and pass a place to it.
 
 If a shared-reference argument is materialized into an owned temporary at the call edge, `SharedRefTempCleanup` records whether that temporary needs a resolved `Value::drop` cleanup after the call.
@@ -124,7 +127,7 @@ If a shared-reference argument is materialized into an owned temporary at the ca
 During type inference, value argument passing may be unknown because the final type is still a type variable.
 Dictionary elaboration resolves these unknowns using the final type:
 
-- concrete `TrivialCopy` values are passed as owned values;
+- concrete `TrivialCopy` values are passed with `Value(TrivialCopy(layout))`;
 - other value types are passed by shared reference;
 - native functions can force already-resolved passing modes from their Rust-side argument extractors.
 
