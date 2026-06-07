@@ -53,13 +53,15 @@ fn call_functions() {
     let mut session = TestSession::new();
 
     assert_eq!(
-        session.emit_ssa("fn a0(x:int) {x + 1}"),
-        r#"u!("a0")
-fn a0(%p0: @arg int):
+        session.emit_ssa("fn a0(x: int) { x + 1 }"),
+        r#"fn a0(%p0: @arg int) -> int:
   0:
-    %r0 = call std::Num<0-5>::from_int(i32 1)
-    %r1 = call std::Num<0-5>::add(%p0, %r0)
-    %r2 = ret %r1
+    %r0 = alloca int
+    %r1 = call std::Num<0-5>::from_int(i32 2)
+    %r2 = call std::Num<0-5>::mul(%r1, %p0)
+    %r3 = store %r2 to %r0
+    %r4 = load %r0
+    %r5 = ret %r4
 "#
     );
 
@@ -348,6 +350,12 @@ fn hir_param_tuple_project() {
 }
 
 #[test]
+fn hir_return_generic() {
+    // 7) Tuple param + projection -> Project, clone-out.
+    print_param_hir("generic_return", "fn apply_fn(f, x: int) { let a = f(x); a }");
+}
+
+#[test]
 fn hir_param_record_field() {
     // 8) Generic record param + field access -> ProjectAt / LoadFieldIndex.
     print_param_hir("record_field", "fn f(r) { r.x }");
@@ -547,6 +555,171 @@ fn f(%p0: @arg int):
     );
 }
 #[test]
+fn shared_ref_param_non_trivial() {
+    // A concrete non-`TrivialCopy` param (`string`) is conveyed by shared reference: the parameter
+    // is a place (`@arg &`), not a by-value register.
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.emit_ssa("fn f(s: string) { }"),
+        r#"u!("f")
+fn f(%p0: @arg & string):
+  0:
+    %r0 = ret ()
+"#,
+    );
+}
+
+#[test]
+fn shared_ref_param_generic() {
+    // A generic param is conveyed by shared reference regardless of any later concrete
+    // instantiation, giving the function one stable parameter convention.
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.emit_ssa("fn f(x) { }"),
+        r#"u!("f")
+fn f(%p0: @arg & A):
+  0:
+    %r0 = ret ()
+"#,
+    );
+}
+
+#[test]
+fn shared_ref_argument_passes_place() {
+    // Passing a shared-reference argument that already denotes a place forwards the incoming
+    // pointer directly, with no copy and no materialized temporary.
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.emit_ssa("fn u(s: string) { } fn caller(s: string) { u(s) }"),
+        r#"u!("u")
+fn u(%p0: @arg & string):
+  0:
+    %r0 = ret ()
+
+u!("caller")
+fn caller(%p0: @arg & string):
+  0:
+    %r0 = call <test>::u(%p0)
+    %r1 = ret %r0
+"#,
+    );
+}
+
+#[test]
+fn call_trivial_copy_argument_passes_value_recursive() {
+    // A `TrivialCopy` argument is passed by value.
+    // The extra store and load are caused by the owned local emission.
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.emit_ssa(r#"
+            fn f(a: int) {
+                let n = 1;
+                f(n)
+            }
+        "#),
+        r#"fn f(%p0: @arg int) -> never:
+  0:
+    %r0 = alloca int
+    %r1 = call std::Num<0-5>::from_int(i32 1)
+    %r2 = store %r1 to %r0
+    %r3 = load %r0
+    %r4 = call <test>::f(%r3)
+    %r5 = ret %r4
+"#,
+    );
+}
+
+#[test]
+fn return_value_is_trivially_passed() {
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.emit_ssa("fn f(a: int) { f(a) }"),
+        r#"u!("f")
+fn f(%p0: @arg int):
+  0:
+    %r0 = call <test>::f(%p0)
+    %r1 = ret %r0
+"#,
+    );
+}
+
+#[test]
+fn call_trivial_copy_argument_passes_value() {
+    // A `TrivialCopy` argument is conveyed by value: the by-value parameter register is forwarded
+    // directly to the call.
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.emit_ssa("fn f(a: int) { f(a) }"),
+        r#"fn f(%p0: @arg int) -> never:
+  0:
+    %r0 = call <test>::f(%p0)
+    %r1 = ret %r0
+"#,
+    );
+}
+
+#[test]
+fn call_mutable_reference_argument_passes_owned_local_place() {
+    // A `&mut` argument backed by an owned local forwards the local's `alloca` place so the callee
+    // mutates the caller's storage.
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.emit_ssa(r#"
+        fn callee(m: &mut int) { }
+        fn caller() {
+            let mut m = 0;
+            callee(m)
+        }
+        "#),
+        r#"fn caller() -> ():
+  0:
+    %r0 = alloca int
+    %r1 = call std::Num<0-5>::from_int(i32 0)
+    %r2 = store %r1 to %r0
+    %r3 = call <test>::callee(%r0)
+    %r4 = ret %r3
+
+fn callee(%p0: @arg &mut int) -> ():
+  0:
+    %r0 = ret ()
+"#,
+    );
+}
+
+#[test]
+fn call_passes_all_argument_conventions() {
+    // A single call covers every Layer-1 passing convention at once:
+    //   `a: int`       (`TrivialCopy`) -> by value, the `from_int(1)` rvalue;
+    //   `m: &mut int`  (`MutableRef`)  -> the owned local's `alloca` place;
+    //   `s: string`    (`SharedRef`)   -> the incoming shared-reference pointer, forwarded directly.
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.emit_ssa(
+            r#"
+            fn callee(a: int, m: &mut int, s: string) { }
+            fn caller(s: string) {
+                let mut m = 0;
+                callee(1, m, s)
+            }
+            "#,
+        ),
+        r#"fn caller(%p0: @arg & string) -> ():
+  0:
+    %r0 = alloca int
+    %r1 = call std::Num<0-5>::from_int(i32 0)
+    %r2 = store %r1 to %r0
+    %r3 = call std::Num<0-5>::from_int(i32 1)
+    %r4 = call <test>::callee(%r3, %r0, %p0)
+    %r5 = ret %r4
+
+fn callee(%p0: @arg int, %p1: @arg &mut int, %p2: @arg & string) -> ():
+  0:
+    %r0 = ret ()
+"#,
+    );
+}
+
+#[test]
 fn mutable_reference_parameter() {
     let mut session = TestSession::new();
     assert_eq!(
@@ -557,6 +730,41 @@ fn f(%p0: @arg &mut int):
     %r0 = call std::Num<0-5>::from_int(i32 2)
     %r1 = store %r0 to %p0
     %r2 = ret ()
+"#,
+    );
+}
+
+#[test]
+fn generic_apply() {
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.emit_ssa("fn f(x) { x * 2 }"),
+        r#"u!("f")
+fn f(%p0: @extra ((A, A) -> A, (A, A) -> A, (A, A) -> A, (A) -> A, (A) -> A, (A) -> A, (int) -> A), %p1: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A, &mut A) -> (), (&mut A) -> (), int, int), %p2: @arg & A):
+  0:
+    %r0 = project 2 from %p0
+    %r1 = project 6 from %p0
+    %r2 = call %r1(i32 2)
+    %r3 = alloca A
+    %r4 = store %r2 to %r3
+    %r5 = call %r0(%p2, %r3)
+    %r6 = ret %r5
+"#,
+    );
+}
+
+#[test]
+fn dynamic_apply() {
+    let mut session = TestSession::new();
+    // todo store return value indirectly
+    assert_eq!(
+        session.emit_ssa("fn apply_fn(f, x: int) { f(x) }"),
+        r#"u!("apply_fn")
+fn apply_fn(%p0: @arg & (int) -> A ! e₀, %p1: @arg int):
+  0:
+    %r0 = load %p0
+    %r1 = call %r0(%p1)
+    %r2 = ret %r1
 "#,
     );
 }

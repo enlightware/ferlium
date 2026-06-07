@@ -3,12 +3,13 @@ use std::fmt;
 
 use ustr::Ustr;
 
+use crate::hir::function::ResolvedValueArgPassing;
 use crate::{
     format::FormatWith,
+    hir::function::ResolvedArgPassing,
     list,
     module::ModuleEnv,
-    ssa,
-    ssa::{Instruction, InstructionIdentity, InstructionResult},
+    ssa::{self, Instruction, InstructionIdentity, InstructionResult},
     types::r#type::Type,
 };
 
@@ -16,26 +17,10 @@ use crate::{
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ParameterKind {
     /// A visible runtime argument, with how it is passed in.
-    Argument(ArgumentPassing),
+    Argument(ResolvedArgPassing),
 
     /// A hidden dictionary/evidence parameter resolving polymorphism.
     Extra,
-}
-
-/// How a visible argument is conveyed into the function.
-///
-/// The callee side of the slot rule in `doc/hir-to-ssa.md` §4: a by-value argument's register holds
-/// the value, whereas a by-reference argument's register is a pointer to the caller's storage.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ArgumentPassing {
-    /// Held directly in its register (a `TrivialCopy` by-value argument).
-    Value,
-
-    /// A pointer to mutable caller storage (an `&mut` / inferred-inout argument).
-    MutableReference,
-
-    /// A pointer to shared caller storage (a `&` argument).
-    SharedReference,
 }
 
 /// A parameter in the signature of an SSA function.
@@ -58,6 +43,9 @@ pub struct Function {
     /// The parameters of the function, in slot order (extra parameters first, then arguments).
     parameters: Vec<Parameter>,
 
+    /// The return type of the function.
+    return_type: Type,
+
     /// The instructions in the function.
     slots: list::List<InstructionSlot>,
 
@@ -70,10 +58,11 @@ pub struct Function {
 
 impl Function {
     /// Creates an instance with the given properties.
-    pub fn new(name: Ustr) -> Self {
+    pub fn new(name: Ustr, return_type: Type) -> Self {
         Self {
             name,
             parameters: Vec::new(),
+            return_type,
             slots: list::List::new(),
             blocks: list::List::new(),
             uses: HashMap::new(),
@@ -156,9 +145,13 @@ impl FormatWith<ModuleEnv<'_>> for Function {
                 write!(f, ", ")?;
             }
             let kind = match p.kind {
-                ParameterKind::Argument(ArgumentPassing::Value) => "arg",
-                ParameterKind::Argument(ArgumentPassing::MutableReference) => "arg &mut",
-                ParameterKind::Argument(ArgumentPassing::SharedReference) => "arg &",
+                ParameterKind::Argument(ResolvedArgPassing::Value(
+                    ResolvedValueArgPassing::TrivialCopy(_),
+                )) => "arg",
+                ParameterKind::Argument(ResolvedArgPassing::Value(
+                    ResolvedValueArgPassing::SharedRef { .. },
+                )) => "arg &",
+                ParameterKind::Argument(ResolvedArgPassing::MutableRef) => "arg &mut",
                 ParameterKind::Extra => "extra",
             };
             write!(
@@ -169,7 +162,7 @@ impl FormatWith<ModuleEnv<'_>> for Function {
                 p.ty.format_with(env)
             )?;
         }
-        write!(f, "):")?;
+        write!(f, ") -> {}:", self.return_type.format_with(env))?;
 
         if !self.slots.is_empty() {
             writeln!(f)?;
@@ -265,7 +258,7 @@ pub struct BlockMut<'a> {
     holder: &'a mut Function,
 }
 
-/// A basic block in a Hylo IR function.
+/// A basic block in a SSA IR function.
 impl BlockMut<'_> {
     /// Returns the identity of `self`.
     pub fn id(&self) -> BlockIdentity {

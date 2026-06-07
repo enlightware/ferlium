@@ -20,6 +20,14 @@ evidence, local frame setup, `let`/`mut` locals, assignment, move-out, and the
 place-results (`FnReturnConvention::Place`), closures, variants, records-by-field.
 These are listed below with status `later` so the map stays complete.
 
+The callee-side parameter classification (`Value` / `SharedReference` / `MutableReference`) is
+read back from each parameter's `LocalDecl::arg_passing`, which elaboration resolves once with the
+trait solver. Lowering never reconstructs it from the parameter type. The physical
+register-vs-pointer ABI decision for a by-value (`TrivialCopy`) parameter stays a backend concern
+(see `doc/abi.md`): both layers are independent, and a shared-reference parameter is a place in the
+SSA regardless of that later decision. Cleanup of a materialized shared-reference temporary
+(`temp_cleanup = Drop(d)`) is not emitted yet.
+
 ## 2. Model
 
 The lowering mirrors the interpreter (`eval.rs`): a function frame of *places*, each
@@ -145,7 +153,7 @@ Each `CallArgument.passing` is consumed directly (never recomputed):
 | `passing` | SSA for the argument operand |
 |---|---|
 | `Value(TrivialCopy(layout))` | lower the arg node **as an rvalue** (a loaded/owned value) |
-| `Value(SharedRef { temp_cleanup })` | lower the arg node **as a place** (pointer). If a temporary owned value had to be materialized and `temp_cleanup = Drop(d)`, drop it per §7 after the call |
+| `Value(SharedRef { temp_cleanup })` | lower the arg node **as a place** (pointer): forward the place when the node denotes one, otherwise materialize an owned temporary (`alloca` + `store`) and pass its pointer. If `temp_cleanup = Drop(d)`, drop it per §7 after the call (drop emission is deferred) |
 | `MutableRef` | lower the arg node **as a place** (pointer); the callee mutates through it |
 
 Extra dictionary arguments (`StaticApply.extra_arguments`) are lowered as rvalues and
@@ -228,3 +236,8 @@ The exact dictionary/evidence operands are pinned by the dictionary test.
   `Static`); SSA must use per-local metadata, never the printed type. (Deferred.)
 - `return` carries pre-aggregated cleanup but `break`/`continue` do not — confirm intent.
 - `LocalDrop::Skip` on heap-owning reps still needs storage reclamation in a native backend.
+
+
+TODO
+- indirect return values (store into out parameter)
+  - needed for non-trivial types and generic return values

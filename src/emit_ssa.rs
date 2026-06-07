@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use ustr::Ustr;
 
+use crate::hir::function::ResolvedValueArgPassing::SharedRef;
+use crate::hir::function::ResolvedValueArgPassing::TrivialCopy;
 use crate::hir::function::{ResolvedArgPassing, ResolvedValueArgPassing};
 use crate::module::{
     ExtraParameterId, ResolvedLocalClone, ResolvedLocalDrop, ResolvedTakeLocalValueMode,
@@ -18,21 +20,19 @@ use crate::{
         ModuleId, TraitDictionary, TraitImpl, TraitImplId, id::Id,
     },
     ssa::{self, BlockIdentity, Program, value::FunctionReference},
-    types::r#type::{FnArgType, Type},
+    types::r#type::Type,
 };
 
 /// Emits the textual representation of the low-level (aka SSA) ferlium IR of `module`.
 ///
 /// Intended for testing & debugging.
 pub fn emit_ssa(module: &Module, others: &Modules, session: &CompilerSession) -> String {
-    let mut a: Vec<String> = vec![];
-    for n in module.own_symbols() {
-        a.push(format!("{:?}", n));
-        if let Some(f) = module.get_local_function_id(n) {
-            a.push(Emitter::emit_ssa_fn(f, module, others, session));
-        }
-    }
-    a.join("\n")
+    module
+        .own_symbols()
+        .filter_map(|n| module.get_local_function_id(n))
+        .map(|f| Emitter::emit_ssa_fn(f, module, others, session))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Returns the qualified name of `f`.
@@ -61,18 +61,6 @@ fn imported_function(
         }
     };
     (fi, mi)
-}
-
-/// How `arg` is conveyed into a callee, following `doc/hir-to-ssa.md` §4.
-///
-/// A mutable argument is an `&mut` / inferred-inout by-reference parameter. Other arguments are
-/// by-value here; the non-`TrivialCopy` shared-reference case arrives with aggregates.
-fn argument_passing(arg: &FnArgType) -> ssa::ArgumentPassing {
-    if arg.mut_ty.is_mutable() {
-        ssa::ArgumentPassing::MutableReference
-    } else {
-        ssa::ArgumentPassing::Value
-    }
 }
 
 /// The SSA blocks involved in the lowering of a case in a match expression.
@@ -109,9 +97,9 @@ struct Emitter<'a> {
 }
 
 impl<'a> Emitter<'a> {
-    /// Generates the IR of `source`, which has the given `identity`.
+    /// Generates the IR of `source`.
     fn emit_ssa_fn(
-        identity: LocalFunctionId,
+        source: LocalFunctionId,
         module: &'a Module,
         others: &'a Modules,
         session: &'a CompilerSession,
@@ -120,85 +108,87 @@ impl<'a> Emitter<'a> {
         // an argument of the function, as this data structure should persist.
         let mut program = Program::new();
 
-        let f = module.get_function_by_id(identity).unwrap();
-        match f.code.as_ref().as_script() {
-            Some(syntax) => {
-                let name = module.get_function_name_by_id(identity).unwrap();
-                let mut lowered = ssa::Function::new(name);
+        let f = module.get_function_by_id(source).unwrap();
+        let syntax = f
+            .code
+            .as_ref()
+            .as_script()
+            .expect("function should be a script");
 
-                // The function signature is laid out as `[extra dictionary/evidence params..., runtime
-                // args...]`. Extra parameters occupy the leading slots `[0, extra_count)` and the visible
-                // runtime arguments, which are the leading `LocalDecl`s, occupy `[extra_count, ..)`.
-                let env = ModuleEnv::new(module, others);
-                let extra = f.definition.ty_scheme.extra_parameters(env);
-                let extra_count = extra.requirements.len();
+        let name = module.get_function_name_by_id(source).unwrap();
+        let mut lowered = ssa::Function::new(name, f.definition.ty_scheme.ty.ret);
 
-                let mut extra_parameters: HashMap<ExtraParameterId, ssa::Value> = HashMap::new();
-                for j in 0..extra_count {
-                    extra_parameters
-                        .insert(ExtraParameterId::from_index(j), ssa::Value::Parameter(j));
-                }
+        // The function signature is laid out as `[extra dictionary/evidence params..., runtime
+        // args...]`. Extra parameters occupy the leading slots `[0, extra_count)` and the visible
+        // runtime arguments, which are the leading `LocalDecl`s, occupy `[extra_count, ..)`.
+        let env = ModuleEnv::new(module, others);
+        let extra = f.definition.ty_scheme.extra_parameters(env);
+        let extra_count = extra.requirements.len();
 
-                // Record the function signature in slot order: the extra (dictionary/evidence)
-                // parameters first, then the visible runtime arguments (the leading `LocalDecl`s).
-                for req in &extra.requirements {
-                    lowered.add_parameter(req.to_dict_type_in_env(&env), ssa::ParameterKind::Extra);
-                }
-
-                // Classify and bind the argument locals per the slot rule (`doc/hir-to-ssa.md` §4). A
-                // by-value (`TrivialCopy`) argument is its register directly; a by-reference argument's
-                // register is the incoming pointer, so the local is bound to that place.
-                let mut locals: HashMap<LocalDeclId, LocalBinding> = HashMap::new();
-                for i in 0..f.definition.arg_names.len() {
-                    let passing = argument_passing(&f.definition.ty_scheme.ty.args[i]);
-                    lowered.add_parameter(f.locals[i].ty, ssa::ParameterKind::Argument(passing));
-                    let param = ssa::Value::Parameter(extra_count + i);
-                    let binding = match passing {
-                        ssa::ArgumentPassing::Value => LocalBinding::Value(param),
-                        ssa::ArgumentPassing::MutableReference
-                        | ssa::ArgumentPassing::SharedReference => LocalBinding::Place(param),
-                    };
-                    locals.insert(LocalDeclId::from_index(i), binding);
-                }
-
-                // Create the function's entry.
-                let entry = lowered.add_block().id();
-                let code = &module.hir_arena[syntax.entry_node_id];
-                let span = code.span;
-
-                // Instantiate an emitter to generate the function's contents.
-                let mut emitter = Emitter {
-                    module,
-                    others,
-                    context: InsertionContext {
-                        function: lowered,
-                        source: identity,
-                        point: InsertionPoint::End(entry),
-                        span,
-                        locals,
-                        extra_parameters,
-                        loop_results: HashMap::new(),
-                    },
-                    hir_arena: &module.hir_arena,
-                    session,
-                };
-
-                // Allocate frame storage for every `Owned` local and bind it to its `alloca` place.
-                emitter.allocate_owned_locals();
-
-                // The body of the function evaluates to the return value.
-                let v = emitter.lower_as_rvalue(code);
-                emitter.insert(ssa::Instruction::ret(emitter.context.span, v));
-
-                // Save the definition of the lowered function into the SSA program.
-                let lowered = emitter.context.function;
-                let g = program.set_definition(lowered);
-                let env = ModuleEnv::new(module, others);
-                format!("{}", g.format_with(&env))
-            }
-
-            None => panic!(),
+        let mut extra_parameters: HashMap<ExtraParameterId, ssa::Value> = HashMap::new();
+        for j in 0..extra_count {
+            extra_parameters.insert(ExtraParameterId::from_index(j), ssa::Value::Parameter(j));
         }
+
+        // Record the function signature in slot order: the extra (dictionary/evidence)
+        // parameters first, then the visible runtime arguments (the leading `LocalDecl`s).
+        for req in &extra.requirements {
+            lowered.add_parameter(req.to_dict_type_in_env(&env), ssa::ParameterKind::Extra);
+        }
+
+        // Classify and bind the argument locals per the slot rule (`doc/hir-to-ssa.md` §4). A
+        // by-value (`TrivialCopy`) argument is its register directly; a by-reference argument's
+        // register is the incoming pointer, so the local is bound to that place.
+        let mut locals: HashMap<LocalDeclId, LocalBinding> = HashMap::new();
+        for i in 0..f.definition.arg_names.len() {
+            let resolved = f.locals[i]
+                .arg_passing
+                .expect("parameter argument passing should have been resolved during elaboration");
+            lowered.add_parameter(f.locals[i].ty, ssa::ParameterKind::Argument(resolved));
+            let param = ssa::Value::Parameter(extra_count + i);
+            let binding = match resolved {
+                ResolvedArgPassing::Value(TrivialCopy(_)) => LocalBinding::Value(param),
+                ResolvedArgPassing::Value(SharedRef { .. }) => LocalBinding::Place(param),
+                ResolvedArgPassing::MutableRef { .. } => LocalBinding::Place(param),
+            };
+            locals.insert(LocalDeclId::from_index(i), binding);
+        }
+
+        // Create the function's entry.
+        let entry = lowered.add_block().id();
+        let code = &module.hir_arena[syntax.entry_node_id];
+        let span = code.span;
+
+        // Instantiate an emitter to generate the function's contents.
+        let mut emitter = Emitter {
+            module,
+            others,
+            context: InsertionContext {
+                function: lowered,
+                source,
+                point: InsertionPoint::End(entry),
+                span,
+                locals,
+                extra_parameters,
+                loop_results: HashMap::new(),
+            },
+            hir_arena: &module.hir_arena,
+            session,
+        };
+
+        // Allocate frame storage for every `Owned` local and bind it to its `alloca` place.
+        emitter.allocate_owned_locals();
+
+        // The body of the function evaluates to the return value.
+        let v = emitter.lower_as_rvalue(code);
+        emitter.insert(ssa::Instruction::ret(emitter.context.span, v));
+
+        // Save the definition of the lowered function into the SSA program.
+        let lowered = emitter.context.function;
+        let g = program.define(lowered);
+        let env = ModuleEnv::new(module, others);
+
+        format!("{}", g.format_with(&env))
     }
 
     /// Returns a reference to the function identified by `f`.
@@ -233,20 +223,22 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// Returns the place (a pointer SSA value) backing the local `id`.
+    /// Returns the place (a pointer SSA value) backing the local `l`.
     ///
     /// - Requires: `id` is bound to a place (an `Owned` `alloca` or a by-reference parameter).
-    fn place_of_local(&self, id: LocalDeclId) -> ssa::Value {
-        match self.context.locals.get(&id) {
+    fn place_of_local(&self, l: LocalDeclId) -> ssa::Value {
+        match self.context.locals.get(&l) {
             Some(LocalBinding::Place(p)) => p.clone(),
             Some(LocalBinding::Value(_)) => {
-                panic!("local {:?} is bound by value and has no place", id)
+                panic!("local {:?} is bound by value and has no place", l)
             }
-            None => panic!("local {:?} is not bound in the current frame", id),
+            None => panic!("local {:?} is not bound in the current frame", l),
         }
     }
 
     /// Generates the IR for `node` used as a place, returning a pointer SSA value.
+    ///
+    /// - Requires: `node` denotes a place (a by-reference parameter or an owned local).
     ///
     /// Mirrors the interpreter's `try_eval_node_as_place`.
     fn lower_as_place(&mut self, node: &ENode) -> ssa::Value {
@@ -260,19 +252,57 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    /// The place backing `node`, if it denotes existing storage; `None` if it is an rvalue.
+    ///
+    /// A `LoadLocal` of a by-reference parameter or an owned local is a place; a `LoadLocal` of a
+    /// by-value parameter is not. Other node kinds are treated as rvalues for now.
+    ///
+    /// Mirrors the interpreter's `try_eval_node_as_place`.
+    fn try_lower_as_place(&mut self, node: &ENode) -> Option<ssa::Value> {
+        use hir::NodeKind as K;
+        match &node.kind {
+            K::LoadLocal(n) => match self.context.locals.get(&n.id) {
+                Some(LocalBinding::Place(p)) => Some(p.clone()),
+                Some(LocalBinding::Value(_)) => None,
+                None => panic!("local {:?} is not bound in the current frame", n.id),
+            },
+            _ => None,
+        }
+    }
+
+    /// Lowers `node` as a shared-reference call operand: a pointer to existing storage when `node`
+    /// denotes a place, or a pointer to a freshly materialized owned temporary otherwise.
+    ///
+    /// Cleanup of a materialized temporary is not emitted yet.
+    /// - See: `doc/hir-to-ssa.md` §6
+    fn lower_as_shared_ref(&mut self, node: &ENode) -> ssa::Value {
+        if let Some(place) = self.try_lower_as_place(node) {
+            return place;
+        }
+        let value = self.lower_as_rvalue(node);
+        let temp = self
+            .insert(ssa::Instruction::alloca(node.span, node.ty))
+            .unwrap();
+        self.insert(ssa::Instruction::store(node.span, value, temp.clone()));
+        temp
+    }
+
     /// Lowers `arg` to its call operand per the resolved passing mode.
     ///
     /// A `MutableRef` (`&mut` / inout) argument is lowered as a place: a pointer the callee mutates
-    /// through. A `TrivialCopy` value is lowered as an rvalue. A `SharedRef` is also lowered as an
-    /// rvalue for now: under the iteration-1 value model a shared borrow is the value register
-    /// itself; true shared-borrow places and temporary materialization arrive with aggregates.
+    /// through. A `TrivialCopy` value is lowered as an rvalue. A `SharedRef` is lowered as a place
+    /// (a pointer to existing storage, or to a materialized owned temporary). The physical
+    /// register-vs-pointer ABI decision for by-value arguments is deferred to a later backend pass.
     /// - See: `doc/hir-to-ssa.md` §6
     fn lower_argument(&mut self, arg: &CallArgument<Elaborated>) -> ssa::Value {
         match arg.passing {
             ResolvedArgPassing::MutableRef => self.lower_as_place(&self.hir_arena[arg.value]),
-            ResolvedArgPassing::Value(
-                ResolvedValueArgPassing::TrivialCopy(_) | ResolvedValueArgPassing::SharedRef { .. },
-            ) => self.lower_as_rvalue(&self.hir_arena[arg.value]),
+            ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy(_)) => {
+                self.lower_as_rvalue(&self.hir_arena[arg.value])
+            }
+            ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef { .. }) => {
+                self.lower_as_shared_ref(&self.hir_arena[arg.value])
+            }
         }
     }
 
@@ -346,6 +376,8 @@ impl<'a> Emitter<'a> {
             }
 
             K::Case(n) => {
+                // TODO make this work for non-primitive types, using the Value dictionary's `eq` or a statically resolved conformance.
+
                 let blocks = self.create_case_blocks(n);
 
                 // We lower the scrutinee before the case blocks so that its value can be used in all conditions.
@@ -370,15 +402,15 @@ impl<'a> Emitter<'a> {
                     // Transfer control flow to the head of the match.
                     self.context.point = InsertionPoint::End(blocks.heads[i]);
 
-                    // Lower the pattern
-                    let x0 = self.lower_as_primitive(c).unwrap();
+                    let alternative_pattern = self.lower_as_primitive(c).unwrap();
+
                     // Compare the condition with the scrutinee and, depending on the result, branch to
                     // either the body of the current alternative or the next head.
                     let v = self
                         .insert(ssa::Instruction::compare_eq(
                             node.span,
                             scrutinee.clone(),
-                            x0,
+                            alternative_pattern,
                         ))
                         .unwrap();
                     self.insert(ssa::Instruction::condbr(
@@ -536,13 +568,8 @@ impl<'a> Emitter<'a> {
                     .map(|arg| self.lower_argument(arg))
                     .collect();
 
-                self.insert(ssa::Instruction::call(
-                    node.span,
-                    f,
-                    a,
-                    self.hir_arena[n.function].ty,
-                ))
-                .unwrap()
+                self.insert(ssa::Instruction::call(node.span, f, a, n.ty.ret))
+                    .unwrap()
             }
 
             K::Project(n) => {
@@ -569,6 +596,8 @@ impl<'a> Emitter<'a> {
                 self.lower_as_rvalue(&self.hir_arena[n.body]);
 
                 // TODO: result is the alloca pointer. lower_as_rvalue must return the value, so this needs a load result like Case does (emit_ssa.rs:374). Additionally there is no loop head/back-edge/exit block emitted, and Break/Continue are unhandled (they fall through to todo!), so Loop is effectively non-functional. §5 marks Loop/Break/Continue as ✅; either complete them or this should be a clearly-scoped TODO.
+
+                // TODO: handle indirect value return/break
 
                 result
             }
@@ -601,11 +630,11 @@ impl<'a> Emitter<'a> {
                         method_ty,
                     ))
                     .unwrap();
-                let mut a: Vec<ssa::Value> = vec![];
-                for arg in &n.arguments {
-                    a.push(self.lower_argument(arg));
-                }
-                self.insert(ssa::Instruction::call(node.span, method, a, n.ty.ret))
+
+                let args: Vec<ssa::Value> =
+                    n.arguments.iter().map(|a| self.lower_argument(a)).collect();
+
+                self.insert(ssa::Instruction::call(node.span, method, args, n.ty.ret))
                     .unwrap()
             }
 
@@ -640,8 +669,7 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// Inserts `s` at the current insertion point and returns the register assigned by
-    /// that instruction, if any.
+    /// Inserts `s` at the current insertion point, and returns its result register, if any.
     fn insert(&mut self, s: ssa::Instruction) -> Option<ssa::Value> {
         let i = match &self.context.point {
             InsertionPoint::End(b) => self.context.function.block_mut(*b).append(s),

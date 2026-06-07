@@ -55,14 +55,14 @@ impl Instruction {
         span: Location,
         callee: ssa::Value,
         arguments: T,
-        ty: Type,
+        result: Type,
     ) -> Self {
         let mut operands = vec![callee];
         operands.extend(arguments);
         Instruction {
             span,
             operands,
-            kind: Box::new(Call { ty }),
+            kind: Box::new(Call { result }),
         }
     }
 
@@ -211,12 +211,12 @@ impl InstructionKind for Alloca {
 /// A function call in SSA.
 struct Call {
     /// The type of the value returned by the callee.
-    pub ty: Type,
+    pub result: Type,
 }
 
 impl InstructionKind for Call {
     fn result(&self, _whole: &Instruction) -> InstructionResult {
-        InstructionResult::Lowered(self.ty)
+        InstructionResult::Lowered(self.result)
     }
 
     fn fmt_within(
@@ -241,7 +241,7 @@ struct CompareEqual {}
 
 impl InstructionKind for CompareEqual {
     fn result(&self, _whole: &Instruction) -> InstructionResult {
-        InstructionResult::pointer_to(InstructionResult::Lowered(cached_primitive_ty!(bool)))
+        InstructionResult::Lowered(cached_primitive_ty!(bool))
     }
 
     fn fmt_within(
