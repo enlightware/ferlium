@@ -180,7 +180,7 @@ impl TraitDictionary {
     }
 
     pub fn methods(&self) -> &Vec<LocalFunctionId> {
-      &self.methods
+        &self.methods
     }
 }
 
