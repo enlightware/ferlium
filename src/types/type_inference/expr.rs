@@ -1508,8 +1508,14 @@ impl TypeInference {
             Loop(data) => {
                 let label = self.fresh_loop_id();
                 let result_ty = self.fresh_type_var();
-                env.loop_frames
-                    .push(LoopFrame::new(label, data.label, result_ty, false));
+                let local_scope_start = env.cur_locals.len();
+                env.loop_frames.push(LoopFrame::new(
+                    label,
+                    data.label,
+                    result_ty,
+                    local_scope_start,
+                    false,
+                ));
                 let mut body_id = self.check_expr(
                     env,
                     data.body,
@@ -1561,15 +1567,23 @@ impl TypeInference {
                 let loop_frame = &mut env.loop_frames[loop_frame_index];
                 let label = loop_frame.label;
                 let result_ty = loop_frame.result_ty;
+                let local_scope_start = loop_frame.local_scope_start;
                 loop_frame.saw_break = true;
                 let value = if let Some(value) = data.value {
-                    self.check_expr(
+                    let value = self.check_expr(
                         env,
                         value,
                         Type::variable(result_ty),
                         MutType::constant(),
                         sp(value),
-                    )?
+                    )?;
+                    let (value, taken_local) =
+                        self.take_local_value_result(env, value, local_scope_start, expr_span);
+                    if taken_local.is_some() {
+                        value
+                    } else {
+                        self.materialize_owned_value(env, value, expr_span)
+                    }
                 } else {
                     let value = env.ir_arena.alloc(N::new(
                         K::Immediate(LiteralValue::new_native(())),

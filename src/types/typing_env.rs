@@ -43,6 +43,7 @@ pub struct LoopFrame {
     pub(crate) label: LoopId,
     pub(crate) source_label: Option<UstrSpan>,
     pub(crate) result_ty: TypeVar,
+    pub(crate) local_scope_start: usize,
     pub(crate) saw_break: bool,
 }
 

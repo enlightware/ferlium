@@ -491,6 +491,68 @@ fn return_moves_owned_local_without_dropping_it() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn break_moves_owned_loop_local_without_dropping_it() {
+    let mut session = TestSession::new();
+    let source = format!(
+        r#"
+        {}
+        testing::reset_tracked_drops();
+        let moved = loop {{
+            let other = Probe(5);
+            let result = Probe(6);
+            break result;
+        }};
+        testing::tracked_drop_log()
+        "#,
+        tracked_probe_value_impl()
+    );
+    assert_val_eq!(session.run(&source), int(5));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn labeled_break_moves_target_loop_local_and_drops_intervening_locals() {
+    let mut session = TestSession::new();
+    let source = format!(
+        r#"
+        {}
+        testing::reset_tracked_drops();
+        let moved = 'outer: loop {{
+            let outer_other = Probe(5);
+            let result = Probe(6);
+            loop {{
+                let inner = Probe(4);
+                break 'outer result;
+            }}
+        }};
+        testing::tracked_drop_log()
+        "#,
+        tracked_probe_value_impl()
+    );
+    assert_val_eq!(session.run(&source), int(45));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn break_clones_owned_outer_local_when_loop_does_not_exit_its_scope() {
+    let mut session = TestSession::new();
+    let source = format!(
+        r#"
+        {}
+        testing::reset_tracked_drops();
+        let source = Probe(7);
+        let moved = loop {{
+            break source;
+        }};
+        moved.0 * 100 + source.0 * 10 + testing::tracked_drop_log()
+        "#,
+        incrementing_clone_probe_value_impl()
+    );
+    assert_val_eq!(session.run(&source), int(870));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn generic_mut_let_drop_uses_value_dictionary() {
     let mut session = TestSession::new();
     let source = format!(
