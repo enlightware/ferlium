@@ -751,23 +751,26 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
         // Build a substitution that maps each type quantifier to a fresh type variable from 0.
         let ty_subst = normalize_types(&mut self.ty_quantifiers);
 
-        // Build a substitution that maps each input effect quantifier to a fresh effect variable from 0.,
+        // Build a substitution that maps each retained effect quantifier to a fresh effect variable from 0.
         // Note: in case of recursive functions, we might have output-only effects.
         // In this case, replace them with empty effects.
         let mut eff_subst = EffectsInstSubst::default();
         let input_effect_vars = self.ty.input_effect_vars();
+        let mut retained_effect_vars = input_effect_vars.clone();
+        self.constraints
+            .fill_with_inner_effect_vars(&mut retained_effect_vars);
         self.ty.output_effect_vars().iter().for_each(|var| {
-            if !input_effect_vars.contains(var) {
+            if !retained_effect_vars.contains(var) {
                 eff_subst.insert(*var, EffType::empty());
             }
         });
-        self.eff_quantifiers = self
-            .eff_quantifiers
-            .iter()
+        self.eff_quantifiers = retained_effect_vars
+            .into_iter()
+            .sorted()
             .enumerate()
             .map(|(i, var)| {
                 let new_var = EffectVar::new(i as u32);
-                eff_subst.insert(*var, EffType::single_variable(new_var));
+                eff_subst.insert(var, EffType::single_variable(new_var));
                 new_var
             })
             .collect();

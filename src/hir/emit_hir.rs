@@ -43,7 +43,7 @@ use crate::{
         is_function_surface_only_value_trait_application, is_value_trait_for_function_type,
     },
     types::coherence::check_trait_impl,
-    types::effects::EffType,
+    types::effects::{EffType, EffectVar},
     types::trait_solver::{TraitSolver, trait_solver_from_module},
     types::r#type::Type,
     types::type_inference::unify::UnifiedTypeInference,
@@ -124,6 +124,114 @@ pub(super) fn instantiate_function_descr_in_place<M: TypeMapper>(
     hir::instantiate_node_in_place(&mut descr.code.arena, descr.code.entry_node_id, mapper);
     for local in &mut descr.locals {
         local.ty = local.ty.map(mapper);
+    }
+}
+
+/// Default effect variables that remain only in the pending HIR body after the public scheme is normalized.
+pub(super) fn default_body_only_effects_in_function_descr(descr: &mut UModuleFunction) {
+    let mut retained_effect_vars = descr.definition.ty_scheme.ty.inner_effect_vars();
+    descr
+        .definition
+        .ty_scheme
+        .constraints
+        .fill_with_inner_effect_vars(&mut retained_effect_vars);
+
+    let mut body_effect_vars = FxHashSet::default();
+    fill_node_effect_vars(
+        &descr.code.arena,
+        descr.code.entry_node_id,
+        &mut body_effect_vars,
+    );
+    for local in &descr.locals {
+        local.ty.fill_with_inner_effect_vars(&mut body_effect_vars);
+    }
+
+    let effect_subst = body_effect_vars
+        .into_iter()
+        .filter(|var| !retained_effect_vars.contains(var))
+        .map(|var| (var, EffType::empty()))
+        .collect::<FxHashMap<EffectVar, EffType>>();
+    if effect_subst.is_empty() {
+        return;
+    }
+
+    let subst = (FxHashMap::default(), effect_subst);
+    let mut mapper = BitmapInstantiationMapper::new(&subst);
+    instantiate_function_descr_in_place(descr, &mut mapper);
+}
+
+fn fill_node_effect_vars(
+    arena: &hir::NodeArena,
+    node_id: hir::NodeId,
+    vars: &mut FxHashSet<EffectVar>,
+) {
+    use hir::NodeKind::*;
+
+    let node = &arena[node_id];
+    node.ty.fill_with_inner_effect_vars(vars);
+    node.effects.fill_with_inner_effect_vars(vars);
+    match &node.kind {
+        Apply(app) => app.ty.fill_with_inner_effect_vars(vars),
+        StaticApply(app) => {
+            app.ty.fill_with_inner_effect_vars(vars);
+            fill_fn_inst_data_effect_vars(&app.inst_data, vars);
+        }
+        TraitMethodApply(app) => {
+            app.ty.fill_with_inner_effect_vars(vars);
+            app.input_tys
+                .iter()
+                .for_each(|ty| ty.fill_with_inner_effect_vars(vars));
+            fill_fn_inst_data_effect_vars(&app.inst_data, vars);
+        }
+        GetFunction(get_fn) => fill_fn_inst_data_effect_vars(&get_fn.inst_data, vars),
+        GetTraitMethod(get_method) => {
+            get_method
+                .input_tys
+                .iter()
+                .chain(get_method.output_tys.iter())
+                .for_each(|ty| ty.fill_with_inner_effect_vars(vars));
+            fill_fn_inst_data_effect_vars(&get_method.inst_data, vars);
+        }
+        GetTraitAssociatedConst(get_const) => {
+            get_const
+                .input_tys
+                .iter()
+                .chain(get_const.output_tys.iter())
+                .for_each(|ty| ty.fill_with_inner_effect_vars(vars));
+        }
+        GetTraitDictionary(get_dict) => {
+            get_dict
+                .input_tys
+                .iter()
+                .chain(get_dict.output_tys.iter())
+                .for_each(|ty| ty.fill_with_inner_effect_vars(vars));
+        }
+        CallDictionaryMethod(call) => call.ty.fill_with_inner_effect_vars(vars),
+        _ => {}
+    }
+
+    for child in node.kind.child_node_ids() {
+        fill_node_effect_vars(arena, child, vars);
+    }
+}
+
+fn fill_fn_inst_data_effect_vars(inst_data: &hir::FnInstData, vars: &mut FxHashSet<EffectVar>) {
+    for req in &inst_data.dicts_req {
+        match req {
+            hir::dictionary::DictionaryReq::FieldIndex { ty, .. } => {
+                ty.fill_with_inner_effect_vars(vars);
+            }
+            hir::dictionary::DictionaryReq::TraitImpl {
+                input_tys,
+                output_tys,
+                ..
+            } => {
+                input_tys
+                    .iter()
+                    .chain(output_tys.iter())
+                    .for_each(|ty| ty.fill_with_inner_effect_vars(vars));
+            }
+        }
     }
 }
 

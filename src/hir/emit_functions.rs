@@ -19,10 +19,10 @@ use crate::{
         emit_hir::{
             ImplStubData, PendingModuleFunctions, PubTypeConstraintPtr,
             add_pending_function_anonymous, borrow_check_and_elaborate_dict, constraint_ptr,
-            default_output_effects_in_functions, function_and_associated_lambdas,
-            insert_inst_data_for_function_and_lambdas, instantiate_function_descr_in_place,
-            is_compiler_provided_value_constraint, log_dropped_constraints_module,
-            refresh_debug_info_for_functions, set_pending_function,
+            default_body_only_effects_in_function_descr, default_output_effects_in_functions,
+            function_and_associated_lambdas, insert_inst_data_for_function_and_lambdas,
+            instantiate_function_descr_in_place, is_compiler_provided_value_constraint,
+            log_dropped_constraints_module, refresh_debug_info_for_functions, set_pending_function,
             substitute_and_canonicalize_functions,
         },
         function::{FunctionDefinition, VoidFunction},
@@ -1247,6 +1247,7 @@ where
                     .expect("expected pending function body");
                 pending.definition = descr.definition.clone();
                 instantiate_function_descr_in_place(pending, &mut mapper);
+                default_body_only_effects_in_function_descr(pending);
             }
         }
 
