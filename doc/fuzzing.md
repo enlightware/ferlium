@@ -44,6 +44,16 @@ The Make targets set `ASAN_OPTIONS=detect_leaks=0` because short fuzz smoke runs
 The first corpus directory passed to libFuzzer is writable.
 The committed `fuzz/corpus/*` directories are seed inputs; generated discoveries go under the ignored `fuzz/corpus-generated/` directory.
 
+Shrink generated corpora with libFuzzer corpus minimization:
+
+```sh
+make fuzz-cmin
+```
+
+This runs `cargo fuzz cmin` for each generated corpus directory.
+Use `make fuzz-cmin-parse`, `make fuzz-cmin-ide`, or `make fuzz-cmin-grammar` to minimize a single target.
+Minimization preserves the coverage observed by the current fuzz target binary and instrumentation; it is still worth keeping a backup or commit boundary before replacing a very large corpus.
+
 Grammar-level fuzzing uses Barkus, pinned as a Git dependency in the fuzz crate.
 The EBNF grammar lives in `fuzz/grammar/ferlium.ebnf`.
 It is a generation grammar for structured compiler inputs, not the official language specification.
