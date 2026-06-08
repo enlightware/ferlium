@@ -286,6 +286,13 @@ fn unresolved_expression_constraints_do_not_reach_dictionary_passing() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn returned_lambda_with_function_typed_num_constraint_compiles() {
+    let mut session = TestSession::new();
+    session.compile("pub fn b() { || 0() }");
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn broad_generic_alias_does_not_recurse_while_formatting_error() {
     let mut session = TestSession::new();
     session

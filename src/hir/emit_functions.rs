@@ -1228,12 +1228,20 @@ where
 
         // Fifth pass, normalize the type schemes, substitute the types in the functions.
         for id in local_fns.iter() {
+            let descr = &mut output.functions[id.as_index()];
+            let subst = descr.definition.ty_scheme.normalize();
+            let normalized_scheme = descr.definition.ty_scheme.clone();
             for function_id in function_and_associated_lambdas(id, &associated_lambdas) {
                 let descr = &mut output.functions[function_id.as_index()];
-                // Note: after that normalization, the functions do not share the same
-                // type variables anymore.
-                let subst = descr.definition.ty_scheme.normalize();
                 let mut mapper = BitmapInstantiationMapper::new(&subst);
+                if function_id != *id {
+                    descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.map(&mut mapper);
+                    descr.definition.ty_scheme.ty_quantifiers =
+                        normalized_scheme.ty_quantifiers.clone();
+                    descr.definition.ty_scheme.eff_quantifiers =
+                        normalized_scheme.eff_quantifiers.clone();
+                    descr.definition.ty_scheme.constraints = normalized_scheme.constraints.clone();
+                }
                 let pending = pending_functions
                     .get_mut(&function_id)
                     .expect("expected pending function body");
