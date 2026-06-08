@@ -1407,36 +1407,66 @@ impl UnifiedTypeInference {
         &mut self,
         dep: PendingEffectDependency,
     ) -> Result<(), InternalCompilationError> {
-        if let Some(existing_effects) = self.effect_unification_table.probe_value(dep.target) {
-            if current_satisfied_by_target(&dep.source, &existing_effects) {
-                return Ok(());
-            }
+        let mut visiting = FxHashSet::default();
+        self.expand_inv_effect_dep_inner(dep, &mut visiting)
+    }
 
-            let target_vars = existing_effects.inner_vars();
-            if target_vars.is_empty() {
-                return Err(internal_compilation_error!(InvalidEffectDependency {
-                    source: dep.source,
-                    source_span: dep.source_span,
-                    target: existing_effects,
-                    target_span: dep.target_span,
-                }));
-            }
-
-            for var in target_vars {
-                self.expand_inv_effect_dep(PendingEffectDependency {
-                    source: dep.source.clone(),
-                    source_span: dep.source_span,
-                    target: var,
-                    target_span: dep.target_span,
-                })?;
-            }
-        } else {
+    fn expand_inv_effect_dep_inner(
+        &mut self,
+        dep: PendingEffectDependency,
+        visiting: &mut FxHashSet<EffectVarKey>,
+    ) -> Result<(), InternalCompilationError> {
+        let target = self.effect_unification_table.find(dep.target);
+        if !visiting.insert(target) {
+            // Preserve the dependency when the target effect graph is cyclic. Dropping it would
+            // make the dependency disappear; descending further would recurse forever.
             self.effect_unification_table.union_value(
-                dep.target,
-                Some(dep.source.union(&EffType::single_variable(dep.target))),
+                target,
+                Some(dep.source.union(&EffType::single_variable(target))),
             );
+            return Ok(());
         }
-        Ok(())
+
+        let result =
+            if let Some(existing_effects) = self.effect_unification_table.probe_value(target) {
+                if current_satisfied_by_target(&dep.source, &existing_effects) {
+                    Ok(())
+                } else {
+                    let target_vars = existing_effects.inner_vars();
+                    if target_vars.is_empty() {
+                        Err(internal_compilation_error!(InvalidEffectDependency {
+                            source: dep.source,
+                            source_span: dep.source_span,
+                            target: existing_effects,
+                            target_span: dep.target_span,
+                        }))
+                    } else {
+                        self.effect_unification_table
+                            .union_value(target, Some(existing_effects.union(&dep.source)));
+                        for var in target_vars {
+                            self.expand_inv_effect_dep_inner(
+                                PendingEffectDependency {
+                                    source: dep.source.clone(),
+                                    source_span: dep.source_span,
+                                    target: var,
+                                    target_span: dep.target_span,
+                                },
+                                visiting,
+                            )?;
+                        }
+                        Ok(())
+                    }
+                }
+            } else {
+                self.effect_unification_table.union_value(
+                    target,
+                    Some(dep.source.union(&EffType::single_variable(target))),
+                );
+                Ok(())
+            };
+
+        visiting.remove(&target);
+        result
     }
 }
 
@@ -1471,4 +1501,40 @@ fn current_satisfied_by_target(current: &EffType, target: &EffType) -> bool {
     // primitive effects. Any target-side variables can still absorb the remaining uncertainty.
     let target_primitives = EffType::multiple_primitive(&target.inner_non_vars());
     current.is_subset_of(&target_primitives)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        parser::location::Location,
+        types::effects::{EffType, Effect, PrimitiveEffect},
+    };
+
+    use super::{PendingEffectDependency, UnifiedTypeInference};
+
+    #[test]
+    fn expanding_inverted_effect_dependency_handles_variable_cycles() {
+        let mut ty_inf = UnifiedTypeInference::default();
+        let first = ty_inf.effect_unification_table.new_key(None);
+        let second = ty_inf.effect_unification_table.new_key(None);
+        ty_inf
+            .effect_unification_table
+            .union_value(first, Some(EffType::single_variable(second)));
+        ty_inf
+            .effect_unification_table
+            .union_value(second, Some(EffType::single_variable(first)));
+
+        let span = Location::new_synthesized();
+        ty_inf
+            .expand_inv_effect_dep(PendingEffectDependency {
+                source: EffType::single_primitive(PrimitiveEffect::Write),
+                source_span: span,
+                target: first,
+                target_span: span,
+            })
+            .unwrap();
+
+        let first_effects = ty_inf.effect_unification_table.probe_value(first).unwrap();
+        assert!(first_effects.contains(Effect::Primitive(PrimitiveEffect::Write)));
+    }
 }
