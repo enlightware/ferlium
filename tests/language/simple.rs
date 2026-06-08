@@ -1147,6 +1147,18 @@ fn value_function_arity() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn value_function_arity_for_static_std_function_value() {
+    let mut session = TestSession::new();
+    session
+        .fail_compilation("{map}(0, 0, 0) == 0")
+        .expect_type_mismatch(
+            "(B, (C) -> D ! fallible) -> E ! fallible",
+            "(F, G, H) -> I ! e₀",
+        );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn lambda() {
     let mut session = TestSession::new();
     assert_val_eq!(session.run("let f = || 1; f()"), int(1));

@@ -995,11 +995,15 @@ impl TypeInference {
                             temp_stores.push(store);
                             load
                         };
+                        let abi_arg_tys = abi_args
+                            .as_deref()
+                            .filter(|abi_args| abi_args.len() == args_tys.len())
+                            .unwrap_or(&args_tys);
                         let prepared_arguments = self.prepare_call_arguments(
                             env,
                             &mut args_nodes,
                             &args_tys,
-                            abi_args.as_deref().unwrap_or(&args_tys),
+                            abi_arg_tys,
                             expr_span,
                             None,
                         );
