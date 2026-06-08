@@ -101,7 +101,7 @@ The `Value` method signatures are:
 
 Both methods have an empty effect type.
 In particular, semantic drop cleanup does not add source-level fallibility.
-The clone target is allocated but uninitialized before the call and becomes initialized only if `clone` returns normally.
+The clone target is allocated but uninitialized before the call and becomes initialized after `clone` returns.
 
 For `Dictionary(id)`, `id` indexes the function's extra dictionary/evidence parameter list.
 The dictionary entry is selected with `VALUE_TRAIT.dictionary_method_index(...)`.
