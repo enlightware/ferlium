@@ -62,14 +62,28 @@ pub struct FunctionReference {
     pub identity: LocalFunctionId,
 }
 
+/// The width of an SSA integer constant.
+///
+/// Keeping the pointer-sized case symbolic (rather than baking in 32 or 64) makes the SSA IR target
+/// independent: `PointerSized` represents `int`/`isize`/`usize`, whose physical width is resolved by
+/// the backend profile (see `doc/abi.md`).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum IntWidth {
+    /// A fixed bit width, e.g. `i8`, `i32`, `u64`.
+    FixedSize(i16),
+
+    /// A pointer-sized width (`int`/`isize`/`usize`), resolved per backend profile.
+    PointerSized,
+}
+
 /// A constant integer, represented as a two's complement value.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Integer {
-    /// The bit pattern of the value. Only the `bit_width` least significant bits are relevant.
+    /// The bit pattern of the value. Only the `width` least significant bits are relevant.
     pub bits: u64,
 
-    /// The number of bits in the representation of `self`.
-    pub bit_width: u8,
+    /// The width of the representation of `self`.
+    pub width: IntWidth,
 
     /// `true` iff the representation of `self` is signed.
     pub signed: bool,
@@ -79,7 +93,7 @@ impl Integer {
     pub fn from_isize(value: isize) -> Self {
         Self {
             bits: isize::cast_unsigned(value) as u64,
-            bit_width: 32,
+            width: IntWidth::PointerSized,
             signed: true,
         }
     }
@@ -87,7 +101,7 @@ impl Integer {
     pub fn from_u32(value: u32) -> Self {
         Self {
             bits: value.into(),
-            bit_width: 32,
+            width: IntWidth::FixedSize(32),
             signed: false,
         }
     }
@@ -95,7 +109,7 @@ impl Integer {
     pub fn from_i32(value: i32) -> Self {
         Self {
             bits: i32::cast_unsigned(value).into(),
-            bit_width: 32,
+            width: IntWidth::FixedSize(32),
             signed: true,
         }
     }
@@ -103,10 +117,21 @@ impl Integer {
 
 impl fmt::Display for Integer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.signed {
-            write!(f, "i{} {}", self.bit_width, u64::cast_signed(self.bits))
-        } else {
-            write!(f, "u{} {}", self.bit_width, self.bits)
+        match self.width {
+            IntWidth::FixedSize(bits) => {
+                if self.signed {
+                    write!(f, "i{} {}", bits, u64::cast_signed(self.bits))
+                } else {
+                    write!(f, "u{} {}", bits, self.bits)
+                }
+            }
+            IntWidth::PointerSized => {
+                if self.signed {
+                    write!(f, "int {}", u64::cast_signed(self.bits))
+                } else {
+                    write!(f, "uint {}", self.bits)
+                }
+            }
         }
     }
 }

@@ -553,6 +553,12 @@ pub struct ScriptFunction {
     /// This includes closure-environment slots prepended when calling a function value, but not
     /// dictionary/evidence parameters, which are passed separately through the extra-parameter frame.
     pub runtime_arg_count: usize,
+    /// Layer-1 argument passing for each visible parameter, in declaration order.
+    ///
+    /// Resolved during elaboration (while the trait solver is available) so SSA lowering can
+    /// classify each parameter as a by-value, shared-reference, or mutable-reference binding
+    /// without reconstructing the trait solver. Length equals the number of visible parameters.
+    pub param_passing: Vec<ResolvedArgPassing>,
     // pub monomorphised: HashMap<Vec<Type>, hir::Node>,
 }
 

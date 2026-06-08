@@ -40,10 +40,11 @@ fn simple_functions() {
     let mut session = TestSession::new();
     assert_eq!(
         session.emit_ssa("fn t(x:int) {x}"),
-        r#"u!("t")
-fn t(%p0: @arg int):
+        r#"fn t(%p0: @arg int, %p1: @ret int):
   0:
-    %r0 = ret %p0
+    %r0 = load %p0
+    %r1 = store %r0 to %p1
+    %r2 = ret
 "#,
     );
 }
@@ -54,28 +55,30 @@ fn call_functions() {
 
     assert_eq!(
         session.emit_ssa("fn a0(x: int) { x + 1 }"),
-        r#"fn a0(%p0: @arg int) -> int:
+        r#"fn a0(%p0: @arg int, %p1: @ret int):
   0:
     %r0 = alloca int
-    %r1 = call std::Num<0-5>::from_int(i32 2)
-    %r2 = call std::Num<0-5>::mul(%r1, %p0)
-    %r3 = store %r2 to %r0
-    %r4 = load %r0
-    %r5 = ret %r4
+    %r1 = alloca int
+    %r2 = store int 1 to %r1
+    %r3 = call std::Num<0-5>::from_int(%r1, %r0)
+    %r4 = call std::Num<0-5>::add(%p0, %r0, %p1)
+    %r5 = ret
 "#
     );
 
     assert_eq!(
         session.emit_ssa("fn a0(x: int) { let y: int = 2 * x; y }"),
-        r#"u!("a0")
-fn a0(%p0: @arg int):
+        r#"fn a0(%p0: @arg int, %p1: @ret int):
   0:
     %r0 = alloca int
-    %r1 = call std::Num<0-5>::from_int(i32 2)
-    %r2 = call std::Num<0-5>::mul(%r1, %p0)
-    %r3 = store %r2 to %r0
-    %r4 = load %r0
-    %r5 = ret %r4
+    %r1 = alloca int
+    %r2 = alloca int
+    %r3 = store int 2 to %r2
+    %r4 = call std::Num<0-5>::from_int(%r2, %r1)
+    %r5 = call std::Num<0-5>::mul(%r1, %p0, %r0)
+    %r6 = load %r0
+    %r7 = store %r6 to %p1
+    %r8 = ret
 "#
     );
 }
@@ -86,56 +89,58 @@ fn match_case_functions() {
 
     assert_eq!(
         session.emit_ssa("fn a0(x:int) {if true {x} else {2}}"),
-        r#"u!("a0")
-fn a0(%p0: @arg int):
+        r#"fn a0(%p0: @arg int, %p1: @ret int):
   0:
-    %r0 = alloca int
-    %r1 = br 1
+    %r0 = br 1
   1:
-    %r2 = comp_eq i1 1 i1 1
-    %r3 = condbr %r2, %b2, &b3
+    %r1 = comp_eq i1 1 i1 1
+    %r2 = condbr %r1, %b2, &b3
   2:
-    %r4 = store %p0 to %r0
+    %r3 = load %p0
+    %r4 = store %r3 to %p1
     %r5 = br 4
   3:
-    %r6 = call std::Num<0-5>::from_int(i32 2)
-    %r7 = store %r6 to %r0
-    %r8 = br 4
+    %r6 = alloca int
+    %r7 = store int 2 to %r6
+    %r8 = call std::Num<0-5>::from_int(%r6, %p1)
+    %r9 = br 4
   4:
-    %r9 = load %r0
-    %r10 = ret %r9
+    %r10 = ret
 "#
     );
 
     assert_eq!(
         session.emit_ssa("fn a0(x:int) {match x { 0 => x, 1 => x - 1, _ => -1 }}"),
-        r#"u!("a0")
-fn a0(%p0: @arg int):
+        r#"fn a0(%p0: @arg int, %p1: @ret int):
   0:
-    %r0 = alloca int
+    %r0 = load %p0
     %r1 = br 1
   1:
-    %r2 = comp_eq %p0 i32 0
+    %r2 = comp_eq %r0 int 0
     %r3 = condbr %r2, %b2, &b3
   2:
-    %r4 = store %p0 to %r0
-    %r5 = br 6
+    %r4 = load %p0
+    %r5 = store %r4 to %p1
+    %r6 = br 6
   3:
-    %r6 = comp_eq %p0 i32 1
-    %r7 = condbr %r6, %b4, &b5
+    %r7 = comp_eq %r0 int 1
+    %r8 = condbr %r7, %b4, &b5
   4:
-    %r8 = call std::Num<0-5>::from_int(i32 1)
-    %r9 = call std::Num<0-5>::sub(%p0, %r8)
-    %r10 = store %r9 to %r0
-    %r11 = br 6
+    %r9 = alloca int
+    %r10 = alloca int
+    %r11 = store int 1 to %r10
+    %r12 = call std::Num<0-5>::from_int(%r10, %r9)
+    %r13 = call std::Num<0-5>::sub(%p0, %r9, %p1)
+    %r14 = br 6
   5:
-    %r12 = call std::Num<0-5>::from_int(i32 1)
-    %r13 = call std::Num<0-5>::neg(%r12)
-    %r14 = store %r13 to %r0
-    %r15 = br 6
+    %r15 = alloca int
+    %r16 = alloca int
+    %r17 = store int 1 to %r16
+    %r18 = call std::Num<0-5>::from_int(%r16, %r15)
+    %r19 = call std::Num<0-5>::neg(%r15, %p1)
+    %r20 = br 6
   6:
-    %r16 = load %r0
-    %r17 = ret %r16
+    %r21 = ret
 "#
     );
 }
@@ -152,7 +157,7 @@ fn a0(%p0: @arg int):
 // fn a0(%p0: @extra ((A, A) -> Ordering,), %p1: @extra ((A, A) -> A, (A, A) -> A, (A, A) -> A, (A) -> A, (A) -> A, (A) -> A, (int) -> A), %p2: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A, &mut A) -> (), (&mut A) -> (), int, int), %p3: @arg A):
 //   0:
 //     %r0 = project 6 from %p1
-//     %r1 = call %r0(i32 2)
+//     %r1 = call %r0(int 2)
 //     %r2 = call std::lt(%p0, %p3, %r1)
 //     %r3 = ret %r2
 // "#
@@ -165,11 +170,10 @@ fn user_function_call() {
 
     assert_eq!(
         sessions.emit_ssa("fn a0(x: int) {a0(x)}"),
-        r#"u!("a0")
-fn a0(%p0: @arg int):
+        r#"fn a0(%p0: @arg int, %p1: @ret never):
   0:
-    %r0 = call <test>::a0(%p0)
-    %r1 = ret %r0
+    %r0 = call <test>::a0(%p0, %p1)
+    %r1 = ret
 "#
     )
 }
@@ -260,30 +264,39 @@ fn factorial() {
 
     assert_eq!(
         sessions.emit_ssa("fn factorial(x: int) {if x > 1 {x * factorial(x - 1)} else {1}}"),
-        r#"u!("factorial")
-fn factorial(%p0: @arg int):
+        r#"fn factorial(%p0: @arg int, %p1: @ret int):
   0:
-    %r0 = call std::Num<0-5>::from_int(i32 1)
-    %r1 = call std::gt((std::Ord<0-5>::cmp), %p0, %r0)
-    %r2 = alloca int
-    %r3 = br 1
+    %r0 = alloca bool
+    %r1 = alloca ((int, int) -> Ordering,)
+    %r2 = store (std::Ord<0-5>::cmp) to %r1
+    %r3 = alloca int
+    %r4 = alloca int
+    %r5 = store int 1 to %r4
+    %r6 = call std::Num<0-5>::from_int(%r4, %r3)
+    %r7 = call std::gt(%r1, %p0, %r3, %r0)
+    %r8 = load %r0
+    %r9 = br 1
   1:
-    %r4 = comp_eq %r1 i1 1
-    %r5 = condbr %r4, %b2, &b3
+    %r10 = comp_eq %r8 i1 1
+    %r11 = condbr %r10, %b2, &b3
   2:
-    %r6 = call std::Num<0-5>::from_int(i32 1)
-    %r7 = call std::Num<0-5>::sub(%p0, %r6)
-    %r8 = call <test>::factorial(%r7)
-    %r9 = call std::Num<0-5>::mul(%p0, %r8)
-    %r10 = store %r9 to %r2
-    %r11 = br 4
+    %r12 = alloca int
+    %r13 = alloca int
+    %r14 = alloca int
+    %r15 = alloca int
+    %r16 = store int 1 to %r15
+    %r17 = call std::Num<0-5>::from_int(%r15, %r14)
+    %r18 = call std::Num<0-5>::sub(%p0, %r14, %r13)
+    %r19 = call <test>::factorial(%r13, %r12)
+    %r20 = call std::Num<0-5>::mul(%p0, %r12, %p1)
+    %r21 = br 4
   3:
-    %r12 = call std::Num<0-5>::from_int(i32 1)
-    %r13 = store %r12 to %r2
-    %r14 = br 4
+    %r22 = alloca int
+    %r23 = store int 1 to %r22
+    %r24 = call std::Num<0-5>::from_int(%r22, %p1)
+    %r25 = br 4
   4:
-    %r15 = load %r2
-    %r16 = ret %r15
+    %r26 = ret
 "#
     );
 }
@@ -486,11 +499,10 @@ fn iter1_multi_param_value() {
     let mut session = TestSession::new();
     assert_eq!(
         session.emit_ssa("fn f(x: int, y: int) { x + y }"),
-        r#"u!("f")
-fn f(%p0: @arg int, %p1: @arg int):
+        r#"fn f(%p0: @arg int, %p1: @arg int, %p2: @ret int):
   0:
-    %r0 = call std::Num<0-5>::add(%p0, %p1)
-    %r1 = ret %r0
+    %r0 = call std::Num<0-5>::add(%p0, %p1, %p2)
+    %r1 = ret
 "#,
     );
 }
@@ -503,17 +515,19 @@ fn iter1_mut_local_copy() {
     let mut session = TestSession::new();
     assert_eq!(
         session.emit_ssa("fn add_one(mut x: int) -> int { x = x + 1; x }"),
-        r#"u!("add_one")
-fn add_one(%p0: @arg int):
+        r#"fn add_one(%p0: @arg int, %p1: @ret int):
   0:
     %r0 = alloca int
-    %r1 = store %p0 to %r0
-    %r2 = load %r0
-    %r3 = call std::Num<0-5>::from_int(i32 1)
-    %r4 = call std::Num<0-5>::add(%r2, %r3)
-    %r5 = store %r4 to %r0
-    %r6 = load %r0
-    %r7 = ret %r6
+    %r1 = load %p0
+    %r2 = store %r1 to %r0
+    %r3 = alloca int
+    %r4 = alloca int
+    %r5 = store int 1 to %r4
+    %r6 = call std::Num<0-5>::from_int(%r4, %r3)
+    %r7 = call std::Num<0-5>::add(%r0, %r3, %r0)
+    %r8 = load %r0
+    %r9 = store %r8 to %p1
+    %r10 = ret
 "#,
     );
 }
@@ -526,17 +540,19 @@ fn iter1_let_mut_move_return() {
     let mut session = TestSession::new();
     assert_eq!(
         session.emit_ssa("fn f(x: int) { let mut y = x; y = y + 1; y }"),
-        r#"u!("f")
-fn f(%p0: @arg int):
+        r#"fn f(%p0: @arg int, %p1: @ret int):
   0:
     %r0 = alloca int
-    %r1 = store %p0 to %r0
-    %r2 = load %r0
-    %r3 = call std::Num<0-5>::from_int(i32 1)
-    %r4 = call std::Num<0-5>::add(%r2, %r3)
-    %r5 = store %r4 to %r0
-    %r6 = load %r0
-    %r7 = ret %r6
+    %r1 = load %p0
+    %r2 = store %r1 to %r0
+    %r3 = alloca int
+    %r4 = alloca int
+    %r5 = store int 1 to %r4
+    %r6 = call std::Num<0-5>::from_int(%r4, %r3)
+    %r7 = call std::Num<0-5>::add(%r0, %r3, %r0)
+    %r8 = load %r0
+    %r9 = store %r8 to %p1
+    %r10 = ret
 "#,
     );
 }
@@ -546,11 +562,10 @@ fn iter1_apply() {
     let mut session = TestSession::new();
     assert_eq!(
         session.emit_ssa("fn f(x: int) { f(x) }"),
-        r#"u!("f")
-fn f(%p0: @arg int):
+        r#"fn f(%p0: @arg int, %p1: @ret never):
   0:
-    %r0 = call <test>::f(%p0)
-    %r1 = ret %r0
+    %r0 = call <test>::f(%p0, %p1)
+    %r1 = ret
 "#,
     );
 }
@@ -561,10 +576,9 @@ fn shared_ref_param_non_trivial() {
     let mut session = TestSession::new();
     assert_eq!(
         session.emit_ssa("fn f(s: string) { }"),
-        r#"u!("f")
-fn f(%p0: @arg & string):
+        r#"fn f(%p0: @arg & string, %p1: @ret ()):
   0:
-    %r0 = ret ()
+    %r0 = ret
 "#,
     );
 }
@@ -576,10 +590,9 @@ fn shared_ref_param_generic() {
     let mut session = TestSession::new();
     assert_eq!(
         session.emit_ssa("fn f(x) { }"),
-        r#"u!("f")
-fn f(%p0: @arg & A):
+        r#"fn f(%p0: @arg & A, %p1: @ret ()):
   0:
-    %r0 = ret ()
+    %r0 = ret
 "#,
     );
 }
@@ -591,16 +604,14 @@ fn shared_ref_argument_passes_place() {
     let mut session = TestSession::new();
     assert_eq!(
         session.emit_ssa("fn u(s: string) { } fn caller(s: string) { u(s) }"),
-        r#"u!("u")
-fn u(%p0: @arg & string):
+        r#"fn u(%p0: @arg & string, %p1: @ret ()):
   0:
-    %r0 = ret ()
+    %r0 = ret
 
-u!("caller")
-fn caller(%p0: @arg & string):
+fn caller(%p0: @arg & string, %p1: @ret ()):
   0:
-    %r0 = call <test>::u(%p0)
-    %r1 = ret %r0
+    %r0 = call <test>::u(%p0, %p1)
+    %r1 = ret
 "#,
     );
 }
@@ -617,14 +628,14 @@ fn call_trivial_copy_argument_passes_value_recursive() {
                 f(n)
             }
         "#),
-        r#"fn f(%p0: @arg int) -> never:
+        r#"fn f(%p0: @arg int, %p1: @ret never):
   0:
     %r0 = alloca int
-    %r1 = call std::Num<0-5>::from_int(i32 1)
-    %r2 = store %r1 to %r0
-    %r3 = load %r0
-    %r4 = call <test>::f(%r3)
-    %r5 = ret %r4
+    %r1 = alloca int
+    %r2 = store int 1 to %r1
+    %r3 = call std::Num<0-5>::from_int(%r1, %r0)
+    %r4 = call <test>::f(%r0, %p1)
+    %r5 = ret
 "#,
     );
 }
@@ -634,11 +645,10 @@ fn return_value_is_trivially_passed() {
     let mut session = TestSession::new();
     assert_eq!(
         session.emit_ssa("fn f(a: int) { f(a) }"),
-        r#"u!("f")
-fn f(%p0: @arg int):
+        r#"fn f(%p0: @arg int, %p1: @ret never):
   0:
-    %r0 = call <test>::f(%p0)
-    %r1 = ret %r0
+    %r0 = call <test>::f(%p0, %p1)
+    %r1 = ret
 "#,
     );
 }
@@ -650,10 +660,10 @@ fn call_trivial_copy_argument_passes_value() {
     let mut session = TestSession::new();
     assert_eq!(
         session.emit_ssa("fn f(a: int) { f(a) }"),
-        r#"fn f(%p0: @arg int) -> never:
+        r#"fn f(%p0: @arg int, %p1: @ret never):
   0:
-    %r0 = call <test>::f(%p0)
-    %r1 = ret %r0
+    %r0 = call <test>::f(%p0, %p1)
+    %r1 = ret
 "#,
     );
 }
@@ -671,17 +681,18 @@ fn call_mutable_reference_argument_passes_owned_local_place() {
             callee(m)
         }
         "#),
-        r#"fn caller() -> ():
+        r#"fn caller(%p0: @ret ()):
   0:
     %r0 = alloca int
-    %r1 = call std::Num<0-5>::from_int(i32 0)
-    %r2 = store %r1 to %r0
-    %r3 = call <test>::callee(%r0)
-    %r4 = ret %r3
+    %r1 = alloca int
+    %r2 = store int 0 to %r1
+    %r3 = call std::Num<0-5>::from_int(%r1, %r0)
+    %r4 = call <test>::callee(%r0, %p0)
+    %r5 = ret
 
-fn callee(%p0: @arg &mut int) -> ():
+fn callee(%p0: @arg &mut int, %p1: @ret ()):
   0:
-    %r0 = ret ()
+    %r0 = ret
 "#,
     );
 }
@@ -703,18 +714,22 @@ fn call_passes_all_argument_conventions() {
             }
             "#,
         ),
-        r#"fn caller(%p0: @arg & string) -> ():
+        r#"fn caller(%p0: @arg & string, %p1: @ret ()):
   0:
     %r0 = alloca int
-    %r1 = call std::Num<0-5>::from_int(i32 0)
-    %r2 = store %r1 to %r0
-    %r3 = call std::Num<0-5>::from_int(i32 1)
-    %r4 = call <test>::callee(%r3, %r0, %p0)
-    %r5 = ret %r4
+    %r1 = alloca int
+    %r2 = store int 0 to %r1
+    %r3 = call std::Num<0-5>::from_int(%r1, %r0)
+    %r4 = alloca int
+    %r5 = alloca int
+    %r6 = store int 1 to %r5
+    %r7 = call std::Num<0-5>::from_int(%r5, %r4)
+    %r8 = call <test>::callee(%r4, %r0, %p0, %p1)
+    %r9 = ret
 
-fn callee(%p0: @arg int, %p1: @arg &mut int, %p2: @arg & string) -> ():
+fn callee(%p0: @arg int, %p1: @arg &mut int, %p2: @arg & string, %p3: @ret ()):
   0:
-    %r0 = ret ()
+    %r0 = ret
 "#,
     );
 }
@@ -724,12 +739,12 @@ fn mutable_reference_parameter() {
     let mut session = TestSession::new();
     assert_eq!(
         session.emit_ssa("fn f(x: &mut int) { x = 2; }"),
-        r#"u!("f")
-fn f(%p0: @arg &mut int):
+        r#"fn f(%p0: @arg &mut int, %p1: @ret ()):
   0:
-    %r0 = call std::Num<0-5>::from_int(i32 2)
-    %r1 = store %r0 to %p0
-    %r2 = ret ()
+    %r0 = alloca int
+    %r1 = store int 2 to %r0
+    %r2 = call std::Num<0-5>::from_int(%r0, %p0)
+    %r3 = ret
 "#,
     );
 }
@@ -739,16 +754,18 @@ fn generic_apply() {
     let mut session = TestSession::new();
     assert_eq!(
         session.emit_ssa("fn f(x) { x * 2 }"),
-        r#"u!("f")
-fn f(%p0: @extra ((A, A) -> A, (A, A) -> A, (A, A) -> A, (A) -> A, (A) -> A, (A) -> A, (int) -> A), %p1: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A, &mut A) -> (), (&mut A) -> (), int, int), %p2: @arg & A):
+        r#"fn f(%p0: @extra ((A, A) -> A, (A, A) -> A, (A, A) -> A, (A) -> A, (A) -> A, (A) -> A, (int) -> A), %p1: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A, &mut A) -> (), (&mut A) -> (), int, int), %p2: @arg & A, %p3: @ret A):
   0:
     %r0 = project 2 from %p0
-    %r1 = project 6 from %p0
-    %r2 = call %r1(i32 2)
-    %r3 = alloca A
-    %r4 = store %r2 to %r3
-    %r5 = call %r0(%p2, %r3)
-    %r6 = ret %r5
+    %r1 = load %r0
+    %r2 = alloca A
+    %r3 = project 6 from %p0
+    %r4 = load %r3
+    %r5 = alloca int
+    %r6 = store int 2 to %r5
+    %r7 = call %r4(%r5, %r2)
+    %r8 = call %r1(%p2, %r2, %p3)
+    %r9 = ret
 "#,
     );
 }
@@ -759,12 +776,11 @@ fn dynamic_apply() {
     // todo store return value indirectly
     assert_eq!(
         session.emit_ssa("fn apply_fn(f, x: int) { f(x) }"),
-        r#"u!("apply_fn")
-fn apply_fn(%p0: @arg & (int) -> A ! e₀, %p1: @arg int):
+        r#"fn apply_fn(%p0: @arg & (int) -> A ! e₀, %p1: @arg int, %p2: @ret A):
   0:
     %r0 = load %p0
-    %r1 = call %r0(%p1)
-    %r2 = ret %r1
+    %r1 = call %r0(%p1, %p2)
+    %r2 = ret
 "#,
     );
 }

@@ -13,14 +13,22 @@ use crate::{
     types::r#type::Type,
 };
 
-/// A visible runtime argument or a hidden extra parameter.
+/// The origin of an SSA function parameter.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ParameterKind {
-    /// A visible runtime argument, with how it is passed in.
-    Argument(ResolvedArgPassing),
+pub enum ParameterTag {
+    /// A parameter that was already visible in Ferlium source, along with the high-level argument passing
+    /// information for the native backend.
+    Parameter(ResolvedArgPassing),
 
-    /// A hidden dictionary/evidence parameter resolving polymorphism.
-    Extra,
+    /// A pointer to a dictionary.
+    ///
+    /// This is used to pass generic parameter witnesses.
+    Dictionary,
+
+    /// The place where the return value (if any) shall be stored.
+    ///
+    /// The storage is allocated by the caller. This parameter is present iff the function returns a non-void result.
+    Return,
 }
 
 /// A parameter in the signature of an SSA function.
@@ -29,10 +37,10 @@ pub enum ParameterKind {
 /// (dictionary/evidence) parameters first, followed by the visible runtime arguments.
 pub struct Parameter {
     /// The type of the parameter.
-    pub ty: Type,
+    pub type_: Type,
 
-    /// Whether the parameter is a visible argument or a hidden extra parameter.
-    pub kind: ParameterKind,
+    /// The origin of the parameter.
+    pub tag: ParameterTag,
 }
 
 /// A function in the SSA form of Ferlium.
@@ -42,9 +50,6 @@ pub struct Function {
 
     /// The parameters of the function, in slot order (extra parameters first, then arguments).
     parameters: Vec<Parameter>,
-
-    /// The return type of the function.
-    return_type: Type,
 
     /// The instructions in the function.
     slots: list::List<InstructionSlot>,
@@ -58,11 +63,10 @@ pub struct Function {
 
 impl Function {
     /// Creates an instance with the given properties.
-    pub fn new(name: Ustr, return_type: Type) -> Self {
+    pub fn new(name: Ustr) -> Self {
         Self {
             name,
             parameters: Vec::new(),
-            return_type,
             slots: list::List::new(),
             blocks: list::List::new(),
             uses: HashMap::new(),
@@ -70,9 +74,9 @@ impl Function {
     }
 
     /// Appends a parameter to this function's signature and returns its slot.
-    pub fn add_parameter(&mut self, t: Type, kind: ParameterKind) -> usize {
+    pub fn add_parameter(&mut self, t: Type, tag: ParameterTag) -> usize {
         let slot = self.parameters.len();
-        self.parameters.push(Parameter { ty: t, kind });
+        self.parameters.push(Parameter { type_: t, tag });
         slot
     }
 
@@ -144,25 +148,26 @@ impl FormatWith<ModuleEnv<'_>> for Function {
             if i != 0 {
                 write!(f, ", ")?;
             }
-            let kind = match p.kind {
-                ParameterKind::Argument(ResolvedArgPassing::Value(
+            let kind = match p.tag {
+                ParameterTag::Parameter(ResolvedArgPassing::Value(
                     ResolvedValueArgPassing::TrivialCopy(_),
                 )) => "arg",
-                ParameterKind::Argument(ResolvedArgPassing::Value(
+                ParameterTag::Parameter(ResolvedArgPassing::Value(
                     ResolvedValueArgPassing::SharedRef { .. },
                 )) => "arg &",
-                ParameterKind::Argument(ResolvedArgPassing::MutableRef) => "arg &mut",
-                ParameterKind::Extra => "extra",
+                ParameterTag::Parameter(ResolvedArgPassing::MutableRef) => "arg &mut",
+                ParameterTag::Dictionary => "extra",
+                ParameterTag::Return => "ret",
             };
             write!(
                 f,
                 "{}: @{} {}",
                 ssa::Value::Parameter(i),
                 kind,
-                p.ty.format_with(env)
+                p.type_.format_with(env)
             )?;
         }
-        write!(f, ") -> {}:", self.return_type.format_with(env))?;
+        write!(f, "):")?;
 
         if !self.slots.is_empty() {
             writeln!(f)?;

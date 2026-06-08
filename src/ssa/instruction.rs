@@ -51,6 +51,10 @@ impl Instruction {
     }
 
     /// Creates a `call` instruction with the given properties.
+    ///
+    /// A call yields no register: a callee with a non-`()` result writes it through the return
+    /// out-pointer passed as the call's last operand. `result` records the callee's logical return
+    /// type as IR metadata.
     pub fn call<T: IntoIterator<Item = ssa::Value>>(
         span: Location,
         callee: ssa::Value,
@@ -110,11 +114,15 @@ impl Instruction {
         }
     }
 
-    /// Creates a 'ret' instruction with the given properties.
-    pub fn ret(span: Location, value: ssa::Value) -> Self {
+    /// Creates a 'ret' instruction.
+    ///
+    /// The return value is not an operand: the function writes its result into the return
+    /// out-pointer (the last parameter) before returning. A function whose return type is `()`
+    /// has no out-pointer and simply returns.
+    pub fn ret(span: Location) -> Self {
         Instruction {
             span,
-            operands: vec![value],
+            operands: vec![],
             kind: Box::new(Ret {}),
         }
     }
@@ -210,13 +218,16 @@ impl InstructionKind for Alloca {
 
 /// A function call in SSA.
 struct Call {
-    /// The type of the value returned by the callee.
+    /// The callee's logical return type, recorded as IR metadata.
     pub result: Type,
 }
 
 impl InstructionKind for Call {
     fn result(&self, _whole: &Instruction) -> InstructionResult {
-        InstructionResult::Lowered(self.result)
+        // Calls do not yield a register: a callee with a non-`()` result writes it through the
+        // return out-pointer passed as the call's last operand.
+        let _ = &self.result;
+        InstructionResult::Nothing
     }
 
     fn fmt_within(
@@ -313,7 +324,9 @@ struct Project {
 
 impl InstructionKind for Project {
     fn result(&self, _whole: &Instruction) -> InstructionResult {
-        InstructionResult::Lowered(self.ty)
+        // The operand is a place (pointer to the aggregate) and the result is a place: a pointer to
+        // the projected element. A register value is obtained by `load`ing the result.
+        InstructionResult::pointer_to(InstructionResult::Lowered(self.ty))
     }
 
     fn fmt_within(
@@ -336,11 +349,11 @@ impl InstructionKind for Ret {
 
     fn fmt_within(
         &self,
-        f: &mut fmt::Formatter<'_>,
-        whole: &Instruction,
+        _f: &mut fmt::Formatter<'_>,
+        _whole: &Instruction,
         _env: &ModuleEnv<'_>,
     ) -> fmt::Result {
-        write!(f, "ret {}", whole.operands[0])
+        write!(_f, "ret")
     }
 }
 
