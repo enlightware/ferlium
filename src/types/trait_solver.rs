@@ -646,7 +646,7 @@ impl<'a> TraitSolver<'a> {
         Ok(ResolvedValueLayout { size, align })
     }
 
-    fn resolved_arg_passing_for_no_temp_arg(
+    pub(crate) fn resolved_arg_passing_for_no_temp_arg(
         &mut self,
         arena: &mut NodeArena,
         arg: &FnArgType,
