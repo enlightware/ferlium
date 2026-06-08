@@ -12,7 +12,7 @@ use crate::harness::{TestSession, int, string};
 use ferlium::{
     compiler::error::{CompilationErrorImpl, RuntimeErrorKind},
     hir::{
-        self, NodeKind,
+        self, ENodeArena, ENodeId, NodeKind,
         function::{ResolvedArgPassing, ResolvedValueArgPassing, SharedRefTempCleanup},
         value::Value,
     },
@@ -378,6 +378,24 @@ fn expression_cleanup_drop_modes(
         .collect()
 }
 
+fn find_return_value(arena: &ENodeArena, node: ENodeId) -> Option<ENodeId> {
+    match &arena[node].kind {
+        NodeKind::Return(value) => Some(*value),
+        NodeKind::Block(block) => block
+            .body
+            .iter()
+            .find_map(|node| find_return_value(arena, *node)),
+        NodeKind::Case(case) => case
+            .alternatives
+            .iter()
+            .map(|(_, node)| *node)
+            .chain(std::iter::once(case.default))
+            .find_map(|node| find_return_value(arena, node)),
+        NodeKind::Loop(node) => find_return_value(arena, node.body),
+        _ => None,
+    }
+}
+
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn discarded_array_literal_with_immediate_elements_uses_semantic_drop() {
@@ -487,6 +505,36 @@ fn return_moves_owned_local_without_dropping_it() {
         tracked_probe_value_impl()
     );
     assert_val_eq!(session.run(&source), int(3));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn return_value_is_not_wrapped_in_cleanup_block() {
+    let mut session = TestSession::new();
+    let source = format!(
+        r#"
+        {}
+        fn run() -> Probe {{
+            let other = Probe(3);
+            let result = Probe(4);
+            return result;
+        }}
+        "#,
+        tracked_probe_value_impl()
+    );
+    let module_id = session.compile(&source).module_id;
+    let module = session.session().expect_fresh_module(module_id);
+    let run = module.get_function(ustr("run")).unwrap();
+    let entry = run.get_code_entry().unwrap();
+    let return_value = find_return_value(&module.hir_arena, entry).unwrap();
+
+    assert!(
+        matches!(
+            module.hir_arena[return_value].kind,
+            NodeKind::TakeLocalValue(_)
+        ),
+        "return should carry the prepared value directly, not a cleanup wrapper block"
+    );
 }
 
 #[test]

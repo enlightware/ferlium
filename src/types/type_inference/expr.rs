@@ -881,16 +881,13 @@ impl TypeInference {
                             reason: "addressor return expression must be a place".into(),
                         }));
                     }
-                    self.wrap_value_with_scope_cleanup(env, node_id, ty, &effects, 0, expr_span)
+                    node_id
                 } else {
-                    let (node_id, taken_local) =
-                        self.take_local_value_result(env, node_id, 0, expr_span);
-                    let node_id = if taken_local.is_some() {
-                        node_id
-                    } else {
-                        self.materialize_owned_value(env, node_id, expr_span)
-                    };
-                    self.wrap_value_with_scope_cleanup(env, node_id, ty, &effects, 0, expr_span)
+                    // Return cleanup is represented by the lexical `Block.cleanup` scopes that the
+                    // transfer exits. Function-entry locals are not wrapped in an extra cleanup
+                    // scope here; the current calling convention passes non-trivial owned inputs by
+                    // reference and only owns trivial-copy inputs at the function boundary.
+                    self.prepare_value_for_exit(env, node_id, 0, expr_span)
                 };
                 let node = K::Return(return_value);
                 (node, Type::never(), MutType::constant(), effects)
@@ -1577,13 +1574,7 @@ impl TypeInference {
                         MutType::constant(),
                         sp(value),
                     )?;
-                    let (value, taken_local) =
-                        self.take_local_value_result(env, value, local_scope_start, expr_span);
-                    if taken_local.is_some() {
-                        value
-                    } else {
-                        self.materialize_owned_value(env, value, expr_span)
-                    }
+                    self.prepare_value_for_exit(env, value, local_scope_start, expr_span)
                 } else {
                     let value = env.ir_arena.alloc(N::new(
                         K::Immediate(LiteralValue::new_native(())),
@@ -2002,25 +1993,19 @@ impl TypeInference {
         }))
     }
 
-    fn wrap_value_with_scope_cleanup(
+    fn prepare_value_for_exit(
         &mut self,
         env: &mut TypingEnv,
         value: NodeId,
-        ty: Type,
-        effects: &EffType,
-        drop_start_index: usize,
+        exit_local_scope_start: usize,
         span: Location,
     ) -> NodeId {
-        let drops = self.cleanup_locals_for_locals(env, drop_start_index);
-        if drops.is_empty() {
+        let (value, taken_local) =
+            self.take_local_value_result(env, value, exit_local_scope_start, span);
+        if taken_local.is_some() {
             value
         } else {
-            env.ir_arena.alloc(hir::Node::new(
-                Self::block(vec![value], drops),
-                ty,
-                effects.clone(),
-                span,
-            ))
+            self.materialize_owned_value(env, value, span)
         }
     }
 

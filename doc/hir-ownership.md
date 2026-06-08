@@ -61,9 +61,9 @@ Current lowering applies these rules in the main ownership-sensitive contexts:
 
 # Drops and Cleanup
 
-Lexical drops are explicit `DropLocal { id }` nodes generated in reverse local order.
-Locals with owned or deferred storage whose lifetime ends receive `DropLocal` nodes.
-After local storage resolution, `DropLocal` is a no-op for non-owning locals.
+Lexical cleanup is represented by `Block.cleanup`, a list of locals in declaration order.
+When a block is exited, cleanup runs in reverse order.
+After local storage resolution, cleanup is a no-op for non-owning locals.
 For owned locals it applies the resolved `LocalDrop`: `Skip` reclaims only storage, while static and dictionary modes call `Value::drop` before discarding storage.
 
 Assignments to initialized storage carry an optional `Assignment::drop`.
@@ -72,10 +72,14 @@ Assignments to uninitialized storage use `assignment_mode == InitializeStorage` 
 
 SSA must preserve the same cleanup behavior on all exits:
 
-- Normal scope exit runs the generated `DropLocal`s.
+- Normal scope exit runs the block's cleanup.
 - A moved local is not dropped again.
 - Runtime-error edges must run semantic drops for initialized owned locals created in the exited scope, in reverse order, before storage is reclaimed.
-- Early return propagates the returned value and must not drop storage that has been moved into that return value.
+- `return`, `break`, and `continue` edges run the cleanup for each lexical block they exit.
+- A value carried by `return` or `break` is prepared before cleanup runs: a local owned by the exited scope is moved with `TakeLocalValue`, while a still-live place is materialized with `CloneValue` or a trivial copy.
+
+Function-entry locals are not represented by an extra cleanup block today.
+This is compatible with the current calling convention: non-trivial source-level value inputs are passed by reference, and owned function-boundary inputs are trivial-copy values whose cleanup is `Skip`.
 
 # Clone and Drop Dispatch
 
@@ -112,7 +116,7 @@ Dispatch sites are:
 
 - `StoreLocal` with `LocalDecl::clone`: clone into the local's uninitialized target storage.
 - `CloneValue`: clone or copy a place into a fresh owned temporary result.
-- `DropLocal` with `LocalDecl::drop`: drop an owned local.
+- `Block.cleanup` with `LocalDecl::drop`: drop an owned local at scope exit.
 - `Assignment::drop`: drop the overwritten destination value.
 
 # Call Argument Passing
