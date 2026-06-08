@@ -17,3 +17,4 @@ It achieves so by borrowing the type system from Haskell, the syntax from Rust, 
 ## Workflow Rules
 - **IF** you modify the main parser file `src/parser.lalrpop`, **THEN** you must also update the IDE Lezer grammar file `playground/src/language/language.grammar` and validate it.
 - **IF** we agree to remove a feature, **THEN** you must **NOT** add a unit test to make sure that this feature is removed.
+- **IF** you modify compiler behaviour or language features, **THEN** update the documentation in `doc/` if necessary.
