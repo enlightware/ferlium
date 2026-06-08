@@ -21,6 +21,7 @@ use ferlium::{
         id::Id,
     },
 };
+use ustr::ustr;
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
@@ -1301,4 +1302,99 @@ fn value_impl_for_foreign_named_adt_is_rejected() {
         CompilationErrorImpl::TraitImplOrphanRuleViolation { .. } => {}
         other => panic!("expected TraitImplOrphanRuleViolation, got {other:?}"),
     }
+}
+
+// Testing resolved parameter passing for script functions, as described in `doc/hir-ownership.md`
+// ("Call Argument Passing").
+
+/// Compile `src` and return the resolved parameter passing of the script function `fn_name`.
+fn parameter_passing_for_fn(
+    session: &mut TestSession,
+    src: &str,
+    fn_name: &str,
+) -> Vec<ResolvedArgPassing> {
+    session
+        .compile_and_get_module(src)
+        .get_function(ustr(fn_name))
+        .expect("function should be defined")
+        .code
+        .as_script()
+        .expect("function should be a script function")
+        .parameter_passing
+        .clone()
+}
+
+fn trivial_copy_int() -> ResolvedArgPassing {
+    ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy(int_value_layout()))
+}
+
+fn shared_ref() -> ResolvedArgPassing {
+    ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef {
+        temp_cleanup: SharedRefTempCleanup::None,
+    })
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn concrete_trivial_copy_parameter_resolves_to_trivial_copy() {
+    let mut session = TestSession::new();
+    let passing =
+        parameter_passing_for_fn(&mut session, "fn id(value: int) -> int { value }", "id");
+    assert_eq!(passing, [trivial_copy_int()]);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn non_trivial_copy_value_parameter_resolves_to_shared_ref() {
+    let mut session = TestSession::new();
+    let passing = parameter_passing_for_fn(
+        &mut session,
+        "fn identity(value: string) -> string { value }",
+        "identity",
+    );
+    assert_eq!(passing, [shared_ref()]);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn mutable_parameter_resolves_to_mutable_ref() {
+    let mut session = TestSession::new();
+    let passing = parameter_passing_for_fn(
+        &mut session,
+        "fn store(slot: &mut int) { slot = 1; }",
+        "store",
+    );
+    assert_eq!(passing, [ResolvedArgPassing::MutableRef]);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_value_parameter_resolves_to_shared_ref() {
+    // A generic parameter is not treated as `TrivialCopy` even under a `Value` constraint.
+    let mut session = TestSession::new();
+    let passing = parameter_passing_for_fn(
+        &mut session,
+        "fn identity<T>(value: T) -> T where T: Value { value }",
+        "identity",
+    );
+    assert_eq!(passing, [shared_ref()]);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn multiple_parameters_preserve_declaration_order() {
+    let mut session = TestSession::new();
+    let passing = parameter_passing_for_fn(
+        &mut session,
+        "fn mix(a: int, b: string, c: &mut int) -> int { c = a; a }",
+        "mix",
+    );
+    assert_eq!(
+        passing,
+        [
+            trivial_copy_int(),
+            shared_ref(),
+            ResolvedArgPassing::MutableRef
+        ]
+    );
 }

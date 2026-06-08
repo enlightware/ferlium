@@ -482,6 +482,10 @@ pub struct ScriptFunction {
     /// This includes closure-environment slots prepended when calling a function value, but not
     /// dictionary/evidence parameters, which are passed separately through the extra-parameter frame.
     pub runtime_arg_count: usize,
+    /// High-level argument passing requirements for each visible parameter, in declaration order.
+    ///
+    /// Length equals the number of visible parameters.
+    pub parameter_passing: Vec<ResolvedArgPassing>,
     // pub monomorphised: HashMap<Vec<Type>, hir::Node>,
 }
 

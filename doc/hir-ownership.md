@@ -134,7 +134,11 @@ Dictionary elaboration resolves these unknowns using the final type:
 
 The interpreter and SSA lowering must consume this call-site metadata.
 They must not recompute source-level argument passing from the final function type.
-The physical direct-vs-indirect ABI decision remains a backend concern, as described in `doc/abi.md`.
+
+## High-level passing convention requirements vs. physical ABI
+
+The high-level passing convention requirement is available on call arguments and on the `ScriptFunction`'s `parameter_passing` field. Native (a.k.a. physical) calling conventions are obliged to pass arguments marked as `MutableRef`/`SharedRef`
+by pointer, but even `Value(TrivialCopy(layout))` may need to get passed indirectly as specified by `doc/abi.md`. E.g. `float64`, a `Value(TrivialCopy(layout))` type, is passed by reference on `wasm32` but by value on `wasm64`.
 
 # Function Values
 
