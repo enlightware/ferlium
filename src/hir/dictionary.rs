@@ -16,6 +16,8 @@ use crate::{
     module::{LocalFunctionId, ModuleEnv, TraitId},
     std::math::int_type,
     types::{
+        effects::EffType,
+        mutability::MutType,
         trait_solver::TraitSolver,
         r#type::{Type, TypeVar},
         type_like::{TypeLike, instantiate_types_in_place},
@@ -189,7 +191,7 @@ pub fn find_trait_impl_dict_index(
     trait_id: TraitId,
     input_tys: &[Type],
 ) -> Option<usize> {
-    dicts.requirements.iter().position(|dict| {
+    let exact = dicts.requirements.iter().position(|dict| {
         if let DictionaryReq::TraitImpl {
             trait_id: trait_id2,
             input_tys: tys2,
@@ -200,7 +202,53 @@ pub fn find_trait_impl_dict_index(
         } else {
             false
         }
+    });
+    // Function effects constrain where a function value may be called, but they do not
+    // distinguish runtime trait dictionaries for otherwise identical function-typed inputs.
+    exact.or_else(|| {
+        dicts.requirements.iter().position(|dict| {
+            if let DictionaryReq::TraitImpl {
+                trait_id: trait_id2,
+                input_tys: tys2,
+                ..
+            } = dict
+            {
+                trait_id == *trait_id2 && same_types_erasing_effects(input_tys, tys2)
+            } else {
+                false
+            }
+        })
     })
+}
+
+fn same_types_erasing_effects(left: &[Type], right: &[Type]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+
+    left.iter()
+        .map(|ty| erase_type_effects(*ty))
+        .eq(right.iter().map(|ty| erase_type_effects(*ty)))
+}
+
+fn erase_type_effects(ty: Type) -> Type {
+    ty.map(&mut EraseEffectsMapper)
+}
+
+struct EraseEffectsMapper;
+
+impl TypeMapper for EraseEffectsMapper {
+    fn map_type(&mut self, ty: Type) -> Type {
+        ty
+    }
+
+    fn map_mut_type(&mut self, mut_ty: MutType) -> MutType {
+        mut_ty
+    }
+
+    fn map_effect_type(&mut self, _eff_ty: &EffType) -> EffType {
+        EffType::empty()
+    }
 }
 
 pub(crate) fn instantiate_dictionary_requirements<M: TypeMapper>(

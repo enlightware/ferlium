@@ -52,6 +52,13 @@ fn constrained_function_value_arithmetic_does_not_panic() {
     session.compile("fn b(mut item) { item - map != map * map }");
 }
 
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn effect_polymorphic_function_parameter_arithmetic_does_not_panic() {
+    let mut session = TestSession::new();
+    session.compile("fn acc(a) { map + 0 == a + map; }");
+}
+
 // Previously, the ModuleParser (used for prelude/module-level code) had an LALR state-merge bug:
 // when an `if` true-branch ended with a block-like expression (e.g. `match`), the parser would
 // enter the expression-reduction chain (Sp<CastExpr<"">>) instead of producing Sp<Block>, causing
