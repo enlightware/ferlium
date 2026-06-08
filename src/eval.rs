@@ -19,15 +19,13 @@ use crate::{
     CompilerSession, Location, ModuleRegistry, SourceId, SourceTable,
     compiler::error::RuntimeErrorKind,
     format::{FormatWith, write_with_separator},
-    hir::function::{
-        ResolvedArgPassing, ResolvedValueArgPassing, SharedRefTempCleanup, TrivialCopy,
-    },
+    hir::function::{ResolvedArgPassing, ResolvedValueArgPassing, TrivialCopy},
     hir::value::{FunctionHiddenArgValue, FunctionValue, NativeValue, Value},
     module::{
         ELocalDecl as LocalDecl, ExtraParameterId, FunctionId, LocalDebugVisibility, LocalDeclId,
         LocalFunctionId, ModuleFunction, ModuleId, ProjectionIndex, ResolvedLocalClone,
-        ResolvedLocalDrop, ResolvedTakeLocalValueMode, TraitDictionary, TraitDictionaryEntry,
-        TraitDictionaryId, TraitImplId,
+        ResolvedLocalDrop, ResolvedTakeLocalValueMode, ResolvedValueLayout, TraitDictionary,
+        TraitDictionaryEntry, TraitDictionaryId, TraitImplId,
     },
     std::buffer,
     types::{
@@ -1385,7 +1383,7 @@ fn eval_call_dictionary_method_with(
         arguments.take_arguments(),
         span,
     );
-    finish_call(ctx, arguments, temp_start, span, result)
+    finish_call(ctx, temp_start, result)
 }
 
 fn discard_call_result(result: EvalControlFlowResult) -> Result<(), RuntimeError> {
@@ -1772,10 +1770,10 @@ fn eval_clone_value(
 ) -> EvalControlFlowResult {
     let clone = resolved_local_clone(&node.clone);
 
-    if matches!(clone, ResolvedLocalClone::TrivialCopy(_)) {
+    if let ResolvedLocalClone::TrivialCopy(layout) = clone {
         let temp_start = ctx.environment.len();
         let place = eval_or_return!(eval_node_as_place(arena, node.source, ctx, locals));
-        let result = copy_trivial_copy_value_from_place(&place, arena[node.source].ty, ctx, span);
+        let result = copy_trivial_copy_value_from_place_layout(&place, layout, ctx, span);
         ctx.truncate_environment_storage(temp_start);
         return cont(result?);
     }
@@ -1836,7 +1834,7 @@ fn eval_apply(
     let temp_start = ctx.environment.len();
     let mut arguments = eval_or_return!(eval_args(arena, &app.arguments, &args_ty, ctx, locals));
     let result = ctx.call_function_value(function_value, arguments.take_arguments(), span);
-    finish_call(ctx, arguments, temp_start, span, result)
+    finish_call(ctx, temp_start, result)
 }
 
 #[inline(never)]
@@ -1899,66 +1897,16 @@ fn eval_static_apply_with(
         arguments.take_arguments(),
         span,
     );
-    finish_call(ctx, arguments, temp_start, span, result)
-}
-
-/// Argument expression result before final call-frame materialization.
-///
-/// Shared-reference fallback temporaries may be evaluated first, then placed in
-/// environment storage later to preserve the caller's argument evaluation order.
-enum EvaluatedCallArg {
-    Ready(ValOrMut),
-    SharedTemp(Value, SharedRefTempCleanup),
-}
-
-impl EvaluatedCallArg {
-    fn discard_storage(self) {
-        match self {
-            Self::Ready(arg) => arg.discard_storage(),
-            Self::SharedTemp(value, _) => value.discard_storage(),
-        }
-    }
-
-    fn materialize(
-        self,
-        ctx: &mut EvalCtx,
-        temp_drops: &mut Vec<(Place, ResolvedLocalDrop)>,
-    ) -> ValOrMut {
-        match self {
-            Self::Ready(arg) => arg,
-            Self::SharedTemp(value, temp_cleanup) => {
-                let target = ctx.environment.len();
-                ctx.environment.push(ValOrMut::Val(value));
-                let place = Place {
-                    target,
-                    path: Vec::new(),
-                };
-                if let SharedRefTempCleanup::Drop(temp_drop) = temp_cleanup {
-                    temp_drops.push((place.clone(), temp_drop));
-                }
-                ValOrMut::Mut(place)
-            }
-        }
-    }
+    finish_call(ctx, temp_start, result)
 }
 
 struct PreparedCallArgs {
     arguments: Vec<ValOrMut>,
-    temp_drops: Vec<(Place, ResolvedLocalDrop)>,
 }
 
 impl PreparedCallArgs {
-    fn new(arguments: Vec<ValOrMut>, temp_drops: Vec<(Place, ResolvedLocalDrop)>) -> Self {
-        Self {
-            arguments,
-            temp_drops,
-        }
-    }
-
-    fn drop_temps(&mut self, ctx: &mut EvalCtx, span: Location) -> Result<(), RuntimeError> {
-        run_temp_drops(ctx, &self.temp_drops, span)?;
-        self.temp_drops.clear();
-        Ok(())
+    fn new(arguments: Vec<ValOrMut>) -> Self {
+        Self { arguments }
     }
 
     fn take_arguments(&mut self) -> Vec<ValOrMut> {
@@ -1966,30 +1914,13 @@ impl PreparedCallArgs {
     }
 }
 
-/// Run `Value::drop` for each materialized shared-ref argument temporary, in reverse order.
-fn run_temp_drops(
-    ctx: &mut EvalCtx,
-    temp_drops: &[(Place, ResolvedLocalDrop)],
-    span: Location,
-) -> Result<(), RuntimeError> {
-    for (place, drop) in temp_drops.iter().rev() {
-        call_local_drop_dispatch(ctx, *drop, place.clone(), span)?;
-    }
-    Ok(())
-}
-
-/// Shared post-call cleanup: drop the argument temporaries, reclaim their storage, then yield the call result.
-/// A cleanup error takes precedence over a successful result.
+/// Shared post-call cleanup: reclaim argument storage, then yield the call result.
 fn finish_call(
     ctx: &mut EvalCtx,
-    mut arguments: PreparedCallArgs,
     temp_start: usize,
-    span: Location,
     result: EvalControlFlowResult,
 ) -> EvalControlFlowResult {
-    let cleanup = arguments.drop_temps(ctx, span);
     ctx.truncate_environment_storage(temp_start);
-    cleanup?;
     result
 }
 
@@ -2004,17 +1935,10 @@ fn eval_place_result_args(
     let results = eval_or_return!(eval_sequence(
         args.iter().zip(args_ty),
         args.len(),
-        EvaluatedCallArg::discard_storage,
-        |(arg, ty)| eval_call_arg(arena, arg.value, ty.ty, arg.passing, ctx, locals),
+        ValOrMut::discard_storage,
+        |(arg, ty)| eval_call_arg(arena, arg.value, ty, arg.passing, ctx, locals),
     ));
-    let mut arguments = Vec::with_capacity(results.len());
-    let mut temp_drops = Vec::new();
-    for result in results {
-        arguments.push(result.materialize(ctx, &mut temp_drops));
-    }
-    Ok(ControlFlow::Continue(PreparedCallArgs::new(
-        arguments, temp_drops,
-    )))
+    Ok(ControlFlow::Continue(PreparedCallArgs::new(results)))
 }
 
 fn value_into_place_result(value: Value) -> Place {
@@ -2047,10 +1971,12 @@ fn eval_store_local(
         ctx.ensure_environment_slot(target_index);
         let target = local_place(ctx, locals, node.id);
         let clone = resolved_local_clone(clone);
-        if matches!(clone, ResolvedLocalClone::TrivialCopy(_)) {
+        if let ResolvedLocalClone::TrivialCopy(layout) = clone {
             let value =
                 match eval_or_return!(try_eval_node_as_place(arena, node.value, ctx, locals)) {
-                    Some(place) => copy_trivial_copy_value_from_place(&place, local.ty, ctx, span)?,
+                    Some(place) => {
+                        copy_trivial_copy_value_from_place_layout(&place, layout, ctx, span)?
+                    }
                     None => eval_or_return!(eval_node_with_ctx(arena, node.value, ctx, locals)),
                 };
             ctx.environment[target_index] = ValOrMut::Val(value);
@@ -2146,13 +2072,10 @@ fn eval_take_local_value(
 ) -> EvalControlFlowResult {
     match node.mode {
         ResolvedTakeLocalValueMode::MoveOwned => take_owned_local_value(node.id, ctx, locals),
-        ResolvedTakeLocalValueMode::CloneBorrowed(ResolvedLocalClone::TrivialCopy(_)) => {
+        ResolvedTakeLocalValueMode::CloneBorrowed(ResolvedLocalClone::TrivialCopy(layout)) => {
             let place = local_place(ctx, locals, node.id);
-            cont(copy_trivial_copy_value_from_place(
-                &place,
-                locals[node.id.as_index()].ty,
-                ctx,
-                span,
+            cont(copy_trivial_copy_value_from_place_layout(
+                &place, layout, ctx, span,
             )?)
         }
         ResolvedTakeLocalValueMode::CloneBorrowed(clone) => {
@@ -2197,6 +2120,22 @@ fn copy_trivial_copy_native_value(value: &Value, ty: Type) -> Option<Value> {
     None
 }
 
+fn copy_trivial_copy_native_value_with_layout(
+    value: &Value,
+    layout: ResolvedValueLayout,
+) -> Option<Value> {
+    if layout == ResolvedValueLayout::native::<()>() {
+        return copy_trivial_copy_native_value_typed::<()>(value);
+    }
+    if layout == ResolvedValueLayout::native::<bool>() {
+        return copy_trivial_copy_native_value_typed::<bool>(value);
+    }
+    if layout == ResolvedValueLayout::native::<isize>() {
+        return copy_trivial_copy_native_value_typed::<isize>(value);
+    }
+    None
+}
+
 fn copy_trivial_copy_value_from_place(
     place: &Place,
     ty: Type,
@@ -2210,6 +2149,23 @@ fn copy_trivial_copy_value_from_place(
         panic!(
             "attempted to materialize non-TrivialCopy local value without Value::clone: type {:?}, place {:?}",
             ty, place
+        );
+    })
+}
+
+fn copy_trivial_copy_value_from_place_layout(
+    place: &Place,
+    layout: ResolvedValueLayout,
+    ctx: &EvalCtx,
+    span: Location,
+) -> Result<Value, RuntimeError> {
+    let value = place
+        .target_ref(ctx)
+        .map_err(|err| RuntimeError::new(err, Some(span)))?;
+    copy_trivial_copy_native_value_with_layout(value, layout).ok_or_else(|| {
+        panic!(
+            "attempted to materialize non-native TrivialCopy local value with layout {:?}, place {:?}",
+            layout, place
         );
     })
 }
@@ -2671,53 +2627,56 @@ fn eval_nodes(
 fn eval_call_arg(
     arena: &ENodeArena,
     arg: ENodeId,
-    ty: Type,
+    arg_ty: &FnArgType,
     passing: ResolvedArgPassing,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
-) -> Result<ControlFlow<EvaluatedCallArg>, RuntimeError> {
+) -> Result<ControlFlow<ValOrMut>, RuntimeError> {
     match passing {
-        ResolvedArgPassing::MutableRef => {
-            eval_node_as_place(arena, arg, ctx, locals).map(|result| {
-                result.map_continue(|place| EvaluatedCallArg::Ready(ValOrMut::Mut(place)))
-            })
-        }
-        ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef { temp_cleanup }) => {
+        ResolvedArgPassing::MutableRef => eval_node_as_place(arena, arg, ctx, locals)
+            .map(|result| result.map_continue(ValOrMut::Mut)),
+        ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef) => {
             match try_eval_node_as_place(arena, arg, ctx, locals) {
-                Ok(ControlFlow::Continue(Some(place))) => Ok(ControlFlow::Continue(
-                    EvaluatedCallArg::Ready(ValOrMut::Mut(place)),
-                )),
+                Ok(ControlFlow::Continue(Some(place))) => {
+                    Ok(ControlFlow::Continue(ValOrMut::Mut(place)))
+                }
                 Ok(ControlFlow::Continue(None)) if is_dictionary_metadata_node(arena, arg) => {
-                    eval_dictionary_metadata_node(arena, arg, ctx).map(|result| {
-                        result.map_continue(|dictionary| {
-                            EvaluatedCallArg::Ready(ValOrMut::Dictionary(dictionary))
-                        })
-                    })
+                    eval_dictionary_metadata_node(arena, arg, ctx)
+                        .map(|result| result.map_continue(ValOrMut::Dictionary))
                 }
                 Ok(ControlFlow::Continue(None)) => {
-                    eval_node_with_ctx(arena, arg, ctx, locals).map(|result| {
-                        result
-                            .map_continue(|value| EvaluatedCallArg::SharedTemp(value, temp_cleanup))
-                    })
+                    panic!(
+                        "shared-reference call argument should have been materialized as a local"
+                    )
                 }
                 Ok(transfer) => Ok(transfer.map_continue(unreachable_continue)),
                 Err(err) => Err(err),
             }
         }
-        ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy(_))
+        ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy)
             if is_dictionary_metadata_node(arena, arg) =>
         {
-            eval_dictionary_metadata_node(arena, arg, ctx).map(|result| {
-                result.map_continue(|dictionary| {
-                    EvaluatedCallArg::Ready(ValOrMut::Dictionary(dictionary))
-                })
-            })
+            eval_dictionary_metadata_node(arena, arg, ctx)
+                .map(|result| result.map_continue(ValOrMut::Dictionary))
         }
-        ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy(_)) => {
-            eval_trivial_copy_arg(arena, arg, ty, ctx, locals)
-                .map(|result| result.map_continue(EvaluatedCallArg::Ready))
+        ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy) => {
+            let layout = trivial_copy_arg_layout(ctx, arg_ty.ty, arena[arg].span);
+            eval_trivial_copy_arg(arena, arg, layout, ctx, locals)
         }
     }
+}
+
+fn trivial_copy_arg_layout(ctx: &EvalCtx<'_>, ty: Type, span: Location) -> ResolvedValueLayout {
+    ctx.compiler_session()
+        .expect_fresh_module(ctx.module_id)
+        .trivial_copy_layout(ty)
+        .unwrap_or_else(|| {
+            panic!(
+                "missing TrivialCopy layout for {} at {}",
+                ty.format_with(&ctx.compiler_session().module_env()),
+                span.format_with(ctx.compiler_session().source_table())
+            )
+        })
 }
 
 fn eval_args(
@@ -2727,55 +2686,44 @@ fn eval_args(
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> Result<ControlFlow<PreparedCallArgs>, RuntimeError> {
-    // Consume the already-resolved source-level argument passing metadata.
     let temp_start = ctx.environment.len();
     let mut results = Vec::with_capacity(args.len());
-    let mut temp_drops = Vec::new();
     assert_eq!(args.len(), args_ty.len());
     for (arg, ty) in args.iter().zip(args_ty) {
-        let result = eval_call_arg(arena, arg.value, ty.ty, arg.passing, ctx, locals)
-            .map(|result| result.map_continue(|arg| arg.materialize(ctx, &mut temp_drops)));
+        let result = eval_call_arg(arena, arg.value, ty, arg.passing, ctx, locals);
         match result {
             Ok(ControlFlow::Continue(arg)) => results.push(arg),
             Ok(transfer) => {
-                let cleanup = run_temp_drops(ctx, &temp_drops, arena[arg.value].span);
                 for result in results {
                     result.discard_storage();
                 }
                 ctx.truncate_environment_storage(temp_start);
-                cleanup?;
                 return Ok(transfer.map_continue(unreachable_continue));
             }
             Err(err) => {
-                let cleanup = run_temp_drops(ctx, &temp_drops, arena[arg.value].span);
                 for result in results {
                     result.discard_storage();
                 }
                 ctx.truncate_environment_storage(temp_start);
-                cleanup?;
                 return Err(err);
             }
         }
     }
-    Ok(ControlFlow::Continue(PreparedCallArgs::new(
-        results, temp_drops,
-    )))
+    Ok(ControlFlow::Continue(PreparedCallArgs::new(results)))
 }
 
 fn eval_trivial_copy_arg(
     arena: &ENodeArena,
     arg: ENodeId,
-    ty: Type,
+    layout: ResolvedValueLayout,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> Result<ControlFlow<ValOrMut>, RuntimeError> {
     let temp_start = ctx.environment.len();
     match try_eval_node_as_place(arena, arg, ctx, locals) {
-        // If the expression is a place, materialize the by-value argument using
-        // the expected callee type. For dictionary-projected concrete methods,
-        // the place node can still carry the caller's generic surface type.
         Ok(ControlFlow::Continue(Some(place))) => {
-            let value = copy_trivial_copy_value_from_place(&place, ty, ctx, arena[arg].span);
+            let value =
+                copy_trivial_copy_value_from_place_layout(&place, layout, ctx, arena[arg].span);
             ctx.truncate_environment_storage(temp_start);
             Ok(ControlFlow::Continue(ValOrMut::Val(value?)))
         }
@@ -2933,7 +2881,7 @@ mod tests {
             function::{ResolvedArgPassing, ResolvedValueArgPassing},
             value::{LiteralValue, NativeDisplay},
         },
-        module::{ModuleId, ResolvedValueLayout, id::Id},
+        module::{Module, ModuleId, Path, ResolvedValueLayout, id::Id},
         types::{
             effects::EffType,
             r#type::{FnArgType, Type},
@@ -2969,6 +2917,25 @@ mod tests {
         ResolvedValueLayout::native::<EvalDropTracked>()
     }
 
+    fn eval_drop_tracked_type() -> Type {
+        crate::cached_primitive_ty!(EvalDropTracked)
+    }
+
+    fn eval_args_test_session() -> (CompilerSession, ModuleId) {
+        let mut session = CompilerSession::new();
+        let module_id = ModuleId::from_index(2);
+        let mut module = Module::new(module_id);
+        module
+            .trivial_copy_status
+            .mark_trivial_copy(eval_drop_tracked_type(), eval_drop_tracked_layout());
+        module
+            .trivial_copy_status
+            .mark_trivial_copy(Type::unit(), unit_layout());
+        let registered = session.register_module(Path::single_str("$eval_args_test"), module);
+        assert_eq!(registered, module_id);
+        (session, module_id)
+    }
+
     fn eval_drop_tracked_count() -> usize {
         EVAL_DROP_TRACKED_COUNT.load(Ordering::Relaxed)
     }
@@ -2980,7 +2947,7 @@ mod tests {
         let mut arena = ENodeArena::default();
         let tracked = arena.alloc(ENode::new(
             NodeKind::Immediate(LiteralValue::new_native(EvalDropTracked)),
-            Type::primitive::<EvalDropTracked>(),
+            eval_drop_tracked_type(),
             EffType::empty(),
             span,
         ));
@@ -2996,8 +2963,8 @@ mod tests {
             EffType::empty(),
             span,
         ));
-        let session = CompilerSession::new();
-        let mut ctx = EvalCtx::new(ModuleId::from_index(0), &session);
+        let (session, module_id) = eval_args_test_session();
+        let mut ctx = EvalCtx::new(module_id, &session);
 
         let result = eval_nodes(&arena, &[tracked, return_unit], &mut ctx, &[]).unwrap();
         let ControlFlow::Transfer(ControlTransfer::Return(value)) = result else {
@@ -3118,24 +3085,20 @@ mod tests {
             EffType::empty(),
             span,
         ));
-        let session = CompilerSession::new();
-        let mut ctx = EvalCtx::new(ModuleId::from_index(0), &session);
+        let (session, module_id) = eval_args_test_session();
+        let mut ctx = EvalCtx::new(module_id, &session);
         let arg_tys = [
-            FnArgType::new_by_val(Type::primitive::<EvalDropTracked>()),
+            FnArgType::new_by_val(eval_drop_tracked_type()),
             FnArgType::new_by_val(Type::unit()),
         ];
         let arguments = [
             CallArgument {
                 value: tracked,
-                passing: ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy(
-                    eval_drop_tracked_layout(),
-                )),
+                passing: ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy),
             },
             CallArgument {
                 value: return_unit,
-                passing: ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy(
-                    unit_layout(),
-                )),
+                passing: ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy),
             },
         ];
 
@@ -3156,7 +3119,7 @@ mod tests {
         let mut arena = ENodeArena::default();
         let tracked = arena.alloc(ENode::new(
             NodeKind::Immediate(LiteralValue::new_native(EvalDropTracked)),
-            Type::primitive::<EvalDropTracked>(),
+            eval_drop_tracked_type(),
             EffType::empty(),
             span,
         ));
@@ -3172,24 +3135,20 @@ mod tests {
             EffType::empty(),
             span,
         ));
-        let session = CompilerSession::new();
-        let mut ctx = EvalCtx::new(ModuleId::from_index(0), &session);
+        let (session, module_id) = eval_args_test_session();
+        let mut ctx = EvalCtx::new(module_id, &session);
         let arg_tys = [
-            FnArgType::new_by_val(Type::primitive::<EvalDropTracked>()),
+            FnArgType::new_by_val(eval_drop_tracked_type()),
             FnArgType::new_by_val(Type::unit()),
         ];
         let arguments = [
             CallArgument {
                 value: tracked,
-                passing: ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy(
-                    eval_drop_tracked_layout(),
-                )),
+                passing: ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy),
             },
             CallArgument {
                 value: break_node,
-                passing: ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy(
-                    unit_layout(),
-                )),
+                passing: ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy),
             },
         ];
 

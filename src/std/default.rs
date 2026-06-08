@@ -13,7 +13,7 @@ use crate::{
     containers::b,
     hir::{
         self, NodeArena, NodeId, function::FunctionDefinition,
-        value_dispatch::static_apply_generated,
+        value_dispatch::static_apply_generated_with_locals,
     },
     module::{Module, PendingFunctionBody, TraitId, TraitImplId},
     std::product_value_deriver::ProductValueDeriver,
@@ -68,6 +68,7 @@ impl Deriver for EnumDefaultDeriver {
         drop(shape_data);
 
         let mut body_arena = NodeArena::default();
+        let mut locals = Vec::new();
         let n = |arena: &mut NodeArena, kind: hir::NodeKind, ty: Type| -> NodeId {
             arena.alloc(hir::Node::new(
                 kind,
@@ -88,22 +89,22 @@ impl Deriver for EnumDefaultDeriver {
                 span,
                 &mut body_arena,
             )?;
-            let payload_kind = static_apply_generated(
+            let payload = static_apply_generated_with_locals(
                 &mut body_arena,
+                &mut locals,
                 solver,
                 function,
                 std::iter::empty(),
                 payload_ty,
                 span,
             )?;
-            let payload = n(&mut body_arena, payload_kind, payload_ty);
             n(&mut body_arena, variant(default_variant, payload), ty)
         };
 
         Ok(Some(TraitImplId::Local(
             solver.add_concrete_impl_from_code(
                 PendingFunctionBody::new(body_arena, root),
-                vec![],
+                locals,
                 trait_id,
                 input_types,
                 [],

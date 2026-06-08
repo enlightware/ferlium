@@ -868,7 +868,8 @@ where
                 .get(id)
                 .expect("expected pending function body");
             let unbound = hir::all_unbound_ty_vars(&pending.code.arena, pending.code.entry_node_id);
-            let uninstantiated_unbound = check_unbounds(unbound, &quantifiers)?;
+            let env = ModuleEnv::new(output, others);
+            let uninstantiated_unbound = check_unbounds(unbound, &quantifiers, &env)?;
             unbound_subst.extend(
                 uninstantiated_unbound
                     .into_iter()
@@ -1121,7 +1122,8 @@ where
 
             // Check for unbound type variables.
             let unbound = hir::all_unbound_ty_vars(&pending.code.arena, pending.code.entry_node_id);
-            let uninstantiated_unbound = check_unbounds(unbound, &quantifiers)?;
+            let env = ModuleEnv::new(output, others);
+            let uninstantiated_unbound = check_unbounds(unbound, &quantifiers, &env)?;
 
             // Apply unbound→Never fixup if needed.
             if !uninstantiated_unbound.is_empty() {
@@ -1289,11 +1291,12 @@ where
 pub(super) fn check_unbounds(
     unbound: IndexMap<TypeVar, hir::UnboundTyCtxs>,
     bounds: &[TypeVar],
+    env: &ModuleEnv<'_>,
 ) -> Result<FxHashSet<TypeVar>, InternalCompilationError> {
     let mut uninstantiated_unbound = FxHashSet::default();
     for (ty_var, ctxs) in unbound {
         if !bounds.contains(&ty_var) {
-            if ctxs.seen_only_in_variants(ty_var) {
+            if ctxs.seen_only_in_variants(ty_var, env) {
                 uninstantiated_unbound.insert(ty_var);
             } else {
                 let (ty, span) = ctxs.first();

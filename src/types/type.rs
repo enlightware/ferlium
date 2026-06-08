@@ -1495,46 +1495,69 @@ impl TypeKind {
         store_type(self)
     }
 
-    /// Return true if the type variable is only found in variants
-    pub fn is_ty_var_only_in_variants(&self, ty_var: TypeVar) -> bool {
-        struct Visitor {
+    /// Return true if the type variable is only found in variant payload positions.
+    pub fn is_ty_var_only_in_variants(&self, ty_var: TypeVar, env: &ModuleEnv<'_>) -> bool {
+        fn go_kind(
+            ty: &TypeKind,
             ty_var: TypeVar,
-            depth: usize,
-            variant_start: Option<usize>,
-            output: bool,
-        }
-        impl TypeInnerVisitor for Visitor {
-            fn visit_ty_kind_start(&mut self, ty: &TypeKind) {
-                if self.variant_start.is_none() {
-                    if ty.is_variant() {
-                        self.variant_start = Some(self.depth);
-                    } else if let Some(var) = ty.as_variable() {
-                        if var == &self.ty_var {
-                            self.output = false;
-                        }
-                    }
+            env: &ModuleEnv<'_>,
+            seen_named: &mut FxHashSet<TypeDefId>,
+            in_variant: bool,
+        ) -> bool {
+            match ty {
+                TypeKind::Variable(var) => *var != ty_var || in_variant,
+                TypeKind::Native(native) => native
+                    .arguments
+                    .iter()
+                    .all(|arg| go(*arg, ty_var, env, seen_named, in_variant)),
+                TypeKind::Variant(variants) => variants
+                    .iter()
+                    .all(|(_, payload)| go(*payload, ty_var, env, seen_named, true)),
+                TypeKind::Tuple(items) => items
+                    .iter()
+                    .all(|item| go(*item, ty_var, env, seen_named, in_variant)),
+                TypeKind::Record(fields) => fields
+                    .iter()
+                    .all(|(_, field)| go(*field, ty_var, env, seen_named, in_variant)),
+                TypeKind::Function(function) => {
+                    function
+                        .args
+                        .iter()
+                        .all(|arg| go(arg.ty, ty_var, env, seen_named, in_variant))
+                        && go(function.ret, ty_var, env, seen_named, in_variant)
                 }
-                self.depth += 1;
-            }
-
-            fn visit_ty_kind_end(&mut self, _ty: &TypeKind) {
-                self.depth -= 1;
-                if let Some(start_depth) = self.variant_start {
-                    if start_depth == self.depth {
-                        self.variant_start = None;
+                TypeKind::Named(named) => {
+                    if in_variant {
+                        return true;
                     }
+                    if !seen_named.insert(named.def) {
+                        return true;
+                    }
+                    let type_def = env.type_def(named.def);
+                    let result = named.params.iter().zip(&type_def.shape.ty_quantifiers).all(
+                        |(param, quantifier)| {
+                            !param.contains_any_type_var(ty_var)
+                                || go(type_def.shape.ty, *quantifier, env, seen_named, false)
+                        },
+                    );
+                    seen_named.remove(&named.def);
+                    result
                 }
+                TypeKind::Never => true,
             }
         }
 
-        let mut visitor = Visitor {
-            ty_var,
-            depth: 0,
-            variant_start: None,
-            output: true,
-        };
-        self.visit(&mut visitor);
-        visitor.output
+        fn go(
+            ty: Type,
+            ty_var: TypeVar,
+            env: &ModuleEnv<'_>,
+            seen_named: &mut FxHashSet<TypeDefId>,
+            in_variant: bool,
+        ) -> bool {
+            go_kind(&ty.data(), ty_var, env, seen_named, in_variant)
+        }
+
+        go_kind(self, ty_var, env, &mut FxHashSet::default(), false)
     }
 
     /// Apply f recursively to content

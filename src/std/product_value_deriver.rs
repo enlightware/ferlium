@@ -11,8 +11,8 @@ use crate::{
     Location,
     compiler::error::InternalCompilationError,
     containers::SVec2,
-    hir::{self, NodeArena, NodeId, value_dispatch::static_apply_generated},
-    module::{PendingFunctionBody, TraitId, TraitImplId},
+    hir::{self, NodeArena, NodeId, value_dispatch::static_apply_generated_with_locals},
+    module::{LocalDecl, PendingFunctionBody, TraitId, TraitImplId},
     types::effects::EffType,
     types::r#trait::{Deriver, TraitMethodIndex},
     types::trait_solver::TraitSolver,
@@ -55,6 +55,7 @@ impl Deriver for ProductValueDeriver {
         assert!(ty.is_constant());
 
         let mut body_arena = NodeArena::default();
+        let mut locals = Vec::new();
         let n = |arena: &mut NodeArena, kind: hir::NodeKind, ty: Type| -> NodeId {
             arena.alloc(hir::Node::new(
                 kind,
@@ -64,24 +65,25 @@ impl Deriver for ProductValueDeriver {
             ))
         };
 
-        let mut build_member_value = |arena: &mut NodeArena, member_ty| {
-            let function = solver.solve_impl_method(
-                trait_id,
-                &[member_ty],
-                TraitMethodIndex(0),
-                span,
-                arena,
-            )?;
-            let member_kind = static_apply_generated(
-                arena,
-                solver,
-                function,
-                std::iter::empty(),
-                member_ty,
-                span,
-            )?;
-            Ok(n(arena, member_kind, member_ty))
-        };
+        let mut build_member_value =
+            |arena: &mut NodeArena, locals: &mut Vec<LocalDecl>, member_ty| {
+                let function = solver.solve_impl_method(
+                    trait_id,
+                    &[member_ty],
+                    TraitMethodIndex(0),
+                    span,
+                    arena,
+                )?;
+                static_apply_generated_with_locals(
+                    arena,
+                    locals,
+                    solver,
+                    function,
+                    std::iter::empty(),
+                    member_ty,
+                    span,
+                )
+            };
 
         let ty_data = ty.data();
         use TypeKind::*;
@@ -91,7 +93,7 @@ impl Deriver for ProductValueDeriver {
                 drop(ty_data);
                 let members = member_tys
                     .into_iter()
-                    .map(|member_ty| build_member_value(&mut body_arena, member_ty))
+                    .map(|member_ty| build_member_value(&mut body_arena, &mut locals, member_ty))
                     .collect::<Result<SVec2<_>, _>>()?;
                 Some(n(&mut body_arena, tuple(members), ty))
             }
@@ -100,7 +102,9 @@ impl Deriver for ProductValueDeriver {
                 drop(ty_data);
                 let members = fields
                     .into_iter()
-                    .map(|(_, member_ty)| build_member_value(&mut body_arena, member_ty))
+                    .map(|(_, member_ty)| {
+                        build_member_value(&mut body_arena, &mut locals, member_ty)
+                    })
                     .collect::<Result<SVec2<_>, _>>()?;
                 Some(n(&mut body_arena, record(members), ty))
             }
@@ -123,7 +127,7 @@ impl Deriver for ProductValueDeriver {
         Ok(root.map(|root| {
             TraitImplId::Local(solver.add_concrete_impl_from_code(
                 PendingFunctionBody::new(body_arena, root),
-                vec![],
+                locals,
                 trait_id,
                 input_types,
                 [],

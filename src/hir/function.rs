@@ -31,9 +31,7 @@ use crate::{
     format::{FormatWith, write_identifier},
     hir::value::{NativeDisplay, Value},
     hir::{self, ENodeId, NodeArena, NodeId, UNodeArena, UNodeId},
-    module::{
-        ELocalDecl, ModuleEnv, ModuleFunction, ResolvedLocalDrop, ResolvedValueLayout, ULocalDecl,
-    },
+    module::{ELocalDecl, ModuleEnv, ModuleFunction, ULocalDecl},
     types::effects::EffType,
     types::r#type::{FnArgType, FnReturnConvention, FnType, Type, fmt_fn_type_with_arg_names},
     types::type_like::TypeLike,
@@ -339,10 +337,10 @@ impl PendingArgPassing {
     pub fn from_resolved(passing: ResolvedArgPassing) -> Self {
         match passing {
             ResolvedArgPassing::MutableRef => Self::MutableRef,
-            ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy(layout)) => Self::Value(
-                PendingValueArgPassing::Resolved(ResolvedValueArgPassing::TrivialCopy(layout)),
+            ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy) => Self::Value(
+                PendingValueArgPassing::Resolved(ResolvedValueArgPassing::TrivialCopy),
             ),
-            ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef { .. }) => {
+            ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef) => {
                 Self::Value(PendingValueArgPassing::Unknown)
             }
         }
@@ -382,18 +380,9 @@ pub enum ResolvedArgPassing {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolvedValueArgPassing {
     /// Copy a concrete `TrivialCopy` argument by representation.
-    TrivialCopy(ResolvedValueLayout),
-    /// Keep a place as a shared borrow when possible, falling back to a temporary owned value.
-    SharedRef { temp_cleanup: SharedRefTempCleanup },
-}
-
-/// Cleanup required if a shared-ref argument is materialized into an owned temporary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SharedRefTempCleanup {
-    /// This call edge is known not to materialize an owned temporary.
-    None,
-    /// Drop a materialized owned temporary with this resolved drop operation.
-    Drop(ResolvedLocalDrop),
+    TrivialCopy,
+    /// Keep a place as a shared borrow.
+    SharedRef,
 }
 
 fn unresolved_arg_passing_for_arg(arg: &FnArgType) -> PendingArgPassing {
@@ -482,10 +471,6 @@ pub struct ScriptFunction {
     /// This includes closure-environment slots prepended when calling a function value, but not
     /// dictionary/evidence parameters, which are passed separately through the extra-parameter frame.
     pub runtime_arg_count: usize,
-    /// High-level argument passing requirements for each visible parameter, in declaration order.
-    ///
-    /// Length equals the number of visible parameters.
-    pub parameter_passing: Vec<ResolvedArgPassing>,
     // pub monomorphised: HashMap<Vec<Type>, hir::Node>,
 }
 
@@ -744,9 +729,7 @@ pub trait ArgExtractor {
 impl ArgExtractor for Value {
     type Output<'a> = &'a Value;
     const PASSING: ResolvedArgPassing =
-        ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef {
-            temp_cleanup: SharedRefTempCleanup::None,
-        });
+        ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef);
     fn extract<'m>(
         arg: &'m ValOrMut,
         ctx: &'m mut CallCtx,
@@ -774,9 +757,8 @@ impl ArgExtractor for &'_ mut Value {
 
 impl<T: TrivialCopy> ArgExtractor for NatVal<T> {
     type Output<'a> = T;
-    const PASSING: ResolvedArgPassing = ResolvedArgPassing::Value(
-        ResolvedValueArgPassing::TrivialCopy(ResolvedValueLayout::native::<T>()),
-    );
+    const PASSING: ResolvedArgPassing =
+        ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy);
     fn extract<'m>(
         arg: &'m ValOrMut,
         ctx: &'m mut CallCtx,
@@ -791,9 +773,7 @@ impl<T: TrivialCopy> ArgExtractor for NatVal<T> {
 impl<T: 'static> ArgExtractor for NatRef<T> {
     type Output<'a> = &'a T;
     const PASSING: ResolvedArgPassing =
-        ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef {
-            temp_cleanup: SharedRefTempCleanup::None,
-        });
+        ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef);
     fn extract<'m>(
         arg: &'m ValOrMut,
         ctx: &'m mut CallCtx,
@@ -1059,8 +1039,8 @@ mod tests {
     use crate::{
         CompilerSession,
         eval::ControlFlow,
-        hir::{CallArgument, Elaborated, NodeId},
-        module::{ModuleId, ResolvedValueLayout, id::Id},
+        hir::{CallArgument, Elaborated},
+        module::{ModuleId, id::Id},
     };
 
     use super::*;
@@ -1085,26 +1065,19 @@ mod tests {
     fn observe_value(_: &Value) {}
 
     #[test]
-    fn resolved_argument_passing_layout_payload_stays_compact() {
-        assert_eq!(size_of::<ResolvedValueLayout>(), 8);
+    fn resolved_argument_passing_stays_compact() {
         assert!(
-            size_of::<ResolvedValueLayout>() <= size_of::<SharedRefTempCleanup>(),
-            "owned layout payload should fit within the existing shared-ref cleanup payload"
-        );
-        assert_eq!(
-            size_of::<ResolvedValueArgPassing>(),
-            size_of::<SharedRefTempCleanup>() + size_of::<u32>(),
-            "ResolvedValueArgPassing should be one discriminant plus the largest existing payload"
+            size_of::<ResolvedValueArgPassing>() <= size_of::<u32>(),
+            "ResolvedValueArgPassing should remain a compact ABI classification"
         );
         assert_eq!(
             size_of::<ResolvedArgPassing>(),
             size_of::<ResolvedValueArgPassing>(),
             "ResolvedArgPassing should stay within the resolved value-passing size"
         );
-        assert_eq!(
-            size_of::<CallArgument<Elaborated>>(),
-            size_of::<NodeId<Elaborated>>() + size_of::<ResolvedArgPassing>(),
-            "CallArgument should not gain padding beyond its node id and passing mode"
+        assert!(
+            size_of::<CallArgument<Elaborated>>() <= size_of::<usize>(),
+            "CallArgument should remain pointer-sized after removing the layout payload"
         );
     }
 

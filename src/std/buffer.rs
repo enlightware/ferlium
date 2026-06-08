@@ -21,14 +21,11 @@ use crate::{
         function::{
             BinaryNativeFnRMN, BinaryNativeFnRRN, BinaryNativeFnRWN, Callable, ContextNativeFn,
             Function, FunctionDefinition, ResolvedArgPassing, ResolvedValueArgPassing,
-            SharedRefTempCleanup, UnaryNativeFnMN, UnaryNativeFnRN,
+            UnaryNativeFnMN, UnaryNativeFnRN,
         },
         value::{NativeDisplay, Value},
     },
-    module::{
-        BlanketTraitImplSubKey, Module, ModuleFunction, ResolvedValueLayout, TraitDictionaryId,
-        TraitId,
-    },
+    module::{BlanketTraitImplSubKey, Module, ModuleFunction, TraitDictionaryId, TraitId},
     std::core_traits_names::{INSPECT_TRAIT_NAME, VALUE_TRAIT_NAME},
     types::{
         effects::no_effects,
@@ -37,13 +34,10 @@ use crate::{
     },
 };
 
-const TRIVIAL_COPY_INT: ResolvedArgPassing = ResolvedArgPassing::Value(
-    ResolvedValueArgPassing::TrivialCopy(ResolvedValueLayout::native::<isize>()),
-);
+const TRIVIAL_COPY_INT: ResolvedArgPassing =
+    ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy);
 const SHARED_REF: ResolvedArgPassing =
-    ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef {
-        temp_cleanup: SharedRefTempCleanup::None,
-    });
+    ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef);
 const MUTABLE_REF: ResolvedArgPassing = ResolvedArgPassing::MutableRef;
 
 use super::value::native_layout_associated_consts;

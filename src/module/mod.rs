@@ -214,6 +214,38 @@ impl ops::IndexMut<usize> for TypeDefSlots {
     }
 }
 
+/// Compiler-derived knowledge about concrete `TrivialCopy` status in one module environment.
+///
+/// This is a transient compilation/lowering cache. A type in `layouts` is proven `TrivialCopy` and
+/// carries its representation layout; a type in `non_trivial_copy_types` is proven not
+/// `TrivialCopy`; absence from both means the solver has not recorded an answer.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TrivialCopyStatus {
+    layouts: FxHashMap<Type, ResolvedValueLayout>,
+    non_trivial_copy_types: FxHashSet<Type>,
+}
+
+impl TrivialCopyStatus {
+    pub(crate) fn layout(&self, ty: Type) -> Option<ResolvedValueLayout> {
+        self.layouts.get(&ty).copied()
+    }
+
+    pub(crate) fn is_known_non_trivial_copy(&self, ty: Type) -> bool {
+        self.non_trivial_copy_types.contains(&ty)
+    }
+
+    pub(crate) fn mark_trivial_copy(&mut self, ty: Type, layout: ResolvedValueLayout) {
+        self.non_trivial_copy_types.remove(&ty);
+        self.layouts.insert(ty, layout);
+    }
+
+    pub(crate) fn mark_non_trivial_copy(&mut self, ty: Type) {
+        if !self.layouts.contains_key(&ty) {
+            self.non_trivial_copy_types.insert(ty);
+        }
+    }
+}
+
 // Module itself
 
 /// Once-built immutable module bundle containing all compiled module data
@@ -238,6 +270,9 @@ pub struct Module {
     // Functions, including methods of trait implementations.
     pub(crate) functions: Vec<ModuleFunction>,
 
+    /// Compiler-derived trivial-copy knowledge used by eval and lowering.
+    pub(crate) trivial_copy_status: TrivialCopyStatus,
+
     // Type system content
     type_aliases: TypeAliases,
     pub(crate) type_defs: TypeDefSlots,
@@ -259,6 +294,7 @@ impl Module {
             def_table: DefTable::new(),
             unsafe_items: FxHashSet::default(),
             functions: Vec::new(),
+            trivial_copy_status: TrivialCopyStatus::default(),
             type_aliases: TypeAliases::default(),
             type_defs: TypeDefSlots::default(),
             traits: Traits::new(),
@@ -277,6 +313,7 @@ impl Module {
             def_table: DefTable::new(),
             unsafe_items: FxHashSet::default(),
             functions: Vec::new(),
+            trivial_copy_status: TrivialCopyStatus::default(),
             type_aliases: TypeAliases::default(),
             type_defs: TypeDefSlots::default(),
             traits: Traits::new(),
@@ -288,6 +325,11 @@ impl Module {
     /// Get this module's ID.
     pub fn module_id(&self) -> ModuleId {
         self.impls.module_id
+    }
+
+    /// Return the representation layout if this module has proven `ty` is a concrete `TrivialCopy` type.
+    pub fn trivial_copy_layout(&self, ty: Type) -> Option<ResolvedValueLayout> {
+        self.trivial_copy_status.layout(ty)
     }
 
     // Imports

@@ -121,28 +121,28 @@ Dispatch sites are:
 
 # Call Argument Passing
 
-HIR call nodes store source-level argument passing decisions:
+HIR derives source-level argument passing from the callee ABI type and the module's `TrivialCopyStatus`:
 
-- `MutableRef`: resolve the argument as a mutable place.
-- `Value(TrivialCopy(layout))`: copy a concrete `TrivialCopy` argument by representation.
-- `Value(SharedRef)`: pass a shared reference to existing storage when possible, or materialize an owned temporary and pass a place to it.
+- mutable parameters resolve the argument as a mutable place;
+- generic by-value parameters are passed by shared reference, even when a concrete call site later solves them to a `TrivialCopy` type;
+- by-value parameters whose concrete type has a positive `TrivialCopyStatus` layout are copied by representation;
+- other by-value parameters are passed by shared reference.
 
-If a shared-reference argument is materialized into an owned temporary at the call edge, `SharedRefTempCleanup` records whether that temporary needs a resolved `Value::drop` cleanup after the call.
+Call nodes store the resolved passing class (`MutableRef`, `SharedRef`, or `TrivialCopy`) so eval and SSA lowering do not have to rediscover callee ABI decisions after type inference has solved call-site types.
+That metadata intentionally stores no cleanup and no layout payload.
 
-During type inference, value argument passing may be unknown because the final type is still a type variable.
-Dictionary elaboration resolves these unknowns using the final type:
+`TrivialCopyStatus` is module-local compiler-derived state.
+It records positive `Type -> ResolvedValueLayout` entries and negative non-`TrivialCopy` results when dictionary elaboration queries a concrete type; absence from both sets means unknown, not non-`TrivialCopy`.
 
-- concrete `TrivialCopy` values are passed with `Value(TrivialCopy(layout))`;
-- other value types are passed by shared reference;
-- native functions can force already-resolved passing modes from their Rust-side argument extractors.
-
-The interpreter and SSA lowering must consume this call-site metadata.
-They must not recompute source-level argument passing from the final function type.
+Shared-reference calls should not hide temporary lifetimes in call metadata.
+If a non-`TrivialCopy` by-value argument is not already a place, HIR generation materializes it into an owned `$arg` local and wraps the call in normal `Block.cleanup`.
+This keeps the cleanup visible to eval and SSA lowering as ordinary HIR.
 
 ## High-level passing convention requirements vs. physical ABI
 
-The high-level passing convention requirement is available on call arguments and on the `ScriptFunction`'s `parameter_passing` field. Native (a.k.a. physical) calling conventions are obliged to pass arguments marked as `MutableRef`/`SharedRef`
-by pointer, but even `Value(TrivialCopy(layout))` may need to get passed indirectly as specified by `doc/abi.md`. E.g. `float64`, a `Value(TrivialCopy(layout))` type, is passed by reference on `wasm32` but by value on `wasm64`.
+The high-level passing convention is derived at call construction/elaboration time and stored on call edges.
+Native (a.k.a. physical) calling conventions must agree with the derived convention: mutable/shared-reference arguments are passed by pointer, while concrete `TrivialCopy` arguments may still need target-specific ABI lowering as specified by `doc/abi.md`.
+For example, a `TrivialCopy` value larger than the native immediate argument size should be passed indirectly even though its language-level representation can be copied.
 
 # Function Values
 

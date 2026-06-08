@@ -13,13 +13,15 @@ use ferlium::{
     compiler::error::{CompilationErrorImpl, RuntimeErrorKind},
     hir::{
         self, ENodeArena, ENodeId, NodeKind,
-        function::{ResolvedArgPassing, ResolvedValueArgPassing, SharedRefTempCleanup},
+        function::{ResolvedArgPassing, ResolvedValueArgPassing},
         value::Value,
     },
     module::{
-        ResolvedLocalClone, ResolvedLocalDrop, ResolvedTakeLocalValueMode, ResolvedValueLayout,
-        id::Id,
+        LocalDeclId, LocalStorage, ResolvedLocalClone, ResolvedLocalDrop,
+        ResolvedTakeLocalValueMode, ResolvedValueLayout, id::Id,
     },
+    std::math::int_type,
+    types::r#type::Type,
 };
 use ustr::ustr;
 
@@ -319,7 +321,7 @@ fn generic_value_dictionary_for_function_type_is_compiler_provided() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn generated_value_to_string_calls_resolve_temp_cleanup_for_string_pieces() {
+fn generated_value_to_string_materializes_string_pieces_as_cleanup_locals() {
     let mut session = TestSession::new();
     let module = session.compile_and_get_module(
         r#"
@@ -328,23 +330,78 @@ fn generated_value_to_string_calls_resolve_temp_cleanup_for_string_pieces() {
         "#,
     );
 
+    let mut saw_shared_ref_piece_local = false;
+    let mut saw_shared_ref_piece_immediate = false;
+    let mut saw_cleanup_block = false;
+    for (_, node) in module.hir_arena.iter() {
+        if let NodeKind::Block(block) = &node.kind
+            && !block.cleanup.is_empty()
+        {
+            saw_cleanup_block = true;
+        }
+        let NodeKind::StaticApply(app) = &node.kind else {
+            continue;
+        };
+        let Some(argument) = app.arguments.get(1) else {
+            continue;
+        };
+        if !matches!(
+            argument.passing,
+            ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef)
+        ) {
+            continue;
+        }
+        match module.hir_arena[argument.value].kind {
+            NodeKind::LoadLocal(_) => saw_shared_ref_piece_local = true,
+            NodeKind::Immediate(_) => saw_shared_ref_piece_immediate = true,
+            _ => {}
+        }
+    }
+
+    assert!(
+        saw_shared_ref_piece_local,
+        "generated shared-ref string pieces should be loaded from explicit temporaries"
+    );
+    assert!(
+        saw_cleanup_block,
+        "generated shared-ref string piece temporaries should use ordinary block cleanup"
+    );
+    assert!(
+        !saw_shared_ref_piece_immediate,
+        "generated shared-ref string pieces should not remain immediate call arguments"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn non_place_shared_ref_call_argument_uses_explicit_temp_cleanup() {
+    let mut session = TestSession::new();
+    let compiled = session.compile(
+        r#"
+        fn id(value: string) -> string { value }
+        id("hello")
+        "#,
+    );
+    let expr = compiled.expr.expect("expected expression");
+    let module = session.session().expect_fresh_module(compiled.module_id);
+    let arg_local_index = expr
+        .locals
+        .iter()
+        .position(|local| local.name.0 == ustr("$arg"))
+        .expect("expected an explicit argument temporary local");
+    assert!(matches!(
+        expr.locals[arg_local_index].storage,
+        LocalStorage::Owned { .. }
+    ));
+    let arg_local = LocalDeclId::from_index(arg_local_index);
     assert!(
         module.hir_arena.iter().any(|(_, node)| {
-            let NodeKind::StaticApply(app) = &node.kind else {
-                return false;
-            };
             matches!(
-                app.arguments.get(1),
-                Some(argument)
-                    if matches!(
-                        argument.passing,
-                        ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef {
-                            temp_cleanup: SharedRefTempCleanup::Drop(_),
-                        })
-                    ) && matches!(module.hir_arena[argument.value].kind, NodeKind::Immediate(_))
+                &node.kind,
+                NodeKind::Block(block) if block.cleanup.contains(&arg_local)
             )
         }),
-        "generated calls passing string literal pieces by shared reference should resolve temp cleanup"
+        "argument temporary should be cleaned by ordinary block cleanup"
     );
 }
 
@@ -798,7 +855,7 @@ fn int_value_layout() -> ResolvedValueLayout {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn concrete_trivial_copy_call_argument_carries_layout() {
+fn concrete_trivial_copy_call_argument_uses_cached_layout() {
     let mut session = TestSession::new();
     let module = session.compile_and_get_module(
         r#"
@@ -818,12 +875,15 @@ fn concrete_trivial_copy_call_argument_carries_layout() {
             app.arguments.iter().any(|argument| {
                 matches!(
                     argument.passing,
-                    ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy(layout))
-                        if layout == int_value_layout()
+                    ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy)
                 )
             })
         }),
-        "expected concrete int call argument to carry trivial-copy layout"
+        "expected concrete int call argument to use trivial-copy passing"
+    );
+    assert_eq!(
+        module.trivial_copy_layout(int_type()),
+        Some(int_value_layout())
     );
 }
 
@@ -1414,67 +1474,56 @@ fn value_impl_for_foreign_named_adt_is_rejected() {
     }
 }
 
-// Testing resolved parameter passing for script functions, as described in `doc/hir-ownership.md`
-// ("Call Argument Passing").
-
-/// Compile `src` and return the resolved parameter passing of the script function `fn_name`.
-fn parameter_passing_for_fn(
-    session: &mut TestSession,
-    src: &str,
-    fn_name: &str,
-) -> Vec<ResolvedArgPassing> {
-    session
-        .compile_and_get_module(src)
-        .get_function(ustr(fn_name))
-        .expect("function should be defined")
-        .code
-        .as_script()
-        .expect("function should be a script function")
-        .parameter_passing
-        .clone()
-}
-
-fn trivial_copy_int() -> ResolvedArgPassing {
-    ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy(int_value_layout()))
-}
-
-fn shared_ref() -> ResolvedArgPassing {
-    ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef {
-        temp_cleanup: SharedRefTempCleanup::None,
-    })
-}
+// Testing the module-level trivial-copy layout cache used to derive physical argument passing,
+// as described in `doc/hir-ownership.md` ("Call Argument Passing").
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn concrete_trivial_copy_parameter_resolves_to_trivial_copy() {
     let mut session = TestSession::new();
-    let passing =
-        parameter_passing_for_fn(&mut session, "fn id(value: int) -> int { value }", "id");
-    assert_eq!(passing, [trivial_copy_int()]);
+    let module = session.compile_and_get_module("fn id(value: int) -> int { value } id(1)");
+    assert_eq!(
+        module.trivial_copy_layout(Type::primitive::<isize>()),
+        Some(int_value_layout())
+    );
 }
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn non_trivial_copy_value_parameter_resolves_to_shared_ref() {
     let mut session = TestSession::new();
-    let passing = parameter_passing_for_fn(
-        &mut session,
-        "fn identity(value: string) -> string { value }",
-        "identity",
+    let module = session.compile_and_get_module(
+        r#"
+        fn identity(value: string) -> string { value }
+        identity("hello")
+        "#,
     );
-    assert_eq!(passing, [shared_ref()]);
+    let string_ty = module
+        .get_function(ustr("identity"))
+        .unwrap()
+        .definition
+        .ty_scheme
+        .ty
+        .args[0]
+        .ty;
+    assert_eq!(module.trivial_copy_layout(string_ty), None);
 }
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn mutable_parameter_resolves_to_mutable_ref() {
     let mut session = TestSession::new();
-    let passing = parameter_passing_for_fn(
-        &mut session,
-        "fn store(slot: &mut int) { slot = 1; }",
-        "store",
+    let module = session.compile_and_get_module(
+        r#"
+        fn store(slot: &mut int) { slot = 1; }
+        let mut value = 0;
+        store(value)
+        "#,
     );
-    assert_eq!(passing, [ResolvedArgPassing::MutableRef]);
+    assert_eq!(
+        module.trivial_copy_layout(Type::primitive::<isize>()),
+        Some(int_value_layout())
+    );
 }
 
 #[test]
@@ -1482,29 +1531,37 @@ fn mutable_parameter_resolves_to_mutable_ref() {
 fn generic_value_parameter_resolves_to_shared_ref() {
     // A generic parameter is not treated as `TrivialCopy` even under a `Value` constraint.
     let mut session = TestSession::new();
-    let passing = parameter_passing_for_fn(
-        &mut session,
-        "fn identity<T>(value: T) -> T where T: Value { value }",
-        "identity",
+    let module = session.compile_and_get_module(
+        r#"
+        fn identity<T>(value: T) -> T where T: Value { value }
+        identity("hello")
+        "#,
     );
-    assert_eq!(passing, [shared_ref()]);
+    assert_eq!(module.trivial_copy_layout(Type::variable_id(0)), None);
 }
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn multiple_parameters_preserve_declaration_order() {
     let mut session = TestSession::new();
-    let passing = parameter_passing_for_fn(
-        &mut session,
-        "fn mix(a: int, b: string, c: &mut int) -> int { c = a; a }",
-        "mix",
+    let module = session.compile_and_get_module(
+        r#"
+        fn mix(a: int, b: string, c: &mut int) -> int { c = a; a }
+        let mut value = 0;
+        mix(1, "hello", value)
+        "#,
     );
     assert_eq!(
-        passing,
-        [
-            trivial_copy_int(),
-            shared_ref(),
-            ResolvedArgPassing::MutableRef
-        ]
+        module.trivial_copy_layout(Type::primitive::<isize>()),
+        Some(int_value_layout())
     );
+    let string_ty = module
+        .get_function(ustr("mix"))
+        .unwrap()
+        .definition
+        .ty_scheme
+        .ty
+        .args[1]
+        .ty;
+    assert_eq!(module.trivial_copy_layout(string_ty), None);
 }

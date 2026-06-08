@@ -17,8 +17,7 @@ use ferlium::{
     hir::{
         NodeKind,
         function::{
-            Function, FunctionDefinition, ResolvedArgPassing, ResolvedValueArgPassing,
-            SharedRefTempCleanup, VoidFunction,
+            Function, FunctionDefinition, ResolvedArgPassing, ResolvedValueArgPassing, VoidFunction,
         },
         value::LiteralValue,
     },
@@ -133,26 +132,39 @@ fn generic_trait_method_function_argument_keeps_source_place_passing() {
         run(Probe(42))
     "#});
 
-    assert!(
-        module.hir_arena.iter().any(|(_, node)| {
-            let NodeKind::StaticApply(app) = &node.kind else {
-                return false;
-            };
-            matches!(
-                app.arguments.first(),
-                Some(argument)
-                    if matches!(
-                        argument.passing,
-                        ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef {
-                            temp_cleanup: SharedRefTempCleanup::None,
-                        })
-                    ) && matches!(
-                        module.hir_arena[argument.value].kind,
-                        NodeKind::GetDictionaryMethod(_)
-                    )
+    let mut saw_method_store = false;
+    let mut saw_shared_ref_local_arg = false;
+    for (_, node) in module.hir_arena.iter() {
+        if let NodeKind::StoreLocal(store) = &node.kind
+            && matches!(
+                module.hir_arena[store.value].kind,
+                NodeKind::GetDictionaryMethod(_)
             )
-        }),
-        "generic trait method values passed as arguments should use source-place argument passing",
+        {
+            saw_method_store = true;
+        }
+        let NodeKind::StaticApply(app) = &node.kind else {
+            continue;
+        };
+        if matches!(
+            app.arguments.first(),
+            Some(argument)
+                if matches!(
+                    argument.passing,
+                    ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef)
+                ) && matches!(module.hir_arena[argument.value].kind, NodeKind::LoadLocal(_))
+        ) {
+            saw_shared_ref_local_arg = true;
+        }
+    }
+
+    assert!(
+        saw_method_store,
+        "generic trait method values passed as arguments should be materialized explicitly",
+    );
+    assert!(
+        saw_shared_ref_local_arg,
+        "materialized generic trait method values should be passed by shared reference from a local",
     );
 }
 

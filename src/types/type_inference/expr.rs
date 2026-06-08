@@ -21,8 +21,8 @@ use crate::{
         self, CallArgument, FieldAccess as HirFieldAccess, LoopId, NodeArena, NodeId, NodeKind,
         Project as HirProject, ProjectAt as HirProjectAt, StoreLocal, Variant as HirVariant,
         function::{
-            FunctionDefinition, PendingArgPassing, ResolvedArgPassing,
-            unresolved_arg_passing_for_args,
+            FunctionDefinition, PendingArgPassing, PendingValueArgPassing, ResolvedArgPassing,
+            ResolvedValueArgPassing, unresolved_arg_passing_for_args,
         },
         node_is_place_reference, place_resolution_may_create_temp,
         place_result_base_argument_index,
@@ -951,6 +951,10 @@ impl TypeInference {
                                 FnReturnConvention::Value
                             }
                         };
+                        let abi_args = match &*env.ir_arena[func_node_id].ty.data() {
+                            TypeKind::Function(fn_ty) => Some(fn_ty.args.clone()),
+                            _ => None,
+                        };
                         // Build the function type
                         let app_ty = FnType::new_with_return_convention(
                             args_tys.clone(),
@@ -995,6 +999,7 @@ impl TypeInference {
                             env,
                             &mut args_nodes,
                             &args_tys,
+                            abi_args.as_deref().unwrap_or(&args_tys),
                             expr_span,
                             None,
                         );
@@ -1438,37 +1443,39 @@ impl TypeInference {
                             &index_effects,
                             &inst_fn_ty.effects,
                         ]);
-                        let argument_values = vec![array_node_id, index_node_id];
+                        let mut argument_values = vec![array_node_id, index_node_id];
                         let visible_arg_passing = visible_native_arg_passing(
                             arg_passing,
                             &inst_data,
                             argument_values.len(),
                         );
-                        let argument_passing =
-                            self.argument_passing_for_args(&inst_fn_ty.args, visible_arg_passing);
-                        for ((arg, arg_ty), passing) in argument_values
-                            .iter()
-                            .zip(&inst_fn_ty.args)
-                            .zip(&argument_passing)
-                        {
-                            self.add_call_argument_temp_value_constraint(
-                                env, *arg, arg_ty.ty, *passing, expr_span,
-                            );
-                        }
-                        let arguments = CallArgument::from_values_and_passing(
-                            argument_values,
-                            argument_passing,
+                        let temp_start_index = env.cur_locals.len();
+                        let prepared_arguments = self.prepare_call_arguments(
+                            env,
+                            &mut argument_values,
+                            &inst_fn_ty.args,
+                            &definition.ty_scheme.ty.args,
+                            expr_span,
+                            visible_arg_passing,
                         );
-                        let node = K::StaticApply(b(hir::StaticApplication {
+                        let call = K::StaticApply(b(hir::StaticApplication {
                             function,
                             function_path: Some(path),
                             function_span: expr_span,
                             extra_arguments: Vec::new(),
-                            arguments,
+                            arguments: prepared_arguments.arguments,
                             argument_names: vec![ustr("array"), ustr("index")],
                             ty: inst_fn_ty,
                             inst_data,
                         }));
+                        let call =
+                            hir::Node::new(call, element_ty, combined_effects.clone(), expr_span);
+                        let node = self.wrap_call_with_temp_drops(
+                            env,
+                            temp_start_index,
+                            prepared_arguments.temp_stores,
+                            call,
+                        );
                         (node, element_ty, array_expr_mut, combined_effects)
                     }
                 }
@@ -1763,10 +1770,11 @@ impl TypeInference {
         env: &mut TypingEnv,
         args: &mut [NodeId],
         arg_tys: &[FnArgType],
+        abi_arg_tys: &[FnArgType],
         span: Location,
         native_arg_passing: Option<&[ResolvedArgPassing]>,
     ) -> PreparedCallArguments {
-        let arg_passing = self.argument_passing_for_args(arg_tys, native_arg_passing);
+        let arg_passing = self.argument_passing_for_args(arg_tys, abi_arg_tys, native_arg_passing);
         let mut stores = Vec::new();
         for ((arg, arg_ty), passing) in args.iter_mut().zip(arg_tys).zip(&arg_passing) {
             match passing {
@@ -1785,9 +1793,19 @@ impl TypeInference {
                         stores.extend(prepared.prefix);
                         *arg = prepared.place;
                     }
-                    self.add_call_argument_temp_value_constraint(
+                    if self.call_value_argument_needs_shared_ref_temp(
                         env, *arg, arg_ty.ty, *passing, span,
-                    );
+                    ) {
+                        let value_ty = env.ir_arena[*arg].ty;
+                        let (store, load) =
+                            self.store_owned_temp(env, *arg, value_ty, span, ustr("$arg"));
+                        stores.push(store);
+                        *arg = load;
+                    } else {
+                        self.add_call_argument_temp_value_constraint(
+                            env, *arg, arg_ty.ty, *passing, span,
+                        );
+                    }
                 }
             }
         }
@@ -1801,8 +1819,10 @@ impl TypeInference {
     fn argument_passing_for_args(
         &self,
         arg_tys: &[FnArgType],
+        abi_arg_tys: &[FnArgType],
         native_arg_passing: Option<&[ResolvedArgPassing]>,
     ) -> Vec<PendingArgPassing> {
+        assert_eq!(arg_tys.len(), abi_arg_tys.len());
         if let Some(native_arg_passing) = native_arg_passing {
             assert_eq!(arg_tys.len(), native_arg_passing.len());
             return native_arg_passing
@@ -1812,7 +1832,55 @@ impl TypeInference {
                 .collect();
         }
 
-        unresolved_arg_passing_for_args(arg_tys)
+        arg_tys
+            .iter()
+            .zip(abi_arg_tys)
+            .map(|(arg_ty, abi_arg_ty)| {
+                if abi_arg_ty
+                    .mut_ty
+                    .as_resolved()
+                    .is_some_and(|mut_ty| mut_ty.is_mutable())
+                {
+                    PendingArgPassing::MutableRef
+                } else if !abi_arg_ty.ty.is_constant() {
+                    PendingArgPassing::Value(PendingValueArgPassing::Resolved(
+                        ResolvedValueArgPassing::SharedRef,
+                    ))
+                } else {
+                    unresolved_arg_passing_for_args(std::slice::from_ref(arg_ty))
+                        .into_iter()
+                        .next()
+                        .unwrap()
+                }
+            })
+            .collect()
+    }
+
+    fn call_value_argument_needs_shared_ref_temp(
+        &mut self,
+        env: &mut TypingEnv,
+        arg: NodeId,
+        ty: Type,
+        passing: PendingArgPassing,
+        span: Location,
+    ) -> bool {
+        let is_stable_place = node_is_place_reference(env.ir_arena, arg)
+            && !matches!(env.ir_arena[arg].kind, NodeKind::GetTraitMethod(_));
+        if ty == Type::never() || is_stable_place {
+            return false;
+        }
+        match passing {
+            PendingArgPassing::MutableRef => false,
+            PendingArgPassing::Value(PendingValueArgPassing::Resolved(
+                ResolvedValueArgPassing::SharedRef,
+            )) => true,
+            PendingArgPassing::Value(PendingValueArgPassing::Resolved(
+                ResolvedValueArgPassing::TrivialCopy,
+            )) => false,
+            PendingArgPassing::Value(PendingValueArgPassing::Unknown) => {
+                !self.type_has_concrete_trivial_copy_impl(env, ty, span)
+            }
+        }
     }
 
     fn add_call_argument_temp_value_constraint(
@@ -2201,6 +2269,24 @@ impl TypeInference {
                     }
                 }
             }
+            NodeKind::Block(block)
+                if block
+                    .tail_node()
+                    .is_some_and(|tail| node_is_place_reference(env.ir_arena, tail)) =>
+            {
+                let tail = block.tail_node().expect("checked above");
+                let mut prefix = block.body.iter().copied().collect::<Vec<_>>();
+                assert_eq!(prefix.pop(), Some(tail));
+                for local in block.cleanup {
+                    if !env.cur_locals.contains(&local) {
+                        env.cur_locals.push(local);
+                    }
+                }
+                PreparedPlace {
+                    prefix,
+                    place: tail,
+                }
+            }
             _ => PreparedPlace {
                 prefix: Vec::new(),
                 place,
@@ -2319,8 +2405,9 @@ impl TypeInference {
         // Pre-extract the children we need to recurse into so we can drop the borrow on the arena before the recursive call.
         // Avoids cloning the whole `NodeKind` just to satisfy the borrow checker.
         let children: SmallVec<[NodeId; 4]> = match &env.ir_arena[value].kind {
-            Immediate(_) | GetFunction(_) => return false,
+            Immediate(_) | GetFunction(_) | GetTraitMethod(_) => return false,
             Variant(variant) => smallvec![variant.payload],
+            Block(block) => block.tail_node().into_iter().collect(),
             Tuple(nodes) | Record(nodes) => nodes.iter().copied().collect(),
             BuildClosure(closure) => closure.captures.iter().copied().collect(),
             _ => return self.type_needs_semantic_drop(env, ty, span),
@@ -2547,6 +2634,7 @@ impl TypeInference {
                         env,
                         &mut args_node_ids,
                         &inst_fn_ty.args,
+                        &inst_fn_ty.args,
                         expr_span,
                         None,
                     );
@@ -2609,6 +2697,7 @@ impl TypeInference {
                         env,
                         &mut args_node_ids,
                         &inst_fn_ty.args,
+                        &definition.ty_scheme.ty.args,
                         expr_span,
                         visible_arg_passing,
                     );

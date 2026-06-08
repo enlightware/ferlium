@@ -18,9 +18,7 @@ use crate::{
     Location,
     compiler::error::InternalCompilationError,
     containers::b,
-    hir::function::{
-        PendingArgPassing, PendingValueArgPassing, ResolvedValueArgPassing, SharedRefTempCleanup,
-    },
+    hir::function::{PendingArgPassing, PendingValueArgPassing, ResolvedValueArgPassing},
     hir::hir_syn::{get_dictionary, load_local},
     hir::{
         CallArgument, FnInstData, Node, NodeArena, NodeKind, StaticApplication, value::LiteralValue,
@@ -32,8 +30,8 @@ use crate::{
         ImportFunctionTarget, ImportImplSlot, ImportImplSlotId, LocalDecl, LocalDeclId,
         LocalFunctionId, LocalImplId, Module, ModuleEnv, ModuleFunction, ModuleId,
         PendingFunctionBody, PendingFunctionCollector, PendingModuleFunction, ResolvedValueLayout,
-        TraitDictionary, TraitId, TraitImpl, TraitImplId, TraitImpls, TraitKey, TypeDefId,
-        build_dictionary_value, id::Id,
+        TraitDictionary, TraitId, TraitImpl, TraitImplId, TraitImpls, TraitKey, TrivialCopyStatus,
+        TypeDefId, build_dictionary_value, id::Id,
     },
     std::{
         STD_MODULE_ID,
@@ -92,6 +90,8 @@ pub struct TraitSolver<'a> {
     pub import_fn_slots: &'a mut Vec<ImportFunctionSlot>,
     /// Current module trait import slots.
     pub import_impl_slots: &'a mut Vec<ImportImplSlot>,
+    /// Current module's compiler-derived trivial-copy knowledge.
+    pub(crate) trivial_copy_status: &'a mut TrivialCopyStatus,
     /// Collector for newly created current module functions.
     pub fn_collector: PendingFunctionCollector,
     /// Other modules available for fetching trait implementations and normal functions (read only).
@@ -164,6 +164,7 @@ macro_rules! trait_solver_from_module {
             current_functions,
             &mut $module.import_fn_slots,
             &mut $module.import_impl_slots,
+            &mut $module.trivial_copy_status,
             crate::module::PendingFunctionCollector::new(function_count),
             $program,
         )
@@ -179,6 +180,7 @@ pub(crate) struct TraitSolverProbe<'a> {
     current_functions: FxHashMap<Ustr, LocalFunctionId>,
     import_fn_slots: Vec<ImportFunctionSlot>,
     import_impl_slots: Vec<ImportImplSlot>,
+    trivial_copy_status: TrivialCopyStatus,
     fn_collector: PendingFunctionCollector,
     active_improvements: FxHashSet<TraitImprovementKey>,
     private_impl_scope: Vec<ModuleId>,
@@ -369,6 +371,7 @@ impl<'a> TraitSolverProbe<'a> {
             current_functions: current_function_map(&module.def_table),
             import_fn_slots: module.import_fn_slots.clone(),
             import_impl_slots: module.import_impl_slots.clone(),
+            trivial_copy_status: module.trivial_copy_status.clone(),
             fn_collector: PendingFunctionCollector::new(module.functions.len()),
             active_improvements: FxHashSet::default(),
             private_impl_scope: Vec::new(),
@@ -388,6 +391,7 @@ impl<'a> TraitSolverProbe<'a> {
             current_functions: solver.current_functions.clone(),
             import_fn_slots: solver.import_fn_slots.clone(),
             import_impl_slots: solver.import_impl_slots.clone(),
+            trivial_copy_status: solver.trivial_copy_status.clone(),
             fn_collector: solver.fn_collector.clone(),
             active_improvements: solver.active_improvements.clone(),
             private_impl_scope: solver.private_impl_scope.clone(),
@@ -408,6 +412,7 @@ impl<'a> TraitSolverProbe<'a> {
             mem::take(&mut self.current_functions),
             &mut self.import_fn_slots,
             &mut self.import_impl_slots,
+            &mut self.trivial_copy_status,
             fn_collector,
             self.others,
         );
@@ -616,6 +621,12 @@ impl<'a> TraitSolver<'a> {
         if !ty.is_constant() {
             return Ok(None);
         }
+        if let Some(layout) = self.trivial_copy_status.layout(ty) {
+            return Ok(Some(layout));
+        }
+        if self.trivial_copy_status.is_known_non_trivial_copy(ty) {
+            return Ok(None);
+        }
         if self
             .solve_impl(
                 self.std_trait_id(TRIVIAL_COPY_TRAIT_NAME),
@@ -625,12 +636,15 @@ impl<'a> TraitSolver<'a> {
             )
             .is_err()
         {
+            self.trivial_copy_status.mark_non_trivial_copy(ty);
             return Ok(None);
         }
         // `TrivialCopy` is marker-only, so selecting its impl proves that a
         // representation copy is valid but does not itself carry layout data.
         // The layout is synthesized structurally from the same concrete type.
-        Ok(Some(self.resolved_value_layout(ty, span)?))
+        let layout = self.resolved_value_layout(ty, span)?;
+        self.trivial_copy_status.mark_trivial_copy(ty, layout);
+        Ok(Some(layout))
     }
 
     fn resolved_value_layout(
@@ -658,15 +672,16 @@ impl<'a> TraitSolver<'a> {
             .is_some_and(|mut_ty| mut_ty.is_mutable())
         {
             Ok(PendingArgPassing::MutableRef)
-        } else if let Some(layout) = self.solve_concrete_trivial_copy_layout(arena, arg.ty, span)? {
+        } else if self
+            .solve_concrete_trivial_copy_layout(arena, arg.ty, span)?
+            .is_some()
+        {
             Ok(PendingArgPassing::Value(PendingValueArgPassing::Resolved(
-                ResolvedValueArgPassing::TrivialCopy(layout),
+                ResolvedValueArgPassing::TrivialCopy,
             )))
         } else {
             Ok(PendingArgPassing::Value(PendingValueArgPassing::Resolved(
-                ResolvedValueArgPassing::SharedRef {
-                    temp_cleanup: SharedRefTempCleanup::None,
-                },
+                ResolvedValueArgPassing::SharedRef,
             )))
         }
     }

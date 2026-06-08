@@ -226,13 +226,14 @@ pub(crate) fn place_resolution_may_create_temp(arena: &NodeArena, node_id: NodeI
         }
         Block(block) => {
             let tail = block.tail_node();
-            block.body.iter().any(|node| {
-                place_resolution_may_create_temp(arena, *node)
+            !block.cleanup.is_empty()
+                || block.body.iter().any(|node| {
+                    place_resolution_may_create_temp(arena, *node)
                     // A non-tail place expression forces a temp: only the block tail
                     // can be exposed as the block's resulting place.
                     || node_is_place_reference(arena, *node)
                         && tail.is_some_and(|tail| tail != *node)
-            })
+                })
         }
         _ => false,
     }
@@ -337,10 +338,10 @@ impl UnboundTyCtxs {
         (ctx.ty, ctx.span)
     }
 
-    pub fn seen_only_in_variants(&self, ty_var: TypeVar) -> bool {
+    pub fn seen_only_in_variants(&self, ty_var: TypeVar, env: &ModuleEnv<'_>) -> bool {
         self.0
             .iter()
-            .all(|ctx| ctx.ty.data().is_ty_var_only_in_variants(ty_var))
+            .all(|ctx| ctx.ty.data().is_ty_var_only_in_variants(ty_var, env))
     }
 }
 
@@ -1591,8 +1592,6 @@ impl Node {
                 // no need to look into the value's type as it is already in this node's type
             }
             Apply(app) => {
-                self.unbound_ty_vars_in_ty(&app.ty, result, ignore);
-                unbound_ty_vars(arena, app.function, result, ignore);
                 for arg in &app.arguments {
                     unbound_ty_vars(arena, arg.value, result, ignore);
                 }
@@ -1604,13 +1603,11 @@ impl Node {
             DropClosureEnv(node) => unbound_ty_vars(arena, node.target, result, ignore),
             CloneValue(node) => unbound_ty_vars(arena, node.source, result, ignore),
             StaticApply(app) => {
-                self.unbound_ty_vars_in_ty(&app.ty, result, ignore);
                 for arg in &app.arguments {
                     unbound_ty_vars(arena, arg.value, result, ignore);
                 }
             }
             TraitMethodApply(app) => {
-                self.unbound_ty_vars_in_ty(&app.ty, result, ignore);
                 for arg in &app.arguments {
                     unbound_ty_vars(arena, arg.value, result, ignore);
                 }
@@ -1646,7 +1643,6 @@ impl Node {
                 unbound_ty_vars(arena, node.dictionary, result, ignore);
             }
             CallDictionaryMethod(node) => {
-                self.unbound_ty_vars_in_ty(&node.ty, result, ignore);
                 unbound_ty_vars(arena, node.dictionary, result, ignore);
                 for arg in &node.arguments {
                     unbound_ty_vars(arena, arg.value, result, ignore);

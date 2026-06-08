@@ -23,7 +23,10 @@ use crate::{
     hir::{self, CallArgument, NodeArena, NodeId},
     hir::{
         emit_value_impl::function_value_method,
-        value_dispatch::{resolved_arg_passing_for_generated_call, static_apply_generated},
+        value_dispatch::{
+            prepare_generated_call_arguments_with_locals, static_apply_generated_with_locals,
+            wrap_generated_call_with_temp_cleanup,
+        },
     },
     internal_compilation_error,
     module::{
@@ -397,13 +400,17 @@ impl<'s, 'm> ValueBodyCtx<'s, 'm> {
 
     fn value_method_call(
         &mut self,
-        trait_id: TraitId,
-        input_ty: Type,
-        method_index: TraitMethodIndex,
+        method: ValueMethod,
         span: Location,
         arena: &mut NodeArena,
-        arguments: Vec<NodeId>,
-    ) -> Result<(hir::NodeKind, Type, EffType), InternalCompilationError> {
+        locals: &mut Vec<LocalDecl>,
+        mut arguments: Vec<NodeId>,
+    ) -> Result<NodeId, InternalCompilationError> {
+        let ValueMethod {
+            trait_id,
+            input_ty,
+            method_index,
+        } = method;
         let (fn_ty, ret_ty, method_name, is_function_value) = {
             let trait_def = self.solver.trait_def(trait_id);
             let definition = trait_def
@@ -423,37 +430,49 @@ impl<'s, 'm> ValueBodyCtx<'s, 'm> {
             let function =
                 FunctionId::Local(function_value_method(self.solver, method_index, span)?);
             let effects = fn_ty.effects.clone();
-            let argument_passing = resolved_arg_passing_for_generated_call(
+            let prepared = prepare_generated_call_arguments_with_locals(
                 arena,
+                locals,
                 self.solver,
-                &arguments,
+                &mut arguments,
                 &fn_ty.args,
                 span,
             )?;
-            return Ok((
+            let call = arena.alloc(hir::Node::new(
                 hir::hir_syn::static_apply_with_argument_passing(
                     function,
                     fn_ty,
                     arguments,
-                    argument_passing,
+                    prepared.argument_passing,
                     span,
                 ),
                 ret_ty,
                 effects,
+                span,
+            ));
+            return Ok(wrap_generated_call_with_temp_cleanup(
+                arena,
+                prepared.temp_stores,
+                prepared.cleanup,
+                call,
+                ret_ty,
+                span,
             ));
         }
 
         if self.emit_generic_trait_calls && !input_ty.is_constant() {
             let effects = fn_ty.effects.clone();
-            let argument_passing = resolved_arg_passing_for_generated_call(
+            let prepared = prepare_generated_call_arguments_with_locals(
                 arena,
+                locals,
                 self.solver,
-                &arguments,
+                &mut arguments,
                 &fn_ty.args,
                 span,
             )?;
-            let arguments = CallArgument::from_values_and_passing(arguments, argument_passing);
-            return Ok((
+            let arguments =
+                CallArgument::from_values_and_passing(arguments, prepared.argument_passing);
+            let call = arena.alloc(hir::Node::new(
                 hir::NodeKind::TraitMethodApply(crate::containers::b(
                     hir::TraitMethodApplication {
                         trait_id,
@@ -469,51 +488,69 @@ impl<'s, 'm> ValueBodyCtx<'s, 'm> {
                 )),
                 ret_ty,
                 effects,
+                span,
+            ));
+            return Ok(wrap_generated_call_with_temp_cleanup(
+                arena,
+                prepared.temp_stores,
+                prepared.cleanup,
+                call,
+                ret_ty,
+                span,
             ));
         }
 
         let function =
             self.solver
                 .solve_impl_method(trait_id, &[input_ty], method_index, span, arena)?;
-        let argument_passing = resolved_arg_passing_for_generated_call(
+        let prepared = prepare_generated_call_arguments_with_locals(
             arena,
+            locals,
             self.solver,
-            &arguments,
+            &mut arguments,
             &fn_ty.args,
             span,
         )?;
         let effects = fn_ty.effects.clone();
-        Ok((
+        let call = arena.alloc(hir::Node::new(
             hir::hir_syn::static_apply_with_argument_passing(
                 function,
                 fn_ty,
                 arguments,
-                argument_passing,
+                prepared.argument_passing,
                 span,
             ),
             ret_ty,
             effects,
+            span,
+        ));
+        Ok(wrap_generated_call_with_temp_cleanup(
+            arena,
+            prepared.temp_stores,
+            prepared.cleanup,
+            call,
+            ret_ty,
+            span,
         ))
     }
 }
 
-fn value_method_call_node(
-    ctx: &mut ValueBodyCtx<'_, '_>,
+#[derive(Clone, Copy)]
+struct ValueMethod {
     trait_id: TraitId,
     input_ty: Type,
     method_index: TraitMethodIndex,
+}
+
+fn value_method_call_node(
+    ctx: &mut ValueBodyCtx<'_, '_>,
+    method: ValueMethod,
     span: Location,
     arena: &mut NodeArena,
+    locals: &mut Vec<LocalDecl>,
     arguments: Vec<NodeId>,
 ) -> Result<NodeId, InternalCompilationError> {
-    let (kind, ty, effects) =
-        ctx.value_method_call(trait_id, input_ty, method_index, span, arena, arguments)?;
-    Ok(arena.alloc(hir::Node::new(
-        kind,
-        ty,
-        effects,
-        Location::new_synthesized(),
-    )))
+    ctx.value_method_call(method, span, arena, locals, arguments)
 }
 
 const FUNCTION_VALUE_METHOD_NAMES: [&str; 5] = [
@@ -701,7 +738,7 @@ pub(crate) fn function_value_method_function(
                 "Compiler-generated function Value hashing.",
             );
             let state_id = LocalDeclId::from_index(1);
-            let locals = vec![
+            let mut locals = vec![
                 local("self", ty),
                 LocalDecl::new(
                     (crate::ustr("state"), Location::new_synthesized()),
@@ -713,15 +750,15 @@ pub(crate) fn function_value_method_function(
             ];
             let state = alloc_synth_node(&mut arena, load_local(state_id), hasher_ty);
             let marker = alloc_synth_node(&mut arena, native_str("<function>"), string_type());
-            let write_kind = static_apply_generated(
+            let write = static_apply_generated_with_locals(
                 &mut arena,
+                &mut locals,
                 solver,
                 hasher_write_string,
                 [(state, hasher_ty), (marker, string_type())],
                 unit_ty,
                 span,
             )?;
-            let write = alloc_synth_node(&mut arena, write_kind, unit_ty);
             let unit = alloc_synth_node(&mut arena, native(()), unit_ty);
             let root = alloc_synth_node(&mut arena, block([write, unit]), unit_ty);
             (definition, root, locals)
@@ -776,7 +813,7 @@ fn derive_structural_text_body(
     span: Location,
     arena: &mut NodeArena,
     ctx: &mut ValueBodyCtx<'_, '_>,
-) -> Result<Option<(NodeId, Vec<crate::module::LocalDecl>)>, InternalCompilationError> {
+) -> Result<Option<(NodeId, Vec<LocalDecl>)>, InternalCompilationError> {
     use hir::hir_syn::*;
 
     assert!(input_types.len() == 1);
@@ -793,21 +830,24 @@ fn derive_structural_text_body(
 
     let string_lit = |arena: &mut NodeArena, text: &str| n(arena, native_str(text), string_type());
     macro_rules! build_text {
-        ($arena:expr, $value:expr, $value_ty:expr) => {
+        ($arena:expr, $locals:expr, $value:expr, $value_ty:expr) => {
             value_method_call_node(
                 ctx,
-                trait_id,
-                $value_ty,
-                method_index,
+                ValueMethod {
+                    trait_id,
+                    input_ty: $value_ty,
+                    method_index,
+                },
                 span,
                 $arena,
+                $locals,
                 vec![$value],
             )
         };
     }
     let build_string_block = |arena: &mut NodeArena,
                               solver: &mut TraitSolver<'_>,
-                              locals: &mut Vec<crate::module::LocalDecl>,
+                              locals: &mut Vec<LocalDecl>,
                               initial: &str,
                               mut pieces: Vec<NodeId>|
      -> Result<NodeId, InternalCompilationError> {
@@ -825,15 +865,16 @@ fn derive_structural_text_body(
         statements.push(n(arena, store_rendered, Type::unit()));
         for piece in pieces.drain(..) {
             let target = n(arena, load_local(l_rendered_id), string_type());
-            let push = static_apply_generated(
+            let push = static_apply_generated_with_locals(
                 arena,
+                locals,
                 solver,
                 string_push_str,
                 [(target, string_type()), (piece, string_type())],
                 Type::unit(),
                 span,
             )?;
-            statements.push(n(arena, push, Type::unit()));
+            statements.push(push);
         }
         let rendered = n(arena, take_local_value(l_rendered_id), string_type());
         statements.push(rendered);
@@ -861,7 +902,7 @@ fn derive_structural_text_body(
                     project(load_self, ProjectionIndex::from_index(index)),
                     member_ty,
                 );
-                let member_str = build_text!(arena, member, member_ty)?;
+                let member_str = build_text!(arena, &mut locals, member, member_ty)?;
                 pieces.push(member_str);
             }
             pieces.push(string_lit(arena, ")"));
@@ -887,7 +928,7 @@ fn derive_structural_text_body(
                     project(load_self, ProjectionIndex::from_index(index)),
                     member_ty,
                 );
-                let member_str = build_text!(arena, member, member_ty)?;
+                let member_str = build_text!(arena, &mut locals, member, member_ty)?;
                 pieces.push(member_str);
             }
             pieces.push(string_lit(arena, " }"));
@@ -910,7 +951,7 @@ fn derive_structural_text_body(
                 } else {
                     let self_value = n(arena, load_local(l_self_id), ty);
                     let payload = variant_payload_project(arena, self_value, payload_ty);
-                    let payload_str = build_text!(arena, payload, payload_ty)?;
+                    let payload_str = build_text!(arena, &mut locals, payload, payload_ty)?;
                     if payload_ty.data().is_tuple() {
                         build_string_block(
                             arena,
@@ -961,7 +1002,7 @@ fn derive_structural_text_body(
                             project(load_self, ProjectionIndex::from_index(index)),
                             member_ty,
                         );
-                        pieces.push(build_text!(arena, member, member_ty)?);
+                        pieces.push(build_text!(arena, &mut locals, member, member_ty)?);
                     }
                     pieces.push(string_lit(arena, ")"));
                     build_string_block(
@@ -987,7 +1028,7 @@ fn derive_structural_text_body(
                             project(load_self, ProjectionIndex::from_index(index)),
                             member_ty,
                         );
-                        pieces.push(build_text!(arena, member, member_ty)?);
+                        pieces.push(build_text!(arena, &mut locals, member, member_ty)?);
                     }
                     pieces.push(string_lit(arena, " }"));
                     build_string_block(
@@ -1010,7 +1051,7 @@ fn derive_structural_text_body(
                         } else {
                             let self_value = n(arena, load_local(l_self_id), ty);
                             let payload = variant_payload_project(arena, self_value, payload_ty);
-                            let payload_str = build_text!(arena, payload, payload_ty)?;
+                            let payload_str = build_text!(arena, &mut locals, payload, payload_ty)?;
                             if payload_ty.data().is_tuple() {
                                 build_string_block(
                                     arena,
@@ -1042,7 +1083,7 @@ fn derive_structural_text_body(
                 _ => {
                     drop(shape_data);
                     let load_self = n(arena, load_local(l_self_id), shape_ty);
-                    let payload_str = build_text!(arena, load_self, shape_ty)?;
+                    let payload_str = build_text!(arena, &mut locals, load_self, shape_ty)?;
                     build_string_block(
                         arena,
                         ctx.solver,
@@ -1073,7 +1114,7 @@ fn derive_value_to_string_body(
     span: Location,
     arena: &mut NodeArena,
     ctx: &mut ValueBodyCtx<'_, '_>,
-) -> Result<Option<(NodeId, Vec<crate::module::LocalDecl>)>, InternalCompilationError> {
+) -> Result<Option<(NodeId, Vec<LocalDecl>)>, InternalCompilationError> {
     derive_structural_text_body(
         trait_id,
         VALUE_TO_STRING_METHOD_INDEX,
@@ -1090,7 +1131,7 @@ fn derive_inspect_body(
     span: Location,
     arena: &mut NodeArena,
     ctx: &mut ValueBodyCtx<'_, '_>,
-) -> Result<Option<(NodeId, Vec<crate::module::LocalDecl>)>, InternalCompilationError> {
+) -> Result<Option<(NodeId, Vec<LocalDecl>)>, InternalCompilationError> {
     derive_structural_text_body(
         trait_id,
         INSPECT_METHOD_INDEX,
@@ -1145,7 +1186,7 @@ fn derive_value_eq_body(
     span: Location,
     arena: &mut NodeArena,
     ctx: &mut ValueBodyCtx<'_, '_>,
-) -> Result<Option<(NodeId, Vec<crate::module::LocalDecl>)>, InternalCompilationError> {
+) -> Result<Option<(NodeId, Vec<LocalDecl>)>, InternalCompilationError> {
     use hir::hir_syn::*;
 
     assert!(input_types.len() == 1);
@@ -1155,7 +1196,7 @@ fn derive_value_eq_body(
     let n = alloc_synth_node;
 
     let bool_ty = bool_type();
-    let locals = vec![local("left", ty), local("right", ty)];
+    let mut locals = vec![local("left", ty), local("right", ty)];
     let l_left_id = LocalDeclId::from_index(0);
     let l_right_id = LocalDeclId::from_index(1);
 
@@ -1177,11 +1218,14 @@ fn derive_value_eq_body(
                 );
                 let eq_i = value_method_call_node(
                     ctx,
-                    trait_id,
-                    member_ty,
-                    VALUE_EQ_METHOD_INDEX,
+                    ValueMethod {
+                        trait_id,
+                        input_ty: member_ty,
+                        method_index: VALUE_EQ_METHOD_INDEX,
+                    },
                     span,
                     $arena,
+                    &mut locals,
                     vec![left_i, right_i],
                 )?;
                 eq_pairs.push(eq_i);
@@ -1214,11 +1258,14 @@ fn derive_value_eq_body(
                     let right_payload = variant_payload_project($arena, load_right_v, payload_ty);
                     value_method_call_node(
                         ctx,
-                        trait_id,
-                        payload_ty,
-                        VALUE_EQ_METHOD_INDEX,
+                        ValueMethod {
+                            trait_id,
+                            input_ty: payload_ty,
+                            method_index: VALUE_EQ_METHOD_INDEX,
+                        },
                         span,
                         $arena,
+                        &mut locals,
                         vec![left_payload, right_payload],
                     )?
                 };
@@ -1289,11 +1336,14 @@ fn derive_value_eq_body(
                     let load_right = n(arena, load_local(l_right_id), shape_ty);
                     Some(value_method_call_node(
                         ctx,
-                        trait_id,
-                        shape_ty,
-                        VALUE_EQ_METHOD_INDEX,
+                        ValueMethod {
+                            trait_id,
+                            input_ty: shape_ty,
+                            method_index: VALUE_EQ_METHOD_INDEX,
+                        },
                         span,
                         arena,
+                        &mut locals,
                         vec![load_left, load_right],
                     )?)
                 }
@@ -1335,7 +1385,7 @@ fn derive_value_hash_body(
         crate::ustr("hasher_write_string"),
     )?;
 
-    let locals = vec![
+    let mut locals = vec![
         local("self", ty),
         LocalDecl::new(
             (crate::ustr("state"), Location::new_synthesized()),
@@ -1350,30 +1400,34 @@ fn derive_value_hash_body(
 
     let build_write_string = |arena: &mut NodeArena,
                               solver: &mut TraitSolver<'_>,
+                              locals: &mut Vec<LocalDecl>,
                               value: &str|
      -> Result<NodeId, InternalCompilationError> {
         let state = n(arena, load_local(l_state_id), hasher_ty);
         let value = n(arena, native_str(value), string_type());
-        let write = static_apply_generated(
+        static_apply_generated_with_locals(
             arena,
+            locals,
             solver,
             hasher_write_string,
             [(state, hasher_ty), (value, string_type())],
             unit_ty,
             span,
-        )?;
-        Ok(n(arena, write, unit_ty))
+        )
     };
     macro_rules! build_hash_value {
         ($arena:expr, $value:expr, $value_ty:expr) => {{
             let state = n($arena, load_local(l_state_id), hasher_ty);
             value_method_call_node(
                 ctx,
-                trait_id,
-                $value_ty,
-                VALUE_HASH_METHOD_INDEX,
+                ValueMethod {
+                    trait_id,
+                    input_ty: $value_ty,
+                    method_index: VALUE_HASH_METHOD_INDEX,
+                },
                 span,
                 $arena,
+                &mut locals,
                 vec![$value, state],
             )
         }};
@@ -1404,7 +1458,12 @@ fn derive_value_hash_body(
 
             for (tag, payload_ty) in $variants.into_iter() {
                 let tag_val = LiteralValue::new_native(ustr_to_isize(tag));
-                let mut statements = vec![build_write_string($arena, ctx.solver, tag.as_str())?];
+                let mut statements = vec![build_write_string(
+                    $arena,
+                    ctx.solver,
+                    &mut locals,
+                    tag.as_str(),
+                )?];
                 if payload_ty != Type::unit() {
                     let self_value = n($arena, load_local(l_self_id), ty);
                     let payload = variant_payload_project($arena, self_value, payload_ty);
@@ -1477,7 +1536,7 @@ fn derive_value_hash_body(
         Function(_) => {
             drop(ty_data);
             let statements = vec![
-                build_write_string(arena, ctx.solver, "<function>")?,
+                build_write_string(arena, ctx.solver, &mut locals, "<function>")?,
                 n(arena, native(()), unit_ty),
             ];
             Some((n(arena, block(statements), unit_ty), locals))
@@ -1507,7 +1566,7 @@ fn derive_value_clone_body(
 
     let source_id = LocalDeclId::from_index(0);
     let target_id = LocalDeclId::from_index(1);
-    let locals = vec![
+    let mut locals = vec![
         local("source", ty),
         LocalDecl::new(
             (crate::ustr("target"), Location::new_synthesized()),
@@ -1564,11 +1623,14 @@ fn derive_value_clone_body(
                 );
                 statements.push(value_method_call_node(
                     ctx,
-                    trait_id,
-                    member_ty,
-                    VALUE_CLONE_METHOD_INDEX,
+                    ValueMethod {
+                        trait_id,
+                        input_ty: member_ty,
+                        method_index: VALUE_CLONE_METHOD_INDEX,
+                    },
                     Location::new_synthesized(),
                     $arena,
+                    &mut locals,
                     vec![source_member, target_member],
                 )?);
             }
@@ -1612,11 +1674,14 @@ fn derive_value_clone_body(
                     let target_payload = variant_payload_project($arena, target, payload_ty);
                     statements.push(value_method_call_node(
                         ctx,
-                        trait_id,
-                        payload_ty,
-                        VALUE_CLONE_METHOD_INDEX,
+                        ValueMethod {
+                            trait_id,
+                            input_ty: payload_ty,
+                            method_index: VALUE_CLONE_METHOD_INDEX,
+                        },
                         Location::new_synthesized(),
                         $arena,
+                        &mut locals,
                         vec![source_payload, target_payload],
                     )?);
                     statements.push(n($arena, native(()), Type::unit()));
@@ -1712,7 +1777,7 @@ fn derive_value_drop_body(
 
     let n = alloc_synth_node;
     let target_id = LocalDeclId::from_index(0);
-    let locals = vec![LocalDecl::new(
+    let mut locals = vec![LocalDecl::new(
         (crate::ustr("target"), Location::new_synthesized()),
         MutType::mutable(),
         ty,
@@ -1732,11 +1797,14 @@ fn derive_value_drop_body(
                 );
                 statements.push(value_method_call_node(
                     ctx,
-                    trait_id,
-                    member_ty,
-                    VALUE_DROP_METHOD_INDEX,
+                    ValueMethod {
+                        trait_id,
+                        input_ty: member_ty,
+                        method_index: VALUE_DROP_METHOD_INDEX,
+                    },
                     Location::new_synthesized(),
                     $arena,
+                    &mut locals,
                     vec![target_member],
                 )?);
             }
@@ -1758,11 +1826,14 @@ fn derive_value_drop_body(
                     let target_payload = variant_payload_project($arena, target, payload_ty);
                     value_method_call_node(
                         ctx,
-                        trait_id,
-                        payload_ty,
-                        VALUE_DROP_METHOD_INDEX,
+                        ValueMethod {
+                            trait_id,
+                            input_ty: payload_ty,
+                            method_index: VALUE_DROP_METHOD_INDEX,
+                        },
                         Location::new_synthesized(),
                         $arena,
+                        &mut locals,
                         vec![target_payload],
                     )?
                 };

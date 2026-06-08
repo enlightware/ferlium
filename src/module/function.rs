@@ -564,20 +564,6 @@ impl PendingModuleFunction {
             &mut self.locals,
             ctx,
         )?;
-        // Classify the visible parameters (the leading locals) into their high-level passing requirements while
-        // the trait solver is available, so SSA lowering can read it back from the function body.
-        let arg_count = self.definition.arg_names.len();
-        let param_passing = (0..arg_count)
-            .map(|i| {
-                let arg_ty = self.definition.ty_scheme.ty.args[i];
-                let span = self.locals[i].name.1;
-                ctx.trait_solver
-                    .resolved_arg_passing_for_no_temp_arg(&mut self.code.arena, &arg_ty, span)
-                    .unwrap()
-                    .into_elaborated()
-            })
-            .collect::<Vec<_>>();
-
         if self.definition.returns_place() {
             if self.code.arena[root].ty != Type::never() {
                 return Err(internal_compilation_error!(Unsupported {
@@ -613,7 +599,6 @@ impl PendingModuleFunction {
             b(ScriptFunction::new(
                 elaborated.root,
                 self.code.runtime_arg_count,
-                param_passing,
             )),
             self.spans,
             locals,

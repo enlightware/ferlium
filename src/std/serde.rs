@@ -18,11 +18,13 @@ use crate::{
     hir::{self, CallArgument, NodeArena, NodeId},
     hir::{
         function::FunctionDefinition,
-        value_dispatch::{resolved_arg_passing_for_generated_call, static_apply_generated},
+        value_dispatch::{
+            prepare_generated_call_arguments_with_locals, static_apply_generated_with_locals,
+        },
     },
     module::{
-        self, LocalDeclId, Module, PendingFunctionBody, PendingLocalClone, ProjectionIndex,
-        ResolvedLocalClone, TraitId, TraitImplId, id::Id,
+        self, LocalDecl, LocalDeclId, Module, PendingFunctionBody, PendingLocalClone,
+        ProjectionIndex, ResolvedLocalClone, TraitId, TraitImplId, id::Id,
     },
     std::{
         array::array_type,
@@ -60,6 +62,7 @@ fn build_serialize_projection(
     solver: &mut TraitSolver,
     trait_id: TraitId,
     span: Location,
+    locals: &mut Vec<LocalDecl>,
     self_id: LocalDeclId,
     self_ty: Type,
     index: usize,
@@ -75,15 +78,15 @@ fn build_serialize_projection(
     );
     let function =
         solver.solve_impl_method(trait_id, &[member_ty], TraitMethodIndex(0), span, arena)?;
-    let apply = static_apply_generated(
+    static_apply_generated_with_locals(
         arena,
+        locals,
         solver,
         function,
         [(project_node, member_ty)],
         data_value_type(),
         span,
-    )?;
-    Ok(alloc_synth_node(arena, apply, data_value_type()))
+    )
 }
 
 fn record_payload_type() -> Type {
@@ -153,7 +156,7 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
 
         let mut body_arena = NodeArena::default();
         let arena = &mut body_arena;
-        let locals = vec![local("self", ty)];
+        let mut locals = vec![local("self", ty)];
         let l_self_id = LocalDeclId::from_index(0);
 
         // derive tuple, record, and enum serialization
@@ -185,7 +188,15 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
                 .map(|(index, ty_i)| {
                     // serialize the i-th element
                     build_serialize_projection(
-                        arena, solver, trait_id, span, l_self_id, ty, index, ty_i,
+                        arena,
+                        solver,
+                        trait_id,
+                        span,
+                        &mut locals,
+                        l_self_id,
+                        ty,
+                        index,
+                        ty_i,
                     )
                 })
                 .collect::<Result<SVec2<_>, _>>()?;
@@ -229,7 +240,15 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
                 .map(|(index, (name, ty_i))| {
                     let tag = n(arena, native_str(&name), string_type());
                     let payload = build_serialize_projection(
-                        arena, solver, trait_id, span, l_self_id, ty, index, ty_i,
+                        arena,
+                        solver,
+                        trait_id,
+                        span,
+                        &mut locals,
+                        l_self_id,
+                        ty,
+                        index,
+                        ty_i,
                     )?;
                     let entry = n(arena, tuple([tag, payload]), data_value_record_entry_type());
                     Ok(entry)
@@ -255,7 +274,15 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
                     let name_node = n(arena, native_str(&tag), string_type());
                     let payload_node = if payload_ty != Type::unit() {
                         build_serialize_projection(
-                            arena, solver, trait_id, span, l_self_id, ty, 0, payload_ty,
+                            arena,
+                            solver,
+                            trait_id,
+                            span,
+                            &mut locals,
+                            l_self_id,
+                            ty,
+                            0,
+                            payload_ty,
                         )?
                     } else {
                         let unit_payload = n(arena, native(()), Type::unit());
@@ -335,20 +362,23 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
         };
 
         // Build the deserialization of a DataValue into a value of type `ty`.
-        let build_deserialize =
-            |arena: &mut NodeArena, solver: &mut TraitSolver, data: NodeId, ty: Type| {
-                let function =
-                    solver.solve_impl_method(trait_id, &[ty], TraitMethodIndex(0), span, arena)?;
-                let apply = static_apply_generated(
-                    arena,
-                    solver,
-                    function,
-                    [(data, data_value_type())],
-                    ty,
-                    Location::new_synthesized(),
-                )?;
-                Ok(n(arena, apply, ty))
-            };
+        let build_deserialize = |arena: &mut NodeArena,
+                                 locals: &mut Vec<LocalDecl>,
+                                 solver: &mut TraitSolver,
+                                 data: NodeId,
+                                 ty: Type| {
+            let function =
+                solver.solve_impl_method(trait_id, &[ty], TraitMethodIndex(0), span, arena)?;
+            static_apply_generated_with_locals(
+                arena,
+                locals,
+                solver,
+                function,
+                [(data, data_value_type())],
+                ty,
+                Location::new_synthesized(),
+            )
+        };
 
         // derive tuple, record, and enum deserialization
         let ty_data = ty.data().clone();
@@ -391,7 +421,7 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
             }
             */
             // extract the tuple payload from the data value
-            let get_array = build_data_value_to_tuple(arena, solver, load_data_value)?;
+            let get_array = build_data_value_to_tuple(arena, &mut locals, solver, load_data_value)?;
             let data_value_ty = data_value_type();
             let array_ty = array_type(data_value_ty);
             let value_trait_id = solver.std_trait_id(VALUE_TRAIT_NAME);
@@ -451,11 +481,18 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                         EffType::empty(),
                         FnReturnConvention::Place,
                     );
-                    let argument_passing = resolved_arg_passing_for_generated_call(
-                        arena, solver, &arguments, &ty.args, span,
+                    let mut arguments = arguments;
+                    let prepared = prepare_generated_call_arguments_with_locals(
+                        arena,
+                        &mut locals,
+                        solver,
+                        &mut arguments,
+                        &ty.args,
+                        span,
                     )?;
                     let arguments =
-                        CallArgument::from_values_and_passing(arguments, argument_passing);
+                        CallArgument::from_values_and_passing(arguments, prepared.argument_passing);
+                    assert!(prepared.temp_stores.is_empty());
                     let index_place = n(
                         arena,
                         hir::NodeKind::StaticApply(b(hir::StaticApplication {
@@ -479,7 +516,7 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                         data_value_ty,
                     );
                     // deserialize the i-th element
-                    build_deserialize(arena, solver, index_node, ty_i)
+                    build_deserialize(arena, &mut locals, solver, index_node, ty_i)
                 })
                 .collect::<Result<SVec2<_>, _>>()?;
             // build the tuple node
@@ -500,7 +537,8 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
             }
             */
             // Extract the record payload from the data value.
-            let get_record = build_data_value_to_record(arena, solver, load_data_value)?;
+            let get_record =
+                build_data_value_to_record(arena, &mut locals, solver, load_data_value)?;
             let record_ty = record_payload_type();
             // store it at 1
             let (store_record, l_record_id) = store_new_local(
@@ -519,8 +557,13 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                     // get the record payload
                     let load_record = n(arena, load_local(l_record_id), record_payload_type());
                     // get the name-th element out of the record array
-                    let get_entry =
-                        build_expect_data_value_record_entry(arena, solver, load_record, &name)?;
+                    let get_entry = build_expect_data_value_record_entry(
+                        arena,
+                        &mut locals,
+                        solver,
+                        load_record,
+                        &name,
+                    )?;
                     // deserialize the name-th element
                     let function = solver.solve_impl_method(
                         trait_id,
@@ -529,15 +572,15 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                         span,
                         arena,
                     )?;
-                    let apply = static_apply_generated(
+                    static_apply_generated_with_locals(
                         arena,
+                        &mut locals,
                         solver,
                         function,
                         [(get_entry, data_value_type())],
                         ty,
                         Location::new_synthesized(),
-                    )?;
-                    Ok(n(arena, apply, ty))
+                    )
                 })
                 .collect::<Result<SVec2<_>, _>>()?;
             // build the record node
@@ -562,7 +605,8 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
             }
             */
             // extract the variant payload
-            let get_variant = build_data_value_to_variant(arena, solver, load_data_value)?;
+            let get_variant =
+                build_data_value_to_variant(arena, &mut locals, solver, load_data_value)?;
             let variant_data_value_ty = variant_payload_type();
             // store it at 1
             let (store_variant, l_variant_id) = store_new_local(
@@ -597,7 +641,8 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                             project(load_variant_for_payload, ProjectionIndex::from_index(1)),
                             data_value_type(),
                         );
-                        let deserialize = build_deserialize(arena, solver, get_data, payload_ty)?;
+                        let deserialize =
+                            build_deserialize(arena, &mut locals, solver, get_data, payload_ty)?;
                         n(arena, variant(tag, deserialize), ty)
                     } else {
                         // variant without payload
@@ -608,7 +653,7 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             // build the match node
-            let panic_node = build_panic(arena, solver, "Unknown enum variant tag")?;
+            let panic_node = build_panic(arena, &mut locals, solver, "Unknown enum variant tag")?;
             let match_type = n(arena, case(get_name, variant_cases, panic_node), ty);
             // assemble the final node
             Some(n(arena, block([store_variant, match_type]), ty))
@@ -683,6 +728,7 @@ pub fn add_to_module(to: &mut Module) {
 // Build a node that fetches the panic function node from the trait solver, importing it if necessary.
 fn build_panic(
     arena: &mut NodeArena,
+    locals: &mut Vec<LocalDecl>,
     solver: &mut TraitSolver,
     message: &str,
 ) -> Result<NodeId, InternalCompilationError> {
@@ -695,24 +741,26 @@ fn build_panic(
 
     let build_string = n(arena, native_str(message), string_type());
     let function = solver.get_function(span, &module::Path::single_str("std"), ustr("panic"))?;
-    let apply = static_apply_generated(
+    static_apply_generated_with_locals(
         arena,
+        locals,
         solver,
         function,
         [(build_string, string_type())],
         Type::never(),
         span,
-    )?;
-    Ok(n(arena, apply, Type::never()))
+    )
 }
 
 fn build_data_value_to_tuple(
     arena: &mut NodeArena,
+    locals: &mut Vec<LocalDecl>,
     solver: &mut TraitSolver,
     data_value_node: NodeId,
 ) -> Result<NodeId, InternalCompilationError> {
     build_data_value_to_x(
         arena,
+        locals,
         solver,
         "tuple",
         array_type(data_value_type()),
@@ -722,11 +770,13 @@ fn build_data_value_to_tuple(
 
 fn build_data_value_to_record(
     arena: &mut NodeArena,
+    locals: &mut Vec<LocalDecl>,
     solver: &mut TraitSolver,
     data_value_node: NodeId,
 ) -> Result<NodeId, InternalCompilationError> {
     build_data_value_to_x(
         arena,
+        locals,
         solver,
         "record",
         record_payload_type(),
@@ -743,11 +793,13 @@ fn variant_payload_type() -> Type {
 
 fn build_data_value_to_variant(
     arena: &mut NodeArena,
+    locals: &mut Vec<LocalDecl>,
     solver: &mut TraitSolver,
     data_value_node: NodeId,
 ) -> Result<NodeId, InternalCompilationError> {
     build_data_value_to_x(
         arena,
+        locals,
         solver,
         "variant",
         variant_payload_type(),
@@ -757,6 +809,7 @@ fn build_data_value_to_variant(
 
 fn build_data_value_to_x(
     arena: &mut NodeArena,
+    locals: &mut Vec<LocalDecl>,
     solver: &mut TraitSolver,
     what: &str,
     ret_ty: Type,
@@ -764,30 +817,26 @@ fn build_data_value_to_x(
 ) -> Result<NodeId, InternalCompilationError> {
     let span = Location::new_synthesized();
 
-    // helpers to synthesize HIR
-    let n = |arena: &mut NodeArena, kind, ty| {
-        arena.alloc(hir::Node::new(kind, ty, EffType::empty(), span))
-    };
-
     let function = solver.get_function(
         span,
         &module::Path::single_str("std"),
         ustr(&format!("data_value_to_{what}")),
     )?;
-    let apply = static_apply_generated(
+    static_apply_generated_with_locals(
         arena,
+        locals,
         solver,
         function,
         [(data_value_node, data_value_type())],
         ret_ty,
         span,
-    )?;
-    Ok(n(arena, apply, ret_ty))
+    )
 }
 
 // Build a node that gets an entry from a data-value record payload [(string, DataValue)].
 fn build_expect_data_value_record_entry(
     arena: &mut NodeArena,
+    locals: &mut Vec<LocalDecl>,
     solver: &mut TraitSolver,
     fields: NodeId,
     name: &str,
@@ -799,24 +848,19 @@ fn build_expect_data_value_record_entry(
     let element_ty = tuple_type([string_type(), data_value_type()]);
     let payload_ty = array_type(element_ty);
 
-    // helpers to synthesize HIR
-    let n = |arena: &mut NodeArena, kind, ty| {
-        arena.alloc(hir::Node::new(kind, ty, EffType::empty(), span))
-    };
-
-    let name_node = n(arena, native_str(name), string_type());
+    let name_node = alloc_synth_node(arena, native_str(name), string_type());
     let function = solver.get_function(
         span,
         &module::Path::single_str("std"),
         ustr("expect_data_value_record_entry"),
     )?;
-    let apply = static_apply_generated(
+    static_apply_generated_with_locals(
         arena,
+        locals,
         solver,
         function,
         [(fields, payload_ty), (name_node, string_type())],
         data_value_type(),
         span,
-    )?;
-    Ok(n(arena, apply, data_value_type()))
+    )
 }

@@ -221,7 +221,7 @@ fn emit_expr_unsafe_inner(
 
     // Check for unbound type variables.
     let unbound = hir::all_unbound_ty_vars(expr_arena, node_id);
-    let uninstantiated_unbound = check_unbounds(unbound, &quantifiers)?;
+    let uninstantiated_unbound = check_unbounds(unbound, &quantifiers, &module_env)?;
 
     // Apply unbound→Never fixup if needed.
     let fixup_subst: (TypeInstSubst, FxHashMap<_, _>) = (
@@ -258,7 +258,7 @@ fn emit_expr_unsafe_inner(
 
     // Filter solved constraints.
     let mut solver = trait_solver_from_module!(module, others);
-    let mut drop_subst = (FxHashMap::default(), FxHashMap::default());
+    let mut drop_subst = fixup_subst;
     let mut constraints: Vec<_> = all_constraints
         .iter()
         .filter_map(|constraint| {
