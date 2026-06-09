@@ -16,7 +16,7 @@ use crate::module::id::Id;
 use crate::std::array::array_value_from_vec;
 use crate::std::value::{VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX};
 use crate::{
-    CompilerSession, Location, ModuleRegistry, SourceId, SourceTable,
+    CompilerSession, FxHashMap, Location, ModuleRegistry, SourceId, SourceTable,
     compiler::error::RuntimeErrorKind,
     format::{FormatWith, write_with_separator},
     hir::function::{ResolvedArgPassing, ResolvedValueArgPassing, TrivialCopy},
@@ -201,6 +201,8 @@ pub struct EvalCtx<'a> {
     pub module_id: ModuleId,
     /// whether the current function returns a place result
     returns_place: bool,
+    /// Per-run cache for layout lookups repeated by hot `TrivialCopy` call edges.
+    trivial_copy_layout_cache: FxHashMap<(ModuleId, Type), ResolvedValueLayout>,
     /// session holding sources and other modules for error reporting and import resolution
     compiler_session: &'a CompilerSession,
 }
@@ -320,6 +322,7 @@ impl<'a> EvalCtx<'a> {
             fuel_remaining: None,
             module_id: module,
             returns_place: false,
+            trivial_copy_layout_cache: FxHashMap::default(),
             compiler_session,
         }
     }
@@ -2666,8 +2669,12 @@ fn eval_call_arg(
     }
 }
 
-fn trivial_copy_arg_layout(ctx: &EvalCtx<'_>, ty: Type, span: Location) -> ResolvedValueLayout {
-    ctx.compiler_session()
+fn trivial_copy_arg_layout(ctx: &mut EvalCtx<'_>, ty: Type, span: Location) -> ResolvedValueLayout {
+    if let Some(layout) = ctx.trivial_copy_layout_cache.get(&(ctx.module_id, ty)) {
+        return *layout;
+    }
+    let layout = ctx
+        .compiler_session()
         .value_layout(ctx.module_id, ty, span)
         .unwrap_or_else(|_| {
             panic!(
@@ -2675,7 +2682,10 @@ fn trivial_copy_arg_layout(ctx: &EvalCtx<'_>, ty: Type, span: Location) -> Resol
                 ty.format_with(&ctx.compiler_session().module_env()),
                 span.format_with(ctx.compiler_session().source_table())
             )
-        })
+        });
+    ctx.trivial_copy_layout_cache
+        .insert((ctx.module_id, ty), layout);
+    layout
 }
 
 fn eval_args(
