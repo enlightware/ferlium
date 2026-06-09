@@ -507,10 +507,12 @@ impl Trait {
         let mut mapper = BitmapInstantiationMapper::new(&inst_subst);
         self.methods
             .iter()
-            .map(|(_, def)| {
-                let mut def = def.map(&mut mapper);
-                def.ty_scheme.simplify();
-                def
+            .map(|(_, def)| FunctionDefinition {
+                ty_scheme: def.ty_scheme.map_simplified(&mut mapper),
+                generic_params: def.generic_params.clone(),
+                arg_names: def.arg_names.clone(),
+                doc: def.doc.clone(),
+                attributes: def.attributes.clone(),
             })
             .collect::<Vec<_>>()
     }

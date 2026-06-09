@@ -785,11 +785,23 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
         subst
     }
 
-    /// Remove constant constraints and simplify the type scheme.
-    pub(crate) fn simplify(&mut self) {
-        self.constraints.retain(|c| !c.is_constant());
-        self.ty_quantifiers = Self::list_ty_vars(&self.ty, self.constraints.iter());
-        self.eff_quantifiers = Self::list_eff_vars(&self.ty, self.constraints.iter());
+    /// Map this type scheme and drop solved constant constraints before recomputing quantifiers.
+    pub(crate) fn map_simplified(&self, f: &mut impl TypeMapper) -> Self {
+        let ty = self.ty.map(f);
+        let constraints = self
+            .constraints
+            .map(f)
+            .into_iter()
+            .filter(|c| !c.is_constant())
+            .collect::<Vec<_>>();
+        let ty_quantifiers = Self::list_ty_vars(&ty, constraints.iter());
+        let eff_quantifiers = Self::list_eff_vars(&ty, constraints.iter());
+        Self {
+            ty_quantifiers,
+            eff_quantifiers,
+            ty,
+            constraints,
+        }
     }
 
     /// Extra functions parameters that must be passed to resolve polymorphism.
