@@ -17,7 +17,8 @@ use ferlium::{
     hir::{
         NodeKind,
         function::{
-            Function, FunctionDefinition, ResolvedArgPassing, ResolvedValueArgPassing, VoidFunction,
+            Function, FunctionDefinition, ResolvedArgPassing, ResolvedValueArgPassing,
+            UnaryNativeFnNN,
         },
         value::LiteralValue,
     },
@@ -511,6 +512,10 @@ fn parent_trait_constraints_are_not_trait_use_entailment() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn concrete_impl_stores_associated_const_values() {
+    fn unit_identity(value: ()) {
+        value
+    }
+
     let method = FunctionDefinition::new_infer_quantifiers(
         FnType::new_by_val([Type::variable_id(0)], Type::variable_id(0), no_effects()),
         ["value"],
@@ -539,7 +544,10 @@ fn concrete_impl_stores_associated_const_values() {
             LiteralValue::new_native(0isize),
             LiteralValue::new_native(1isize),
         ],
-        [(Box::new(VoidFunction) as Function, Vec::<LocalDecl>::new())],
+        [(
+            Box::new(UnaryNativeFnNN::new(unit_identity)) as Function,
+            Vec::<LocalDecl>::new(),
+        )],
         &mut fn_collector,
     );
     let imp = impls.get_impl_by_local_id(impl_id);

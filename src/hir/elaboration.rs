@@ -1166,7 +1166,7 @@ mod tests {
         hir::{GetTraitAssociatedConst, value::LiteralValue},
         module::{
             FunctionCollector, LocalDecl, LocalTraitId, ModuleId, PendingFunctionCollector,
-            TraitId, TraitImpls, TrivialCopyStatus, id::Id,
+            TraitId, TraitImpls, id::Id,
         },
         types::{
             r#trait::{Trait, TraitAssociatedConst, TraitAssociatedConstIndex},
@@ -1241,7 +1241,6 @@ mod tests {
         let type_defs = Vec::new();
         let mut import_fn_slots = Vec::new();
         let mut import_impl_slots = Vec::new();
-        let mut trivial_copy_status = TrivialCopyStatus::default();
         let mut solver = TraitSolver::new(
             crate::types::trait_solver::CurrentTypeDefs::new(ModuleId(0), &type_defs),
             &traits,
@@ -1249,7 +1248,6 @@ mod tests {
             FxHashMap::default(),
             &mut import_fn_slots,
             &mut import_impl_slots,
-            &mut trivial_copy_status,
             PendingFunctionCollector::new(0),
             &modules,
         );
@@ -1293,7 +1291,6 @@ mod tests {
         let type_defs = Vec::new();
         let mut import_fn_slots = Vec::new();
         let mut import_impl_slots = Vec::new();
-        let mut trivial_copy_status = TrivialCopyStatus::default();
         let mut solver = TraitSolver::new(
             crate::types::trait_solver::CurrentTypeDefs::new(ModuleId(0), &type_defs),
             &traits,
@@ -1301,7 +1298,6 @@ mod tests {
             FxHashMap::default(),
             &mut import_fn_slots,
             &mut import_impl_slots,
-            &mut trivial_copy_status,
             PendingFunctionCollector::new(0),
             &modules,
         );

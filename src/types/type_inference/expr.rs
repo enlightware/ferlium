@@ -641,10 +641,10 @@ impl TypeInference {
                     )
                 }
                 // Retrieve the function from the environment, if it exists
-                else if let Some((definition, function, _module_id, _arg_passing)) = env
+                else if let Some((definition, function, _module_id, _runtime_arg_passing)) = env
                     .get_function(path)?
-                    .map(|(definition, function, module_id, arg_passing)| {
-                        (definition.clone(), function, module_id, arg_passing)
+                    .map(|(definition, function, module_id, runtime_arg_passing)| {
+                        (definition.clone(), function, module_id, runtime_arg_passing)
                     })
                 {
                     let (fn_ty, inst_data, _subst) = definition
@@ -1427,10 +1427,13 @@ impl TypeInference {
                         let effects = self.make_dependent_effect([&array_effects, &index_effects]);
                         self.diverging_prefix_result(env, nodes, effects)
                     } else {
-                        let (path, (definition, function, _module_id, arg_passing)) = {
-                            let (path, (definition, function, module_id, arg_passing)) =
+                        let (path, (definition, function, _module_id, runtime_arg_passing)) = {
+                            let (path, (definition, function, module_id, runtime_arg_passing)) =
                                 env.get_std_function(ustr("array_index"), expr_span)?;
-                            (path, (definition.clone(), function, module_id, arg_passing))
+                            (
+                                path,
+                                (definition.clone(), function, module_id, runtime_arg_passing),
+                            )
                         };
                         let (inst_fn_ty, inst_data, _subst) = definition
                             .ty_scheme
@@ -1448,8 +1451,8 @@ impl TypeInference {
                             &inst_fn_ty.effects,
                         ]);
                         let mut argument_values = vec![array_node_id, index_node_id];
-                        let visible_arg_passing = visible_native_arg_passing(
-                            arg_passing,
+                        let visible_arg_passing = visible_arg_passing_from_runtime(
+                            runtime_arg_passing.as_deref(),
                             &inst_data,
                             argument_values.len(),
                         );
@@ -1776,9 +1779,10 @@ impl TypeInference {
         arg_tys: &[FnArgType],
         abi_arg_tys: &[FnArgType],
         span: Location,
-        native_arg_passing: Option<&[ResolvedArgPassing]>,
+        visible_arg_passing_override: Option<&[ResolvedArgPassing]>,
     ) -> PreparedCallArguments {
-        let arg_passing = self.argument_passing_for_args(arg_tys, abi_arg_tys, native_arg_passing);
+        let arg_passing =
+            self.argument_passing_for_args(arg_tys, abi_arg_tys, visible_arg_passing_override);
         let mut stores = Vec::new();
         for ((arg, arg_ty), passing) in args.iter_mut().zip(arg_tys).zip(&arg_passing) {
             match passing {
@@ -1824,12 +1828,12 @@ impl TypeInference {
         &self,
         arg_tys: &[FnArgType],
         abi_arg_tys: &[FnArgType],
-        native_arg_passing: Option<&[ResolvedArgPassing]>,
+        visible_arg_passing_override: Option<&[ResolvedArgPassing]>,
     ) -> Vec<PendingArgPassing> {
         assert_eq!(arg_tys.len(), abi_arg_tys.len());
-        if let Some(native_arg_passing) = native_arg_passing {
-            assert_eq!(arg_tys.len(), native_arg_passing.len());
-            return native_arg_passing
+        if let Some(visible_arg_passing_override) = visible_arg_passing_override {
+            assert_eq!(arg_tys.len(), visible_arg_passing_override.len());
+            return visible_arg_passing_override
                 .iter()
                 .copied()
                 .map(PendingArgPassing::from_resolved)
@@ -2662,10 +2666,10 @@ impl TypeInference {
                     );
                     (node, ret_ty, MutType::constant(), combined_effects)
                 }
-            } else if let Some((definition, function, _module_id, arg_passing)) = env
+            } else if let Some((definition, function, _module_id, runtime_arg_passing)) = env
                 .get_function(path)?
-                .map(|(definition, function, module_id, arg_passing)| {
-                    (definition.clone(), function, module_id, arg_passing)
+                .map(|(definition, function, module_id, runtime_arg_passing)| {
+                    (definition.clone(), function, module_id, runtime_arg_passing)
                 })
             {
                 if definition.ty_scheme.ty.args.len() != args.len() {
@@ -2694,8 +2698,11 @@ impl TypeInference {
                     let ret_ty = inst_fn_ty.ret;
                     let combined_effects =
                         self.make_dependent_effect([&args_effects, &inst_fn_ty.effects]);
-                    let visible_arg_passing =
-                        visible_native_arg_passing(arg_passing, &inst_data, args_node_ids.len());
+                    let visible_arg_passing = visible_arg_passing_from_runtime(
+                        runtime_arg_passing.as_deref(),
+                        &inst_data,
+                        args_node_ids.len(),
+                    );
                     let temp_start_index = env.cur_locals.len();
                     let prepared_arguments = self.prepare_call_arguments(
                         env,
@@ -3527,21 +3534,22 @@ impl TypeInference {
     }
 }
 
-fn visible_native_arg_passing(
-    passing: Option<&'static [ResolvedArgPassing]>,
+fn visible_arg_passing_from_runtime<'a>(
+    runtime_arg_passing: Option<&'a [ResolvedArgPassing]>,
     inst_data: &hir::FnInstData,
     visible_arg_count: usize,
-) -> Option<&'static [ResolvedArgPassing]> {
-    let passing = passing?;
+) -> Option<&'a [ResolvedArgPassing]> {
+    let runtime_arg_passing = runtime_arg_passing?;
     let hidden_dict_arg_count = inst_data.dicts_req.len();
     if hidden_dict_arg_count == 0 {
-        Some(passing)
+        Some(runtime_arg_passing)
     } else {
-        assert!(
-            passing.len() >= hidden_dict_arg_count
-                && passing.len() <= hidden_dict_arg_count + visible_arg_count
+        assert_eq!(
+            runtime_arg_passing.len(),
+            hidden_dict_arg_count + visible_arg_count,
+            "runtime argument passing should contain hidden evidence followed by visible arguments"
         );
-        Some(&passing[hidden_dict_arg_count..])
+        Some(&runtime_arg_passing[hidden_dict_arg_count..])
     }
 }
 

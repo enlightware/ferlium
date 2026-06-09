@@ -14,7 +14,7 @@ use itertools::Itertools;
 use crate::{
     FxHashSet, Location, SourceId, SourceTable, ast, compilation_error,
     compiler::diagnostics::ModuleDiagnostic,
-    compiler::error::{CompilationError, LocatedError},
+    compiler::error::{CompilationError, InternalCompilationError, LocatedError},
     compiler::pipeline::{
         ModuleRef, compile_with_source_id, new_ast_arena_sized_from_source, parse_module_and_expr,
     },
@@ -30,11 +30,12 @@ use crate::{
         emit_hir::{EmitModuleFrom, emit_module},
     },
     module::{
-        self, LocalDecl, Module, ModuleEnv, ModuleFunction, ModuleId, Path, Uses,
+        self, LocalDecl, Module, ModuleEnv, ModuleFunction, ModuleId, Path, ResolvedValueLayout,
+        Uses,
         id::{Id, NamedIndexed},
     },
     parser::{self, describe_parse_error},
-    std::{self as ferlium_std, STD_MODULE_ID, new_module_using_std},
+    std::{self as ferlium_std, STD_MODULE_ID, new_module_using_std, value::value_layout_for_type},
     types::r#type::Type,
 };
 
@@ -1007,6 +1008,18 @@ impl CompilerSession {
             panic!("Module {module_id} is stale due to failed compilation, cannot access it");
         }
         entry.module().unwrap()
+    }
+
+    /// Compute the concrete value layout of `ty` in the environment of `module_id`.
+    pub(crate) fn value_layout(
+        &self,
+        module_id: ModuleId,
+        ty: Type,
+        span: Location,
+    ) -> Result<ResolvedValueLayout, InternalCompilationError> {
+        let module = self.expect_fresh_module(module_id);
+        let env = ModuleEnv::new(module, &self.modules);
+        value_layout_for_type(ty, span, &env)
     }
 
     /// Returned the last good compiled module for module_id, or panic if none exists.

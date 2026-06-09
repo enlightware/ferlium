@@ -251,8 +251,13 @@ pub trait Callable: DynClone {
     fn as_script(&self) -> Option<&ScriptFunction> {
         None
     }
-    fn argument_passing(&self) -> Option<&'static [ResolvedArgPassing]> {
+    /// Passing convention for the runtime adapter argument vector, including hidden evidence.
+    fn runtime_argument_passing(&self) -> Option<&[ResolvedArgPassing]> {
         None
+    }
+    /// Passing convention for source-visible callee parameters only.
+    fn visible_parameter_passing(&self) -> Option<&[ResolvedArgPassing]> {
+        self.runtime_argument_passing()
     }
     fn as_script_mut(&mut self) -> Option<&mut ScriptFunction> {
         None
@@ -597,22 +602,34 @@ impl Eq for Box<ScriptFunction> {}
 /// Context-native functions take ownership of their argument vector. Unlike the
 /// generated native wrappers below, they must consume or explicitly discard any
 /// `ValOrMut::Val` they remove from that vector.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ContextNativeFn {
+    /// Debug name used when formatting the native callable.
     name: &'static str,
-    argument_passing: &'static [ResolvedArgPassing],
+    /// Runtime adapter passing, including hidden evidence followed by visible parameters.
+    runtime_argument_passing: Vec<ResolvedArgPassing>,
+    /// Visible Ferlium parameter passing, excluding hidden runtime evidence.
+    visible_parameter_passing: &'static [ResolvedArgPassing],
+    /// Rust callback implementing the context-native operation.
     function: for<'a> fn(ValOrMutArgs, &mut CallCtx<'a>) -> EvalControlFlowResult,
 }
 
 impl ContextNativeFn {
     pub(crate) fn new(
         name: &'static str,
-        argument_passing: &'static [ResolvedArgPassing],
+        hidden_argument_passing: &'static [ResolvedArgPassing],
+        visible_parameter_passing: &'static [ResolvedArgPassing],
         function: for<'a> fn(ValOrMutArgs, &mut CallCtx<'a>) -> EvalControlFlowResult,
     ) -> Self {
+        let runtime_argument_passing = hidden_argument_passing
+            .iter()
+            .chain(visible_parameter_passing)
+            .copied()
+            .collect();
         Self {
             name,
-            argument_passing,
+            runtime_argument_passing,
+            visible_parameter_passing,
             function,
         }
     }
@@ -628,8 +645,12 @@ impl Callable for ContextNativeFn {
         (self.function)(ValOrMutArgs::new(args), ctx)
     }
 
-    fn argument_passing(&self) -> Option<&'static [ResolvedArgPassing]> {
-        Some(self.argument_passing)
+    fn runtime_argument_passing(&self) -> Option<&[ResolvedArgPassing]> {
+        Some(&self.runtime_argument_passing)
+    }
+
+    fn visible_parameter_passing(&self) -> Option<&[ResolvedArgPassing]> {
+        Some(self.visible_parameter_passing)
     }
 
     fn format_ind(
@@ -967,7 +988,7 @@ macro_rules! n_ary_native_fn {
             }
             }
 
-            fn argument_passing(&self) -> Option<&'static [ResolvedArgPassing]> {
+            fn runtime_argument_passing(&self) -> Option<&[ResolvedArgPassing]> {
                 Some(&[$($arg::PASSING),*])
             }
 

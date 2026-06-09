@@ -25,7 +25,7 @@ use crate::{
             log_dropped_constraints_module, refresh_debug_info_for_functions, set_pending_function,
             substitute_and_canonicalize_functions,
         },
-        function::{FunctionDefinition, VoidFunction},
+        function::FunctionDefinition,
     },
     internal_compilation_error,
     module::{
@@ -586,12 +586,7 @@ where
             doc.clone(),
             attributes.clone(),
         );
-        let descr = ModuleFunction::new_without_debug_info(
-            definition,
-            b(VoidFunction),
-            Some(spans),
-            vec![],
-        );
+        let descr = ModuleFunction::placeholder(definition, Some(spans));
         let id = if let Some(placeholder_ids) = trait_ctx
             .as_ref()
             .and_then(|tc| tc.stub_data.as_ref().map(|tys| &tys.method_ids))

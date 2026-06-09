@@ -30,9 +30,9 @@ use crate::{
     },
     internal_compilation_error,
     module::{
-        self, ConcreteTraitImplKey, FunctionId, LocalDecl, LocalDeclId, Module,
-        PendingFunctionBody, PendingModuleFunction, ProjectionIndex, TraitId, TraitImpl,
-        TraitImplId, TraitImpls, id::Id,
+        self, ConcreteTraitImplKey, FunctionId, LocalDecl, LocalDeclId, Module, ModuleEnv,
+        PendingFunctionBody, PendingModuleFunction, ProjectionIndex, ResolvedValueLayout, TraitId,
+        TraitImpl, TraitImplId, TraitImpls, TypeDefId, id::Id,
     },
     std::{
         STD_MODULE_ID,
@@ -48,7 +48,7 @@ use crate::{
         Deriver, Trait, TraitAssociatedConst, TraitAssociatedConstIndex, TraitMethodIndex,
     },
     types::trait_solver::TraitSolver,
-    types::r#type::{FnArgType, FnType, Type, TypeKind, tuple_type},
+    types::r#type::{FnArgType, FnType, Type, TypeDef, TypeKind, tuple_type},
     types::type_like::TypeLike,
 };
 
@@ -170,11 +170,27 @@ fn align_to(offset: usize, align: usize) -> usize {
     }
 }
 
+pub(crate) trait TypeLayoutEnv {
+    fn type_def(&self, id: TypeDefId) -> &TypeDef;
+}
+
+impl TypeLayoutEnv for ModuleEnv<'_> {
+    fn type_def(&self, id: TypeDefId) -> &TypeDef {
+        ModuleEnv::type_def(self, id)
+    }
+}
+
+impl TypeLayoutEnv for TraitSolver<'_> {
+    fn type_def(&self, id: TypeDefId) -> &TypeDef {
+        TraitSolver::type_def(self, id)
+    }
+}
+
 fn layout_for_value_type(
     ty: Type,
     span: Location,
     active: &mut FxHashSet<Type>,
-    solver: &TraitSolver<'_>,
+    env: &impl TypeLayoutEnv,
 ) -> Result<ValueLayout, InternalCompilationError> {
     if !active.insert(ty) {
         // Recursive occurrences are represented indirectly at runtime, so their
@@ -193,7 +209,7 @@ fn layout_for_value_type(
             drop(ty_data);
             let fields = member_tys
                 .into_iter()
-                .map(|member_ty| layout_for_value_type(member_ty, span, active, solver))
+                .map(|member_ty| layout_for_value_type(member_ty, span, active, env))
                 .collect::<Result<Vec<_>, _>>()?;
             active.remove(&ty);
             return Ok(ValueLayout::product(fields));
@@ -206,7 +222,7 @@ fn layout_for_value_type(
             drop(ty_data);
             let fields = field_tys
                 .into_iter()
-                .map(|field_ty| layout_for_value_type(field_ty, span, active, solver))
+                .map(|field_ty| layout_for_value_type(field_ty, span, active, env))
                 .collect::<Result<Vec<_>, _>>()?;
             active.remove(&ty);
             return Ok(ValueLayout::product(fields));
@@ -219,7 +235,7 @@ fn layout_for_value_type(
             drop(ty_data);
             let payloads = payload_tys
                 .into_iter()
-                .map(|payload_ty| layout_for_value_type(payload_ty, span, active, solver))
+                .map(|payload_ty| layout_for_value_type(payload_ty, span, active, env))
                 .collect::<Result<Vec<_>, _>>()?;
             active.remove(&ty);
             return Ok(ValueLayout::variant(payloads));
@@ -227,8 +243,8 @@ fn layout_for_value_type(
         Named(named) => {
             let named = named.clone();
             drop(ty_data);
-            let shape_ty = solver.type_def(named.def).instantiated_shape(&named.params);
-            let layout = layout_for_value_type(shape_ty, span, active, solver)?;
+            let shape_ty = env.type_def(named.def).instantiated_shape(&named.params);
+            let layout = layout_for_value_type(shape_ty, span, active, env)?;
             active.remove(&ty);
             return Ok(layout);
         }
@@ -248,13 +264,33 @@ fn layout_for_value_type(
     Ok(layout)
 }
 
+pub(crate) fn value_layout_for_type(
+    ty: Type,
+    span: Location,
+    env: &impl TypeLayoutEnv,
+) -> Result<ResolvedValueLayout, InternalCompilationError> {
+    let layout = layout_for_value_type(ty, span, &mut FxHashSet::default(), env)?;
+    let size = u32::try_from(layout.size).map_err(|_| {
+        internal_compilation_error!(Internal {
+            error: format!("Value size {} does not fit in u32", layout.size),
+            span,
+        })
+    })?;
+    let align = u32::try_from(layout.align).map_err(|_| {
+        internal_compilation_error!(Internal {
+            error: format!("Value alignment {} does not fit in u32", layout.align),
+            span,
+        })
+    })?;
+    Ok(ResolvedValueLayout { size, align })
+}
+
 pub(crate) fn value_layout_associated_const_values(
     ty: Type,
     span: Location,
-    solver: &TraitSolver<'_>,
+    env: &impl TypeLayoutEnv,
 ) -> Result<[isize; 2], InternalCompilationError> {
-    layout_for_value_type(ty, span, &mut FxHashSet::default(), solver)?
-        .associated_const_values(span)
+    layout_for_value_type(ty, span, &mut FxHashSet::default(), env)?.associated_const_values(span)
 }
 
 /// Return whether all unresolved variables in `ty` appear only in function types.

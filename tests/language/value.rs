@@ -20,8 +20,6 @@ use ferlium::{
         LocalDeclId, LocalStorage, ResolvedLocalClone, ResolvedLocalDrop,
         ResolvedTakeLocalValueMode, ResolvedValueLayout, id::Id,
     },
-    std::math::int_type,
-    types::r#type::Type,
 };
 use ustr::ustr;
 
@@ -855,7 +853,7 @@ fn int_value_layout() -> ResolvedValueLayout {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn concrete_trivial_copy_call_argument_uses_cached_layout() {
+fn concrete_trivial_copy_call_argument_uses_trivial_copy_passing() {
     let mut session = TestSession::new();
     let module = session.compile_and_get_module(
         r#"
@@ -880,10 +878,6 @@ fn concrete_trivial_copy_call_argument_uses_cached_layout() {
             })
         }),
         "expected concrete int call argument to use trivial-copy passing"
-    );
-    assert_eq!(
-        module.trivial_copy_layout(int_type()),
-        Some(int_value_layout())
     );
 }
 
@@ -1474,7 +1468,7 @@ fn value_impl_for_foreign_named_adt_is_rejected() {
     }
 }
 
-// Testing the module-level trivial-copy layout cache used to derive physical argument passing,
+// Testing the callee-side parameter passing metadata used by SSA lowering,
 // as described in `doc/hir-ownership.md` ("Call Argument Passing").
 
 #[test]
@@ -1483,8 +1477,14 @@ fn concrete_trivial_copy_parameter_resolves_to_trivial_copy() {
     let mut session = TestSession::new();
     let module = session.compile_and_get_module("fn id(value: int) -> int { value } id(1)");
     assert_eq!(
-        module.trivial_copy_layout(Type::primitive::<isize>()),
-        Some(int_value_layout())
+        module
+            .get_function(ustr("id"))
+            .unwrap()
+            .parameter_passing
+            .as_slice(),
+        &[ResolvedArgPassing::Value(
+            ResolvedValueArgPassing::TrivialCopy,
+        )][..],
     );
 }
 
@@ -1498,15 +1498,16 @@ fn non_trivial_copy_value_parameter_resolves_to_shared_ref() {
         identity("hello")
         "#,
     );
-    let string_ty = module
-        .get_function(ustr("identity"))
-        .unwrap()
-        .definition
-        .ty_scheme
-        .ty
-        .args[0]
-        .ty;
-    assert_eq!(module.trivial_copy_layout(string_ty), None);
+    assert_eq!(
+        module
+            .get_function(ustr("identity"))
+            .unwrap()
+            .parameter_passing
+            .as_slice(),
+        &[ResolvedArgPassing::Value(
+            ResolvedValueArgPassing::SharedRef
+        )][..]
+    );
 }
 
 #[test]
@@ -1521,8 +1522,12 @@ fn mutable_parameter_resolves_to_mutable_ref() {
         "#,
     );
     assert_eq!(
-        module.trivial_copy_layout(Type::primitive::<isize>()),
-        Some(int_value_layout())
+        module
+            .get_function(ustr("store"))
+            .unwrap()
+            .parameter_passing
+            .as_slice(),
+        &[ResolvedArgPassing::MutableRef][..]
     );
 }
 
@@ -1537,7 +1542,16 @@ fn generic_value_parameter_resolves_to_shared_ref() {
         identity("hello")
         "#,
     );
-    assert_eq!(module.trivial_copy_layout(Type::variable_id(0)), None);
+    assert_eq!(
+        module
+            .get_function(ustr("identity"))
+            .unwrap()
+            .parameter_passing
+            .as_slice(),
+        &[ResolvedArgPassing::Value(
+            ResolvedValueArgPassing::SharedRef
+        )][..]
+    );
 }
 
 #[test]
@@ -1552,16 +1566,41 @@ fn multiple_parameters_preserve_declaration_order() {
         "#,
     );
     assert_eq!(
-        module.trivial_copy_layout(Type::primitive::<isize>()),
-        Some(int_value_layout())
+        module
+            .get_function(ustr("mix"))
+            .unwrap()
+            .parameter_passing
+            .as_slice(),
+        &[
+            ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy),
+            ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef),
+            ResolvedArgPassing::MutableRef,
+        ][..],
     );
-    let string_ty = module
-        .get_function(ustr("mix"))
-        .unwrap()
-        .definition
-        .ty_scheme
-        .ty
-        .args[1]
-        .ty;
-    assert_eq!(module.trivial_copy_layout(string_ty), None);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn context_native_parameter_passing_excludes_hidden_dictionary_args() {
+    let session = TestSession::new();
+    let function = session
+        .session()
+        .std_module()
+        .get_function(ustr("buffer_drop_at"))
+        .unwrap();
+    assert_eq!(
+        function.parameter_passing.as_slice(),
+        &[
+            ResolvedArgPassing::MutableRef,
+            ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy),
+        ][..],
+    );
+    assert_eq!(
+        function.code.runtime_argument_passing().unwrap(),
+        &[
+            ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef),
+            ResolvedArgPassing::MutableRef,
+            ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy),
+        ][..],
+    );
 }

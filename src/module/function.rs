@@ -17,7 +17,7 @@ use crate::{
     define_id_type,
     format::FormatWith,
     hir::borrow_checker::{check_borrows, check_place_return_roots},
-    hir::function::{Function, FunctionDefinition, PendingScriptFunction},
+    hir::function::{Function, FunctionDefinition, PendingScriptFunction, ResolvedArgPassing},
     hir::{
         ENodeArena, ENodeId, Elaborated, HirPhase, NodeId, UNodeArena, UNodeId, Unelaborated,
         function::ScriptFunction,
@@ -500,6 +500,11 @@ impl PendingFunctionBody {
 pub struct ModuleFunction {
     pub definition: FunctionDefinition,
     pub code: Function,
+    /// High-level argument passing requirements for each visible parameter.
+    ///
+    /// HIR bodies set this during elaboration with the trait solver. Native/interpreter-only
+    /// bodies provide it through `Callable::visible_parameter_passing`.
+    pub parameter_passing: Vec<ResolvedArgPassing>,
     pub spans: Option<ModuleFunctionSpans>,
     /// Local variable declarations for the function body, including arguments and any variables declared within the function.
     pub locals: Vec<ELocalDecl>,
@@ -508,6 +513,32 @@ pub struct ModuleFunction {
 
 /// A module function after HIR elaboration.
 pub type EModuleFunction = ModuleFunction;
+
+fn parameter_passing_from_code(
+    definition: &FunctionDefinition,
+    code: &Function,
+) -> Vec<ResolvedArgPassing> {
+    let parameter_passing = code
+        .visible_parameter_passing()
+        .expect("module function code should expose visible parameter passing")
+        .to_vec();
+    check_parameter_passing_len(definition, &parameter_passing);
+    parameter_passing
+}
+
+fn check_parameter_passing_len(
+    definition: &FunctionDefinition,
+    parameter_passing: &[ResolvedArgPassing],
+) {
+    let expected = definition.arg_names.len();
+    assert_eq!(
+        parameter_passing.len(),
+        expected,
+        "function has {} visible parameters but {} parameter-passing entries",
+        expected,
+        parameter_passing.len()
+    );
+}
 
 impl PendingModuleFunction {
     pub fn new(
@@ -544,12 +575,7 @@ impl PendingModuleFunction {
     }
 
     pub fn placeholder(&self) -> EModuleFunction {
-        ModuleFunction::new_without_debug_info(
-            self.definition.clone(),
-            b(crate::hir::function::VoidFunction),
-            self.spans.clone(),
-            Vec::new(),
-        )
+        ModuleFunction::placeholder(self.definition.clone(), self.spans.clone())
     }
 
     pub fn check_borrows_and_elaborate_hir(
@@ -564,6 +590,18 @@ impl PendingModuleFunction {
             &mut self.locals,
             ctx,
         )?;
+        // Classify visible parameters while the trait solver is available, so
+        // later lowering passes can read the callee ABI without solving traits.
+        let arg_count = self.definition.arg_names.len();
+        let parameter_passing = (0..arg_count)
+            .map(|i| {
+                let arg_ty = self.definition.ty_scheme.ty.args[i];
+                let span = self.locals[i].name.1;
+                ctx.trait_solver
+                    .resolved_arg_passing_for_no_temp_arg(&mut self.code.arena, &arg_ty, span)
+                    .map(|passing| passing.into_elaborated())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         if self.definition.returns_place() {
             if self.code.arena[root].ty != Type::never() {
                 return Err(internal_compilation_error!(Unsupported {
@@ -600,6 +638,7 @@ impl PendingModuleFunction {
                 elaborated.root,
                 self.code.runtime_arg_count,
             )),
+            parameter_passing,
             self.spans,
             locals,
         );
@@ -611,13 +650,16 @@ impl ModuleFunction {
     pub fn new_elaborated(
         definition: FunctionDefinition,
         code: Function,
+        parameter_passing: Vec<ResolvedArgPassing>,
         spans: Option<ModuleFunctionSpans>,
         locals: Vec<ELocalDecl>,
     ) -> Self {
+        check_parameter_passing_len(&definition, &parameter_passing);
         let debug_info = FunctionDebugInfo::from_locals(&locals);
         Self {
             definition,
             code,
+            parameter_passing,
             spans,
             locals,
             debug_info,
@@ -633,8 +675,17 @@ impl ModuleFunction {
         let locals = locals
             .into_iter()
             .map(ULocalDecl::into_elaborated)
-            .collect();
-        Self::new_elaborated(definition, code, spans, locals)
+            .collect::<Vec<_>>();
+        let parameter_passing = parameter_passing_from_code(&definition, &code);
+        let debug_info = FunctionDebugInfo::from_locals(&locals);
+        Self {
+            definition,
+            code,
+            parameter_passing,
+            spans,
+            locals,
+            debug_info,
+        }
     }
 
     /// Constructs a function whose debug info will be populated by a later `refresh_debug_info` call after locals have reached their final form.
@@ -647,10 +698,12 @@ impl ModuleFunction {
         let locals = locals
             .into_iter()
             .map(ULocalDecl::into_elaborated)
-            .collect();
+            .collect::<Vec<_>>();
+        let parameter_passing = parameter_passing_from_code(&definition, &code);
         Self {
             definition,
             code,
+            parameter_passing,
             spans,
             locals,
             debug_info: FunctionDebugInfo::default(),
@@ -659,6 +712,19 @@ impl ModuleFunction {
 
     pub fn new_without_spans_nor_locals(definition: FunctionDefinition, code: Function) -> Self {
         Self::new_without_debug_info(definition, code, None, Vec::new())
+    }
+
+    pub fn placeholder(definition: FunctionDefinition, spans: Option<ModuleFunctionSpans>) -> Self {
+        Self {
+            definition,
+            code: b(crate::hir::function::VoidFunction),
+            // Placeholders are transient module slots installed before their
+            // pending function body is elaborated and replaced.
+            parameter_passing: Vec::new(),
+            spans,
+            locals: Vec::new(),
+            debug_info: FunctionDebugInfo::default(),
+        }
     }
 
     pub fn refresh_debug_info(&mut self) {

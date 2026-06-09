@@ -9,11 +9,8 @@
 use crate::{
     FxHashMap, FxHashSet, Modules,
     containers::B,
-    hir::{
-        emit_associated_consts::{
-            SourceAssociatedConstImpl, associated_const_values_for_source_impl,
-        },
-        function::VoidFunction,
+    hir::emit_associated_consts::{
+        SourceAssociatedConstImpl, associated_const_values_for_source_impl,
     },
     module::Uses,
 };
@@ -24,7 +21,7 @@ use ustr::Ustr;
 use crate::{
     ast::{self, *},
     compiler::error::InternalCompilationError,
-    containers::{b, iterable_to_string},
+    containers::iterable_to_string,
     format::FormatWith,
     hir::{self, UNodeArena},
     hir::{
@@ -476,8 +473,7 @@ pub fn emit_module(
             let mut method_ids = Vec::with_capacity(method_defs.len());
             for def in method_defs {
                 // Placeholder ModuleFunction that will be replaced later.
-                let placeholder = b(VoidFunction);
-                let module_fn = ModuleFunction::new_without_spans_nor_locals(def, placeholder);
+                let module_fn = ModuleFunction::placeholder(def, None);
                 method_ids.push(output.add_function_anonymous(module_fn));
             }
             // Build the trait impl and fill it with placeholders.

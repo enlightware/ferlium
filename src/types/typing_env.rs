@@ -34,7 +34,7 @@ pub type GetFunctionData<'a> = (
     &'a FunctionDefinition,
     FunctionId,
     Option<ModuleId>,
-    Option<&'static [ResolvedArgPassing]>,
+    Option<Vec<ResolvedArgPassing>>,
 );
 pub type GetFunctionWithPathData<'a> = (ast::Path, GetFunctionData<'a>);
 
@@ -186,7 +186,7 @@ impl<'m> TypingEnv<'m> {
                 &function.definition,
                 FunctionId::Import(id),
                 Some(module_id),
-                function.code.argument_passing(),
+                function.code.runtime_argument_passing().map(<[_]>::to_vec),
             ))
         } else {
             let id = self
@@ -199,7 +199,7 @@ impl<'m> TypingEnv<'m> {
                 &function.definition,
                 FunctionId::Local(id),
                 None,
-                function.code.argument_passing(),
+                function.code.runtime_argument_passing().map(<[_]>::to_vec),
             ))
         })
     }
@@ -221,7 +221,7 @@ impl<'m> TypingEnv<'m> {
                 &function.definition,
                 FunctionId::Local(id),
                 None,
-                function.code.argument_passing(),
+                function.code.runtime_argument_passing().map(<[_]>::to_vec),
             )
         } else {
             let id = self.import_function(STD_MODULE_ID, function_name);
@@ -240,7 +240,7 @@ impl<'m> TypingEnv<'m> {
                 &function.definition,
                 FunctionId::Import(id),
                 Some(STD_MODULE_ID),
-                function.code.argument_passing(),
+                function.code.runtime_argument_passing().map(<[_]>::to_vec),
             )
         };
         Ok((path, function))

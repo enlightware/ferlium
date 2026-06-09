@@ -2668,9 +2668,8 @@ fn eval_call_arg(
 
 fn trivial_copy_arg_layout(ctx: &EvalCtx<'_>, ty: Type, span: Location) -> ResolvedValueLayout {
     ctx.compiler_session()
-        .expect_fresh_module(ctx.module_id)
-        .trivial_copy_layout(ty)
-        .unwrap_or_else(|| {
+        .value_layout(ctx.module_id, ty, span)
+        .unwrap_or_else(|_| {
             panic!(
                 "missing TrivialCopy layout for {} at {}",
                 ty.format_with(&ctx.compiler_session().module_env()),
@@ -2881,7 +2880,7 @@ mod tests {
             function::{ResolvedArgPassing, ResolvedValueArgPassing},
             value::{LiteralValue, NativeDisplay},
         },
-        module::{Module, ModuleId, Path, ResolvedValueLayout, id::Id},
+        module::{Module, ModuleId, Path, id::Id},
         types::{
             effects::EffType,
             r#type::{FnArgType, Type},
@@ -2909,14 +2908,6 @@ mod tests {
         EVAL_DROP_TRACKED_COUNT.store(0, Ordering::Relaxed);
     }
 
-    fn unit_layout() -> ResolvedValueLayout {
-        ResolvedValueLayout::native::<()>()
-    }
-
-    fn eval_drop_tracked_layout() -> ResolvedValueLayout {
-        ResolvedValueLayout::native::<EvalDropTracked>()
-    }
-
     fn eval_drop_tracked_type() -> Type {
         crate::cached_primitive_ty!(EvalDropTracked)
     }
@@ -2924,13 +2915,7 @@ mod tests {
     fn eval_args_test_session() -> (CompilerSession, ModuleId) {
         let mut session = CompilerSession::new();
         let module_id = ModuleId::from_index(2);
-        let mut module = Module::new(module_id);
-        module
-            .trivial_copy_status
-            .mark_trivial_copy(eval_drop_tracked_type(), eval_drop_tracked_layout());
-        module
-            .trivial_copy_status
-            .mark_trivial_copy(Type::unit(), unit_layout());
+        let module = Module::new(module_id);
         let registered = session.register_module(Path::single_str("$eval_args_test"), module);
         assert_eq!(registered, module_id);
         (session, module_id)

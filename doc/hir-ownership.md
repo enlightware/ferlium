@@ -121,18 +121,21 @@ Dispatch sites are:
 
 # Call Argument Passing
 
-HIR derives source-level argument passing from the callee ABI type and the module's `TrivialCopyStatus`:
+HIR derives source-level argument passing from the callee ABI type:
 
 - mutable parameters resolve the argument as a mutable place;
 - generic by-value parameters are passed by shared reference, even when a concrete call site later solves them to a `TrivialCopy` type;
-- by-value parameters whose concrete type has a positive `TrivialCopyStatus` layout are copied by representation;
+- by-value parameters that are concrete types that solve as `TrivialCopy` are copied by representation;
 - other by-value parameters are passed by shared reference.
 
 Call nodes store the resolved passing class (`MutableRef`, `SharedRef`, or `TrivialCopy`) so eval and SSA lowering do not have to rediscover callee ABI decisions after type inference has solved call-site types.
+For HIR bodies, the same high-level passing class is stored on `ModuleFunction.parameter_passing` for visible callee parameters, in declaration order.
+Native/interpreter-only bodies provide the same visible metadata explicitly; context-native helpers that also receive hidden runtime arguments keep those separate from visible parameter passing.
 That metadata intentionally stores no cleanup and no layout payload.
 
-`TrivialCopyStatus` is module-local compiler-derived state.
-It records positive `Type -> ResolvedValueLayout` entries and negative non-`TrivialCopy` results when dictionary elaboration queries a concrete type; absence from both sets means unknown, not non-`TrivialCopy`.
+The legality of `TrivialCopy` remains a trait-solver decision during HIR elaboration.
+Concrete value layout is not persisted in HIR or `Module`; eval and SSA lowering compute it structurally from `Type` plus the owning module environment when a resolved `TrivialCopy` edge needs size/alignment.
+`Value` associated consts remain the dictionary carrier for generic layout metadata, not the source of truth for concrete layouts.
 
 Shared-reference calls should not hide temporary lifetimes in call metadata.
 If a non-`TrivialCopy` by-value argument is not already a place, HIR generation materializes it into an owned `$arg` local and wraps the call in normal `Block.cleanup`.

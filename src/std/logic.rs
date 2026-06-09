@@ -6,7 +6,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use std::{convert::identity, fmt, ops};
+use std::{fmt, ops};
 
 use ustr::ustr;
 
@@ -45,8 +45,12 @@ impl NativeDisplay for bool {
     }
 }
 
-fn false_value(_: bool) -> bool {
+fn false_with_int(_: bool, _: Int) -> bool {
     false
+}
+
+fn identity_with_int(value: bool, _: Int) -> bool {
+    value
 }
 
 fn count_ones(value: bool) -> Int {
@@ -118,10 +122,10 @@ pub fn add_to_module(to: &mut Module) {
             b(BinaryFn::new(<bool as ops::BitOr>::bitor)) as Function,
             b(BinaryFn::new(<bool as ops::BitXor>::bitxor)) as Function,
             b(UnaryFn::new(<bool as ops::Not>::not)) as Function,
-            b(UnaryFn::new(false_value)) as Function,
-            b(UnaryFn::new(false_value)) as Function,
-            b(UnaryFn::new(identity::<bool>)) as Function,
-            b(UnaryFn::new(identity::<bool>)) as Function,
+            b(BinaryFn::new(false_with_int)) as Function,
+            b(BinaryFn::new(false_with_int)) as Function,
+            b(BinaryFn::new(identity_with_int)) as Function,
+            b(BinaryFn::new(identity_with_int)) as Function,
             b(UnaryFn::new(count_ones)) as Function,
             b(UnaryFn::new(count_zeros)) as Function,
             b(UnaryFn::new(bit)) as Function,
