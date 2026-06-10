@@ -150,10 +150,10 @@ impl FormatWith<ModuleEnv<'_>> for Function {
             }
             let kind = match p.tag {
                 ParameterTag::Parameter(ResolvedArgPassing::Value(
-                    ResolvedValueArgPassing::TrivialCopy(_),
+                    ResolvedValueArgPassing::TrivialCopy,
                 )) => "arg",
                 ParameterTag::Parameter(ResolvedArgPassing::Value(
-                    ResolvedValueArgPassing::SharedRef { .. },
+                    ResolvedValueArgPassing::SharedRef,
                 )) => "arg &",
                 ParameterTag::Parameter(ResolvedArgPassing::MutableRef) => "arg &mut",
                 ParameterTag::Dictionary => "extra",

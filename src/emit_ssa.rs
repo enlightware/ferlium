@@ -139,7 +139,7 @@ impl<'a> Emitter<'a> {
         // denotes.
         let mut locals: HashMap<LocalDeclId, ssa::Value> = HashMap::new();
         for i in 0..f.definition.arg_names.len() {
-            let resolved = syntax.param_passing[i];
+            let resolved = f.parameter_passing[i];
             lowered.add_parameter(f.locals[i].ty, ssa::ParameterTag::Parameter(resolved));
             let param = ssa::Value::Parameter(extra_count + i);
             locals.insert(LocalDeclId::from_index(i), param);
@@ -492,7 +492,7 @@ impl<'a> Emitter<'a> {
                         let place = self.place_of_local(n.id);
                         self.lower_into(&self.hir_arena[n.value], Some(place));
                     }
-                    Some(ResolvedLocalClone::Static(f)) => {
+                    Some(ResolvedLocalClone::Static(_f)) => {
                         // let (fi, mi) = match f {
                         //     FunctionId::Local(i) => (i, self.module.module_id()),
                         //     FunctionId::Import(i) => imported_function(i, self.module, self.session),

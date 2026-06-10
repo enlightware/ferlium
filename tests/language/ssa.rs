@@ -74,9 +74,9 @@ fn call_functions() {
     %r1 = alloca int
     %r2 = alloca int
     %r3 = store int 2 to %r2
-    %r4 = call std::Num<0-5>::from_int(%r2, %r1)
-    %r5 = call std::Num<0-5>::mul(%r1, %p0, %r0)
-    %r6 = load %r0
+    %r4 = call std::Num<0-5>::from_int(%r2, %r0)
+    %r5 = call std::Num<0-5>::mul(%r0, %p0, %r1)
+    %r6 = load %r1
     %r7 = store %r6 to %p1
     %r8 = ret
 "#
@@ -113,31 +113,31 @@ fn match_case_functions() {
         session.emit_ssa("fn a0(x:int) {match x { 0 => x, 1 => x - 1, _ => -1 }}"),
         r#"fn a0(%p0: @arg int, %p1: @ret int):
   0:
-    %r0 = load %p0
-    %r1 = br 1
+    %r0 = alloca int
+    %r1 = alloca int
+    %r2 = load %p0
+    %r3 = br 1
   1:
-    %r2 = comp_eq %r0 int 0
-    %r3 = condbr %r2, %b2, &b3
+    %r4 = comp_eq %r2 int 0
+    %r5 = condbr %r4, %b2, &b3
   2:
-    %r4 = load %p0
-    %r5 = store %r4 to %p1
-    %r6 = br 6
+    %r6 = load %p0
+    %r7 = store %r6 to %p1
+    %r8 = br 6
   3:
-    %r7 = comp_eq %r0 int 1
-    %r8 = condbr %r7, %b4, &b5
+    %r9 = comp_eq %r2 int 1
+    %r10 = condbr %r9, %b4, &b5
   4:
-    %r9 = alloca int
-    %r10 = alloca int
-    %r11 = store int 1 to %r10
-    %r12 = call std::Num<0-5>::from_int(%r10, %r9)
-    %r13 = call std::Num<0-5>::sub(%p0, %r9, %p1)
-    %r14 = br 6
+    %r11 = alloca int
+    %r12 = store int 1 to %r11
+    %r13 = call std::Num<0-5>::from_int(%r11, %r1)
+    %r14 = call std::Num<0-5>::sub(%p0, %r1, %p1)
+    %r15 = br 6
   5:
-    %r15 = alloca int
     %r16 = alloca int
     %r17 = store int 1 to %r16
-    %r18 = call std::Num<0-5>::from_int(%r16, %r15)
-    %r19 = call std::Num<0-5>::neg(%r15, %p1)
+    %r18 = call std::Num<0-5>::from_int(%r16, %r0)
+    %r19 = call std::Num<0-5>::neg(%r0, %p1)
     %r20 = br 6
   6:
     %r21 = ret
@@ -266,29 +266,29 @@ fn factorial() {
         sessions.emit_ssa("fn factorial(x: int) {if x > 1 {x * factorial(x - 1)} else {1}}"),
         r#"fn factorial(%p0: @arg int, %p1: @ret int):
   0:
-    %r0 = alloca bool
-    %r1 = alloca ((int, int) -> Ordering,)
-    %r2 = store (std::Ord<0-5>::cmp) to %r1
-    %r3 = alloca int
+    %r0 = alloca int
+    %r1 = alloca int
+    %r2 = alloca int
+    %r3 = alloca bool
     %r4 = alloca int
     %r5 = store int 1 to %r4
-    %r6 = call std::Num<0-5>::from_int(%r4, %r3)
-    %r7 = call std::gt(%r1, %p0, %r3, %r0)
-    %r8 = load %r0
-    %r9 = br 1
+    %r6 = call std::Num<0-5>::from_int(%r4, %r0)
+    %r7 = alloca ((int, int) -> Ordering,)
+    %r8 = store (std::Ord<0-5>::cmp) to %r7
+    %r9 = call std::gt(%r7, %p0, %r0, %r3)
+    %r10 = load %r3
+    %r11 = br 1
   1:
-    %r10 = comp_eq %r8 i1 1
-    %r11 = condbr %r10, %b2, &b3
+    %r12 = comp_eq %r10 i1 1
+    %r13 = condbr %r12, %b2, &b3
   2:
-    %r12 = alloca int
-    %r13 = alloca int
     %r14 = alloca int
     %r15 = alloca int
     %r16 = store int 1 to %r15
-    %r17 = call std::Num<0-5>::from_int(%r15, %r14)
-    %r18 = call std::Num<0-5>::sub(%p0, %r14, %r13)
-    %r19 = call <test>::factorial(%r13, %r12)
-    %r20 = call std::Num<0-5>::mul(%p0, %r12, %p1)
+    %r17 = call std::Num<0-5>::from_int(%r15, %r1)
+    %r18 = call std::Num<0-5>::sub(%p0, %r1, %r14)
+    %r19 = call <test>::factorial(%r14, %r2)
+    %r20 = call std::Num<0-5>::mul(%p0, %r2, %p1)
     %r21 = br 4
   3:
     %r22 = alloca int
@@ -518,13 +518,13 @@ fn iter1_mut_local_copy() {
         r#"fn add_one(%p0: @arg int, %p1: @ret int):
   0:
     %r0 = alloca int
-    %r1 = load %p0
-    %r2 = store %r1 to %r0
-    %r3 = alloca int
+    %r1 = alloca int
+    %r2 = load %p0
+    %r3 = store %r2 to %r0
     %r4 = alloca int
     %r5 = store int 1 to %r4
-    %r6 = call std::Num<0-5>::from_int(%r4, %r3)
-    %r7 = call std::Num<0-5>::add(%r0, %r3, %r0)
+    %r6 = call std::Num<0-5>::from_int(%r4, %r1)
+    %r7 = call std::Num<0-5>::add(%r0, %r1, %r0)
     %r8 = load %r0
     %r9 = store %r8 to %p1
     %r10 = ret
@@ -543,13 +543,13 @@ fn iter1_let_mut_move_return() {
         r#"fn f(%p0: @arg int, %p1: @ret int):
   0:
     %r0 = alloca int
-    %r1 = load %p0
-    %r2 = store %r1 to %r0
-    %r3 = alloca int
+    %r1 = alloca int
+    %r2 = load %p0
+    %r3 = store %r2 to %r0
     %r4 = alloca int
     %r5 = store int 1 to %r4
-    %r6 = call std::Num<0-5>::from_int(%r4, %r3)
-    %r7 = call std::Num<0-5>::add(%r0, %r3, %r0)
+    %r6 = call std::Num<0-5>::from_int(%r4, %r1)
+    %r7 = call std::Num<0-5>::add(%r0, %r1, %r0)
     %r8 = load %r0
     %r9 = store %r8 to %p1
     %r10 = ret
@@ -756,15 +756,15 @@ fn generic_apply() {
         session.emit_ssa("fn f(x) { x * 2 }"),
         r#"fn f(%p0: @extra ((A, A) -> A, (A, A) -> A, (A, A) -> A, (A) -> A, (A) -> A, (A) -> A, (int) -> A), %p1: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A, &mut A) -> (), (&mut A) -> (), int, int), %p2: @arg & A, %p3: @ret A):
   0:
-    %r0 = project 2 from %p0
-    %r1 = load %r0
-    %r2 = alloca A
-    %r3 = project 6 from %p0
-    %r4 = load %r3
-    %r5 = alloca int
-    %r6 = store int 2 to %r5
-    %r7 = call %r4(%r5, %r2)
-    %r8 = call %r1(%p2, %r2, %p3)
+    %r0 = alloca A
+    %r1 = project 6 from %p0
+    %r2 = load %r1
+    %r3 = alloca int
+    %r4 = store int 2 to %r3
+    %r5 = call %r2(%r3, %r0)
+    %r6 = project 2 from %p0
+    %r7 = load %r6
+    %r8 = call %r7(%p2, %r0, %p3)
     %r9 = ret
 "#,
     );
@@ -798,13 +798,13 @@ fn copy_int() {
         r#"fn f(%p0: @arg int, %p1: @ret int):
   0:
     %r0 = alloca int
-    %r1 = load %p0
-    %r2 = store %r1 to %r0
-    %r3 = alloca int
+    %r1 = alloca int
+    %r2 = load %p0
+    %r3 = store %r2 to %r0
     %r4 = alloca int
     %r5 = store int 1 to %r4
-    %r6 = call std::Num<0-5>::from_int(%r4, %r3)
-    %r7 = call std::Num<0-5>::add(%r0, %r3, %p1)
+    %r6 = call std::Num<0-5>::from_int(%r4, %r1)
+    %r7 = call std::Num<0-5>::add(%r0, %r1, %p1)
     %r8 = ret
 "#,
     );
@@ -891,13 +891,13 @@ fn copy_int_param_to_local() {
         r#"fn f(%p0: @arg int, %p1: @ret int):
   0:
     %r0 = alloca int
-    %r1 = load %p0
-    %r2 = store %r1 to %r0
-    %r3 = alloca int
+    %r1 = alloca int
+    %r2 = load %p0
+    %r3 = store %r2 to %r0
     %r4 = alloca int
     %r5 = store int 1 to %r4
-    %r6 = call std::Num<0-5>::from_int(%r4, %r3)
-    %r7 = call std::Num<0-5>::add(%r0, %r3, %r0)
+    %r6 = call std::Num<0-5>::from_int(%r4, %r1)
+    %r7 = call std::Num<0-5>::add(%r0, %r1, %r0)
     %r8 = load %r0
     %r9 = store %r8 to %p1
     %r10 = ret
