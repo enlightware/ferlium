@@ -277,6 +277,7 @@ pub(super) fn emit_auto_value_impls(
             value_trait_id,
             false,
             &[input_ty],
+            &[],
             ty_var_count,
             &constraints,
             type_def_span,

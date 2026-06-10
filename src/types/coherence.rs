@@ -80,6 +80,7 @@ pub(crate) fn check_trait_impl(
     trait_id: TraitId,
     trait_is_local: bool,
     input_tys: &[Type],
+    output_tys: &[Type],
     ty_var_count: u32,
     constraints: &[PubTypeConstraint],
     span: Location,
@@ -143,7 +144,14 @@ pub(crate) fn check_trait_impl(
         if key.trait_id() != trait_id {
             continue;
         }
-        if impls_overlap(current, others, &new_key, &key)? {
+        if impls_overlap(
+            current,
+            others,
+            &new_key,
+            output_tys,
+            &key,
+            imp.output_tys.as_slice(),
+        )? {
             return Err(internal_compilation_error!(OverlappingTraitImpls {
                 trait_ref: trait_id,
                 input_tys: input_tys.to_vec(),
@@ -237,91 +245,52 @@ fn impls_overlap(
     current: &Module,
     others: &Modules,
     new_key: &TraitKey,
+    new_output_tys: &[Type],
     existing_key: &TraitKey,
+    existing_output_tys: &[Type],
 ) -> Result<bool, InternalCompilationError> {
     use TraitKey::*;
     let overlap = match (new_key, existing_key) {
         (Concrete(new_key), Concrete(existing_key)) => new_key.input_tys == existing_key.input_tys,
-        (Concrete(new_key), Blanket(existing_key)) => {
-            blanket_matches_concrete(current, others, &existing_key.sub_key, &new_key.input_tys)?
-        }
-        (Blanket(new_key), Concrete(existing_key)) => {
-            blanket_matches_concrete(current, others, &new_key.sub_key, &existing_key.input_tys)?
-        }
-        (Blanket(new_key), Blanket(existing_key)) => {
-            blanket_impls_overlap(current, others, &new_key.sub_key, &existing_key.sub_key)?
-        }
+        (Concrete(new_key), Blanket(existing_key)) => blanket_impls_overlap(
+            current,
+            others,
+            &concrete_as_blanket_sub_key(&new_key.input_tys),
+            new_output_tys,
+            &existing_key.sub_key,
+            existing_output_tys,
+        )?,
+        (Blanket(new_key), Concrete(existing_key)) => blanket_impls_overlap(
+            current,
+            others,
+            &new_key.sub_key,
+            new_output_tys,
+            &concrete_as_blanket_sub_key(&existing_key.input_tys),
+            existing_output_tys,
+        )?,
+        (Blanket(new_key), Blanket(existing_key)) => blanket_impls_overlap(
+            current,
+            others,
+            &new_key.sub_key,
+            new_output_tys,
+            &existing_key.sub_key,
+            existing_output_tys,
+        )?,
     };
     Ok(overlap)
 }
 
-fn blanket_matches_concrete(
-    current: &Module,
-    others: &Modules,
-    blanket: &BlanketTraitImplSubKey,
-    concrete_inputs: &[Type],
-) -> Result<bool, InternalCompilationError> {
-    if blanket.input_tys.len() != concrete_inputs.len() {
-        return Ok(false);
-    }
-
-    let span = Location::new_synthesized();
-    let mut ty_inf = CoherenceTypeUnifier::new_with_ty_vars(blanket.ty_var_count);
-    for (&blanket_input, &concrete_input) in blanket.input_tys.iter().zip(concrete_inputs) {
-        if ty_inf
-            .unify_same_type(blanket_input, span, concrete_input, span)
-            .is_err()
-        {
-            return Ok(false);
-        }
-    }
-
-    let mut trait_solver = TraitSolverProbe::from_module(current, others);
-    let mut arena = NodeArena::default();
-    let mut remaining_indices: Vec<_> = (0..blanket.constraints.len()).collect();
-    loop {
-        let initial_count = remaining_indices.len();
-        let mut still_remaining = Vec::new();
-        for constraint_idx in remaining_indices {
-            let constraint = &blanket.constraints[constraint_idx];
-            let (trait_id, input_tys, output_tys, _) = ty_inf
-                .substitute_in_constraint(constraint)
-                .into_have_trait()
-                .expect("Non trait constraint in blanket impl");
-            if !input_tys.iter().all(Type::is_constant) {
-                still_remaining.push(constraint_idx);
-                continue;
-            }
-            let solved_output_tys: Vec<Type> =
-                match trait_solver.solve_output_types(trait_id, &input_tys, span, &mut arena) {
-                    Ok(tys) => tys,
-                    Err(_) => return Ok(false),
-                };
-            for (&solved_output_ty, &output_ty) in solved_output_tys.iter().zip(&output_tys) {
-                if ty_inf
-                    .unify_same_type(solved_output_ty, span, output_ty, span)
-                    .is_err()
-                {
-                    return Ok(false);
-                }
-            }
-        }
-
-        if still_remaining.is_empty() {
-            return Ok(true);
-        }
-        if still_remaining.len() == initial_count {
-            return Ok(false);
-        }
-        remaining_indices = still_remaining;
-    }
+fn concrete_as_blanket_sub_key(input_tys: &[Type]) -> BlanketTraitImplSubKey {
+    BlanketTraitImplSubKey::new(input_tys.to_vec(), 0, Vec::new())
 }
 
 fn blanket_impls_overlap(
     current: &Module,
     others: &Modules,
     lhs: &BlanketTraitImplSubKey,
+    lhs_output_tys: &[Type],
     rhs: &BlanketTraitImplSubKey,
+    rhs_output_tys: &[Type],
 ) -> Result<bool, InternalCompilationError> {
     if lhs.input_tys.len() != rhs.input_tys.len() {
         return Ok(false);
@@ -337,11 +306,20 @@ fn blanket_impls_overlap(
     let inst_subst = (rhs_ty_subst, FxHashMap::default());
     let mut mapper = SimpleInstantiationMapper::new(&inst_subst);
     let rhs_inputs = instantiate_types(&rhs.input_tys, &mut mapper);
+    let rhs_outputs = instantiate_types(rhs_output_tys, &mut mapper);
     let rhs_constraints = instantiate_types(&rhs.constraints, &mut mapper);
     let span = Location::new_synthesized();
     let mut ty_inf = CoherenceTypeUnifier::new_with_ty_vars(lhs.ty_var_count + rhs.ty_var_count);
     for (&lhs_ty, &rhs_ty) in lhs.input_tys.iter().zip(rhs_inputs.iter()) {
         if ty_inf.unify_same_type(lhs_ty, span, rhs_ty, span).is_err() {
+            return Ok(false);
+        }
+    }
+    for (&lhs_output_ty, &rhs_output_ty) in lhs_output_tys.iter().zip(rhs_outputs.iter()) {
+        if ty_inf
+            .unify_same_type(lhs_output_ty, span, rhs_output_ty, span)
+            .is_err()
+        {
             return Ok(false);
         }
     }
@@ -374,7 +352,7 @@ fn constraints_may_be_satisfiable(
     let (trait_id, input_tys, output_tys, _span) = constraint
         .into_have_trait()
         .expect("Non trait constraint in blanket impl overlap check");
-    if input_tys.iter().all(Type::is_constant) {
+    if input_tys.iter().all(Type::is_constant) && output_tys.iter().all(Type::is_constant) {
         let mut trait_solver = TraitSolverProbe::from_module(current, others);
         let mut arena = NodeArena::default();
         let solved_output_tys = match trait_solver.solve_output_types(

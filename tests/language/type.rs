@@ -807,6 +807,84 @@ fn overlapping_blanket_trait_impls_are_rejected() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn impl_overlap_accounts_for_trait_output_bindings() {
+    let mut session = TestSession::new();
+    session.compile(indoc! { r#"
+        trait Adapter<Self |-> Output> {
+            fn adapt(value: Self) -> Output;
+        }
+
+        impl<I, T> Adapter for <Self = I |-> Output = I>
+        where
+            I: Iterator<Item = T>,
+            I: Value
+        {
+            fn adapt(value: I) -> I {
+                value
+            }
+        }
+
+        impl<A> Adapter for <Self = [A] |-> Output = ArrayIterator<A>>
+        where
+            A: Value
+        {
+            fn adapt(value: [A]) -> ArrayIterator<A> {
+                iter(value)
+            }
+        }
+    "# });
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn matching_trait_output_bindings_still_reject_real_overlap() {
+    let mut session = TestSession::new();
+    let err = session.fail_compilation(indoc! { r#"
+        trait Adapter<Self |-> Output> {
+            fn adapt(value: Self) -> Output;
+        }
+
+        struct CounterIter {
+            next: int,
+            end: int,
+        }
+
+        impl Iterator for CounterIter {
+            fn next(it: &mut CounterIter) -> None | Some(int) {
+                if it.next < it.end {
+                    let current = it.next;
+                    it.next += 1;
+                    Some(current)
+                } else {
+                    None
+                }
+            }
+        }
+
+        impl<I, T> Adapter for <Self = I |-> Output = I>
+        where
+            I: Iterator<Item = T>,
+            I: Value
+        {
+            fn adapt(value: I) -> I {
+                value
+            }
+        }
+
+        impl Adapter for <Self = CounterIter |-> Output = CounterIter> {
+            fn adapt(value: CounterIter) -> CounterIter {
+                value
+            }
+        }
+    "# });
+    match err.into_inner() {
+        CompilationErrorImpl::OverlappingTraitImpls { .. } => {}
+        other => panic!("expected OverlappingTraitImpls, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn recursive_variant_value_derivation() {
     let mut session = TestSession::new();
     let code = indoc! { r#"
