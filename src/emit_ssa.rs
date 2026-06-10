@@ -492,9 +492,27 @@ impl<'a> Emitter<'a> {
                         let place = self.place_of_local(n.id);
                         self.lower_into(&self.hir_arena[n.value], Some(place));
                     }
-                    Some(ResolvedLocalClone::Static(_))
-                    | Some(ResolvedLocalClone::Dictionary(_)) => {
+                    Some(ResolvedLocalClone::Static(f)) => {
+                        // let (fi, mi) = match f {
+                        //     FunctionId::Local(i) => (i, self.module.module_id()),
+                        //     FunctionId::Import(i) => imported_function(i, self.module, self.session),
+                        // };
+                        // let f = self.demand_function(fi, mi);
+                        // let mut arguments: Vec<ssa::Value> = vec![];
+
+                        // for arg in &n.arguments {
+                        //     arguments.push(self.lower_argument(arg));
+                        // }
+
+                        // assert_eq!(node.ty, n.ty.ret);
+                        // arguments.push(self.call_out_ptr(node, dest));
+                        // self.insert(ssa::Instruction::call(node.span, f, arguments, n.ty.ret));
                         todo!("StoreLocal initialization via Value::clone is not lowered yet")
+                        // see https://github.com/enlightware/ferlium/issues/151
+                    }
+                    Some(ResolvedLocalClone::Dictionary(_)) => {
+                        todo!("StoreLocal initialization via Value::clone is not lowered yet")
+                        // see https://github.com/enlightware/ferlium/issues/151
                     }
                 }
                 // `StoreLocal` is `()`-typed: nothing to store into `dest`.

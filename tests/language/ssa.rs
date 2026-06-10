@@ -784,3 +784,123 @@ fn dynamic_apply() {
 "#,
     );
 }
+
+// ============================================================================
+// Copy and Move Tests
+// ============================================================================
+
+#[test]
+fn copy_int() {
+    // Copying an int (TrivialCopy) - should use trivial copy, not call clone
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.emit_ssa("fn f(x: int) { let y = x; y + 1 }"),
+        r#"fn f(%p0: @arg int, %p1: @ret int):
+  0:
+    %r0 = alloca int
+    %r1 = load %p0
+    %r2 = store %r1 to %r0
+    %r3 = alloca int
+    %r4 = alloca int
+    %r5 = store int 1 to %r4
+    %r6 = call std::Num<0-5>::from_int(%r4, %r3)
+    %r7 = call std::Num<0-5>::add(%r0, %r3, %p1)
+    %r8 = ret
+"#,
+    );
+}
+
+// Note: Tests for copy_struct_with_explicit_clone and copy_generic_parameter
+// are currently disabled as the SSA emitter does not yet support:
+// 1. Copying shared-ref parameters to owned locals for non-TrivialCopy types
+// 2. Dictionary-based cloning for generic parameters
+// These features require additional work in src/emit_ssa.rs
+
+// #[test]
+// fn copy_struct_with_explicit_clone() {
+//     // Copying a struct with explicit clone function - should call Value::clone
+//     let mut session = TestSession::new();
+//     assert_eq!(
+//         session.emit_ssa(r#"
+//             struct Probe(int)
+//
+//             impl Value for Probe {
+//                 fn eq(left: Probe, right: Probe) -> bool { left.0 == right.0 }
+//                 fn to_string(value: Probe) -> string { to_string(value.0) }
+//                 fn hash(value: Probe, state: &mut hasher) { hash(value.0, state) }
+//                 fn clone(source: Probe, target: &mut Probe) {
+//                     target = Probe(source.0 + 100);
+//                 }
+//                 fn drop(target: &mut Probe) {}
+//             }
+//
+//             fn f(x: Probe) { let y = x; y }
+//         "#),
+//         r#"fn f(%p0: @arg & Probe, %p1: @ret Probe):
+//   0:
+//     %r0 = alloca Probe
+//     %r1 = call std::Value<0-4>::clone(%p0, %r0)
+//     %r2 = load %r0
+//     %r3 = store %r2 to %p1
+//     %r4 = ret
+// "#,
+//     );
+// }
+
+// #[test]
+// fn copy_generic_parameter() {
+//     // Copying a generic parameter - should call Value::clone through dictionary
+//     let mut session = TestSession::new();
+//     assert_eq!(
+//         session.emit_ssa("fn f<T>(x: T) { let y = x; y }"),
+//         r#"fn f(%p0: @extra ((A, &mut A) -> (),), %p1: @arg & A, %p2: @ret A):
+//   0:
+//     %r3 = alloca A
+//     %r4 = project 0 from %p0
+//     %r5 = call %r4(%p1, %r3)
+//     %r6 = load %r3
+//     %r7 = store %r6 to %p2
+//     %r8 = ret
+// "#,
+//     );
+// }
+
+#[test]
+fn return_local_int_move() {
+    // Returning a local int variable - should move (trivial copy for int)
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.emit_ssa("fn f() { let x: int = 42; x }"),
+        r#"fn f(%p0: @ret int):
+  0:
+    %r0 = alloca int
+    %r1 = store int 42 to %r0
+    %r2 = load %r0
+    %r3 = store %r2 to %p0
+    %r4 = ret
+"#,
+    );
+}
+
+#[test]
+fn copy_int_param_to_local() {
+    // Copying int parameter to a mutable local - uses trivial copy
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.emit_ssa("fn f(x: int) { let mut y = x; y = y + 1; y }"),
+        r#"fn f(%p0: @arg int, %p1: @ret int):
+  0:
+    %r0 = alloca int
+    %r1 = load %p0
+    %r2 = store %r1 to %r0
+    %r3 = alloca int
+    %r4 = alloca int
+    %r5 = store int 1 to %r4
+    %r6 = call std::Num<0-5>::from_int(%r4, %r3)
+    %r7 = call std::Num<0-5>::add(%r0, %r3, %r0)
+    %r8 = load %r0
+    %r9 = store %r8 to %p1
+    %r10 = ret
+"#,
+    );
+}
