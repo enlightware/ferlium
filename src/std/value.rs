@@ -280,6 +280,10 @@ fn layout_for_value_type(
     active: &mut FxHashSet<Type>,
     env: &impl TypeLayoutEnv,
 ) -> Result<ValueLayout, InternalCompilationError> {
+    if let Some(inner_ty) = uninit_inner_type(ty) {
+        return layout_for_value_type(inner_ty, span, active, env);
+    }
+
     if !active.insert(ty) {
         // Recursive occurrences are represented indirectly at runtime, so their
         // inline layout is a value slot rather than another full copy.
@@ -2494,4 +2498,35 @@ pub fn add_to_module(to: &mut Module) {
     to.add_private_unsafe_function(ustr("write_init"), write_init_descr());
     to.add_private_unsafe_function(ustr("assume_init"), assume_init_descr());
     to.add_private_unsafe_function(ustr("assume_init_mut"), assume_init_mut_descr());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        ModuleEnv,
+        parser::location::SourceTable,
+        std::{array::array_type, math::float_type, math::int_type},
+    };
+
+    fn assert_uninit_layout_matches_inner_type(ty: Type, env: &ModuleEnv<'_>) {
+        let span = Location::new_synthesized();
+        assert_eq!(
+            value_layout_for_type(uninit_type(ty), span, env).unwrap(),
+            value_layout_for_type(ty, span, env).unwrap()
+        );
+    }
+
+    #[test]
+    fn uninit_layout_matches_initialized_storage_layout() {
+        let mut source_table = SourceTable::default();
+        let std_module = crate::std::std_module(&mut source_table);
+        let modules = crate::Modules::default();
+        let env = ModuleEnv::new(&std_module, &modules);
+
+        let int = int_type();
+        assert_uninit_layout_matches_inner_type(int, &env);
+        assert_uninit_layout_matches_inner_type(Type::tuple([int, float_type()]), &env);
+        assert_uninit_layout_matches_inner_type(array_type(int), &env);
+    }
 }
