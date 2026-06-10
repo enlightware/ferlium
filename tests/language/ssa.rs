@@ -315,7 +315,60 @@ fn hir_param_trivial_copy_passed_to_call() {
         "fn f(x: int) { x + 1 } fn g(x: int) { f(x) }",
     );
 }
+#[test]
+fn hir_block_discard() {
+    // 2) How a TrivialCopy param is passed into another call.
+    print_param_hir(
+        "trivial_copy_passed_to_call",
+        "fn r() -> [int] { [] } \
+        fn u() {\
+          r();\
+          r();\
+          r()\
+        }",
+    );
+}
 
+#[test]
+fn place_call_into_alias_local_branch() {
+    // A `let` alias initialized from a non-place expression (an `if` over place calls) aliases a
+    // materialized temporary: each branch copies its element value into the temporary, and the
+    // alias reads through it.
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.emit_ssa("fn f(a: [int]) -> int { let x = if true { a[6] } else { a[4] }; x }"),
+        r#"fn f(%p0: @arg & [int], %p1: @ret int):
+  0:
+    %r0 = alloca int
+    %r1 = br 1
+  1:
+    %r2 = comp_eq i1 1 i1 1
+    %r3 = condbr %r2, %b2, &b3
+  2:
+    %r4 = alloca int
+    %r5 = store int 6 to %r4
+    %r6 = alloca_place int
+    %r7 = call std::array_index(%p0, %r4, %r6)
+    %r8 = load %r6
+    %r9 = load %r8
+    %r10 = store %r9 to %r0
+    %r11 = br 4
+  3:
+    %r12 = alloca int
+    %r13 = store int 4 to %r12
+    %r14 = alloca_place int
+    %r15 = call std::array_index(%p0, %r12, %r14)
+    %r16 = load %r14
+    %r17 = load %r16
+    %r18 = store %r17 to %r0
+    %r19 = br 4
+  4:
+    %r20 = load %r0
+    %r21 = store %r20 to %p1
+    %r22 = ret
+"#,
+    );
+}
 #[test]
 fn hir_param_mut_local_copy() {
     // 3a) `mut x` param = mutable LOCAL COPY; caller is NOT affected (value semantics).
@@ -324,6 +377,19 @@ fn hir_param_mut_local_copy() {
         "mut_local_copy",
         "fn add_one(mut x: int) -> int { x = x + 1; x }",
     );
+}
+
+#[test]
+fn hir_array() {
+    print_param_hir(
+        "hir_array",
+        "fn f(x: [int]) { let res = x[4]; let y = res; } fn f2(x: &mut [int]) { x[3] = 8; }",
+    );
+}
+
+#[test]
+fn hret() {
+    print_param_hir("hret", "fn f() { let x = 2; x }");
 }
 
 #[test]
@@ -365,7 +431,10 @@ fn hir_param_tuple_project() {
 #[test]
 fn hir_return_generic() {
     // 7) Tuple param + projection -> Project, clone-out.
-    print_param_hir("generic_return", "fn apply_fn(f, x: int) { let a = f(x); a }");
+    print_param_hir(
+        "generic_return",
+        "fn apply_fn(f, x: int) { let a = f(x); a }",
+    );
 }
 
 #[test]
@@ -376,11 +445,8 @@ fn hir_param_record_field() {
 
 #[test]
 fn hir_param_array_mutation() {
-    // 9) Array param mutated through index places -> Assign into projection, MutableRef.
-    print_param_hir(
-        "array_mutation",
-        "fn swap(a, i, j) { let t = a[i]; a[i] = a[j]; a[j] = t }",
-    );
+    // 9) Array param mutated through index places -> Assign to place.
+    print_param_hir("array_mutation", "fn swap(a: &mut [int]) { a[1] = 3; }");
 }
 
 #[test]
@@ -558,6 +624,280 @@ fn iter1_let_mut_move_return() {
 }
 
 #[test]
+fn array_index_read() {
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.emit_ssa("fn r(a: [bool]) -> int { if a[0] { 1 } else { 2 } }"),
+        r#"fn r(%p0: @arg & [bool], %p1: @ret int):
+  0:
+    %r0 = alloca int
+    %r1 = store int 0 to %r0
+    %r2 = alloca_place bool
+    %r3 = call std::array_index(%p0, %r0, %r2)
+    %r4 = load %r2
+    %r5 = load %r4
+    %r6 = br 1
+  1:
+    %r7 = comp_eq %r5 i1 1
+    %r8 = condbr %r7, %b2, &b3
+  2:
+    %r9 = alloca int
+    %r10 = store int 1 to %r9
+    %r11 = call std::Num<0-5>::from_int(%r9, %p1)
+    %r12 = br 4
+  3:
+    %r13 = alloca int
+    %r14 = store int 2 to %r13
+    %r15 = call std::Num<0-5>::from_int(%r13, %p1)
+    %r16 = br 4
+  4:
+    %r17 = ret
+"#,
+    );
+}
+
+#[test]
+fn array_index_assign() {
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.emit_ssa("fn s(a: &mut [bool]) { a[1] = true; }"),
+        r#"fn s(%p0: @arg &mut [bool], %p1: @ret ()):
+  0:
+    %r0 = alloca int
+    %r1 = store int 1 to %r0
+    %r2 = alloca_place bool
+    %r3 = call std::array_index(%p0, %r0, %r2)
+    %r4 = load %r2
+    %r5 = store i1 1 to %r4
+    %r6 = ret
+"#,
+    );
+}
+
+#[test]
+fn place_call_returned_as_value() {
+    // A place-returning call in value position must resolve the place and copy the value out;
+    // the value destination (here the return out-pointer) must NOT be passed as the place
+    // out-slot of the call.
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.emit_ssa("fn first(a: [int]) -> int { a[0] }"),
+        r#"fn first(%p0: @arg & [int], %p1: @ret int):
+  0:
+    %r0 = alloca int
+    %r1 = store int 0 to %r0
+    %r2 = alloca_place int
+    %r3 = call std::array_index(%p0, %r0, %r2)
+    %r4 = load %r2
+    %r5 = load %r4
+    %r6 = store %r5 to %p1
+    %r7 = ret
+"#,
+    );
+}
+
+#[test]
+fn place_call_into_owned_local() {
+    // A place-returning call initializing an owned (`let mut`) local copies the element value
+    // into the local's alloca; the local must hold the value, not the element address.
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.emit_ssa("fn f(a: [int]) -> int { let mut x = a[0]; x = x + 1; x }"),
+        r#"fn f(%p0: @arg & [int], %p1: @ret int):
+  0:
+    %r0 = alloca int
+    %r1 = alloca int
+    %r2 = alloca int
+    %r3 = store int 0 to %r2
+    %r4 = alloca_place int
+    %r5 = call std::array_index(%p0, %r2, %r4)
+    %r6 = load %r4
+    %r7 = load %r6
+    %r8 = store %r7 to %r0
+    %r9 = alloca int
+    %r10 = store int 1 to %r9
+    %r11 = call std::Num<0-5>::from_int(%r9, %r1)
+    %r12 = call std::Num<0-5>::add(%r0, %r1, %r0)
+    %r13 = load %r0
+    %r14 = store %r13 to %p1
+    %r15 = ret
+"#,
+    );
+}
+
+#[test]
+fn place_call_discarded() {
+    // A discarded place-returning call still lowers (for its effects),
+    // writing the place into a throwaway `alloca_place`.
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.emit_ssa("fn f(a: [int]) { a[0]; }"),
+        r#"fn f(%p0: @arg & [int], %p1: @ret ()):
+  0:
+    %r0 = alloca int
+    %r1 = store int 0 to %r0
+    %r2 = alloca_place int
+    %r3 = call std::array_index(%p0, %r0, %r2)
+    %r4 = load %r2
+    %r5 = ret
+"#,
+    );
+}
+
+#[test]
+fn nested_place_call() {
+    // A place-returning call whose base is itself a place-returning call chains the loaded
+    // place pointers.
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.emit_ssa("fn f(a: [[int]]) -> int { a[0][1] }"),
+        r#"fn f(%p0: @arg & [[int]], %p1: @ret int):
+  0:
+    %r0 = alloca int
+    %r1 = store int 0 to %r0
+    %r2 = alloca_place [int]
+    %r3 = call std::array_index(%p0, %r0, %r2)
+    %r4 = load %r2
+    %r5 = alloca int
+    %r6 = store int 1 to %r5
+    %r7 = alloca_place int
+    %r8 = call std::array_index(%r4, %r5, %r7)
+    %r9 = load %r7
+    %r10 = load %r9
+    %r11 = store %r10 to %p1
+    %r12 = ret
+"#,
+    );
+}
+
+#[test]
+fn place_call_as_shared_ref_argument() {
+    // A place-returning call passed as a shared-reference argument forwards the loaded place
+    // pointer directly, with no copy.
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.emit_ssa("fn g(s: [int]) { } fn f(a: [[int]]) { g(a[0]) }"),
+        r#"fn f(%p0: @arg & [[int]], %p1: @ret ()):
+  0:
+    %r0 = alloca int
+    %r1 = store int 0 to %r0
+    %r2 = alloca_place [int]
+    %r3 = call std::array_index(%p0, %r0, %r2)
+    %r4 = load %r2
+    %r5 = call <test>::g(%r4, %p1)
+    %r6 = ret
+
+fn g(%p0: @arg & [int], %p1: @ret ()):
+  0:
+    %r0 = ret
+"#,
+    );
+}
+
+#[test]
+fn place_call_as_mutable_ref_argument() {
+    // A place-returning call passed as a mutable-reference argument forwards the loaded place
+    // pointer directly, with no copy.
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.emit_ssa("fn g(s: &mut [int]) { } fn f(a: &mut [[int]]) { g(a[0]) }"),
+        r#"fn f(%p0: @arg &mut [[int]], %p1: @ret ()):
+  0:
+    %r0 = alloca int
+    %r1 = store int 0 to %r0
+    %r2 = alloca_place [int]
+    %r3 = call std::array_index(%p0, %r0, %r2)
+    %r4 = load %r2
+    %r5 = call <test>::g(%r4, %p1)
+    %r6 = ret
+
+fn g(%p0: @arg &mut [int], %p1: @ret ()):
+  0:
+    %r0 = ret
+"#,
+    );
+}
+
+#[test]
+fn projection_of_place_call() {
+    // A projection rooted in a place-returning call projects out of the loaded place pointer.
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.emit_ssa("fn f(a: [(int, bool)]) -> bool { a[0].1 }"),
+        r#"fn f(%p0: @arg & [(int, bool)], %p1: @ret bool):
+  0:
+    %r0 = alloca int
+    %r1 = store int 0 to %r0
+    %r2 = alloca_place (int, bool)
+    %r3 = call std::array_index(%p0, %r0, %r2)
+    %r4 = load %r2
+    %r5 = project 1 from %r4
+    %r6 = load %r5
+    %r7 = store %r6 to %p1
+    %r8 = ret
+"#,
+    );
+}
+
+#[test]
+fn place_call_value_in_branches() {
+    // Each branch resolves its own place and copies the value into the shared destination.
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.emit_ssa("fn f(a: [int], c: bool) -> int { if c { a[0] } else { a[1] } }"),
+        r#"fn f(%p0: @arg & [int], %p1: @arg bool, %p2: @ret int):
+  0:
+    %r0 = load %p1
+    %r1 = br 1
+  1:
+    %r2 = comp_eq %r0 i1 1
+    %r3 = condbr %r2, %b2, &b3
+  2:
+    %r4 = alloca int
+    %r5 = store int 0 to %r4
+    %r6 = alloca_place int
+    %r7 = call std::array_index(%p0, %r4, %r6)
+    %r8 = load %r6
+    %r9 = load %r8
+    %r10 = store %r9 to %p2
+    %r11 = br 4
+  3:
+    %r12 = alloca int
+    %r13 = store int 1 to %r12
+    %r14 = alloca_place int
+    %r15 = call std::array_index(%p0, %r12, %r14)
+    %r16 = load %r14
+    %r17 = load %r16
+    %r18 = store %r17 to %p2
+    %r19 = br 4
+  4:
+    %r20 = ret
+"#,
+    );
+}
+
+#[test]
+fn place_call_into_alias_local() {
+    // `let x = a[0]` makes `x` a `NonOwning` alias local: the local is rebound to the place
+    // denoted by its initializer, with no store; the read goes through the alias.
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.emit_ssa("fn f(a: [int]) -> int { let x = a[0]; x }"),
+        r#"fn f(%p0: @arg & [int], %p1: @ret int):
+  0:
+    %r0 = alloca int
+    %r1 = store int 0 to %r0
+    %r2 = alloca_place int
+    %r3 = call std::array_index(%p0, %r0, %r2)
+    %r4 = load %r2
+    %r5 = load %r4
+    %r6 = store %r5 to %p1
+    %r7 = ret
+"#,
+    );
+}
+
+#[test]
 fn iter1_apply() {
     let mut session = TestSession::new();
     assert_eq!(
@@ -622,12 +962,14 @@ fn call_trivial_copy_argument_passes_value_recursive() {
     // The extra store and load are caused by the owned local emission.
     let mut session = TestSession::new();
     assert_eq!(
-        session.emit_ssa(r#"
+        session.emit_ssa(
+            r#"
             fn f(a: int) {
                 let n = 1;
                 f(n)
             }
-        "#),
+        "#
+        ),
         r#"fn f(%p0: @arg int, %p1: @ret never):
   0:
     %r0 = alloca int
@@ -674,13 +1016,15 @@ fn call_mutable_reference_argument_passes_owned_local_place() {
     // mutates the caller's storage.
     let mut session = TestSession::new();
     assert_eq!(
-        session.emit_ssa(r#"
+        session.emit_ssa(
+            r#"
         fn callee(m: &mut int) { }
         fn caller() {
             let mut m = 0;
             callee(m)
         }
-        "#),
+        "#
+        ),
         r#"fn caller(%p0: @ret ()):
   0:
     %r0 = alloca int
@@ -721,10 +1065,10 @@ fn call_passes_all_argument_conventions() {
     %r2 = store int 0 to %r1
     %r3 = call std::Num<0-5>::from_int(%r1, %r0)
     %r4 = alloca int
-    %r5 = alloca int
-    %r6 = store int 1 to %r5
-    %r7 = call std::Num<0-5>::from_int(%r5, %r4)
-    %r8 = call <test>::callee(%r4, %r0, %p0, %p1)
+    %r5 = store int 1 to %r4
+    %r6 = alloca int
+    %r7 = call std::Num<0-5>::from_int(%r4, %r6)
+    %r8 = call <test>::callee(%r6, %r0, %p0, %p1)
     %r9 = ret
 
 fn callee(%p0: @arg int, %p1: @arg &mut int, %p2: @arg & string, %p3: @ret ()):

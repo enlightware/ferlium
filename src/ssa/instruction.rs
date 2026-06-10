@@ -41,6 +41,14 @@ impl Instruction {
         }
     }
 
+    pub fn alloca_place(span: Location, pointing_to: Type) -> Self {
+        Instruction {
+            span,
+            operands: vec![],
+            kind: Box::new(AllocaPlace { pointing_to }),
+        }
+    }
+
     /// Creates a 'br' instruction with the given properties.
     pub fn br(span: Location, target: ssa::BlockIdentity) -> Self {
         Instruction {
@@ -59,14 +67,13 @@ impl Instruction {
         span: Location,
         callee: ssa::Value,
         arguments: T,
-        result: Type,
     ) -> Self {
         let mut operands = vec![callee];
         operands.extend(arguments);
         Instruction {
             span,
             operands,
-            kind: Box::new(Call { result }),
+            kind: Box::new(Call {}),
         }
     }
 
@@ -117,8 +124,7 @@ impl Instruction {
     /// Creates a 'ret' instruction.
     ///
     /// The return value is not an operand: the function writes its result into the return
-    /// out-pointer (the last parameter) before returning. A function whose return type is `()`
-    /// has no out-pointer and simply returns.
+    /// out-pointer (the last parameter) before returning.
     pub fn ret(span: Location) -> Self {
         Instruction {
             span,
@@ -128,10 +134,10 @@ impl Instruction {
     }
 
     /// Creates a 'store' instruction with the given properties.
-    pub fn store(span: Location, value: ssa::Value, target: ssa::Value) -> Self {
+    pub fn store(span: Location, value: ssa::Value, destination: ssa::Value) -> Self {
         Instruction {
             span,
-            operands: vec![value, target],
+            operands: vec![value, destination],
             kind: Box::new(Store {}),
         }
     }
@@ -216,17 +222,36 @@ impl InstructionKind for Alloca {
     }
 }
 
-/// A function call in SSA.
-struct Call {
-    /// The callee's logical return type, recorded as IR metadata.
-    pub result: Type,
+/// A stack allocation of a pointer to a value.
+pub struct AllocaPlace {
+    /// The type of object the allocated pointer points to.
+    pub pointing_to: Type,
 }
+
+impl InstructionKind for AllocaPlace {
+    fn result(&self, _whole: &Instruction) -> InstructionResult {
+        InstructionResult::pointer_to(InstructionResult::pointer_to(InstructionResult::Lowered(
+            self.pointing_to,
+        )))
+    }
+
+    fn fmt_within(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        _whole: &Instruction,
+        env: &ModuleEnv<'_>,
+    ) -> fmt::Result {
+        write!(f, "alloca_place {}", self.pointing_to.format_with(env))
+    }
+}
+
+/// A function call in SSA.
+struct Call {}
 
 impl InstructionKind for Call {
     fn result(&self, _whole: &Instruction) -> InstructionResult {
         // Calls do not yield a register: a callee with a non-`()` result writes it through the
         // return out-pointer passed as the call's last operand.
-        let _ = &self.result;
         InstructionResult::Nothing
     }
 
