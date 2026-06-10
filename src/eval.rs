@@ -1548,6 +1548,13 @@ pub(crate) fn call_value_clone_to_target(
     target: Place,
     span: Location,
 ) -> EvalControlFlowResult {
+    let target_value = target
+        .target_mut(ctx)
+        .map_err(|err| RuntimeError::new(err, Some(span)))?;
+    assert!(
+        matches!(target_value, Value::Uninit),
+        "Value::clone target storage must be uninitialized"
+    );
     discard_call_result(call_dictionary_method(
         ctx,
         dictionary,
@@ -1726,10 +1733,14 @@ fn eval_clone_closure_env(
         closure_env_value_dictionary,
     };
     let target = eval_or_return!(eval_node_as_place(arena, node.target, ctx, locals));
-    *target
+    let target_value = target
         .target_mut(ctx)
-        .map_err(|err| RuntimeError::new(err, Some(span)))? =
-        Value::function_value(target_function);
+        .map_err(|err| RuntimeError::new(err, Some(span)))?;
+    assert!(
+        matches!(target_value, Value::Uninit),
+        "function Value::clone target storage must be uninitialized"
+    );
+    *target_value = Value::function_value(target_function);
     cont(Value::unit())
 }
 

@@ -171,11 +171,11 @@ where
 	    effects_unsafe { hash_collection_hash(value, "hash_set", state) }
 	}
 
-	fn clone(source: HashSet<V>, target: &mut HashSet<V>) {
-		target = HashSet {
+	fn clone(source: HashSet<V>, target: &mut Uninit<HashSet<V>>) {
+		write_init(target, HashSet {
 			buckets: source.buckets,
 			len: source.len,
-		};
+		});
 	}
 
 	fn drop(target: &mut HashSet<V>) {}
@@ -224,12 +224,12 @@ where
 		hash(value.value, state);
 	}
 
-	fn clone(source: HashMapEntry<K, V>, target: &mut HashMapEntry<K, V>) {
-		target = HashMapEntry {
+	fn clone(source: HashMapEntry<K, V>, target: &mut Uninit<HashMapEntry<K, V>>) {
+		write_init(target, HashMapEntry {
 			hash: source.hash,
 			key: source.key,
 			value: source.value,
-		};
+		});
 	}
 
 	fn drop(target: &mut HashMapEntry<K, V>) {}
@@ -468,11 +468,11 @@ where
 	    effects_unsafe { hash_collection_hash(value, "hash_map", state) }
 	}
 
-	fn clone(source: HashMap<K, V>, target: &mut HashMap<K, V>) {
-		target = HashMap {
+	fn clone(source: HashMap<K, V>, target: &mut Uninit<HashMap<K, V>>) {
+		write_init(target, HashMap {
 			buckets: source.buckets,
 			len: source.len,
-		};
+		});
 	}
 
 	fn drop(target: &mut HashMap<K, V>) {}

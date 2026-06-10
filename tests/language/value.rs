@@ -43,7 +43,7 @@ fn tracked_probe_value_impl() -> &'static str {
             hash(value.0, state)
         }
 
-        fn clone(source: Probe, target: &mut Probe) {
+        fn clone(source: Probe, target: &mut Uninit<Probe>) {
             target = Probe(source.0);
         }
 
@@ -71,7 +71,7 @@ fn incrementing_clone_probe_value_impl() -> &'static str {
             hash(value.0, state)
         }
 
-        fn clone(source: Probe, target: &mut Probe) {
+        fn clone(source: Probe, target: &mut Uninit<Probe>) {
             target = Probe(source.0 + 1);
         }
 
@@ -80,6 +80,27 @@ fn incrementing_clone_probe_value_impl() -> &'static str {
         }
     }
     "#
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn array_clone_initializes_uninit_target_without_prior_drop() {
+    let mut session = TestSession::new();
+    let source = format!(
+        r#"
+        {}
+        testing::reset_tracked_drops();
+        {{
+            let original = [Probe(1), Probe(2)];
+            let mut cloned = original;
+            original[0].0 + cloned[0].0;
+            ();
+        }};
+        testing::tracked_drop_log()
+        "#,
+        incrementing_clone_probe_value_impl()
+    );
+    assert_val_eq!(session.run(&source), int(3221));
 }
 
 #[test]
@@ -1297,7 +1318,7 @@ fn auto_derived_struct_value_clone_uses_field_clone() {
                     hash(value.0, state)
                 }
 
-                fn clone(source: Probe, target: &mut Probe) {
+                fn clone(source: Probe, target: &mut Uninit<Probe>) {
                     target = Probe(source.0 + 10);
                 }
 
@@ -1340,7 +1361,7 @@ fn named_generic_enum_auto_derives_value() {
                     hash(value.0, state)
                 }
 
-                fn clone(source: Probe, target: &mut Probe) {
+                fn clone(source: Probe, target: &mut Uninit<Probe>) {
                     target = Probe(source.0 + 10);
                 }
 
@@ -1413,7 +1434,7 @@ fn explicit_concrete_value_impl_suppresses_auto_blanket_impl() {
                     hash(value.0, state)
                 }
 
-                fn clone(source: Wrapper<int>, target: &mut Wrapper<int>) {
+                fn clone(source: Wrapper<int>, target: &mut Uninit<Wrapper<int>>) {
                     target = Wrapper(source.0 + 10);
                 }
 
@@ -1453,7 +1474,7 @@ fn value_impl_for_foreign_named_adt_is_rejected() {
                     hash(value.0, state)
                 }
 
-                fn clone(source: a::Foreign, target: &mut a::Foreign) {
+                fn clone(source: a::Foreign, target: &mut Uninit<a::Foreign>) {
                     target = source;
                 }
 

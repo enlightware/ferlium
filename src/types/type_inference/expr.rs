@@ -40,7 +40,9 @@ use crate::{
         STD_MODULE_ID,
         core_traits_names::{REPR_TRAIT_NAME, TRIVIAL_COPY_TRAIT_NAME, VALUE_TRAIT_NAME},
         math::int_type,
-        value::{VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX, is_value_trait},
+        value::{
+            VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX, is_value_trait, uninit_inner_type,
+        },
     },
     types::{
         effects::{
@@ -1096,7 +1098,13 @@ impl TypeInference {
                     let value_ty = env.ir_arena[value_id].ty;
                     let value_span = env.ir_arena[value_id].span;
                     let place_ty = env.ir_arena[place_id].ty;
-                    self.add_sub_type_constraint(value_ty, value_span, place_ty, place_span);
+                    let assignment_value_ty = uninit_inner_type(place_ty).unwrap_or(place_ty);
+                    self.add_sub_type_constraint(
+                        value_ty,
+                        value_span,
+                        assignment_value_ty,
+                        place_span,
+                    );
                     let value_effects = env.ir_arena[value_id].effects.clone();
                     if value_ty == Type::never() {
                         let mut nodes = self.place_evaluation_prefix_nodes(env.ir_arena, place_id);
@@ -2704,6 +2712,11 @@ impl TypeInference {
                         args_node_ids.len(),
                     );
                     let temp_start_index = env.cur_locals.len();
+                    let mut_ty = if inst_fn_ty.returns_place() {
+                        MutType::mutable()
+                    } else {
+                        MutType::constant()
+                    };
                     let prepared_arguments = self.prepare_call_arguments(
                         env,
                         &mut args_node_ids,
@@ -2729,7 +2742,7 @@ impl TypeInference {
                         prepared_arguments.temp_stores,
                         call,
                     );
-                    (node, ret_ty, MutType::constant(), combined_effects)
+                    (node, ret_ty, mut_ty, combined_effects)
                 }
             } else if let Some(type_def) = env.get_type_def(path)? {
                 // Retrieve the payload type and the tag, if it is an enum.

@@ -269,7 +269,7 @@ fn mutable_let_initialization_uses_value_clone() {
                     hash(value.0, state)
                 }
 
-                fn clone(source: Probe, target: &mut Probe) {
+                fn clone(source: Probe, target: &mut Uninit<Probe>) {
                     target = Probe(source.0 + 10);
                 }
 
@@ -581,7 +581,7 @@ fn array_drop_drops_elements() {
                     hash(value.0, state)
                 }
 
-                fn clone(source: Probe, target: &mut Probe) {
+                fn clone(source: Probe, target: &mut Uninit<Probe>) {
                     target = Probe(source.0);
                 }
 
