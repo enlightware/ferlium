@@ -100,10 +100,7 @@ impl Validation {
                 .iter()
                 .all(|(_, field)| self.validate(*field, guarded)),
             Function(fn_ty) => {
-                fn_ty
-                    .args
-                    .iter()
-                    .all(|arg| self.validate(arg.ty, guarded))
+                fn_ty.args.iter().all(|arg| self.validate(arg.ty, guarded))
                     && self.validate(fn_ty.ret, guarded)
             }
             Named(named) => named

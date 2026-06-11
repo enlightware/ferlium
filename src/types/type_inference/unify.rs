@@ -774,7 +774,10 @@ impl UnifiedTypeInference {
                         }
                     }
                 };
-                internal_compilation_error!(InfiniteType { kind, span: ty_span })
+                internal_compilation_error!(InfiniteType {
+                    kind,
+                    span: ty_span
+                })
             })?
         } else {
             // If the type is a function type with concrete (non-variable) effects,
