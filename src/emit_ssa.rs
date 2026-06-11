@@ -363,7 +363,7 @@ impl<'a> Emitter<'a> {
     }
 
     /// Returns the blocks created for `n`.
-    fn create_case_blocks(&mut self, n: &Box<Case<Elaborated>>) -> CaseBlocks {
+    fn create_case_blocks(&mut self, n: &Case<Elaborated>) -> CaseBlocks {
         let mut heads: Vec<BlockIdentity> = vec![];
         let mut bodies: Vec<BlockIdentity> = vec![];
         for _ in n.alternatives.iter() {
@@ -781,10 +781,8 @@ impl<'a> Emitter<'a> {
             Some(ssa::Value::Integer(containers::b(Int::from_u32(*n))))
         } else if let Some(n) = native.as_primitive_ty::<i32>() {
             Some(ssa::Value::Integer(containers::b(Int::from_i32(*n))))
-        } else if let Some(n) = native.as_primitive_ty::<bool>() {
-            Some(ssa::Value::Boolean(*n))
         } else {
-            None
+            native.as_primitive_ty::<bool>().map(|n| ssa::Value::Boolean(*n))
         }
     }
 

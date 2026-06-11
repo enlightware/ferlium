@@ -272,7 +272,7 @@ impl BlockMut<'_> {
 
     /// Returns `true` iff `self` contains no instruction.
     pub fn is_empty(&self) -> bool {
-        self.holder.blocks[self.identity] == None
+        self.holder.blocks[self.identity].is_none()
     }
 
     //noinspection DuplicatedCode
