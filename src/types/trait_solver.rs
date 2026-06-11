@@ -38,12 +38,13 @@ use crate::{
         core_traits_names::{REPR_TRAIT_NAME, TRIVIAL_COPY_TRAIT_NAME, VALUE_TRAIT_NAME},
         value::{is_value_trait, value_layout_associated_const_values, value_layout_for_type},
     },
-    types::effects::EffType,
+    types::effects::{EffType, Effect, EffectVar},
+    types::mutability::{MutType, MutVar},
     types::r#trait::{Trait, TraitAssociatedConstIndex, TraitMethodIndex},
-    types::r#type::{FnArgType, Type, TypeDef, TypeDefSlot},
+    types::r#type::{FnArgType, Type, TypeDef, TypeDefSlot, TypeVar},
     types::type_inference::unify::UnifiedTypeInference,
     types::type_like::{TypeLike, instantiate_types},
-    types::type_mapper::BitmapInstantiationMapper,
+    types::type_mapper::{BitmapInstantiationMapper, TypeMapper},
 };
 
 #[cfg(debug_assertions)]
@@ -185,6 +186,68 @@ struct TraitImprovementKey {
     trait_id: TraitId,
     input_tys: Vec<Type>,
     output_tys: Vec<Type>,
+}
+
+#[derive(Default)]
+/// Renames inference variables deterministically so alpha-equivalent trait queries share a cycle-detection key.
+struct AlphaCanonicalTypeMapper {
+    ty_vars: FxHashMap<TypeVar, TypeVar>,
+    mut_vars: FxHashMap<MutVar, MutVar>,
+    effect_vars: FxHashMap<EffectVar, EffectVar>,
+}
+
+impl AlphaCanonicalTypeMapper {
+    fn type_var(&mut self, var: TypeVar) -> TypeVar {
+        let next = self.ty_vars.len() as u32;
+        *self
+            .ty_vars
+            .entry(var)
+            .or_insert_with(|| TypeVar::new(next))
+    }
+
+    fn mut_var(&mut self, var: MutVar) -> MutVar {
+        let next = self.mut_vars.len() as u32;
+        *self
+            .mut_vars
+            .entry(var)
+            .or_insert_with(|| MutVar::new(next))
+    }
+
+    fn effect_var(&mut self, var: EffectVar) -> EffectVar {
+        let next = self.effect_vars.len() as u32;
+        *self
+            .effect_vars
+            .entry(var)
+            .or_insert_with(|| EffectVar::new(next))
+    }
+}
+
+impl TypeMapper for AlphaCanonicalTypeMapper {
+    fn map_type(&mut self, ty: Type) -> Type {
+        let Some(var) = ({ ty.data().as_variable().copied() }) else {
+            return ty;
+        };
+        Type::variable(self.type_var(var))
+    }
+
+    fn map_mut_type(&mut self, mut_ty: MutType) -> MutType {
+        match mut_ty {
+            MutType::Variable(var) => MutType::variable(self.mut_var(var)),
+            MutType::Resolved(_) => mut_ty,
+        }
+    }
+
+    fn map_effect_type(&mut self, eff_ty: &EffType) -> EffType {
+        EffType::from_vec(
+            eff_ty
+                .iter()
+                .map(|effect| match effect {
+                    Effect::Primitive(_) => effect,
+                    Effect::Variable(var) => Effect::Variable(self.effect_var(var)),
+                })
+                .collect(),
+        )
+    }
 }
 
 pub(crate) fn current_function_map(def_table: &DefTable) -> FxHashMap<Ustr, LocalFunctionId> {
@@ -860,10 +923,19 @@ impl<'a> TraitSolver<'a> {
         fn_span: Location,
         arena: &mut NodeArena,
     ) -> Result<TraitImprovementMatch, InternalCompilationError> {
+        let mut key_mapper = AlphaCanonicalTypeMapper::default();
         let key = TraitImprovementKey {
             trait_id,
-            input_tys: ty_inf.substitute_in_types(input_tys),
-            output_tys: ty_inf.substitute_in_types(output_tys),
+            input_tys: ty_inf
+                .substitute_in_types(input_tys)
+                .into_iter()
+                .map(|ty| ty.map(&mut key_mapper))
+                .collect(),
+            output_tys: ty_inf
+                .substitute_in_types(output_tys)
+                .into_iter()
+                .map(|ty| ty.map(&mut key_mapper))
+                .collect(),
         };
         if !self.active_improvements.insert(key.clone()) {
             return Ok(TraitImprovementMatch::Unknown);

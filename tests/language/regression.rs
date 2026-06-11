@@ -300,6 +300,15 @@ fn unresolved_expression_constraints_do_not_reach_dictionary_passing() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn recursive_trait_improvement_probe_from_grammar_fuzzer_does_not_overflow_stack() {
+    let mut session = TestSession::new();
+    session
+        .fail_compilation("{filter_map} - 0[0] == 0")
+        .expect_unbound_ty_var();
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn returned_lambda_with_function_typed_num_constraint_compiles() {
     let mut session = TestSession::new();
     session.compile("pub fn b() { || 0() }");
