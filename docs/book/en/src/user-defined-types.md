@@ -144,11 +144,22 @@ fn none() {
 returns a value whose type includes the `None` variant, because the caller may choose any compatible sum type that contains `None`.
 
 If you want to specify a particular sum type, you can add an annotation:
+
 ```ferlium
 fn none() -> None | Some(int) {
     None
 }
 ```
+
+A bare variant tag can also appear directly in a type annotation.
+If the name does not resolve to a generic parameter, type alias, struct, or enum, Ferlium treats it as a structural unit variant type:
+
+```ferlium
+let signal: Ready = Ready;
+```
+
+This means that `signal` has a sum type containing the unit variant `Ready`.
+It does not require a prior enum declaration.
 
 As we will see later, matching on a sum type also narrows the type to the relevant alternative, which is how you can access the payload data.
 Also, this can constrain the set of valid alternatives.
