@@ -81,6 +81,16 @@ SSA must preserve the same cleanup behavior on all exits:
 Function-entry locals are not represented by an extra cleanup block today.
 This is compatible with the current calling convention: non-trivial source-level value inputs are passed by reference, and owned function-boundary inputs are trivial-copy values whose cleanup is `Skip`.
 
+# Block Sequencing
+
+Blocks evaluate every node in `Block.body` in order.
+Only the tail node is the block's value, but non-tail nodes are still semantic evaluation steps and must not be skipped by HIR consumers.
+
+HIR generation makes discard cleanup explicit for non-tail values that need semantic `Value::drop`.
+In that case, the generation stores the discarded value in a generated owned local, wraps that store in a block, and records the local in that wrapper's `Block.cleanup`.
+SSA lowering should treat these wrappers like ordinary blocks: lower their body, run their cleanup on every exit, and ignore their unit result as the enclosing block's non-tail value.
+For any non-tail node, SSA lowering should preserve evaluation order and effects, ignore the produced value as the enclosing block value, and preserve any nested or enclosing `Block.cleanup` obligations.
+
 # Clone and Drop Dispatch
 
 Clone and drop dispatch are specialized by site.
