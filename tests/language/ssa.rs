@@ -60,8 +60,8 @@ fn call_functions() {
     %r0 = alloca int
     %r1 = alloca int
     %r2 = store int 1 to %r1
-    %r3 = call std::Num<0-5>::from_int(%r1, %r0)
-    %r4 = call std::Num<0-5>::add(%p0, %r0, %p1)
+    %r3 = call std::Num<0-6>::from_int(%r1, %r0)
+    %r4 = call std::Num<0-6>::add(%p0, %r0, %p1)
     %r5 = ret
 "#
     );
@@ -74,8 +74,8 @@ fn call_functions() {
     %r1 = alloca int
     %r2 = alloca int
     %r3 = store int 2 to %r2
-    %r4 = call std::Num<0-5>::from_int(%r2, %r0)
-    %r5 = call std::Num<0-5>::mul(%r0, %p0, %r1)
+    %r4 = call std::Num<0-6>::from_int(%r2, %r0)
+    %r5 = call std::Num<0-6>::mul(%r0, %p0, %r1)
     %r6 = load %r1
     %r7 = store %r6 to %p1
     %r8 = ret
@@ -102,7 +102,7 @@ fn match_case_functions() {
   3:
     %r6 = alloca int
     %r7 = store int 2 to %r6
-    %r8 = call std::Num<0-5>::from_int(%r6, %p1)
+    %r8 = call std::Num<0-6>::from_int(%r6, %p1)
     %r9 = br 4
   4:
     %r10 = ret
@@ -130,14 +130,14 @@ fn match_case_functions() {
   4:
     %r11 = alloca int
     %r12 = store int 1 to %r11
-    %r13 = call std::Num<0-5>::from_int(%r11, %r1)
-    %r14 = call std::Num<0-5>::sub(%p0, %r1, %p1)
+    %r13 = call std::Num<0-6>::from_int(%r11, %r1)
+    %r14 = call std::Num<0-6>::sub(%p0, %r1, %p1)
     %r15 = br 6
   5:
     %r16 = alloca int
     %r17 = store int 1 to %r16
-    %r18 = call std::Num<0-5>::from_int(%r16, %r0)
-    %r19 = call std::Num<0-5>::neg(%r0, %p1)
+    %r18 = call std::Num<0-6>::from_int(%r16, %r0)
+    %r19 = call std::Num<0-6>::neg(%r0, %p1)
     %r20 = br 6
   6:
     %r21 = ret
@@ -272,9 +272,9 @@ fn factorial() {
     %r3 = alloca bool
     %r4 = alloca int
     %r5 = store int 1 to %r4
-    %r6 = call std::Num<0-5>::from_int(%r4, %r0)
+    %r6 = call std::Num<0-6>::from_int(%r4, %r0)
     %r7 = alloca ((int, int) -> Ordering,)
-    %r8 = store (std::Ord<0-5>::cmp) to %r7
+    %r8 = store (std::Ord<0-6>::cmp) to %r7
     %r9 = call std::gt(%r7, %p0, %r0, %r3)
     %r10 = load %r3
     %r11 = br 1
@@ -285,15 +285,15 @@ fn factorial() {
     %r14 = alloca int
     %r15 = alloca int
     %r16 = store int 1 to %r15
-    %r17 = call std::Num<0-5>::from_int(%r15, %r1)
-    %r18 = call std::Num<0-5>::sub(%p0, %r1, %r14)
+    %r17 = call std::Num<0-6>::from_int(%r15, %r1)
+    %r18 = call std::Num<0-6>::sub(%p0, %r1, %r14)
     %r19 = call <test>::factorial(%r14, %r2)
-    %r20 = call std::Num<0-5>::mul(%p0, %r2, %p1)
+    %r20 = call std::Num<0-6>::mul(%p0, %r2, %p1)
     %r21 = br 4
   3:
     %r22 = alloca int
     %r23 = store int 1 to %r22
-    %r24 = call std::Num<0-5>::from_int(%r22, %p1)
+    %r24 = call std::Num<0-6>::from_int(%r22, %p1)
     %r25 = br 4
   4:
     %r26 = ret
@@ -567,7 +567,7 @@ fn iter1_multi_param_value() {
         session.emit_ssa("fn f(x: int, y: int) { x + y }"),
         r#"fn f(%p0: @arg int, %p1: @arg int, %p2: @ret int):
   0:
-    %r0 = call std::Num<0-5>::add(%p0, %p1, %p2)
+    %r0 = call std::Num<0-6>::add(%p0, %p1, %p2)
     %r1 = ret
 "#,
     );
@@ -589,8 +589,8 @@ fn iter1_mut_local_copy() {
     %r3 = store %r2 to %r0
     %r4 = alloca int
     %r5 = store int 1 to %r4
-    %r6 = call std::Num<0-5>::from_int(%r4, %r1)
-    %r7 = call std::Num<0-5>::add(%r0, %r1, %r0)
+    %r6 = call std::Num<0-6>::from_int(%r4, %r1)
+    %r7 = call std::Num<0-6>::add(%r0, %r1, %r0)
     %r8 = load %r0
     %r9 = store %r8 to %p1
     %r10 = ret
@@ -614,8 +614,8 @@ fn iter1_let_mut_move_return() {
     %r3 = store %r2 to %r0
     %r4 = alloca int
     %r5 = store int 1 to %r4
-    %r6 = call std::Num<0-5>::from_int(%r4, %r1)
-    %r7 = call std::Num<0-5>::add(%r0, %r1, %r0)
+    %r6 = call std::Num<0-6>::from_int(%r4, %r1)
+    %r7 = call std::Num<0-6>::add(%r0, %r1, %r0)
     %r8 = load %r0
     %r9 = store %r8 to %p1
     %r10 = ret
@@ -643,12 +643,12 @@ fn array_index_read() {
   2:
     %r9 = alloca int
     %r10 = store int 1 to %r9
-    %r11 = call std::Num<0-5>::from_int(%r9, %p1)
+    %r11 = call std::Num<0-6>::from_int(%r9, %p1)
     %r12 = br 4
   3:
     %r13 = alloca int
     %r14 = store int 2 to %r13
-    %r15 = call std::Num<0-5>::from_int(%r13, %p1)
+    %r15 = call std::Num<0-6>::from_int(%r13, %p1)
     %r16 = br 4
   4:
     %r17 = ret
@@ -716,8 +716,8 @@ fn place_call_into_owned_local() {
     %r8 = store %r7 to %r0
     %r9 = alloca int
     %r10 = store int 1 to %r9
-    %r11 = call std::Num<0-5>::from_int(%r9, %r1)
-    %r12 = call std::Num<0-5>::add(%r0, %r1, %r0)
+    %r11 = call std::Num<0-6>::from_int(%r9, %r1)
+    %r12 = call std::Num<0-6>::add(%r0, %r1, %r0)
     %r13 = load %r0
     %r14 = store %r13 to %p1
     %r15 = ret
@@ -975,7 +975,7 @@ fn call_trivial_copy_argument_passes_value_recursive() {
     %r0 = alloca int
     %r1 = alloca int
     %r2 = store int 1 to %r1
-    %r3 = call std::Num<0-5>::from_int(%r1, %r0)
+    %r3 = call std::Num<0-6>::from_int(%r1, %r0)
     %r4 = call <test>::f(%r0, %p1)
     %r5 = ret
 "#,
@@ -1030,7 +1030,7 @@ fn call_mutable_reference_argument_passes_owned_local_place() {
     %r0 = alloca int
     %r1 = alloca int
     %r2 = store int 0 to %r1
-    %r3 = call std::Num<0-5>::from_int(%r1, %r0)
+    %r3 = call std::Num<0-6>::from_int(%r1, %r0)
     %r4 = call <test>::callee(%r0, %p0)
     %r5 = ret
 
@@ -1063,11 +1063,11 @@ fn call_passes_all_argument_conventions() {
     %r0 = alloca int
     %r1 = alloca int
     %r2 = store int 0 to %r1
-    %r3 = call std::Num<0-5>::from_int(%r1, %r0)
+    %r3 = call std::Num<0-6>::from_int(%r1, %r0)
     %r4 = alloca int
     %r5 = store int 1 to %r4
     %r6 = alloca int
-    %r7 = call std::Num<0-5>::from_int(%r4, %r6)
+    %r7 = call std::Num<0-6>::from_int(%r4, %r6)
     %r8 = call <test>::callee(%r6, %r0, %p0, %p1)
     %r9 = ret
 
@@ -1087,7 +1087,7 @@ fn mutable_reference_parameter() {
   0:
     %r0 = alloca int
     %r1 = store int 2 to %r0
-    %r2 = call std::Num<0-5>::from_int(%r0, %p0)
+    %r2 = call std::Num<0-6>::from_int(%r0, %p0)
     %r3 = ret
 "#,
     );
@@ -1098,9 +1098,9 @@ fn generic_apply() {
     let mut session = TestSession::new();
     assert_eq!(
         session.emit_ssa("fn f(x) { x * 2 }"),
-        r#"fn f(%p0: @extra ((A, A) -> A, (A, A) -> A, (A, A) -> A, (A) -> A, (A) -> A, (A) -> A, (int) -> A), %p1: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A, &mut A) -> (), (&mut A) -> (), int, int), %p2: @arg & A, %p3: @ret A):
+        r#"fn f(%p0: @extra ((A, A) -> A, (A, A) -> A, (A, A) -> A, (A) -> A, (A) -> A, (A) -> A, (int) -> A), %p1: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A, &mut Uninit<A>) -> (), (&mut A) -> (), int, int), %p2: @arg & A, %p3: @ret A):
   0:
-    %r0 = alloca A
+    %r0 = alloca A using %p1
     %r1 = project 6 from %p0
     %r2 = load %r1
     %r3 = alloca int
@@ -1130,6 +1130,83 @@ fn dynamic_apply() {
 }
 
 // ============================================================================
+// Generic handling tests
+// ============================================================================
+
+#[test]
+fn generic_two_same_type_params() {
+    // Two parameters of the same generic type share the same Num dictionary; the call forwards
+    // both shared-ref args and the result pointer directly without an intermediate alloca.
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.emit_ssa("fn f(x, y) { x + y }"),
+        r#"fn f(%p0: @extra ((A, A) -> A, (A, A) -> A, (A, A) -> A, (A) -> A, (A) -> A, (A) -> A, (int) -> A), %p1: @arg & A, %p2: @arg & A, %p3: @ret A):
+  0:
+    %r0 = project 0 from %p0
+    %r1 = load %r0
+    %r2 = call %r1(%p1, %p2, %p3)
+    %r3 = ret
+"#,
+    );
+}
+
+#[test]
+fn generic_higher_order_function_param() {
+    // A higher-order parameter `f: (A) -> A` is passed as a shared reference to a function
+    // value whose generic variable appears only under the function type (function-surface).  The
+    // call directly threads the incoming pointers with no intermediate alloca.
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.emit_ssa("fn apply(f: (A) -> A, x) { f(x) }"),
+        r#"fn apply(%p0: @arg & (A) -> A ! e₀, %p1: @arg & A, %p2: @ret A):
+  0:
+    %r0 = load %p0
+    %r1 = call %r0(%p1, %p2)
+    %r2 = ret
+"#,
+    );
+}
+
+#[test]
+fn generic_multiple_ops_reuse_witness() {
+    // `x * x + x` requires two intermediate generic temporaries.  Both are allocated with
+    // `alloca A using %p1`, confirming that the single Value dictionary witness (%p1) is reused
+    // for every dynamic allocation of type A within the function.
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.emit_ssa("fn f(x) { x * x + x }"),
+        r#"fn f(%p0: @extra ((A, A) -> A, (A, A) -> A, (A, A) -> A, (A) -> A, (A) -> A, (A) -> A, (int) -> A), %p1: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A, &mut Uninit<A>) -> (), (&mut A) -> (), int, int), %p2: @arg & A, %p3: @ret A):
+  0:
+    %r0 = alloca A using %p1
+    %r1 = project 2 from %p0
+    %r2 = load %r1
+    %r3 = call %r2(%p2, %p2, %r0)
+    %r4 = project 0 from %p0
+    %r5 = load %r4
+    %r6 = call %r5(%r0, %p2, %p3)
+    %r7 = ret
+"#,
+    );
+}
+
+#[test]
+fn generic_comparison() {
+    // Comparing two generic values calls `Value::eq` projected from the Value dictionary (%p0).
+    // The result is a concrete `bool`, so the return place needs no dynamic alloca.
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.emit_ssa("fn f(x, y) { x == y }"),
+        r#"fn f(%p0: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A, &mut Uninit<A>) -> (), (&mut A) -> (), int, int), %p1: @arg & A, %p2: @arg & A, %p3: @ret bool):
+  0:
+    %r0 = project 0 from %p0
+    %r1 = load %r0
+    %r2 = call %r1(%p1, %p2, %p3)
+    %r3 = ret
+"#,
+    );
+}
+
+// ============================================================================
 // Copy and Move Tests
 // ============================================================================
 
@@ -1147,8 +1224,8 @@ fn copy_int() {
     %r3 = store %r2 to %r0
     %r4 = alloca int
     %r5 = store int 1 to %r4
-    %r6 = call std::Num<0-5>::from_int(%r4, %r1)
-    %r7 = call std::Num<0-5>::add(%r0, %r1, %p1)
+    %r6 = call std::Num<0-6>::from_int(%r4, %r1)
+    %r7 = call std::Num<0-6>::add(%r0, %r1, %p1)
     %r8 = ret
 "#,
     );
@@ -1226,6 +1303,145 @@ fn return_local_int_move() {
     );
 }
 
+// ============================================================================
+// (Re)assignment tests
+// ============================================================================
+
+#[test]
+fn reassign_local_literal() {
+    // Reassigning an owned int local overwrites its alloca in place; the old value
+    // needs no semantic drop (Skip for int).
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.emit_ssa("fn f() -> int { let mut y: int = 1; y = 2; y }"),
+        r#"fn f(%p0: @ret int):
+  0:
+    %r0 = alloca int
+    %r1 = store int 1 to %r0
+    %r2 = alloca int
+    %r3 = store int 2 to %r2
+    %r4 = call std::Num<0-6>::from_int(%r2, %r0)
+    %r5 = load %r0
+    %r6 = store %r5 to %p0
+    %r7 = ret
+"#,
+    );
+}
+
+#[test]
+fn reassign_local_from_param() {
+    // Reassigning an owned local from a by-value param is a trivial copy: load %p0,
+    // store into the local's alloca.
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.emit_ssa("fn f(x: int) -> int { let mut y: int = 0; y = x; y }"),
+        r#"fn f(%p0: @arg int, %p1: @ret int):
+  0:
+    %r0 = alloca int
+    %r1 = store int 0 to %r0
+    %r2 = load %p0
+    %r3 = store %r2 to %r0
+    %r4 = load %r0
+    %r5 = store %r4 to %p1
+    %r6 = ret
+"#,
+    );
+}
+
+#[test]
+fn reassign_in_branches() {
+    // Each branch writes its value directly into the same owned local's alloca.
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.emit_ssa("fn f(c: bool) -> int { let mut y: int = 0; if c { y = 1 } else { y = 2 }; y }"),
+        r#"fn f(%p0: @arg bool, %p1: @ret int):
+  0:
+    %r0 = alloca int
+    %r1 = alloca ()
+    %r2 = store int 0 to %r0
+    %r3 = load %p0
+    %r4 = br 1
+  1:
+    %r5 = comp_eq %r3 i1 1
+    %r6 = condbr %r5, %b2, &b3
+  2:
+    %r7 = alloca int
+    %r8 = store int 1 to %r7
+    %r9 = call std::Num<0-6>::from_int(%r7, %r0)
+    %r10 = br 4
+  3:
+    %r11 = alloca int
+    %r12 = store int 2 to %r11
+    %r13 = call std::Num<0-6>::from_int(%r11, %r0)
+    %r14 = br 4
+  4:
+    %r15 = load %r0
+    %r16 = store %r15 to %p1
+    %r17 = ret
+"#,
+    );
+}
+
+#[test]
+fn reassign_mutable_ref_param_from_local() {
+    // Assigning through a `&mut` param writes into the caller's storage via the
+    // incoming pointer; the source local is read with a trivial-copy load.
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.emit_ssa("fn f(x: &mut int) { let y: int = 1; x = y; }"),
+        r#"fn f(%p0: @arg &mut int, %p1: @ret ()):
+  0:
+    %r0 = alloca int
+    %r1 = store int 1 to %r0
+    %r2 = load %r0
+    %r3 = store %r2 to %p0
+    %r4 = ret
+"#,
+    );
+}
+
+#[test]
+fn reassign_array_element_from_param() {
+    // Assigning into an array element resolves the element place and stores the
+    // param's trivially-copied value into it.
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.emit_ssa("fn f(a: &mut [int], v: int) { a[0] = v; }"),
+        r#"fn f(%p0: @arg &mut [int], %p1: @arg int, %p2: @ret ()):
+  0:
+    %r0 = alloca int
+    %r1 = store int 0 to %r0
+    %r2 = alloca_place int
+    %r3 = call std::array_index(%p0, %r0, %r2)
+    %r4 = load %r2
+    %r5 = load %p1
+    %r6 = store %r5 to %r4
+    %r7 = ret
+"#,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Assign drop via Value::drop is not lowered yet")]
+fn reassign_generic_never_direct_load_store() {
+    // Assigning a generic value must go through its Value dictionary witness
+    // (Value::drop of the old value + Value::clone of the new one); lowering it
+    // with a direct load/store would be unsound since generic values have no
+    // static layout. Until witness-based assignment is implemented, lowering
+    // must refuse (panic) rather than emit a direct load/store.
+    let mut session = TestSession::new();
+    session.emit_ssa("fn set<A>(a: &mut A, b: A) { a = b }");
+}
+
+#[test]
+#[should_panic(expected = "attempted direct load/store of a generic value")]
+fn generic_register_read_is_rejected() {
+    // Reading a generic value into an SSA register would be a direct load of a value
+    // with no static layout; the emitter must refuse instead of emitting it.
+    let mut session = TestSession::new();
+    session.emit_ssa("fn f(x) -> int { match x { 0 => 1, _ => 2 } }");
+}
+
 #[test]
 fn copy_int_param_to_local() {
     // Copying int parameter to a mutable local - uses trivial copy
@@ -1240,8 +1456,8 @@ fn copy_int_param_to_local() {
     %r3 = store %r2 to %r0
     %r4 = alloca int
     %r5 = store int 1 to %r4
-    %r6 = call std::Num<0-5>::from_int(%r4, %r1)
-    %r7 = call std::Num<0-5>::add(%r0, %r1, %r0)
+    %r6 = call std::Num<0-6>::from_int(%r4, %r1)
+    %r7 = call std::Num<0-6>::add(%r0, %r1, %r0)
     %r8 = load %r0
     %r9 = store %r8 to %p1
     %r10 = ret

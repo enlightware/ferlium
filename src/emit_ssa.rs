@@ -12,14 +12,16 @@ use crate::{
     format::FormatWith,
     hir::{
         self, CallArgument, Case, ENode, ENodeArena, Elaborated, GetDictionary, LoopId,
-        value::LiteralValue,
+        dictionary::DictionaryReq, value::LiteralValue,
     },
     module::{
         self, FunctionId, ImportFunctionSlotId, LocalDeclId, LocalFunctionId, Module, ModuleEnv,
         ModuleId, TraitDictionary, TraitImpl, TraitImplId, id::Id,
     },
     ssa::{self, BlockIdentity, Program, value::FunctionReference},
+    std::{core_traits_names::VALUE_TRAIT_NAME, value::is_function_surface_only_value_type},
     types::r#type::Type,
+    types::type_like::TypeLike,
 };
 
 /// Emits the textual representation of the low-level (aka SSA) ferlium IR of `module`.
@@ -129,6 +131,23 @@ impl<'a> Emitter<'a> {
             extra_parameters.insert(ExtraParameterId::from_index(j), ssa::Value::Parameter(j));
         }
 
+        // Record which incoming dictionary parameter witnesses the `Value` layout of each generic
+        // type, so that allocations of generic storage can carry their run-time layout witness.
+        let value_trait_id = env.expect_std_trait_id(VALUE_TRAIT_NAME);
+        let mut value_witnesses: Vec<(Type, ssa::Value)> = vec![];
+        for (j, req) in extra.requirements.iter().enumerate() {
+            if let DictionaryReq::TraitImpl {
+                trait_id,
+                input_tys,
+                ..
+            } = req
+                && *trait_id == value_trait_id
+                && let [ty] = input_tys[..]
+            {
+                value_witnesses.push((ty, ssa::Value::Parameter(j)));
+            }
+        }
+
         // Record the function signature in slot order: the extra (dictionary/evidence)
         // parameters first, then the visible runtime arguments (the leading `LocalDecl`s).
         for req in &extra.requirements {
@@ -170,6 +189,7 @@ impl<'a> Emitter<'a> {
                 span,
                 locals,
                 extra_parameters,
+                value_witnesses,
                 loop_results: HashMap::new(),
                 return_destination,
             },
@@ -218,11 +238,53 @@ impl<'a> Emitter<'a> {
             .map(|(i, l)| (LocalDeclId::from_index(i), l.ty))
             .collect();
         for (id, ty) in owned {
-            let place = self
-                .insert(ssa::Instruction::alloca(self.context.span, ty))
-                .unwrap();
+            let place = self.alloca_storage(self.context.span, ty);
             self.context.locals.insert(id, place);
         }
+    }
+
+    /// Returns the `Value` dictionary parameter (a place) witnessing the run-time layout of `ty`, if any.
+    fn value_dictionary(&self, ty: Type) -> Option<ssa::Value> {
+        self.context
+            .value_witnesses
+            .iter()
+            .find(|(t, _)| *t == ty)
+            .map(|(_, w)| w.clone())
+    }
+
+    /// Inserts an allocation of storage for an instance of `ty` and returns its address.
+    ///
+    /// Statically sized storage is allocated directly; storage of a generic type carries the
+    /// `Value` dictionary witnessing its run-time layout as operand.
+    fn alloca_storage(&mut self, span: Location, ty: Type) -> ssa::Value {
+        if ty.is_constant() || is_function_surface_only_value_type(ty) {
+            // Note: is_function_surface_only_value_type indicates it's a function, which always
+            // has the same, known layout. No dictionary is required.
+            self.insert(ssa::Instruction::alloca(span, ty)).unwrap()
+        } else {
+            let witness = self.value_dictionary(ty).unwrap_or_else(|| {
+                panic!(
+                    "no Value dictionary witnesses the layout of generic storage of type {}",
+                    self.show(ty)
+                )
+            });
+            self.insert(ssa::Instruction::alloca_dynamic(span, ty, witness))
+                .unwrap()
+        }
+    }
+
+    /// Asserts that `ty` has a statically known layout, so that a value of that type may be moved
+    /// with direct `load`/`store` instructions.
+    ///
+    /// Generic values have no static layout: they must be allocated with `alloca_dynamic` and
+    /// moved through their `Value` dictionary witness (`Value::clone`/`Value::drop`), never with
+    /// direct `load`/`store`.
+    fn assert_statically_sized(&self, ty: Type) {
+        assert!(
+            ty.is_constant() || is_function_surface_only_value_type(ty),
+            "attempted direct load/store of a generic value of type {}; generic values must be moved through their Value dictionary witness",
+            self.show(ty)
+        );
     }
 
     /// Returns the declaration for `l` within the currently-lowered function.
@@ -312,7 +374,7 @@ impl<'a> Emitter<'a> {
                     arguments.push(self.lower_as_place(&self.hir_arena[*x]));
                 }
                 for arg in &n.arguments {
-                    arguments.push(self.lower_argument(arg));
+                    arguments.push(self.lower_as_place(&self.hir_arena[arg.value]));
                 }
 
                 let result_storage = self.allocate_result(node, &n.ty);
@@ -330,9 +392,7 @@ impl<'a> Emitter<'a> {
 
             // A value-producing node is materialized into a temporary place.
             _ => {
-                let storage = self
-                    .insert(Instruction::alloca(node.span, node.ty))
-                    .unwrap();
+                let storage = self.alloca_storage(node.span, node.ty);
                 self.lower_value_into(node, Some(storage.clone()));
                 storage
             }
@@ -350,6 +410,7 @@ impl<'a> Emitter<'a> {
         {
             return prim;
         }
+        self.assert_statically_sized(node.ty);
         let place = self.lower_as_place(node);
         self.insert(ssa::Instruction::load(node.span, place))
             .unwrap()
@@ -408,12 +469,18 @@ impl<'a> Emitter<'a> {
     /// Returns the SSA Dictionary lowered from `n`.
     fn lower_dictionary(&mut self, n: &GetDictionary) -> ssa::Value {
         let (d, m) = self.dictionary_value(n);
-        ssa::Value::Dictionary(
-            d.methods()
-                .iter()
-                .map(|x| self.demand_function(*x, m))
-                .collect(),
-        )
+        let mut entries: Vec<ssa::Value> = d
+            .methods()
+            .iter()
+            .map(|x| self.demand_function(*x, m))
+            .collect();
+        for value in d.associated_const_values() {
+            let value = self
+                .lower_as_primitive(value)
+                .expect("dictionary associated const must be a primitive value");
+            entries.push(value);
+        }
+        ssa::Value::Dictionary(entries)
     }
 
     /// Stores the register `value` into `dest` if a destination is present; a `None` `dest`
@@ -437,9 +504,7 @@ impl<'a> Emitter<'a> {
     /// Inserts an allocation of `f`'s result storage and returns its address.
     fn allocate_result(&mut self, node: &ENode, f: &FnType) -> ssa::Value {
         match f.return_convention {
-            FnReturnConvention::Value => self
-                .insert(ssa::Instruction::alloca(node.span, node.ty))
-                .unwrap(),
+            FnReturnConvention::Value => self.alloca_storage(node.span, node.ty),
             FnReturnConvention::Place => self
                 .insert(ssa::Instruction::alloca_place(node.span, node.ty))
                 .unwrap(),
@@ -452,6 +517,7 @@ impl<'a> Emitter<'a> {
     fn lower_place_call_into(&mut self, node: &ENode, destination: Option<ssa::Value>) {
         let place = self.lower_as_place(node);
         if let Some(dest) = destination {
+            self.assert_statically_sized(node.ty);
             let v = self
                 .insert(ssa::Instruction::load(node.span, place))
                 .unwrap();
@@ -565,6 +631,7 @@ impl<'a> Emitter<'a> {
                 // A bare load in value position is a trivial-copy read (non-trivial reads are wrapped
                 // in `CloneValue`/`TakeLocalValue` by HIR): load the local's place and store it.
                 if destination.is_some() {
+                    self.assert_statically_sized(node.ty);
                     let p = self.place_of_local(n.id);
                     let v = self.insert(ssa::Instruction::load(node.span, p)).unwrap();
                     self.store_into_if(node.span, v, destination);
@@ -633,6 +700,7 @@ impl<'a> Emitter<'a> {
                     // Move the owned value out: load the place and store it into the destination,
                     // skipping the local's lexical drop (cleanup is deferred).
                     if destination.is_some() {
+                        self.assert_statically_sized(node.ty);
                         let p = self.place_of_local(n.id);
                         let v = self.insert(ssa::Instruction::load(node.span, p)).unwrap();
                         self.store_into_if(node.span, v, destination);
@@ -688,6 +756,7 @@ impl<'a> Emitter<'a> {
                 // A projection is a place: load the field place and store it into the destination
                 // (trivial copy; non-trivial reads are wrapped in `CloneValue` by HIR).
                 if destination.is_some() {
+                    self.assert_statically_sized(node.ty);
                     let fp = self.lower_as_place(node);
                     let v = self.insert(ssa::Instruction::load(node.span, fp)).unwrap();
                     self.store_into_if(node.span, v, destination);
@@ -698,9 +767,7 @@ impl<'a> Emitter<'a> {
                 // The loop's result is written into `dest` (or a throwaway temporary when discarded).
                 let result = match &destination {
                     Some(dest) => dest.clone(),
-                    None => self
-                        .insert(ssa::Instruction::alloca(node.span, node.ty))
-                        .unwrap(),
+                    None => self.alloca_storage(node.span, node.ty),
                 };
                 self.context.loop_results.insert(n.label, result);
 
@@ -782,7 +849,9 @@ impl<'a> Emitter<'a> {
         } else if let Some(n) = native.as_primitive_ty::<i32>() {
             Some(ssa::Value::Integer(containers::b(Int::from_i32(*n))))
         } else {
-            native.as_primitive_ty::<bool>().map(|n| ssa::Value::Boolean(*n))
+            native
+                .as_primitive_ty::<bool>()
+                .map(|n| ssa::Value::Boolean(*n))
         }
     }
 
@@ -821,6 +890,10 @@ struct InsertionContext {
 
     /// The SSA values bound to extra parameters of the function.
     extra_parameters: HashMap<ExtraParameterId, ssa::Value>,
+
+    /// The `Value` dictionary parameters witnessing the run-time layout of generic types, used to
+    /// allocate storage whose size is known only at run time.
+    value_witnesses: Vec<(Type, ssa::Value)>,
 
     /// The SSA place (an `alloca` result or the return out-pointer) into which each active loop
     /// writes its result via `break`, keyed by the loop's `LoopId`.

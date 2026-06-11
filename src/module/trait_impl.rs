@@ -182,6 +182,11 @@ impl TraitDictionary {
     pub fn methods(&self) -> &Vec<LocalFunctionId> {
         &self.methods
     }
+
+    /// The compile-time known associated constant fields of the dictionary.
+    pub fn associated_const_values(&self) -> &Vec<LiteralValue> {
+        &self.associated_const_values
+    }
 }
 
 pub fn build_dictionary_value(

@@ -201,7 +201,7 @@ walk/obligation structure must already be in place.
 ## 9. Worked examples (golden targets)
 
 Type debug for `int` prints `Type { world: Some(0), index: 5 }`; the `Num` impl methods
-print as `std::Num<0-5>::add` / `::from_int` etc.
+print as `std::Num<0-6>::add` / `::from_int` etc.
 
 ### By-value param, read-only — `fn t(x: int) { x }`
 `x` is `NonOwning` by-value → bare `%p0`; trivial-copy clone is `%p0`.
@@ -219,8 +219,8 @@ fn add_one:
     %r0 = alloca Type { world: Some(0), index: 5 }
     %r1 = store %p0 to %r0
     %r2 = load %r0
-    %r3 = call std::Num<0-5>::from_int(i32 1)
-    %r4 = call std::Num<0-5>::add(%r2, %r3)
+    %r3 = call std::Num<0-6>::from_int(i32 1)
+    %r4 = call std::Num<0-6>::add(%r2, %r3)
     %r5 = store %r4 to %r0
     %r6 = load %r0
     %r7 = ret %r6

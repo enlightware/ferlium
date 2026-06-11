@@ -32,11 +32,24 @@ impl Instruction {
         self.kind.is_terminator()
     }
 
-    /// Creates an `alloca` instruction with the given properties.
+    /// Creates an `alloca` instruction for storage whose size is known at compile time.
     pub fn alloca(span: Location, ty: Type) -> Self {
         Instruction {
             span,
             operands: vec![],
+            kind: Box::new(Alloca { ty }),
+        }
+    }
+
+    /// Creates an `alloca` instruction for storage whose size is known only at run time.
+    ///
+    /// `witness` is the place of the `Value` dictionary witnessing the run-time layout of `ty`;
+    /// its `SIZE` and `ALIGN` associated const entries determine the size and alignment of the
+    /// allocation.
+    pub fn alloca_dynamic(span: Location, ty: Type, witness: ssa::Value) -> Self {
+        Instruction {
+            span,
+            operands: vec![witness],
             kind: Box::new(Alloca { ty }),
         }
     }
@@ -202,6 +215,12 @@ impl InstructionResult {
 }
 
 /// A stack allocation.
+///
+/// The instruction defines a place capable of storing an instance of `ty`, allocated on the
+/// stack.
+///
+/// If `ty` is not statically sized, the instruction carries a single operand: the `Value`
+/// dictionary witnessing the run-time layout of `ty` (see `Instruction::alloca_dynamic`).
 struct Alloca {
     /// The type of the allocation.
     pub ty: Type,
@@ -215,10 +234,14 @@ impl InstructionKind for Alloca {
     fn fmt_within(
         &self,
         f: &mut fmt::Formatter<'_>,
-        _whole: &Instruction,
+        whole: &Instruction,
         env: &ModuleEnv<'_>,
     ) -> fmt::Result {
-        write!(f, "alloca {}", self.ty.format_with(env))
+        if let Some(witness) = whole.operands.first() {
+            write!(f, "alloca {} using {}", self.ty.format_with(env), witness)
+        } else {
+            write!(f, "alloca {}", self.ty.format_with(env))
+        }
     }
 }
 
