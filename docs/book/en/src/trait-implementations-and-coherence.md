@@ -49,14 +49,15 @@ struct Wrapper<T>(T)
 
 impl<T> SizedSeq for Wrapper<T>
 where
-    T: Iterator<Item = int>
+    T: SizedSeq
 {
     fn len(wrapper: Wrapper<T>) {
-        count(wrapper.0)
+        len(wrapper.0)
     }
 }
 ```
 
+Here, `Wrapper<T>` is a sized sequence whenever its inner value is.
 The extra constraints become part of the impl itself.
 They participate in trait selection and in coherence checking, just like the types named in the impl header.
 

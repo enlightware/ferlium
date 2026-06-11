@@ -580,6 +580,7 @@ impl InvalidLoopControlKind {
 #[derive(Debug, Clone, EnumAsInner)]
 pub enum InfiniteTypeKind<S: Scope> {
     TypeVariableCycle { ty_var: S::TypeVar, ty: S::Type },
+    TypeVariableSumCycleWithoutTerminatingVariant { ty_var: S::TypeVar, ty: S::Type },
     ProductCycleWithoutSum { name: Ustr },
     SumCycleWithoutTerminatingVariant { name: Ustr },
 }
@@ -1209,6 +1210,15 @@ impl FormatWith<SourceTable> for CompilationError {
                     write!(
                         f,
                         "Infinite type: `{}` = `{}` in {}",
+                        ty_var,
+                        ty,
+                        fmt_span(span)
+                    )
+                }
+                InfiniteTypeKind::TypeVariableSumCycleWithoutTerminatingVariant { ty_var, ty } => {
+                    write!(
+                        f,
+                        "Infinite type: `{}` = `{}` because every variant branch refers back to the recursive cycle in {}",
                         ty_var,
                         ty,
                         fmt_span(span)
@@ -1934,6 +1944,13 @@ impl CompilationError {
                             ty: ty.format_with(env).to_string(),
                         }
                     }
+                    InfiniteTypeKind::TypeVariableSumCycleWithoutTerminatingVariant {
+                        ty_var,
+                        ty,
+                    } => InfiniteTypeKind::TypeVariableSumCycleWithoutTerminatingVariant {
+                        ty_var: ty_var.to_string(),
+                        ty: ty.format_with(env).to_string(),
+                    },
                     InfiniteTypeKind::ProductCycleWithoutSum { name } => {
                         InfiniteTypeKind::ProductCycleWithoutSum { name }
                     }

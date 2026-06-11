@@ -261,6 +261,11 @@ pub(super) fn compilation_error_to_data(
                 InfiniteTypeKind::TypeVariableCycle { ty_var, ty } => {
                     format!("Infinite type: `{ty_var}` = `{ty}`")
                 }
+                InfiniteTypeKind::TypeVariableSumCycleWithoutTerminatingVariant { ty_var, ty } => {
+                    format!(
+                        "Infinite type: `{ty_var}` = `{ty}` because every variant branch refers back to the recursive cycle"
+                    )
+                }
                 InfiniteTypeKind::ProductCycleWithoutSum { name } => {
                     format!(
                         "Type `{name}` is infinitely recursive because its cycle does not pass through an enum or variant union"

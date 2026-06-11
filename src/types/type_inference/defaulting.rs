@@ -294,12 +294,31 @@ impl UnifiedTypeInference {
     ) -> Result<(), InternalCompilationError> {
         use crate::types::type_scheme::VariantConstraint;
 
-        // First, collect the type variables that are invalid for variant simplification.
+        // First, collect the type variables that are themselves the subject of
+        // a variant constraint: a payload reference to such a variable forms a
+        // (possibly mutual) recursive variant group, which recursive-type
+        // interning resolves during unification one equation at a time, so it
+        // does not make the variable invalid.
+        let mut variant_subject_vars = FxHashSet::<TypeVar>::default();
+        for constraint in constraints {
+            if let PubTypeConstraint::TypeHasVariant { variant_ty, .. } = constraint {
+                if let Some(var) = variant_ty.data().as_variable() {
+                    variant_subject_vars.insert(*var);
+                }
+            }
+        }
+
+        // Then, collect the type variables that are invalid for variant simplification.
         let mut invalid_ty_vars = FxHashSet::<TypeVar>::default();
         for constraint in constraints {
             match constraint {
                 PubTypeConstraint::TypeHasVariant { payload_ty, .. } => {
-                    invalid_ty_vars.extend(payload_ty.inner_ty_vars());
+                    invalid_ty_vars.extend(
+                        payload_ty
+                            .inner_ty_vars()
+                            .into_iter()
+                            .filter(|var| !variant_subject_vars.contains(var)),
+                    );
                 }
                 PubTypeConstraint::HaveTrait { .. } => {}
                 _ => {

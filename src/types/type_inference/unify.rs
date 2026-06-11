@@ -16,6 +16,7 @@ use crate::{
     types::{
         effects::{EffType, EffectVar, EffectVarKey},
         mutability::{MutType, MutVal, MutVar, MutVarKey},
+        recursive_equation::{RecursiveEquationError, try_intern_recursive_equation},
         trait_solver::{ConstraintAssumptions, TraitSolver},
         r#type::{FnType, TyVarKey, Type, TypeInstSubst, TypeKind, TypeVar},
         type_like::TypeLike,
@@ -757,29 +758,42 @@ impl UnifiedTypeInference {
         ty: Type,
         ty_span: Location,
     ) -> Result<(), InternalCompilationError> {
-        if ty.contains_any_type_var(var) {
-            Err(internal_compilation_error!(InfiniteType {
-                kind: InfiniteTypeKind::TypeVariableCycle { ty_var: var, ty },
-                span: ty_span,
-            }))
+        let ty = if ty.contains_any_type_var(var) {
+            // A recursive type equation: intern it as a recursive type when it
+            // satisfies the same rules as declared recursive types; otherwise
+            // it denotes an infinite type.
+            try_intern_recursive_equation(var, ty).map_err(|error| {
+                let kind = match error {
+                    RecursiveEquationError::UnguardedCycle => {
+                        InfiniteTypeKind::TypeVariableCycle { ty_var: var, ty }
+                    }
+                    RecursiveEquationError::NoTerminatingPayload => {
+                        InfiniteTypeKind::TypeVariableSumCycleWithoutTerminatingVariant {
+                            ty_var: var,
+                            ty,
+                        }
+                    }
+                };
+                internal_compilation_error!(InfiniteType { kind, span: ty_span })
+            })?
         } else {
             // If the type is a function type with concrete (non-variable) effects,
             // we need to generalize those effects to preserve effect polymorphism.
             // Otherwise, the concrete effects would be "baked in" and the function
             // parameter couldn't contribute its effect variable to the parent function.
-            let ty = self.generalize_function_effects(ty);
-            self.ty_unification_table
-                .unify_var_value(var, Some(ty))
-                .map_err(|(l, r)| {
-                    internal_compilation_error!(TypeMismatch {
-                        current_ty: l,
-                        current_span: var_span,
-                        expected_ty: r,
-                        expected_span: ty_span,
-                        sub_or_same: SubOrSameType::SameType
-                    })
+            self.generalize_function_effects(ty)
+        };
+        self.ty_unification_table
+            .unify_var_value(var, Some(ty))
+            .map_err(|(l, r)| {
+                internal_compilation_error!(TypeMismatch {
+                    current_ty: l,
+                    current_span: var_span,
+                    expected_ty: r,
+                    expected_span: ty_span,
+                    sub_or_same: SubOrSameType::SameType
                 })
-        }
+            })
     }
 
     /// Generalize concrete effects in a function type to effect variables.

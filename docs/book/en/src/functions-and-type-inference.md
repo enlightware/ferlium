@@ -95,7 +95,9 @@ fn fact(n) {
 
 Here, `fact` calls itself with a smaller argument until it reaches the base case `n <= 1`.
 
-Recursion works naturally with type inference. The compiler infers one type for the function and checks that all recursive calls are consistent with that type.
+Recursion works naturally with type inference.
+The compiler infers one type for the function and checks that all recursive calls are consistent with that type.
+This extends to recursive data: a function that recurses over a variant infers a recursive structural type for it, see [Recursive types](./user-defined-types.md#recursive-types).
 
 Ferlium cannot enforce at compile time that recursive functions terminate.
 If a function calls itself indefinitely, execution will fail at runtime.

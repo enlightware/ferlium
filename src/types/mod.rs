@@ -17,6 +17,7 @@ pub mod typing_env;
 
 pub(crate) mod coherence;
 pub(crate) mod never;
+pub(crate) mod recursive_equation;
 pub(crate) mod type_constraints;
 pub(crate) mod type_inference;
 pub(crate) mod type_like;

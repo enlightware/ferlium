@@ -106,6 +106,28 @@ impl CompilationError {
         }
     }
 
+    pub fn expect_infinite_type_ty_var_cycle(&self) {
+        match self.deref() {
+            CompilationErrorImpl::InfiniteType {
+                kind: InfiniteTypeKind::TypeVariableCycle { .. },
+                ..
+            } => {}
+            _ => panic!("expect_infinite_type_ty_var_cycle called on unexpected error {self:?}"),
+        }
+    }
+
+    pub fn expect_infinite_type_ty_var_sum_cycle_without_terminating_variant(&self) {
+        match self.deref() {
+            CompilationErrorImpl::InfiniteType {
+                kind: InfiniteTypeKind::TypeVariableSumCycleWithoutTerminatingVariant { .. },
+                ..
+            } => {}
+            _ => panic!(
+                "expect_infinite_type_ty_var_sum_cycle_without_terminating_variant called on unexpected error {self:?}"
+            ),
+        }
+    }
+
     pub fn expect_infinite_type_product_cycle(&self, expected_name: &str) {
         match self.deref() {
             CompilationErrorImpl::InfiniteType {

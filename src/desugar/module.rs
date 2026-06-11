@@ -459,6 +459,10 @@ fn is_recursive_singleton(index: usize, deps: &[DepGraphNode]) -> bool {
 }
 
 /// Rejects recursive SCCs that are product-only or have no terminating sum branch.
+///
+/// These rules are mirrored on the inferred-type side by `Validation` in
+/// `types/recursive_equation.rs`, which enforces them on the interned type graph
+/// for recursive type equations arising during unification; keep the two in sync.
 fn validate_type_cycle(
     scc: &[usize],
     ty_refs: &[NamedTypeData],

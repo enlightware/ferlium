@@ -119,10 +119,12 @@ let a: Shape = Circle(5.0);
 The `|` syntax separates variant alternatives, not arbitrary value types.
 Each alternative needs its own tag name:
 
-```ferlium
+```ferlium,compile_fail
 // Wrong: bool and int are type names, not variant tags.
 type Value = bool | int;
+```
 
+```ferlium
 // Right: Bool and Int are tags carrying bool and int payloads.
 type Value = Bool(bool) | Int(int);
 ```
@@ -297,8 +299,20 @@ For example, `struct Node { next: Node }` has no finite value, while `Tree` work
 For generic recursive types, recursive references must pass the type parameters through unchanged.
 For example, `Tree<T>` is supported, but `Tree<(T, T)>` in the recursive position is rejected.
 
-Recursive types currently need to be declared explicitly, or supplied through a type annotation/ascription.
-Ferlium does not yet infer a new structural recursive type from an unannotated recursive function body.
+Recursive structural types are also inferred from unannotated recursive function bodies, under the same rules: the recursion must go through a variant with a terminating branch.
+
+```ferlium
+fn size(t) {
+    match t {
+        Leaf(x) => 1,
+        Node(l, r) => size(l) + size(r),
+    }
+}
+```
+
+Here the type of `t` is inferred as the structural recursive variant `Leaf (A) | Node (Self, Self)`, where `Self` stands for the type itself.
+A value of a structural alias with the same shape, such as `type Tree<T> = Leaf(T) | Node(Tree<T>, Tree<T>)`, can be passed to `size` directly.
+This extends to mutually recursive structures, whether the values are consumed in matches or only built with constructors.
 
 ## Destructuring structured values
 

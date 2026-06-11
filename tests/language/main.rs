@@ -18,6 +18,7 @@ mod complex;
 mod effects;
 mod math;
 mod multi_module;
+mod recursive_types;
 mod regression;
 mod serde;
 mod simple;
