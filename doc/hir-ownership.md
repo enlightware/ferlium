@@ -39,7 +39,7 @@ When a context needs an owned value and the source is already an owned value, HI
 When the source is a place, HIR must materialize ownership explicitly:
 
 - Type not yet resolved after HIR construction: emit `CloneValue { source, clone: LocalClone::Unknown }`.
-- Concrete `TrivialCopy` type after dictionary elaboration: resolve to `LocalClone::Resolved(TrivialCopy(layout))`.
+- Concrete `TrivialCopy` type after dictionary elaboration: resolve to `LocalClone::Resolved(TrivialCopy)`.
 - Non-`TrivialCopy` value type after dictionary elaboration: resolve to a static or dictionary `Value::clone` dispatch.
 - Local consumed as an owned result: emit `TakeLocalValue { id, mode }` and skip the matching lexical drop if it resolves to `MoveOwned`.
 - If local ownership is not known yet, emit `TakeLocalValue { id, mode: Unknown }`, then resolve it to either a move or clone/copy after local storage is known.
@@ -98,7 +98,7 @@ Before dictionary elaboration, `Unknown` means the final type is needed to choos
 
 `LocalClone` resolves to one of:
 
-- `TrivialCopy(ResolvedValueLayout)`, which copies the value representation without `Value::clone`.
+- `TrivialCopy`, which copies a concrete value representation without `Value::clone`.
 - `Static(FunctionId)`, which calls a concrete generated or user-provided `Value::clone`.
 - `Dictionary(ExtraParameterId)`, which loads `Value::clone` from a hidden dictionary parameter.
 

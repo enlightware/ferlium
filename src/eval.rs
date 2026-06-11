@@ -1425,7 +1425,7 @@ enum ResolvedValueMethod {
 
 fn clone_value_method_dispatch(clone: &ResolvedLocalClone) -> Option<ResolvedValueMethod> {
     match clone {
-        ResolvedLocalClone::TrivialCopy(_) => None,
+        ResolvedLocalClone::TrivialCopy => None,
         ResolvedLocalClone::Static(function) => Some(ResolvedValueMethod::Static(*function)),
         ResolvedLocalClone::Dictionary(dictionary) => {
             Some(ResolvedValueMethod::Dictionary(*dictionary))
@@ -1784,7 +1784,8 @@ fn eval_clone_value(
 ) -> EvalControlFlowResult {
     let clone = resolved_local_clone(&node.clone);
 
-    if let ResolvedLocalClone::TrivialCopy(layout) = clone {
+    if let ResolvedLocalClone::TrivialCopy = clone {
+        let layout = trivial_copy_layout(ctx, arena[node.source].ty, span);
         let temp_start = ctx.environment.len();
         let place = eval_or_return!(eval_node_as_place(arena, node.source, ctx, locals));
         let result = copy_trivial_copy_value_from_place_layout(&place, layout, ctx, span);
@@ -1985,10 +1986,11 @@ fn eval_store_local(
         ctx.ensure_environment_slot(target_index);
         let target = local_place(ctx, locals, node.id);
         let clone = resolved_local_clone(clone);
-        if let ResolvedLocalClone::TrivialCopy(layout) = clone {
+        if let ResolvedLocalClone::TrivialCopy = clone {
             let value =
                 match eval_or_return!(try_eval_node_as_place(arena, node.value, ctx, locals)) {
                     Some(place) => {
+                        let layout = trivial_copy_layout(ctx, local.ty, span);
                         copy_trivial_copy_value_from_place_layout(&place, layout, ctx, span)?
                     }
                     None => eval_or_return!(eval_node_with_ctx(arena, node.value, ctx, locals)),
@@ -2086,7 +2088,9 @@ fn eval_take_local_value(
 ) -> EvalControlFlowResult {
     match node.mode {
         ResolvedTakeLocalValueMode::MoveOwned => take_owned_local_value(node.id, ctx, locals),
-        ResolvedTakeLocalValueMode::CloneBorrowed(ResolvedLocalClone::TrivialCopy(layout)) => {
+        ResolvedTakeLocalValueMode::CloneBorrowed(ResolvedLocalClone::TrivialCopy) => {
+            let local = &locals[node.id.as_index()];
+            let layout = trivial_copy_layout(ctx, local.ty, span);
             let place = local_place(ctx, locals, node.id);
             cont(copy_trivial_copy_value_from_place_layout(
                 &place, layout, ctx, span,
@@ -2674,13 +2678,13 @@ fn eval_call_arg(
                 .map(|result| result.map_continue(ValOrMut::Dictionary))
         }
         ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy) => {
-            let layout = trivial_copy_arg_layout(ctx, arg_ty.ty, arena[arg].span);
+            let layout = trivial_copy_layout(ctx, arg_ty.ty, arena[arg].span);
             eval_trivial_copy_arg(arena, arg, layout, ctx, locals)
         }
     }
 }
 
-fn trivial_copy_arg_layout(ctx: &mut EvalCtx<'_>, ty: Type, span: Location) -> ResolvedValueLayout {
+fn trivial_copy_layout(ctx: &mut EvalCtx<'_>, ty: Type, span: Location) -> ResolvedValueLayout {
     if let Some(layout) = ctx.trivial_copy_layout_cache.get(&(ctx.module_id, ty)) {
         return *layout;
     }

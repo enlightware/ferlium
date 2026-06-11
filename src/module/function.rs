@@ -324,7 +324,7 @@ impl LocalCloneMetadata for PendingLocalClone {
     fn format_label(self) -> &'static str {
         match self {
             Self::Unknown => "unknown mode",
-            Self::Resolved(ResolvedLocalClone::TrivialCopy(_)) => "trivial copy",
+            Self::Resolved(ResolvedLocalClone::TrivialCopy) => "trivial copy",
             Self::Resolved(ResolvedLocalClone::Static(_) | ResolvedLocalClone::Dictionary(_)) => {
                 "Value::clone"
             }
@@ -335,7 +335,7 @@ impl LocalCloneMetadata for PendingLocalClone {
 impl LocalCloneMetadata for ResolvedLocalClone {
     fn format_label(self) -> &'static str {
         match self {
-            Self::TrivialCopy(_) => "trivial copy",
+            Self::TrivialCopy => "trivial copy",
             Self::Static(_) | Self::Dictionary(_) => "Value::clone",
         }
     }
@@ -372,7 +372,7 @@ impl TakeLocalValueModeMetadata for PendingTakeLocalValueMode {
         match self {
             Self::Unknown => "unknown",
             Self::MoveOwned => "move",
-            Self::CloneBorrowed(ResolvedLocalClone::TrivialCopy(_)) => "trivial copy",
+            Self::CloneBorrowed(ResolvedLocalClone::TrivialCopy) => "trivial copy",
             Self::CloneBorrowed(
                 ResolvedLocalClone::Static(_) | ResolvedLocalClone::Dictionary(_),
             ) => "Value::clone",
@@ -384,7 +384,7 @@ impl TakeLocalValueModeMetadata for ResolvedTakeLocalValueMode {
     fn format_label(self) -> &'static str {
         match self {
             Self::MoveOwned => "move",
-            Self::CloneBorrowed(ResolvedLocalClone::TrivialCopy(_)) => "trivial copy",
+            Self::CloneBorrowed(ResolvedLocalClone::TrivialCopy) => "trivial copy",
             Self::CloneBorrowed(
                 ResolvedLocalClone::Static(_) | ResolvedLocalClone::Dictionary(_),
             ) => "Value::clone",
@@ -405,7 +405,7 @@ pub enum ResolvedTakeLocalValueMode {
 #[derive(Debug, Clone, Copy)]
 pub enum ResolvedLocalClone {
     /// Copy a concrete `TrivialCopy` value.
-    TrivialCopy(ResolvedValueLayout),
+    TrivialCopy,
     /// Call this concrete `Value` implementation.
     Static(FunctionId),
     /// Load the `Value` method from this hidden trait dictionary extra parameter.

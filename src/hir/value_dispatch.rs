@@ -125,11 +125,12 @@ pub(crate) fn resolve_local_clone(
     ty: Type,
     span: Location,
 ) -> Result<ResolvedLocalClone, InternalCompilationError> {
-    if let Some(layout) = ctx
+    if ctx
         .trait_solver
         .solve_concrete_trivial_copy_layout(arena, ty, span)?
+        .is_some()
     {
-        return Ok(ResolvedLocalClone::TrivialCopy(layout));
+        return Ok(ResolvedLocalClone::TrivialCopy);
     }
     let dispatch = resolve_value_method_dispatch(
         arena,

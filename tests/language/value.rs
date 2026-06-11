@@ -18,7 +18,7 @@ use ferlium::{
     },
     module::{
         LocalDeclId, LocalStorage, ResolvedLocalClone, ResolvedLocalDrop,
-        ResolvedTakeLocalValueMode, ResolvedValueLayout, id::Id,
+        ResolvedTakeLocalValueMode, id::Id,
     },
 };
 use ustr::ustr;
@@ -865,13 +865,6 @@ fn generic_owned_argument_from_mutable_place_uses_value_clone_and_owns_snapshot(
     assert_val_eq!(session.run(&source), int(35235));
 }
 
-fn int_value_layout() -> ResolvedValueLayout {
-    ResolvedValueLayout {
-        size: std::mem::size_of::<isize>() as u32,
-        align: std::mem::align_of::<isize>() as u32,
-    }
-}
-
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn concrete_trivial_copy_call_argument_uses_trivial_copy_passing() {
@@ -923,11 +916,11 @@ fn mutable_concrete_trivial_copy_place_lowers_to_snapshot_copy() {
         module.hir_arena.iter().any(|(_, node)| matches!(
             node.kind,
             NodeKind::CloneValue(hir::CloneValue {
-                clone: ResolvedLocalClone::TrivialCopy(layout),
+                clone: ResolvedLocalClone::TrivialCopy,
                 ..
-            }) if layout == int_value_layout()
+            })
         )),
-        "expected mutable int place materialization to lower through trivial-copy CloneValue with int layout"
+        "expected mutable int place materialization to lower through trivial-copy CloneValue"
     );
     assert!(
         !module.hir_arena.iter().any(|(_, node)| matches!(
@@ -965,13 +958,11 @@ fn inferred_mutable_let_clone_resolves_to_trivial_copy_after_unification() {
         module.hir_arena.iter().any(|(_, node)| matches!(
             node.kind,
             NodeKind::TakeLocalValue(hir::TakeLocalValue {
-                mode: ResolvedTakeLocalValueMode::CloneBorrowed(
-                    ResolvedLocalClone::TrivialCopy(layout)
-                ),
+                mode: ResolvedTakeLocalValueMode::CloneBorrowed(ResolvedLocalClone::TrivialCopy),
                 ..
-            }) if layout == int_value_layout()
+            })
         )),
-        "expected inferred owned materialization to resolve to trivial copy with int layout"
+        "expected inferred owned materialization to resolve to trivial copy"
     );
 
     let mut run_session = TestSession::new();
@@ -996,11 +987,11 @@ fn inferred_projection_materialization_resolves_to_trivial_copy_after_unificatio
         module.hir_arena.iter().any(|(_, node)| matches!(
             node.kind,
             NodeKind::CloneValue(hir::CloneValue {
-                clone: ResolvedLocalClone::TrivialCopy(layout),
+                clone: ResolvedLocalClone::TrivialCopy,
                 ..
-            }) if layout == int_value_layout()
+            })
         )),
-        "expected projected int place materialization to resolve to trivial-copy CloneValue with int layout"
+        "expected projected int place materialization to resolve to trivial-copy CloneValue"
     );
     assert!(
         !module.hir_arena.iter().any(|(_, node)| matches!(
