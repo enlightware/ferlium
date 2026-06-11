@@ -15,7 +15,7 @@ Place-like nodes include `LoadLocal`, projections (`Project`, `ProjectAt`, field
 SSA must not treat every `LoadLocal` as an owned read: ownership transfer, clone, and copy are explicit HIR operations.
 
 When a place-producing projection or call needs a non-place base, HIR generation stores that base in an explicit owned temporary local first.
-The consumer then uses a normal place rooted at that temporary, and ordinary `DropLocal` cleanup releases the temporary after the consumer.
+The consumer then uses a normal place rooted at that temporary, and the surrounding `Block.cleanup` releases the temporary after the consumer.
 
 Std-only functions marked with `#[place_result]` are place-like nodes.
 The attribute also marks the function unsafe, so user source cannot call or bind it directly.
