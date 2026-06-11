@@ -1625,3 +1625,81 @@ fn context_native_parameter_passing_excludes_hidden_dictionary_args() {
         ][..],
     );
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn discarded_empty_struct_temporary_runs_semantic_drop() {
+    let mut session = TestSession::new();
+    let source = r#"
+        struct Empty {}
+
+        impl Value for Empty {
+            fn eq(left: Empty, right: Empty) -> bool { true }
+            fn to_string(value: Empty) -> string { "" }
+            fn hash(value: Empty, state: &mut hasher) { }
+            fn clone(source: Empty, target: &mut Uninit<Empty>) { target = Empty{}; }
+            fn drop(target: &mut Empty) {
+                testing::record_tracked_drop(1);
+            }
+        }
+
+        testing::reset_tracked_drops();
+        if true {
+          Empty{};
+        };
+        testing::tracked_drop_log()
+    "#;
+    assert_val_eq!(session.run(source), int(1));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn discarded_nonempty_struct_temporary_runs_semantic_drop() {
+    let mut session = TestSession::new();
+    let source = r#"
+        struct NonEmpty { value: int }
+
+        impl Value for NonEmpty {
+            fn eq(left: NonEmpty, right: NonEmpty) -> bool { true }
+            fn to_string(value: NonEmpty) -> string { "" }
+            fn hash(value: NonEmpty, state: &mut hasher) { }
+            fn clone(source: NonEmpty, target: &mut Uninit<NonEmpty>) { target = NonEmpty{value: 0}; }
+            fn drop(target: &mut NonEmpty) {
+                testing::record_tracked_drop(1);
+            }
+        }
+
+        testing::reset_tracked_drops();
+        if true {
+          NonEmpty{value: 7};
+        };
+        testing::tracked_drop_log()
+    "#;
+    assert_val_eq!(session.run(source), int(1));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn discarded_bool_struct_temporary_runs_semantic_drop() {
+    let mut session = TestSession::new();
+    let source = r#"
+        struct Wrap { value: bool }
+
+        impl Value for Wrap {
+            fn eq(left: Wrap, right: Wrap) -> bool { true }
+            fn to_string(value: Wrap) -> string { "" }
+            fn hash(value: Wrap, state: &mut hasher) { }
+            fn clone(source: Wrap, target: &mut Uninit<Wrap>) { target = Wrap{value: false}; }
+            fn drop(target: &mut Wrap) {
+                testing::record_tracked_drop(1);
+            }
+        }
+
+        testing::reset_tracked_drops();
+        if true {
+          Wrap{value: true};
+        };
+        testing::tracked_drop_log()
+    "#;
+    assert_val_eq!(session.run(source), int(1));
+}

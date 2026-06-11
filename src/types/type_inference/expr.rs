@@ -2418,6 +2418,12 @@ impl TypeInference {
     ) -> bool {
         use NodeKind::*;
 
+        // A named type may have an explicit `Value` impl whose `drop` is not memberwise,
+        // so the structural shortcut below does not apply to it.
+        if ty.data().is_named() {
+            return self.type_needs_semantic_drop(env, ty, span);
+        }
+
         // Pre-extract the children we need to recurse into so we can drop the borrow on the arena before the recursive call.
         // Avoids cloning the whole `NodeKind` just to satisfy the borrow checker.
         let children: SmallVec<[NodeId; 4]> = match &env.ir_arena[value].kind {
