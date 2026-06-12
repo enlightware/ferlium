@@ -1185,7 +1185,7 @@ impl FormatWith<SourceTable> for CompilationError {
                 fmt_span(current_span),
                 match sub_or_same {
                     SubOrSameType::SubType => "a sub-type of",
-                    SubOrSameType::SameType => "the same type as",
+                    SubOrSameType::SameTypeWithSubEffects => "the same type as",
                 },
                 expected_ty,
                 fmt_span(expected_span),

@@ -158,9 +158,9 @@ impl UnifiedTypeInference {
     }
 
     fn resolve_effect_var(&mut self, var: EffectVar) -> EffType {
-        match self.effect_unification_table.probe_value(var) {
+        match self.effects.effect_var_value(var) {
             Some(effects) => SubstituteTypes(self).substitute_effect_type(&effects),
-            None => EffType::single_variable(self.effect_unification_table.find(var)),
+            None => EffType::single_variable(self.effects.effect_var_root(var)),
         }
     }
 
@@ -192,9 +192,7 @@ impl UnifiedTypeInference {
             }
         }
         for var in summary.free_eff_vars.iter() {
-            if self.effect_unification_table.probe_value(var).is_some()
-                || self.effect_unification_table.find(var) != var
-            {
+            if self.effects.effect_var_affects_substitution(var) {
                 return true;
             }
         }
@@ -369,27 +367,7 @@ impl UnifiedTypeInference {
                 }),
             }
         }
-        self.log_debug_effect_constraints();
-    }
-
-    fn log_debug_effect_constraints(&mut self) {
-        log::debug!("Effect substitution table:");
-        for i in 0..self.effect_unification_table.len() {
-            let var = EffectVar::new(i as u32);
-            let value = self.effect_unification_table.probe_value(var);
-            match value {
-                Some(value) => log::debug!("  {var} → {value}"),
-                None => log::debug!("  {var} → {} (unbound)", {
-                    self.effect_unification_table.find(var)
-                }),
-            }
-        }
-        if !self.effect_constraints_inv.is_empty() {
-            log::debug!("Inverted effect constraints:");
-            for dep in &self.effect_constraints_inv {
-                log::debug!("  {} → {}", dep.source, dep.target);
-            }
-        }
+        self.effects.log_debug_constraints();
     }
 }
 

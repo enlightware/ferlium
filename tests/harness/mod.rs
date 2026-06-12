@@ -455,6 +455,27 @@ fn test_eff_pair_trait() -> Trait {
     .with_output_effects(["E1", "E2"])
 }
 
+fn test_eff_join_trait() -> Trait {
+    Trait::new_with_self_input_type(
+        "TestEffJoin",
+        "Test-only trait whose output effect is derived from multiple trait obligations.",
+        Vec::<&str>::new(),
+        [(
+            "eff_join",
+            FunctionDefinition::new_infer_quantifiers(
+                FnType::new_by_val(
+                    [Type::variable_id(0)],
+                    int_type(),
+                    EffType::single_variable_id(0),
+                ),
+                ["value"],
+                "Projects an int with the joined effect of the input.",
+            ),
+        )],
+    )
+    .with_output_effects(["E"])
+}
+
 fn option_type_def() -> TypeDef {
     TypeDef {
         name: ustr("Option"),
@@ -753,6 +774,34 @@ fn testing_module(
                 },
             )) as Function,
         ],
+    );
+    let test_eff_join_trait_id = TraitId::new(module_id, module.add_trait(test_eff_join_trait()));
+    module.add_blanket_impl_with_effects_no_locals(
+        test_eff_join_trait_id,
+        BlanketTraitImplSubKey {
+            input_tys: vec![Type::tuple([Type::variable_id(0), Type::variable_id(1)])],
+            ty_var_count: 4,
+            constraints: vec![
+                PubTypeConstraint::new_have_trait(
+                    test_eff_trait_id,
+                    vec![Type::variable_id(0)],
+                    vec![Type::variable_id(2)],
+                    vec![EffType::single_variable_id(1)],
+                    Location::new_synthesized(),
+                ),
+                PubTypeConstraint::new_have_trait(
+                    test_eff_trait_id,
+                    vec![Type::variable_id(1)],
+                    vec![Type::variable_id(3)],
+                    vec![EffType::single_variable_id(2)],
+                    Location::new_synthesized(),
+                ),
+            ],
+        },
+        [],
+        [EffType::single_variable_id(1).union(&EffType::single_variable_id(2))],
+        [],
+        [Box::new(UnaryNativeFnVN::new(|_value: &Value| 0isize)) as Function],
     );
     module.add_concrete_impl_for_trait_def_no_locals(
         value_trait_id,

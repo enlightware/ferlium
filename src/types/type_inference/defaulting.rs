@@ -359,7 +359,7 @@ impl UnifiedTypeInference {
         for (ty_var, variant) in variants {
             let variant_ty = Type::variant(variant.into_iter().collect::<Vec<_>>());
             let span = variant_spans[&ty_var];
-            self.unify_same_type(Type::variable(ty_var), span, variant_ty, span)?;
+            self.unify_same_type_with_sub_effects(Type::variable(ty_var), span, variant_ty, span)?;
         }
         Ok(())
     }
@@ -461,7 +461,12 @@ impl UnifiedTypeInference {
             if let Some(default_ty) = default_tys.get(*default_index) {
                 let current = self.lookup_type_var(*ty_var);
                 if current.data().as_variable().is_some() {
-                    self.unify_same_type(Type::variable(*ty_var), span, *default_ty, span)?;
+                    self.unify_same_type_with_sub_effects(
+                        Type::variable(*ty_var),
+                        span,
+                        *default_ty,
+                        span,
+                    )?;
                 }
             }
         }
@@ -553,7 +558,12 @@ impl UnifiedTypeInference {
                     .find(|constraint| constraint.contains_any_type_var(ty_var))
                     .expect("candidate type variable must appear in constraints")
                     .use_site();
-                self.unify_same_type(Type::variable(ty_var), span, Type::unit(), span)?;
+                self.unify_same_type_with_sub_effects(
+                    Type::variable(ty_var),
+                    span,
+                    Type::unit(),
+                    span,
+                )?;
                 progress = true;
             }
         }
@@ -638,7 +648,12 @@ impl UnifiedTypeInference {
                     .expect("there must be a relevant constraint for expr defaulting")
                     .use_site();
                 if self
-                    .unify_same_type(Type::variable(ty_var), span, int_type(), span)
+                    .unify_same_type_with_sub_effects(
+                        Type::variable(ty_var),
+                        span,
+                        int_type(),
+                        span,
+                    )
                     .is_ok()
                 {
                     progress = true;

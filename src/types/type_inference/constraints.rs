@@ -18,18 +18,35 @@ use crate::{
 /// A constraint on types.
 #[derive(Debug, Clone)]
 pub enum TypeConstraint {
+    /// Same structural type, and any function types contained in the compared
+    /// values must have the same latent effects.
+    ///
+    /// This form is for expression joins where alternatives produce one shared
+    /// result value.
     SameType {
         current: Type,
         current_span: Location,
         expected: Type,
         expected_span: Location,
     },
+    /// Same structural type, with function effects checked directionally.
+    ///
+    /// This preserves independently polymorphic implicit effect variables in
+    /// annotations and other contextual type checks.
+    SameTypeWithSubEffects {
+        current: Type,
+        current_span: Location,
+        expected: Type,
+        expected_span: Location,
+    },
+    /// Directional compatibility: `current` must be usable where `expected` is required.
     SubType {
         current: Type,
         current_span: Location,
         expected: Type,
         expected_span: Location,
     },
+    /// A public constraint that may be solved later or retained in the inferred type scheme.
     Pub(PubTypeConstraint),
 }
 
@@ -38,6 +55,9 @@ impl FormatWith<ModuleEnv<'_>> for TypeConstraint {
         use TypeConstraint::*;
         match self {
             SameType {
+                current, expected, ..
+            }
+            | SameTypeWithSubEffects {
                 current, expected, ..
             } => {
                 write!(

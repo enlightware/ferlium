@@ -378,7 +378,7 @@ where
                 ty_inf.add_pub_constraint(constraint.clone());
             }
             for (input_ty, explicit_ty) in input_tys.iter().zip(explicit_input_tys.iter()) {
-                ty_inf.add_same_type_constraint(
+                ty_inf.add_same_type_with_sub_effects_constraint(
                     *input_ty,
                     trait_ctx.span,
                     *explicit_ty,
@@ -386,7 +386,7 @@ where
                 );
             }
             for (output_ty, explicit_ty) in output_tys.iter().zip(explicit_output_tys.iter()) {
-                ty_inf.add_same_type_constraint(
+                ty_inf.add_same_type_with_sub_effects_constraint(
                     *output_ty,
                     trait_ctx.span,
                     *explicit_ty,
@@ -397,7 +397,7 @@ where
             // For a stub implementation, equate the fresh input types with the concrete types from the impl annotation.
             assert_eq!(input_tys.len(), stub_data.input_tys.len());
             for (ty_var, concrete_ty) in input_tys.iter().zip(stub_data.input_tys.iter()) {
-                ty_inf.add_same_type_constraint(
+                ty_inf.add_same_type_with_sub_effects_constraint(
                     *ty_var,
                     trait_ctx.span,
                     *concrete_ty,

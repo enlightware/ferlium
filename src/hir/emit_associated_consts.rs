@@ -140,7 +140,7 @@ fn source_associated_const_values(
                 current_span: associated_const.span,
                 expected_ty,
                 expected_span: impl_span,
-                sub_or_same: SubOrSameType::SameType,
+                sub_or_same: SubOrSameType::SameTypeWithSubEffects,
             }));
         }
         values.push(associated_const.value.clone());
