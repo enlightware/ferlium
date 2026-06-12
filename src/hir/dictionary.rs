@@ -20,7 +20,7 @@ use crate::{
         mutability::MutType,
         trait_solver::TraitSolver,
         r#type::{Type, TypeVar},
-        type_like::{TypeLike, instantiate_types_in_place},
+        type_like::{TypeLike, instantiate_effect_types_in_place, instantiate_types_in_place},
         type_mapper::TypeMapper,
         type_scheme_display::format_have_trait,
     },
@@ -37,7 +37,8 @@ pub enum DictionaryReq {
         trait_id: TraitId,
         input_tys: Vec<Type>,
         output_tys: Vec<Type>, // stored here for type generation, but not used in comparisons
-                               // FIXME: maybe we need a span here for proper error reporting
+        // FIXME: maybe we need a span here for proper error reporting
+        output_effs: Vec<EffType>, // stored here for type generation, but not used in comparisons
     },
 }
 
@@ -46,11 +47,17 @@ impl DictionaryReq {
         Self::FieldIndex { ty, field }
     }
 
-    pub fn new_trait_impl(trait_id: TraitId, input_tys: Vec<Type>, output_tys: Vec<Type>) -> Self {
+    pub fn new_trait_impl(
+        trait_id: TraitId,
+        input_tys: Vec<Type>,
+        output_tys: Vec<Type>,
+        output_effs: Vec<EffType>,
+    ) -> Self {
         Self::TraitImpl {
             trait_id,
             input_tys,
             output_tys,
+            output_effs,
         }
     }
 
@@ -71,10 +78,12 @@ impl DictionaryReq {
             TraitImpl {
                 input_tys,
                 output_tys,
+                output_effs,
                 ..
             } => {
                 instantiate_types_in_place(input_tys, mapper);
                 instantiate_types_in_place(output_tys, mapper);
+                instantiate_effect_types_in_place(output_effs, mapper);
             }
         }
     }
@@ -86,10 +95,10 @@ impl DictionaryReq {
                 trait_id,
                 input_tys,
                 output_tys,
-                ..
+                output_effs,
             } => trait_solver
                 .trait_def(*trait_id)
-                .get_dictionary_type_for_tys(input_tys, output_tys),
+                .get_dictionary_type_for_tys(input_tys, output_tys, output_effs),
         }
     }
 }
@@ -140,8 +149,8 @@ impl FormatWith<ModuleEnv<'_>> for DictionaryReq {
                 trait_id,
                 input_tys,
                 output_tys,
-                ..
-            } => format_have_trait(*trait_id, input_tys, output_tys, f, env),
+                output_effs,
+            } => format_have_trait(*trait_id, input_tys, output_tys, output_effs, f, env),
         }
     }
 }

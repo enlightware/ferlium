@@ -93,6 +93,23 @@ impl UnifiedTypeInference {
         SubstituteTypes(self).substitute_mut_type(mut_ty)
     }
 
+    pub fn substitute_in_effect_type(&mut self, eff_ty: &EffType) -> EffType {
+        SubstituteTypes(self).substitute_effect_type(eff_ty)
+    }
+
+    pub fn substitute_in_effect_types(&mut self, eff_tys: &[EffType]) -> Vec<EffType> {
+        eff_tys
+            .iter()
+            .map(|eff| self.substitute_in_effect_type(eff))
+            .collect()
+    }
+
+    pub fn substitute_in_effect_types_in_place(&mut self, eff_tys: &mut [EffType]) {
+        for eff in eff_tys {
+            *eff = SubstituteTypes(self).substitute_effect_type(eff);
+        }
+    }
+
     pub(crate) fn substitute_in_local_decls_in_place(&mut self, locals: &mut [LocalDecl]) {
         substitute_type_fields_in_place(locals, |local| &mut local.ty, &mut SubstituteTypes(self));
         for local in locals {
@@ -212,15 +229,18 @@ impl UnifiedTypeInference {
             GetTraitMethod(get_method) => {
                 self.substitute_in_types_in_place(&mut get_method.input_tys);
                 self.substitute_in_types_in_place(&mut get_method.output_tys);
+                self.substitute_in_effect_types_in_place(&mut get_method.output_effs);
                 self.substitute_in_fn_inst_data(&mut get_method.inst_data);
             }
             GetTraitAssociatedConst(get_const) => {
                 self.substitute_in_types_in_place(&mut get_const.input_tys);
                 self.substitute_in_types_in_place(&mut get_const.output_tys);
+                self.substitute_in_effect_types_in_place(&mut get_const.output_effs);
             }
             GetTraitDictionary(get_dict) => {
                 self.substitute_in_types_in_place(&mut get_dict.input_tys);
                 self.substitute_in_types_in_place(&mut get_dict.output_tys);
+                self.substitute_in_effect_types_in_place(&mut get_dict.output_effs);
             }
             _ => {}
         }
@@ -235,10 +255,12 @@ impl UnifiedTypeInference {
                 DictionaryReq::TraitImpl {
                     input_tys,
                     output_tys,
+                    output_effs,
                     ..
                 } => {
                     self.substitute_in_types_in_place(input_tys);
                     self.substitute_in_types_in_place(output_tys);
+                    self.substitute_in_effect_types_in_place(output_effs);
                 }
             }
         }
@@ -283,10 +305,12 @@ impl UnifiedTypeInference {
             HaveTrait {
                 input_tys,
                 output_tys,
+                output_effs,
                 ..
             } => {
                 self.substitute_in_types_in_place(input_tys);
                 self.substitute_in_types_in_place(output_tys);
+                self.substitute_in_effect_types_in_place(output_effs);
             }
         }
     }

@@ -433,6 +433,7 @@ fn desugar_type_constraint(
         trait_id,
         input_tys,
         output_tys,
+        vec![],
         constraint.span,
     ))
 }

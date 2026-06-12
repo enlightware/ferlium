@@ -75,7 +75,7 @@ pub(crate) fn generic_value_methods_for_type(
 
     let (definitions, method_names) = {
         let trait_def = solver.trait_def(trait_id);
-        let definitions = trait_def.instantiate_for_tys(input_tys, &[]);
+        let definitions = trait_def.instantiate_for_tys(input_tys, &[], &[]);
         let method_names = (0..definitions.len())
             .map(|index| {
                 let method_index = TraitMethodIndex::from_index(index);
@@ -164,7 +164,7 @@ fn auto_value_constraints(
             continue;
         }
         let constraint =
-            PubTypeConstraint::new_have_trait(value_trait_id, vec![member_ty], vec![], span);
+            PubTypeConstraint::new_have_trait(value_trait_id, vec![member_ty], vec![], vec![], span);
         constraints.insert(constraint);
     }
 
@@ -278,6 +278,7 @@ pub(super) fn emit_auto_value_impls(
             false,
             &[input_ty],
             &[],
+            &[],
             ty_var_count,
             &constraints,
             type_def_span,
@@ -307,7 +308,7 @@ pub(super) fn emit_auto_value_impls(
         let (definitions, method_names) = {
             let env = ModuleEnv::new(output, others);
             let trait_def = env.trait_def(value_trait_id);
-            let definitions = trait_def.instantiate_for_tys(&[input_ty], &[]);
+            let definitions = trait_def.instantiate_for_tys(&[input_ty], &[], &[]);
             let method_names = (0..definitions.len())
                 .map(|index| {
                     let method_index = TraitMethodIndex::from_index(index);
@@ -349,13 +350,14 @@ pub(super) fn emit_auto_value_impls(
         let associated_const_tys = {
             let env = ModuleEnv::new(output, others);
             env.trait_def(value_trait_id)
-                .instantiate_associated_const_tys_for_tys(&[input_ty], &[])
+                .instantiate_associated_const_tys_for_tys(&[input_ty], &[], &[])
         };
         output.add_emitted_impl(
             value_trait_id,
             EmitTraitOutput {
                 input_tys: vec![input_ty],
                 output_tys: vec![],
+                output_effs: vec![],
                 ty_var_count,
                 constraints,
                 functions: function_ids,

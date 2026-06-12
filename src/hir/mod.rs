@@ -40,7 +40,9 @@ use crate::{
         TakeLocalValueModeMetadata, TraitId, TraitImplId, id::Id,
     },
     types::r#trait::{TraitAssociatedConstIndex, TraitDictionaryEntryIndex, TraitMethodIndex},
-    types::type_like::{CastableToType, TypeLike, instantiate_types_in_place},
+    types::type_like::{
+        CastableToType, TypeLike, instantiate_effect_types_in_place, instantiate_types_in_place,
+    },
     types::type_mapper::TypeMapper,
 };
 use derive_new::new;
@@ -579,6 +581,7 @@ pub struct GetTraitMethod {
     pub method_span: Location,
     pub input_tys: Vec<Type>,
     pub output_tys: Vec<Type>,
+    pub output_effs: Vec<EffType>,
     pub inst_data: FnInstData,
 }
 
@@ -591,6 +594,7 @@ pub struct GetTraitAssociatedConst {
     pub associated_const_span: Location,
     pub input_tys: Vec<Type>,
     pub output_tys: Vec<Type>,
+    pub output_effs: Vec<EffType>,
 }
 
 /// Load a trait dictionary before dictionary passing resolves it.
@@ -599,6 +603,7 @@ pub struct GetTraitDictionary {
     pub trait_id: TraitId,
     pub input_tys: Vec<Type>,
     pub output_tys: Vec<Type>,
+    pub output_effs: Vec<EffType>,
 }
 
 /// Get a trait dictionary selected by static trait resolution.
@@ -1742,15 +1747,18 @@ pub(crate) fn instantiate_node_in_place<M: TypeMapper>(
         GetTraitMethod(get_method) => {
             instantiate_types_in_place(&mut get_method.input_tys, mapper);
             instantiate_types_in_place(&mut get_method.output_tys, mapper);
+            instantiate_effect_types_in_place(&mut get_method.output_effs, mapper);
             get_method.inst_data.instantiate_in_place(mapper);
         }
         GetTraitAssociatedConst(get_const) => {
             instantiate_types_in_place(&mut get_const.input_tys, mapper);
             instantiate_types_in_place(&mut get_const.output_tys, mapper);
+            instantiate_effect_types_in_place(&mut get_const.output_effs, mapper);
         }
         GetTraitDictionary(get_dict) => {
             instantiate_types_in_place(&mut get_dict.input_tys, mapper);
             instantiate_types_in_place(&mut get_dict.output_tys, mapper);
+            instantiate_effect_types_in_place(&mut get_dict.output_effs, mapper);
         }
         CallDictionaryMethod(call) => {
             call.ty = call.ty.map(mapper);

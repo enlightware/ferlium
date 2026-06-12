@@ -187,6 +187,10 @@ fn fill_node_effect_vars(
                 .iter()
                 .chain(get_method.output_tys.iter())
                 .for_each(|ty| ty.fill_with_inner_effect_vars(vars));
+            get_method
+                .output_effs
+                .iter()
+                .for_each(|eff| eff.fill_with_inner_effect_vars(vars));
             fill_fn_inst_data_effect_vars(&get_method.inst_data, vars);
         }
         GetTraitAssociatedConst(get_const) => {
@@ -195,6 +199,10 @@ fn fill_node_effect_vars(
                 .iter()
                 .chain(get_const.output_tys.iter())
                 .for_each(|ty| ty.fill_with_inner_effect_vars(vars));
+            get_const
+                .output_effs
+                .iter()
+                .for_each(|eff| eff.fill_with_inner_effect_vars(vars));
         }
         GetTraitDictionary(get_dict) => {
             get_dict
@@ -202,6 +210,10 @@ fn fill_node_effect_vars(
                 .iter()
                 .chain(get_dict.output_tys.iter())
                 .for_each(|ty| ty.fill_with_inner_effect_vars(vars));
+            get_dict
+                .output_effs
+                .iter()
+                .for_each(|eff| eff.fill_with_inner_effect_vars(vars));
         }
         CallDictionaryMethod(call) => call.ty.fill_with_inner_effect_vars(vars),
         _ => {}
@@ -221,12 +233,16 @@ fn fill_fn_inst_data_effect_vars(inst_data: &hir::FnInstData, vars: &mut FxHashS
             hir::dictionary::DictionaryReq::TraitImpl {
                 input_tys,
                 output_tys,
+                output_effs,
                 ..
             } => {
                 input_tys
                     .iter()
                     .chain(output_tys.iter())
                     .for_each(|ty| ty.fill_with_inner_effect_vars(vars));
+                output_effs
+                    .iter()
+                    .for_each(|eff| eff.fill_with_inner_effect_vars(vars));
             }
         }
     }
@@ -458,6 +474,11 @@ pub fn emit_module(
             if output_tys.is_empty() && trait_def.output_type_count() != 0 {
                 continue;
             }
+            if trait_def.output_effect_count() != 0 {
+                // Effect slots cannot be written in source yet, so the impl is
+                // registered through the main emission path only.
+                continue;
+            }
             check_trait_impl(
                 &output,
                 others,
@@ -465,12 +486,13 @@ pub fn emit_module(
                 trait_module_id.is_none(),
                 &input_tys,
                 &output_tys,
+                &[],
                 0,
                 &[],
                 imp.span,
             )?;
             // Pre-allocate placeholder functions for each trait method.
-            let method_defs = trait_def.instantiate_for_tys(&input_tys, &output_tys);
+            let method_defs = trait_def.instantiate_for_tys(&input_tys, &output_tys, &[]);
             let mut method_ids = Vec::with_capacity(method_defs.len());
             for def in method_defs {
                 // Placeholder ModuleFunction that will be replaced later.
@@ -487,6 +509,7 @@ pub fn emit_module(
                     SourceAssociatedConstImpl {
                         input_tys: &input_tys,
                         output_tys: &output_tys,
+                        output_effs: &[],
                         ty_var_count: 0,
                         associated_consts: &imp.associated_consts,
                         span: imp.span,
@@ -496,10 +519,11 @@ pub fn emit_module(
             };
             let dictionary_value = build_dictionary_value(&method_ids, &associated_const_values);
             let associated_const_tys =
-                trait_def.instantiate_associated_const_tys_for_tys(&input_tys, &output_tys);
+                trait_def.instantiate_associated_const_tys_for_tys(&input_tys, &output_tys, &[]);
             let dictionary_ty = output.computer_dictionary_ty(&method_ids, associated_const_tys);
             let stub = TraitImpl::new(
                 output_tys,
+                vec![],
                 method_ids.clone(),
                 dictionary_value,
                 dictionary_ty,
@@ -652,6 +676,7 @@ pub fn emit_module(
                 .instantiate_associated_const_tys_for_tys(
                     &emit_output.input_tys,
                     &emit_output.output_tys,
+                    &emit_output.output_effs,
                 );
             let new_dictionary_ty =
                 output.computer_dictionary_ty(&emit_output.functions, associated_const_tys);
@@ -666,6 +691,7 @@ pub fn emit_module(
                 trait_module_id.is_none(),
                 &emit_output.input_tys,
                 &emit_output.output_tys,
+                &emit_output.output_effs,
                 emit_output.ty_var_count,
                 &emit_output.constraints,
                 imp.span,
@@ -676,6 +702,7 @@ pub fn emit_module(
                 SourceAssociatedConstImpl {
                     input_tys: &emit_output.input_tys,
                     output_tys: &emit_output.output_tys,
+                    output_effs: &emit_output.output_effs,
                     ty_var_count: emit_output.ty_var_count,
                     associated_consts: &imp.associated_consts,
                     span: imp.span,
@@ -692,6 +719,7 @@ pub fn emit_module(
                 .instantiate_associated_const_tys_for_tys(
                     &emit_output.input_tys,
                     &emit_output.output_tys,
+                    &emit_output.output_effs,
                 );
             output.add_emitted_impl(
                 trait_id,

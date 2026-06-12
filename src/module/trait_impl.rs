@@ -26,10 +26,11 @@ use crate::{
         TraitId, id::Id,
     },
     parser::location::Location,
+    types::effects::{EffType, EffectVar},
     types::r#trait::{
         Trait, TraitAssociatedConstIndex, TraitDictionaryEntryIndex, TraitMethodIndex,
     },
-    types::r#type::{Type, TypeInstSubst, TypeVar, fmt_fn_type_with_arg_names},
+    types::r#type::{Type, TypeVar, fmt_fn_type_with_arg_names},
     types::type_inference::substitution::InstSubst,
     types::type_like::TypeLike,
     types::type_scheme::PubTypeConstraint,
@@ -206,6 +207,8 @@ pub fn build_dictionary_value(
 pub struct TraitImpl {
     /// The output types of the trait.
     pub output_tys: Vec<Type>,
+    /// The output effects of the trait.
+    pub output_effs: Vec<EffType>,
     /// The implemented methods in the module.
     pub methods: Vec<LocalFunctionId>,
     /// Values for associated consts, in trait declaration order.
@@ -334,6 +337,7 @@ impl TraitImpls {
     /// The definition will be retrieved by instantiating the trait method definitions with the given types.
     /// The caller is responsible to ensure that the input and output types match the trait definition
     /// and that the constraints are satisfied.
+    /// An empty `output_effs` defaults to all-empty output effects.
     #[allow(clippy::too_many_arguments)]
     pub fn add_concrete_raw(
         &mut self,
@@ -341,16 +345,18 @@ impl TraitImpls {
         trait_def: &Trait,
         input_tys: impl Into<Vec<Type>>,
         output_tys: impl Into<Vec<Type>>,
+        output_effs: impl Into<Vec<EffType>>,
         associated_const_values: impl Into<Vec<LiteralValue>>,
         functions: impl Into<Vec<(Function, Vec<LocalDecl>)>>,
         fn_collector: &mut FunctionCollector,
     ) -> LocalImplId {
         let input_tys = input_tys.into();
         let output_tys = output_tys.into();
+        let output_effs = trait_def.normalized_output_effs(output_effs.into());
         let associated_const_values = associated_const_values.into();
 
         // Recover the definitions from the trait by instantiating the trait method definitions with the given types.
-        let definitions = trait_def.instantiate_for_tys(&input_tys, &output_tys);
+        let definitions = trait_def.instantiate_for_tys(&input_tys, &output_tys, &output_effs);
 
         // Combine them into module functions.
         let functions: Vec<_> = definitions
@@ -367,6 +373,7 @@ impl TraitImpls {
             trait_def,
             input_tys,
             output_tys,
+            output_effs,
             associated_const_values,
             functions,
             fn_collector,
@@ -383,15 +390,18 @@ impl TraitImpls {
         trait_def: &Trait,
         input_tys: Vec<Type>,
         output_tys: Vec<Type>,
+        output_effs: Vec<EffType>,
         associated_const_values: impl Into<Vec<LiteralValue>>,
         functions: Vec<ModuleFunction>,
         fn_collector: &mut FunctionCollector,
     ) -> LocalImplId {
+        let output_effs = trait_def.normalized_output_effs(output_effs);
         let associated_const_values = associated_const_values.into();
         // Minimal validation
         trait_def.validate_impl_shape(
             &input_tys,
             &output_tys,
+            &output_effs,
             associated_const_values.len(),
             functions.len(),
         );
@@ -406,11 +416,12 @@ impl TraitImpls {
 
         // Build and insert the implementation.
         let associated_const_tys =
-            trait_def.instantiate_associated_const_tys_for_tys(&input_tys, &output_tys);
+            trait_def.instantiate_associated_const_tys_for_tys(&input_tys, &output_tys, &output_effs);
         let dictionary_type = Self::dictionary_ty(method_tys, associated_const_tys);
         let dictionary_value = build_dictionary_value(&methods, &associated_const_values);
         let imp = TraitImpl::new(
             output_tys,
+            output_effs,
             methods,
             dictionary_value,
             dictionary_type,
@@ -431,14 +442,17 @@ impl TraitImpls {
         trait_def: &Trait,
         input_tys: Vec<Type>,
         output_tys: Vec<Type>,
+        output_effs: Vec<EffType>,
         associated_const_values: impl Into<Vec<LiteralValue>>,
         functions: Vec<PendingModuleFunction>,
         fn_collector: &mut PendingFunctionCollector,
     ) -> LocalImplId {
+        let output_effs = trait_def.normalized_output_effs(output_effs);
         let associated_const_values = associated_const_values.into();
         trait_def.validate_impl_shape(
             &input_tys,
             &output_tys,
+            &output_effs,
             associated_const_values.len(),
             functions.len(),
         );
@@ -452,11 +466,12 @@ impl TraitImpls {
             Self::bundle_pending_module_functions(functions, fn_collector, namer);
 
         let associated_const_tys =
-            trait_def.instantiate_associated_const_tys_for_tys(&input_tys, &output_tys);
+            trait_def.instantiate_associated_const_tys_for_tys(&input_tys, &output_tys, &output_effs);
         let dictionary_type = Self::dictionary_ty(method_tys, associated_const_tys);
         let dictionary_value = build_dictionary_value(&methods, &associated_const_values);
         let imp = TraitImpl::new(
             output_tys,
+            output_effs,
             methods,
             dictionary_value,
             dictionary_type,
@@ -494,15 +509,18 @@ impl TraitImpls {
         trait_def: &Trait,
         sub_key: BlanketTraitImplSubKey,
         output_tys: impl Into<Vec<Type>>,
+        output_effs: impl Into<Vec<EffType>>,
         associated_const_values: impl Into<Vec<LiteralValue>>,
         functions: impl Into<Vec<(Function, Vec<LocalDecl>)>>,
         fn_collector: &mut FunctionCollector,
     ) -> LocalImplId {
         let output_tys = output_tys.into();
+        let output_effs = trait_def.normalized_output_effs(output_effs.into());
         let associated_const_values = associated_const_values.into();
 
         // Recover the definitions from the trait by instantiating the trait method definitions with the given types.
-        let definitions = trait_def.instantiate_for_tys(&sub_key.input_tys, &output_tys);
+        let definitions =
+            trait_def.instantiate_for_tys(&sub_key.input_tys, &output_tys, &output_effs);
 
         // Combine them into module functions.
         let functions: Vec<_> = definitions
@@ -519,6 +537,7 @@ impl TraitImpls {
             trait_def,
             sub_key,
             output_tys,
+            output_effs,
             associated_const_values,
             functions,
             fn_collector,
@@ -532,15 +551,18 @@ impl TraitImpls {
         trait_def: &Trait,
         sub_key: BlanketTraitImplSubKey,
         output_tys: Vec<Type>,
+        output_effs: Vec<EffType>,
         associated_const_values: impl Into<Vec<LiteralValue>>,
         functions: Vec<ModuleFunction>,
         fn_collector: &mut FunctionCollector,
     ) -> LocalImplId {
+        let output_effs = trait_def.normalized_output_effs(output_effs);
         let associated_const_values = associated_const_values.into();
         // Minimal validation
         trait_def.validate_impl_shape(
             &sub_key.input_tys,
             &output_tys,
+            &output_effs,
             associated_const_values.len(),
             functions.len(),
         );
@@ -557,12 +579,16 @@ impl TraitImpls {
         let (methods, method_tys) = Self::bundle_module_functions(functions, fn_collector, namer);
 
         // Build and insert the implementation.
-        let associated_const_tys =
-            trait_def.instantiate_associated_const_tys_for_tys(&sub_key.input_tys, &output_tys);
+        let associated_const_tys = trait_def.instantiate_associated_const_tys_for_tys(
+            &sub_key.input_tys,
+            &output_tys,
+            &output_effs,
+        );
         let dictionary_type = Self::dictionary_ty(method_tys, associated_const_tys);
         let dictionary_value = build_dictionary_value(&methods, &associated_const_values);
         let imp = TraitImpl::new(
             output_tys,
+            output_effs,
             methods,
             dictionary_value,
             dictionary_type,
@@ -711,7 +737,7 @@ impl TraitImpls {
             if level == DisplayFilter::Hide {
                 continue;
             }
-            let subst = format_concrete_impl_header(key, &imp.output_tys, f, env)?;
+            let subst = format_concrete_impl_header(key, &imp.output_tys, &imp.output_effs, f, env)?;
             write!(f, " (#{id})")?;
             if level == DisplayFilter::MethodDefinitions {
                 format_impl_fns(key.trait_id, subst, imp, false, f, env)?;
@@ -728,14 +754,14 @@ impl TraitImpls {
                 }
                 let imp = self.get_impl_by_local_id(*id);
                 let key = BlanketTraitImplKey::new(*trait_id, sub_key.clone());
-                format_blanket_impl_header(&key, &imp.output_tys, f, env)?;
+                format_blanket_impl_header(&key, &imp.output_tys, &imp.output_effs, f, env)?;
                 write!(f, " (#{id})")?;
                 // For blanket impls, the function types already use the correct type variables,
                 // so we don't need to apply any substitution.
                 if level == DisplayFilter::MethodDefinitions {
-                    format_impl_fns(key.trait_id, TypeInstSubst::default(), imp, false, f, env)?;
+                    format_impl_fns(key.trait_id, InstSubst::default(), imp, false, f, env)?;
                 } else if level == DisplayFilter::MethodCode {
-                    format_impl_fns(key.trait_id, TypeInstSubst::default(), imp, true, f, env)?;
+                    format_impl_fns(key.trait_id, InstSubst::default(), imp, true, f, env)?;
                 }
                 writeln!(f)?;
             }
@@ -805,7 +831,7 @@ pub fn format_concrete_impl(
     f: &mut std::fmt::Formatter,
     env: &ModuleEnv<'_>,
 ) -> std::fmt::Result {
-    let subst = format_concrete_impl_header(key, &imp.output_tys, f, env)?;
+    let subst = format_concrete_impl_header(key, &imp.output_tys, &imp.output_effs, f, env)?;
     format_impl_fns(key.trait_id, subst, imp, false, f, env)
 }
 
@@ -815,10 +841,10 @@ pub fn format_blanket_impl(
     f: &mut std::fmt::Formatter,
     env: &ModuleEnv<'_>,
 ) -> std::fmt::Result {
-    format_blanket_impl_header(key, &imp.output_tys, f, env)?;
+    format_blanket_impl_header(key, &imp.output_tys, &imp.output_effs, f, env)?;
     // For blanket impls, the function types already use the correct type variables,
     // so we don't need to apply any substitution.
-    format_impl_fns(key.trait_id, TypeInstSubst::default(), imp, false, f, env)
+    format_impl_fns(key.trait_id, InstSubst::default(), imp, false, f, env)
 }
 
 pub fn format_impl_header_by_key(
@@ -826,25 +852,29 @@ pub fn format_impl_header_by_key(
     key: &TraitKey,
     imp: &TraitImpl,
     env: &ModuleEnv,
-) -> Result<TypeInstSubst, std::fmt::Error> {
+) -> Result<InstSubst, std::fmt::Error> {
     use TraitKey::*;
     match key {
-        Concrete(key) => format_concrete_impl_header(key, &imp.output_tys, f, env),
-        Blanket(key) => format_blanket_impl_header(key, &imp.output_tys, f, env),
+        Concrete(key) => {
+            format_concrete_impl_header(key, &imp.output_tys, &imp.output_effs, f, env)
+        }
+        Blanket(key) => format_blanket_impl_header(key, &imp.output_tys, &imp.output_effs, f, env),
     }
 }
 
 pub fn format_blanket_impl_header(
     key: &BlanketTraitImplKey,
     output_tys: &[Type],
+    output_effs: &[EffType],
     f: &mut std::fmt::Formatter,
     env: &ModuleEnv<'_>,
-) -> Result<TypeInstSubst, std::fmt::Error> {
+) -> Result<InstSubst, std::fmt::Error> {
     let subst = format_impl_header_expanded(
         key.trait_id,
         key.sub_key.ty_var_count,
         &key.sub_key.input_tys,
         output_tys,
+        output_effs,
         f,
         env,
     )?;
@@ -859,26 +889,29 @@ pub fn format_blanket_impl_header(
 pub fn format_concrete_impl_header(
     key: &ConcreteTraitImplKey,
     output_tys: &[Type],
+    output_effs: &[EffType],
     f: &mut std::fmt::Formatter,
     env: &ModuleEnv<'_>,
-) -> Result<TypeInstSubst, std::fmt::Error> {
-    format_impl_header_expanded(key.trait_id, 0, &key.input_tys, output_tys, f, env)
+) -> Result<InstSubst, std::fmt::Error> {
+    format_impl_header_expanded(key.trait_id, 0, &key.input_tys, output_tys, output_effs, f, env)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn format_impl_header_expanded(
     trait_id: TraitId,
     ty_var_count: u32,
     input_tys: &[Type],
     output_tys: &[Type],
+    output_effs: &[EffType],
     f: &mut std::fmt::Formatter,
     env: &ModuleEnv<'_>,
-) -> Result<TypeInstSubst, std::fmt::Error> {
+) -> Result<InstSubst, std::fmt::Error> {
     let trait_def = env.trait_def(trait_id);
     write!(f, "impl")?;
     if ty_var_count > 0 {
         fmt_ordered_quantifiers(f, ty_var_count)?;
     }
-    if input_tys.len() == 1 && output_tys.is_empty() {
+    if input_tys.len() == 1 && output_tys.is_empty() && output_effs.is_empty() {
         write!(
             f,
             " {} for {}",
@@ -902,28 +935,39 @@ fn format_impl_header_expanded(
                 f,
             )?;
         }
+        if !output_effs.is_empty() {
+            write!(f, " ! ")?;
+            write_with_separator_and_format_fn(
+                output_effs.iter().zip(trait_def.output_effect_names.iter()),
+                ", ",
+                |(eff, name), f| write!(f, "{name} = {eff}"),
+                f,
+            )?;
+        }
         write!(f, ">")?;
     }
-    let mut subst = TypeInstSubst::default();
+    let mut subst = InstSubst::default();
     for (i, ty) in input_tys.iter().enumerate() {
-        subst.insert(TypeVar::new(i as u32), *ty);
+        subst.0.insert(TypeVar::new(i as u32), *ty);
     }
     for (i, ty) in output_tys.iter().enumerate() {
-        subst.insert(TypeVar::new(i as u32 + input_tys.len() as u32), *ty);
+        subst.0.insert(TypeVar::new(i as u32 + input_tys.len() as u32), *ty);
+    }
+    for (i, eff) in output_effs.iter().enumerate() {
+        subst.1.insert(EffectVar::new(i as u32), eff.clone());
     }
     Ok(subst)
 }
 
 fn format_impl_fns(
     trait_id: TraitId,
-    subst: TypeInstSubst,
+    subst: InstSubst,
     imp: &TraitImpl,
     show_code: bool,
     f: &mut std::fmt::Formatter,
     env: &ModuleEnv<'_>,
 ) -> std::fmt::Result {
     let trait_def = env.trait_def(trait_id);
-    let subst = (subst, FxHashMap::default());
     writeln!(f, " {{")?;
     let impl_functions = imp.methods.iter().map(|&id| {
         let function = env.current.get_function_by_id(id).unwrap();

@@ -17,7 +17,7 @@ use crate::{
     format::{FormatWith, FormatWithData, write_with_separator_and_format_fn},
     module::{ModuleEnv, TraitId},
     types::{
-        effects::EffectsInstSubst,
+        effects::{EffType, EffectsInstSubst},
         r#type::{Type, TypeDisplayEnv, TypeInstSubst, TypeVar},
         type_inference::substitution::InstSubst,
         type_like::TypeLike,
@@ -144,8 +144,9 @@ where
             trait_id,
             input_tys,
             output_tys,
+            output_effs,
             ..
-        } => format_have_trait_with_env(*trait_id, input_tys, output_tys, f, env, style),
+        } => format_have_trait_with_env(*trait_id, input_tys, output_tys, output_effs, f, env, style),
     }
 }
 
@@ -275,6 +276,7 @@ struct NonUnaryTraitConstraint<'a> {
     trait_id: TraitId,
     input_tys: &'a [Type],
     output_tys: &'a [Type],
+    output_effs: &'a [EffType],
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
@@ -326,8 +328,9 @@ impl<'a> DisplayConstraints<'a> {
                 trait_id,
                 input_tys,
                 output_tys,
+                output_effs,
                 ..
-            } if input_tys.len() == 1 && output_tys.is_empty() => {
+            } if input_tys.len() == 1 && output_tys.is_empty() && output_effs.is_empty() => {
                 self.simple_trait_constraints
                     .entry(input_tys[0])
                     .or_default()
@@ -337,12 +340,14 @@ impl<'a> DisplayConstraints<'a> {
                 trait_id,
                 input_tys,
                 output_tys,
+                output_effs,
                 ..
             } => {
                 self.other_trait_constraints.push(NonUnaryTraitConstraint {
                     trait_id: *trait_id,
                     input_tys,
                     output_tys,
+                    output_effs,
                 });
             }
             PubTypeConstraint::TupleAtIndexIs { .. }
@@ -464,6 +469,7 @@ impl ConstraintDisplayItem<'_> {
                 constraint.trait_id,
                 constraint.input_tys,
                 constraint.output_tys,
+                constraint.output_effs,
                 f,
                 env,
                 TypeConstraintRenderStyle::WhereClause,
@@ -660,6 +666,7 @@ pub fn format_have_trait(
     trait_id: TraitId,
     input_tys: &[Type],
     output_tys: &[Type],
+    output_effs: &[EffType],
     f: &mut std::fmt::Formatter,
     env: &ModuleEnv<'_>,
 ) -> std::fmt::Result {
@@ -667,16 +674,19 @@ pub fn format_have_trait(
         trait_id,
         input_tys,
         output_tys,
+        output_effs,
         f,
         env,
         TypeConstraintRenderStyle::WhereClause,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn format_have_trait_with_env<Env>(
     trait_id: TraitId,
     input_tys: &[Type],
     output_tys: &[Type],
+    output_effs: &[EffType],
     f: &mut std::fmt::Formatter,
     env: &Env,
     style: TypeConstraintRenderStyle,
@@ -699,7 +709,7 @@ where
         input_tys.len() == 1 && matches!(style, TypeConstraintRenderStyle::WhereClause);
     if use_unary_where_clause {
         write!(f, "{}: {}", input_tys[0].format_with(env), trait_name)?;
-        if output_tys.is_empty() {
+        if output_tys.is_empty() && output_effs.is_empty() {
             return Ok(());
         }
         write!(f, " <")?;
@@ -733,6 +743,17 @@ where
                     trait_def.output_type_names[index],
                     ty.format_with(env)
                 )
+            },
+            f,
+        )?;
+    }
+    if !output_effs.is_empty() {
+        write!(f, " ! ")?;
+        write_with_separator_and_format_fn(
+            output_effs.iter().enumerate(),
+            ", ",
+            |(index, eff), f| {
+                write!(f, "{} = {}", trait_def.output_effect_names[index], eff)
             },
             f,
         )?;

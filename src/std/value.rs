@@ -542,7 +542,7 @@ impl<'s, 'm> ValueBodyCtx<'s, 'm> {
         let (fn_ty, ret_ty, method_name, is_function_value) = {
             let trait_def = self.solver.trait_def(trait_id);
             let definition = trait_def
-                .instantiate_for_tys(&[input_ty], &[])
+                .instantiate_for_tys(&[input_ty], &[], &[])
                 .into_iter()
                 .nth(method_index.as_index())
                 .expect("Value method index out of bounds");
@@ -1291,7 +1291,7 @@ impl Deriver for InspectDeriver {
 
         let snapshot = solver.snapshot_derived_impl_state();
         let impl_id =
-            solver.reserve_concrete_impl_from_code_entries(trait_id, input_types, &[], []);
+            solver.reserve_concrete_impl_from_code_entries(trait_id, input_types, &[], &[], []);
         let mut body_arena = NodeArena::default();
         let mut ctx = ValueBodyCtx::concrete(solver);
         let Some((root, locals)) =
@@ -1304,6 +1304,7 @@ impl Deriver for InspectDeriver {
             impl_id,
             trait_id,
             input_types,
+            &[],
             &[],
             [(PendingFunctionBody::new(body_arena, root), locals)],
         );
@@ -2064,7 +2065,7 @@ fn derive_function_value_impl(
         let trait_def = solver.trait_def(trait_id);
         (
             trait_def.methods.len(),
-            trait_def.instantiate_for_tys(input_types, &[]),
+            trait_def.instantiate_for_tys(input_types, &[], &[]),
         )
     };
     let methods = (0..method_count)
@@ -2077,10 +2078,11 @@ fn derive_function_value_impl(
         .collect::<Vec<_>>();
     let associated_const_tys = solver
         .trait_def(trait_id)
-        .instantiate_associated_const_tys_for_tys(input_types, &[]);
+        .instantiate_associated_const_tys_for_tys(input_types, &[], &[]);
     let dictionary_ty = TraitImpls::dictionary_ty(tys, associated_const_tys);
     let dictionary_value = module::build_dictionary_value(&methods, &associated_const_values);
     let imp = TraitImpl::new(
+        Vec::new(),
         Vec::new(),
         methods,
         dictionary_value,
@@ -2144,6 +2146,7 @@ fn derive_structural_value_impl(
     let impl_id = solver.reserve_concrete_impl_from_code_entries(
         trait_id,
         input_types,
+        &[],
         &[],
         associated_const_values,
     );
@@ -2222,6 +2225,7 @@ fn derive_structural_value_impl(
         impl_id,
         trait_id,
         input_types,
+        &[],
         &[],
         [eq, to_string, hash, clone, drop],
     );

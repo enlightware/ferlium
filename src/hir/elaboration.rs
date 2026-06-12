@@ -66,22 +66,24 @@ fn value_dictionary_node_kind_from_methods(
     // consts are layout metadata, so they are computed from the concrete HIR
     // type rather than read from a source impl.
     assert_eq!(methods.len(), trait_def.methods.len());
-    let definitions = trait_def.instantiate_for_tys(input_tys, &[]);
+    let definitions = trait_def.instantiate_for_tys(input_tys, &[], &[]);
     let method_tys = definitions
         .into_iter()
         .map(|definition| Type::function_type(definition.ty_scheme.ty))
         .collect::<Vec<_>>();
     let associated_const_values =
         value_layout_associated_const_values(input_tys[0], span, ctx.trait_solver)?;
-    let ty = trait_def.get_dictionary_type_for_tys(input_tys, &[]);
+    let ty = trait_def.get_dictionary_type_for_tys(input_tys, &[], &[]);
     let associated_const_values = associated_const_values
         .into_iter()
         .map(LiteralValue::new_native)
         .collect::<Vec<_>>();
-    let associated_const_tys = trait_def.instantiate_associated_const_tys_for_tys(input_tys, &[]);
+    let associated_const_tys =
+        trait_def.instantiate_associated_const_tys_for_tys(input_tys, &[], &[]);
     let dictionary_ty = TraitImpls::dictionary_ty(method_tys, associated_const_tys);
     let dictionary_value = build_dictionary_value(&methods, &associated_const_values);
     let imp = TraitImpl::new(
+        Vec::new(),
         Vec::new(),
         methods,
         dictionary_value,
@@ -138,11 +140,13 @@ fn generic_derived_value_dictionary_node_kind(
 }
 
 /// Build the HIR expression that provides the runtime dictionary for a trait requirement.
+#[allow(clippy::too_many_arguments)]
 fn trait_dictionary_node_kind(
     arena: &mut NodeArena,
     trait_id: TraitId,
     input_tys: &[Type],
     output_tys: &[Type],
+    output_effs: &[EffType],
     span: Location,
     ctx: &mut DictElaborationCtx<'_, '_, '_>,
 ) -> Result<(NodeKind, Type), InternalCompilationError> {
@@ -160,7 +164,7 @@ fn trait_dictionary_node_kind(
     let ty = ctx
         .trait_solver
         .trait_def(trait_id)
-        .get_dictionary_type_for_tys(input_tys, output_tys);
+        .get_dictionary_type_for_tys(input_tys, output_tys, output_effs);
 
     let node_kind = if input_tys.iter().all(Type::is_constant) {
         let dictionary = ctx
@@ -232,12 +236,13 @@ fn extra_arg_kind_from_inst_data(
                     };
                     (node_kind, int_type())
                 }
-                TraitImpl { trait_id, input_tys, output_tys, .. } => {
+                TraitImpl { trait_id, input_tys, output_tys, output_effs } => {
                     let (node_kind, ty) = trait_dictionary_node_kind(
                         arena,
                         *trait_id,
                         input_tys,
                         output_tys,
+                        output_effs,
                         span,
                         ctx,
                     )?;
@@ -710,7 +715,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                 } else if is_function_surface_only {
                     let (dict_ty, entry_index) = {
                         let trait_def = self.ctx.trait_solver.trait_def(trait_id);
-                        let dict_ty = trait_def.get_dictionary_type_for_tys(&input_tys, &[]);
+                        let dict_ty = trait_def.get_dictionary_type_for_tys(&input_tys, &[], &[]);
                         let (entry_index, _) =
                             dictionary_method_projection_data(trait_def, dict_ty, method_index);
                         (dict_ty, entry_index)
@@ -719,6 +724,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                         &mut self.generated,
                         trait_id,
                         &input_tys,
+                        &[],
                         &[],
                         method_span,
                         self.ctx,
@@ -832,6 +838,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                 );
                 let input_tys = get_method.input_tys.clone();
                 let output_tys = get_method.output_tys.clone();
+                let output_effs = get_method.output_effs.clone();
                 let resolved = input_tys.iter().all(Type::is_constant);
                 let is_value_function = {
                     let trait_def = self.ctx.trait_solver.trait_def(trait_id);
@@ -862,8 +869,11 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                 } else {
                     let (dict_ty, entry_index) = {
                         let trait_def = self.ctx.trait_solver.trait_def(trait_id);
-                        let dict_ty =
-                            trait_def.get_dictionary_type_for_tys(&input_tys, &output_tys);
+                        let dict_ty = trait_def.get_dictionary_type_for_tys(
+                            &input_tys,
+                            &output_tys,
+                            &output_effs,
+                        );
                         let (entry_index, _) =
                             dictionary_method_projection_data(trait_def, dict_ty, method_index);
                         (dict_ty, entry_index)
@@ -873,6 +883,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                         trait_id,
                         &input_tys,
                         &output_tys,
+                        &output_effs,
                         method_span,
                         self.ctx,
                     )?;
@@ -954,11 +965,13 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
             GetTraitDictionary(get_dict) => {
                 let input_tys = get_dict.input_tys.clone();
                 let output_tys = get_dict.output_tys.clone();
+                let output_effs = get_dict.output_effs.clone();
                 let (node_kind, _) = trait_dictionary_node_kind(
                     &mut self.generated,
                     get_dict.trait_id,
                     &input_tys,
                     &output_tys,
+                    &output_effs,
                     node_span,
                     self.ctx,
                 )?;
@@ -1201,6 +1214,7 @@ mod tests {
             associated_const_index,
             input_tys,
             output_tys: vec![],
+            output_effs: vec![],
         }))
     }
 
@@ -1229,6 +1243,7 @@ mod tests {
             trait_id,
             trait_def,
             [Type::unit()],
+            [],
             [],
             [
                 LiteralValue::new_native(8isize),
@@ -1305,6 +1320,7 @@ mod tests {
             requirements: vec![DictionaryReq::new_trait_impl(
                 trait_id,
                 vec![input_ty],
+                vec![],
                 vec![],
             )],
             repr_map: FxHashMap::default(),

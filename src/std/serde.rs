@@ -152,7 +152,7 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
         }
         let snapshot = solver.snapshot_derived_impl_state();
         let impl_id =
-            solver.reserve_concrete_impl_from_code_entries(trait_id, input_types, &[], []);
+            solver.reserve_concrete_impl_from_code_entries(trait_id, input_types, &[], &[], []);
 
         let mut body_arena = NodeArena::default();
         let arena = &mut body_arena;
@@ -327,6 +327,7 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
             trait_id,
             input_types,
             &[],
+            &[],
             [(PendingFunctionBody::new(body_arena, root), locals)],
         );
         Ok(Some(TraitImplId::Local(impl_id)))
@@ -400,7 +401,7 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
         }
         let snapshot = solver.snapshot_derived_impl_state();
         let impl_id =
-            solver.reserve_concrete_impl_from_code_entries(trait_id, input_types, &[], []);
+            solver.reserve_concrete_impl_from_code_entries(trait_id, input_types, &[], &[], []);
 
         let mut body_arena = NodeArena::default();
         let arena = &mut body_arena;
@@ -427,7 +428,7 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
             let value_trait_id = solver.std_trait_id(VALUE_TRAIT_NAME);
             let data_value_dictionary_ty = solver
                 .trait_def(value_trait_id)
-                .get_dictionary_type_for_tys(&[data_value_ty], &[]);
+                .get_dictionary_type_for_tys(&[data_value_ty], &[], &[]);
             let data_value_clone =
                 PendingLocalClone::Resolved(ResolvedLocalClone::Static(solver.solve_impl_method(
                     value_trait_id,
@@ -668,6 +669,7 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
             impl_id,
             trait_id,
             input_types,
+            &[],
             &[],
             [(PendingFunctionBody::new(body_arena, root), locals)],
         );
