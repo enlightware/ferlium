@@ -146,7 +146,9 @@ where
             output_tys,
             output_effs,
             ..
-        } => format_have_trait_with_env(*trait_id, input_tys, output_tys, output_effs, f, env, style),
+        } => {
+            format_have_trait_with_env(*trait_id, input_tys, output_tys, output_effs, f, env, style)
+        }
     }
 }
 
@@ -752,9 +754,7 @@ where
         write_with_separator_and_format_fn(
             output_effs.iter().enumerate(),
             ", ",
-            |(index, eff), f| {
-                write!(f, "{} = {}", trait_def.output_effect_names[index], eff)
-            },
+            |(index, eff), f| write!(f, "{} = {}", trait_def.output_effect_names[index], eff),
             f,
         )?;
     }

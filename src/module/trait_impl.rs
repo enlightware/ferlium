@@ -352,7 +352,7 @@ impl TraitImpls {
     ) -> LocalImplId {
         let input_tys = input_tys.into();
         let output_tys = output_tys.into();
-        let output_effs = trait_def.normalized_output_effs(output_effs.into());
+        let output_effs = trait_def.impl_output_effs_or_pure_defaults(output_effs.into());
         let associated_const_values = associated_const_values.into();
 
         // Recover the definitions from the trait by instantiating the trait method definitions with the given types.
@@ -395,7 +395,7 @@ impl TraitImpls {
         functions: Vec<ModuleFunction>,
         fn_collector: &mut FunctionCollector,
     ) -> LocalImplId {
-        let output_effs = trait_def.normalized_output_effs(output_effs);
+        let output_effs = trait_def.impl_output_effs_or_pure_defaults(output_effs);
         let associated_const_values = associated_const_values.into();
         // Minimal validation
         trait_def.validate_impl_shape(
@@ -415,8 +415,11 @@ impl TraitImpls {
         let (methods, method_tys) = Self::bundle_module_functions(functions, fn_collector, namer);
 
         // Build and insert the implementation.
-        let associated_const_tys =
-            trait_def.instantiate_associated_const_tys_for_tys(&input_tys, &output_tys, &output_effs);
+        let associated_const_tys = trait_def.instantiate_associated_const_tys_for_tys(
+            &input_tys,
+            &output_tys,
+            &output_effs,
+        );
         let dictionary_type = Self::dictionary_ty(method_tys, associated_const_tys);
         let dictionary_value = build_dictionary_value(&methods, &associated_const_values);
         let imp = TraitImpl::new(
@@ -447,7 +450,7 @@ impl TraitImpls {
         functions: Vec<PendingModuleFunction>,
         fn_collector: &mut PendingFunctionCollector,
     ) -> LocalImplId {
-        let output_effs = trait_def.normalized_output_effs(output_effs);
+        let output_effs = trait_def.impl_output_effs_or_pure_defaults(output_effs);
         let associated_const_values = associated_const_values.into();
         trait_def.validate_impl_shape(
             &input_tys,
@@ -465,8 +468,11 @@ impl TraitImpls {
         let (methods, method_tys) =
             Self::bundle_pending_module_functions(functions, fn_collector, namer);
 
-        let associated_const_tys =
-            trait_def.instantiate_associated_const_tys_for_tys(&input_tys, &output_tys, &output_effs);
+        let associated_const_tys = trait_def.instantiate_associated_const_tys_for_tys(
+            &input_tys,
+            &output_tys,
+            &output_effs,
+        );
         let dictionary_type = Self::dictionary_ty(method_tys, associated_const_tys);
         let dictionary_value = build_dictionary_value(&methods, &associated_const_values);
         let imp = TraitImpl::new(
@@ -515,7 +521,7 @@ impl TraitImpls {
         fn_collector: &mut FunctionCollector,
     ) -> LocalImplId {
         let output_tys = output_tys.into();
-        let output_effs = trait_def.normalized_output_effs(output_effs.into());
+        let output_effs = trait_def.impl_output_effs_or_pure_defaults(output_effs.into());
         let associated_const_values = associated_const_values.into();
 
         // Recover the definitions from the trait by instantiating the trait method definitions with the given types.
@@ -556,7 +562,7 @@ impl TraitImpls {
         functions: Vec<ModuleFunction>,
         fn_collector: &mut FunctionCollector,
     ) -> LocalImplId {
-        let output_effs = trait_def.normalized_output_effs(output_effs);
+        let output_effs = trait_def.impl_output_effs_or_pure_defaults(output_effs);
         let associated_const_values = associated_const_values.into();
         // Minimal validation
         trait_def.validate_impl_shape(
@@ -737,7 +743,8 @@ impl TraitImpls {
             if level == DisplayFilter::Hide {
                 continue;
             }
-            let subst = format_concrete_impl_header(key, &imp.output_tys, &imp.output_effs, f, env)?;
+            let subst =
+                format_concrete_impl_header(key, &imp.output_tys, &imp.output_effs, f, env)?;
             write!(f, " (#{id})")?;
             if level == DisplayFilter::MethodDefinitions {
                 format_impl_fns(key.trait_id, subst, imp, false, f, env)?;
@@ -893,7 +900,15 @@ pub fn format_concrete_impl_header(
     f: &mut std::fmt::Formatter,
     env: &ModuleEnv<'_>,
 ) -> Result<InstSubst, std::fmt::Error> {
-    format_impl_header_expanded(key.trait_id, 0, &key.input_tys, output_tys, output_effs, f, env)
+    format_impl_header_expanded(
+        key.trait_id,
+        0,
+        &key.input_tys,
+        output_tys,
+        output_effs,
+        f,
+        env,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -951,7 +966,9 @@ fn format_impl_header_expanded(
         subst.0.insert(TypeVar::new(i as u32), *ty);
     }
     for (i, ty) in output_tys.iter().enumerate() {
-        subst.0.insert(TypeVar::new(i as u32 + input_tys.len() as u32), *ty);
+        subst
+            .0
+            .insert(TypeVar::new(i as u32 + input_tys.len() as u32), *ty);
     }
     for (i, eff) in output_effs.iter().enumerate() {
         subst.1.insert(EffectVar::new(i as u32), eff.clone());

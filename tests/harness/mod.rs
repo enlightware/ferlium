@@ -692,11 +692,11 @@ fn testing_module(
         [int_type()],
         [effect(PrimitiveEffect::Read)],
         [],
-        [
-            Box::new(UnaryNativeFnNN::new(|v: bool| {
+        [Box::new(UnaryNativeFnNN::new(
+            |v: bool| {
                 if v { 1isize } else { 0isize }
-            })) as Function,
-        ],
+            },
+        )) as Function],
     );
     module.add_concrete_impl_with_effects_no_locals(
         test_eff_trait_id,
@@ -736,15 +736,22 @@ fn testing_module(
         test_eff_pair_trait_id,
         [bool_type()],
         [],
-        [effect(PrimitiveEffect::Read), effect(PrimitiveEffect::Write)],
+        [
+            effect(PrimitiveEffect::Read),
+            effect(PrimitiveEffect::Write),
+        ],
         [],
         [
-            Box::new(UnaryNativeFnNN::new(|v: bool| {
-                if v { 1isize } else { 0isize }
-            })) as Function,
-            Box::new(UnaryNativeFnNN::new(|v: bool| {
-                if v { 2isize } else { 0isize }
-            })) as Function,
+            Box::new(UnaryNativeFnNN::new(
+                |v: bool| {
+                    if v { 1isize } else { 0isize }
+                },
+            )) as Function,
+            Box::new(UnaryNativeFnNN::new(
+                |v: bool| {
+                    if v { 2isize } else { 0isize }
+                },
+            )) as Function,
         ],
     );
     module.add_concrete_impl_for_trait_def_no_locals(

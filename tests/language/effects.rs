@@ -365,9 +365,7 @@ fn trait_output_effects_are_rejected_in_restricted_contexts() {
     // The TestEff impl for string has the write effect, so a callback using it
     // cannot be passed where only the read effect is allowed.
     session
-        .fail_compilation(
-            r#"fn f() { effects::take_read(|| { testing::eff_project("s"); () }) }"#,
-        )
+        .fail_compilation(r#"fn f() { effects::take_read(|| { testing::eff_project("s"); () }) }"#)
         .expect_invalid_effect_dependency(effect(Write), effect(Read));
 }
 
@@ -401,10 +399,20 @@ fn trait_output_effects_multiple_slots_resolve_independently() {
     "#};
     test_mod(&mut session, generic_src, "generic_first", effect_var(0));
     test_mod(&mut session, generic_src, "generic_second", effect_var(0));
-    test_mod(&mut session, generic_src, "generic_both", effect_vars(&[0, 1]));
+    test_mod(
+        &mut session,
+        generic_src,
+        "generic_both",
+        effect_vars(&[0, 1]),
+    );
     test_mod(&mut session, generic_src, "call_first", effect(Read));
     test_mod(&mut session, generic_src, "call_second", effect(Write));
-    test_mod(&mut session, generic_src, "call_both", effects(&[Read, Write]));
+    test_mod(
+        &mut session,
+        generic_src,
+        "call_both",
+        effects(&[Read, Write]),
+    );
 
     // Effects are compile-time only; both methods dispatch normally.
     assert_val_eq!(session.run("testing::eff_pair_first(true)"), int(1));
@@ -412,9 +420,7 @@ fn trait_output_effects_multiple_slots_resolve_independently() {
 
     // A read-only context accepts the first (read) slot but rejects the
     // second (write) one.
-    session.compile(
-        r#"fn ok() { effects::take_read(|| { testing::eff_pair_first(true); () }) }"#,
-    );
+    session.compile(r#"fn ok() { effects::take_read(|| { testing::eff_pair_first(true); () }) }"#);
     session
         .fail_compilation(
             r#"fn bad() { effects::take_read(|| { testing::eff_pair_second(true); () }) }"#,
