@@ -207,11 +207,11 @@ impl TypeInference {
         trait_id: TraitId,
         input_tys: &[Type],
         output_tys: &[Type],
+        output_effs: &[EffType],
         span: Location,
     ) {
         let trait_def = env.module_env.trait_def(trait_id);
-        let subst = trait_def.type_param_subst_for_tys(input_tys, output_tys);
-        let inst_subst = (subst, FxHashMap::default());
+        let inst_subst = trait_def.param_subst_for(input_tys, output_tys, output_effs);
         let mut mapper = BitmapInstantiationMapper::new(&inst_subst);
         for constraint in trait_def
             .parent_constraints
@@ -220,18 +220,26 @@ impl TypeInference {
         {
             let mut constraint = constraint.map(&mut mapper);
             constraint.instantiate_location(span);
-            let parent = constraint
-                .as_have_trait()
-                .map(|(trait_id, input_tys, output_tys, _)| {
-                    (*trait_id, input_tys.to_vec(), output_tys.to_vec())
-                });
+            let parent = constraint.as_have_trait().map(
+                |(trait_id, input_tys, output_tys, output_effs, _)| {
+                    (
+                        *trait_id,
+                        input_tys.to_vec(),
+                        output_tys.to_vec(),
+                        output_effs.to_vec(),
+                    )
+                },
+            );
             self.add_pub_constraint(constraint);
-            if let Some((parent_trait_id, parent_input_tys, parent_output_tys)) = parent {
+            if let Some((parent_trait_id, parent_input_tys, parent_output_tys, parent_output_effs)) =
+                parent
+            {
                 self.add_instantiated_trait_assumptions(
                     env,
                     parent_trait_id,
                     &parent_input_tys,
                     &parent_output_tys,
+                    &parent_output_effs,
                     span,
                 );
             }
@@ -269,15 +277,26 @@ impl TypeInference {
             self.fresh_type_var_tys(trait_def.input_type_count() as usize)
         };
         let output_tys = self.fresh_type_var_tys(trait_def.output_type_count() as usize);
+        let output_effs = (0..trait_def.output_effect_count())
+            .map(|_| self.fresh_effect_var_ty())
+            .collect::<Vec<_>>();
         self.add_pub_constraint(PubTypeConstraint::new_have_trait(
             trait_id,
             input_tys.clone(),
             output_tys.clone(),
+            output_effs.clone(),
             expr_span,
         ));
-        self.add_instantiated_trait_assumptions(env, trait_id, &input_tys, &output_tys, expr_span);
+        self.add_instantiated_trait_assumptions(
+            env,
+            trait_id,
+            &input_tys,
+            &output_tys,
+            &output_effs,
+            expr_span,
+        );
         let associated_const_tys =
-            trait_def.instantiate_associated_const_tys_for_tys(&input_tys, &output_tys);
+            trait_def.instantiate_associated_const_tys_for_tys(&input_tys, &output_tys, &output_effs);
         let ty = associated_const_tys[associated_const_index.as_index()];
         let node = NodeKind::GetTraitAssociatedConst(b(hir::GetTraitAssociatedConst {
             trait_id,
@@ -286,6 +305,7 @@ impl TypeInference {
             associated_const_span: associated_const_name.1,
             input_tys,
             output_tys,
+            output_effs,
         }));
         Ok((node, ty, MutType::constant(), no_effects()))
     }
@@ -525,6 +545,7 @@ impl TypeInference {
                 value_trait_id,
                 vec![capture_env_ty],
                 vec![],
+                vec![],
                 span,
             ));
             let captures_value_dictionary = env.ir_arena.alloc(N::new(
@@ -532,10 +553,11 @@ impl TypeInference {
                     trait_id: value_trait_id,
                     input_tys: vec![capture_env_ty],
                     output_tys: vec![],
+                    output_effs: vec![],
                 })),
                 env.module_env
                     .trait_def(value_trait_id)
-                    .get_dictionary_type_for_tys(&[capture_env_ty], &[]),
+                    .get_dictionary_type_for_tys(&[capture_env_ty], &[], &[]),
                 no_effects(),
                 span,
             ));
@@ -598,12 +620,13 @@ impl TypeInference {
                     }
                     let trait_ty_var_count = trait_def.type_var_count();
                     let trait_input_type_count = trait_def.input_type_count();
+                    let trait_eff_var_count = trait_def.output_effect_count();
                     let trait_constraints = trait_def.constraints.clone();
                     let (inst_fn_ty, inst_data, subst) =
                         definition.ty_scheme.instantiate_with_fresh_vars(
                             self,
                             expr_span,
-                            Some(trait_ty_var_count),
+                            Some((trait_ty_var_count, trait_eff_var_count)),
                             env.module_env,
                         );
                     assert!(
@@ -616,6 +639,9 @@ impl TypeInference {
                         constraint.instantiate_location(expr_span);
                         self.add_pub_constraint(constraint);
                     });
+                    let output_effs = (0..trait_eff_var_count)
+                        .map(|i| subst.1.get(&EffectVar::new(i)).cloned().unwrap())
+                        .collect::<Vec<_>>();
                     let mut trait_tys = continuous_hashmap_to_vec(subst.0).unwrap();
                     assert_eq!(trait_tys.len(), trait_ty_var_count as usize);
                     let output_tys = trait_tys.split_off(trait_input_type_count as usize);
@@ -624,6 +650,7 @@ impl TypeInference {
                         trait_id,
                         input_tys.clone(),
                         output_tys.clone(),
+                        output_effs.clone(),
                         expr_span,
                     ));
                     let node = K::GetTraitMethod(b(hir::GetTraitMethod {
@@ -633,6 +660,7 @@ impl TypeInference {
                         method_span: expr_span,
                         input_tys,
                         output_tys,
+                        output_effs,
                         inst_data,
                     }));
                     (
@@ -777,6 +805,7 @@ impl TypeInference {
                     self.add_pub_constraint(PubTypeConstraint::new_have_trait(
                         value_trait_id(env),
                         vec![node_ty],
+                        vec![],
                         vec![],
                         expr_span,
                     ));
@@ -1129,6 +1158,7 @@ impl TypeInference {
                                     value_trait_id(env),
                                     vec![place_ty],
                                     vec![],
+                                    vec![],
                                     expr_span,
                                 ));
                             }
@@ -1180,6 +1210,7 @@ impl TypeInference {
                         repr_trait_id(env),
                         vec![tuple_node_ty],
                         vec![tuple_ty],
+                        vec![],
                         index_span,
                     ));
                     let element_ty = self.fresh_type_var_ty(); // V
@@ -1349,6 +1380,7 @@ impl TypeInference {
                         repr_trait_id(env),
                         vec![record_node_ty],
                         vec![record_ty],
+                        vec![],
                         field_span,
                     ));
                     let element_ty = self.fresh_type_var_ty(); // V
@@ -1918,6 +1950,7 @@ impl TypeInference {
                 value_trait_id(env),
                 vec![ty],
                 vec![],
+                vec![],
                 span,
             ));
         }
@@ -2169,6 +2202,7 @@ impl TypeInference {
                 value_trait_id(env),
                 vec![ty],
                 vec![],
+                vec![],
                 span,
             ));
         }
@@ -2404,6 +2438,7 @@ impl TypeInference {
                 value_trait_id,
                 vec![ty],
                 vec![],
+                vec![],
                 span,
             ));
         }
@@ -2600,6 +2635,7 @@ impl TypeInference {
                 }
                 let trait_ty_var_count = trait_def.type_var_count();
                 let trait_input_type_count = trait_def.input_type_count();
+                let trait_eff_var_count = trait_def.output_effect_count();
                 let trait_constraints = trait_def.constraints.clone();
                 // Validate the number of arguments
                 if definition.ty_scheme.ty.args.len() != args.len() {
@@ -2615,7 +2651,7 @@ impl TypeInference {
                     definition.ty_scheme.instantiate_with_fresh_vars(
                         self,
                         path_span,
-                        Some(trait_ty_var_count),
+                        Some((trait_ty_var_count, trait_eff_var_count)),
                         env.module_env,
                     );
                 assert!(
@@ -2637,6 +2673,9 @@ impl TypeInference {
                         self.value_evaluation_prefix_nodes_for_many(env.ir_arena, args_node_ids);
                     self.diverging_prefix_result(env, nodes, args_effects)
                 } else {
+                    let output_effs = (0..trait_eff_var_count)
+                        .map(|i| subst.1.get(&EffectVar::new(i)).cloned().unwrap())
+                        .collect::<Vec<_>>();
                     let mut trait_tys = continuous_hashmap_to_vec(subst.0).unwrap();
                     assert_eq!(trait_tys.len(), trait_ty_var_count as usize);
                     let output_tys = trait_tys.split_off(trait_input_type_count as usize);
@@ -2645,6 +2684,7 @@ impl TypeInference {
                         trait_id,
                         input_tys.clone(),
                         output_tys,
+                        output_effs,
                         path_span,
                     ));
                     // Build and return the trait method node
@@ -3541,7 +3581,7 @@ impl TypeInference {
         let mut trait_solver =
             TraitSolverProbe::from_module(env.module_env.current, env.module_env.modules);
         let result = trait_solver
-            .solve_output_types(
+            .solve_outputs(
                 env.module_env.expect_std_trait_id(TRIVIAL_COPY_TRAIT_NAME),
                 &[ty],
                 span,

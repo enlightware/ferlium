@@ -233,7 +233,8 @@ impl UnifiedTypeInference {
         if ty.is_function() {
             return;
         }
-        let constraint = PubTypeConstraint::new_have_trait(value_trait_id, vec![ty], vec![], span);
+        let constraint =
+            PubTypeConstraint::new_have_trait(value_trait_id, vec![ty], vec![], vec![], span);
         if !self.remaining_ty_constraints.contains(&constraint) {
             self.remaining_ty_constraints.push(constraint);
         }
@@ -512,6 +513,7 @@ impl UnifiedTypeInference {
                     input_tys,
                     output_tys,
                     span,
+                    ..
                 } = constraint
                 else {
                     all_satisfied = false;

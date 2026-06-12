@@ -1022,6 +1022,7 @@ impl ast::TraitDefinition {
             doc: self.doc,
             input_type_names,
             output_type_names,
+            output_effect_names: Vec::new(),
             parent_constraints,
             constraints,
             methods,

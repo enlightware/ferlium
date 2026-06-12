@@ -120,6 +120,7 @@ fn value_constraint(value_trait_id: TraitId, ty: Type) -> Vec<PubTypeConstraint>
         value_trait_id,
         vec![ty],
         vec![],
+        vec![],
         Location::new_synthesized(),
     )]
 }

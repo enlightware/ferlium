@@ -11,7 +11,7 @@ use test_log::test;
 use indoc::indoc;
 use ustr::ustr;
 
-use crate::harness::TestSession;
+use crate::harness::{TestSession, int};
 use ferlium::{
     compiler::{
         error::{CompilationErrorImpl, UnsafeFeature},
@@ -269,6 +269,157 @@ fn effects_unsafe_erases_effects_in_std_context() {
     .expect("std-context expression should compile");
 
     assert_eq!(module.hir_arena[compiled.expr].effects, EffType::empty());
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_output_effects_resolve_to_impl_effects() {
+    use PrimitiveEffect::*;
+
+    let mut session = TestSession::new();
+
+    // The TestEff impl for int is pure, the one for bool has the read effect.
+    let mod_src = indoc! {r#"
+        fn pure_project(x: int) -> int { testing::eff_project(x) }
+        fn effectful_project(x: bool) -> int { testing::eff_project(x) }
+    "#};
+    test_mod(&mut session, mod_src, "pure_project", EffType::empty());
+    test_mod(&mut session, mod_src, "effectful_project", effect(Read));
+
+    // The same resolution happens for expressions.
+    test_expr(&mut session, "testing::eff_project(1)", EffType::empty());
+    test_expr(&mut session, "testing::eff_project(true)", effect(Read));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_output_effects_are_quantified_in_generic_functions() {
+    use PrimitiveEffect::*;
+
+    let mut session = TestSession::new();
+
+    // The generic function's effect is the trait's output effect variable,
+    // which gets resolved at concrete call sites through the trait constraint.
+    let mod_src = indoc! {r#"
+        fn generic_project(x) { testing::eff_project(x) }
+        fn call_pure(y: int) -> int { generic_project(y) }
+        fn call_effectful(y: bool) -> int { generic_project(y) }
+    "#};
+    test_mod(&mut session, mod_src, "generic_project", effect_var(0));
+    test_mod(&mut session, mod_src, "call_pure", EffType::empty());
+    test_mod(&mut session, mod_src, "call_effectful", effect(Read));
+
+    // The generic function's scheme carries the effect variable in the
+    // trait constraint's output effects.
+    let module = session.compile_and_get_module(mod_src);
+    let def = &module
+        .get_function(ustr("generic_project"))
+        .unwrap()
+        .definition;
+    let output_effs = def
+        .ty_scheme
+        .constraints
+        .iter()
+        .find_map(|constraint| {
+            let (_, _, _, output_effs, _) = constraint.as_have_trait()?;
+            (!output_effs.is_empty()).then(|| output_effs.clone())
+        })
+        .expect("expected a trait constraint with output effects");
+    assert_eq!(output_effs, vec![effect_var(0)]);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_output_effects_propagate_through_blanket_impls() {
+    use PrimitiveEffect::*;
+
+    let mut session = TestSession::new();
+
+    // The blanket TestEff impl over Option<T> forwards the effect of T's impl.
+    let mod_src = indoc! {r#"
+        fn pure_project() -> int { testing::eff_project(testing::some_int(1)) }
+        fn effectful_project() -> int { testing::eff_project(testing::some_bool(true)) }
+    "#};
+    test_mod(&mut session, mod_src, "pure_project", EffType::empty());
+    test_mod(&mut session, mod_src, "effectful_project", effect(Read));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_output_effects_dispatch_at_runtime() {
+    let mut session = TestSession::new();
+
+    // Trait output effects are compile-time only and do not change dispatch.
+    assert_val_eq!(session.run("testing::eff_project(21)"), int(42));
+    assert_val_eq!(session.run("testing::eff_project(true)"), int(1));
+    assert_val_eq!(session.run("testing::eff_project(false)"), int(0));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_output_effects_are_rejected_in_restricted_contexts() {
+    use PrimitiveEffect::*;
+
+    let mut session = TestSession::new();
+
+    // The TestEff impl for string has the write effect, so a callback using it
+    // cannot be passed where only the read effect is allowed.
+    session
+        .fail_compilation(
+            r#"fn f() { effects::take_read(|| { testing::eff_project("s"); () }) }"#,
+        )
+        .expect_invalid_effect_dependency(effect(Write), effect(Read));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_output_effects_multiple_slots_resolve_independently() {
+    use PrimitiveEffect::*;
+
+    let mut session = TestSession::new();
+
+    // The TestEffPair impl for bool has read in its first effect slot and
+    // write in its second one; each method must resolve to its own slot.
+    let mod_src = indoc! {r#"
+        fn first(x: bool) -> int { testing::eff_pair_first(x) }
+        fn second(x: bool) -> int { testing::eff_pair_second(x) }
+        fn both(x: bool) -> int { testing::eff_pair_first(x) + testing::eff_pair_second(x) }
+    "#};
+    test_mod(&mut session, mod_src, "first", effect(Read));
+    test_mod(&mut session, mod_src, "second", effect(Write));
+    test_mod(&mut session, mod_src, "both", effects(&[Read, Write]));
+
+    // The same holds through generic functions, where each slot is quantified
+    // by its own effect variable.
+    let generic_src = indoc! {r#"
+        fn generic_first(x) { testing::eff_pair_first(x) }
+        fn generic_second(x) { testing::eff_pair_second(x) }
+        fn generic_both(x) { testing::eff_pair_first(x) + testing::eff_pair_second(x) }
+        fn call_first(y: bool) -> int { generic_first(y) }
+        fn call_second(y: bool) -> int { generic_second(y) }
+        fn call_both(y: bool) -> int { generic_both(y) }
+    "#};
+    test_mod(&mut session, generic_src, "generic_first", effect_var(0));
+    test_mod(&mut session, generic_src, "generic_second", effect_var(0));
+    test_mod(&mut session, generic_src, "generic_both", effect_vars(&[0, 1]));
+    test_mod(&mut session, generic_src, "call_first", effect(Read));
+    test_mod(&mut session, generic_src, "call_second", effect(Write));
+    test_mod(&mut session, generic_src, "call_both", effects(&[Read, Write]));
+
+    // Effects are compile-time only; both methods dispatch normally.
+    assert_val_eq!(session.run("testing::eff_pair_first(true)"), int(1));
+    assert_val_eq!(session.run("testing::eff_pair_second(true)"), int(2));
+
+    // A read-only context accepts the first (read) slot but rejects the
+    // second (write) one.
+    session.compile(
+        r#"fn ok() { effects::take_read(|| { testing::eff_pair_first(true); () }) }"#,
+    );
+    session
+        .fail_compilation(
+            r#"fn bad() { effects::take_read(|| { testing::eff_pair_second(true); () }) }"#,
+        )
+        .expect_invalid_effect_dependency(effect(Write), effect(Read));
 }
 
 #[test]

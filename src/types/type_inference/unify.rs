@@ -86,6 +86,30 @@ impl UnifiedTypeInference {
             .collect()
     }
 
+    pub(crate) fn fresh_effect_var(&mut self) -> EffectVar {
+        self.effect_unification_table.new_key(None)
+    }
+
+    /// Build a substitution mapping every effect variable occurring in the given
+    /// constraints and effect types to a fresh inference effect variable.
+    pub(crate) fn fresh_effect_var_subst_for(
+        &mut self,
+        constraints: &[PubTypeConstraint],
+        effs: &[EffType],
+    ) -> crate::types::effects::EffectsInstSubst {
+        let mut eff_vars = FxHashSet::default();
+        for constraint in constraints {
+            constraint.fill_with_inner_effect_vars(&mut eff_vars);
+        }
+        for eff in effs {
+            eff.fill_with_inner_effect_vars(&mut eff_vars);
+        }
+        eff_vars
+            .into_iter()
+            .map(|var| (var, EffType::single_variable(self.fresh_effect_var())))
+            .collect()
+    }
+
     pub(crate) fn snapshot(&mut self) -> UnifiedTypeInferenceSnapshot {
         UnifiedTypeInferenceSnapshot {
             ty_unification_table: self.ty_unification_table.snapshot(),
@@ -270,9 +294,12 @@ impl UnifiedTypeInference {
                     FxHashMap::default();
                 let mut variants_are: FxHashMap<Type, FxHashMap<Ustr, (Type, Location)>> =
                     FxHashMap::default();
+                /// The outputs of an already-seen trait application: its output
+                /// types, output effects, and the location of its first use.
+                type HaveTraitOutputs = (Vec<Type>, Vec<EffType>, Location);
                 let mut have_traits: FxHashMap<
                     (crate::module::TraitId, Vec<Type>),
-                    (Vec<Type>, Location),
+                    HaveTraitOutputs,
                 > = FxHashMap::default();
                 for constraint in &remaining_constraints {
                     use PubTypeConstraint::*;
@@ -416,10 +443,13 @@ impl UnifiedTypeInference {
                             trait_id,
                             input_tys,
                             output_tys,
+                            output_effs,
                             span,
                         } => {
                             let input_types = unified_ty_inf.normalize_types(input_tys);
                             let output_types = unified_ty_inf.normalize_types(output_tys);
+                            let output_effects =
+                                unified_ty_inf.substitute_in_effect_types(output_effs);
                             let key = (*trait_id, input_types);
                             if let Some(have_trait) = have_traits.get(&key) {
                                 assert_eq!(have_trait.0.len(), output_types.len());
@@ -430,11 +460,29 @@ impl UnifiedTypeInference {
                                         *actual,
                                         span.use_site,
                                         *expected,
-                                        have_trait.1,
+                                        have_trait.2,
                                     )?;
                                 }
+                                // Output effects are unified on the common prefix:
+                                // an empty list on either side means unspecified.
+                                for (expected, actual) in
+                                    have_trait.1.iter().zip(output_effects.iter())
+                                {
+                                    unified_ty_inf.unify_same_effect(
+                                        actual.clone(),
+                                        span.use_site,
+                                        expected.clone(),
+                                        have_trait.2,
+                                    )?;
+                                }
+                                if have_trait.1.is_empty() && !output_effects.is_empty() {
+                                    let span = have_trait.2;
+                                    have_traits
+                                        .insert(key, (output_types, output_effects, span));
+                                }
                             } else {
-                                have_traits.insert(key, (output_types, span.use_site));
+                                have_traits
+                                    .insert(key, (output_types, output_effects, span.use_site));
                             }
                         }
                     }
@@ -982,6 +1030,7 @@ impl UnifiedTypeInference {
         trait_id: crate::module::TraitId,
         input_tys: &[Type],
         output_tys: &[Type],
+        output_effs: &[EffType],
         span: Location,
         assumptions: ConstraintAssumptions<'_>,
         is_ty_adt: impl Fn(Type) -> bool,
@@ -990,6 +1039,7 @@ impl UnifiedTypeInference {
     ) -> Result<Option<PubTypeConstraint>, InternalCompilationError> {
         let mut input_tys = self.normalize_types(input_tys);
         let mut output_tys = self.normalize_types(output_tys);
+        let mut output_effs = self.substitute_in_effect_types(output_effs);
         let repr_trait_id = trait_solver.std_trait_id(REPR_TRAIT_NAME);
 
         // Look for the special case of a Repr trait constraint where the target
@@ -1026,12 +1076,16 @@ impl UnifiedTypeInference {
         let resolved = input_tys.iter().all(Type::is_constant);
         Ok(if resolved {
             // Fully resolved, validate the trait implementation.
-            let impl_output_tys =
-                trait_solver.solve_output_types(trait_id, &input_tys, span, arena)?;
-            // Found, unify the output types.
+            let (impl_output_tys, impl_output_effs) =
+                trait_solver.solve_outputs(trait_id, &input_tys, span, arena)?;
+            // Found, unify the output types and resolve the output effects.
             assert!(output_tys.is_empty() || output_tys.len() == impl_output_tys.len());
             for (cur_ty, exp_ty) in output_tys.iter().zip(impl_output_tys.iter()) {
                 self.unify_same_type(*cur_ty, span, *exp_ty, span)?;
+            }
+            assert!(output_effs.is_empty() || output_effs.len() == impl_output_effs.len());
+            for (cur_eff, exp_eff) in output_effs.iter().zip(impl_output_effs.iter()) {
+                self.resolve_trait_output_effect(cur_eff, exp_eff, span)?;
             }
             None
         } else {
@@ -1045,25 +1099,31 @@ impl UnifiedTypeInference {
                     trait_id,
                     &input_tys,
                     &output_tys,
+                    &output_effs,
                     assumptions,
                     span,
                     arena,
                 )?;
                 self.normalize_types_in_place(&mut input_tys);
                 self.normalize_types_in_place(&mut output_tys);
+                self.substitute_in_effect_types_in_place(&mut output_effs);
             }
             if input_tys.iter().all(Type::is_constant) {
-                let impl_output_tys =
-                    trait_solver.solve_output_types(trait_id, &input_tys, span, arena)?;
+                let (impl_output_tys, impl_output_effs) =
+                    trait_solver.solve_outputs(trait_id, &input_tys, span, arena)?;
                 assert!(output_tys.is_empty() || output_tys.len() == impl_output_tys.len());
                 for (cur_ty, exp_ty) in output_tys.iter().zip(impl_output_tys.iter()) {
                     self.unify_same_type(*cur_ty, span, *exp_ty, span)?;
+                }
+                assert!(output_effs.is_empty() || output_effs.len() == impl_output_effs.len());
+                for (cur_eff, exp_eff) in output_effs.iter().zip(impl_output_effs.iter()) {
+                    self.resolve_trait_output_effect(cur_eff, exp_eff, span)?;
                 }
                 None
             } else {
                 // Not fully resolved, defer the unification.
                 Some(PubTypeConstraint::new_have_trait(
-                    trait_id, input_tys, output_tys, span,
+                    trait_id, input_tys, output_tys, output_effs, span,
                 ))
             }
         })
@@ -1126,11 +1186,13 @@ impl UnifiedTypeInference {
                     trait_id,
                     input_tys,
                     output_tys,
+                    output_effs,
                     span,
                 } => self.unify_have_trait(
                     *trait_id,
                     input_tys,
                     output_tys,
+                    output_effs,
                     span.use_site,
                     ConstraintAssumptions::excluding(constraints, constraint_index),
                     &is_ty_adt,
@@ -1308,6 +1370,39 @@ impl UnifiedTypeInference {
         }
     }
 
+    /// Resolve a trait application's output effect against the effects solved
+    /// from the selected implementation.
+    ///
+    /// When the constraint's effect expression contains variables, the solved
+    /// effects flow into them as pending lower-bound dependencies, so that
+    /// upper bounds already recorded on those variables (e.g. from passing a
+    /// callback where only some effects are allowed) are still enforced when
+    /// the pending dependencies are expanded. A fully concrete constraint
+    /// effect must equal the solved one.
+    fn resolve_trait_output_effect(
+        &mut self,
+        constraint_eff: &EffType,
+        solved_eff: &EffType,
+        span: Location,
+    ) -> Result<(), InternalCompilationError> {
+        if constraint_eff.has_variables() {
+            if solved_eff.is_empty() {
+                return Ok(());
+            }
+            for var in constraint_eff.inner_vars() {
+                self.effect_constraints_inv.push(PendingEffectDependency {
+                    source: solved_eff.clone(),
+                    source_span: span,
+                    target: var,
+                    target_span: span,
+                });
+            }
+            Ok(())
+        } else {
+            self.unify_same_effect(constraint_eff.clone(), span, solved_eff.clone(), span)
+        }
+    }
+
     /// Make current and target the same effect type.
     pub fn unify_same_effect(
         &mut self,
@@ -1360,14 +1455,22 @@ impl UnifiedTypeInference {
                         reason: "Cannot unify multiple effect variables in the target".into(),
                     }));
                 }
-                self.effect_unification_table.union_value(
-                    current_vars[0],
-                    Some(EffType::multiple_primitive(&target.inner_non_vars())),
-                );
-                self.effect_unification_table.union_value(
-                    target_vars[0],
-                    Some(EffType::multiple_primitive(&current.inner_non_vars())),
-                );
+                // Only record actual primitives: binding an empty value would
+                // prematurely mark a pristine variable as resolved to pure.
+                let target_prims = target.inner_non_vars();
+                if !target_prims.is_empty() {
+                    self.effect_unification_table.union_value(
+                        current_vars[0],
+                        Some(EffType::multiple_primitive(&target_prims)),
+                    );
+                }
+                let current_prims = current.inner_non_vars();
+                if !current_prims.is_empty() {
+                    self.effect_unification_table.union_value(
+                        target_vars[0],
+                        Some(EffType::multiple_primitive(&current_prims)),
+                    );
+                }
                 self.effect_unification_table
                     .unify_var_var(current_vars[0], target_vars[0])
                     .map_err(|_| {
@@ -1495,8 +1598,12 @@ fn constraint_solve_priority(constraint: &PubTypeConstraint, trait_solver: &Trai
         PubTypeConstraint::HaveTrait {
             trait_id,
             output_tys,
+            output_effs,
             ..
-        } if *trait_id == trait_solver.std_trait_id(REPR_TRAIT_NAME) || !output_tys.is_empty() => {
+        } if *trait_id == trait_solver.std_trait_id(REPR_TRAIT_NAME)
+            || !output_tys.is_empty()
+            || !output_effs.is_empty() =>
+        {
             10
         }
         PubTypeConstraint::HaveTrait { trait_id, .. }

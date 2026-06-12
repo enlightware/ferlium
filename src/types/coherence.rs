@@ -17,13 +17,14 @@ use crate::{
         ModuleId, TraitId, TraitImpl, TraitKey,
     },
     std::value::{NO_DERIVE_VALUE_ATTRIBUTE, is_value_trait},
+    types::effects::{EffType, EffectsInstSubst},
     types::r#trait::TraitImplPolicy,
     types::trait_solver::TraitSolverProbe,
     types::r#type::{Type, TypeKind, TypeVar},
     types::type_inference::unify::{UnifiedTypeInference, UnifiedTypeInferenceSnapshot},
     types::type_like::TypeLike,
     types::type_like::instantiate_types,
-    types::type_mapper::{BitmapInstantiationMapper, SimpleInstantiationMapper},
+    types::type_mapper::{BitmapInstantiationMapper, SimpleInstantiationMapper, TypeMapper},
     types::type_scheme::PubTypeConstraint,
 };
 use ustr::ustr;
@@ -68,6 +69,25 @@ impl CoherenceTypeUnifier {
             .unify_same_type(current, current_span, expected, expected_span)
     }
 
+    fn unify_same_effect(
+        &mut self,
+        current: EffType,
+        current_span: Location,
+        expected: EffType,
+        expected_span: Location,
+    ) -> Result<(), InternalCompilationError> {
+        self.inner
+            .unify_same_effect(current, current_span, expected, expected_span)
+    }
+
+    fn fresh_effect_var_subst_for(
+        &mut self,
+        constraints: &[PubTypeConstraint],
+        effs: &[EffType],
+    ) -> EffectsInstSubst {
+        self.inner.fresh_effect_var_subst_for(constraints, effs)
+    }
+
     fn substitute_in_constraint(&mut self, constraint: &PubTypeConstraint) -> PubTypeConstraint {
         self.inner.substitute_in_constraint(constraint)
     }
@@ -81,6 +101,7 @@ pub(crate) fn check_trait_impl(
     trait_is_local: bool,
     input_tys: &[Type],
     output_tys: &[Type],
+    output_effs: &[EffType],
     ty_var_count: u32,
     constraints: &[PubTypeConstraint],
     span: Location,
@@ -149,8 +170,10 @@ pub(crate) fn check_trait_impl(
             others,
             &new_key,
             output_tys,
+            output_effs,
             &key,
             imp.output_tys.as_slice(),
+            imp.output_effs.as_slice(),
         )? {
             return Err(internal_compilation_error!(OverlappingTraitImpls {
                 trait_ref: trait_id,
@@ -241,13 +264,16 @@ fn iter_visible_impls<'a>(
     local.chain(local_blankets).chain(imported)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn impls_overlap(
     current: &Module,
     others: &Modules,
     new_key: &TraitKey,
     new_output_tys: &[Type],
+    new_output_effs: &[EffType],
     existing_key: &TraitKey,
     existing_output_tys: &[Type],
+    existing_output_effs: &[EffType],
 ) -> Result<bool, InternalCompilationError> {
     use TraitKey::*;
     let overlap = match (new_key, existing_key) {
@@ -257,24 +283,30 @@ fn impls_overlap(
             others,
             &concrete_as_blanket_sub_key(&new_key.input_tys),
             new_output_tys,
+            new_output_effs,
             &existing_key.sub_key,
             existing_output_tys,
+            existing_output_effs,
         )?,
         (Blanket(new_key), Concrete(existing_key)) => blanket_impls_overlap(
             current,
             others,
             &new_key.sub_key,
             new_output_tys,
+            new_output_effs,
             &concrete_as_blanket_sub_key(&existing_key.input_tys),
             existing_output_tys,
+            existing_output_effs,
         )?,
         (Blanket(new_key), Blanket(existing_key)) => blanket_impls_overlap(
             current,
             others,
             &new_key.sub_key,
             new_output_tys,
+            new_output_effs,
             &existing_key.sub_key,
             existing_output_tys,
+            existing_output_effs,
         )?,
     };
     Ok(overlap)
@@ -284,17 +316,34 @@ fn concrete_as_blanket_sub_key(input_tys: &[Type]) -> BlanketTraitImplSubKey {
     BlanketTraitImplSubKey::new(input_tys.to_vec(), 0, Vec::new())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn blanket_impls_overlap(
     current: &Module,
     others: &Modules,
     lhs: &BlanketTraitImplSubKey,
     lhs_output_tys: &[Type],
+    lhs_output_effs: &[EffType],
     rhs: &BlanketTraitImplSubKey,
     rhs_output_tys: &[Type],
+    rhs_output_effs: &[EffType],
 ) -> Result<bool, InternalCompilationError> {
     if lhs.input_tys.len() != rhs.input_tys.len() {
         return Ok(false);
     }
+
+    let span = Location::new_synthesized();
+    let mut ty_inf = CoherenceTypeUnifier::new_with_ty_vars(lhs.ty_var_count + rhs.ty_var_count);
+
+    // Both sides use raw effect variable indices, so each side is renamed to
+    // its own fresh inference effect variables before unification.
+    let lhs_eff_subst = ty_inf.fresh_effect_var_subst_for(&lhs.constraints, lhs_output_effs);
+    let lhs_inst_subst = (FxHashMap::default(), lhs_eff_subst);
+    let mut lhs_mapper = SimpleInstantiationMapper::new(&lhs_inst_subst);
+    let lhs_constraints = instantiate_types(&lhs.constraints, &mut lhs_mapper);
+    let lhs_output_effs: Vec<_> = lhs_output_effs
+        .iter()
+        .map(|eff| lhs_mapper.map_effect_type(eff))
+        .collect();
 
     let rhs_ty_subst: FxHashMap<_, _> = (0..rhs.ty_var_count)
         .map(|index| {
@@ -303,13 +352,16 @@ fn blanket_impls_overlap(
             (var, shifted)
         })
         .collect();
-    let inst_subst = (rhs_ty_subst, FxHashMap::default());
+    let rhs_eff_subst = ty_inf.fresh_effect_var_subst_for(&rhs.constraints, rhs_output_effs);
+    let inst_subst = (rhs_ty_subst, rhs_eff_subst);
     let mut mapper = SimpleInstantiationMapper::new(&inst_subst);
     let rhs_inputs = instantiate_types(&rhs.input_tys, &mut mapper);
     let rhs_outputs = instantiate_types(rhs_output_tys, &mut mapper);
+    let rhs_output_effs: Vec<_> = rhs_output_effs
+        .iter()
+        .map(|eff| mapper.map_effect_type(eff))
+        .collect();
     let rhs_constraints = instantiate_types(&rhs.constraints, &mut mapper);
-    let span = Location::new_synthesized();
-    let mut ty_inf = CoherenceTypeUnifier::new_with_ty_vars(lhs.ty_var_count + rhs.ty_var_count);
     for (&lhs_ty, &rhs_ty) in lhs.input_tys.iter().zip(rhs_inputs.iter()) {
         if ty_inf.unify_same_type(lhs_ty, span, rhs_ty, span).is_err() {
             return Ok(false);
@@ -323,7 +375,15 @@ fn blanket_impls_overlap(
             return Ok(false);
         }
     }
-    let mut pending = lhs.constraints.clone();
+    for (lhs_output_eff, rhs_output_eff) in lhs_output_effs.iter().zip(rhs_output_effs.iter()) {
+        if ty_inf
+            .unify_same_effect(lhs_output_eff.clone(), span, rhs_output_eff.clone(), span)
+            .is_err()
+        {
+            return Ok(false);
+        }
+    }
+    let mut pending = lhs_constraints;
     pending.extend(rhs_constraints);
     constraints_may_be_satisfiable(
         current,
@@ -349,19 +409,19 @@ fn constraints_may_be_satisfiable(
 
     let constraint = pending.pop().unwrap();
     let constraint = ty_inf.substitute_in_constraint(&constraint);
-    let (trait_id, input_tys, output_tys, _span) = constraint
+    let (trait_id, input_tys, output_tys, output_effs, _span) = constraint
         .into_have_trait()
         .expect("Non trait constraint in blanket impl overlap check");
     if input_tys.iter().all(Type::is_constant) && output_tys.iter().all(Type::is_constant) {
         let mut trait_solver = TraitSolverProbe::from_module(current, others);
         let mut arena = NodeArena::default();
-        let solved_output_tys = match trait_solver.solve_output_types(
+        let (solved_output_tys, solved_output_effs) = match trait_solver.solve_outputs(
             trait_id,
             &input_tys,
             Location::new_synthesized(),
             &mut arena,
         ) {
-            Ok(tys) => tys,
+            Ok(outputs) => outputs,
             Err(_) => return Ok(false),
         };
         for (&solved_output_ty, &output_ty) in solved_output_tys.iter().zip(&output_tys) {
@@ -370,6 +430,19 @@ fn constraints_may_be_satisfiable(
                     solved_output_ty,
                     Location::new_synthesized(),
                     output_ty,
+                    Location::new_synthesized(),
+                )
+                .is_err()
+            {
+                return Ok(false);
+            }
+        }
+        for (solved_output_eff, output_eff) in solved_output_effs.iter().zip(&output_effs) {
+            if ty_inf
+                .unify_same_effect(
+                    solved_output_eff.clone(),
+                    Location::new_synthesized(),
+                    output_eff.clone(),
                     Location::new_synthesized(),
                 )
                 .is_err()
@@ -397,6 +470,7 @@ fn constraints_may_be_satisfiable(
         trait_id,
         &input_tys,
         &output_tys,
+        &output_effs,
     )
 }
 
@@ -411,6 +485,7 @@ fn trait_constraint_may_be_satisfiable(
     trait_id: TraitId,
     input_tys: &[Type],
     output_tys: &[Type],
+    output_effs: &[EffType],
 ) -> Result<bool, InternalCompilationError> {
     let derivers_enabled = !value_deriver_disabled_for_input(current, others, trait_id, input_tys);
     let env = ModuleEnv::new(current, others);
@@ -452,6 +527,7 @@ fn trait_constraint_may_be_satisfiable(
                 imp,
                 input_tys,
                 output_tys,
+                output_effs,
             )?,
             TraitKey::Blanket(key) => blanket_impl_may_match_constraint(
                 current,
@@ -464,6 +540,7 @@ fn trait_constraint_may_be_satisfiable(
                 imp,
                 input_tys,
                 output_tys,
+                output_effs,
             )?,
         };
         ty_inf.rollback_to(snapshot);
@@ -515,6 +592,7 @@ fn concrete_impl_may_match_constraint(
     imp: &TraitImpl,
     input_tys: &[Type],
     output_tys: &[Type],
+    output_effs: &[EffType],
 ) -> Result<bool, InternalCompilationError> {
     let span = Location::new_synthesized();
     for (&candidate_input_ty, &constraint_input_ty) in key.input_tys.iter().zip(input_tys) {
@@ -528,6 +606,19 @@ fn concrete_impl_may_match_constraint(
     for (&candidate_output_ty, &constraint_output_ty) in imp.output_tys.iter().zip(output_tys) {
         if ty_inf
             .unify_same_type(candidate_output_ty, span, constraint_output_ty, span)
+            .is_err()
+        {
+            return Ok(false);
+        }
+    }
+    for (candidate_output_eff, constraint_output_eff) in imp.output_effs.iter().zip(output_effs) {
+        if ty_inf
+            .unify_same_effect(
+                candidate_output_eff.clone(),
+                span,
+                constraint_output_eff.clone(),
+                span,
+            )
             .is_err()
         {
             return Ok(false);
@@ -548,6 +639,7 @@ fn blanket_impl_may_match_constraint(
     imp: &TraitImpl,
     input_tys: &[Type],
     output_tys: &[Type],
+    output_effs: &[EffType],
 ) -> Result<bool, InternalCompilationError> {
     let offset = next_ty_var_index;
     ty_inf.add_ty_vars(key.sub_key.ty_var_count);
@@ -558,10 +650,17 @@ fn blanket_impl_may_match_constraint(
             (var, shifted)
         })
         .collect();
-    let inst_subst = (candidate_ty_subst, FxHashMap::default());
+    let candidate_eff_subst =
+        ty_inf.fresh_effect_var_subst_for(&key.sub_key.constraints, &imp.output_effs);
+    let inst_subst = (candidate_ty_subst, candidate_eff_subst);
     let mut mapper = BitmapInstantiationMapper::new(&inst_subst);
     let candidate_inputs = instantiate_types(&key.sub_key.input_tys, &mut mapper);
     let candidate_outputs = instantiate_types(&imp.output_tys, &mut mapper);
+    let candidate_output_effs: Vec<_> = imp
+        .output_effs
+        .iter()
+        .map(|eff| mapper.map_effect_type(eff))
+        .collect();
     let candidate_constraints = instantiate_types(&key.sub_key.constraints, &mut mapper);
 
     let span = Location::new_synthesized();
@@ -576,6 +675,21 @@ fn blanket_impl_may_match_constraint(
     for (&candidate_output_ty, &constraint_output_ty) in candidate_outputs.iter().zip(output_tys) {
         if ty_inf
             .unify_same_type(candidate_output_ty, span, constraint_output_ty, span)
+            .is_err()
+        {
+            return Ok(false);
+        }
+    }
+    for (candidate_output_eff, constraint_output_eff) in
+        candidate_output_effs.iter().zip(output_effs)
+    {
+        if ty_inf
+            .unify_same_effect(
+                candidate_output_eff.clone(),
+                span,
+                constraint_output_eff.clone(),
+                span,
+            )
             .is_err()
         {
             return Ok(false);

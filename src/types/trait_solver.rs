@@ -186,6 +186,7 @@ struct TraitImprovementKey {
     trait_id: TraitId,
     input_tys: Vec<Type>,
     output_tys: Vec<Type>,
+    output_effs: Vec<EffType>,
 }
 
 #[derive(Default)]
@@ -266,13 +267,13 @@ pub(crate) fn current_function_map(def_table: &DefTable) -> FxHashMap<Ustr, Loca
 struct NeverProbe;
 
 impl TraitOutputQuery for NeverProbe {
-    fn solve_output_types_query(
+    fn solve_outputs_query(
         &mut self,
         _trait_id: TraitId,
         _input_tys: &[Type],
         _fn_span: Location,
         _arena: &mut NodeArena,
-    ) -> Result<Vec<Type>, InternalCompilationError> {
+    ) -> Result<(Vec<Type>, Vec<EffType>), InternalCompilationError> {
         unreachable!(
             "NeverProbe should not be queried — concrete candidates do not call match_blanket_impl"
         )
@@ -284,6 +285,7 @@ impl TraitOutputQuery for NeverProbe {
         _trait_id: TraitId,
         _input_tys: &[Type],
         _output_tys: &[Type],
+        _output_effs: &[EffType],
         _assumptions: ConstraintAssumptions<'_>,
         _fn_span: Location,
         _arena: &mut NodeArena,
@@ -300,13 +302,13 @@ impl TraitOutputQuery for NeverProbe {
 /// solver, which may materialize concrete impls, or against `TraitSolverProbe`,
 /// which answers the same questions through a scratch overlay.
 trait TraitOutputQuery {
-    fn solve_output_types_query(
+    fn solve_outputs_query(
         &mut self,
         trait_id: TraitId,
         input_tys: &[Type],
         fn_span: Location,
         arena: &mut NodeArena,
-    ) -> Result<Vec<Type>, InternalCompilationError>;
+    ) -> Result<(Vec<Type>, Vec<EffType>), InternalCompilationError>;
 
     #[allow(clippy::too_many_arguments)]
     fn improve_trait_application_query(
@@ -315,6 +317,7 @@ trait TraitOutputQuery {
         trait_id: TraitId,
         input_tys: &[Type],
         output_tys: &[Type],
+        output_effs: &[EffType],
         assumptions: ConstraintAssumptions<'_>,
         fn_span: Location,
         arena: &mut NodeArena,
@@ -346,15 +349,15 @@ impl<'solver, 'a> LazyTraitSolverProbe<'solver, 'a> {
 }
 
 impl TraitOutputQuery for LazyTraitSolverProbe<'_, '_> {
-    fn solve_output_types_query(
+    fn solve_outputs_query(
         &mut self,
         trait_id: TraitId,
         input_tys: &[Type],
         fn_span: Location,
         arena: &mut NodeArena,
-    ) -> Result<Vec<Type>, InternalCompilationError> {
+    ) -> Result<(Vec<Type>, Vec<EffType>), InternalCompilationError> {
         self.probe()
-            .solve_output_types_query(trait_id, input_tys, fn_span, arena)
+            .solve_outputs_query(trait_id, input_tys, fn_span, arena)
     }
 
     fn improve_trait_application_query(
@@ -363,6 +366,7 @@ impl TraitOutputQuery for LazyTraitSolverProbe<'_, '_> {
         trait_id: TraitId,
         input_tys: &[Type],
         output_tys: &[Type],
+        output_effs: &[EffType],
         assumptions: ConstraintAssumptions<'_>,
         fn_span: Location,
         arena: &mut NodeArena,
@@ -372,6 +376,7 @@ impl TraitOutputQuery for LazyTraitSolverProbe<'_, '_> {
             trait_id,
             input_tys,
             output_tys,
+            output_effs,
             assumptions,
             fn_span,
             arena,
@@ -482,26 +487,26 @@ impl<'a> TraitSolverProbe<'a> {
         result
     }
 
-    pub(crate) fn solve_output_types(
+    pub(crate) fn solve_outputs(
         &mut self,
         trait_id: TraitId,
         input_tys: &[Type],
         fn_span: Location,
         arena: &mut NodeArena,
-    ) -> Result<Vec<Type>, InternalCompilationError> {
-        self.with_solver(|solver| solver.solve_output_types(trait_id, input_tys, fn_span, arena))
+    ) -> Result<(Vec<Type>, Vec<EffType>), InternalCompilationError> {
+        self.with_solver(|solver| solver.solve_outputs(trait_id, input_tys, fn_span, arena))
     }
 }
 
 impl TraitOutputQuery for TraitSolverProbe<'_> {
-    fn solve_output_types_query(
+    fn solve_outputs_query(
         &mut self,
         trait_id: TraitId,
         input_tys: &[Type],
         fn_span: Location,
         arena: &mut NodeArena,
-    ) -> Result<Vec<Type>, InternalCompilationError> {
-        self.solve_output_types(trait_id, input_tys, fn_span, arena)
+    ) -> Result<(Vec<Type>, Vec<EffType>), InternalCompilationError> {
+        self.solve_outputs(trait_id, input_tys, fn_span, arena)
     }
 
     fn improve_trait_application_query(
@@ -510,6 +515,7 @@ impl TraitOutputQuery for TraitSolverProbe<'_> {
         trait_id: TraitId,
         input_tys: &[Type],
         output_tys: &[Type],
+        output_effs: &[EffType],
         assumptions: ConstraintAssumptions<'_>,
         fn_span: Location,
         arena: &mut NodeArena,
@@ -520,6 +526,7 @@ impl TraitOutputQuery for TraitSolverProbe<'_> {
                 trait_id,
                 input_tys,
                 output_tys,
+                output_effs,
                 assumptions,
                 fn_span,
                 arena,
@@ -536,12 +543,14 @@ enum TraitImprovementCandidate {
     Concrete {
         input_tys: Vec<Type>,
         output_tys: Vec<Type>,
+        output_effs: Vec<EffType>,
     },
     /// A blanket impl head plus the generic information needed to instantiate
     /// and check its impl constraints.
     Blanket {
         input_tys: Vec<Type>,
         output_tys: Vec<Type>,
+        output_effs: Vec<EffType>,
         ty_var_count: u32,
         constraints: Vec<PubTypeConstraint>,
     },
@@ -555,6 +564,7 @@ struct ResolvedTraitConstraint {
     trait_id: TraitId,
     input_tys: Vec<Type>,
     output_tys: Vec<Type>,
+    output_effs: Vec<EffType>,
 }
 
 pub(crate) struct DerivedImplSnapshot {
@@ -597,10 +607,11 @@ enum BlanketImplMatch {
     /// The blanket impl may still match later, but some nested trait
     /// constraints remain unresolved.
     Unknown,
-    /// The blanket impl matches, yielding instantiated output types and the
-    /// resolved nested trait constraints in source order.
+    /// The blanket impl matches, yielding instantiated output types and effects
+    /// and the resolved nested trait constraints in source order.
     Yes {
         output_tys: Vec<Type>,
+        output_effs: Vec<EffType>,
         resolved_constraints: Vec<ResolvedTraitConstraint>,
     },
 }
@@ -744,6 +755,7 @@ impl<'a> TraitSolver<'a> {
                 candidates.push(TraitImprovementCandidate::Concrete {
                     input_tys: key.input_tys.clone(),
                     output_tys: imp.output_tys.clone(),
+                    output_effs: imp.output_effs.clone(),
                 });
             }
         }
@@ -754,6 +766,7 @@ impl<'a> TraitSolver<'a> {
                 candidates.push(TraitImprovementCandidate::Blanket {
                     input_tys: sub_key.input_tys.clone(),
                     output_tys: imp.output_tys.clone(),
+                    output_effs: imp.output_effs.clone(),
                     ty_var_count: sub_key.ty_var_count,
                     constraints: sub_key.constraints.clone(),
                 });
@@ -772,6 +785,7 @@ impl<'a> TraitSolver<'a> {
                         candidates.push(TraitImprovementCandidate::Concrete {
                             input_tys: key.input_tys.clone(),
                             output_tys: imp.output_tys.clone(),
+                            output_effs: imp.output_effs.clone(),
                         });
                     }
                 }
@@ -784,6 +798,7 @@ impl<'a> TraitSolver<'a> {
                         candidates.push(TraitImprovementCandidate::Blanket {
                             input_tys: sub_key.input_tys.clone(),
                             output_tys: imp.output_tys.clone(),
+                            output_effs: imp.output_effs.clone(),
                             ty_var_count: sub_key.ty_var_count,
                             constraints: sub_key.constraints.clone(),
                         });
@@ -804,6 +819,7 @@ impl<'a> TraitSolver<'a> {
         candidate: &TraitImprovementCandidate,
         input_tys: &[Type],
         output_tys: &[Type],
+        output_effs: &[EffType],
         assumptions: ConstraintAssumptions<'_>,
         fn_span: Location,
         arena: &mut NodeArena,
@@ -812,6 +828,7 @@ impl<'a> TraitSolver<'a> {
             TraitImprovementCandidate::Concrete {
                 input_tys: candidate_inputs,
                 output_tys: candidate_outputs,
+                output_effs: candidate_output_effs,
             } => {
                 for (candidate_input, input_ty) in candidate_inputs.iter().zip(input_tys.iter()) {
                     if ty_inf
@@ -830,11 +847,22 @@ impl<'a> TraitSolver<'a> {
                         return Ok(TraitImprovementMatch::No);
                     }
                 }
+                for (candidate_eff, output_eff) in
+                    candidate_output_effs.iter().zip(output_effs.iter())
+                {
+                    if ty_inf
+                        .unify_same_effect(candidate_eff.clone(), fn_span, output_eff.clone(), fn_span)
+                        .is_err()
+                    {
+                        return Ok(TraitImprovementMatch::No);
+                    }
+                }
                 Ok(TraitImprovementMatch::Yes)
             }
             TraitImprovementCandidate::Blanket {
                 input_tys: candidate_inputs,
                 output_tys: candidate_outputs,
+                output_effs: candidate_output_effs,
                 ty_var_count,
                 constraints,
             } => Ok(
@@ -843,10 +871,12 @@ impl<'a> TraitSolver<'a> {
                     ty_inf,
                     candidate_inputs,
                     candidate_outputs,
+                    candidate_output_effs,
                     *ty_var_count,
                     constraints,
                     input_tys,
                     output_tys,
+                    output_effs,
                     assumptions,
                     fn_span,
                     arena,
@@ -865,12 +895,14 @@ impl<'a> TraitSolver<'a> {
         candidate: &TraitImprovementCandidate,
         input_tys: &[Type],
         output_tys: &[Type],
+        output_effs: &[EffType],
         fn_span: Location,
     ) -> Result<(), InternalCompilationError> {
         match candidate {
             TraitImprovementCandidate::Concrete {
                 input_tys: candidate_inputs,
                 output_tys: candidate_outputs,
+                output_effs: candidate_output_effs,
             } => {
                 for (candidate_input, input_ty) in candidate_inputs.iter().zip(input_tys.iter()) {
                     ty_inf.unify_same_type(*candidate_input, fn_span, *input_ty, fn_span)?;
@@ -878,27 +910,52 @@ impl<'a> TraitSolver<'a> {
                 for (candidate_output, output_ty) in candidate_outputs.iter().zip(output_tys.iter())
                 {
                     ty_inf.unify_same_type(*candidate_output, fn_span, *output_ty, fn_span)?;
+                }
+                for (candidate_eff, output_eff) in
+                    candidate_output_effs.iter().zip(output_effs.iter())
+                {
+                    ty_inf.unify_same_effect(
+                        candidate_eff.clone(),
+                        fn_span,
+                        output_eff.clone(),
+                        fn_span,
+                    )?;
                 }
             }
             TraitImprovementCandidate::Blanket {
                 input_tys: candidate_inputs,
                 output_tys: candidate_outputs,
+                output_effs: candidate_output_effs,
                 ty_var_count,
-                ..
+                constraints,
             } => {
                 let inst_subst = (
                     ty_inf.fresh_type_var_subst(*ty_var_count),
-                    FxHashMap::default(),
+                    ty_inf.fresh_effect_var_subst_for(constraints, candidate_output_effs),
                 );
                 let mut mapper = BitmapInstantiationMapper::new(&inst_subst);
                 let candidate_inputs = instantiate_types(candidate_inputs, &mut mapper);
                 let candidate_outputs = instantiate_types(candidate_outputs, &mut mapper);
+                let candidate_output_effs: Vec<_> = candidate_output_effs
+                    .iter()
+                    .map(|eff| mapper.map_effect_type(eff))
+                    .collect();
                 for (candidate_input, input_ty) in candidate_inputs.iter().zip(input_tys.iter()) {
                     ty_inf.unify_same_type(*candidate_input, fn_span, *input_ty, fn_span)?;
                 }
                 for (candidate_output, output_ty) in candidate_outputs.iter().zip(output_tys.iter())
                 {
                     ty_inf.unify_same_type(*candidate_output, fn_span, *output_ty, fn_span)?;
+                }
+                for (candidate_eff, output_eff) in
+                    candidate_output_effs.iter().zip(output_effs.iter())
+                {
+                    ty_inf.unify_same_effect(
+                        candidate_eff.clone(),
+                        fn_span,
+                        output_eff.clone(),
+                        fn_span,
+                    )?;
                 }
             }
         }
@@ -919,6 +976,7 @@ impl<'a> TraitSolver<'a> {
         trait_id: TraitId,
         input_tys: &[Type],
         output_tys: &[Type],
+        output_effs: &[EffType],
         assumptions: ConstraintAssumptions<'_>,
         fn_span: Location,
         arena: &mut NodeArena,
@@ -936,6 +994,13 @@ impl<'a> TraitSolver<'a> {
                 .into_iter()
                 .map(|ty| ty.map(&mut key_mapper))
                 .collect(),
+            output_effs: output_effs
+                .iter()
+                .map(|eff| {
+                    let eff = ty_inf.substitute_in_effect_type(eff);
+                    key_mapper.map_effect_type(&eff)
+                })
+                .collect(),
         };
         if !self.active_improvements.insert(key.clone()) {
             return Ok(TraitImprovementMatch::Unknown);
@@ -945,6 +1010,7 @@ impl<'a> TraitSolver<'a> {
             trait_id,
             input_tys,
             output_tys,
+            output_effs,
             assumptions,
             fn_span,
             arena,
@@ -960,6 +1026,7 @@ impl<'a> TraitSolver<'a> {
         trait_id: TraitId,
         input_tys: &[Type],
         output_tys: &[Type],
+        output_effs: &[EffType],
         assumptions: ConstraintAssumptions<'_>,
         fn_span: Location,
         arena: &mut NodeArena,
@@ -989,6 +1056,7 @@ impl<'a> TraitSolver<'a> {
                     &candidate,
                     input_tys,
                     output_tys,
+                    output_effs,
                     assumptions,
                     fn_span,
                     arena,
@@ -1001,6 +1069,7 @@ impl<'a> TraitSolver<'a> {
                         &candidate,
                         input_tys,
                         output_tys,
+                        output_effs,
                         assumptions,
                         fn_span,
                         arena,
@@ -1066,7 +1135,12 @@ impl<'a> TraitSolver<'a> {
                     }
                 } else {
                     Self::improve_trait_application_with_candidate_head(
-                        ty_inf, &candidate, input_tys, output_tys, fn_span,
+                        ty_inf,
+                        &candidate,
+                        input_tys,
+                        output_tys,
+                        output_effs,
+                        fn_span,
                     )?;
                 }
                 Ok(TraitImprovementMatch::Unknown)
@@ -1077,6 +1151,7 @@ impl<'a> TraitSolver<'a> {
                 &candidate,
                 input_tys,
                 output_tys,
+                output_effs,
                 assumptions,
                 fn_span,
                 arena,
@@ -1098,6 +1173,7 @@ impl<'a> TraitSolver<'a> {
         trait_id: TraitId,
         input_tys: &[Type],
         output_tys: &[Type],
+        output_effs: &[EffType],
         assumptions: ConstraintAssumptions<'_>,
         fn_span: Location,
         arena: &mut NodeArena,
@@ -1108,6 +1184,7 @@ impl<'a> TraitSolver<'a> {
                 trait_id,
                 input_tys,
                 output_tys,
+                output_effs,
                 assumptions,
                 fn_span,
                 arena,
@@ -1123,6 +1200,7 @@ impl<'a> TraitSolver<'a> {
         trait_id: TraitId,
         input_tys: &[Type],
         output_tys: &[Type],
+        output_effs: &[EffType],
         assumptions: ConstraintAssumptions<'_>,
     ) -> bool {
         assumptions.iter().any(|assumption| {
@@ -1143,7 +1221,7 @@ impl<'a> TraitSolver<'a> {
             }
 
             let substituted_assumption = ty_inf.substitute_in_constraint(assumption);
-            let Some((ass_trait_id, ass_input_tys, ass_output_tys, _)) =
+            let Some((ass_trait_id, ass_input_tys, ass_output_tys, ass_output_effs, _)) =
                 substituted_assumption.as_have_trait()
             else {
                 return false;
@@ -1159,7 +1237,14 @@ impl<'a> TraitSolver<'a> {
             {
                 return false;
             }
-            ass_input_tys == input_tys && ass_output_tys == output_tys
+            // Output effects are compared on the common prefix: an empty list on
+            // either side means they are unspecified.
+            ass_input_tys == input_tys
+                && ass_output_tys == output_tys
+                && ass_output_effs
+                    .iter()
+                    .zip(output_effs.iter())
+                    .all(|(ass_eff, eff)| ass_eff == eff)
         })
     }
 
@@ -1184,19 +1269,30 @@ impl<'a> TraitSolver<'a> {
         let mut ty_vars = FxHashSet::default();
         let mut mut_vars = FxHashSet::default();
         let mut eff_vars = FxHashSet::default();
-        let mut collector = AllVarsCollector {
-            ty_vars: &mut ty_vars,
-            mut_vars: &mut mut_vars,
-            effect_vars: &mut eff_vars,
-        };
-        for ty in imp_input_tys {
-            ty.visit(&mut collector);
+        {
+            let mut collector = AllVarsCollector {
+                ty_vars: &mut ty_vars,
+                mut_vars: &mut mut_vars,
+                effect_vars: &mut eff_vars,
+            };
+            for ty in imp_input_tys {
+                ty.visit(&mut collector);
+            }
         }
-        for constraint in imp_constraints {
-            constraint.visit(&mut collector);
+        // Effect variables may only occur in the impl's constraints (as output
+        // effects bound by nested trait applications), not in the head input types.
+        assert!(eff_vars.is_empty());
+        {
+            let mut collector = AllVarsCollector {
+                ty_vars: &mut ty_vars,
+                mut_vars: &mut mut_vars,
+                effect_vars: &mut eff_vars,
+            };
+            for constraint in imp_constraints {
+                constraint.visit(&mut collector);
+            }
         }
         assert!(mut_vars.is_empty());
-        assert!(eff_vars.is_empty());
         assert_eq!(ty_vars.len(), imp_ty_var_count as usize);
     }
 
@@ -1213,24 +1309,30 @@ impl<'a> TraitSolver<'a> {
         ty_inf: &mut UnifiedTypeInference,
         imp_input_tys: &[Type],
         imp_output_tys: &[Type],
+        imp_output_effs: &[EffType],
         imp_ty_var_count: u32,
         imp_constraints: &[PubTypeConstraint],
         input_tys: &[Type],
         output_tys: &[Type],
+        output_effs: &[EffType],
         assumptions: ConstraintAssumptions<'_>,
         fn_span: Location,
         arena: &mut NodeArena,
         mode: BlanketConstraintMode,
     ) -> Result<BlanketImplMatch, InternalCompilationError> {
-        // First instantiate the blanket-local type variables with fresh
-        // inference variables in the caller-provided unifier.
+        // First instantiate the blanket-local type and effect variables with
+        // fresh inference variables in the caller-provided unifier.
         let inst_subst = (
             ty_inf.fresh_type_var_subst(imp_ty_var_count),
-            FxHashMap::default(),
+            ty_inf.fresh_effect_var_subst_for(imp_constraints, imp_output_effs),
         );
         let mut mapper = BitmapInstantiationMapper::new(&inst_subst);
         let imp_input_tys = instantiate_types(imp_input_tys, &mut mapper);
         let mut imp_output_tys = instantiate_types(imp_output_tys, &mut mapper);
+        let mut imp_output_effs: Vec<_> = imp_output_effs
+            .iter()
+            .map(|eff| mapper.map_effect_type(eff))
+            .collect();
         let remaining = instantiate_types(imp_constraints, &mut mapper)
             .into_iter()
             .enumerate()
@@ -1257,6 +1359,19 @@ impl<'a> TraitSolver<'a> {
                 return Ok(BlanketImplMatch::No);
             }
         }
+        for (imp_output_eff, output_eff) in imp_output_effs.iter().zip(output_effs.iter()) {
+            if ty_inf
+                .unify_same_effect(
+                    imp_output_eff.clone(),
+                    fn_span,
+                    output_eff.clone(),
+                    fn_span,
+                )
+                .is_err()
+            {
+                return Ok(BlanketImplMatch::No);
+            }
+        }
 
         let mut remaining = Self::normalize_blanket_remaining_constraints(
             ty_inf,
@@ -1271,15 +1386,17 @@ impl<'a> TraitSolver<'a> {
             for (constraint_index, constraint) in old_remaining.iter() {
                 // Re-substitute the constraint on every pass because earlier
                 // solved constraints may have refined the type variables it uses.
-                let (trait_id, constraint_inputs, constraint_outputs, _span) = ty_inf
-                    .substitute_in_constraint(constraint)
-                    .into_have_trait()
-                    .expect("Non trait constraint in blanket impl");
+                let (trait_id, constraint_inputs, constraint_outputs, constraint_output_effs, _span) =
+                    ty_inf
+                        .substitute_in_constraint(constraint)
+                        .into_have_trait()
+                        .expect("Non trait constraint in blanket impl");
                 if Self::match_assumption(
                     ty_inf,
                     trait_id,
                     &constraint_inputs,
                     &constraint_outputs,
+                    &constraint_output_effs,
                     assumptions,
                 ) {
                     continue;
@@ -1294,6 +1411,7 @@ impl<'a> TraitSolver<'a> {
                             trait_id,
                             &constraint_inputs,
                             &constraint_outputs,
+                            &constraint_output_effs,
                             assumptions,
                             fn_span,
                             arena,
@@ -1306,7 +1424,7 @@ impl<'a> TraitSolver<'a> {
                     still_remaining.push((*constraint_index, constraint));
                     continue;
                 }
-                let solved_outputs = match query.solve_output_types_query(
+                let (solved_outputs, solved_output_effs) = match query.solve_outputs_query(
                     trait_id,
                     &constraint_inputs,
                     fn_span,
@@ -1329,11 +1447,27 @@ impl<'a> TraitSolver<'a> {
                         return Ok(BlanketImplMatch::No);
                     }
                 }
+                for (solved_output_eff, constraint_output_eff) in
+                    solved_output_effs.iter().zip(constraint_output_effs.iter())
+                {
+                    if ty_inf
+                        .unify_same_effect(
+                            solved_output_eff.clone(),
+                            fn_span,
+                            constraint_output_eff.clone(),
+                            fn_span,
+                        )
+                        .is_err()
+                    {
+                        return Ok(BlanketImplMatch::No);
+                    }
+                }
                 resolved_constraints.push(ResolvedTraitConstraint {
                     index: *constraint_index,
                     trait_id,
                     input_tys: constraint_inputs,
                     output_tys: constraint_outputs,
+                    output_effs: constraint_output_effs,
                 });
             }
 
@@ -1355,7 +1489,13 @@ impl<'a> TraitSolver<'a> {
                     }
                     BlanketConstraintMode::DeferConcreteObligations => {
                         for (constraint_index, constraint) in still_remaining {
-                            let (trait_id, constraint_inputs, constraint_outputs, _span) = ty_inf
+                            let (
+                                trait_id,
+                                constraint_inputs,
+                                constraint_outputs,
+                                constraint_output_effs,
+                                _span,
+                            ) = ty_inf
                                 .substitute_in_constraint(&constraint)
                                 .into_have_trait()
                                 .expect("Non trait constraint in blanket impl");
@@ -1367,6 +1507,7 @@ impl<'a> TraitSolver<'a> {
                                 trait_id,
                                 input_tys: constraint_inputs,
                                 output_tys: constraint_outputs,
+                                output_effs: constraint_output_effs,
                             });
                         }
                         break;
@@ -1387,11 +1528,26 @@ impl<'a> TraitSolver<'a> {
                 return Ok(BlanketImplMatch::No);
             }
         }
+        for (imp_output_eff, output_eff) in imp_output_effs.iter().zip(output_effs.iter()) {
+            if ty_inf
+                .unify_same_effect(
+                    imp_output_eff.clone(),
+                    fn_span,
+                    output_eff.clone(),
+                    fn_span,
+                )
+                .is_err()
+            {
+                return Ok(BlanketImplMatch::No);
+            }
+        }
 
         resolved_constraints.sort_by_key(|constraint| constraint.index);
         ty_inf.substitute_in_types_in_place(&mut imp_output_tys);
+        ty_inf.substitute_in_effect_types_in_place(&mut imp_output_effs);
         Ok(BlanketImplMatch::Yes {
             output_tys: imp_output_tys,
+            output_effs: imp_output_effs,
             resolved_constraints,
         })
     }
@@ -1434,7 +1590,8 @@ impl<'a> TraitSolver<'a> {
         );
         let input_types = input_types.into();
         let output_types = output_types.into();
-        let definitions = trait_def.instantiate_for_tys(&input_types, &output_types);
+        let output_effs = trait_def.normalized_output_effs(vec![]);
+        let definitions = trait_def.instantiate_for_tys(&input_types, &output_types, &output_effs);
         let definition = definitions
             .into_iter()
             .next()
@@ -1447,6 +1604,7 @@ impl<'a> TraitSolver<'a> {
             trait_def,
             input_types,
             output_types,
+            output_effs,
             [],
             vec![function],
             &mut self.fn_collector,
@@ -1476,6 +1634,7 @@ impl<'a> TraitSolver<'a> {
         trait_id: TraitId,
         input_types: &[Type],
         output_types: &[Type],
+        output_effs: &[EffType],
         associated_const_values: impl Into<Vec<LiteralValue>>,
     ) -> LocalImplId {
         let associated_const_values = associated_const_values.into();
@@ -1488,10 +1647,11 @@ impl<'a> TraitSolver<'a> {
         trait_def.validate_impl_shape(
             input_types,
             output_types,
+            output_effs,
             associated_const_values.len(),
             trait_def.methods.len(),
         );
-        let definitions = trait_def.instantiate_for_tys(input_types, output_types);
+        let definitions = trait_def.instantiate_for_tys(input_types, output_types, output_effs);
         let mut methods = Vec::with_capacity(definitions.len());
         let mut tys = Vec::with_capacity(definitions.len());
 
@@ -1507,12 +1667,16 @@ impl<'a> TraitSolver<'a> {
             tys.push(ty);
         }
 
-        let associated_const_tys =
-            trait_def.instantiate_associated_const_tys_for_tys(input_types, output_types);
+        let associated_const_tys = trait_def.instantiate_associated_const_tys_for_tys(
+            input_types,
+            output_types,
+            output_effs,
+        );
         let dictionary_ty = TraitImpls::dictionary_ty(tys, associated_const_tys);
         let dictionary_value = build_dictionary_value(&methods, &associated_const_values);
         let imp = TraitImpl::new(
             output_types.to_vec(),
+            output_effs.to_vec(),
             methods,
             dictionary_value,
             dictionary_ty,
@@ -1524,12 +1688,14 @@ impl<'a> TraitSolver<'a> {
         self.impls.add_concrete_struct(key, imp)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn replace_concrete_impl_code_entries(
         &mut self,
         impl_id: LocalImplId,
         trait_id: TraitId,
         input_types: &[Type],
         output_types: &[Type],
+        output_effs: &[EffType],
         code_entries: impl Into<Vec<(PendingFunctionBody, Vec<LocalDecl>)>>,
     ) {
         let methods = self.impls.data[impl_id.as_index()].methods.clone();
@@ -1539,7 +1705,7 @@ impl<'a> TraitSolver<'a> {
             self.others,
             trait_id,
         );
-        let definitions = trait_def.instantiate_for_tys(input_types, output_types);
+        let definitions = trait_def.instantiate_for_tys(input_types, output_types, output_effs);
 
         for ((method_id, definition), (body, locals)) in methods
             .into_iter()
@@ -1722,6 +1888,7 @@ impl<'a> TraitSolver<'a> {
             } else {
                 let imp = TraitImpl {
                     output_tys: vec![output_ty],
+                    output_effs: vec![],
                     methods: vec![],
                     associated_const_values: vec![],
                     dictionary_value: TraitDictionary::new(&[], &[]),
@@ -1752,23 +1919,26 @@ impl<'a> TraitSolver<'a> {
                 let imp_input_tys = &sub_key.input_tys;
                 let imp_ty_var_count = sub_key.ty_var_count;
                 let imp_constraints = &sub_key.constraints;
-                let (imp_public, imp_output_tys) = if let Some(module_id) = imp_module_id {
-                    let imp = &self
-                        .others
-                        .get(module_id)
-                        .unwrap()
-                        .module
-                        .as_ref()
-                        .unwrap()
-                        .impls
-                        .data[impl_id.as_index()];
-                    (
-                        self.can_use_other_impl(module_id, imp),
-                        imp.output_tys.clone(),
-                    )
-                } else {
-                    (true, self.impls.data[impl_id.as_index()].output_tys.clone())
-                };
+                let (imp_public, imp_output_tys, imp_output_effs) =
+                    if let Some(module_id) = imp_module_id {
+                        let imp = &self
+                            .others
+                            .get(module_id)
+                            .unwrap()
+                            .module
+                            .as_ref()
+                            .unwrap()
+                            .impls
+                            .data[impl_id.as_index()];
+                        (
+                            self.can_use_other_impl(module_id, imp),
+                            imp.output_tys.clone(),
+                            imp.output_effs.clone(),
+                        )
+                    } else {
+                        let imp = &self.impls.data[impl_id.as_index()];
+                        (true, imp.output_tys.clone(), imp.output_effs.clone())
+                    };
                 if !imp_public {
                     continue 'impl_loop;
                 }
@@ -1806,9 +1976,11 @@ impl<'a> TraitSolver<'a> {
                     &mut ty_inf,
                     imp_input_tys,
                     &imp_output_tys,
+                    &imp_output_effs,
                     imp_ty_var_count,
                     imp_constraints,
                     input_tys,
+                    &[],
                     &[],
                     ConstraintAssumptions::all(&[]),
                     fn_span,
@@ -1817,11 +1989,19 @@ impl<'a> TraitSolver<'a> {
                 )?;
                 let BlanketImplMatch::Yes {
                     output_tys,
+                    output_effs,
                     resolved_constraints,
                 } = blanket_match
                 else {
                     continue_impl_loop!();
                 };
+                // The matched impl is being materialized for constant input types:
+                // any output effect variable left unbound by the head and constraint
+                // solving is unconstrained, so it resolves to the empty (pure) effect.
+                let output_effs: Vec<_> = output_effs
+                    .iter()
+                    .map(|eff| EffType::multiple_primitive(&eff.inner_non_vars()))
+                    .collect();
 
                 // Non-Value blanket impls can materialize all constraint dictionaries up front.
                 if trait_id != value_trait_id {
@@ -1898,7 +2078,8 @@ impl<'a> TraitSolver<'a> {
                         self.others,
                         trait_id,
                     );
-                    let definitions = trait_def.instantiate_for_tys(input_tys, &output_tys);
+                    let definitions =
+                        trait_def.instantiate_for_tys(input_tys, &output_tys, &output_effs);
                     let gen_functions = imp.methods.clone(); // clone to avoid borrowing issues
                     let mut methods = Vec::with_capacity(gen_functions.len());
                     let mut tys = Vec::with_capacity(gen_functions.len());
@@ -2015,13 +2196,17 @@ impl<'a> TraitSolver<'a> {
                     }
 
                     // Build and insert the implementation.
-                    let associated_const_tys =
-                        trait_def.instantiate_associated_const_tys_for_tys(input_tys, &output_tys);
+                    let associated_const_tys = trait_def.instantiate_associated_const_tys_for_tys(
+                        input_tys,
+                        &output_tys,
+                        &output_effs,
+                    );
                     let dictionary_ty = TraitImpls::dictionary_ty(tys, associated_const_tys);
                     let dictionary_value =
                         build_dictionary_value(&methods, &associated_const_values);
                     let imp = TraitImpl::new(
                         output_tys,
+                        output_effs,
                         methods,
                         dictionary_value,
                         dictionary_ty,
@@ -2077,6 +2262,7 @@ impl<'a> TraitSolver<'a> {
                     trait_id,
                     input_tys,
                     &output_tys,
+                    &output_effs,
                     associated_const_values,
                 );
 
@@ -2109,8 +2295,13 @@ impl<'a> TraitSolver<'a> {
                             continue_impl_loop!();
                         }
                     };
-                    if self.get_impl_data_by_id(dict_id).output_tys
-                        != resolved_constraint.output_tys
+                    let dict_impl_data = self.get_impl_data_by_id(dict_id);
+                    if dict_impl_data.output_tys != resolved_constraint.output_tys
+                        || !dict_impl_data
+                            .output_effs
+                            .iter()
+                            .zip(resolved_constraint.output_effs.iter())
+                            .all(|(solved_eff, constraint_eff)| solved_eff == constraint_eff)
                     {
                         self.rollback_derived_impl_state(materialization_snapshot);
                         continue_impl_loop!();
@@ -2138,7 +2329,7 @@ impl<'a> TraitSolver<'a> {
                     self.others,
                     trait_id,
                 )
-                .instantiate_for_tys(input_tys, &output_tys);
+                .instantiate_for_tys(input_tys, &output_tys, &output_effs);
                 let code_entries = gen_functions
                     .iter()
                     .zip(definitions)
@@ -2232,6 +2423,7 @@ impl<'a> TraitSolver<'a> {
                     trait_id,
                     input_tys,
                     &output_tys,
+                    &output_effs,
                     code_entries,
                 );
 
@@ -2315,6 +2507,20 @@ impl<'a> TraitSolver<'a> {
     ) -> Result<Vec<Type>, InternalCompilationError> {
         let impl_id = self.solve_impl(trait_id, input_tys, fn_span, arena)?;
         Ok(self.get_impl_data_by_id(impl_id).output_tys.clone())
+    }
+
+    /// Get the output types and effects for the given trait id and input types.
+    /// This function is implemented using solve_impl, like `solve_output_types`.
+    pub fn solve_outputs(
+        &mut self,
+        trait_id: TraitId,
+        input_tys: &[Type],
+        fn_span: Location,
+        arena: &mut NodeArena,
+    ) -> Result<(Vec<Type>, Vec<EffType>), InternalCompilationError> {
+        let impl_id = self.solve_impl(trait_id, input_tys, fn_span, arena)?;
+        let impl_data = self.get_impl_data_by_id(impl_id);
+        Ok((impl_data.output_tys.clone(), impl_data.output_effs.clone()))
     }
 
     pub fn solve_associated_const(
@@ -2487,14 +2693,14 @@ impl<'a> TraitSolver<'a> {
 }
 
 impl TraitOutputQuery for TraitSolver<'_> {
-    fn solve_output_types_query(
+    fn solve_outputs_query(
         &mut self,
         trait_id: TraitId,
         input_tys: &[Type],
         fn_span: Location,
         arena: &mut NodeArena,
-    ) -> Result<Vec<Type>, InternalCompilationError> {
-        self.solve_output_types(trait_id, input_tys, fn_span, arena)
+    ) -> Result<(Vec<Type>, Vec<EffType>), InternalCompilationError> {
+        self.solve_outputs(trait_id, input_tys, fn_span, arena)
     }
 
     fn improve_trait_application_query(
@@ -2503,6 +2709,7 @@ impl TraitOutputQuery for TraitSolver<'_> {
         trait_id: TraitId,
         input_tys: &[Type],
         output_tys: &[Type],
+        output_effs: &[EffType],
         assumptions: ConstraintAssumptions<'_>,
         fn_span: Location,
         arena: &mut NodeArena,
@@ -2512,6 +2719,7 @@ impl TraitOutputQuery for TraitSolver<'_> {
             trait_id,
             input_tys,
             output_tys,
+            output_effs,
             assumptions,
             fn_span,
             arena,

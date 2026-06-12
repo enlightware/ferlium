@@ -165,6 +165,7 @@ impl TypeInference {
             env.module_env.expect_std_trait_id(REPR_TRAIT_NAME),
             vec![condition_node.ty],
             vec![pattern_ty],
+            vec![],
             condition_node.span,
         ));
 

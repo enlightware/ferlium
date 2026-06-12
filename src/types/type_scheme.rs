@@ -76,6 +76,8 @@ pub enum PubTypeConstraint {
         trait_id: TraitId,
         input_tys: Vec<Type>,
         output_tys: Vec<Type>,
+        /// The output effects of the trait application.
+        output_effs: Vec<EffType>,
         span: InstantiableLocation,
     },
 }
@@ -133,12 +135,14 @@ impl PubTypeConstraint {
         trait_id: TraitId,
         input_tys: Vec<Type>,
         output_tys: Vec<Type>,
+        output_effs: Vec<EffType>,
         span: Location,
     ) -> Self {
         Self::HaveTrait {
             trait_id,
             input_tys,
             output_tys,
+            output_effs,
             span: InstantiableLocation::new(span),
         }
     }
@@ -247,6 +251,7 @@ impl PubTypeConstraint {
                 trait_id,
                 input_tys,
                 output_tys,
+                output_effs,
                 span,
             } => {
                 let trait_def = trait_solver.trait_def(*trait_id);
@@ -260,7 +265,7 @@ impl PubTypeConstraint {
                     return Ok(None);
                 }
                 if input_tys.iter().all(Type::is_constant) {
-                    let got_output_tys = trait_solver.solve_output_types(
+                    let (got_output_tys, got_output_effs) = trait_solver.solve_outputs(
                         *trait_id,
                         input_tys,
                         span.use_site,
@@ -294,6 +299,23 @@ impl PubTypeConstraint {
                                 let ty = ty_inf.lookup_type_var(TypeVar::new(index as u32));
                                 assert!(ty.is_constant());
                                 subst.0.insert(*inner_ty_var, ty);
+                            }
+                        }
+                    }
+                    for (got_output_eff, output_eff) in
+                        got_output_effs.iter().zip(output_effs.iter())
+                    {
+                        let inner_eff_vars = output_eff.inner_vars();
+                        if inner_eff_vars.is_empty() {
+                            assert_eq!(got_output_eff, output_eff);
+                        } else if let Some(eff_var) = output_eff.to_single_variable() {
+                            subst.1.insert(eff_var, got_output_eff.clone());
+                        } else {
+                            // The constraint's output effect mixes variables and primitives;
+                            // bind each variable to the whole solved effect, which is a
+                            // conservative upper bound and keeps the scheme instantiable.
+                            for eff_var in inner_eff_vars {
+                                subst.1.insert(eff_var, got_output_eff.clone());
                             }
                         }
                     }
@@ -353,11 +375,16 @@ impl TypeLike for PubTypeConstraint {
                 trait_id,
                 input_tys,
                 output_tys,
+                output_effs,
                 span,
             } => HaveTrait {
                 trait_id: *trait_id,
                 input_tys: input_tys.iter().map(|ty| ty.map(f)).collect(),
                 output_tys: output_tys.iter().map(|ty| ty.map(f)).collect(),
+                output_effs: output_effs
+                    .iter()
+                    .map(|eff| f.map_effect_type(eff))
+                    .collect(),
                 span: span.clone(),
             },
         }
@@ -393,6 +420,7 @@ impl TypeLike for PubTypeConstraint {
             HaveTrait {
                 input_tys,
                 output_tys,
+                output_effs,
                 ..
             } => {
                 for ty in input_tys {
@@ -400,6 +428,9 @@ impl TypeLike for PubTypeConstraint {
                 }
                 for ty in output_tys {
                     ty.data().visit(visitor);
+                }
+                for eff in output_effs {
+                    visitor.visit_eff_ty(eff);
                 }
             }
         }
@@ -469,15 +500,17 @@ impl PartialEq for PubTypeConstraint {
                     trait_id: t1,
                     input_tys: i1,
                     output_tys: o1,
+                    output_effs: e1,
                     ..
                 },
                 HaveTrait {
                     trait_id: t2,
                     input_tys: i2,
                     output_tys: o2,
+                    output_effs: e2,
                     ..
                 },
-            ) => t1 == t2 && i1 == i2 && o1 == o2,
+            ) => t1 == t2 && i1 == i2 && o1 == o2 && e1 == e2,
             _ => false,
         }
     }
@@ -521,6 +554,7 @@ impl Hash for PubTypeConstraint {
                 trait_id,
                 input_tys,
                 output_tys,
+                output_effs,
                 ..
             } => {
                 trait_id.hash(state);
@@ -529,6 +563,9 @@ impl Hash for PubTypeConstraint {
                 }
                 for ty in output_tys {
                     ty.hash(state);
+                }
+                for eff in output_effs {
+                    eff.hash(state);
                 }
             }
         }
@@ -688,17 +725,18 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
     }
 
     /// Instantiates this type scheme with fresh type variables in ty_inf.
-    /// If ty_var_count is not None, it will ensure having fresh type variables from 0 to ty_var_count-1.
+    /// If trait_var_counts is not None, it will ensure having fresh type variables
+    /// from 0 to the type count-1 and fresh effect variables from 0 to the effect count-1.
     pub(crate) fn instantiate_with_fresh_vars(
         &self,
         ty_inf: &mut TypeInference,
         use_site: Location,
-        ty_var_count: Option<u32>,
+        trait_var_counts: Option<(u32, u32)>,
         env: ModuleEnv<'_>,
     ) -> (Ty, FnInstData, InstSubst) {
         let mut ty_subst = ty_inf.fresh_type_var_subst(&self.ty_quantifiers);
-        let eff_subst = ty_inf.fresh_effect_var_subst(&self.eff_quantifiers);
-        if let Some(ty_var_count) = ty_var_count {
+        let mut eff_subst = ty_inf.fresh_effect_var_subst(&self.eff_quantifiers);
+        if let Some((ty_var_count, eff_var_count)) = trait_var_counts {
             let mut ext_subst = FxHashMap::default();
             for ty_var_index in 0..ty_var_count {
                 let ty_var = TypeVar::new(ty_var_index);
@@ -707,6 +745,12 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
                 }
             }
             ty_subst.extend(ext_subst);
+            for eff_var_index in 0..eff_var_count {
+                let eff_var = EffectVar::new(eff_var_index);
+                eff_subst
+                    .entry(eff_var)
+                    .or_insert_with(|| ty_inf.fresh_effect_var_ty());
+            }
         }
         let subst = (ty_subst, eff_subst);
         let mut mapper = BitmapInstantiationMapper::new(&subst);
@@ -918,6 +962,7 @@ pub(crate) fn extra_parameters_from_constraints(
                 trait_id,
                 input_tys,
                 output_tys,
+                output_effs,
                 ..
             } => {
                 let trait_def = env.trait_def(*trait_id);
@@ -942,6 +987,7 @@ pub(crate) fn extra_parameters_from_constraints(
                         *trait_id,
                         input_tys.clone(),
                         output_tys.clone(),
+                        output_effs.clone(),
                     ))
                 }
             }

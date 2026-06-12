@@ -65,6 +65,7 @@ use log::log_enabled;
 use ustr::{Ustr, ustr};
 
 use crate::hir::elaboration::elaborate_generated_functions;
+use crate::types::effects::EffType;
 
 /// Context passed to emit_functions when a trait implementation is being emitted.
 pub(super) struct EmitTraitCtx<'a> {
@@ -80,6 +81,7 @@ pub(super) struct EmitTraitCtx<'a> {
 pub(crate) struct EmitTraitOutput {
     pub(crate) input_tys: Vec<Type>,
     pub(crate) output_tys: Vec<Type>,
+    pub(crate) output_effs: Vec<EffType>,
     pub(crate) ty_var_count: u32,
     pub(crate) constraints: Vec<PubTypeConstraint>,
     pub(crate) functions: Vec<LocalFunctionId>,
@@ -306,6 +308,9 @@ where
         let trait_def = &trait_ctx.trait_def;
         let input_tys = ty_inf.fresh_type_var_tys(trait_def.input_type_count() as usize);
         let output_tys = ty_inf.fresh_type_var_tys(trait_def.output_type_count() as usize);
+        let output_effs = (0..trait_def.output_effect_count())
+            .map(|_| ty_inf.fresh_effect_var_ty())
+            .collect::<Vec<_>>();
         let explicit_quantifiers = if trait_ctx.generic_param_count > 0 {
             (0..trait_ctx.generic_param_count)
                 .map(|index| TypeVar::new(index as u32))
@@ -419,6 +424,7 @@ where
         Some(EmitTraitOutput {
             input_tys,
             output_tys,
+            output_effs,
             ty_var_count: 0,
             constraints: vec![],
             functions: vec![],
@@ -427,11 +433,11 @@ where
         None
     };
     let instantiated_trait_method_defs = match (&trait_ctx, &trait_output) {
-        (Some(trait_ctx), Some(trait_output)) => Some(
-            trait_ctx
-                .trait_def
-                .instantiate_for_tys(&trait_output.input_tys, &trait_output.output_tys),
-        ),
+        (Some(trait_ctx), Some(trait_output)) => Some(trait_ctx.trait_def.instantiate_for_tys(
+            &trait_output.input_tys,
+            &trait_output.output_tys,
+            &trait_output.output_effs,
+        )),
         _ => None,
     };
 
@@ -803,9 +809,15 @@ where
             &local_fns,
         );
 
-        // Resolve input and output types.
+        // Resolve input and output types and output effects.
         ty_inf.substitute_in_types_in_place(&mut trait_output.input_tys);
         ty_inf.substitute_in_types_in_place(&mut trait_output.output_tys);
+        ty_inf.substitute_in_effect_types_in_place(&mut trait_output.output_effs);
+        // Any output effect slot left unconstrained by the methods resolves to
+        // the empty (pure) effect.
+        for eff in &mut trait_output.output_effs {
+            *eff = EffType::multiple_primitive(&eff.inner_non_vars());
+        }
 
         // Take final substituted constraints.
         ty_inf.normalize_remaining_constraints();
@@ -816,11 +828,16 @@ where
         // This ensures ABI consistency: the calling convention is determined by the trait definition.
         let trait_ctx = trait_ctx.unwrap();
         let trait_def = &trait_ctx.trait_def;
+        let trait_effect_subst = trait_def.effect_param_subst_for_effs(&trait_output.output_effs);
         for (i, id) in local_fns.iter().enumerate() {
             let i = TraitMethodIndex::from_index(i);
             let descr = &mut output.functions[id.as_index()];
             let (method_name, trait_method_def) = trait_def.method(i);
-            let trait_effects = &trait_method_def.ty_scheme.ty.effects;
+            let trait_effects = &trait_method_def
+                .ty_scheme
+                .ty
+                .effects
+                .instantiate(&trait_effect_subst);
             let impl_effects = &descr.definition.ty_scheme.ty.effects;
 
             // Check that impl effects are a subset of trait effects.

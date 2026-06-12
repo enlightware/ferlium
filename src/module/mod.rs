@@ -872,6 +872,74 @@ impl Module {
         self.add_concrete_impl_no_locals(trait_id, input_tys, output_tys, [], functions);
     }
 
+    /// Add a concrete trait implementation with explicit output effects, raw functions and no local variables.
+    /// The definition will be retrieved by instantiating the trait method definitions with the given types and effects.
+    /// The caller is responsible to ensure that the input/output types and output effects match the trait definition
+    /// and that the constraints are satisfied.
+    pub fn add_concrete_impl_with_effects_no_locals(
+        &mut self,
+        trait_id: TraitId,
+        input_tys: impl Into<Vec<Type>>,
+        output_tys: impl Into<Vec<Type>>,
+        output_effs: impl Into<Vec<crate::types::effects::EffType>>,
+        associated_const_values: impl Into<Vec<LiteralValue>>,
+        functions: impl Into<Vec<Function>>,
+    ) {
+        assert_eq!(trait_id.module, self.module_id());
+        let trait_def = &self.traits[trait_id.index.as_index()];
+        let functions: Vec<_> = functions
+            .into()
+            .into_iter()
+            .map(|f| (f, Vec::new()))
+            .collect();
+        let mut fn_collector = FunctionCollector::new(self.functions.len());
+        self.impls.add_concrete_raw(
+            trait_id,
+            trait_def,
+            input_tys,
+            output_tys,
+            output_effs,
+            associated_const_values,
+            functions,
+            &mut fn_collector,
+        );
+        self.add_collected_functions(fn_collector);
+    }
+
+    /// Add a blanket trait implementation with explicit output effects, raw functions and no local variables.
+    /// The definition will be retrieved by instantiating the trait method definitions with the given types and effects.
+    /// The caller is responsible to ensure that the input/output types and output effects match the trait definition
+    /// and that the provided constraints are consistent with the trait definition.
+    pub fn add_blanket_impl_with_effects_no_locals(
+        &mut self,
+        trait_id: TraitId,
+        sub_key: BlanketTraitImplSubKey,
+        output_tys: impl Into<Vec<Type>>,
+        output_effs: impl Into<Vec<crate::types::effects::EffType>>,
+        associated_const_values: impl Into<Vec<LiteralValue>>,
+        functions: impl Into<Vec<Function>>,
+    ) {
+        assert_eq!(trait_id.module, self.module_id());
+        let trait_def = &self.traits[trait_id.index.as_index()];
+        let functions: Vec<_> = functions
+            .into()
+            .into_iter()
+            .map(|f| (f, Vec::new()))
+            .collect();
+        let mut fn_collector = FunctionCollector::new(self.functions.len());
+        self.impls.add_blanket_raw(
+            trait_id,
+            trait_def,
+            sub_key,
+            output_tys,
+            output_effs,
+            associated_const_values,
+            functions,
+            &mut fn_collector,
+        );
+        self.add_collected_functions(fn_collector);
+    }
+
     /// Add a concrete trait implementation to this module, with raw functions and no local variables.
     /// The definition will be retrieved by instantiating the trait method definitions with the given types.
     /// The caller is responsible to ensure that the input and output types match the trait definition
@@ -944,6 +1012,7 @@ impl Module {
             trait_def,
             input_tys,
             output_tys,
+            [],
             associated_const_values,
             functions,
             &mut fn_collector,
@@ -971,6 +1040,7 @@ impl Module {
             trait_def,
             input_tys,
             output_tys,
+            [],
             associated_const_values,
             functions,
             &mut fn_collector,
@@ -1025,6 +1095,7 @@ impl Module {
             trait_def,
             sub_key,
             output_tys,
+            [],
             associated_const_values,
             functions,
             &mut fn_collector,
@@ -1049,6 +1120,7 @@ impl Module {
             build_dictionary_value(&emit_output.functions, &associated_const_values);
         let imp = TraitImpl::new(
             emit_output.output_tys,
+            emit_output.output_effs,
             emit_output.functions,
             dictionary_value,
             dictionary_ty,

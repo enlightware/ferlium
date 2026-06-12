@@ -497,7 +497,7 @@ fn parent_trait_constraints_are_not_trait_use_entailment() {
         .constraints
         .iter()
         .filter_map(|constraint| {
-            constraint.as_have_trait().map(|(trait_id, _, _, _)| {
+            constraint.as_have_trait().map(|(trait_id, _, _, _, _)| {
                 module
                     .try_trait_name(*trait_id)
                     .expect("constraint trait should be defined")
@@ -539,6 +539,7 @@ fn concrete_impl_stores_associated_const_values() {
         trait_id.clone(),
         &trait_def,
         [Type::unit()],
+        [],
         [],
         [
             LiteralValue::new_native(0isize),

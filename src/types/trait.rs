@@ -23,8 +23,10 @@ use crate::{
     format::{FormatWith, write_with_separator_and_format_fn},
     hir::function::FunctionDefinition,
     module::{ModuleEnv, TraitId, TraitImplId, id::Id},
+    types::effects::{EffType, EffectVar, EffectsInstSubst},
     types::trait_solver::TraitSolver,
     types::r#type::{Type, TypeInstSubst, TypeVar},
+    types::type_inference::substitution::InstSubst,
     types::type_like::TypeLike,
     types::type_mapper::BitmapInstantiationMapper,
     types::type_scheme::PubTypeConstraint,
@@ -124,6 +126,9 @@ pub struct Trait {
     /// Name of the output types.
     /// By convention, the type variables just after input types correspond to output types.
     pub output_type_names: Vec<Ustr>,
+    /// Name of the output effects, determined by the input types like output types.
+    /// By convention, the first effect variables correspond to output effects.
+    pub output_effect_names: Vec<Ustr>,
     /// Trait constraints required to implement this trait.
     pub parent_constraints: Vec<PubTypeConstraint>,
     /// The constraints on the trait, for example related to the associated types.
@@ -195,6 +200,7 @@ impl Trait {
             doc: Some(doc.to_string()),
             input_type_names: input_type_names.into_iter().map(ustr).collect(),
             output_type_names: output_type_names.into().into_iter().map(ustr).collect(),
+            output_effect_names: Vec::new(),
             parent_constraints: Vec::new(),
             constraints: Vec::new(),
             methods,
@@ -204,6 +210,16 @@ impl Trait {
             spans: None,
         };
         Self::from_trait_data(trait_data).unwrap()
+    }
+
+    /// Add output effect slots to this trait, re-validating the methods against them.
+    pub fn with_output_effects<'a>(
+        mut self,
+        output_effect_names: impl Into<Vec<&'a str>>,
+    ) -> Self {
+        self.output_effect_names = output_effect_names.into().into_iter().map(ustr).collect();
+        self.validate();
+        self
     }
 
     pub fn new_with_self_input_type<'a>(
@@ -238,6 +254,7 @@ impl Trait {
             doc: Some(doc.to_string()),
             input_type_names: input_type_names.into_iter().map(ustr).collect(),
             output_type_names: output_type_names.into().into_iter().map(ustr).collect(),
+            output_effect_names: Vec::new(),
             parent_constraints: Vec::new(),
             constraints: constraints.into(),
             methods,
@@ -285,6 +302,27 @@ impl Trait {
     /// Return the number of type variables in this trait.
     pub fn type_var_count(&self) -> u32 {
         self.input_type_count() + self.output_type_count()
+    }
+
+    /// Return the number of output effects in this trait.
+    pub fn output_effect_count(&self) -> u32 {
+        self.output_effect_names.len() as u32
+    }
+
+    /// Return the given output effects, or all-empty effects if none are given.
+    /// Panics if a non-empty list of the wrong length is given.
+    pub fn normalized_output_effs(&self, output_effs: Vec<EffType>) -> Vec<EffType> {
+        if output_effs.is_empty() {
+            vec![EffType::empty(); self.output_effect_count() as usize]
+        } else {
+            assert_eq!(
+                output_effs.len(),
+                self.output_effect_count() as usize,
+                "Mismatched output effect count when implementing trait {}.",
+                self.name,
+            );
+            output_effs
+        }
     }
 
     /// Return the number of methods in this trait.
@@ -415,6 +453,20 @@ impl Trait {
             }
         }
 
+        // Collect the effect variables that methods are allowed to mention:
+        // the trait's output effect slots plus the effect variables bound as
+        // outputs of the trait's constraints.
+        let mut allowed_effect_vars: FxHashSet<EffectVar> = (0..self.output_effect_count())
+            .map(EffectVar::new)
+            .collect();
+        for constraint in &self.constraints {
+            if let Some((_, _, _, output_effs, _)) = constraint.as_have_trait() {
+                for eff in output_effs {
+                    eff.fill_with_inner_effect_vars(&mut allowed_effect_vars);
+                }
+            }
+        }
+
         // Make sure that all method definitions are valid and refer to the correct type variables.
         for (name, method) in &self.methods {
             for quantifier in &method.ty_scheme.ty_quantifiers {
@@ -428,18 +480,20 @@ impl Trait {
                     });
                 }
             }
-            if !method.ty_scheme.eff_quantifiers.is_empty() {
+            let foreign_effect_vars: Vec<_> = method
+                .ty_scheme
+                .eff_quantifiers
+                .iter()
+                .filter(|eff_var| !allowed_effect_vars.contains(eff_var))
+                .copied()
+                .sorted()
+                .collect();
+            if !foreign_effect_vars.is_empty() {
                 return Err(TraitValidationError::Unsupported {
                     trait_name: self.name,
                     kind: UnsupportedTraitDefinitionKind::GenericEffect {
                         method_name: *name,
-                        effect_vars: method
-                            .ty_scheme
-                            .eff_quantifiers
-                            .iter()
-                            .copied()
-                            .sorted()
-                            .collect(),
+                        effect_vars: foreign_effect_vars,
                     },
                 });
             }
@@ -471,7 +525,7 @@ impl Trait {
             let mut quantifiers: FxHashSet<_> =
                 method.ty_scheme.ty_quantifiers.iter().copied().collect();
             for (i, constraint) in self.constraints.iter().enumerate() {
-                let (_, input_tys, output_tys, _) = constraint
+                let (_, input_tys, output_tys, _, _) = constraint
                     .as_have_trait()
                     .expect("Only HaveTrait constraints are supported in traits.");
                 if !input_tys
@@ -496,14 +550,14 @@ impl Trait {
         Ok(())
     }
 
-    /// Instantiate all method definitions of this trait for the given input and output types.
+    /// Instantiate all method definitions of this trait for the given input and output types and output effects.
     pub fn instantiate_for_tys(
         &self,
         input_tys: &[Type],
         output_tys: &[Type],
+        output_effs: &[EffType],
     ) -> Vec<FunctionDefinition> {
-        let ty_subst = self.type_param_subst_for_tys(input_tys, output_tys);
-        let inst_subst = (ty_subst, FxHashMap::default());
+        let inst_subst = self.param_subst_for(input_tys, output_tys, output_effs);
         let mut mapper = BitmapInstantiationMapper::new(&inst_subst);
         self.methods
             .iter()
@@ -522,9 +576,9 @@ impl Trait {
         &self,
         input_tys: &[Type],
         output_tys: &[Type],
+        output_effs: &[EffType],
     ) -> Vec<Type> {
-        let ty_subst = self.type_param_subst_for_tys(input_tys, output_tys);
-        let inst_subst = (ty_subst, FxHashMap::default());
+        let inst_subst = self.param_subst_for(input_tys, output_tys, output_effs);
         let mut mapper = BitmapInstantiationMapper::new(&inst_subst);
         self.associated_consts
             .iter()
@@ -534,9 +588,13 @@ impl Trait {
 
     /// Get the type of the dictionary for this trait for the given input and output types.
     /// Only the types are substituted, the constraints are not considered.
-    pub fn get_dictionary_type_for_tys(&self, input_tys: &[Type], output_tys: &[Type]) -> Type {
-        let ty_subst = self.type_param_subst_for_tys(input_tys, output_tys);
-        let inst_subst = (ty_subst, FxHashMap::default());
+    pub fn get_dictionary_type_for_tys(
+        &self,
+        input_tys: &[Type],
+        output_tys: &[Type],
+        output_effs: &[EffType],
+    ) -> Type {
+        let inst_subst = self.param_subst_for(input_tys, output_tys, output_effs);
         let mut mapper = BitmapInstantiationMapper::new(&inst_subst);
         let method_tys = self
             .methods
@@ -570,6 +628,30 @@ impl Trait {
             .enumerate()
             .map(|(i, ty)| (TypeVar::new(i as u32), *ty))
             .collect::<FxHashMap<_, _>>()
+    }
+
+    /// Build the effect-variable substitution for this trait applied to the given output effects.
+    pub fn effect_param_subst_for_effs(&self, output_effs: &[EffType]) -> EffectsInstSubst {
+        debug_assert_eq!(output_effs.len(), self.output_effect_count() as usize);
+        output_effs
+            .iter()
+            .enumerate()
+            .map(|(i, eff)| (EffectVar::new(i as u32), eff.clone()))
+            .collect::<FxHashMap<_, _>>()
+    }
+
+    /// Build the full instantiation substitution for this trait applied to the
+    /// given input/output types and output effects.
+    pub fn param_subst_for(
+        &self,
+        input_tys: &[Type],
+        output_tys: &[Type],
+        output_effs: &[EffType],
+    ) -> InstSubst {
+        (
+            self.type_param_subst_for_tys(input_tys, output_tys),
+            self.effect_param_subst_for_effs(output_effs),
+        )
     }
 }
 
@@ -606,6 +688,22 @@ impl FormatWith<ModuleEnv<'_>> for Trait {
                         "{} = {}",
                         self.output_type_names[index as usize],
                         TypeVar::new(input_ty_count + index)
+                    )
+                },
+                f,
+            )?;
+        }
+        if self.output_effect_count() > 0 {
+            write!(f, " ! ")?;
+            write_with_separator_and_format_fn(
+                0..self.output_effect_count(),
+                ", ",
+                |index, f| {
+                    write!(
+                        f,
+                        "{} = {}",
+                        self.output_effect_names[index as usize],
+                        EffectVar::new(index)
                     )
                 },
                 f,
@@ -700,17 +798,53 @@ mod tests {
             Some(TraitMethodIndex(0))
         );
     }
+
+    #[test]
+    fn construct_trait_with_output_effect() {
+        let fn_ty = FnType::new_by_val(
+            [Type::variable_id(0)],
+            Type::variable_id(1),
+            EffType::single_variable_id(0),
+        );
+        let trait_def = Trait::new(
+            "EffProject",
+            "Projection with a trait-determined effect.",
+            ["Self"],
+            ["Output"],
+            [(
+                "project",
+                FunctionDefinition::new_infer_quantifiers(fn_ty, ["value"], "Project a value."),
+            )],
+        )
+        .with_output_effects(["E"]);
+
+        assert_eq!(trait_def.output_effect_count(), 1);
+        assert_eq!(trait_def.output_effect_names, vec![ustr("E")]);
+
+        // Instantiating the trait substitutes the effect slot in the method signature.
+        let read = EffType::single_primitive(crate::types::effects::PrimitiveEffect::Read);
+        let defs = trait_def.instantiate_for_tys(
+            &[Type::unit()],
+            &[Type::unit()],
+            std::slice::from_ref(&read),
+        );
+        assert_eq!(defs[0].ty_scheme.ty.effects, read);
+
+        // An empty effect list pads to all-empty effects, a wrong length panics.
+        assert_eq!(trait_def.normalized_output_effs(vec![]), vec![EffType::empty()]);
+    }
 }
 
 impl Trait {
     pub fn validate_impl_size(&self, input_tys: &[Type], output_tys: &[Type], method_count: usize) {
-        self.validate_impl_shape(input_tys, output_tys, 0, method_count)
+        self.validate_impl_shape(input_tys, output_tys, &[], 0, method_count)
     }
 
     pub fn validate_impl_shape(
         &self,
         input_tys: &[Type],
         output_tys: &[Type],
+        output_effs: &[EffType],
         associated_const_count: usize,
         method_count: usize,
     ) {
@@ -724,6 +858,12 @@ impl Trait {
             self.output_type_count(),
             output_tys.len() as u32,
             "Mismatched output type count when implementing trait {}.",
+            self.name,
+        );
+        assert_eq!(
+            self.output_effect_count(),
+            output_effs.len() as u32,
+            "Mismatched output effect count when implementing trait {}.",
             self.name,
         );
         assert_eq!(

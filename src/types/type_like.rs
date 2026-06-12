@@ -138,6 +138,16 @@ pub(crate) fn instantiate_types_in_place<T: TypeLike, M: TypeMapper>(
     }
 }
 
+/// Instantiate every effect type in `effs` in place using a pre-built mapper.
+pub(crate) fn instantiate_effect_types_in_place<M: TypeMapper>(
+    effs: &mut [crate::types::effects::EffType],
+    mapper: &mut M,
+) {
+    for eff in effs {
+        *eff = mapper.map_effect_type(eff);
+    }
+}
+
 /// Something that is like a type and can be casted to a type.
 pub trait CastableToType: TypeLike {
     /// Return this as a type

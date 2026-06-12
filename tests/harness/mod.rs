@@ -26,7 +26,7 @@ use ferlium::{
         math::int_type,
         string::string_type,
     },
-    types::effects::{PrimitiveEffect, effect, effects, no_effects},
+    types::effects::{EffType, PrimitiveEffect, effect, effects, no_effects},
     types::r#trait::Trait,
     types::r#type::{
         FnType, Type, TypeDef, TypeDefProductDocs, TypeDefShapeDocs, TypeVar, variant_type,
@@ -399,6 +399,62 @@ fn test_witnessed_project_trait() -> Trait {
     )
 }
 
+fn test_eff_trait() -> Trait {
+    Trait::new_with_self_input_type(
+        "TestEff",
+        "Test-only trait with one associated output type and one output effect.",
+        ["Output"],
+        [(
+            "eff_project",
+            FunctionDefinition::new_infer_quantifiers(
+                FnType::new_by_val(
+                    [Type::variable_id(0)],
+                    Type::variable_id(1),
+                    EffType::single_variable_id(0),
+                ),
+                ["value"],
+                "Projects a test-only associated output type with a trait-determined effect.",
+            ),
+        )],
+    )
+    .with_output_effects(["E"])
+}
+
+fn test_eff_pair_trait() -> Trait {
+    Trait::new_with_self_input_type(
+        "TestEffPair",
+        "Test-only trait with two output effect slots, each used by one method.",
+        Vec::<&str>::new(),
+        [
+            (
+                "eff_pair_first",
+                FunctionDefinition::new_infer_quantifiers(
+                    FnType::new_by_val(
+                        [Type::variable_id(0)],
+                        int_type(),
+                        EffType::single_variable_id(0),
+                    ),
+                    ["value"],
+                    "Projects an int with the effect of the first slot.",
+                ),
+            ),
+            (
+                "eff_pair_second",
+                FunctionDefinition::new_infer_quantifiers(
+                    FnType::new_by_val(
+                        [Type::variable_id(0)],
+                        int_type(),
+                        EffType::single_variable_id(1),
+                    ),
+                    ["value"],
+                    "Projects an int with the effect of the second slot.",
+                ),
+            ),
+        ],
+    )
+    .with_output_effects(["E1", "E2"])
+}
+
 fn option_type_def() -> TypeDef {
     TypeDef {
         name: ustr("Option"),
@@ -443,6 +499,7 @@ fn map_iterator_type_def(iterator_trait: TraitId) -> TypeDef {
                 iterator_trait,
                 vec![Type::variable_id(0)],
                 vec![Type::variable_id(1)],
+                vec![],
                 Location::new_synthesized(),
             )],
         },
@@ -469,6 +526,7 @@ fn witnessed_type_def(test_assoc_trait: TraitId) -> TypeDef {
                 test_assoc_trait,
                 vec![Type::variable_id(0)],
                 vec![Type::variable_id(1)],
+                vec![],
                 Location::new_synthesized(),
             )],
         },
@@ -608,12 +666,86 @@ fn testing_module(
                 test_assoc_trait_id,
                 vec![Type::variable_id(0)],
                 vec![Type::variable_id(1)],
+                vec![],
                 Location::new_synthesized(),
             )],
         },
         vec![Type::variable_id(1)],
         [],
         [Box::new(UnaryNativeFnVV::new(|_value: &Value| Value::unit())) as Function],
+    );
+    // Test trait with an output effect slot: a pure impl for int, an impl with
+    // the read effect for bool, and a blanket impl over Option<T> forwarding
+    // the effect of the inner type.
+    let test_eff_trait_id = TraitId::new(module_id, module.add_trait(test_eff_trait()));
+    module.add_concrete_impl_with_effects_no_locals(
+        test_eff_trait_id,
+        [int_type()],
+        [int_type()],
+        [no_effects()],
+        [],
+        [Box::new(UnaryNativeFnNN::new(|v: isize| v * 2)) as Function],
+    );
+    module.add_concrete_impl_with_effects_no_locals(
+        test_eff_trait_id,
+        [bool_type()],
+        [int_type()],
+        [effect(PrimitiveEffect::Read)],
+        [],
+        [
+            Box::new(UnaryNativeFnNN::new(|v: bool| {
+                if v { 1isize } else { 0isize }
+            })) as Function,
+        ],
+    );
+    module.add_concrete_impl_with_effects_no_locals(
+        test_eff_trait_id,
+        [string_type()],
+        [int_type()],
+        [effect(PrimitiveEffect::Write)],
+        [],
+        [
+            Box::new(UnaryNativeFnRN::new(|_: &ferlium::std::string::String| {
+                0isize
+            })) as Function,
+        ],
+    );
+    module.add_blanket_impl_with_effects_no_locals(
+        test_eff_trait_id,
+        BlanketTraitImplSubKey {
+            input_tys: vec![Type::named(option_type_def_id, [Type::variable_id(0)])],
+            ty_var_count: 2,
+            constraints: vec![PubTypeConstraint::new_have_trait(
+                test_eff_trait_id,
+                vec![Type::variable_id(0)],
+                vec![Type::variable_id(1)],
+                vec![EffType::single_variable_id(0)],
+                Location::new_synthesized(),
+            )],
+        },
+        vec![Type::variable_id(1)],
+        vec![EffType::single_variable_id(0)],
+        [],
+        [Box::new(UnaryNativeFnVV::new(|_value: &Value| Value::unit())) as Function],
+    );
+    // Test trait with two output effect slots: the bool impl has different
+    // effects in each slot, so any slot transposition swaps the methods'
+    // effects and is caught by the tests.
+    let test_eff_pair_trait_id = TraitId::new(module_id, module.add_trait(test_eff_pair_trait()));
+    module.add_concrete_impl_with_effects_no_locals(
+        test_eff_pair_trait_id,
+        [bool_type()],
+        [],
+        [effect(PrimitiveEffect::Read), effect(PrimitiveEffect::Write)],
+        [],
+        [
+            Box::new(UnaryNativeFnNN::new(|v: bool| {
+                if v { 1isize } else { 0isize }
+            })) as Function,
+            Box::new(UnaryNativeFnNN::new(|v: bool| {
+                if v { 2isize } else { 0isize }
+            })) as Function,
+        ],
     );
     module.add_concrete_impl_for_trait_def_no_locals(
         value_trait_id,
@@ -640,6 +772,17 @@ fn testing_module(
             "Wraps an integer into an Option variant.",
             int_type(),
             Type::named(option_type_def_id, [int_type()]),
+            no_effects(),
+        ),
+    );
+    module.add_function(
+        "some_bool".into(),
+        UnaryNativeFnNV::description_with_ty(
+            |v: bool| Value::tuple_variant(ustr("Some"), [Value::native(v)]),
+            ["option"],
+            "Wraps a boolean into an Option variant.",
+            bool_type(),
+            Type::named(option_type_def_id, [bool_type()]),
             no_effects(),
         ),
     );

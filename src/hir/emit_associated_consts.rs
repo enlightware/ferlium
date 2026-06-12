@@ -7,6 +7,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
+use crate::types::effects::EffType;
 use crate::{
     FxHashSet, Location, ast,
     compiler::error::{
@@ -72,11 +73,13 @@ fn invalid_associated_const_impl(
 }
 
 /// Validate and collect associated const values written in a source impl.
+#[allow(clippy::too_many_arguments)]
 fn source_associated_const_values(
     trait_id: TraitId,
     trait_def: &Trait,
     input_tys: &[Type],
     output_tys: &[Type],
+    output_effs: &[EffType],
     associated_consts: &[ast::TraitAssociatedConstImpl],
     impl_span: Location,
 ) -> Result<Vec<LiteralValue>, InternalCompilationError> {
@@ -94,7 +97,7 @@ fn source_associated_const_values(
     }
 
     let associated_const_tys =
-        trait_def.instantiate_associated_const_tys_for_tys(input_tys, output_tys);
+        trait_def.instantiate_associated_const_tys_for_tys(input_tys, output_tys, output_effs);
     let mut values = Vec::with_capacity(trait_def.associated_const_count());
     let mut seen = FxHashSet::default();
     for associated_const in associated_consts {
@@ -158,6 +161,7 @@ fn source_associated_const_values(
 pub(super) struct SourceAssociatedConstImpl<'a> {
     pub(super) input_tys: &'a [Type],
     pub(super) output_tys: &'a [Type],
+    pub(super) output_effs: &'a [EffType],
     pub(super) ty_var_count: u32,
     pub(super) associated_consts: &'a [ast::TraitAssociatedConstImpl],
     pub(super) span: Location,
@@ -180,6 +184,7 @@ pub(super) fn associated_const_values_for_source_impl(
             trait_def,
             imp.input_tys,
             imp.output_tys,
+            imp.output_effs,
             imp.associated_consts,
             imp.span,
         )
