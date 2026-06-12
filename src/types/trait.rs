@@ -213,10 +213,7 @@ impl Trait {
     }
 
     /// Add output effect slots to this trait, re-validating the methods against them.
-    pub fn with_output_effects<'a>(
-        mut self,
-        output_effect_names: impl Into<Vec<&'a str>>,
-    ) -> Self {
+    pub fn with_output_effects<'a>(mut self, output_effect_names: impl Into<Vec<&'a str>>) -> Self {
         self.output_effect_names = output_effect_names.into().into_iter().map(ustr).collect();
         self.validate();
         self
@@ -309,9 +306,9 @@ impl Trait {
         self.output_effect_names.len() as u32
     }
 
-    /// Return the given output effects, or all-empty effects if none are given.
+    /// Return impl output effects, defaulting omitted slots to empty effects.
     /// Panics if a non-empty list of the wrong length is given.
-    pub fn normalized_output_effs(&self, output_effs: Vec<EffType>) -> Vec<EffType> {
+    pub fn impl_output_effs_or_pure_defaults(&self, output_effs: Vec<EffType>) -> Vec<EffType> {
         if output_effs.is_empty() {
             vec![EffType::empty(); self.output_effect_count() as usize]
         } else {
@@ -831,7 +828,10 @@ mod tests {
         assert_eq!(defs[0].ty_scheme.ty.effects, read);
 
         // An empty effect list pads to all-empty effects, a wrong length panics.
-        assert_eq!(trait_def.normalized_output_effs(vec![]), vec![EffType::empty()]);
+        assert_eq!(
+            trait_def.impl_output_effs_or_pure_defaults(vec![]),
+            vec![EffType::empty()]
+        );
     }
 }
 

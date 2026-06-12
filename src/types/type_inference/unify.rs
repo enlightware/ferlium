@@ -463,8 +463,7 @@ impl UnifiedTypeInference {
                                         have_trait.2,
                                     )?;
                                 }
-                                // Output effects are unified on the common prefix:
-                                // an empty list on either side means unspecified.
+                                assert_eq!(have_trait.1.len(), output_effects.len());
                                 for (expected, actual) in
                                     have_trait.1.iter().zip(output_effects.iter())
                                 {
@@ -474,11 +473,6 @@ impl UnifiedTypeInference {
                                         expected.clone(),
                                         have_trait.2,
                                     )?;
-                                }
-                                if have_trait.1.is_empty() && !output_effects.is_empty() {
-                                    let span = have_trait.2;
-                                    have_traits
-                                        .insert(key, (output_types, output_effects, span));
                                 }
                             } else {
                                 have_traits
@@ -1079,11 +1073,11 @@ impl UnifiedTypeInference {
             let (impl_output_tys, impl_output_effs) =
                 trait_solver.solve_outputs(trait_id, &input_tys, span, arena)?;
             // Found, unify the output types and resolve the output effects.
-            assert!(output_tys.is_empty() || output_tys.len() == impl_output_tys.len());
+            assert_eq!(output_tys.len(), impl_output_tys.len());
             for (cur_ty, exp_ty) in output_tys.iter().zip(impl_output_tys.iter()) {
                 self.unify_same_type(*cur_ty, span, *exp_ty, span)?;
             }
-            assert!(output_effs.is_empty() || output_effs.len() == impl_output_effs.len());
+            assert_eq!(output_effs.len(), impl_output_effs.len());
             for (cur_eff, exp_eff) in output_effs.iter().zip(impl_output_effs.iter()) {
                 self.resolve_trait_output_effect(cur_eff, exp_eff, span)?;
             }
@@ -1098,8 +1092,8 @@ impl UnifiedTypeInference {
                     self,
                     trait_id,
                     &input_tys,
-                    &output_tys,
-                    &output_effs,
+                    Some(&output_tys),
+                    Some(&output_effs),
                     assumptions,
                     span,
                     arena,
@@ -1111,11 +1105,11 @@ impl UnifiedTypeInference {
             if input_tys.iter().all(Type::is_constant) {
                 let (impl_output_tys, impl_output_effs) =
                     trait_solver.solve_outputs(trait_id, &input_tys, span, arena)?;
-                assert!(output_tys.is_empty() || output_tys.len() == impl_output_tys.len());
+                assert_eq!(output_tys.len(), impl_output_tys.len());
                 for (cur_ty, exp_ty) in output_tys.iter().zip(impl_output_tys.iter()) {
                     self.unify_same_type(*cur_ty, span, *exp_ty, span)?;
                 }
-                assert!(output_effs.is_empty() || output_effs.len() == impl_output_effs.len());
+                assert_eq!(output_effs.len(), impl_output_effs.len());
                 for (cur_eff, exp_eff) in output_effs.iter().zip(impl_output_effs.iter()) {
                     self.resolve_trait_output_effect(cur_eff, exp_eff, span)?;
                 }
@@ -1123,7 +1117,11 @@ impl UnifiedTypeInference {
             } else {
                 // Not fully resolved, defer the unification.
                 Some(PubTypeConstraint::new_have_trait(
-                    trait_id, input_tys, output_tys, output_effs, span,
+                    trait_id,
+                    input_tys,
+                    output_tys,
+                    output_effs,
+                    span,
                 ))
             }
         })

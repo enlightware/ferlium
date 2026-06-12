@@ -163,8 +163,13 @@ fn auto_value_constraints(
         {
             continue;
         }
-        let constraint =
-            PubTypeConstraint::new_have_trait(value_trait_id, vec![member_ty], vec![], vec![], span);
+        let constraint = PubTypeConstraint::new_have_trait(
+            value_trait_id,
+            vec![member_ty],
+            vec![],
+            vec![],
+            span,
+        );
         constraints.insert(constraint);
     }
 

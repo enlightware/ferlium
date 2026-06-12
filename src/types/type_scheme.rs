@@ -75,8 +75,11 @@ pub enum PubTypeConstraint {
     HaveTrait {
         trait_id: TraitId,
         input_tys: Vec<Type>,
+        /// The known output types of the trait application. This list is full
+        /// arity for the trait; traits with no output types use an empty list.
         output_tys: Vec<Type>,
-        /// The output effects of the trait application.
+        /// The known output effects of the trait application. This list is full
+        /// arity for the trait; traits with no output effects use an empty list.
         output_effs: Vec<EffType>,
         span: InstantiableLocation,
     },
@@ -265,12 +268,8 @@ impl PubTypeConstraint {
                     return Ok(None);
                 }
                 if input_tys.iter().all(Type::is_constant) {
-                    let (got_output_tys, got_output_effs) = trait_solver.solve_outputs(
-                        *trait_id,
-                        input_tys,
-                        span.use_site,
-                        arena,
-                    )?;
+                    let (got_output_tys, got_output_effs) =
+                        trait_solver.solve_outputs(*trait_id, input_tys, span.use_site, arena)?;
                     assert_eq!(got_output_tys.len(), output_tys.len());
                     for (got_output_ty, output_ty) in got_output_tys.iter().zip(output_tys.iter()) {
                         let inner_ty_vars = output_ty.inner_ty_vars();

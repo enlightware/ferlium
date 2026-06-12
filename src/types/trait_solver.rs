@@ -185,8 +185,8 @@ pub(crate) struct TraitSolverProbe<'a> {
 struct TraitImprovementKey {
     trait_id: TraitId,
     input_tys: Vec<Type>,
-    output_tys: Vec<Type>,
-    output_effs: Vec<EffType>,
+    output_tys: Option<Vec<Type>>,
+    output_effs: Option<Vec<EffType>>,
 }
 
 #[derive(Default)]
@@ -284,8 +284,8 @@ impl TraitOutputQuery for NeverProbe {
         _ty_inf: &mut UnifiedTypeInference,
         _trait_id: TraitId,
         _input_tys: &[Type],
-        _output_tys: &[Type],
-        _output_effs: &[EffType],
+        _output_tys: Option<&[Type]>,
+        _output_effs: Option<&[EffType]>,
         _assumptions: ConstraintAssumptions<'_>,
         _fn_span: Location,
         _arena: &mut NodeArena,
@@ -310,14 +310,17 @@ trait TraitOutputQuery {
         arena: &mut NodeArena,
     ) -> Result<(Vec<Type>, Vec<EffType>), InternalCompilationError>;
 
+    /// Attempt to improve a trait application. `output_tys` and `output_effs`
+    /// are `None` only for solver queries that intentionally ask for outputs
+    /// from inputs alone; stored `HaveTrait` constraints pass full-arity lists.
     #[allow(clippy::too_many_arguments)]
     fn improve_trait_application_query(
         &mut self,
         ty_inf: &mut UnifiedTypeInference,
         trait_id: TraitId,
         input_tys: &[Type],
-        output_tys: &[Type],
-        output_effs: &[EffType],
+        output_tys: Option<&[Type]>,
+        output_effs: Option<&[EffType]>,
         assumptions: ConstraintAssumptions<'_>,
         fn_span: Location,
         arena: &mut NodeArena,
@@ -365,8 +368,8 @@ impl TraitOutputQuery for LazyTraitSolverProbe<'_, '_> {
         ty_inf: &mut UnifiedTypeInference,
         trait_id: TraitId,
         input_tys: &[Type],
-        output_tys: &[Type],
-        output_effs: &[EffType],
+        output_tys: Option<&[Type]>,
+        output_effs: Option<&[EffType]>,
         assumptions: ConstraintAssumptions<'_>,
         fn_span: Location,
         arena: &mut NodeArena,
@@ -514,8 +517,8 @@ impl TraitOutputQuery for TraitSolverProbe<'_> {
         ty_inf: &mut UnifiedTypeInference,
         trait_id: TraitId,
         input_tys: &[Type],
-        output_tys: &[Type],
-        output_effs: &[EffType],
+        output_tys: Option<&[Type]>,
+        output_effs: Option<&[EffType]>,
         assumptions: ConstraintAssumptions<'_>,
         fn_span: Location,
         arena: &mut NodeArena,
@@ -818,8 +821,8 @@ impl<'a> TraitSolver<'a> {
         ty_inf: &mut UnifiedTypeInference,
         candidate: &TraitImprovementCandidate,
         input_tys: &[Type],
-        output_tys: &[Type],
-        output_effs: &[EffType],
+        output_tys: Option<&[Type]>,
+        output_effs: Option<&[EffType]>,
         assumptions: ConstraintAssumptions<'_>,
         fn_span: Location,
         arena: &mut NodeArena,
@@ -838,23 +841,33 @@ impl<'a> TraitSolver<'a> {
                         return Ok(TraitImprovementMatch::No);
                     }
                 }
-                for (candidate_output, output_ty) in candidate_outputs.iter().zip(output_tys.iter())
-                {
-                    if ty_inf
-                        .unify_same_type(*candidate_output, fn_span, *output_ty, fn_span)
-                        .is_err()
+                if let Some(output_tys) = output_tys {
+                    for (candidate_output, output_ty) in
+                        candidate_outputs.iter().zip(output_tys.iter())
                     {
-                        return Ok(TraitImprovementMatch::No);
+                        if ty_inf
+                            .unify_same_type(*candidate_output, fn_span, *output_ty, fn_span)
+                            .is_err()
+                        {
+                            return Ok(TraitImprovementMatch::No);
+                        }
                     }
                 }
-                for (candidate_eff, output_eff) in
-                    candidate_output_effs.iter().zip(output_effs.iter())
-                {
-                    if ty_inf
-                        .unify_same_effect(candidate_eff.clone(), fn_span, output_eff.clone(), fn_span)
-                        .is_err()
+                if let Some(output_effs) = output_effs {
+                    for (candidate_eff, output_eff) in
+                        candidate_output_effs.iter().zip(output_effs.iter())
                     {
-                        return Ok(TraitImprovementMatch::No);
+                        if ty_inf
+                            .unify_same_effect(
+                                candidate_eff.clone(),
+                                fn_span,
+                                output_eff.clone(),
+                                fn_span,
+                            )
+                            .is_err()
+                        {
+                            return Ok(TraitImprovementMatch::No);
+                        }
                     }
                 }
                 Ok(TraitImprovementMatch::Yes)
@@ -894,8 +907,8 @@ impl<'a> TraitSolver<'a> {
         ty_inf: &mut UnifiedTypeInference,
         candidate: &TraitImprovementCandidate,
         input_tys: &[Type],
-        output_tys: &[Type],
-        output_effs: &[EffType],
+        output_tys: Option<&[Type]>,
+        output_effs: Option<&[EffType]>,
         fn_span: Location,
     ) -> Result<(), InternalCompilationError> {
         match candidate {
@@ -907,19 +920,24 @@ impl<'a> TraitSolver<'a> {
                 for (candidate_input, input_ty) in candidate_inputs.iter().zip(input_tys.iter()) {
                     ty_inf.unify_same_type(*candidate_input, fn_span, *input_ty, fn_span)?;
                 }
-                for (candidate_output, output_ty) in candidate_outputs.iter().zip(output_tys.iter())
-                {
-                    ty_inf.unify_same_type(*candidate_output, fn_span, *output_ty, fn_span)?;
+                if let Some(output_tys) = output_tys {
+                    for (candidate_output, output_ty) in
+                        candidate_outputs.iter().zip(output_tys.iter())
+                    {
+                        ty_inf.unify_same_type(*candidate_output, fn_span, *output_ty, fn_span)?;
+                    }
                 }
-                for (candidate_eff, output_eff) in
-                    candidate_output_effs.iter().zip(output_effs.iter())
-                {
-                    ty_inf.unify_same_effect(
-                        candidate_eff.clone(),
-                        fn_span,
-                        output_eff.clone(),
-                        fn_span,
-                    )?;
+                if let Some(output_effs) = output_effs {
+                    for (candidate_eff, output_eff) in
+                        candidate_output_effs.iter().zip(output_effs.iter())
+                    {
+                        ty_inf.unify_same_effect(
+                            candidate_eff.clone(),
+                            fn_span,
+                            output_eff.clone(),
+                            fn_span,
+                        )?;
+                    }
                 }
             }
             TraitImprovementCandidate::Blanket {
@@ -943,19 +961,24 @@ impl<'a> TraitSolver<'a> {
                 for (candidate_input, input_ty) in candidate_inputs.iter().zip(input_tys.iter()) {
                     ty_inf.unify_same_type(*candidate_input, fn_span, *input_ty, fn_span)?;
                 }
-                for (candidate_output, output_ty) in candidate_outputs.iter().zip(output_tys.iter())
-                {
-                    ty_inf.unify_same_type(*candidate_output, fn_span, *output_ty, fn_span)?;
+                if let Some(output_tys) = output_tys {
+                    for (candidate_output, output_ty) in
+                        candidate_outputs.iter().zip(output_tys.iter())
+                    {
+                        ty_inf.unify_same_type(*candidate_output, fn_span, *output_ty, fn_span)?;
+                    }
                 }
-                for (candidate_eff, output_eff) in
-                    candidate_output_effs.iter().zip(output_effs.iter())
-                {
-                    ty_inf.unify_same_effect(
-                        candidate_eff.clone(),
-                        fn_span,
-                        output_eff.clone(),
-                        fn_span,
-                    )?;
+                if let Some(output_effs) = output_effs {
+                    for (candidate_eff, output_eff) in
+                        candidate_output_effs.iter().zip(output_effs.iter())
+                    {
+                        ty_inf.unify_same_effect(
+                            candidate_eff.clone(),
+                            fn_span,
+                            output_eff.clone(),
+                            fn_span,
+                        )?;
+                    }
                 }
             }
         }
@@ -963,7 +986,7 @@ impl<'a> TraitSolver<'a> {
     }
 
     /// Try to improve a deferred trait application from its partially known
-    /// inputs and outputs.
+    /// inputs and optional known outputs.
     ///
     /// The algorithm probes every visible impl in a fresh scratch solver under
     /// a snapshot of the current unifier. If exactly one candidate remains
@@ -975,8 +998,8 @@ impl<'a> TraitSolver<'a> {
         ty_inf: &mut UnifiedTypeInference,
         trait_id: TraitId,
         input_tys: &[Type],
-        output_tys: &[Type],
-        output_effs: &[EffType],
+        output_tys: Option<&[Type]>,
+        output_effs: Option<&[EffType]>,
         assumptions: ConstraintAssumptions<'_>,
         fn_span: Location,
         arena: &mut NodeArena,
@@ -989,18 +1012,22 @@ impl<'a> TraitSolver<'a> {
                 .into_iter()
                 .map(|ty| ty.map(&mut key_mapper))
                 .collect(),
-            output_tys: ty_inf
-                .substitute_in_types(output_tys)
-                .into_iter()
-                .map(|ty| ty.map(&mut key_mapper))
-                .collect(),
-            output_effs: output_effs
-                .iter()
-                .map(|eff| {
-                    let eff = ty_inf.substitute_in_effect_type(eff);
-                    key_mapper.map_effect_type(&eff)
-                })
-                .collect(),
+            output_tys: output_tys.map(|output_tys| {
+                ty_inf
+                    .substitute_in_types(output_tys)
+                    .into_iter()
+                    .map(|ty| ty.map(&mut key_mapper))
+                    .collect()
+            }),
+            output_effs: output_effs.map(|output_effs| {
+                output_effs
+                    .iter()
+                    .map(|eff| {
+                        let eff = ty_inf.substitute_in_effect_type(eff);
+                        key_mapper.map_effect_type(&eff)
+                    })
+                    .collect()
+            }),
         };
         if !self.active_improvements.insert(key.clone()) {
             return Ok(TraitImprovementMatch::Unknown);
@@ -1025,8 +1052,8 @@ impl<'a> TraitSolver<'a> {
         ty_inf: &mut UnifiedTypeInference,
         trait_id: TraitId,
         input_tys: &[Type],
-        output_tys: &[Type],
-        output_effs: &[EffType],
+        output_tys: Option<&[Type]>,
+        output_effs: Option<&[EffType]>,
         assumptions: ConstraintAssumptions<'_>,
         fn_span: Location,
         arena: &mut NodeArena,
@@ -1034,14 +1061,14 @@ impl<'a> TraitSolver<'a> {
         let candidates = self.improvement_candidates(trait_id);
         let original_vars = input_tys
             .iter()
-            .chain(output_tys.iter())
+            .chain(output_tys.unwrap_or_default().iter())
             .flat_map(TypeLike::inner_ty_vars)
             .collect::<FxHashSet<_>>();
         let mut unique_candidate: Option<(
             TraitImprovementCandidate,
             TraitImprovementMatch,
             Vec<Type>,
-            Vec<Type>,
+            Option<Vec<Type>>,
         )> = None;
         let mut found_multiple_candidates = false;
 
@@ -1077,7 +1104,8 @@ impl<'a> TraitSolver<'a> {
                 }
             };
             let improved_input_tys = ty_inf.substitute_in_types(input_tys);
-            let improved_output_tys = ty_inf.substitute_in_types(output_tys);
+            let improved_output_tys =
+                output_tys.map(|output_tys| ty_inf.substitute_in_types(output_tys));
             ty_inf.rollback_to(snapshot);
             use TraitImprovementMatch::*;
             match matched {
@@ -1114,7 +1142,7 @@ impl<'a> TraitSolver<'a> {
             TraitImprovementMatch::Unknown => {
                 let improved_vars = improved_input_tys
                     .iter()
-                    .chain(improved_output_tys.iter())
+                    .chain(improved_output_tys.as_deref().unwrap_or_default().iter())
                     .flat_map(TypeLike::inner_ty_vars)
                     .collect::<FxHashSet<_>>();
                 if improved_vars.is_subset(&original_vars) {
@@ -1123,15 +1151,19 @@ impl<'a> TraitSolver<'a> {
                     {
                         ty_inf.unify_same_type(*input_ty, fn_span, *improved_input_ty, fn_span)?;
                     }
-                    for (output_ty, improved_output_ty) in
-                        output_tys.iter().zip(improved_output_tys.iter())
+                    if let (Some(output_tys), Some(improved_output_tys)) =
+                        (output_tys, improved_output_tys.as_deref())
                     {
-                        ty_inf.unify_same_type(
-                            *output_ty,
-                            fn_span,
-                            *improved_output_ty,
-                            fn_span,
-                        )?;
+                        for (output_ty, improved_output_ty) in
+                            output_tys.iter().zip(improved_output_tys.iter())
+                        {
+                            ty_inf.unify_same_type(
+                                *output_ty,
+                                fn_span,
+                                *improved_output_ty,
+                                fn_span,
+                            )?;
+                        }
                     }
                 } else {
                     Self::improve_trait_application_with_candidate_head(
@@ -1172,8 +1204,8 @@ impl<'a> TraitSolver<'a> {
         ty_inf: &mut UnifiedTypeInference,
         trait_id: TraitId,
         input_tys: &[Type],
-        output_tys: &[Type],
-        output_effs: &[EffType],
+        output_tys: Option<&[Type]>,
+        output_effs: Option<&[EffType]>,
         assumptions: ConstraintAssumptions<'_>,
         fn_span: Location,
         arena: &mut NodeArena,
@@ -1199,8 +1231,8 @@ impl<'a> TraitSolver<'a> {
         ty_inf: &mut UnifiedTypeInference,
         trait_id: TraitId,
         input_tys: &[Type],
-        output_tys: &[Type],
-        output_effs: &[EffType],
+        output_tys: Option<&[Type]>,
+        output_effs: Option<&[EffType]>,
         assumptions: ConstraintAssumptions<'_>,
     ) -> bool {
         assumptions.iter().any(|assumption| {
@@ -1215,7 +1247,8 @@ impl<'a> TraitSolver<'a> {
             };
             if *assumption_trait_id != trait_id
                 || assumption_input_tys.len() != input_tys.len()
-                || assumption_output_tys.len() != output_tys.len()
+                || output_tys
+                    .is_some_and(|output_tys| assumption_output_tys.len() != output_tys.len())
             {
                 return false;
             }
@@ -1233,18 +1266,13 @@ impl<'a> TraitSolver<'a> {
             }
             if *ass_trait_id != trait_id
                 || ass_input_tys.len() != input_tys.len()
-                || ass_output_tys.len() != output_tys.len()
+                || output_tys.is_some_and(|output_tys| ass_output_tys.len() != output_tys.len())
             {
                 return false;
             }
-            // Output effects are compared on the common prefix: an empty list on
-            // either side means they are unspecified.
             ass_input_tys == input_tys
-                && ass_output_tys == output_tys
-                && ass_output_effs
-                    .iter()
-                    .zip(output_effs.iter())
-                    .all(|(ass_eff, eff)| ass_eff == eff)
+                && output_tys.is_none_or(|output_tys| ass_output_tys == output_tys)
+                && output_effs.is_none_or(|output_effs| ass_output_effs == output_effs)
         })
     }
 
@@ -1301,8 +1329,9 @@ impl<'a> TraitSolver<'a> {
     ///
     /// This is the shared fixed-point engine used by both normal blanket impl
     /// solving and trait improvement. It instantiates the blanket-local type
-    /// variables, unifies the impl head with the requested types, then iterates
-    /// the impl constraints until no more progress is possible.
+    /// variables, unifies the impl head with the requested types, unifies known
+    /// requested outputs when present, then iterates the impl constraints until
+    /// no more progress is possible.
     #[allow(clippy::too_many_arguments)]
     fn match_blanket_impl<Q: TraitOutputQuery>(
         query: &mut Q,
@@ -1313,8 +1342,8 @@ impl<'a> TraitSolver<'a> {
         imp_ty_var_count: u32,
         imp_constraints: &[PubTypeConstraint],
         input_tys: &[Type],
-        output_tys: &[Type],
-        output_effs: &[EffType],
+        output_tys: Option<&[Type]>,
+        output_effs: Option<&[EffType]>,
         assumptions: ConstraintAssumptions<'_>,
         fn_span: Location,
         arena: &mut NodeArena,
@@ -1351,25 +1380,24 @@ impl<'a> TraitSolver<'a> {
                 return Ok(BlanketImplMatch::No);
             }
         }
-        for (imp_output_ty, output_ty) in imp_output_tys.iter().zip(output_tys.iter()) {
-            if ty_inf
-                .unify_same_type(*imp_output_ty, fn_span, *output_ty, fn_span)
-                .is_err()
-            {
-                return Ok(BlanketImplMatch::No);
+        if let Some(output_tys) = output_tys {
+            for (imp_output_ty, output_ty) in imp_output_tys.iter().zip(output_tys.iter()) {
+                if ty_inf
+                    .unify_same_type(*imp_output_ty, fn_span, *output_ty, fn_span)
+                    .is_err()
+                {
+                    return Ok(BlanketImplMatch::No);
+                }
             }
         }
-        for (imp_output_eff, output_eff) in imp_output_effs.iter().zip(output_effs.iter()) {
-            if ty_inf
-                .unify_same_effect(
-                    imp_output_eff.clone(),
-                    fn_span,
-                    output_eff.clone(),
-                    fn_span,
-                )
-                .is_err()
-            {
-                return Ok(BlanketImplMatch::No);
+        if let Some(output_effs) = output_effs {
+            for (imp_output_eff, output_eff) in imp_output_effs.iter().zip(output_effs.iter()) {
+                if ty_inf
+                    .unify_same_effect(imp_output_eff.clone(), fn_span, output_eff.clone(), fn_span)
+                    .is_err()
+                {
+                    return Ok(BlanketImplMatch::No);
+                }
             }
         }
 
@@ -1386,17 +1414,22 @@ impl<'a> TraitSolver<'a> {
             for (constraint_index, constraint) in old_remaining.iter() {
                 // Re-substitute the constraint on every pass because earlier
                 // solved constraints may have refined the type variables it uses.
-                let (trait_id, constraint_inputs, constraint_outputs, constraint_output_effs, _span) =
-                    ty_inf
-                        .substitute_in_constraint(constraint)
-                        .into_have_trait()
-                        .expect("Non trait constraint in blanket impl");
+                let (
+                    trait_id,
+                    constraint_inputs,
+                    constraint_outputs,
+                    constraint_output_effs,
+                    _span,
+                ) = ty_inf
+                    .substitute_in_constraint(constraint)
+                    .into_have_trait()
+                    .expect("Non trait constraint in blanket impl");
                 if Self::match_assumption(
                     ty_inf,
                     trait_id,
                     &constraint_inputs,
-                    &constraint_outputs,
-                    &constraint_output_effs,
+                    Some(&constraint_outputs),
+                    Some(&constraint_output_effs),
                     assumptions,
                 ) {
                     continue;
@@ -1410,8 +1443,8 @@ impl<'a> TraitSolver<'a> {
                             ty_inf,
                             trait_id,
                             &constraint_inputs,
-                            &constraint_outputs,
-                            &constraint_output_effs,
+                            Some(&constraint_outputs),
+                            Some(&constraint_output_effs),
                             assumptions,
                             fn_span,
                             arena,
@@ -1424,19 +1457,17 @@ impl<'a> TraitSolver<'a> {
                     still_remaining.push((*constraint_index, constraint));
                     continue;
                 }
-                let (solved_outputs, solved_output_effs) = match query.solve_outputs_query(
-                    trait_id,
-                    &constraint_inputs,
-                    fn_span,
-                    arena,
-                ) {
-                    Ok(outputs) => outputs,
-                    Err(_) if matches!(mode, BlanketConstraintMode::DeferConcreteObligations) => {
-                        still_remaining.push((*constraint_index, constraint));
-                        continue;
-                    }
-                    Err(_) => return Ok(BlanketImplMatch::No),
-                };
+                let (solved_outputs, solved_output_effs) =
+                    match query.solve_outputs_query(trait_id, &constraint_inputs, fn_span, arena) {
+                        Ok(outputs) => outputs,
+                        Err(_)
+                            if matches!(mode, BlanketConstraintMode::DeferConcreteObligations) =>
+                        {
+                            still_remaining.push((*constraint_index, constraint));
+                            continue;
+                        }
+                        Err(_) => return Ok(BlanketImplMatch::No),
+                    };
                 for (solved_output, constraint_output) in
                     solved_outputs.iter().zip(constraint_outputs.iter())
                 {
@@ -1519,26 +1550,26 @@ impl<'a> TraitSolver<'a> {
         }
 
         // Finally, unify the instantiated blanket outputs with the requested
-        // outputs and return the resolved nested trait constraints in source order.
-        for (imp_output_ty, output_ty) in imp_output_tys.iter().zip(output_tys.iter()) {
-            if ty_inf
-                .unify_same_type(*imp_output_ty, fn_span, *output_ty, fn_span)
-                .is_err()
-            {
-                return Ok(BlanketImplMatch::No);
+        // outputs if the caller supplied them, then return the resolved nested
+        // trait constraints in source order.
+        if let Some(output_tys) = output_tys {
+            for (imp_output_ty, output_ty) in imp_output_tys.iter().zip(output_tys.iter()) {
+                if ty_inf
+                    .unify_same_type(*imp_output_ty, fn_span, *output_ty, fn_span)
+                    .is_err()
+                {
+                    return Ok(BlanketImplMatch::No);
+                }
             }
         }
-        for (imp_output_eff, output_eff) in imp_output_effs.iter().zip(output_effs.iter()) {
-            if ty_inf
-                .unify_same_effect(
-                    imp_output_eff.clone(),
-                    fn_span,
-                    output_eff.clone(),
-                    fn_span,
-                )
-                .is_err()
-            {
-                return Ok(BlanketImplMatch::No);
+        if let Some(output_effs) = output_effs {
+            for (imp_output_eff, output_eff) in imp_output_effs.iter().zip(output_effs.iter()) {
+                if ty_inf
+                    .unify_same_effect(imp_output_eff.clone(), fn_span, output_eff.clone(), fn_span)
+                    .is_err()
+                {
+                    return Ok(BlanketImplMatch::No);
+                }
             }
         }
 
@@ -1590,7 +1621,7 @@ impl<'a> TraitSolver<'a> {
         );
         let input_types = input_types.into();
         let output_types = output_types.into();
-        let output_effs = trait_def.normalized_output_effs(vec![]);
+        let output_effs = trait_def.impl_output_effs_or_pure_defaults(vec![]);
         let definitions = trait_def.instantiate_for_tys(&input_types, &output_types, &output_effs);
         let definition = definitions
             .into_iter()
@@ -1980,8 +2011,8 @@ impl<'a> TraitSolver<'a> {
                     imp_ty_var_count,
                     imp_constraints,
                     input_tys,
-                    &[],
-                    &[],
+                    None,
+                    None,
                     ConstraintAssumptions::all(&[]),
                     fn_span,
                     arena,
@@ -2708,8 +2739,8 @@ impl TraitOutputQuery for TraitSolver<'_> {
         ty_inf: &mut UnifiedTypeInference,
         trait_id: TraitId,
         input_tys: &[Type],
-        output_tys: &[Type],
-        output_effs: &[EffType],
+        output_tys: Option<&[Type]>,
+        output_effs: Option<&[EffType]>,
         assumptions: ConstraintAssumptions<'_>,
         fn_span: Location,
         arena: &mut NodeArena,

@@ -231,8 +231,12 @@ impl TypeInference {
                 },
             );
             self.add_pub_constraint(constraint);
-            if let Some((parent_trait_id, parent_input_tys, parent_output_tys, parent_output_effs)) =
-                parent
+            if let Some((
+                parent_trait_id,
+                parent_input_tys,
+                parent_output_tys,
+                parent_output_effs,
+            )) = parent
             {
                 self.add_instantiated_trait_assumptions(
                     env,
@@ -295,8 +299,11 @@ impl TypeInference {
             &output_effs,
             expr_span,
         );
-        let associated_const_tys =
-            trait_def.instantiate_associated_const_tys_for_tys(&input_tys, &output_tys, &output_effs);
+        let associated_const_tys = trait_def.instantiate_associated_const_tys_for_tys(
+            &input_tys,
+            &output_tys,
+            &output_effs,
+        );
         let ty = associated_const_tys[associated_const_index.as_index()];
         let node = NodeKind::GetTraitAssociatedConst(b(hir::GetTraitAssociatedConst {
             trait_id,
