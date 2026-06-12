@@ -46,8 +46,7 @@ use crate::{
     },
     types::{
         effects::{
-            EffType, Effect, EffectVar, EffectVarKey, EffectsInstSubst, PrimitiveEffect, effect,
-            no_effects,
+            EffType, Effect, EffectVar, EffectsInstSubst, PrimitiveEffect, effect, no_effects,
         },
         mutability::{MutType, MutVar, MutVarKey},
         r#trait::{Trait, TraitMethodIndex},
@@ -81,7 +80,8 @@ fn split_inferred_trait_associated_const_path(path: &ast::Path) -> Option<(ast::
 }
 
 use super::{
-    constraints::{EffectConstraint, MutConstraint, TypeConstraint},
+    constraints::{MutConstraint, TypeConstraint},
+    effect_solver::EffectSolver,
     unify::UnifiedTypeInference,
 };
 
@@ -131,8 +131,7 @@ pub struct TypeInference {
     pub(super) mut_unification_table: InPlaceUnificationTable<MutVarKey>,
     pub(super) mut_constraints: Vec<MutConstraint>,
     pub(super) ty_coverage_constraints: Vec<(Location, Type, Vec<LiteralValue>)>,
-    pub(super) effect_unification_table: InPlaceUnificationTable<EffectVarKey>,
-    pub(super) effect_constraints: Vec<EffectConstraint>,
+    pub(super) effects: EffectSolver,
     /// Memoised results of `TrivialCopy` solver probes keyed by the queried concrete type.
     /// `TraitSolverProbe::from_module` clones the module's impl table on every call, so this cache avoids re-cloning when the same type is checked repeatedly during a single inference pass.
     trivial_copy_cache: FxHashMap<Type, bool>,
@@ -326,11 +325,11 @@ impl TypeInference {
     }
 
     pub fn fresh_effect_var(&mut self) -> EffectVar {
-        self.effect_unification_table.new_key(None)
+        self.effects.fresh_var()
     }
 
     pub fn fresh_effect_var_ty(&mut self) -> EffType {
-        EffType::single_variable(self.fresh_effect_var())
+        self.effects.fresh_var_ty()
     }
 
     pub fn fresh_fn_arg(&mut self) -> FnArgType {
@@ -872,7 +871,7 @@ impl TypeInference {
                         } else {
                             Type::tuple(self.fresh_type_var_tys(*element_count))
                         };
-                        self.add_same_type_constraint(
+                        self.add_same_type_with_sub_effects_constraint(
                             env.ir_arena[node_id].ty,
                             sp(data.expr),
                             expected_ty,
@@ -885,7 +884,7 @@ impl TypeInference {
                             data.span,
                             &env.module_env,
                         );
-                        self.add_same_type_constraint(
+                        self.add_same_type_with_sub_effects_constraint(
                             env.ir_arena[node_id].ty,
                             sp(data.expr),
                             named_ty,
@@ -910,7 +909,7 @@ impl TypeInference {
                     self.infer_expr_drop_mut(env, *expr)?
                 };
                 let ty = env.ir_arena[node_id].ty;
-                self.add_same_type_constraint(ty, sp(*expr), outer_ty, outer_span);
+                self.add_same_type_with_sub_effects_constraint(ty, sp(*expr), outer_ty, outer_span);
                 let effects = env.ir_arena[node_id].effects.clone();
                 let return_value = if env.expected_return_convention.returns_place() {
                     if ty != Type::never() && !node_is_place_reference(env.ir_arena, node_id) {
@@ -1485,7 +1484,7 @@ impl TypeInference {
                         let (inst_fn_ty, inst_data, _subst) = definition
                             .ty_scheme
                             .instantiate_with_fresh_vars(self, expr_span, None, env.module_env);
-                        self.add_same_type_constraint(
+                        self.add_same_type_with_sub_effects_constraint(
                             inst_fn_ty.ret,
                             expr_span,
                             element_ty,
@@ -1643,7 +1642,7 @@ impl TypeInference {
                         no_effects(),
                         expr_span,
                     ));
-                    self.add_same_type_constraint(
+                    self.add_same_type_with_sub_effects_constraint(
                         Type::variable(result_ty),
                         expr_span,
                         Type::unit(),
@@ -1697,7 +1696,7 @@ impl TypeInference {
                     self,
                     env.annotation_ty_subst,
                 ));
-                self.add_same_type_constraint(
+                self.add_same_type_with_sub_effects_constraint(
                     env.ir_arena[node_id].ty,
                     sp(data.expr),
                     ty,
@@ -3130,17 +3129,26 @@ impl TypeInference {
 
     #[allow(dead_code)]
     fn log_debug_effect_constraints(&mut self) {
-        log::debug!("Effect substitution table:");
-        for i in 0..self.effect_unification_table.len() {
-            let var = EffectVar::new(i as u32);
-            let value = self.effect_unification_table.probe_value(var);
-            match value {
-                Some(value) => log::debug!("  {var} → {value}"),
-                None => log::debug!("  {var} → {} (unbound)", {
-                    self.effect_unification_table.find(var)
-                }),
-            }
+        self.effects.log_debug_constraints();
+    }
+
+    pub(crate) fn add_same_type_with_sub_effects_constraint(
+        &mut self,
+        current: Type,
+        current_span: Location,
+        expected: Type,
+        expected_span: Location,
+    ) {
+        if current == expected {
+            return;
         }
+        self.ty_constraints
+            .push(TypeConstraint::SameTypeWithSubEffects {
+                current,
+                current_span,
+                expected,
+                expected_span,
+            });
     }
 
     pub(crate) fn add_same_type_constraint(
@@ -3230,12 +3238,8 @@ impl TypeInference {
         if current == expected {
             return;
         }
-        self.effect_constraints.push(EffectConstraint::SameEffect {
-            current: current.clone(),
-            current_span,
-            expected: expected.clone(),
-            expected_span,
-        });
+        self.effects
+            .add_same_constraint(current, current_span, expected, expected_span);
     }
 
     /// Add a constraint that the two function types must be equal.
@@ -3280,7 +3284,7 @@ impl TypeInference {
         include_effects: bool,
     ) {
         for (current_arg, expected_arg) in current.args.iter().zip(expected.args.iter()) {
-            self.add_same_type_constraint(
+            self.add_same_type_with_sub_effects_constraint(
                 current_arg.ty,
                 current_span,
                 expected_arg.ty,
@@ -3293,7 +3297,12 @@ impl TypeInference {
                 expected_span,
             );
         }
-        self.add_same_type_constraint(current.ret, current_span, expected.ret, expected_span);
+        self.add_same_type_with_sub_effects_constraint(
+            current.ret,
+            current_span,
+            expected.ret,
+            expected_span,
+        );
         if include_effects {
             self.add_same_effect_constraint(
                 &current.effects,
@@ -3309,50 +3318,12 @@ impl TypeInference {
         &mut self,
         deps: impl AsRef<[T]>,
     ) -> EffType {
-        let deps = deps.as_ref();
-
-        // Handle the trivial cases.
-        if deps.is_empty() {
-            return EffType::empty();
-        } else if deps.len() == 1 {
-            return deps[0].borrow().clone();
-        }
-
-        let mut effects = deps[0].borrow().clone();
-        for effect in &deps[1..] {
-            effects.extend(effect.borrow());
-        }
-
-        if !effects.has_variables() || effects.to_single_variable().is_some() {
-            return effects;
-        }
-
-        // Otherwise, we need to create a new effect variable.
-        let effect_var = self.effect_unification_table.new_key(Some(effects));
-        EffType::single_variable(effect_var)
+        self.effects.make_dependent_effect(deps)
     }
 
     /// Make the two effects equal and fuse their dependencies
     pub fn unify_effects(&mut self, eff1: &EffType, eff2: &EffType) -> EffType {
-        let var1 = eff1.to_single_variable();
-        let var2 = eff2.to_single_variable();
-        match (var1, var2) {
-            (None, None) => eff1.union(eff2),
-            (None, Some(var)) => {
-                self.effect_unification_table
-                    .union_value(var, Some(eff1.clone()));
-                eff1.clone()
-            }
-            (Some(var), None) => {
-                self.effect_unification_table
-                    .union_value(var, Some(eff2.clone()));
-                eff2.clone()
-            }
-            (Some(var1), Some(var2)) => {
-                self.effect_unification_table.union(var1, var2);
-                eff1.clone()
-            }
-        }
+        self.effects.unify_effects(eff1, eff2)
     }
 
     pub fn unify(

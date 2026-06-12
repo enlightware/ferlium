@@ -37,7 +37,7 @@ pub fn test_mod(session: &mut TestSession, src: &str, f: &str, exp_eff: EffType)
         .ty()
         .effects
         .clone();
-    assert_eq!(effects, exp_eff);
+    assert_eq!(effects, exp_eff, "effect mismatch for function {f}");
 }
 
 fn test_expr(session: &mut TestSession, src: &str, exp_eff: EffType) {
@@ -163,6 +163,41 @@ fn effects_from_fn_value() {
         mod_src,
         "b",
         effects(&[Fallible, Write]).union(&effect_var(0)),
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn branch_returning_composed_closures_unifies_multiple_effect_variables() {
+    use PrimitiveEffect::*;
+
+    let mut session = TestSession::new();
+
+    let mod_src = indoc! {r#"
+        fn choose(flag, f, g, h, k) {
+            if flag {
+                |x| g(f(x))
+            } else {
+                |x| k(h(x))
+            }
+        }
+
+        fn call_read_write() {
+            let composed = choose(
+                true,
+                |x| { effects::read(); x },
+                |x| x,
+                |x| x,
+                |x| { effects::write(); x },
+            );
+            composed(1)
+        }
+    "#};
+    test_mod(
+        &mut session,
+        mod_src,
+        "call_read_write",
+        effects(&[Read, Write]),
     );
 }
 
@@ -426,6 +461,48 @@ fn trait_output_effects_multiple_slots_resolve_independently() {
             r#"fn bad() { effects::take_read(|| { testing::eff_pair_second(true); () }) }"#,
         )
         .expect_invalid_effect_dependency(effect(Write), effect(Read));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_output_effects_can_join_multiple_effect_variables() {
+    use PrimitiveEffect::*;
+
+    let mut session = TestSession::new();
+
+    let concrete_src = indoc! {r#"
+        fn pure_join() -> int { let x: int = 1; let y: int = 2; testing::eff_join((x, y)) }
+        fn read_join() -> int { let x: int = 1; testing::eff_join((x, true)) }
+        fn write_join() -> int { let x: int = 1; testing::eff_join((x, "s")) }
+        fn read_write_join() -> int { testing::eff_join((true, "s")) }
+    "#};
+    test_mod(&mut session, concrete_src, "pure_join", EffType::empty());
+    test_mod(&mut session, concrete_src, "read_join", effect(Read));
+    test_mod(&mut session, concrete_src, "write_join", effect(Write));
+    test_mod(
+        &mut session,
+        concrete_src,
+        "read_write_join",
+        effects(&[Read, Write]),
+    );
+
+    let generic_src = indoc! {r#"
+        fn generic_join(a, b) { testing::eff_join((a, b)) }
+        fn call_pure() -> int { let x: int = 1; let y: int = 2; generic_join(x, y) }
+        fn call_read() -> int { let x: int = 1; generic_join(x, true) }
+        fn call_write() -> int { let x: int = 1; generic_join(x, "s") }
+        fn call_read_write() -> int { generic_join(true, "s") }
+    "#};
+    test_mod(&mut session, generic_src, "generic_join", effect_var(0));
+    test_mod(&mut session, generic_src, "call_pure", EffType::empty());
+    test_mod(&mut session, generic_src, "call_read", effect(Read));
+    test_mod(&mut session, generic_src, "call_write", effect(Write));
+    test_mod(
+        &mut session,
+        generic_src,
+        "call_read_write",
+        effects(&[Read, Write]),
+    );
 }
 
 #[test]

@@ -287,7 +287,7 @@ impl PubTypeConstraint {
                             let mut ty_inf = UnifiedTypeInference::new_with_ty_vars(ty_var_count);
                             let output_ty = output_ty.instantiate_simple(&local_subst);
                             ty_inf
-                                .unify_same_type(
+                                .unify_same_type_with_sub_effects(
                                     *got_output_ty,
                                     span.use_site,
                                     output_ty,

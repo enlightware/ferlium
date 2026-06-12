@@ -835,7 +835,12 @@ impl<'a> TraitSolver<'a> {
             } => {
                 for (candidate_input, input_ty) in candidate_inputs.iter().zip(input_tys.iter()) {
                     if ty_inf
-                        .unify_same_type(*candidate_input, fn_span, *input_ty, fn_span)
+                        .unify_same_type_with_sub_effects(
+                            *candidate_input,
+                            fn_span,
+                            *input_ty,
+                            fn_span,
+                        )
                         .is_err()
                     {
                         return Ok(TraitImprovementMatch::No);
@@ -846,7 +851,12 @@ impl<'a> TraitSolver<'a> {
                         candidate_outputs.iter().zip(output_tys.iter())
                     {
                         if ty_inf
-                            .unify_same_type(*candidate_output, fn_span, *output_ty, fn_span)
+                            .unify_same_type_with_sub_effects(
+                                *candidate_output,
+                                fn_span,
+                                *output_ty,
+                                fn_span,
+                            )
                             .is_err()
                         {
                             return Ok(TraitImprovementMatch::No);
@@ -918,13 +928,23 @@ impl<'a> TraitSolver<'a> {
                 output_effs: candidate_output_effs,
             } => {
                 for (candidate_input, input_ty) in candidate_inputs.iter().zip(input_tys.iter()) {
-                    ty_inf.unify_same_type(*candidate_input, fn_span, *input_ty, fn_span)?;
+                    ty_inf.unify_same_type_with_sub_effects(
+                        *candidate_input,
+                        fn_span,
+                        *input_ty,
+                        fn_span,
+                    )?;
                 }
                 if let Some(output_tys) = output_tys {
                     for (candidate_output, output_ty) in
                         candidate_outputs.iter().zip(output_tys.iter())
                     {
-                        ty_inf.unify_same_type(*candidate_output, fn_span, *output_ty, fn_span)?;
+                        ty_inf.unify_same_type_with_sub_effects(
+                            *candidate_output,
+                            fn_span,
+                            *output_ty,
+                            fn_span,
+                        )?;
                     }
                 }
                 if let Some(output_effs) = output_effs {
@@ -959,13 +979,23 @@ impl<'a> TraitSolver<'a> {
                     .map(|eff| mapper.map_effect_type(eff))
                     .collect();
                 for (candidate_input, input_ty) in candidate_inputs.iter().zip(input_tys.iter()) {
-                    ty_inf.unify_same_type(*candidate_input, fn_span, *input_ty, fn_span)?;
+                    ty_inf.unify_same_type_with_sub_effects(
+                        *candidate_input,
+                        fn_span,
+                        *input_ty,
+                        fn_span,
+                    )?;
                 }
                 if let Some(output_tys) = output_tys {
                     for (candidate_output, output_ty) in
                         candidate_outputs.iter().zip(output_tys.iter())
                     {
-                        ty_inf.unify_same_type(*candidate_output, fn_span, *output_ty, fn_span)?;
+                        ty_inf.unify_same_type_with_sub_effects(
+                            *candidate_output,
+                            fn_span,
+                            *output_ty,
+                            fn_span,
+                        )?;
                     }
                 }
                 if let Some(output_effs) = output_effs {
@@ -1149,7 +1179,12 @@ impl<'a> TraitSolver<'a> {
                     for (input_ty, improved_input_ty) in
                         input_tys.iter().zip(improved_input_tys.iter())
                     {
-                        ty_inf.unify_same_type(*input_ty, fn_span, *improved_input_ty, fn_span)?;
+                        ty_inf.unify_same_type_with_sub_effects(
+                            *input_ty,
+                            fn_span,
+                            *improved_input_ty,
+                            fn_span,
+                        )?;
                     }
                     if let (Some(output_tys), Some(improved_output_tys)) =
                         (output_tys, improved_output_tys.as_deref())
@@ -1157,7 +1192,7 @@ impl<'a> TraitSolver<'a> {
                         for (output_ty, improved_output_ty) in
                             output_tys.iter().zip(improved_output_tys.iter())
                         {
-                            ty_inf.unify_same_type(
+                            ty_inf.unify_same_type_with_sub_effects(
                                 *output_ty,
                                 fn_span,
                                 *improved_output_ty,
@@ -1374,7 +1409,7 @@ impl<'a> TraitSolver<'a> {
         // information already available at the use site.
         for (imp_input_ty, input_ty) in imp_input_tys.iter().zip(input_tys.iter()) {
             if ty_inf
-                .unify_same_type(*imp_input_ty, fn_span, *input_ty, fn_span)
+                .unify_same_type_with_sub_effects(*imp_input_ty, fn_span, *input_ty, fn_span)
                 .is_err()
             {
                 return Ok(BlanketImplMatch::No);
@@ -1383,7 +1418,7 @@ impl<'a> TraitSolver<'a> {
         if let Some(output_tys) = output_tys {
             for (imp_output_ty, output_ty) in imp_output_tys.iter().zip(output_tys.iter()) {
                 if ty_inf
-                    .unify_same_type(*imp_output_ty, fn_span, *output_ty, fn_span)
+                    .unify_same_type_with_sub_effects(*imp_output_ty, fn_span, *output_ty, fn_span)
                     .is_err()
                 {
                     return Ok(BlanketImplMatch::No);
@@ -1472,7 +1507,12 @@ impl<'a> TraitSolver<'a> {
                     solved_outputs.iter().zip(constraint_outputs.iter())
                 {
                     if ty_inf
-                        .unify_same_type(*solved_output, fn_span, *constraint_output, fn_span)
+                        .unify_same_type_with_sub_effects(
+                            *solved_output,
+                            fn_span,
+                            *constraint_output,
+                            fn_span,
+                        )
                         .is_err()
                     {
                         return Ok(BlanketImplMatch::No);
@@ -1555,7 +1595,7 @@ impl<'a> TraitSolver<'a> {
         if let Some(output_tys) = output_tys {
             for (imp_output_ty, output_ty) in imp_output_tys.iter().zip(output_tys.iter()) {
                 if ty_inf
-                    .unify_same_type(*imp_output_ty, fn_span, *output_ty, fn_span)
+                    .unify_same_type_with_sub_effects(*imp_output_ty, fn_span, *output_ty, fn_span)
                     .is_err()
                 {
                     return Ok(BlanketImplMatch::No);

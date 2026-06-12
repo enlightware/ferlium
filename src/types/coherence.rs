@@ -58,7 +58,7 @@ impl CoherenceTypeUnifier {
         self.inner.rollback_to(snapshot.inner);
     }
 
-    fn unify_same_type(
+    fn unify_same_type_with_sub_effects(
         &mut self,
         current: Type,
         current_span: Location,
@@ -66,7 +66,7 @@ impl CoherenceTypeUnifier {
         expected_span: Location,
     ) -> Result<(), InternalCompilationError> {
         self.inner
-            .unify_same_type(current, current_span, expected, expected_span)
+            .unify_same_type_with_sub_effects(current, current_span, expected, expected_span)
     }
 
     fn unify_same_effect(
@@ -363,13 +363,16 @@ fn blanket_impls_overlap(
         .collect();
     let rhs_constraints = instantiate_types(&rhs.constraints, &mut mapper);
     for (&lhs_ty, &rhs_ty) in lhs.input_tys.iter().zip(rhs_inputs.iter()) {
-        if ty_inf.unify_same_type(lhs_ty, span, rhs_ty, span).is_err() {
+        if ty_inf
+            .unify_same_type_with_sub_effects(lhs_ty, span, rhs_ty, span)
+            .is_err()
+        {
             return Ok(false);
         }
     }
     for (&lhs_output_ty, &rhs_output_ty) in lhs_output_tys.iter().zip(rhs_outputs.iter()) {
         if ty_inf
-            .unify_same_type(lhs_output_ty, span, rhs_output_ty, span)
+            .unify_same_type_with_sub_effects(lhs_output_ty, span, rhs_output_ty, span)
             .is_err()
         {
             return Ok(false);
@@ -426,7 +429,7 @@ fn constraints_may_be_satisfiable(
         };
         for (&solved_output_ty, &output_ty) in solved_output_tys.iter().zip(&output_tys) {
             if ty_inf
-                .unify_same_type(
+                .unify_same_type_with_sub_effects(
                     solved_output_ty,
                     Location::new_synthesized(),
                     output_ty,
@@ -597,7 +600,7 @@ fn concrete_impl_may_match_constraint(
     let span = Location::new_synthesized();
     for (&candidate_input_ty, &constraint_input_ty) in key.input_tys.iter().zip(input_tys) {
         if ty_inf
-            .unify_same_type(candidate_input_ty, span, constraint_input_ty, span)
+            .unify_same_type_with_sub_effects(candidate_input_ty, span, constraint_input_ty, span)
             .is_err()
         {
             return Ok(false);
@@ -605,7 +608,7 @@ fn concrete_impl_may_match_constraint(
     }
     for (&candidate_output_ty, &constraint_output_ty) in imp.output_tys.iter().zip(output_tys) {
         if ty_inf
-            .unify_same_type(candidate_output_ty, span, constraint_output_ty, span)
+            .unify_same_type_with_sub_effects(candidate_output_ty, span, constraint_output_ty, span)
             .is_err()
         {
             return Ok(false);
@@ -666,7 +669,7 @@ fn blanket_impl_may_match_constraint(
     let span = Location::new_synthesized();
     for (&candidate_input_ty, &constraint_input_ty) in candidate_inputs.iter().zip(input_tys) {
         if ty_inf
-            .unify_same_type(candidate_input_ty, span, constraint_input_ty, span)
+            .unify_same_type_with_sub_effects(candidate_input_ty, span, constraint_input_ty, span)
             .is_err()
         {
             return Ok(false);
@@ -674,7 +677,7 @@ fn blanket_impl_may_match_constraint(
     }
     for (&candidate_output_ty, &constraint_output_ty) in candidate_outputs.iter().zip(output_tys) {
         if ty_inf
-            .unify_same_type(candidate_output_ty, span, constraint_output_ty, span)
+            .unify_same_type_with_sub_effects(candidate_output_ty, span, constraint_output_ty, span)
             .is_err()
         {
             return Ok(false);
