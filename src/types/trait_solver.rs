@@ -1094,12 +1094,13 @@ impl<'a> TraitSolver<'a> {
             .chain(output_tys.unwrap_or_default().iter())
             .flat_map(TypeLike::inner_ty_vars)
             .collect::<FxHashSet<_>>();
-        let mut unique_candidate: Option<(
+        type Candidate = (
             TraitImprovementCandidate,
             TraitImprovementMatch,
             Vec<Type>,
             Option<Vec<Type>>,
-        )> = None;
+        );
+        let mut unique_candidate: Option<Candidate> = None;
         let mut found_multiple_candidates = false;
 
         for candidate in candidates {
