@@ -497,6 +497,15 @@ mod tests {
     }
 
     #[test]
+    fn run_expr_inspects_unit() {
+        let mut compiler = build("()");
+
+        let result = compiler.run_expr().expect("expression should exist");
+
+        assert_eq!(result.html_message(), "(): ()");
+    }
+
+    #[test]
     fn run_expr_inspect_preserves_named_types() {
         let mut compiler =
             build(r#"struct Person { name: string, age: int } Person { name: "Alice", age: 30 }"#);

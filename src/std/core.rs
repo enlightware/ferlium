@@ -15,7 +15,8 @@ use crate::{
     module::Module,
     std::{
         core_traits_names::{
-            DEFAULT_TRAIT_NAME, REPR_TRAIT_NAME, TRIVIAL_COPY_TRAIT_NAME, VALUE_TRAIT_NAME,
+            DEFAULT_TRAIT_NAME, INSPECT_TRAIT_NAME, REPR_TRAIT_NAME, TRIVIAL_COPY_TRAIT_NAME,
+            VALUE_TRAIT_NAME,
         },
         hash::Hasher,
         logic::bool_type,
@@ -82,6 +83,7 @@ pub fn add_to_module(to: &mut Module) {
         TRIVIAL_COPY_TRAIT_NAME
     );
     let value_trait_id = to.expect_std_trait_id_in_current_module(VALUE_TRAIT_NAME);
+    let inspect_trait_id = to.expect_std_trait_id_in_current_module(INSPECT_TRAIT_NAME);
 
     to.add_concrete_impl_no_locals(
         value_trait_id,
@@ -95,6 +97,13 @@ pub fn add_to_module(to: &mut Module) {
             native_value_clone_function::<()>(),
             native_value_drop_function::<()>(),
         ],
+    );
+    to.add_concrete_impl_no_locals(
+        inspect_trait_id,
+        [Type::unit()],
+        [],
+        [],
+        [b(UnaryNativeFnNN::new(unit_to_string)) as Function],
     );
     let default_trait_id = to.expect_std_trait_id_in_current_module(DEFAULT_TRAIT_NAME);
     to.add_native_concrete_impl(
