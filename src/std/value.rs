@@ -335,7 +335,9 @@ fn layout_for_value_type(
         Named(named) => {
             let named = named.clone();
             drop(ty_data);
-            let shape_ty = env.type_def(named.def).instantiated_shape(&named.params);
+            let shape_ty = env
+                .type_def(named.def)
+                .instantiated_shape_with_effects(&named.params, &named.effect_params);
             let layout = layout_for_value_type(shape_ty, span, active, env)?;
             active.remove(&ty);
             return Ok(layout);
@@ -1115,7 +1117,8 @@ fn derive_structural_text_body(
             drop(ty_data);
             let type_def = ctx.solver.type_def(named.def);
             let type_name = type_def.name;
-            let shape_ty = type_def.instantiated_shape(&named.params);
+            let shape_ty =
+                type_def.instantiated_shape_with_effects(&named.params, &named.effect_params);
             let load_self = n(arena, load_local(l_self_id), ty);
             let mut locals = locals;
             let shape_data = shape_ty.data();
@@ -1440,7 +1443,7 @@ fn derive_value_eq_body(
             let shape_ty = ctx
                 .solver
                 .type_def(named.def)
-                .instantiated_shape(&named.params);
+                .instantiated_shape_with_effects(&named.params, &named.effect_params);
             let shape_data = shape_ty.data();
             match &*shape_data {
                 Tuple(member_tys) => {
@@ -1636,7 +1639,7 @@ fn derive_value_hash_body(
             let shape_ty = ctx
                 .solver
                 .type_def(named.def)
-                .instantiated_shape(&named.params);
+                .instantiated_shape_with_effects(&named.params, &named.effect_params);
             let shape_data = shape_ty.data();
             match &*shape_data {
                 Tuple(member_tys) => {
@@ -1864,7 +1867,7 @@ fn derive_value_clone_body(
             let shape_ty = ctx
                 .solver
                 .type_def(named.def)
-                .instantiated_shape(&named.params);
+                .instantiated_shape_with_effects(&named.params, &named.effect_params);
             let shape_data = shape_ty.data();
             match &*shape_data {
                 Tuple(member_tys) => {
@@ -2014,7 +2017,7 @@ fn derive_value_drop_body(
             let shape_ty = ctx
                 .solver
                 .type_def(named.def)
-                .instantiated_shape(&named.params);
+                .instantiated_shape_with_effects(&named.params, &named.effect_params);
             let shape_data = shape_ty.data();
             match &*shape_data {
                 Tuple(member_tys) => {

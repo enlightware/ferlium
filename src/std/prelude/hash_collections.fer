@@ -132,11 +132,11 @@ where
 	}
 }
 
-impl<V, I> FromIterator for <Self = HashSet<V>, Iter = I>
+impl<V, I ! IterEffect> FromIterator for <Self = HashSet<V>, Iter = I |-> Item = V ! FromIterEffect = (fallible, IterEffect)>
 where
 	V: Value,
-	I: Iterator<Item = V>,
-	I: Value
+	I: Value,
+	I: Iterator<Item = V ! NextEffect = IterEffect>
 {
 	fn from_iter(iterator: I) -> HashSet<V> {
 		let mut iterator = iterator;
@@ -427,12 +427,12 @@ where
 	}
 }
 
-impl<K, V, I> FromIterator for <Self = HashMap<K, V>, Iter = I>
+impl<K, V, I ! IterEffect> FromIterator for <Self = HashMap<K, V>, Iter = I |-> Item = (K, V) ! FromIterEffect = (fallible, IterEffect)>
 where
 	K: Value,
 	V: Value,
-	I: Iterator<Item = (K, V)>,
-	I: Value
+	I: Value,
+	I: Iterator<Item = (K, V) ! NextEffect = IterEffect>
 {
 	fn from_iter(iterator: I) -> HashMap<K, V> {
 		let mut iterator = iterator;

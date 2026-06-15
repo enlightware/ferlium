@@ -26,7 +26,7 @@ use ferlium::{
         math::int_type,
         string::string_type,
     },
-    types::effects::{EffType, PrimitiveEffect, effect, effects, no_effects},
+    types::effects::{EffType, EffectVar, PrimitiveEffect, effect, effects, no_effects},
     types::r#trait::Trait,
     types::r#type::{
         FnType, Type, TypeDef, TypeDefProductDocs, TypeDefShapeDocs, TypeVar, variant_type,
@@ -481,6 +481,7 @@ fn option_type_def() -> TypeDef {
         name: ustr("Option"),
         doc: None,
         generic_params: vec![(ustr("T"), Location::new_synthesized())],
+        generic_effect_params: vec![],
         shape: TypeScheme {
             ty_quantifiers: vec![TypeVar::new(0)],
             eff_quantifiers: FxHashSet::default(),
@@ -506,9 +507,10 @@ fn map_iterator_type_def(iterator_trait: TraitId) -> TypeDef {
             (ustr("T"), Location::new_synthesized()),
             (ustr("O"), Location::new_synthesized()),
         ],
+        generic_effect_params: vec![],
         shape: TypeScheme {
             ty_quantifiers: vec![TypeVar::new(0), TypeVar::new(1), TypeVar::new(2)],
-            eff_quantifiers: FxHashSet::default(),
+            eff_quantifiers: [EffectVar::new(0)].into_iter().collect(),
             ty: Type::record([
                 (ustr("iterator"), Type::variable_id(0)),
                 (
@@ -520,7 +522,7 @@ fn map_iterator_type_def(iterator_trait: TraitId) -> TypeDef {
                 iterator_trait,
                 vec![Type::variable_id(0)],
                 vec![Type::variable_id(1)],
-                vec![],
+                vec![EffType::single_variable_id(0)],
                 Location::new_synthesized(),
             )],
         },
@@ -539,6 +541,7 @@ fn witnessed_type_def(test_assoc_trait: TraitId) -> TypeDef {
             (ustr("Input"), Location::new_synthesized()),
             (ustr("Output"), Location::new_synthesized()),
         ],
+        generic_effect_params: vec![],
         shape: TypeScheme {
             ty_quantifiers: vec![TypeVar::new(0), TypeVar::new(1)],
             eff_quantifiers: FxHashSet::default(),
@@ -683,6 +686,7 @@ fn testing_module(
                 [Type::variable_id(0), Type::variable_id(1)],
             )],
             ty_var_count: 2,
+            eff_var_count: 0,
             constraints: vec![PubTypeConstraint::new_have_trait(
                 test_assoc_trait_id,
                 vec![Type::variable_id(0)],
@@ -736,6 +740,7 @@ fn testing_module(
         BlanketTraitImplSubKey {
             input_tys: vec![Type::named(option_type_def_id, [Type::variable_id(0)])],
             ty_var_count: 2,
+            eff_var_count: 0,
             constraints: vec![PubTypeConstraint::new_have_trait(
                 test_eff_trait_id,
                 vec![Type::variable_id(0)],
@@ -781,6 +786,7 @@ fn testing_module(
         BlanketTraitImplSubKey {
             input_tys: vec![Type::tuple([Type::variable_id(0), Type::variable_id(1)])],
             ty_var_count: 4,
+            eff_var_count: 0,
             constraints: vec![
                 PubTypeConstraint::new_have_trait(
                     test_eff_trait_id,

@@ -26,7 +26,7 @@ use crate::{
         TraitId, id::Id,
     },
     parser::location::Location,
-    types::effects::{EffType, EffectVar},
+    types::effects::{EffType, EffectVar, format_effect_binding_value},
     types::r#trait::{
         Trait, TraitAssociatedConstIndex, TraitDictionaryEntryIndex, TraitMethodIndex,
     },
@@ -119,6 +119,8 @@ pub struct BlanketTraitImplSubKey {
     pub input_tys: Vec<Type>,
     /// Number of type variables in this blanket implementation.
     pub ty_var_count: u32,
+    /// Number of effect variables in this blanket implementation.
+    pub eff_var_count: u32,
     /// The generic constraints necessary to implement the trait.
     pub constraints: Vec<PubTypeConstraint>,
 }
@@ -955,7 +957,10 @@ fn format_impl_header_expanded(
             write_with_separator_and_format_fn(
                 output_effs.iter().zip(trait_def.output_effect_names.iter()),
                 ", ",
-                |(eff, name), f| write!(f, "{name} = {eff}"),
+                |(eff, name), f| {
+                    write!(f, "{name} = ")?;
+                    format_effect_binding_value(eff, f)
+                },
                 f,
             )?;
         }

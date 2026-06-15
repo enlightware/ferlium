@@ -204,9 +204,14 @@ fn substitute_type_rec(
         Named(NamedType {
             def: decl,
             params: args,
+            effect_params,
         }) => Named(NamedType {
             def: decl,
             params: substitute_types_rec(&args, substituer, output, seen),
+            effect_params: effect_params
+                .iter()
+                .map(|eff| substituer.substitute_effect_type(eff))
+                .collect(),
         }),
         Never => Never,
     };
@@ -259,9 +264,17 @@ fn map_type_rec(
                 .collect(),
         ),
         Function(fn_ty) => Function(b(map_fn_type_rec(&fn_ty, mapper, output, seen))),
-        Named(NamedType { def, params }) => Named(NamedType {
+        Named(NamedType {
+            def,
+            params,
+            effect_params,
+        }) => Named(NamedType {
             def,
             params: map_types_rec(&params, mapper, output, seen),
+            effect_params: effect_params
+                .iter()
+                .map(|eff| mapper.map_effect_type(eff))
+                .collect(),
         }),
         Never => Never,
     };

@@ -1151,10 +1151,7 @@ fn value_function_arity_for_static_std_function_value() {
     let mut session = TestSession::new();
     session
         .fail_compilation("{map}(0, 0, 0) == 0")
-        .expect_type_mismatch(
-            "(B, (C) -> D ! fallible) -> E ! fallible",
-            "(F, G, H) -> I ! e₀",
-        );
+        .expect_type_mismatch("(B, (C) -> D ! e₀) -> E ! e₁", "(F, G, H) -> I ! e₂");
 }
 
 #[test]

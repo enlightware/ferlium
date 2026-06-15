@@ -46,7 +46,9 @@ use crate::{
         type_constraints::named_type_constraints_in_types,
         type_inference::{
             defaulting::{ConstraintBoundary, DefaultingScope},
+            effect_solver::EffectConstraintOrigin,
             expr::{AnnotationTypeMapper, TypeInference},
+            substitution::InstSubst,
             unify::UnifiedTypeInference,
         },
         type_like::{TypeLike, instantiate_types_in_place},
@@ -65,7 +67,7 @@ use log::log_enabled;
 use ustr::{Ustr, ustr};
 
 use crate::hir::elaboration::elaborate_generated_functions;
-use crate::types::effects::EffType;
+use crate::types::effects::{EffType, Effect, EffectVar, EffectsInstSubst};
 
 /// Context passed to emit_functions when a trait implementation is being emitted.
 pub(super) struct EmitTraitCtx<'a> {
@@ -74,6 +76,7 @@ pub(super) struct EmitTraitCtx<'a> {
     pub(super) span: Location,
     pub(super) stub_data: Option<&'a ImplStubData>,
     pub(super) generic_param_count: usize,
+    pub(super) generic_effect_param_count: usize,
     pub(super) for_trait: Option<&'a ast::DTraitImplFor>,
     pub(super) impl_constraints: &'a [PubTypeConstraint],
 }
@@ -83,6 +86,7 @@ pub(crate) struct EmitTraitOutput {
     pub(crate) output_tys: Vec<Type>,
     pub(crate) output_effs: Vec<EffType>,
     pub(crate) ty_var_count: u32,
+    pub(crate) eff_var_count: u32,
     pub(crate) constraints: Vec<PubTypeConstraint>,
     pub(crate) functions: Vec<LocalFunctionId>,
 }
@@ -91,6 +95,16 @@ pub(crate) struct EmitTraitOutput {
 struct FunctionAttributes {
     returns_place: bool,
     no_fuel_check: bool,
+}
+
+fn normalize_effect_vars(vars: &mut [EffectVar]) -> EffectsInstSubst {
+    let mut eff_subst = EffectsInstSubst::default();
+    for (index, quantifier) in vars.iter_mut().enumerate() {
+        let new_var = EffectVar::new(index as u32);
+        eff_subst.insert(*quantifier, EffType::single_variable(new_var));
+        *quantifier = new_var;
+    }
+    eff_subst
 }
 
 fn validate_function_attributes(
@@ -299,6 +313,7 @@ where
     let mut ty_inf = TypeInference::default();
     let mut impl_annotation_subst = None;
     let mut outer_annotation_var_count = 0;
+    let mut outer_annotation_eff_var_count = 0;
     let mut explicit_trait_impl = None;
     let module_env = ModuleEnv::new(output, others);
 
@@ -325,10 +340,14 @@ where
         // Reserve the leading annotation placeholder indices for explicit impl-level generics,
         // so any function-level generics in this shared path start after them.
         outer_annotation_var_count = explicit_quantifiers.len();
-        if !explicit_quantifiers.is_empty() {
+        let explicit_eff_quantifiers = (0..trait_ctx.generic_effect_param_count)
+            .map(|index| EffectVar::new(index as u32))
+            .collect::<FxHashSet<_>>();
+        outer_annotation_eff_var_count = trait_ctx.generic_effect_param_count;
+        if !explicit_quantifiers.is_empty() || !explicit_eff_quantifiers.is_empty() {
             impl_annotation_subst = Some((
                 ty_inf.fresh_type_var_subst(&explicit_quantifiers),
-                FxHashMap::default(),
+                ty_inf.fresh_effect_var_subst(&explicit_eff_quantifiers),
             ));
         }
         explicit_trait_impl = trait_ctx.for_trait.map(|for_trait| {
@@ -349,14 +368,26 @@ where
                 .into_iter()
                 .map(&mut instantiate)
                 .collect();
+            let output_effs: Vec<_> = for_trait
+                .output_effs()
+                .into_iter()
+                .map(|eff| match &mut mapper {
+                    Some(m) => m.map_effect_type(&eff),
+                    None => eff,
+                })
+                .collect();
             let mut explicit_tys = input_tys.clone();
             explicit_tys.extend(output_tys.iter().copied());
             let explicit_constraints =
                 named_type_constraints_in_types(explicit_tys, trait_ctx.span, &module_env);
-            (input_tys, output_tys, explicit_constraints)
+            (input_tys, output_tys, output_effs, explicit_constraints)
         });
-        if let Some((explicit_input_tys, explicit_output_tys, explicit_constraints)) =
-            &explicit_trait_impl
+        if let Some((
+            explicit_input_tys,
+            explicit_output_tys,
+            explicit_output_effs,
+            explicit_constraints,
+        )) = &explicit_trait_impl
         {
             if explicit_input_tys.len() != input_tys.len() {
                 return Err(internal_compilation_error!(WrongNumberOfArguments {
@@ -371,6 +402,14 @@ where
                     expected: output_tys.len(),
                     expected_span: trait_ctx.span,
                     got: explicit_output_tys.len(),
+                    got_span: trait_ctx.span,
+                }));
+            }
+            if !explicit_output_effs.is_empty() && explicit_output_effs.len() != output_effs.len() {
+                return Err(internal_compilation_error!(WrongNumberOfArguments {
+                    expected: output_effs.len(),
+                    expected_span: trait_ctx.span,
+                    got: explicit_output_effs.len(),
                     got_span: trait_ctx.span,
                 }));
             }
@@ -390,6 +429,14 @@ where
                     *output_ty,
                     trait_ctx.span,
                     *explicit_ty,
+                    trait_ctx.span,
+                );
+            }
+            for (output_eff, explicit_eff) in output_effs.iter().zip(explicit_output_effs.iter()) {
+                ty_inf.add_same_effect_constraint(
+                    output_eff,
+                    trait_ctx.span,
+                    explicit_eff,
                     trait_ctx.span,
                 );
             }
@@ -426,6 +473,7 @@ where
             output_tys,
             output_effs,
             ty_var_count: 0,
+            eff_var_count: 0,
             constraints: vec![],
             functions: vec![],
         })
@@ -443,7 +491,7 @@ where
 
     // Populate the function table
     let mut local_fns = Vec::new();
-    let mut function_annotation_ty_substs = Vec::new();
+    let mut function_annotation_substs = Vec::new();
     let mut function_explicit_root_tys = Vec::new();
     let mut function_attrs = Vec::new();
     for ast::ModuleFunction {
@@ -465,9 +513,15 @@ where
         // They will be filled in the second pass.
         // The effect quantifiers are filled with the output effect variable.
         if let Some(trait_ctx) = &trait_ctx {
-            if let Some((_, generic_span)) = generic_params.first() {
+            if !generic_params.is_empty() {
+                let generic_span = generic_params
+                    .type_params()
+                    .first()
+                    .or_else(|| generic_params.effect_params().first())
+                    .unwrap()
+                    .1;
                 return Err(internal_compilation_error!(Unsupported {
-                    span: *generic_span,
+                    span: generic_span,
                     reason: format!(
                         "Explicit generic parameters on trait impl methods are not supported yet: method `{}` in impl of trait `{}`",
                         name.0, trait_ctx.trait_def.name
@@ -484,26 +538,29 @@ where
                 }));
             }
         }
-        let mut annotation_ty_subst = impl_annotation_subst
-            .as_ref()
-            .map(|subst| subst.0.clone())
-            .unwrap_or_default();
+        let mut annotation_subst: InstSubst = impl_annotation_subst.clone().unwrap_or_default();
         let explicit_root_tys = generic_params
+            .type_params()
             .iter()
             .enumerate()
             .map(|(index, _)| {
                 let source_var = TypeVar::new((outer_annotation_var_count + index) as u32);
                 let fresh_ty = ty_inf.fresh_type_var_ty();
-                annotation_ty_subst.insert(source_var, fresh_ty);
+                annotation_subst.0.insert(source_var, fresh_ty);
                 fresh_ty
             })
             .collect::<Vec<_>>();
+        for (index, _) in generic_params.effect_params().iter().enumerate() {
+            let source_var = EffectVar::new((outer_annotation_eff_var_count + index) as u32);
+            let fresh_eff = ty_inf.fresh_effect_var_ty();
+            annotation_subst.1.insert(source_var, fresh_eff);
+        }
         let args_ty = args
             .iter()
             .map(|arg| {
                 if let Some((mut_ty, ty, _)) = &arg.ty {
                     let mut mapper =
-                        AnnotationTypeMapper::new(&mut ty_inf, Some(&annotation_ty_subst));
+                        AnnotationTypeMapper::new(&mut ty_inf, Some(&annotation_subst));
                     let mut_ty = match mut_ty {
                         Some(mut_ty) => mapper.map_mut_type(*mut_ty),
                         None => MutType::constant(),
@@ -518,12 +575,11 @@ where
         let ret_ty_ty = if let Some((ret_ty, _)) = ret_ty {
             ret_ty.map(&mut AnnotationTypeMapper::new(
                 &mut ty_inf,
-                Some(&annotation_ty_subst),
+                Some(&annotation_subst),
             ))
         } else {
             ty_inf.fresh_type_var_ty()
         };
-        let annotation_subst = (annotation_ty_subst.clone(), FxHashMap::default());
         let mut mapper = BitmapInstantiationMapper::new(&annotation_subst);
         for constraint in where_clause {
             ty_inf.add_pub_constraint(constraint.map(&mut mapper));
@@ -587,7 +643,7 @@ where
         let ty_scheme = TypeScheme::new_just_type(fn_type);
         let definition = FunctionDefinition::new_with_generic_params_and_attributes(
             ty_scheme,
-            generic_params.clone(),
+            generic_params.type_params().to_vec(),
             arg_names,
             doc.clone(),
             attributes.clone(),
@@ -609,7 +665,7 @@ where
             output.add_function_with_visibility(name.0, descr, *visibility)
         };
         local_fns.push(id);
-        function_annotation_ty_substs.push(annotation_ty_subst);
+        function_annotation_substs.push(annotation_subst);
         function_explicit_root_tys.push(explicit_root_tys);
         function_attrs.push(attrs);
     }
@@ -629,9 +685,9 @@ where
         .collect::<FxHashSet<_>>();
 
     // Second pass, infer types and emit function bodies.
-    for (((function, id), annotation_ty_subst), attrs) in ast_functions()
+    for (((function, id), annotation_subst), attrs) in ast_functions()
         .zip(local_fns.iter())
-        .zip(function_annotation_ty_substs.iter())
+        .zip(function_annotation_substs.iter())
         .zip(function_attrs.iter())
     {
         let descr = output.get_function_by_id(*id).unwrap();
@@ -659,7 +715,8 @@ where
             module_env,
             Some((expected_ret_ty, expected_span)),
             descr.definition.ty_scheme.ty.return_convention,
-            (!annotation_ty_subst.is_empty()).then_some(annotation_ty_subst),
+            (!annotation_subst.0.is_empty() || !annotation_subst.1.is_empty())
+                .then_some(annotation_subst),
             vec![],
             !attrs.no_fuel_check,
             &mut lambda_functions,
@@ -710,6 +767,38 @@ where
     }
     let module_env = ModuleEnv::new(output, others);
     ty_inf.log_debug_constraints(module_env);
+
+    if let (Some(trait_ctx), Some(trait_output)) = (&trait_ctx, &trait_output) {
+        let trait_effect_subst = trait_ctx
+            .trait_def
+            .effect_param_subst_for_effs(&trait_output.output_effs);
+        for (method_index, id) in local_fns.iter().enumerate() {
+            let method_index = TraitMethodIndex::from_index(method_index);
+            let descr = output.get_function_by_id(*id).unwrap();
+            let (method_name, trait_method_def) = trait_ctx.trait_def.method(method_index);
+            let trait_effects = trait_method_def
+                .ty_scheme
+                .ty
+                .effects
+                .instantiate(&trait_effect_subst);
+            let impl_effects = &descr.definition.ty_scheme.ty.effects;
+            let span = descr
+                .spans
+                .as_ref()
+                .map_or(trait_ctx.span, |spans| spans.span);
+            ty_inf.add_effect_dep_constraint_with_origin(
+                impl_effects,
+                span,
+                &trait_effects,
+                trait_ctx.span,
+                EffectConstraintOrigin::TraitMethodImpl {
+                    trait_id: trait_ctx.trait_id,
+                    method_name: *method_name,
+                    impl_span: span,
+                },
+            )?;
+        }
+    }
 
     // Third pass, perform the unification.
     let mut solver = trait_solver_from_module!(output, others);
@@ -765,6 +854,8 @@ where
             );
             elaborate_generated_functions(output, others, &mut pending_functions, generated)?;
 
+            ty_inf.finalize_effect_dependencies()?;
+
             // Check for remaining orphans.
             ty_inf.normalize_remaining_constraints();
             let input_tys = ty_inf.substitute_in_types(&trait_output.input_tys);
@@ -812,11 +903,49 @@ where
         // Resolve input and output types and output effects.
         ty_inf.substitute_in_types_in_place(&mut trait_output.input_tys);
         ty_inf.substitute_in_types_in_place(&mut trait_output.output_tys);
+        let output_eff_slot_roots = trait_output
+            .output_effs
+            .iter()
+            .map(|eff| {
+                eff.to_single_variable()
+                    .map(|var| ty_inf.effect_var_root(var))
+            })
+            .collect::<Vec<_>>();
         ty_inf.substitute_in_effect_types_in_place(&mut trait_output.output_effs);
-        // Any output effect slot left unconstrained by the methods resolves to
-        // the empty (pure) effect.
-        for eff in &mut trait_output.output_effs {
-            *eff = EffType::multiple_primitive(&eff.inner_non_vars());
+        match explicit_trait_impl
+            .as_ref()
+            .map(|(_, _, explicit_output_effs, _)| explicit_output_effs.as_slice())
+        {
+            Some(explicit_output_effs) if !explicit_output_effs.is_empty() => {
+                let explicit_output_effs = ty_inf.substitute_in_effect_types(explicit_output_effs);
+                trait_output.output_effs = trait_output
+                    .output_effs
+                    .iter()
+                    .zip(explicit_output_effs)
+                    .zip(output_eff_slot_roots)
+                    .map(|((slot_eff, mut explicit_eff), slot_root)| {
+                        // The explicit associated output-effect expression is
+                        // the impl head. Trait output slots are inference
+                        // placeholders used while checking method bodies; keep
+                        // real inferred lower bounds, but do not leak the slot
+                        // placeholder itself into the public impl output.
+                        for effect in slot_eff.iter() {
+                            if matches!(effect, Effect::Variable(var) if Some(var) == slot_root) {
+                                continue;
+                            }
+                            explicit_eff.insert(effect);
+                        }
+                        explicit_eff
+                    })
+                    .collect();
+            }
+            _ => {
+                // Without explicit output-effect bindings, any output effect
+                // slot left unconstrained by the methods resolves to empty.
+                for eff in &mut trait_output.output_effs {
+                    *eff = EffType::multiple_primitive(&eff.inner_non_vars());
+                }
+            }
         }
 
         // Take final substituted constraints.
@@ -832,26 +961,12 @@ where
         for (i, id) in local_fns.iter().enumerate() {
             let i = TraitMethodIndex::from_index(i);
             let descr = &mut output.functions[id.as_index()];
-            let (method_name, trait_method_def) = trait_def.method(i);
+            let (_, trait_method_def) = trait_def.method(i);
             let trait_effects = &trait_method_def
                 .ty_scheme
                 .ty
                 .effects
                 .instantiate(&trait_effect_subst);
-            let impl_effects = &descr.definition.ty_scheme.ty.effects;
-
-            // Check that impl effects are a subset of trait effects.
-            if !impl_effects.is_subset_of(trait_effects) {
-                let span = descr.spans.as_ref().unwrap().span;
-                return Err(internal_compilation_error!(TraitMethodEffectMismatch {
-                    trait_ref: trait_ctx.trait_id,
-                    method_name: *method_name,
-                    expected: trait_effects.clone(),
-                    got: impl_effects.clone(),
-                    span,
-                }));
-            }
-
             // Override the function's effects with the trait's effects for ABI consistency.
             descr.definition.ty_scheme.ty.effects = trait_effects.clone();
         }
@@ -930,11 +1045,30 @@ where
             }
         }
 
-        // Fifth pass, normalize the input types, substitute the types in the functions and input/output types.
-        let subst = (normalize_types(&mut quantifiers), FxHashMap::default());
+        let mut effect_quantifiers = FxHashSet::default();
+        for ty in &trait_output.input_tys {
+            ty.fill_with_inner_effect_vars(&mut effect_quantifiers);
+        }
+        for ty in &trait_output.output_tys {
+            ty.fill_with_inner_effect_vars(&mut effect_quantifiers);
+        }
+        for eff in &trait_output.output_effs {
+            eff.fill_with_inner_effect_vars(&mut effect_quantifiers);
+        }
+        let mut effect_quantifiers = effect_quantifiers.into_iter().sorted().collect::<Vec<_>>();
+        trait_output.eff_var_count = effect_quantifiers.len() as u32;
+
+        // Fifth pass, normalize the input types/effects, substitute the types in the functions and input/output types.
+        let subst = (
+            normalize_types(&mut quantifiers),
+            normalize_effect_vars(&mut effect_quantifiers),
+        );
         let mut mapper = BitmapInstantiationMapper::new(&subst);
         instantiate_types_in_place(&mut trait_output.input_tys, &mut mapper);
         instantiate_types_in_place(&mut trait_output.output_tys, &mut mapper);
+        for eff in &mut trait_output.output_effs {
+            *eff = mapper.map_effect_type(eff);
+        }
         instantiate_types_in_place(&mut trait_output.constraints, &mut mapper);
         for (method_index, id) in local_fns.iter().enumerate() {
             let method_index = TraitMethodIndex::from_index(method_index);
@@ -943,7 +1077,6 @@ where
                 descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.map(&mut mapper);
                 descr.definition.ty_scheme.ty_quantifiers = quantifiers.clone();
                 let eff_quantifiers = descr.definition.ty_scheme.ty.input_effect_vars();
-                assert!(eff_quantifiers.is_empty());
                 descr.definition.ty_scheme.eff_quantifiers = eff_quantifiers;
                 descr.definition.ty_scheme.constraints = trait_output.constraints.clone();
                 let pending = pending_functions
@@ -1068,6 +1201,8 @@ where
             }
         }
 
+        ty_inf.finalize_effect_dependencies()?;
+
         // Substitute everything using ty_inf (single pass, includes all defaults).
         substitute_and_canonicalize_functions(
             output,
@@ -1091,7 +1226,6 @@ where
                 pending_functions: &mut pending_functions,
             },
         );
-
         // Take final substituted constraints.
         let all_constraints = ty_inf.take_constraints();
 
@@ -1196,7 +1330,7 @@ where
                 descr.definition.ty_scheme.eff_quantifiers =
                     descr.definition.ty_scheme.ty.input_effect_vars();
                 descr.definition.ty_scheme.constraints = constraints.clone();
-                descr.definition.generic_params = function.generic_params.clone();
+                descr.definition.generic_params = function.generic_params.type_params().to_vec();
                 pending_functions
                     .get_mut(&function_id)
                     .expect("expected pending function body")
@@ -1217,6 +1351,13 @@ where
                 );
             }
         }
+
+        default_output_effects_in_functions(
+            output,
+            &mut pending_functions,
+            &associated_lambdas,
+            &local_fns,
+        );
 
         // Safety check: make sure that there are no unused constraints.
         let module_env = ModuleEnv::new(output, others);

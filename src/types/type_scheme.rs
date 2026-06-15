@@ -267,7 +267,7 @@ impl PubTypeConstraint {
                 {
                     return Ok(None);
                 }
-                if input_tys.iter().all(Type::is_constant) {
+                if input_tys.iter().all(|ty| ty.is_trait_input_resolved()) {
                     let (got_output_tys, got_output_effs) =
                         trait_solver.solve_outputs(*trait_id, input_tys, span.use_site, arena)?;
                     assert_eq!(got_output_tys.len(), output_tys.len());
@@ -974,7 +974,7 @@ pub(crate) fn extra_parameters_from_constraints(
                 {
                     return None;
                 }
-                if input_tys.iter().all(Type::is_constant) {
+                if input_tys.iter().all(|ty| ty.is_trait_input_resolved()) {
                     panic!(
                         "Type scheme with trait having only non-variable input types in constraints"
                     )

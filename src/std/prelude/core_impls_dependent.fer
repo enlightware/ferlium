@@ -9,29 +9,29 @@ where
 	}
 }
 
-impl<A, B> Map for <Self = [A], Mapped = B |-> Item = A, Output = [B]>
+impl<A, B ! MapperEffect> Map for <Self = [A], Mapped = B |-> Item = A, Output = [B] ! MapperEffect = MapperEffect, MapEffect = (fallible, MapperEffect)>
 where
 	A: Value
 {
-	fn map(value: [A], mapper: ((A) -> B ! fallible)) -> [B] {
+	fn map(value: [A], mapper: (A) -> B ! MapperEffect) -> [B] {
 		from_iter(MapIterator { iterator: ArrayIterator { array: value, index: 0 }, mapper })
 	}
 }
 
-impl<A> Filter for <Self = [A] |-> Item = A, Output = [A]>
+impl<A ! PredicateEffect> Filter for <Self = [A] |-> Item = A, Output = [A] ! PredicateEffect = PredicateEffect, FilterEffect = (fallible, PredicateEffect)>
 where
 	A: Value
 {
-	fn filter(value: [A], predicate: ((A) -> bool ! fallible)) -> [A] {
+	fn filter(value: [A], predicate: (A) -> bool ! PredicateEffect) -> [A] {
 		from_iter(FilterIterator { iterator: ArrayIterator { array: value, index: 0 }, filter: predicate })
 	}
 }
 
-impl<A, B> FilterMap for <Self = [A], Mapped = B |-> Item = A, Output = [B]>
+impl<A, B ! MapperEffect> FilterMap for <Self = [A], Mapped = B |-> Item = A, Output = [B] ! MapperEffect = MapperEffect, FilterMapEffect = (fallible, MapperEffect)>
 where
 	A: Value
 {
-	fn filter_map(value: [A], mapper: ((A) -> Option<B> ! fallible)) -> [B] {
+	fn filter_map(value: [A], mapper: (A) -> Option<B> ! MapperEffect) -> [B] {
 		from_iter(FilterMapIterator { iterator: ArrayIterator { array: value, index: 0 }, filter_map: mapper })
 	}
 }
@@ -75,10 +75,10 @@ pub fn join(seq, separator) {
 // Split implementations
 
 /// Splits `value` around a non-empty `separator` and collects the parts into an array.
-pub fn split<S, Sep, Part, I, Out>(value: S, separator: Sep) -> Out
+pub fn split<S, Sep, Part, I, Out ! SplitIterEffect, FromIterEffect>(value: S, separator: Sep) -> Out
 where
-	Split<Self = S, Separator = Sep |-> Part = Part, Iter = I, Output = Out>,
-	FromIterator<Self = Out, Iter = I>
+	Split<Self = S, Separator = Sep |-> Part = Part, Iter = I, Output = Out ! SplitIterEffect = SplitIterEffect>,
+	FromIterator<Self = Out, Iter = I |-> Item = Part ! FromIterEffect = FromIterEffect>
 {
 	from_iter(split_iterator(value, separator))
 }
@@ -93,7 +93,7 @@ pub struct ArraySplitElementIterator<A>
 	finished: bool,
 }
 
-impl Iterator for ArraySplitElementIterator<A>
+impl Iterator for <Self = ArraySplitElementIterator<A> |-> Item = [A] ! NextEffect = fallible>
 where
 	A: Value
 {
@@ -103,18 +103,19 @@ where
 		};
 
 		let len = len(it.array);
-		match position(skip(it.array, it.next_start), |item| item == it.separator) {
-			Some(relative_start) => {
-				let separator_start = it.next_start + relative_start;
-				let part = array_slice(it.array, it.next_start, separator_start);
-				it.next_start = separator_start + 1;
-				Some(part)
-			},
-			None => {
+		let mut separator_start = it.next_start;
+		loop {
+			if separator_start >= len {
 				let part = array_slice(it.array, it.next_start, len);
 				it.finished = true;
-				Some(part)
-			}
+				return Some(part);
+			};
+			if it.array[separator_start] == it.separator {
+				let part = array_slice(it.array, it.next_start, separator_start);
+				it.next_start = separator_start + 1;
+				return Some(part);
+			};
+			separator_start += 1;
 		}
 	}
 }
@@ -129,7 +130,7 @@ pub struct ArraySplitIterator<A>
 	finished: bool,
 }
 
-impl Iterator for ArraySplitIterator<A>
+impl Iterator for <Self = ArraySplitIterator<A> |-> Item = [A] ! NextEffect = fallible>
 where
 	A: Value
 {
@@ -147,20 +148,19 @@ where
 		};
 
 		let last_candidate = array_len - separator_len;
-		match position(it.next_start..(last_candidate + 1), |candidate_start| {
-			array_slice(it.array, candidate_start, candidate_start + separator_len) == it.separator
-		}) {
-			Some(relative_start) => {
-				let separator_start = it.next_start + relative_start;
-				let part = array_slice(it.array, it.next_start, separator_start);
-				it.next_start = separator_start + separator_len;
-				Some(part)
-			},
-			None => {
+		let mut separator_start = it.next_start;
+		loop {
+			if separator_start > last_candidate {
 				let part = array_slice(it.array, it.next_start, array_len);
 				it.finished = true;
-				Some(part)
-			}
+				return Some(part);
+			};
+			if array_slice(it.array, separator_start, separator_start + separator_len) == it.separator {
+				let part = array_slice(it.array, it.next_start, separator_start);
+				it.next_start = separator_start + separator_len;
+				return Some(part);
+			};
+			separator_start += 1;
 		}
 	}
 }
@@ -177,7 +177,7 @@ impl Split for <Self = string, Separator = string |-> Part = string, Iter = stri
 	}
 }
 
-impl<A> Split for <Self = [A], Separator = A |-> Part = [A], Iter = ArraySplitElementIterator<A>, Output = [[A]]>
+impl<A> Split for <Self = [A], Separator = A |-> Part = [A], Iter = ArraySplitElementIterator<A>, Output = [[A]] ! SplitIterEffect = fallible>
 where
 	A: Value
 {
@@ -191,7 +191,7 @@ where
 	}
 }
 
-impl<A> Split for <Self = [A], Separator = [A] |-> Part = [A], Iter = ArraySplitIterator<A>, Output = [[A]]>
+impl<A> Split for <Self = [A], Separator = [A] |-> Part = [A], Iter = ArraySplitIterator<A>, Output = [[A]] ! SplitIterEffect = fallible>
 where
 	A: Value
 {
@@ -255,7 +255,7 @@ where
 
 // Sort for arrays
 
-fn array_merge_ranges_by<A>(source: &mut [A], target: &mut [A], start: int, middle: int, end: int, compare: ((A, A) -> Ordering ! fallible)) {
+fn array_merge_ranges_by<A>(source: &mut [A], target: &mut [A], start: int, middle: int, end: int, compare: (A, A) -> Ordering ! fallible) {
 	let mut left = start;
 	let mut right = middle;
 
@@ -282,7 +282,7 @@ fn array_merge_ranges_by<A>(source: &mut [A], target: &mut [A], start: int, midd
 	};
 }
 
-fn array_split_merge_by<A>(source: &mut [A], target: &mut [A], start: int, end: int, compare: ((A, A) -> Ordering ! fallible)) {
+fn array_split_merge_by<A>(source: &mut [A], target: &mut [A], start: int, end: int, compare: (A, A) -> Ordering ! fallible) {
 	if end - start > 1 {
 		let middle = shift_right(start + end, 1);
 		array_split_merge_by(target, source, start, middle, compare);
@@ -292,7 +292,7 @@ fn array_split_merge_by<A>(source: &mut [A], target: &mut [A], start: int, end: 
 }
 
 /// Sorts `value` in place with a stable merge sort using `compare`.
-fn array_merge_sort_by<A>(value: &mut [A], compare: ((A, A) -> Ordering ! fallible)) {
+fn array_merge_sort_by<A>(value: &mut [A], compare: (A, A) -> Ordering ! fallible) {
 	let size = len(value);
 	if size > 1 {
 		// Use one full-size scratch array and alternate source/target roles recursively.
@@ -302,7 +302,7 @@ fn array_merge_sort_by<A>(value: &mut [A], compare: ((A, A) -> Ordering ! fallib
 }
 
 impl<A> SortBy for <Self = [A] |-> Item = A> {
-	fn sort_by(value: &mut [A], compare: ((A, A) -> Ordering ! fallible)) {
+	fn sort_by(value: &mut [A], compare: (A, A) -> Ordering ! fallible) {
 		array_merge_sort_by(value, compare)
 	}
 }
@@ -317,7 +317,7 @@ where
 }
 
 /// Returns a sorted copy of `value` using `compare`.
-pub fn sorted_by<S, A>(value: S, compare: ((A, A) -> Ordering ! fallible)) -> S
+pub fn sorted_by<S, A>(value: S, compare: (A, A) -> Ordering ! fallible) -> S
 where
 	SortBy<Self = S |-> Item = A>
 {

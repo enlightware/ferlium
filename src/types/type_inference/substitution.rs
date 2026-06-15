@@ -1,4 +1,4 @@
-use std::{cell::RefCell, mem};
+use std::mem;
 
 use crate::{
     FxHashSet,
@@ -154,13 +154,6 @@ impl UnifiedTypeInference {
                     }
                 }
             }
-        }
-    }
-
-    fn resolve_effect_var(&mut self, var: EffectVar) -> EffType {
-        match self.effects.effect_var_value(var) {
-            Some(effects) => SubstituteTypes(self).substitute_effect_type(&effects),
-            None => EffType::single_variable(self.effects.effect_var_root(var)),
         }
     }
 
@@ -372,6 +365,59 @@ impl UnifiedTypeInference {
 }
 
 struct SubstituteTypes<'a>(&'a mut UnifiedTypeInference);
+
+impl SubstituteTypes<'_> {
+    fn substitute_effect_type_inner(
+        &mut self,
+        eff_ty: &EffType,
+        visiting: &mut FxHashSet<EffectVar>,
+    ) -> EffType {
+        use Effect::*;
+
+        if eff_ty.is_empty() || !eff_ty.has_variables() {
+            return eff_ty.clone();
+        }
+
+        if let Some(Variable(var)) = eff_ty.as_single() {
+            return self.substitute_effect_var(var, visiting);
+        }
+
+        let mut effects = EffType::multiple_primitive(&eff_ty.inner_non_vars());
+        for var in eff_ty.inner_vars() {
+            effects.extend(&self.substitute_effect_var(var, visiting));
+        }
+        effects
+    }
+
+    fn substitute_effect_var(
+        &mut self,
+        var: EffectVar,
+        visiting: &mut FxHashSet<EffectVar>,
+    ) -> EffType {
+        use Effect::*;
+
+        let root = self.0.effects.effect_var_root(var);
+        if !visiting.insert(root) {
+            return EffType::single_variable(root);
+        }
+
+        let mut effects = match self.0.effects.effect_var_value(root) {
+            Some(value) => self.substitute_effect_type_inner(&value, visiting),
+            None => EffType::single_variable(root),
+        };
+
+        // When an effect variable has accumulated concrete lower bounds, keep
+        // the canonical variable in the substituted effect so later callers can
+        // still add more bounds to the same polymorphic effect.
+        if !effects.is_only_vars() {
+            effects.insert(Variable(root));
+        }
+
+        visiting.remove(&root);
+        effects
+    }
+}
+
 impl TypeSubstituer for SubstituteTypes<'_> {
     fn substitute_type(&mut self, ty: Type) -> Type {
         self.0.substitute_type_lookup(ty)
@@ -387,62 +433,7 @@ impl TypeSubstituer for SubstituteTypes<'_> {
 
     /// Substitute the effect type by flattening the effect variables.
     fn substitute_effect_type(&mut self, eff_ty: &EffType) -> EffType {
-        use Effect::*;
-
-        if eff_ty.is_empty() || !eff_ty.has_variables() {
-            return eff_ty.clone();
-        }
-
-        // Thread-local hash-map for cycle detection
-        thread_local! {
-            static VAR_VISITED: RefCell<FxHashSet<EffectVar>> = RefCell::new(FxHashSet::default());
-        }
-
-        let mut substitute_var = |var| {
-            let cycle_detected = VAR_VISITED.with(|visited| {
-                let mut visited = visited.borrow_mut();
-                if visited.contains(&var) {
-                    true // Cycle detected
-                } else {
-                    visited.insert(var);
-                    false
-                }
-            });
-
-            if cycle_detected {
-                return EffType::empty();
-            }
-
-            let mut effects = self.0.resolve_effect_var(var);
-
-            // add back the variable itself if not only variables
-            if !effects.is_only_vars() {
-                effects.insert(Variable(var));
-            }
-
-            VAR_VISITED.with(|visited| {
-                visited.borrow_mut().remove(&var);
-            });
-
-            effects
-        };
-
-        if let Some(Variable(var)) = eff_ty.as_single() {
-            return substitute_var(var);
-        }
-
-        if !eff_ty.has_variables() {
-            return eff_ty.clone();
-        }
-
-        let mut effects = EffType::empty();
-        for eff in eff_ty.iter() {
-            match eff {
-                Primitive(effect) => effects.insert(Primitive(effect)),
-                Variable(var) => effects.extend(&substitute_var(var)),
-            }
-        }
-        effects
+        self.substitute_effect_type_inner(eff_ty, &mut FxHashSet::default())
     }
 }
 
@@ -463,5 +454,72 @@ impl TypeSubstituer for NormalizeTypes<'_> {
 
     fn affects_type(&mut self, ty: Type) -> bool {
         self.0.substitution_affects_type(ty)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        parser::location::Location,
+        types::effects::{EffType, Effect, PrimitiveEffect},
+    };
+
+    use super::UnifiedTypeInference;
+
+    #[test]
+    fn recursive_effect_substitution_reaches_a_fixed_point() {
+        let mut unified = UnifiedTypeInference::default();
+        let var = unified.fresh_effect_var();
+        let span = Location::new_synthesized();
+        let recursive_effect =
+            EffType::single_primitive(PrimitiveEffect::Read).union(&EffType::single_variable(var));
+
+        unified
+            .unify_same_effect(
+                EffType::single_variable(var),
+                span,
+                recursive_effect.clone(),
+                span,
+            )
+            .unwrap();
+
+        let mut substituted = EffType::single_variable(var);
+        for _ in 0..8 {
+            substituted = unified.substitute_in_effect_type(&substituted);
+            assert!(substituted.contains(Effect::Primitive(PrimitiveEffect::Read)));
+            assert!(substituted.contains(Effect::Variable(var)));
+        }
+        assert_eq!(substituted, recursive_effect);
+    }
+
+    #[test]
+    fn recursive_effect_substitution_canonicalizes_alias_cycles() {
+        let mut unified = UnifiedTypeInference::default();
+        let first = unified.fresh_effect_var();
+        let second = unified.fresh_effect_var();
+        let span = Location::new_synthesized();
+
+        unified
+            .unify_same_effect(
+                EffType::single_variable(first),
+                span,
+                EffType::single_primitive(PrimitiveEffect::Read)
+                    .union(&EffType::single_variable(second)),
+                span,
+            )
+            .unwrap();
+        unified
+            .unify_same_effect(
+                EffType::single_variable(second),
+                span,
+                EffType::single_variable(first),
+                span,
+            )
+            .unwrap();
+
+        let substituted = unified.substitute_in_effect_type(&EffType::single_variable(first));
+        let root = unified.effects.effect_var_root(first);
+        assert!(substituted.contains(Effect::Primitive(PrimitiveEffect::Read)));
+        assert!(substituted.contains(Effect::Variable(root)));
     }
 }

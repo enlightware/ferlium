@@ -277,6 +277,16 @@ impl<'m> ModuleEnv<'m> {
             .and_then(|module| module.try_type_def_param_spans(id))
     }
 
+    pub fn type_def_effect_param_count(&self, id: TypeDefId) -> usize {
+        self.try_type_def_effect_param_count(id)
+            .unwrap_or_else(|| unavailable_type_def(id))
+    }
+
+    pub fn try_type_def_effect_param_count(&self, id: TypeDefId) -> Option<usize> {
+        self.type_def_module(id)
+            .and_then(|module| module.try_type_def_effect_param_count(id))
+    }
+
     pub fn type_def_span(&self, id: TypeDefId) -> Location {
         self.try_type_def_span(id)
             .unwrap_or_else(|| unavailable_type_def(id))

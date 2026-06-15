@@ -159,6 +159,10 @@ pub(super) fn compilation_error_to_data(
             span,
             format!("Cannot find type `{}` in this scope", fmt_span(span)),
         )],
+        EffectNotFound { name, span } => vec![error_data_from_location(
+            span,
+            format!("Cannot find effect `{name}` in this scope"),
+        )],
         TraitNotFound(span) => vec![error_data_from_location(
             span,
             format!("Cannot find trait `{}` in this scope", fmt_span(span)),

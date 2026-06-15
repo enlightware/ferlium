@@ -11,7 +11,7 @@ use std::mem;
 
 mod import_resolver;
 
-use crate::{FxHashMap, FxHashSet, Modules};
+use crate::{FxHashMap, FxHashSet, Modules, ast::PFnEffects};
 use ustr::{Ustr, ustr};
 
 use crate::{
@@ -37,8 +37,8 @@ use crate::{
     module::{Module, ModuleEnv, ModuleId, TypeDefLookupResult},
     parser::helpers::syn_static_apply,
     std::{STD_MODULE_ID, math::int_type},
-    types::effects::EffType,
     types::effects::EffectsInstSubst,
+    types::effects::{EffType, Effect, EffectVar, PrimitiveEffect},
     types::mutability::{MutType, MutVal},
     types::r#type::{FnArgType, FnType, NativeType, Type, TypeDef as HirTypeDef, TypeVar},
     types::type_like::TypeLike,
@@ -62,6 +62,43 @@ pub type FnSccs = Vec<ast::FunctionScc>;
 type FnMap = FxHashMap<Ustr, usize>;
 type FnDeps = FxHashSet<usize>;
 type GenericTyParams = FxHashMap<Ustr, TypeVar>;
+type GenericEffParams = FxHashMap<Ustr, EffectVar>;
+
+fn primitive_effect_by_name(name: Ustr) -> Option<PrimitiveEffect> {
+    match name.as_str() {
+        "read" => Some(PrimitiveEffect::Read),
+        "write" => Some(PrimitiveEffect::Write),
+        "fallible" => Some(PrimitiveEffect::Fallible),
+        _ => None,
+    }
+}
+
+fn desugar_fn_effects(
+    effects: &PFnEffects,
+    generic_eff_params: Option<&GenericEffParams>,
+) -> Result<EffType, InternalCompilationError> {
+    match effects {
+        PFnEffects::ImplicitPure => Ok(EffType::empty()),
+        // Always emit variable id 0 here; type inference will freshen it later.
+        PFnEffects::ImplicitGeneric => Ok(EffType::single_variable_id(0)),
+        PFnEffects::Explicit(effects) => {
+            let mut result = EffType::empty();
+            for effect in effects {
+                let (name, span) = effect.name;
+                if let Some(primitive) = primitive_effect_by_name(name) {
+                    result.insert(Effect::Primitive(primitive));
+                } else if let Some(var) =
+                    generic_eff_params.and_then(|params| params.get(&name).copied())
+                {
+                    result.insert(Effect::Variable(var));
+                } else {
+                    return Err(internal_compilation_error!(EffectNotFound { name, span }));
+                }
+            }
+            Ok(result)
+        }
+    }
+}
 
 /// Context used for desugaring and collecting function dependencies
 #[derive(Debug)]
@@ -76,6 +113,8 @@ struct DesugarCtx<'a> {
     module_env: &'a ModuleEnv<'a>,
     /// Generic type parameters available in the current function, if any.
     generic_ty_params: &'a GenericTyParams,
+    /// Generic effect parameters available in the current function, if any.
+    generic_eff_params: &'a GenericEffParams,
     /// Counter for generated local names
     temp_counter: usize,
 }
@@ -85,6 +124,7 @@ impl<'a> DesugarCtx<'a> {
         fn_map: &'a FnMap,
         module_env: &'a ModuleEnv<'a>,
         generic_ty_params: &'a GenericTyParams,
+        generic_eff_params: &'a GenericEffParams,
     ) -> Self {
         Self {
             fn_map,
@@ -92,6 +132,7 @@ impl<'a> DesugarCtx<'a> {
             locals: Vec::new(),
             module_env,
             generic_ty_params,
+            generic_eff_params,
             temp_counter: 0,
         }
     }
@@ -100,6 +141,7 @@ impl<'a> DesugarCtx<'a> {
         locals: Vec<Ustr>,
         module_env: &'a ModuleEnv<'a>,
         generic_ty_params: &'a GenericTyParams,
+        generic_eff_params: &'a GenericEffParams,
     ) -> Self {
         Self {
             fn_map,
@@ -107,6 +149,7 @@ impl<'a> DesugarCtx<'a> {
             locals,
             module_env,
             generic_ty_params,
+            generic_eff_params,
             temp_counter: 0,
         }
     }

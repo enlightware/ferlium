@@ -15,7 +15,13 @@ pub fn desugar_expr_with_empty_ctx(
 ) -> Result<(DExprId, DExprArena), InternalCompilationError> {
     let empty_fn_map = FxHashMap::default();
     let generic_ty_params = GenericTyParams::default();
-    let mut ctx = DesugarCtx::new(&empty_fn_map, module_env, &generic_ty_params);
+    let generic_eff_params = GenericEffParams::default();
+    let mut ctx = DesugarCtx::new(
+        &empty_fn_map,
+        module_env,
+        &generic_ty_params,
+        &generic_eff_params,
+    );
     let mut desugared_arena = new_desugared_arena_sized_from_parsed_arena(parsed_arena);
     let result = desugar(
         id,
@@ -184,11 +190,12 @@ pub(crate) fn desugar(
                 .into_iter()
                 .map(|(ty, span)| {
                     Ok((
-                        ty.desugar_with_ty_params(
+                        ty.desugar_with_ty_and_eff_params(
                             span,
                             false,
                             ctx.module_env,
                             ctx.generic_ty_params,
+                            Some(ctx.generic_eff_params),
                             modules_used,
                         )?,
                         span,
@@ -438,11 +445,12 @@ pub(crate) fn desugar(
         }
         TypeAscription(data) => {
             let TypeAscriptionData { expr, ty, span } = *data;
-            let ty = ty.desugar_with_ty_params(
+            let ty = ty.desugar_with_ty_and_eff_params(
                 span,
                 false,
                 ctx.module_env,
                 ctx.generic_ty_params,
+                Some(ctx.generic_eff_params),
                 modules_used,
             )?;
             let expr_node = &parsed_arena[expr];
@@ -491,12 +499,14 @@ fn inferred_collection_type(
     let ty = ast::PType::AppliedPath {
         path: std_path(name, span),
         args: (0..arg_count).map(|_| (ast::PType::Infer, span)).collect(),
+        effect_args: vec![],
     };
-    ty.desugar_with_ty_params(
+    ty.desugar_with_ty_and_eff_params(
         span,
         false,
         ctx.module_env,
         ctx.generic_ty_params,
+        Some(ctx.generic_eff_params),
         modules_used,
     )
 }

@@ -24,6 +24,7 @@ use crate::{
     },
     types::{
         coherence::check_trait_impl,
+        effects::{EffType, EffectVar},
         r#trait::TraitMethodIndex,
         trait_solver::{TraitSolver, trait_solver_from_module},
         r#type::{Type, TypeDef, TypeKind, TypeVar},
@@ -254,10 +255,14 @@ pub(super) fn emit_auto_value_impls(
         }
         let type_def_span = type_def.span;
         let type_def_param_count = type_def.param_count();
-        let input_ty = Type::named(
+        let type_def_effect_param_count = type_def.effect_param_count();
+        let input_ty = Type::named_with_effects(
             type_def_id,
             (0..type_def_param_count)
                 .map(|index| Type::variable_id(index as u32))
+                .collect::<Vec<_>>(),
+            (0..type_def_effect_param_count)
+                .map(|index| EffType::single_variable(EffectVar::new(index as u32)))
                 .collect::<Vec<_>>(),
         );
         let constraints = {
@@ -265,6 +270,7 @@ pub(super) fn emit_auto_value_impls(
             auto_value_constraints(type_def, input_ty, &env)
         };
         let ty_var_count = TypeScheme::list_ty_vars(&input_ty, constraints.iter()).len() as u32;
+        let eff_var_count = input_ty.inner_effect_vars().len() as u32;
         let associated_const_values = {
             let solver = trait_solver_from_module!(output, others);
             emitted_associated_const_values(
@@ -285,6 +291,7 @@ pub(super) fn emit_auto_value_impls(
             &[],
             &[],
             ty_var_count,
+            eff_var_count,
             &constraints,
             type_def_span,
         )?;
@@ -364,6 +371,7 @@ pub(super) fn emit_auto_value_impls(
                 output_tys: vec![],
                 output_effs: vec![],
                 ty_var_count,
+                eff_var_count,
                 constraints,
                 functions: function_ids,
             },

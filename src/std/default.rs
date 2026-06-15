@@ -55,7 +55,7 @@ impl Deriver for EnumDefaultDeriver {
             return Ok(None);
         };
 
-        let shape = type_def.instantiated_shape(&named.params);
+        let shape = type_def.instantiated_shape_with_effects(&named.params, &named.effect_params);
         let shape_data = shape.data();
         let payload_ty = shape_data
             .as_variant()

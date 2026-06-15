@@ -10,7 +10,12 @@ use crate::{
     hir::NodeArena,
     internal_compilation_error,
     parser::location::Location,
-    std::core_traits_names::{FROM_ITERATOR_TRAIT_NAME, REPR_TRAIT_NAME, VALUE_TRAIT_NAME},
+    std::{
+        core_traits_names::{FROM_ITERATOR_TRAIT_NAME, REPR_TRAIT_NAME, VALUE_TRAIT_NAME},
+        value::{
+            is_function_surface_only_value_trait_application, is_value_trait_for_function_type,
+        },
+    },
     types::{
         effects::{EffType, EffectVar},
         mutability::{MutType, MutVal, MutVar, MutVarKey},
@@ -77,6 +82,20 @@ impl UnifiedTypeInference {
 
     pub(crate) fn fresh_effect_var(&mut self) -> EffectVar {
         self.effects.fresh_var()
+    }
+
+    pub(crate) fn fresh_effect_var_subst(
+        &mut self,
+        count: u32,
+    ) -> crate::types::effects::EffectsInstSubst {
+        (0..count)
+            .map(|old_var| {
+                (
+                    EffectVar::new(old_var),
+                    EffType::single_variable(self.fresh_effect_var()),
+                )
+            })
+            .collect()
     }
 
     /// Build a substitution mapping every effect variable occurring in the given
@@ -522,6 +541,10 @@ impl UnifiedTypeInference {
         self.effects.effect_unioned(var)
     }
 
+    pub fn effect_var_root(&mut self, var: EffectVar) -> EffectVar {
+        self.effects.effect_var_root(var)
+    }
+
     pub fn unify_sub_type(
         &mut self,
         current: Type,
@@ -649,6 +672,18 @@ impl UnifiedTypeInference {
                         current_param,
                         current_span,
                         expected_param,
+                        expected_span,
+                    )?;
+                }
+                for (current_effect, expected_effect) in current_named
+                    .effect_params
+                    .into_iter()
+                    .zip(expected_named.effect_params)
+                {
+                    self.unify_same_effect(
+                        current_effect,
+                        current_span,
+                        expected_effect,
                         expected_span,
                     )?;
                 }
@@ -863,6 +898,14 @@ impl UnifiedTypeInference {
                         expected_span,
                         sub_or_same,
                     )?;
+                }
+                assert_eq!(
+                    cur.effect_params.len(),
+                    exp.effect_params.len(),
+                    "A Named type must have the same number of effect arguments for all its instances"
+                );
+                for (cur_eff, exp_eff) in cur.effect_params.into_iter().zip(exp.effect_params) {
+                    self.unify_same_effect(cur_eff, current_span, exp_eff, expected_span)?;
                 }
                 Ok(())
             }
@@ -1093,7 +1136,7 @@ impl UnifiedTypeInference {
                 Some(
                     trait_solver
                         .type_def(named.def)
-                        .instantiated_shape(&named.params),
+                        .instantiated_shape_with_effects(&named.params, &named.effect_params),
                 )
             } else if is_known_non_named_ty || is_ty_adt(input_ty) {
                 drop(ty_data);
@@ -1110,8 +1153,21 @@ impl UnifiedTypeInference {
 
         // Normal case.
         // Is the trait fully resolved?
-        let resolved = input_tys.iter().all(Type::is_constant);
+        let resolved = input_tys.iter().all(|ty| ty.is_trait_input_resolved());
         Ok(if resolved {
+            let trait_def = trait_solver.trait_def(trait_id);
+            if output_tys.is_empty()
+                && output_effs.is_empty()
+                && (is_value_trait_for_function_type(trait_id, trait_def, &input_tys, &output_tys)
+                    || is_function_surface_only_value_trait_application(
+                        trait_id,
+                        trait_def,
+                        &input_tys,
+                        &output_tys,
+                    ))
+            {
+                return Ok(None);
+            }
             // Fully resolved, validate the trait implementation.
             let (impl_output_tys, impl_output_effs) =
                 trait_solver.solve_outputs(trait_id, &input_tys, span, arena)?;
@@ -1129,7 +1185,7 @@ impl UnifiedTypeInference {
             // Partially resolved, we can progress a bit.
             let has_structured_non_constant_input = input_tys
                 .iter()
-                .any(|ty| !ty.is_constant() && !ty.data().is_variable());
+                .any(|ty| !ty.is_trait_input_resolved() && !ty.data().is_variable());
             if has_structured_non_constant_input {
                 let _ = trait_solver.try_improve_trait_application(
                     self,
@@ -1145,7 +1201,7 @@ impl UnifiedTypeInference {
                 self.normalize_types_in_place(&mut output_tys);
                 self.substitute_in_effect_types_in_place(&mut output_effs);
             }
-            if input_tys.iter().all(Type::is_constant) {
+            if input_tys.iter().all(|ty| ty.is_trait_input_resolved()) {
                 let (impl_output_tys, impl_output_effs) =
                     trait_solver.solve_outputs(trait_id, &input_tys, span, arena)?;
                 assert_eq!(output_tys.len(), impl_output_tys.len());
@@ -1182,70 +1238,98 @@ impl UnifiedTypeInference {
         ordered_constraints
             .sort_by_key(|(_, constraint)| constraint_solve_priority(constraint, trait_solver));
         for (constraint_index, constraint) in ordered_constraints {
-            use PubTypeConstraint::*;
-            let unified_constraint = match constraint {
-                TupleAtIndexIs {
-                    tuple_ty,
-                    tuple_span,
-                    index,
-                    index_span,
-                    element_ty,
-                } => self.unify_tuple_project(
-                    *tuple_ty,
-                    tuple_span.use_site,
-                    *index,
-                    index_span.use_site,
-                    *element_ty,
-                )?,
-                RecordFieldIs {
-                    record_ty,
-                    record_span,
-                    field,
-                    field_span,
-                    element_ty,
-                } => self.unify_record_field_access(
-                    *record_ty,
-                    record_span.use_site,
-                    *field,
-                    field_span.use_site,
-                    *element_ty,
-                )?,
-                TypeHasVariant {
-                    variant_ty,
-                    variant_span,
-                    tag,
-                    payload_ty,
-                    payload_span,
-                } => self.unify_type_has_variant(
-                    *variant_ty,
-                    variant_span.use_site,
-                    *tag,
-                    *payload_ty,
-                    payload_span.use_site,
-                )?,
-                HaveTrait {
-                    trait_id,
-                    input_tys,
-                    output_tys,
-                    output_effs,
-                    span,
-                } => self.unify_have_trait(
-                    *trait_id,
-                    input_tys,
-                    output_tys,
-                    output_effs,
-                    span.use_site,
-                    ConstraintAssumptions::excluding(constraints, constraint_index),
-                    &is_ty_adt,
-                    trait_solver,
-                    arena,
-                )?,
-            };
+            let unified_constraint = self.unify_pub_constraint(
+                constraint,
+                ConstraintAssumptions::excluding(constraints, constraint_index),
+                &is_ty_adt,
+                trait_solver,
+                arena,
+            )?;
             if let Some(new_constraint) = unified_constraint {
                 new_constraints.push(new_constraint);
             }
         }
         Ok(new_constraints)
+    }
+
+    fn unify_pub_constraint(
+        &mut self,
+        constraint: &PubTypeConstraint,
+        assumptions: ConstraintAssumptions<'_>,
+        is_ty_adt: impl Fn(Type) -> bool,
+        trait_solver: &mut TraitSolver<'_>,
+        arena: &mut NodeArena,
+    ) -> Result<Option<PubTypeConstraint>, InternalCompilationError> {
+        if let PubTypeConstraint::HaveTrait {
+            trait_id,
+            input_tys,
+            output_tys,
+            output_effs,
+            span,
+        } = constraint
+        {
+            return self.unify_have_trait(
+                *trait_id,
+                input_tys,
+                output_tys,
+                output_effs,
+                span.use_site,
+                assumptions,
+                is_ty_adt,
+                trait_solver,
+                arena,
+            );
+        }
+        self.unify_structural_pub_constraint(constraint)
+    }
+
+    pub(crate) fn unify_structural_pub_constraint(
+        &mut self,
+        constraint: &PubTypeConstraint,
+    ) -> Result<Option<PubTypeConstraint>, InternalCompilationError> {
+        use PubTypeConstraint::*;
+        match constraint {
+            TupleAtIndexIs {
+                tuple_ty,
+                tuple_span,
+                index,
+                index_span,
+                element_ty,
+            } => self.unify_tuple_project(
+                *tuple_ty,
+                tuple_span.use_site,
+                *index,
+                index_span.use_site,
+                *element_ty,
+            ),
+            RecordFieldIs {
+                record_ty,
+                record_span,
+                field,
+                field_span,
+                element_ty,
+            } => self.unify_record_field_access(
+                *record_ty,
+                record_span.use_site,
+                *field,
+                field_span.use_site,
+                *element_ty,
+            ),
+            TypeHasVariant {
+                variant_ty,
+                variant_span,
+                tag,
+                payload_ty,
+                payload_span,
+            } => self.unify_type_has_variant(
+                *variant_ty,
+                variant_span.use_site,
+                *tag,
+                *payload_ty,
+                payload_span.use_site,
+            ),
+            HaveTrait { .. } => unreachable!("trait constraints are handled by the caller"),
+        }
     }
 
     fn unify_mut_must_be_at_least_or_equal(
@@ -1442,6 +1526,10 @@ impl UnifiedTypeInference {
     ) -> Result<(), InternalCompilationError> {
         self.effects
             .add_effect_dep(current, current_span, target, target_span)
+    }
+
+    pub fn finalize_effect_dependencies(&mut self) -> Result<(), InternalCompilationError> {
+        self.effects.expand_pending_dependencies()
     }
 }
 

@@ -294,7 +294,7 @@ where
 {
     let expected = collect_expected_path_segments(expected);
     match ty {
-        ast::PType::AppliedPath { path, args } => {
+        ast::PType::AppliedPath { path, args, .. } => {
             assert_path_matches(path, &expected);
             args
         }
@@ -403,6 +403,7 @@ fn assert_type_def_constraints<S, I, C>(
     assert_eq!(
         type_def
             .generic_params
+            .type_params()
             .iter()
             .map(|(name, _)| *name)
             .collect::<Vec<_>>(),
@@ -655,6 +656,7 @@ fn parse_generic_type_definitions() {
     assert_eq!(
         box_def
             .generic_params
+            .type_params()
             .iter()
             .map(|(name, _)| *name)
             .collect::<Vec<_>>(),
@@ -673,6 +675,7 @@ fn parse_generic_type_definitions() {
     assert_eq!(
         entry_def
             .generic_params
+            .type_params()
             .iter()
             .map(|(name, _)| *name)
             .collect::<Vec<_>>(),
@@ -693,6 +696,7 @@ fn parse_generic_type_definitions() {
     assert_eq!(
         option_def
             .generic_params
+            .type_params()
             .iter()
             .map(|(name, _)| *name)
             .collect::<Vec<_>>(),
@@ -729,6 +733,38 @@ fn parse_generic_type_use_sites() {
     let nested_args = expect_applied_path(&nested_ty, ["testing", "Option"]);
     assert_eq!(nested_args.len(), 1);
     assert_applied_path_is!(&nested_args[0].0, ["Pair"], [["int"], ["string"]]);
+
+    match parse_type_ast("Callback<(int) -> int ! read>") {
+        ast::PType::AppliedPath {
+            args, effect_args, ..
+        } => {
+            assert_eq!(args.len(), 1);
+            assert!(
+                matches!(args[0].0, ast::PType::Function(_)),
+                "expected angle-level ! to bind as a type effect argument"
+            );
+            assert_eq!(effect_args.len(), 1);
+            assert_eq!(effect_args[0].name.0, ustr("read"));
+        }
+        other => panic!("expected applied path type, got {other:?}"),
+    }
+
+    match parse_type_ast("Callback<((int) -> int ! read)>") {
+        ast::PType::AppliedPath {
+            args, effect_args, ..
+        } => {
+            assert_eq!(args.len(), 1);
+            assert!(effect_args.is_empty());
+            let ast::PType::Function(fn_ty) = &args[0].0 else {
+                panic!(
+                    "expected effectful function type argument, got {:?}",
+                    args[0].0
+                );
+            };
+            assert!(matches!(fn_ty.effects, ast::PFnEffects::Explicit(_)));
+        }
+        other => panic!("expected applied path type, got {other:?}"),
+    }
 }
 
 #[test]
@@ -876,6 +912,7 @@ fn parse_generic_trait_impl_headers() {
     assert_eq!(
         inferred_header
             .generic_params
+            .type_params()
             .iter()
             .map(|(name, _)| *name)
             .collect::<Vec<_>>(),
@@ -895,6 +932,7 @@ fn parse_generic_trait_impl_headers() {
     assert_eq!(
         explicit_header
             .generic_params
+            .type_params()
             .iter()
             .map(|(name, _)| *name)
             .collect::<Vec<_>>(),
@@ -952,6 +990,7 @@ fn parse_trait_impl_where_clauses() {
     let imp = &module.impls[0];
     assert_eq!(
         imp.generic_params
+            .type_params()
             .iter()
             .map(|(name, _)| *name)
             .collect::<Vec<_>>(),
@@ -1755,6 +1794,11 @@ fn compiled_impl_headers_use_source_syntax() {
                     mapper: (T) -> O,
                 }
 
+                struct PureIterHolder<I, T>
+                where
+                    I: Iterator<Item = T ! NextEffect = ()>
+                (I)
+
                 impl<I, T, O> Iterator for TransformIter<I, T, O>
                 where
                     I: Iterator<Item = T>
@@ -1767,6 +1811,17 @@ fn compiled_impl_headers_use_source_syntax() {
                     }
                 }
             "# },
+            indoc! { r#"
+                struct ReadWriteIter(())
+
+                impl Iterator for <Self = ReadWriteIter |-> Item = int ! NextEffect = (read, write)> {
+                    fn next(it: &mut ReadWriteIter) -> None | Some(int) {
+                        effects::read();
+                        effects::write();
+                        None
+                    }
+                }
+            "# },
         ]),
     );
 
@@ -1775,14 +1830,22 @@ fn compiled_impl_headers_use_source_syntax() {
         "expected unary-input impl sugar, got:\n{rendered}"
     );
     assert!(
-        rendered.contains("impl<A, B, C> Iterator for <Self = MapIterator<A, B, C> |-> Item = C>"),
+        rendered.contains(
+            "impl<A, B, C> Iterator for <Self = MapIterator<A, B, C> |-> Item = C ! NextEffect = ()>"
+        ),
         "expected explicit output impl header, got:\n{rendered}"
     );
     assert!(
         rendered.contains(
-            "impl<A, B, C> Iterator for <Self = TransformIter<A, B, C> |-> Item = C> where A: Iterator <Item = B>"
-        ),
+            "impl<A, B, C> Iterator for <Self = TransformIter<A, B, C> |-> Item = C ! NextEffect = ()>"
+        ) && rendered.contains("struct PureIterHolder<I, T> where I: Iterator <Item = T ! NextEffect = ()>"),
         "expected impl where clause in module formatting, got:\n{rendered}"
+    );
+    assert!(
+        rendered.contains(
+            "impl Iterator for <Self = ReadWriteIter |-> Item = int ! NextEffect = (read, write)>"
+        ),
+        "expected multi-effect output binding to be parenthesized, got:\n{rendered}"
     );
 }
 

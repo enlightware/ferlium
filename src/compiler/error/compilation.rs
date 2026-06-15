@@ -139,6 +139,7 @@ impl GenericParamsOwner {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InvalidGenericParamsKind {
     DuplicateParam { name: Ustr },
+    DuplicateEffectParam { name: Ustr },
 }
 
 impl InvalidGenericParamsKind {
@@ -147,6 +148,12 @@ impl InvalidGenericParamsKind {
             Self::DuplicateParam { name } => {
                 format!(
                     "Duplicate generic type parameter `{name}` in {}",
+                    owner.description()
+                )
+            }
+            Self::DuplicateEffectParam { name } => {
+                format!(
+                    "Duplicate generic effect parameter `{name}` in {}",
                     owner.description()
                 )
             }
@@ -172,6 +179,15 @@ pub enum InvalidTraitConstraintKind {
         name: Ustr,
     },
     MissingOutputBindings {
+        names: Vec<Ustr>,
+    },
+    UnknownOutputEffectBinding {
+        name: Ustr,
+    },
+    DuplicateOutputEffectBinding {
+        name: Ustr,
+    },
+    MissingOutputEffectBindings {
         names: Vec<Ustr>,
     },
     ExpectedNamedInputs {
@@ -205,6 +221,16 @@ impl InvalidTraitConstraintKind {
             }
             MissingOutputBindings { names } => format!(
                 "Missing output type parameters {} for trait `{trait_name}`",
+                iterable_to_string(names, ", ")
+            ),
+            UnknownOutputEffectBinding { name } => {
+                format!("Unknown output effect parameter `{name}` for trait `{trait_name}`")
+            }
+            DuplicateOutputEffectBinding { name } => {
+                format!("Duplicate output effect parameter `{name}` for trait `{trait_name}`")
+            }
+            MissingOutputEffectBindings { names } => format!(
+                "Missing output effect parameters {} for trait `{trait_name}`",
                 iterable_to_string(names, ", ")
             ),
             ExpectedNamedInputs { expected_count } => format!(
@@ -619,6 +645,10 @@ pub enum CompilationErrorImpl<S: Scope> {
     },
     ImportNotFound(ImportSite),
     TypeNotFound(Location),
+    EffectNotFound {
+        name: Ustr,
+        span: Location,
+    },
     TraitNotFound(Location),
     InvalidGenericParams {
         owner: GenericParamsOwner,
@@ -1093,6 +1123,9 @@ impl FormatWith<SourceTable> for CompilationError {
             },
             TypeNotFound(span) => {
                 write!(f, "Cannot find type {} in this scope", fmt_span(span))
+            }
+            EffectNotFound { name, span } => {
+                write!(f, "Cannot find effect `{name}` in {}", fmt_span(span))
             }
             TraitNotFound(span) => {
                 write!(f, "Cannot find trait {} in this scope", fmt_span(span))
@@ -1830,6 +1863,7 @@ impl CompilationError {
                 compilation_error!(ImportNotFound(site))
             }
             TypeNotFound(span) => compilation_error!(TypeNotFound(span)),
+            EffectNotFound { name, span } => compilation_error!(EffectNotFound { name, span }),
             TraitNotFound(span) => compilation_error!(TraitNotFound(span)),
             InvalidGenericParams { owner, kind, span } => {
                 compilation_error!(InvalidGenericParams { owner, kind, span })

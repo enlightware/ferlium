@@ -16,9 +16,10 @@ use crate::{
     Location,
     compiler::error::LocatedError,
     format::write_with_separator_and_format_fn,
-    format::{FormatWith, write_identifier, write_identifier_list, write_with_separator},
+    format::{FormatWith, write_identifier, write_identifier_list},
     hir::value::LiteralValue,
     module::{ModuleEnv, Visibility},
+    types::effects::EffType,
     types::mutability::FormatInFnArg,
     types::r#type::Type,
     types::type_like::TypeLike,
@@ -26,9 +27,10 @@ use crate::{
 
 use super::expr::ErrorCollector;
 use super::{
-    Attribute, Desugared, ExprArena, ExprId, ExprVisitor, FormatWithIndent, MutTypeTypeSpan,
-    PFnArgType, PFnEffects, PTypeConstraint, PTypeSpan, Parsed, Phase, TypeConstraintInput,
-    TypeConstraintOutput, TypeSpan, UseTree, UstrSpan, VisitExpr,
+    Attribute, Desugared, ExprArena, ExprId, ExprVisitor, FormatWithIndent, GenericParams,
+    MutTypeTypeSpan, PFnArgType, PFnEffects, PTypeConstraint, PTypeSpan, Parsed, Phase,
+    TypeConstraintEffectOutput, TypeConstraintInput, TypeConstraintOutput, TypeSpan, UseTree,
+    UstrSpan, VisitExpr, format_effect_binding_value,
 };
 
 #[derive(Debug, Clone)]
@@ -60,7 +62,7 @@ impl DModuleFunctionArg {
 pub struct ModuleFunction<P: Phase> {
     pub visibility: Visibility,
     pub name: UstrSpan,
-    pub generic_params: Vec<UstrSpan>,
+    pub generic_params: GenericParams,
     pub args: Vec<ModuleFunctionArg<P>>,
     pub args_span: Location,
     pub ret_ty: Option<TypeSpan<P>>,
@@ -120,6 +122,7 @@ pub struct TraitDefinition {
     pub name: UstrSpan,
     pub input_type_names: Vec<UstrSpan>,
     pub output_type_names: Vec<UstrSpan>,
+    pub output_effect_names: Vec<UstrSpan>,
     pub parent_constraints: Vec<PTypeConstraint>,
     pub where_clause: Vec<PTypeConstraint>,
     pub associated_consts: Vec<TraitAssociatedConstDecl<Parsed>>,
@@ -135,6 +138,10 @@ impl TraitDefinition {
     pub(crate) fn iter_output_type_names(&self) -> impl Iterator<Item = Ustr> {
         self.output_type_names.iter().map(|(s, _)| *s)
     }
+
+    pub(crate) fn iter_output_effect_names(&self) -> impl Iterator<Item = Ustr> {
+        self.output_effect_names.iter().map(|(s, _)| *s)
+    }
 }
 
 pub type PTraitDefinition = TraitDefinition;
@@ -144,19 +151,24 @@ pub type PTraitDefinition = TraitDefinition;
 pub struct TraitImplFor<P: Phase> {
     pub input_types: Vec<TypeConstraintInput<P>>,
     pub output_types: Vec<TypeConstraintOutput<P>>,
+    pub output_effects: Vec<TypeConstraintEffectOutput>,
+    pub output_effs: Vec<EffType>,
     pub span: Location,
 }
 
 impl<P: Phase> FormatWith<ModuleEnv<'_>> for TraitImplFor<P> {
     fn fmt_with(&self, f: &mut fmt::Formatter<'_>, env: &ModuleEnv<'_>) -> fmt::Result {
         if self.output_types.is_empty()
+            && self.output_effects.is_empty()
             && self.input_types.len() == 1
             && self.input_types[0].name.is_none()
         {
             return self.input_types[0].ty.0.fmt_with(f, env);
         }
 
-        if self.output_types.is_empty() && self.input_types.iter().all(|input| input.name.is_none())
+        if self.output_types.is_empty()
+            && self.output_effects.is_empty()
+            && self.input_types.iter().all(|input| input.name.is_none())
         {
             write!(f, "<")?;
             write_with_separator_and_format_fn(
@@ -175,14 +187,32 @@ impl<P: Phase> FormatWith<ModuleEnv<'_>> for TraitImplFor<P> {
             }
             input.fmt_with(f, env)?;
         }
-        if !self.output_types.is_empty() {
+        if !self.output_types.is_empty() || !self.output_effects.is_empty() {
             write!(f, " |-> ")?;
-            write_with_separator_and_format_fn(
-                &self.output_types,
-                ", ",
-                |output_ty, f| output_ty.ty.0.fmt_with(f, env),
-                f,
-            )?;
+            if !self.output_types.is_empty() {
+                write_with_separator_and_format_fn(
+                    &self.output_types,
+                    ", ",
+                    |output_ty, f| output_ty.ty.0.fmt_with(f, env),
+                    f,
+                )?;
+            }
+            if !self.output_effects.is_empty() {
+                if !self.output_types.is_empty() {
+                    write!(f, " ")?;
+                }
+                write!(f, "! ")?;
+                write_with_separator_and_format_fn(
+                    &self.output_effects,
+                    ", ",
+                    |output_eff, f| {
+                        write_identifier(f, output_eff.name.0.as_str())?;
+                        write!(f, " = ")?;
+                        format_effect_binding_value(&output_eff.effects, f)
+                    },
+                    f,
+                )?;
+            }
         }
         write!(f, ">")
     }
@@ -194,6 +224,9 @@ impl TraitImplFor<Desugared> {
     }
     pub fn output_tys(&self) -> Vec<<Desugared as Phase>::Type> {
         self.output_types.iter().map(|output| output.ty.0).collect()
+    }
+    pub fn output_effs(&self) -> Vec<EffType> {
+        self.output_effs.clone()
     }
 }
 
@@ -229,6 +262,7 @@ pub struct TraitAssociatedConstImpl {
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum TraitImplItem {
     AssociatedConst(TraitAssociatedConstImpl),
     Function(PModuleFunction),
@@ -237,7 +271,7 @@ pub enum TraitImplItem {
 /// A trait implementation
 #[derive(Debug, Clone)]
 pub struct TraitImpl<P: Phase> {
-    pub generic_params: Vec<UstrSpan>,
+    pub generic_params: GenericParams,
     pub trait_name: UstrSpan,
     /// Explicit trait inputs and outputs for the implementation header, if any.
     /// When `None`, they are fully inferred from the function signatures.
@@ -396,11 +430,8 @@ fn fmt_trait_method(
         write!(f, " → {}", ret_ty.format_with(env))?;
     }
     if let PFnEffects::Explicit(effects) = &method.effects {
-        write!(f, " !")?;
-        if !effects.is_empty() {
-            write!(f, " ")?;
-            write_with_separator(effects, ", ", f)?;
-        }
+        write!(f, " ! ")?;
+        format_effect_binding_value(effects, f)?;
     }
     writeln!(f, ";")
 }
@@ -431,15 +462,7 @@ fn fmt_module_function<P: Phase>(
     }
     write!(f, "    fn ")?;
     write_identifier(f, name.0.as_str())?;
-    if !generic_params.is_empty() {
-        write!(f, "<")?;
-        write_identifier_list(
-            generic_params.iter().map(|(name, _)| name.as_str()),
-            ", ",
-            f,
-        )?;
-        write!(f, ">")?;
-    }
+    generic_params.format_source(f)?;
     write!(f, "(")?;
     for (i, arg) in args.iter().enumerate() {
         if i > 0 {
@@ -502,16 +525,34 @@ impl<'a> FormatWith<ModuleEnv<'_>> for ModuleDisplay<'a, Parsed> {
                     ", ",
                     f,
                 )?;
-                if !trait_def.output_type_names.is_empty() {
+                if !trait_def.output_type_names.is_empty()
+                    || !trait_def.output_effect_names.is_empty()
+                {
                     write!(f, " |-> ")?;
-                    write_identifier_list(
-                        trait_def
-                            .output_type_names
-                            .iter()
-                            .map(|(name, _)| name.as_str()),
-                        ", ",
-                        f,
-                    )?;
+                    if !trait_def.output_type_names.is_empty() {
+                        write_identifier_list(
+                            trait_def
+                                .output_type_names
+                                .iter()
+                                .map(|(name, _)| name.as_str()),
+                            ", ",
+                            f,
+                        )?;
+                    }
+                    if !trait_def.output_effect_names.is_empty() {
+                        if !trait_def.output_type_names.is_empty() {
+                            write!(f, " ")?;
+                        }
+                        write!(f, "! ")?;
+                        write_identifier_list(
+                            trait_def
+                                .output_effect_names
+                                .iter()
+                                .map(|(name, _)| name.as_str()),
+                            ", ",
+                            f,
+                        )?;
+                    }
                 }
                 write!(f, ">")?;
                 if !trait_def.parent_constraints.is_empty() {
@@ -551,15 +592,7 @@ impl<'a> FormatWith<ModuleEnv<'_>> for ModuleDisplay<'a, Parsed> {
             } in module.impls.iter()
             {
                 write!(f, "  impl")?;
-                if !generic_params.is_empty() {
-                    write!(f, "<")?;
-                    write_identifier_list(
-                        generic_params.iter().map(|(name, _)| name.as_str()),
-                        ", ",
-                        f,
-                    )?;
-                    write!(f, ">")?;
-                }
+                generic_params.format_source(f)?;
                 write!(f, " ")?;
                 write_identifier(f, trait_name.0.as_str())?;
                 if let Some(for_trait) = for_trait {

@@ -21,7 +21,10 @@ use crate::{
     },
     std::{STD_MODULE_ID, array::array_type as std_array_type},
     types::r#trait::TraitMethodIndex,
-    types::r#type::{FnReturnConvention, Type, TypeInstSubst, TypeVar},
+    types::{
+        r#type::{FnReturnConvention, Type, TypeVar},
+        type_inference::substitution::InstSubst,
+    },
 };
 
 use derive_new::new;
@@ -66,8 +69,8 @@ pub struct TypingEnv<'m> {
     pub(crate) expected_return_ty: Option<(Type, Location)>,
     /// The return convention of the enclosing function.
     pub(crate) expected_return_convention: FnReturnConvention,
-    /// The substitution to use for explicit generic type parameters in current annotations.
-    pub(crate) annotation_ty_subst: Option<&'m TypeInstSubst>,
+    /// The substitution to use for explicit generic parameters in current annotations.
+    pub(crate) annotation_subst: Option<&'m InstSubst>,
     /// The active loop frames, used for type-checking loop control flow.
     pub(crate) loop_frames: Vec<LoopFrame>,
     /// Whether compiler-inserted fuel checks should be emitted for loops.

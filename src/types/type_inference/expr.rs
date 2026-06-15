@@ -5,6 +5,7 @@ use ena::unify::InPlaceUnificationTable;
 use smallvec::{SmallVec, smallvec};
 use ustr::{Ustr, ustr};
 
+use super::substitution::InstSubst;
 use crate::{
     FxHashMap, FxHashSet,
     ast::{
@@ -381,7 +382,14 @@ impl TypeInference {
             .iter()
             .map(|quantifier| quantifier.instantiate(&subst.0))
             .collect();
-        let named_ty = Type::named(type_def, params);
+        let effect_params: Vec<_> = type_def_data
+            .generic_effect_params
+            .iter()
+            .enumerate()
+            .map(|(index, _)| EffType::single_variable(EffectVar::new(index as u32)))
+            .map(|effect| effect.instantiate(&subst.1))
+            .collect();
+        let named_ty = Type::named_with_effects(type_def, params, effect_params);
         (type_def, payload_ty, named_ty, tag)
     }
 
@@ -482,7 +490,7 @@ impl TypeInference {
             expected_fn_ty
                 .as_ref()
                 .map_or(FnReturnConvention::Value, |fn_ty| fn_ty.return_convention),
-            env.annotation_ty_subst,
+            env.annotation_subst,
             vec![],
             env.fuel_checks_enabled,
             env.lambda_functions,
@@ -1692,10 +1700,9 @@ impl TypeInference {
             }
             TypeAscription(data) => {
                 let (node_id, mut_type) = self.infer_expr(env, data.expr)?;
-                let ty = data.ty.map(&mut AnnotationTypeMapper::new(
-                    self,
-                    env.annotation_ty_subst,
-                ));
+                let ty = data
+                    .ty
+                    .map(&mut AnnotationTypeMapper::new(self, env.annotation_subst));
                 self.add_same_type_with_sub_effects_constraint(
                     env.ir_arena[node_id].ty,
                     sp(data.expr),
@@ -3228,7 +3235,7 @@ impl TypeInference {
         });
     }
 
-    fn add_same_effect_constraint(
+    pub(crate) fn add_same_effect_constraint(
         &mut self,
         current: &EffType,
         current_span: Location,
@@ -3240,6 +3247,18 @@ impl TypeInference {
         }
         self.effects
             .add_same_constraint(current, current_span, expected, expected_span);
+    }
+
+    pub(crate) fn add_effect_dep_constraint_with_origin(
+        &mut self,
+        current: &EffType,
+        current_span: Location,
+        target: &EffType,
+        target_span: Location,
+        origin: super::effect_solver::EffectConstraintOrigin,
+    ) -> Result<(), InternalCompilationError> {
+        self.effects
+            .add_effect_dep_with_origin(current, current_span, target, target_span, origin)
     }
 
     /// Add a constraint that the two function types must be equal.
@@ -3338,15 +3357,15 @@ impl TypeInference {
 #[derive(new)]
 pub struct AnnotationTypeMapper<'a, 'b> {
     ty_inf: &'a mut TypeInference,
-    explicit_ty_subst: Option<&'b TypeInstSubst>,
+    explicit_subst: Option<&'b InstSubst>,
 }
 impl TypeMapper for AnnotationTypeMapper<'_, '_> {
     fn map_type(&mut self, ty: Type) -> Type {
         let var = { ty.data().as_variable().copied() };
         if let Some(var) = var {
             if let Some(ty) = self
-                .explicit_ty_subst
-                .and_then(|explicit_ty_subst| explicit_ty_subst.get(&var))
+                .explicit_subst
+                .and_then(|explicit_subst| explicit_subst.0.get(&var))
             {
                 *ty
             } else {
@@ -3366,18 +3385,22 @@ impl TypeMapper for AnnotationTypeMapper<'_, '_> {
     }
 
     fn map_effect_type(&mut self, eff_ty: &EffType) -> EffType {
-        EffType::from_vec(
-            eff_ty
-                .iter()
-                .map(|effect| {
-                    if effect.is_variable() {
-                        Effect::Variable(self.ty_inf.fresh_effect_var())
-                    } else {
-                        effect
-                    }
-                })
-                .collect(),
-        )
+        let mut result = EffType::empty();
+        for effect in eff_ty.iter() {
+            if let Effect::Variable(var) = effect {
+                if let Some(eff) = self
+                    .explicit_subst
+                    .and_then(|explicit_subst| explicit_subst.1.get(&var))
+                {
+                    result.extend(eff);
+                } else {
+                    result.insert(Effect::Variable(self.ty_inf.fresh_effect_var()));
+                }
+            } else {
+                result.insert(effect);
+            }
+        }
+        result
     }
 
     fn affects_type(&mut self, ty: Type) -> bool {

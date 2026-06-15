@@ -135,7 +135,9 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
 
         let ty_data = ty.data().clone();
         if let TypeKind::Named(named) = ty_data {
-            let inner_ty = solver.type_def(named.def).instantiated_shape(&named.params);
+            let inner_ty = solver
+                .type_def(named.def)
+                .instantiated_shape_with_effects(&named.params, &named.effect_params);
             // serialize the inner type
             return Ok(Some(solver.solve_impl(
                 trait_id,
@@ -384,7 +386,9 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
         // derive tuple, record, and enum deserialization
         let ty_data = ty.data().clone();
         if let TypeKind::Named(named) = ty_data {
-            let inner_ty = solver.type_def(named.def).instantiated_shape(&named.params);
+            let inner_ty = solver
+                .type_def(named.def)
+                .instantiated_shape_with_effects(&named.params, &named.effect_params);
             // deserialize the inner type
             return Ok(Some(solver.solve_impl(
                 trait_id,

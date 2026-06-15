@@ -117,7 +117,8 @@ pub(crate) fn diagnostics_from_error(
         | Unsupported { span, .. }
         | ReturnOutsideFunction { span }
         | CircularImportDependency { span, .. }
-        | Internal { span, .. } => vec![*span],
+        | Internal { span, .. }
+        | EffectNotFound { span, .. } => vec![*span],
         WrongNumberOfArguments {
             expected_span,
             got_span,

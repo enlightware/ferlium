@@ -18,15 +18,16 @@ use crate::harness::{
 use ferlium::{
     SourceTable,
     compiler::error::{CompilationErrorImpl, RuntimeErrorKind},
+    format::FormatWith,
     hir::value::{LiteralValue, Value},
     hir::{ENodeArena, ENodeId, NodeKind},
-    module::{ConcreteTraitImplKey, Module, TraitDictionaryEntry},
+    module::{ConcreteTraitImplKey, Module, ShowModuleWithOptions, TraitDictionaryEntry},
     std::{
         core_traits_names::VALUE_TRAIT_NAME,
         option::{none, some},
         std_module,
     },
-    types::effects::{PrimitiveEffect, effect, effects},
+    types::effects::{PrimitiveEffect, effect, effects, no_effects},
 };
 
 use ferlium::std::array::array_type;
@@ -39,6 +40,28 @@ use ferlium::types::r#type::{Type, tuple_type};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn print_std_formats_empty_associated_effect_bindings() {
+    let session = TestSession::new();
+    let rendered = session
+        .session()
+        .std_module()
+        .format_with(&ShowModuleWithOptions::public(session.session().modules()))
+        .to_string();
+
+    assert!(
+        rendered.contains(
+            "impl Seq for <Self = string |-> Item = string, Iter = string_iterator ! IterEffect = ()>"
+        ),
+        "expected empty associated effect binding in printed std, got:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("IterEffect = >"),
+        "printed std must not render an empty associated effect binding without a value:\n{rendered}"
+    );
+}
 
 fn assert_std_value_layout<T>(module: &Module, ty: Type) {
     let value_trait_id = module
@@ -986,6 +1009,10 @@ fn map() {
     let mut session = TestSession::new();
     assert_val_eq!(session.run("[0, 1, 2] |> map(|x| x + 1)"), int_a![1, 2, 3]);
     assert_val_eq!(
+        session.run("let xs = [0, 1, 2] |> map(|x| x + 1); xs"),
+        int_a![1, 2, 3]
+    );
+    assert_val_eq!(
         session.run(
             "let mut it = [0, 1, 2] |> iter() |> map(|x| x + 1); (next(it), next(it), next(it), next(it))"
         ),
@@ -994,18 +1021,34 @@ fn map() {
     use PrimitiveEffect::*;
     test_mod_for_effects(
         &mut session,
-        "fn f() { [0, 1, 2] |> map(|x| x + 1) }",
+        "fn f() -> [int] { [0, 1, 2] |> map(|x| x + 1) }",
         "f",
         effect(Fallible),
     );
-    session
-        .fail_compilation("fn f() { [0, 1, 2] |> map(|x| { effects::read(); x + 1 }) }")
-        .expect_invalid_effect_dependency(effect(Read), effect(Fallible));
-    session
-        .fail_compilation(
-            "fn f() { let ignored = [0, 1, 2] |> iter() |> map(|x| { effects::read(); x + 1 }); () }",
-        )
-        .expect_invalid_effect_dependency(effect(Read), effect(Fallible));
+    test_mod_for_effects(
+        &mut session,
+        "fn f() -> [int] { [0, 1, 2] |> map(|x| { effects::read(); x + 1 }) }",
+        "f",
+        effects(&[Fallible, Read]),
+    );
+    test_mod_for_effects(
+        &mut session,
+        "fn f() { let ignored = [0, 1, 2] |> iter() |> map(|x| { effects::read(); x + 1 }); () }",
+        "f",
+        no_effects(),
+    );
+    test_mod_for_effects(
+        &mut session,
+        "fn f() -> Option<int> { let mut it = [0, 1, 2] |> iter() |> map(|x| { effects::read(); x + 1 }); next(it) }",
+        "f",
+        effect(Read),
+    );
+    test_mod_for_effects(
+        &mut session,
+        "fn f() -> Option<int> { let mut it = split_iterator([1, 0, 2], 0) |> map(|part| len(part)); next(it) }",
+        "f",
+        effect(Fallible),
+    );
 }
 
 #[test]
@@ -1020,14 +1063,24 @@ fn filter() {
         tuple!(some(int(1)), some(int(2)), none())
     );
     use PrimitiveEffect::*;
-    session
-        .fail_compilation("fn f() { [0, 1, 2] |> filter(|x| { effects::read(); x > 0 }) }")
-        .expect_invalid_effect_dependency(effect(Read), effect(Fallible));
-    session
-        .fail_compilation(
-            "fn f() { let ignored = [0, 1, 2] |> iter() |> filter(|x| { effects::read(); x > 0 }); () }",
-        )
-        .expect_invalid_effect_dependency(effect(Read), effect(Fallible));
+    test_mod_for_effects(
+        &mut session,
+        "fn f() -> [int] { [0, 1, 2] |> filter(|x| { effects::read(); x > 0 }) }",
+        "f",
+        effects(&[Fallible, Read]),
+    );
+    test_mod_for_effects(
+        &mut session,
+        "fn f() { let ignored = [0, 1, 2] |> iter() |> filter(|x| { effects::read(); x > 0 }); () }",
+        "f",
+        no_effects(),
+    );
+    test_mod_for_effects(
+        &mut session,
+        "fn f() -> Option<int> { let mut it = [0, 1, 2] |> iter() |> filter(|x| { effects::read(); x > 0 }); next(it) }",
+        "f",
+        effects(&[Fallible, Read]),
+    );
 }
 
 #[test]
@@ -1045,14 +1098,24 @@ fn filter_map() {
         tuple!(some(int(1)), some(int(4)), none())
     );
     use PrimitiveEffect::*;
-    session
-        .fail_compilation("fn f() { [0, 1, 2] |> filter_map(|x| { effects::read(); Some(x) }) }")
-        .expect_invalid_effect_dependency(effect(Read), effect(Fallible));
-    session
-        .fail_compilation(
-            "fn f() { let ignored = [0, 1, 2] |> iter() |> filter_map(|x| { effects::read(); Some(x) }); () }",
-        )
-        .expect_invalid_effect_dependency(effect(Read), effect(Fallible));
+    test_mod_for_effects(
+        &mut session,
+        "fn f() -> [int] { [0, 1, 2] |> filter_map(|x| { effects::read(); Some(x) }) }",
+        "f",
+        effects(&[Fallible, Read]),
+    );
+    test_mod_for_effects(
+        &mut session,
+        "fn f() { let ignored = [0, 1, 2] |> iter() |> filter_map(|x| { effects::read(); Some(x) }); () }",
+        "f",
+        no_effects(),
+    );
+    test_mod_for_effects(
+        &mut session,
+        "fn f() -> Option<int> { let mut it = [0, 1, 2] |> iter() |> filter_map(|x| { effects::read(); Some(x) }); next(it) }",
+        "f",
+        effects(&[Fallible, Read]),
+    );
 }
 
 #[test]

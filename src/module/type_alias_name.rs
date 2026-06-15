@@ -246,14 +246,17 @@ fn match_alias_type_inner(
             Named(NamedType {
                 def: lhs_def,
                 params: lhs_params,
+                effect_params: lhs_effect_params,
             }),
             Named(NamedType {
                 def: rhs_def,
                 params: rhs_params,
+                effect_params: rhs_effect_params,
             }),
         ) => {
             lhs_def == rhs_def
                 && lhs_params.len() == rhs_params.len()
+                && lhs_effect_params == rhs_effect_params
                 && lhs_params.iter().zip(rhs_params.iter()).all(|(lhs, rhs)| {
                     match_alias_type_inner(*lhs, *rhs, ty_var_count, subst, visited)
                 })

@@ -246,9 +246,9 @@ fn effects_in_fn_type_ascription() {
 
     let mod_src = "fn g(f: (() -> (), () -> ())) { (f.0(), f.1()) }";
     test_mod(&mut session, mod_src, "g", effect_vars(&[0, 1]));
-    let mod_src = "fn g(f: ((() -> () !), (() -> () ! read))) { (f.0(), f.1()) }";
+    let mod_src = "fn g(f: ((() -> () ! ()), (() -> () ! read))) { (f.0(), f.1()) }";
     test_mod(&mut session, mod_src, "g", effect(Read));
-    let mod_src = "fn g(f: ((() -> () ! fallible), (() -> () ! read, write))) { (f.0(), f.1()) }";
+    let mod_src = "fn g(f: ((() -> () ! fallible), (() -> () ! (read, write)))) { (f.0(), f.1()) }";
     test_mod(
         &mut session,
         mod_src,
@@ -377,6 +377,71 @@ fn trait_output_effects_propagate_through_blanket_impls() {
     "#};
     test_mod(&mut session, mod_src, "pure_project", EffType::empty());
     test_mod(&mut session, mod_src, "effectful_project", effect(Read));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn associated_effect_bindings_accept_parenthesized_values() {
+    use PrimitiveEffect::*;
+
+    let mut session = TestSession::new();
+
+    let mod_src = indoc! {r#"
+        trait Do<Self |-> ! Eff> {
+            fn do(value: Self) ! Eff;
+        }
+
+        struct Pure;
+        struct Single;
+        struct Trailing;
+        struct Union;
+
+        impl Do for <Self = Pure |-> ! Eff = ()> {
+            fn do(value: Pure) {}
+        }
+        impl Do for <Self = Single |-> ! Eff = (read)> {
+            fn do(value: Single) { effects::read() }
+        }
+        impl Do for <Self = Trailing |-> ! Eff = (read,)> {
+            fn do(value: Trailing) { effects::read() }
+        }
+        impl Do for <Self = Union |-> ! Eff = (read, write)> {
+            fn do(value: Union) { effects::read(); effects::write() }
+        }
+
+        fn call_pure() { do(Pure) }
+        fn call_single() { do(Single) }
+        fn call_trailing() { do(Trailing) }
+        fn call_union() { do(Union) }
+    "#};
+
+    test_mod(&mut session, mod_src, "call_pure", EffType::empty());
+    test_mod(&mut session, mod_src, "call_single", effect(Read));
+    test_mod(&mut session, mod_src, "call_trailing", effect(Read));
+    test_mod(&mut session, mod_src, "call_union", effects(&[Read, Write]));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn concrete_trait_output_effect_does_not_leak_inference_slot() {
+    use PrimitiveEffect::*;
+
+    let mut session = TestSession::new();
+
+    let mod_src = indoc! {r#"
+        trait Do<Self |-> ! Eff> {
+            fn do(value: Self) ! Eff;
+        }
+
+        struct ReadOnly;
+        impl Do for <Self = ReadOnly |-> ! Eff = read> {
+            fn do(value: ReadOnly) { effects::read() }
+        }
+
+        fn call_read() { do(ReadOnly) }
+    "#};
+
+    test_mod(&mut session, mod_src, "call_read", effect(Read));
 }
 
 #[test]

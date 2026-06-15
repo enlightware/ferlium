@@ -15,17 +15,21 @@ use crate::ast::ExprId;
 use crate::ast::ExprKind;
 use crate::ast::ForLoopData;
 use crate::ast::MapLiteralEntry;
+use crate::ast::PEffect;
 use crate::ast::PExpr;
 use crate::ast::PExprArena;
 use crate::ast::PExprId;
 use crate::ast::PExprKind;
 use crate::ast::PLetPattern;
 use crate::ast::PType;
+use crate::ast::PTypeConstraintInput;
+use crate::ast::PTypeConstraintOutput;
 use crate::ast::PTypeSpan;
 use crate::ast::Path;
 use crate::ast::Pattern;
 use crate::ast::PatternKind;
 use crate::ast::Phase;
+use crate::ast::TypeConstraintEffectOutput;
 use crate::ast::UnnamedArg;
 use crate::ast::UstrSpan;
 use crate::compiler::error::LocatedError;
@@ -48,6 +52,111 @@ use std::hash::Hash;
 use crate::FxHashMap;
 use std::sync::LazyLock;
 use ustr::{Ustr, ustr};
+
+/// One item in a neutral `<...>` type/trait argument list.
+#[derive(Debug)]
+pub(crate) enum AngleTypeArg {
+    Positional(PTypeSpan),
+    Named { name: UstrSpan, ty: PTypeSpan },
+}
+
+/// Neutral representation for `Path<...>` contents.
+///
+/// The parser intentionally does not decide whether `Path<...>` is a type
+/// application or a trait constraint head. That is context-sensitive: in
+/// `MapIterator<I ! E>` the `! E` section is a type effect argument, while in
+/// `Iterator<Self = I |-> Item = T ! NextEffect = E>` the `!` section belongs
+/// to associated effect outputs.
+#[derive(Debug, Default)]
+pub(crate) struct AngleArgs {
+    pub(crate) inputs: Vec<AngleTypeArg>,
+    pub(crate) output_types: Vec<PTypeConstraintOutput>,
+    pub(crate) output_effects: Vec<TypeConstraintEffectOutput>,
+    pub(crate) effect_args: Vec<PEffect>,
+}
+
+pub(crate) type TypeApplicationArgsResult<L, T> =
+    Result<(Vec<PTypeSpan>, Vec<PEffect>), ParseError<L, T, LocatedError>>;
+
+pub(crate) type TraitHeadArgsResult<L, T> = Result<
+    (
+        Vec<PTypeConstraintInput>,
+        Vec<PTypeConstraintOutput>,
+        Vec<TypeConstraintEffectOutput>,
+    ),
+    ParseError<L, T, LocatedError>,
+>;
+
+pub(crate) fn validate_type_application_args<L, T>(
+    args: AngleArgs,
+) -> TypeApplicationArgsResult<L, T> {
+    let AngleArgs {
+        inputs,
+        output_types,
+        output_effects,
+        effect_args,
+    } = args;
+    if let Some(named) = inputs.iter().find_map(|arg| match arg {
+        AngleTypeArg::Named { name, .. } => Some(name),
+        AngleTypeArg::Positional(_) => None,
+    }) {
+        return error(
+            "named type arguments are only valid in trait constraints".into(),
+            named.1,
+        );
+    }
+    if let Some(output) = output_types.first() {
+        return error(
+            "associated type bindings are only valid in trait constraints".into(),
+            output.name.1,
+        );
+    }
+    if let Some(output) = output_effects.first() {
+        return error(
+            "associated effect bindings are only valid in trait constraints".into(),
+            output.name.1,
+        );
+    }
+    Ok((
+        inputs
+            .into_iter()
+            .map(|arg| match arg {
+                AngleTypeArg::Positional(ty) => ty,
+                AngleTypeArg::Named { .. } => unreachable!(),
+            })
+            .collect(),
+        effect_args,
+    ))
+}
+
+pub(crate) fn validate_trait_head_args<L, T>(args: AngleArgs) -> TraitHeadArgsResult<L, T> {
+    let AngleArgs {
+        inputs,
+        output_types,
+        output_effects,
+        effect_args,
+    } = args;
+    if let Some(effect) = effect_args.first() {
+        return error(
+            "bare effect arguments are only valid in type applications".into(),
+            effect.name.1,
+        );
+    }
+    Ok((
+        inputs
+            .into_iter()
+            .map(|arg| match arg {
+                AngleTypeArg::Positional(ty) => PTypeConstraintInput { name: None, ty },
+                AngleTypeArg::Named { name, ty } => PTypeConstraintInput {
+                    name: Some(name),
+                    ty,
+                },
+            })
+            .collect(),
+        output_types,
+        output_effects,
+    ))
+}
 
 /// Create a span from two numbers (used by lalrpop with @L/@R positions)
 pub(crate) fn span(l: usize, r: usize, source_id: SourceId) -> Location {

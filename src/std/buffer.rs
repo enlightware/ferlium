@@ -502,6 +502,7 @@ pub fn add_to_module(to: &mut Module) {
         BlanketTraitImplSubKey {
             input_tys: vec![buffer_type(gen0)],
             ty_var_count: 1,
+            eff_var_count: 0,
             constraints: vec![],
         },
         [],
@@ -519,6 +520,7 @@ pub fn add_to_module(to: &mut Module) {
         BlanketTraitImplSubKey {
             input_tys: vec![buffer_type(gen0)],
             ty_var_count: 1,
+            eff_var_count: 0,
             constraints: vec![],
         },
         [],

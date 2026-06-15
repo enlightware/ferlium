@@ -98,7 +98,9 @@ The same eager/lazy distinction applies to `filter` and `filter_map`.
 
 ### Callback purity
 
-Callbacks passed to `map`, `filter`, and `filter_map` and `sort` functions are currently required to be pure.
+Callbacks passed to `map`, `filter`, and `filter_map` may have effects.
+For eager collection calls, those effects happen while building the result.
+For lazy iterator adaptors, callback effects happen later, when the iterator is advanced with `next`.
 
 ## Collecting results
 

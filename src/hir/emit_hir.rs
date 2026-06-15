@@ -47,7 +47,7 @@ use crate::{
     types::type_like::TypeLike,
     types::type_mapper::{BitmapInstantiationMapper, TypeMapper},
     types::type_scheme::PubTypeConstraint,
-    types::type_visitor::collect_ty_vars,
+    types::type_visitor::{collect_effect_vars, collect_ty_vars},
 };
 
 fn validate_name_uniqueness(source: &ast::PModule) -> Result<(), InternalCompilationError> {
@@ -286,14 +286,30 @@ pub(super) fn default_output_effects_in_functions(
     for &id in function_ids {
         let effect_subst: FxHashMap<_, _> = {
             let descr = &output.functions[id.as_index()];
-            let input_effect_vars = descr.definition.ty_scheme.ty.input_effect_vars();
+            let public_signature_ty_vars = descr
+                .definition
+                .ty_scheme
+                .ty
+                .inner_ty_vars()
+                .into_iter()
+                .collect::<FxHashSet<_>>();
+            let mut retained_effect_vars = descr.definition.ty_scheme.ty.input_effect_vars();
+            for constraint in &descr.definition.ty_scheme.constraints {
+                let constraint_mentions_public_signature_ty = constraint
+                    .inner_ty_vars()
+                    .into_iter()
+                    .any(|var| public_signature_ty_vars.contains(&var));
+                if constraint_mentions_public_signature_ty {
+                    constraint.fill_with_inner_effect_vars(&mut retained_effect_vars);
+                }
+            }
             descr
                 .definition
                 .ty_scheme
                 .ty
                 .output_effect_vars()
                 .into_iter()
-                .filter(|var| !input_effect_vars.contains(var))
+                .filter(|var| !retained_effect_vars.contains(var))
                 .map(|var| (var, EffType::empty()))
                 .collect()
         };
@@ -434,6 +450,7 @@ pub fn emit_module(
         if let Some(for_trait) = &imp.for_trait {
             let input_tys = for_trait.input_tys();
             let output_tys = for_trait.output_tys();
+            let output_effs = for_trait.output_effs();
             let Some((trait_module_id, trait_id, trait_def)) = ({
                 let module_env = ModuleEnv::new(&output, others);
                 module_env
@@ -459,7 +476,10 @@ pub fn emit_module(
             }
             let mut stub_tys = input_tys.clone();
             stub_tys.extend(output_tys.iter().copied());
-            if !collect_ty_vars(&stub_tys).is_empty() {
+            if !collect_ty_vars(&stub_tys).is_empty()
+                || !collect_effect_vars(&stub_tys).is_empty()
+                || output_effs.iter().any(EffType::has_variables)
+            {
                 continue;
             }
             if !output_tys.is_empty() && output_tys.len() != trait_def.output_type_count() as usize
@@ -474,11 +494,7 @@ pub fn emit_module(
             if output_tys.is_empty() && trait_def.output_type_count() != 0 {
                 continue;
             }
-            if trait_def.output_effect_count() != 0 {
-                // Effect slots cannot be written in source yet, so the impl is
-                // registered through the main emission path only.
-                continue;
-            }
+            let output_effs = trait_def.impl_output_effs_or_pure_defaults(output_effs);
             check_trait_impl(
                 &output,
                 others,
@@ -486,13 +502,14 @@ pub fn emit_module(
                 trait_module_id.is_none(),
                 &input_tys,
                 &output_tys,
-                &[],
+                &output_effs,
+                0,
                 0,
                 &[],
                 imp.span,
             )?;
             // Pre-allocate placeholder functions for each trait method.
-            let method_defs = trait_def.instantiate_for_tys(&input_tys, &output_tys, &[]);
+            let method_defs = trait_def.instantiate_for_tys(&input_tys, &output_tys, &output_effs);
             let mut method_ids = Vec::with_capacity(method_defs.len());
             for def in method_defs {
                 // Placeholder ModuleFunction that will be replaced later.
@@ -509,7 +526,7 @@ pub fn emit_module(
                     SourceAssociatedConstImpl {
                         input_tys: &input_tys,
                         output_tys: &output_tys,
-                        output_effs: &[],
+                        output_effs: &output_effs,
                         ty_var_count: 0,
                         associated_consts: &imp.associated_consts,
                         span: imp.span,
@@ -518,12 +535,15 @@ pub fn emit_module(
                 )?
             };
             let dictionary_value = build_dictionary_value(&method_ids, &associated_const_values);
-            let associated_const_tys =
-                trait_def.instantiate_associated_const_tys_for_tys(&input_tys, &output_tys, &[]);
+            let associated_const_tys = trait_def.instantiate_associated_const_tys_for_tys(
+                &input_tys,
+                &output_tys,
+                &output_effs,
+            );
             let dictionary_ty = output.computer_dictionary_ty(&method_ids, associated_const_tys);
             let stub = TraitImpl::new(
                 output_tys,
-                vec![],
+                output_effs,
                 method_ids.clone(),
                 dictionary_value,
                 dictionary_ty,
@@ -640,7 +660,8 @@ pub fn emit_module(
             trait_def,
             span: imp.span,
             stub_data: concrete_impl_stubs.get(&imp_idx),
-            generic_param_count: imp.generic_params.len(),
+            generic_param_count: imp.generic_params.type_params().len(),
+            generic_effect_param_count: imp.generic_params.effect_params().len(),
             for_trait: imp.for_trait.as_ref(),
             impl_constraints: &imp.where_clause,
         };
@@ -666,7 +687,7 @@ pub fn emit_module(
         .unwrap();
 
         // Register the implementation if no stub was present.
-        let is_concrete = emit_output.ty_var_count == 0;
+        let is_concrete = emit_output.ty_var_count == 0 && emit_output.eff_var_count == 0;
         let local_impl_id = if let Some(stub_data) = concrete_impl_stubs.get(&imp_idx) {
             assert_eq!(
                 &emit_output.functions,
@@ -693,6 +714,7 @@ pub fn emit_module(
                 &emit_output.output_tys,
                 &emit_output.output_effs,
                 emit_output.ty_var_count,
+                emit_output.eff_var_count,
                 &emit_output.constraints,
                 imp.span,
             )?;

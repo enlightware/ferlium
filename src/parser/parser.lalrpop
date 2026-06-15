@@ -1,6 +1,5 @@
 use crate::{SourceId, Location, LocatedError};
-use crate::ast::{UstrSpan, Path, UseTree, PTypeSpan as TypeSpan, PMutTypeTypeSpan as MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, Pattern, PatternKind as PatK, PatternVar, PLetPattern as LetPattern, LetPatternKind as LetPatK, LetRecordPatternField, MapLiteralEntry, PModuleFunctionArg as ModuleFunctionArg, PModule as Module, PModuleFunction as ModuleFunction, PTraitDefinition as TraitDefinition, TraitAssociatedConstDecl, TraitAssociatedConstImpl, TraitDefinitionItem, TraitImplItem, TraitMethod, TraitMethodArg, PTraitImpl as TraitImpl, PTraitImplFor as TraitImplForHeader, PTypeConstraint as TypeConstraint, PTypeConstraintInput as TypeConstraintInput, PTypeConstraintOutput as TypeConstraintOutput, PTypeDef as TypeDef, TypeAlias, PType as Type, PFnType as FnType, PFnEffects, PFnArgType as FnArgType, PMutType as MutType, Attribute, MetaItem, UnnamedArg, PExprArena, PExprId};
-use crate::types::effects::PrimitiveEffect;
+use crate::ast::{UstrSpan, Path, UseTree, PTypeSpan as TypeSpan, PMutTypeTypeSpan as MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, Pattern, PatternKind as PatK, PatternVar, PLetPattern as LetPattern, LetPatternKind as LetPatK, LetRecordPatternField, MapLiteralEntry, PModuleFunctionArg as ModuleFunctionArg, PModule as Module, PModuleFunction as ModuleFunction, PTraitDefinition as TraitDefinition, TraitAssociatedConstDecl, TraitAssociatedConstImpl, TraitDefinitionItem, TraitImplItem, TraitMethod, TraitMethodArg, PTraitImpl as TraitImpl, PTraitImplFor as TraitImplForHeader, PTypeConstraint as TypeConstraint, PTypeConstraintInput as TypeConstraintInput, PTypeConstraintOutput as TypeConstraintOutput, TypeConstraintEffectOutput, GenericParams, PTypeDef as TypeDef, TypeAlias, PType as Type, PFnType as FnType, PFnEffects, PEffect, PFnArgType as FnArgType, PMutType as MutType, Attribute, MetaItem, UnnamedArg, PExprArena, PExprId};
 use crate::hir::value::LiteralValue;
 use crate::types::r#type::{
     Type as IrType,
@@ -85,6 +84,7 @@ TraitDefinition: TraitDefinition = {
             name,
             input_type_names: header.0,
             output_type_names: header.1,
+            output_effect_names: header.2,
             parent_constraints: parent_constraints.unwrap_or_default(),
             where_clause: where_clause.unwrap_or_default(),
             associated_consts,
@@ -100,13 +100,25 @@ TraitItem: TraitDefinitionItem = {
     TraitMethod => TraitDefinitionItem::Method(<>),
 }
 
-TraitDefinitionHeader: (Vec<UstrSpan>, Vec<UstrSpan>) = {
+TraitDefinitionHeader: (Vec<UstrSpan>, Vec<UstrSpan>, Vec<UstrSpan>) = {
     "<" <input_type_names:Sep1<Sp<UIdentifier>, ",">> <output_type_names:TraitDefinitionOutputSection?> ">" =>
-        (input_type_names, output_type_names.unwrap_or_default()),
+        {
+            let (output_type_names, output_effect_names) = output_type_names.unwrap_or_default();
+            (input_type_names, output_type_names, output_effect_names)
+        },
 }
 
-TraitDefinitionOutputSection: Vec<UstrSpan> = {
-    "|->" <output_type_names:Sep1<Sp<UIdentifier>, ",">> => output_type_names,
+TraitDefinitionOutputSection: (Vec<UstrSpan>, Vec<UstrSpan>) = {
+    "|->" <output_type_names:Sep1<Sp<UIdentifier>, ",">> "!" <output_effect_names:Sep1<Sp<UIdentifier>, ",">> =>
+        (output_type_names, output_effect_names),
+    "|->" <output_type_names:Sep1<Sp<UIdentifier>, ",">> =>
+        (output_type_names, vec![]),
+    "|->" <output_effect_names:TraitDefinitionOutputEffectSection> =>
+        (vec![], output_effect_names),
+}
+
+TraitDefinitionOutputEffectSection: Vec<UstrSpan> = {
+    "!" <output_effect_names:Sep1<Sp<UIdentifier>, ",">> => output_effect_names,
 }
 
 ParentConstraintList: Vec<TypeConstraint> = {
@@ -162,26 +174,35 @@ TraitImplItem: TraitImplItem = {
 }
 
 TraitImplForHeader: TraitImplForHeader = {
-    <ty:Sp<Type<"", "">>> => {
+    <ty:Sp<Type<"", "", "F">>> => {
         let span = ty.1;
         TraitImplForHeader {
             input_types: vec![TypeConstraintInput { name: None, ty }],
             output_types: vec![],
+            output_effects: vec![],
+            output_effs: vec![],
             span,
         }
     },
-    <l:@L> "<" <tys:Sep1<Sp<Type<"", "">>, ",">> ">" <r:@R> => TraitImplForHeader {
+    <l:@L> "<" <tys:Sep1<Sp<Type<"", "", "">>, ",">> ">" <r:@R> => TraitImplForHeader {
         input_types: tys
             .into_iter()
             .map(|ty| TypeConstraintInput { name: None, ty })
             .collect(),
         output_types: vec![],
+        output_effects: vec![],
+        output_effs: vec![],
         span: span(l, r, source_id),
     },
-    <l:@L> "<" <input_types:TypeConstraintNamedInputList> <output_types:TypeConstraintOutputSection?> ">" <r:@R> => TraitImplForHeader {
+    <l:@L> "<" <input_types:TypeConstraintNamedInputList> <outputs:TraitImplForOutputSection?> ">" <r:@R> => {
+        let (output_types, output_effects) = outputs.unwrap_or_default();
+        TraitImplForHeader {
         input_types,
-        output_types: output_types.unwrap_or_default(),
+        output_types,
+        output_effects,
+        output_effs: vec![],
         span: span(l, r, source_id),
+        }
     },
 }
 
@@ -253,7 +274,7 @@ TraitMethod: TraitMethod = {
 }
 
 TraitAssociatedConstDecl: TraitAssociatedConstDecl<crate::ast::Parsed> = {
-    <doc:DOC_COMMENT*> <l:@L> "const" <name:Sp<UIdentifier>> ":" <ty:Sp<Type<"P", "">>> ";" <r:@R> =>
+    <doc:DOC_COMMENT*> <l:@L> "const" <name:Sp<UIdentifier>> ":" <ty:Sp<Type<"P", "", "F">>> ";" <r:@R> =>
         TraitAssociatedConstDecl {
             name,
             ty,
@@ -283,32 +304,30 @@ TraitMethodArgs: Vec<TraitMethodArg> = {
 }
 
 TraitMethodArg: TraitMethodArg = {
-    <name:Sp<UIdentifier>> ":" <ty:ArgType<"", "">> => TraitMethodArg { name, ty },
+    <name:Sp<UIdentifier>> ":" <ty:ArgType<"", "", "F">> => TraitMethodArg { name, ty },
 }
 
 // Type
 
 pub DefinedType: Type = {
-    Type<"", "R">
+    Type<"", "R", "F">
 }
 
 pub HoledType: Type = {
-    Type<"P", "R">
+    Type<"P", "R", "F">
 }
 
-// P: placeholder allowed, R: return type context
-Type<P, R>: Type = {
+// P: placeholder allowed, R: return type context, F: bare function effects allowed
+Type<P, R, F>: Type = {
     PlaceholderType if P != "",
-    ExplicitFunctionType<P, R>,
     NonFunctionType<P, R>,
-    FunctionType<P, R>,
+    FunctionType<P, R, F>,
     PathType<P>,
 }
 
-NonPathType<P, R>: Type = {
-    ExplicitFunctionType<P, R>,
+NonPathType<P, R, F>: Type = {
     NonFunctionType<P, R>,
-    FunctionType<P, R>,
+    FunctionType<P, R, F>,
 }
 
 NonFunctionType<P, R>: Type = {
@@ -325,7 +344,7 @@ UnitType: Type = {
 }
 
 ParenthesizedType<P, R>: Type = {
-    "(" <arg:ArgType<P, R>> ")" =>?
+    "(" <arg:ArgType<P, R, "F">> ")" =>?
         if arg.mut_ty.is_some() {
             return error("types outside function arguments cannot be &mut".into(), arg.span);
         } else {
@@ -334,7 +353,7 @@ ParenthesizedType<P, R>: Type = {
 }
 
 TupleType<P, R>: Type = {
-    "(" <arg0:ArgType<P, R>> "," <args:Sep<ArgType<P, R>, ",">> ")" =>?
+    "(" <arg0:ArgType<P, R, "F">> "," <args:Sep<ArgType<P, R, "F">, ",">> ")" =>?
     {
         let args = ext_f(arg0, args);
         if let Some(arg) = args.iter().find(|a| a.mut_ty.is_some()) {
@@ -345,54 +364,60 @@ TupleType<P, R>: Type = {
     }
 }
 
-FunctionType<P, R>: Type = {
-    "(" ")" <ret:EffFnRet<P>> => Type::function_type(FnType::new(vec![], ret.0, ret.1)),
-    "(" <arg:ArgType<P, R>> ")" <ret:EffFnRet<P>> =>
+FunctionType<P, R, F>: Type = {
+    "(" ")" <ret:EffFnRet<P, F>> => Type::function_type(FnType::new(vec![], ret.0, ret.1)),
+    "(" <arg:ArgType<P, R, "F">> ")" <ret:EffFnRet<P, F>> =>
         Type::function_type(FnType::new(vec![arg], ret.0, ret.1)),
-    "(" <arg0:ArgType<P, R>> "," <args:Sep<ArgType<P, R>, ",">> ")" <ret:EffFnRet<P>> =>
+    "(" <arg0:ArgType<P, R, "F">> "," <args:Sep<ArgType<P, R, "F">, ",">> ")" <ret:EffFnRet<P, F>> =>
         Type::function_type(FnType::new(ext_f(arg0, args), ret.0, ret.1)),
 }
 
 #[inline]
-EffFnRet<P>: (TypeSpan, PFnEffects) = {
-    "->" <ret:Sp<Type<P, "">>> if P != "" => (ret, PFnEffects::implicit(true)),
-    "->" <ret:Sp<Type<P, "">>> if P == "" => (ret, PFnEffects::implicit(false))
+EffFnRet<P, F>: (TypeSpan, PFnEffects) = {
+    <ret:EffFnRetWithEffects<P>> if F != "" => ret,
+    <ret:EffFnRetWithoutEffects<P>> if F == "" => ret,
+}
+
+#[inline]
+EffFnRetWithEffects<P>: (TypeSpan, PFnEffects) = {
+    "->" <ret:Sp<Type<P, "", "">>> <effects:FnEffectsAnnotation?> if P != "" =>
+        (ret, effects.map(|(effects, _)| effects).unwrap_or(PFnEffects::implicit(true))),
+    "->" <ret:Sp<Type<P, "", "">>> <effects:FnEffectsAnnotation?> if P == "" =>
+        (ret, effects.map(|(effects, _)| effects).unwrap_or(PFnEffects::implicit(false))),
+}
+
+#[inline]
+EffFnRetWithoutEffects<P>: (TypeSpan, PFnEffects) = {
+    "->" <ret:Sp<Type<P, "", "">>> if P != "" =>
+        (ret, PFnEffects::implicit(true)),
+    "->" <ret:Sp<Type<P, "", "">>> if P == "" =>
+        (ret, PFnEffects::implicit(false))
 }
 
 #[inline]
 SpFnRet<P>: TypeSpan = {
-    "->" <ret:Sp<Type<P, "">>> => ret
+    "->" <ret:Sp<Type<P, "", "">>> => ret
 }
 
 FnEffectsAnnotation: (PFnEffects, Location) = {
-    <l:@L> "!" <effects:Sep<PrimitiveEffectName, ",">> <r:@R> =>
+    <l:@L> "!" <effects:FnEffectBindingValue> <r:@R> =>
         (PFnEffects::Explicit(effects), span(l, r, source_id)),
 }
 
-ExplicitFunctionType<P, R>: Type = {
-    "(" <fn_ty:FunctionType<P, R>> <effects:FnEffectsAnnotation> ")" =>? {
-        let Type::Function(fn_ty) = fn_ty else {
-            unreachable!();
-        };
-        let mut fn_ty = *fn_ty;
-        fn_ty.effects = effects.0;
-        Ok(Type::function_type(fn_ty))
-    }
+FnEffectBindingValue: Vec<PEffect> = {
+    "(" ")" => vec![],
+    "(" <effects:Sep1<EffectName, ",">> ")" => effects,
+    <effect:EffectName> => vec![effect],
 }
 
-PrimitiveEffectName: PrimitiveEffect = {
-    <name:Sp<UIdentifier>> =>? match name.0.as_str() {
-        "read" => Ok(PrimitiveEffect::Read),
-        "write" => Ok(PrimitiveEffect::Write),
-        "fallible" => Ok(PrimitiveEffect::Fallible),
-        _ => error(format!("unknown effect `{}`", name.0), name.1),
-    }
+EffectName: PEffect = {
+    <name:Sp<UIdentifier>> => PEffect { name },
 }
 
-ArgType<P, R>: FnArgType = {
-    <l:@L> "&" "mut" <t:Sp<Type<P, R>>> <r:@R> => FnArgType::new(t, Some(MutType::Mut), span(l, r, source_id)),
-    <l:@L> "&" "?" <t:Sp<Type<P, R>>> <r:@R> if P !=  "" => FnArgType::new(t, Some(MutType::Infer), span(l, r, source_id)),
-    <t:Sp<Type<P, R>>> => { let span = t.1; FnArgType::new(t, None, span) },
+ArgType<P, R, F>: FnArgType = {
+    <l:@L> "&" "mut" <t:Sp<Type<P, R, F>>> <r:@R> => FnArgType::new(t, Some(MutType::Mut), span(l, r, source_id)),
+    <l:@L> "&" "?" <t:Sp<Type<P, R, F>>> <r:@R> if P !=  "" => FnArgType::new(t, Some(MutType::Infer), span(l, r, source_id)),
+    <t:Sp<Type<P, R, F>>> => { let span = t.1; FnArgType::new(t, None, span) },
 }
 
 PlaceholderType: Type = {
@@ -400,12 +425,12 @@ PlaceholderType: Type = {
 }
 
 PathType<P>: Type = {
-    <p:Path> "<" <args:TypeArgList<P>> ">" => Type::path_with_args(p, args),
+    <p:Path> "<" <args:TypeApplicationArgs<P>> ">" => Type::path_with_type_and_effect_args(p, args.0, args.1),
     <p:Path> => Type::Path(p),
 }
 
 ArrayType<P>: Type = {
-    "[" <t:Sp<Type<P, "">>> "]" => Type::Array(Box::new(t))
+    "[" <t:Sp<Type<P, "", "F">>> "]" => Type::Array(Box::new(t))
 }
 
 RecordType<P>: Type = {
@@ -418,7 +443,7 @@ RecordTypeFields<P>: Type = {
 }
 
 RecordTypeField<P>: (UstrSpan, TypeSpan) = {
-    <n:Sp<FieldIdentifier>> ":" <t:Sp<Type<P, "">>> => (n, t),
+    <n:Sp<FieldIdentifier>> ":" <t:Sp<Type<P, "", "F">>> => (n, t),
 }
 
 VariantType<P, R>: Type = {
@@ -428,7 +453,7 @@ VariantType<P, R>: Type = {
 
 VariantTypeAlternative<P, U, R>: (UstrSpan, TypeSpan) = {
     <tag:Sp<UIdentifier>> if U != "" => (tag, (Type::Unit, tag.1)),
-    <tag:Sp<UIdentifier>> <l:@L> "(" <args:Sep<Sp<Type<P, R>>, ",">> ")" <r:@R> => (tag, (Type::Tuple(args), span(l, r, source_id))),
+    <tag:Sp<UIdentifier>> <l:@L> "(" <args:Sep<Sp<Type<P, R, "F">>, ",">> ")" <r:@R> => (tag, (Type::Tuple(args), span(l, r, source_id))),
     <tag:Sp<UIdentifier>> <l:@L> "{" <rec:RecordTypeFields<P>> "}" <r:@R> if R != "" => (tag, (rec, span(l, r, source_id))),
 }
 
@@ -583,12 +608,17 @@ EnumTupleVariantField: DocTypeSpan = {
     <doc:DOC_COMMENT*> <ty:Sp<DefinedType>> => (ty, parse_doc_comments(doc)),
 }
 
-GenericParams: Vec<UstrSpan> = {
+GenericParams: GenericParams = {
     "<" <params:GenericParamList?> ">" => params.unwrap_or_default(),
 }
 
-GenericParamList: Vec<UstrSpan> = {
-    Sep1<Sp<UIdentifier>, ",">,
+GenericParamList: GenericParams = {
+    <type_params:Sep1<Sp<UIdentifier>, ",">> "!" <effect_params:Sep1<Sp<UIdentifier>, ",">> =>
+        GenericParams::new(type_params, effect_params),
+    <type_params:Sep1<Sp<UIdentifier>, ",">> =>
+        GenericParams::new(type_params, vec![]),
+    "!" <effect_params:Sep1<Sp<UIdentifier>, ",">> =>
+        GenericParams::new(vec![], effect_params),
 }
 
 WhereClause: Vec<TypeConstraint> = {
@@ -596,60 +626,140 @@ WhereClause: Vec<TypeConstraint> = {
 }
 
 TypeConstraint: TypeConstraint = {
-    <l:@L> <ty:TypeConstraintUnaryInput> ":" <trait_name:Path> <output_types:TypeConstraintOutputBindings?> <r:@R> => {
+    <l:@L> <ty:Sp<NonPathType<"", "", "F">>> ":" <trait_name:Path> <outputs:TypeConstraintOutputBindings?> <r:@R> => {
+        let (output_types, output_effects) = outputs.unwrap_or_default();
         TypeConstraint {
             trait_name,
             input_types: vec![TypeConstraintInput { name: None, ty }],
-            output_types: output_types.unwrap_or_default(),
+            output_types,
+            output_effects,
             span: span(l, r, source_id),
         }
     },
-    <l:@L> <trait_name:Path> "<" <input_types:TypeConstraintNamedInputList> <output_types:TypeConstraintOutputSection?> ">" <r:@R> => {
+    <l:@L> <path:Sp<Path>> ":" <trait_name:Path> <outputs:TypeConstraintOutputBindings?> <r:@R> => {
+        let (output_types, output_effects) = outputs.unwrap_or_default();
         TypeConstraint {
+            trait_name,
+            input_types: vec![TypeConstraintInput { name: None, ty: (Type::Path(path.0), path.1) }],
+            output_types,
+            output_effects,
+            span: span(l, r, source_id),
+        }
+    },
+    <l:@L> <path:Path> "<" <args:AngleArgs<"">> ">" <app_r:@R> ":" <trait_name:Path> <outputs:TypeConstraintOutputBindings?> <r:@R> =>? {
+        let (type_args, effect_args) = validate_type_application_args(args)?;
+        let (output_types, output_effects) = outputs.unwrap_or_default();
+        Ok(TypeConstraint {
+            trait_name,
+            input_types: vec![TypeConstraintInput {
+                name: None,
+                ty: (Type::path_with_type_and_effect_args(path, type_args, effect_args), span(l, app_r, source_id)),
+            }],
+            output_types,
+            output_effects,
+            span: span(l, r, source_id),
+        })
+    },
+    <l:@L> <trait_name:Path> "<" <args:AngleArgs<"">> ">" <r:@R> =>? {
+        let (input_types, output_types, output_effects) = validate_trait_head_args(args)?;
+        Ok(TypeConstraint {
             trait_name,
             input_types,
-            output_types: output_types.unwrap_or_default(),
+            output_types,
+            output_effects,
             span: span(l, r, source_id),
-        }
+        })
     },
-    <l:@L> <trait_name:Path> "<" <input_tys:TypeArgList<"">> <output_types:TypeConstraintOutputSection?> ">" <r:@R> => {
-        TypeConstraint {
-            trait_name,
-            input_types: input_tys
-                .into_iter()
-                .map(|ty| TypeConstraintInput { name: None, ty })
-                .collect(),
-            output_types: output_types.unwrap_or_default(),
-            span: span(l, r, source_id),
-        }
-    },
-}
-
-TypeConstraintUnaryInput: TypeSpan = {
-    <ty:Sp<NonPathType<"", "">>> => ty,
-    <path:Sp<Path>> => (Type::Path(path.0), path.1),
-    <l:@L> <path:Path> "<" <args:TypeArgList<"">> ">" <r:@R> =>
-        (Type::path_with_args(path, args), span(l, r, source_id)),
 }
 
 TypeArgList<P>: Vec<TypeSpan> = {
-    Sep1<Sp<Type<P, "">>, ",">,
+    Sep1<Sp<Type<P, "", "">>, ",">,
 }
 
-TypeConstraintOutputBindings: Vec<TypeConstraintOutput> = {
-    "<" <bindings:AssociatedTypeBindingList> ">" => bindings,
+TypeApplicationArgs<P>: (Vec<TypeSpan>, Vec<PEffect>) = {
+    <args:AngleArgs<P>> =>? validate_type_application_args(args),
+}
+
+AngleArgs<P>: AngleArgs = {
+    <inputs:AngleTypeArgList<P>> "|->" <outputs:AssociatedOutputBindingSection> => AngleArgs {
+        inputs,
+        output_types: outputs.0,
+        output_effects: outputs.1,
+        effect_args: vec![],
+    },
+    <inputs:AngleTypeArgList<P>> "!" <effect_args:Sep1<EffectName, ",">> => AngleArgs {
+        inputs,
+        output_types: vec![],
+        output_effects: vec![],
+        effect_args,
+    },
+    <inputs:AngleTypeArgList<P>> => AngleArgs {
+        inputs,
+        output_types: vec![],
+        output_effects: vec![],
+        effect_args: vec![],
+    },
+    "|->" <outputs:AssociatedOutputBindingSection> => AngleArgs {
+        inputs: vec![],
+        output_types: outputs.0,
+        output_effects: outputs.1,
+        effect_args: vec![],
+    },
+    "!" <effect_args:Sep1<EffectName, ",">> => AngleArgs {
+        inputs: vec![],
+        output_types: vec![],
+        output_effects: vec![],
+        effect_args,
+    },
+}
+
+AngleTypeArgList<P>: Vec<AngleTypeArg> = {
+    Sep1<AngleTypeArg<P>, ",">,
+}
+
+AngleTypeArg<P>: AngleTypeArg = {
+    <name:Sp<PathIdentifier<"">>> "=" <ty:Sp<Type<P, "", "">>> => AngleTypeArg::Named { name, ty },
+    <ty:Sp<Type<P, "", "">>> => AngleTypeArg::Positional(ty),
+}
+
+TypeConstraintOutputBindings: (Vec<TypeConstraintOutput>, Vec<TypeConstraintEffectOutput>) = {
+    "<" <bindings:AssociatedOutputBindingSection> ">" => bindings,
 }
 
 AssociatedTypeBinding: TypeConstraintOutput = {
-    <name:Sp<UIdentifier>> "=" <ty:Sp<Type<"", "">>> => TypeConstraintOutput { name, ty },
+    <name:Sp<UIdentifier>> "=" <ty:Sp<Type<"", "", "">>> => TypeConstraintOutput { name, ty },
 }
 
 AssociatedTypeBindingList: Vec<TypeConstraintOutput> = {
     Sep1<AssociatedTypeBinding, ",">,
 }
 
-TypeConstraintOutputSection: Vec<TypeConstraintOutput> = {
-    "|->" <bindings:AssociatedTypeBindingList> => bindings,
+TypeConstraintOutputSection: (Vec<TypeConstraintOutput>, Vec<TypeConstraintEffectOutput>) = {
+    "|->" <bindings:AssociatedOutputBindingSection> => bindings,
+}
+
+AssociatedOutputBindingSection: (Vec<TypeConstraintOutput>, Vec<TypeConstraintEffectOutput>) = {
+    <types:AssociatedTypeBindingList> "!" <effects:AssociatedEffectBindingList> => (types, effects),
+    <types:AssociatedTypeBindingList> => (types, vec![]),
+    "!" <effects:AssociatedEffectBindingList> => (vec![], effects),
+}
+
+TraitImplForOutputSection: (Vec<TypeConstraintOutput>, Vec<TypeConstraintEffectOutput>) = {
+    "|->" <bindings:AssociatedOutputBindingSection> => bindings,
+}
+
+AssociatedEffectBindingValue: Vec<PEffect> = {
+    "(" ")" => vec![],
+    "(" <effects:Sep1<EffectName, ",">> ")" => effects,
+    <effect:EffectName> => vec![effect],
+}
+
+AssociatedEffectBinding: TypeConstraintEffectOutput = {
+    <name:Sp<UIdentifier>> "=" <effects:AssociatedEffectBindingValue> => TypeConstraintEffectOutput { name, effects },
+}
+
+AssociatedEffectBindingList: Vec<TypeConstraintEffectOutput> = {
+    Sep1<AssociatedEffectBinding, ",">,
 }
 
 TypeConstraintNamedInputList: Vec<TypeConstraintInput> = {
@@ -657,7 +767,7 @@ TypeConstraintNamedInputList: Vec<TypeConstraintInput> = {
 }
 
 TypeConstraintNamedInput: TypeConstraintInput = {
-    <name:Sp<PathIdentifier<"">>> "=" <ty:Sp<Type<"", "">>> => TypeConstraintInput {
+    <name:Sp<PathIdentifier<"">>> "=" <ty:Sp<Type<"", "", "">>> => TypeConstraintInput {
         name: Some(name),
         ty,
     },
@@ -820,9 +930,9 @@ Path: Path = {
     <p:PathSegments> => Path::new(p),
 }
 
+#[inline]
 PathSegments: Vec<UstrSpan> = {
-    Sp<PathIdentifier<"">> => vec![<>],
-    <p:PathSegments> "::" <e:Sp<PathIdentifier<"E">>> => ext_b(p, e),
+    <first:Sp<PathIdentifier<"">>> <rest:("::" <Sp<PathIdentifier<"E">>>)*> => ext_f(first, rest),
 }
 
 PathIdentifier<E>: Ustr = {

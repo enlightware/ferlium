@@ -84,6 +84,7 @@ pub struct TraitSpans {
     pub name: Location,
     pub input_type_names: Vec<Location>,
     pub output_type_names: Vec<Location>,
+    pub output_effect_names: Vec<Location>,
     pub parent_constraints: Vec<Location>,
     pub constraints: Vec<Location>,
     pub methods: Vec<TraitMethodSpans>,

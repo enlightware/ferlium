@@ -75,8 +75,16 @@ fn is_definitely_uninhabited(ty: Type, env: &TypingEnv) -> bool {
 
 impl TypeInference {
     fn fresh_named_type_instance(&mut self, type_def: TypeDefId, env: &TypingEnv) -> Type {
-        let param_count = env.module_env.type_def(type_def).param_count();
-        Type::named(type_def, self.fresh_type_var_tys(param_count))
+        let type_def_data = env.module_env.type_def(type_def);
+        let param_count = type_def_data.param_count();
+        let effect_param_count = type_def_data.effect_param_count();
+        Type::named_with_effects(
+            type_def,
+            self.fresh_type_var_tys(param_count),
+            (0..effect_param_count)
+                .map(|_| self.fresh_effect_var_ty())
+                .collect::<Vec<_>>(),
+        )
     }
 
     fn named_enum_variant_tys_with_uninhabited_omissions(

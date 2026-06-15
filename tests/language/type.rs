@@ -300,7 +300,7 @@ fn fn_type() {
         ))
     );
     assert_eq!(
-        session.resolve_defined_type("((int) -> int !)").unwrap(),
+        session.resolve_defined_type("((int) -> int ! ())").unwrap(),
         Type::function_by_val_with_effects([int_type()], int_type(), EffType::empty())
     );
     assert_eq!(
@@ -315,7 +315,7 @@ fn fn_type() {
     );
     assert_eq!(
         session
-            .resolve_defined_type("((int) -> int ! write, read)")
+            .resolve_defined_type("((int) -> int ! (write, read))")
             .unwrap(),
         Type::function_by_val_with_effects(
             [int_type()],
@@ -324,12 +324,36 @@ fn fn_type() {
         )
     );
     assert_eq!(
-        session.resolve_holed_type("((int) -> int !)").unwrap(),
+        session.resolve_holed_type("((int) -> int ! ())").unwrap(),
         Type::function_by_val_with_effects([int_type()], int_type(), EffType::empty())
+    );
+    assert_eq!(
+        session.resolve_defined_type("(int) -> int ! read").unwrap(),
+        Type::function_by_val_with_effects([int_type()], int_type(), effect(PrimitiveEffect::Read))
+    );
+    assert_eq!(
+        session
+            .resolve_defined_type("(int) -> int ! (read, write)")
+            .unwrap(),
+        Type::function_by_val_with_effects(
+            [int_type()],
+            int_type(),
+            effects(&[PrimitiveEffect::Read, PrimitiveEffect::Write])
+        )
     );
     assert_eq!(
         session.resolve_holed_type("((int) -> int ! read)").unwrap(),
         Type::function_by_val_with_effects([int_type()], int_type(), effect(PrimitiveEffect::Read))
+    );
+    assert_eq!(
+        session
+            .resolve_defined_type("() -> (int) -> int ! read")
+            .unwrap(),
+        Type::function_by_val_with_effects(
+            [],
+            Type::function_by_val_with_effects([int_type()], int_type(), EffType::empty()),
+            effect(PrimitiveEffect::Read)
+        )
     );
     assert_eq!(
         session
@@ -355,7 +379,7 @@ fn fn_type() {
                 session.source_table(),
             )
         )
-        .starts_with("Parsing failed: unknown effect `unknown`")
+        .contains("Cannot find effect `unknown`")
     );
     assert_eq!(
         session

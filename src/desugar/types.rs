@@ -184,7 +184,7 @@ impl<'a, 'm> RecursiveTypeBuilder<'a, 'm> {
                 .iter()
                 .map(|(arg, arg_span)| self.desugar_type(arg, *arg_span, false, None))
                 .collect::<Result<Vec<_>, _>>()?;
-            desugar_resolved_type_with_args(resolved, path, desugared_args, span, self.env)
+            desugar_resolved_type_with_args(resolved, path, desugared_args, vec![], span, self.env)
         } else {
             Err(internal_compilation_error!(TypeNotFound(span)))
         }
@@ -208,11 +208,7 @@ impl<'a, 'm> RecursiveTypeBuilder<'a, 'm> {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let ret = self.desugar_type(&fn_type.ret.0, fn_type.ret.1, false, None)?;
-        let effects = match &fn_type.effects {
-            ast::PFnEffects::ImplicitPure => EffType::empty(),
-            ast::PFnEffects::ImplicitGeneric => EffType::single_variable_id(0),
-            ast::PFnEffects::Explicit(effects) => EffType::multiple_primitive(effects),
-        };
+        let effects = desugar_fn_effects(&fn_type.effects, None)?;
         Ok(FnType::new(args, ret, effects))
     }
 
@@ -245,7 +241,21 @@ impl<'a, 'm> RecursiveTypeBuilder<'a, 'm> {
             Resolved(ty) => *ty,
             Infer => Type::variable_id(0),
             Path(path) => self.desugar_path_without_args(path, span)?,
-            AppliedPath { path, args } => self.desugar_path_with_args(path, args, span)?,
+            AppliedPath {
+                path,
+                args,
+                effect_args,
+            } => {
+                if !effect_args.is_empty() {
+                    return Err(internal_compilation_error!(WrongNumberOfArguments {
+                        expected: 0,
+                        expected_span: span,
+                        got: effect_args.len(),
+                        got_span: span,
+                    }));
+                }
+                self.desugar_path_with_args(path, args, span)?
+            }
             Variant(types) => {
                 let mut seen = FxHashMap::default();
                 let variants = types
@@ -324,6 +334,8 @@ impl<'a, 'm> RecursiveTypeBuilder<'a, 'm> {
 fn desugar_type_constraint(
     constraint: &ast::PTypeConstraint,
     generic_ty_params: &GenericTyParams,
+    generic_eff_params: Option<&GenericEffParams>,
+    next_effect_var: &mut u32,
     env: &ModuleEnv<'_>,
     modules_used: &mut FxHashSet<ModuleId>,
 ) -> Result<PubTypeConstraint, InternalCompilationError> {
@@ -363,11 +375,12 @@ fn desugar_type_constraint(
             .input_types
             .iter()
             .map(|input| {
-                input.ty.0.desugar_with_ty_params(
+                input.ty.0.desugar_with_ty_and_eff_params(
                     input.ty.1,
                     false,
                     env,
                     generic_ty_params,
+                    generic_eff_params,
                     modules_used,
                 )
             })
@@ -387,11 +400,12 @@ fn desugar_type_constraint(
                 };
                 Ok((
                     name,
-                    input.ty.0.desugar_with_ty_params(
+                    input.ty.0.desugar_with_ty_and_eff_params(
                         input.ty.1,
                         false,
                         env,
                         generic_ty_params,
+                        generic_eff_params,
                         modules_used,
                     )?,
                 ))
@@ -414,11 +428,12 @@ fn desugar_type_constraint(
             .map(|output| {
                 Ok((
                     output.name,
-                    output.ty.0.desugar_with_ty_params(
+                    output.ty.0.desugar_with_ty_and_eff_params(
                         output.ty.1,
                         false,
                         env,
                         generic_ty_params,
+                        generic_eff_params,
                         modules_used,
                     )?,
                 ))
@@ -428,25 +443,64 @@ fn desugar_type_constraint(
         &constraint.trait_name,
         constraint.span,
     )?;
+    let output_effs = if constraint.output_effects.is_empty() {
+        (0..trait_def.output_effect_count())
+            .map(|_| {
+                let var = EffectVar::new(*next_effect_var);
+                *next_effect_var += 1;
+                EffType::single_variable(var)
+            })
+            .collect()
+    } else {
+        desugar_named_effect_bindings(
+            &trait_def.output_effect_names,
+            constraint
+                .output_effects
+                .iter()
+                .map(|output| {
+                    Ok((
+                        output.name,
+                        desugar_fn_effects(
+                            &ast::PFnEffects::Explicit(output.effects.clone()),
+                            generic_eff_params,
+                        )?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            &constraint.trait_name,
+            constraint.span,
+        )?
+    };
 
     Ok(PubTypeConstraint::new_have_trait(
         trait_id,
         input_tys,
         output_tys,
-        vec![],
+        output_effs,
         constraint.span,
     ))
 }
 
-pub(crate) fn desugar_type_constraints(
+pub(crate) fn desugar_type_constraints_with_next_effect_var(
     constraints: &[ast::PTypeConstraint],
     generic_ty_params: &GenericTyParams,
+    generic_eff_params: Option<&GenericEffParams>,
+    next_effect_var: &mut u32,
     env: &ModuleEnv<'_>,
     modules_used: &mut FxHashSet<ModuleId>,
 ) -> Result<Vec<PubTypeConstraint>, InternalCompilationError> {
     constraints
         .iter()
-        .map(|constraint| desugar_type_constraint(constraint, generic_ty_params, env, modules_used))
+        .map(|constraint| {
+            desugar_type_constraint(
+                constraint,
+                generic_ty_params,
+                generic_eff_params,
+                next_effect_var,
+                env,
+                modules_used,
+            )
+        })
         .collect()
 }
 
@@ -567,11 +621,22 @@ impl ast::PFnArgType {
         generic_ty_params: &GenericTyParams,
         modules_used: &mut FxHashSet<ModuleId>,
     ) -> Result<FnArgType, InternalCompilationError> {
-        let ty = self.ty.0.desugar_with_ty_params(
+        self.desugar_with_ty_and_eff_params(env, generic_ty_params, None, modules_used)
+    }
+
+    pub(crate) fn desugar_with_ty_and_eff_params(
+        &self,
+        env: &ModuleEnv<'_>,
+        generic_ty_params: &GenericTyParams,
+        generic_eff_params: Option<&GenericEffParams>,
+        modules_used: &mut FxHashSet<ModuleId>,
+    ) -> Result<FnArgType, InternalCompilationError> {
+        let ty = self.ty.0.desugar_with_ty_and_eff_params(
             self.ty.1,
             false,
             env,
             generic_ty_params,
+            generic_eff_params,
             modules_used,
         )?;
         let mut_ty = match self.mut_ty {
@@ -602,24 +667,37 @@ impl ast::PFnType {
         generic_ty_params: &GenericTyParams,
         modules_used: &mut FxHashSet<ModuleId>,
     ) -> Result<FnType, InternalCompilationError> {
+        self.desugar_with_ty_and_eff_params(env, generic_ty_params, None, modules_used)
+    }
+
+    fn desugar_with_ty_and_eff_params(
+        &self,
+        env: &ModuleEnv<'_>,
+        generic_ty_params: &GenericTyParams,
+        generic_eff_params: Option<&GenericEffParams>,
+        modules_used: &mut FxHashSet<ModuleId>,
+    ) -> Result<FnType, InternalCompilationError> {
         let args = self
             .args
             .iter()
-            .map(|arg| arg.desugar_with_ty_params(env, generic_ty_params, modules_used))
+            .map(|arg| {
+                arg.desugar_with_ty_and_eff_params(
+                    env,
+                    generic_ty_params,
+                    generic_eff_params,
+                    modules_used,
+                )
+            })
             .collect::<Result<Vec<_>, _>>()?;
-        let ret = self.ret.0.desugar_with_ty_params(
+        let ret = self.ret.0.desugar_with_ty_and_eff_params(
             self.ret.1,
             false,
             env,
             generic_ty_params,
+            generic_eff_params,
             modules_used,
         )?;
-        let effects = match &self.effects {
-            ast::PFnEffects::ImplicitPure => EffType::empty(),
-            // Always emit variable id 0 here; type inference will freshen it later.
-            ast::PFnEffects::ImplicitGeneric => EffType::single_variable_id(0),
-            ast::PFnEffects::Explicit(effects) => EffType::multiple_primitive(effects),
-        };
+        let effects = desugar_fn_effects(&self.effects, generic_eff_params)?;
         Ok(FnType::new(args, ret, effects))
     }
 }
@@ -644,6 +722,25 @@ impl ast::PType {
         generic_ty_params: &GenericTyParams,
         modules_used: &mut FxHashSet<ModuleId>,
     ) -> Result<Type, InternalCompilationError> {
+        self.desugar_with_ty_and_eff_params(
+            span,
+            in_ty_def,
+            env,
+            generic_ty_params,
+            None,
+            modules_used,
+        )
+    }
+
+    pub(crate) fn desugar_with_ty_and_eff_params(
+        &self,
+        span: Location,
+        in_ty_def: bool,
+        env: &ModuleEnv<'_>,
+        generic_ty_params: &GenericTyParams,
+        generic_eff_params: Option<&GenericEffParams>,
+        modules_used: &mut FxHashSet<ModuleId>,
+    ) -> Result<Type, InternalCompilationError> {
         use ast::PType::*;
         Ok(match self {
             Never => Type::never(),
@@ -663,11 +760,29 @@ impl ast::PType {
                     return Err(internal_compilation_error!(TypeNotFound(span)));
                 }
             }
-            AppliedPath { path, args } => {
+            AppliedPath {
+                path,
+                args,
+                effect_args,
+            } => {
                 if let Some(resolved) = resolve_type_path(path, env, modules_used)? {
-                    let desugared_args =
-                        desugar_type_arguments(args, env, generic_ty_params, modules_used)?;
-                    desugar_resolved_type_with_args(resolved, path, desugared_args, span, env)?
+                    let desugared_args = desugar_type_arguments(
+                        args,
+                        env,
+                        generic_ty_params,
+                        generic_eff_params,
+                        modules_used,
+                    )?;
+                    let desugared_effect_args =
+                        desugar_effect_arguments(effect_args, generic_eff_params)?;
+                    desugar_resolved_type_with_args(
+                        resolved,
+                        path,
+                        desugared_args,
+                        desugared_effect_args,
+                        span,
+                        env,
+                    )?
                 } else if let [(name, name_span)] = &path.segments[..] {
                     if generic_ty_params.contains_key(name) {
                         return Err(internal_compilation_error!(WrongNumberOfArguments {
@@ -718,11 +833,12 @@ impl ast::PType {
                                 seen.insert(name, *name_span);
                                 Ok((
                                     *name,
-                                    ty.desugar_with_ty_params(
+                                    ty.desugar_with_ty_and_eff_params(
                                         *ty_span,
                                         false,
                                         env,
                                         generic_ty_params,
+                                        generic_eff_params,
                                         modules_used,
                                     )?,
                                 ))
@@ -735,11 +851,12 @@ impl ast::PType {
                 elements
                     .iter()
                     .map(|(ty, span)| {
-                        ty.desugar_with_ty_params(
+                        ty.desugar_with_ty_and_eff_params(
                             *span,
                             false,
                             env,
                             generic_ty_params,
+                            generic_eff_params,
                             modules_used,
                         )
                     })
@@ -766,11 +883,12 @@ impl ast::PType {
                                 seen.insert(name, *name_span);
                                 Ok((
                                     *name,
-                                    ty.desugar_with_ty_params(
+                                    ty.desugar_with_ty_and_eff_params(
                                         *ty_span,
                                         false,
                                         env,
                                         generic_ty_params,
+                                        generic_eff_params,
                                         modules_used,
                                     )?,
                                 ))
@@ -780,19 +898,21 @@ impl ast::PType {
                 )
             }
             Array(array) => desugar_array_syntax_type(
-                array.0.desugar_with_ty_params(
+                array.0.desugar_with_ty_and_eff_params(
                     array.1,
                     false,
                     env,
                     generic_ty_params,
+                    generic_eff_params,
                     modules_used,
                 )?,
                 env.current.module_id(),
                 modules_used,
             ),
-            Function(fn_type) => Type::function_type(fn_type.desugar_with_ty_params(
+            Function(fn_type) => Type::function_type(fn_type.desugar_with_ty_and_eff_params(
                 env,
                 generic_ty_params,
+                generic_eff_params,
                 modules_used,
             )?),
         })
@@ -819,36 +939,61 @@ impl PTypeDef {
         validate_type_def_attributes(self, env.current.module_id() == STD_MODULE_ID)?;
         let generic_ty_params = extend_generic_ty_params(
             &GenericTyParams::default(),
-            &self.generic_params,
+            self.generic_params.type_params(),
+            GenericParamsOwner::TypeDef { name: self.name.0 },
+        )?;
+        let generic_eff_params = extend_generic_eff_params(
+            &GenericEffParams::default(),
+            self.generic_params.effect_params(),
             GenericParamsOwner::TypeDef { name: self.name.0 },
         )?;
         let ty_quantifiers = self
             .generic_params
+            .type_params()
             .iter()
             .map(|param| generic_ty_params.get(&param.0).copied().unwrap())
             .collect();
-        let shape = self.shape.desugar_with_ty_params(
+        let shape = self.shape.desugar_with_ty_and_eff_params(
             self.span,
             true,
             env,
             &generic_ty_params,
+            Some(&generic_eff_params),
             modules_used,
         )?;
-        let constraints = self
-            .where_clause
-            .iter()
-            .map(|constraint| {
-                desugar_type_constraint(constraint, &generic_ty_params, env, modules_used)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut next_effect_var = generic_eff_params
+            .values()
+            .map(|var| var.name() + 1)
+            .chain(
+                shape
+                    .inner_effect_vars()
+                    .into_iter()
+                    .map(|var| var.name() + 1),
+            )
+            .max()
+            .unwrap_or(0);
+        let constraints = desugar_type_constraints_with_next_effect_var(
+            &self.where_clause,
+            &generic_ty_params,
+            Some(&generic_eff_params),
+            &mut next_effect_var,
+            env,
+            modules_used,
+        )?;
+        let mut eff_quantifiers: FxHashSet<_> = generic_eff_params.values().copied().collect();
+        shape.fill_with_inner_effect_vars(&mut eff_quantifiers);
+        for constraint in &constraints {
+            constraint.fill_with_inner_effect_vars(&mut eff_quantifiers);
+        }
         let default_variant = desugar_default_variant(self)?;
         Ok(HirTypeDef {
             name: self.name.0,
             doc: (!self.doc_comments.is_empty()).then(|| self.doc_comments.join("\n")),
-            generic_params: self.generic_params.clone(),
+            generic_params: self.generic_params.type_params().to_vec(),
+            generic_effect_params: self.generic_params.effect_params().to_vec(),
             shape: TypeScheme {
                 ty_quantifiers,
-                eff_quantifiers: FxHashSet::default(),
+                eff_quantifiers,
                 ty: shape,
                 constraints,
             },
@@ -884,6 +1029,16 @@ impl PModuleFunctionArg {
         generic_ty_params: &GenericTyParams,
         modules_used: &mut FxHashSet<ModuleId>,
     ) -> Result<DModuleFunctionArg, InternalCompilationError> {
+        self.desugar_with_ty_and_eff_params(env, generic_ty_params, None, modules_used)
+    }
+
+    pub(crate) fn desugar_with_ty_and_eff_params(
+        self,
+        env: &ModuleEnv<'_>,
+        generic_ty_params: &GenericTyParams,
+        generic_eff_params: Option<&GenericEffParams>,
+        modules_used: &mut FxHashSet<ModuleId>,
+    ) -> Result<DModuleFunctionArg, InternalCompilationError> {
         let ty = self
             .ty
             .map(|(mut_ty, ty, span)| {
@@ -893,7 +1048,14 @@ impl PModuleFunctionArg {
                         // if placeholder, always emit variable id 0 that will be replaced by fresh variables in type inference
                         ast::PMutType::Infer => MutType::variable_id(0),
                     }),
-                    ty.desugar_with_ty_params(span, false, env, generic_ty_params, modules_used)?,
+                    ty.desugar_with_ty_and_eff_params(
+                        span,
+                        false,
+                        env,
+                        generic_ty_params,
+                        generic_eff_params,
+                        modules_used,
+                    )?,
                     span,
                 ))
             })
@@ -1008,6 +1170,7 @@ fn invalid_generic_params_error(
     })
 }
 
+/// Add newly declared generic type parameters to scope, assigning fresh type variables and rejecting duplicates.
 pub(crate) fn extend_generic_ty_params(
     existing: &GenericTyParams,
     generic_params: &[UstrSpan],
@@ -1026,6 +1189,31 @@ pub(crate) fn extend_generic_ty_params(
         }
     }
     Ok(generic_ty_params)
+}
+
+/// Add newly declared generic effect parameters to scope, assigning fresh effect variables and rejecting duplicates.
+pub(crate) fn extend_generic_eff_params(
+    existing: &GenericEffParams,
+    generic_params: &[UstrSpan],
+    owner: GenericParamsOwner,
+) -> Result<GenericEffParams, InternalCompilationError> {
+    let next_index = existing
+        .values()
+        .map(EffectVar::name)
+        .max()
+        .map_or(0, |index| index + 1);
+    let mut generic_eff_params = existing.clone();
+    for (generic_index, param) in generic_params.iter().enumerate() {
+        let eff_var = EffectVar::new(next_index + generic_index as u32);
+        if generic_eff_params.insert(param.0, eff_var).is_some() {
+            return Err(internal_compilation_error!(InvalidGenericParams {
+                owner,
+                kind: InvalidGenericParamsKind::DuplicateEffectParam { name: param.0 },
+                span: param.1,
+            }));
+        }
+    }
+    Ok(generic_eff_params)
 }
 
 fn collect_trait_impl_generic_ty_params(
@@ -1057,6 +1245,7 @@ fn desugar_trait_impl_for(
     for_trait: ast::PTraitImplFor,
     trait_name: UstrSpan,
     generic_ty_params: &GenericTyParams,
+    generic_eff_params: &GenericEffParams,
     env: &ModuleEnv<'_>,
     modules_used: &mut FxHashSet<ModuleId>,
 ) -> Result<ast::DTraitImplFor, InternalCompilationError> {
@@ -1068,6 +1257,7 @@ fn desugar_trait_impl_for(
     let trait_def = env.trait_def(trait_id);
 
     if for_trait.output_types.is_empty()
+        && for_trait.output_effects.is_empty()
         && for_trait
             .input_types
             .iter()
@@ -1080,7 +1270,14 @@ fn desugar_trait_impl_for(
                 input
                     .ty
                     .0
-                    .desugar_with_ty_params(input.ty.1, false, env, generic_ty_params, modules_used)
+                    .desugar_with_ty_and_eff_params(
+                        input.ty.1,
+                        false,
+                        env,
+                        generic_ty_params,
+                        Some(generic_eff_params),
+                        modules_used,
+                    )
                     .map(|ty| ast::TypeConstraintInput {
                         name: None,
                         ty: (ty, input.ty.1),
@@ -1098,6 +1295,8 @@ fn desugar_trait_impl_for(
         return Ok(ast::DTraitImplFor {
             input_types,
             output_types: vec![],
+            output_effects: vec![],
+            output_effs: vec![],
             span: for_trait.span,
         });
     }
@@ -1119,11 +1318,12 @@ fn desugar_trait_impl_for(
                 Ok((
                     name,
                     (
-                        input.ty.0.desugar_with_ty_params(
+                        input.ty.0.desugar_with_ty_and_eff_params(
                             input.ty.1,
                             false,
                             env,
                             generic_ty_params,
+                            Some(generic_eff_params),
                             modules_used,
                         )?,
                         input.ty.1,
@@ -1144,11 +1344,12 @@ fn desugar_trait_impl_for(
                 Ok((
                     output.name,
                     (
-                        output.ty.0.desugar_with_ty_params(
+                        output.ty.0.desugar_with_ty_and_eff_params(
                             output.ty.1,
                             false,
                             env,
                             generic_ty_params,
+                            Some(generic_eff_params),
                             modules_used,
                         )?,
                         output.ty.1,
@@ -1160,6 +1361,28 @@ fn desugar_trait_impl_for(
         &trait_path,
         for_trait.span,
     )?;
+    let output_effs = if for_trait.output_effects.is_empty() {
+        vec![]
+    } else {
+        desugar_named_effect_bindings(
+            &trait_def.output_effect_names,
+            for_trait
+                .output_effects
+                .iter()
+                .map(|output| {
+                    Ok((
+                        output.name,
+                        desugar_fn_effects(
+                            &ast::PFnEffects::Explicit(output.effects.clone()),
+                            Some(generic_eff_params),
+                        )?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            &trait_path,
+            for_trait.span,
+        )?
+    };
 
     Ok(ast::DTraitImplFor {
         input_types: trait_def
@@ -1182,6 +1405,8 @@ fn desugar_trait_impl_for(
                 ty,
             })
             .collect(),
+        output_effects: for_trait.output_effects,
+        output_effs,
         span: for_trait.span,
     })
 }
@@ -1250,11 +1475,33 @@ fn desugar_type_arguments(
     args: &[ast::TypeSpan<Parsed>],
     env: &ModuleEnv<'_>,
     generic_ty_params: &GenericTyParams,
+    generic_eff_params: Option<&GenericEffParams>,
     modules_used: &mut FxHashSet<ModuleId>,
 ) -> Result<Vec<Type>, InternalCompilationError> {
     args.iter()
         .map(|(ty, ty_span)| {
-            ty.desugar_with_ty_params(*ty_span, false, env, generic_ty_params, modules_used)
+            ty.desugar_with_ty_and_eff_params(
+                *ty_span,
+                false,
+                env,
+                generic_ty_params,
+                generic_eff_params,
+                modules_used,
+            )
+        })
+        .collect()
+}
+
+fn desugar_effect_arguments(
+    args: &[ast::PEffect],
+    generic_eff_params: Option<&GenericEffParams>,
+) -> Result<Vec<EffType>, InternalCompilationError> {
+    args.iter()
+        .map(|effect| {
+            desugar_fn_effects(
+                &ast::PFnEffects::Explicit(vec![*effect]),
+                generic_eff_params,
+            )
         })
         .collect()
 }
@@ -1305,6 +1552,7 @@ fn desugar_resolved_type_with_args(
     resolved: ResolvedTypePath,
     path: &ast::Path,
     args: Vec<Type>,
+    effect_args: Vec<EffType>,
     span: Location,
     env: &ModuleEnv<'_>,
 ) -> Result<Type, InternalCompilationError> {
@@ -1316,6 +1564,7 @@ fn desugar_resolved_type_with_args(
                 args.len(),
                 span,
             )?;
+            expect_type_argument_count(0, path.span().unwrap_or(span), effect_args.len(), span)?;
             let ty_subst = (0..entry.ty_var_count)
                 .map(TypeVar::new)
                 .zip(args)
@@ -1332,9 +1581,19 @@ fn desugar_resolved_type_with_args(
                 args.len(),
                 span,
             )?;
-            Ok(Type::named(type_def, args))
+            let effect_param_count = env.type_def_effect_param_count(type_def);
+            expect_type_argument_count(
+                effect_param_count,
+                env.type_def_span(type_def),
+                effect_args.len(),
+                span,
+            )?;
+            Ok(Type::named_with_effects(type_def, args, effect_args))
         }
-        ResolvedTypePath::BareNative(bare) => Ok(Type::native_type(NativeType::new(bare, args))),
+        ResolvedTypePath::BareNative(bare) => {
+            expect_type_argument_count(0, path.span().unwrap_or(span), effect_args.len(), span)?;
+            Ok(Type::native_type(NativeType::new(bare, args)))
+        }
     }
 }
 
@@ -1355,12 +1614,19 @@ impl PTraitImpl {
         } else {
             extend_generic_ty_params(
                 &GenericTyParams::default(),
-                &self.generic_params,
+                self.generic_params.type_params(),
                 GenericParamsOwner::TraitImpl {
                     trait_name: self.trait_name.0,
                 },
             )?
         };
+        let generic_eff_params = extend_generic_eff_params(
+            &GenericEffParams::default(),
+            self.generic_params.effect_params(),
+            GenericParamsOwner::TraitImpl {
+                trait_name: self.trait_name.0,
+            },
+        )?;
         let fn_map = self
             .functions
             .iter()
@@ -1369,10 +1635,11 @@ impl PTraitImpl {
             .collect::<FxHashMap<_, _>>();
         let (functions, fn_dep_graph): (_, Vec<_>) = process_results(
             self.functions.into_iter().map(|f| {
-                f.desugar_with_ty_params(
+                f.desugar_with_ty_and_eff_params(
                     &fn_map,
                     env,
                     &generic_ty_params,
+                    &generic_eff_params,
                     parsed_arena,
                     desugared_arena,
                     modules_used,
@@ -1390,13 +1657,25 @@ impl PTraitImpl {
                     for_trait,
                     self.trait_name,
                     &generic_ty_params,
+                    &generic_eff_params,
                     env,
                     modules_used,
                 )
             })
             .transpose()?;
-        let where_clause =
-            desugar_type_constraints(&self.where_clause, &generic_ty_params, env, modules_used)?;
+        let mut next_effect_var = generic_eff_params
+            .values()
+            .map(|var| var.name() + 1)
+            .max()
+            .unwrap_or(0);
+        let where_clause = desugar_type_constraints_with_next_effect_var(
+            &self.where_clause,
+            &generic_ty_params,
+            Some(&generic_eff_params),
+            &mut next_effect_var,
+            env,
+            modules_used,
+        )?;
         Ok(DTraitImpl {
             span: self.span,
             generic_params: self.generic_params,
@@ -1511,5 +1790,57 @@ fn desugar_named_type_bindings<T>(
     Ok(ordered
         .into_iter()
         .map(|ty| ty.expect("missing bindings already checked"))
+        .collect())
+}
+
+fn desugar_named_effect_bindings(
+    expected_names: &[Ustr],
+    bindings: Vec<(UstrSpan, EffType)>,
+    trait_name: &ast::Path,
+    span: Location,
+) -> Result<Vec<EffType>, InternalCompilationError> {
+    let mut positions = FxHashMap::default();
+    for (index, name) in expected_names.iter().copied().enumerate() {
+        positions.insert(name, index);
+    }
+
+    let mut ordered = (0..expected_names.len()).map(|_| None).collect::<Vec<_>>();
+    for (binding_name, eff) in bindings {
+        let Some(&index) = positions.get(&binding_name.0) else {
+            let name = binding_name.0;
+            return Err(internal_compilation_error!(InvalidTraitConstraint {
+                trait_name: trait_name.to_string(),
+                kind: InvalidTraitConstraintKind::UnknownOutputEffectBinding { name },
+                span: binding_name.1,
+            }));
+        };
+        if ordered[index].is_some() {
+            let name = binding_name.0;
+            return Err(internal_compilation_error!(InvalidTraitConstraint {
+                trait_name: trait_name.to_string(),
+                kind: InvalidTraitConstraintKind::DuplicateOutputEffectBinding { name },
+                span: binding_name.1,
+            }));
+        }
+        ordered[index] = Some(eff);
+    }
+
+    let missing = expected_names
+        .iter()
+        .enumerate()
+        .filter_map(|(index, name)| ordered[index].is_none().then_some(name.to_string()))
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        let names = missing.iter().map(|name| ustr(name)).collect();
+        return Err(internal_compilation_error!(InvalidTraitConstraint {
+            trait_name: trait_name.to_string(),
+            kind: InvalidTraitConstraintKind::MissingOutputEffectBindings { names },
+            span,
+        }));
+    }
+
+    Ok(ordered
+        .into_iter()
+        .map(|eff| eff.expect("missing bindings already checked"))
         .collect())
 }

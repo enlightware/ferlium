@@ -6,7 +6,11 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use std::{cmp::Ordering, fmt::Display, iter::FusedIterator};
+use std::{
+    cmp::Ordering,
+    fmt::{self, Display},
+    iter::FusedIterator,
+};
 
 use crate::{FxHashMap, FxHashSet};
 
@@ -684,6 +688,40 @@ impl FromIterator<Effect> for EffType {
 impl Display for EffType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write_with_separator(self.iter(), ", ", f)
+    }
+}
+
+pub(crate) fn format_effect_binding_value(
+    eff: &EffType,
+    f: &mut fmt::Formatter<'_>,
+) -> fmt::Result {
+    match eff.as_single() {
+        Some(effect) => effect.fmt(f),
+        None if eff.is_empty() => write!(f, "()"),
+        None => write!(f, "({eff})"),
+    }
+}
+
+struct EffectBindingValueDisplay<'a>(&'a EffType);
+
+impl Display for EffectBindingValueDisplay<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        format_effect_binding_value(self.0, f)
+    }
+}
+
+pub(crate) fn display_effect_binding_value(eff: &EffType) -> impl Display + '_ {
+    EffectBindingValueDisplay(eff)
+}
+
+pub(crate) fn format_function_effect_suffix(
+    eff: &EffType,
+    f: &mut fmt::Formatter<'_>,
+) -> fmt::Result {
+    if eff.is_empty() {
+        Ok(())
+    } else {
+        write!(f, " ! {}", display_effect_binding_value(eff))
     }
 }
 

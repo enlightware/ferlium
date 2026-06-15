@@ -111,12 +111,16 @@ impl Deriver for ProductValueDeriver {
             Named(named) => {
                 let named = named.clone();
                 drop(ty_data);
-                return Ok(Some(solver.solve_impl(
-                    trait_id,
-                    &[solver.type_def(named.def).instantiated_shape(&named.params)],
-                    span,
-                    arena,
-                )?));
+                return Ok(Some(
+                    solver.solve_impl(
+                        trait_id,
+                        &[solver
+                            .type_def(named.def)
+                            .instantiated_shape_with_effects(&named.params, &named.effect_params)],
+                        span,
+                        arena,
+                    )?,
+                ));
             }
             _ => {
                 drop(ty_data);

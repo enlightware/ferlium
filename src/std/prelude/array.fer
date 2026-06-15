@@ -287,10 +287,10 @@ where
 
 impl<A, B> RebindItem for <Self = [A], Item = B |-> Output = [B]> {}
 
-impl<I, T> FromIterator for <Self = [T], Iter = I>
+impl<I, T ! IterEffect> FromIterator for <Self = [T], Iter = I |-> Item = T ! FromIterEffect = (fallible, IterEffect)>
 where
-	I: Iterator<Item = T>,
-	I: Value
+	I: Value,
+	I: Iterator<Item = T ! NextEffect = IterEffect>
 {
 	fn from_iter(iterator: I) -> [T] {
 		let mut iterator = iterator;

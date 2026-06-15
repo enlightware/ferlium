@@ -28,7 +28,9 @@
     noStruct,
     structLiteral,
     plainPathType,
-    appliedPathType
+    appliedPathType,
+    fnRetNoEffects,
+    fnRetWithEffects
 }
 
 kw<term> { @specialize[@name={term}]<Identifier, term> }
@@ -65,11 +67,16 @@ traitTypeParams {
 }
 
 traitOutputParams {
-    '|->' Identifier (',' Identifier)*
+    '|->' Identifier (',' Identifier)* traitOutputEffectParams?
+    | '|->' traitOutputEffectParams
+}
+
+traitOutputEffectParams {
+    '!' Identifier (',' Identifier)*
 }
 
 parentConstraints {
-    ':' traitConstraint (',' traitConstraint)*
+    ':' headedTraitConstraint (',' headedTraitConstraint)*
 }
 
 Function {
@@ -100,7 +107,7 @@ TraitAssociatedConstImpl {
 traitImplForType {
     TypeNoRecordVariant
     | '<' (TypeNoRecordVariant ',')* TypeNoRecordVariant? '>'
-    | '<' namedConstraintInputList constraintOutputSection? '>'
+    | '<' namedConstraintInputList traitImplForOutputSection? '>'
 }
 
 TypeDef {
@@ -136,7 +143,13 @@ structBody {
 }
 
 GenericParams {
-    '<' Identifier (',' Identifier)* '>'
+    '<' genericParamList? '>'
+}
+
+genericParamList {
+    Identifier (',' Identifier)* '!' Identifier (',' Identifier)*
+    | Identifier (',' Identifier)*
+    | '!' Identifier (',' Identifier)*
 }
 
 EnumDef {
@@ -164,7 +177,6 @@ attrMetaItem {
 
 TypeAllowRecordVariant {
     placeholderType
-    | explicitFnTypeAllowRecord
     | PathType
     | arrayType
     | recordType
@@ -173,9 +185,12 @@ TypeAllowRecordVariant {
 }
 
 TypeNoRecordVariant {
-    placeholderType
-    | explicitFnTypeNoRecord
+    NonPathTypeNoRecordVariant
     | PathType
+}
+
+NonPathTypeNoRecordVariant {
+    placeholderType
     | arrayType
     | recordType
     | variantTypeNoRecord
@@ -183,8 +198,7 @@ TypeNoRecordVariant {
 }
 
 AliasType {
-    explicitFnTypeAllowRecord
-    | PathType
+    PathType
     | arrayType
     | recordType
     | variantTypeAllowRecord
@@ -197,7 +211,13 @@ PathType {
 }
 
 typeArgList {
-    '<' TypeNoRecordVariant (',' TypeNoRecordVariant)* '>'
+    '<' typeArgContent? '>'
+}
+
+typeArgContent {
+    TypeNoRecordVariant (',' TypeNoRecordVariant)* '!' effectList
+    | TypeNoRecordVariant (',' TypeNoRecordVariant)*
+    | '!' effectList
 }
 
 tupleOrFnTypeAllowRecord {
@@ -210,30 +230,19 @@ tupleOrFnTypeNoRecord {
     | '(' (argTypeNoRecord ',')* argTypeNoRecord? ')' fnRet?
 }
 
-explicitFnTypeAllowRecord {
-    '(' fnTypeAllowRecord fnEffects ')'
-}
-
-explicitFnTypeNoRecord {
-    '(' fnTypeNoRecord fnEffects ')'
-}
-
-fnTypeAllowRecord {
-    '(' ')' fnRet
-    | '(' (argTypeAllowRecord ',')* argTypeAllowRecord? ')' fnRet
-}
-
-fnTypeNoRecord {
-    '(' ')' fnRet
-    | '(' (argTypeNoRecord ',')* argTypeNoRecord? ')' fnRet
-}
-
 fnRet {
-    '->' TypeNoRecordVariant
+    '->' TypeNoRecordVariant !fnRetNoEffects
+    | '->' TypeNoRecordVariant fnEffects !fnRetWithEffects
 }
 
 fnEffects {
-    '!' effectList?
+    '!' fnEffectBindingValue
+}
+
+fnEffectBindingValue {
+    '(' ')'
+    | '(' effectList ')'
+    | effectName
 }
 
 effectList {
@@ -317,25 +326,58 @@ variantTypeRecord {
 }
 
 whereClause {
-    kw<'where'> traitConstraint (',' traitConstraint)*
+    kw<'where'> whereConstraint (',' whereConstraint)*
 }
 
-traitConstraint {
-    TypeNoRecordVariant ':' Path associatedTypeBindings?
+whereConstraint {
+    headedTraitConstraint
+    | constraintSubject ':' Path associatedTypeBindings?
+}
+
+headedTraitConstraint {
+    Path '<' traitConstraintInputList constraintOutputSection? '>'
     | Path '<' namedConstraintInputList constraintOutputSection? '>'
-    | Path '<' TypeNoRecordVariant (',' TypeNoRecordVariant)* constraintOutputSection? '>'
+}
+
+traitConstraintInputList {
+    Path (',' Path)*
+}
+
+constraintSubject {
+    NonPathTypeNoRecordVariant
+    | Path
 }
 
 associatedTypeBindings {
-    '<' associatedTypeBinding (',' associatedTypeBinding)* '>'
+    '<' associatedOutputBindingSection '>'
+}
+
+associatedOutputBindingSection {
+    associatedTypeBinding (',' associatedTypeBinding)* '!' associatedEffectBinding (',' associatedEffectBinding)*
+    | associatedTypeBinding (',' associatedTypeBinding)*
+    | '!' associatedEffectBinding (',' associatedEffectBinding)*
 }
 
 associatedTypeBinding {
     Identifier '=' TypeNoRecordVariant
 }
 
+associatedEffectBinding {
+    Identifier '=' associatedEffectBindingValue
+}
+
+associatedEffectBindingValue {
+    effectName
+    | '(' ')'
+    | '(' effectName (',' effectName)* ','? ')'
+}
+
 constraintOutputSection {
-    '|->' associatedTypeBinding (',' associatedTypeBinding)*
+    '|->' associatedOutputBindingSection
+}
+
+traitImplForOutputSection {
+    '|->' associatedOutputBindingSection
 }
 
 namedConstraintInputList {

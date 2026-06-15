@@ -6,12 +6,14 @@ use crate::{
     FxHashSet,
     compiler::error::InternalCompilationError,
     internal_compilation_error,
+    module::TraitId,
     parser::location::Location,
     types::{
         effects::{EffType, Effect, EffectVar, EffectVarKey},
         r#type::{FnType, Type, TypeKind},
     },
 };
+use ustr::Ustr;
 
 use super::constraints::EffectConstraint;
 
@@ -27,6 +29,18 @@ pub(super) struct PendingEffectDependency {
     pub(super) source_span: Location,
     pub(super) target: EffectVarKey,
     pub(super) target_span: Location,
+    pub(super) origin: EffectConstraintOrigin,
+}
+
+/// Diagnostic origin for internal effect dependency constraints.
+#[derive(Debug, Clone)]
+pub(crate) enum EffectConstraintOrigin {
+    Inference,
+    TraitMethodImpl {
+        trait_id: TraitId,
+        method_name: Ustr,
+        impl_span: Location,
+    },
 }
 
 /// A deferred effect inclusion `lower <= upper`.
@@ -43,6 +57,7 @@ struct EffectInclusion {
     lower_span: Location,
     upper: EffType,
     upper_span: Location,
+    origin: EffectConstraintOrigin,
 }
 
 pub(crate) struct EffectSolverSnapshot {
@@ -69,6 +84,18 @@ pub(crate) struct EffectSolver {
 impl EffectSolver {
     pub(crate) fn fresh_var(&mut self) -> EffectVar {
         self.table.new_key(None)
+    }
+
+    fn ensure_var(&mut self, var: EffectVar) {
+        while self.table.len() <= var.name() as usize {
+            self.table.new_key(None);
+        }
+    }
+
+    fn ensure_effect_vars(&mut self, eff: &EffType) {
+        for var in eff.inner_vars() {
+            self.ensure_var(var);
+        }
     }
 
     pub(crate) fn fresh_var_ty(&mut self) -> EffType {
@@ -138,6 +165,8 @@ impl EffectSolver {
 
     /// Make the two effects equal and fuse their dependencies.
     pub(super) fn unify_effects(&mut self, eff1: &EffType, eff2: &EffType) -> EffType {
+        self.ensure_effect_vars(eff1);
+        self.ensure_effect_vars(eff2);
         let var1 = eff1.to_single_variable();
         let var2 = eff2.to_single_variable();
         match (var1, var2) {
@@ -163,6 +192,7 @@ impl EffectSolver {
                 let mut first_var = None;
                 fn_arg.effects.iter().for_each(|eff| {
                     if let Some(var) = eff.as_variable() {
+                        self.ensure_var(*var);
                         if let Some(first_var) = first_var {
                             self.table.union(first_var, *var);
                         } else {
@@ -175,6 +205,7 @@ impl EffectSolver {
     }
 
     pub(super) fn effect_unioned(&mut self, var: EffectVar) -> Option<EffectVar> {
+        self.ensure_var(var);
         let root = self.table.find(var);
         if root != var { Some(root) } else { None }
     }
@@ -200,6 +231,7 @@ impl EffectSolver {
                                 source_span: Location::new_synthesized(),
                                 target: fresh_eff_var,
                                 target_span: Location::new_synthesized(),
+                                origin: EffectConstraintOrigin::Inference,
                             });
                         } else if let Some(var) = eff.as_variable() {
                             self.table.union(fresh_eff_var, *var);
@@ -231,7 +263,13 @@ impl EffectSolver {
         solved_eff: &EffType,
         span: Location,
     ) -> Result<(), InternalCompilationError> {
-        self.add_effect_inclusion(solved_eff.clone(), span, constraint_eff.clone(), span)
+        self.add_effect_inclusion(
+            solved_eff.clone(),
+            span,
+            constraint_eff.clone(),
+            span,
+            EffectConstraintOrigin::Inference,
+        )
     }
 
     /// Make current and target the same effect type.
@@ -242,17 +280,20 @@ impl EffectSolver {
         target: EffType,
         target_span: Location,
     ) -> Result<(), InternalCompilationError> {
+        self.ensure_effect_vars(&current);
+        self.ensure_effect_vars(&target);
         match (current.to_single_variable(), target.to_single_variable()) {
             (Some(current_var), Some(target_var)) => {
                 self.table
                     .unify_var_var(current_var, target_var)
                     .map_err(|_| {
-                        internal_compilation_error!(InvalidEffectDependency {
-                            source: current,
-                            source_span: current_span,
+                        invalid_effect_dependency(
+                            current,
+                            current_span,
                             target,
                             target_span,
-                        })
+                            EffectConstraintOrigin::Inference,
+                        )
                     })?;
                 return Ok(());
             }
@@ -266,8 +307,20 @@ impl EffectSolver {
             }
             (None, None) => {}
         }
-        self.add_effect_inclusion(current.clone(), current_span, target.clone(), target_span)?;
-        self.add_effect_inclusion(target, target_span, current, current_span)
+        self.add_effect_inclusion(
+            current.clone(),
+            current_span,
+            target.clone(),
+            target_span,
+            EffectConstraintOrigin::Inference,
+        )?;
+        self.add_effect_inclusion(
+            target,
+            target_span,
+            current,
+            current_span,
+            EffectConstraintOrigin::Inference,
+        )
     }
 
     pub(crate) fn add_effect_dep(
@@ -277,7 +330,30 @@ impl EffectSolver {
         target: &EffType,
         target_span: Location,
     ) -> Result<(), InternalCompilationError> {
-        self.add_effect_inclusion(current.clone(), current_span, target.clone(), target_span)
+        self.add_effect_dep_with_origin(
+            current,
+            current_span,
+            target,
+            target_span,
+            EffectConstraintOrigin::Inference,
+        )
+    }
+
+    pub(crate) fn add_effect_dep_with_origin(
+        &mut self,
+        current: &EffType,
+        current_span: Location,
+        target: &EffType,
+        target_span: Location,
+        origin: EffectConstraintOrigin,
+    ) -> Result<(), InternalCompilationError> {
+        self.add_effect_inclusion(
+            current.clone(),
+            current_span,
+            target.clone(),
+            target_span,
+            origin,
+        )
     }
 
     pub(super) fn expand_pending_dependencies(&mut self) -> Result<(), InternalCompilationError> {
@@ -311,12 +387,16 @@ impl EffectSolver {
         lower_span: Location,
         upper: EffType,
         upper_span: Location,
+        origin: EffectConstraintOrigin,
     ) -> Result<(), InternalCompilationError> {
+        self.ensure_effect_vars(&lower);
+        self.ensure_effect_vars(&upper);
         let inclusion = EffectInclusion {
             lower,
             lower_span,
             upper,
             upper_span,
+            origin,
         };
         self.try_add_effect_inclusion(inclusion, true).map(|_| ())
     }
@@ -356,12 +436,13 @@ impl EffectSolver {
         let lower_vars = lower.inner_vars();
         let upper_vars = upper.inner_vars();
         match (lower_vars.is_empty(), upper_vars.is_empty()) {
-            (true, true) => Err(internal_compilation_error!(InvalidEffectDependency {
-                source: lower,
-                source_span: inclusion.lower_span,
-                target: upper,
-                target_span: inclusion.upper_span,
-            })),
+            (true, true) => Err(invalid_effect_dependency(
+                lower,
+                inclusion.lower_span,
+                upper,
+                inclusion.upper_span,
+                inclusion.origin,
+            )),
             (false, true) => {
                 for var in lower_vars {
                     self.table.union_value(var, Some(upper.clone()));
@@ -375,6 +456,7 @@ impl EffectSolver {
                         source_span: inclusion.lower_span,
                         target: var,
                         target_span: inclusion.upper_span,
+                        origin: inclusion.origin,
                     });
                     Ok(true)
                 } else if defer_ambiguous {
@@ -383,6 +465,7 @@ impl EffectSolver {
                         lower_span: inclusion.lower_span,
                         upper,
                         upper_span: inclusion.upper_span,
+                        origin: inclusion.origin,
                     });
                     Ok(true)
                 } else {
@@ -399,6 +482,7 @@ impl EffectSolver {
                         source_span: inclusion.lower_span,
                         target: var,
                         target_span: inclusion.upper_span,
+                        origin: inclusion.origin,
                     });
                     Ok(true)
                 } else if defer_ambiguous {
@@ -407,6 +491,7 @@ impl EffectSolver {
                         lower_span: inclusion.lower_span,
                         upper,
                         upper_span: inclusion.upper_span,
+                        origin: inclusion.origin,
                     });
                     Ok(true)
                 } else {
@@ -430,12 +515,13 @@ impl EffectSolver {
         let lower_vars = lower.inner_vars();
         let upper_vars = upper.inner_vars();
         match (lower_vars.is_empty(), upper_vars.is_empty()) {
-            (true, true) => Err(internal_compilation_error!(InvalidEffectDependency {
-                source: lower,
-                source_span: inclusion.lower_span,
-                target: upper,
-                target_span: inclusion.upper_span,
-            })),
+            (true, true) => Err(invalid_effect_dependency(
+                lower,
+                inclusion.lower_span,
+                upper,
+                inclusion.upper_span,
+                inclusion.origin,
+            )),
             (false, _) => {
                 for var in lower_vars {
                     self.table.union_value(var, Some(upper.clone()));
@@ -449,6 +535,7 @@ impl EffectSolver {
                         source_span: inclusion.lower_span,
                         target: var,
                         target_span: inclusion.upper_span,
+                        origin: inclusion.origin.clone(),
                     });
                 }
                 Ok(())
@@ -472,6 +559,7 @@ impl EffectSolver {
 
         let mut normalized = EffType::multiple_primitive(&eff.inner_non_vars());
         for var in eff.inner_vars() {
+            self.ensure_var(var);
             let root = self.table.find(var);
             if !visiting.insert(root) {
                 normalized.insert(Effect::Variable(root));
@@ -499,6 +587,7 @@ impl EffectSolver {
         dep: PendingEffectDependency,
         visiting: &mut FxHashSet<EffectVarKey>,
     ) -> Result<(), InternalCompilationError> {
+        self.ensure_var(dep.target);
         let target = self.table.find(dep.target);
         if !visiting.insert(target) {
             self.table.union_value(
@@ -514,12 +603,13 @@ impl EffectSolver {
             } else {
                 let target_vars = existing_effects.inner_vars();
                 if target_vars.is_empty() {
-                    Err(internal_compilation_error!(InvalidEffectDependency {
-                        source: dep.source,
-                        source_span: dep.source_span,
-                        target: existing_effects,
-                        target_span: dep.target_span,
-                    }))
+                    Err(invalid_effect_dependency(
+                        dep.source,
+                        dep.source_span,
+                        existing_effects,
+                        dep.target_span,
+                        dep.origin,
+                    ))
                 } else {
                     self.table
                         .union_value(target, Some(existing_effects.union(&dep.source)));
@@ -530,6 +620,7 @@ impl EffectSolver {
                                 source_span: dep.source_span,
                                 target: var,
                                 target_span: dep.target_span,
+                                origin: dep.origin.clone(),
                             },
                             visiting,
                         )?;
@@ -550,15 +641,25 @@ impl EffectSolver {
     }
 
     pub(super) fn effect_var_value(&mut self, var: EffectVar) -> Option<EffType> {
-        self.table.probe_value(var)
+        self.ensure_var(var);
+        let root = self.table.find(var);
+        self.table.probe_value(root)
     }
 
     pub(super) fn effect_var_root(&mut self, var: EffectVar) -> EffectVar {
+        self.ensure_var(var);
         self.table.find(var)
     }
 
     pub(super) fn effect_var_affects_substitution(&mut self, var: EffectVar) -> bool {
-        self.table.probe_value(var).is_some() || self.table.find(var) != var
+        self.ensure_var(var);
+        let root = self.table.find(var);
+        if root != var {
+            return true;
+        }
+        self.table
+            .probe_value(root)
+            .is_some_and(|value| value.to_single_variable() != Some(root))
     }
 
     pub(super) fn log_debug_constraints(&mut self) {
@@ -585,14 +686,60 @@ fn current_satisfied_by_target(current: &EffType, target: &EffType) -> bool {
     current.is_subset_of(&target_primitives)
 }
 
+fn invalid_effect_dependency(
+    source: EffType,
+    source_span: Location,
+    target: EffType,
+    target_span: Location,
+    origin: EffectConstraintOrigin,
+) -> InternalCompilationError {
+    match origin {
+        EffectConstraintOrigin::Inference => internal_compilation_error!(InvalidEffectDependency {
+            source,
+            source_span,
+            target,
+            target_span,
+        }),
+        EffectConstraintOrigin::TraitMethodImpl {
+            trait_id,
+            method_name,
+            impl_span,
+        } => internal_compilation_error!(TraitMethodEffectMismatch {
+            trait_ref: trait_id,
+            method_name,
+            expected: target,
+            got: source,
+            span: impl_span,
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{
+        compiler::error::CompilationErrorImpl,
+        module::{LocalTraitId, ModuleId, TraitId},
         parser::location::Location,
         types::effects::{EffType, Effect, PrimitiveEffect},
     };
+    use ustr::ustr;
 
-    use super::{EffectSolver, PendingEffectDependency};
+    use super::{EffectConstraintOrigin, EffectSolver, PendingEffectDependency};
+
+    #[test]
+    fn self_referential_effect_var_is_a_stable_noop() {
+        let mut solver = EffectSolver::default();
+        let var = solver.table.new_key(None);
+        solver
+            .table
+            .union_value(var, Some(EffType::single_variable(var)));
+
+        assert!(!solver.effect_var_affects_substitution(var));
+        assert_eq!(
+            solver.normalize_effect(&EffType::single_variable(var)),
+            EffType::single_variable(var)
+        );
+    }
 
     #[test]
     fn expanding_inverted_effect_dependency_handles_variable_cycles() {
@@ -613,11 +760,54 @@ mod tests {
                 source_span: span,
                 target: first,
                 target_span: span,
+                origin: EffectConstraintOrigin::Inference,
             })
             .unwrap();
 
         let first_effects = solver.table.probe_value(first).unwrap();
         assert!(first_effects.contains(Effect::Primitive(PrimitiveEffect::Write)));
+    }
+
+    #[test]
+    fn pending_effect_dependency_preserves_trait_method_origin() {
+        let mut solver = EffectSolver::default();
+        let target = solver.table.new_key(None);
+        let span = Location::new_synthesized();
+        let trait_id = TraitId::new(ModuleId(0), LocalTraitId(0));
+        let method_name = ustr("pure");
+
+        solver
+            .add_effect_dep_with_origin(
+                &EffType::single_primitive(PrimitiveEffect::Read),
+                span,
+                &EffType::single_variable(target),
+                span,
+                EffectConstraintOrigin::TraitMethodImpl {
+                    trait_id,
+                    method_name,
+                    impl_span: span,
+                },
+            )
+            .unwrap();
+        solver.table.union_value(target, Some(EffType::empty()));
+
+        let error = solver.expand_pending_dependencies().unwrap_err();
+        match &*error {
+            CompilationErrorImpl::TraitMethodEffectMismatch {
+                trait_ref,
+                method_name: got_method_name,
+                expected,
+                got,
+                span: got_span,
+            } => {
+                assert_eq!(*trait_ref, trait_id);
+                assert_eq!(*got_method_name, method_name);
+                assert_eq!(*expected, EffType::empty());
+                assert_eq!(*got, EffType::single_primitive(PrimitiveEffect::Read));
+                assert_eq!(*got_span, span);
+            }
+            other => panic!("expected TraitMethodEffectMismatch, got {other:?}"),
+        }
     }
 
     #[test]

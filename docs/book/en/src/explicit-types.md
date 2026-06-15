@@ -51,6 +51,14 @@ The body is still type-checked as usual, but the explicit parameter list fixes t
 Function generics compose naturally with inference for the rest of the signature.
 You may annotate as much or as little as you want.
 
+Effect parameters can be made explicit in the same list after `!`:
+
+```ferlium
+fn apply<T ! E>(value: T, f: (T) -> T ! E) -> T {
+    f(value)
+}
+```
+
 ### Function-level `where` clauses
 
 Functions may also carry an explicit `where` clause.
@@ -127,19 +135,20 @@ These constrain which type arguments are allowed.
 ```ferlium
 struct TransformIter<I, T, O>
 where
-    I: Iterator<Item = T>
+    I: Iterator<Item = T ! NextEffect = ()>
 {
     iterator: I,
     mapper: (T) -> O,
 }
 ```
 
-This says that `TransformIter<I, T, O>` only makes sense when `I` is an iterator producing `T`.
+This says that `TransformIter<I, T, O>` only makes sense when `I` is an iterator producing `T` without any effect.
 
 The `where` clause can mention:
 
 - trait constraints on the generic parameters
 - associated type bindings such as `Item = T`
+- associated effect bindings such as `NextEffect = ()`
 - multi-parameter trait constraints, as described later in the type abstraction chapters
 
 ## What can be explicit today
@@ -147,6 +156,7 @@ The `where` clause can mention:
 Ferlium still has an inference-first design, but several parts of type abstraction can now be written explicitly:
 
 - you can write explicit generic parameter lists on functions
+- you can write explicit generic effect parameters
 - you can write function-level `where` clauses
 - you can define generic `struct` and `enum` types
 - you can add `where` clauses to generic type definitions

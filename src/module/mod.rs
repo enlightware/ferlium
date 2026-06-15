@@ -600,9 +600,30 @@ impl Module {
         span: Location,
         visibility: Visibility,
     ) -> TypeDefId {
+        self.reserve_type_def_with_effect_params_and_visibility(
+            name,
+            generic_params,
+            Vec::new(),
+            span,
+            visibility,
+        )
+    }
+
+    pub fn reserve_type_def_with_effect_params_and_visibility(
+        &mut self,
+        name: Ustr,
+        generic_params: Vec<UstrSpan>,
+        generic_effect_params: Vec<UstrSpan>,
+        span: Location,
+        visibility: Visibility,
+    ) -> TypeDefId {
         let id = LocalTypeDefId::from_index(self.type_defs.len());
-        self.type_defs
-            .push(TypeDefSlot::reserved(name, generic_params, span));
+        self.type_defs.push(TypeDefSlot::reserved(
+            name,
+            generic_params,
+            generic_effect_params,
+            span,
+        ));
         self.def_table
             .insert(name, Def::new(DefKind::TypeDef(id), visibility));
         TypeDefId::new(self.module_id(), id)
@@ -681,6 +702,21 @@ impl Module {
             self.type_defs
                 .get(id.index.as_index())
                 .map(TypeDefSlot::param_spans)
+        } else {
+            None
+        }
+    }
+
+    pub fn type_def_effect_param_count(&self, id: TypeDefId) -> usize {
+        assert_eq!(id.module, self.module_id());
+        self.type_defs[id.index.as_index()].effect_param_count()
+    }
+
+    pub fn try_type_def_effect_param_count(&self, id: TypeDefId) -> Option<usize> {
+        if id.module == self.module_id() {
+            self.type_defs
+                .get(id.index.as_index())
+                .map(TypeDefSlot::effect_param_count)
         } else {
             None
         }
@@ -1128,13 +1164,14 @@ impl Module {
             source_span,
         )
         .with_associated_const_values(associated_const_values);
-        if emit_output.ty_var_count == 0 {
+        if emit_output.ty_var_count == 0 && emit_output.eff_var_count == 0 {
             let key = ConcreteTraitImplKey::new(trait_id, emit_output.input_tys);
             self.impls.add_concrete_struct(key, imp)
         } else {
             let sub_key = BlanketTraitImplSubKey::new(
                 emit_output.input_tys,
                 emit_output.ty_var_count,
+                emit_output.eff_var_count,
                 emit_output.constraints,
             );
             self.impls

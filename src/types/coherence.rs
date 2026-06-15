@@ -103,6 +103,7 @@ pub(crate) fn check_trait_impl(
     output_tys: &[Type],
     output_effs: &[EffType],
     ty_var_count: u32,
+    eff_var_count: u32,
     constraints: &[PubTypeConstraint],
     span: Location,
 ) -> Result<(), InternalCompilationError> {
@@ -152,12 +153,17 @@ pub(crate) fn check_trait_impl(
         }));
     }
 
-    let new_key = if ty_var_count == 0 {
+    let new_key = if ty_var_count == 0 && eff_var_count == 0 {
         TraitKey::Concrete(ConcreteTraitImplKey::new(trait_id, input_tys.to_vec()))
     } else {
         TraitKey::Blanket(BlanketTraitImplKey::new(
             trait_id,
-            BlanketTraitImplSubKey::new(input_tys.to_vec(), ty_var_count, constraints.to_vec()),
+            BlanketTraitImplSubKey::new(
+                input_tys.to_vec(),
+                ty_var_count,
+                eff_var_count,
+                constraints.to_vec(),
+            ),
         ))
     };
 
@@ -313,7 +319,7 @@ fn impls_overlap(
 }
 
 fn concrete_as_blanket_sub_key(input_tys: &[Type]) -> BlanketTraitImplSubKey {
-    BlanketTraitImplSubKey::new(input_tys.to_vec(), 0, Vec::new())
+    BlanketTraitImplSubKey::new(input_tys.to_vec(), 0, 0, Vec::new())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -336,9 +342,12 @@ fn blanket_impls_overlap(
 
     // Both sides use raw effect variable indices, so each side is renamed to
     // its own fresh inference effect variables before unification.
-    let lhs_eff_subst = ty_inf.fresh_effect_var_subst_for(&lhs.constraints, lhs_output_effs);
+    let mut lhs_eff_subst = ty_inf.inner.fresh_effect_var_subst(lhs.eff_var_count);
+    lhs_eff_subst.extend(ty_inf.fresh_effect_var_subst_for(&lhs.constraints, lhs_output_effs));
     let lhs_inst_subst = (FxHashMap::default(), lhs_eff_subst);
     let mut lhs_mapper = SimpleInstantiationMapper::new(&lhs_inst_subst);
+    let lhs_inputs = instantiate_types(&lhs.input_tys, &mut lhs_mapper);
+    let lhs_outputs = instantiate_types(lhs_output_tys, &mut lhs_mapper);
     let lhs_constraints = instantiate_types(&lhs.constraints, &mut lhs_mapper);
     let lhs_output_effs: Vec<_> = lhs_output_effs
         .iter()
@@ -352,7 +361,8 @@ fn blanket_impls_overlap(
             (var, shifted)
         })
         .collect();
-    let rhs_eff_subst = ty_inf.fresh_effect_var_subst_for(&rhs.constraints, rhs_output_effs);
+    let mut rhs_eff_subst = ty_inf.inner.fresh_effect_var_subst(rhs.eff_var_count);
+    rhs_eff_subst.extend(ty_inf.fresh_effect_var_subst_for(&rhs.constraints, rhs_output_effs));
     let inst_subst = (rhs_ty_subst, rhs_eff_subst);
     let mut mapper = SimpleInstantiationMapper::new(&inst_subst);
     let rhs_inputs = instantiate_types(&rhs.input_tys, &mut mapper);
@@ -362,7 +372,7 @@ fn blanket_impls_overlap(
         .map(|eff| mapper.map_effect_type(eff))
         .collect();
     let rhs_constraints = instantiate_types(&rhs.constraints, &mut mapper);
-    for (&lhs_ty, &rhs_ty) in lhs.input_tys.iter().zip(rhs_inputs.iter()) {
+    for (&lhs_ty, &rhs_ty) in lhs_inputs.iter().zip(rhs_inputs.iter()) {
         if ty_inf
             .unify_same_type_with_sub_effects(lhs_ty, span, rhs_ty, span)
             .is_err()
@@ -370,7 +380,7 @@ fn blanket_impls_overlap(
             return Ok(false);
         }
     }
-    for (&lhs_output_ty, &rhs_output_ty) in lhs_output_tys.iter().zip(rhs_outputs.iter()) {
+    for (&lhs_output_ty, &rhs_output_ty) in lhs_outputs.iter().zip(rhs_outputs.iter()) {
         if ty_inf
             .unify_same_type_with_sub_effects(lhs_output_ty, span, rhs_output_ty, span)
             .is_err()

@@ -78,6 +78,7 @@ Traits can also carry associated type information. In the standard library, iter
 
 - `Iterator` has an associated `Item` type (the element type produced by `next`).
 - `Seq` links a sequence type to both its element type and its iterator type.
+- Some traits also expose associated effects, such as the effect of advancing an iterator.
 
 This helps explain annotations: when the IDE shows inferred constraints, you may see that some types are not independent, but connected through trait relations.
 

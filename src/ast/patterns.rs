@@ -24,7 +24,7 @@ use crate::{
     types::r#type::{Type as IrType, TypeDefShapeDocs},
 };
 
-use super::{Desugared, Parsed, Path, Phase, TypeSpan, UstrSpan};
+use super::{Desugared, GenericParams, PEffect, Parsed, Path, Phase, TypeSpan, UstrSpan};
 
 #[derive(Debug, Clone, Copy, new)]
 pub struct LetBindingPattern {
@@ -470,12 +470,35 @@ impl TypeConstraintOutput<Parsed> {
     }
 }
 
+/// A parsed output effect binding in a trait constraint.
+#[derive(Debug, Clone)]
+pub struct TypeConstraintEffectOutput {
+    pub name: UstrSpan,
+    pub effects: Vec<PEffect>,
+}
+
+pub(crate) fn format_effect_binding_value(
+    effects: &[PEffect],
+    f: &mut fmt::Formatter<'_>,
+) -> fmt::Result {
+    match effects {
+        [] => write!(f, "()"),
+        [effect] => effect.fmt(f),
+        effects => {
+            write!(f, "(")?;
+            write_with_separator(effects, ", ", f)?;
+            write!(f, ")")
+        }
+    }
+}
+
 /// A parsed trait constraint as written in a type definition `where` clause.
 #[derive(Debug, Clone)]
 pub struct TypeConstraint<P: Phase> {
     pub trait_name: Path,
     pub input_types: Vec<TypeConstraintInput<P>>,
     pub output_types: Vec<TypeConstraintOutput<P>>,
+    pub output_effects: Vec<TypeConstraintEffectOutput>,
     pub span: Location,
 }
 
@@ -488,16 +511,34 @@ impl<P: Phase> FormatWith<ModuleEnv<'_>> for TypeConstraint<P> {
                 self.input_types[0].ty.0.format_with(env),
                 self.trait_name
             )?;
-            if self.output_types.is_empty() {
+            if self.output_types.is_empty() && self.output_effects.is_empty() {
                 return Ok(());
             }
             write!(f, "<")?;
-            write_with_separator_and_format_fn(
-                &self.output_types,
-                ", ",
-                |output_ty, f| output_ty.fmt_with(f, env),
-                f,
-            )?;
+            if !self.output_types.is_empty() {
+                write_with_separator_and_format_fn(
+                    &self.output_types,
+                    ", ",
+                    |output_ty, f| output_ty.fmt_with(f, env),
+                    f,
+                )?;
+            }
+            if !self.output_effects.is_empty() {
+                if !self.output_types.is_empty() {
+                    write!(f, " ")?;
+                }
+                write!(f, "! ")?;
+                write_with_separator_and_format_fn(
+                    &self.output_effects,
+                    ", ",
+                    |output_eff, f| {
+                        write_identifier(f, output_eff.name.0.as_str())?;
+                        write!(f, " = ")?;
+                        format_effect_binding_value(&output_eff.effects, f)
+                    },
+                    f,
+                )?;
+            }
             write!(f, ">")?;
             return Ok(());
         }
@@ -519,14 +560,32 @@ impl<P: Phase> TypeConstraint<P> {
             |input_ty, f| input_ty.fmt_with(f, env),
             f,
         )?;
-        if !self.output_types.is_empty() {
+        if !self.output_types.is_empty() || !self.output_effects.is_empty() {
             write!(f, " |-> ")?;
-            write_with_separator_and_format_fn(
-                &self.output_types,
-                ", ",
-                |output_ty, f| output_ty.fmt_with(f, env),
-                f,
-            )?;
+            if !self.output_types.is_empty() {
+                write_with_separator_and_format_fn(
+                    &self.output_types,
+                    ", ",
+                    |output_ty, f| output_ty.fmt_with(f, env),
+                    f,
+                )?;
+            }
+            if !self.output_effects.is_empty() {
+                if !self.output_types.is_empty() {
+                    write!(f, " ")?;
+                }
+                write!(f, "! ")?;
+                write_with_separator_and_format_fn(
+                    &self.output_effects,
+                    ", ",
+                    |output_eff, f| {
+                        write_identifier(f, output_eff.name.0.as_str())?;
+                        write!(f, " = ")?;
+                        format_effect_binding_value(&output_eff.effects, f)
+                    },
+                    f,
+                )?;
+            }
         }
         write!(f, ">")
     }
@@ -554,7 +613,7 @@ impl TypeConstraint<Parsed> {
 pub struct TypeDef<P: Phase> {
     pub visibility: Visibility,
     pub name: UstrSpan,
-    pub generic_params: Vec<UstrSpan>,
+    pub generic_params: GenericParams,
     // The structural shape of the type (record, tuple, or unit)
     pub shape: P::Type,
     pub where_clause: Vec<TypeConstraint<P>>,

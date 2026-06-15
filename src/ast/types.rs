@@ -19,21 +19,62 @@ use crate::{
     containers::{B, b},
     format::{FormatWith, write_identifier, write_identifier_list, write_with_separator},
     module::{ModuleEnv, Visibility},
-    types::effects::PrimitiveEffect,
     types::mutability::FormatInFnArg,
     types::r#type::Type as IrType,
 };
 
-use super::{Parsed, Path, Phase, UstrSpan};
+use super::{Parsed, Path, Phase, UstrSpan, format_effect_binding_value};
 
 pub type TypeSpan<P> = (<P as Phase>::Type, Location);
+
+/// Generic parameters as written in source.
+///
+/// The type section preserves the historical `<T, U>` behavior. The optional
+/// effect section is written after `!`, for example `<T ! E>`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, new)]
+pub struct GenericParams {
+    type_params: Vec<UstrSpan>,
+    effect_params: Vec<UstrSpan>,
+}
+
+impl GenericParams {
+    pub fn is_empty(&self) -> bool {
+        self.type_params.is_empty() && self.effect_params.is_empty()
+    }
+
+    pub fn type_params(&self) -> &[UstrSpan] {
+        &self.type_params
+    }
+
+    pub fn effect_params(&self) -> &[UstrSpan] {
+        &self.effect_params
+    }
+
+    pub fn format_source(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.is_empty() {
+            return Ok(());
+        }
+        write!(f, "<")?;
+        if !self.type_params.is_empty() {
+            write_identifier_list(self.type_params.iter().map(|(s, _)| s.as_str()), ", ", f)?;
+        }
+        if !self.effect_params.is_empty() {
+            if !self.type_params.is_empty() {
+                write!(f, " ")?;
+            }
+            write!(f, "! ")?;
+            write_identifier_list(self.effect_params.iter().map(|(s, _)| s.as_str()), ", ", f)?;
+        }
+        write!(f, ">")
+    }
+}
 
 /// A spanned type alias during parsing
 #[derive(Debug, Clone, new)]
 pub struct TypeAlias {
     pub visibility: Visibility,
     pub name: UstrSpan,
-    pub generic_params: Vec<UstrSpan>,
+    pub generic_params: GenericParams,
     pub ty: TypeSpan<Parsed>,
     pub doc: Option<String>,
 }
@@ -43,11 +84,7 @@ pub type PTypeAlias = TypeAlias;
 impl FormatWith<ModuleEnv<'_>> for TypeAlias {
     fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv) -> std::fmt::Result {
         write_identifier(f, self.name.0.as_str())?;
-        if !self.generic_params.is_empty() {
-            write!(f, "<")?;
-            write_identifier_list(self.generic_params.iter().map(|(s, _)| s.as_str()), ", ", f)?;
-            write!(f, ">")?;
-        }
+        self.generic_params.format_source(f)?;
         write!(f, ": ")?;
         self.ty.0.fmt_with(f, env)
     }
@@ -97,12 +134,25 @@ impl FormatWith<ModuleEnv<'_>> for PFnArgType {
     }
 }
 
+/// A parsed effect name, either a primitive effect or a trait output effect
+/// resolved later by desugaring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PEffect {
+    pub name: UstrSpan,
+}
+
+impl Display for PEffect {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write_identifier(f, self.name.0.as_str())
+    }
+}
+
 /// Effect information attached to a parsed function type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PFnEffects {
     ImplicitPure,
     ImplicitGeneric,
-    Explicit(Vec<PrimitiveEffect>),
+    Explicit(Vec<PEffect>),
 }
 
 impl PFnEffects {
@@ -149,11 +199,8 @@ impl FormatWith<ModuleEnv<'_>> for PFnType {
         write!(f, ") -> ")?;
         self.ret.0.fmt_with(f, env)?;
         if let PFnEffects::Explicit(effects) = &self.effects {
-            write!(f, " !")?;
-            if !effects.is_empty() {
-                write!(f, " ")?;
-                write_with_separator(effects, ", ", f)?;
-            }
+            write!(f, " ! ")?;
+            format_effect_binding_value(effects, f)?;
         }
         Ok(())
     }
@@ -176,6 +223,7 @@ pub enum PType {
     AppliedPath {
         path: Path,
         args: Vec<TypeSpan<Parsed>>,
+        effect_args: Vec<PEffect>,
     },
     /// Tagged union sum type
     Variant(Vec<(UstrSpan, TypeSpan<Parsed>)>),
@@ -194,7 +242,23 @@ impl PType {
     }
 
     pub fn path_with_args(path: Path, args: Vec<TypeSpan<Parsed>>) -> Self {
-        PType::AppliedPath { path, args }
+        PType::AppliedPath {
+            path,
+            args,
+            effect_args: vec![],
+        }
+    }
+
+    pub fn path_with_type_and_effect_args(
+        path: Path,
+        args: Vec<TypeSpan<Parsed>>,
+        effect_args: Vec<PEffect>,
+    ) -> Self {
+        PType::AppliedPath {
+            path,
+            args,
+            effect_args,
+        }
     }
 
     /// Collect indices of types in ty_names that are referenced in this type.
@@ -215,7 +279,7 @@ impl PType {
                     }
                 }
             }
-            AppliedPath { path, args } => {
+            AppliedPath { path, args, .. } => {
                 if path.segments.len() == 1 {
                     let ty_name = path.segments[0].0;
                     if let Some(index) = ty_names.get(&ty_name) {
@@ -251,13 +315,24 @@ impl FormatWith<ModuleEnv<'_>> for PType {
             Resolved(ty) => ty.fmt_with(f, env),
             Infer => write!(f, "_"),
             Path(path) => write!(f, "{path}"),
-            AppliedPath { path, args } => {
+            AppliedPath {
+                path,
+                args,
+                effect_args,
+            } => {
                 write!(f, "{path}<")?;
                 for (i, (ty, _)) in args.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
                     ty.fmt_with(f, env)?;
+                }
+                if !effect_args.is_empty() {
+                    if !args.is_empty() {
+                        write!(f, " ")?;
+                    }
+                    write!(f, "! ")?;
+                    write_with_separator(effect_args, ", ", f)?;
                 }
                 write!(f, ">")
             }

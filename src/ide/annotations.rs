@@ -18,7 +18,7 @@ use crate::{
     hir::{ENode, ENodeArena, ENodeId, NodeKind},
     module::{ELocalDecl as LocalDecl, ModuleEnv, id::Id},
     types::{
-        effects::{EffType, Effect, PrimitiveEffect},
+        effects::{EffType, Effect, PrimitiveEffect, display_effect_binding_value},
         r#type::Type,
         type_scheme_display::TypeSchemeConstraintRenderMode,
     },
@@ -160,10 +160,11 @@ pub(super) fn display_annotations(
                 ));
             }
         }
-        let displayed_effects = display_effects_with_constraint_mode(
+        let displayed_effect_set = display_effects_with_constraint_mode(
             &function.definition.ty_scheme.ty.effects,
             constraint_mode,
         );
+        let displayed_effects = display_effect_binding_value(&displayed_effect_set);
         let byte_src = src.as_bytes();
         let past_args_index = spans.args_span.end_usize();
         let start_space = if past_args_index > 0 && byte_src[past_args_index - 1] == b' ' {
@@ -171,7 +172,7 @@ pub(super) fn display_annotations(
         } else {
             " "
         };
-        let mut annotation = if displayed_effects.is_empty() {
+        let mut annotation = if displayed_effect_set.is_empty() {
             if let Some((ret_span, ty_constant)) = spans.ret_ty {
                 if !ty_constant {
                     let rendered = function

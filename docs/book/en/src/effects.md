@@ -30,19 +30,26 @@ Ferlium shows effects in function type displays when the effect set is non-empty
 
 - Pure function: `(int) -> int`
 - Effectful function: `(int, int) -> int ! fallible`
-- Multiple effects: `() -> () ! read, write`
+- Multiple effects: `() -> () ! (read, write)`
+- Explicitly pure: `() -> () ! ()`
 
 This `! …` suffix appears in inferred function signatures and IDE annotations.
 Effect-related compilation errors also report effect sets (for example, incompatible effect dependencies).
 
-Ferlium currently does not provide user syntax to manually write effect constraints; effects are inferred from code.
+You can also write effect annotations in function types when you need to constrain inference.
+Ordinary function definitions still infer their own effects; explicit source annotations are used for function types, trait method declarations, and trait or type effect bindings.
+Most code still relies on inference.
 
 ## Effects are inferred and propagate through calls
 
-You do not declare effects manually. Ferlium infers them from what a function does.
+You usually do not need to declare effects manually.
+Ferlium infers them from what a function does.
 
 If a function calls another function, the caller inherits the callee’s effects.
 This propagation is transitive: effects flow through chains of calls.
+
+Generic code can abstract over effects in the same way it abstracts over types.
+For example, a function parameter may have type `(int) -> int ! E`, where `E` stands for the callback's effect set.
 
 ## Examples
 

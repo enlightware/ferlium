@@ -50,7 +50,7 @@ use crate::format::type_variable_index_to_string_latin;
 use crate::graph;
 use crate::module::ModuleEnv;
 use crate::sync::SyncPhantomData;
-use crate::types::effects::{EffType, EffectVar, EffectsInstSubst};
+use crate::types::effects::{EffType, EffectVar, format_function_effect_suffix};
 use crate::types::mutability::{MutType, MutVar};
 use crate::types::type_scheme::TypeScheme;
 
@@ -557,11 +557,7 @@ where
         write!(f, "place ")?;
     }
     function.ret.fmt_with(f, env)?;
-    if function.effects.is_empty() {
-        Ok(())
-    } else {
-        write!(f, " ! {}", function.effects)
-    }
+    format_function_effect_suffix(&function.effects, f)
 }
 
 pub fn fmt_fn_type_with_arg_names<Env>(
@@ -587,11 +583,7 @@ where
         write!(f, "place ")?;
     }
     fn_ty.ret.fmt_with(f, env)?;
-    if fn_ty.effects.is_empty() {
-        Ok(())
-    } else {
-        write!(f, " ! {}", fn_ty.effects)
-    }
+    format_function_effect_suffix(&fn_ty.effects, f)
 }
 
 /// A type identifier, unique for a given type of a given mathematical structure
@@ -681,9 +673,18 @@ impl Type {
     }
 
     pub fn named(decl: TypeDefId, arg_tys: impl Into<Vec<Self>>) -> Self {
+        Self::named_with_effects(decl, arg_tys, Vec::new())
+    }
+
+    pub fn named_with_effects(
+        decl: TypeDefId,
+        arg_tys: impl Into<Vec<Self>>,
+        effect_args: impl Into<Vec<EffType>>,
+    ) -> Self {
         TypeKind::Named(NamedType {
             def: decl,
             params: arg_tys.into(),
+            effect_params: effect_args.into(),
         })
         .store()
     }
@@ -729,6 +730,17 @@ impl Type {
     pub fn summary<'t>(self) -> TypeSummaryRef<'t> {
         let guard = types().read().unwrap();
         TypeSummaryRef { ty: self, guard }
+    }
+
+    /// Whether this type's shape is known enough for trait impl selection.
+    ///
+    /// Effect variables do not make the selected impl ambiguous: once the type
+    /// and mutability shape has selected an impl head, effect arguments are
+    /// solved by the ordinary effect constraints produced while matching that
+    /// head.
+    pub fn is_trait_input_resolved(self) -> bool {
+        let summary = self.summary();
+        summary.free_ty_vars.is_empty() && summary.free_mut_vars.is_empty()
     }
 
     // filter
@@ -997,6 +1009,8 @@ pub struct TypeDef {
     pub doc: Option<String>,
     /// The generic parameters of this type, if any.
     pub generic_params: Vec<UstrSpan>,
+    /// The generic effect parameters accepted by this type constructor.
+    pub generic_effect_params: Vec<UstrSpan>,
     /// The inner type data, possibly with generic arguments
     pub shape: TypeScheme<Type>,
     /// Documentation for the declared struct fields or enum variants.
@@ -1125,6 +1139,10 @@ impl TypeDef {
         self.generic_params.len()
     }
 
+    pub fn effect_param_count(&self) -> usize {
+        self.generic_effect_params.len()
+    }
+
     pub(crate) fn validate(&self) {
         assert_eq!(
             self.param_count(),
@@ -1140,6 +1158,15 @@ impl TypeDef {
                 index as u32,
                 "Type definition `{}` has non-canonical type quantifier ordering",
                 self.name,
+            );
+        }
+        for (index, param) in self.generic_effect_params.iter().enumerate() {
+            let quantifier = EffectVar::new(index as u32);
+            assert!(
+                self.shape.eff_quantifiers.contains(&quantifier),
+                "Type definition `{}` declares effect parameter `{}` but its scheme does not quantify it",
+                self.name,
+                param.0,
             );
         }
         if let Some(default_variant) = self.default_variant {
@@ -1167,6 +1194,14 @@ impl TypeDef {
     }
 
     pub fn instantiated_shape(&self, params: &[Type]) -> Type {
+        self.instantiated_shape_with_effects(params, &[])
+    }
+
+    pub fn instantiated_shape_with_effects(
+        &self,
+        params: &[Type],
+        effect_params: &[EffType],
+    ) -> Type {
         assert_eq!(
             params.len(),
             self.param_count(),
@@ -1175,6 +1210,14 @@ impl TypeDef {
             self.param_count(),
             params.len(),
         );
+        assert_eq!(
+            effect_params.len(),
+            self.effect_param_count(),
+            "Type definition `{}` expects {} effect parameters, got {}",
+            self.name,
+            self.effect_param_count(),
+            effect_params.len(),
+        );
         let ty_subst = self
             .shape
             .ty_quantifiers
@@ -1182,7 +1225,14 @@ impl TypeDef {
             .copied()
             .zip(params.iter().copied())
             .collect();
-        instantiate_type(self.shape.ty, &(ty_subst, EffectsInstSubst::default()))
+        let eff_subst = self
+            .generic_effect_params
+            .iter()
+            .enumerate()
+            .map(|(index, _)| EffectVar::new(index as u32))
+            .zip(effect_params.iter().cloned())
+            .collect();
+        instantiate_type(self.shape.ty, &(ty_subst, eff_subst))
     }
 
     pub fn payload_scheme(&self, tag: Option<Ustr>) -> TypeScheme<Type> {
@@ -1334,14 +1384,21 @@ impl TypeDef {
 pub(crate) struct TypeDefHeader {
     name: Ustr,
     generic_params: Vec<UstrSpan>,
+    generic_effect_params: Vec<UstrSpan>,
     span: Location,
 }
 
 impl TypeDefHeader {
-    fn new(name: Ustr, generic_params: Vec<UstrSpan>, span: Location) -> Self {
+    fn new(
+        name: Ustr,
+        generic_params: Vec<UstrSpan>,
+        generic_effect_params: Vec<UstrSpan>,
+        span: Location,
+    ) -> Self {
         Self {
             name,
             generic_params,
+            generic_effect_params,
             span,
         }
     }
@@ -1360,8 +1417,18 @@ impl TypeDefSlot {
         Self::Resolved(def)
     }
 
-    pub(crate) fn reserved(name: Ustr, generic_params: Vec<UstrSpan>, span: Location) -> Self {
-        Self::Reserved(TypeDefHeader::new(name, generic_params, span))
+    pub(crate) fn reserved(
+        name: Ustr,
+        generic_params: Vec<UstrSpan>,
+        generic_effect_params: Vec<UstrSpan>,
+        span: Location,
+    ) -> Self {
+        Self::Reserved(TypeDefHeader::new(
+            name,
+            generic_params,
+            generic_effect_params,
+            span,
+        ))
     }
 
     pub(crate) fn fill(&mut self, def: TypeDef) {
@@ -1370,6 +1437,7 @@ impl TypeDefSlot {
         };
         assert_eq!(header.name, def.name);
         assert_eq!(header.generic_params, def.generic_params);
+        assert_eq!(header.generic_effect_params, def.generic_effect_params);
         assert_eq!(header.span, def.span);
         def.validate();
         *self = Self::Resolved(def);
@@ -1389,12 +1457,23 @@ impl TypeDefSlot {
         }
     }
 
+    pub(crate) fn generic_effect_params(&self) -> &[UstrSpan] {
+        match self {
+            Self::Reserved(header) => &header.generic_effect_params,
+            Self::Resolved(def) => &def.generic_effect_params,
+        }
+    }
+
     pub(crate) fn param_names(&self) -> impl ExactSizeIterator<Item = Ustr> + '_ {
         self.generic_params().iter().map(|(name, _)| *name)
     }
 
     pub(crate) fn param_spans(&self) -> impl ExactSizeIterator<Item = Location> + '_ {
         self.generic_params().iter().map(|(_, span)| *span)
+    }
+
+    pub(crate) fn effect_param_count(&self) -> usize {
+        self.generic_effect_params().len()
     }
 
     pub(crate) fn span(&self) -> Location {
@@ -1424,12 +1503,15 @@ pub struct NamedType {
     pub def: TypeDefId,
     /// The type arguments for this named type to replace its generic variables
     pub params: Vec<Type>,
+    /// The effect arguments for this named type to replace its generic effect variables
+    pub effect_params: Vec<EffType>,
     // TODO: add constraints for the type arguments
 }
 
 impl NamedType {
     pub fn instantiated_shape(&self, env: &ModuleEnv<'_>) -> Type {
-        env.type_def(self.def).instantiated_shape(&self.params)
+        env.type_def(self.def)
+            .instantiated_shape_with_effects(&self.params, &self.effect_params)
     }
 }
 
@@ -1590,7 +1672,15 @@ impl TypeKind {
             Named(NamedType {
                 def: decl,
                 params: args,
-            }) => Type::named(*decl, args.iter().map(|ty| ty.map(f)).collect::<Vec<_>>()),
+                effect_params,
+            }) => Type::named_with_effects(
+                *decl,
+                args.iter().map(|ty| ty.map(f)).collect::<Vec<_>>(),
+                effect_params
+                    .iter()
+                    .map(|eff| f.map_effect_type(eff))
+                    .collect::<Vec<_>>(),
+            ),
             Never => Type::never(),
         }
     }
@@ -1617,8 +1707,15 @@ impl TypeKind {
             Tuple(types) => types.iter().for_each(|ty| process_ty(*ty, visitor)),
             Record(fields) => fields.iter().for_each(|(_, ty)| process_ty(*ty, visitor)),
             Function(fn_type) => fn_type.visit(visitor),
-            Named(NamedType { params: args, .. }) => {
+            Named(NamedType {
+                params: args,
+                effect_params,
+                ..
+            }) => {
                 args.iter().for_each(|ty| process_ty(*ty, visitor));
+                effect_params
+                    .iter()
+                    .for_each(|eff| visitor.visit_eff_ty(eff));
             }
         };
 
@@ -1908,25 +2005,43 @@ where
             write!(f, " }}")
         }
         Function(function) => function.fmt_with(f, env),
-        Named(NamedType { def, params: args })
-            if *def == crate::std::array::array_type_def() && args.len() == 1 =>
-        {
+        Named(NamedType {
+            def,
+            params: args,
+            effect_params: _,
+        }) if *def == crate::std::array::array_type_def() && args.len() == 1 => {
             write!(f, "[")?;
             args[0].fmt_with(f, env)?;
             write!(f, "]")
         }
-        Named(NamedType { def, params: args }) => {
+        Named(NamedType {
+            def,
+            params: args,
+            effect_params,
+        }) => {
             match env.module_env().try_type_def_name(*def) {
                 Some(name) => write!(f, "{name}")?,
                 None => write!(f, "#{}:{}", def.module, def.index)?,
             }
-            if !args.is_empty() {
+            if !args.is_empty() || !effect_params.is_empty() {
                 write!(f, "<")?;
                 for (i, ty) in args.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
                     ty.fmt_with(f, env)?;
+                }
+                if !effect_params.is_empty() {
+                    if !args.is_empty() {
+                        write!(f, " ")?;
+                    }
+                    write!(f, "! ")?;
+                    for (i, eff) in effect_params.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{eff}")?;
+                    }
                 }
                 write!(f, ">")?;
             }
@@ -2629,9 +2744,20 @@ impl TypeUniverse {
                     self.fold_child(*ty, summary, visited, &mut lookup);
                 }
             }
-            Named(NamedType { params, .. }) => {
+            Named(NamedType {
+                params,
+                effect_params,
+                ..
+            }) => {
                 for ty in params {
                     self.fold_child(*ty, summary, visited, &mut lookup);
+                }
+                for eff in effect_params {
+                    let mut vars = FxHashSet::default();
+                    eff.fill_with_inner_effect_vars(&mut vars);
+                    for var in vars {
+                        summary.free_eff_vars.insert(var);
+                    }
                 }
             }
             Never => {}

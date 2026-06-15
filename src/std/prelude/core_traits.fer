@@ -149,47 +149,48 @@ pub trait Bits<Self> {
 }
 
 /// An iterator that can produce a sequence of values.
-pub trait Iterator<Self |-> Item> {
+pub trait Iterator<Self |-> Item ! NextEffect> {
 	/// Returns the next item from the iterator, or `None` if the iterator is exhausted.
-	fn next(iterator: &mut Self) -> Option<Item> ! fallible;
+	fn next(iterator: &mut Self) -> Option<Item> ! NextEffect;
 }
 
 /// A sequence of elements that can produce an iterator over its elements.
-pub trait Seq<Self |-> Item, Iter>
-    where Iter: Iterator<Item = Item>
+pub trait Seq<Self |-> Item, Iter ! IterEffect>
+    where Iter: Iterator<Item = Item ! NextEffect = IterEffect>
 {
     /// Gets an iterator over the elements of this sequence.
     fn iter(seq: Self) -> Iter;
 }
 
 /// A collection that can be built from an iterator.
-pub trait FromIterator<Self, Iter>
+pub trait FromIterator<Self, Iter |-> Item ! FromIterEffect>
     where
+        Iter: Iterator<Item = Item ! NextEffect = FromIterEffect>,
         Iter: Value
 {
     /// Creates a collection from an iterator.
-    fn from_iter(iterator: Iter) -> Self ! fallible;
+    fn from_iter(iterator: Iter) -> Self ! FromIterEffect;
 }
 
 /// Marker trait that relates a collection family to the collection obtained by replacing its element type.
 pub trait RebindItem<Self, Item |-> Output> {}
 
 /// Maps a function over a value, producing either a lazy iterator adaptor or an eagerly rebuilt collection depending on the input type.
-pub trait Map<Self, Mapped |-> Item, Output> {
+pub trait Map<Self, Mapped |-> Item, Output ! MapperEffect, MapEffect> {
     /// Maps `mapper` over `value`.
-    fn map(value: Self, mapper: ((Item) -> Mapped ! fallible)) -> Output ! fallible;
+    fn map(value: Self, mapper: (Item) -> Mapped ! MapperEffect) -> Output ! MapEffect;
 }
 
 /// Filters a value with a predicate, producing either a lazy iterator adaptor or an eagerly rebuilt collection depending on the input type.
-pub trait Filter<Self |-> Item, Output> {
+pub trait Filter<Self |-> Item, Output ! PredicateEffect, FilterEffect> {
     /// Keeps only the elements of `value` that satisfy `predicate`.
-    fn filter(value: Self, predicate: ((Item) -> bool ! fallible)) -> Output ! fallible;
+    fn filter(value: Self, predicate: (Item) -> bool ! PredicateEffect) -> Output ! FilterEffect;
 }
 
 /// Filters and maps a value in one pass, producing either a lazy iterator adaptor or an eagerly rebuilt collection depending on the input type.
-pub trait FilterMap<Self, Mapped |-> Item, Output> {
+pub trait FilterMap<Self, Mapped |-> Item, Output ! MapperEffect, FilterMapEffect> {
     /// Applies `mapper` to each element, keeping only `Some` results.
-    fn filter_map(value: Self, mapper: ((Item) -> Option<Mapped> ! fallible)) -> Output ! fallible;
+    fn filter_map(value: Self, mapper: (Item) -> Option<Mapped> ! MapperEffect) -> Output ! FilterMapEffect;
 }
 
 /// A sequence with a known, fixed size.
@@ -205,8 +206,8 @@ pub trait Concat<Self> {
 }
 
 /// A sequence-like value that can be split around a non-empty separator, yielding parts lazily.
-pub trait Split<Self, Separator |-> Part, Iter, Output>
-    where Iterator<Self = Iter |-> Item = Part>
+pub trait Split<Self, Separator |-> Part, Iter, Output ! SplitIterEffect>
+    where Iterator<Self = Iter |-> Item = Part ! NextEffect = SplitIterEffect>
 {
     /// Returns an iterator that yields the parts of `value` split around `separator`.
     fn split_iterator(value: Self, separator: Separator) -> Iter ! fallible;
@@ -233,5 +234,5 @@ pub trait Reverse<Self> {
 /// A container that can be sorted in place with a custom comparator.
 pub trait SortBy<Self |-> Item> {
     /// Sorts `value` in place using `compare`.
-    fn sort_by(self: &mut Self, comparator: ((Item, Item) -> Ordering ! fallible)) ! fallible;
+    fn sort_by(self: &mut Self, comparator: (Item, Item) -> Ordering ! fallible) ! fallible;
 }

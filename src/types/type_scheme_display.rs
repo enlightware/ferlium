@@ -17,7 +17,7 @@ use crate::{
     format::{FormatWith, FormatWithData, write_with_separator_and_format_fn},
     module::{ModuleEnv, TraitId},
     types::{
-        effects::{EffType, EffectsInstSubst},
+        effects::{EffType, EffectsInstSubst, format_effect_binding_value},
         r#type::{Type, TypeDisplayEnv, TypeInstSubst, TypeVar},
         type_inference::substitution::InstSubst,
         type_like::TypeLike,
@@ -754,7 +754,10 @@ where
         write_with_separator_and_format_fn(
             output_effs.iter().enumerate(),
             ", ",
-            |(index, eff), f| write!(f, "{} = {}", trait_def.output_effect_names[index], eff),
+            |(index, eff), f| {
+                write!(f, "{} = ", trait_def.output_effect_names[index])?;
+                format_effect_binding_value(eff, f)
+            },
             f,
         )?;
     }

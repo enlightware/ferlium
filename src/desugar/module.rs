@@ -1,6 +1,7 @@
 use crate::compiler::error::InvalidRecursiveTypeKind;
 use crate::desugar::types::{
-    RecursiveAliasRef, RecursiveTypeBuilder, desugar_type_constraints, extend_generic_ty_params,
+    RecursiveAliasRef, RecursiveTypeBuilder, desugar_type_constraints_with_next_effect_var,
+    extend_generic_eff_params, extend_generic_ty_params,
 };
 use crate::hir::function::FunctionDefinition;
 use crate::module::Visibility;
@@ -34,8 +35,8 @@ impl NamedTypeData {
     fn generic_params(&self) -> &[UstrSpan] {
         use NamedTypeData::*;
         match self {
-            Alias(alias) => &alias.generic_params,
-            Def(def) => &def.generic_params,
+            Alias(alias) => alias.generic_params.type_params(),
+            Def(def) => def.generic_params.type_params(),
         }
     }
 
@@ -75,7 +76,7 @@ impl NamedTypeData {
             NamedTypeData::Alias(alias) => validate_regular_generic_refs_in_type(
                 &alias.ty.0,
                 alias.ty.1,
-                &alias.generic_params,
+                alias.generic_params.type_params(),
                 scc_set,
                 ty_names,
                 ty_refs,
@@ -84,7 +85,7 @@ impl NamedTypeData {
                 validate_regular_generic_refs_in_type(
                     &def.shape,
                     def.span,
-                    &def.generic_params,
+                    def.generic_params.type_params(),
                     scc_set,
                     ty_names,
                     ty_refs,
@@ -94,7 +95,7 @@ impl NamedTypeData {
                         validate_regular_generic_refs_in_type(
                             &input.ty.0,
                             input.ty.1,
-                            &def.generic_params,
+                            def.generic_params.type_params(),
                             scc_set,
                             ty_names,
                             ty_refs,
@@ -104,7 +105,7 @@ impl NamedTypeData {
                         validate_regular_generic_refs_in_type(
                             &output.ty.0,
                             output.ty.1,
-                            &def.generic_params,
+                            def.generic_params.type_params(),
                             scc_set,
                             ty_names,
                             ty_refs,
@@ -152,21 +153,27 @@ impl NamedTypeData {
             NamedTypeData::Alias(alias) => {
                 let generic_ty_params = extend_generic_ty_params(
                     &GenericTyParams::default(),
-                    &alias.generic_params,
+                    alias.generic_params.type_params(),
                     GenericParamsOwner::TypeAlias { name: alias.name.0 },
                 )?;
-                let ty_var_count = alias.generic_params.len() as u32;
-                let ty = alias.ty.0.desugar_with_ty_params(
+                let generic_eff_params = extend_generic_eff_params(
+                    &GenericEffParams::default(),
+                    alias.generic_params.effect_params(),
+                    GenericParamsOwner::TypeAlias { name: alias.name.0 },
+                )?;
+                let ty_var_count = alias.generic_params.type_params().len() as u32;
+                let ty = alias.ty.0.desugar_with_ty_and_eff_params(
                     alias.ty.1,
                     false,
                     env,
                     &generic_ty_params,
+                    Some(&generic_eff_params),
                     modules_used,
                 )?;
                 DesugaredNamedType::Alias(DesugaredTypeAlias {
                     visibility: alias.visibility,
                     name: alias.name,
-                    generic_params: alias.generic_params.clone(),
+                    generic_params: alias.generic_params.type_params().to_vec(),
                     ty_var_count,
                     ty,
                     doc: alias.doc.clone(),
@@ -256,7 +263,7 @@ fn validate_regular_generic_refs_in_type(
 ) -> Result<(), InternalCompilationError> {
     use ast::PType::*;
     match ty {
-        AppliedPath { path, args } => {
+        AppliedPath { path, args, .. } => {
             // For now, recursive generic SCCs must be regular: every recursive
             // application of a generic declaration in the SCC must pass the
             // current declaration's type parameters through unchanged. This
@@ -393,7 +400,7 @@ impl TypeCycleInfo {
                     }
                 }
             }
-            AppliedPath { path, args } => {
+            AppliedPath { path, args, .. } => {
                 // A generic use such as `List<T>` contributes the same dependency as
                 // `List`; its arguments may contribute additional local dependencies.
                 if let [(name, _)] = &path.segments[..]
@@ -672,7 +679,7 @@ fn build_recursive_alias_refs(
 ) -> FxHashMap<Ustr, RecursiveAliasRef> {
     scc.iter()
         .filter_map(|&index| match &ty_refs[index] {
-            NamedTypeData::Alias(alias) => Some((alias.name, &alias.generic_params)),
+            NamedTypeData::Alias(alias) => Some((alias.name, alias.generic_params.type_params())),
             NamedTypeData::Def(_) => None,
         })
         .enumerate()
@@ -701,9 +708,10 @@ fn predeclare_recursive_type_defs(
         .filter_map(|&index| match &ty_refs[index] {
             NamedTypeData::Alias(_) => None,
             NamedTypeData::Def(def) => {
-                let type_def = output.reserve_type_def_with_visibility(
+                let type_def = output.reserve_type_def_with_effect_params_and_visibility(
                     def.name.0,
-                    def.generic_params.clone(),
+                    def.generic_params.type_params().to_vec(),
+                    def.generic_params.effect_params().to_vec(),
                     def.span,
                     def.visibility,
                 );
@@ -737,7 +745,7 @@ fn desugar_recursive_aliases_in_scc(
         // by `RecursiveTypeBuilder`.
         let generic_ty_params = extend_generic_ty_params(
             &GenericTyParams::default(),
-            &alias.generic_params,
+            alias.generic_params.type_params(),
             GenericParamsOwner::TypeAlias { name: alias.name.0 },
         )?;
         builder.set_generic_ty_params(generic_ty_params);
@@ -746,7 +754,7 @@ fn desugar_recursive_aliases_in_scc(
         root_entries.push((
             alias.visibility,
             alias.name,
-            alias.generic_params.clone(),
+            alias.generic_params.type_params().to_vec(),
             alias.doc.clone(),
         ));
     }
@@ -977,14 +985,36 @@ impl ast::TraitDefinition {
             &generic_params,
             GenericParamsOwner::Trait { name: self.name.0 },
         )?;
-        let parent_constraints = desugar_type_constraints(
+        let mut generic_eff_params = GenericEffParams::default();
+        for (index, (name, span)) in self.output_effect_names.iter().copied().enumerate() {
+            if generic_eff_params
+                .insert(name, crate::types::effects::EffectVar::new(index as u32))
+                .is_some()
+            {
+                return Err(internal_compilation_error!(InvalidGenericParams {
+                    owner: GenericParamsOwner::Trait { name: self.name.0 },
+                    kind: InvalidGenericParamsKind::DuplicateEffectParam { name },
+                    span,
+                }));
+            }
+        }
+        let mut next_effect_var = self.output_effect_names.len() as u32;
+        let parent_constraints = desugar_type_constraints_with_next_effect_var(
             &self.parent_constraints,
             &generic_ty_params,
+            Some(&generic_eff_params),
+            &mut next_effect_var,
             env,
             modules_used,
         )?;
-        let constraints =
-            desugar_type_constraints(&self.where_clause, &generic_ty_params, env, modules_used)?;
+        let constraints = desugar_type_constraints_with_next_effect_var(
+            &self.where_clause,
+            &generic_ty_params,
+            Some(&generic_eff_params),
+            &mut next_effect_var,
+            env,
+            modules_used,
+        )?;
         let method_spans = self
             .methods
             .iter()
@@ -993,10 +1023,13 @@ impl ast::TraitDefinition {
         let spans = self.spans(method_spans);
         let input_type_names = self.iter_input_type_names().collect();
         let output_type_names = self.iter_output_type_names().collect();
+        let output_effect_names = self.iter_output_effect_names().collect();
         let methods = self
             .methods
             .into_iter()
-            .map(|function| function.desugar(env, &generic_ty_params, modules_used))
+            .map(|function| {
+                function.desugar(env, &generic_ty_params, &generic_eff_params, modules_used)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let associated_consts = self
             .associated_consts
@@ -1022,7 +1055,7 @@ impl ast::TraitDefinition {
             doc: self.doc,
             input_type_names,
             output_type_names,
-            output_effect_names: Vec::new(),
+            output_effect_names,
             parent_constraints,
             constraints,
             methods,
@@ -1068,28 +1101,35 @@ impl ast::TraitMethod {
         self,
         env: &ModuleEnv<'_>,
         generic_ty_params: &GenericTyParams,
+        generic_eff_params: &GenericEffParams,
         modules_used: &mut FxHashSet<ModuleId>,
     ) -> Result<(Ustr, FunctionDefinition), InternalCompilationError> {
         let args = self
             .args
             .iter()
             .map(|arg| {
-                arg.ty
-                    .desugar_with_ty_params(env, generic_ty_params, modules_used)
+                arg.ty.desugar_with_ty_and_eff_params(
+                    env,
+                    generic_ty_params,
+                    Some(generic_eff_params),
+                    modules_used,
+                )
             })
             .collect::<Result<Vec<_>, _>>()?;
         let ret = self.ret_ty.map_or_else(
             || Ok(Type::unit()),
             |(ret_ty, span)| {
-                ret_ty.desugar_with_ty_params(span, false, env, generic_ty_params, modules_used)
+                ret_ty.desugar_with_ty_and_eff_params(
+                    span,
+                    false,
+                    env,
+                    generic_ty_params,
+                    Some(generic_eff_params),
+                    modules_used,
+                )
             },
         )?;
-        use ast::PFnEffects::*;
-        let effects = match self.effects {
-            ImplicitPure => EffType::empty(),
-            ImplicitGeneric => EffType::single_variable_id(0),
-            Explicit(effects) => EffType::multiple_primitive(&effects),
-        };
+        let effects = desugar_fn_effects(&self.effects, Some(generic_eff_params))?;
         let fn_ty = FnType::new(args, ret, effects);
         Ok((
             self.name.0,
@@ -1113,6 +1153,11 @@ impl ast::TraitDefinition {
                 .collect(),
             output_type_names: self
                 .output_type_names
+                .iter()
+                .map(|(_, span)| *span)
+                .collect(),
+            output_effect_names: self
+                .output_effect_names
                 .iter()
                 .map(|(_, span)| *span)
                 .collect(),
@@ -1146,24 +1191,54 @@ impl PModuleFunction {
             fn_map,
             env,
             &generic_ty_params,
+            &GenericEffParams::default(),
             parsed_arena,
             desugared_arena,
             modules_used,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn desugar_with_ty_params(
         self,
         fn_map: &FnMap,
         env: &ModuleEnv<'_>,
         generic_ty_params: &GenericTyParams,
+        generic_eff_params: &GenericEffParams,
+        parsed_arena: &PExprArena,
+        desugared_arena: &mut DExprArena,
+        modules_used: &mut FxHashSet<ModuleId>,
+    ) -> Result<(DModuleFunction, DepGraphNode), InternalCompilationError> {
+        self.desugar_with_ty_and_eff_params(
+            fn_map,
+            env,
+            generic_ty_params,
+            generic_eff_params,
+            parsed_arena,
+            desugared_arena,
+            modules_used,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn desugar_with_ty_and_eff_params(
+        self,
+        fn_map: &FnMap,
+        env: &ModuleEnv<'_>,
+        generic_ty_params: &GenericTyParams,
+        outer_generic_eff_params: &GenericEffParams,
         parsed_arena: &PExprArena,
         desugared_arena: &mut DExprArena,
         modules_used: &mut FxHashSet<ModuleId>,
     ) -> Result<(DModuleFunction, DepGraphNode), InternalCompilationError> {
         let generic_ty_params = extend_generic_ty_params(
             generic_ty_params,
-            &self.generic_params,
+            self.generic_params.type_params(),
+            GenericParamsOwner::Function { name: self.name.0 },
+        )?;
+        let generic_eff_params = extend_generic_eff_params(
+            outer_generic_eff_params,
+            self.generic_params.effect_params(),
             GenericParamsOwner::Function { name: self.name.0 },
         )?;
         // Collect mut-binding arg info before args are consumed.
@@ -1174,7 +1249,13 @@ impl PModuleFunction {
             .map(|arg| arg.name)
             .collect();
         let locals = self.args.iter().map(|arg| arg.name.0).collect();
-        let mut ctx = DesugarCtx::new_with_locals(fn_map, locals, env, &generic_ty_params);
+        let mut ctx = DesugarCtx::new_with_locals(
+            fn_map,
+            locals,
+            env,
+            &generic_ty_params,
+            &generic_eff_params,
+        );
         let body = desugar(
             self.body,
             &mut ctx,
@@ -1212,20 +1293,57 @@ impl PModuleFunction {
         let args = self
             .args
             .into_iter()
-            .map(|arg| arg.desugar_with_ty_params(env, &generic_ty_params, modules_used))
+            .map(|arg| {
+                arg.desugar_with_ty_and_eff_params(
+                    env,
+                    &generic_ty_params,
+                    Some(&generic_eff_params),
+                    modules_used,
+                )
+            })
             .collect::<Result<Vec<_>, _>>()?;
         // Collect function dependencies
         let ret_ty = self
             .ret_ty
             .map(|(ty, span)| {
                 Ok((
-                    ty.desugar_with_ty_params(span, false, env, &generic_ty_params, modules_used)?,
+                    ty.desugar_with_ty_and_eff_params(
+                        span,
+                        false,
+                        env,
+                        &generic_ty_params,
+                        Some(&generic_eff_params),
+                        modules_used,
+                    )?,
                     span,
                 ))
             })
             .transpose()?;
-        let where_clause =
-            desugar_type_constraints(&self.where_clause, &generic_ty_params, env, modules_used)?;
+        let mut next_effect_var = generic_eff_params
+            .values()
+            .map(|var| var.name() + 1)
+            .chain(
+                args.iter()
+                    .filter_map(|arg| arg.ty.map(|(_, ty, _)| ty))
+                    .flat_map(|ty| ty.inner_effect_vars())
+                    .chain(
+                        ret_ty
+                            .as_ref()
+                            .into_iter()
+                            .flat_map(|(ty, _)| ty.inner_effect_vars()),
+                    )
+                    .map(|var| var.name() + 1),
+            )
+            .max()
+            .unwrap_or(0);
+        let where_clause = desugar_type_constraints_with_next_effect_var(
+            &self.where_clause,
+            &generic_ty_params,
+            Some(&generic_eff_params),
+            &mut next_effect_var,
+            env,
+            modules_used,
+        )?;
         let function = ModuleFunction {
             visibility: self.visibility,
             name: self.name,

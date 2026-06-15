@@ -83,22 +83,22 @@ impl<T> Cast for <From = T, To = Wrapper<T>> {
 Ferlium also accepts positional input bindings such as `impl<T> Cast for <T, Wrapper<T>> { ... }`.
 Named bindings are usually easier to read, and they line up naturally with traits that also have output slots.
 
-### Traits with output types
+### Traits with output types and effects
 
 Traits such as `Iterator` have output slots.
 You may write them explicitly:
 
 ```ferlium
-struct TransformIter<I, T, O>
+struct TransformIter<I, T, O ! MapperEffect>
 where
-    I: Iterator<Item = T>
+    I: Iterator<Item = T ! NextEffect = ()>
 {
     iterator: I,
-    mapper: (T) -> O,
+    mapper: (T) -> O ! MapperEffect,
 }
 
-impl<I, T, O> Iterator for <Self = TransformIter<I, T, O> |-> Item = O> {
-    fn next(it: &mut TransformIter<I, T, O>) -> None | Some(O) {
+impl<I, T, O ! MapperEffect> Iterator for <Self = TransformIter<I, T, O ! MapperEffect> |-> Item = O ! NextEffect = MapperEffect> {
+    fn next(it: &mut TransformIter<I, T, O ! MapperEffect>) -> Option<O> {
         match next(it.iterator) {
             Some(value) => Some(it.mapper(value)),
             None => None,
@@ -110,6 +110,7 @@ impl<I, T, O> Iterator for <Self = TransformIter<I, T, O> |-> Item = O> {
 Writing output bindings is optional.
 If you omit them, Ferlium infers them from the method signatures.
 If you write them explicitly, they must agree with the inferred ones.
+Effect outputs, such as `NextEffect`, work the same way for traits that expose them.
 
 ## Associated constants
 

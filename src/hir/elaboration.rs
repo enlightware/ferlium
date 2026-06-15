@@ -12,6 +12,7 @@ use crate::{FxHashMap, FxHashSet, Modules};
 use crate::{
     Location,
     compiler::error::InternalCompilationError,
+    hir::hir_syn::get_dictionary,
     hir::{
         dictionary::{
             DictElaborationCtx, DictionariesReq, DictionaryReq, ExtraParameters,
@@ -21,10 +22,9 @@ use crate::{
     },
     internal_compilation_error,
     module::{
-        ConcreteTraitImplKey, ExtraParameterId, FunctionId, LocalDecl, LocalFunctionId, Module,
-        ModuleEnv, PendingLocalClone, PendingLocalDrop, PendingModuleFunction,
-        PendingTakeLocalValueMode, ProjectionIndex, TraitId, TraitImpl, TraitImplId, TraitImpls,
-        build_dictionary_value, id::Id,
+        ExtraParameterId, FunctionId, LocalDecl, LocalFunctionId, Module, ModuleEnv,
+        PendingLocalClone, PendingLocalDrop, PendingModuleFunction, PendingTakeLocalValueMode,
+        ProjectionIndex, TraitId, id::Id,
     },
     types::r#trait::{TraitDictionaryEntryIndex, TraitMethodIndex},
     types::trait_solver::{TraitSolver, trait_solver_from_module},
@@ -50,7 +50,6 @@ use crate::{
     types::effects::{EffType, no_effects},
     types::mutability::MutType,
     types::r#type::{FnArgType, Type, TypeKind},
-    types::type_like::TypeLike,
 };
 
 /// Build the use-site HIR expression for a generated `Value` dictionary.
@@ -61,53 +60,10 @@ fn value_dictionary_node_kind_from_methods(
     methods: Vec<LocalFunctionId>,
     ctx: &mut DictElaborationCtx<'_, '_, '_>,
 ) -> Result<(NodeKind, Type), InternalCompilationError> {
-    let trait_def = ctx.trait_solver.trait_def(trait_id);
-    // This builds compiler-generated `Value` dictionaries. The associated
-    // consts are layout metadata, so they are computed from the concrete HIR
-    // type rather than read from a source impl.
-    assert_eq!(methods.len(), trait_def.methods.len());
-    let definitions = trait_def.instantiate_for_tys(input_tys, &[], &[]);
-    let method_tys = definitions
-        .into_iter()
-        .map(|definition| Type::function_type(definition.ty_scheme.ty))
-        .collect::<Vec<_>>();
-    let associated_const_values =
-        value_layout_associated_const_values(input_tys[0], span, ctx.trait_solver)?;
-    let ty = trait_def.get_dictionary_type_for_tys(input_tys, &[], &[]);
-    let associated_const_values = associated_const_values
-        .into_iter()
-        .map(LiteralValue::new_native)
-        .collect::<Vec<_>>();
-    let associated_const_tys =
-        trait_def.instantiate_associated_const_tys_for_tys(input_tys, &[], &[]);
-    let dictionary_ty = TraitImpls::dictionary_ty(method_tys, associated_const_tys);
-    let dictionary_value = build_dictionary_value(&methods, &associated_const_values);
-    let imp = TraitImpl::new(
-        Vec::new(),
-        Vec::new(),
-        methods,
-        dictionary_value,
-        dictionary_ty,
-        false,
-        None,
-    )
-    .with_associated_const_values(associated_const_values);
-    let impl_id = if input_tys.iter().all(Type::is_constant) {
-        let key = ConcreteTraitImplKey::new(trait_id, input_tys.to_vec());
-        if let Some(impl_id) = ctx.trait_solver.impls.concrete().get(&key).copied() {
-            impl_id
-        } else {
-            ctx.trait_solver.impls.add_concrete_struct(key, imp)
-        }
-    } else {
-        ctx.trait_solver.impls.add_anonymous_dictionary_struct(imp)
-    };
-    Ok((
-        NodeKind::GetDictionary(hir::GetDictionary {
-            dictionary: TraitImplId::Local(impl_id),
-        }),
-        ty,
-    ))
+    let (dictionary, ty) = ctx
+        .trait_solver
+        .materialize_generated_value_impl_from_methods(trait_id, input_tys, span, methods)?;
+    Ok((get_dictionary(dictionary), ty))
 }
 
 /// Build the compiler-provided `Value` dictionary for a concrete function type.
@@ -166,7 +122,7 @@ fn trait_dictionary_node_kind(
         .trait_def(trait_id)
         .get_dictionary_type_for_tys(input_tys, output_tys, output_effs);
 
-    let node_kind = if input_tys.iter().all(Type::is_constant) {
+    let node_kind = if input_tys.iter().all(|ty| ty.is_trait_input_resolved()) {
         let dictionary = ctx
             .trait_solver
             .solve_impl(trait_id, input_tys, span, arena)?;
@@ -667,7 +623,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                     inst_data.dicts_req.is_empty(),
                     "Instantiation data for trait method is not supported yet."
                 );
-                let resolved = input_tys.iter().all(Type::is_constant);
+                let resolved = input_tys.iter().all(|ty| ty.is_trait_input_resolved());
                 let (is_value_function, is_function_surface_only, argument_names) = {
                     let trait_def = self.ctx.trait_solver.trait_def(trait_id);
                     let definition = &trait_def.method(method_index).1;
@@ -839,7 +795,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                 let input_tys = get_method.input_tys.clone();
                 let output_tys = get_method.output_tys.clone();
                 let output_effs = get_method.output_effs.clone();
-                let resolved = input_tys.iter().all(Type::is_constant);
+                let resolved = input_tys.iter().all(|ty| ty.is_trait_input_resolved());
                 let is_value_function = {
                     let trait_def = self.ctx.trait_solver.trait_def(trait_id);
                     is_value_trait_for_function_type(trait_id, trait_def, &input_tys, &output_tys)
@@ -905,7 +861,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                 let associated_const_span = get_const.associated_const_span;
                 let input_tys = get_const.input_tys.clone();
                 let output_tys = get_const.output_tys.clone();
-                let resolved = input_tys.iter().all(Type::is_constant);
+                let resolved = input_tys.iter().all(|ty| ty.is_trait_input_resolved());
                 let is_compiler_value_application = {
                     let trait_def = self.ctx.trait_solver.trait_def(trait_id);
                     is_value_trait_for_function_type(trait_id, trait_def, &input_tys, &output_tys)
@@ -1094,7 +1050,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                     self.ctx
                         .trait_solver
                         .type_def(named.def)
-                        .instantiated_shape(&named.params)
+                        .instantiated_shape_with_effects(&named.params, &named.effect_params)
                         .data()
                 } else {
                     ty_data
