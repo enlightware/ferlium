@@ -15,7 +15,9 @@ use crate::{
         emit_associated_consts::emitted_associated_const_values, emit_functions::EmitTraitOutput,
     },
     internal_compilation_error,
-    module::{LocalFunctionId, Module, ModuleEnv, PendingModuleFunction, TypeDefId, id::Id},
+    module::{
+        LocalFunctionId, Module, ModuleEnv, PendingModuleFunction, TypeDefId, Visibility, id::Id,
+    },
     std::core_traits_names::VALUE_TRAIT_NAME,
     std::value::{
         NO_DERIVE_VALUE_ATTRIBUTE, derive_generic_value_code_entries,
@@ -52,7 +54,9 @@ pub(crate) fn function_value_method(
 
     let local_id = solver.fn_collector.next_id();
     let function = function_value_method_function(method_index, span, solver)?;
-    solver.fn_collector.push(name, function);
+    solver
+        .fn_collector
+        .push_with_visibility(name, function, Visibility::Module);
     Ok(local_id)
 }
 

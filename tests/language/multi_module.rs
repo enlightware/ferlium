@@ -16,10 +16,11 @@ use ferlium::{
     },
     eval::ValOrMut,
     hir::value::Value,
-    module::{ModuleId, id::Id},
+    module::{ModuleId, Visibility, id::Id},
     types::r#type::Type,
 };
 use indoc::indoc;
+use ustr::ustr;
 
 use crate::harness::{TestSession, int};
 
@@ -111,6 +112,50 @@ fn pub_function_is_visible_across_modules() {
     );
 
     assert_val_eq!(session.run("user::result()"), int(1));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generated_function_value_methods_and_lambdas_are_private() {
+    let mut session = TestSession::new();
+    let module_id = compile_module(
+        &mut session,
+        "base",
+        indoc! { r#"
+            fn id(x: int) -> int { x }
+
+            pub fn function_values_equal() -> bool {
+                id == id
+            }
+
+            pub fn call_lambda() -> int {
+                let f = |x| x + 1;
+                f(1)
+            }
+        "# },
+    );
+    let module = session.session().expect_fresh_module(module_id);
+
+    let function_value_eq = ustr("$_ferlium_function_value_eq");
+    assert_eq!(
+        module.symbol_visibility(function_value_eq),
+        Some(Visibility::Module)
+    );
+    assert!(
+        !module
+            .public_symbols()
+            .any(|name| name == function_value_eq)
+    );
+
+    let lambda_name = module
+        .own_symbols()
+        .find(|name| name.as_str().starts_with("$lambda$"))
+        .expect("module should contain a generated lambda function name");
+    assert_eq!(
+        module.symbol_visibility(lambda_name),
+        Some(Visibility::Module)
+    );
+    assert!(!module.public_symbols().any(|name| name == lambda_name));
 }
 
 #[test]

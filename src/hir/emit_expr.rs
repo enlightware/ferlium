@@ -28,7 +28,8 @@ use crate::{
     },
     internal_compilation_error,
     module::{
-        ELocalDecl, GENERATED_LAMBDA_PREFIX, LocalDecl, LocalDeclId, Module, ModuleEnv, id::Id,
+        ELocalDecl, GENERATED_LAMBDA_PREFIX, LocalDecl, LocalDeclId, Module, ModuleEnv, Visibility,
+        id::Id,
     },
     types::{
         effects::EffType,
@@ -133,9 +134,10 @@ fn emit_expr_unsafe_inner(
         .drain(..)
         .map(|function| {
             let id = add_pending_function_anonymous(module, &mut pending_functions, function);
-            module.name_function(
+            module.name_function_with_visibility(
                 id,
                 format!("{GENERATED_LAMBDA_PREFIX}{}", id.as_index()).into(),
+                Visibility::Module,
             );
             id
         })

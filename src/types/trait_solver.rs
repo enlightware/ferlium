@@ -1739,9 +1739,9 @@ impl<'a> TraitSolver<'a> {
         pending_functions: &mut FxHashMap<LocalFunctionId, PendingModuleFunction>,
     ) -> Vec<LocalFunctionId> {
         let mut ids = Vec::with_capacity(self.fn_collector.new_elements.len());
-        for (name, function) in self.fn_collector.new_elements.drain(..) {
+        for (name, function, visibility) in self.fn_collector.new_elements.drain(..) {
             let id = LocalFunctionId::from_index(functions.len());
-            def_table.insert(name, Def::public(DefKind::Function(id)));
+            def_table.insert(name, Def::new(DefKind::Function(id), visibility));
             let function = function.expect("committing a reserved generated function without code");
             functions.push(function.placeholder());
             pending_functions.insert(id, function);

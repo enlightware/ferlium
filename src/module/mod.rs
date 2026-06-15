@@ -387,8 +387,18 @@ impl Module {
 
     /// Name a previously added anonymous function.
     pub(crate) fn name_function(&mut self, id: LocalFunctionId, new_name: Ustr) {
+        self.name_function_with_visibility(id, new_name, Visibility::Public);
+    }
+
+    /// Name a previously added anonymous function with explicit visibility.
+    pub(crate) fn name_function_with_visibility(
+        &mut self,
+        id: LocalFunctionId,
+        new_name: Ustr,
+        visibility: Visibility,
+    ) {
         self.def_table
-            .insert(new_name, Def::public(DefKind::Function(id)));
+            .insert(new_name, Def::new(DefKind::Function(id), visibility));
     }
 
     /// Add collected final functions from a FunctionCollector to this module.

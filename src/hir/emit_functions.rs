@@ -31,7 +31,7 @@ use crate::{
     module::{
         FunctionId, GENERATED_LAMBDA_PREFIX, LocalAssignmentMode, LocalDecl, LocalDeclId,
         LocalFunctionId, Module, ModuleEnv, ModuleFunction, ModuleFunctionSpans, ModuleId,
-        PendingFunctionBody, PendingModuleFunction, TraitId, id::Id,
+        PendingFunctionBody, PendingModuleFunction, TraitId, Visibility, id::Id,
     },
     std::{
         STD_MODULE_ID, new_module_using_std,
@@ -743,9 +743,10 @@ where
         lambda_functions.drain(..).for_each(|function| {
             let lambda_id =
                 add_pending_function_anonymous(output, &mut pending_functions, function);
-            output.name_function(
+            output.name_function_with_visibility(
                 lambda_id,
                 format!("{GENERATED_LAMBDA_PREFIX}{}", lambda_id.as_index()).into(),
+                Visibility::Module,
             );
             associated_lambdas.entry(*id).or_default().push(lambda_id);
         });

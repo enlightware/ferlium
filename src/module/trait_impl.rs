@@ -23,7 +23,7 @@ use crate::{
     hir::value::LiteralValue,
     module::{
         LocalDecl, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleId, PendingModuleFunction,
-        TraitId, id::Id,
+        TraitId, Visibility, id::Id,
     },
     parser::location::Location,
     types::effects::{EffType, EffectVar, format_effect_binding_value},
@@ -257,7 +257,7 @@ pub struct PendingFunctionCollector {
     pub initial_count: usize,
     /// `None` marks a reserved slot whose body will be supplied by `replace`.
     #[new(default)]
-    pub new_elements: Vec<(Ustr, Option<PendingModuleFunction>)>,
+    pub new_elements: Vec<(Ustr, Option<PendingModuleFunction>, Visibility)>,
 }
 
 impl FunctionCollector {
@@ -283,13 +283,26 @@ impl PendingFunctionCollector {
         LocalFunctionId::from_index(self.initial_count + self.new_elements.len())
     }
 
-    pub fn push(&mut self, name: Ustr, mut function: PendingModuleFunction) {
+    pub fn push(&mut self, name: Ustr, function: PendingModuleFunction) {
+        self.push_with_visibility(name, function, Visibility::Public);
+    }
+
+    pub fn push_with_visibility(
+        &mut self,
+        name: Ustr,
+        mut function: PendingModuleFunction,
+        visibility: Visibility,
+    ) {
         function.assign_local_slots();
-        self.new_elements.push((name, Some(function)));
+        self.new_elements.push((name, Some(function), visibility));
     }
 
     pub fn reserve(&mut self, name: Ustr) {
-        self.new_elements.push((name, None));
+        self.reserve_with_visibility(name, Visibility::Public);
+    }
+
+    pub fn reserve_with_visibility(&mut self, name: Ustr, visibility: Visibility) {
+        self.new_elements.push((name, None, visibility));
     }
 
     pub(crate) fn replace(&mut self, id: LocalFunctionId, mut function: PendingModuleFunction) {
@@ -304,7 +317,7 @@ impl PendingFunctionCollector {
     pub fn get_function(&self, name: Ustr) -> Option<LocalFunctionId> {
         self.new_elements
             .iter()
-            .position(|(fn_name, _)| *fn_name == name)
+            .position(|(fn_name, _, _)| *fn_name == name)
             .map(|i| LocalFunctionId::from_index(self.initial_count + i))
     }
 }
