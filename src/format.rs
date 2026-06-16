@@ -70,6 +70,29 @@ pub(crate) fn write_identifier_list<'a>(
     write_with_separator(iter.into_iter().map(escape_identifier), separator, f)
 }
 
+pub(crate) fn format_generic_param_list(
+    type_params: &[String],
+    effect_params: &[String],
+) -> Option<String> {
+    if type_params.is_empty() && effect_params.is_empty() {
+        return None;
+    }
+
+    let mut result = String::from("<");
+    if !type_params.is_empty() {
+        result.push_str(&type_params.join(", "));
+    }
+    if !effect_params.is_empty() {
+        if !type_params.is_empty() {
+            result.push(' ');
+        }
+        result.push_str("! ");
+        result.push_str(&effect_params.join(", "));
+    }
+    result.push('>');
+    Some(result)
+}
+
 /// A wrapper to fmt::Display types that depend on third-party data
 #[derive(new)]
 pub struct FormatWithData<'a, T: ?Sized + 'a, D: ?Sized + 'a> {

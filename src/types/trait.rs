@@ -21,7 +21,7 @@ use crate::{
         InternalCompilationError, InvalidTraitDefinitionKind, UnsupportedTraitDefinitionKind,
     },
     format::{FormatWith, write_with_separator_and_format_fn},
-    hir::function::FunctionDefinition,
+    hir::function::{FunctionDefinition, FunctionDisplayContext},
     module::{ModuleEnv, TraitId, TraitImplId, id::Id},
     types::effects::{EffType, EffectVar, EffectsInstSubst},
     types::trait_solver::TraitSolver,
@@ -562,6 +562,7 @@ impl Trait {
             .map(|(_, def)| FunctionDefinition {
                 ty_scheme: def.ty_scheme.map_simplified(&mut mapper),
                 generic_params: def.generic_params.clone(),
+                generic_effect_params: def.generic_effect_params.clone(),
                 arg_names: def.arg_names.clone(),
                 doc: def.doc.clone(),
                 attributes: def.attributes.clone(),
@@ -735,6 +736,13 @@ impl FormatWith<ModuleEnv<'_>> for Trait {
             }
             writeln!(f, "\n{{")?;
         }
+        let method_effect_params = self
+            .output_effect_names
+            .iter()
+            .copied()
+            .map(|name| (name, Location::new_synthesized()))
+            .collect::<Vec<_>>();
+        let method_display_context = FunctionDisplayContext::new(env, &method_effect_params);
         let mut first = true;
         for (name, def) in &self.methods {
             if first {
@@ -742,7 +750,7 @@ impl FormatWith<ModuleEnv<'_>> for Trait {
             } else {
                 writeln!(f)?;
             }
-            def.fmt_with_name_and_module_env(f, *name, "    ", env)?;
+            def.fmt_with_name_and_display_context(f, *name, "    ", &method_display_context)?;
             write!(f, ";")?;
         }
         writeln!(f, "\n}}")?;

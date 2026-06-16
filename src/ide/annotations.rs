@@ -8,18 +8,20 @@
 //
 use std::sync::LazyLock;
 
-use crate::{FxHashMap, FxHashSet};
+use crate::{FxHashMap, FxHashSet, Location};
 
 use heck::ToSnakeCase;
 
 use crate::{
     CompilerSession, ModuleAndExpr, SourceId, ast,
-    format::FormatWith,
+    format::{FormatWith, format_generic_param_list},
     hir::{ENode, ENodeArena, ENodeId, NodeKind},
     module::{ELocalDecl as LocalDecl, ModuleEnv, id::Id},
     types::{
-        effects::{EffType, Effect, EffectVar, display_effect_binding_value},
-        r#type::{FnType, Type, TypeDisplayEnv, TypeKind, TypeVar},
+        effects::{EffType, Effect, EffectVar},
+        r#type::{
+            FnType, Type, TypeDisplayEnv, TypeKind, TypeVar, display_effect_binding_value_with_env,
+        },
         type_scheme::{PubTypeConstraint, TypeScheme},
         type_scheme_display::TypeSchemeConstraintRenderMode,
         type_visitor::TypeInnerVisitor,
@@ -75,12 +77,19 @@ pub(super) fn display_annotations(
                 .definition
                 .ty_scheme
                 .display_ty_var_names_with_source_params(&function.definition.generic_params);
+            let eff_var_names = function
+                .definition
+                .ty_scheme
+                .display_eff_var_names_with_source_params(
+                    &function.definition.generic_effect_params,
+                );
             let hidden_effect_vars =
                 light_hidden_effect_vars(&function.definition.ty_scheme, constraint_mode);
             let type_env = annotation_type_display_env(
                 &function.definition.ty_scheme,
                 &env,
                 &ty_var_names,
+                &eff_var_names,
                 constraint_mode,
                 &hidden_effect_vars,
             );
@@ -118,49 +127,52 @@ pub(super) fn display_annotations(
         let ty_scheme = &function.definition.ty_scheme;
         let ty_var_names =
             ty_scheme.display_ty_var_names_with_source_params(&function.definition.generic_params);
+        let eff_var_names = ty_scheme
+            .display_eff_var_names_with_source_params(&function.definition.generic_effect_params);
         let hidden_effect_vars = light_hidden_effect_vars(ty_scheme, constraint_mode);
         let type_env = annotation_type_display_env(
             ty_scheme,
             &env,
             &ty_var_names,
+            &eff_var_names,
             constraint_mode,
             &hidden_effect_vars,
         );
         if !function.definition.ty_scheme.is_just_type() {
-            let source_param_count = function.definition.generic_params.len();
-            let mut inserted_quantifiers = ty_scheme
+            let source_type_param_count = function.definition.generic_params.len();
+            let source_effect_param_count = function.definition.generic_effect_params.len();
+            let inserted_type_quantifiers = ty_scheme
                 .display_ty_quantifiers_with_source_params(&function.definition.generic_params)
                 .into_iter()
-                .filter(|ty_var| ty_var.name() as usize >= source_param_count)
+                .filter(|ty_var| ty_var.name() as usize >= source_type_param_count)
                 .map(|ty_var| {
                     ty_var_names
                         .get(&ty_var)
                         .map_or_else(|| format!("{ty_var}"), ToString::to_string)
                 })
-                .chain(
-                    ty_scheme
-                        .eff_quantifiers
-                        .iter()
-                        .filter(|q| !type_env.hides_effect_var(**q))
-                        .map(|q| format!("{q}")),
+                .collect::<Vec<_>>();
+            let inserted_effect_quantifiers = ty_scheme
+                .display_eff_quantifiers_with_source_params(
+                    &function.definition.generic_effect_params,
                 )
-                .peekable();
-            if inserted_quantifiers.peek().is_some() {
-                let inserted_quantifiers = inserted_quantifiers.collect::<Vec<_>>().join(", ");
-                if let Some((_, last_source_param_span)) = function
-                    .definition
-                    .generic_params
-                    .iter()
-                    .max_by_key(|(_, span)| span.end_usize())
-                {
-                    annotations.push((
-                        last_source_param_span.end_usize(),
-                        format!(", {inserted_quantifiers}"),
-                    ));
-                } else if !spans.name.is_synthesized() {
-                    annotations.push((spans.name.end_usize(), format!("<{inserted_quantifiers}>")));
-                }
-            }
+                .into_iter()
+                .filter(|eff_var| eff_var.name() as usize >= source_effect_param_count)
+                .filter(|eff_var| !type_env.hides_effect_var(*eff_var))
+                .map(|eff_var| {
+                    eff_var_names
+                        .get(&eff_var)
+                        .map_or_else(|| format!("{eff_var}"), ToString::to_string)
+                })
+                .collect::<Vec<_>>();
+            add_generic_quantifier_annotations(
+                &mut annotations,
+                src,
+                spans.name,
+                &function.definition.generic_params,
+                &function.definition.generic_effect_params,
+                &inserted_type_quantifiers,
+                &inserted_effect_quantifiers,
+            );
         }
         for ((name_span, ty_span), arg_ty) in spans
             .args
@@ -183,7 +195,8 @@ pub(super) fn display_annotations(
         }
         let displayed_effect_set =
             type_env.displayed_effects(&function.definition.ty_scheme.ty.effects);
-        let displayed_effects = display_effect_binding_value(&displayed_effect_set);
+        let displayed_effects =
+            display_effect_binding_value_with_env(&displayed_effect_set, &type_env);
         let byte_src = src.as_bytes();
         let past_args_index = spans.args_span.end_usize();
         let start_space = if past_args_index > 0 && byte_src[past_args_index - 1] == b' ' {
@@ -300,16 +313,117 @@ fn annotation_type_display_env<'a, 'm>(
     ty_scheme: &'a TypeScheme<FnType>,
     env: &'a ModuleEnv<'m>,
     ty_var_names: &'a FxHashMap<TypeVar, Ustr>,
+    eff_var_names: &'a FxHashMap<EffectVar, Ustr>,
     constraint_mode: TypeSchemeConstraintRenderMode,
     hidden_effect_vars: &'a FxHashSet<EffectVar>,
 ) -> TypeDisplayEnv<'a, 'm> {
-    let type_env = ty_scheme.type_display_env(env, ty_var_names);
+    let type_env = ty_scheme
+        .type_display_env(env, ty_var_names)
+        .with_eff_var_names(eff_var_names);
     match constraint_mode {
         TypeSchemeConstraintRenderMode::Full => type_env,
         TypeSchemeConstraintRenderMode::Light => {
             type_env.with_light_effect_display(hidden_effect_vars)
         }
     }
+}
+
+fn add_generic_quantifier_annotations(
+    annotations: &mut Vec<(usize, String)>,
+    src: &str,
+    name_span: Location,
+    source_type_params: &[ast::UstrSpan],
+    source_effect_params: &[ast::UstrSpan],
+    inserted_type_quantifiers: &[String],
+    inserted_effect_quantifiers: &[String],
+) {
+    if inserted_type_quantifiers.is_empty() && inserted_effect_quantifiers.is_empty() {
+        return;
+    }
+
+    if source_type_params.is_empty() && source_effect_params.is_empty() {
+        if !name_span.is_synthesized()
+            && let Some(generic_params) =
+                format_generic_param_list(inserted_type_quantifiers, inserted_effect_quantifiers)
+        {
+            annotations.push((name_span.end_usize(), generic_params));
+        }
+        return;
+    }
+
+    if source_type_params.is_empty() && !source_effect_params.is_empty() {
+        if !inserted_type_quantifiers.is_empty()
+            && let Some(bang_pos) = find_effect_generic_bang(src, name_span, source_effect_params)
+        {
+            annotations.push((
+                bang_pos,
+                format!("{} ", inserted_type_quantifiers.join(", ")),
+            ));
+        }
+        if !inserted_effect_quantifiers.is_empty()
+            && let Some((_, last_source_effect_param_span)) = source_effect_params
+                .iter()
+                .max_by_key(|(_, span)| span.end_usize())
+        {
+            annotations.push((
+                last_source_effect_param_span.end_usize(),
+                format!(", {}", inserted_effect_quantifiers.join(", ")),
+            ));
+        }
+        return;
+    }
+
+    if !inserted_effect_quantifiers.is_empty() {
+        if let Some((_, last_source_effect_param_span)) = source_effect_params
+            .iter()
+            .max_by_key(|(_, span)| span.end_usize())
+        {
+            annotations.push((
+                last_source_effect_param_span.end_usize(),
+                format!(", {}", inserted_effect_quantifiers.join(", ")),
+            ));
+        } else if let Some((_, last_source_type_param_span)) = source_type_params
+            .iter()
+            .max_by_key(|(_, span)| span.end_usize())
+        {
+            let mut suffix = String::from(" !");
+            if !inserted_type_quantifiers.is_empty() {
+                suffix = format!(", {}{suffix}", inserted_type_quantifiers.join(", "));
+            }
+            suffix.push(' ');
+            suffix.push_str(&inserted_effect_quantifiers.join(", "));
+            annotations.push((last_source_type_param_span.end_usize(), suffix));
+            return;
+        }
+    }
+
+    if !inserted_type_quantifiers.is_empty()
+        && let Some((_, last_source_type_param_span)) = source_type_params
+            .iter()
+            .max_by_key(|(_, span)| span.end_usize())
+    {
+        annotations.push((
+            last_source_type_param_span.end_usize(),
+            format!(", {}", inserted_type_quantifiers.join(", ")),
+        ));
+    }
+}
+
+fn find_effect_generic_bang(
+    src: &str,
+    name_span: Location,
+    source_effect_params: &[ast::UstrSpan],
+) -> Option<usize> {
+    let (_, first_effect_param_span) = source_effect_params
+        .iter()
+        .min_by_key(|(_, span)| span.start_usize())?;
+    let start = name_span.end_usize();
+    let end = first_effect_param_span.start_usize();
+    src.as_bytes()
+        .get(start..end)?
+        .iter()
+        .rposition(|byte| *byte == b'!')
+        .map(|offset| start + offset)
 }
 
 fn light_hidden_effect_vars(

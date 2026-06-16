@@ -28,7 +28,7 @@ use crate::{
         ControlFlow, EvalControlFlowResult, EvalCtx, RuntimeError, ValOrMut, ValOrMutArgs, cont,
         drop_frame_owned_locals_on_error, eval_node_with_ctx,
     },
-    format::{FormatWith, write_identifier},
+    format::{FormatWith, escape_identifier, format_generic_param_list, write_identifier},
     hir::value::{NativeDisplay, Value},
     hir::{self, ENodeId, NodeArena, NodeId, UNodeArena, UNodeId},
     module::{ELocalDecl, ModuleEnv, ModuleFunction, ULocalDecl},
@@ -40,11 +40,29 @@ use crate::{
     types::type_visitor::TypeInnerVisitor,
 };
 
+pub(crate) struct FunctionDisplayContext<'a, 'm> {
+    module_env: &'a ModuleEnv<'m>,
+    generic_effect_params: &'a [UstrSpan],
+}
+
+impl<'a, 'm> FunctionDisplayContext<'a, 'm> {
+    pub(crate) fn new(
+        module_env: &'a ModuleEnv<'m>,
+        generic_effect_params: &'a [UstrSpan],
+    ) -> Self {
+        Self {
+            module_env,
+            generic_effect_params,
+        }
+    }
+}
+
 /// The definition of a function, to be used in modules, traits and IDEs.
 #[derive(Debug, Clone)]
 pub struct FunctionDefinition {
     pub ty_scheme: TypeScheme<FnType>,
     pub generic_params: Vec<UstrSpan>,
+    pub generic_effect_params: Vec<UstrSpan>,
     pub arg_names: Vec<Ustr>,
     pub doc: Option<String>,
     pub attributes: Vec<Attribute>,
@@ -55,6 +73,7 @@ impl FunctionDefinition {
         Self {
             ty_scheme,
             generic_params: vec![],
+            generic_effect_params: vec![],
             arg_names,
             doc,
             attributes: vec![],
@@ -70,6 +89,7 @@ impl FunctionDefinition {
         Self {
             ty_scheme,
             generic_params,
+            generic_effect_params: vec![],
             arg_names,
             doc,
             attributes: vec![],
@@ -79,6 +99,7 @@ impl FunctionDefinition {
     pub fn new_with_generic_params_and_attributes(
         ty_scheme: TypeScheme<FnType>,
         generic_params: Vec<UstrSpan>,
+        generic_effect_params: Vec<UstrSpan>,
         arg_names: Vec<Ustr>,
         doc: Option<String>,
         attributes: Vec<Attribute>,
@@ -86,6 +107,7 @@ impl FunctionDefinition {
         Self {
             ty_scheme,
             generic_params,
+            generic_effect_params,
             arg_names,
             doc,
             attributes,
@@ -101,6 +123,7 @@ impl FunctionDefinition {
         FunctionDefinition {
             ty_scheme: TypeScheme::new_infer_quantifiers(fn_ty),
             generic_params: vec![],
+            generic_effect_params: vec![],
             arg_names,
             doc: Some(String::from(doc)),
             attributes: vec![],
@@ -120,6 +143,7 @@ impl FunctionDefinition {
                 constraints.into(),
             ),
             generic_params: vec![],
+            generic_effect_params: vec![],
             arg_names,
             doc: Some(String::from(doc)),
             attributes: vec![],
@@ -174,6 +198,17 @@ impl FunctionDefinition {
         prefix: &str,
         env: &ModuleEnv<'_>,
     ) -> fmt::Result {
+        let context = FunctionDisplayContext::new(env, &self.generic_effect_params);
+        self.fmt_with_name_and_display_context(f, name, prefix, &context)
+    }
+
+    pub(crate) fn fmt_with_name_and_display_context(
+        &self,
+        f: &mut fmt::Formatter,
+        name: Ustr,
+        prefix: &str,
+        context: &FunctionDisplayContext<'_, '_>,
+    ) -> fmt::Result {
         if let Some(doc) = &self.doc {
             for line in doc.split("\n") {
                 writeln!(f, "{prefix}/// {line}")?;
@@ -184,26 +219,38 @@ impl FunctionDefinition {
         let ty_var_names = self
             .ty_scheme
             .display_ty_var_names_with_source_params(&self.generic_params);
-        let mut quantifiers = self
+        let eff_var_names = self
+            .ty_scheme
+            .display_eff_var_names_with_source_params(context.generic_effect_params);
+        let type_quantifiers = self
             .ty_scheme
             .display_ty_quantifiers_with_source_params(&self.generic_params)
             .into_iter()
             .map(|q| {
                 ty_var_names
                     .get(&q)
-                    .map_or_else(|| format!("{q}"), ToString::to_string)
+                    .map_or_else(|| format!("{q}"), |name| escape_identifier(name.as_str()))
             })
-            .chain(
-                self.ty_scheme
-                    .eff_quantifiers
-                    .iter()
-                    .map(|q| format!("{q}")),
-            )
-            .peekable();
-        if quantifiers.peek().is_some() {
-            write!(f, "<{}>", quantifiers.collect::<Vec<_>>().join(", "))?;
+            .collect::<Vec<_>>();
+        let effect_quantifiers = self
+            .ty_scheme
+            .display_eff_quantifiers_with_source_params(context.generic_effect_params)
+            .into_iter()
+            .map(|q| {
+                eff_var_names
+                    .get(&q)
+                    .map_or_else(|| format!("{q}"), |name| escape_identifier(name.as_str()))
+            })
+            .collect::<Vec<_>>();
+        if let Some(generic_params) =
+            format_generic_param_list(&type_quantifiers, &effect_quantifiers)
+        {
+            write!(f, "{generic_params}")?;
         }
-        let type_env = self.ty_scheme.type_display_env(env, &ty_var_names);
+        let type_env = self
+            .ty_scheme
+            .type_display_env(context.module_env, &ty_var_names)
+            .with_eff_var_names(&eff_var_names);
         fmt_fn_type_with_arg_names(&self.ty_scheme.ty, &self.arg_names, f, &type_env)?;
         if !self.ty_scheme.is_just_type_and_effects() {
             write!(f, " ")?;
@@ -224,6 +271,7 @@ impl TypeLike for FunctionDefinition {
         FunctionDefinition {
             ty_scheme: self.ty_scheme.map(f),
             generic_params: self.generic_params.clone(),
+            generic_effect_params: self.generic_effect_params.clone(),
             arg_names: self.arg_names.clone(),
             doc: self.doc.clone(),
             attributes: self.attributes.clone(),

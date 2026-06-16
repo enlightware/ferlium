@@ -213,6 +213,7 @@ fn buffer_slot_descr() -> ModuleFunction {
         FunctionDefinition::new_with_generic_params_and_attributes(
             TypeScheme::new_infer_quantifiers(ty),
             Vec::new(),
+            Vec::new(),
             vec![ustr("buffer"), ustr("index")],
             Some(String::from("Returns the place for a buffer slot.")),
             Vec::new(),

@@ -18,7 +18,7 @@ use crate::{
     Location,
     ast::UstrSpan,
     compiler::error::InternalCompilationError,
-    format::type_variable_index_to_string_latin,
+    format::{type_variable_index_to_string_latin, type_variable_subscript},
     hir::dictionary::ExtraParameters,
     parser::location::InstantiableLocation,
     std::value::{
@@ -684,6 +684,53 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
                     .copied()
                     .sorted()
                     .filter(|ty_var| ty_var.name() as usize >= source_generic_params.len()),
+            )
+            .unique()
+            .collect()
+    }
+
+    pub(crate) fn display_eff_var_names_with_source_params(
+        &self,
+        source_generic_params: &[UstrSpan],
+    ) -> FxHashMap<EffectVar, Ustr> {
+        let mut names = FxHashMap::default();
+        let mut used = FxHashSet::default();
+        for (index, (name, _)) in source_generic_params.iter().enumerate() {
+            let eff_var = EffectVar::new(index as u32);
+            used.insert(*name);
+            names.insert(eff_var, *name);
+        }
+        for quantifier in self.eff_quantifiers.iter().sorted() {
+            if names.contains_key(quantifier) {
+                continue;
+            }
+            let mut index = quantifier.name();
+            loop {
+                let candidate = Ustr::from(&format!("e{}", type_variable_subscript(index)));
+                if !used.contains(&candidate) {
+                    names.insert(*quantifier, candidate);
+                    used.insert(candidate);
+                    break;
+                }
+                index += 1;
+            }
+        }
+        names
+    }
+
+    pub(crate) fn display_eff_quantifiers_with_source_params(
+        &self,
+        source_generic_params: &[UstrSpan],
+    ) -> Vec<EffectVar> {
+        (0..source_generic_params.len())
+            .map(|index| EffectVar::new(index as u32))
+            .filter(|eff_var| self.eff_quantifiers.contains(eff_var))
+            .chain(
+                self.eff_quantifiers
+                    .iter()
+                    .copied()
+                    .sorted()
+                    .filter(|eff_var| eff_var.name() as usize >= source_generic_params.len()),
             )
             .unique()
             .collect()

@@ -244,10 +244,44 @@ fn light_annotations_keep_generic_effect_binders_used_by_callable_effects() {
     let light = light_annotated_ide_source(&mut compiler, src);
 
     assert!(
-        light.contains("<A, e₀>")
+        light.contains("<A ! e₀>")
             && light.contains("f: () -> A ! e₀")
             && light.contains("-> A ! e₀"),
         "expected light annotations to keep callable effect binder and uses, got:\n{light}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn annotations_preserve_source_effect_generic_names() {
+    let src = indoc! { r#"
+        fn run<! E>(f: () -> int ! E) {
+            f()
+        }
+    "# };
+    let mut compiler = compile_source(src);
+    let annotated = annotated_ide_source(&mut compiler, src);
+
+    assert!(
+        annotated.contains("fn run<! E>(f: () -> int ! E) -> int ! E"),
+        "expected annotations to preserve source effect generic name, got:\n{annotated}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn annotations_insert_inferred_type_params_before_existing_effect_params() {
+    let src = indoc! { r#"
+        fn keep<! E>(f: () -> int ! E, value) {
+            value
+        }
+    "# };
+    let mut compiler = compile_source(src);
+    let annotated = annotated_ide_source(&mut compiler, src);
+
+    assert!(
+        annotated.contains("fn keep<A ! E>(f: () -> int ! E, value: A) -> A"),
+        "expected annotations to insert type params before existing effect params, got:\n{annotated}"
     );
 }
 

@@ -702,29 +702,6 @@ pub(crate) fn format_effect_binding_value(
     }
 }
 
-struct EffectBindingValueDisplay<'a>(&'a EffType);
-
-impl Display for EffectBindingValueDisplay<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        format_effect_binding_value(self.0, f)
-    }
-}
-
-pub(crate) fn display_effect_binding_value(eff: &EffType) -> impl Display + '_ {
-    EffectBindingValueDisplay(eff)
-}
-
-pub(crate) fn format_function_effect_suffix(
-    eff: &EffType,
-    f: &mut fmt::Formatter<'_>,
-) -> fmt::Result {
-    if eff.is_empty() {
-        Ok(())
-    } else {
-        write!(f, " ! {}", display_effect_binding_value(eff))
-    }
-}
-
 pub fn no_effects() -> EffType {
     EffType::empty()
 }

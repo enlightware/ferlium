@@ -1822,6 +1822,16 @@ fn compiled_impl_headers_use_source_syntax() {
                     }
                 }
             "# },
+            indoc! { r#"
+                struct EffectBox<! E> {
+                    f: () -> () ! E,
+                }
+            "# },
+            indoc! { r#"
+                trait Effectful<Self |-> ! InputEffect, OutputEffect> {
+                    fn run(value: Self, callback: () -> () ! InputEffect) ! OutputEffect;
+                }
+            "# },
         ]),
     );
 
@@ -1846,6 +1856,16 @@ fn compiled_impl_headers_use_source_syntax() {
             "impl Iterator for <Self = ReadWriteIter |-> Item = int ! NextEffect = (read, write)>"
         ),
         "expected multi-effect output binding to be parenthesized, got:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("struct EffectBox<! E> { f: () -> () ! E }"),
+        "expected type definition effect generic syntax to be preserved, got:\n{rendered}"
+    );
+    assert!(
+        rendered.contains(
+            "fn run<A ! InputEffect>(value: A, callback: () -> () ! InputEffect) -> () ! OutputEffect"
+        ),
+        "expected trait method display to use associated effect names, got:\n{rendered}"
     );
 }
 

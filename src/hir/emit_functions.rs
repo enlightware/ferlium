@@ -644,6 +644,7 @@ where
         let definition = FunctionDefinition::new_with_generic_params_and_attributes(
             ty_scheme,
             generic_params.type_params().to_vec(),
+            generic_params.effect_params().to_vec(),
             arg_names,
             doc.clone(),
             attributes.clone(),
@@ -1332,6 +1333,8 @@ where
                     descr.definition.ty_scheme.ty.input_effect_vars();
                 descr.definition.ty_scheme.constraints = constraints.clone();
                 descr.definition.generic_params = function.generic_params.type_params().to_vec();
+                descr.definition.generic_effect_params =
+                    function.generic_params.effect_params().to_vec();
                 pending_functions
                     .get_mut(&function_id)
                     .expect("expected pending function body")

@@ -21,7 +21,10 @@ use crate::ast::Attribute;
 use crate::ast::UstrSpan;
 use crate::containers::FromIndex;
 use crate::define_id_type;
-use crate::format::{FormatWith, write_identifier};
+use crate::format::{
+    FormatWith, escape_identifier, format_generic_param_list, write_identifier,
+    write_with_separator_and_format_fn,
+};
 use crate::graph::find_strongly_connected_components;
 use crate::graph::topological_sort_sccs;
 use crate::hir::value::LiteralValue;
@@ -50,10 +53,7 @@ use crate::format::type_variable_index_to_string_latin;
 use crate::graph;
 use crate::module::ModuleEnv;
 use crate::sync::SyncPhantomData;
-use crate::types::effects::{
-    EffType, Effect, EffectVar, PrimitiveEffect, format_effect_binding_value,
-    format_function_effect_suffix,
-};
+use crate::types::effects::{EffType, Effect, EffectVar, PrimitiveEffect};
 use crate::types::mutability::{MutType, MutVar};
 use crate::types::type_scheme::TypeScheme;
 
@@ -266,6 +266,7 @@ where
 pub struct TypeDisplayEnv<'a, 'm> {
     pub module_env: &'a ModuleEnv<'m>,
     pub ty_var_names: &'a FxHashMap<TypeVar, Ustr>,
+    pub eff_var_names: Option<&'a FxHashMap<EffectVar, Ustr>>,
     effect_display: EffectDisplay<'a>,
 }
 
@@ -282,8 +283,17 @@ impl<'a, 'm> TypeDisplayEnv<'a, 'm> {
         Self {
             module_env,
             ty_var_names,
+            eff_var_names: None,
             effect_display: EffectDisplay::Full,
         }
+    }
+
+    pub(crate) fn with_eff_var_names(
+        mut self,
+        eff_var_names: &'a FxHashMap<EffectVar, Ustr>,
+    ) -> Self {
+        self.eff_var_names = Some(eff_var_names);
+        self
     }
 
     pub(crate) fn with_light_effect_display(
@@ -339,6 +349,8 @@ pub(crate) trait TypeFormatEnv {
     -> Result<bool, fmt::Error>;
 
     fn fmt_type_var(&self, var: TypeVar, f: &mut fmt::Formatter<'_>) -> fmt::Result;
+
+    fn fmt_effect_var(&self, var: EffectVar, f: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 
 impl TypeFormatEnv for ModuleEnv<'_> {
@@ -359,6 +371,10 @@ impl TypeFormatEnv for ModuleEnv<'_> {
     }
 
     fn fmt_type_var(&self, var: TypeVar, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{var}")
+    }
+
+    fn fmt_effect_var(&self, var: EffectVar, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{var}")
     }
 }
@@ -393,6 +409,13 @@ impl TypeFormatEnv for TypeDisplayEnv<'_, '_> {
 
     fn fmt_type_var(&self, var: TypeVar, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.ty_var_names.get(&var) {
+            Some(name) => write_identifier(f, name.as_str()),
+            None => write!(f, "{var}"),
+        }
+    }
+
+    fn fmt_effect_var(&self, var: EffectVar, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.eff_var_names.and_then(|names| names.get(&var)) {
             Some(name) => write_identifier(f, name.as_str()),
             None => write!(f, "{var}"),
         }
@@ -620,7 +643,7 @@ where
         write!(f, "place ")?;
     }
     function.ret.fmt_with(f, env)?;
-    format_function_effect_suffix(&env.displayed_effects(&function.effects), f)
+    format_function_effect_suffix_with_env(&env.displayed_effects(&function.effects), f, env)
 }
 
 pub(crate) fn fmt_fn_type_with_arg_names<Env>(
@@ -647,7 +670,74 @@ where
         write!(f, "place ")?;
     }
     fn_ty.ret.fmt_with(f, env)?;
-    format_function_effect_suffix(&env.displayed_effects(&fn_ty.effects), f)
+    format_function_effect_suffix_with_env(&env.displayed_effects(&fn_ty.effects), f, env)
+}
+
+pub(crate) fn format_effect_binding_value_with_env<Env>(
+    eff: &EffType,
+    f: &mut fmt::Formatter<'_>,
+    env: &Env,
+) -> fmt::Result
+where
+    Env: TypeFormatEnv,
+{
+    match eff.as_single() {
+        Some(Effect::Variable(var)) => env.fmt_effect_var(var, f),
+        Some(effect) => Display::fmt(&effect, f),
+        None if eff.is_empty() => write!(f, "()"),
+        None => {
+            write!(f, "(")?;
+            write_with_separator_and_format_fn(
+                eff.iter(),
+                ", ",
+                |effect, f| match effect {
+                    Effect::Variable(var) => env.fmt_effect_var(var, f),
+                    effect => Display::fmt(&effect, f),
+                },
+                f,
+            )?;
+            write!(f, ")")
+        }
+    }
+}
+
+pub(crate) fn display_effect_binding_value_with_env<'a, Env>(
+    eff: &'a EffType,
+    env: &'a Env,
+) -> impl Display + 'a
+where
+    Env: TypeFormatEnv,
+{
+    struct EffectBindingValueDisplay<'a, Env> {
+        eff: &'a EffType,
+        env: &'a Env,
+    }
+
+    impl<Env> Display for EffectBindingValueDisplay<'_, Env>
+    where
+        Env: TypeFormatEnv,
+    {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            format_effect_binding_value_with_env(self.eff, f, self.env)
+        }
+    }
+
+    EffectBindingValueDisplay { eff, env }
+}
+
+fn format_function_effect_suffix_with_env<Env>(
+    eff: &EffType,
+    f: &mut fmt::Formatter<'_>,
+    env: &Env,
+) -> fmt::Result
+where
+    Env: TypeFormatEnv,
+{
+    if eff.is_empty() {
+        Ok(())
+    } else {
+        write!(f, " ! {}", display_effect_binding_value_with_env(eff, env))
+    }
 }
 
 /// A type identifier, unique for a given type of a given mathematical structure
@@ -1354,20 +1444,29 @@ impl TypeDef {
         }
         write!(f, " ")?;
         write_identifier(f, self.name.as_str())?;
-        if !self.generic_params.is_empty() {
-            write!(f, "<")?;
-            for (i, (name, _)) in self.generic_params.iter().enumerate() {
-                if i > 0 {
-                    write!(f, ", ")?;
-                }
-                write_identifier(f, name.as_str())?;
-            }
-            write!(f, ">")?;
+        let type_params = self
+            .generic_params
+            .iter()
+            .map(|(name, _)| escape_identifier(name.as_str()))
+            .collect::<Vec<_>>();
+        let effect_params = self
+            .generic_effect_params
+            .iter()
+            .map(|(name, _)| escape_identifier(name.as_str()))
+            .collect::<Vec<_>>();
+        if let Some(generic_params) = format_generic_param_list(&type_params, &effect_params) {
+            write!(f, "{generic_params}")?;
         }
         let ty_var_names = self
             .shape
             .display_ty_var_names_with_source_params(&self.generic_params);
-        let type_env = self.shape.type_display_env(env, &ty_var_names);
+        let eff_var_names = self
+            .shape
+            .display_eff_var_names_with_source_params(&self.generic_effect_params);
+        let type_env = self
+            .shape
+            .type_display_env(env, &ty_var_names)
+            .with_eff_var_names(&eff_var_names);
         if !self.shape.constraints.is_empty() {
             write!(f, " ")?;
             self.shape.format_constraints_with_type_env(f, &type_env)?;
@@ -2111,7 +2210,7 @@ where
                         if i > 0 {
                             write!(f, ", ")?;
                         }
-                        format_effect_binding_value(eff, f)?;
+                        format_effect_binding_value_with_env(eff, f, env)?;
                     }
                 }
                 write!(f, ">")?;

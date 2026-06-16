@@ -17,8 +17,11 @@ use crate::{
     format::{FormatWith, FormatWithData, write_with_separator_and_format_fn},
     module::{ModuleEnv, TraitId},
     types::{
-        effects::{EffType, EffectsInstSubst, format_effect_binding_value},
-        r#type::{Type, TypeDisplayEnv, TypeFormatEnv, TypeInstSubst, TypeVar},
+        effects::{EffType, EffectsInstSubst},
+        r#type::{
+            Type, TypeDisplayEnv, TypeFormatEnv, TypeInstSubst, TypeVar,
+            format_effect_binding_value_with_env,
+        },
         type_inference::substitution::InstSubst,
         type_like::TypeLike,
         type_scheme::{PubTypeConstraint, TupleConstraint, TypeScheme, VariantConstraint},
@@ -749,7 +752,7 @@ where
             ", ",
             |(index, eff), f| {
                 write!(f, "{} = ", trait_def.output_effect_names[*index])?;
-                format_effect_binding_value(eff, f)
+                format_effect_binding_value_with_env(eff, f, env)
             },
             f,
         )?;
