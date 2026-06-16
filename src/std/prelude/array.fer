@@ -287,7 +287,7 @@ where
 
 impl<A, B> RebindItem for <Self = [A], Item = B |-> Output = [B]> {}
 
-impl<I, T ! IterEffect> FromIterator for <Self = [T], Iter = I |-> Item = T ! FromIterEffect = (fallible, IterEffect)>
+impl<I, T ! IterEffect> FromIterator for <Self = [T], Iter = I |-> Item = T ! IterEffect = IterEffect, FromIterEffect = (fallible, IterEffect)>
 where
 	I: Value,
 	I: Iterator<Item = T ! NextEffect = IterEffect>

@@ -78,7 +78,7 @@ pub fn join(seq, separator) {
 pub fn split<S, Sep, Part, I, Out ! SplitIterEffect, FromIterEffect>(value: S, separator: Sep) -> Out
 where
 	Split<Self = S, Separator = Sep |-> Part = Part, Iter = I, Output = Out ! SplitIterEffect = SplitIterEffect>,
-	FromIterator<Self = Out, Iter = I |-> Item = Part ! FromIterEffect = FromIterEffect>
+	FromIterator<Self = Out, Iter = I |-> Item = Part ! IterEffect = SplitIterEffect, FromIterEffect = FromIterEffect>
 {
 	from_iter(split_iterator(value, separator))
 }

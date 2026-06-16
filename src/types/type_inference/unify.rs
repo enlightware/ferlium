@@ -1169,8 +1169,14 @@ impl UnifiedTypeInference {
                 return Ok(None);
             }
             // Fully resolved, validate the trait implementation.
-            let (impl_output_tys, impl_output_effs) =
-                trait_solver.solve_outputs(trait_id, &input_tys, span, arena)?;
+            let (impl_output_tys, impl_output_effs) = trait_solver.solve_application_outputs(
+                trait_id,
+                &input_tys,
+                &output_tys,
+                &output_effs,
+                span,
+                arena,
+            )?;
             // Found, unify the output types and resolve the output effects.
             assert_eq!(output_tys.len(), impl_output_tys.len());
             for (cur_ty, exp_ty) in output_tys.iter().zip(impl_output_tys.iter()) {
@@ -1183,10 +1189,7 @@ impl UnifiedTypeInference {
             None
         } else {
             // Partially resolved, we can progress a bit.
-            let has_structured_non_constant_input = input_tys
-                .iter()
-                .any(|ty| !ty.is_trait_input_resolved() && !ty.data().is_variable());
-            if has_structured_non_constant_input {
+            if TraitSolver::input_tys_can_drive_improvement(&input_tys) {
                 let _ = trait_solver.try_improve_trait_application(
                     self,
                     trait_id,
@@ -1202,8 +1205,14 @@ impl UnifiedTypeInference {
                 self.substitute_in_effect_types_in_place(&mut output_effs);
             }
             if input_tys.iter().all(|ty| ty.is_trait_input_resolved()) {
-                let (impl_output_tys, impl_output_effs) =
-                    trait_solver.solve_outputs(trait_id, &input_tys, span, arena)?;
+                let (impl_output_tys, impl_output_effs) = trait_solver.solve_application_outputs(
+                    trait_id,
+                    &input_tys,
+                    &output_tys,
+                    &output_effs,
+                    span,
+                    arena,
+                )?;
                 assert_eq!(output_tys.len(), impl_output_tys.len());
                 for (cur_ty, exp_ty) in output_tys.iter().zip(impl_output_tys.iter()) {
                     self.unify_same_type_with_sub_effects(*cur_ty, span, *exp_ty, span)?;

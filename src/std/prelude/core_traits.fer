@@ -163,9 +163,9 @@ pub trait Seq<Self |-> Item, Iter ! IterEffect>
 }
 
 /// A collection that can be built from an iterator.
-pub trait FromIterator<Self, Iter |-> Item ! FromIterEffect>
+pub trait FromIterator<Self, Iter |-> Item ! IterEffect, FromIterEffect>
     where
-        Iter: Iterator<Item = Item ! NextEffect = FromIterEffect>,
+        Iter: Iterator<Item = Item ! NextEffect = IterEffect>,
         Iter: Value
 {
     /// Creates a collection from an iterator.

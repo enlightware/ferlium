@@ -27,7 +27,7 @@ use ferlium::{
         option::{none, some},
         std_module,
     },
-    types::effects::{PrimitiveEffect, effect, effects, no_effects},
+    types::effects::{EffType, PrimitiveEffect, effect, effects, no_effects},
 };
 
 use ferlium::std::array::array_type;
@@ -60,6 +60,47 @@ fn print_std_formats_empty_associated_effect_bindings() {
     assert!(
         !rendered.contains("IterEffect = >"),
         "printed std must not render an empty associated effect binding without a value:\n{rendered}"
+    );
+}
+
+fn assert_compiled_fn_signature(
+    session: &mut TestSession,
+    src: &str,
+    fn_name: &str,
+    expected_arg_tys: &[Type],
+    expected_ret: Type,
+    expected_effects: EffType,
+) {
+    let function = session.compile_and_get_fn_def(src, fn_name);
+    let scheme = &function.ty_scheme;
+    assert!(
+        scheme.ty_quantifiers.is_empty(),
+        "expected no type quantifiers, got {}",
+        scheme.display(&session.std_module_env()),
+    );
+    assert!(
+        scheme.eff_quantifiers.is_empty(),
+        "expected no effect quantifiers, got {}",
+        scheme.display(&session.std_module_env()),
+    );
+    assert!(
+        scheme.constraints.is_empty(),
+        "expected no retained constraints, got {}",
+        scheme.display(&session.std_module_env()),
+    );
+    let fn_ty = scheme.ty();
+    assert_eq!(
+        fn_ty.args_ty().collect::<Vec<_>>(),
+        expected_arg_tys,
+        "argument type mismatch for function {fn_name}",
+    );
+    assert_eq!(
+        fn_ty.ret, expected_ret,
+        "return type mismatch for function {fn_name}",
+    );
+    assert_eq!(
+        fn_ty.effects, expected_effects,
+        "effect mismatch for function {fn_name}",
     );
 }
 
@@ -1000,6 +1041,43 @@ fn reducing_fns() {
     assert_val_eq!(
         session.run("[3.0, 1.0, 2.0] |> iter() |> maximum()"),
         float(3.0)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn eager_iterator_adaptors_improve_outputs_from_known_input() {
+    use PrimitiveEffect::Fallible;
+
+    let int_array = array_type(int_type());
+    let mut session = TestSession::new();
+    assert_compiled_fn_signature(
+        &mut session,
+        "pub fn f(x: [int]) { map(x, |v| v + 1) }",
+        "f",
+        &[int_array],
+        int_array,
+        effect(Fallible),
+    );
+
+    let int_array = array_type(int_type());
+    assert_compiled_fn_signature(
+        &mut session,
+        "pub fn f(x: [int]) { filter(x, |v| v > 0) }",
+        "f",
+        &[int_array],
+        int_array,
+        effect(Fallible),
+    );
+
+    let int_array = array_type(int_type());
+    assert_compiled_fn_signature(
+        &mut session,
+        "pub fn f(x: [int]) { filter_map(x, |v| Some(v)) }",
+        "f",
+        &[int_array],
+        int_array,
+        effect(Fallible),
     );
 }
 

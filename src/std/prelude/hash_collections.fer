@@ -132,7 +132,7 @@ where
 	}
 }
 
-impl<V, I ! IterEffect> FromIterator for <Self = HashSet<V>, Iter = I |-> Item = V ! FromIterEffect = (fallible, IterEffect)>
+impl<V, I ! IterEffect> FromIterator for <Self = HashSet<V>, Iter = I |-> Item = V ! IterEffect = IterEffect, FromIterEffect = (fallible, IterEffect)>
 where
 	V: Value,
 	I: Value,
@@ -427,7 +427,7 @@ where
 	}
 }
 
-impl<K, V, I ! IterEffect> FromIterator for <Self = HashMap<K, V>, Iter = I |-> Item = (K, V) ! FromIterEffect = (fallible, IterEffect)>
+impl<K, V, I ! IterEffect> FromIterator for <Self = HashMap<K, V>, Iter = I |-> Item = (K, V) ! IterEffect = IterEffect, FromIterEffect = (fallible, IterEffect)>
 where
 	K: Value,
 	V: Value,

@@ -715,6 +715,17 @@ fn is_compiler_provided_no_output_trait_application(
 }
 
 impl<'a> TraitSolver<'a> {
+    /// Whether a partially unresolved trait application has enough input-side
+    /// shape for improvement to learn from visible impl heads.
+    ///
+    /// A bare inference variable carries no impl-selection information, but a
+    /// resolved or structured input such as `[int]`, `Option<T>`, or
+    /// `MapIterator<I, T, O>` can make an impl candidate unique even when some
+    /// other input is still unresolved.
+    pub(crate) fn input_tys_can_drive_improvement(input_tys: &[Type]) -> bool {
+        input_tys.iter().any(|ty| !ty.data().is_variable())
+    }
+
     fn can_use_other_impl(&self, module_id: ModuleId, imp: &TraitImpl) -> bool {
         imp.public || self.private_impl_scope.last().copied() == Some(module_id)
     }
@@ -946,14 +957,13 @@ impl<'a> TraitSolver<'a> {
                     for (candidate_eff, output_eff) in
                         candidate_output_effs.iter().zip(output_effs.iter())
                     {
-                        if ty_inf
-                            .unify_same_effect(
-                                candidate_eff.clone(),
-                                fn_span,
-                                output_eff.clone(),
-                                fn_span,
-                            )
-                            .is_err()
+                        if Self::match_trait_output_effect(
+                            ty_inf,
+                            candidate_eff,
+                            output_eff,
+                            fn_span,
+                        )
+                        .is_err()
                         {
                             return Ok(TraitImprovementMatch::No);
                         }
@@ -1032,10 +1042,10 @@ impl<'a> TraitSolver<'a> {
                     for (candidate_eff, output_eff) in
                         candidate_output_effs.iter().zip(output_effs.iter())
                     {
-                        ty_inf.unify_same_effect(
-                            candidate_eff.clone(),
-                            fn_span,
-                            output_eff.clone(),
+                        Self::match_trait_output_effect(
+                            ty_inf,
+                            candidate_eff,
+                            output_eff,
                             fn_span,
                         )?;
                     }
@@ -1084,10 +1094,10 @@ impl<'a> TraitSolver<'a> {
                     for (candidate_eff, output_eff) in
                         candidate_output_effs.iter().zip(output_effs.iter())
                     {
-                        ty_inf.unify_same_effect(
-                            candidate_eff.clone(),
-                            fn_span,
-                            output_eff.clone(),
+                        Self::match_trait_output_effect(
+                            ty_inf,
+                            candidate_eff,
+                            output_eff,
                             fn_span,
                         )?;
                     }
@@ -1095,6 +1105,78 @@ impl<'a> TraitSolver<'a> {
             }
         }
         Ok(())
+    }
+
+    fn match_trait_output_effect(
+        ty_inf: &mut UnifiedTypeInference,
+        impl_eff: &EffType,
+        requested_eff: &EffType,
+        fn_span: Location,
+    ) -> Result<(), InternalCompilationError> {
+        let impl_eff = ty_inf.substitute_in_effect_type(impl_eff);
+        let requested_eff = ty_inf.substitute_in_effect_type(requested_eff);
+        // A single impl-side effect variable is an associated-effect alias and
+        // must stay equal to the requested slot. Concrete or composite effects
+        // are lower bounds: the requested slot may contain additional effects.
+        if impl_eff.to_single_variable().is_some() {
+            ty_inf.unify_same_effect(impl_eff, fn_span, requested_eff, fn_span)
+        } else {
+            ty_inf.add_effect_dep(&impl_eff, fn_span, &requested_eff, fn_span)
+        }
+    }
+
+    fn type_var_capacity_for_types<'t>(types: impl IntoIterator<Item = &'t Type>) -> u32 {
+        types
+            .into_iter()
+            .flat_map(TypeLike::inner_ty_vars)
+            .map(|var| var.name() + 1)
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn impl_matches_requested_outputs(
+        &self,
+        imp: &TraitImpl,
+        requested_output_tys: Option<&[Type]>,
+        requested_output_effs: Option<&[EffType]>,
+        fn_span: Location,
+    ) -> bool {
+        if requested_output_tys.is_none() && requested_output_effs.is_none() {
+            return true;
+        }
+        if requested_output_tys.is_some_and(|tys| tys.len() != imp.output_tys.len())
+            || requested_output_effs.is_some_and(|effs| effs.len() != imp.output_effs.len())
+        {
+            return false;
+        }
+
+        let mut ty_inf = UnifiedTypeInference::new_with_ty_vars(Self::type_var_capacity_for_types(
+            imp.output_tys
+                .iter()
+                .chain(requested_output_tys.unwrap_or_default()),
+        ));
+        if let Some(requested_output_tys) = requested_output_tys {
+            for (impl_ty, requested_ty) in imp.output_tys.iter().zip(requested_output_tys.iter()) {
+                if ty_inf
+                    .unify_same_type_with_sub_effects(*impl_ty, fn_span, *requested_ty, fn_span)
+                    .is_err()
+                {
+                    return false;
+                }
+            }
+        }
+        if let Some(requested_output_effs) = requested_output_effs {
+            for (impl_eff, requested_eff) in
+                imp.output_effs.iter().zip(requested_output_effs.iter())
+            {
+                if Self::match_trait_output_effect(&mut ty_inf, impl_eff, requested_eff, fn_span)
+                    .is_err()
+                {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     /// Try to improve a deferred trait application from its partially known
@@ -1249,6 +1331,15 @@ impl<'a> TraitSolver<'a> {
             }
             return Ok(TraitImprovementMatch::No);
         };
+
+        // Visible impl uniqueness is not conclusive while a trait with derivers
+        // still has unresolved inputs: a derived impl may become applicable
+        // once those inputs are fixed.
+        if !self.trait_def(trait_id).derivers.is_empty()
+            && !input_tys.iter().all(|ty| ty.is_trait_input_resolved())
+        {
+            return Ok(TraitImprovementMatch::Unknown);
+        }
 
         match matched {
             TraitImprovementMatch::No => unreachable!(),
@@ -1508,8 +1599,7 @@ impl<'a> TraitSolver<'a> {
         }
         if let Some(output_effs) = output_effs {
             for (imp_output_eff, output_eff) in imp_output_effs.iter().zip(output_effs.iter()) {
-                if ty_inf
-                    .unify_same_effect(imp_output_eff.clone(), fn_span, output_eff.clone(), fn_span)
+                if Self::match_trait_output_effect(ty_inf, imp_output_eff, output_eff, fn_span)
                     .is_err()
                 {
                     return Ok(BlanketImplMatch::No);
@@ -1560,10 +1650,7 @@ impl<'a> TraitSolver<'a> {
                     .iter()
                     .all(|ty| ty.is_trait_input_resolved())
                 {
-                    let has_structured_non_constant_input = constraint_inputs
-                        .iter()
-                        .any(|ty| !ty.is_trait_input_resolved() && !ty.data().is_variable());
-                    if has_structured_non_constant_input {
+                    if Self::input_tys_can_drive_improvement(&constraint_inputs) {
                         match query.improve_trait_application_query(
                             ty_inf,
                             trait_id,
@@ -1707,8 +1794,7 @@ impl<'a> TraitSolver<'a> {
         }
         if let Some(output_effs) = output_effs {
             for (imp_output_eff, output_eff) in imp_output_effs.iter().zip(output_effs.iter()) {
-                if ty_inf
-                    .unify_same_effect(imp_output_eff.clone(), fn_span, output_eff.clone(), fn_span)
+                if Self::match_trait_output_effect(ty_inf, imp_output_eff, output_eff, fn_span)
                     .is_err()
                 {
                     return Ok(BlanketImplMatch::No);
@@ -2202,6 +2288,19 @@ impl<'a> TraitSolver<'a> {
         fn_span: Location,
         arena: &mut NodeArena,
     ) -> Result<TraitImplId, InternalCompilationError> {
+        self.solve_impl_application(trait_id, input_tys, None, None, fn_span, arena)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve_impl_application(
+        &mut self,
+        trait_id: TraitId,
+        input_tys: &[Type],
+        requested_output_tys: Option<&[Type]>,
+        requested_output_effs: Option<&[EffType]>,
+        fn_span: Location,
+        arena: &mut NodeArena,
+    ) -> Result<TraitImplId, InternalCompilationError> {
         // Sanity checks
         assert!(
             input_tys.iter().all(|ty| ty.is_trait_input_resolved()),
@@ -2212,7 +2311,14 @@ impl<'a> TraitSolver<'a> {
         let key = (trait_id, input_tys.to_vec());
         let concrete_key = ConcreteTraitImplKey::new(trait_id, input_tys.to_vec());
         if let Some(imp) = self.get_concrete_impl(&concrete_key) {
-            return Ok(imp);
+            if self.impl_matches_requested_outputs(
+                self.get_impl_data_by_id(imp),
+                requested_output_tys,
+                requested_output_effs,
+                fn_span,
+            ) {
+                return Ok(imp);
+            }
         }
         if self.solving_stack.contains(&key) {
             return Err(internal_compilation_error!(TraitSolverCycleDetected {
@@ -2236,7 +2342,14 @@ impl<'a> TraitSolver<'a> {
         self.recursion_depth += 1;
         self.solving_stack.insert(key.clone());
 
-        let result = self.solve_impl_actual(trait_id, input_tys, fn_span, arena);
+        let result = self.solve_impl_actual(
+            trait_id,
+            input_tys,
+            requested_output_tys,
+            requested_output_effs,
+            fn_span,
+            arena,
+        );
 
         self.solving_stack.remove(&key);
         self.recursion_depth -= 1;
@@ -2247,6 +2360,8 @@ impl<'a> TraitSolver<'a> {
         &mut self,
         trait_id: TraitId,
         input_tys: &[Type],
+        requested_output_tys: Option<&[Type]>,
+        requested_output_effs: Option<&[EffType]>,
         fn_span: Location,
         arena: &mut NodeArena,
     ) -> Result<TraitImplId, InternalCompilationError> {
@@ -2286,7 +2401,14 @@ impl<'a> TraitSolver<'a> {
         // If a concrete implementation is found, return it.
         let key = ConcreteTraitImplKey::new(trait_id, input_tys.to_vec());
         if let Some(imp) = self.get_concrete_impl(&key) {
-            return Ok(imp);
+            if self.impl_matches_requested_outputs(
+                self.get_impl_data_by_id(imp),
+                requested_output_tys,
+                requested_output_effs,
+                fn_span,
+            ) {
+                return Ok(imp);
+            }
         }
 
         // No concrete implementation found, search for a matching blanket implementation.
@@ -2349,7 +2471,12 @@ impl<'a> TraitSolver<'a> {
 
                 // Match the blanket implementation and resolve the blanket constraints to a
                 // fixed point before materializing the concrete implementation.
-                let mut ty_inf = UnifiedTypeInference::new_with_ty_vars(imp_ty_var_count);
+                let mut ty_inf =
+                    UnifiedTypeInference::new_with_ty_vars(Self::type_var_capacity_for_types(
+                        input_tys
+                            .iter()
+                            .chain(requested_output_tys.unwrap_or_default()),
+                    ));
                 let blanket_constraint_mode = if trait_id == value_trait_id {
                     BlanketConstraintMode::DeferConcreteObligations
                 } else {
@@ -2365,8 +2492,8 @@ impl<'a> TraitSolver<'a> {
                     imp_eff_var_count,
                     imp_constraints,
                     input_tys,
-                    None,
-                    None,
+                    requested_output_tys,
+                    requested_output_effs,
                     ConstraintAssumptions::all(&[]),
                     fn_span,
                     arena,
@@ -2380,6 +2507,8 @@ impl<'a> TraitSolver<'a> {
                 else {
                     continue_impl_loop!();
                 };
+                let output_effs_depend_on_application =
+                    output_effs.iter().any(EffType::has_variables);
                 // The matched impl is being materialized for constant input types:
                 // any output effect variable left unbound by the head and constraint
                 // solving is unconstrained, so it resolves to the empty (pure) effect.
@@ -2522,8 +2651,17 @@ impl<'a> TraitSolver<'a> {
                         None,
                     )
                     .with_associated_const_values(associated_const_values);
-                    let key = ConcreteTraitImplKey::new(trait_id, input_tys.to_vec());
-                    let local_impl_id = self.impls.add_concrete_struct(key, imp);
+                    let local_impl_id = if output_effs_depend_on_application {
+                        // Concrete impl lookup is keyed only by input types. If
+                        // output effects still had variables before the
+                        // materialized dictionary defaulted them, caching this
+                        // impl would make that default leak into later
+                        // applications with different output-effect bindings.
+                        self.impls.add_anonymous_dictionary_struct(imp)
+                    } else {
+                        let key = ConcreteTraitImplKey::new(trait_id, input_tys.to_vec());
+                        self.impls.add_concrete_struct(key, imp)
+                    };
 
                     if imp_module_id.is_some() {
                         self.private_impl_scope.pop();
@@ -2728,6 +2866,33 @@ impl<'a> TraitSolver<'a> {
         arena: &mut NodeArena,
     ) -> Result<(Vec<Type>, Vec<EffType>), InternalCompilationError> {
         let impl_id = self.solve_impl(trait_id, input_tys, fn_span, arena)?;
+        let impl_data = self.get_impl_data_by_id(impl_id);
+        Ok((impl_data.output_tys.clone(), impl_data.output_effs.clone()))
+    }
+
+    /// Solve a full trait application.
+    ///
+    /// Impl identity is selected by trait id and resolved input types, but
+    /// associated output types and effects are application parameters. They are
+    /// matched against the selected impl for this application and must not be
+    /// treated as canonical values of the input-keyed impl cache.
+    pub fn solve_application_outputs(
+        &mut self,
+        trait_id: TraitId,
+        input_tys: &[Type],
+        requested_output_tys: &[Type],
+        requested_output_effs: &[EffType],
+        fn_span: Location,
+        arena: &mut NodeArena,
+    ) -> Result<(Vec<Type>, Vec<EffType>), InternalCompilationError> {
+        let impl_id = self.solve_impl_application(
+            trait_id,
+            input_tys,
+            Some(requested_output_tys),
+            Some(requested_output_effs),
+            fn_span,
+            arena,
+        )?;
         let impl_data = self.get_impl_data_by_id(impl_id);
         Ok((impl_data.output_tys.clone(), impl_data.output_effs.clone()))
     }
