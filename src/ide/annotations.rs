@@ -8,7 +8,7 @@
 //
 use std::sync::LazyLock;
 
-use crate::FxHashSet;
+use crate::{FxHashMap, FxHashSet};
 
 use heck::ToSnakeCase;
 
@@ -18,11 +18,14 @@ use crate::{
     hir::{ENode, ENodeArena, ENodeId, NodeKind},
     module::{ELocalDecl as LocalDecl, ModuleEnv, id::Id},
     types::{
-        effects::{EffType, Effect, PrimitiveEffect, display_effect_binding_value},
-        r#type::Type,
+        effects::{EffType, Effect, EffectVar, display_effect_binding_value},
+        r#type::{FnType, Type, TypeDisplayEnv, TypeKind, TypeVar},
+        type_scheme::{PubTypeConstraint, TypeScheme},
         type_scheme_display::TypeSchemeConstraintRenderMode,
+        type_visitor::TypeInnerVisitor,
     },
 };
+use ustr::Ustr;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
@@ -72,10 +75,15 @@ pub(super) fn display_annotations(
                 .definition
                 .ty_scheme
                 .display_ty_var_names_with_source_params(&function.definition.generic_params);
-            let type_env = function
-                .definition
-                .ty_scheme
-                .type_display_env(&env, &ty_var_names);
+            let hidden_effect_vars =
+                light_hidden_effect_vars(&function.definition.ty_scheme, constraint_mode);
+            let type_env = annotation_type_display_env(
+                &function.definition.ty_scheme,
+                &env,
+                &ty_var_names,
+                constraint_mode,
+                &hidden_effect_vars,
+            );
             variable_type_annotations(
                 &module.hir_arena,
                 script_fn.entry_node_id,
@@ -110,7 +118,14 @@ pub(super) fn display_annotations(
         let ty_scheme = &function.definition.ty_scheme;
         let ty_var_names =
             ty_scheme.display_ty_var_names_with_source_params(&function.definition.generic_params);
-        let type_env = ty_scheme.type_display_env(&env, &ty_var_names);
+        let hidden_effect_vars = light_hidden_effect_vars(ty_scheme, constraint_mode);
+        let type_env = annotation_type_display_env(
+            ty_scheme,
+            &env,
+            &ty_var_names,
+            constraint_mode,
+            &hidden_effect_vars,
+        );
         if !function.definition.ty_scheme.is_just_type() {
             let source_param_count = function.definition.generic_params.len();
             let mut inserted_quantifiers = ty_scheme
@@ -122,7 +137,13 @@ pub(super) fn display_annotations(
                         .get(&ty_var)
                         .map_or_else(|| format!("{ty_var}"), ToString::to_string)
                 })
-                .chain(ty_scheme.eff_quantifiers.iter().map(|q| format!("{q}")))
+                .chain(
+                    ty_scheme
+                        .eff_quantifiers
+                        .iter()
+                        .filter(|q| !type_env.hides_effect_var(**q))
+                        .map(|q| format!("{q}")),
+                )
                 .peekable();
             if inserted_quantifiers.peek().is_some() {
                 let inserted_quantifiers = inserted_quantifiers.collect::<Vec<_>>().join(", ");
@@ -160,10 +181,8 @@ pub(super) fn display_annotations(
                 ));
             }
         }
-        let displayed_effect_set = display_effects_with_constraint_mode(
-            &function.definition.ty_scheme.ty.effects,
-            constraint_mode,
-        );
+        let displayed_effect_set =
+            type_env.displayed_effects(&function.definition.ty_scheme.ty.effects);
         let displayed_effects = display_effect_binding_value(&displayed_effect_set);
         let byte_src = src.as_bytes();
         let past_args_index = spans.args_span.end_usize();
@@ -277,16 +296,111 @@ pub(super) fn display_annotations(
     annotations
 }
 
-fn display_effects_with_constraint_mode(
-    effects: &EffType,
+fn annotation_type_display_env<'a, 'm>(
+    ty_scheme: &'a TypeScheme<FnType>,
+    env: &'a ModuleEnv<'m>,
+    ty_var_names: &'a FxHashMap<TypeVar, Ustr>,
     constraint_mode: TypeSchemeConstraintRenderMode,
-) -> EffType {
+    hidden_effect_vars: &'a FxHashSet<EffectVar>,
+) -> TypeDisplayEnv<'a, 'm> {
+    let type_env = ty_scheme.type_display_env(env, ty_var_names);
     match constraint_mode {
-        TypeSchemeConstraintRenderMode::Full => effects.clone(),
-        TypeSchemeConstraintRenderMode::Light => effects
-            .iter()
-            .filter(|effect| *effect != Effect::Primitive(PrimitiveEffect::Fallible))
-            .collect(),
+        TypeSchemeConstraintRenderMode::Full => type_env,
+        TypeSchemeConstraintRenderMode::Light => {
+            type_env.with_light_effect_display(hidden_effect_vars)
+        }
+    }
+}
+
+fn light_hidden_effect_vars(
+    ty_scheme: &TypeScheme<FnType>,
+    constraint_mode: TypeSchemeConstraintRenderMode,
+) -> FxHashSet<EffectVar> {
+    if matches!(constraint_mode, TypeSchemeConstraintRenderMode::Full) {
+        return FxHashSet::default();
+    }
+
+    let mut callable_effect_vars = FxHashSet::default();
+    collect_callable_effect_vars_in_fn_type(&ty_scheme.ty, &mut callable_effect_vars);
+    for constraint in &ty_scheme.constraints {
+        collect_callable_effect_vars_in_constraint(constraint, &mut callable_effect_vars);
+    }
+
+    ty_scheme
+        .eff_quantifiers
+        .iter()
+        .copied()
+        .filter(|var| !callable_effect_vars.contains(var))
+        .collect()
+}
+
+fn collect_effect_vars(effects: &EffType, vars: &mut FxHashSet<EffectVar>) {
+    vars.extend(effects.iter().filter_map(|effect| match effect {
+        Effect::Variable(var) => Some(var),
+        Effect::Primitive(_) => None,
+    }));
+}
+
+fn collect_callable_effect_vars_in_fn_type(fn_ty: &FnType, vars: &mut FxHashSet<EffectVar>) {
+    collect_effect_vars(&fn_ty.effects, vars);
+    for arg in &fn_ty.args {
+        collect_callable_effect_vars_in_type(arg.ty, vars);
+    }
+    collect_callable_effect_vars_in_type(fn_ty.ret, vars);
+}
+
+fn collect_callable_effect_vars_in_type(ty: Type, vars: &mut FxHashSet<EffectVar>) {
+    struct CallableEffectVarsCollector<'a>(&'a mut FxHashSet<EffectVar>);
+
+    impl TypeInnerVisitor for CallableEffectVarsCollector<'_> {
+        fn visit_ty_kind_start(&mut self, ty: &TypeKind) {
+            if let TypeKind::Function(fn_ty) = ty {
+                collect_effect_vars(&fn_ty.effects, self.0);
+            }
+        }
+    }
+
+    ty.data().visit(&mut CallableEffectVarsCollector(vars));
+}
+
+fn collect_callable_effect_vars_in_constraint(
+    constraint: &PubTypeConstraint,
+    vars: &mut FxHashSet<EffectVar>,
+) {
+    match constraint {
+        PubTypeConstraint::TupleAtIndexIs {
+            tuple_ty,
+            element_ty,
+            ..
+        } => {
+            collect_callable_effect_vars_in_type(*tuple_ty, vars);
+            collect_callable_effect_vars_in_type(*element_ty, vars);
+        }
+        PubTypeConstraint::RecordFieldIs {
+            record_ty,
+            element_ty,
+            ..
+        } => {
+            collect_callable_effect_vars_in_type(*record_ty, vars);
+            collect_callable_effect_vars_in_type(*element_ty, vars);
+        }
+        PubTypeConstraint::TypeHasVariant {
+            variant_ty,
+            payload_ty,
+            ..
+        } => {
+            collect_callable_effect_vars_in_type(*variant_ty, vars);
+            collect_callable_effect_vars_in_type(*payload_ty, vars);
+        }
+        PubTypeConstraint::HaveTrait {
+            input_tys,
+            output_tys,
+            ..
+        } => {
+            for ty in input_tys.iter().chain(output_tys) {
+                collect_callable_effect_vars_in_type(*ty, vars);
+            }
+        }
     }
 }
 

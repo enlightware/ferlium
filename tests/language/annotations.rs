@@ -195,6 +195,86 @@ fn light_annotations_keep_non_fallible_effects() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn light_annotations_hide_fallible_inside_returned_function_types() {
+    let src = indoc! { r#"
+        fn keep(f: (() -> int ! fallible)) {
+            f
+        }
+    "# };
+    let mut compiler = compile_source(src);
+    let full_annotations = annotation_hints(&mut compiler);
+    let light_annotations = light_annotation_hints(&mut compiler);
+
+    assert!(
+        full_annotations.contains("fallible"),
+        "expected full annotations to show nested fallible effect, got: {full_annotations}"
+    );
+    assert!(
+        light_annotations.contains("() -> int ! e₀") && !light_annotations.contains("fallible"),
+        "expected light annotations to hide nested fallible effect, got: {light_annotations}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn light_annotations_keep_non_fallible_effects_inside_returned_function_types() {
+    let src = indoc! { r#"
+        fn keep(f: (() -> int ! read)) {
+            f
+        }
+    "# };
+    let mut compiler = compile_source(src);
+    let light_annotations = light_annotation_hints(&mut compiler);
+
+    assert!(
+        light_annotations.contains("() -> int ! (read, e₀)"),
+        "expected light annotations to keep nested read effect, got: {light_annotations}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn light_annotations_keep_generic_effect_binders_used_by_callable_effects() {
+    let src = indoc! { r#"
+        fn call(f) {
+            f()
+        }
+    "# };
+    let mut compiler = compile_source(src);
+    let light = light_annotated_ide_source(&mut compiler, src);
+
+    assert!(
+        light.contains("<A, e₀>")
+            && light.contains("f: () -> A ! e₀")
+            && light.contains("-> A ! e₀"),
+        "expected light annotations to keep callable effect binder and uses, got:\n{light}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn light_annotations_hide_generic_effects_used_only_as_associated_outputs() {
+    let src = indoc! { r#"
+        fn get_iterator(seq) {
+            iter(seq)
+        }
+    "# };
+    let mut compiler = compile_source(src);
+    let full_annotations = annotation_hints(&mut compiler);
+    let light_annotations = light_annotation_hints(&mut compiler);
+
+    assert!(
+        full_annotations.contains("IterEffect = e₀"),
+        "expected full annotations to show associated sequence effect, got: {full_annotations}"
+    );
+    assert!(
+        !light_annotations.contains("IterEffect") && !light_annotations.contains("e₀"),
+        "expected light annotations to hide associated-only generic effect, got: {light_annotations}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn ide_annotations_add_function_effect_annotation_once() {
     let src = indoc! { r#"
         fn get(xs: [int]) -> int {

@@ -50,7 +50,10 @@ use crate::format::type_variable_index_to_string_latin;
 use crate::graph;
 use crate::module::ModuleEnv;
 use crate::sync::SyncPhantomData;
-use crate::types::effects::{EffType, EffectVar, format_function_effect_suffix};
+use crate::types::effects::{
+    EffType, Effect, EffectVar, PrimitiveEffect, format_effect_binding_value,
+    format_function_effect_suffix,
+};
 use crate::types::mutability::{MutType, MutVar};
 use crate::types::type_scheme::TypeScheme;
 
@@ -263,6 +266,15 @@ where
 pub struct TypeDisplayEnv<'a, 'm> {
     pub module_env: &'a ModuleEnv<'m>,
     pub ty_var_names: &'a FxHashMap<TypeVar, Ustr>,
+    effect_display: EffectDisplay<'a>,
+}
+
+#[derive(Clone, Copy)]
+enum EffectDisplay<'a> {
+    Full,
+    Light {
+        hidden_vars: &'a FxHashSet<EffectVar>,
+    },
 }
 
 impl<'a, 'm> TypeDisplayEnv<'a, 'm> {
@@ -270,7 +282,41 @@ impl<'a, 'm> TypeDisplayEnv<'a, 'm> {
         Self {
             module_env,
             ty_var_names,
+            effect_display: EffectDisplay::Full,
         }
+    }
+
+    pub(crate) fn with_light_effect_display(
+        mut self,
+        hidden_vars: &'a FxHashSet<EffectVar>,
+    ) -> Self {
+        self.effect_display = EffectDisplay::Light { hidden_vars };
+        self
+    }
+
+    pub(crate) fn hides_effect_var(&self, var: EffectVar) -> bool {
+        match self.effect_display {
+            EffectDisplay::Full => false,
+            EffectDisplay::Light { hidden_vars } => hidden_vars.contains(&var),
+        }
+    }
+
+    pub(crate) fn displayed_effects(&self, effects: &EffType) -> EffType {
+        match self.effect_display {
+            EffectDisplay::Full => effects.clone(),
+            EffectDisplay::Light { hidden_vars } => effects
+                .iter()
+                .filter(|effect| match effect {
+                    Effect::Primitive(PrimitiveEffect::Fallible) => false,
+                    Effect::Variable(var) => !hidden_vars.contains(var),
+                    _ => true,
+                })
+                .collect(),
+        }
+    }
+
+    pub(crate) fn is_light_effect_display(&self) -> bool {
+        matches!(self.effect_display, EffectDisplay::Light { .. })
     }
 
     fn format_type(&self, ty: Type) -> String {
@@ -278,8 +324,16 @@ impl<'a, 'm> TypeDisplayEnv<'a, 'm> {
     }
 }
 
-trait TypeFormatEnv {
+pub(crate) trait TypeFormatEnv {
     fn module_env(&self) -> &ModuleEnv<'_>;
+
+    fn displayed_effects(&self, effects: &EffType) -> EffType {
+        effects.clone()
+    }
+
+    fn is_light_effect_display(&self) -> bool {
+        false
+    }
 
     fn fmt_type_alias_name(&self, ty: Type, f: &mut fmt::Formatter<'_>)
     -> Result<bool, fmt::Error>;
@@ -312,6 +366,14 @@ impl TypeFormatEnv for ModuleEnv<'_> {
 impl TypeFormatEnv for TypeDisplayEnv<'_, '_> {
     fn module_env(&self) -> &ModuleEnv<'_> {
         self.module_env
+    }
+
+    fn displayed_effects(&self, effects: &EffType) -> EffType {
+        self.displayed_effects(effects)
+    }
+
+    fn is_light_effect_display(&self) -> bool {
+        self.is_light_effect_display()
     }
 
     fn fmt_type_alias_name(
@@ -544,6 +606,7 @@ fn fmt_fn_type_with_env<Env>(function: &FnType, f: &mut fmt::Formatter, env: &En
 where
     FnArgType: FormatWith<Env>,
     Type: FormatWith<Env>,
+    Env: TypeFormatEnv,
 {
     write!(f, "(")?;
     for (i, arg) in function.args.iter().enumerate() {
@@ -557,10 +620,10 @@ where
         write!(f, "place ")?;
     }
     function.ret.fmt_with(f, env)?;
-    format_function_effect_suffix(&function.effects, f)
+    format_function_effect_suffix(&env.displayed_effects(&function.effects), f)
 }
 
-pub fn fmt_fn_type_with_arg_names<Env>(
+pub(crate) fn fmt_fn_type_with_arg_names<Env>(
     fn_ty: &FnType,
     arg_names: &[Ustr],
     f: &mut fmt::Formatter,
@@ -569,6 +632,7 @@ pub fn fmt_fn_type_with_arg_names<Env>(
 where
     FnArgType: FormatWith<Env>,
     Type: FormatWith<Env>,
+    Env: TypeFormatEnv,
 {
     write!(f, "(")?;
     for (i, (arg_ty, arg_name)) in fn_ty.args.iter().zip(arg_names).enumerate() {
@@ -583,7 +647,7 @@ where
         write!(f, "place ")?;
     }
     fn_ty.ret.fmt_with(f, env)?;
-    format_function_effect_suffix(&fn_ty.effects, f)
+    format_function_effect_suffix(&env.displayed_effects(&fn_ty.effects), f)
 }
 
 /// A type identifier, unique for a given type of a given mathematical structure
@@ -2023,7 +2087,14 @@ where
                 Some(name) => write!(f, "{name}")?,
                 None => write!(f, "#{}:{}", def.module, def.index)?,
             }
-            if !args.is_empty() || !effect_params.is_empty() {
+            let displayed_effect_params = effect_params
+                .iter()
+                .map(|eff| env.displayed_effects(eff))
+                .collect::<Vec<_>>();
+            let display_effect_params = !displayed_effect_params.is_empty()
+                && (!env.is_light_effect_display()
+                    || displayed_effect_params.iter().any(EffType::any));
+            if !args.is_empty() || display_effect_params {
                 write!(f, "<")?;
                 for (i, ty) in args.iter().enumerate() {
                     if i > 0 {
@@ -2031,16 +2102,16 @@ where
                     }
                     ty.fmt_with(f, env)?;
                 }
-                if !effect_params.is_empty() {
+                if display_effect_params {
                     if !args.is_empty() {
                         write!(f, " ")?;
                     }
                     write!(f, "! ")?;
-                    for (i, eff) in effect_params.iter().enumerate() {
+                    for (i, eff) in displayed_effect_params.iter().enumerate() {
                         if i > 0 {
                             write!(f, ", ")?;
                         }
-                        write!(f, "{eff}")?;
+                        format_effect_binding_value(eff, f)?;
                     }
                 }
                 write!(f, ">")?;

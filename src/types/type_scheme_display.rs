@@ -18,28 +18,12 @@ use crate::{
     module::{ModuleEnv, TraitId},
     types::{
         effects::{EffType, EffectsInstSubst, format_effect_binding_value},
-        r#type::{Type, TypeDisplayEnv, TypeInstSubst, TypeVar},
+        r#type::{Type, TypeDisplayEnv, TypeFormatEnv, TypeInstSubst, TypeVar},
         type_inference::substitution::InstSubst,
         type_like::TypeLike,
         type_scheme::{PubTypeConstraint, TupleConstraint, TypeScheme, VariantConstraint},
     },
 };
-
-pub(crate) trait HasModuleEnv {
-    fn module_env(&self) -> &ModuleEnv<'_>;
-}
-
-impl HasModuleEnv for ModuleEnv<'_> {
-    fn module_env(&self) -> &ModuleEnv<'_> {
-        self
-    }
-}
-
-impl HasModuleEnv for TypeDisplayEnv<'_, '_> {
-    fn module_env(&self) -> &ModuleEnv<'_> {
-        self.module_env
-    }
-}
 
 impl FormatWith<ModuleEnv<'_>> for PubTypeConstraint {
     fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv<'_>) -> std::fmt::Result {
@@ -76,7 +60,7 @@ fn format_pub_type_constraint<Env>(
 ) -> std::fmt::Result
 where
     Type: FormatWith<Env>,
-    Env: HasModuleEnv,
+    Env: TypeFormatEnv,
 {
     format_pub_type_constraint_with_style(
         constraint,
@@ -94,7 +78,7 @@ pub(crate) fn format_pub_type_constraint_with_style<Env>(
 ) -> std::fmt::Result
 where
     Type: FormatWith<Env>,
-    Env: HasModuleEnv,
+    Env: TypeFormatEnv,
 {
     use PubTypeConstraint::*;
     match constraint {
@@ -226,7 +210,7 @@ fn write_aggregated_constraint<Env>(
 ) -> std::fmt::Result
 where
     Type: FormatWith<Env>,
-    Env: HasModuleEnv,
+    Env: TypeFormatEnv,
 {
     write!(f, "{}: ", ty.format_with(env))?;
     match constraint {
@@ -369,7 +353,7 @@ impl<'a> DisplayConstraints<'a> {
     fn format<Env>(&self, f: &mut std::fmt::Formatter, env: &Env) -> std::fmt::Result
     where
         Type: FormatWith<Env>,
-        Env: HasModuleEnv,
+        Env: TypeFormatEnv,
     {
         let mut items = self
             .simple_trait_constraints
@@ -412,7 +396,7 @@ impl ConstraintDisplayItem<'_> {
     fn sort_key<Env>(&self, env: &Env) -> ConstraintSortKey
     where
         Type: FormatWith<Env>,
-        Env: HasModuleEnv,
+        Env: TypeFormatEnv,
     {
         match self {
             Self::UnaryTraitGroup {
@@ -452,7 +436,7 @@ impl ConstraintDisplayItem<'_> {
     fn format<Env>(&self, f: &mut std::fmt::Formatter, env: &Env) -> std::fmt::Result
     where
         Type: FormatWith<Env>,
-        Env: HasModuleEnv,
+        Env: TypeFormatEnv,
     {
         match self {
             Self::UnaryTraitGroup {
@@ -695,7 +679,7 @@ fn format_have_trait_with_env<Env>(
 ) -> std::fmt::Result
 where
     Type: FormatWith<Env>,
-    Env: HasModuleEnv,
+    Env: TypeFormatEnv,
 {
     let trait_def = env.module_env().trait_def(trait_id);
     if is_repr_trait(env.module_env(), trait_id) && input_tys.len() == 1 && output_tys.len() == 1 {
@@ -709,9 +693,18 @@ where
     let trait_name = trait_def.name;
     let use_unary_where_clause =
         input_tys.len() == 1 && matches!(style, TypeConstraintRenderStyle::WhereClause);
+    let displayed_output_effs = output_effs
+        .iter()
+        .enumerate()
+        .filter_map(|(index, eff)| {
+            let displayed = env.displayed_effects(eff);
+            (!env.is_light_effect_display() || displayed.any()).then_some((index, displayed))
+        })
+        .collect::<Vec<_>>();
+    let display_output_effs = !displayed_output_effs.is_empty();
     if use_unary_where_clause {
         write!(f, "{}: {}", input_tys[0].format_with(env), trait_name)?;
-        if output_tys.is_empty() && output_effs.is_empty() {
+        if output_tys.is_empty() && !display_output_effs {
             return Ok(());
         }
         write!(f, " <")?;
@@ -749,13 +742,13 @@ where
             f,
         )?;
     }
-    if !output_effs.is_empty() {
+    if display_output_effs {
         write!(f, " ! ")?;
         write_with_separator_and_format_fn(
-            output_effs.iter().enumerate(),
+            displayed_output_effs.iter(),
             ", ",
             |(index, eff), f| {
-                write!(f, "{} = ", trait_def.output_effect_names[index])?;
+                write!(f, "{} = ", trait_def.output_effect_names[*index])?;
                 format_effect_binding_value(eff, f)
             },
             f,
@@ -779,7 +772,7 @@ fn format_constraints_consolidated_with_env<Env>(
 ) -> std::fmt::Result
 where
     Type: FormatWith<Env>,
-    Env: HasModuleEnv,
+    Env: TypeFormatEnv,
 {
     DisplayConstraints::full(constraints).format(f, env)
 }
