@@ -325,6 +325,24 @@ fn inferred_function_value_derivation_from_grammar_fuzzer_does_not_panic() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn recursive_function_effect_equality_from_grammar_fuzzer_does_not_overflow_stack() {
+    let mut session = TestSession::new();
+    let error = session
+        .fail_compilation(
+            "fn a<map, a>(a: a) { \
+                let mut result: None(a, [()]) | Some = a(); \
+                let b: result = a < a or a; \
+            }",
+        )
+        .into_inner();
+    match error {
+        CompilationErrorImpl::TypeMismatch { .. } => {}
+        other => panic!("expected TypeMismatch, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn returned_lambda_with_function_typed_num_constraint_compiles() {
     let mut session = TestSession::new();
     session.compile("pub fn b() { || 0() }");

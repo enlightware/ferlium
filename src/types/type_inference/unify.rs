@@ -595,9 +595,29 @@ impl UnifiedTypeInference {
         expected: Type,
         expected_span: Location,
     ) -> Result<(), InternalCompilationError> {
+        self.unify_equal_function_effects_inner(
+            current,
+            current_span,
+            expected,
+            expected_span,
+            &mut FxHashSet::default(),
+        )
+    }
+
+    fn unify_equal_function_effects_inner(
+        &mut self,
+        current: Type,
+        current_span: Location,
+        expected: Type,
+        expected_span: Location,
+        visited: &mut FxHashSet<(Type, Type)>,
+    ) -> Result<(), InternalCompilationError> {
         let current_ty = self.normalize_type(current);
         let expected_ty = self.normalize_type(expected);
         if current_ty == Type::never() || expected_ty == Type::never() {
+            return Ok(());
+        }
+        if !visited.insert((current_ty, expected_ty)) {
             return Ok(());
         }
 
@@ -613,27 +633,30 @@ impl UnifiedTypeInference {
                     expected_span,
                 )?;
                 for (current_arg, expected_arg) in current_fn.args.iter().zip(&expected_fn.args) {
-                    self.unify_equal_function_effects(
+                    self.unify_equal_function_effects_inner(
                         current_arg.ty,
                         current_span,
                         expected_arg.ty,
                         expected_span,
+                        visited,
                     )?;
                 }
-                self.unify_equal_function_effects(
+                self.unify_equal_function_effects_inner(
                     current_fn.ret,
                     current_span,
                     expected_fn.ret,
                     expected_span,
+                    visited,
                 )
             }
             (Tuple(current_items), Tuple(expected_items)) => {
                 for (current_item, expected_item) in current_items.into_iter().zip(expected_items) {
-                    self.unify_equal_function_effects(
+                    self.unify_equal_function_effects_inner(
                         current_item,
                         current_span,
                         expected_item,
                         expected_span,
+                        visited,
                     )?;
                 }
                 Ok(())
@@ -642,11 +665,12 @@ impl UnifiedTypeInference {
                 for ((_, current_field), (_, expected_field)) in
                     current_fields.into_iter().zip(expected_fields)
                 {
-                    self.unify_equal_function_effects(
+                    self.unify_equal_function_effects_inner(
                         current_field,
                         current_span,
                         expected_field,
                         expected_span,
+                        visited,
                     )?;
                 }
                 Ok(())
@@ -655,11 +679,12 @@ impl UnifiedTypeInference {
                 for ((_, current_payload), (_, expected_payload)) in
                     current_variants.into_iter().zip(expected_variants)
                 {
-                    self.unify_equal_function_effects(
+                    self.unify_equal_function_effects_inner(
                         current_payload,
                         current_span,
                         expected_payload,
                         expected_span,
+                        visited,
                     )?;
                 }
                 Ok(())
@@ -668,11 +693,12 @@ impl UnifiedTypeInference {
                 for (current_param, expected_param) in
                     current_named.params.into_iter().zip(expected_named.params)
                 {
-                    self.unify_equal_function_effects(
+                    self.unify_equal_function_effects_inner(
                         current_param,
                         current_span,
                         expected_param,
                         expected_span,
+                        visited,
                     )?;
                 }
                 for (current_effect, expected_effect) in current_named
