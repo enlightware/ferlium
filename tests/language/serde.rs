@@ -8,14 +8,11 @@
 //
 use indoc::indoc;
 use test_log::test;
-use ustr::ustr;
 
-use crate::harness::{TestSession, bool, float, int, string, unit, variant_0, variant_t1};
-use ferlium::{
-    compiler::error::RuntimeErrorKind,
-    hir::value::Value,
-    std::option::{none, some},
+use crate::harness::{
+    TestSession, bool, float, int, none, some, string, unit, variant_0, variant_raw, variant_t1,
 };
+use ferlium::{compiler::error::RuntimeErrorKind, hir::value::Value};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
@@ -51,12 +48,12 @@ fn serde_serialize() {
     // variants
     assert_val_eq!(
         session.run("serialize(None)"),
-        Value::raw_variant(ustr("Variant"), tuple!(string("None"), variant_0("Unit")))
+        variant_raw("Variant", tuple!(string("None"), variant_0("Unit")))
     );
     assert_val_eq!(
         session.run("serialize(Some(1.0))"),
-        Value::raw_variant(
-            ustr("Variant"),
+        variant_raw(
+            "Variant",
             tuple!(
                 string("Some"),
                 variant_t1("Tuple", array![variant_t1("Float", float(1.0))])

@@ -10,7 +10,6 @@
 use ferlium::{
     compiler::error::CompilationErrorImpl,
     format::{FormatWith, FormatWithData},
-    hir::value::Value,
     std::{
         array::array_type,
         data_value,

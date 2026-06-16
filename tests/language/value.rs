@@ -14,7 +14,6 @@ use ferlium::{
     hir::{
         self, ENodeArena, ENodeId, NodeKind,
         function::{ResolvedArgPassing, ResolvedValueArgPassing},
-        value::Value,
     },
     module::{
         LocalDeclId, LocalStorage, ResolvedLocalClone, ResolvedLocalDrop,

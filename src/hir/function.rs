@@ -29,7 +29,7 @@ use crate::{
         drop_frame_owned_locals_on_error, eval_node_with_ctx,
     },
     format::{FormatWith, escape_identifier, format_generic_param_list, write_identifier},
-    hir::value::{NativeDisplay, Value},
+    hir::value::{NativeValue, Value},
     hir::{self, ENodeId, NodeArena, NodeId, UNodeArena, UNodeId},
     module::{ELocalDecl, ModuleEnv, ModuleFunction, ULocalDecl},
     types::effects::EffType,
@@ -718,8 +718,8 @@ impl Callable for ContextNativeFn {
 
 /// A trait that must be satisfied by the output of a native function.
 /// This is used to ensure that the output can be converted to a `Value`.
-pub trait NativeOutput: Debug + NativeDisplay + 'static {}
-impl<T: Debug + NativeDisplay + 'static> NativeOutput for T {}
+pub trait NativeOutput: NativeValue {}
+impl<T: NativeValue> NativeOutput for T {}
 
 /// Marker struct to declare argument by value to native functions.
 pub struct NatVal<T> {
@@ -1100,15 +1100,12 @@ n_ary_native_fn!(OctonaryNativeFn, A0, A1, A2, A3, A4, A5, A6, A7);
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fmt,
-        sync::atomic::{AtomicUsize, Ordering},
-    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::{
         CompilerSession,
         eval::ControlFlow,
-        hir::{CallArgument, Elaborated},
+        hir::{CallArgument, Elaborated, value::NativeValueType},
         module::{ModuleId, id::Id},
     };
 
@@ -1119,15 +1116,11 @@ mod tests {
     #[derive(Debug)]
     struct NativeArgDropTracked;
 
+    impl NativeValueType for NativeArgDropTracked {}
+
     impl Drop for NativeArgDropTracked {
         fn drop(&mut self) {
             NATIVE_ARG_DROP_COUNT.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    impl NativeDisplay for NativeArgDropTracked {
-        fn fmt_repr(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(f, "<native-arg-drop-tracked>")
         }
     }
 

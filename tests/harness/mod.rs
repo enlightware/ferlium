@@ -9,14 +9,13 @@
 use ferlium::{
     CompilerSession, FxHashSet, Location, ModuleAndExpr, SourceTable,
     compiler::error::{CompilationError, RuntimeErrorKind},
-    containers::IntoSVec2,
     eval::{ControlFlow, EvalResult, RuntimeError, eval_node},
     hir::function::{
         BinaryNativeFnNNV, BinaryNativeFnRMN, BinaryNativeFnRRN, BinaryNativeFnRWN, Function,
         FunctionDefinition, NullaryNativeFnN, NullaryNativeFnV, UnaryNativeFnMN, UnaryNativeFnNN,
         UnaryNativeFnNV, UnaryNativeFnRN, UnaryNativeFnVN, UnaryNativeFnVV,
     },
-    hir::value::{LiteralValue, NativeDisplay, Value},
+    hir::value::{LiteralValue, NativeValueType, Value},
     module::{BlanketTraitImplSubKey, Module, ModuleEnv, ModuleId, Path, TraitId},
     std::core_traits_names::{ITERATOR_TRAIT_NAME, VALUE_TRAIT_NAME},
     std::{
@@ -43,71 +42,60 @@ pub enum Error {
 }
 
 pub type CompileRunResult = Result<Value, Error>;
+pub type CompileRunValueResult = Result<RunValue, Error>;
 
-fn write_values_with_separator<'a>(
-    values: impl IntoIterator<Item = &'a Value>,
-    separator: &str,
-    f: &mut fmt::Formatter<'_>,
-) -> fmt::Result {
-    let mut first = true;
-    for value in values {
-        if first {
-            first = false;
-        } else {
-            write!(f, "{separator}")?;
-        }
-        format_value_as_string_repr(value, f)?;
-    }
-    Ok(())
+#[derive(Debug)]
+pub struct RunValue {
+    pub module_id: ModuleId,
+    pub value: Value,
+    pub ty: Type,
 }
 
-fn format_value_as_string_repr(value: &Value, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+#[derive(Debug)]
+pub struct ExpectedValue {
+    pub value: Value,
+    pub ty: Option<Type>,
+}
+
+impl ExpectedValue {
+    pub fn raw(value: Value) -> Self {
+        Self { value, ty: None }
+    }
+
+    pub fn typed(value: Value, ty: Type) -> Self {
+        Self {
+            value,
+            ty: Some(ty),
+        }
+    }
+
+    pub fn as_value(&self) -> &Value {
+        &self.value
+    }
+
+    pub fn into_value(self) -> Value {
+        self.value
+    }
+}
+
+impl From<Value> for ExpectedValue {
+    fn from(value: Value) -> Self {
+        Self::raw(value)
+    }
+}
+
+pub fn raw_value(value: impl Into<ExpectedValue>) -> Value {
+    value.into().into_value()
+}
+
+fn value_shape(value: &Value) -> &'static str {
     match value {
-        Value::Uninit => write!(f, "<uninitialized>"),
-        Value::Native(value) => value.fmt_in_to_string(f),
-        Value::Variant(variant) => {
-            if variant.value.is_tuple() {
-                write!(f, "{}", variant.tag)?;
-                format_value_as_string_repr(&variant.value, f)
-            } else {
-                write!(f, "{}(", variant.tag)?;
-                format_value_as_string_repr(&variant.value, f)?;
-                write!(f, ")")
-            }
-        }
-        Value::Tuple(tuple) => {
-            write!(f, "(")?;
-            write_values_with_separator(tuple.iter(), ", ", f)?;
-            write!(f, ")")
-        }
-        Value::Function(fv) => {
-            if fv.hidden_args.is_empty() && fv.closure_env_len == 0 {
-                write!(f, "function {} in {}", fv.function_id, fv.module_id)
-            } else {
-                write!(
-                    f,
-                    "closure of function {} in {} with {} evidence captures and captured values [",
-                    fv.function_id,
-                    fv.module_id,
-                    fv.hidden_args.len()
-                )?;
-                write_values_with_separator(fv.closure_env_values(), ", ", f)?;
-                write!(f, "]")
-            }
-        }
+        Value::Uninit => "uninitialized value",
+        Value::Native(_) => "native value",
+        Value::Variant(_) => "variant value",
+        Value::Tuple(_) => "tuple value",
+        Value::Function(_) => "function value",
     }
-}
-
-pub(crate) fn value_to_string_repr(value: &Value) -> String {
-    struct FormatValue<'a>(&'a Value);
-
-    impl fmt::Display for FormatValue<'_> {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            format_value_as_string_repr(self.0, f)
-        }
-    }
-
-    FormatValue(value).to_string()
 }
 
 fn compare_native_values(actual: &Value, expected: &Value, path: &str) -> Result<(), String> {
@@ -180,11 +168,7 @@ fn compare_native_values(actual: &Value, expected: &Value, path: &str) -> Result
         return Ok(());
     }
 
-    Err(format!(
-        "{path}: unsupported native comparison between {} and {}",
-        value_to_string_repr(actual),
-        value_to_string_repr(expected)
-    ))
+    Err(format!("{path}: unsupported native comparison"))
 }
 
 fn ferlium_array_parts(value: &Value) -> Option<(&Buffer, usize, usize)> {
@@ -263,13 +247,13 @@ pub(crate) fn compare_values(actual: &Value, expected: &Value, path: &str) -> Re
         }
         (Value::Tuple(_), Value::Native(_)) => Err(format!(
             "{path}: expected {}, got {}",
-            value_to_string_repr(expected),
-            value_to_string_repr(actual)
+            value_shape(expected),
+            value_shape(actual)
         )),
         (Value::Native(_), Value::Tuple(_)) => Err(format!(
             "{path}: expected {}, got {}",
-            value_to_string_repr(expected),
-            value_to_string_repr(actual)
+            value_shape(expected),
+            value_shape(actual)
         )),
         (Value::Native(_), Value::Native(_)) => compare_native_values(actual, expected, path),
         (Value::Variant(actual), Value::Variant(expected)) => {
@@ -325,45 +309,48 @@ pub(crate) fn compare_values(actual: &Value, expected: &Value, path: &str) -> Re
         }
         _ => Err(format!(
             "{path}: expected {}, got {}",
-            value_to_string_repr(expected),
-            value_to_string_repr(actual)
+            value_shape(expected),
+            value_shape(actual)
         )),
     }
 }
 
 pub fn assert_value_eq(actual: &Value, expected: &Value) {
     if let Err(message) = compare_values(actual, expected, "value") {
-        panic!(
-            "Value assertion failed: {message}\nactual: {}\nexpected: {}",
-            value_to_string_repr(actual),
-            value_to_string_repr(expected)
-        );
+        panic!("Value assertion failed: {message}");
     }
 }
 
-pub fn assert_some_value_eq(actual: Option<Value>, expected: Value) {
+pub fn assert_some_value_eq(actual: Option<Value>, expected: impl Into<ExpectedValue>) {
     let actual = actual.expect("expected Some(value)");
-    assert_value_eq(&actual, &expected)
+    let expected = expected.into();
+    assert_value_eq(&actual, expected.as_value())
 }
 
 #[macro_export]
 macro_rules! assert_val_eq {
+    ($session:ident . run($src:expr), $expected:expr, $($arg:tt)+) => {{
+        let expected = $expected;
+        $session.assert_run_value_eq_with_message($src, expected, format_args!($($arg)+));
+    }};
+    ($session:ident . run($src:expr), $expected:expr $(,)?) => {{
+        let expected = $expected;
+        $session.assert_run_value_eq($src, expected);
+    }};
     ($actual:expr, $expected:expr, $($arg:tt)+) => {{
         let actual = $actual;
-        let expected = $expected;
-        if let Err(message) = $crate::harness::compare_values(&actual, &expected, "value") {
+        let expected: $crate::harness::ExpectedValue = $expected.into();
+        if let Err(message) = $crate::harness::compare_values(&actual, expected.as_value(), "value") {
             panic!(
-                "Value assertion failed: {message}\nactual: {}\nexpected: {}\n{}",
-                $crate::harness::value_to_string_repr(&actual),
-                $crate::harness::value_to_string_repr(&expected),
+                "Value assertion failed: {message}\n{}",
                 format_args!($($arg)+),
             );
         }
     }};
     ($actual:expr, $expected:expr $(,)?) => {{
         let actual = $actual;
-        let expected = $expected;
-        $crate::harness::assert_value_eq(&actual, &expected);
+        let expected: $crate::harness::ExpectedValue = $expected.into();
+        $crate::harness::assert_value_eq(&actual, expected.as_value());
     }};
 }
 
@@ -567,16 +554,12 @@ static TRACKED_DROPS: AtomicIsize = AtomicIsize::new(0);
 #[derive(Debug)]
 pub struct CloneTrackedNative(isize);
 
+impl NativeValueType for CloneTrackedNative {}
+
 impl Clone for CloneTrackedNative {
     fn clone(&self) -> Self {
         TRACKED_CLONES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Self(self.0)
-    }
-}
-
-impl NativeDisplay for CloneTrackedNative {
-    fn fmt_repr(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "clone_tracked({})", self.0)
     }
 }
 
@@ -989,7 +972,8 @@ thread_local! {
     static INT_ARRAY_PROPERTY_VALUE: RefCell<Vec<isize>> = const { RefCell::new(Vec::new()) };
 }
 
-pub fn set_array_property_value(value: Value) {
+pub fn set_array_property_value(value: impl Into<ExpectedValue>) {
+    let value = raw_value(value);
     INT_ARRAY_PROPERTY_VALUE.with(|cell| *cell.borrow_mut() = int_vec_from_array_value(&value));
 }
 
@@ -1144,6 +1128,58 @@ impl TestSession {
             .expect("value formatting should succeed")
     }
 
+    pub fn value_to_inspect_text(&mut self, module_id: ModuleId, value: Value, ty: Type) -> String {
+        self.session
+            .value_to_inspect_text(module_id, value, ty)
+            .expect("value inspection should succeed")
+    }
+
+    fn value_to_assertion_text(&mut self, module_id: ModuleId, value: Value, ty: Type) -> String {
+        self.session
+            .value_to_inspect_text(module_id, value, ty)
+            .unwrap_or_else(|error| format!("<inspect failed: {error}>"))
+    }
+
+    fn assert_run_value_eq_inner(
+        &mut self,
+        actual: RunValue,
+        expected: ExpectedValue,
+        extra_message: Option<fmt::Arguments<'_>>,
+    ) {
+        if let Err(message) = compare_values(&actual.value, expected.as_value(), "value") {
+            let RunValue {
+                module_id,
+                value,
+                ty,
+            } = actual;
+            let expected_ty = expected.ty.unwrap_or_else(|| ty.clone());
+            let actual = self.value_to_assertion_text(module_id, value, ty);
+            let expected = self.value_to_assertion_text(module_id, expected.value, expected_ty);
+            if let Some(extra_message) = extra_message {
+                panic!(
+                    "Value assertion failed: {message}\nactual: {actual}\nexpected: {expected}\n{extra_message}"
+                );
+            } else {
+                panic!("Value assertion failed: {message}\nactual: {actual}\nexpected: {expected}");
+            }
+        }
+    }
+
+    pub fn assert_run_value_eq(&mut self, src: &str, expected: impl Into<ExpectedValue>) {
+        let actual = self.run_value(src);
+        self.assert_run_value_eq_inner(actual, expected.into(), None);
+    }
+
+    pub fn assert_run_value_eq_with_message(
+        &mut self,
+        src: &str,
+        expected: impl Into<ExpectedValue>,
+        message: fmt::Arguments<'_>,
+    ) {
+        let actual = self.run_value(src);
+        self.assert_run_value_eq_inner(actual, expected.into(), Some(message));
+    }
+
     pub fn std_trait(&self, name: &str) -> TraitId {
         self.session
             .module_env()
@@ -1205,21 +1241,37 @@ impl TestSession {
             .clone()
     }
 
-    /// Compile and run the src and return its execution result (either a value or an error)
-    pub fn try_compile_and_run(&mut self, src: &str) -> CompileRunResult {
+    /// Compile and run the src and return its typed execution result (either a value or an error)
+    pub fn try_compile_and_run_value(&mut self, src: &str) -> CompileRunValueResult {
         // Compile the source.
         let ModuleAndExpr { module_id, expr } =
             self.try_compile(src).map_err(Error::Compilation)?;
 
         // Run the expression if any.
         if let Some(expr) = expr {
+            let ty = expr.ty.ty;
             let arena = &self.session.expect_fresh_module(module_id).hir_arena;
             eval_node(arena, expr.expr, module_id, &expr.locals, &self.session)
                 .map(ControlFlow::into_value)
+                .map(|value| RunValue {
+                    module_id,
+                    value,
+                    ty,
+                })
                 .map_err(Error::Runtime)
         } else {
-            Ok(Value::unit())
+            Ok(RunValue {
+                module_id,
+                value: Value::unit(),
+                ty: Type::unit(),
+            })
         }
+    }
+
+    /// Compile and run the src and return its execution result (either a value or an error)
+    pub fn try_compile_and_run(&mut self, src: &str) -> CompileRunResult {
+        self.try_compile_and_run_value(src)
+            .map(|run_value| run_value.value)
     }
 
     /// Compile and run the src and return its execution result (either a value or an error)
@@ -1230,30 +1282,45 @@ impl TestSession {
         })
     }
 
+    /// Compile and run the src and return its typed value
+    pub fn try_run_value(&mut self, src: &str) -> Result<RunValue, RuntimeError> {
+        self.try_compile_and_run_value(src)
+            .map_err(|error| match error {
+                Error::Compilation(error) => panic!("Compilation error: {error:?}"),
+                Error::Runtime(error) => error,
+            })
+    }
+
     /// Compile and run the src and return its value
     pub fn run(&mut self, src: &str) -> Value {
         self.try_run(src)
             .unwrap_or_else(|error| panic!("Runtime error: {error:?}"))
     }
 
+    /// Compile and run the src and return its typed value
+    pub fn run_value(&mut self, src: &str) -> RunValue {
+        self.try_run_value(src)
+            .unwrap_or_else(|error| panic!("Runtime error: {error:?}"))
+    }
+
     /// Compile and run the src and expect a runtime error
     pub fn fail_run(&mut self, src: &str) -> RuntimeErrorKind {
-        match self.try_run(src) {
-            Ok(value) => panic!(
-                "Expected runtime error, got value: {}",
-                value_to_string_repr(&value)
-            ),
+        match self.try_run_value(src) {
+            Ok(value) => {
+                let rendered = self.value_to_assertion_text(value.module_id, value.value, value.ty);
+                panic!("Expected runtime error, got value: {rendered}");
+            }
             Err(error) => error.kind(),
         }
     }
 
     /// Compile and expect a check error
     pub fn fail_compilation(&mut self, src: &str) -> CompilationError {
-        match self.try_compile_and_run(src) {
-            Ok(value) => panic!(
-                "Expected compilation error, got value: {}",
-                value_to_string_repr(&value)
-            ),
+        match self.try_compile_and_run_value(src) {
+            Ok(value) => {
+                let rendered = self.value_to_assertion_text(value.module_id, value.value, value.ty);
+                panic!("Expected compilation error, got value: {rendered}");
+            }
             Err(error) => match error {
                 Error::Compilation(error) => error,
                 _ => panic!("Expected compilation error, got {error:?}"),
@@ -1269,43 +1336,160 @@ impl TestSession {
 // helper functions to construct values easily to make tests more readable
 
 /// The value of type unit
-pub fn unit() -> Value {
+pub fn unit() -> ExpectedValue {
+    ExpectedValue::typed(unit_value(), Type::unit())
+}
+
+pub fn unit_value() -> Value {
     Value::unit()
 }
 
 /// A primitive boolean value
-pub fn bool(b: bool) -> Value {
+pub fn bool(b: bool) -> ExpectedValue {
+    ExpectedValue::typed(bool_value(b), bool_type())
+}
+
+pub fn bool_value(b: bool) -> Value {
     Value::native(b)
 }
 
 /// A primitive integer value
-pub fn int(n: isize) -> Value {
+pub fn int(n: isize) -> ExpectedValue {
+    ExpectedValue::typed(int_value(n), int_type())
+}
+
+pub fn int_value(n: isize) -> Value {
     Value::native(n)
 }
 
 /// A primitive float value
-pub fn float(f: f64) -> Value {
+pub fn float(f: f64) -> ExpectedValue {
+    ExpectedValue::typed(float_value(f), ferlium::std::math::float_type())
+}
+
+pub fn float_value(f: f64) -> Value {
     Value::native(ferlium::std::math::Float::new(f).unwrap())
 }
 
 /// A primitive string value
-pub fn string(s: &str) -> Value {
+pub fn string(s: &str) -> ExpectedValue {
+    ExpectedValue::typed(string_value(s), string_type())
+}
+
+pub fn string_value(s: &str) -> Value {
     use std::str::FromStr;
     Value::native(ferlium::std::string::String::from_str(s).unwrap())
 }
+
+/// An expected tuple value. If any field lacks a type, the tuple type is left unknown.
+pub fn expected_tuple<I, V>(values: I) -> ExpectedValue
+where
+    I: IntoIterator<Item = V>,
+    V: Into<ExpectedValue>,
+{
+    let mut raw_values = Vec::new();
+    let mut types = Vec::new();
+    let mut fully_typed = true;
+    for value in values {
+        let value = value.into();
+        if let Some(ty) = value.ty {
+            types.push(ty);
+        } else {
+            fully_typed = false;
+        }
+        raw_values.push(value.value);
+    }
+    let value = Value::tuple(raw_values);
+    if fully_typed {
+        ExpectedValue::typed(value, Type::tuple(types))
+    } else {
+        ExpectedValue::raw(value)
+    }
+}
+
+/// An expected array value with a caller-supplied element type.
+pub fn expected_array<I, V>(element_ty: Type, values: I) -> ExpectedValue
+where
+    I: IntoIterator<Item = V>,
+    V: Into<ExpectedValue>,
+{
+    let values = values.into_iter().map(raw_value).collect();
+    ExpectedValue::typed(array_value_from_vec(values), array_type(element_ty))
+}
+
+/// An expected array value. If element types are known and uniform, the array type is preserved.
+pub fn expected_array_infer<I, V>(values: I) -> ExpectedValue
+where
+    I: IntoIterator<Item = V>,
+    V: Into<ExpectedValue>,
+{
+    let mut raw_values = Vec::new();
+    let mut element_ty: Option<Type> = None;
+    let mut fully_typed = true;
+    for value in values {
+        let value = value.into();
+        match (element_ty.as_ref(), value.ty) {
+            (None, Some(ty)) => element_ty = Some(ty),
+            (Some(element_ty), Some(ty)) if *element_ty == ty => {}
+            _ => fully_typed = false,
+        }
+        raw_values.push(value.value);
+    }
+    let value = array_value_from_vec(raw_values);
+    if fully_typed {
+        if let Some(element_ty) = element_ty {
+            ExpectedValue::typed(value, array_type(element_ty))
+        } else {
+            ExpectedValue::raw(value)
+        }
+    } else {
+        ExpectedValue::raw(value)
+    }
+}
+
 /// A variant value of given tag and no values
-pub fn variant_0(tag: &str) -> Value {
-    Value::unit_variant(ustr(tag))
+pub fn variant_0(tag: &str) -> ExpectedValue {
+    ExpectedValue::raw(Value::unit_variant(ustr(tag)))
+}
+
+/// A variant value with an exact runtime payload.
+pub fn variant_raw(tag: &str, payload: impl Into<ExpectedValue>) -> ExpectedValue {
+    ExpectedValue::raw(Value::raw_variant(ustr(tag), raw_value(payload)))
+}
+
+/// A variant value with an exact unit runtime payload.
+pub fn variant_unit(tag: &str) -> ExpectedValue {
+    ExpectedValue::raw(Value::raw_variant(ustr(tag), Value::unit()))
 }
 
 /// A variant value of given tag and exactly 1 value
-pub fn variant_t1(tag: &str, value: Value) -> Value {
-    Value::tuple_variant(ustr(tag), [value])
+pub fn variant_t1(tag: &str, value: impl Into<ExpectedValue>) -> ExpectedValue {
+    ExpectedValue::raw(Value::tuple_variant(ustr(tag), [raw_value(value)]))
 }
 
 /// A variant value of given tag and N values
-pub fn variant_tn(tag: &str, values: impl IntoSVec2<Value>) -> Value {
-    Value::tuple_variant(ustr(tag), values)
+pub fn variant_tn<I, V>(tag: &str, values: I) -> ExpectedValue
+where
+    I: IntoIterator<Item = V>,
+    V: Into<ExpectedValue>,
+{
+    ExpectedValue::raw(Value::tuple_variant(
+        ustr(tag),
+        values.into_iter().map(raw_value).collect::<Vec<_>>(),
+    ))
+}
+
+pub fn none() -> ExpectedValue {
+    ExpectedValue::raw(ferlium::std::option::none())
+}
+
+pub fn some(value: impl Into<ExpectedValue>) -> ExpectedValue {
+    let value = value.into();
+    let ty = value.ty.clone().map(ferlium::std::option::option_type);
+    ExpectedValue {
+        value: ferlium::std::option::some(value.value),
+        ty,
+    }
 }
 
 // macros to construct values easily to make tests more readable
@@ -1314,14 +1498,14 @@ pub fn variant_tn(tag: &str, values: impl IntoSVec2<Value>) -> Value {
 #[macro_export]
 macro_rules! bool_a {
     [] => {
-        ferlium::std::array::array_value_from_vec(vec![])
+        $crate::harness::expected_array(ferlium::std::logic::bool_type(), Vec::<$crate::harness::ExpectedValue>::new())
     };
     [$($elem:expr),+ $(,)?] => {
         {
             let values = vec![
-            $(Value::native::<bool>($elem)),+
+            $($crate::harness::bool($elem)),+
             ];
-            ferlium::std::array::array_value_from_vec(values)
+            $crate::harness::expected_array(ferlium::std::logic::bool_type(), values)
         }
     };
 }
@@ -1330,14 +1514,14 @@ macro_rules! bool_a {
 #[macro_export]
 macro_rules! int_a {
     [] => {
-        ferlium::std::array::array_value_from_vec(vec![])
+        $crate::harness::expected_array(ferlium::std::math::int_type(), Vec::<$crate::harness::ExpectedValue>::new())
     };
     [$($elem:expr),+ $(,)?] => {
         {
             let values = vec![
-            $(Value::native::<ferlium::std::math::Int>($elem)),+
+            $($crate::harness::int($elem)),+
             ];
-            ferlium::std::array::array_value_from_vec(values)
+            $crate::harness::expected_array(ferlium::std::math::int_type(), values)
         }
     };
 }
@@ -1346,14 +1530,14 @@ macro_rules! int_a {
 #[macro_export]
 macro_rules! float_a {
     [] => {
-        ferlium::std::array::array_value_from_vec(vec![])
+        $crate::harness::expected_array(ferlium::std::math::float_type(), Vec::<$crate::harness::ExpectedValue>::new())
     };
     [$($elem:expr),+ $(,)?] => {
         {
             let values = vec![
-            $(Value::native::<ferlium::std::math::Float>(ferlium::std::math::Float::new($elem).unwrap())),+
+            $($crate::harness::float($elem)),+
             ];
-            ferlium::std::array::array_value_from_vec(values)
+            $crate::harness::expected_array(ferlium::std::math::float_type(), values)
         }
     };
 }
@@ -1362,11 +1546,11 @@ macro_rules! float_a {
 #[macro_export]
 macro_rules! int_tuple {
     () => {
-        Value::tuple(vec![])
+        $crate::harness::expected_tuple(Vec::<$crate::harness::ExpectedValue>::new())
     };
     ($($elem:expr),+ $(,)?) => {
-        Value::tuple(vec![
-            $(Value::native::<ferlium::std::math::Int>($elem)),+
+        $crate::harness::expected_tuple(vec![
+            $($crate::harness::int($elem)),+
         ])
     };
 }
@@ -1375,12 +1559,12 @@ macro_rules! int_tuple {
 #[macro_export]
 macro_rules! tuple {
     () => {
-        Value::tuple([])
+        $crate::harness::expected_tuple(Vec::<$crate::harness::ExpectedValue>::new())
     };
     ($($elem:expr),+ $(,)?) => {
-        Value::tuple(vec![
-            $($elem),+
-        ])
+        $crate::harness::expected_tuple(Vec::<$crate::harness::ExpectedValue>::from([
+            $(($elem).into()),+
+        ]))
     };
 }
 
@@ -1388,14 +1572,14 @@ macro_rules! tuple {
 #[macro_export]
 macro_rules! array {
     [] => {
-        ferlium::std::array::array_value_from_vec(vec![])
+        $crate::harness::ExpectedValue::raw(ferlium::std::array::array_value_from_vec(vec![]))
     };
     [$($elem:expr),+ $(,)?] => {
         {
-            let values = vec![
-            $($elem),+
-            ];
-            ferlium::std::array::array_value_from_vec(values)
+            let values = Vec::<$crate::harness::ExpectedValue>::from([
+            $(($elem).into()),+
+            ]);
+            $crate::harness::expected_array_infer(values)
         }
     };
 }

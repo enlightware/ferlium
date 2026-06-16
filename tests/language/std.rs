@@ -12,8 +12,8 @@ use ustr::ustr;
 use crate::effects::test_mod as test_mod_for_effects;
 
 use crate::harness::{
-    TestSession, assert_some_value_eq, bool, float, int, string, unit, value_to_string_repr,
-    variant_0, variant_t1,
+    TestSession, assert_some_value_eq, bool, float, int, none, some, string, unit, variant_0,
+    variant_t1,
 };
 use ferlium::{
     SourceTable,
@@ -22,11 +22,7 @@ use ferlium::{
     hir::value::{LiteralValue, Value},
     hir::{ENodeArena, ENodeId, NodeKind},
     module::{ConcreteTraitImplKey, Module, ShowModuleWithOptions, TraitDictionaryEntry},
-    std::{
-        core_traits_names::VALUE_TRAIT_NAME,
-        option::{none, some},
-        std_module,
-    },
+    std::{core_traits_names::VALUE_TRAIT_NAME, std_module},
     types::effects::{EffType, PrimitiveEffect, effect, effects, no_effects},
 };
 
@@ -1861,7 +1857,10 @@ fn hashing() {
         bool(true)
     );
 
-    let mut run_hash = |src| value_to_string_repr(&session.run(src));
+    let mut run_hash = |src| {
+        let value = session.run_value(src);
+        session.value_to_inspect_text(value.module_id, value.value, value.ty)
+    };
 
     let ordered_12 = run_hash(
         "let mut h = hasher_new(); hasher_write_int(h, 1); hasher_write_int(h, 2); hasher_finish(h)",

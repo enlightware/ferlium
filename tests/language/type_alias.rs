@@ -11,9 +11,9 @@
 use indoc::indoc;
 use ustr::ustr;
 
-use ferlium::{compiler::error::CompilationErrorImpl, format::FormatWith, std::option::some};
+use ferlium::{compiler::error::CompilationErrorImpl, format::FormatWith};
 
-use crate::harness::{TestSession, float, int, string, variant_t1, variant_tn};
+use crate::harness::{TestSession, float, int, some, string, variant_t1, variant_tn};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;

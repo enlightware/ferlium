@@ -1505,7 +1505,7 @@ fn records() {
     );
     assert_val_eq!(
         session.run("let f = |x, y| (x.a, x.a.b, y == x.a); f({a: {a: 3, b: 1}}, {a: 4, b: 1})"),
-        Value::tuple([int_tuple!(3, 1), int(1), bool(false)])
+        tuple!(int_tuple!(3, 1), int(1), bool(false))
     );
     assert_val_eq!(
         session.run("fn l(v) { ((|v| v.x)(v), (|v| v.y)(v)) } l({x:1, y:2})"),

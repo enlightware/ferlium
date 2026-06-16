@@ -26,7 +26,7 @@ use crate::{
 
 // Support for primitive values
 
-/// Native types must implement this so that they can be displayed.
+/// Native types implement this when they need a Rust-side literal/string representation.
 pub trait NativeDisplay {
     /// Format the native value, without type information.
     fn fmt_repr(&self, f: &mut fmt::Formatter) -> fmt::Result;
@@ -43,13 +43,17 @@ impl NativeDisplay for () {
     }
 }
 
-pub trait NativeValue: Any + fmt::Debug + NativeDisplay + 'static {
+pub trait NativeValueType: Any + fmt::Debug + 'static {}
+
+impl<T: Any + fmt::Debug + NativeDisplay + 'static> NativeValueType for T {}
+
+pub trait NativeValue: NativeValueType {
     fn as_any(&self) -> &dyn Any;
     fn as_mut_any(&mut self) -> &mut dyn Any;
     fn into_any(self: B<Self>) -> B<dyn Any>;
 }
 
-impl<T: Any + fmt::Debug + NativeDisplay> NativeValue for T {
+impl<T: NativeValueType> NativeValue for T {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -72,7 +76,7 @@ pub trait LiteralNativeValue:
     fn into_native_value(self: B<Self>) -> B<dyn NativeValue>;
 }
 
-impl<T: NativeValue + Clone + Hash + Eq> LiteralNativeValue for T {
+impl<T: NativeValue + Clone + Hash + Eq + NativeDisplay> LiteralNativeValue for T {
     fn as_any(&self) -> &dyn Any {
         self
     }

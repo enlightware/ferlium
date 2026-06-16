@@ -13,7 +13,6 @@ use indoc::indoc;
 use crate::harness::{TestSession, bool, float, int, unit};
 use ferlium::{
     compiler::error::MutabilityMustBeWhat,
-    hir::value::Value,
     std::core_traits_names::{NUM_TRAIT_NAME, ORD_TRAIT_NAME, VALUE_TRAIT_NAME},
     types::type_scheme::PubTypeConstraint,
 };
@@ -648,7 +647,7 @@ fn early_returns_in_unexpected_places() {
             }
             f()
         "# }),
-        Value::tuple([int(1), bool(true)])
+        tuple!(int(1), bool(true))
     );
 
     // Test return in array index evaluation

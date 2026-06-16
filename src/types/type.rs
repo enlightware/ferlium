@@ -3052,7 +3052,6 @@ pub struct TypeNames {
 mod tests {
     use crate::{
         CompilerSession,
-        hir::value::NativeDisplay,
         std::{
             array::array_type,
             logic::bool_type,
@@ -3065,12 +3064,6 @@ mod tests {
 
     #[derive(Debug)]
     struct SyntheticContainer;
-
-    impl NativeDisplay for SyntheticContainer {
-        fn fmt_repr(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(f, "<synthetic-container>")
-        }
-    }
 
     fn container_kind(element_ty: Type) -> TypeKind {
         TypeKind::Native(b(NativeType::new(

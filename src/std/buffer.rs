@@ -6,7 +6,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use std::{fmt, mem};
+use std::mem;
 
 use ustr::ustr;
 
@@ -23,7 +23,7 @@ use crate::{
             Function, FunctionDefinition, ResolvedArgPassing, ResolvedValueArgPassing,
             UnaryNativeFnMN, UnaryNativeFnRN,
         },
-        value::{NativeDisplay, Value},
+        value::{NativeValueType, Value},
     },
     module::{BlanketTraitImplSubKey, Module, ModuleFunction, TraitDictionaryId, TraitId},
     std::core_traits_names::{INSPECT_TRAIT_NAME, VALUE_TRAIT_NAME},
@@ -47,6 +47,8 @@ use super::value::native_layout_associated_consts;
 pub struct Buffer {
     slots: Vec<Value>,
 }
+
+impl NativeValueType for Buffer {}
 
 impl Buffer {
     pub fn with_capacity(capacity: usize) -> Self {
@@ -86,12 +88,6 @@ impl Buffer {
     pub fn take(&mut self, index: usize) -> Option<Value> {
         self.get_mut(index)
             .map(|slot| mem::replace(slot, Value::uninit()))
-    }
-}
-
-impl NativeDisplay for Buffer {
-    fn fmt_repr(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "<buffer:{}>", self.slots.len())
     }
 }
 

@@ -26,7 +26,7 @@ use crate::{
         BinaryNativeFnRRV, Function, NullaryNativeFnN, TernaryNativeFnRNNN, TernaryNativeFnRRRN,
         UnaryNativeFnMV, UnaryNativeFnRN, UnaryNativeFnRV,
     },
-    hir::value::{NativeDisplay, Value},
+    hir::value::{NativeDisplay, NativeValueType, Value},
     module::{Module, ModuleFunction},
     std::{
         core_traits_names::{
@@ -338,6 +338,8 @@ pub struct StringIterator {
     position: usize,
 }
 
+impl NativeValueType for StringIterator {}
+
 impl StringIterator {
     pub fn next_value(&mut self) -> Value {
         match self.next() {
@@ -380,16 +382,6 @@ impl Iterator for StringIterator {
     }
 }
 
-impl NativeDisplay for StringIterator {
-    fn fmt_repr(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "StringIterator on \"{}\" @ {}",
-            self.string, self.position
-        )
-    }
-}
-
 /// An iterator over the grapheme-aligned parts of a string separated by a substring.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StringSplitIterator {
@@ -400,6 +392,8 @@ pub struct StringSplitIterator {
     next_start: usize,
     finished: bool,
 }
+
+impl NativeValueType for StringSplitIterator {}
 
 impl StringSplitIterator {
     fn slice_grapheme_range(&self, start: usize, end: usize) -> String {
@@ -471,16 +465,6 @@ impl Iterator for StringSplitIterator {
                 Some(part)
             }
         }
-    }
-}
-
-impl NativeDisplay for StringSplitIterator {
-    fn fmt_repr(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "StringSplitIterator on \"{}\" by \"{}\" @ {}",
-            self.string, self.separator, self.next_start
-        )
     }
 }
 

@@ -35,8 +35,7 @@ use crate::ast::UstrSpan;
 use crate::compiler::error::LocatedError;
 use crate::containers::SVec2;
 use crate::containers::b;
-use crate::hir::value::LiteralValue;
-use crate::hir::value::NativeDisplay;
+use crate::hir::value::{LiteralNativeValue, LiteralValue};
 use crate::parser::escapes::apply_string_escapes;
 use crate::std::math::{Float, int_type};
 use crate::std::string::String as MyString;
@@ -45,9 +44,7 @@ use core::str::FromStr;
 use lalrpop_util::ParseError;
 use lalrpop_util::lexer::Token;
 use num_traits::bounds::Bounded;
-use std::any::Any;
 use std::fmt::{Debug, Display};
-use std::hash::Hash;
 
 use crate::FxHashMap;
 use std::sync::LazyLock;
@@ -179,7 +176,7 @@ pub(crate) fn error<R, L, T>(
 /// Make a literal
 pub(crate) fn literal_value<T>(value: T) -> (LiteralValue, Type)
 where
-    T: Any + Clone + Debug + Eq + Hash + NativeDisplay + 'static,
+    T: LiteralNativeValue + 'static,
 {
     (LiteralValue::new_native(value), Type::primitive::<T>())
 }
@@ -187,7 +184,7 @@ where
 /// Make a literal expression and allocate it in the arena
 pub(crate) fn literal_expr<T>(value: T, span: Location, arena: &mut PExprArena) -> PExprId
 where
-    T: Any + Clone + Debug + Eq + Hash + NativeDisplay + 'static,
+    T: LiteralNativeValue + 'static,
 {
     arena.alloc(PExpr::new(
         PExprKind::Literal(LiteralValue::new_native(value), Type::primitive::<T>()),
@@ -206,7 +203,7 @@ pub(crate) fn unit_literal_expr(span: Location, arena: &mut PExprArena) -> PExpr
 /// Make a literal
 pub(crate) fn literal_pattern<T>(value: T, span: Location) -> Pattern
 where
-    T: Any + Clone + Debug + Eq + Hash + NativeDisplay + 'static,
+    T: LiteralNativeValue + 'static,
 {
     Pattern::new(
         PatternKind::Literal(LiteralValue::new_native(value), Type::primitive::<T>()),
@@ -273,7 +270,7 @@ pub(crate) fn parse_hex_int(s: &str) -> Result<isize, String> {
 /// Parse a number, if it is too big, return an error
 fn parse_num_value<F>(s: &str) -> Result<(LiteralValue, Type), String>
 where
-    F: FromStr + Bounded + Display + Clone + Debug + Eq + Hash + NativeDisplay + 'static,
+    F: FromStr + Bounded + Display + LiteralNativeValue + 'static,
 {
     parse_num::<F>(s).map(|value| literal_value(value))
 }
@@ -284,7 +281,7 @@ fn parse_num_literal<F, L, T>(
     span: Location,
 ) -> Result<PExprKind, ParseError<L, T, LocatedError>>
 where
-    F: FromStr + Bounded + Display + Clone + Debug + Eq + Hash + NativeDisplay + 'static,
+    F: FromStr + Bounded + Display + LiteralNativeValue + 'static,
 {
     match parse_num_value::<F>(s) {
         Ok((value, ty)) => Ok(ExprKind::literal(value, ty)),

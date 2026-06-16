@@ -7,8 +7,6 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use std::fmt;
-
 use crate::{
     cached_primitive_ty,
     containers::b,
@@ -16,7 +14,7 @@ use crate::{
         BinaryNativeFnMNN, BinaryNativeFnMRN, BinaryNativeFnRMN, BinaryNativeFnRRN, Function,
         NullaryNativeFnN, UnaryNativeFnRN,
     },
-    hir::value::NativeDisplay,
+    hir::value::NativeValueType,
     module::Module,
     std::{
         core_traits_names::{CAST_TRAIT_NAME, INSPECT_TRAIT_NAME, VALUE_TRAIT_NAME},
@@ -36,11 +34,7 @@ use ustr::ustr;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct HashValue(u64);
 
-impl NativeDisplay for HashValue {
-    fn fmt_repr(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "hash({})", self.0)
-    }
-}
+impl NativeValueType for HashValue {}
 
 pub fn hash_type() -> Type {
     cached_primitive_ty!(HashValue)
@@ -51,6 +45,8 @@ pub fn hash_type() -> Type {
 pub struct Hasher {
     state: u64,
 }
+
+impl NativeValueType for Hasher {}
 
 impl Default for Hasher {
     fn default() -> Self {
@@ -102,12 +98,6 @@ impl Hasher {
     }
 }
 
-impl NativeDisplay for Hasher {
-    fn fmt_repr(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "hasher {{ state = {} }}", self.state)
-    }
-}
-
 /// Mix one 64-bit word into the running state.
 fn mix_word(state: u64, word: u64) -> u64 {
     // Based on a splitmix64-style avalanche, but used incrementally.
@@ -142,6 +132,8 @@ struct UnorderedHasher {
     count: u64,
 }
 
+impl NativeValueType for UnorderedHasher {}
+
 impl UnorderedHasher {
     pub fn new() -> Self {
         Self {
@@ -163,16 +155,6 @@ impl UnorderedHasher {
         h.write_u64(self.xor);
         h.write_u64(self.count);
         h.finish()
-    }
-}
-
-impl NativeDisplay for UnorderedHasher {
-    fn fmt_repr(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "UnorderedHasher {{ sum: {}, xor: {}, count: {} }}",
-            self.sum, self.xor, self.count
-        )
     }
 }
 

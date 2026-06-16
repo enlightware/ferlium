@@ -26,7 +26,7 @@ use test_log::test;
 use indoc::indoc;
 use ustr::ustr;
 
-use crate::harness::{TestSession, bool, float, int, string};
+use crate::harness::{TestSession, bool, float, int, string, variant_raw, variant_unit};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
@@ -2285,7 +2285,7 @@ fn create_record_enum_values() {
 
             Message::Move { y: 30 + 10, x: 30 }
         "# }),
-        Value::raw_variant(ustr("Move"), Value::tuple([int(30), int(40)]))
+        variant_raw("Move", tuple!(int(30), int(40)))
     );
 
     let mod_src = indoc! { "
@@ -2298,7 +2298,7 @@ fn create_record_enum_values() {
         session.run(&format!(
             "{mod_src} Message::Flag {{ v1: false, v0: true }}"
         )),
-        Value::raw_variant(ustr("Flag"), Value::tuple([bool(true), bool(false)]))
+        variant_raw("Flag", tuple!(bool(true), bool(false)))
     );
 
     assert_eq!(
@@ -2344,7 +2344,7 @@ fn create_tuple_enum_values() {
 
             Player::Positioned(30 + 10, 0)
         "# }),
-        Value::raw_variant(ustr("Positioned"), Value::tuple([int(40), int(0)]))
+        variant_raw("Positioned", tuple!(int(40), int(0)))
     );
 
     let mod_src = indoc! { "
@@ -2355,11 +2355,11 @@ fn create_tuple_enum_values() {
     " };
     assert_val_eq!(
         session.run(&format!(r#"{mod_src} Player::Basic("ok")"#)),
-        Value::raw_variant(ustr("Basic"), Value::tuple([string("ok")]))
+        variant_raw("Basic", tuple!(string("ok")))
     );
     assert_val_eq!(
         session.run(&format!("{mod_src} Player::State(false)")),
-        Value::raw_variant(ustr("State"), Value::tuple([bool(false)]))
+        variant_raw("State", tuple!(bool(false)))
     );
     session
         .fail_compilation(&format!("{mod_src} Player::State(1.0)"))
@@ -2388,25 +2388,22 @@ fn create_mix_enum_values() {
 
     assert_val_eq!(
         session.run(&format!("{mod_src} Message::Quit")),
-        Value::raw_variant(ustr("Quit"), Value::unit())
+        variant_unit("Quit")
     );
 
     assert_val_eq!(
         session.run(&format!("{mod_src} Message::Move {{ x: 30, y: 40 }}")),
-        Value::raw_variant(ustr("Move"), Value::tuple(vec![int(30), int(40)]))
+        variant_raw("Move", tuple!(int(30), int(40)))
     );
 
     assert_val_eq!(
         session.run(&format!(r#"{mod_src} Message::Write("Hello, world!")"#)),
-        Value::raw_variant(ustr("Write"), Value::tuple(vec![string("Hello, world!")])),
+        variant_raw("Write", tuple!(string("Hello, world!"))),
     );
 
     assert_val_eq!(
         session.run(&format!("{mod_src} Message::ChangeColor(255, 0, 0)")),
-        Value::raw_variant(
-            ustr("ChangeColor"),
-            Value::tuple(vec![int(255), int(0), int(0)])
-        )
+        variant_raw("ChangeColor", tuple!(int(255), int(0), int(0)))
     );
 
     let value = session.run(&format!("{mod_src} Message::Callback(|x| x + 1)"));
@@ -2841,7 +2838,7 @@ fn create_record_struct_values() {
                 is_active: true
             }
         "# }),
-        Value::tuple(vec![int(30), bool(true), string("Alice")])
+        tuple!(int(30), bool(true), string("Alice"))
     );
 
     let mod_src = "struct Person { name: string, is_active: bool }";
@@ -2849,7 +2846,7 @@ fn create_record_struct_values() {
         session.run(&format!(
             r#"{mod_src} Person {{ name: "Alice", is_active: true }}"#
         )),
-        Value::tuple(vec![bool(true), string("Alice")])
+        tuple!(bool(true), string("Alice"))
     );
 
     assert_eq!(
@@ -2899,29 +2896,29 @@ fn create_tuple_struct_values() {
     let mut session = TestSession::new();
     assert_val_eq!(
         session.run(r#"struct Email(string) Email(string_concat("h", "i"))"#),
-        Value::tuple(vec![string("hi")])
+        tuple!(string("hi"))
     );
     assert_val_eq!(
         session.run(r#"struct Email(string) Email("hi")"#),
-        Value::tuple(vec![string("hi")])
+        tuple!(string("hi"))
     );
 
     assert_val_eq!(
         session.run(r#"struct Email((string, )) Email((string_concat("h", "i"), ))"#),
-        Value::tuple(vec![Value::tuple(vec![string("hi")])])
+        tuple!(tuple!(string("hi")))
     );
     assert_val_eq!(
         session.run(r#"struct Email((string, )) Email(("hi", ))"#),
-        Value::tuple(vec![Value::tuple(vec![string("hi")])])
+        tuple!(tuple!(string("hi")))
     );
 
     assert_val_eq!(
         session.run(r#"struct Point(int, int) Point(1 + 0, 2)"#),
-        Value::tuple(vec![int(1), int(2)])
+        tuple!(int(1), int(2))
     );
     assert_val_eq!(
         session.run(r#"struct Point(float, float) Point(1.0, 2.0)"#),
-        Value::tuple(vec![float(1.0), float(2.0)])
+        tuple!(float(1.0), float(2.0))
     );
 }
 
@@ -2962,7 +2959,7 @@ fn struct_destructuring() {
             let Pair(x, y) = Pair(1, 2);
             (x, y)
         "# }),
-        Value::tuple([int(1), int(2)])
+        tuple!(int(1), int(2))
     );
     assert_val_eq!(
         session.run(indoc! { r#"
@@ -2988,7 +2985,7 @@ fn struct_destructuring() {
             let ((feet, inches), Point { x, y }) = ((3, 10), Point { x: 3, y: -10 });
             (feet, inches, x, y)
         "# }),
-        Value::tuple([int(3), int(10), int(3), int(-10)])
+        tuple!(int(3), int(10), int(3), int(-10))
     );
 
     assert_eq!(

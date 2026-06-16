@@ -20,7 +20,7 @@ use crate::{
     compiler::error::RuntimeErrorKind,
     format::{FormatWith, write_with_separator},
     hir::function::{ResolvedArgPassing, ResolvedValueArgPassing, TrivialCopy},
-    hir::value::{FunctionHiddenArgValue, FunctionValue, NativeValue, Value},
+    hir::value::{FunctionHiddenArgValue, FunctionValue, NativeValue, NativeValueType, Value},
     module::{
         ELocalDecl as LocalDecl, ExtraParameterId, FunctionId, LocalDebugVisibility, LocalDeclId,
         LocalFunctionId, ModuleFunction, ModuleId, ProjectionIndex, ResolvedLocalClone,
@@ -627,6 +627,8 @@ pub struct Place {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlaceResult(Place);
 
+impl NativeValueType for PlaceResult {}
+
 impl PlaceResult {
     pub(crate) fn new(place: Place) -> Self {
         Self(place)
@@ -634,12 +636,6 @@ impl PlaceResult {
 
     fn into_place(self) -> Place {
         self.0
-    }
-}
-
-impl crate::hir::value::NativeDisplay for PlaceResult {
-    fn fmt_repr(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "<place>")
     }
 }
 

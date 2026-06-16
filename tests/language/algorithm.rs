@@ -11,11 +11,10 @@ use test_log::test;
 
 use indoc::indoc;
 
-use crate::harness::{TestSession, int, string};
+use crate::harness::{TestSession, int, raw_value, string};
 
 use ferlium::{
     call_fn,
-    hir::value::Value,
     module::ModuleId,
     run_fn_native,
     std::{array::array_type, math::int_type, string::String as Str},
@@ -66,7 +65,7 @@ fn quicksort() {
         .compile(include_str!("../modules/quicksort.fer"))
         .module_id;
     let array_ty = array_type(int_type());
-    let input = int_a![5, 3, 8, 1, 2, 7, 4, 11, 0];
+    let input = raw_value(int_a![5, 3, 8, 1, 2, 7, 4, 11, 0]);
     assert_val_eq!(
         call_fn!(session.session(), module_id, "quicksort_int_a", [input => array_ty] -> array_ty)
             .unwrap(),
@@ -87,9 +86,9 @@ fn sieve() {
         call_fn!(session.session(), module_id, "primes_up_to", [n => int_type()] -> array_ty)
             .unwrap()
     };
-    assert_val_eq!(primes_up_to(int(10)), int_a![2, 3, 5, 7]);
+    assert_val_eq!(primes_up_to(raw_value(int(10))), int_a![2, 3, 5, 7]);
     assert_val_eq!(
-        primes_up_to(int(30)),
+        primes_up_to(raw_value(int(30))),
         int_a![2, 3, 5, 7, 11, 13, 17, 19, 23, 29]
     );
 
