@@ -9,6 +9,7 @@
 
 use ustr::ustr;
 
+use ferlium::compiler::error::CompilationErrorImpl;
 use ferlium::hir::value::Value;
 use ferlium::{Compiler, Path, eval::eval_node};
 use test_log::test;
@@ -305,6 +306,21 @@ fn recursive_trait_improvement_probe_from_grammar_fuzzer_does_not_overflow_stack
     session
         .fail_compilation("{filter_map} - 0[0] == 0")
         .expect_unbound_ty_var();
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn inferred_function_value_derivation_from_grammar_fuzzer_does_not_panic() {
+    let mut session = TestSession::new();
+    let error = session
+        .fail_compilation("|a| a = for a in [] { a() }")
+        .into_inner();
+    match error {
+        CompilationErrorImpl::TraitImplNotFound { trait_ref, .. } => {
+            assert_eq!(trait_ref, "Value");
+        }
+        other => panic!("expected TraitImplNotFound for Value, got {other:?}"),
+    }
 }
 
 #[test]

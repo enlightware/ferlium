@@ -2305,7 +2305,9 @@ impl Deriver for ValueDeriver {
     ) -> Result<Option<TraitImplId>, InternalCompilationError> {
         assert!(input_types.len() == 1);
         let ty = input_types[0];
-        assert!(ty.is_constant());
+        if !ty.is_constant() {
+            return Ok(None);
+        }
 
         derive_structural_value_impl(trait_id, input_types, span, arena, solver)
     }
