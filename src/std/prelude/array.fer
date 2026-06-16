@@ -253,6 +253,7 @@ impl Concat {
 }
 
 // Iterator and Seq for array
+#[private_repr]
 pub struct ArrayIterator<A>
 where
 	A: Value

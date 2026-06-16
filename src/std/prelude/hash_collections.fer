@@ -30,6 +30,7 @@ where
 pub type set<V> = HashSet<V>;
 
 /// An iterator over the values of a `HashSet<V>`.
+#[private_repr]
 pub struct HashSetIterator<V>
 where
 	V: Value
@@ -261,6 +262,7 @@ where
 pub type map<K, V> = HashMap<K, V>;
 
 /// An iterator over the key-value pairs of a `HashMap<K, V>`.
+#[private_repr]
 pub struct HashMapIterator<K, V>
 where
 	K: Value,

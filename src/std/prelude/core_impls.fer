@@ -18,6 +18,7 @@ pub struct Range {
 }
 
 /// An iterator over a range.
+#[private_repr]
 pub struct RangeIterator {
 	range: Range,
 	next: int,
@@ -63,6 +64,7 @@ pub struct RangeInclusive {
 }
 
 /// An iterator over an inclusive range.
+#[private_repr]
 pub struct RangeInclusiveIterator {
 	range: RangeInclusive,
 	next: int,
@@ -253,6 +255,7 @@ pub fn collect(value) {
 }
 
 /// An iterator that maps a function over another iterator.
+#[private_repr]
 pub struct MapIterator<I, T, O ! MapperEffect> {
 	iterator: I,
 	mapper: (T) -> O ! MapperEffect,
@@ -280,6 +283,7 @@ where
 }
 
 /// An iterator that filters another iterator with a predicate.
+#[private_repr]
 pub struct FilterIterator<I, T ! PredicateEffect> {
 	iterator: I,
 	filter: (T) -> bool ! PredicateEffect,
@@ -313,6 +317,7 @@ where
 }
 
 /// An iterator that uses a function to both filter and map another iterator.
+#[private_repr]
 pub struct FilterMapIterator<I, T, O ! MapperEffect> {
 	iterator: I,
 	filter_map: (T) -> Option<O> ! MapperEffect,
@@ -347,6 +352,7 @@ where
 }
 
 /// An iterator that zips two iterators together, yielding pairs of their items.
+#[private_repr]
 pub struct ZipIterator<I, J, A, B> {
 	left: I,
 	right: J,
@@ -374,6 +380,7 @@ pub fn zip(seq1, seq2) {
 }
 
 /// An iterator that yields (index, item) pairs.
+#[private_repr]
 pub struct EnumerateIterator<I, T> {
 	iterator: I,
 	index: int,
@@ -401,6 +408,7 @@ pub fn enumerate(seq) {
 }
 
 /// An iterator that yields at most n items from another iterator.
+#[private_repr]
 pub struct TakeIterator<I, T> {
 	iterator: I,
 	remaining: int,
@@ -431,6 +439,7 @@ pub fn take(seq, n) {
 }
 
 /// An iterator that skips the first n items of another iterator.
+#[private_repr]
 pub struct SkipIterator<I, T> {
 	iterator: I,
 	to_skip: int,
@@ -460,6 +469,7 @@ pub fn skip(seq, n) {
 }
 
 /// An iterator that chains two iterators of the same item type together.
+#[private_repr]
 pub struct ChainIterator<I, J, T> {
 	first: I,
 	second: J,

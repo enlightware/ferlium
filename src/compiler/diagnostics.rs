@@ -100,6 +100,9 @@ pub(crate) fn diagnostics_from_error(
         | UnsupportedTraitDefinition { span, .. }
         | InvalidEnumDefaultAttribute { span, .. }
         | InvalidAttribute { span, .. }
+        | PrivateReprAccess {
+            access_span: span, ..
+        }
         | InfiniteType { span, .. }
         | InvalidRecursiveType { span, .. }
         | UnboundTypeVar { span, .. }

@@ -730,6 +730,20 @@ impl<'a> TraitSolver<'a> {
         imp.public || self.private_impl_scope.last().copied() == Some(module_id)
     }
 
+    pub(crate) fn reject_inaccessible_private_repr(
+        &self,
+        id: TypeDefId,
+        access_span: Location,
+    ) -> Result<(), InternalCompilationError> {
+        if id.module != self.current_type_defs.module_id && self.type_def(id).has_private_repr() {
+            return Err(internal_compilation_error!(PrivateReprAccess {
+                type_def: id,
+                access_span,
+            }));
+        }
+        Ok(())
+    }
+
     pub fn trait_def(&self, id: TraitId) -> &Trait {
         trait_def_from_parts(
             self.current_type_defs.module_id,
@@ -2372,6 +2386,7 @@ impl<'a> TraitSolver<'a> {
             let ty_data = input_ty.data();
             let output_ty = if ty_data.is_named() {
                 let named = ty_data.as_named().unwrap().clone();
+                self.reject_inaccessible_private_repr(named.def, fn_span)?;
                 self.type_def(named.def)
                     .instantiated_shape_with_effects(&named.params, &named.effect_params)
             } else {

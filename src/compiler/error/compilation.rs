@@ -706,6 +706,10 @@ pub enum CompilationErrorImpl<S: Scope> {
         expected_decl: S::TypeDefId,
         expected_span: Location,
     },
+    PrivateReprAccess {
+        type_def: S::TypeDefId,
+        access_span: Location,
+    },
     InfiniteType {
         kind: InfiniteTypeKind<S>,
         span: Location,
@@ -1237,6 +1241,15 @@ impl FormatWith<SourceTable> for CompilationError {
                 expected_decl.0,
                 fmt_span(expected_span),
                 fmt_span(&expected_decl.1),
+            ),
+            PrivateReprAccess {
+                type_def,
+                access_span,
+            } => write!(
+                f,
+                "Representation of `{}` is private and cannot be accessed in {}",
+                type_def.0,
+                fmt_span(access_span)
             ),
             InfiniteType { kind, span } => match kind {
                 InfiniteTypeKind::TypeVariableCycle { ty_var, ty } => {
@@ -1968,6 +1981,16 @@ impl CompilationError {
                     current_span,
                     expected_decl,
                     expected_span,
+                })
+            }
+            PrivateReprAccess {
+                type_def,
+                access_span,
+            } => {
+                let type_def = type_def_origin_from_internal(type_def, access_span, env);
+                compilation_error!(PrivateReprAccess {
+                    type_def,
+                    access_span
                 })
             }
             InfiniteType { kind, span } => {

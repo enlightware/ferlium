@@ -57,6 +57,8 @@ use crate::types::effects::{EffType, Effect, EffectVar, PrimitiveEffect};
 use crate::types::mutability::{MutType, MutVar};
 use crate::types::type_scheme::TypeScheme;
 
+pub const PRIVATE_REPR_ATTRIBUTE: &str = "private_repr";
+
 // use crate::types::typing_env::Local;
 
 #[macro_export]
@@ -1281,6 +1283,12 @@ fn write_product_docs(
 }
 
 impl TypeDef {
+    pub fn has_private_repr(&self) -> bool {
+        self.attributes
+            .iter()
+            .any(|attribute| attribute.path.0 == ustr(PRIVATE_REPR_ATTRIBUTE))
+    }
+
     pub fn param_names(&self) -> impl ExactSizeIterator<Item = Ustr> + '_ {
         self.generic_params.iter().map(|(name, _)| *name)
     }

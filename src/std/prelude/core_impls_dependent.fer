@@ -84,6 +84,7 @@ where
 }
 
 /// An iterator over array parts split around a single element separator.
+#[private_repr]
 pub struct ArraySplitElementIterator<A>
 	where A: Value
 {
@@ -121,6 +122,7 @@ where
 }
 
 /// An iterator over array parts split around an array separator.
+#[private_repr]
 pub struct ArraySplitIterator<A>
 	where A: Value
 {

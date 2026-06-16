@@ -1133,6 +1133,7 @@ impl UnifiedTypeInference {
             let unify_to_ty = if ty_data.is_named() {
                 let named = ty_data.as_named().unwrap().clone();
                 drop(ty_data);
+                trait_solver.reject_inaccessible_private_repr(named.def, span)?;
                 Some(
                     trait_solver
                         .type_def(named.def)

@@ -101,6 +101,206 @@ fn private_function_is_hidden_across_modules_by_default() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn private_struct_constructor_is_hidden_across_modules_by_default() {
+    let mut session = TestSession::new();
+
+    compile_module(
+        &mut session,
+        "base",
+        indoc! { r#"
+            struct Hidden {
+                value: int,
+            }
+        "# },
+    );
+    assert!(
+        session
+            .try_compile_module(
+                "user",
+                "pub fn result() -> int { let hidden = base::Hidden { value: 1 }; hidden.value }",
+            )
+            .is_err(),
+        "module-local struct constructors should not be callable from another module"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn private_enum_variant_constructor_is_hidden_across_modules_by_default() {
+    let mut session = TestSession::new();
+
+    compile_module(
+        &mut session,
+        "base",
+        indoc! { r#"
+            enum Hidden {
+                Value(int),
+            }
+        "# },
+    );
+    assert!(
+        session
+            .try_compile_module("user", "pub fn result() { base::Hidden::Value(1) }",)
+            .is_err(),
+        "module-local enum variant constructors should not be callable from another module"
+    );
+}
+
+fn private_repr_struct_module_src() -> &'static str {
+    indoc! { r#"
+        pub trait ToInt<Self> {
+            fn to_int(value: Self) -> int;
+        }
+
+        #[private_repr]
+        pub struct Secret {
+            value: int,
+        }
+
+        pub fn make(value: int) -> Secret {
+            Secret { value }
+        }
+
+        pub fn value(value: Secret) -> int {
+            value.value
+        }
+
+        impl ToInt for Secret {
+            fn to_int(value: Secret) -> int {
+                value.value
+            }
+        }
+    "# }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn private_repr_type_can_be_named_and_used_through_public_trait_impls() {
+    let mut session = TestSession::new();
+
+    compile_module(&mut session, "base", private_repr_struct_module_src());
+    compile_module(
+        &mut session,
+        "user",
+        indoc! { r#"
+            pub fn roundtrip(value: base::Secret) -> base::Secret {
+                value
+            }
+
+            pub fn result() -> int {
+                base::to_int(roundtrip(base::make(5)))
+            }
+        "# },
+    );
+
+    assert_val_eq!(session.run("user::result()"), int(5));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn private_repr_struct_can_be_constructed_and_projected_in_defining_module() {
+    let mut session = TestSession::new();
+
+    compile_module(&mut session, "base", private_repr_struct_module_src());
+
+    assert_val_eq!(session.run("base::value(base::make(7))"), int(7));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn private_repr_struct_constructor_is_hidden_across_modules() {
+    let mut session = TestSession::new();
+
+    compile_module(&mut session, "base", private_repr_struct_module_src());
+    assert!(
+        session
+            .try_compile_module(
+                "user",
+                "pub fn result() -> int { base::value(base::Secret { value: 1 }) }",
+            )
+            .is_err(),
+        "private_repr struct constructors should not be callable from another module"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn private_repr_struct_fields_are_hidden_across_modules() {
+    let mut session = TestSession::new();
+
+    compile_module(&mut session, "base", private_repr_struct_module_src());
+    assert!(
+        session
+            .try_compile_module(
+                "user",
+                "pub fn result() -> int { let value = base::make(1); value.value }",
+            )
+            .is_err(),
+        "private_repr struct fields should not be projectable from another module"
+    );
+}
+
+fn private_repr_enum_module_src() -> &'static str {
+    indoc! { r#"
+        #[private_repr]
+        pub enum Secret {
+            Empty,
+            Value(int),
+        }
+
+        pub fn make(value: int) -> Secret {
+            Secret::Value(value)
+        }
+
+        pub fn value(value: Secret) -> int {
+            match value {
+                Secret::Empty => 0,
+                Secret::Value(v) => v,
+            }
+        }
+    "# }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn private_repr_enum_variant_constructor_is_hidden_across_modules() {
+    let mut session = TestSession::new();
+
+    compile_module(&mut session, "base", private_repr_enum_module_src());
+    assert!(
+        session
+            .try_compile_module("user", "pub fn result() { base::Secret::Value(1) }",)
+            .is_err(),
+        "private_repr enum variant constructors should not be callable from another module"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn private_repr_enum_patterns_are_hidden_across_modules() {
+    let mut session = TestSession::new();
+
+    compile_module(&mut session, "base", private_repr_enum_module_src());
+    assert!(
+        session
+            .try_compile_module(
+                "user",
+                indoc! { r#"
+                    pub fn result() -> int {
+                        match base::make(1) {
+                            base::Secret::Empty => 0,
+                            base::Secret::Value(value) => value,
+                        }
+                    }
+                "# },
+            )
+            .is_err(),
+        "private_repr enum variants should not be destructurable from another module"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn pub_function_is_visible_across_modules() {
     let mut session = TestSession::new();
 

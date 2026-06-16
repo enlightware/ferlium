@@ -10,6 +10,7 @@ use crate::{
     Location,
     ast::{self, UstrSpan},
     compiler::error::InternalCompilationError,
+    internal_compilation_error,
     module::{
         Module, ModuleFunction, ModuleId, Modules, TraitId, TypeDefId,
         id::Id,
@@ -307,6 +308,20 @@ impl<'m> ModuleEnv<'m> {
             .and_then(|module| module.try_type_def(id))
     }
 
+    fn reject_inaccessible_private_repr(
+        &self,
+        id: TypeDefId,
+        access_span: Location,
+    ) -> Result<(), InternalCompilationError> {
+        if id.module != self.current.module_id() && self.type_def(id).has_private_repr() {
+            return Err(internal_compilation_error!(PrivateReprAccess {
+                type_def: id,
+                access_span,
+            }));
+        }
+        Ok(())
+    }
+
     pub fn type_def_for_construction(
         &self,
         path: &ast::Path,
@@ -328,6 +343,10 @@ impl<'m> ModuleEnv<'m> {
                     let variants = ty_data.as_variant().unwrap();
                     let variant = variants.iter().find(|(name, _)| *name == variant_name);
                     if let Some((tag, _)) = variant {
+                        self.reject_inaccessible_private_repr(
+                            ty_def,
+                            path.span().unwrap_or(ty_def_data.span),
+                        )?;
                         let td = TypeDefLookupResult::Enum(ty_def, *tag);
                         return Ok(Some((module_id, td)));
                     }
@@ -340,6 +359,10 @@ impl<'m> ModuleEnv<'m> {
                 .get_module_member(segments, &|name, module| module.get_type_def_id(ustr(name)))?
             {
                 if self.type_def(ty_def).is_struct_like() {
+                    self.reject_inaccessible_private_repr(
+                        ty_def,
+                        path.span().unwrap_or(self.type_def(ty_def).span),
+                    )?;
                     let td = TypeDefLookupResult::Struct(ty_def);
                     return Ok(Some((module_id, td)));
                 }

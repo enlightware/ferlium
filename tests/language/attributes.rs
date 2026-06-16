@@ -123,6 +123,18 @@ fn type_def_attributes_are_preserved_in_hir_metadata() {
         "Person",
     );
     assert_multi_attributes(&attributes);
+
+    let attributes = attrs(
+        indoc! { r#"
+            #[private_repr]
+            pub struct Secret {
+                value: int,
+            }
+        "# },
+        "Secret",
+    );
+    assert_eq!(attributes.len(), 1);
+    assert_eq!(attributes[0].path.0, ustr("private_repr"));
 }
 
 fn assert_multi_attributes(attributes: &[ast::Attribute]) {
@@ -232,6 +244,71 @@ fn place_result_attribute_is_rejected_in_user_code() {
             );
         }
         other => panic!("expected unsafe feature error, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn private_repr_attribute_rejects_arguments() {
+    let mut session = TestSession::new();
+    match session
+        .fail_compilation(indoc! { r#"
+            #[private_repr(reason = "hidden")]
+            pub struct Secret {
+                value: int,
+            }
+        "# })
+        .into_inner()
+    {
+        CompilationErrorImpl::InvalidAttribute {
+            attribute_name,
+            target,
+            kind,
+            ..
+        } => {
+            assert_eq!(attribute_name, ustr("private_repr"));
+            assert_eq!(
+                target,
+                AttributeTarget::TypeDef {
+                    name: ustr("Secret")
+                }
+            );
+            assert_eq!(kind, InvalidAttributeKind::HasArguments);
+        }
+        other => panic!("expected invalid attribute error, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn private_repr_attribute_rejects_duplicates() {
+    let mut session = TestSession::new();
+    match session
+        .fail_compilation(indoc! { r#"
+            #[private_repr]
+            #[private_repr]
+            pub struct Secret {
+                value: int,
+            }
+        "# })
+        .into_inner()
+    {
+        CompilationErrorImpl::InvalidAttribute {
+            attribute_name,
+            target,
+            kind,
+            ..
+        } => {
+            assert_eq!(attribute_name, ustr("private_repr"));
+            assert_eq!(
+                target,
+                AttributeTarget::TypeDef {
+                    name: ustr("Secret")
+                }
+            );
+            assert_eq!(kind, InvalidAttributeKind::Duplicate);
+        }
+        other => panic!("expected invalid attribute error, got {other:?}"),
     }
 }
 

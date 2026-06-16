@@ -4,7 +4,8 @@ use crate::compiler::error::{
 };
 use crate::std::{array::array_type, value::NO_DERIVE_VALUE_ATTRIBUTE};
 use crate::types::r#type::{
-    BareNativeTypeB, TypeAliasEntry, TypeDef as HirTypeDef, TypeKind, store_types,
+    BareNativeTypeB, PRIVATE_REPR_ATTRIBUTE, TypeAliasEntry, TypeDef as HirTypeDef, TypeKind,
+    store_types,
 };
 use crate::types::type_substitution::instantiate_type;
 
@@ -568,40 +569,57 @@ fn validate_type_def_attributes(
     is_std_module: bool,
 ) -> Result<(), InternalCompilationError> {
     let mut has_no_derive_value = false;
+    let mut has_private_repr = false;
     for attribute in &type_def.attributes {
-        if attribute.path.0 != ustr(NO_DERIVE_VALUE_ATTRIBUTE) {
-            continue;
+        match attribute.path.0.as_str() {
+            NO_DERIVE_VALUE_ATTRIBUTE => {
+                if !is_std_module {
+                    return Err(
+                        InternalCompilationError::new_unsafe_feature_use_not_allowed(
+                            UnsafeFeature::TypeAttribute(attribute.path.0),
+                            attribute.span,
+                        ),
+                    );
+                }
+                validate_flag_type_def_attribute(type_def, attribute, &mut has_no_derive_value)?;
+            }
+            PRIVATE_REPR_ATTRIBUTE => {
+                validate_flag_type_def_attribute(type_def, attribute, &mut has_private_repr)?;
+            }
+            _ => {
+                continue;
+            }
         }
-        if !is_std_module {
-            return Err(
-                InternalCompilationError::new_unsafe_feature_use_not_allowed(
-                    UnsafeFeature::TypeAttribute(attribute.path.0),
-                    attribute.span,
-                ),
-            );
-        }
-        if !attribute.items.is_empty() {
-            return Err(internal_compilation_error!(InvalidAttribute {
-                attribute_name: attribute.path.0,
-                target: AttributeTarget::TypeDef {
-                    name: type_def.name.0,
-                },
-                kind: InvalidAttributeKind::HasArguments,
-                span: attribute.span,
-            }));
-        }
-        if has_no_derive_value {
-            return Err(internal_compilation_error!(InvalidAttribute {
-                attribute_name: attribute.path.0,
-                target: AttributeTarget::TypeDef {
-                    name: type_def.name.0,
-                },
-                kind: InvalidAttributeKind::Duplicate,
-                span: attribute.span,
-            }));
-        }
-        has_no_derive_value = true;
     }
+    Ok(())
+}
+
+fn validate_flag_type_def_attribute(
+    type_def: &ast::PTypeDef,
+    attribute: &ast::Attribute,
+    seen: &mut bool,
+) -> Result<(), InternalCompilationError> {
+    if !attribute.items.is_empty() {
+        return Err(internal_compilation_error!(InvalidAttribute {
+            attribute_name: attribute.path.0,
+            target: AttributeTarget::TypeDef {
+                name: type_def.name.0,
+            },
+            kind: InvalidAttributeKind::HasArguments,
+            span: attribute.span,
+        }));
+    }
+    if *seen {
+        return Err(internal_compilation_error!(InvalidAttribute {
+            attribute_name: attribute.path.0,
+            target: AttributeTarget::TypeDef {
+                name: type_def.name.0,
+            },
+            kind: InvalidAttributeKind::Duplicate,
+            span: attribute.span,
+        }));
+    }
+    *seen = true;
     Ok(())
 }
 

@@ -260,6 +260,13 @@ pub(super) fn compilation_error_to_data(
                 fmt_span(&expected_decl.1),
             ),
         )],
+        PrivateReprAccess {
+            type_def,
+            access_span,
+        } => vec![error_data_from_location(
+            access_span,
+            format!("Representation of `{}` is private", type_def.0),
+        )],
         InfiniteType { kind, span } => {
             let message = match kind {
                 InfiniteTypeKind::TypeVariableCycle { ty_var, ty } => {

@@ -1092,6 +1092,9 @@ fn map() {
         ),
         tuple!(some(int(1)), some(int(2)), some(int(3)), none())
     );
+    session.fail_compilation(
+        "let iterator = iter([0, 1, 2]); MapIterator { iterator, mapper: |x| x + 1 }",
+    );
     use PrimitiveEffect::*;
     test_mod_for_effects(
         &mut session,
