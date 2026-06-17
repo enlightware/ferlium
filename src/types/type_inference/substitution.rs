@@ -1,7 +1,7 @@
 use std::mem;
 
 use crate::{
-    FxHashSet,
+    FxHashMap, FxHashSet,
     format::FormatWith,
     hir::dictionary::DictionaryReq,
     hir::{self, FnInstData},
@@ -70,31 +70,31 @@ impl UnifiedTypeInference {
     }
 
     pub fn substitute_in_type(&mut self, ty: Type) -> Type {
-        substitute_type(ty, &mut SubstituteTypes(self))
+        substitute_type(ty, &mut SubstituteTypes::new(self))
     }
 
     pub fn substitute_in_types(&mut self, tys: &[Type]) -> Vec<Type> {
-        substitute_types(tys, &mut SubstituteTypes(self))
+        substitute_types(tys, &mut SubstituteTypes::new(self))
     }
 
     pub fn substitute_in_types_in_place(&mut self, tys: &mut [Type]) {
-        substitute_types_in_place(tys, &mut SubstituteTypes(self));
+        substitute_types_in_place(tys, &mut SubstituteTypes::new(self));
     }
 
     pub fn substitute_in_fn_type(&mut self, fn_ty: &FnType) -> FnType {
-        substitute_fn_type(fn_ty, &mut SubstituteTypes(self))
+        substitute_fn_type(fn_ty, &mut SubstituteTypes::new(self))
     }
 
     pub fn substitute_in_fn_type_in_place(&mut self, fn_ty: &mut FnType) {
-        substitute_fn_type_in_place(fn_ty, &mut SubstituteTypes(self));
+        substitute_fn_type_in_place(fn_ty, &mut SubstituteTypes::new(self));
     }
 
     pub fn substitute_in_mut_type(&mut self, mut_ty: MutType) -> MutType {
-        SubstituteTypes(self).substitute_mut_type(mut_ty)
+        SubstituteTypes::new(self).substitute_mut_type(mut_ty)
     }
 
     pub fn substitute_in_effect_type(&mut self, eff_ty: &EffType) -> EffType {
-        SubstituteTypes(self).substitute_effect_type(eff_ty)
+        SubstituteTypes::new(self).substitute_effect_type(eff_ty)
     }
 
     pub fn substitute_in_effect_types(&mut self, eff_tys: &[EffType]) -> Vec<EffType> {
@@ -106,12 +106,16 @@ impl UnifiedTypeInference {
 
     pub fn substitute_in_effect_types_in_place(&mut self, eff_tys: &mut [EffType]) {
         for eff in eff_tys {
-            *eff = SubstituteTypes(self).substitute_effect_type(eff);
+            *eff = SubstituteTypes::new(self).substitute_effect_type(eff);
         }
     }
 
     pub(crate) fn substitute_in_local_decls_in_place(&mut self, locals: &mut [LocalDecl]) {
-        substitute_type_fields_in_place(locals, |local| &mut local.ty, &mut SubstituteTypes(self));
+        substitute_type_fields_in_place(
+            locals,
+            |local| &mut local.ty,
+            &mut SubstituteTypes::new(self),
+        );
         for local in locals {
             local.mut_ty = self.substitute_in_mut_type(local.mut_ty);
             if let LocalStorage::Deferred(deferred) = &mut local.storage {
@@ -199,7 +203,7 @@ impl UnifiedTypeInference {
         }
         let node = &mut arena[node_id];
         node.ty = self.substitute_in_type(node.ty);
-        node.effects = SubstituteTypes(self).substitute_effect_type(&node.effects);
+        node.effects = SubstituteTypes::new(self).substitute_effect_type(&node.effects);
         use hir::NodeKind::*;
         match &mut arena[node_id].kind {
             Apply(app) => {
@@ -364,7 +368,19 @@ impl UnifiedTypeInference {
     }
 }
 
-struct SubstituteTypes<'a>(&'a mut UnifiedTypeInference);
+struct SubstituteTypes<'a> {
+    ty_inf: &'a mut UnifiedTypeInference,
+    effect_cache: FxHashMap<EffectVar, EffType>,
+}
+
+impl<'a> SubstituteTypes<'a> {
+    fn new(ty_inf: &'a mut UnifiedTypeInference) -> Self {
+        Self {
+            ty_inf,
+            effect_cache: FxHashMap::default(),
+        }
+    }
+}
 
 impl SubstituteTypes<'_> {
     fn substitute_effect_type_inner(
@@ -396,12 +412,15 @@ impl SubstituteTypes<'_> {
     ) -> EffType {
         use Effect::*;
 
-        let root = self.0.effects.effect_var_root(var);
+        let root = self.ty_inf.effects.effect_var_root(var);
+        if let Some(cached) = self.effect_cache.get(&root) {
+            return cached.clone();
+        }
         if !visiting.insert(root) {
             return EffType::single_variable(root);
         }
 
-        let mut effects = match self.0.effects.effect_var_value(root) {
+        let mut effects = match self.ty_inf.effects.effect_var_value(root) {
             Some(value) => self.substitute_effect_type_inner(&value, visiting),
             None => EffType::single_variable(root),
         };
@@ -414,21 +433,22 @@ impl SubstituteTypes<'_> {
         }
 
         visiting.remove(&root);
+        self.effect_cache.insert(root, effects.clone());
         effects
     }
 }
 
 impl TypeSubstituer for SubstituteTypes<'_> {
     fn substitute_type(&mut self, ty: Type) -> Type {
-        self.0.substitute_type_lookup(ty)
+        self.ty_inf.substitute_type_lookup(ty)
     }
 
     fn substitute_mut_type(&mut self, mut_ty: MutType) -> MutType {
-        self.0.substitute_mut_lookup(mut_ty, false)
+        self.ty_inf.substitute_mut_lookup(mut_ty, false)
     }
 
     fn affects_type(&mut self, ty: Type) -> bool {
-        self.0.substitution_affects_type(ty)
+        self.ty_inf.substitution_affects_type(ty)
     }
 
     /// Substitute the effect type by flattening the effect variables.

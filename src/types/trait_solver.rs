@@ -47,7 +47,7 @@ use crate::{
     types::effects::{EffType, Effect, EffectVar},
     types::mutability::{MutType, MutVar},
     types::r#trait::{Trait, TraitAssociatedConstIndex, TraitMethodIndex},
-    types::r#type::{FnArgType, Type, TypeDef, TypeDefSlot, TypeVar},
+    types::r#type::{FnArgType, Type, TypeDef, TypeDefSlot, TypeKind, TypeVar},
     types::type_inference::unify::UnifiedTypeInference,
     types::type_like::{TypeLike, instantiate_types},
     types::type_mapper::{BitmapInstantiationMapper, TypeMapper},
@@ -722,8 +722,16 @@ impl<'a> TraitSolver<'a> {
     /// resolved or structured input such as `[int]`, `Option<T>`, or
     /// `MapIterator<I, T, O>` can make an impl candidate unique even when some
     /// other input is still unresolved.
+    ///
+    /// A bare function type is deliberately not a driver here: generic
+    /// function values such as `map` or `filter_map` can carry large unresolved
+    /// effect/type graphs, and probing ordinary trait impl heads from that
+    /// shape cannot select a user-visible impl. Function `Value` handling is
+    /// covered by compiler-provided special cases once applicable.
     pub(crate) fn input_tys_can_drive_improvement(input_tys: &[Type]) -> bool {
-        input_tys.iter().any(|ty| !ty.data().is_variable())
+        input_tys
+            .iter()
+            .any(|ty| !matches!(&*ty.data(), TypeKind::Variable(_) | TypeKind::Function(_)))
     }
 
     fn can_use_other_impl(&self, module_id: ModuleId, imp: &TraitImpl) -> bool {

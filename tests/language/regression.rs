@@ -343,6 +343,32 @@ fn recursive_function_effect_equality_from_grammar_fuzzer_does_not_overflow_stac
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_function_trait_improvement_slow_unit_from_grammar_fuzzer_finishes() {
+    let mut session = TestSession::new();
+    session.fail_compilation(
+        "filter_map * filter_map \
+            - filter_map * filter_map * filter_map \
+            - filter_map \
+            + filter_map * filter_map \
+            == filter_map * filter_map * filter_map * filter_map \
+                * filter_map * filter_map * filter_map * filter_map \
+            or 0 < 0",
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_function_trait_improvement_timeout_from_grammar_fuzzer_finishes() {
+    let mut session = TestSession::new();
+    session.fail_compilation(
+        "3.result == -map \
+            and map + map + map + map + map + map + map * 0.a.a \
+                == map * map + map + map + map + 0 + 0 + 42(-y())",
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn returned_lambda_with_function_typed_num_constraint_compiles() {
     let mut session = TestSession::new();
     session.compile("pub fn b() { || 0() }");
