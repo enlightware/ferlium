@@ -21,6 +21,13 @@ Override the default 30 second per-target duration with `FUZZ_TIME`:
 make fuzz FUZZ_TIME=120
 ```
 
+Each generated input has a default one minute timeout.
+Override it with `FUZZ_ITEM_TIMEOUT` when investigating slower inputs:
+
+```sh
+make fuzz-grammar FUZZ_ITEM_TIMEOUT=10
+```
+
 Fuzzing uses multiple libFuzzer workers by default.
 `FUZZ_JOBS` defaults to the online CPU count reported by `nproc`, with a `getconf _NPROCESSORS_ONLN` fallback.
 Override it when you want fewer workers:
@@ -33,11 +40,11 @@ The equivalent direct commands are:
 
 ```sh
 mkdir -p fuzz/corpus-generated/parse_any
-ASAN_OPTIONS=detect_leaks=0 cargo +nightly fuzz run parse_any fuzz/corpus-generated/parse_any fuzz/corpus/parse_any -- -max_total_time=30 -jobs=$(nproc) -workers=$(nproc)
+ASAN_OPTIONS=detect_leaks=0 cargo +nightly fuzz run parse_any fuzz/corpus-generated/parse_any fuzz/corpus/parse_any -- -max_total_time=30 -timeout=60 -jobs=$(nproc) -workers=$(nproc)
 mkdir -p fuzz/corpus-generated/ide_compile_any
-ASAN_OPTIONS=detect_leaks=0 cargo +nightly fuzz run ide_compile_any fuzz/corpus-generated/ide_compile_any fuzz/corpus/programs fuzz/corpus/diagnostics -- -max_total_time=30 -jobs=$(nproc) -workers=$(nproc)
+ASAN_OPTIONS=detect_leaks=0 cargo +nightly fuzz run ide_compile_any fuzz/corpus-generated/ide_compile_any fuzz/corpus/programs fuzz/corpus/diagnostics -- -max_total_time=30 -timeout=60 -jobs=$(nproc) -workers=$(nproc)
 mkdir -p fuzz/corpus-generated/grammar_ide_compile
-ASAN_OPTIONS=detect_leaks=0 cargo +nightly fuzz run grammar_ide_compile fuzz/corpus-generated/grammar_ide_compile fuzz/corpus/grammar_ide_compile -- -max_total_time=30 -jobs=$(nproc) -workers=$(nproc)
+ASAN_OPTIONS=detect_leaks=0 cargo +nightly fuzz run grammar_ide_compile fuzz/corpus-generated/grammar_ide_compile fuzz/corpus/grammar_ide_compile -- -max_total_time=30 -timeout=60 -jobs=$(nproc) -workers=$(nproc)
 ```
 
 The Make targets set `ASAN_OPTIONS=detect_leaks=0` because short fuzz smoke runs are looking for compiler crashes, not process-lifetime leak reports from the sanitizer runtime.
@@ -52,6 +59,7 @@ make fuzz-cmin
 
 This runs `cargo fuzz cmin` for each generated corpus directory.
 Use `make fuzz-cmin-parse`, `make fuzz-cmin-ide`, or `make fuzz-cmin-grammar` to minimize a single target.
+These targets also use `FUZZ_ITEM_TIMEOUT`, so pathological inputs do not block minimization indefinitely.
 Minimization preserves the coverage observed by the current fuzz target binary and instrumentation; it is still worth keeping a backup or commit boundary before replacing a very large corpus.
 
 Grammar-level fuzzing uses Barkus, pinned as a Git dependency in the fuzz crate.

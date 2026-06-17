@@ -1,5 +1,7 @@
 # Fuzzing duration in seconds
 FUZZ_TIME ?= 30
+# Per-input libFuzzer timeout in seconds.
+FUZZ_ITEM_TIMEOUT ?= 60
 # Number of parallel libFuzzer workers. Defaults to the online CPU count on Linux.
 FUZZ_JOBS ?= $(shell nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
 # Directory where libFuzzer writes fuzz-*.log files in multi-worker mode.
@@ -33,29 +35,29 @@ bench:
 
 fuzz-parse:
 	mkdir -p fuzz/corpus-generated/parse_any $(FUZZ_LOG_DIR)/parse_any
-	cd $(FUZZ_LOG_DIR)/parse_any && $(FUZZ_ENV) cargo +nightly fuzz run --fuzz-dir $(CURDIR)/fuzz --target-dir $(CURDIR)/target parse_any $(CURDIR)/fuzz/corpus-generated/parse_any $(CURDIR)/fuzz/corpus/parse_any -- -max_total_time=$(FUZZ_TIME) -jobs=$(FUZZ_JOBS) -workers=$(FUZZ_JOBS)
+	cd $(FUZZ_LOG_DIR)/parse_any && $(FUZZ_ENV) cargo +nightly fuzz run --fuzz-dir $(CURDIR)/fuzz --target-dir $(CURDIR)/target parse_any $(CURDIR)/fuzz/corpus-generated/parse_any $(CURDIR)/fuzz/corpus/parse_any -- -max_total_time=$(FUZZ_TIME) -timeout=$(FUZZ_ITEM_TIMEOUT) -jobs=$(FUZZ_JOBS) -workers=$(FUZZ_JOBS)
 
 fuzz-ide:
 	mkdir -p fuzz/corpus-generated/ide_compile_any $(FUZZ_LOG_DIR)/ide_compile_any
-	cd $(FUZZ_LOG_DIR)/ide_compile_any && $(FUZZ_ENV) cargo +nightly fuzz run --fuzz-dir $(CURDIR)/fuzz --target-dir $(CURDIR)/target ide_compile_any $(CURDIR)/fuzz/corpus-generated/ide_compile_any $(CURDIR)/fuzz/corpus/programs $(CURDIR)/fuzz/corpus/diagnostics -- -max_total_time=$(FUZZ_TIME) -jobs=$(FUZZ_JOBS) -workers=$(FUZZ_JOBS)
+	cd $(FUZZ_LOG_DIR)/ide_compile_any && $(FUZZ_ENV) cargo +nightly fuzz run --fuzz-dir $(CURDIR)/fuzz --target-dir $(CURDIR)/target ide_compile_any $(CURDIR)/fuzz/corpus-generated/ide_compile_any $(CURDIR)/fuzz/corpus/programs $(CURDIR)/fuzz/corpus/diagnostics -- -max_total_time=$(FUZZ_TIME) -timeout=$(FUZZ_ITEM_TIMEOUT) -jobs=$(FUZZ_JOBS) -workers=$(FUZZ_JOBS)
 
 fuzz-grammar:
 	mkdir -p fuzz/corpus-generated/grammar_ide_compile $(FUZZ_LOG_DIR)/grammar_ide_compile
-	cd $(FUZZ_LOG_DIR)/grammar_ide_compile && $(FUZZ_ENV) cargo +nightly fuzz run --fuzz-dir $(CURDIR)/fuzz --target-dir $(CURDIR)/target grammar_ide_compile $(CURDIR)/fuzz/corpus-generated/grammar_ide_compile $(CURDIR)/fuzz/corpus/grammar_ide_compile -- -max_total_time=$(FUZZ_TIME) -jobs=$(FUZZ_JOBS) -workers=$(FUZZ_JOBS)
+	cd $(FUZZ_LOG_DIR)/grammar_ide_compile && $(FUZZ_ENV) cargo +nightly fuzz run --fuzz-dir $(CURDIR)/fuzz --target-dir $(CURDIR)/target grammar_ide_compile $(CURDIR)/fuzz/corpus-generated/grammar_ide_compile $(CURDIR)/fuzz/corpus/grammar_ide_compile -- -max_total_time=$(FUZZ_TIME) -timeout=$(FUZZ_ITEM_TIMEOUT) -jobs=$(FUZZ_JOBS) -workers=$(FUZZ_JOBS)
 
 fuzz: fuzz-parse fuzz-ide fuzz-grammar
 
 fuzz-cmin-parse:
 	mkdir -p fuzz/corpus-generated/parse_any
-	$(FUZZ_ENV) cargo +nightly fuzz cmin --fuzz-dir $(CURDIR)/fuzz --target-dir $(CURDIR)/target parse_any $(CURDIR)/fuzz/corpus-generated/parse_any
+	$(FUZZ_ENV) cargo +nightly fuzz cmin --fuzz-dir $(CURDIR)/fuzz --target-dir $(CURDIR)/target parse_any $(CURDIR)/fuzz/corpus-generated/parse_any -- -timeout=$(FUZZ_ITEM_TIMEOUT)
 
 fuzz-cmin-ide:
 	mkdir -p fuzz/corpus-generated/ide_compile_any
-	$(FUZZ_ENV) cargo +nightly fuzz cmin --fuzz-dir $(CURDIR)/fuzz --target-dir $(CURDIR)/target ide_compile_any $(CURDIR)/fuzz/corpus-generated/ide_compile_any
+	$(FUZZ_ENV) cargo +nightly fuzz cmin --fuzz-dir $(CURDIR)/fuzz --target-dir $(CURDIR)/target ide_compile_any $(CURDIR)/fuzz/corpus-generated/ide_compile_any -- -timeout=$(FUZZ_ITEM_TIMEOUT)
 
 fuzz-cmin-grammar:
 	mkdir -p fuzz/corpus-generated/grammar_ide_compile
-	$(FUZZ_ENV) cargo +nightly fuzz cmin --fuzz-dir $(CURDIR)/fuzz --target-dir $(CURDIR)/target grammar_ide_compile $(CURDIR)/fuzz/corpus-generated/grammar_ide_compile
+	$(FUZZ_ENV) cargo +nightly fuzz cmin --fuzz-dir $(CURDIR)/fuzz --target-dir $(CURDIR)/target grammar_ide_compile $(CURDIR)/fuzz/corpus-generated/grammar_ide_compile -- -timeout=$(FUZZ_ITEM_TIMEOUT)
 
 fuzz-cmin: fuzz-cmin-parse fuzz-cmin-ide fuzz-cmin-grammar
 
