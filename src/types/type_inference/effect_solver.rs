@@ -3,7 +3,7 @@ use std::borrow::Borrow;
 use ena::unify::{InPlace, InPlaceUnificationTable, Snapshot};
 
 use crate::{
-    FxHashSet,
+    FxHashMap, FxHashSet,
     compiler::error::InternalCompilationError,
     internal_compilation_error,
     module::TraitId,
@@ -544,14 +544,16 @@ impl EffectSolver {
     }
 
     fn normalize_effect(&mut self, eff: &EffType) -> EffType {
+        let mut cache = FxHashMap::default();
         let mut visiting = FxHashSet::default();
-        self.normalize_effect_inner(eff, &mut visiting)
+        self.normalize_effect_inner(eff, &mut visiting, &mut cache)
     }
 
     fn normalize_effect_inner(
         &mut self,
         eff: &EffType,
         visiting: &mut FxHashSet<EffectVarKey>,
+        cache: &mut FxHashMap<EffectVarKey, EffType>,
     ) -> EffType {
         if eff.is_empty() || !eff.has_variables() {
             return eff.clone();
@@ -561,15 +563,21 @@ impl EffectSolver {
         for var in eff.inner_vars() {
             self.ensure_var(var);
             let root = self.table.find(var);
+            if let Some(cached) = cache.get(&root) {
+                normalized.extend(cached);
+                continue;
+            }
             if !visiting.insert(root) {
                 normalized.insert(Effect::Variable(root));
                 continue;
             }
-            match self.table.probe_value(root) {
-                Some(value) => normalized.extend(&self.normalize_effect_inner(&value, visiting)),
-                None => normalized.insert(Effect::Variable(root)),
-            }
+            let root_effect = match self.table.probe_value(root) {
+                Some(value) => self.normalize_effect_inner(&value, visiting, cache),
+                None => EffType::single_variable(root),
+            };
             visiting.remove(&root);
+            cache.insert(root, root_effect.clone());
+            normalized.extend(&root_effect);
         }
         normalized
     }

@@ -369,6 +369,18 @@ fn generic_function_trait_improvement_timeout_from_grammar_fuzzer_finishes() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn repeated_generic_function_effect_normalization_from_grammar_fuzzer_finishes() {
+    let mut session = TestSession::new();
+    session.fail_compilation(
+        "map + map + map + map + map + x \
+            + {acc, map}.map.map(map == map) + map \
+            < map + map + map + map + map + map + map + map \
+            and a - 0 + 0 + 0 + 0 == 0",
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn returned_lambda_with_function_typed_num_constraint_compiles() {
     let mut session = TestSession::new();
     session.compile("pub fn b() { || 0() }");
