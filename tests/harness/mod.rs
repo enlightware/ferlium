@@ -11,9 +11,9 @@ use ferlium::{
     compiler::error::{CompilationError, RuntimeErrorKind},
     eval::{ControlFlow, EvalResult, RuntimeError, eval_node},
     hir::function::{
-        BinaryNativeFnNNV, BinaryNativeFnRMN, BinaryNativeFnRRN, BinaryNativeFnRWN, Function,
-        FunctionDefinition, NullaryNativeFnN, NullaryNativeFnV, UnaryNativeFnMN, UnaryNativeFnNN,
-        UnaryNativeFnNV, UnaryNativeFnRN, UnaryNativeFnVN, UnaryNativeFnVV,
+        BinaryNativeFnNNV, BinaryNativeFnRMN, BinaryNativeFnRRN, Function, FunctionDefinition,
+        NullaryNativeFnN, NullaryNativeFnV, UnaryNativeFnMN, UnaryNativeFnNN, UnaryNativeFnNV,
+        UnaryNativeFnRN, UnaryNativeFnVN, UnaryNativeFnVV,
     },
     hir::value::{LiteralValue, NativeValueType, Value},
     module::{BlanketTraitImplSubKey, Module, ModuleEnv, ModuleId, Path, TraitId},
@@ -591,14 +591,14 @@ fn hash_clone_tracked(value: &CloneTrackedNative, state: &mut ferlium::std::hash
     state.write_isize(value.0);
 }
 
-fn clone_clone_tracked(source: &CloneTrackedNative, target: &mut Value) {
-    *target = Value::native(source.clone());
+fn clone_clone_tracked(source: &CloneTrackedNative) -> CloneTrackedNative {
+    source.clone()
 }
 
 fn drop_clone_tracked(_target: &mut CloneTrackedNative) {}
 
 fn clone_tracked_value_clone_function() -> Function {
-    Box::new(BinaryNativeFnRWN::new(clone_clone_tracked)) as Function
+    Box::new(UnaryNativeFnRN::new(clone_clone_tracked)) as Function
 }
 
 fn clone_tracked_value_drop_function() -> Function {

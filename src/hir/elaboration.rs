@@ -528,10 +528,8 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
             }
             CloneClosureEnv(node) => {
                 let source = node.source;
-                let target = node.target;
                 CloneClosureEnv(hir::CloneClosureEnv {
                     source: self.elaborate_node(src, source)?,
-                    target: self.elaborate_node(src, target)?,
                 })
             }
             DropClosureEnv(node) => {

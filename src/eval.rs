@@ -1502,22 +1502,7 @@ fn call_value_clone_with(
     _span: Location,
     call: impl FnOnce(&mut EvalCtx, Vec<ValOrMut>) -> EvalControlFlowResult,
 ) -> Result<Value, RuntimeError> {
-    let target_index = ctx.environment.len();
-    ctx.environment.push(ValOrMut::Val(Value::uninit()));
-    let target = Place {
-        target: target_index,
-        path: Vec::new(),
-    };
-    let result = call(ctx, vec![source, ValOrMut::Mut(target)]);
-    let target = ctx.pop_environment_entry().unwrap().into_val().unwrap();
-    if let Err(err) = discard_call_result(result) {
-        target.discard_storage();
-        return Err(err);
-    }
-    if matches!(target, Value::Uninit) {
-        panic!("Value::clone returned without initializing its target");
-    }
-    Ok(target)
+    Ok(call(ctx, vec![source])?.into_value())
 }
 
 pub(crate) fn call_value_clone_for_temp(
@@ -1549,21 +1534,13 @@ pub(crate) fn call_value_clone_to_target(
         .map_err(|err| RuntimeError::new(err, Some(span)))?;
     assert!(
         matches!(target_value, Value::Uninit),
-        "Value::clone target storage must be uninitialized"
+        "Value::clone destination slot must be uninitialized"
     );
-    discard_call_result(call_dictionary_method(
-        ctx,
-        dictionary,
-        TraitDictionaryEntryIndex::from_index(VALUE_CLONE_METHOD_INDEX.as_index()),
-        vec![source, ValOrMut::Mut(target.clone())],
-        span,
-    ))?;
+    let value = call_value_clone_for_temp(ctx, dictionary, source, span)?;
     let target_value = target
         .target_mut(ctx)
         .map_err(|err| RuntimeError::new(err, Some(span)))?;
-    if matches!(target_value, Value::Uninit) {
-        panic!("Value::clone returned without initializing its target");
-    }
+    *target_value = value;
     cont(Value::unit())
 }
 
@@ -1728,16 +1705,7 @@ fn eval_clone_closure_env(
         closure_env_len,
         closure_env_value_dictionary,
     };
-    let target = eval_or_return!(eval_node_as_place(arena, node.target, ctx, locals));
-    let target_value = target
-        .target_mut(ctx)
-        .map_err(|err| RuntimeError::new(err, Some(span)))?;
-    assert!(
-        matches!(target_value, Value::Uninit),
-        "function Value::clone target storage must be uninitialized"
-    );
-    *target_value = Value::function_value(target_function);
-    cont(Value::unit())
+    cont(Value::function_value(target_function))
 }
 
 #[inline(never)]
@@ -1980,7 +1948,6 @@ fn eval_store_local(
     ctx.check_stack_limit(target_index, Some(span))?;
     if let Some(clone) = &local.clone {
         ctx.ensure_environment_slot(target_index);
-        let target = local_place(ctx, locals, node.id);
         let clone = resolved_local_clone(clone);
         if let ResolvedLocalClone::TrivialCopy = clone {
             let value =
@@ -2005,14 +1972,12 @@ fn eval_store_local(
                 arena, node.value, ctx, locals
             ))),
         };
-        let arguments = vec![source, ValOrMut::Mut(target)];
+        let arguments = vec![source];
         let dispatch = clone_value_method_dispatch(&clone).expect("trivial copy handled above");
-        let result =
-            call_resolved_value_method(ctx, dispatch, VALUE_CLONE_METHOD_INDEX, arguments, span);
-        discard_call_result(result)?;
-        if matches!(&ctx.environment[target_index], ValOrMut::Val(Value::Uninit)) {
-            panic!("Value::clone returned without initializing local storage");
-        }
+        let value =
+            call_resolved_value_method(ctx, dispatch, VALUE_CLONE_METHOD_INDEX, arguments, span)?
+                .into_value();
+        ctx.environment[target_index] = ValOrMut::Val(value);
     } else if !local.owns_storage() {
         let entry = match eval_or_return!(try_eval_node_as_place(arena, node.value, ctx, locals)) {
             Some(place) => {

@@ -468,11 +468,10 @@ pub struct Continue {
     pub label: LoopId,
 }
 
-/// Clone the closure environment of `source` into already allocated `target` storage.
+/// Clone the closure environment of `source` and return the cloned function value.
 #[derive(Debug, Clone, Copy)]
 pub struct CloneClosureEnv<P: HirPhase = Unelaborated> {
     pub source: NodeId<P>,
-    pub target: NodeId<P>,
 }
 
 /// Drop the owned closure environment stored in `target`.
@@ -788,7 +787,7 @@ impl NodeKind {
                 v.extend(app.arguments.iter().map(|arg| arg.value));
                 v
             }
-            CloneClosureEnv(node) => smallvec![node.source, node.target],
+            CloneClosureEnv(node) => smallvec![node.source],
             DropClosureEnv(node) => smallvec![node.target],
             CloneValue(node) => smallvec![node.source],
             StaticApply(app) => app
@@ -1098,8 +1097,6 @@ impl<P: HirPhase> Node<P> {
             CloneClosureEnv(node) => {
                 writeln!(f, "{indent_str}clone closure env")?;
                 format_ind(arena, node.source, f, locals, env, spacing, indent + 1)?;
-                writeln!(f, "{indent_str}into")?;
-                format_ind(arena, node.target, f, locals, env, spacing, indent + 1)?;
             }
             DropClosureEnv(node) => {
                 writeln!(f, "{indent_str}drop closure env")?;
@@ -1414,9 +1411,6 @@ impl<P: HirPhase> Node<P> {
                 if let Some(ty) = type_at(arena, node.source, pos) {
                     return Some(ty);
                 }
-                if let Some(ty) = type_at(arena, node.target, pos) {
-                    return Some(ty);
-                }
             }
             DropClosureEnv(node) => {
                 if let Some(ty) = type_at(arena, node.target, pos) {
@@ -1603,7 +1597,6 @@ impl Node {
             }
             CloneClosureEnv(node) => {
                 unbound_ty_vars(arena, node.source, result, ignore);
-                unbound_ty_vars(arena, node.target, result, ignore);
             }
             DropClosureEnv(node) => unbound_ty_vars(arena, node.target, result, ignore),
             CloneValue(node) => unbound_ty_vars(arena, node.source, result, ignore),

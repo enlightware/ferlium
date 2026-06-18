@@ -329,8 +329,8 @@ fn mutable_let_initialization_uses_value_clone() {
                     hash(value.0, state)
                 }
 
-                fn clone(source: Probe, target: &mut Uninit<Probe>) {
-                    target = Probe(source.0 + 10);
+                fn clone(source: Probe) -> Probe {
+                    Probe(source.0 + 10)
                 }
 
                 fn drop(target: &mut Probe) {}
@@ -347,7 +347,7 @@ fn mutable_let_initialization_uses_value_clone() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn mutable_let_clone_does_not_preclone_target_storage() {
+fn mutable_let_clone_does_not_clone_more_than_needed() {
     let mut session = TestSession::new();
     assert_val_eq!(
         session.run(
@@ -641,8 +641,8 @@ fn array_drop_drops_elements() {
                     hash(value.0, state)
                 }
 
-                fn clone(source: Probe, target: &mut Uninit<Probe>) {
-                    target = Probe(source.0);
+                fn clone(source: Probe) -> Probe {
+                    Probe(source.0)
                 }
 
                 fn drop(target: &mut Probe) {

@@ -29,14 +29,11 @@ use crate::{
     },
     internal_compilation_error,
     module::{
-        FunctionId, GENERATED_LAMBDA_PREFIX, LocalAssignmentMode, LocalDecl, LocalDeclId,
-        LocalFunctionId, Module, ModuleEnv, ModuleFunction, ModuleFunctionSpans, ModuleId,
-        PendingFunctionBody, PendingModuleFunction, TraitId, Visibility, id::Id,
+        FunctionId, GENERATED_LAMBDA_PREFIX, LocalDecl, LocalDeclId, LocalFunctionId, Module,
+        ModuleEnv, ModuleFunction, ModuleFunctionSpans, ModuleId, PendingFunctionBody,
+        PendingModuleFunction, TraitId, Visibility, id::Id,
     },
-    std::{
-        STD_MODULE_ID, new_module_using_std,
-        value::{VALUE_CLONE_METHOD_INDEX, is_value_trait},
-    },
+    std::{STD_MODULE_ID, new_module_using_std},
     types::{
         effects::{PrimitiveEffect, effect},
         mutability::MutType,
@@ -702,12 +699,6 @@ where
         let mut fn_arena = NodeArena::default();
         LocalDecl::assign_sequential_slots(&mut locals);
         let cur_locals = (0..locals.len()).map(LocalDeclId::from_index).collect();
-        if let Some(trait_ctx) = &trait_ctx
-            && is_value_trait(trait_ctx.trait_id, &trait_ctx.trait_def)
-            && trait_ctx.trait_def.method_index(function.name.0) == Some(VALUE_CLONE_METHOD_INDEX)
-        {
-            locals[1].assignment_mode = LocalAssignmentMode::InitializeStorage;
-        }
         let mut ty_env = TypingEnv::new(
             &mut locals,
             cur_locals,

@@ -29,7 +29,6 @@ use crate::{
         core_traits_names::VALUE_TRAIT_NAME,
         value::{
             VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX, is_function_surface_only_value_type,
-            uninit_inner_type,
         },
     },
     types::{
@@ -154,9 +153,6 @@ pub(crate) fn resolve_local_drop(
     ty: Type,
     span: Location,
 ) -> Result<PendingLocalDrop, InternalCompilationError> {
-    if uninit_inner_type(ty).is_some() {
-        return Ok(PendingLocalDrop::Resolved(ResolvedLocalDrop::Skip));
-    }
     if ctx
         .trait_solver
         .solve_concrete_trivial_copy_layout(arena, ty, span)?

@@ -314,7 +314,6 @@ impl Node {
             }
             CloneClosureEnv(node) => {
                 check_borrows(arena, node.source)?;
-                check_borrows(arena, node.target)?;
             }
             DropClosureEnv(node) => {
                 check_borrows(arena, node.target)?;

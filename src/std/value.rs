@@ -16,14 +16,10 @@ use crate::{
     ast::{Path, UnnamedArg},
     compiler::error::InternalCompilationError,
     containers::b,
-    eval::{
-        EvalControlFlowResult, EvalCtx, PlaceResult, RuntimeError, ValOrMut, ValOrMutArgs, cont,
-    },
     hir::function::{
-        BinaryNativeFnRWN, ContextNativeFn, Function, FunctionDefinition, PendingScriptFunction,
-        ResolvedArgPassing, ResolvedValueArgPassing, UnaryNativeFnMN,
+        Function, FunctionDefinition, PendingScriptFunction, UnaryNativeFnMN, UnaryNativeFnRN,
     },
-    hir::value::{FunctionValue, LiteralValue, NativeValue, Value, ustr_to_isize},
+    hir::value::{FunctionValue, LiteralValue, NativeValue, ustr_to_isize},
     hir::{self, CallArgument, NodeArena, NodeId},
     hir::{
         emit_value_impl::function_value_method,
@@ -35,8 +31,8 @@ use crate::{
     internal_compilation_error,
     module::{
         self, ConcreteTraitImplKey, FunctionId, LocalDecl, LocalDeclId, Module, ModuleEnv,
-        ModuleFunction, PendingFunctionBody, PendingModuleFunction, ProjectionIndex,
-        ResolvedValueLayout, TraitId, TraitImpl, TraitImplId, TraitImpls, TypeDefId, id::Id,
+        PendingFunctionBody, PendingModuleFunction, ProjectionIndex, ResolvedValueLayout, TraitId,
+        TraitImpl, TraitImplId, TraitImpls, TypeDefId, id::Id,
     },
     std::{
         STD_MODULE_ID,
@@ -52,12 +48,8 @@ use crate::{
         Deriver, Trait, TraitAssociatedConst, TraitAssociatedConstIndex, TraitMethodIndex,
     },
     types::trait_solver::TraitSolver,
-    types::r#type::{
-        FnArgType, FnReturnConvention, FnType, Type, TypeDef, TypeKind, bare_native_type,
-        tuple_type,
-    },
+    types::r#type::{FnArgType, FnType, Type, TypeDef, TypeKind, tuple_type},
     types::type_like::TypeLike,
-    types::type_scheme::TypeScheme,
 };
 
 pub(crate) fn equal<T>(lhs: T, rhs: T) -> bool
@@ -78,28 +70,6 @@ pub(crate) const VALUE_ALIGN_ASSOC_CONST_INDEX: TraitAssociatedConstIndex =
     TraitAssociatedConstIndex(1);
 pub(crate) const INSPECT_METHOD_INDEX: TraitMethodIndex = TraitMethodIndex(0);
 pub(crate) const NO_DERIVE_VALUE_ATTRIBUTE: &str = "no_derive_value";
-pub(crate) const UNINIT_TYPE_NAME: &str = "Uninit";
-
-const SHARED_REF: ResolvedArgPassing =
-    ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef);
-const MUTABLE_REF: ResolvedArgPassing = ResolvedArgPassing::MutableRef;
-
-#[derive(Debug)]
-pub(crate) struct UninitStorage;
-
-pub(crate) fn uninit_type(inner: Type) -> Type {
-    Type::native::<UninitStorage>([inner])
-}
-
-pub(crate) fn uninit_inner_type(ty: Type) -> Option<Type> {
-    let data = ty.data();
-    let native = data.as_native()?;
-    if native.bare_ty == bare_native_type::<UninitStorage>() && native.arguments.len() == 1 {
-        Some(native.arguments[0])
-    } else {
-        None
-    }
-}
 
 pub(crate) fn native_layout_associated_consts<T>() -> Vec<LiteralValue> {
     let mut values = [0; 2];
@@ -108,76 +78,18 @@ pub(crate) fn native_layout_associated_consts<T>() -> Vec<LiteralValue> {
     values.into_iter().map(LiteralValue::new_native).collect()
 }
 
-pub(crate) fn native_value_clone<T: Clone + NativeValue>(source: &T, target: &mut Value) {
-    assert!(
-        matches!(target, Value::Uninit),
-        "Value::clone target storage must be uninitialized"
-    );
-    *target = Value::native(source.clone());
+pub(crate) fn native_value_clone<T: Clone + NativeValue>(source: &T) -> T {
+    source.clone()
 }
 
 pub(crate) fn native_value_clone_function<T: Clone + NativeValue>() -> Function {
-    b(BinaryNativeFnRWN::new(native_value_clone::<T>)) as Function
+    b(UnaryNativeFnRN::new(native_value_clone::<T>)) as Function
 }
 
 pub(crate) fn native_value_drop<T>(_target: &mut T) {}
 
 pub(crate) fn native_value_drop_function<T: 'static>() -> Function {
     b(UnaryNativeFnMN::new(native_value_drop::<T>)) as Function
-}
-
-fn take_init_value(arg: ValOrMut, ctx: &mut EvalCtx<'_>, op: &str) -> Result<Value, RuntimeError> {
-    match arg {
-        ValOrMut::Val(value) => {
-            assert!(
-                !matches!(value, Value::Uninit),
-                "{op} received uninitialized value storage"
-            );
-            Ok(value)
-        }
-        ValOrMut::Mut(place) => {
-            let source = place.target_mut(ctx).map_err(RuntimeError::new_native)?;
-            let value = mem::replace(source, Value::uninit());
-            assert!(
-                !matches!(value, Value::Uninit),
-                "{op} received uninitialized value storage"
-            );
-            Ok(value)
-        }
-        ValOrMut::Dictionary(_) => panic!("{op} cannot move trait dictionary metadata"),
-        ValOrMut::Ref(_) => panic!("{op} requires owned or mutable storage"),
-    }
-}
-
-fn uninit_native(_args: ValOrMutArgs, _ctx: &mut EvalCtx) -> EvalControlFlowResult {
-    cont(Value::uninit())
-}
-
-fn write_init_native(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalControlFlowResult {
-    let target = args.next().unwrap().as_place().clone();
-    let value = take_init_value(args.next().unwrap(), ctx, "write_init")?;
-    let target_value = target.target_mut(ctx).map_err(RuntimeError::new_native)?;
-    assert!(
-        matches!(target_value, Value::Uninit),
-        "write_init target storage must be uninitialized"
-    );
-    *target_value = value;
-    cont(Value::unit())
-}
-
-fn assume_init_native(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalControlFlowResult {
-    let value = take_init_value(args.next().unwrap(), ctx, "assume_init")?;
-    cont(value)
-}
-
-fn assume_init_mut_native(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalControlFlowResult {
-    let target = args.next().unwrap().as_place().clone();
-    let target_value = target.target_mut(ctx).map_err(RuntimeError::new_native)?;
-    assert!(
-        !matches!(target_value, Value::Uninit),
-        "assume_init_mut target storage must be initialized"
-    );
-    cont(Value::native(PlaceResult::new(target)))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -280,10 +192,6 @@ fn layout_for_value_type(
     active: &mut FxHashSet<Type>,
     env: &impl TypeLayoutEnv,
 ) -> Result<ValueLayout, InternalCompilationError> {
-    if let Some(inner_ty) = uninit_inner_type(ty) {
-        return layout_for_value_type(inner_ty, span, active, env);
-    }
-
     if !active.insert(ty) {
         // Recursive occurrences are represented indirectly at runtime, so their
         // inline layout is a value slot rather than another full copy.
@@ -754,22 +662,14 @@ fn variant_payload_storage_node(
     }
 }
 
-fn function_value_clone_root(
-    ty: Type,
-    source_id: LocalDeclId,
-    target_id: LocalDeclId,
-    arena: &mut NodeArena,
-) -> NodeId {
+fn function_value_clone_root(ty: Type, source_id: LocalDeclId, arena: &mut NodeArena) -> NodeId {
     use hir::hir_syn::*;
 
     let source = alloc_synth_node(arena, load_local(source_id), ty);
-    // The clone target is typed as `Uninit<T>` at the trait boundary. Generated
-    // clone glue reinterprets it as `T` only after writing initialized storage.
-    let target = alloc_synth_node(arena, load_local(target_id), ty);
     alloc_synth_node(
         arena,
-        hir::NodeKind::CloneClosureEnv(hir::CloneClosureEnv { source, target }),
-        Type::unit(),
+        hir::NodeKind::CloneClosureEnv(hir::CloneClosureEnv { source }),
+        ty,
     )
 }
 
@@ -777,19 +677,8 @@ fn function_value_clone_body(ty: Type, arena: &mut NodeArena) -> (NodeId, Vec<Lo
     use hir::hir_syn::*;
 
     let source_id = LocalDeclId::from_index(0);
-    let target_id = LocalDeclId::from_index(1);
-    let uninit_ty = uninit_type(ty);
-    let locals = vec![
-        local("source", ty),
-        LocalDecl::new(
-            (crate::ustr("target"), Location::new_synthesized()),
-            MutType::mutable(),
-            uninit_ty,
-            None,
-            Location::new_synthesized(),
-        ),
-    ];
-    let root = function_value_clone_root(ty, source_id, target_id, arena);
+    let locals = vec![local("source", ty)];
+    let root = function_value_clone_root(ty, source_id, arena);
     (root, locals)
 }
 
@@ -897,17 +786,10 @@ pub(crate) fn function_value_method_function(
             (definition, root, locals)
         }
         VALUE_CLONE_METHOD_INDEX => {
-            let fn_ty = FnType::new(
-                vec![
-                    FnArgType::new_by_val(ty),
-                    FnArgType::new(ty, MutType::mutable()),
-                ],
-                unit_ty,
-                EffType::empty(),
-            );
+            let fn_ty = FnType::new_by_val([ty], ty, EffType::empty());
             let definition = Def::new_infer_quantifiers(
                 fn_ty,
-                ["source", "target"],
+                ["source"],
                 "Compiler-generated function Value clone.",
             );
             let (root, locals) = function_value_clone_body(ty, &mut arena);
@@ -1700,50 +1582,12 @@ fn derive_value_clone_body(
     let n = alloc_synth_node;
 
     let source_id = LocalDeclId::from_index(0);
-    let target_id = LocalDeclId::from_index(1);
-    let uninit_ty = uninit_type(ty);
-    let mut locals = vec![
-        local("source", ty),
-        LocalDecl::new(
-            (crate::ustr("target"), Location::new_synthesized()),
-            MutType::mutable(),
-            uninit_ty,
-            None,
-            Location::new_synthesized(),
-        ),
-    ];
-    let build_assign_whole = |arena: &mut NodeArena| {
-        let target = n(arena, load_local(target_id), uninit_ty);
-        let source = n(arena, load_local(source_id), ty);
-        n(
-            arena,
-            hir::NodeKind::Assign(hir::Assignment {
-                place: target,
-                value: source,
-                drop: None,
-            }),
-            Type::unit(),
-        )
-    };
+    let mut locals = vec![local("source", ty)];
+    let build_assign_whole = |arena: &mut NodeArena| n(arena, load_local(source_id), ty);
     macro_rules! build_product_clone {
         ($arena:expr, $member_tys:expr) => {{
             let member_tys = $member_tys;
-            let mut statements = Vec::with_capacity(member_tys.len() + 2);
-            let target = n($arena, load_local(target_id), uninit_ty);
-            let uninit_members = member_tys
-                .iter()
-                .map(|&member_ty| n($arena, hir::NodeKind::Uninit, member_ty))
-                .collect::<Vec<_>>();
-            let uninit_product = n($arena, tuple(uninit_members), ty);
-            statements.push(n(
-                $arena,
-                hir::NodeKind::Assign(hir::Assignment {
-                    place: target,
-                    value: uninit_product,
-                    drop: None,
-                }),
-                Type::unit(),
-            ));
+            let mut cloned_members = Vec::with_capacity(member_tys.len());
             for (index, &member_ty) in member_tys.iter().enumerate() {
                 let source = n($arena, load_local(source_id), ty);
                 let source_member = n(
@@ -1751,13 +1595,7 @@ fn derive_value_clone_body(
                     project(source, ProjectionIndex::from_index(index)),
                     member_ty,
                 );
-                let target = n($arena, load_local(target_id), ty);
-                let target_member = n(
-                    $arena,
-                    project(target, ProjectionIndex::from_index(index)),
-                    uninit_type(member_ty),
-                );
-                statements.push(value_method_call_node(
+                cloned_members.push(value_method_call_node(
                     ctx,
                     ValueMethod {
                         trait_id,
@@ -1767,11 +1605,10 @@ fn derive_value_clone_body(
                     Location::new_synthesized(),
                     $arena,
                     &mut locals,
-                    vec![source_member, target_member],
+                    vec![source_member],
                 )?);
             }
-            statements.push(n($arena, native(()), Type::unit()));
-            n($arena, block(statements), Type::unit())
+            n($arena, tuple(cloned_members), ty)
         }};
     }
     macro_rules! build_variant_clone {
@@ -1781,39 +1618,13 @@ fn derive_value_clone_body(
             let mut alternatives = Vec::with_capacity($variants.len());
             for (tag, payload_ty) in $variants {
                 let tag_val = LiteralValue::new_native(ustr_to_isize(tag));
-                let target = n($arena, load_local(target_id), uninit_ty);
-                let target_value = if payload_ty == Type::unit() {
+                let branch = if payload_ty == Type::unit() {
                     let payload = n($arena, native(()), Type::unit());
                     n($arena, variant(tag, payload), ty)
                 } else {
-                    let uninit_payload = n($arena, hir::NodeKind::Uninit, payload_ty);
-                    let payload = variant_payload_storage_node($arena, uninit_payload, payload_ty);
-                    n($arena, variant(tag, payload), ty)
-                };
-                let init_target = n(
-                    $arena,
-                    hir::NodeKind::Assign(hir::Assignment {
-                        place: target,
-                        value: target_value,
-                        drop: None,
-                    }),
-                    Type::unit(),
-                );
-                let branch = if payload_ty == Type::unit() {
-                    init_target
-                } else {
-                    let mut statements = Vec::with_capacity(3);
-                    statements.push(init_target);
                     let source = n($arena, load_local(source_id), ty);
                     let source_payload = variant_payload_project($arena, source, payload_ty);
-                    let target = n($arena, load_local(target_id), ty);
-                    let target_payload = variant_payload_project($arena, target, payload_ty);
-                    let target_payload = {
-                        let old = target_payload;
-                        $arena[old].ty = uninit_type(payload_ty);
-                        old
-                    };
-                    statements.push(value_method_call_node(
+                    let cloned_payload = value_method_call_node(
                         ctx,
                         ValueMethod {
                             trait_id,
@@ -1823,19 +1634,15 @@ fn derive_value_clone_body(
                         Location::new_synthesized(),
                         $arena,
                         &mut locals,
-                        vec![source_payload, target_payload],
-                    )?);
-                    statements.push(n($arena, native(()), Type::unit()));
-                    n($arena, block(statements), Type::unit())
+                        vec![source_payload],
+                    )?;
+                    let payload = variant_payload_storage_node($arena, cloned_payload, payload_ty);
+                    n($arena, variant(tag, payload), ty)
                 };
                 alternatives.push((tag_val, branch));
             }
-            let default = n($arena, native(()), Type::unit());
-            n(
-                $arena,
-                case(source_tag, alternatives, default),
-                Type::unit(),
-            )
+            let default = n($arena, hir::NodeKind::Uninit, ty);
+            n($arena, case(source_tag, alternatives, default), ty)
         }};
     }
 
@@ -1859,7 +1666,7 @@ fn derive_value_clone_body(
         }
         Function(_) => {
             drop(ty_data);
-            function_value_clone_root(ty, source_id, target_id, arena)
+            function_value_clone_root(ty, source_id, arena)
         }
         Named(named) => {
             let named = named.clone();
@@ -1887,7 +1694,7 @@ fn derive_value_clone_body(
                 }
                 Never => {
                     drop(shape_data);
-                    n(arena, native(()), Type::unit())
+                    n(arena, hir::NodeKind::Uninit, ty)
                 }
                 _ => {
                     drop(shape_data);
@@ -2325,14 +2132,7 @@ pub fn value_trait() -> Trait {
         Type::unit(),
         EffType::empty(),
     );
-    let clone_ty = FnType::new(
-        vec![
-            FnArgType::new_by_val(var_ty),
-            FnArgType::new(uninit_type(var_ty), MutType::mutable()),
-        ],
-        Type::unit(),
-        EffType::empty(),
-    );
+    let clone_ty = FnType::new_by_val([var_ty], var_ty, EffType::empty());
     let drop_ty = FnType::new(
         vec![FnArgType::new(var_ty, MutType::mutable())],
         Type::unit(),
@@ -2371,8 +2171,8 @@ pub fn value_trait() -> Trait {
                 "clone",
                 Def::new_infer_quantifiers(
                     clone_ty,
-                    ["source", "target"],
-                    "Compiler-owned method that clones `source` into already allocated `target` storage.",
+                    ["source"],
+                    "Compiler-owned method that returns an owned clone of `source`.",
                 ),
             ),
             (
@@ -2415,127 +2215,11 @@ pub fn inspect_trait() -> Trait {
     .with_deriver(InspectDeriver)
 }
 
-fn trusted_uninit_function(
-    debug_name: &'static str,
-    ty: FnType,
-    arg_names: impl IntoIterator<Item = &'static str>,
-    doc: &'static str,
-    passing: &'static [ResolvedArgPassing],
-    code: fn(ValOrMutArgs, &mut EvalCtx) -> EvalControlFlowResult,
-) -> ModuleFunction {
-    ModuleFunction::new(
-        FunctionDefinition::new(
-            TypeScheme::new_infer_quantifiers(ty),
-            arg_names.into_iter().map(ustr::Ustr::from).collect(),
-            Some(String::from(doc)),
-        ),
-        Box::new(ContextNativeFn::new(debug_name, &[], passing, code)),
-        None,
-        Vec::new(),
-    )
-}
-
-fn uninit_descr() -> ModuleFunction {
-    let gen0 = Type::variable_id(0);
-    trusted_uninit_function(
-        "uninit",
-        FnType::new(Vec::new(), uninit_type(gen0), EffType::empty()),
-        [],
-        "Creates trusted uninitialized storage.",
-        &[],
-        uninit_native,
-    )
-}
-
-fn write_init_descr() -> ModuleFunction {
-    let gen0 = Type::variable_id(0);
-    trusted_uninit_function(
-        "write_init",
-        FnType::new(
-            vec![
-                FnArgType::new(uninit_type(gen0), MutType::mutable()),
-                FnArgType::new_by_val(gen0),
-            ],
-            Type::unit(),
-            EffType::empty(),
-        ),
-        ["target", "value"],
-        "Moves a value into trusted uninitialized storage.",
-        &[MUTABLE_REF, SHARED_REF],
-        write_init_native,
-    )
-}
-
-fn assume_init_descr() -> ModuleFunction {
-    let gen0 = Type::variable_id(0);
-    trusted_uninit_function(
-        "assume_init",
-        FnType::new_by_val([uninit_type(gen0)], gen0, EffType::empty()),
-        ["value"],
-        "Moves an initialized value out of trusted storage.",
-        &[SHARED_REF],
-        assume_init_native,
-    )
-}
-
-fn assume_init_mut_descr() -> ModuleFunction {
-    let gen0 = Type::variable_id(0);
-    trusted_uninit_function(
-        "assume_init_mut",
-        FnType::new_with_return_convention(
-            vec![FnArgType::new(uninit_type(gen0), MutType::mutable())],
-            gen0,
-            EffType::empty(),
-            FnReturnConvention::Place,
-        ),
-        ["target"],
-        "Reinterprets trusted storage as initialized mutable storage.",
-        &[MUTABLE_REF],
-        assume_init_mut_native,
-    )
-}
-
 pub fn add_to_module(to: &mut Module) {
-    to.add_bare_native_type_alias_str(UNINIT_TYPE_NAME, bare_native_type::<UninitStorage>());
     let value_trait_id = to.add_trait(value_trait());
     let value_trait_id = TraitId::new(to.module_id(), value_trait_id);
     debug_assert_eq!(to.trait_def(value_trait_id).name, VALUE_TRAIT_NAME);
     let inspect_trait_id = to.add_trait(inspect_trait());
     let inspect_trait_id = TraitId::new(to.module_id(), inspect_trait_id);
     debug_assert_eq!(to.trait_def(inspect_trait_id).name, INSPECT_TRAIT_NAME);
-    to.add_private_unsafe_function(ustr("uninit"), uninit_descr());
-    to.add_private_unsafe_function(ustr("write_init"), write_init_descr());
-    to.add_private_unsafe_function(ustr("assume_init"), assume_init_descr());
-    to.add_private_unsafe_function(ustr("assume_init_mut"), assume_init_mut_descr());
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        ModuleEnv,
-        parser::location::SourceTable,
-        std::{array::array_type, math::float_type, math::int_type},
-    };
-
-    fn assert_uninit_layout_matches_inner_type(ty: Type, env: &ModuleEnv<'_>) {
-        let span = Location::new_synthesized();
-        assert_eq!(
-            value_layout_for_type(uninit_type(ty), span, env).unwrap(),
-            value_layout_for_type(ty, span, env).unwrap()
-        );
-    }
-
-    #[test]
-    fn uninit_layout_matches_initialized_storage_layout() {
-        let mut source_table = SourceTable::default();
-        let std_module = crate::std::std_module(&mut source_table);
-        let modules = crate::Modules::default();
-        let env = ModuleEnv::new(&std_module, &modules);
-
-        let int = int_type();
-        assert_uninit_layout_matches_inner_type(int, &env);
-        assert_uninit_layout_matches_inner_type(Type::tuple([int, float_type()]), &env);
-        assert_uninit_layout_matches_inner_type(array_type(int), &env);
-    }
 }

@@ -42,8 +42,8 @@ fn tracked_probe_value_impl() -> &'static str {
             hash(value.0, state)
         }
 
-        fn clone(source: Probe, target: &mut Uninit<Probe>) {
-            target = Probe(source.0);
+        fn clone(source: Probe) -> Probe {
+            Probe(source.0)
         }
 
         fn drop(target: &mut Probe) {
@@ -70,8 +70,8 @@ fn incrementing_clone_probe_value_impl() -> &'static str {
             hash(value.0, state)
         }
 
-        fn clone(source: Probe, target: &mut Uninit<Probe>) {
-            target = Probe(source.0 + 1);
+        fn clone(source: Probe) -> Probe {
+            Probe(source.0 + 1)
         }
 
         fn drop(target: &mut Probe) {
@@ -83,7 +83,7 @@ fn incrementing_clone_probe_value_impl() -> &'static str {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn array_clone_initializes_uninit_target_without_prior_drop() {
+fn array_clone_returns_owned_array_without_extra_drop() {
     let mut session = TestSession::new();
     let source = format!(
         r#"
@@ -1308,8 +1308,8 @@ fn auto_derived_struct_value_clone_uses_field_clone() {
                     hash(value.0, state)
                 }
 
-                fn clone(source: Probe, target: &mut Uninit<Probe>) {
-                    target = Probe(source.0 + 10);
+                fn clone(source: Probe) -> Probe {
+                    Probe(source.0 + 10)
                 }
 
                 fn drop(target: &mut Probe) {}
@@ -1351,8 +1351,8 @@ fn named_generic_enum_auto_derives_value() {
                     hash(value.0, state)
                 }
 
-                fn clone(source: Probe, target: &mut Uninit<Probe>) {
-                    target = Probe(source.0 + 10);
+                fn clone(source: Probe) -> Probe {
+                    Probe(source.0 + 10)
                 }
 
                 fn drop(target: &mut Probe) {}
@@ -1424,8 +1424,8 @@ fn explicit_concrete_value_impl_suppresses_auto_blanket_impl() {
                     hash(value.0, state)
                 }
 
-                fn clone(source: Wrapper<int>, target: &mut Uninit<Wrapper<int>>) {
-                    target = Wrapper(source.0 + 10);
+                fn clone(source: Wrapper<int>) -> Wrapper<int> {
+                    Wrapper(source.0 + 10)
                 }
 
                 fn drop(target: &mut Wrapper<int>) {}
@@ -1464,8 +1464,8 @@ fn value_impl_for_foreign_named_adt_is_rejected() {
                     hash(value.0, state)
                 }
 
-                fn clone(source: a::Foreign, target: &mut Uninit<a::Foreign>) {
-                    target = source;
+                fn clone(source: a::Foreign) -> a::Foreign {
+                    source
                 }
 
                 fn drop(target: &mut a::Foreign) {}
@@ -1627,7 +1627,7 @@ fn discarded_empty_struct_temporary_runs_semantic_drop() {
             fn eq(left: Empty, right: Empty) -> bool { true }
             fn to_string(value: Empty) -> string { "" }
             fn hash(value: Empty, state: &mut hasher) { }
-            fn clone(source: Empty, target: &mut Uninit<Empty>) { target = Empty{}; }
+            fn clone(source: Empty) -> Empty { Empty{} }
             fn drop(target: &mut Empty) {
                 testing::record_tracked_drop(1);
             }
@@ -1653,7 +1653,7 @@ fn discarded_nonempty_struct_temporary_runs_semantic_drop() {
             fn eq(left: NonEmpty, right: NonEmpty) -> bool { true }
             fn to_string(value: NonEmpty) -> string { "" }
             fn hash(value: NonEmpty, state: &mut hasher) { }
-            fn clone(source: NonEmpty, target: &mut Uninit<NonEmpty>) { target = NonEmpty{value: 0}; }
+            fn clone(source: NonEmpty) -> NonEmpty { NonEmpty{value: 0} }
             fn drop(target: &mut NonEmpty) {
                 testing::record_tracked_drop(1);
             }
@@ -1679,7 +1679,7 @@ fn discarded_bool_struct_temporary_runs_semantic_drop() {
             fn eq(left: Wrap, right: Wrap) -> bool { true }
             fn to_string(value: Wrap) -> string { "" }
             fn hash(value: Wrap, state: &mut hasher) { }
-            fn clone(source: Wrap, target: &mut Uninit<Wrap>) { target = Wrap{value: false}; }
+            fn clone(source: Wrap) -> Wrap { Wrap{value: false} }
             fn drop(target: &mut Wrap) {
                 testing::record_tracked_drop(1);
             }

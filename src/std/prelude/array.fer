@@ -51,16 +51,16 @@ impl<A> Value for [A] where A: Value {
 	}
 
 	#[no_fuel_check]
-	fn clone(source: [A], target: &mut Uninit<[A]>) {
+	fn clone(source: [A]) -> [A] {
 		let len = array_len(source);
-		write_init(target, array_with_capacity(len));
+		let mut target = array_with_capacity(len);
 		let mut i = 0;
 		loop {
 			if i >= len {
-				return ();
+				return target;
 			};
-			buffer_clone_into(source.data, array_physical_index_unchecked(source, i), assume_init_mut(target).data, assume_init_mut(target).len);
-			assume_init_mut(target).len += 1;
+			buffer_clone_into(source.data, array_physical_index_unchecked(source, i), target.data, target.len);
+			target.len += 1;
 			i += 1;
 		}
 	}

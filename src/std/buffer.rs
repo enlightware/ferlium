@@ -19,9 +19,9 @@ use crate::{
     },
     hir::{
         function::{
-            BinaryNativeFnRMN, BinaryNativeFnRRN, BinaryNativeFnRWN, Callable, ContextNativeFn,
-            Function, FunctionDefinition, ResolvedArgPassing, ResolvedValueArgPassing,
-            UnaryNativeFnMN, UnaryNativeFnRN,
+            BinaryNativeFnRMN, BinaryNativeFnRRN, Callable, ContextNativeFn, Function,
+            FunctionDefinition, ResolvedArgPassing, ResolvedValueArgPassing, UnaryNativeFnMN,
+            UnaryNativeFnRN,
         },
         value::{NativeValueType, Value},
     },
@@ -105,7 +105,7 @@ fn buffer_to_string(_: &Buffer) -> super::string::String {
 
 fn buffer_hash(_: &Buffer, _: &mut super::hash::Hasher) {}
 
-fn buffer_clone(_: &Buffer, _: &mut Value) {
+fn buffer_clone(_: &Buffer) -> Buffer {
     panic!("Buffer values are std-internal and cannot be cloned directly")
 }
 
@@ -508,7 +508,7 @@ pub fn add_to_module(to: &mut Module) {
             Box::new(BinaryNativeFnRRN::new(buffer_eq)) as Function,
             Box::new(UnaryNativeFnRN::new(buffer_to_string)) as Function,
             Box::new(BinaryNativeFnRMN::new(buffer_hash)) as Function,
-            Box::new(BinaryNativeFnRWN::new(buffer_clone)) as Function,
+            Box::new(UnaryNativeFnRN::new(buffer_clone)) as Function,
             Box::new(UnaryNativeFnMN::new(buffer_drop)) as Function,
         ],
     );

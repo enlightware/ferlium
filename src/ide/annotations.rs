@@ -554,7 +554,6 @@ fn node_variable_type_annotations<Env>(
         }
         CloneClosureEnv(node) => {
             variable_type_annotations(arena, node.source, result, locals, env);
-            variable_type_annotations(arena, node.target, result, locals, env);
         }
         DropClosureEnv(node) => {
             variable_type_annotations(arena, node.target, result, locals, env);

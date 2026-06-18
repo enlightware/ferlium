@@ -30,7 +30,7 @@ HIR must not store a raw place in a local, aggregate, closure capture, or normal
 |-------|--------------------|
 | `slot` | Frame slot offset within the local value frame. Extra dictionary/evidence parameters use a separate index space. |
 | `storage` | Whether this local is a non-owning alias, owns storage with lexical cleanup, or is temporarily deferred until final mutability facts are known. |
-| `clone` | If present, `StoreLocal` initializes the local by either a trivial copy or `Value::clone(source, &mut uninit_target)`. |
+| `clone` | If present, `StoreLocal` initializes the local by either a trivial copy or the returned result of `Value::clone(source)`. |
 | `assignment_mode` | `InitializeStorage` means assignment writes uninitialized storage and must not drop the previous destination. |
 
 # Owned Materialization
@@ -110,13 +110,14 @@ Before dictionary elaboration, `Unknown` means the final type is needed to choos
 
 The `Value` method signatures are:
 
-- `clone(source: T, target: &mut Uninit<T>)`
+- `clone(source: T) -> T`
 - `drop(target: &mut T)`
 
 Both methods have an empty effect type.
 In particular, semantic drop cleanup does not add source-level fallibility.
-The clone target is allocated as `Uninit<T>` before the call and becomes initialized after `clone` returns.
-Dropping `Uninit<T>` is a no-op, so first writes into clone out-parameters never drop prior garbage storage.
+`clone` semantically produces a fresh owned value. SSA lowering may still use the
+normal caller-allocated return convention to write that result directly into its
+final destination slot.
 
 For `Dictionary(id)`, `id` indexes the function's extra dictionary/evidence parameter list.
 The dictionary entry is selected with `VALUE_TRAIT.dictionary_method_index(...)`.
@@ -125,7 +126,7 @@ SSA lowering may choose a physical ABI layout that packs evidence and values tog
 
 Dispatch sites are:
 
-- `StoreLocal` with `LocalDecl::clone`: clone into the local's uninitialized target storage.
+- `StoreLocal` with `LocalDecl::clone`: clone, then store the returned value into the local's storage.
 - `CloneValue`: clone or copy a place into a fresh owned temporary result.
 - `Block.cleanup` with `LocalDecl::drop`: drop an owned local at scope exit.
 - `Assignment::drop`: drop the overwritten destination value.
@@ -163,7 +164,7 @@ For example, a `TrivialCopy` value larger than the native immediate argument siz
 Function surface types do not create user-visible `Value` dictionary requirements.
 Their `Value` implementation is compiler-provided and uses the closure payload metadata stored in the function value.
 
-`FunctionClone` clones a function value's closure environment into already allocated target storage.
+`FunctionClone` returns a function value with a cloned closure environment.
 `FunctionDrop` drops the owned closure environment stored in a function value.
 If a function value has no owned closure environment, these operations are no-ops.
 

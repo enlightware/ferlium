@@ -567,14 +567,6 @@ impl Module {
         self.unsafe_items.insert(ustr(name));
     }
 
-    pub(crate) fn add_bare_native_type_alias_str(
-        &mut self,
-        name: &str,
-        native: Box<dyn crate::types::r#type::BareNativeType>,
-    ) {
-        self.add_bare_native_type_alias_with_visibility(ustr(name), native, Visibility::Public);
-    }
-
     fn add_bare_native_type_alias_with_visibility(
         &mut self,
         name: Ustr,
