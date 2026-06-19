@@ -203,7 +203,7 @@ fn buffer_slot_descr() -> ModuleFunction {
         ],
         gen0,
         no_effects(),
-        FnReturnConvention::Place,
+        FnReturnConvention::AddressorPlace,
     );
     ModuleFunction::new(
         FunctionDefinition::new_with_generic_params_and_attributes(

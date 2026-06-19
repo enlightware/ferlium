@@ -464,19 +464,50 @@ where
 
 /// How a function call yields its result.
 ///
-/// `Place` is a call-result convention, not a first-class reference type. The
-/// return value still has type `ret`; the convention only controls whether the
-/// immediate call result may be consumed as a place before being materialized.
+/// Borrow-returning conventions are call-result conventions, not first-class
+/// reference types. The return value still has type `ret`; the convention only
+/// controls whether and how the immediate call result may be consumed as a
+/// place before being materialized.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub enum FnReturnConvention {
     #[default]
     Value,
-    Place,
+    /// A scoped, callee-rooted yielded place. It must be consumed through a
+    /// `WithYielded` driver and cannot escape as caller-rooted storage.
+    YieldedOnce,
+    /// A caller-rooted place, used by legacy addressor functions such as array
+    /// indexing. This is the strongest borrow-returning convention because it
+    /// can also satisfy scoped-yield consumers.
+    AddressorPlace,
 }
 
 impl FnReturnConvention {
+    pub fn returns_borrow(self) -> bool {
+        matches!(self, Self::YieldedOnce | Self::AddressorPlace)
+    }
+
+    pub fn returns_caller_rooted_place(self) -> bool {
+        matches!(self, Self::AddressorPlace)
+    }
+
+    pub fn requires_yield_driver(self) -> bool {
+        matches!(self, Self::YieldedOnce)
+    }
+
     pub fn returns_place(self) -> bool {
-        matches!(self, Self::Place)
+        self.returns_caller_rooted_place()
+    }
+
+    pub fn can_satisfy(self, expected: Self) -> bool {
+        self.capability_rank() >= expected.capability_rank()
+    }
+
+    fn capability_rank(self) -> u8 {
+        match self {
+            Self::Value => 0,
+            Self::YieldedOnce => 1,
+            Self::AddressorPlace => 2,
+        }
     }
 }
 

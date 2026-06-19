@@ -26,8 +26,8 @@ use crate::{
     hir::value::Value,
     hir::{self, hir_syn::local},
     hir::{
-        emit_expr::emit_expr,
-        emit_hir::{EmitModuleFrom, emit_module},
+        emit_expr::emit_expr_with_capabilities,
+        emit_hir::{EmitModuleFrom, emit_module_with_capabilities},
     },
     module::{
         self, LocalDecl, Module, ModuleEnv, ModuleFunction, ModuleId, Path, ResolvedValueLayout,
@@ -381,6 +381,13 @@ pub struct CompilerSession {
     pub(crate) empty_std_user: ModuleId,
     /// Initial size of the source table, for reset().
     pub(crate) initial_source_table_size: usize,
+    /// Explicit feature capabilities enabled for source compiled through this session.
+    pub(crate) capabilities: CompilationCapabilities,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CompilationCapabilities {
+    pub allow_experimental: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -414,6 +421,7 @@ impl CompilerSession {
             modules,
             empty_std_user,
             initial_source_table_size,
+            capabilities: CompilationCapabilities::default(),
         };
 
         EMPTY_COMPILER_SESSION_CACHE.with(|cache| {
@@ -426,6 +434,14 @@ impl CompilerSession {
     /// Get the source table for this compilation session.
     pub fn source_table(&self) -> &SourceTable {
         &self.source_table
+    }
+
+    pub fn compilation_capabilities(&self) -> CompilationCapabilities {
+        self.capabilities
+    }
+
+    pub fn set_allow_experimental(&mut self, allow: bool) {
+        self.capabilities.allow_experimental = allow;
     }
 
     /// Get a read-only view of modules in this compilation session.
@@ -513,6 +529,7 @@ impl CompilerSession {
             &mut self.modules,
             ModuleRef::Existing(module_id),
             uses,
+            self.capabilities,
             None,
         );
         let entry = self
@@ -558,12 +575,13 @@ impl CompilerSession {
                 EvalExprError::Compilation(compilation_error!(ParsingFailed(error)))
             })?;
         let emit_from = EmitModuleFrom::Existing(b(module.clone()));
-        let mut temp_module = emit_module(
+        let mut temp_module = emit_module_with_capabilities(
             module_ast,
             &arena,
             module.module_id(),
             &self.modules,
             emit_from,
+            self.capabilities,
         )
         .map_err(|error| {
             let env = ModuleEnv::new(module, &self.modules);
@@ -574,15 +592,22 @@ impl CompilerSession {
             ))
         })?;
         let expr_ast = expr_ast.expect("snippet source must contain an expression");
-        let compiled = emit_expr(expr_ast, &arena, &mut temp_module, &self.modules, locals)
-            .map_err(|error| {
-                let env = ModuleEnv::new(&temp_module, &self.modules);
-                EvalExprError::Compilation(CompilationError::resolve_types(
-                    error,
-                    &env,
-                    &self.source_table,
-                ))
-            })?;
+        let compiled = emit_expr_with_capabilities(
+            expr_ast,
+            &arena,
+            &mut temp_module,
+            &self.modules,
+            locals,
+            self.capabilities,
+        )
+        .map_err(|error| {
+            let env = ModuleEnv::new(&temp_module, &self.modules);
+            EvalExprError::Compilation(CompilationError::resolve_types(
+                error,
+                &env,
+                &self.source_table,
+            ))
+        })?;
         let result_ty = compiled.ty.ty;
         let previous_module = {
             let entry = self
@@ -990,6 +1015,7 @@ impl CompilerSession {
             &mut self.modules,
             ModuleRef::ByPath(module_path),
             uses,
+            self.capabilities,
             ast_inspector,
         )
     }

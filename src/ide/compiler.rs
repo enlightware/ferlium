@@ -55,6 +55,10 @@ impl Compiler {
         Self::new_with_session_and_uses(CompilerSession::new(), Uses::new_with_std())
     }
 
+    pub fn set_allow_experimental(&mut self, allow: bool) {
+        self.session.set_allow_experimental(allow);
+    }
+
     fn compile_internal(&mut self, src: &str) -> Result<(), CompilationError> {
         self.user_module = self.session.compile_to(
             src,

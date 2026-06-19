@@ -66,6 +66,9 @@ impl UnifiedTypeInference {
         self.substitute_in_fn_type_in_place(&mut descr.definition.ty_scheme.ty);
         self.substitute_in_constraints_in_place(&mut descr.definition.ty_scheme.constraints);
         self.substitute_in_node(&mut descr.code.arena, descr.code.entry_node_id);
+        if let Some(yield_node_id) = descr.code.yield_node_id {
+            self.substitute_in_node(&mut descr.code.arena, yield_node_id);
+        }
         self.substitute_in_local_decls_in_place(&mut descr.locals);
     }
 

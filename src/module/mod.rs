@@ -44,11 +44,15 @@ use crate::{
     define_id_type,
     format::{FormatWith, write_identifier},
     hir::{
-        self, ENodeArena, emit_functions::EmitTraitOutput, function::Function, value::LiteralValue,
+        self, ENodeArena,
+        emit_functions::EmitTraitOutput,
+        function::{Function, FunctionDefinition},
+        value::LiteralValue,
     },
     internal_compilation_error,
     module::id::{Id, NamedIndexed},
     types::{
+        effects::EffType,
         r#trait::Trait,
         r#type::{
             LocalTypeAliasId, Type, TypeAliasEntry, TypeAliases, TypeDef, TypeDefSlot,
@@ -68,6 +72,42 @@ define_id_type!(
     /// ID of a definition within a module
     LocalDefId
 );
+
+define_id_type!(
+    /// ID of a subscript bundle within a module
+    LocalSubscriptId
+);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscriptMemberKind {
+    Ref,
+    Mut,
+}
+
+/// Provenance class for a subscript member's place-producing function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum YieldProvenance {
+    /// The member yields a caller-scoped place through a yielded-once accessor body.
+    YieldedOnce,
+    /// The member returns a place rooted in one of its caller-provided arguments.
+    AddressorPlace,
+}
+
+/// Callable implementation and metadata for one access mode of a subscript.
+#[derive(Debug, Clone)]
+pub struct SubscriptMember {
+    pub function: LocalFunctionId,
+    pub effects: EffType,
+    pub provenance: YieldProvenance,
+}
+
+/// A named subscript bundle with a shared signature and optional read/write members.
+#[derive(Debug, Clone)]
+pub struct SubscriptDefinition {
+    pub definition: FunctionDefinition,
+    pub ref_member: Option<SubscriptMember>,
+    pub mut_member: Option<SubscriptMember>,
+}
 
 /// A reference to a definition, consisting of the module ID and the definition index within that module.
 pub type DefId = (ModuleId, LocalDefId);
@@ -148,6 +188,7 @@ impl FormatWith<ModuleEnv<'_>> for TraitId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumAsInner)]
 pub enum DefKind {
     Function(LocalFunctionId),
+    Subscript(LocalSubscriptId),
     TypeDef(LocalTypeDefId),
     TypeAlias(LocalTypeAliasId),
     BareNativeTypeAlias,
@@ -237,6 +278,7 @@ pub struct Module {
 
     // Functions, including methods of trait implementations.
     pub(crate) functions: Vec<ModuleFunction>,
+    pub(crate) subscripts: Vec<SubscriptDefinition>,
 
     // Type system content
     type_aliases: TypeAliases,
@@ -259,6 +301,7 @@ impl Module {
             def_table: DefTable::new(),
             unsafe_items: FxHashSet::default(),
             functions: Vec::new(),
+            subscripts: Vec::new(),
             type_aliases: TypeAliases::default(),
             type_defs: TypeDefSlots::default(),
             traits: Traits::new(),
@@ -277,6 +320,7 @@ impl Module {
             def_table: DefTable::new(),
             unsafe_items: FxHashSet::default(),
             functions: Vec::new(),
+            subscripts: Vec::new(),
             type_aliases: TypeAliases::default(),
             type_defs: TypeDefSlots::default(),
             traits: Traits::new(),
@@ -383,6 +427,35 @@ impl Module {
         let id = LocalFunctionId::from_index(self.functions.len());
         self.functions.push(function);
         id
+    }
+
+    pub(crate) fn add_subscript(
+        &mut self,
+        name: Ustr,
+        subscript: SubscriptDefinition,
+        visibility: Visibility,
+    ) -> LocalSubscriptId {
+        let id = LocalSubscriptId::from_index(self.subscripts.len());
+        self.subscripts.push(subscript);
+        self.def_table
+            .insert(name, Def::new(DefKind::Subscript(id), visibility));
+        id
+    }
+
+    pub fn get_subscript_by_id(&self, id: LocalSubscriptId) -> Option<&SubscriptDefinition> {
+        self.subscripts.get(id.as_index())
+    }
+
+    /// Get a local subscript ID by name.
+    pub fn get_local_subscript_id(&self, name: Ustr) -> Option<LocalSubscriptId> {
+        self.get_definition(name)
+            .and_then(|def_kind| def_kind.as_subscript().copied())
+    }
+
+    /// Get a local subscript by name.
+    pub fn get_subscript(&self, name: Ustr) -> Option<&SubscriptDefinition> {
+        let id = self.get_local_subscript_id(name)?;
+        self.get_subscript_by_id(id)
     }
 
     /// Name a previously added anonymous function.

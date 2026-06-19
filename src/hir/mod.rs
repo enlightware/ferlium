@@ -13,6 +13,7 @@ pub(crate) mod emit_associated_consts;
 pub(crate) mod emit_expr;
 pub(crate) mod emit_functions;
 pub(crate) mod emit_hir;
+pub(crate) mod emit_subscripts;
 pub(crate) mod emit_value_impl;
 pub mod function;
 pub(crate) mod hir_syn;
@@ -656,6 +657,14 @@ pub struct Case<P: HirPhase = Unelaborated> {
     pub default: NodeId<P>,
 }
 
+/// Caller-side driver for a scoped yielded place.
+#[derive(Debug, Clone, Copy)]
+pub struct WithYielded<P: HirPhase = Unelaborated> {
+    pub accessor: NodeId<P>,
+    pub binding: LocalDeclId,
+    pub body: NodeId<P>,
+}
+
 /// The kind-specific part of the expression-based execution tree
 #[derive(Debug, Clone, EnumAsInner)]
 pub enum NodeKind<P: HirPhase = Unelaborated> {
@@ -744,6 +753,10 @@ pub enum NodeKind<P: HirPhase = Unelaborated> {
     Block(B<Block<P>>),
     /// Return from the current function.
     Return(NodeId<P>),
+    /// Suspend an accessor member and expose a yielded place to its caller-side driver.
+    Yield(NodeId<P>),
+    /// Drive a scoped yielded projection for the dynamic extent of `body`.
+    WithYielded(WithYielded<P>),
     /// Branch on a literal value with a default alternative.
     Case(B<Case<P>>),
     /// Loop forever until a return or break targeting this loop is reached.
@@ -805,7 +818,8 @@ impl NodeKind {
             }
             TraitMethodApply(app) => app.arguments.iter().map(|arg| arg.value).collect(),
             StoreLocal(store) => smallvec![store.value],
-            Return(node) | ExtractTag(node) => smallvec![*node],
+            Return(node) | Yield(node) | ExtractTag(node) => smallvec![*node],
+            WithYielded(node) => smallvec![node.accessor, node.body],
             Loop(node) => smallvec![node.body],
             Break(node) => smallvec![node.value],
             Block(block) => block.body.iter().copied().collect(),
@@ -1255,6 +1269,20 @@ impl<P: HirPhase> Node<P> {
                 writeln!(f, "{indent_str}return")?;
                 format_ind(arena, *node, f, locals, env, spacing, indent + 1)?;
             }
+            Yield(node) => {
+                writeln!(f, "{indent_str}yield")?;
+                format_ind(arena, *node, f, locals, env, spacing, indent + 1)?;
+            }
+            WithYielded(node) => {
+                let local = &locals[node.binding.as_index()];
+                writeln!(
+                    f,
+                    "{indent_str}with yielded binding {} as \"{}\"",
+                    local.slot, local.name.0
+                )?;
+                format_ind(arena, node.accessor, f, locals, env, spacing, indent + 1)?;
+                format_ind(arena, node.body, f, locals, env, spacing, indent + 1)?;
+            }
             Block(block) => {
                 writeln!(f, "{indent_str}block {{")?;
                 for &node in block.body.iter() {
@@ -1482,6 +1510,19 @@ impl<P: HirPhase> Node<P> {
                     return Some(ty);
                 }
             }
+            Yield(node) => {
+                if let Some(ty) = type_at(arena, *node, pos) {
+                    return Some(ty);
+                }
+            }
+            WithYielded(node) => {
+                if let Some(ty) = type_at(arena, node.accessor, pos) {
+                    return Some(ty);
+                }
+                if let Some(ty) = type_at(arena, node.body, pos) {
+                    return Some(ty);
+                }
+            }
             Block(block) => {
                 for &child in block.body.iter() {
                     if let Some(ty) = type_at(arena, child, pos) {
@@ -1650,6 +1691,11 @@ impl Node {
             TakeLocalValue(_) => {}
             LoadLocal(_) => {}
             Return(node) => unbound_ty_vars(arena, *node, result, ignore),
+            Yield(node) => unbound_ty_vars(arena, *node, result, ignore),
+            WithYielded(node) => {
+                unbound_ty_vars(arena, node.accessor, result, ignore);
+                unbound_ty_vars(arena, node.body, result, ignore);
+            }
             Block(block) => block
                 .body
                 .iter()

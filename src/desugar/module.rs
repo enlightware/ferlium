@@ -888,6 +888,7 @@ impl PModule {
         let PModule {
             traits,
             functions,
+            subscripts,
             impls,
             type_aliases,
             type_defs,
@@ -927,6 +928,18 @@ impl PModule {
             }),
             |iter| iter.unzip(),
         )?;
+        let subscripts = subscripts
+            .into_iter()
+            .map(|s| {
+                s.desugar(
+                    &fn_map,
+                    &env,
+                    parsed_arena,
+                    &mut desugared_arena,
+                    &mut modules_used,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let sccs = find_strongly_connected_components(&fn_dep_graph);
         let sorted_sccs = function_sccs(&fn_dep_graph, topological_sort_sccs(&fn_dep_graph, &sccs));
 
@@ -941,6 +954,7 @@ impl PModule {
         let module = DModule {
             traits: vec![],
             functions,
+            subscripts,
             impls,
             type_aliases: vec![],
             type_defs: vec![],
@@ -1248,7 +1262,7 @@ impl PModuleFunction {
             .filter(|arg| arg.mut_binding)
             .map(|arg| arg.name)
             .collect();
-        let locals = self.args.iter().map(|arg| arg.name.0).collect();
+        let locals: Vec<_> = self.args.iter().map(|arg| arg.name.0).collect();
         let mut ctx = DesugarCtx::new_with_locals(
             fn_map,
             locals,
@@ -1359,5 +1373,112 @@ impl PModuleFunction {
         };
         let deps = DepGraphNode(ctx.fn_deps.into_iter().collect());
         Ok((function, deps))
+    }
+}
+
+impl ast::PSubscriptDefinition {
+    pub fn desugar(
+        self,
+        fn_map: &FnMap,
+        env: &ModuleEnv<'_>,
+        parsed_arena: &PExprArena,
+        desugared_arena: &mut DExprArena,
+        modules_used: &mut FxHashSet<ModuleId>,
+    ) -> Result<ast::DSubscriptDefinition, InternalCompilationError> {
+        let generic_ty_params = extend_generic_ty_params(
+            &GenericTyParams::default(),
+            self.generic_params.type_params(),
+            GenericParamsOwner::Function { name: self.name.0 },
+        )?;
+        let generic_eff_params = extend_generic_eff_params(
+            &GenericEffParams::default(),
+            self.generic_params.effect_params(),
+            GenericParamsOwner::Function { name: self.name.0 },
+        )?;
+
+        let locals: Vec<_> = self.args.iter().map(|arg| arg.name.0).collect();
+        let args = self
+            .args
+            .into_iter()
+            .map(|arg| {
+                arg.desugar_with_ty_and_eff_params(
+                    env,
+                    &generic_ty_params,
+                    Some(&generic_eff_params),
+                    modules_used,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let ret_ty = (
+            self.ret_ty.0.desugar_with_ty_and_eff_params(
+                self.ret_ty.1,
+                false,
+                env,
+                &generic_ty_params,
+                Some(&generic_eff_params),
+                modules_used,
+            )?,
+            self.ret_ty.1,
+        );
+
+        let mut next_effect_var = generic_eff_params
+            .values()
+            .map(|var| var.name() + 1)
+            .chain(
+                args.iter()
+                    .filter_map(|arg| arg.ty.map(|(_, ty, _)| ty))
+                    .flat_map(|ty| ty.inner_effect_vars())
+                    .chain(ret_ty.0.inner_effect_vars())
+                    .map(|var| var.name() + 1),
+            )
+            .max()
+            .unwrap_or(0);
+        let where_clause = desugar_type_constraints_with_next_effect_var(
+            &self.where_clause,
+            &generic_ty_params,
+            Some(&generic_eff_params),
+            &mut next_effect_var,
+            env,
+            modules_used,
+        )?;
+
+        let members = self
+            .members
+            .into_iter()
+            .map(|member| {
+                let mut ctx = DesugarCtx::new_with_locals(
+                    fn_map,
+                    locals.clone(),
+                    env,
+                    &generic_ty_params,
+                    &generic_eff_params,
+                );
+                let body = desugar(
+                    member.body,
+                    &mut ctx,
+                    parsed_arena,
+                    desugared_arena,
+                    modules_used,
+                )?;
+                Ok(ast::SubscriptMember {
+                    mode: member.mode,
+                    body,
+                    span: member.span,
+                })
+            })
+            .collect::<Result<Vec<_>, InternalCompilationError>>()?;
+
+        Ok(ast::SubscriptDefinition {
+            visibility: self.visibility,
+            name: self.name,
+            generic_params: self.generic_params,
+            args,
+            args_span: self.args_span,
+            ret_ty,
+            where_clause,
+            members,
+            span: self.span,
+            doc: self.doc,
+        })
     }
 }

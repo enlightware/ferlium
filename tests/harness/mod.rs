@@ -1116,6 +1116,10 @@ impl TestSession {
         &self.session
     }
 
+    pub fn allow_experimental(&mut self) {
+        self.session.set_allow_experimental(true);
+    }
+
     /// Get a module environment, with an empty module including the standard library
     /// for debugging purposes.
     pub fn std_module_env(&self) -> ModuleEnv<'_> {

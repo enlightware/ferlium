@@ -16,7 +16,7 @@ use crate::{
     containers::b,
     define_id_type,
     format::FormatWith,
-    hir::borrow_checker::{check_borrows, check_place_return_roots},
+    hir::borrow_checker::{check_borrows, check_place_return_roots, check_yield_roots},
     hir::function::{Function, FunctionDefinition, PendingScriptFunction, ResolvedArgPassing},
     hir::{
         ENodeArena, ENodeId, Elaborated, HirPhase, NodeId, UNodeArena, UNodeId, Unelaborated,
@@ -480,6 +480,7 @@ pub type UModuleFunction = PendingModuleFunction;
 pub(crate) struct PendingFunctionBody {
     pub(crate) arena: UNodeArena,
     pub(crate) entry_node_id: UNodeId,
+    pub(crate) yield_node_id: Option<UNodeId>,
 }
 
 impl PendingFunctionBody {
@@ -487,11 +488,20 @@ impl PendingFunctionBody {
         Self {
             arena,
             entry_node_id,
+            yield_node_id: None,
         }
     }
 
+    pub(crate) fn with_yield_node_id(mut self, yield_node_id: Option<UNodeId>) -> Self {
+        self.yield_node_id = yield_node_id;
+        self
+    }
+
     pub(crate) fn into_script_function(self, runtime_arg_count: usize) -> PendingScriptFunction {
-        PendingScriptFunction::new(self.arena, self.entry_node_id, runtime_arg_count)
+        let mut function =
+            PendingScriptFunction::new(self.arena, self.entry_node_id, runtime_arg_count);
+        function.yield_node_id = self.yield_node_id;
+        function
     }
 }
 
@@ -590,6 +600,9 @@ impl PendingModuleFunction {
             &mut self.locals,
             ctx,
         )?;
+        if self.code.yield_node_id.is_some() {
+            check_yield_roots(&self.code.arena, root, &self.locals)?;
+        }
         // Classify visible parameters while the trait solver is available, so
         // later lowering passes can read the callee ABI without solving traits.
         let arg_count = self.definition.arg_names.len();
@@ -634,10 +647,11 @@ impl PendingModuleFunction {
             .collect();
         let function = ModuleFunction::new_elaborated(
             self.definition,
-            b(ScriptFunction::new(
-                elaborated.root,
-                self.code.runtime_arg_count,
-            )),
+            b(ScriptFunction {
+                entry_node_id: elaborated.root,
+                yield_node_id: self.code.yield_node_id.map(|node| elaborated.remap[&node]),
+                runtime_arg_count: self.code.runtime_arg_count,
+            }),
             parameter_passing,
             self.spans,
             locals,

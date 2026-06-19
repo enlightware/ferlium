@@ -1116,6 +1116,12 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                 value: self.elaborate_node(src, node.value)?,
             }),
             Continue(node) => Continue(hir::Continue { label: node.label }),
+            Yield(node) => Yield(self.elaborate_node(src, *node)?),
+            WithYielded(node) => WithYielded(hir::WithYielded {
+                accessor: self.elaborate_node(src, node.accessor)?,
+                binding: node.binding,
+                body: self.elaborate_node(src, node.body)?,
+            }),
             CheckCallDepth => CheckCallDepth,
             CheckFuel => CheckFuel,
         })

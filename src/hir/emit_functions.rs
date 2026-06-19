@@ -9,8 +9,9 @@
 use crate::{
     FxHashMap, FxHashSet, Location, Modules,
     ast::{self, DExprArena, DModuleFunction, DModuleFunctionArg},
-    compiler::error::{
-        AttributeTarget, InternalCompilationError, InvalidAttributeKind, UnsafeFeature,
+    compiler::{
+        CompilationCapabilities,
+        error::{AttributeTarget, InternalCompilationError, InvalidAttributeKind, UnsafeFeature},
     },
     containers::{SVec2, b},
     format::FormatWith,
@@ -92,6 +93,56 @@ pub(crate) struct EmitTraitOutput {
 struct FunctionAttributes {
     returns_place: bool,
     no_fuel_check: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct EmitFunctionOptions {
+    pub(super) capabilities: CompilationCapabilities,
+    pub(super) kind: EmitFunctionKind,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) enum EmitFunctionKind {
+    #[default]
+    Normal,
+    SubscriptMember {
+        requires_mutable_yield: bool,
+    },
+}
+
+impl EmitFunctionKind {
+    fn return_convention(self, attrs: FunctionAttributes) -> FnReturnConvention {
+        match self {
+            EmitFunctionKind::Normal => {
+                if attrs.returns_place {
+                    FnReturnConvention::AddressorPlace
+                } else {
+                    FnReturnConvention::Value
+                }
+            }
+            EmitFunctionKind::SubscriptMember { .. } => FnReturnConvention::YieldedOnce,
+        }
+    }
+
+    fn body_expected_ty(self, default: Type) -> Type {
+        match self {
+            EmitFunctionKind::Normal => default,
+            EmitFunctionKind::SubscriptMember { .. } => Type::unit(),
+        }
+    }
+
+    fn force_anonymous(self) -> bool {
+        matches!(self, EmitFunctionKind::SubscriptMember { .. })
+    }
+
+    fn requires_mutable_yield(self) -> bool {
+        match self {
+            EmitFunctionKind::Normal => false,
+            EmitFunctionKind::SubscriptMember {
+                requires_mutable_yield,
+            } => requires_mutable_yield,
+        }
+    }
 }
 
 fn normalize_effect_vars(vars: &mut [EffectVar]) -> EffectsInstSubst {
@@ -293,6 +344,7 @@ fn default_unconstrained_diverging_returns_to_never<'func, I>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn emit_functions<'a, F, I>(
     output: &mut Module,
     solver_arena: &mut NodeArena,
@@ -301,6 +353,7 @@ pub(super) fn emit_functions<'a, F, I>(
     others: &Modules,
     trait_ctx: Option<EmitTraitCtx>,
     recursive_function_names: &FxHashSet<Ustr>,
+    options: EmitFunctionOptions,
 ) -> Result<Option<EmitTraitOutput>, InternalCompilationError>
 where
     I: Iterator<Item = &'a DModuleFunction>,
@@ -584,11 +637,7 @@ where
         let attrs =
             validate_function_attributes(attributes, name.0, output.module_id() == STD_MODULE_ID)?;
         let effects = ty_inf.fresh_effect_var_ty();
-        let return_convention = if attrs.returns_place {
-            FnReturnConvention::Place
-        } else {
-            FnReturnConvention::Value
-        };
+        let return_convention = options.kind.return_convention(attrs);
         let fn_type = FnType::new_with_return_convention(
             args_ty,
             ret_ty_ty,
@@ -655,7 +704,7 @@ where
             let placeholder_id = placeholder_ids[local_fns.len()];
             output.functions[placeholder_id.as_index()] = descr;
             placeholder_id
-        } else if trait_ctx.is_some() {
+        } else if trait_ctx.is_some() || options.kind.force_anonymous() {
             output.add_function_anonymous(descr)
         } else if attrs.returns_place {
             output.add_private_unsafe_function(name.0, descr)
@@ -716,13 +765,50 @@ where
             desugared_arena,
             &mut fn_arena,
         );
+        ty_env.compilation_capabilities = options.capabilities;
+        if descr
+            .definition
+            .ty_scheme
+            .ty
+            .return_convention
+            .requires_yield_driver()
+        {
+            ty_env.yield_context = Some(crate::types::typing_env::YieldTypingContext::new(
+                expected_ret_ty,
+                expected_span,
+                options.kind.requires_mutable_yield(),
+            ));
+        }
         let mut fn_node_id = ty_inf.check_expr(
             &mut ty_env,
             function.body,
-            descr.definition.ty_scheme.ty.ret,
+            options
+                .kind
+                .body_expected_ty(descr.definition.ty_scheme.ty.ret),
             MutType::constant(),
             expected_span,
         )?;
+        let yield_node_id =
+            ty_env
+                .yield_context
+                .take()
+                .and_then(|ctx| match ctx.yielded_nodes.as_slice() {
+                    [node] => Some(*node),
+                    _ => None,
+                });
+        if descr
+            .definition
+            .ty_scheme
+            .ty
+            .return_convention
+            .requires_yield_driver()
+            && yield_node_id.is_none()
+        {
+            return Err(internal_compilation_error!(Unsupported {
+                span: function.span,
+                reason: "subscript member bodies must contain exactly one yield".into(),
+            }));
+        }
         fn_node_id = wrap_body_with_call_depth_check_if_recursive(
             &mut ty_inf,
             &mut fn_arena,
@@ -749,7 +835,7 @@ where
         );
         let pending = PendingModuleFunction::from_body(
             descr.definition.clone(),
-            PendingFunctionBody::new(fn_arena, fn_node_id),
+            PendingFunctionBody::new(fn_arena, fn_node_id).with_yield_node_id(yield_node_id),
             descr.definition.arg_names.len(),
             descr.spans.clone(),
             locals,

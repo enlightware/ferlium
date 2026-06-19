@@ -20,14 +20,15 @@ use ustr::Ustr;
 
 use crate::{
     ast::{self, *},
-    compiler::error::InternalCompilationError,
+    compiler::{CompilationCapabilities, error::InternalCompilationError},
     containers::iterable_to_string,
     format::FormatWith,
     hir::{self, UNodeArena},
     hir::{
         dictionary::{DictElaborationCtx, ExtraParameters},
         elaboration::elaborate_generated_functions,
-        emit_functions::{EmitTraitCtx, emit_functions},
+        emit_functions::{EmitFunctionOptions, EmitTraitCtx, emit_functions},
+        emit_subscripts::emit_subscripts,
         emit_value_impl::emit_auto_value_impls,
     },
     internal_compilation_error,
@@ -431,6 +432,24 @@ pub fn emit_module(
     others: &Modules,
     emit_from: EmitModuleFrom,
 ) -> Result<Module, InternalCompilationError> {
+    emit_module_with_capabilities(
+        source,
+        parsed_arena,
+        module_id,
+        others,
+        emit_from,
+        CompilationCapabilities::default(),
+    )
+}
+
+pub(crate) fn emit_module_with_capabilities(
+    source: ast::PModule,
+    parsed_arena: &PExprArena,
+    module_id: ModuleId,
+    others: &Modules,
+    emit_from: EmitModuleFrom,
+    capabilities: CompilationCapabilities,
+) -> Result<Module, InternalCompilationError> {
     // Preliminary: Make sure no name is defined multiple times.
     validate_name_uniqueness(&source)?;
 
@@ -601,8 +620,21 @@ pub fn emit_module(
             others,
             None,
             &recursive_function_names,
+            EmitFunctionOptions {
+                capabilities,
+                ..Default::default()
+            },
         )?;
     }
+
+    emit_subscripts(
+        &mut output,
+        &mut solver_arena,
+        &source,
+        &desugared_arena,
+        others,
+        capabilities,
+    )?;
 
     // Process trait implementations
     for (imp_idx, imp) in source.impls.iter().enumerate() {
@@ -683,6 +715,10 @@ pub fn emit_module(
             others,
             Some(trait_ctx),
             &recursive_function_names,
+            EmitFunctionOptions {
+                capabilities,
+                ..Default::default()
+            },
         )?
         .unwrap();
 

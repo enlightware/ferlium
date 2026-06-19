@@ -146,11 +146,28 @@ pub struct ApplyData<P: Phase> {
     pub unnamed_arg: UnnamedArg,
 }
 
+/// Data for the [`ExprKind::NamedSubscript`] variant: experimental receiver-first named subscript access.
+#[derive(Debug, Clone)]
+pub struct NamedSubscriptData<P: Phase> {
+    pub receiver: ExprId<P>,
+    pub name: UstrSpan,
+    pub args: Vec<ExprId<P>>,
+}
+
 /// Data for the [`ExprKind::Assign`] variant: assignment
 #[derive(Debug, Clone)]
 pub struct AssignData<P: Phase> {
     pub place: ExprId<P>,
     pub sign_span: Location,
+    pub value: ExprId<P>,
+}
+
+/// Data for the [`ExprKind::AssignOp`] variant: compound assignment.
+#[derive(Debug, Clone)]
+pub struct AssignOpData<P: Phase> {
+    pub place: ExprId<P>,
+    pub sign_span: Location,
+    pub op_path: Path,
     pub value: ExprId<P>,
 }
 
@@ -275,10 +292,13 @@ pub enum ExprKind<P: Phase> {
     Identifier(Path),
     Let(B<LetData<P>>),
     Return(ExprId<P>),
+    Yield(ExprId<P>),
     Abstract(B<AbstractData<P>>),
     Apply(B<ApplyData<P>>),
+    NamedSubscript(B<NamedSubscriptData<P>>),
     Block(Vec<ExprId<P>>),
     Assign(B<AssignData<P>>),
+    AssignOp(B<AssignOpData<P>>),
     PropertyPath(B<PropertyPathData>),
     TraitAssociatedConst(B<TraitAssociatedConstData<P>>),
     Tuple(Vec<ExprId<P>>),
@@ -335,6 +355,11 @@ impl<P: Phase> ExprKind<P> {
         ExprKind::Return(expr)
     }
 
+    /// Construct a [`Yield`](ExprKind::Yield) expression.
+    pub fn yield_(expr: ExprId<P>) -> Self {
+        ExprKind::Yield(expr)
+    }
+
     /// Construct an [`Abstract`](ExprKind::Abstract) expression (anonymous function / lambda).
     pub fn abstract_(args: Vec<UstrSpan>, body: ExprId<P>) -> Self {
         ExprKind::Abstract(b(AbstractData { args, body }))
@@ -349,6 +374,15 @@ impl<P: Phase> ExprKind<P> {
         }))
     }
 
+    /// Construct a [`NamedSubscript`](ExprKind::NamedSubscript) expression.
+    pub fn named_subscript(receiver: ExprId<P>, name: UstrSpan, args: Vec<ExprId<P>>) -> Self {
+        ExprKind::NamedSubscript(b(NamedSubscriptData {
+            receiver,
+            name,
+            args,
+        }))
+    }
+
     /// Construct a [`Block`](ExprKind::Block) expression.
     pub fn block(stmts: Vec<ExprId<P>>) -> Self {
         ExprKind::Block(stmts)
@@ -359,6 +393,21 @@ impl<P: Phase> ExprKind<P> {
         ExprKind::Assign(b(AssignData {
             place,
             sign_span,
+            value,
+        }))
+    }
+
+    /// Construct an [`AssignOp`](ExprKind::AssignOp) expression.
+    pub fn assign_op(
+        place: ExprId<P>,
+        sign_span: Location,
+        op_path: Path,
+        value: ExprId<P>,
+    ) -> Self {
+        ExprKind::AssignOp(b(AssignOpData {
+            place,
+            sign_span,
+            op_path,
             value,
         }))
     }
@@ -511,6 +560,10 @@ impl<P: Phase> FormatWithIndent<P> for Expr<P> {
                 writeln!(f, "{indent_str}return")?;
                 arena[*expr].format_ind(f, env, arena, indent + 1)
             }
+            Yield(expr) => {
+                writeln!(f, "{indent_str}yield")?;
+                arena[*expr].format_ind(f, env, arena, indent + 1)
+            }
             Abstract(data) => {
                 write!(f, "{indent_str}|")?;
                 for (arg, _) in &data.args {
@@ -532,6 +585,14 @@ impl<P: Phase> FormatWithIndent<P> for Expr<P> {
                     writeln!(f, "{indent_str})")
                 }
             }
+            NamedSubscript(data) => {
+                writeln!(f, "{indent_str}named subscript {}", data.name.0)?;
+                arena[data.receiver].format_ind(f, env, arena, indent + 1)?;
+                for &arg in &data.args {
+                    arena[arg].format_ind(f, env, arena, indent + 1)?;
+                }
+                Ok(())
+            }
             Block(exprs) => {
                 for &expr in exprs.iter() {
                     arena[expr].format_ind(f, env, arena, indent)?;
@@ -540,6 +601,11 @@ impl<P: Phase> FormatWithIndent<P> for Expr<P> {
             }
             Assign(data) => {
                 writeln!(f, "{indent_str}assign")?;
+                arena[data.place].format_ind(f, env, arena, indent + 1)?;
+                arena[data.value].format_ind(f, env, arena, indent + 1)
+            }
+            AssignOp(data) => {
+                writeln!(f, "{indent_str}compound assign {}", data.op_path)?;
                 arena[data.place].format_ind(f, env, arena, indent + 1)?;
                 arena[data.value].format_ind(f, env, arena, indent + 1)
             }
@@ -692,8 +758,16 @@ impl<P: Phase> VisitExpr<P> for Expr<P> {
                 arena[data.func].visit(visitor, arena);
                 visitor.visit_exprs(data.args.iter().copied(), arena);
             }
+            NamedSubscript(data) => {
+                arena[data.receiver].visit(visitor, arena);
+                visitor.visit_exprs(data.args.iter().copied(), arena);
+            }
             Block(exprs) => visitor.visit_exprs(exprs.iter().copied(), arena),
             Assign(data) => {
+                arena[data.place].visit(visitor, arena);
+                arena[data.value].visit(visitor, arena);
+            }
+            AssignOp(data) => {
                 arena[data.place].visit(visitor, arena);
                 arena[data.value].visit(visitor, arena);
             }
@@ -729,6 +803,7 @@ impl<P: Phase> VisitExpr<P> for Expr<P> {
             }
             ForLoop(for_loop) => for_loop.visit(visitor, arena),
             Return(expr) => arena[*expr].visit(visitor, arena),
+            Yield(expr) => arena[*expr].visit(visitor, arena),
             Loop(data) => arena[data.body].visit(visitor, arena),
             Break(data) => {
                 if let Some(value) = data.value {

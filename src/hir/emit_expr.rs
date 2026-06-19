@@ -11,7 +11,7 @@ use std::mem;
 use crate::{
     FxHashMap, FxHashSet, Location, Modules,
     ast::{PExprArena, PExprId},
-    compiler::error::InternalCompilationError,
+    compiler::{CompilationCapabilities, error::InternalCompilationError},
     desugar::desugar_expr_with_empty_ctx,
     hir::{self, UNodeArena},
     hir::{
@@ -66,6 +66,24 @@ pub fn emit_expr_unsafe(
     others: &Modules,
     locals: Vec<LocalDecl>,
 ) -> Result<CompiledExpr, InternalCompilationError> {
+    emit_expr_unsafe_with_capabilities(
+        source,
+        parsed_arena,
+        module,
+        others,
+        locals,
+        CompilationCapabilities::default(),
+    )
+}
+
+pub(crate) fn emit_expr_unsafe_with_capabilities(
+    source: PExprId,
+    parsed_arena: &PExprArena,
+    module: &mut Module,
+    others: &Modules,
+    locals: Vec<LocalDecl>,
+    capabilities: CompilationCapabilities,
+) -> Result<CompiledExpr, InternalCompilationError> {
     let mut expr_arena = UNodeArena::default();
     emit_expr_unsafe_inner(
         source,
@@ -74,6 +92,7 @@ pub fn emit_expr_unsafe(
         others,
         locals,
         &mut expr_arena,
+        capabilities,
     )
 }
 
@@ -84,6 +103,7 @@ fn emit_expr_unsafe_inner(
     others: &Modules,
     mut locals: Vec<LocalDecl>,
     expr_arena: &mut UNodeArena,
+    capabilities: CompilationCapabilities,
 ) -> Result<CompiledExpr, InternalCompilationError> {
     // Make sure that the locals' types have no type variables in them
     assert!(
@@ -126,6 +146,7 @@ fn emit_expr_unsafe_inner(
         &desugared_arena,
         expr_arena,
     );
+    ty_env.compilation_capabilities = capabilities;
     let mut ty_inf = TypeInference::new_empty();
     let (node_id, _) = ty_inf.infer_expr(&mut ty_env, source)?;
     let mut locals = mem::take(&mut locals);
@@ -426,18 +447,25 @@ fn emit_expr_unsafe_inner(
     })
 }
 
-/// Emit HIR for an expression, and fails if there are any unbound type variables or constraints.
-/// If the expression imports functions from the Program, module's imports will be updated.
-pub fn emit_expr(
+/// Emit HIR for an expression, failing if there are any unbound type variables or constraints.
+/// If the expression imports functions from the module graph, the module's imports are updated.
+pub(crate) fn emit_expr_with_capabilities(
     source: PExprId,
     parsed_arena: &PExprArena,
     module: &mut Module,
     others: &Modules,
     locals: Vec<LocalDecl>,
+    capabilities: CompilationCapabilities,
 ) -> Result<CompiledExpr, InternalCompilationError> {
     let span = parsed_arena[source].span;
-    let CompiledExpr { ty, expr, locals } =
-        emit_expr_unsafe(source, parsed_arena, module, others, locals)?;
+    let CompiledExpr { ty, expr, locals } = emit_expr_unsafe_with_capabilities(
+        source,
+        parsed_arena,
+        module,
+        others,
+        locals,
+        capabilities,
+    )?;
     validate_safe_expr_type_scheme(&ty, span)?;
     Ok(CompiledExpr { ty, expr, locals })
 }

@@ -484,7 +484,7 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                         ],
                         data_value_ty,
                         EffType::empty(),
-                        FnReturnConvention::Place,
+                        FnReturnConvention::AddressorPlace,
                     );
                     let mut arguments = arguments;
                     let prepared = prepare_generated_call_arguments_with_locals(

@@ -34,7 +34,7 @@ use crate::{
         DeferredLocalStorage, FunctionId, LocalAssignmentMode, LocalDecl, LocalDeclId, ModuleEnv,
         ModuleFunctionSpans, PendingFunctionBody, PendingLocalClone, PendingLocalDrop,
         PendingModuleFunction, PendingTakeLocalValueMode, ProjectionIndex, ResolvedLocalDrop,
-        TraitId, TypeDefLookupResult, id::Id,
+        SubscriptMember, TraitId, TypeDefLookupResult, id::Id,
     },
     parser::location::Location,
     std::{
@@ -145,6 +145,77 @@ struct PreparedPlace {
 struct PreparedCallArguments {
     arguments: Vec<CallArgument>,
     temp_stores: Vec<NodeId>,
+}
+
+struct StaticCallFromCheckedArgs {
+    callee: CheckedStaticCallee,
+    inst_fn_ty: FnType,
+    inst_data: hir::FnInstData,
+    args_node_ids: Vec<NodeId>,
+    abi_arg_tys: Vec<FnArgType>,
+    visible_arg_passing: Option<Vec<ResolvedArgPassing>>,
+    result_mut_ty: MutType,
+}
+
+enum CheckedStaticCallee {
+    Function {
+        function: FunctionId,
+        function_path: Option<ast::Path>,
+        function_span: Location,
+        argument_names: Vec<Ustr>,
+    },
+    TraitMethod {
+        trait_id: TraitId,
+        method_index: TraitMethodIndex,
+        method_path: ast::Path,
+        method_span: Location,
+        arguments_unnamed: UnnamedArg,
+        input_tys: Vec<Type>,
+    },
+}
+
+struct BuiltStaticCall {
+    node: NodeKind,
+    ty: Type,
+    mut_ty: MutType,
+    effects: EffType,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SubscriptAccessMode {
+    Ref,
+    Mut,
+}
+
+struct NamedSubscriptReceiverOverride {
+    node: NodeId,
+    ty: Type,
+    mut_ty: MutType,
+}
+
+type WithYieldedBodyBuilder<'a> = Box<
+    dyn FnOnce(
+            &mut TypeInference,
+            &mut TypingEnv,
+            LocalDeclId,
+            Type,
+        ) -> Result<(NodeId, Type), InternalCompilationError>
+        + 'a,
+>;
+
+/// Inferred accessor call data for a named subscript projection.
+struct NamedSubscriptCall {
+    node: NodeId,
+    ty: Type,
+    effects: EffType,
+}
+
+/// Prepared named subscript accessor, or the pre-yield divergence that prevents one.
+enum PreparedNamedSubscriptAccessor {
+    /// The accessor call was emitted and can be driven by `WithYielded`.
+    Ready(NamedSubscriptCall),
+    /// Accessor argument evaluation diverges before any yielded place can exist.
+    DivergedBeforeYield(NodeId),
 }
 
 impl TypeInference {
@@ -496,6 +567,7 @@ impl TypeInference {
             env.ast_arena,
             &mut fn_arena,
         );
+        inner_env.compilation_capabilities = env.compilation_capabilities;
 
         // 5. Infer the body's type.
         let mut code_id = self.check_expr(
@@ -935,6 +1007,56 @@ impl TypeInference {
                 let node = K::Return(return_value);
                 (node, Type::never(), MutType::constant(), effects)
             }
+            Yield(expr) => {
+                if !env.loop_frames.is_empty() {
+                    return Err(internal_compilation_error!(Unsupported {
+                        span: expr_span,
+                        reason: "yield inside a loop is not supported".into(),
+                    }));
+                }
+                let (node_id, mut_ty) = self.infer_expr(env, *expr)?;
+                let ty = env.ir_arena[node_id].ty;
+                let operand_span = env.ir_arena[node_id].span;
+                if ty != Type::never() && !node_is_place_reference(env.ir_arena, node_id) {
+                    return Err(internal_compilation_error!(Unsupported {
+                        span: operand_span,
+                        reason: "yield expression must be a place".into(),
+                    }));
+                }
+                let Some(yield_context) = &env.yield_context else {
+                    return Err(internal_compilation_error!(Unsupported {
+                        span: expr_span,
+                        reason: "yield is only supported inside subscript members".into(),
+                    }));
+                };
+                self.add_same_type_with_sub_effects_constraint(
+                    ty,
+                    operand_span,
+                    yield_context.expected_ty,
+                    yield_context.expected_span,
+                );
+                if yield_context.requires_mutable_place {
+                    self.add_mut_be_at_least_constraint(
+                        mut_ty,
+                        operand_span,
+                        MutType::mutable(),
+                        expr_span,
+                    );
+                }
+                let effects = env.ir_arena[node_id].effects.clone();
+                let node = env.ir_arena.alloc(hir::Node::new(
+                    K::Yield(node_id),
+                    Type::never(),
+                    effects.clone(),
+                    expr_span,
+                ));
+                env.yield_context
+                    .as_mut()
+                    .expect("yield context disappeared")
+                    .yielded_nodes
+                    .push(node);
+                return Ok((node, MutType::constant()));
+            }
             Abstract(data) => {
                 let (node_id, _ty, mut_ty, _effects) =
                     self.infer_abstract(env, &data.args, data.body, None, expr_span)?;
@@ -1069,6 +1191,9 @@ impl TypeInference {
                     }
                 }
             }
+            NamedSubscript(data) => {
+                return self.infer_named_subscript_read(env, data, expr_span);
+            }
             Block(exprs) => {
                 assert!(!exprs.is_empty());
                 let env_size = env.cur_locals.len();
@@ -1082,6 +1207,12 @@ impl TypeInference {
                 // untouched). Only the block *result* handling below is gated on `!diverges`.
                 let last_index = nodes.len().saturating_sub(1);
                 for node in nodes.iter_mut().take(last_index) {
+                    let contains_yield = env.yield_context.as_ref().is_some_and(|ctx| {
+                        node_contains_any_yield(env.ir_arena, *node, &ctx.yielded_nodes)
+                    });
+                    if contains_yield {
+                        continue;
+                    };
                     *node = self.discard_unused_value(env, *node, expr_span);
                 }
                 if !diverges {
@@ -1103,6 +1234,15 @@ impl TypeInference {
                 (node, ty, MutType::constant(), effects)
             }
             Assign(data) => {
+                if let ExprKind::NamedSubscript(subscript) = &env.ast_arena[data.place].kind {
+                    return self.infer_named_subscript_assign(
+                        env,
+                        subscript,
+                        data.sign_span,
+                        data.value,
+                        expr_span,
+                    );
+                }
                 if let Some(pp_data) = env.ast_arena[data.place].kind.as_property_path() {
                     let fn_path = property_to_fn_path(
                         &pp_data.path,
@@ -1136,6 +1276,93 @@ impl TypeInference {
                         data.sign_span,
                     );
                     let value_id = self.infer_expr_drop_mut(env, data.value)?;
+                    let value_ty = env.ir_arena[value_id].ty;
+                    let value_span = env.ir_arena[value_id].span;
+                    let place_ty = env.ir_arena[place_id].ty;
+                    self.add_sub_type_constraint(value_ty, value_span, place_ty, place_span);
+                    let value_effects = env.ir_arena[value_id].effects.clone();
+                    if value_ty == Type::never() {
+                        let mut nodes = self.place_evaluation_prefix_nodes(env.ir_arena, place_id);
+                        nodes.push(value_id);
+                        let effects = self.make_dependent_effect([&place_effects, &value_effects]);
+                        self.diverging_prefix_result(env, nodes, effects)
+                    } else {
+                        let temp_start_index = env.cur_locals.len();
+                        let prepared_place =
+                            self.prepare_place_for_consumer(env, place_id, expr_span);
+                        let place_id = prepared_place.place;
+                        let value_id = self.materialize_owned_value(env, value_id, expr_span);
+                        let initializes_storage =
+                            assignment_initializes_storage(env.ir_arena, place_id, env);
+                        let drop = if initializes_storage {
+                            None
+                        } else {
+                            if self.type_needs_semantic_drop(env, place_ty, expr_span)
+                                && !place_ty.is_function()
+                            {
+                                self.add_pub_constraint(PubTypeConstraint::new_have_trait(
+                                    value_trait_id(env),
+                                    vec![place_ty],
+                                    vec![],
+                                    vec![],
+                                    expr_span,
+                                ));
+                            }
+                            Some(PendingLocalDrop::Unknown)
+                        };
+                        let combined_effects =
+                            self.make_dependent_effect([&value_effects, &place_effects]);
+                        let node = K::Assign(hir::Assignment {
+                            place: place_id,
+                            value: value_id,
+                            drop,
+                        });
+                        let node = self.wrap_unit_with_temp_drops(
+                            env,
+                            temp_start_index,
+                            prepared_place.prefix,
+                            hir::Node::new(node, Type::unit(), combined_effects.clone(), expr_span),
+                        );
+                        (node, Type::unit(), MutType::constant(), combined_effects)
+                    }
+                }
+            }
+            AssignOp(data) => {
+                if let ExprKind::NamedSubscript(subscript) = &env.ast_arena[data.place].kind {
+                    return self.infer_named_subscript_assign_op(
+                        env,
+                        subscript,
+                        data.sign_span,
+                        &data.op_path,
+                        data.value,
+                        expr_span,
+                    );
+                }
+                let (place_id, place_mut) = self.infer_expr(env, data.place)?;
+                let place_span = env.ir_arena[place_id].span;
+                let place_effects = env.ir_arena[place_id].effects.clone();
+                if env.ir_arena[place_id].ty == Type::never() {
+                    let effects = self.make_dependent_effect([&place_effects]);
+                    self.diverging_prefix_result(env, [place_id], effects)
+                } else {
+                    self.add_mut_be_at_least_constraint(
+                        place_mut,
+                        place_span,
+                        MutType::mutable(),
+                        data.sign_span,
+                    );
+                    let (value_node, value_ty, _value_mut_ty, value_effects) = self
+                        .infer_static_apply(
+                            env,
+                            &data.op_path,
+                            data.sign_span,
+                            &[data.place, data.value],
+                            expr_span,
+                            UnnamedArg::All,
+                        )?;
+                    let value_id =
+                        env.ir_arena
+                            .alloc(N::new(value_node, value_ty, value_effects, expr_span));
                     let value_ty = env.ir_arena[value_id].ty;
                     let value_span = env.ir_arena[value_id].span;
                     let place_ty = env.ir_arena[place_id].ty;
@@ -1780,6 +2007,730 @@ impl TypeInference {
             }
             _ => self.infer_expr_drop_mut(env, expr),
         }
+    }
+
+    fn ensure_named_subscript_access_allowed(
+        env: &TypingEnv,
+        span: Location,
+    ) -> Result<(), InternalCompilationError> {
+        if !env.compilation_capabilities.allow_experimental {
+            return Err(internal_compilation_error!(Unsupported {
+                span,
+                reason:
+                    "named subscript access is experimental; enable experimental features to use it"
+                        .into(),
+            }));
+        }
+        Ok(())
+    }
+
+    fn named_subscript_member(
+        &self,
+        env: &TypingEnv,
+        data: &ast::NamedSubscriptData<Desugared>,
+        mode: SubscriptAccessMode,
+    ) -> Result<SubscriptMember, InternalCompilationError> {
+        let Some(subscript) = env.module_env.current.get_subscript(data.name.0) else {
+            return Err(internal_compilation_error!(Unsupported {
+                span: data.name.1,
+                reason: format!("unknown named subscript `{}`", data.name.0),
+            }));
+        };
+        let member = match mode {
+            SubscriptAccessMode::Ref => subscript.ref_member.as_ref(),
+            SubscriptAccessMode::Mut => subscript.mut_member.as_ref(),
+        };
+        member.cloned().ok_or_else(|| {
+            let member_name = match mode {
+                SubscriptAccessMode::Ref => "ref",
+                SubscriptAccessMode::Mut => "mut",
+            };
+            internal_compilation_error!(Unsupported {
+                span: data.name.1,
+                reason: format!(
+                    "named subscript `{}` has no {member_name} member",
+                    data.name.0
+                ),
+            })
+        })
+    }
+
+    fn named_subscript_args(data: &ast::NamedSubscriptData<Desugared>) -> Vec<DExprId> {
+        std::iter::once(data.receiver)
+            .chain(data.args.iter().copied())
+            .collect()
+    }
+
+    fn infer_named_subscript_accessor_call(
+        &mut self,
+        env: &mut TypingEnv,
+        data: &ast::NamedSubscriptData<Desugared>,
+        mode: SubscriptAccessMode,
+        expr_span: Location,
+        receiver_override: Option<NamedSubscriptReceiverOverride>,
+    ) -> Result<PreparedNamedSubscriptAccessor, InternalCompilationError> {
+        Self::ensure_named_subscript_access_allowed(env, expr_span)?;
+        let member = self.named_subscript_member(env, data, mode)?;
+        let function_data = env
+            .module_env
+            .current
+            .get_function_by_id(member.function)
+            .expect("subscript member function should exist");
+        let definition = function_data.definition.clone();
+        let runtime_arg_passing = function_data
+            .code
+            .runtime_argument_passing()
+            .map(<[_]>::to_vec);
+        let args = Self::named_subscript_args(data);
+        if definition.ty_scheme.ty.args.len() != args.len() {
+            return Err(internal_compilation_error!(WrongNumberOfArguments {
+                expected: definition.ty_scheme.ty.args.len(),
+                expected_span: data.name.1,
+                got: args.len(),
+                got_span: Location::fuse(args.iter().map(|arg| env.ast_arena[*arg].span))
+                    .unwrap_or(expr_span),
+            }));
+        }
+
+        let (mut inst_fn_ty, inst_data, _subst) = definition.ty_scheme.instantiate_with_fresh_vars(
+            self,
+            data.name.1,
+            None,
+            env.module_env,
+        );
+        let member_effects = member.effects.clone();
+        inst_fn_ty.effects = member_effects.clone();
+        let (mut args_node_ids, args_effects, args_diverge) =
+            if let Some(receiver) = receiver_override {
+                let mut node_ids = Vec::with_capacity(args.len());
+                let mut effects = Vec::with_capacity(args.len());
+                let mut diverges = false;
+                for (index, (arg, arg_ty)) in args.iter().zip(&inst_fn_ty.args).enumerate() {
+                    let node_id = if index == 0 {
+                        self.add_sub_type_constraint(
+                            receiver.ty,
+                            env.ir_arena[receiver.node].span,
+                            arg_ty.ty,
+                            data.name.1,
+                        );
+                        self.add_mut_be_at_least_constraint(
+                            receiver.mut_ty,
+                            env.ir_arena[receiver.node].span,
+                            arg_ty.mut_ty,
+                            data.name.1,
+                        );
+                        receiver.node
+                    } else {
+                        self.check_expr(env, *arg, arg_ty.ty, arg_ty.mut_ty, data.name.1)?
+                    };
+                    let ty = env.ir_arena[node_id].ty;
+                    effects.push(env.ir_arena[node_id].effects.clone());
+                    node_ids.push(node_id);
+                    if ty == Type::never() {
+                        diverges = true;
+                        break;
+                    }
+                }
+                (node_ids, self.make_dependent_effect(&effects), diverges)
+            } else {
+                self.check_exprs_until_never(env, &args, &inst_fn_ty.args, data.name.1)?
+            };
+        if args_diverge {
+            let nodes = self.value_evaluation_prefix_nodes_for_many(env.ir_arena, args_node_ids);
+            let effects = self.make_dependent_effect([&args_effects, &member_effects]);
+            return Ok(PreparedNamedSubscriptAccessor::DivergedBeforeYield(
+                self.alloc_diverging_prefix_node(env, nodes, effects, expr_span),
+            ));
+        }
+
+        let ret_ty = inst_fn_ty.ret;
+        let combined_effects = self.make_dependent_effect([&args_effects, &member_effects]);
+        let visible_arg_passing = visible_arg_passing_from_runtime(
+            runtime_arg_passing.as_deref(),
+            &inst_data,
+            args_node_ids.len(),
+        );
+        let temp_start_index = env.cur_locals.len();
+        let prepared_arguments = self.prepare_call_arguments(
+            env,
+            &mut args_node_ids,
+            &inst_fn_ty.args,
+            &definition.ty_scheme.ty.args,
+            expr_span,
+            visible_arg_passing,
+        );
+        let call = NodeKind::StaticApply(b(hir::StaticApplication {
+            function: FunctionId::Local(member.function),
+            function_path: None,
+            function_span: data.name.1,
+            extra_arguments: Vec::new(),
+            arguments: prepared_arguments.arguments,
+            argument_names: definition.arg_names.clone(),
+            ty: inst_fn_ty,
+            inst_data,
+        }));
+        let call = hir::Node::new(call, ret_ty, combined_effects.clone(), expr_span);
+        let node = self.wrap_call_with_temp_drops(
+            env,
+            temp_start_index,
+            prepared_arguments.temp_stores,
+            call,
+        );
+        let node = env.ir_arena.alloc(hir::Node::new(
+            node,
+            ret_ty,
+            combined_effects.clone(),
+            expr_span,
+        ));
+        Ok(PreparedNamedSubscriptAccessor::Ready(NamedSubscriptCall {
+            node,
+            ty: ret_ty,
+            effects: combined_effects,
+        }))
+    }
+
+    fn alloc_diverging_prefix_node(
+        &mut self,
+        env: &mut TypingEnv,
+        nodes: Vec<NodeId>,
+        effects: EffType,
+        span: Location,
+    ) -> NodeId {
+        env.ir_arena.alloc(hir::Node::new(
+            Self::block(nodes, Vec::new()),
+            Type::never(),
+            effects,
+            span,
+        ))
+    }
+
+    fn push_yielded_binding(
+        &mut self,
+        env: &mut TypingEnv,
+        ty: Type,
+        span: Location,
+    ) -> (usize, LocalDeclId) {
+        let env_size = env.cur_locals.len();
+        let mut local =
+            LocalDecl::new((ustr("$yielded"), span), MutType::mutable(), ty, None, span);
+        local.set_non_owning_storage();
+        let id = env.push_local(local);
+        (env_size, id)
+    }
+
+    fn yielded_binding_load(
+        &mut self,
+        env: &mut TypingEnv,
+        binding: LocalDeclId,
+        ty: Type,
+        span: Location,
+    ) -> NodeId {
+        env.ir_arena.alloc(hir::Node::new(
+            NodeKind::LoadLocal(hir::LoadLocal { id: binding }),
+            ty,
+            no_effects(),
+            span,
+        ))
+    }
+
+    fn close_yielded_binding_scope(env: &mut TypingEnv, env_size: usize, span: Location) {
+        Self::extend_local_scopes_to_span_end(env, env_size, span);
+        env.cur_locals.truncate(env_size);
+    }
+
+    fn infer_named_subscript_with_yielded_body(
+        &mut self,
+        env: &mut TypingEnv,
+        data: &ast::NamedSubscriptData<Desugared>,
+        mode: SubscriptAccessMode,
+        expr_span: Location,
+        build_body: impl FnOnce(
+            &mut Self,
+            &mut TypingEnv,
+            LocalDeclId,
+            Type,
+        ) -> Result<(NodeId, Type), InternalCompilationError>,
+    ) -> Result<(NodeId, MutType), InternalCompilationError> {
+        self.infer_named_subscript_with_yielded_body_boxed(
+            env,
+            data,
+            mode,
+            expr_span,
+            Box::new(build_body),
+        )
+    }
+
+    fn infer_named_subscript_with_yielded_body_boxed(
+        &mut self,
+        env: &mut TypingEnv,
+        data: &ast::NamedSubscriptData<Desugared>,
+        mode: SubscriptAccessMode,
+        expr_span: Location,
+        build_body: WithYieldedBodyBuilder<'_>,
+    ) -> Result<(NodeId, MutType), InternalCompilationError> {
+        if mode == SubscriptAccessMode::Mut
+            && let ExprKind::NamedSubscript(receiver) = &env.ast_arena[data.receiver].kind.clone()
+        {
+            return self.infer_named_subscript_with_yielded_body_boxed(
+                env,
+                receiver,
+                SubscriptAccessMode::Mut,
+                expr_span,
+                Box::new(move |this, env, receiver_binding, receiver_ty| {
+                    let receiver_node =
+                        this.yielded_binding_load(env, receiver_binding, receiver_ty, expr_span);
+                    let (node, _) = this.infer_named_subscript_with_yielded_body_with_receiver(
+                        env,
+                        data,
+                        mode,
+                        expr_span,
+                        Some(NamedSubscriptReceiverOverride {
+                            node: receiver_node,
+                            ty: receiver_ty,
+                            mut_ty: MutType::mutable(),
+                        }),
+                        build_body,
+                    )?;
+                    Ok((node, env.ir_arena[node].ty))
+                }),
+            );
+        }
+
+        self.infer_named_subscript_with_yielded_body_with_receiver(
+            env, data, mode, expr_span, None, build_body,
+        )
+    }
+
+    fn infer_named_subscript_with_yielded_body_with_receiver(
+        &mut self,
+        env: &mut TypingEnv,
+        data: &ast::NamedSubscriptData<Desugared>,
+        mode: SubscriptAccessMode,
+        expr_span: Location,
+        receiver_override: Option<NamedSubscriptReceiverOverride>,
+        build_body: WithYieldedBodyBuilder<'_>,
+    ) -> Result<(NodeId, MutType), InternalCompilationError> {
+        let accessor = match self.infer_named_subscript_accessor_call(
+            env,
+            data,
+            mode,
+            expr_span,
+            receiver_override,
+        )? {
+            PreparedNamedSubscriptAccessor::Ready(call) => call,
+            PreparedNamedSubscriptAccessor::DivergedBeforeYield(node) => {
+                return Ok((node, MutType::constant()));
+            }
+        };
+        let (env_size, binding) = self.push_yielded_binding(env, accessor.ty, expr_span);
+        let (body, result_ty) = build_body(self, env, binding, accessor.ty)?;
+        let body_effects = env.ir_arena[body].effects.clone();
+        let effects = self.make_dependent_effect([&accessor.effects, &body_effects]);
+        Self::close_yielded_binding_scope(env, env_size, expr_span);
+        let node = NodeKind::WithYielded(hir::WithYielded {
+            accessor: accessor.node,
+            binding,
+            body,
+        });
+        let node = env
+            .ir_arena
+            .alloc(hir::Node::new(node, result_ty, effects, expr_span));
+        Ok((node, MutType::constant()))
+    }
+
+    fn infer_named_subscript_read(
+        &mut self,
+        env: &mut TypingEnv,
+        data: &ast::NamedSubscriptData<Desugared>,
+        expr_span: Location,
+    ) -> Result<(NodeId, MutType), InternalCompilationError> {
+        self.infer_named_subscript_with_yielded_body(
+            env,
+            data,
+            SubscriptAccessMode::Ref,
+            expr_span,
+            |this, env, binding, binding_ty| {
+                let load = this.yielded_binding_load(env, binding, binding_ty, expr_span);
+                Ok((
+                    this.materialize_owned_value(env, load, expr_span),
+                    binding_ty,
+                ))
+            },
+        )
+    }
+
+    fn infer_named_subscript_assign(
+        &mut self,
+        env: &mut TypingEnv,
+        data: &ast::NamedSubscriptData<Desugared>,
+        sign_span: Location,
+        value: DExprId,
+        expr_span: Location,
+    ) -> Result<(NodeId, MutType), InternalCompilationError> {
+        self.infer_named_subscript_with_yielded_body(
+            env,
+            data,
+            SubscriptAccessMode::Mut,
+            expr_span,
+            |this, env, binding, binding_ty| {
+                Ok((
+                    this.infer_assign_to_yielded_binding(
+                        env, binding, binding_ty, value, sign_span, expr_span,
+                    )?,
+                    Type::unit(),
+                ))
+            },
+        )
+    }
+
+    fn infer_named_subscript_assign_op(
+        &mut self,
+        env: &mut TypingEnv,
+        data: &ast::NamedSubscriptData<Desugared>,
+        sign_span: Location,
+        op_path: &ast::Path,
+        value: DExprId,
+        expr_span: Location,
+    ) -> Result<(NodeId, MutType), InternalCompilationError> {
+        self.infer_named_subscript_with_yielded_body(
+            env,
+            data,
+            SubscriptAccessMode::Mut,
+            expr_span,
+            |this, env, binding, binding_ty| {
+                let value = this.infer_static_apply_with_yielded_binding(
+                    env, binding, binding_ty, op_path, sign_span, value, expr_span,
+                )?;
+                Ok((
+                    this.assign_value_node_to_yielded_binding(
+                        env, binding, binding_ty, value, sign_span, expr_span,
+                    ),
+                    Type::unit(),
+                ))
+            },
+        )
+    }
+
+    fn infer_assign_to_yielded_binding(
+        &mut self,
+        env: &mut TypingEnv,
+        binding: LocalDeclId,
+        binding_ty: Type,
+        value: DExprId,
+        sign_span: Location,
+        expr_span: Location,
+    ) -> Result<NodeId, InternalCompilationError> {
+        let value_id = self.infer_expr_drop_mut(env, value)?;
+        self.add_sub_type_constraint(
+            env.ir_arena[value_id].ty,
+            env.ir_arena[value_id].span,
+            binding_ty,
+            sign_span,
+        );
+        Ok(self.assign_value_node_to_yielded_binding(
+            env, binding, binding_ty, value_id, sign_span, expr_span,
+        ))
+    }
+
+    fn assign_value_node_to_yielded_binding(
+        &mut self,
+        env: &mut TypingEnv,
+        binding: LocalDeclId,
+        binding_ty: Type,
+        value: NodeId,
+        sign_span: Location,
+        expr_span: Location,
+    ) -> NodeId {
+        let place = self.yielded_binding_load(env, binding, binding_ty, sign_span);
+        let value_ty = env.ir_arena[value].ty;
+        if value_ty == Type::never() {
+            return value;
+        }
+        let value = self.materialize_owned_value(env, value, expr_span);
+        let value_effects = env.ir_arena[value].effects.clone();
+        let place_effects = env.ir_arena[place].effects.clone();
+        let effects = self.make_dependent_effect([&value_effects, &place_effects]);
+        env.ir_arena.alloc(hir::Node::new(
+            NodeKind::Assign(hir::Assignment {
+                place,
+                value,
+                drop: Some(PendingLocalDrop::Unknown),
+            }),
+            Type::unit(),
+            effects,
+            expr_span,
+        ))
+    }
+
+    fn build_static_call_from_checked_args(
+        &mut self,
+        env: &mut TypingEnv,
+        mut call: StaticCallFromCheckedArgs,
+        expr_span: Location,
+    ) -> BuiltStaticCall {
+        let args_effects = self.make_dependent_effect(
+            call.args_node_ids
+                .iter()
+                .map(|node| env.ir_arena[*node].effects.clone())
+                .collect::<Vec<_>>(),
+        );
+        if call
+            .args_node_ids
+            .iter()
+            .any(|node| env.ir_arena[*node].ty == Type::never())
+        {
+            let nodes =
+                self.value_evaluation_prefix_nodes_for_many(env.ir_arena, call.args_node_ids);
+            let effects = self.make_dependent_effect([&args_effects, &call.inst_fn_ty.effects]);
+            return BuiltStaticCall {
+                node: self.diverging_prefix_node(env, nodes),
+                ty: Type::never(),
+                mut_ty: MutType::constant(),
+                effects,
+            };
+        }
+
+        let ret_ty = call.inst_fn_ty.ret;
+        let effects = self.make_dependent_effect([&args_effects, &call.inst_fn_ty.effects]);
+        let temp_start_index = env.cur_locals.len();
+        let prepared_arguments = self.prepare_call_arguments(
+            env,
+            &mut call.args_node_ids,
+            &call.inst_fn_ty.args,
+            &call.abi_arg_tys,
+            expr_span,
+            call.visible_arg_passing.as_deref(),
+        );
+        let node = match call.callee {
+            CheckedStaticCallee::Function {
+                function,
+                function_path,
+                function_span,
+                argument_names,
+            } => NodeKind::StaticApply(b(hir::StaticApplication {
+                function,
+                function_path,
+                function_span,
+                extra_arguments: Vec::new(),
+                arguments: prepared_arguments.arguments,
+                argument_names,
+                ty: call.inst_fn_ty,
+                inst_data: call.inst_data,
+            })),
+            CheckedStaticCallee::TraitMethod {
+                trait_id,
+                method_index,
+                method_path,
+                method_span,
+                arguments_unnamed,
+                input_tys,
+            } => NodeKind::TraitMethodApply(b(hir::TraitMethodApplication {
+                trait_id,
+                method_index,
+                method_path,
+                method_span,
+                arguments: prepared_arguments.arguments,
+                arguments_unnamed,
+                ty: call.inst_fn_ty,
+                input_tys,
+                inst_data: call.inst_data,
+            })),
+        };
+        let call_node = hir::Node::new(node, ret_ty, effects.clone(), expr_span);
+        let node = self.wrap_call_with_temp_drops(
+            env,
+            temp_start_index,
+            prepared_arguments.temp_stores,
+            call_node,
+        );
+        BuiltStaticCall {
+            node,
+            ty: ret_ty,
+            mut_ty: call.result_mut_ty,
+            effects,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn infer_static_apply_with_yielded_binding(
+        &mut self,
+        env: &mut TypingEnv,
+        binding: LocalDeclId,
+        binding_ty: Type,
+        path: &ast::Path,
+        path_span: Location,
+        rhs: DExprId,
+        expr_span: Location,
+    ) -> Result<NodeId, InternalCompilationError> {
+        if let Some((_module_name, trait_descr)) = env.module_env.get_trait_method(path)? {
+            let (trait_id, method_index, definition) = trait_descr;
+            let trait_def = env.module_env.trait_def(trait_id);
+            if is_compiler_callable_only_method(trait_id, trait_def, method_index) {
+                return Err(compiler_only_trait_method_use_error(
+                    trait_id,
+                    trait_def,
+                    method_index,
+                    path_span,
+                ));
+            }
+            if definition.ty_scheme.ty.args.len() != 2 {
+                return Err(internal_compilation_error!(WrongNumberOfArguments {
+                    expected: definition.ty_scheme.ty.args.len(),
+                    expected_span: path_span,
+                    got: 2,
+                    got_span: expr_span,
+                }));
+            }
+
+            let trait_ty_var_count = trait_def.type_var_count();
+            let trait_input_type_count = trait_def.input_type_count();
+            let trait_eff_var_count = trait_def.output_effect_count();
+            let trait_constraints = trait_def.constraints.clone();
+            let (inst_fn_ty, inst_data, subst) = definition.ty_scheme.instantiate_with_fresh_vars(
+                self,
+                path_span,
+                Some((trait_ty_var_count, trait_eff_var_count)),
+                env.module_env,
+            );
+            assert!(
+                inst_data.dicts_req.is_empty(),
+                "Instantiation data for trait method is not supported yet."
+            );
+            let mut mapper = BitmapInstantiationMapper::new(&subst);
+            trait_constraints.iter().for_each(|constraint| {
+                let mut constraint = constraint.map(&mut mapper);
+                constraint.instantiate_location(path_span);
+                self.add_pub_constraint(constraint);
+            });
+
+            let args_node_ids = vec![
+                self.yielded_binding_load(env, binding, binding_ty, expr_span),
+                self.check_expr(
+                    env,
+                    rhs,
+                    inst_fn_ty.args[1].ty,
+                    inst_fn_ty.args[1].mut_ty,
+                    path_span,
+                )?,
+            ];
+            self.add_sub_type_constraint(binding_ty, expr_span, inst_fn_ty.args[0].ty, path_span);
+            self.add_mut_be_at_least_constraint(
+                MutType::mutable(),
+                expr_span,
+                inst_fn_ty.args[0].mut_ty,
+                path_span,
+            );
+
+            let output_effs = (0..trait_eff_var_count)
+                .map(|i| subst.1.get(&EffectVar::new(i)).cloned().unwrap())
+                .collect::<Vec<_>>();
+            let mut trait_tys = continuous_hashmap_to_vec(subst.0).unwrap();
+            assert_eq!(trait_tys.len(), trait_ty_var_count as usize);
+            let output_tys = trait_tys.split_off(trait_input_type_count as usize);
+            let input_tys = trait_tys;
+            self.add_pub_constraint(PubTypeConstraint::new_have_trait(
+                trait_id,
+                input_tys.clone(),
+                output_tys,
+                output_effs,
+                path_span,
+            ));
+
+            let call = self.build_static_call_from_checked_args(
+                env,
+                StaticCallFromCheckedArgs {
+                    callee: CheckedStaticCallee::TraitMethod {
+                        trait_id,
+                        method_index,
+                        method_path: path.clone(),
+                        method_span: path_span,
+                        arguments_unnamed: UnnamedArg::All,
+                        input_tys,
+                    },
+                    abi_arg_tys: inst_fn_ty.args.clone(),
+                    inst_fn_ty,
+                    inst_data,
+                    args_node_ids,
+                    visible_arg_passing: None,
+                    result_mut_ty: MutType::constant(),
+                },
+                expr_span,
+            );
+            return Ok(env.ir_arena.alloc(hir::Node::new(
+                call.node,
+                call.ty,
+                call.effects,
+                expr_span,
+            )));
+        }
+
+        let Some((definition, function, _module_id, runtime_arg_passing)) = env
+            .get_function(path)?
+            .map(|(definition, function, module_id, runtime_arg_passing)| {
+                (definition.clone(), function, module_id, runtime_arg_passing)
+            })
+        else {
+            return Err(internal_compilation_error!(Unsupported {
+                span: path_span,
+                reason: format!("unknown compound-assignment operator `{path}`"),
+            }));
+        };
+        if definition.ty_scheme.ty.args.len() != 2 {
+            return Err(internal_compilation_error!(WrongNumberOfArguments {
+                expected: definition.ty_scheme.ty.args.len(),
+                expected_span: path_span,
+                got: 2,
+                got_span: expr_span,
+            }));
+        }
+        let (inst_fn_ty, inst_data, _subst) =
+            definition
+                .ty_scheme
+                .instantiate_with_fresh_vars(self, path_span, None, env.module_env);
+        let args_node_ids = vec![
+            self.yielded_binding_load(env, binding, binding_ty, expr_span),
+            self.check_expr(
+                env,
+                rhs,
+                inst_fn_ty.args[1].ty,
+                inst_fn_ty.args[1].mut_ty,
+                path_span,
+            )?,
+        ];
+        self.add_sub_type_constraint(binding_ty, expr_span, inst_fn_ty.args[0].ty, path_span);
+        self.add_mut_be_at_least_constraint(
+            MutType::mutable(),
+            expr_span,
+            inst_fn_ty.args[0].mut_ty,
+            path_span,
+        );
+        let visible_arg_passing = visible_arg_passing_from_runtime(
+            runtime_arg_passing.as_deref(),
+            &inst_data,
+            args_node_ids.len(),
+        )
+        .map(<[_]>::to_vec);
+        let call = self.build_static_call_from_checked_args(
+            env,
+            StaticCallFromCheckedArgs {
+                callee: CheckedStaticCallee::Function {
+                    function,
+                    function_path: Some(path.clone()),
+                    function_span: path_span,
+                    argument_names: UnnamedArg::All.filter_args(&definition.arg_names),
+                },
+                abi_arg_tys: definition.ty_scheme.ty.args.clone(),
+                inst_fn_ty,
+                inst_data,
+                args_node_ids,
+                visible_arg_passing,
+                result_mut_ty: MutType::constant(),
+            },
+            expr_span,
+        );
+        Ok(env
+            .ir_arena
+            .alloc(hir::Node::new(call.node, call.ty, call.effects, expr_span)))
     }
 
     fn store_owned_temp(
@@ -2671,7 +3622,7 @@ impl TypeInference {
                     self.add_pub_constraint(constraint);
                 });
                 // Make sure the types of the trait arguments match the expected types
-                let (mut args_node_ids, args_effects, args_diverge) =
+                let (args_node_ids, args_effects, args_diverge) =
                     self.check_exprs_until_never(env, args, &inst_fn_ty.args, path_span)?;
                 if args_diverge {
                     let nodes =
@@ -2692,38 +3643,27 @@ impl TypeInference {
                         output_effs,
                         path_span,
                     ));
-                    // Build and return the trait method node
-                    let ret_ty = inst_fn_ty.ret;
-                    let combined_effects =
-                        self.make_dependent_effect([&args_effects, &inst_fn_ty.effects]);
-                    let temp_start_index = env.cur_locals.len();
-                    let prepared_arguments = self.prepare_call_arguments(
+                    let call = self.build_static_call_from_checked_args(
                         env,
-                        &mut args_node_ids,
-                        &inst_fn_ty.args,
-                        &inst_fn_ty.args,
+                        StaticCallFromCheckedArgs {
+                            callee: CheckedStaticCallee::TraitMethod {
+                                trait_id,
+                                method_index,
+                                method_path: path.clone(),
+                                method_span: path_span,
+                                arguments_unnamed,
+                                input_tys,
+                            },
+                            abi_arg_tys: inst_fn_ty.args.clone(),
+                            inst_fn_ty,
+                            inst_data,
+                            args_node_ids,
+                            visible_arg_passing: None,
+                            result_mut_ty: MutType::constant(),
+                        },
                         expr_span,
-                        None,
                     );
-                    let call = K::TraitMethodApply(b(hir::TraitMethodApplication {
-                        trait_id,
-                        method_index,
-                        method_path: path.clone(),
-                        method_span: path_span,
-                        arguments: prepared_arguments.arguments,
-                        arguments_unnamed,
-                        ty: inst_fn_ty,
-                        input_tys,
-                        inst_data,
-                    }));
-                    let call = hir::Node::new(call, ret_ty, combined_effects.clone(), expr_span);
-                    let node = self.wrap_call_with_temp_drops(
-                        env,
-                        temp_start_index,
-                        prepared_arguments.temp_stores,
-                        call,
-                    );
-                    (node, ret_ty, MutType::constant(), combined_effects)
+                    (call.node, call.ty, call.mut_ty, call.effects)
                 }
             } else if let Some((definition, function, _module_id, runtime_arg_passing)) = env
                 .get_function(path)?
@@ -2746,54 +3686,43 @@ impl TypeInference {
                 // Get argument names if any
                 let argument_names = arguments_unnamed.filter_args(&definition.arg_names);
                 // Get the code and make sure the types of its arguments match the expected types
-                let (mut args_node_ids, args_effects, args_diverge) =
+                let (args_node_ids, args_effects, args_diverge) =
                     self.check_exprs_until_never(env, args, &inst_fn_ty.args, path_span)?;
                 if args_diverge {
                     let nodes =
                         self.value_evaluation_prefix_nodes_for_many(env.ir_arena, args_node_ids);
                     self.diverging_prefix_result(env, nodes, args_effects)
                 } else {
-                    // Build and return the function node
-                    let ret_ty = inst_fn_ty.ret;
-                    let combined_effects =
-                        self.make_dependent_effect([&args_effects, &inst_fn_ty.effects]);
                     let visible_arg_passing = visible_arg_passing_from_runtime(
                         runtime_arg_passing.as_deref(),
                         &inst_data,
                         args_node_ids.len(),
-                    );
-                    let temp_start_index = env.cur_locals.len();
+                    )
+                    .map(<[_]>::to_vec);
                     let mut_ty = if inst_fn_ty.returns_place() {
                         MutType::mutable()
                     } else {
                         MutType::constant()
                     };
-                    let prepared_arguments = self.prepare_call_arguments(
+                    let call = self.build_static_call_from_checked_args(
                         env,
-                        &mut args_node_ids,
-                        &inst_fn_ty.args,
-                        &definition.ty_scheme.ty.args,
+                        StaticCallFromCheckedArgs {
+                            callee: CheckedStaticCallee::Function {
+                                function,
+                                function_path: Some(path.clone()),
+                                function_span: path_span,
+                                argument_names,
+                            },
+                            abi_arg_tys: definition.ty_scheme.ty.args.clone(),
+                            inst_fn_ty,
+                            inst_data,
+                            args_node_ids,
+                            visible_arg_passing,
+                            result_mut_ty: mut_ty,
+                        },
                         expr_span,
-                        visible_arg_passing,
                     );
-                    let call = K::StaticApply(b(hir::StaticApplication {
-                        function,
-                        function_path: Some(path.clone()),
-                        function_span: path_span,
-                        extra_arguments: Vec::new(),
-                        arguments: prepared_arguments.arguments,
-                        argument_names,
-                        ty: inst_fn_ty,
-                        inst_data,
-                    }));
-                    let call = hir::Node::new(call, ret_ty, combined_effects.clone(), expr_span);
-                    let node = self.wrap_call_with_temp_drops(
-                        env,
-                        temp_start_index,
-                        prepared_arguments.temp_stores,
-                        call,
-                    );
-                    (node, ret_ty, mut_ty, combined_effects)
+                    (call.node, call.ty, call.mut_ty, call.effects)
                 }
             } else if let Some(type_def) = env.get_type_def(path)? {
                 // Retrieve the payload type and the tag, if it is an enum.
@@ -2927,6 +3856,10 @@ impl TypeInference {
         let mut effects = Vec::with_capacity(exprs.len());
         let mut diverges = false;
         for expr in exprs {
+            let yield_count_before = env
+                .yield_context
+                .as_ref()
+                .map_or(0, |ctx| ctx.yielded_nodes.len());
             let node_id = self.infer_expr_drop_mut(env, *expr)?;
             let ty = env.ir_arena[node_id].ty;
             let expr_effects = env.ir_arena[node_id].effects.clone();
@@ -2934,6 +3867,13 @@ impl TypeInference {
             tys.push(ty);
             effects.push(expr_effects);
             if ty == Type::never() {
+                let contains_new_yield = env
+                    .yield_context
+                    .as_ref()
+                    .is_some_and(|ctx| ctx.yielded_nodes.len() > yield_count_before);
+                if contains_new_yield {
+                    continue;
+                }
                 diverges = true;
                 break;
             }
@@ -3402,6 +4342,15 @@ impl TypeMapper for AnnotationTypeMapper<'_, '_> {
     }
 }
 
+fn node_contains_any_yield(arena: &NodeArena, node_id: NodeId, yield_nodes: &[NodeId]) -> bool {
+    yield_nodes.contains(&node_id)
+        || arena[node_id]
+            .kind
+            .child_node_ids()
+            .into_iter()
+            .any(|child| node_contains_any_yield(arena, child, yield_nodes))
+}
+
 fn collect_free_variables(
     expr_id: DExprId,
     arena: &DExprArena,
@@ -3466,7 +4415,17 @@ fn collect_free_variables(
                 collect_free_variables(*arg, arena, bound, free);
             }
         }
+        NamedSubscript(data) => {
+            collect_free_variables(data.receiver, arena, bound, free);
+            for arg in &data.args {
+                collect_free_variables(*arg, arena, bound, free);
+            }
+        }
         Assign(data) => {
+            collect_free_variables(data.place, arena, bound, free);
+            collect_free_variables(data.value, arena, bound, free);
+        }
+        AssignOp(data) => {
             collect_free_variables(data.place, arena, bound, free);
             collect_free_variables(data.value, arena, bound, free);
         }
@@ -3482,6 +4441,9 @@ fn collect_free_variables(
         FieldAccess(data) => collect_free_variables(data.expr, arena, bound, free),
         TypeAscription(data) => collect_free_variables(data.expr, arena, bound, free),
         Return(expr) => {
+            collect_free_variables(*expr, arena, bound, free);
+        }
+        Yield(expr) => {
             collect_free_variables(*expr, arena, bound, free);
         }
         Loop(data) => {

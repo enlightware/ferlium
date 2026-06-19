@@ -215,6 +215,12 @@ impl<'a> EvalCtx<'a> {
         Self::with_environment(module_id, Vec::new(), compiler_session)
     }
 
+    fn reserve_current_frame_slots(&mut self, locals: &[LocalDecl]) {
+        if let Some(last) = locals.last() {
+            self.ensure_environment_slot(self.frame_base + last.slot.as_index());
+        }
+    }
+
     /// Get the compiler session.
     pub fn compiler_session(&self) -> &'a CompilerSession {
         self.compiler_session
@@ -560,6 +566,188 @@ impl<'a> EvalCtx<'a> {
             })
     }
 
+    fn call_resolved_accessor_until_yield_with_extra(
+        &mut self,
+        local_id: LocalFunctionId,
+        module_id: ModuleId,
+        extra_arguments: Vec<FunctionHiddenArgValue>,
+        arguments: Vec<ValOrMut>,
+        location: Location,
+    ) -> Result<(SuspendedAccessor, Place), RuntimeError> {
+        self.call_accessor_until_yield(local_id, module_id, extra_arguments, arguments)
+            .map_err(|err| {
+                err.with_frame(
+                    module_id,
+                    FunctionId::Local(local_id),
+                    self.environment.len(),
+                    location,
+                )
+            })
+    }
+
+    fn call_accessor_until_yield(
+        &mut self,
+        local_id: LocalFunctionId,
+        mut module_id: ModuleId,
+        extra_arguments: Vec<FunctionHiddenArgValue>,
+        arguments: Vec<ValOrMut>,
+    ) -> Result<(SuspendedAccessor, Place), RuntimeError> {
+        self.check_stack_limit(self.environment.len(), None)?;
+        let target_module_id = module_id;
+        mem::swap(&mut self.module_id, &mut module_id);
+
+        let module = self.compiler_session.expect_fresh_module(self.module_id);
+        let function_data = module.get_function_by_id(local_id).unwrap();
+        let script = function_data
+            .code
+            .as_script()
+            .expect("WithYielded accessor must be a script function");
+        let locals = &function_data.locals;
+        let arena = &module.hir_arena;
+        let previous_returns_place = mem::replace(
+            &mut self.returns_place,
+            function_data.definition.returns_place(),
+        );
+        let old_extra_frame_base = self.extra_frame_base;
+        let extra_start = self.extra_parameters.len();
+        self.extra_frame_base = extra_start;
+        self.extra_parameters
+            .extend(extra_arguments.iter().copied());
+
+        let old_frame_base = self.frame_base;
+        let frame_base = self.environment.len();
+        self.frame_base = frame_base;
+        self.environment.extend(arguments);
+        self.call_depth += 1;
+
+        let result = eval_node_with_ctx(arena, script.entry_node_id, self, locals);
+        match result {
+            Ok(ControlFlow::Transfer(ControlTransfer::Yield(place))) => {
+                self.frame_base = old_frame_base;
+                self.extra_frame_base = old_extra_frame_base;
+                self.returns_place = previous_returns_place;
+                mem::swap(&mut self.module_id, &mut module_id);
+                Ok((
+                    SuspendedAccessor {
+                        local_id,
+                        module_id: target_module_id,
+                        frame_base,
+                        old_frame_base,
+                        previous_returns_place,
+                        old_extra_frame_base,
+                        extra_start,
+                    },
+                    place,
+                ))
+            }
+            Ok(result) => {
+                self.call_depth -= 1;
+                self.truncate_environment_storage(frame_base);
+                self.extra_parameters.truncate(extra_start);
+                self.frame_base = old_frame_base;
+                self.extra_frame_base = old_extra_frame_base;
+                self.returns_place = previous_returns_place;
+                mem::swap(&mut self.module_id, &mut module_id);
+                match result {
+                    ControlFlow::Continue(value) => {
+                        value.discard_storage();
+                        panic!("WithYielded accessor returned without yielding")
+                    }
+                    ControlFlow::Transfer(transfer) => {
+                        if let Some(value) = transfer.into_value() {
+                            value.discard_storage();
+                        }
+                        panic!("WithYielded accessor exited before yielding")
+                    }
+                }
+            }
+            Err(err) => {
+                let cleanup = drop_frame_owned_locals_on_error(
+                    self,
+                    locals,
+                    arena[script.entry_node_id].span,
+                );
+                self.call_depth -= 1;
+                self.truncate_environment_storage(frame_base);
+                self.extra_parameters.truncate(extra_start);
+                self.frame_base = old_frame_base;
+                self.extra_frame_base = old_extra_frame_base;
+                self.returns_place = previous_returns_place;
+                mem::swap(&mut self.module_id, &mut module_id);
+                cleanup?;
+                Err(err)
+            }
+        }
+    }
+
+    fn resume_suspended_accessor_epilogue(
+        &mut self,
+        suspension: SuspendedAccessor,
+        location: Location,
+    ) -> EvalControlFlowResult {
+        self.resume_suspended_accessor_epilogue_inner(suspension)
+            .map_err(|err| {
+                err.with_frame(
+                    suspension.module_id,
+                    FunctionId::Local(suspension.local_id),
+                    suspension.frame_base,
+                    location,
+                )
+            })
+    }
+
+    fn resume_suspended_accessor_epilogue_inner(
+        &mut self,
+        suspension: SuspendedAccessor,
+    ) -> EvalControlFlowResult {
+        let caller_frame_base = self.frame_base;
+        let caller_module_id = self.module_id;
+        let caller_returns_place = self.returns_place;
+        let caller_extra_frame_base = self.extra_frame_base;
+
+        self.frame_base = suspension.frame_base;
+        self.module_id = suspension.module_id;
+        self.returns_place = false;
+        self.extra_frame_base = suspension.extra_start;
+
+        let module = self
+            .compiler_session
+            .expect_fresh_module(suspension.module_id);
+        let function_data = module.get_function_by_id(suspension.local_id).unwrap();
+        let script = function_data
+            .code
+            .as_script()
+            .expect("WithYielded accessor must be a script function");
+        let yield_node_id = script
+            .yield_node_id
+            .expect("WithYielded accessor script must record its yield node");
+        let locals = &function_data.locals;
+        let arena = &module.hir_arena;
+
+        let result =
+            eval_epilogue_after_yield(arena, script.entry_node_id, yield_node_id, self, locals);
+        let cleanup = if result.is_err() {
+            drop_frame_owned_locals_on_error(self, locals, arena[yield_node_id].span)
+        } else {
+            Ok(())
+        };
+
+        self.call_depth -= 1;
+        self.truncate_environment_storage(suspension.frame_base);
+        self.extra_parameters.truncate(suspension.extra_start);
+        self.frame_base = suspension.old_frame_base;
+        self.extra_frame_base = suspension.old_extra_frame_base;
+        self.returns_place = suspension.previous_returns_place;
+
+        self.frame_base = caller_frame_base;
+        self.module_id = caller_module_id;
+        self.returns_place = caller_returns_place;
+        self.extra_frame_base = caller_extra_frame_base;
+
+        cleanup?;
+        result
+    }
+
     /// Call a function along with its correct module context.
     fn call_function(
         &mut self,
@@ -637,6 +825,17 @@ impl PlaceResult {
     fn into_place(self) -> Place {
         self.0
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SuspendedAccessor {
+    local_id: LocalFunctionId,
+    module_id: ModuleId,
+    frame_base: usize,
+    old_frame_base: usize,
+    previous_returns_place: bool,
+    old_extra_frame_base: usize,
+    extra_start: usize,
 }
 
 fn invalid_buffer_index(index: isize, len: usize) -> RuntimeErrorKind {
@@ -793,6 +992,7 @@ pub enum ControlFlow<V> {
 #[derive(Debug)]
 pub enum ControlTransfer {
     Return(Value),
+    Yield(Place),
     Break { label: LoopId, value: Value },
     Continue { label: LoopId },
 }
@@ -816,7 +1016,7 @@ impl ControlTransfer {
     fn into_value(self) -> Option<Value> {
         match self {
             ControlTransfer::Return(value) | ControlTransfer::Break { value, .. } => Some(value),
-            ControlTransfer::Continue { .. } => None,
+            ControlTransfer::Yield(_) | ControlTransfer::Continue { .. } => None,
         }
     }
 }
@@ -831,9 +1031,11 @@ impl ControlFlow<Value> {
             ControlFlow::Continue(value) => value,
             ControlFlow::Transfer(ControlTransfer::Return(value)) => value,
             ControlFlow::Transfer(
-                ControlTransfer::Break { .. } | ControlTransfer::Continue { .. },
+                ControlTransfer::Yield(_)
+                | ControlTransfer::Break { .. }
+                | ControlTransfer::Continue { .. },
             ) => {
-                panic!("loop control escaped its target loop")
+                panic!("control transfer escaped its target")
             }
         }
     }
@@ -1115,6 +1317,8 @@ pub fn eval_node_with_ctx(
         TakeLocalValue(node) => eval_take_local_value(node, arena[node_id].span, ctx, locals),
         LoadLocal(node) => eval_load_local(arena, node_id, node, ctx, locals),
         Return(node) => eval_return(arena, *node, ctx, locals),
+        Yield(node) => eval_yield(arena, *node, ctx, locals),
+        WithYielded(node) => eval_with_yielded(arena, node, arena[node_id].span, ctx, locals),
         Block(block) => eval_block(arena, block, ctx, locals),
         Assign(assignment) => eval_assign(arena, node_id, assignment, ctx, locals),
         Tuple(nodes) | Record(nodes) => eval_tuple(arena, nodes, ctx, locals),
@@ -2200,6 +2404,222 @@ fn eval_return(
 }
 
 #[inline(never)]
+fn eval_yield(
+    arena: &ENodeArena,
+    node: ENodeId,
+    ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
+) -> EvalControlFlowResult {
+    let place = match eval_node_as_place(arena, node, ctx, locals)? {
+        ControlFlow::Continue(place) => place.resolved(ctx),
+        transfer => return Ok(transfer.map_continue(unreachable_continue)),
+    };
+    Ok(ControlFlow::Transfer(ControlTransfer::Yield(place)))
+}
+
+#[inline(never)]
+fn eval_with_yielded(
+    arena: &ENodeArena,
+    node: &hir::WithYielded<Elaborated>,
+    span: Location,
+    ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
+) -> EvalControlFlowResult {
+    ctx.reserve_current_frame_slots(locals);
+    let temp_start = ctx.environment.len();
+    let (suspension, yielded_place) = eval_or_return!(eval_accessor_until_yield(
+        arena,
+        node.accessor,
+        span,
+        ctx,
+        locals
+    ));
+
+    let binding_index = local_environment_index(ctx, locals, node.binding);
+    ctx.set_environment_entry(binding_index, ValOrMut::Mut(yielded_place));
+    let body_result = eval_node_with_ctx(arena, node.body, ctx, locals);
+    ctx.set_environment_entry(binding_index, ValOrMut::Val(Value::uninit()));
+
+    let epilogue_result = ctx.resume_suspended_accessor_epilogue(suspension, span);
+    ctx.truncate_environment_storage(temp_start);
+    combine_with_yielded_body_and_epilogue(body_result, epilogue_result)
+}
+
+fn eval_accessor_until_yield(
+    arena: &ENodeArena,
+    accessor: ENodeId,
+    span: Location,
+    ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
+) -> Result<ControlFlow<(SuspendedAccessor, Place)>, RuntimeError> {
+    let NodeKind::StaticApply(app) = &arena[accessor].kind else {
+        panic!("WithYielded accessor must be a static accessor call");
+    };
+    let (local_id, module_id) = ctx.get_function_local_id(app.function);
+    let temp_start = ctx.environment.len();
+    let extra_arguments =
+        match eval_function_hidden_arg_nodes(arena, &app.extra_arguments, ctx, locals)? {
+            ControlFlow::Continue(arguments) => arguments,
+            ControlFlow::Transfer(transfer) => {
+                ctx.truncate_environment_storage(temp_start);
+                return Ok(ControlFlow::Transfer(transfer));
+            }
+        };
+    let mut arguments = match eval_args(arena, &app.arguments, &app.ty.args, ctx, locals)? {
+        ControlFlow::Continue(arguments) => arguments,
+        ControlFlow::Transfer(transfer) => {
+            ctx.truncate_environment_storage(temp_start);
+            return Ok(ControlFlow::Transfer(transfer));
+        }
+    };
+    match ctx.call_resolved_accessor_until_yield_with_extra(
+        local_id,
+        module_id,
+        extra_arguments,
+        arguments.take_arguments(),
+        span,
+    ) {
+        Ok(suspension) => Ok(ControlFlow::Continue(suspension)),
+        Err(err) => {
+            ctx.truncate_environment_storage(temp_start);
+            Err(err)
+        }
+    }
+}
+
+fn combine_with_yielded_body_and_epilogue(
+    body_result: EvalControlFlowResult,
+    epilogue_result: EvalControlFlowResult,
+) -> EvalControlFlowResult {
+    match (body_result, epilogue_result) {
+        (Ok(body), Ok(ControlFlow::Continue(value))) => {
+            value.discard_storage();
+            Ok(body)
+        }
+        (Ok(body), Ok(epilogue @ ControlFlow::Transfer(_))) => {
+            discard_control_flow_value(body);
+            Ok(epilogue)
+        }
+        (Ok(body), Err(err)) => {
+            discard_control_flow_value(body);
+            Err(err)
+        }
+        (Err(err), Ok(ControlFlow::Continue(value))) => {
+            value.discard_storage();
+            Err(err)
+        }
+        (Err(_), Ok(epilogue @ ControlFlow::Transfer(_))) => Ok(epilogue),
+        (Err(_), Err(epilogue_err)) => Err(epilogue_err),
+    }
+}
+
+fn discard_control_flow_value(flow: ControlFlow<Value>) {
+    match flow {
+        ControlFlow::Continue(value) => value.discard_storage(),
+        ControlFlow::Transfer(transfer) => {
+            if let Some(value) = transfer.into_value() {
+                value.discard_storage();
+            }
+        }
+    }
+}
+
+fn eval_epilogue_after_yield(
+    arena: &ENodeArena,
+    node_id: ENodeId,
+    yield_node_id: ENodeId,
+    ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
+) -> EvalControlFlowResult {
+    if node_id == yield_node_id {
+        return cont(Value::unit());
+    }
+    match &arena[node_id].kind {
+        NodeKind::Block(block) => {
+            eval_block_epilogue_after_yield(arena, block, yield_node_id, ctx, locals)
+        }
+        _ => panic!("yield epilogue replay only supports block-structured accessor bodies"),
+    }
+}
+
+fn eval_block_epilogue_after_yield(
+    arena: &ENodeArena,
+    block: &hir::Block<Elaborated>,
+    yield_node_id: ENodeId,
+    ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
+) -> EvalControlFlowResult {
+    let Some(yield_index) = block
+        .body
+        .iter()
+        .position(|node| node_contains_yield(arena, *node, yield_node_id))
+    else {
+        panic!("yield node is not contained in accessor body");
+    };
+
+    let yield_container = block.body[yield_index];
+    if yield_container != yield_node_id {
+        match eval_epilogue_after_yield(arena, yield_container, yield_node_id, ctx, locals) {
+            Ok(ControlFlow::Continue(value)) => value.discard_storage(),
+            Ok(transfer) => {
+                drop_cleanup_locals(ctx, locals, &block.cleanup, arena[yield_container].span)?;
+                return Ok(transfer);
+            }
+            Err(err) => {
+                drop_cleanup_locals(ctx, locals, &block.cleanup, arena[yield_container].span)?;
+                return Err(err);
+            }
+        }
+    }
+
+    let mut last_value: Option<Value> = None;
+    for node in block.body.iter().skip(yield_index + 1) {
+        match eval_node_with_ctx(arena, *node, ctx, locals) {
+            Err(err) => {
+                if let Some(value) = last_value.take() {
+                    value.discard_storage();
+                }
+                drop_cleanup_locals(ctx, locals, &block.cleanup, arena[*node].span)?;
+                return Err(err);
+            }
+            Ok(ControlFlow::Continue(value)) => {
+                if let Some(old_value) = last_value.replace(value) {
+                    old_value.discard_storage();
+                }
+            }
+            Ok(transfer) => {
+                if let Some(value) = last_value.take() {
+                    value.discard_storage();
+                }
+                drop_cleanup_locals(ctx, locals, &block.cleanup, arena[*node].span)?;
+                return Ok(transfer);
+            }
+        }
+    }
+
+    let span = block
+        .body
+        .last()
+        .map(|node| arena[*node].span)
+        .unwrap_or_else(Location::new_synthesized);
+    drop_cleanup_locals(ctx, locals, &block.cleanup, span)?;
+    cont(last_value.unwrap_or_else(Value::unit))
+}
+
+fn node_contains_yield(arena: &ENodeArena, node_id: ENodeId, yield_node_id: ENodeId) -> bool {
+    if node_id == yield_node_id {
+        return true;
+    }
+    match &arena[node_id].kind {
+        NodeKind::Block(block) => block
+            .body
+            .iter()
+            .any(|child| node_contains_yield(arena, *child, yield_node_id)),
+        _ => false,
+    }
+}
+
+#[inline(never)]
 fn eval_block(
     arena: &ENodeArena,
     block: &hir::Block<Elaborated>,
@@ -2229,6 +2649,9 @@ fn eval_block(
             Ok(transfer) => {
                 if let Some(value) = last_value.take() {
                     value.discard_storage();
+                }
+                if matches!(transfer, ControlFlow::Transfer(ControlTransfer::Yield(_))) {
+                    return Ok(transfer);
                 }
                 ctx.truncate_environment_storage(env_size);
                 return Ok(transfer);
@@ -2292,6 +2715,9 @@ fn eval_block_with_cleanup(
             Ok(transfer) => {
                 if let Some(value) = last_value.take() {
                     value.discard_storage();
+                }
+                if matches!(transfer, ControlFlow::Transfer(ControlTransfer::Yield(_))) {
+                    return Ok(transfer);
                 }
                 let cleanup = drop_cleanup_locals(ctx, locals, cleanup_drops, arena[*node].span);
                 ctx.truncate_environment_storage(env_size);
@@ -2523,6 +2949,9 @@ fn eval_loop(
             ControlFlow::Continue(value) => value.discard_storage(),
             ControlFlow::Transfer(ControlTransfer::Return(value)) => {
                 return Ok(ControlFlow::Transfer(ControlTransfer::Return(value)));
+            }
+            ControlFlow::Transfer(ControlTransfer::Yield(place)) => {
+                return Ok(ControlFlow::Transfer(ControlTransfer::Yield(place)));
             }
             ControlFlow::Transfer(ControlTransfer::Break {
                 label: break_label,
@@ -2862,16 +3291,26 @@ mod tests {
         containers::{SVec2, b},
         eval::{ControlFlow, ControlTransfer, EvalCtx, eval_args, eval_node, eval_nodes},
         hir::{
-            self, CallArgument, ENode, ENodeArena, LoopId, NodeKind,
-            function::{ResolvedArgPassing, ResolvedValueArgPassing},
+            self, CallArgument, ENode, ENodeArena, Elaborated, LoopId, NodeKind,
+            function::{
+                FunctionDefinition, ResolvedArgPassing, ResolvedValueArgPassing, ScriptFunction,
+            },
+            hir_syn,
             value::{LiteralValue, NativeDisplay},
         },
-        module::{Module, ModuleId, Path, id::Id},
+        module::{
+            LocalDecl, LocalDeclId, LocalFunctionId, Module, ModuleFunction, ModuleId, Path,
+            PendingLocalDrop, ResolvedLocalDrop, id::Id,
+        },
+        std::math::{Int, int_type},
         types::{
             effects::EffType,
-            r#type::{FnArgType, Type},
+            mutability::MutType,
+            r#type::{FnArgType, FnReturnConvention, FnType, Type},
+            type_scheme::TypeScheme,
         },
     };
+    use ustr::ustr;
 
     static EVAL_DROP_TRACKED_COUNT: AtomicUsize = AtomicUsize::new(0);
 
@@ -2909,6 +3348,494 @@ mod tests {
 
     fn eval_drop_tracked_count() -> usize {
         EVAL_DROP_TRACKED_COUNT.load(Ordering::Relaxed)
+    }
+
+    fn local(name: &str, mut_ty: MutType, ty: Type, span: Location) -> LocalDecl {
+        LocalDecl::new((ustr(name), span), mut_ty, ty, None, span)
+    }
+
+    fn owned_local(name: &str, mut_ty: MutType, ty: Type, span: Location) -> LocalDecl {
+        let mut local = local(name, mut_ty, ty, span);
+        local.set_owned_storage(PendingLocalDrop::Resolved(ResolvedLocalDrop::Skip));
+        local
+    }
+
+    fn function_definition(
+        fn_ty: FnType,
+        arg_names: impl IntoIterator<Item = &'static str>,
+    ) -> FunctionDefinition {
+        FunctionDefinition::new(
+            TypeScheme::new_infer_quantifiers(fn_ty),
+            arg_names.into_iter().map(ustr).collect(),
+            None,
+        )
+    }
+
+    fn log_epilogue_accessor_function(
+        arena: &mut ENodeArena,
+        marker: Int,
+        scratch_value: Int,
+        span: Location,
+    ) -> (ModuleFunction, FnType) {
+        let int_ty = int_type();
+        let accessor_log = LocalDeclId::from_index(0);
+        let accessor_scratch = LocalDeclId::from_index(1);
+
+        let scratch_value = node(arena, hir_syn::native(scratch_value), int_ty, span);
+        let store_scratch = node(
+            arena,
+            hir_syn::store_local_to(scratch_value, accessor_scratch),
+            Type::unit(),
+            span,
+        );
+        let load_scratch = node(arena, hir_syn::load_local(accessor_scratch), int_ty, span);
+        let yield_scratch = node(arena, hir_syn::yield_(load_scratch), Type::never(), span);
+        let load_log = node(arena, hir_syn::load_local(accessor_log), int_ty, span);
+        let marker = node(arena, hir_syn::native(marker), int_ty, span);
+        let assign_log = node(
+            arena,
+            hir_syn::assign(load_log, marker, None),
+            Type::unit(),
+            span,
+        );
+        let accessor_entry = node(
+            arena,
+            hir_syn::block([store_scratch, yield_scratch, assign_log]),
+            Type::unit(),
+            span,
+        );
+
+        let accessor_fn_ty = FnType::new_with_return_convention(
+            vec![FnArgType::new(int_ty, MutType::mutable())],
+            int_ty,
+            EffType::empty(),
+            FnReturnConvention::YieldedOnce,
+        );
+        let mut accessor_locals = vec![
+            local("log", MutType::mutable(), int_ty, span),
+            owned_local("scratch", MutType::mutable(), int_ty, span),
+        ];
+        LocalDecl::assign_sequential_slots(&mut accessor_locals);
+        let accessor_locals = accessor_locals
+            .into_iter()
+            .map(LocalDecl::into_elaborated)
+            .collect::<Vec<_>>();
+        let accessor_function = ModuleFunction::new_elaborated(
+            function_definition(accessor_fn_ty.clone(), ["log"]),
+            b(ScriptFunction {
+                entry_node_id: accessor_entry,
+                yield_node_id: Some(yield_scratch),
+                runtime_arg_count: 1,
+            }),
+            vec![ResolvedArgPassing::MutableRef],
+            None,
+            accessor_locals,
+        );
+        (accessor_function, accessor_fn_ty)
+    }
+
+    fn node(
+        arena: &mut ENodeArena,
+        kind: NodeKind<Elaborated>,
+        ty: Type,
+        span: Location,
+    ) -> hir::ENodeId {
+        arena.alloc(ENode::new(kind, ty, EffType::empty(), span))
+    }
+
+    #[test]
+    fn with_yielded_runs_body_then_accessor_epilogue() {
+        let span = Location::new_synthesized();
+        let int_ty = int_type();
+        let mut arena = ENodeArena::default();
+
+        let accessor_log = LocalDeclId::from_index(0);
+        let accessor_scratch = LocalDeclId::from_index(1);
+        let caller_log = LocalDeclId::from_index(0);
+        let caller_result = LocalDeclId::from_index(1);
+        let caller_binding = LocalDeclId::from_index(2);
+
+        let value_41 = node(&mut arena, hir_syn::native(41 as Int), int_ty, span);
+        let value_2 = node(&mut arena, hir_syn::native(2 as Int), int_ty, span);
+        let store_scratch = node(
+            &mut arena,
+            hir_syn::store_local_to(value_41, accessor_scratch),
+            Type::unit(),
+            span,
+        );
+        let load_scratch = node(
+            &mut arena,
+            hir_syn::load_local(accessor_scratch),
+            int_ty,
+            span,
+        );
+        let yield_scratch = node(
+            &mut arena,
+            hir_syn::yield_(load_scratch),
+            Type::never(),
+            span,
+        );
+        let load_accessor_log = node(&mut arena, hir_syn::load_local(accessor_log), int_ty, span);
+        let assign_log = node(
+            &mut arena,
+            hir_syn::assign(load_accessor_log, value_2, None),
+            Type::unit(),
+            span,
+        );
+        let accessor_entry = node(
+            &mut arena,
+            hir_syn::block([store_scratch, yield_scratch, assign_log]),
+            Type::unit(),
+            span,
+        );
+
+        let value_0 = node(&mut arena, hir_syn::native(0 as Int), int_ty, span);
+        let store_caller_log = node(
+            &mut arena,
+            hir_syn::store_local_to(value_0, caller_log),
+            Type::unit(),
+            span,
+        );
+        let load_caller_log_for_arg =
+            node(&mut arena, hir_syn::load_local(caller_log), int_ty, span);
+        let accessor_fn_ty = FnType::new_with_return_convention(
+            vec![FnArgType::new(int_ty, MutType::mutable())],
+            int_ty,
+            EffType::empty(),
+            FnReturnConvention::YieldedOnce,
+        );
+        let accessor_id = LocalFunctionId::from_index(0);
+        let accessor_call = node(
+            &mut arena,
+            hir_syn::static_apply(
+                crate::module::FunctionId::Local(accessor_id),
+                accessor_fn_ty.clone(),
+                vec![CallArgument {
+                    value: load_caller_log_for_arg,
+                    passing: ResolvedArgPassing::MutableRef,
+                }],
+                span,
+            ),
+            int_ty,
+            span,
+        );
+        let load_binding = node(
+            &mut arena,
+            hir_syn::load_local(caller_binding),
+            int_ty,
+            span,
+        );
+        let load_caller_result_place =
+            node(&mut arena, hir_syn::load_local(caller_result), int_ty, span);
+        let store_body_result = node(
+            &mut arena,
+            hir_syn::assign(load_caller_result_place, load_binding, None),
+            Type::unit(),
+            span,
+        );
+        let with_yielded = node(
+            &mut arena,
+            hir_syn::with_yielded(accessor_call, caller_binding, store_body_result),
+            Type::unit(),
+            span,
+        );
+        let load_caller_result = node(&mut arena, hir_syn::load_local(caller_result), int_ty, span);
+        let load_caller_log = node(&mut arena, hir_syn::load_local(caller_log), int_ty, span);
+        let tuple = node(
+            &mut arena,
+            hir_syn::tuple([load_caller_result, load_caller_log]),
+            Type::tuple([int_ty, int_ty]),
+            span,
+        );
+        let caller_entry = node(
+            &mut arena,
+            hir_syn::block([store_caller_log, with_yielded, tuple]),
+            Type::tuple([int_ty, int_ty]),
+            span,
+        );
+
+        let mut accessor_locals = vec![
+            local("log", MutType::mutable(), int_ty, span),
+            owned_local("scratch", MutType::mutable(), int_ty, span),
+        ];
+        LocalDecl::assign_sequential_slots(&mut accessor_locals);
+        let accessor_locals = accessor_locals
+            .into_iter()
+            .map(LocalDecl::into_elaborated)
+            .collect::<Vec<_>>();
+        let accessor_function = ModuleFunction::new_elaborated(
+            function_definition(accessor_fn_ty, ["log"]),
+            b(ScriptFunction {
+                entry_node_id: accessor_entry,
+                yield_node_id: Some(yield_scratch),
+                runtime_arg_count: 1,
+            }),
+            vec![ResolvedArgPassing::MutableRef],
+            None,
+            accessor_locals,
+        );
+
+        let mut caller_locals = vec![
+            owned_local("log", MutType::mutable(), int_ty, span),
+            owned_local("result", MutType::mutable(), int_ty, span),
+            local("$yielded", MutType::mutable(), int_ty, span),
+        ];
+        LocalDecl::assign_sequential_slots(&mut caller_locals);
+        let caller_locals = caller_locals
+            .into_iter()
+            .map(LocalDecl::into_elaborated)
+            .collect::<Vec<_>>();
+
+        let mut module = Module::new(ModuleId::from_index(2));
+        module.hir_arena = arena;
+        let registered_accessor = module.add_function(ustr("accessor"), accessor_function);
+        assert_eq!(registered_accessor, accessor_id);
+
+        let mut session = CompilerSession::new();
+        let module_id = session.register_module(Path::single_str("$with_yielded_test"), module);
+        let module = session.expect_fresh_module(module_id);
+        let result = eval_node(
+            &module.hir_arena,
+            caller_entry,
+            module_id,
+            &caller_locals,
+            &session,
+        )
+        .unwrap()
+        .into_value();
+
+        let mut values = result.into_tuple().expect("caller should return a tuple");
+        assert_eq!(values[0].as_primitive_ty::<Int>(), Some(&(41 as Int)));
+        assert_eq!(values[1].as_primitive_ty::<Int>(), Some(&(2 as Int)));
+        while let Some(value) = values.pop() {
+            value.discard_storage();
+        }
+    }
+
+    #[test]
+    fn with_yielded_runs_accessor_epilogue_when_body_returns() {
+        reset_eval_drop_tracked_count();
+        let span = Location::new_synthesized();
+        let int_ty = int_type();
+        let mut arena = ENodeArena::default();
+
+        let accessor_scratch = LocalDeclId::from_index(0);
+        let caller_binding = LocalDeclId::from_index(0);
+
+        let value_41 = node(&mut arena, hir_syn::native(41 as Int), int_ty, span);
+        let store_scratch = node(
+            &mut arena,
+            hir_syn::store_local_to(value_41, accessor_scratch),
+            Type::unit(),
+            span,
+        );
+        let load_scratch = node(
+            &mut arena,
+            hir_syn::load_local(accessor_scratch),
+            int_ty,
+            span,
+        );
+        let yield_scratch = node(
+            &mut arena,
+            hir_syn::yield_(load_scratch),
+            Type::never(),
+            span,
+        );
+        let epilogue_tracked = node(
+            &mut arena,
+            hir_syn::native(EvalDropTracked),
+            eval_drop_tracked_type(),
+            span,
+        );
+        let accessor_entry = node(
+            &mut arena,
+            hir_syn::block([store_scratch, yield_scratch, epilogue_tracked]),
+            eval_drop_tracked_type(),
+            span,
+        );
+
+        let accessor_id = LocalFunctionId::from_index(0);
+        let accessor_fn_ty = FnType::new_with_return_convention(
+            vec![],
+            int_ty,
+            EffType::empty(),
+            FnReturnConvention::YieldedOnce,
+        );
+        let accessor_call = node(
+            &mut arena,
+            hir_syn::static_apply(
+                crate::module::FunctionId::Local(accessor_id),
+                accessor_fn_ty.clone(),
+                Vec::new(),
+                span,
+            ),
+            int_ty,
+            span,
+        );
+        let unit = node(&mut arena, hir_syn::native(()), Type::unit(), span);
+        let body_return = node(&mut arena, hir_syn::return_(unit), Type::never(), span);
+        let with_yielded = node(
+            &mut arena,
+            hir_syn::with_yielded(accessor_call, caller_binding, body_return),
+            Type::never(),
+            span,
+        );
+
+        let mut accessor_locals = vec![owned_local("scratch", MutType::mutable(), int_ty, span)];
+        LocalDecl::assign_sequential_slots(&mut accessor_locals);
+        let accessor_locals = accessor_locals
+            .into_iter()
+            .map(LocalDecl::into_elaborated)
+            .collect::<Vec<_>>();
+        let accessor_function = ModuleFunction::new_elaborated(
+            function_definition(accessor_fn_ty, []),
+            b(ScriptFunction {
+                entry_node_id: accessor_entry,
+                yield_node_id: Some(yield_scratch),
+                runtime_arg_count: 0,
+            }),
+            Vec::new(),
+            None,
+            accessor_locals,
+        );
+
+        let mut caller_locals = vec![local("$yielded", MutType::mutable(), int_ty, span)];
+        LocalDecl::assign_sequential_slots(&mut caller_locals);
+        let caller_locals = caller_locals
+            .into_iter()
+            .map(LocalDecl::into_elaborated)
+            .collect::<Vec<_>>();
+
+        let mut module = Module::new(ModuleId::from_index(2));
+        module.hir_arena = arena;
+        let registered_accessor = module.add_function(ustr("accessor"), accessor_function);
+        assert_eq!(registered_accessor, accessor_id);
+
+        let mut session = CompilerSession::new();
+        let module_id =
+            session.register_module(Path::single_str("$with_yielded_return_test"), module);
+        let module = session.expect_fresh_module(module_id);
+        let result = eval_node(
+            &module.hir_arena,
+            with_yielded,
+            module_id,
+            &caller_locals,
+            &session,
+        )
+        .unwrap();
+
+        let ControlFlow::Transfer(ControlTransfer::Return(value)) = result else {
+            panic!("expected body return to propagate");
+        };
+        assert!(value.as_primitive_ty::<()>().is_some());
+        value.discard_storage();
+        assert_eq!(eval_drop_tracked_count(), 1);
+    }
+
+    #[test]
+    fn nested_with_yielded_runs_epilogues_lifo() {
+        let span = Location::new_synthesized();
+        let int_ty = int_type();
+        let mut arena = ENodeArena::default();
+
+        let caller_log = LocalDeclId::from_index(0);
+        let outer_binding = LocalDeclId::from_index(1);
+        let inner_binding = LocalDeclId::from_index(2);
+
+        let outer_id = LocalFunctionId::from_index(0);
+        let inner_id = LocalFunctionId::from_index(1);
+        let (outer_function, outer_fn_ty) = log_epilogue_accessor_function(&mut arena, 4, 41, span);
+        let (inner_function, inner_fn_ty) = log_epilogue_accessor_function(&mut arena, 3, 42, span);
+
+        let value_0 = node(&mut arena, hir_syn::native(0 as Int), int_ty, span);
+        let store_log = node(
+            &mut arena,
+            hir_syn::store_local_to(value_0, caller_log),
+            Type::unit(),
+            span,
+        );
+        let outer_log_arg = node(&mut arena, hir_syn::load_local(caller_log), int_ty, span);
+        let outer_call = node(
+            &mut arena,
+            hir_syn::static_apply(
+                crate::module::FunctionId::Local(outer_id),
+                outer_fn_ty,
+                vec![CallArgument {
+                    value: outer_log_arg,
+                    passing: ResolvedArgPassing::MutableRef,
+                }],
+                span,
+            ),
+            int_ty,
+            span,
+        );
+        let inner_log_arg = node(&mut arena, hir_syn::load_local(caller_log), int_ty, span);
+        let inner_call = node(
+            &mut arena,
+            hir_syn::static_apply(
+                crate::module::FunctionId::Local(inner_id),
+                inner_fn_ty,
+                vec![CallArgument {
+                    value: inner_log_arg,
+                    passing: ResolvedArgPassing::MutableRef,
+                }],
+                span,
+            ),
+            int_ty,
+            span,
+        );
+        let unit = node(&mut arena, hir_syn::native(()), Type::unit(), span);
+        let inner_with_yielded = node(
+            &mut arena,
+            hir_syn::with_yielded(inner_call, inner_binding, unit),
+            Type::unit(),
+            span,
+        );
+        let outer_with_yielded = node(
+            &mut arena,
+            hir_syn::with_yielded(outer_call, outer_binding, inner_with_yielded),
+            Type::unit(),
+            span,
+        );
+        let load_log = node(&mut arena, hir_syn::load_local(caller_log), int_ty, span);
+        let caller_entry = node(
+            &mut arena,
+            hir_syn::block([store_log, outer_with_yielded, load_log]),
+            int_ty,
+            span,
+        );
+
+        let mut caller_locals = vec![
+            owned_local("log", MutType::mutable(), int_ty, span),
+            local("$outer_yielded", MutType::mutable(), int_ty, span),
+            local("$inner_yielded", MutType::mutable(), int_ty, span),
+        ];
+        LocalDecl::assign_sequential_slots(&mut caller_locals);
+        let caller_locals = caller_locals
+            .into_iter()
+            .map(LocalDecl::into_elaborated)
+            .collect::<Vec<_>>();
+
+        let mut module = Module::new(ModuleId::from_index(2));
+        module.hir_arena = arena;
+        assert_eq!(module.add_function(ustr("outer"), outer_function), outer_id);
+        assert_eq!(module.add_function(ustr("inner"), inner_function), inner_id);
+
+        let mut session = CompilerSession::new();
+        let module_id =
+            session.register_module(Path::single_str("$with_yielded_lifo_test"), module);
+        let module = session.expect_fresh_module(module_id);
+        let result = eval_node(
+            &module.hir_arena,
+            caller_entry,
+            module_id,
+            &caller_locals,
+            &session,
+        )
+        .unwrap()
+        .into_value();
+
+        assert_eq!(result.as_primitive_ty::<Int>(), Some(&(4 as Int)));
     }
 
     #[test]

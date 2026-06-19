@@ -79,6 +79,60 @@ pub type PModuleFunction = ModuleFunction<Parsed>;
 /// An AST module function after desugaring
 pub type DModuleFunction = ModuleFunction<Desugared>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SubscriptMemberMode {
+    pub ref_member: bool,
+    pub mut_member: bool,
+}
+
+impl SubscriptMemberMode {
+    pub fn ref_() -> Self {
+        Self {
+            ref_member: true,
+            mut_member: false,
+        }
+    }
+
+    pub fn mut_() -> Self {
+        Self {
+            ref_member: false,
+            mut_member: true,
+        }
+    }
+
+    pub fn ref_mut() -> Self {
+        Self {
+            ref_member: true,
+            mut_member: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SubscriptMember<P: Phase> {
+    pub mode: SubscriptMemberMode,
+    pub body: ExprId<P>,
+    pub span: Location,
+}
+
+#[derive(Debug, Clone)]
+#[allow(clippy::too_many_arguments)]
+pub struct SubscriptDefinition<P: Phase> {
+    pub visibility: Visibility,
+    pub name: UstrSpan,
+    pub generic_params: GenericParams,
+    pub args: Vec<ModuleFunctionArg<P>>,
+    pub args_span: Location,
+    pub ret_ty: TypeSpan<P>,
+    pub where_clause: Vec<P::WhereClause>,
+    pub members: Vec<SubscriptMember<P>>,
+    pub span: Location,
+    pub doc: Option<String>,
+}
+
+pub type PSubscriptDefinition = SubscriptDefinition<Parsed>;
+pub type DSubscriptDefinition = SubscriptDefinition<Desugared>;
+
 #[derive(Debug, Clone)]
 pub struct TraitMethodArg {
     pub name: UstrSpan,
@@ -294,6 +348,7 @@ pub type DTraitImpl = TraitImpl<Desugared>;
 pub struct Module<P: Phase> {
     pub traits: Vec<P::TraitInModule>,
     pub functions: Vec<ModuleFunction<P>>,
+    pub subscripts: Vec<SubscriptDefinition<P>>,
     pub impls: Vec<TraitImpl<P>>,
     pub type_aliases: Vec<P::TypeAliasInModule>,
     pub type_defs: Vec<P::TypeDefInModule>,
@@ -309,6 +364,12 @@ impl<P: Phase> Module<P> {
     pub fn single_function(function: ModuleFunction<P>) -> Self {
         Self {
             functions: vec![function],
+            ..Self::default()
+        }
+    }
+    pub fn single_subscript(subscript: SubscriptDefinition<P>) -> Self {
+        Self {
+            subscripts: vec![subscript],
             ..Self::default()
         }
     }
@@ -341,6 +402,7 @@ impl<P: Phase> Module<P> {
     pub fn extend(&mut self, other: Self) {
         self.traits.extend(other.traits);
         self.functions.extend(other.functions);
+        self.subscripts.extend(other.subscripts);
         self.impls.extend(other.impls);
         self.type_aliases.extend(other.type_aliases);
         self.type_defs.extend(other.type_defs);
@@ -359,6 +421,7 @@ impl<P: Phase> Module<P> {
     pub fn is_empty(&self) -> bool {
         self.traits.is_empty()
             && self.functions.is_empty()
+            && self.subscripts.is_empty()
             && self.impls.is_empty()
             && self.type_aliases.is_empty()
             && self.type_defs.is_empty()
@@ -372,6 +435,7 @@ impl Module<Parsed> {
             .iter()
             .map(|trait_def| trait_def.name)
             .chain(self.functions.iter().map(|f| f.name))
+            .chain(self.subscripts.iter().map(|s| s.name))
             .chain(self.type_aliases.iter().map(|alias| alias.name))
             .chain(self.type_defs.iter().map(|def| def.name))
     }
@@ -382,6 +446,7 @@ impl<P: Phase> Default for Module<P> {
         Self {
             traits: Vec::new(),
             functions: Vec::new(),
+            subscripts: Vec::new(),
             impls: Vec::new(),
             type_aliases: Vec::new(),
             type_defs: Vec::new(),
@@ -394,6 +459,11 @@ impl<P: Phase> VisitExpr<P> for Module<P> {
     fn visit<V: ExprVisitor<P>>(&self, visitor: &mut V, arena: &ExprArena<P>) {
         for ModuleFunction { body, .. } in self.functions.iter() {
             arena[*body].visit(visitor, arena);
+        }
+        for subscript in self.subscripts.iter() {
+            for member in &subscript.members {
+                arena[member.body].visit(visitor, arena);
+            }
         }
         for imp in self.impls.iter() {
             for ModuleFunction { body, .. } in imp.functions.iter() {
@@ -494,6 +564,71 @@ fn fmt_module_function<P: Phase>(
     }
     writeln!(f)?;
     arena[*body].format_ind(f, env, arena, body_indent)
+}
+
+fn fmt_subscript_definition<P: Phase>(
+    f: &mut fmt::Formatter<'_>,
+    env: &ModuleEnv<'_>,
+    arena: &ExprArena<P>,
+    subscript: &SubscriptDefinition<P>,
+    doc_prefix: &str,
+    body_indent: usize,
+) -> fmt::Result {
+    let SubscriptDefinition {
+        name,
+        generic_params,
+        args,
+        ret_ty,
+        where_clause,
+        members,
+        doc,
+        ..
+    } = subscript;
+
+    if let Some(doc) = doc {
+        for line in doc.split("\n") {
+            writeln!(f, "{doc_prefix}/// {line}")?;
+        }
+    }
+    write!(f, "    subscript ")?;
+    write_identifier(f, name.0.as_str())?;
+    generic_params.format_source(f)?;
+    write!(f, "(")?;
+    for (i, arg) in args.iter().enumerate() {
+        if i > 0 {
+            write!(f, ", ")?;
+        }
+        write_identifier(f, arg.name.0.as_str())?;
+        if let Some((mut_ty, ty, _)) = &arg.ty {
+            write!(f, ": ")?;
+            if let Some(mut_ty) = mut_ty {
+                mut_ty.format_in_fn_arg(f)?;
+            }
+            write!(f, "{}", ty.format_with(env))?;
+        }
+    }
+    write!(f, ") -> {}", ret_ty.0.format_with(env))?;
+    if !where_clause.is_empty() {
+        write!(f, " where ")?;
+        write_with_separator_and_format_fn(
+            where_clause,
+            ", ",
+            |constraint, f| constraint.fmt_with(f, env),
+            f,
+        )?;
+    }
+    writeln!(f, " {{")?;
+    for member in members {
+        let member_name = match (member.mode.ref_member, member.mode.mut_member) {
+            (true, true) => "ref mut",
+            (true, false) => "ref",
+            (false, true) => "mut",
+            (false, false) => "<invalid>",
+        };
+        writeln!(f, "{doc_prefix}    {member_name}")?;
+        arena[member.body].format_ind(f, env, arena, body_indent)?;
+    }
+    writeln!(f, "{doc_prefix}}}")
 }
 
 impl<'a> FormatWith<ModuleEnv<'_>> for ModuleDisplay<'a, Parsed> {
@@ -621,6 +756,12 @@ impl<'a> FormatWith<ModuleEnv<'_>> for ModuleDisplay<'a, Parsed> {
             writeln!(f, "Functions:")?;
             for function in module.functions.iter() {
                 fmt_module_function(f, env, arena, function, "  ", 2)?;
+            }
+        }
+        if !module.subscripts.is_empty() {
+            writeln!(f, "Subscripts:")?;
+            for subscript in module.subscripts.iter() {
+                fmt_subscript_definition(f, env, arena, subscript, "  ", 2)?;
             }
         }
         Ok(())

@@ -23,6 +23,7 @@ mod regression;
 mod serde;
 mod simple;
 mod std;
+mod subscript;
 mod r#trait;
 mod r#type;
 mod type_alias;

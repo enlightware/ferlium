@@ -11,7 +11,7 @@ use crate::{
     containers::{IntoSVec2, b},
     hir::function::PendingArgPassing,
     hir::value::{LiteralNativeValue, LiteralValue},
-    hir::{self, CallArgument, NodeId, NodeKind, Project, Variant},
+    hir::{self, CallArgument, HirPhase, NodeId, NodeKind, Project, Variant},
     module::{
         FunctionId, LocalDecl, LocalDeclId, LocalFrameSlot, PendingLocalDrop,
         PendingTakeLocalValueMode, ProjectionIndex, TraitImplId, id::Id,
@@ -26,17 +26,17 @@ use ustr::{Ustr, ustr};
 use NodeKind as K;
 
 #[allow(dead_code)]
-pub fn native<T: LiteralNativeValue + 'static>(value: T) -> NodeKind {
+pub fn native<P: HirPhase, T: LiteralNativeValue + 'static>(value: T) -> NodeKind<P> {
     immediate(LiteralValue::new_native(value))
 }
 
-pub fn native_str(value: &str) -> NodeKind {
+pub fn native_str<P: HirPhase>(value: &str) -> NodeKind<P> {
     immediate(LiteralValue::new_native(
         FerliumString::from_str(value).unwrap(),
     ))
 }
 
-pub fn immediate(value: LiteralValue) -> NodeKind {
+pub fn immediate<P: HirPhase>(value: LiteralValue) -> NodeKind<P> {
     K::Immediate(value)
 }
 
@@ -96,7 +96,7 @@ pub fn store_new_local(
 }
 
 #[allow(dead_code)]
-pub fn store_local_to(value: NodeId, id: LocalDeclId) -> NodeKind {
+pub fn store_local_to<P: HirPhase>(value: NodeId<P>, id: LocalDeclId) -> NodeKind<P> {
     K::StoreLocal(hir::StoreLocal { value, id })
 }
 
@@ -104,7 +104,7 @@ pub fn get_dictionary(dictionary: TraitImplId) -> NodeKind {
     K::GetDictionary(hir::GetDictionary { dictionary })
 }
 
-pub fn load_local(id: LocalDeclId) -> NodeKind {
+pub fn load_local<P: HirPhase>(id: LocalDeclId) -> NodeKind<P> {
     K::LoadLocal(hir::LoadLocal { id })
 }
 
@@ -127,7 +127,60 @@ pub fn variant(tag: Ustr, payload: NodeId) -> NodeKind {
     K::Variant(Variant::new(tag, payload))
 }
 
-pub fn tuple(values: impl IntoSVec2<NodeId>) -> NodeKind {
+#[allow(dead_code)]
+pub fn assign<P: HirPhase>(
+    place: NodeId<P>,
+    value: NodeId<P>,
+    drop: Option<P::LocalDrop>,
+) -> NodeKind<P> {
+    K::Assign(hir::Assignment { place, value, drop })
+}
+
+#[allow(dead_code)]
+pub fn return_<P: HirPhase>(value: NodeId<P>) -> NodeKind<P> {
+    K::Return(value)
+}
+
+#[allow(dead_code)]
+pub fn yield_<P: HirPhase>(value: NodeId<P>) -> NodeKind<P> {
+    K::Yield(value)
+}
+
+#[allow(dead_code)]
+pub fn with_yielded<P: HirPhase>(
+    accessor: NodeId<P>,
+    binding: LocalDeclId,
+    body: NodeId<P>,
+) -> NodeKind<P> {
+    K::WithYielded(hir::WithYielded {
+        accessor,
+        binding,
+        body,
+    })
+}
+
+#[allow(dead_code)]
+pub fn static_apply<P: HirPhase>(
+    function: FunctionId,
+    ty: FnType,
+    arguments: Vec<CallArgument<P>>,
+    span: Location,
+) -> NodeKind<P> {
+    K::StaticApply(b(hir::StaticApplication {
+        function,
+        function_path: None,
+        function_span: span,
+        extra_arguments: Vec::new(),
+        argument_names: (0..arguments.len())
+            .map(|i| ustr(&format!("arg{i}")))
+            .collect(),
+        arguments,
+        ty,
+        inst_data: hir::FnInstData::none(),
+    }))
+}
+
+pub fn tuple<P: HirPhase>(values: impl IntoSVec2<NodeId<P>>) -> NodeKind<P> {
     K::Tuple(b(values.into_svec2()))
 }
 
@@ -159,7 +212,7 @@ pub fn case_from_complete_alternatives(
     }))
 }
 
-pub fn block(statements: impl IntoSVec2<NodeId>) -> NodeKind {
+pub fn block<P: HirPhase>(statements: impl IntoSVec2<NodeId<P>>) -> NodeKind<P> {
     K::Block(b(hir::Block {
         body: b(statements.into_svec2()),
         cleanup: Vec::new(),

@@ -341,14 +341,15 @@ pub(crate) fn assign_op(
     identifier_span: Location,
     lhs: PExprId,
     rhs: PExprId,
-    arena: &mut PExprArena,
 ) -> PExprKind {
-    let lhs_span = arena[lhs].span;
-    let rhs_span = arena[rhs].span;
-    let span = Location::fuse([lhs_span, rhs_span]).unwrap();
-    let apply_kind = syn_static_apply_path(identifiers, identifier_span, vec![lhs, rhs], arena);
-    let apply = arena.alloc(Expr::new(apply_kind, span));
-    ExprKind::assign(lhs, identifier_span, apply)
+    let path = Path::new(
+        identifiers
+            .into()
+            .into_iter()
+            .map(|s| (ustr(s), identifier_span))
+            .collect(),
+    );
+    ExprKind::assign_op(lhs, identifier_span, path, rhs)
 }
 
 pub(crate) fn build_range(

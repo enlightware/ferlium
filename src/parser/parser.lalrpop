@@ -1,5 +1,5 @@
 use crate::{SourceId, Location, LocatedError};
-use crate::ast::{UstrSpan, Path, UseTree, PTypeSpan as TypeSpan, PMutTypeTypeSpan as MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, Pattern, PatternKind as PatK, PatternVar, PLetPattern as LetPattern, LetPatternKind as LetPatK, LetRecordPatternField, MapLiteralEntry, PModuleFunctionArg as ModuleFunctionArg, PModule as Module, PModuleFunction as ModuleFunction, PTraitDefinition as TraitDefinition, TraitAssociatedConstDecl, TraitAssociatedConstImpl, TraitDefinitionItem, TraitImplItem, TraitMethod, TraitMethodArg, PTraitImpl as TraitImpl, PTraitImplFor as TraitImplForHeader, PTypeConstraint as TypeConstraint, PTypeConstraintInput as TypeConstraintInput, PTypeConstraintOutput as TypeConstraintOutput, TypeConstraintEffectOutput, GenericParams, PTypeDef as TypeDef, TypeAlias, PType as Type, PFnType as FnType, PFnEffects, PEffect, PFnArgType as FnArgType, PMutType as MutType, Attribute, MetaItem, UnnamedArg, PExprArena, PExprId};
+use crate::ast::{UstrSpan, Path, UseTree, PTypeSpan as TypeSpan, PMutTypeTypeSpan as MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, Pattern, PatternKind as PatK, PatternVar, PLetPattern as LetPattern, LetPatternKind as LetPatK, LetRecordPatternField, MapLiteralEntry, PModuleFunctionArg as ModuleFunctionArg, PModule as Module, PModuleFunction as ModuleFunction, PSubscriptDefinition as SubscriptDefinition, SubscriptMember, SubscriptMemberMode, PTraitDefinition as TraitDefinition, TraitAssociatedConstDecl, TraitAssociatedConstImpl, TraitDefinitionItem, TraitImplItem, TraitMethod, TraitMethodArg, PTraitImpl as TraitImpl, PTraitImplFor as TraitImplForHeader, PTypeConstraint as TypeConstraint, PTypeConstraintInput as TypeConstraintInput, PTypeConstraintOutput as TypeConstraintOutput, TypeConstraintEffectOutput, GenericParams, PTypeDef as TypeDef, TypeAlias, PType as Type, PFnType as FnType, PFnEffects, PEffect, PFnArgType as FnArgType, PMutType as MutType, Attribute, MetaItem, UnnamedArg, PExprArena, PExprId};
 use crate::hir::value::LiteralValue;
 use crate::types::r#type::{
     Type as IrType,
@@ -55,6 +55,7 @@ pub Module: Module = {
 ModuleItem = {
     ModuleTraitDefinition,
     ModuleFunction,
+    ModuleSubscript,
     ModuleTraitImpl,
     ModuleTypeDef,
     ModuleTypeAlias,
@@ -210,6 +211,10 @@ ModuleFunction: Module = {
     Function => Module::single_function(<>)
 }
 
+ModuleSubscript: Module = {
+    SubscriptDefinition => Module::single_subscript(<>)
+}
+
 ModuleTypeDef: Module = {
     TypeDefinition => Module::single_type_def(<>)
 }
@@ -259,6 +264,31 @@ Function: ModuleFunction = {
             span(l, r, source_id),
             parse_doc_comments(doc),
         ),
+}
+
+SubscriptDefinition: SubscriptDefinition = {
+    <doc:DOC_COMMENT*> <visibility:Visibility> <l:@L> "subscript" <name:Sp<UIdentifier>> <generic_params:GenericParams?> <al:@L> "(" <args:ModuleFunctionArgs> ")" <ret:SpFnRet<"P">> <where_clause:WhereClause?> <ar:@R> "{" <members:SubscriptMember*> "}" <r:@R> =>
+        SubscriptDefinition {
+            visibility,
+            name,
+            generic_params: generic_params.unwrap_or_default(),
+            args,
+            args_span: span(al, ar, source_id),
+            ret_ty: ret,
+            where_clause: where_clause.unwrap_or_default(),
+            members,
+            span: span(l, r, source_id),
+            doc: parse_doc_comments(doc),
+        },
+}
+
+SubscriptMember: SubscriptMember<crate::ast::Parsed> = {
+    <l:@L> "ref" "mut" <body:Es<Block>> <r:@R> =>
+        SubscriptMember { mode: SubscriptMemberMode::ref_mut(), body, span: span(l, r, source_id) },
+    <l:@L> "ref" <body:Es<Block>> <r:@R> =>
+        SubscriptMember { mode: SubscriptMemberMode::ref_(), body, span: span(l, r, source_id) },
+    <l:@L> "mut" <body:Es<Block>> <r:@R> =>
+        SubscriptMember { mode: SubscriptMemberMode::mut_(), body, span: span(l, r, source_id) },
 }
 
 TraitMethod: TraitMethod = {
@@ -790,6 +820,7 @@ pub Expr = {
 TopExpr<NoStruct> = {
     AssignExpr<NoStruct>,
     ReturnExpr<NoStruct>,
+    YieldExpr<NoStruct>,
     BreakExpr<NoStruct>,
     ContinueExpr,
     AbstractExpr<NoStruct>,
@@ -798,11 +829,15 @@ TopExpr<NoStruct> = {
 
 AssignExpr<NoStruct>: ExprKind = {
     <le:Es<PipeExpr<NoStruct>>> <ls:@L> "=" <rs:@R> <re:Es<TopExpr<NoStruct>>> => ExprKind::assign(le, span(ls, rs, source_id), re),
-    <le:Es<PipeExpr<NoStruct>>> <ls:@L> <op:Sp<OpEqual>> <rs:@R> <re:Es<TopExpr<NoStruct>>> => assign_op(op.0, op.1, le, re, arena),
+    <le:Es<PipeExpr<NoStruct>>> <ls:@L> <op:Sp<OpEqual>> <rs:@R> <re:Es<TopExpr<NoStruct>>> => assign_op(op.0, op.1, le, re),
 }
 
 ReturnExpr<NoStruct>: ExprKind = {
     "return" <e:Es<TopExpr<NoStruct>>> => ExprKind::return_(e),
+}
+
+YieldExpr<NoStruct>: ExprKind = {
+    "yield" <e:Es<TopExpr<NoStruct>>> => ExprKind::yield_(e),
 }
 
 AbstractExpr<NoStruct>: ExprKind = {
@@ -874,16 +909,33 @@ PlainPathType: Type = {
 }
 
 UnaryExpr<NoStruct> = {
+    NamedSubscriptExpr<NoStruct>,
     SuffixExpr<NoStruct>,
     <o:Sp<UnaryOp>> <e:Es<UnaryExpr<NoStruct>>> => syn_static_apply_path(o.0, o.1, vec![e], arena),
 }
 
-SuffixExpr<NoStruct> = {
+SuffixExpr<NoStruct>: ExprKind = {
     AtomExpr<NoStruct>,
     <e:Es<SuffixExpr<NoStruct>>> "." <f:Sp<FieldIdentifier>> => ExprKind::field_access(e, f),
     <e:Es<SuffixExpr<NoStruct>>> "." <i:Sp<UIntValue>> =>? proj_or_float(e, i, arena),
     <e:Es<SuffixExpr<NoStruct>>> "[" <i:Expr> "]" => ExprKind::index(e, i),
     <e:Es<SuffixExpr<NoStruct>>> "(" <a:Sep<Es<TopExpr<"">>, ",">> ")" => ExprKind::apply(e, a, UnnamedArg::None),
+}
+
+NamedSubscriptExpr<NoStruct>: ExprKind = {
+    <e:Es<SuffixExpr<NoStruct>>> <tail:NamedSubscriptTail> => {
+        let (name, args) = tail;
+        ExprKind::named_subscript(e, name, args)
+    },
+    <e:Es<NamedSubscriptExpr<NoStruct>>> <tail:NamedSubscriptTail> => {
+        let (name, args) = tail;
+        ExprKind::named_subscript(e, name, args)
+    },
+}
+
+NamedSubscriptTail: (UstrSpan, Vec<PExprId>) = {
+    "->" "[" <name:Sp<UIdentifier>> "]" => (name, vec![]),
+    "->" "[" <name:Sp<UIdentifier>> "]" "(" <args:Sep1<Es<TopExpr<"">>, ",">> ")" => (name, args),
 }
 
 AtomExpr<NoStruct> = {

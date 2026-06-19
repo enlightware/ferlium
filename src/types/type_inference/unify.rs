@@ -21,7 +21,7 @@ use crate::{
         mutability::{MutType, MutVal, MutVar, MutVarKey},
         recursive_equation::{RecursiveEquationError, try_intern_recursive_equation},
         trait_solver::{ConstraintAssumptions, TraitSolver},
-        r#type::{FnType, TyVarKey, Type, TypeInstSubst, TypeKind, TypeVar},
+        r#type::{FnReturnConvention, FnType, TyVarKey, Type, TypeInstSubst, TypeKind, TypeVar},
         type_like::TypeLike,
         type_scheme::PubTypeConstraint,
     },
@@ -38,6 +38,17 @@ use super::{
 pub enum SubOrSameType {
     SubType,
     SameTypeWithSubEffects,
+}
+
+fn return_convention_can_satisfy(
+    current: FnReturnConvention,
+    expected: FnReturnConvention,
+    sub_or_same: SubOrSameType,
+) -> bool {
+    match sub_or_same {
+        SubOrSameType::SubType => current.can_satisfy(expected),
+        SubOrSameType::SameTypeWithSubEffects => current == expected,
+    }
 }
 
 pub(crate) struct UnifiedTypeInferenceSnapshot {
@@ -863,7 +874,11 @@ impl UnifiedTypeInference {
                         sub_or_same,
                     }));
                 }
-                if cur.return_convention != exp.return_convention {
+                if !return_convention_can_satisfy(
+                    cur.return_convention,
+                    exp.return_convention,
+                    sub_or_same,
+                ) {
                     return Err(internal_compilation_error!(TypeMismatch {
                         current_ty,
                         current_span,

@@ -628,6 +628,11 @@ fn node_variable_type_annotations<Env>(
         TakeLocalValue(_) => {}
         LoadLocal(_) => {}
         Return(node) => variable_type_annotations(arena, *node, result, locals, env),
+        Yield(node) => variable_type_annotations(arena, *node, result, locals, env),
+        WithYielded(node) => {
+            variable_type_annotations(arena, node.accessor, result, locals, env);
+            variable_type_annotations(arena, node.body, result, locals, env);
+        }
         Block(block) => block
             .body
             .iter()

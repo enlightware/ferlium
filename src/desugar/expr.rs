@@ -1,7 +1,7 @@
 use super::format_string::emit_format_string_ast;
 use super::patterns::{desugar_block_exprs, desugar_let_exprs, desugar_pattern_bindings};
 use super::*;
-use crate::ast::{self, Desugared};
+use crate::ast::{self, AssignOpData, Desugared};
 use crate::containers::b;
 use crate::parser::helpers::ext_b;
 
@@ -97,6 +97,13 @@ pub(crate) fn desugar(
             desugared_arena,
             modules_used,
         )?),
+        Yield(expr) => ExprKind::yield_(desugar(
+            expr,
+            ctx,
+            parsed_arena,
+            desugared_arena,
+            modules_used,
+        )?),
         Abstract(data) => {
             let AbstractData { args, body } = *data;
             // we swap the locals with the lambda arguments, as we do not capture the outer scope
@@ -117,6 +124,20 @@ pub(crate) fn desugar(
                 desugar(func, ctx, parsed_arena, desugared_arena, modules_used)?,
                 desugar_exprs(args, ctx, parsed_arena, desugared_arena, modules_used)?,
                 unnamed_arg,
+            )
+        }
+        NamedSubscript(data) => {
+            let data = *data;
+            ExprKind::named_subscript(
+                desugar(
+                    data.receiver,
+                    ctx,
+                    parsed_arena,
+                    desugared_arena,
+                    modules_used,
+                )?,
+                data.name,
+                desugar_exprs(data.args, ctx, parsed_arena, desugared_arena, modules_used)?,
             )
         }
         Block(stmts) => {
@@ -181,6 +202,60 @@ pub(crate) fn desugar(
                 }
             }
             ExprKind::assign(place, sign_span, value)
+        }
+        AssignOp(data) => {
+            let AssignOpData {
+                place,
+                sign_span,
+                op_path,
+                value,
+            } = *data;
+            let place = desugar(place, ctx, parsed_arena, desugared_arena, modules_used)?;
+            let value = desugar(value, ctx, parsed_arena, desugared_arena, modules_used)?;
+            if desugared_arena[place].kind.is_property_path() {
+                let func = desugared_arena
+                    .alloc(DExpr::new(ExprKind::identifier(op_path.clone()), sign_span));
+                let apply = desugared_arena.alloc(DExpr::new(
+                    ExprKind::apply(func, vec![place, value], UnnamedArg::All),
+                    expr_span,
+                ));
+                return Ok(desugared_arena.alloc(DExpr::new(
+                    ExprKind::assign(place, sign_span, apply),
+                    expr_span,
+                )));
+            }
+            let index_data = desugared_arena[place].kind.as_index().cloned();
+            if let Some(index) = index_data {
+                if desugared_arena[index.array].kind.is_property_path() {
+                    let let_stmt = desugared_arena.alloc(DExpr::new(
+                        ExprKind::let_(
+                            DLetPattern::binding((ustr("tmp"), expr_span), MutVal::mutable()),
+                            index.array,
+                            None,
+                        ),
+                        expr_span,
+                    ));
+                    let tmp_expr =
+                        desugared_arena.alloc(DExpr::single_identifier(ustr("tmp"), expr_span));
+                    let index_expr = desugared_arena.alloc(DExpr::new(
+                        ExprKind::index(tmp_expr, index.index),
+                        expr_span,
+                    ));
+                    let assign_tmp_stmt = desugared_arena.alloc(DExpr::new(
+                        ExprKind::assign_op(index_expr, sign_span, op_path, value),
+                        expr_span,
+                    ));
+                    let assign_back_stmt = desugared_arena.alloc(DExpr::new(
+                        ExprKind::assign(index.array, sign_span, tmp_expr),
+                        expr_span,
+                    ));
+                    return Ok(desugared_arena.alloc(DExpr::new(
+                        Block(vec![let_stmt, assign_tmp_stmt, assign_back_stmt]),
+                        expr_span,
+                    )));
+                }
+            }
+            ExprKind::assign_op(place, sign_span, op_path, value)
         }
         PropertyPath(data) => PropertyPath(data),
         TraitAssociatedConst(data) => {

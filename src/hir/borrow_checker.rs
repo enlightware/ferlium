@@ -13,7 +13,7 @@ use crate::{
     compiler::error::InternalCompilationError,
     hir::{CallArgument, Node, NodeArena, NodeId, NodeKind},
     internal_compilation_error,
-    module::{LocalDeclId, id::Id},
+    module::{LocalDeclId, ULocalDecl, id::Id},
     types::r#type::{FnArgType, Type},
 };
 
@@ -179,6 +179,62 @@ pub fn check_place_return_roots(
     base_parameter_index: Option<usize>,
 ) -> Result<(), InternalCompilationError> {
     check_place_return_roots_in_node(arena, node_id, base_parameter_index)
+}
+
+pub fn check_yield_roots(
+    arena: &NodeArena,
+    node_id: NodeId,
+    locals: &[ULocalDecl],
+) -> Result<(), InternalCompilationError> {
+    check_yield_roots_in_node(arena, node_id, locals)
+}
+
+fn check_yield_roots_in_node(
+    arena: &NodeArena,
+    node_id: NodeId,
+    locals: &[ULocalDecl],
+) -> Result<(), InternalCompilationError> {
+    let node = &arena[node_id];
+    if let NodeKind::Yield(value) = &node.kind {
+        check_yield_root(arena, *value, locals)?;
+    }
+    for child in node.kind.child_node_ids() {
+        check_yield_roots_in_node(arena, child, locals)?;
+    }
+    Ok(())
+}
+
+fn check_yield_root(
+    arena: &NodeArena,
+    node_id: NodeId,
+    locals: &[ULocalDecl],
+) -> Result<(), InternalCompilationError> {
+    if arena[node_id].ty == Type::never() {
+        return Ok(());
+    }
+
+    let Some(origin) = returned_place_origin(arena, node_id) else {
+        return Err(internal_compilation_error!(Unsupported {
+            span: arena[node_id].span,
+            reason: "yield expression must be rooted in accessor-owned storage".into(),
+        }));
+    };
+
+    match origin {
+        PlaceOrigin::Direct(local_id)
+            if locals
+                .get(local_id.as_index())
+                .is_some_and(|local| local.may_own_storage()) =>
+        {
+            Ok(())
+        }
+        PlaceOrigin::Direct(_) | PlaceOrigin::Addressor(_) => {
+            Err(internal_compilation_error!(Unsupported {
+                span: arena[node_id].span,
+                reason: "yield expression must be rooted in accessor-owned storage".into(),
+            }))
+        }
+    }
 }
 
 fn check_place_return_roots_in_node(
@@ -358,6 +414,13 @@ impl Node {
             LoadLocal(_) => {}
             Return(node_id) => {
                 check_borrows(arena, *node_id)?;
+            }
+            Yield(node_id) => {
+                check_borrows(arena, *node_id)?;
+            }
+            WithYielded(node) => {
+                check_borrows(arena, node.accessor)?;
+                check_borrows(arena, node.body)?;
             }
             Block(block) => {
                 for &node_id in block.body.iter() {

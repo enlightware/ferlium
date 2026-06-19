@@ -66,6 +66,7 @@ The same `CompilerSession` API is what powers the [Playground](https://enlightwa
 
 * **Online playground:** <https://enlightware.github.io/ferlium/playground/>
 * **REPL:** `cargo run --example ferlium` (use `print(string)` in REPL to print to console)
+* **Experimental features:** pass `--allow-experimental` to the example REPL or pipe mode to try safe, unstable language features. See [doc/experimental.md](doc/experimental.md).
 * **Book:** <https://enlightware.github.io/ferlium/book/>
 * **Chat:** [ferlium.zulipchat.com](https://ferlium.zulipchat.com)
 

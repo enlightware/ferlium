@@ -649,8 +649,9 @@ fn annotated_source(input: &str, annotations: &[AnnotationData]) -> String {
     output
 }
 
-fn print_pipe_annotations(input: &str) -> i32 {
+fn print_pipe_annotations(input: &str, allow_experimental: bool) -> i32 {
     let mut compiler = IdeCompiler::new();
+    compiler.set_allow_experimental(allow_experimental);
     if let Some(errors) = compiler.compile(input) {
         for error in errors {
             eprintln!("{error}");
@@ -662,7 +663,11 @@ fn print_pipe_annotations(input: &str) -> i32 {
     0
 }
 
-fn process_pipe_input(print_module: bool, print_annotations: bool) -> i32 {
+fn process_pipe_input(
+    print_module: bool,
+    print_annotations: bool,
+    allow_experimental: bool,
+) -> i32 {
     // Read all input from stdin
     let mut input = String::new();
     if let Err(e) = io::stdin().read_to_string(&mut input) {
@@ -676,11 +681,12 @@ fn process_pipe_input(print_module: bool, print_annotations: bool) -> i32 {
     }
 
     if print_annotations {
-        return print_pipe_annotations(&input);
+        return print_pipe_annotations(&input, allow_experimental);
     }
 
     // Initialize ferlium contexts
     let mut session = CompilerSession::new();
+    session.set_allow_experimental(allow_experimental);
 
     // Process the input
     process_input("<stdin>", &input, 0, &mut session, false, None).map_or_else(
@@ -701,12 +707,18 @@ fn main() {
         // Pipe mode: read from stdin, process, and exit
         let print_module = env::args().any(|arg| arg == "--print-module");
         let print_annotations = env::args().any(|arg| arg == "--print-annotations");
-        std::process::exit(process_pipe_input(print_module, print_annotations));
+        let allow_experimental = env::args().any(|arg| arg == "--allow-experimental");
+        std::process::exit(process_pipe_input(
+            print_module,
+            print_annotations,
+            allow_experimental,
+        ));
     }
 
     // Check for help flag
     let args: Vec<String> = env::args().collect();
-    if args.len() > 1 && (args[1] == "--help" || args[1] == "-h") {
+    let allow_experimental = args.iter().any(|arg| arg == "--allow-experimental");
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         println!("Ferlium REPL - A functional programming language interpreter");
         println!();
         println!("Usage:");
@@ -731,6 +743,10 @@ fn main() {
             "  {} [--print-annotations] Print the IDE-annotated source (pipe mode only).",
             args[0]
         );
+        println!(
+            "  {} [--allow-experimental] Enable safe experimental language features.",
+            args[0]
+        );
         println!("  echo 'code' | {}", args[0]);
         println!();
         println!("Modes:");
@@ -748,7 +764,7 @@ fn main() {
 
     // Check for print-std flags
     if args.len() > 1 {
-        if args[1] == "--print-std" {
+        if args.iter().any(|arg| arg == "--print-std") {
             let session = CompilerSession::new();
             println!(
                 "{}",
@@ -758,7 +774,7 @@ fn main() {
             );
             return;
         }
-        if args[1] == "--print-std-all" {
+        if args.iter().any(|arg| arg == "--print-std-all") {
             let session = CompilerSession::new();
             println!(
                 "{}",
@@ -768,7 +784,7 @@ fn main() {
             );
             return;
         }
-        if args[1] == "--print-std-full" {
+        if args.iter().any(|arg| arg == "--print-std-full") {
             let session = CompilerSession::new();
             println!(
                 "{}",
@@ -781,15 +797,16 @@ fn main() {
     }
 
     // Interactive REPL mode
-    run_interactive_repl();
+    run_interactive_repl(allow_experimental);
 }
 
-fn run_interactive_repl() {
+fn run_interactive_repl(allow_experimental: bool) {
     // Logging
     env_logger::init();
 
     // ferlium emission and evaluation contexts
     let mut session = CompilerSession::new();
+    session.set_allow_experimental(allow_experimental);
     session.register_module(
         Path::single_str("console"),
         console_module(session.modules().next_id()),

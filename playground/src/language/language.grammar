@@ -48,6 +48,7 @@ Module {
 modelItem {
     TraitDef
     | Function
+    | SubscriptDef
     | TraitImpl
     | TypeDef
     | UseDecl
@@ -81,6 +82,16 @@ parentConstraints {
 
 Function {
     Attribute* visibility kw<'fn'> Identifier GenericParams? '(' identifierWithOptTypeArgs ')' fnRet? whereClause? Block
+}
+
+SubscriptDef {
+    visibility kw<'subscript'> Identifier GenericParams? '(' identifierWithOptTypeArgs ')' fnRet whereClause? '{' SubscriptMember* '}'
+}
+
+SubscriptMember {
+    kw<'ref'> kw<'mut'> Block
+    | kw<'ref'> Block
+    | kw<'mut'> Block
 }
 
 TraitMethod {
@@ -408,6 +419,7 @@ extraExpr {
 expr {
     Assignment
     | Return
+    | Yield
     | Break
     | Continue
     | Abstraction
@@ -421,6 +433,10 @@ Assignment {
 
 Return {
     kw<'return'> expr
+}
+
+Yield {
+    kw<'yield'> expr
 }
 
 Break {
@@ -491,7 +507,8 @@ CastTargetType {
 }
 
 unaryExpr {
-    suffixExpr
+    NamedSubscript
+    | suffixExpr
     | LogicOp { kw<'not'> } unaryExpr
     | LogicOp { '!' } unaryExpr
     | ArithOp { '-' } unaryExpr
@@ -511,6 +528,15 @@ Projection {
 
 Indexing {
     suffixExpr '[' expr ']'
+}
+
+NamedSubscript {
+    suffixExpr namedSubscriptTail+
+}
+
+namedSubscriptTail {
+    '->' '[' Identifier ']'
+    | '->' '[' Identifier ']' '(' exprArgsNonEmptyOptComma ')'
 }
 
 Application {
@@ -636,6 +662,10 @@ fieldIdentifier {
 
 exprArgsOptComma {
     (expr ',')* expr?
+}
+
+exprArgsNonEmptyOptComma {
+    expr (',' expr)* ','?
 }
 
 matchArgsOptComma {

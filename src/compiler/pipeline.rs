@@ -15,6 +15,7 @@ use crate::{
     Location, SourceId, SourceTable,
     ast::{self, PExprArena, UnstableCollector, VisitExpr},
     compilation_error,
+    compiler::CompilationCapabilities,
     compiler::diagnostics::diagnostics_from_error,
     compiler::error::{CompilationError, LocatedError},
     compiler::session::{
@@ -25,8 +26,8 @@ use crate::{
     format::FormatWith,
     graph,
     hir::{
-        emit_expr::emit_expr,
-        emit_hir::{EmitModuleFrom, emit_module},
+        emit_expr::emit_expr_with_capabilities,
+        emit_hir::{EmitModuleFrom, emit_module, emit_module_with_capabilities},
     },
     module::{Module, ModuleEnv, ModuleId, Path, Uses, id::Id},
     parser::{self, describe_parse_error},
@@ -57,6 +58,7 @@ static MODULE_AND_BLOCK_CONTENT_PARSER: LazyLock<parser::ModuleAndBlockContentPa
 /// registered in the [`SourceTable`]. Accepts a [`SourceId`] instead of raw
 /// source strings so that cascade recompilations can skip the duplicate
 /// [`SourceTable::add_source`] call and the associated string clones.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn compile_with_source_id(
     source_id: SourceId,
     source_version: SourceVersion,
@@ -64,6 +66,7 @@ pub(crate) fn compile_with_source_id(
     modules: &mut Modules,
     module_ref: ModuleRef,
     uses: Uses,
+    capabilities: CompilationCapabilities,
     ast_inspector: Option<AstInspectorCb<'_>>,
 ) -> Result<ModuleAndExpr, CompilationError> {
     // Retrieve the source text registered under this id.
@@ -157,7 +160,14 @@ pub(crate) fn compile_with_source_id(
 
     // Emit HIR for the module.
     let emit_from = EmitModuleFrom::Uses(uses);
-    let mut module = match emit_module(module_ast, &arena, module_id, modules, emit_from) {
+    let mut module = match emit_module_with_capabilities(
+        module_ast,
+        &arena,
+        module_id,
+        modules,
+        emit_from,
+        capabilities,
+    ) {
         Ok(result) => result,
         Err(error) => {
             // Resolve types in the error, to provide better error messages.
@@ -175,7 +185,14 @@ pub(crate) fn compile_with_source_id(
 
     // Emit HIR for the expression, if any.
     let expr = if let Some(expr_ast) = expr_ast {
-        let compiled_expr = match emit_expr(expr_ast, &arena, &mut module, modules, vec![]) {
+        let compiled_expr = match emit_expr_with_capabilities(
+            expr_ast,
+            &arena,
+            &mut module,
+            modules,
+            vec![],
+            capabilities,
+        ) {
             Ok(result) => result,
             Err(error) => {
                 // Resolve types in the error, to provide better error messages.
@@ -253,6 +270,7 @@ pub(crate) fn compile_with_source_id(
                 modules,
                 ModuleRef::Existing(dep_id),
                 dep_uses,
+                capabilities,
                 None,
             );
         }

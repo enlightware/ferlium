@@ -11,9 +11,12 @@ use ustr::{Ustr, ustr};
 use crate::{
     FxHashSet, Location,
     ast::{self, DExprArena, UstrSpan},
-    compiler::error::{InternalCompilationError, UnsafeFeature},
+    compiler::{
+        CompilationCapabilities,
+        error::{InternalCompilationError, UnsafeFeature},
+    },
     hir::function::{FunctionDefinition, ResolvedArgPassing},
-    hir::{LoopId, NodeArena},
+    hir::{LoopId, NodeArena, NodeId},
     module::{
         FunctionId, ImportFunctionSlot, ImportFunctionSlotId, ImportFunctionTarget, LocalDecl,
         LocalDeclId, LocalFunctionId, ModuleEnv, ModuleId, TraitId, TypeDefLookupResult,
@@ -50,6 +53,29 @@ pub struct LoopFrame {
     pub(crate) saw_break: bool,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct YieldTypingContext {
+    pub(crate) expected_ty: Type,
+    pub(crate) expected_span: Location,
+    pub(crate) requires_mutable_place: bool,
+    pub(crate) yielded_nodes: Vec<NodeId>,
+}
+
+impl YieldTypingContext {
+    pub(crate) fn new(
+        expected_ty: Type,
+        expected_span: Location,
+        requires_mutable_place: bool,
+    ) -> Self {
+        Self {
+            expected_ty,
+            expected_span,
+            requires_mutable_place,
+            yielded_nodes: Vec::new(),
+        }
+    }
+}
+
 /// A typing environment, mapping local variable names to types.
 #[derive(new)]
 #[allow(clippy::too_many_arguments)]
@@ -83,6 +109,10 @@ pub struct TypingEnv<'m> {
     pub(crate) ast_arena: &'m DExprArena,
     /// The HIR node arena, used to allocate HIR nodes during type inference.
     pub(crate) ir_arena: &'m mut NodeArena,
+    #[new(default)]
+    pub(crate) compilation_capabilities: CompilationCapabilities,
+    #[new(default)]
+    pub(crate) yield_context: Option<YieldTypingContext>,
 }
 
 impl<'m> TypingEnv<'m> {

@@ -18,8 +18,8 @@ pub(crate) use pipeline::add_code_to_module;
 pub use pipeline::parse_module_and_expr;
 pub(crate) use session::Modules;
 pub use session::{
-    CompilationRevision, CompilerSession, ModuleAndExpr, ModuleInfo, ModuleRegistry, ModuleSource,
-    ModuleUpdateResult, SourceVersion,
+    CompilationCapabilities, CompilationRevision, CompilerSession, ModuleAndExpr, ModuleInfo,
+    ModuleRegistry, ModuleSource, ModuleUpdateResult, SourceVersion,
 };
 
 #[doc(hidden)]

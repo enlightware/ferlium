@@ -518,7 +518,11 @@ impl Callable for VoidFunction {
 /// A function holding user-defined code.
 #[derive(Debug, Clone, new)]
 pub struct ScriptFunction {
+    /// Entry node for normal function execution.
     pub entry_node_id: ENodeId,
+    /// Suspension node for yielded-once functions, if the body yields a place.
+    #[new(default)]
+    pub yield_node_id: Option<ENodeId>,
     /// Number of ordinary runtime arguments expected by this body.
     ///
     /// This includes closure-environment slots prepended when calling a function value, but not
@@ -622,7 +626,10 @@ impl Callable for ScriptFunction {
 #[derive(Debug, Clone)]
 pub struct PendingScriptFunction {
     pub arena: UNodeArena,
+    /// Entry node for normal function execution.
     pub entry_node_id: UNodeId,
+    /// Suspension node for yielded-once functions, if the body yields a place.
+    pub yield_node_id: Option<UNodeId>,
     /// Runtime arity to preserve while the entry node still points into the unelaborated arena.
     pub runtime_arg_count: usize,
 }
@@ -632,6 +639,21 @@ impl PendingScriptFunction {
         Self {
             arena,
             entry_node_id,
+            yield_node_id: None,
+            runtime_arg_count,
+        }
+    }
+
+    pub fn new_with_yield(
+        arena: UNodeArena,
+        entry_node_id: UNodeId,
+        yield_node_id: UNodeId,
+        runtime_arg_count: usize,
+    ) -> Self {
+        Self {
+            arena,
+            entry_node_id,
+            yield_node_id: Some(yield_node_id),
             runtime_arg_count,
         }
     }
