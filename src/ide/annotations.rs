@@ -633,6 +633,10 @@ fn node_variable_type_annotations<Env>(
             variable_type_annotations(arena, node.accessor, result, locals, env);
             variable_type_annotations(arena, node.body, result, locals, env);
         }
+        WithPlace(node) => {
+            variable_type_annotations(arena, node.place, result, locals, env);
+            variable_type_annotations(arena, node.body, result, locals, env);
+        }
         Block(block) => block
             .body
             .iter()

@@ -559,6 +559,6 @@ fn array_index_ide_annotations_do_not_expose_generated_place_call() {
             && !annotated.contains("place")
             && !annotated.contains("array: ")
             && !annotated.contains("index: "),
-        "array index annotations should not expose generated place-result call details, got:\n{annotated}"
+        "array index annotations should not expose generated addressor-place call details, got:\n{annotated}"
     );
 }

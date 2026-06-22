@@ -365,6 +365,27 @@ impl<'a> EvalCtx<'a> {
                             )
                         })
                     }
+                    &SubscriptMember { name, mut_member } => {
+                        let subscript = module.get_subscript(name).unwrap_or_else(|| {
+                            panic!(
+                                "imported subscript not found: {} in module #{}",
+                                name, module_id
+                            )
+                        });
+                        let member = if mut_member {
+                            subscript.mut_member.as_ref()
+                        } else {
+                            subscript.ref_member.as_ref()
+                        }
+                        .unwrap_or_else(|| {
+                            let member = if mut_member { "mut" } else { "ref" };
+                            panic!(
+                                "imported subscript member not found: {}::{} in module #{}",
+                                name, member, module_id
+                            )
+                        });
+                        member.function
+                    }
                 };
                 (local_id, target_module_id)
             }
@@ -811,7 +832,7 @@ pub struct Place {
     pub path: Vec<isize>,
 }
 
-/// Internal runtime marker returned by functions marked `#[place_result]`.
+/// Internal runtime marker returned by addressor-place functions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlaceResult(Place);
 
@@ -1086,6 +1107,10 @@ impl BacktraceFrame {
                         )?
                     }
                     NamedFunction(fn_name) => write!(f, "{module_path}::{fn_name}")?,
+                    SubscriptMember { name, mut_member } => {
+                        let member = if *mut_member { "mut" } else { "ref" };
+                        write!(f, "{module_path}::{name}::{member}")?
+                    }
                 }
             }
         };
@@ -1319,6 +1344,7 @@ pub fn eval_node_with_ctx(
         Return(node) => eval_return(arena, *node, ctx, locals),
         Yield(node) => eval_yield(arena, *node, ctx, locals),
         WithYielded(node) => eval_with_yielded(arena, node, arena[node_id].span, ctx, locals),
+        WithPlace(node) => eval_with_place(arena, node, arena[node_id].span, ctx, locals),
         Block(block) => eval_block(arena, block, ctx, locals),
         Assign(assignment) => eval_assign(arena, node_id, assignment, ctx, locals),
         Tuple(nodes) | Record(nodes) => eval_tuple(arena, nodes, ctx, locals),
@@ -1552,14 +1578,14 @@ fn eval_call_dictionary_method(
     eval_call_dictionary_method_with(arena, node, span, ctx, locals, eval_args)
 }
 
-fn eval_place_result_call_dictionary_method(
+fn eval_addressor_place_call_dictionary_method(
     arena: &ENodeArena,
     node: &hir::CallDictionaryMethod<Elaborated>,
     span: Location,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
-    eval_call_dictionary_method_with(arena, node, span, ctx, locals, eval_place_result_args)
+    eval_call_dictionary_method_with(arena, node, span, ctx, locals, eval_addressor_place_args)
 }
 
 fn eval_call_dictionary_method_with(
@@ -2031,14 +2057,14 @@ fn eval_static_apply(
     eval_static_apply_with(arena, app, span, ctx, locals, eval_args)
 }
 
-fn eval_place_result_static_apply(
+fn eval_addressor_place_static_apply(
     arena: &ENodeArena,
     app: &hir::StaticApplication<Elaborated>,
     span: Location,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
-    eval_static_apply_with(arena, app, span, ctx, locals, eval_place_result_args)
+    eval_static_apply_with(arena, app, span, ctx, locals, eval_addressor_place_args)
 }
 
 /// Strategy for evaluating a static call's visible arguments into a [`PreparedCallArgs`].
@@ -2107,7 +2133,7 @@ fn finish_call(
     result
 }
 
-fn eval_place_result_args(
+fn eval_addressor_place_args(
     arena: &ENodeArena,
     args: &[CallArgument<Elaborated>],
     args_ty: &[FnArgType],
@@ -2124,16 +2150,16 @@ fn eval_place_result_args(
     Ok(ControlFlow::Continue(PreparedCallArgs::new(results)))
 }
 
-fn value_into_place_result(value: Value) -> Place {
+fn value_into_addressor_place(value: Value) -> Place {
     value
         .into_primitive_ty::<PlaceResult>()
-        .expect("place_result function should return internal PlaceResult")
+        .expect("addressor-place function should return internal PlaceResult")
         .into_place()
 }
 
-fn control_flow_into_place_result(result: ControlFlow<Value>) -> ControlFlow<Place> {
+fn control_flow_into_addressor_place(result: ControlFlow<Value>) -> ControlFlow<Place> {
     match result {
-        ControlFlow::Continue(value) => ControlFlow::Continue(value_into_place_result(value)),
+        ControlFlow::Continue(value) => ControlFlow::Continue(value_into_addressor_place(value)),
         ControlFlow::Transfer(transfer) => ControlFlow::Transfer(transfer),
     }
 }
@@ -2516,6 +2542,29 @@ fn combine_with_yielded_body_and_epilogue(
     }
 }
 
+#[inline(never)]
+fn eval_with_place(
+    arena: &ENodeArena,
+    node: &hir::WithPlace<Elaborated>,
+    _span: Location,
+    ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
+) -> EvalControlFlowResult {
+    ctx.reserve_current_frame_slots(locals);
+    let temp_start = ctx.environment.len();
+    let Some(place) = eval_or_return!(try_eval_node_as_place(arena, node.place, ctx, locals))
+    else {
+        panic!("WithPlace input must evaluate to a place");
+    };
+
+    let binding_index = local_environment_index(ctx, locals, node.binding);
+    ctx.set_environment_entry(binding_index, ValOrMut::Mut(place));
+    let body_result = eval_node_with_ctx(arena, node.body, ctx, locals);
+    ctx.set_environment_entry(binding_index, ValOrMut::Val(Value::uninit()));
+    ctx.truncate_environment_storage(temp_start);
+    body_result
+}
+
 fn discard_control_flow_value(flow: ControlFlow<Value>) {
     match flow {
         ControlFlow::Continue(value) => value.discard_storage(),
@@ -2787,7 +2836,7 @@ fn eval_project(
     let index = index.as_index();
     if let Some(mut place) = eval_or_return!(try_eval_node_as_place(arena, data, ctx, locals)) {
         place.path.push(index as isize);
-        if place_resolution_depends_on_place_result(arena, data) {
+        if place_resolution_depends_on_addressor_place(arena, data) {
             if let Some(value) = try_copy_trivial_copy_value_from_place(
                 &place,
                 arena[node_id].ty,
@@ -2825,7 +2874,7 @@ fn eval_project_at(
     if let Some(mut place) = eval_or_return!(try_eval_node_as_place(arena, data, ctx, locals)) {
         let index = field_index_from_extra_parameter(ctx, index);
         place.path.push(index);
-        if place_resolution_depends_on_place_result(arena, data) {
+        if place_resolution_depends_on_addressor_place(arena, data) {
             if let Some(value) = try_copy_trivial_copy_value_from_place(
                 &place,
                 arena[node_id].ty,
@@ -2852,17 +2901,17 @@ fn eval_project_at(
     )
 }
 
-fn place_resolution_depends_on_place_result(arena: &ENodeArena, node_id: ENodeId) -> bool {
+fn place_resolution_depends_on_addressor_place(arena: &ENodeArena, node_id: ENodeId) -> bool {
     match &arena[node_id].kind {
         NodeKind::Apply(app) => app.ty.returns_place(),
         NodeKind::StaticApply(app) => app.ty.returns_place(),
         NodeKind::CallDictionaryMethod(call) => call.ty.returns_place(),
-        NodeKind::Project(node) => place_resolution_depends_on_place_result(arena, node.value),
-        NodeKind::ProjectAt(node) => place_resolution_depends_on_place_result(arena, node.value),
+        NodeKind::Project(node) => place_resolution_depends_on_addressor_place(arena, node.value),
+        NodeKind::ProjectAt(node) => place_resolution_depends_on_addressor_place(arena, node.value),
         NodeKind::Block(block) => block
             .body
             .last()
-            .is_some_and(|node| place_resolution_depends_on_place_result(arena, *node)),
+            .is_some_and(|node| place_resolution_depends_on_addressor_place(arena, *node)),
         _ => false,
     }
 }
@@ -3196,16 +3245,16 @@ fn try_eval_node_as_place(
         }
         Apply(app) if app.ty.returns_place() => {
             let result = eval_apply(arena, app, node.span, ctx, locals)?;
-            return Ok(control_flow_into_place_result(result).map_continue(Some));
+            return Ok(control_flow_into_addressor_place(result).map_continue(Some));
         }
         StaticApply(app) if app.ty.returns_place() => {
-            let result = eval_place_result_static_apply(arena, app, node.span, ctx, locals)?;
-            return Ok(control_flow_into_place_result(result).map_continue(Some));
+            let result = eval_addressor_place_static_apply(arena, app, node.span, ctx, locals)?;
+            return Ok(control_flow_into_addressor_place(result).map_continue(Some));
         }
         CallDictionaryMethod(call) if call.ty.returns_place() => {
             let result =
-                eval_place_result_call_dictionary_method(arena, call, node.span, ctx, locals)?;
-            return Ok(control_flow_into_place_result(result).map_continue(Some));
+                eval_addressor_place_call_dictionary_method(arena, call, node.span, ctx, locals)?;
+            return Ok(control_flow_into_addressor_place(result).map_continue(Some));
         }
         CloneValue(node)
             if matches!(
@@ -3218,7 +3267,7 @@ fn try_eval_node_as_place(
         Block(block) => {
             let place = eval_or_return!(try_eval_nodes_as_place(arena, &block.body, ctx, locals));
             if !block.cleanup.is_empty() {
-                // Place-result helpers may need temporaries to compute the final place.
+                // Addressor-place helpers may need temporaries to compute the final place.
                 // The returned place must not point into these cleanup locals.
                 drop_cleanup_locals(ctx, locals, &block.cleanup, node.span)?;
             }

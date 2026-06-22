@@ -30,7 +30,9 @@
     plainPathType,
     appliedPathType,
     fnRetNoEffects,
-    fnRetWithEffects
+    fnRetWithEffects,
+    namedSubscriptNoArgs,
+    namedSubscriptWithArgs
 }
 
 kw<term> { @specialize[@name={term}]<Identifier, term> }
@@ -458,7 +460,7 @@ Abstraction {
 
 pipeExpr {
     rangeExpr
-    | pipeExpr '|>' suffixExpr '(' exprArgsOptComma ')'
+    | pipeExpr '|>' pipeCalleeExpr '(' exprArgsOptComma ')'
 }
 
 rangeExpr {
@@ -507,40 +509,52 @@ CastTargetType {
 }
 
 unaryExpr {
-    NamedSubscript
-    | suffixExpr
+    suffixExpr
     | LogicOp { kw<'not'> } unaryExpr
     | LogicOp { '!' } unaryExpr
     | ArithOp { '-' } unaryExpr
 }
 
 suffixExpr {
-    atomExpr
-    | Projection
+    atomExpr suffixTail*
+}
+
+pipeCalleeExpr {
+    atomExpr pipeCalleeSuffixTail*
+}
+
+suffixTail {
+    Projection
     | Indexing
+    | NamedSubscript
     | Application
 }
 
+pipeCalleeSuffixTail {
+    Projection
+    | Indexing
+}
+
 Projection {
-    suffixExpr '.' fieldIdentifier
-    | suffixExpr '.' UInt
+    '.' fieldIdentifier
+    | '.' UInt
 }
 
 Indexing {
-    suffixExpr '[' expr ']'
+    '[' expr ']'
 }
 
 NamedSubscript {
-    suffixExpr namedSubscriptTail+
+    namedSubscriptTail
 }
 
 namedSubscriptTail {
-    '->' '[' Identifier ']'
-    | '->' '[' Identifier ']' '(' exprArgsNonEmptyOptComma ')'
+    '->' '[' Identifier ']' !namedSubscriptNoArgs
+    | '->' '[' Identifier ']' '(' exprArgsNonEmptyOptComma ')' !namedSubscriptWithArgs
 }
 
 Application {
-    suffixExpr '(' exprArgsOptComma ')'
+    '(' exprArgsOptComma ')'
 }
 
 atomExpr {

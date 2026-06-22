@@ -1122,6 +1122,11 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                 binding: node.binding,
                 body: self.elaborate_node(src, node.body)?,
             }),
+            WithPlace(node) => WithPlace(hir::WithPlace {
+                place: self.elaborate_node(src, node.place)?,
+                binding: node.binding,
+                body: self.elaborate_node(src, node.body)?,
+            }),
             CheckCallDepth => CheckCallDepth,
             CheckFuel => CheckFuel,
         })

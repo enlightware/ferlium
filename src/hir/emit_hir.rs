@@ -38,7 +38,7 @@ use crate::{
     module::{
         ConcreteTraitImplKey, LocalFunctionId, LocalImplId, LocalSubscriptId, Module, ModuleEnv,
         ModuleFunction, ModuleId, PendingModuleFunction, TraitImpl, UModuleFunction,
-        build_dictionary_value, id::Id,
+        YieldProvenance, build_dictionary_value, id::Id,
     },
     std::value::{
         is_function_surface_only_value_trait_application, is_value_trait_for_function_type,
@@ -462,12 +462,14 @@ impl<'a> ModuleImplementationEmission<'a> {
 fn subscript_member_attachments(
     subscript_id: LocalSubscriptId,
     member: &ast::SubscriptMember<ast::Desugared>,
+    provenance: YieldProvenance,
 ) -> Vec<SubscriptMemberAttachment> {
     let mut attachments = Vec::with_capacity(2);
     if member.mode.ref_member {
         attachments.push(SubscriptMemberAttachment {
             subscript_id,
             is_mut_member: false,
+            provenance,
             span: member.span,
         });
     }
@@ -475,14 +477,102 @@ fn subscript_member_attachments(
         attachments.push(SubscriptMemberAttachment {
             subscript_id,
             is_mut_member: true,
+            provenance,
             span: member.span,
         });
     }
     attachments
 }
 
+fn subscript_member_provenance(
+    member: &ast::SubscriptMember<ast::Desugared>,
+    arena: &ast::DExprArena,
+) -> YieldProvenance {
+    if subscript_member_body_contains_yield(member.body, arena) {
+        YieldProvenance::YieldedOnce
+    } else {
+        YieldProvenance::AddressorPlace
+    }
+}
+
+fn subscript_member_body_contains_yield(expr: ast::DExprId, arena: &ast::DExprArena) -> bool {
+    use ast::ExprKind::*;
+
+    match &arena[expr].kind {
+        Yield(_) => true,
+        Abstract(_) => false,
+        Let(data) => subscript_member_body_contains_yield(data.expr, arena),
+        Apply(data) => {
+            subscript_member_body_contains_yield(data.func, arena)
+                || data
+                    .args
+                    .iter()
+                    .any(|arg| subscript_member_body_contains_yield(*arg, arena))
+        }
+        NamedSubscript(data) => {
+            subscript_member_body_contains_yield(data.receiver, arena)
+                || data
+                    .args
+                    .iter()
+                    .any(|arg| subscript_member_body_contains_yield(*arg, arena))
+        }
+        Block(exprs) | Tuple(exprs) | Array(exprs) => exprs
+            .iter()
+            .any(|expr| subscript_member_body_contains_yield(*expr, arena)),
+        Assign(data) => {
+            subscript_member_body_contains_yield(data.place, arena)
+                || subscript_member_body_contains_yield(data.value, arena)
+        }
+        AssignOp(data) => {
+            subscript_member_body_contains_yield(data.place, arena)
+                || subscript_member_body_contains_yield(data.value, arena)
+        }
+        Project(data) => subscript_member_body_contains_yield(data.expr, arena),
+        StructLiteral(data) => data
+            .fields
+            .iter()
+            .any(|(_, expr)| subscript_member_body_contains_yield(*expr, arena)),
+        Record(fields) => fields
+            .iter()
+            .any(|(_, expr)| subscript_member_body_contains_yield(*expr, arena)),
+        FieldAccess(data) => subscript_member_body_contains_yield(data.expr, arena),
+        Index(data) => {
+            subscript_member_body_contains_yield(data.array, arena)
+                || subscript_member_body_contains_yield(data.index, arena)
+        }
+        EffectsUnsafe(expr) | Return(expr) => subscript_member_body_contains_yield(*expr, arena),
+        TypeAscription(data) => subscript_member_body_contains_yield(data.expr, arena),
+        Match(data) => {
+            subscript_member_body_contains_yield(data.cond_expr, arena)
+                || data
+                    .alternatives
+                    .iter()
+                    .any(|(_, expr)| subscript_member_body_contains_yield(*expr, arena))
+                || data
+                    .default
+                    .is_some_and(|expr| subscript_member_body_contains_yield(expr, arena))
+        }
+        Loop(data) => subscript_member_body_contains_yield(data.body, arena),
+        Break(data) => data
+            .value
+            .is_some_and(|expr| subscript_member_body_contains_yield(expr, arena)),
+        PatternConstraint(data) => subscript_member_body_contains_yield(data.expr, arena),
+        Literal(_, _)
+        | FormattedString(_)
+        | Identifier(_)
+        | PropertyPath(_)
+        | TraitAssociatedConst(_)
+        | SetLiteral(_)
+        | MapLiteral(_)
+        | ForLoop(_)
+        | Continue(_)
+        | Error => false,
+    }
+}
+
 fn module_implementation_emissions<'a>(
     source: &'a ast::DModule,
+    desugared_arena: &ast::DExprArena,
     subscript_ids: &[LocalSubscriptId],
     scc: &ast::ModuleImplementationScc,
 ) -> Vec<ModuleImplementationEmission<'a>> {
@@ -495,17 +585,20 @@ fn module_implementation_emissions<'a>(
             ast::ModuleImplementationAstIndex::SubscriptMember { subscript, member } => {
                 let subscript_def = &source.subscripts[subscript.as_index()];
                 let member_def = &subscript_def.members[member.as_index()];
+                let provenance = subscript_member_provenance(member_def, desugared_arena);
                 ModuleImplementationEmission::SubscriptMember {
                     function: b(synthetic_subscript_member_function(
                         subscript_def,
                         member_def,
                     )),
                     kind: EmitFunctionKind::SubscriptMember {
+                        provenance,
                         requires_mutable_yield: member_def.mode.mut_member,
                     },
                     attachments: subscript_member_attachments(
                         subscript_ids[subscript.as_index()],
                         member_def,
+                        provenance,
                     ),
                 }
             }
@@ -685,7 +778,8 @@ pub(crate) fn emit_module_with_capabilities(
         // Keep the existing deterministic intra-SCC order used as a compatibility workaround for
         // effect tracking. Mixed function/subscript-member SCCs are intentionally included here.
         scc.implementations.sort();
-        let emissions = module_implementation_emissions(&source, &subscript_ids, &scc);
+        let emissions =
+            module_implementation_emissions(&source, &desugared_arena, &subscript_ids, &scc);
         let recursive_function_names = if scc.recursive {
             emissions
                 .iter()

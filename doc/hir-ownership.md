@@ -11,30 +11,31 @@ This document is about source-level ownership semantics and the HIR operations t
 # Values, Places, and Locals
 
 A HIR expression either produces an owned value, denotes a caller-rooted place in existing storage, or drives a scoped yielded place.
-Caller-rooted place-like nodes include `LoadLocal`, projections (`Project`, `ProjectAt`, field projections before elaboration), and call nodes whose `FnType` has `FnReturnConvention::AddressorPlace`.
+Caller-rooted place-like nodes include `LoadLocal`, projections (`Project`, `ProjectAt`), and call nodes whose `FnType` has `FnReturnConvention::AddressorPlace`.
 SSA must not treat every `LoadLocal` as an owned read: ownership transfer, clone, and copy are explicit HIR operations.
 
 When a place-producing projection or call needs a non-place base, HIR generation stores that base in an explicit owned temporary local first.
 The consumer then uses a normal place rooted at that temporary, and the surrounding `Block.cleanup` releases the temporary after the consumer.
 
-Std-only functions marked with `#[place_result]` are place-like nodes.
-The attribute also marks the function unsafe, so user source cannot call or bind it directly.
-The attribute is a bootstrap spelling for `FnReturnConvention::AddressorPlace`; after HIR construction the function type is the source of truth.
-HIR consumers must handle `Apply`, `StaticApply`, and unelaborated `TraitMethodApply` calls with that convention like other place references when a place is required, or first materialize them with `CloneValue` when an owned value is required.
+Addressor-place functions are place-like nodes.
+Native definitions may declare `FnReturnConvention::AddressorPlace` directly, and source subscript members without `yield` infer that convention from their body shape.
+After HIR construction the function type is the source of truth: consumers handle any call node with that convention like a place when a place is required, or materialize it with `CloneValue` when an owned value is required.
 The returned place is an expression-local capability, not a storable reference value.
 HIR must not store a raw place in a local, aggregate, closure capture, or normal value return.
 
-Scoped subscript members are different from addressors.
-In the current experimental lowering, every parsed named subscript member uses `FnReturnConvention::YieldedOnce`.
+Subscript members split by body shape.
+A member that contains `yield` uses `FnReturnConvention::YieldedOnce`.
 The yielded place is valid only while the accessor frame is suspended, so HIR must consume the call through `WithYielded { accessor, binding, body }`.
 `WithYielded` runs the accessor to its single `Yield(place)`, binds that place to an internal non-owning `binding`, evaluates `body`, then resumes the accessor epilogue.
 The binding is not source-visible storage and must not be captured, returned, or stored as a value.
 If `body` exits by return, break, continue, or runtime error, the accessor epilogue and normal frame cleanup still run before the transfer continues.
 If the accessor fails before yielding, no yielded binding exists and no post-yield epilogue runs.
 
-This is not the final story for all subscripts.
-Addressor-style subscripts, including a future rewrite of `array_index`, should keep `FnReturnConvention::AddressorPlace` and the existing caller-rooted projection behavior.
-That addressor-subscript lowering is not implemented yet; today's named subscript syntax covers only the scoped `YieldedOnce` path.
+A member without `yield` uses `FnReturnConvention::AddressorPlace` and keeps caller-rooted projection behavior.
+When a named subscript use must evaluate an addressor projection exactly once, HIR uses `WithPlace { place, binding, body }`.
+`WithPlace` evaluates `place` as a caller-rooted place, binds it to an internal non-owning `binding`, and evaluates `body`.
+It does not suspend an accessor and has no epilogue.
+Std `array_index` is now a source subscript with `AddressorPlace` provenance; source array-index syntax resolves that subscript and lowers through the addressor path.
 
 `LocalDecl` is the ownership metadata for a local:
 
@@ -68,9 +69,10 @@ Current lowering applies these rules in the main ownership-sensitive contexts:
 - Closure captures are materialized as owned values before `BuildClosure`.
 - Function returns use `TakeLocalValue` when returning a local out of the current scope.
 - Function calls use the explicit argument passing rules described below.
-- Assignment targets may consume projections and place-result calls directly as places, subject to the usual mutability checks.
-- Projections and place-result calls of non-place bases use explicit owned temporaries when consumed as places; if an owned result is needed, that place is then wrapped in `CloneValue`.
-- Named subscript reads, assignments, and compound assignments use one `WithYielded` projection; compound assignment reads and writes the internal binding inside that single projection instead of duplicating the accessor.
+- Assignment targets may consume projections and addressor-place calls directly as places, subject to the usual mutability checks.
+- Projections and addressor-place calls of non-place bases use explicit owned temporaries when consumed as places; if an owned result is needed, that place is then wrapped in `CloneValue`.
+- Named subscript reads, assignments, and compound assignments use one projection driver: `WithYielded` for scoped members and `WithPlace` for addressor members.
+  Compound assignment reads and writes the internal binding inside that single projection instead of duplicating the accessor.
 
 # Drops and Cleanup
 
@@ -91,6 +93,7 @@ SSA must preserve the same cleanup behavior on all exits:
 - `return`, `break`, and `continue` edges run the cleanup for each lexical block they exit.
 - A value carried by `return` or `break` is prepared before cleanup runs: a local owned by the exited scope is moved with `TakeLocalValue`, while a still-live place is materialized with `CloneValue` or a trivial copy.
 - If a transfer exits a `WithYielded` body, the suspended accessor epilogue runs before the transfer continues past the `WithYielded`.
+  `WithPlace` has no epilogue; ordinary enclosing `Block.cleanup` still applies.
 
 Function-entry locals are not represented by an extra cleanup block today.
 This is compatible with the current calling convention: non-trivial source-level value inputs are passed by reference, and owned function-boundary inputs are trivial-copy values whose cleanup is `Skip`.

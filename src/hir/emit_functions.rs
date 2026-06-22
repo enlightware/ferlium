@@ -32,7 +32,7 @@ use crate::{
     module::{
         FunctionId, GENERATED_LAMBDA_PREFIX, LocalDecl, LocalDeclId, LocalFunctionId,
         LocalSubscriptId, Module, ModuleEnv, ModuleFunction, ModuleFunctionSpans, ModuleId,
-        PendingFunctionBody, PendingModuleFunction, TraitId, Visibility, id::Id,
+        PendingFunctionBody, PendingModuleFunction, TraitId, Visibility, YieldProvenance, id::Id,
     },
     std::{STD_MODULE_ID, new_module_using_std},
     types::{
@@ -91,7 +91,6 @@ pub(crate) struct EmitTraitOutput {
 
 #[derive(Clone, Copy, Debug, Default)]
 struct FunctionAttributes {
-    returns_place: bool,
     no_fuel_check: bool,
 }
 
@@ -100,6 +99,7 @@ pub(super) enum EmitFunctionKind {
     #[default]
     Normal,
     SubscriptMember {
+        provenance: YieldProvenance,
         requires_mutable_yield: bool,
     },
 }
@@ -108,6 +108,7 @@ pub(super) enum EmitFunctionKind {
 pub(super) struct SubscriptMemberAttachment {
     pub(super) subscript_id: LocalSubscriptId,
     pub(super) is_mut_member: bool,
+    pub(super) provenance: YieldProvenance,
     pub(super) span: Location,
 }
 
@@ -129,23 +130,31 @@ impl<'a> EmitFunctionInput<'a> {
 }
 
 impl EmitFunctionKind {
-    fn return_convention(self, attrs: FunctionAttributes) -> FnReturnConvention {
+    fn return_convention(self) -> FnReturnConvention {
         match self {
-            EmitFunctionKind::Normal => {
-                if attrs.returns_place {
-                    FnReturnConvention::AddressorPlace
-                } else {
-                    FnReturnConvention::Value
-                }
-            }
-            EmitFunctionKind::SubscriptMember { .. } => FnReturnConvention::YieldedOnce,
+            EmitFunctionKind::Normal => FnReturnConvention::Value,
+            EmitFunctionKind::SubscriptMember {
+                provenance: YieldProvenance::YieldedOnce,
+                ..
+            } => FnReturnConvention::YieldedOnce,
+            EmitFunctionKind::SubscriptMember {
+                provenance: YieldProvenance::AddressorPlace,
+                ..
+            } => FnReturnConvention::AddressorPlace,
         }
     }
 
     fn body_expected_ty(self, default: Type) -> Type {
         match self {
             EmitFunctionKind::Normal => default,
-            EmitFunctionKind::SubscriptMember { .. } => Type::unit(),
+            EmitFunctionKind::SubscriptMember {
+                provenance: YieldProvenance::YieldedOnce,
+                ..
+            } => Type::unit(),
+            EmitFunctionKind::SubscriptMember {
+                provenance: YieldProvenance::AddressorPlace,
+                ..
+            } => default,
         }
     }
 
@@ -157,8 +166,13 @@ impl EmitFunctionKind {
         match self {
             EmitFunctionKind::Normal => false,
             EmitFunctionKind::SubscriptMember {
+                provenance: YieldProvenance::YieldedOnce,
                 requires_mutable_yield,
             } => requires_mutable_yield,
+            EmitFunctionKind::SubscriptMember {
+                provenance: YieldProvenance::AddressorPlace,
+                ..
+            } => false,
         }
     }
 }
@@ -178,9 +192,8 @@ fn validate_function_attributes(
     function_name: Ustr,
     is_std_module: bool,
 ) -> Result<FunctionAttributes, InternalCompilationError> {
-    let mut returns_place = false;
     let mut no_fuel_check = false;
-    let known_attributes = [ustr("place_result"), ustr("no_fuel_check")];
+    let known_attributes = [ustr("no_fuel_check")];
     for attribute in attributes {
         let attr_name = attribute.path.0;
         if !known_attributes.contains(&attr_name) {
@@ -204,12 +217,7 @@ fn validate_function_attributes(
                 span: attribute.span,
             }));
         }
-        let enabled = if attr_name == known_attributes[0] {
-            &mut returns_place
-        } else {
-            &mut no_fuel_check
-        };
-        if *enabled {
+        if no_fuel_check {
             return Err(internal_compilation_error!(InvalidAttribute {
                 attribute_name: attr_name,
                 target: AttributeTarget::Function {
@@ -219,12 +227,9 @@ fn validate_function_attributes(
                 span: attribute.span,
             }));
         }
-        *enabled = true;
+        no_fuel_check = true;
     }
-    Ok(FunctionAttributes {
-        returns_place,
-        no_fuel_check,
-    })
+    Ok(FunctionAttributes { no_fuel_check })
 }
 
 fn node_references_any_function(
@@ -676,7 +681,7 @@ where
         let attrs =
             validate_function_attributes(attributes, name.0, output.module_id() == STD_MODULE_ID)?;
         let effects = ty_inf.fresh_effect_var_ty();
-        let return_convention = kind.return_convention(attrs);
+        let return_convention = kind.return_convention();
         let fn_type = FnType::new_with_return_convention(
             args_ty,
             ret_ty_ty,
@@ -745,8 +750,6 @@ where
             placeholder_id
         } else if trait_ctx.is_some() || kind.force_anonymous() {
             output.add_function_anonymous(descr)
-        } else if attrs.returns_place {
-            output.add_private_unsafe_function(name.0, descr)
         } else {
             output.add_function_with_visibility(name.0, descr, *visibility)
         };
@@ -765,6 +768,7 @@ where
                 attachment.subscript_id,
                 *id,
                 attachment.is_mut_member,
+                attachment.provenance,
                 attachment.span,
             )?;
         }

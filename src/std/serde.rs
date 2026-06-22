@@ -471,10 +471,11 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                         get_dictionary(data_value_dictionary),
                         data_value_dictionary_ty,
                     );
-                    let array_index = solver.get_function(
+                    let array_index = solver.get_subscript_member(
                         span,
                         &module::Path::single_str("std"),
                         ustr("array_index"),
+                        false,
                     )?;
                     let arguments = vec![get_array, index_node];
                     let ty = FnType::new_with_return_convention(

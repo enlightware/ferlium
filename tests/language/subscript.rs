@@ -11,8 +11,8 @@ use super::harness::{TestSession, expected_tuple, int, string};
 use ferlium::{
     SourceId,
     ast::{PExprKind, SubscriptMemberMode},
-    compiler::error::RuntimeErrorKind,
-    module::id::Id,
+    compiler::error::{CompilationErrorImpl, RuntimeErrorKind},
+    module::{YieldProvenance, id::Id},
     parse_module_and_expr,
     std::math::int_type,
     types::effects::{PrimitiveEffect, effect},
@@ -155,6 +155,48 @@ fn named_subscript_has_lower_precedence_than_ordinary_suffixes() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn named_subscript_allows_following_ordinary_suffixes() {
+    let (_module, expr, arena) =
+        parse_module_and_expr("value->[row](0)[1]", SourceId::from_index(1), true)
+            .expect("named subscript followed by index should parse");
+
+    let expr = single_top_level_expr(expr.expect("expected expression"), &arena);
+    let PExprKind::Index(index) = &arena[expr].kind else {
+        panic!("expected index expression, got {:?}", arena[expr].kind);
+    };
+    let PExprKind::NamedSubscript(data) = &arena[index.array].kind else {
+        panic!(
+            "expected indexed receiver to be named subscript, got {:?}",
+            arena[index.array].kind
+        );
+    };
+    assert_eq!(data.name.0, ustr("row"));
+    assert_eq!(data.args.len(), 1);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn named_subscript_result_call_requires_parentheses() {
+    let (_module, expr, arena) =
+        parse_module_and_expr("(value->[cell])(1)", SourceId::from_index(1), true)
+            .expect("parenthesized named subscript result call should parse");
+
+    let expr = single_top_level_expr(expr.expect("expected expression"), &arena);
+    let PExprKind::Apply(data) = &arena[expr].kind else {
+        panic!(
+            "expected application expression, got {:?}",
+            arena[expr].kind
+        );
+    };
+    assert_eq!(data.args.len(), 1);
+    assert!(matches!(
+        arena[data.func].kind,
+        PExprKind::NamedSubscript(_)
+    ));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn named_subscript_has_higher_precedence_than_unary_operators() {
     let (_module, expr, arena) =
         parse_module_and_expr("-value->[cell]", SourceId::from_index(1), true)
@@ -233,6 +275,135 @@ fn compiled_module_exposes_subscript_by_name() {
     assert_eq!(subscript.signature.ret, int_type());
     assert!(subscript.ref_member.is_some());
     assert!(subscript.mut_member.is_none());
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn subscript_member_without_yield_is_addressor_place() {
+    let mut session = experimental_session();
+    let module = session.compile_and_get_module(indoc! { r#"
+        subscript first(values: &mut [int]) -> int {
+            ref mut {
+                return values[0]
+            }
+        }
+    "# });
+
+    let subscript = module
+        .get_subscript(ustr("first"))
+        .expect("subscript should be available by source name");
+    let ref_member = subscript.ref_member.as_ref().unwrap();
+    let mut_member = subscript.mut_member.as_ref().unwrap();
+    assert_eq!(ref_member.function, mut_member.function);
+    assert_eq!(ref_member.provenance, YieldProvenance::AddressorPlace);
+    assert_eq!(mut_member.provenance, YieldProvenance::AddressorPlace);
+    let function = module
+        .get_function_by_id(ref_member.function)
+        .expect("subscript member function should exist");
+    assert!(function.definition.ty_scheme.ty.returns_place());
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn addressor_subscript_rejects_direct_by_value_parameter_root() {
+    assert_experimental_compile_error(indoc! { r#"
+        subscript cell(value: int) -> int {
+            ref {
+                return value
+            }
+        }
+    "# });
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn addressor_subscript_rejects_owned_local_return_root() {
+    assert_experimental_compile_error_reason(
+        indoc! { r#"
+            subscript cell(value: int) -> int {
+                ref {
+                    let local = value;
+                    return local
+                }
+            }
+        "# },
+        "addressor rooted in the base parameter",
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn addressor_subscript_rejects_addressor_rooted_in_owned_local() {
+    assert_experimental_compile_error_reason(
+        indoc! { r#"
+            subscript first(values: &mut [int]) -> int {
+                ref {
+                    let local = values;
+                    return local[0]
+                }
+            }
+        "# },
+        "addressor rooted in the base parameter",
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn addressor_subscript_rejects_addressor_rooted_in_non_base_parameter() {
+    assert_experimental_compile_error_reason(
+        indoc! { r#"
+            subscript first(first_values: &mut [int], values: &mut [int]) -> int {
+                ref {
+                    return values[0]
+                }
+            }
+        "# },
+        "addressor rooted in the base parameter",
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn addressor_subscript_rejects_generic_parameter_return_root() {
+    assert_experimental_compile_error_reason(
+        indoc! { r#"
+            subscript cell<A>(value: A) -> A {
+                ref {
+                    return value
+                }
+            }
+        "# },
+        "addressor rooted in the base parameter",
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn addressor_subscript_rejects_implicit_tail_return() {
+    assert_experimental_compile_error_reason(
+        indoc! { r#"
+            subscript first(values: &mut [int]) -> int {
+                ref {
+                    values[0]
+                }
+            }
+        "# },
+        "must return explicitly",
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn addressor_subscript_rejects_empty_member_body() {
+    assert_experimental_compile_error_reason(
+        indoc! { r#"
+            subscript cell() -> () {
+                ref {
+                }
+            }
+        "# },
+        "must return explicitly",
+    );
 }
 
 #[test]
@@ -385,6 +556,40 @@ fn rejects_yield_outside_subscript_member() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn rejects_yield_inside_user_closure() {
+    let mut session = TestSession::new();
+    match session
+        .fail_compilation(indoc! { r#"
+            let f = || { yield 1 };
+            ()
+        "# })
+        .into_inner()
+    {
+        CompilationErrorImpl::Unsupported { reason, .. } => {
+            assert!(reason.contains("yield is only supported inside subscript members"));
+        }
+        other => panic!("expected unsupported yield error, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn rejects_yield_inside_closure_nested_in_subscript_member() {
+    assert_experimental_compile_error_reason(
+        indoc! { r#"
+            subscript cell(value: int) -> int {
+                ref {
+                    let f = || { yield value };
+                    return value
+                }
+            }
+        "# },
+        "yield is only supported inside subscript members",
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn rejects_multiple_reachable_yields() {
     let mut session = TestSession::new();
     assert!(
@@ -507,6 +712,18 @@ fn assert_experimental_compile_error(src: &str) {
     assert!(experimental_session().try_compile(src).is_err());
 }
 
+fn assert_experimental_compile_error_reason(src: &str, expected_reason: &str) {
+    match experimental_session().fail_compilation(src).into_inner() {
+        CompilationErrorImpl::Unsupported { reason, .. } => {
+            assert!(
+                reason.contains(expected_reason),
+                "expected reason to contain `{expected_reason}`, got `{reason}`"
+            );
+        }
+        other => panic!("expected unsupported compile error, got {other:?}"),
+    }
+}
+
 fn run_experimental_subscript_source(src: &str) -> ferlium::hir::value::Value {
     let mut session = experimental_session();
     session.run(src)
@@ -532,6 +749,221 @@ fn module_function_can_use_later_named_subscript() {
     "# });
 
     assert_val_eq!(value, int(8));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn addressor_named_subscript_rvalue_reads_direct_place() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        subscript first(values: &mut [int]) -> int {
+            ref mut {
+                return values[0]
+            }
+        }
+
+        let mut values = [8];
+        values->[first]
+    "# });
+
+    assert_val_eq!(value, int(8));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn addressor_named_subscript_assignment_writes_direct_place() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        subscript first(values: &mut [int]) -> int {
+            ref mut {
+                return values[0]
+            }
+        }
+
+        let mut values = [8];
+        values->[first] = 13;
+        values[0]
+    "# });
+
+    assert_val_eq!(value, int(13));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn addressor_named_subscript_compound_assignment_uses_single_place() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        subscript first(values: &mut [int], log: &mut int) -> int {
+            ref mut {
+                log = log + 1;
+                return values[0]
+            }
+        }
+
+        let mut values = [8];
+        let mut log = 0;
+        values->[first](log) += 5;
+        (values[0], log)
+    "# });
+
+    assert_val_eq!(value, expected_tuple([int(13), int(1)]));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn nested_array_index_compound_assignment_composes_addressor_places() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        let mut values = [[1, 2], [3, 4]];
+        values[0][1] += 10;
+        (values[0][0], values[0][1], values[1][0], values[1][1])
+    "# });
+
+    assert_val_eq!(value, expected_tuple([int(1), int(12), int(3), int(4)]));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn array_index_receiver_can_drive_yielded_subscript() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        subscript probe(slot: &mut int, log: &mut int) -> int {
+            ref mut {
+                log = log + 1;
+                let mut local = slot;
+                yield local;
+                slot = local;
+                log = log + 10
+            }
+        }
+
+        let mut values = [5, 8];
+        let mut log = 0;
+        values[0]->[probe](log) += 2;
+        (values[0], values[1], log)
+    "# });
+
+    assert_val_eq!(value, expected_tuple([int(7), int(8), int(11)]));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn yielded_subscript_result_can_be_indexed_by_mutable_consumer() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        subscript row(rows: &mut [[int]], index: int, log: &mut int) -> [int] {
+            ref mut {
+                log = log + 1;
+                let mut local = rows[index];
+                yield local;
+                rows[index] = local;
+                log = log + 10
+            }
+        }
+
+        let mut rows = [[1, 2], [3, 4]];
+        let mut log = 0;
+        rows->[row](0, log)[1] += 10;
+        (rows[0][0], rows[0][1], rows[1][0], rows[1][1], log)
+    "# });
+
+    assert_val_eq!(
+        value,
+        expected_tuple([int(1), int(12), int(3), int(4), int(11)])
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn yielded_subscript_result_can_be_indexed_repeatedly_by_mutable_consumer() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        subscript plane(cubes: &mut [[[int]]], index: int, log: &mut int) -> [[int]] {
+            ref mut {
+                log = log + 1;
+                let mut local = cubes[index];
+                yield local;
+                cubes[index] = local;
+                log = log + 10
+            }
+        }
+
+        let mut cubes = [[[1, 2], [3, 4]], [[5, 6], [7, 8]]];
+        let mut log = 0;
+        cubes->[plane](0, log)[1][0] += 20;
+        (cubes[0][0][0], cubes[0][1][0], cubes[0][1][1], cubes[1][0][0], log)
+    "# });
+
+    assert_val_eq!(
+        value,
+        expected_tuple([int(1), int(23), int(4), int(5), int(11)])
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn array_index_receiver_can_drive_addressor_subscript() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        subscript first(values: &mut [int], log: &mut int) -> int {
+            ref mut {
+                log = log + 1;
+                return values[0]
+            }
+        }
+
+        let mut values = [[5, 6], [8, 9]];
+        let mut log = 0;
+        values[0]->[first](log) += 2;
+        (values[0][0], values[0][1], values[1][0], values[1][1], log)
+    "# });
+
+    assert_val_eq!(
+        value,
+        expected_tuple([int(7), int(6), int(8), int(9), int(1)])
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn named_subscript_can_be_passed_as_mutable_function_argument() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        fn bump(slot: &mut int) {
+            slot = slot + 1
+        }
+
+        subscript cell(slot: &mut int) -> int {
+            ref mut {
+                let mut local = slot;
+                yield local;
+                slot = local
+            }
+        }
+
+        let mut slot = 5;
+        bump(slot->[cell]);
+        slot
+    "# });
+
+    assert_val_eq!(value, int(6));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn rejects_multiple_named_subscripts_as_mutable_function_arguments() {
+    assert_experimental_compile_error_reason(
+        indoc! { r#"
+            fn add_to_both(first: &mut int, second: &mut int) {
+                first = first + 1;
+                second = second + 1
+            }
+
+            subscript cell(slot: &mut int) -> int {
+                ref mut {
+                    let mut local = slot;
+                    yield local;
+                    slot = local
+                }
+            }
+
+            let mut first = 1;
+            let mut second = 2;
+            add_to_both(first->[cell], second->[cell])
+        "# },
+        "more than one named subscript as mutable arguments",
+    );
 }
 
 #[test]

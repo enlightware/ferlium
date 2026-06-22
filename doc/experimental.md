@@ -6,12 +6,9 @@ Experimental features are not part of the stable source language. They may be re
 
 ## Named Subscripts
 
-Named subscripts are an experimental projection mechanism for places that need bracketed access:
-
-1. run accessor prologue code,
-2. `yield` a place,
-3. run caller code against that place,
-4. run accessor epilogue code.
+Named subscripts are an experimental projection mechanism. They give a name to
+place access that can either be a direct addressor projection or a scoped
+acquire/yield/release operation.
 
 The temporary use-site syntax is receiver-first:
 
@@ -21,25 +18,47 @@ value->[name](arg1, arg2)
 ```
 
 This is intentionally provisional. It means "call the named subscript `name` with the receiver as the first argument".
+Array indexing is implemented as a standard-library subscript, and it composes with named subscripts:
+
+```ferlium
+rows->[row](0)[1]
+```
+
+If the subscript result itself should be called as a function, parenthesize the subscript access:
+
+```ferlium
+(value->[name])(arg)
+```
 
 Subscripts are declared as a single signature with one or two member bodies:
 
 ```ferlium
-subscript cell(slot: &mut int) -> int {
+subscript first(values: &mut [int]) -> int {
     ref {
-        let local = slot;
-        yield local
+        return values[0]
     }
 
     mut {
-        let mut local = slot;
-        yield local;
-        slot = local
+        return values[0]
     }
 }
 ```
 
 `ref` is selected for reads. `mut` is selected for assignment and compound assignment. A single shared member can serve both roles:
+
+```ferlium
+subscript first(values: &mut [int]) -> int {
+    ref mut {
+        return values[0]
+    }
+}
+```
+
+When `ref mut` is used, it is the whole bundle body: it cannot be combined with separate `ref` or `mut` members.
+
+A member without `yield` is an addressor subscript. It returns a direct place in existing caller-visible storage. This is the shape used by standard array indexing.
+
+A member with `yield` is a scoped subscript:
 
 ```ferlium
 subscript cell(slot: &mut int) -> int {
@@ -51,8 +70,6 @@ subscript cell(slot: &mut int) -> int {
 }
 ```
 
-When `ref mut` is used, it is the whole bundle body: it cannot be combined with separate `ref` or `mut` members.
-
-Each member must contain exactly one reachable `yield`, and that `yield` must yield a place. A `mut` member must yield a mutable place. For now, the `yield` path must be block-structured: the yield may be nested in blocks, but not inside conditionals, matches, or loops.
+The code before `yield` is the accessor prologue, and the code after `yield` is the epilogue. The caller uses the yielded place between those two parts. Scoped members must contain exactly one reachable `yield`, and that `yield` must yield a place. A `mut` member must yield a mutable place. For now, the `yield` path must be block-structured: the yield may be nested in blocks, but not inside conditionals, matches, or loops.
 
 Named subscript access is currently accepted only when experimental features are enabled. The syntax is intended for standard-library work, tests, and design experiments such as generalized record-like projections.

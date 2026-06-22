@@ -195,7 +195,7 @@ pub(crate) fn place_resolution_may_create_temp(arena: &NodeArena, node_id: NodeI
         Apply(app) if app.ty.returns_place() => {
             !node_is_place_reference(arena, app.function)
                 || place_resolution_may_create_temp(arena, app.function)
-                || place_result_base_argument_index(arena, &app.arguments).is_some_and(
+                || addressor_place_base_argument_index(arena, &app.arguments).is_some_and(
                     |base_index| !node_is_place_reference(arena, app.arguments[base_index].value),
                 )
                 || app
@@ -204,7 +204,7 @@ pub(crate) fn place_resolution_may_create_temp(arena: &NodeArena, node_id: NodeI
                     .any(|arg| place_resolution_may_create_temp(arena, arg.value))
         }
         StaticApply(app) if app.ty.returns_place() => {
-            place_result_base_argument_index(arena, &app.arguments).is_some_and(|base_index| {
+            addressor_place_base_argument_index(arena, &app.arguments).is_some_and(|base_index| {
                 !node_is_place_reference(arena, app.arguments[base_index].value)
             }) || app
                 .arguments
@@ -212,7 +212,7 @@ pub(crate) fn place_resolution_may_create_temp(arena: &NodeArena, node_id: NodeI
                 .any(|arg| place_resolution_may_create_temp(arena, arg.value))
         }
         TraitMethodApply(app) if app.ty.returns_place() => {
-            place_result_base_argument_index(arena, &app.arguments).is_some_and(|base_index| {
+            addressor_place_base_argument_index(arena, &app.arguments).is_some_and(|base_index| {
                 !node_is_place_reference(arena, app.arguments[base_index].value)
             }) || app
                 .arguments
@@ -220,7 +220,7 @@ pub(crate) fn place_resolution_may_create_temp(arena: &NodeArena, node_id: NodeI
                 .any(|arg| place_resolution_may_create_temp(arena, arg.value))
         }
         CallDictionaryMethod(call) if call.ty.returns_place() => {
-            place_result_base_argument_index(arena, &call.arguments).is_some_and(|base_index| {
+            addressor_place_base_argument_index(arena, &call.arguments).is_some_and(|base_index| {
                 !node_is_place_reference(arena, call.arguments[base_index].value)
             }) || call
                 .arguments
@@ -274,7 +274,7 @@ pub(crate) fn resolve_deferred_local_storage_shape(
     }
 }
 
-pub(crate) fn place_result_base_argument_index(
+pub(crate) fn addressor_place_base_argument_index(
     arena: &NodeArena,
     arguments: &[CallArgument],
 ) -> Option<usize> {
@@ -294,7 +294,7 @@ pub(crate) fn place_result_base_argument_index(
 }
 
 /// Whether `kind` is a hidden evidence argument (trait dictionary or field index) rather than a value argument.
-/// Evidence arguments are expected to form a contiguous prefix of a call's argument list; see [`place_result_base_argument_index`].
+/// Evidence arguments are expected to form a contiguous prefix of a call's argument list; see [`addressor_place_base_argument_index`].
 fn is_evidence_node(kind: &NodeKind) -> bool {
     matches!(
         kind,
@@ -665,6 +665,14 @@ pub struct WithYielded<P: HirPhase = Unelaborated> {
     pub body: NodeId<P>,
 }
 
+/// Bind a place once for the dynamic extent of `body`.
+#[derive(Debug, Clone, Copy)]
+pub struct WithPlace<P: HirPhase = Unelaborated> {
+    pub place: NodeId<P>,
+    pub binding: LocalDeclId,
+    pub body: NodeId<P>,
+}
+
 /// The kind-specific part of the expression-based execution tree
 #[derive(Debug, Clone, EnumAsInner)]
 pub enum NodeKind<P: HirPhase = Unelaborated> {
@@ -757,6 +765,8 @@ pub enum NodeKind<P: HirPhase = Unelaborated> {
     Yield(NodeId<P>),
     /// Drive a scoped yielded projection for the dynamic extent of `body`.
     WithYielded(WithYielded<P>),
+    /// Bind an already caller-rooted place once for the dynamic extent of `body`.
+    WithPlace(WithPlace<P>),
     /// Branch on a literal value with a default alternative.
     Case(B<Case<P>>),
     /// Loop forever until a return or break targeting this loop is reached.
@@ -820,6 +830,7 @@ impl NodeKind {
             StoreLocal(store) => smallvec![store.value],
             Return(node) | Yield(node) | ExtractTag(node) => smallvec![*node],
             WithYielded(node) => smallvec![node.accessor, node.body],
+            WithPlace(node) => smallvec![node.place, node.body],
             Loop(node) => smallvec![node.body],
             Break(node) => smallvec![node.value],
             Block(block) => block.body.iter().copied().collect(),
@@ -1283,6 +1294,16 @@ impl<P: HirPhase> Node<P> {
                 format_ind(arena, node.accessor, f, locals, env, spacing, indent + 1)?;
                 format_ind(arena, node.body, f, locals, env, spacing, indent + 1)?;
             }
+            WithPlace(node) => {
+                let local = &locals[node.binding.as_index()];
+                writeln!(
+                    f,
+                    "{indent_str}with place binding {} as \"{}\"",
+                    local.slot, local.name.0
+                )?;
+                format_ind(arena, node.place, f, locals, env, spacing, indent + 1)?;
+                format_ind(arena, node.body, f, locals, env, spacing, indent + 1)?;
+            }
             Block(block) => {
                 writeln!(f, "{indent_str}block {{")?;
                 for &node in block.body.iter() {
@@ -1523,6 +1544,14 @@ impl<P: HirPhase> Node<P> {
                     return Some(ty);
                 }
             }
+            WithPlace(node) => {
+                if let Some(ty) = type_at(arena, node.place, pos) {
+                    return Some(ty);
+                }
+                if let Some(ty) = type_at(arena, node.body, pos) {
+                    return Some(ty);
+                }
+            }
             Block(block) => {
                 for &child in block.body.iter() {
                     if let Some(ty) = type_at(arena, child, pos) {
@@ -1694,6 +1723,10 @@ impl Node {
             Yield(node) => unbound_ty_vars(arena, *node, result, ignore),
             WithYielded(node) => {
                 unbound_ty_vars(arena, node.accessor, result, ignore);
+                unbound_ty_vars(arena, node.body, result, ignore);
+            }
+            WithPlace(node) => {
+                unbound_ty_vars(arena, node.place, result, ignore);
                 unbound_ty_vars(arena, node.body, result, ignore);
             }
             Block(block) => block

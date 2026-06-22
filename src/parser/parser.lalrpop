@@ -846,7 +846,7 @@ AbstractExpr<NoStruct>: ExprKind = {
 }
 
 PipeExpr<NoStruct>: ExprKind = {
-    <l:Es<PipeExpr<NoStruct>>> "|>" <e:Es<SuffixExpr<"">>> "(" <a:Sep<Es<TopExpr<"">>, ",">> ")" => ExprKind::apply(e, ext_f(l, a), UnnamedArg::First),
+    <l:Es<PipeExpr<NoStruct>>> "|>" <e:Es<PipeCalleeExpr<"">>> "(" <a:Sep<Es<TopExpr<"">>, ",">> ")" => ExprKind::apply(e, ext_f(l, a), UnnamedArg::First),
     RangeExpr<NoStruct>,
 }
 
@@ -909,33 +909,74 @@ PlainPathType: Type = {
 }
 
 UnaryExpr<NoStruct> = {
-    NamedSubscriptExpr<NoStruct>,
     SuffixExpr<NoStruct>,
     <o:Sp<UnaryOp>> <e:Es<UnaryExpr<NoStruct>>> => syn_static_apply_path(o.0, o.1, vec![e], arena),
 }
 
 SuffixExpr<NoStruct>: ExprKind = {
-    AtomExpr<NoStruct>,
-    <e:Es<SuffixExpr<NoStruct>>> "." <f:Sp<FieldIdentifier>> => ExprKind::field_access(e, f),
-    <e:Es<SuffixExpr<NoStruct>>> "." <i:Sp<UIntValue>> =>? proj_or_float(e, i, arena),
-    <e:Es<SuffixExpr<NoStruct>>> "[" <i:Expr> "]" => ExprKind::index(e, i),
-    <e:Es<SuffixExpr<NoStruct>>> "(" <a:Sep<Es<TopExpr<"">>, ",">> ")" => ExprKind::apply(e, a, UnnamedArg::None),
+    <e:Es<AtomExpr<NoStruct>>> <tails:SuffixTailList> =>? fold_suffix_expr(e, tails, arena),
 }
 
-NamedSubscriptExpr<NoStruct>: ExprKind = {
-    <e:Es<SuffixExpr<NoStruct>>> <tail:NamedSubscriptTail> => {
-        let (name, args) = tail;
-        ExprKind::named_subscript(e, name, args)
+PipeCalleeExpr<NoStruct>: ExprKind = {
+    <e:Es<AtomExpr<NoStruct>>> <tails:PipeCalleeSuffixTail*> =>? fold_suffix_expr(e, tails, arena),
+}
+
+SuffixTailList: Vec<PExprSuffixTail> = {
+    => vec![],
+    <tail:NonNamedSuffixTail> <mut rest:SuffixTailList> => {
+        rest.insert(0, tail);
+        rest
     },
-    <e:Es<NamedSubscriptExpr<NoStruct>>> <tail:NamedSubscriptTail> => {
-        let (name, args) = tail;
-        ExprKind::named_subscript(e, name, args)
+    <tail:NamedSubscriptTail> <mut rest:SuffixTailListAfterNamedSubscript> => {
+        rest.insert(0, tail);
+        rest
     },
 }
 
-NamedSubscriptTail: (UstrSpan, Vec<PExprId>) = {
-    "->" "[" <name:Sp<UIdentifier>> "]" => (name, vec![]),
-    "->" "[" <name:Sp<UIdentifier>> "]" "(" <args:Sep1<Es<TopExpr<"">>, ",">> ")" => (name, args),
+SuffixTailListAfterNamedSubscript: Vec<PExprSuffixTail> = {
+    => vec![],
+    <tail:NonApplyNonNamedSuffixTail> <mut rest:SuffixTailList> => {
+        rest.insert(0, tail);
+        rest
+    },
+    <tail:NamedSubscriptTail> <mut rest:SuffixTailListAfterNamedSubscript> => {
+        rest.insert(0, tail);
+        rest
+    },
+}
+
+NonNamedSuffixTail: PExprSuffixTail = {
+    "." <f:Sp<FieldIdentifier>> => PExprSuffixTail::Field(f),
+    "." <i:Sp<UIntValue>> => PExprSuffixTail::TupleIndex(i),
+    <l:@L> "[" <i:Expr> "]" <r:@R> => PExprSuffixTail::Index(i, span(l, r, source_id)),
+    <l:@L> "(" <a:Sep<Es<TopExpr<"">>, ",">> ")" <r:@R> => PExprSuffixTail::Apply(a, span(l, r, source_id)),
+}
+
+NonApplyNonNamedSuffixTail: PExprSuffixTail = {
+    "." <f:Sp<FieldIdentifier>> => PExprSuffixTail::Field(f),
+    "." <i:Sp<UIntValue>> => PExprSuffixTail::TupleIndex(i),
+    <l:@L> "[" <i:Expr> "]" <r:@R> => PExprSuffixTail::Index(i, span(l, r, source_id)),
+}
+
+SuffixTail: PExprSuffixTail = {
+    NonNamedSuffixTail,
+    NamedSubscriptTail,
+}
+
+PipeCalleeSuffixTail: PExprSuffixTail = {
+    "." <f:Sp<FieldIdentifier>> => PExprSuffixTail::Field(f),
+    "." <i:Sp<UIntValue>> => PExprSuffixTail::TupleIndex(i),
+    <l:@L> "[" <i:Expr> "]" <r:@R> => PExprSuffixTail::Index(i, span(l, r, source_id)),
+}
+
+NamedSubscriptTail: PExprSuffixTail = {
+    <l:@L> "->" "[" <name:Sp<UIdentifier>> "]" <args:NamedSubscriptArgs?> <r:@R> => {
+        PExprSuffixTail::NamedSubscript(name, args.unwrap_or_default(), span(l, r, source_id))
+    },
+}
+
+NamedSubscriptArgs: Vec<PExprId> = {
+    "(" <args:Sep1<Es<TopExpr<"">>, ",">> ")" => args,
 }
 
 AtomExpr<NoStruct> = {

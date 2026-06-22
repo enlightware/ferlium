@@ -21,7 +21,9 @@ use ferlium::{
     format::FormatWith,
     hir::value::{LiteralValue, Value},
     hir::{ENodeArena, ENodeId, NodeKind},
-    module::{ConcreteTraitImplKey, Module, ShowModuleWithOptions, TraitDictionaryEntry},
+    module::{
+        ConcreteTraitImplKey, Module, ShowModuleWithOptions, TraitDictionaryEntry, YieldProvenance,
+    },
     std::{core_traits_names::VALUE_TRAIT_NAME, std_module},
     types::effects::{EffType, PrimitiveEffect, effect, effects, no_effects},
 };
@@ -454,7 +456,17 @@ fn array_index_return_preserves_place_tail() {
 
     let mut source_table = SourceTable::default();
     let module = std_module(&mut source_table);
-    let array_index = module.get_function(ustr("array_index")).unwrap();
+    let subscript = module
+        .get_subscript(ustr("array_index"))
+        .expect("std array_index subscript should exist");
+    let array_index_id = subscript
+        .ref_member
+        .as_ref()
+        .expect("array_index should have a ref member")
+        .function;
+    let array_index = module
+        .get_function_by_id(array_index_id)
+        .expect("std array_index subscript member should be valid");
     assert!(array_index.definition.ty_scheme.ty.returns_place());
     let entry = array_index.get_code_entry().unwrap();
     let return_value = find_return_value(&module.hir_arena, entry).unwrap();
@@ -464,6 +476,48 @@ fn array_index_return_preserves_place_tail() {
         !matches!(module.hir_arena[tail].kind, NodeKind::CloneValue(_)),
         "array_index place return should not materialize its place tail with CloneValue"
     );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn array_index_is_registered_as_source_addressor_subscript() {
+    let mut source_table = SourceTable::default();
+    let module = std_module(&mut source_table);
+    let subscript = module
+        .get_subscript(ustr("array_index"))
+        .expect("array_index source subscript should be registered");
+
+    let ref_member = subscript.ref_member.as_ref().unwrap();
+    let mut_member = subscript.mut_member.as_ref().unwrap();
+    assert_eq!(ref_member.function, mut_member.function);
+    let array_index_id = ref_member.function;
+    let array_index = module
+        .get_function_by_id(array_index_id)
+        .expect("std array_index subscript member function id should be valid");
+    assert_eq!(
+        module.get_function_name_by_id(array_index_id),
+        Some(ustr("array_index"))
+    );
+    assert_eq!(
+        subscript.signature.args,
+        array_index.definition.ty_scheme.ty.args
+    );
+    assert_eq!(
+        subscript.signature.ret,
+        array_index.definition.ty_scheme.ty.ret
+    );
+    assert_eq!(
+        subscript.signature.arg_names,
+        array_index.definition.arg_names
+    );
+    assert_eq!(
+        subscript.signature.generic_params,
+        array_index.definition.generic_params
+    );
+    assert_eq!(ref_member.function, array_index_id);
+    assert_eq!(mut_member.function, array_index_id);
+    assert_eq!(ref_member.provenance, YieldProvenance::AddressorPlace);
+    assert_eq!(mut_member.provenance, YieldProvenance::AddressorPlace);
 }
 
 #[test]

@@ -310,6 +310,68 @@ pub(crate) fn proj_or_float<L, T>(
     Ok(ExprKind::project(lhs, rhs))
 }
 
+pub(crate) enum PExprSuffixTail {
+    Field(UstrSpan),
+    TupleIndex((usize, Location)),
+    Index(PExprId, Location),
+    Apply(Vec<PExprId>, Location),
+    NamedSubscript(UstrSpan, Vec<PExprId>, Location),
+}
+
+impl PExprSuffixTail {
+    fn span(&self) -> Location {
+        match self {
+            Self::Field((_, span)) | Self::TupleIndex((_, span)) => *span,
+            Self::Index(_, span) | Self::Apply(_, span) | Self::NamedSubscript(_, _, span) => *span,
+        }
+    }
+}
+
+pub(crate) fn fold_suffix_expr<L, T>(
+    base: PExprId,
+    tails: Vec<PExprSuffixTail>,
+    arena: &mut PExprArena,
+) -> Result<PExprKind, ParseError<L, T, LocatedError>> {
+    let Some((last, prefix)) = tails.split_last() else {
+        return Ok(arena[base].kind.clone());
+    };
+
+    let mut current = base;
+    for tail in prefix {
+        current = alloc_suffix_tail(current, tail, arena)?;
+    }
+    suffix_tail_kind(current, last, arena)
+}
+
+fn alloc_suffix_tail<L, T>(
+    receiver: PExprId,
+    tail: &PExprSuffixTail,
+    arena: &mut PExprArena,
+) -> Result<PExprId, ParseError<L, T, LocatedError>> {
+    let span = Location::fuse([arena[receiver].span, tail.span()])
+        .expect("suffix tail should have a source span");
+    let kind = suffix_tail_kind(receiver, tail, arena)?;
+    Ok(arena.alloc(PExpr::new(kind, span)))
+}
+
+fn suffix_tail_kind<L, T>(
+    receiver: PExprId,
+    tail: &PExprSuffixTail,
+    arena: &mut PExprArena,
+) -> Result<PExprKind, ParseError<L, T, LocatedError>> {
+    match tail {
+        PExprSuffixTail::Field(field) => Ok(ExprKind::field_access(receiver, *field)),
+        PExprSuffixTail::TupleIndex(index) => proj_or_float(receiver, *index, arena),
+        PExprSuffixTail::Index(index, _) => Ok(ExprKind::index(receiver, *index)),
+        PExprSuffixTail::Apply(args, _) => {
+            Ok(ExprKind::apply(receiver, args.clone(), UnnamedArg::None))
+        }
+        PExprSuffixTail::NamedSubscript(name, args, _) => {
+            Ok(ExprKind::named_subscript(receiver, *name, args.clone()))
+        }
+    }
+}
+
 pub(crate) fn syn_static_apply<P: Phase>(
     identifier: UstrSpan,
     args: Vec<ExprId<P>>,

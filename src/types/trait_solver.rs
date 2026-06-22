@@ -3021,6 +3021,57 @@ impl<'a> TraitSolver<'a> {
         self.get_function(use_site, module_path, function_name)
     }
 
+    /// Get a specific subscript member from a given module.
+    /// If necessary, the import slots are updated.
+    pub fn get_subscript_member(
+        &mut self,
+        use_site: Location,
+        module_path: &module::Path,
+        subscript_name: Ustr,
+        mut_member: bool,
+    ) -> Result<FunctionId, InternalCompilationError> {
+        let module_not_found_error = || {
+            internal_compilation_error!(Internal {
+                error: format!(
+                    "Module {module_path} not found when looking for subscript {subscript_name}"
+                ),
+                span: use_site
+            })
+        };
+        let (module_id, entry) = self
+            .others
+            .get_by_name(module_path)
+            .ok_or_else(module_not_found_error)?;
+        let module = entry.module().ok_or_else(module_not_found_error)?;
+        let subscript = module.get_subscript(subscript_name).ok_or_else(|| {
+            internal_compilation_error!(Internal {
+                error: format!("Subscript {subscript_name} not found in module {module_path}"),
+                span: use_site
+            })
+        })?;
+        let member = if mut_member {
+            subscript.mut_member.as_ref()
+        } else {
+            subscript.ref_member.as_ref()
+        };
+        if member.is_none() {
+            let member_name = if mut_member { "mut" } else { "ref" };
+            return Err(internal_compilation_error!(Internal {
+                error: format!(
+                    "Subscript {subscript_name} in module {module_path} has no {member_name} member"
+                ),
+                span: use_site
+            }));
+        }
+        Ok(FunctionId::Import(self.import_function_target(
+            module_id,
+            ImportFunctionTarget::SubscriptMember {
+                name: subscript_name,
+                mut_member,
+            },
+        )))
+    }
+
     /// Import a function from another module, possibly updating the import slots.
     /// The function is assumed to exist.
     fn import_function(
@@ -3028,17 +3079,26 @@ impl<'a> TraitSolver<'a> {
         module_id: ModuleId,
         function_name: Ustr,
     ) -> ImportFunctionSlotId {
+        self.import_function_target(
+            module_id,
+            ImportFunctionTarget::NamedFunction(function_name),
+        )
+    }
+
+    fn import_function_target(
+        &mut self,
+        module_id: ModuleId,
+        target: ImportFunctionTarget,
+    ) -> ImportFunctionSlotId {
         self.import_fn_slots
             .iter()
-            .position(|slot| slot.module == module_id &&
-                matches!(&slot.target, ImportFunctionTarget::NamedFunction(name) if *name == function_name)
-            )
+            .position(|slot| slot.module == module_id && slot.target == target)
             .map(ImportFunctionSlotId::from_index)
             .unwrap_or_else(|| {
                 let index = self.import_fn_slots.len();
                 self.import_fn_slots.push(ImportFunctionSlot {
                     module: module_id,
-                    target: ImportFunctionTarget::NamedFunction(function_name),
+                    target,
                 });
                 ImportFunctionSlotId::from_index(index)
             })

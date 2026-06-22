@@ -94,6 +94,11 @@ impl FormatWith<ModuleEnv<'_>> for FunctionId {
                         name
                     }
                     ImportFunctionTarget::NamedFunction(name) => *name,
+                    ImportFunctionTarget::SubscriptMember { name, mut_member } => {
+                        let member = if *mut_member { "mut" } else { "ref" };
+                        write!(f, "{name}::{member} (slot #{id})")?;
+                        return Ok(());
+                    }
                 };
                 write!(f, "{function_name} (slot #{id})")
             }
@@ -102,10 +107,12 @@ impl FormatWith<ModuleEnv<'_>> for FunctionId {
 }
 
 /// Target of a function import slot
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImportFunctionTarget {
     /// Name of the function in the target module
     NamedFunction(Ustr),
+    /// Member function of a named subscript in the target module.
+    SubscriptMember { name: Ustr, mut_member: bool },
     /// Trait method to import
     TraitImplMethod {
         /// The concrete trait implementation key
@@ -619,7 +626,7 @@ impl PendingModuleFunction {
             if self.code.arena[root].ty != Type::never() {
                 return Err(internal_compilation_error!(Unsupported {
                     span: self.code.arena[root].span,
-                    reason: "place_result functions must return explicitly".into(),
+                    reason: "addressor-place functions must return explicitly".into(),
                 }));
             }
             let visible_arg_count = self.definition.arg_names.len();

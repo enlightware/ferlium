@@ -48,16 +48,16 @@ impl Path {
                 path
             }
             StaticApply(app) if app.ty.returns_place() => {
-                Self::from_place_result_arguments(arena, &app.arguments)
+                Self::from_addressor_place_arguments(arena, &app.arguments)
             }
             Apply(app) if app.ty.returns_place() => {
-                Self::from_place_result_arguments(arena, &app.arguments)
+                Self::from_addressor_place_arguments(arena, &app.arguments)
             }
             TraitMethodApply(app) if app.ty.returns_place() => {
-                Self::from_place_result_arguments(arena, &app.arguments)
+                Self::from_addressor_place_arguments(arena, &app.arguments)
             }
             CallDictionaryMethod(call) if call.ty.returns_place() => {
-                Self::from_place_result_arguments(arena, &call.arguments)
+                Self::from_addressor_place_arguments(arena, &call.arguments)
             }
             Block(block) => {
                 let tail = block
@@ -73,11 +73,11 @@ impl Path {
         }
     }
 
-    fn from_place_result_arguments(arena: &NodeArena, arguments: &[CallArgument]) -> Self {
+    fn from_addressor_place_arguments(arena: &NodeArena, arguments: &[CallArgument]) -> Self {
         let base_index = arguments
             .iter()
             .position(|argument| !is_evidence_node(&arena[argument.value].kind))
-            .expect("place_result application should have a base argument");
+            .expect("addressor-place application should have a base argument");
         let mut path = Self::from_node(arena, arguments[base_index].value);
         if let Some(index) = arguments.get(base_index + 1) {
             path.parts.push(Self::index_part(arena, index.value));
@@ -283,7 +283,7 @@ fn check_place_return_root(
     }
 }
 
-// Very conservative first addressor rule: a Ferlium place-result function can
+// Very conservative first addressor rule: a Ferlium addressor-place function can
 // only return a place produced by another addressor call, and that call must be
 // rooted in this function's base/receiver parameter: the first visible
 // source-level parameter, after hidden closure captures if any. This is
@@ -420,6 +420,10 @@ impl Node {
             }
             WithYielded(node) => {
                 check_borrows(arena, node.accessor)?;
+                check_borrows(arena, node.body)?;
+            }
+            WithPlace(node) => {
+                check_borrows(arena, node.place)?;
                 check_borrows(arena, node.body)?;
             }
             Block(block) => {

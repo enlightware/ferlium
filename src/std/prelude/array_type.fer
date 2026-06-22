@@ -45,12 +45,12 @@ fn array_physical_index_unchecked<A>(array: [A], index: int) -> int {
 	array_wrap_index(array.capacity, array.start + resolved)
 }
 
-#[place_result]
-fn array_index<A>(array: [A], index: int) -> A
-{
-	let len = array_len(array);
-	let resolved = array_resolve_index(index, len);
-	return effects_unsafe { buffer_slot(array.data, array_wrap_index(array.capacity, array.start + resolved)) };
+subscript array_index<A>(array: [A], index: int) -> A {
+	ref mut {
+		let len = array_len(array);
+		let resolved = array_resolve_index(index, len);
+		return effects_unsafe { buffer_slot(array.data, array_wrap_index(array.capacity, array.start + resolved)) };
+	}
 }
 
 fn array_with_capacity<A>(capacity: int) -> [A] {

@@ -152,11 +152,12 @@ pub(super) fn attach_subscript_member(
     subscript_id: LocalSubscriptId,
     function: LocalFunctionId,
     is_mut_member: bool,
+    provenance: YieldProvenance,
     span: Location,
 ) -> Result<(), InternalCompilationError> {
     let member = ModuleSubscriptMember {
         function,
-        provenance: YieldProvenance::YieldedOnce,
+        provenance,
     };
     let subscript = output
         .subscripts

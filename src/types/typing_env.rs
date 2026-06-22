@@ -19,8 +19,8 @@ use crate::{
     hir::{LoopId, NodeArena, NodeId},
     module::{
         FunctionId, ImportFunctionSlot, ImportFunctionSlotId, ImportFunctionTarget, LocalDecl,
-        LocalDeclId, LocalFunctionId, ModuleEnv, ModuleId, TraitId, TypeDefLookupResult,
-        UModuleFunction, id::Id,
+        LocalDeclId, LocalFunctionId, ModuleEnv, ModuleId, SubscriptDefinition, SubscriptMember,
+        TraitId, TypeDefLookupResult, UModuleFunction, id::Id,
     },
     std::{STD_MODULE_ID, array::array_type as std_array_type},
     types::r#trait::TraitMethodIndex,
@@ -43,6 +43,12 @@ pub type GetFunctionData<'a> = (
     Option<Vec<ResolvedArgPassing>>,
 );
 pub type GetFunctionWithPathData<'a> = (ast::Path, GetFunctionData<'a>);
+pub type GetSubscriptMemberData<'a> = (
+    &'a SubscriptDefinition,
+    &'a SubscriptMember,
+    GetFunctionData<'a>,
+);
+pub type GetSubscriptMemberWithPathData<'a> = (ast::Path, GetSubscriptMemberData<'a>);
 
 #[derive(Debug, new)]
 pub struct LoopFrame {
@@ -73,6 +79,48 @@ impl YieldTypingContext {
             requires_mutable_place,
             yielded_nodes: Vec::new(),
         }
+    }
+}
+
+fn select_subscript_member(
+    subscript: &SubscriptDefinition,
+    subscript_name: Ustr,
+    mut_member: bool,
+) -> &SubscriptMember {
+    if mut_member {
+        subscript.mut_member.as_ref()
+    } else {
+        subscript.ref_member.as_ref()
+    }
+    .unwrap_or_else(|| panic!("std subscript {subscript_name} member should be available"))
+}
+
+fn import_targets_equal(left: &ImportFunctionTarget, right: &ImportFunctionTarget) -> bool {
+    match (left, right) {
+        (ImportFunctionTarget::NamedFunction(left), ImportFunctionTarget::NamedFunction(right)) => {
+            left == right
+        }
+        (
+            ImportFunctionTarget::SubscriptMember {
+                name: left_name,
+                mut_member: left_mut_member,
+            },
+            ImportFunctionTarget::SubscriptMember {
+                name: right_name,
+                mut_member: right_mut_member,
+            },
+        ) => left_name == right_name && left_mut_member == right_mut_member,
+        (
+            ImportFunctionTarget::TraitImplMethod {
+                key: left_key,
+                index: left_index,
+            },
+            ImportFunctionTarget::TraitImplMethod {
+                key: right_key,
+                index: right_index,
+            },
+        ) => left_key == right_key && left_index == right_index,
+        _ => false,
     }
 }
 
@@ -164,16 +212,30 @@ impl<'m> TypingEnv<'m> {
         module_id: ModuleId,
         function_name: Ustr,
     ) -> ImportFunctionSlotId {
-        self.module_env.current.iter_import_fn_slots()
-            .position(|slot| slot.module == module_id &&
-                matches!(slot.target, ImportFunctionTarget::NamedFunction(name) if name == function_name)
-            )
+        self.import_function_target(
+            module_id,
+            ImportFunctionTarget::NamedFunction(function_name),
+        )
+    }
+
+    fn import_function_target(
+        &mut self,
+        module_id: ModuleId,
+        target: ImportFunctionTarget,
+    ) -> ImportFunctionSlotId {
+        self.module_env
+            .current
+            .iter_import_fn_slots()
+            .position(|slot| {
+                slot.module == module_id && import_targets_equal(&slot.target, &target)
+            })
             .map(|index| ImportFunctionSlotId(index as u32))
             .unwrap_or_else(|| {
-                let slot_index = (self.module_env.current.import_fn_slot_count() + self.new_import_slots.len()) as u32;
+                let slot_index = (self.module_env.current.import_fn_slot_count()
+                    + self.new_import_slots.len()) as u32;
                 self.new_import_slots.push(ImportFunctionSlot {
                     module: module_id,
-                    target: ImportFunctionTarget::NamedFunction(function_name),
+                    target,
                 });
                 ImportFunctionSlotId(slot_index)
             })
@@ -277,6 +339,69 @@ impl<'m> TypingEnv<'m> {
             )
         };
         Ok((path, function))
+    }
+
+    pub fn get_std_subscript_member(
+        &mut self,
+        subscript_name: Ustr,
+        mut_member: bool,
+        span: Location,
+    ) -> Result<GetSubscriptMemberWithPathData<'_>, InternalCompilationError> {
+        let path = ast::Path::new(vec![(ustr("std"), span), (subscript_name, span)]);
+        let member = if self.current_module_id() == STD_MODULE_ID
+            && let Some(subscript) = self.module_env.current.get_subscript(subscript_name)
+        {
+            let member = select_subscript_member(subscript, subscript_name, mut_member);
+            let function = self
+                .module_env
+                .current
+                .get_function_by_id(member.function)
+                .expect("std subscript function id should be valid");
+            (
+                subscript,
+                member,
+                (
+                    &function.definition,
+                    FunctionId::Local(member.function),
+                    None,
+                    function.code.runtime_argument_passing().map(<[_]>::to_vec),
+                ),
+            )
+        } else {
+            let source_module = self
+                .module_env
+                .modules
+                .get(STD_MODULE_ID)
+                .unwrap()
+                .module
+                .as_ref()
+                .unwrap();
+            let subscript = source_module
+                .get_subscript(subscript_name)
+                .unwrap_or_else(|| panic!("std subscript {subscript_name} should be available"));
+            let member = select_subscript_member(subscript, subscript_name, mut_member);
+            let id = self.import_function_target(
+                STD_MODULE_ID,
+                ImportFunctionTarget::SubscriptMember {
+                    name: subscript_name,
+                    mut_member,
+                },
+            );
+            let function = source_module
+                .get_function_by_id(member.function)
+                .expect("std subscript function id should be valid");
+            (
+                subscript,
+                member,
+                (
+                    &function.definition,
+                    FunctionId::Import(id),
+                    Some(STD_MODULE_ID),
+                    function.code.runtime_argument_passing().map(<[_]>::to_vec),
+                ),
+            )
+        };
+        Ok((path, member))
     }
 
     pub fn get_type_def(

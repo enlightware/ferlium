@@ -91,7 +91,7 @@ pub struct SubscriptMember {
     pub provenance: YieldProvenance,
 }
 
-/// Shared, effect-free source signature for a named subscript bundle.
+/// Shared, effect-free signature for a subscript bundle.
 #[derive(Debug, Clone)]
 pub struct SubscriptSignature {
     pub args: Vec<FnArgType>,
@@ -107,7 +107,8 @@ pub struct SubscriptSignature {
 ///
 /// This is intentionally not a `FunctionDefinition`: ref and mut members are
 /// separate implementations with independent effects. The future first-class
-/// projection capability is `SubscriptType`; see `doc/subscripts-design.md`.
+/// projection capability is expected to be represented by a distinct
+/// `SubscriptType`.
 #[derive(Debug, Clone)]
 pub struct SubscriptDefinition {
     pub signature: SubscriptSignature,
@@ -530,7 +531,8 @@ impl Module {
 
     /// Get a local function name by ID (slow, iterates over the def table)
     pub fn get_function_name_by_id(&self, id: LocalFunctionId) -> Option<Ustr> {
-        self.def_table
+        if let Some(name) = self
+            .def_table
             .iter()
             .find(|(def, _)| {
                 def.kind
@@ -538,6 +540,22 @@ impl Module {
                     .is_some_and(|function_id| *function_id == id)
             })
             .and_then(|(_, name)| *name)
+        {
+            return Some(name);
+        }
+
+        self.def_table.iter().find_map(|(def, name)| {
+            let subscript = self.get_subscript_by_id(*def.kind.as_subscript()?)?;
+            let member_matches = subscript
+                .ref_member
+                .as_ref()
+                .is_some_and(|member| member.function == id)
+                || subscript
+                    .mut_member
+                    .as_ref()
+                    .is_some_and(|member| member.function == id);
+            member_matches.then_some(*name).flatten()
+        })
     }
 
     /// Get a local function by ID
