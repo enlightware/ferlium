@@ -38,7 +38,7 @@ fn print_param_hir(label: &str, src: &str) {
 #[test]
 fn simple_functions() {
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa("fn t(x:int) {x}"),
         r#"fn t(%p0: @arg int, %p1: @ret int):
   0:
@@ -53,7 +53,7 @@ fn simple_functions() {
 fn call_functions() {
     let mut session = TestSession::new();
 
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa("fn a0(x: int) { x + 1 }"),
         r#"fn a0(%p0: @arg int, %p1: @ret int):
   0:
@@ -66,7 +66,7 @@ fn call_functions() {
 "#
     );
 
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa("fn a0(x: int) { let y: int = 2 * x; y }"),
         r#"fn a0(%p0: @arg int, %p1: @ret int):
   0:
@@ -87,7 +87,7 @@ fn call_functions() {
 fn match_case_functions() {
     let mut session = TestSession::new();
 
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa("fn a0(x:int) {if true {x} else {2}}"),
         r#"fn a0(%p0: @arg int, %p1: @ret int):
   0:
@@ -109,7 +109,7 @@ fn match_case_functions() {
 "#
     );
 
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa("fn a0(x:int) {match x { 0 => x, 1 => x - 1, _ => -1 }}"),
         r#"fn a0(%p0: @arg int, %p1: @ret int):
   0:
@@ -151,7 +151,7 @@ fn match_case_functions() {
 //
 //     print_param_hir("generic", "fn a0(x) { x < 2 }");
 //
-//     assert_eq!(
+//     assert_eq_sans_flake!(
 //         sessions.emit_ssa("fn a0(x) { x < 2 }"),
 //         r#"u!("a0")
 // fn a0(%p0: @extra ((A, A) -> Ordering,), %p1: @extra ((A, A) -> A, (A, A) -> A, (A, A) -> A, (A) -> A, (A) -> A, (A) -> A, (int) -> A), %p2: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A, &mut A) -> (), (&mut A) -> (), int, int), %p3: @arg A):
@@ -168,7 +168,7 @@ fn match_case_functions() {
 fn user_function_call() {
     let mut sessions = TestSession::new();
 
-    assert_eq!(
+    assert_eq_sans_flake!(
         sessions.emit_ssa("fn a0(x: int) {a0(x)}"),
         r#"fn a0(%p0: @arg int, %p1: @ret never):
   0:
@@ -262,7 +262,7 @@ fn use_mutable_arg() {
 fn factorial() {
     let mut sessions = TestSession::new();
 
-    assert_eq!(
+    assert_eq_sans_flake!(
         sessions.emit_ssa("fn factorial(x: int) {if x > 1 {x * factorial(x - 1)} else {1}}"),
         r#"fn factorial(%p0: @arg int, %p1: @ret int):
   0:
@@ -335,7 +335,7 @@ fn place_call_into_alias_local_branch() {
     // materialized temporary: each branch copies its element value into the temporary, and the
     // alias reads through it.
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa("fn f(a: [int]) -> int { let x = if true { a[6] } else { a[4] }; x }"),
         r#"fn f(%p0: @arg & [int], %p1: @ret int):
   0:
@@ -563,7 +563,7 @@ fn hir_iter1_mutable_ref_bool() {
 fn iter1_multi_param_value() {
     // Two by-value (TrivialCopy) params, both read -> bare %p0/%p1, no allocas.
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa("fn f(x: int, y: int) { x + y }"),
         r#"fn f(%p0: @arg int, %p1: @arg int, %p2: @ret int):
   0:
@@ -579,7 +579,7 @@ fn iter1_mut_local_copy() {
     // (%p0). The copy gets an `alloca`; the param itself stays `%p0`.
     // Caller is NOT affected (value semantics).
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa("fn add_one(mut x: int) -> int { x = x + 1; x }"),
         r#"fn add_one(%p0: @arg int, %p1: @ret int):
   0:
@@ -604,7 +604,7 @@ fn iter1_let_mut_move_return() {
     // of the by-value param; tail `y` is a `TakeLocalValue(MoveOwned)` -> load + no
     // drop (drop is Skip for int anyway).
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa("fn f(x: int) { let mut y = x; y = y + 1; y }"),
         r#"fn f(%p0: @arg int, %p1: @ret int):
   0:
@@ -626,7 +626,7 @@ fn iter1_let_mut_move_return() {
 #[test]
 fn array_index_read() {
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa("fn r(a: [bool]) -> int { if a[0] { 1 } else { 2 } }"),
         r#"fn r(%p0: @arg & [bool], %p1: @ret int):
   0:
@@ -659,7 +659,7 @@ fn array_index_read() {
 #[test]
 fn array_index_assign() {
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa("fn s(a: &mut [bool]) { a[1] = true; }"),
         r#"fn s(%p0: @arg &mut [bool], %p1: @ret ()):
   0:
@@ -680,7 +680,7 @@ fn place_call_returned_as_value() {
     // the value destination (here the return out-pointer) must NOT be passed as the place
     // out-slot of the call.
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa("fn first(a: [int]) -> int { a[0] }"),
         r#"fn first(%p0: @arg & [int], %p1: @ret int):
   0:
@@ -701,7 +701,7 @@ fn place_call_into_owned_local() {
     // A place-returning call initializing an owned (`let mut`) local copies the element value
     // into the local's alloca; the local must hold the value, not the element address.
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa("fn f(a: [int]) -> int { let mut x = a[0]; x = x + 1; x }"),
         r#"fn f(%p0: @arg & [int], %p1: @ret int):
   0:
@@ -730,7 +730,7 @@ fn place_call_discarded() {
     // A discarded place-returning call still lowers (for its effects),
     // writing the place into a throwaway `alloca_place`.
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa("fn f(a: [int]) { a[0]; }"),
         r#"fn f(%p0: @arg & [int], %p1: @ret ()):
   0:
@@ -749,7 +749,7 @@ fn nested_place_call() {
     // A place-returning call whose base is itself a place-returning call chains the loaded
     // place pointers.
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa("fn f(a: [[int]]) -> int { a[0][1] }"),
         r#"fn f(%p0: @arg & [[int]], %p1: @ret int):
   0:
@@ -775,7 +775,7 @@ fn place_call_as_shared_ref_argument() {
     // A place-returning call passed as a shared-reference argument forwards the loaded place
     // pointer directly, with no copy.
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa("fn g(s: [int]) { } fn f(a: [[int]]) { g(a[0]) }"),
         r#"fn f(%p0: @arg & [[int]], %p1: @ret ()):
   0:
@@ -799,7 +799,7 @@ fn place_call_as_mutable_ref_argument() {
     // A place-returning call passed as a mutable-reference argument forwards the loaded place
     // pointer directly, with no copy.
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa("fn g(s: &mut [int]) { } fn f(a: &mut [[int]]) { g(a[0]) }"),
         r#"fn f(%p0: @arg &mut [[int]], %p1: @ret ()):
   0:
@@ -822,7 +822,7 @@ fn g(%p0: @arg &mut [int], %p1: @ret ()):
 fn projection_of_place_call() {
     // A projection rooted in a place-returning call projects out of the loaded place pointer.
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa("fn f(a: [(int, bool)]) -> bool { a[0].1 }"),
         r#"fn f(%p0: @arg & [(int, bool)], %p1: @ret bool):
   0:
@@ -843,7 +843,7 @@ fn projection_of_place_call() {
 fn place_call_value_in_branches() {
     // Each branch resolves its own place and copies the value into the shared destination.
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa("fn f(a: [int], c: bool) -> int { if c { a[0] } else { a[1] } }"),
         r#"fn f(%p0: @arg & [int], %p1: @arg bool, %p2: @ret int):
   0:
@@ -881,7 +881,7 @@ fn place_call_into_alias_local() {
     // `let x = a[0]` makes `x` a `NonOwning` alias local: the local is rebound to the place
     // denoted by its initializer, with no store; the read goes through the alias.
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa("fn f(a: [int]) -> int { let x = a[0]; x }"),
         r#"fn f(%p0: @arg & [int], %p1: @ret int):
   0:
@@ -900,7 +900,7 @@ fn place_call_into_alias_local() {
 #[test]
 fn iter1_apply() {
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa("fn f(x: int) { f(x) }"),
         r#"fn f(%p0: @arg int, %p1: @ret never):
   0:
@@ -914,7 +914,7 @@ fn shared_ref_param_non_trivial() {
     // A concrete non-`TrivialCopy` param (`string`) is conveyed by shared reference: the parameter
     // is a place (`@arg &`), not a by-value register.
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa("fn f(s: string) { }"),
         r#"fn f(%p0: @arg & string, %p1: @ret ()):
   0:
@@ -928,7 +928,7 @@ fn shared_ref_param_generic() {
     // A generic param is conveyed by shared reference regardless of any later concrete
     // instantiation, giving the function one stable parameter convention.
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa("fn f(x) { }"),
         r#"fn f(%p0: @arg & A, %p1: @ret ()):
   0:
@@ -942,16 +942,16 @@ fn shared_ref_argument_passes_place() {
     // Passing a shared-reference argument that already denotes a place forwards the incoming
     // pointer directly, with no copy and no materialized temporary.
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa("fn u(s: string) { } fn caller(s: string) { u(s) }"),
-        r#"fn u(%p0: @arg & string, %p1: @ret ()):
-  0:
-    %r0 = ret
-
-fn caller(%p0: @arg & string, %p1: @ret ()):
+        r#"fn caller(%p0: @arg & string, %p1: @ret ()):
   0:
     %r0 = call <test>::u(%p0, %p1)
     %r1 = ret
+
+fn u(%p0: @arg & string, %p1: @ret ()):
+  0:
+    %r0 = ret
 "#,
     );
 }
@@ -961,7 +961,7 @@ fn call_trivial_copy_argument_passes_value_recursive() {
     // A `TrivialCopy` argument is passed by value.
     // The extra store and load are caused by the owned local emission.
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa(
             r#"
             fn f(a: int) {
@@ -985,7 +985,7 @@ fn call_trivial_copy_argument_passes_value_recursive() {
 #[test]
 fn return_value_is_trivially_passed() {
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa("fn f(a: int) { f(a) }"),
         r#"fn f(%p0: @arg int, %p1: @ret never):
   0:
@@ -1000,7 +1000,7 @@ fn call_trivial_copy_argument_passes_value() {
     // A `TrivialCopy` argument is conveyed by value: the by-value parameter register is forwarded
     // directly to the call.
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa("fn f(a: int) { f(a) }"),
         r#"fn f(%p0: @arg int, %p1: @ret never):
   0:
@@ -1015,7 +1015,7 @@ fn call_mutable_reference_argument_passes_owned_local_place() {
     // A `&mut` argument backed by an owned local forwards the local's `alloca` place so the callee
     // mutates the caller's storage.
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa(
             r#"
         fn callee(m: &mut int) { }
@@ -1025,7 +1025,11 @@ fn call_mutable_reference_argument_passes_owned_local_place() {
         }
         "#
         ),
-        r#"fn caller(%p0: @ret ()):
+        r#"fn callee(%p0: @arg &mut int, %p1: @ret ()):
+  0:
+    %r0 = ret
+
+fn caller(%p0: @ret ()):
   0:
     %r0 = alloca int
     %r1 = alloca int
@@ -1033,10 +1037,6 @@ fn call_mutable_reference_argument_passes_owned_local_place() {
     %r3 = call std::Num<0-6>::from_int(%r1, %r0)
     %r4 = call <test>::callee(%r0, %p0)
     %r5 = ret
-
-fn callee(%p0: @arg &mut int, %p1: @ret ()):
-  0:
-    %r0 = ret
 "#,
     );
 }
@@ -1048,7 +1048,7 @@ fn call_passes_all_argument_conventions() {
     //   `m: &mut int`  (`MutableRef`)  -> the owned local's `alloca` place;
     //   `s: string`    (`SharedRef`)   -> the incoming shared-reference pointer, forwarded directly.
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa(
             r#"
             fn callee(a: int, m: &mut int, s: string) { }
@@ -1058,7 +1058,11 @@ fn call_passes_all_argument_conventions() {
             }
             "#,
         ),
-        r#"fn caller(%p0: @arg & string, %p1: @ret ()):
+        r#"fn callee(%p0: @arg int, %p1: @arg &mut int, %p2: @arg & string, %p3: @ret ()):
+  0:
+    %r0 = ret
+
+fn caller(%p0: @arg & string, %p1: @ret ()):
   0:
     %r0 = alloca int
     %r1 = alloca int
@@ -1070,10 +1074,6 @@ fn call_passes_all_argument_conventions() {
     %r7 = call std::Num<0-6>::from_int(%r4, %r6)
     %r8 = call <test>::callee(%r6, %r0, %p0, %p1)
     %r9 = ret
-
-fn callee(%p0: @arg int, %p1: @arg &mut int, %p2: @arg & string, %p3: @ret ()):
-  0:
-    %r0 = ret
 "#,
     );
 }
@@ -1081,7 +1081,7 @@ fn callee(%p0: @arg int, %p1: @arg &mut int, %p2: @arg & string, %p3: @ret ()):
 #[test]
 fn mutable_reference_parameter() {
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa("fn f(x: &mut int) { x = 2; }"),
         r#"fn f(%p0: @arg &mut int, %p1: @ret ()):
   0:
@@ -1096,7 +1096,7 @@ fn mutable_reference_parameter() {
 #[test]
 fn generic_apply() {
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa("fn f(x) { x * 2 }"),
         r#"fn f(%p0: @extra ((A, A) -> A, (A, A) -> A, (A, A) -> A, (A) -> A, (A) -> A, (A) -> A, (int) -> A), %p1: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A, &mut Uninit<A>) -> (), (&mut A) -> (), int, int), %p2: @arg & A, %p3: @ret A):
   0:
@@ -1117,8 +1117,7 @@ fn generic_apply() {
 #[test]
 fn dynamic_apply() {
     let mut session = TestSession::new();
-    // todo store return value indirectly
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa("fn apply_fn(f, x: int) { f(x) }"),
         r#"fn apply_fn(%p0: @arg & (int) -> A ! e₀, %p1: @arg int, %p2: @ret A):
   0:
@@ -1138,7 +1137,7 @@ fn generic_two_same_type_params() {
     // Two parameters of the same generic type share the same Num dictionary; the call forwards
     // both shared-ref args and the result pointer directly without an intermediate alloca.
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa("fn f(x, y) { x + y }"),
         r#"fn f(%p0: @extra ((A, A) -> A, (A, A) -> A, (A, A) -> A, (A) -> A, (A) -> A, (A) -> A, (int) -> A), %p1: @arg & A, %p2: @arg & A, %p3: @ret A):
   0:
@@ -1156,7 +1155,7 @@ fn generic_higher_order_function_param() {
     // value whose generic variable appears only under the function type (function-surface).  The
     // call directly threads the incoming pointers with no intermediate alloca.
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa("fn apply(f: (A) -> A, x) { f(x) }"),
         r#"fn apply(%p0: @arg & (A) -> A ! e₀, %p1: @arg & A, %p2: @ret A):
   0:
@@ -1173,7 +1172,7 @@ fn generic_multiple_ops_reuse_witness() {
     // `alloca A using %p1`, confirming that the single Value dictionary witness (%p1) is reused
     // for every dynamic allocation of type A within the function.
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa("fn f(x) { x * x + x }"),
         r#"fn f(%p0: @extra ((A, A) -> A, (A, A) -> A, (A, A) -> A, (A) -> A, (A) -> A, (A) -> A, (int) -> A), %p1: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A, &mut Uninit<A>) -> (), (&mut A) -> (), int, int), %p2: @arg & A, %p3: @ret A):
   0:
@@ -1194,7 +1193,7 @@ fn generic_comparison() {
     // Comparing two generic values calls `Value::eq` projected from the Value dictionary (%p0).
     // The result is a concrete `bool`, so the return place needs no dynamic alloca.
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa("fn f(x, y) { x == y }"),
         r#"fn f(%p0: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A, &mut Uninit<A>) -> (), (&mut A) -> (), int, int), %p1: @arg & A, %p2: @arg & A, %p3: @ret bool):
   0:
@@ -1214,7 +1213,7 @@ fn generic_comparison() {
 fn copy_int() {
     // Copying an int (TrivialCopy) - should use trivial copy, not call clone
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa("fn f(x: int) { let y = x; y + 1 }"),
         r#"fn f(%p0: @arg int, %p1: @ret int):
   0:
@@ -1231,66 +1230,402 @@ fn copy_int() {
     );
 }
 
-// Note: Tests for copy_struct_with_explicit_clone and copy_generic_parameter
-// are currently disabled as the SSA emitter does not yet support:
-// 1. Copying shared-ref parameters to owned locals for non-TrivialCopy types
-// 2. Dictionary-based cloning for generic parameters
-// These features require additional work in src/emit_ssa.rs
+#[test]
+fn construct_struct() {
+    // Copying an int (TrivialCopy) - should use trivial copy, not call clone
+    print_param_hir(
+        "label",
+        "struct A{ x: int, y: int }\
+        \
+        struct Wrapper { left: A, right: A }\
+        \
+        fn make_a() -> A {\
+          A { x: 1, y: 2 }\
+        }\
+        \
+        fn make_wrapper() -> Wrapper {\
+          Wrapper { left: make_a(), right: make_a() }\
+        }",
+    );
+    let mut session = TestSession::new();
+    let ssa = session.emit_ssa(
+        "struct A{ x: int, y: int }\
+        \
+        struct Wrapper { left: A, right: A }\
+        \
+        fn make_a() -> A {\
+          A { x: 1, y: 2 }\
+        }\
+        \
+        fn make_wrapper() -> Wrapper {\
+          Wrapper { left: make_a(), right: make_a() }\
+        }",
+    );
 
-// #[test]
-// fn copy_struct_with_explicit_clone() {
-//     // Copying a struct with explicit clone function - should call Value::clone
-//     let mut session = TestSession::new();
-//     assert_eq!(
-//         session.emit_ssa(r#"
-//             struct Probe(int)
-//
-//             impl Value for Probe {
-//                 fn eq(left: Probe, right: Probe) -> bool { left.0 == right.0 }
-//                 fn to_string(value: Probe) -> string { to_string(value.0) }
-//                 fn hash(value: Probe, state: &mut hasher) { hash(value.0, state) }
-//                 fn clone(source: Probe, target: &mut Probe) {
-//                     target = Probe(source.0 + 100);
-//                 }
-//                 fn drop(target: &mut Probe) {}
-//             }
-//
-//             fn f(x: Probe) { let y = x; y }
-//         "#),
-//         r#"fn f(%p0: @arg & Probe, %p1: @ret Probe):
-//   0:
-//     %r0 = alloca Probe
-//     %r1 = call std::Value<0-4>::clone(%p0, %r0)
-//     %r2 = load %r0
-//     %r3 = store %r2 to %p1
-//     %r4 = ret
-// "#,
-//     );
-// }
+    assert_eq_sans_flake!(
+        ssa,
+        r#"fn Value<0-4044>::clone(%p0: @arg & A, %p1: @arg &mut Uninit<A>, %p2: @ret ()):
+  0:
+    %r0 = project 0 from %p1
+    %r1 = store Uninit<int> to %r0
+    %r2 = project 1 from %p1
+    %r3 = store Uninit<int> to %r2
+    %r4 = project 0 from %p0
+    %r5 = project 0 from %p1
+    %r6 = call std::Value<0-6>::clone(%r4, %r5, &())
+    %r7 = project 1 from %p0
+    %r8 = project 1 from %p1
+    %r9 = call std::Value<0-6>::clone(%r7, %r8, &())
+    %r10 = ret
 
-// #[test]
-// fn copy_generic_parameter() {
-//     // Copying a generic parameter - should call Value::clone through dictionary
-//     let mut session = TestSession::new();
-//     assert_eq!(
-//         session.emit_ssa("fn f<T>(x: T) { let y = x; y }"),
-//         r#"fn f(%p0: @extra ((A, &mut A) -> (),), %p1: @arg & A, %p2: @ret A):
-//   0:
-//     %r3 = alloca A
-//     %r4 = project 0 from %p0
-//     %r5 = call %r4(%p1, %r3)
-//     %r6 = load %r3
-//     %r7 = store %r6 to %p2
-//     %r8 = ret
-// "#,
-//     );
-// }
+fn Value<0-4044>::drop(%p0: @arg &mut A, %p1: @ret ()):
+  0:
+    %r0 = project 0 from %p0
+    %r1 = call std::Value<0-6>::drop(%r0, &())
+    %r2 = project 1 from %p0
+    %r3 = call std::Value<0-6>::drop(%r2, &())
+    %r4 = ret
+
+fn Value<0-4044>::eq(%p0: @arg & A, %p1: @arg & A, %p2: @ret bool):
+  0:
+    %r0 = project 0 from %p0
+    %r1 = project 0 from %p1
+    %r2 = alloca bool
+    %r3 = call std::Value<0-6>::eq(%r0, %r1, %r2)
+    %r4 = load %r2
+    %r5 = br 1
+  1:
+    %r6 = comp_eq %r4 i1 1
+    %r7 = condbr %r6, %b2, &b3
+  2:
+    %r8 = project 1 from %p0
+    %r9 = project 1 from %p1
+    %r10 = alloca bool
+    %r11 = call std::Value<0-6>::eq(%r8, %r9, %r10)
+    %r12 = load %r10
+    %r13 = br 5
+  3:
+    %r21 = store i1 0 to %p2
+    %r22 = br 4
+  4:
+    %r23 = ret
+  5:
+    %r14 = comp_eq %r12 i1 1
+    %r15 = condbr %r14, %b6, &b7
+  6:
+    %r16 = store i1 1 to %p2
+    %r17 = br 8
+  7:
+    %r18 = store i1 0 to %p2
+    %r19 = br 8
+  8:
+    %r20 = br 4
+
+fn Value<0-4044>::hash(%p0: @arg & A, %p1: @arg &mut hasher, %p2: @ret ()):
+  0:
+    %r0 = project 0 from %p0
+    %r1 = call std::Value<0-6>::hash(%r0, %p1, &())
+    %r2 = project 1 from %p0
+    %r3 = call std::Value<0-6>::hash(%r2, %p1, &())
+    %r4 = ret
+
+fn Value<0-4044>::to_string(%p0: @arg & A, %p1: @ret string):
+  0:
+    %r0 = alloca string
+    %r1 = alloca string
+    %r2 = alloca string
+    %r3 = alloca string
+    %r4 = alloca string
+    %r5 = alloca string
+    %r6 = alloca string
+    %r7 = alloca string
+    %r8 = alloca string
+    %r9 = store "A { " to %r0
+    %r10 = store "x" to %r1
+    %r11 = call std::string_push_str(%r0, %r1, &())
+    %r12 = store ": " to %r2
+    %r13 = call std::string_push_str(%r0, %r2, &())
+    %r14 = project 0 from %p0
+    %r15 = call std::Value<0-6>::to_string(%r14, %r3)
+    %r16 = call std::string_push_str(%r0, %r3, &())
+    %r17 = store ", " to %r4
+    %r18 = call std::string_push_str(%r0, %r4, &())
+    %r19 = store "y" to %r5
+    %r20 = call std::string_push_str(%r0, %r5, &())
+    %r21 = store ": " to %r6
+    %r22 = call std::string_push_str(%r0, %r6, &())
+    %r23 = project 1 from %p0
+    %r24 = call std::Value<0-6>::to_string(%r23, %r7)
+    %r25 = call std::string_push_str(%r0, %r7, &())
+    %r26 = store " }" to %r8
+    %r27 = call std::string_push_str(%r0, %r8, &())
+    %r28 = load %r0
+    %r29 = store %r28 to %p1
+    %r30 = ret
+
+fn Value<0-4046>::clone(%p0: @arg & Wrapper, %p1: @arg &mut Uninit<Wrapper>, %p2: @ret ()):
+  0:
+    %r0 = project 0 from %p1
+    %r1 = store Uninit<A> to %r0
+    %r2 = project 1 from %p1
+    %r3 = store Uninit<A> to %r2
+    %r4 = project 0 from %p0
+    %r5 = project 0 from %p1
+    %r6 = call <test>::Value<0-4044>::clone(%r4, %r5, &())
+    %r7 = project 1 from %p0
+    %r8 = project 1 from %p1
+    %r9 = call <test>::Value<0-4044>::clone(%r7, %r8, &())
+    %r10 = ret
+
+fn Value<0-4046>::drop(%p0: @arg &mut Wrapper, %p1: @ret ()):
+  0:
+    %r0 = project 0 from %p0
+    %r1 = call <test>::Value<0-4044>::drop(%r0, &())
+    %r2 = project 1 from %p0
+    %r3 = call <test>::Value<0-4044>::drop(%r2, &())
+    %r4 = ret
+
+fn Value<0-4046>::eq(%p0: @arg & Wrapper, %p1: @arg & Wrapper, %p2: @ret bool):
+  0:
+    %r0 = project 0 from %p0
+    %r1 = project 0 from %p1
+    %r2 = alloca bool
+    %r3 = call <test>::Value<0-4044>::eq(%r0, %r1, %r2)
+    %r4 = load %r2
+    %r5 = br 1
+  1:
+    %r6 = comp_eq %r4 i1 1
+    %r7 = condbr %r6, %b2, &b3
+  2:
+    %r8 = project 1 from %p0
+    %r9 = project 1 from %p1
+    %r10 = alloca bool
+    %r11 = call <test>::Value<0-4044>::eq(%r8, %r9, %r10)
+    %r12 = load %r10
+    %r13 = br 5
+  3:
+    %r21 = store i1 0 to %p2
+    %r22 = br 4
+  4:
+    %r23 = ret
+  5:
+    %r14 = comp_eq %r12 i1 1
+    %r15 = condbr %r14, %b6, &b7
+  6:
+    %r16 = store i1 1 to %p2
+    %r17 = br 8
+  7:
+    %r18 = store i1 0 to %p2
+    %r19 = br 8
+  8:
+    %r20 = br 4
+
+fn Value<0-4046>::hash(%p0: @arg & Wrapper, %p1: @arg &mut hasher, %p2: @ret ()):
+  0:
+    %r0 = project 0 from %p0
+    %r1 = call <test>::Value<0-4044>::hash(%r0, %p1, &())
+    %r2 = project 1 from %p0
+    %r3 = call <test>::Value<0-4044>::hash(%r2, %p1, &())
+    %r4 = ret
+
+fn Value<0-4046>::to_string(%p0: @arg & Wrapper, %p1: @ret string):
+  0:
+    %r0 = alloca string
+    %r1 = alloca string
+    %r2 = alloca string
+    %r3 = alloca string
+    %r4 = alloca string
+    %r5 = alloca string
+    %r6 = alloca string
+    %r7 = alloca string
+    %r8 = alloca string
+    %r9 = store "Wrapper { " to %r0
+    %r10 = store "left" to %r1
+    %r11 = call std::string_push_str(%r0, %r1, &())
+    %r12 = store ": " to %r2
+    %r13 = call std::string_push_str(%r0, %r2, &())
+    %r14 = project 0 from %p0
+    %r15 = call <test>::Value<0-4044>::to_string(%r14, %r3)
+    %r16 = call std::string_push_str(%r0, %r3, &())
+    %r17 = store ", " to %r4
+    %r18 = call std::string_push_str(%r0, %r4, &())
+    %r19 = store "right" to %r5
+    %r20 = call std::string_push_str(%r0, %r5, &())
+    %r21 = store ": " to %r6
+    %r22 = call std::string_push_str(%r0, %r6, &())
+    %r23 = project 1 from %p0
+    %r24 = call <test>::Value<0-4044>::to_string(%r23, %r7)
+    %r25 = call std::string_push_str(%r0, %r7, &())
+    %r26 = store " }" to %r8
+    %r27 = call std::string_push_str(%r0, %r8, &())
+    %r28 = load %r0
+    %r29 = store %r28 to %p1
+    %r30 = ret
+
+fn make_a(%p0: @ret A):
+  0:
+    %r0 = project 0 from %p0
+    %r1 = alloca int
+    %r2 = store int 1 to %r1
+    %r3 = call std::Num<0-6>::from_int(%r1, %r0)
+    %r4 = project 1 from %p0
+    %r5 = alloca int
+    %r6 = store int 2 to %r5
+    %r7 = call std::Num<0-6>::from_int(%r5, %r4)
+    %r8 = ret
+
+fn make_wrapper(%p0: @ret Wrapper):
+  0:
+    %r0 = project 0 from %p0
+    %r1 = call <test>::make_a(%r0)
+    %r2 = project 1 from %p0
+    %r3 = call <test>::make_a(%r2)
+    %r4 = ret
+"#
+    );
+}
+
+#[test]
+fn copy_struct_with_explicit_clone() {
+    // Copying a struct with explicit clone function - should call Value::clone
+    let mut session = TestSession::new();
+    let ssa = session.emit_ssa(
+        r#"
+            struct Probe(int)
+
+            impl Value for Probe {
+                fn eq(left: Probe, right: Probe) -> bool { left.0 == right.0 }
+                fn to_string(value: Probe) -> string { to_string(value.0) }
+                fn hash(value: Probe, state: &mut hasher) { hash(value.0, state) }
+                fn clone(source: Probe, target: &mut Uninit<Probe>) {
+                    target = Probe(source.0 + 100);
+                }
+                fn drop(target: &mut Probe) {}
+            }
+
+            fn f(x: Probe) { let y = x; y }
+        "#,
+    );
+
+    assert_eq_sans_flake!(
+        ssa,
+        r#"fn Value<0-4043>::clone(%p0: @arg & Probe, %p1: @arg &mut Uninit<Probe>, %p2: @ret ()):
+  0:
+    %r0 = alloca int
+    %r1 = project 0 from %p1
+    %r2 = alloca int
+    %r3 = store int 100 to %r2
+    %r4 = call std::Num<0-6>::from_int(%r2, %r0)
+    %r5 = project 0 from %p0
+    %r6 = call std::Num<0-6>::add(%r5, %r0, %r1)
+    %r7 = ret
+
+fn Value<0-4043>::drop(%p0: @arg &mut Probe, %p1: @ret ()):
+  0:
+    %r0 = ret
+
+fn Value<0-4043>::eq(%p0: @arg & Probe, %p1: @arg & Probe, %p2: @ret bool):
+  0:
+    %r0 = project 0 from %p0
+    %r1 = project 0 from %p1
+    %r2 = call std::Value<0-6>::eq(%r0, %r1, %p2)
+    %r3 = ret
+
+fn Value<0-4043>::hash(%p0: @arg & Probe, %p1: @arg &mut hasher, %p2: @ret ()):
+  0:
+    %r0 = project 0 from %p0
+    %r1 = call std::Value<0-6>::hash(%r0, %p1, %p2)
+    %r2 = ret
+
+fn Value<0-4043>::to_string(%p0: @arg & Probe, %p1: @ret string):
+  0:
+    %r0 = project 0 from %p0
+    %r1 = call std::Value<0-6>::to_string(%r0, %p1)
+    %r2 = ret
+
+fn f(%p0: @arg & Probe, %p1: @ret Probe):
+  0:
+    %r0 = call <test>::Value<0-4043>::clone(%p0, %p1, &())
+    %r1 = ret
+"#
+    );
+    // TODO pattern based matching
+}
+
+#[test]
+fn clone_value_generic_return() {
+    // Returning a generic parameter clones it through the Value dictionary.
+    let mut session = TestSession::new();
+    assert_eq_sans_flake!(
+        session.emit_ssa("fn f<T>(x: T) -> T { x }"),
+        r#"fn f(%p0: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A, &mut Uninit<A>) -> (), (&mut A) -> (), int, int), %p1: @arg & A, %p2: @ret A):
+  0:
+    %r0 = project 3 from %p0
+    %r1 = load %r0
+    %r2 = call %r1(%p1, %p2, &())
+    %r3 = ret
+"#,
+    );
+}
+
+#[test]
+fn clone_value_generic_branch() {
+    // A generic parameter used in both branches of an if-else clones through the Value
+    // dictionary in each branch, storing directly into the shared return out-pointer.
+    let mut session = TestSession::new();
+    assert_eq_sans_flake!(
+        session.emit_ssa("fn f<T>(x: T) -> T { if true { x } else { x } }"),
+        r#"fn f(%p0: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A, &mut Uninit<A>) -> (), (&mut A) -> (), int, int), %p1: @arg & A, %p2: @ret A):
+  0:
+    %r0 = br 1
+  1:
+    %r1 = comp_eq i1 1 i1 1
+    %r2 = condbr %r1, %b2, &b3
+  2:
+    %r3 = project 3 from %p0
+    %r4 = load %r3
+    %r5 = call %r4(%p1, %p2, &())
+    %r6 = br 4
+  3:
+    %r7 = project 3 from %p0
+    %r8 = load %r7
+    %r9 = call %r8(%p1, %p2, &())
+    %r10 = br 4
+  4:
+    %r11 = ret
+"#,
+    );
+}
+
+#[test]
+fn store_local_generic_clone_dictionary() {
+    // Initializing an owned mutable local from a generic parameter clones through the
+    // Value dictionary into dynamically-allocated storage (alloca_dynamic via the dictionary
+    // witness). The local is then passed by mutable reference without an extra copy.
+    let mut session = TestSession::new();
+    assert_eq_sans_flake!(
+        session.emit_ssa("fn g<T>(x: &mut T) {} fn f<T>(x: T) { let mut y = x; g(y); }"),
+        r#"fn f(%p0: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A, &mut Uninit<A>) -> (), (&mut A) -> (), int, int), %p1: @arg & A, %p2: @ret ()):
+  0:
+    %r0 = alloca A using %p0
+    %r1 = project 3 from %p0
+    %r2 = load %r1
+    %r3 = call %r2(%p1, %r0, &())
+    %r4 = call <test>::g(%r0, &())
+    %r5 = ret
+
+fn g(%p0: @arg &mut A, %p1: @ret ()):
+  0:
+    %r0 = ret
+"#,
+    );
+}
 
 #[test]
 fn return_local_int_move() {
     // Returning a local int variable - should move (trivial copy for int)
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa("fn f() { let x: int = 42; x }"),
         r#"fn f(%p0: @ret int):
   0:
@@ -1312,7 +1647,7 @@ fn reassign_local_literal() {
     // Reassigning an owned int local overwrites its alloca in place; the old value
     // needs no semantic drop (Skip for int).
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa("fn f() -> int { let mut y: int = 1; y = 2; y }"),
         r#"fn f(%p0: @ret int):
   0:
@@ -1333,7 +1668,7 @@ fn reassign_local_from_param() {
     // Reassigning an owned local from a by-value param is a trivial copy: load %p0,
     // store into the local's alloca.
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa("fn f(x: int) -> int { let mut y: int = 0; y = x; y }"),
         r#"fn f(%p0: @arg int, %p1: @ret int):
   0:
@@ -1352,8 +1687,10 @@ fn reassign_local_from_param() {
 fn reassign_in_branches() {
     // Each branch writes its value directly into the same owned local's alloca.
     let mut session = TestSession::new();
-    assert_eq!(
-        session.emit_ssa("fn f(c: bool) -> int { let mut y: int = 0; if c { y = 1 } else { y = 2 }; y }"),
+    assert_eq_sans_flake!(
+        session.emit_ssa(
+            "fn f(c: bool) -> int { let mut y: int = 0; if c { y = 1 } else { y = 2 }; y }"
+        ),
         r#"fn f(%p0: @arg bool, %p1: @ret int):
   0:
     %r0 = alloca int
@@ -1387,7 +1724,7 @@ fn reassign_mutable_ref_param_from_local() {
     // Assigning through a `&mut` param writes into the caller's storage via the
     // incoming pointer; the source local is read with a trivial-copy load.
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa("fn f(x: &mut int) { let y: int = 1; x = y; }"),
         r#"fn f(%p0: @arg &mut int, %p1: @ret ()):
   0:
@@ -1405,7 +1742,7 @@ fn reassign_array_element_from_param() {
     // Assigning into an array element resolves the element place and stores the
     // param's trivially-copied value into it.
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa("fn f(a: &mut [int], v: int) { a[0] = v; }"),
         r#"fn f(%p0: @arg &mut [int], %p1: @arg int, %p2: @ret ()):
   0:
@@ -1446,7 +1783,7 @@ fn generic_register_read_is_rejected() {
 fn copy_int_param_to_local() {
     // Copying int parameter to a mutable local - uses trivial copy
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa("fn f(x: int) { let mut y = x; y = y + 1; y }"),
         r#"fn f(%p0: @arg int, %p1: @ret int):
   0:
@@ -1462,5 +1799,18 @@ fn copy_int_param_to_local() {
     %r9 = store %r8 to %p1
     %r10 = ret
 "#,
+    );
+}
+
+#[test]
+fn variants() {
+    let mut session = TestSession::new();
+
+    assert_eq_sans_flake!(
+        session.emit_ssa("fn f(x: Y | X(string)) { let r = x; } "),
+        r#"fn f(%p0: @arg & X (string) | Y, %p1: @ret ()):
+  0:
+    %r0 = ret
+"#
     );
 }

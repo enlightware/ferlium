@@ -32,6 +32,15 @@ impl Instruction {
         self.kind.is_terminator()
     }
 
+    /// Returns a borrowed, kind-discriminated view of this instruction.
+    ///
+    /// This lets backends (e.g. the WASM emitter) match on the instruction kind and read its
+    /// kind-specific data without exposing the concrete kind structs or depending on backend
+    /// types within this module.
+    pub fn view(&self) -> InstructionView<'_> {
+        self.kind.view(self)
+    }
+
     /// Creates an `alloca` instruction for storage whose size is known at compile time.
     pub fn alloca(span: Location, ty: Type) -> Self {
         Instruction {
@@ -174,6 +183,10 @@ pub trait InstructionKind: Any {
         false
     }
 
+    /// Returns a borrowed, kind-discriminated view of `self`, which is the kind-specific part of
+    /// `whole`. Backends match on this view to lower the instruction.
+    fn view<'a>(&'a self, whole: &'a Instruction) -> InstructionView<'a>;
+
     /// Computes a textual representation of `self`, which is the kind-specific part of `whole`.
     fn fmt_within(
         &self,
@@ -181,6 +194,52 @@ pub trait InstructionKind: Any {
         whole: &Instruction,
         env: &ModuleEnv<'_>,
     ) -> fmt::Result;
+}
+
+/// A borrowed, kind-discriminated view of an [`Instruction`].
+///
+/// This is the backend-facing projection of the private instruction-kind structs: it exposes the
+/// data each backend needs to lower an instruction without leaking backend types into this module
+/// or making the kind structs public. Operands (such as a `load` source or a `store`
+/// value/destination) remain available through `Instruction::operands`.
+pub enum InstructionView<'a> {
+    /// A stack allocation of an instance of `ty`. For a non-statically-sized `ty`, `witness` is
+    /// the `Value` dictionary place witnessing its run-time layout (the instruction's sole operand).
+    Alloca {
+        ty: Type,
+        witness: Option<&'a ssa::Value>,
+    },
+
+    /// A stack allocation of a pointer to an instance of `pointing_to`.
+    AllocaPlace { pointing_to: Type },
+
+    /// A function call. Operand `0` is the callee; the remaining operands are the arguments,
+    /// the last of which is the return out-pointer for a non-`()` result.
+    Call,
+
+    /// An equality comparison of operands `0` and `1`.
+    CompareEqual,
+
+    /// A conditional branch on operand `0`.
+    ConditionalBranch {
+        on_success: ssa::BlockIdentity,
+        on_failure: ssa::BlockIdentity,
+    },
+
+    /// An unconditional branch to `target`.
+    UnconditionalBranch { target: ssa::BlockIdentity },
+
+    /// A load of the value at the place given by operand `0`.
+    Load,
+
+    /// A projection of field `index` (of type `ty`) out of the aggregate place at operand `0`.
+    Project { index: usize, ty: Type },
+
+    /// A return. The result, if any, has already been written through the return out-pointer.
+    Ret,
+
+    /// A store of operand `0` (a value) into operand `1` (a place).
+    Store,
 }
 
 /// The type of an instruction's result.
@@ -231,6 +290,13 @@ impl InstructionKind for Alloca {
         InstructionResult::pointer_to(InstructionResult::Lowered(self.ty))
     }
 
+    fn view<'a>(&'a self, whole: &'a Instruction) -> InstructionView<'a> {
+        InstructionView::Alloca {
+            ty: self.ty,
+            witness: whole.operands.first(),
+        }
+    }
+
     fn fmt_within(
         &self,
         f: &mut fmt::Formatter<'_>,
@@ -258,6 +324,12 @@ impl InstructionKind for AllocaPlace {
         )))
     }
 
+    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
+        InstructionView::AllocaPlace {
+            pointing_to: self.pointing_to,
+        }
+    }
+
     fn fmt_within(
         &self,
         f: &mut fmt::Formatter<'_>,
@@ -276,6 +348,10 @@ impl InstructionKind for Call {
         // Calls do not yield a register: a callee with a non-`()` result writes it through the
         // return out-pointer passed as the call's last operand.
         InstructionResult::Nothing
+    }
+
+    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
+        InstructionView::Call
     }
 
     fn fmt_within(
@@ -303,6 +379,10 @@ impl InstructionKind for CompareEqual {
         InstructionResult::Lowered(cached_primitive_ty!(bool))
     }
 
+    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
+        InstructionView::CompareEqual
+    }
+
     fn fmt_within(
         &self,
         f: &mut fmt::Formatter<'_>,
@@ -327,6 +407,13 @@ impl InstructionKind for ConditionalBranch {
         true
     }
 
+    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
+        InstructionView::ConditionalBranch {
+            on_success: self.on_success,
+            on_failure: self.on_failure,
+        }
+    }
+
     fn fmt_within(
         &self,
         f: &mut fmt::Formatter<'_>,
@@ -349,6 +436,10 @@ struct Load {}
 impl InstructionKind for Load {
     fn result(&self, whole: &Instruction) -> InstructionResult {
         InstructionResult::pointee_of(InstructionResult::Same(whole.operands[0].clone()))
+    }
+
+    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
+        InstructionView::Load
     }
 
     fn fmt_within(
@@ -377,6 +468,13 @@ impl InstructionKind for Project {
         InstructionResult::pointer_to(InstructionResult::Lowered(self.ty))
     }
 
+    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
+        InstructionView::Project {
+            index: self.index,
+            ty: self.ty,
+        }
+    }
+
     fn fmt_within(
         &self,
         f: &mut fmt::Formatter<'_>,
@@ -395,6 +493,10 @@ impl InstructionKind for Ret {
         true
     }
 
+    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
+        InstructionView::Ret
+    }
+
     fn fmt_within(
         &self,
         _f: &mut fmt::Formatter<'_>,
@@ -409,6 +511,10 @@ impl InstructionKind for Ret {
 struct Store {}
 
 impl InstructionKind for Store {
+    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
+        InstructionView::Store
+    }
+
     fn fmt_within(
         &self,
         f: &mut fmt::Formatter<'_>,
@@ -427,6 +533,12 @@ struct UnconditionalBranch {
 impl InstructionKind for UnconditionalBranch {
     fn is_terminator(&self) -> bool {
         true
+    }
+
+    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
+        InstructionView::UnconditionalBranch {
+            target: self.target,
+        }
     }
 
     fn fmt_within(

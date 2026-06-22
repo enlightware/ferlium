@@ -80,6 +80,17 @@ impl Function {
         slot
     }
 
+    /// Returns this function's parameters in slot order (extra parameters first, then arguments).
+    pub fn parameters(&self) -> &[Parameter] {
+        &self.parameters
+    }
+
+    /// Returns an iterator over the identities of this function's basic blocks, the first of which
+    /// is the entry block.
+    pub fn blocks(&self) -> impl Iterator<Item = BlockIdentity> + '_ {
+        self.blocks.addresses()
+    }
+
     /// Returns the value of `i`.
     pub fn at(&self, i: InstructionIdentity) -> &Instruction {
         &self.slots[i].instruction

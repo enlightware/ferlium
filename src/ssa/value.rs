@@ -1,8 +1,10 @@
 use std::fmt;
 
 use itertools::Itertools;
+use ordered_float::NotNan;
 use ustr::Ustr;
 
+use crate::types::r#type::Type;
 use crate::{
     module::{LocalFunctionId, ModuleId},
     ssa,
@@ -16,6 +18,9 @@ pub enum Value {
 
     /// A dictionary value
     Dictionary(Vec<ssa::Value>),
+
+    /// A constant finite float (`float`), represented as an `f64` that is never NaN.
+    Float(NotNan<f64>),
 
     /// A reference to a lowered function.
     Function(FunctionReference),
@@ -31,6 +36,15 @@ pub enum Value {
 
     /// A unit value.
     Unit,
+
+    /// A pointer to a unit value. Must not be dereferenced.
+    UnitPlace,
+
+    /// A constant string value.
+    String(crate::std::string::String),
+
+    /// An uninitialized value of type `T`.
+    Uninit(ShownType),
 }
 
 impl fmt::Display for Value {
@@ -40,11 +54,15 @@ impl fmt::Display for Value {
             Value::Dictionary(i) => {
                 write!(f, "({})", i.iter().map(|v| format!("{}", v)).join(", "))
             }
+            Value::Float(x) => write!(f, "float {}", x.into_inner()),
             Value::Function(i) => write!(f, "{}", i.name),
             Value::Integer(i) => i.fmt(f),
             Value::Parameter(i) => write!(f, "%p{}", i),
             Value::Register(i) => write!(f, "%r{}", i.raw()),
             Value::Unit => write!(f, "()"),
+            Value::Uninit(t) => write!(f, "Uninit<{}>", t.name),
+            Value::String(s) => write!(f, "\"{}\"", s),
+            Value::UnitPlace => write!(f, "&()"),
         }
     }
 }
@@ -60,6 +78,16 @@ pub struct FunctionReference {
 
     /// The LocalFunctionId in the module in which the function is declared.
     pub identity: LocalFunctionId,
+}
+
+/// A type identity along with the type's string representation.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct ShownType {
+    /// The type's identity.
+    pub ty: Type,
+
+    /// The string representation of `ty`.
+    pub name: String,
 }
 
 /// The width of an SSA integer constant.

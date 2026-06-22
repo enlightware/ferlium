@@ -348,6 +348,59 @@ macro_rules! assert_val_eq {
     }};
 }
 
+/// Replaces every interned-id marker of the form `<number-number>` (e.g. `<0-6>`, `<0-4043>`) with
+/// `...`, so that textual assertions don't flake on the non-deterministic ids embedded in dumps.
+pub(crate) fn replace_flaky_ids(s: impl AsRef<str>) -> String {
+    let s = s.as_ref();
+    let bytes = s.as_bytes();
+    let mut result = String::with_capacity(s.len());
+    let mut i = 0;
+    let mut segment_start = 0;
+    while i < bytes.len() {
+        // Try to match `<digits-digits>` starting at `i`.
+        if bytes[i] == b'<' {
+            let mut j = i + 1;
+            let first_digits = j;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j > first_digits && j < bytes.len() && bytes[j] == b'-' {
+                j += 1;
+                let second_digits = j;
+                while j < bytes.len() && bytes[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if j > second_digits && j < bytes.len() && bytes[j] == b'>' {
+                    result.push_str(&s[segment_start..i]);
+                    result.push_str("...");
+                    i = j + 1;
+                    segment_start = i;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    result.push_str(&s[segment_start..]);
+    result
+}
+
+/// Like `assert_eq!`, but first replaces every interned-id marker (`<number-number>`) in both sides
+/// with `...`, so the comparison ignores non-deterministic ids that would otherwise cause flakes.
+#[macro_export]
+macro_rules! assert_eq_sans_flake {
+    ($lhs:expr, $rhs:expr $(,)?) => {{
+        let lhs = $crate::harness::replace_flaky_ids($lhs);
+        let rhs = $crate::harness::replace_flaky_ids($rhs);
+        assert_eq!(lhs, rhs);
+    }};
+    ($lhs:expr, $rhs:expr, $($arg:tt)+) => {{
+        let lhs = $crate::harness::replace_flaky_ids($lhs);
+        let rhs = $crate::harness::replace_flaky_ids($rhs);
+        assert_eq!(lhs, rhs, $($arg)+);
+    }};
+}
+
 fn test_assoc_trait() -> Trait {
     Trait::new_with_self_input_type(
         "TestAssoc",

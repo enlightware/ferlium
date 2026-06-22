@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 
+use ordered_float::NotNan;
 use ustr::Ustr;
 
 use crate::module::{
     ExtraParameterId, ResolvedLocalClone, ResolvedLocalDrop, ResolvedTakeLocalValueMode,
 };
 use crate::ssa::Instruction;
+use crate::ssa::value::ShownType;
 use crate::types::r#type::{FnReturnConvention, FnType};
 use crate::{
     CompilerSession, Location, Modules, containers,
@@ -18,8 +20,13 @@ use crate::{
         self, FunctionId, ImportFunctionSlotId, LocalDeclId, LocalFunctionId, Module, ModuleEnv,
         ModuleId, TraitDictionary, TraitImpl, TraitImplId, id::Id,
     },
-    ssa::{self, BlockIdentity, Program, value::FunctionReference},
-    std::{core_traits_names::VALUE_TRAIT_NAME, value::is_function_surface_only_value_type},
+    ssa::{self, BlockIdentity, value::FunctionReference},
+    std::{
+        STD_MODULE_ID,
+        core_traits_names::VALUE_TRAIT_NAME,
+        math::Float,
+        value::{VALUE_CLONE_METHOD_INDEX, is_function_surface_only_value_type},
+    },
     types::r#type::Type,
     types::type_like::TypeLike,
 };
@@ -28,10 +35,14 @@ use crate::{
 ///
 /// Intended for testing & debugging.
 pub fn emit_ssa(module: &Module, others: &Modules, session: &CompilerSession) -> String {
-    module
+    let mut functions: Vec<(Ustr, LocalFunctionId)> = module
         .own_symbols()
-        .filter_map(|n| module.get_local_function_id(n))
-        .map(|f| Emitter::emit_ssa_fn(f, module, others, session))
+        .filter_map(|n| module.get_local_function_id(n).map(|f| (n, f)))
+        .collect();
+    functions.sort_by_key(|(name, _)| *name);
+    functions
+        .into_iter()
+        .map(|(_, f)| Emitter::emit_ssa_fn(f, module, others, session))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -62,6 +73,22 @@ fn imported_function(
         }
     };
     (fi, mi)
+}
+
+/// A standard-library intrinsic operating on trusted `Uninit<T>` storage.
+///
+/// These intrinsics have no script body; the SSA emitter lowers them inline as memory operations
+/// (`Uninit<T>` has the same layout as `T`, so the conversions are reinterpretations).
+#[derive(Clone, Copy)]
+enum UninitIntrinsic {
+    /// `uninit() -> Uninit<T>`: produces uninitialized storage.
+    Uninit,
+    /// `write_init(target: &mut Uninit<T>, value: T)`: moves `value` into `target`.
+    WriteInit,
+    /// `assume_init(value: Uninit<T>) -> T`: moves the initialized value out of its storage.
+    AssumeInit,
+    /// `assume_init_mut(target: &mut Uninit<T>) -> &mut T`: reinterprets storage as initialized.
+    AssumeInitMut,
 }
 
 /// The SSA blocks involved in the lowering of a case in a match expression.
@@ -97,18 +124,39 @@ struct Emitter<'a> {
     session: &'a CompilerSession,
 }
 
+/// Builds the SSA IR of the function `source` of `module` and returns the lowered function.
+///
+/// This is the shared entry point used both by the textual SSA dump (`emit_ssa`) and by backends
+/// such as the WASM emitter that consume the lowered `ssa::Function` directly.
+pub fn build_ssa_function(
+    source: LocalFunctionId,
+    module: &Module,
+    others: &Modules,
+    session: &CompilerSession,
+) -> ssa::Function {
+    Emitter::build_ssa_fn(source, module, others, session)
+}
+
 impl<'a> Emitter<'a> {
-    /// Generates the IR of `source`.
+    /// Generates the textual IR of `source`.
     fn emit_ssa_fn(
         source: LocalFunctionId,
         module: &'a Module,
         others: &'a Modules,
         session: &'a CompilerSession,
     ) -> String {
-        // TODO: This is the program into which IR is being inserted. Eventually that should become
-        // an argument of the function, as this data structure should persist.
-        let mut program = Program::new();
+        let lowered = Self::build_ssa_fn(source, module, others, session);
+        let env = ModuleEnv::new(module, others);
+        format!("{}", lowered.format_with(&env))
+    }
 
+    /// Builds and returns the lowered SSA representation of `source`.
+    fn build_ssa_fn(
+        source: LocalFunctionId,
+        module: &'a Module,
+        others: &'a Modules,
+        session: &'a CompilerSession,
+    ) -> ssa::Function {
         let f = module.get_function_by_id(source).unwrap();
         let syntax = f
             .code
@@ -203,14 +251,9 @@ impl<'a> Emitter<'a> {
         // The body of the function stores its result into the return out-pointer and then returns.
         let ret_dest = emitter.context.return_destination.clone();
         emitter.lower_value_into(code, Some(ret_dest));
-        emitter.insert(ssa::Instruction::ret(emitter.context.span));
+        emitter.insert(Instruction::ret(emitter.context.span));
 
-        // Save the definition of the lowered function into the SSA program.
-        let lowered = emitter.context.function;
-        let g = program.define(lowered);
-        let env = ModuleEnv::new(module, others);
-
-        format!("{}", g.format_with(&env))
+        emitter.context.function
     }
 
     /// Returns a reference to the function identified by `f`.
@@ -221,6 +264,106 @@ impl<'a> Emitter<'a> {
             name: function_name(f, module, self.others),
             module: module_identity,
         })
+    }
+
+    /// Lowers an indirect `Value::clone(source, target)` call dispatched through the dictionary
+    /// extra parameter `dictionary`.
+    ///
+    /// `source` is the place of the value to clone and `target` is the (uninitialized) destination
+    /// place the clone initializes. `cloned_ty` is the cloned value's type `T`, used to resolve the
+    /// dictionary's `clone` slot. The clone method returns `()`, so a throwaway unit return
+    /// out-pointer is appended to the call per the ABI.
+    fn lower_value_clone_via_dictionary(
+        &mut self,
+        span: Location,
+        dictionary: ExtraParameterId,
+        cloned_ty: Type,
+        source: ssa::Value,
+        target: ssa::Value,
+    ) {
+        // The dictionary parameter is itself a place (a pointer to the dictionary tuple).
+        let dictionary_place = self.context.extra_parameters[&dictionary].clone();
+        let (entry_index, method_ty) = self.value_clone_method(cloned_ty);
+        let method_place = self
+            .insert(Instruction::project(
+                span,
+                dictionary_place,
+                entry_index,
+                method_ty,
+            ))
+            .unwrap();
+        let method = self.insert(Instruction::load(span, method_place)).unwrap();
+        self.insert(Instruction::call(span, method, [source, target, ssa::Value::UnitPlace]));
+    }
+
+    /// Returns the runtime dictionary entry index and function type of the `Value::clone` method
+    /// for `cloning`.
+    fn value_clone_method(&self, cloning: Type) -> (usize, Type) {
+        let env = ModuleEnv::new(self.module, self.others);
+        let value_trait_id = env.expect_std_trait_id(VALUE_TRAIT_NAME);
+        let trait_def = env.trait_def(value_trait_id);
+        let dict_ty = trait_def.get_dictionary_type_for_tys(&[cloning], &[]);
+        let entry_index = trait_def
+            .dictionary_method_index(VALUE_CLONE_METHOD_INDEX)
+            .as_index();
+        let dict_ty_data = dict_ty.data();
+        let method_ty = dict_ty_data
+            .as_tuple()
+            .expect("Value dictionary should be a tuple type")[entry_index];
+        (entry_index, method_ty)
+    }
+
+    /// Recognizes a call to a trusted `Uninit<T>` standard-library intrinsic, which the emitter
+    /// lowers inline as a memory operation rather than as an opaque (bodyless) call.
+    fn uninit_intrinsic(&self, function: FunctionId) -> Option<UninitIntrinsic> {
+        let (fi, mi) = match function {
+            FunctionId::Local(i) => (i, self.module.module_id()),
+            FunctionId::Import(i) => imported_function(i, self.module, self.session),
+        };
+        if mi != STD_MODULE_ID {
+            return None;
+        }
+        let module = self.session.expect_fresh_module(mi);
+        let name = module.get_function_name_by_id(fi)?;
+        match name.as_str() {
+            "uninit" => Some(UninitIntrinsic::Uninit),
+            "write_init" => Some(UninitIntrinsic::WriteInit),
+            "assume_init" => Some(UninitIntrinsic::AssumeInit),
+            "assume_init_mut" => Some(UninitIntrinsic::AssumeInitMut),
+            _ => None,
+        }
+    }
+
+    /// Lowers a trusted `Uninit<T>` intrinsic call in destination-passing (value) position.
+    fn lower_uninit_intrinsic_into(
+        &mut self,
+        node: &ENode,
+        n: &hir::StaticApplication<Elaborated>,
+        intrinsic: UninitIntrinsic,
+        destination: Option<ssa::Value>,
+    ) {
+        match intrinsic {
+            // `uninit()` yields uninitialized storage: leave `destination` uninitialized.
+            UninitIntrinsic::Uninit => {}
+            // `write_init(target, value)` moves `value` into `target`'s storage. It is `()`-typed,
+            // so nothing is stored into `destination`.
+            UninitIntrinsic::WriteInit => {
+                let target = self.lower_as_place(&self.hir_arena[n.arguments[0].value]);
+                self.lower_value_into(&self.hir_arena[n.arguments[1].value], Some(target));
+            }
+            // `assume_init(value)` reinterprets the storage as initialized and moves the value out;
+            // the value lives in the argument's place, so copy it into `destination`.
+            UninitIntrinsic::AssumeInit => {
+                if destination.is_some() {
+                    self.assert_statically_sized(node.ty);
+                    let place = self.lower_as_place(&self.hir_arena[n.arguments[0].value]);
+                    let v = self.insert(Instruction::load(node.span, place)).unwrap();
+                    self.store_into_if_needed(node.span, v, destination);
+                }
+            }
+            // `assume_init_mut` is place-returning; lower it through the place path.
+            UninitIntrinsic::AssumeInitMut => self.lower_place_call_into(node, destination),
+        }
     }
 
     /// Allocates frame storage for every [`LocalStorage::Owned`] local of the lowered function and
@@ -260,7 +403,7 @@ impl<'a> Emitter<'a> {
         if ty.is_constant() || is_function_surface_only_value_type(ty) {
             // Note: is_function_surface_only_value_type indicates it's a function, which always
             // has the same, known layout. No dictionary is required.
-            self.insert(ssa::Instruction::alloca(span, ty)).unwrap()
+            self.insert(Instruction::alloca(span, ty)).unwrap()
         } else {
             let witness = self.value_dictionary(ty).unwrap_or_else(|| {
                 panic!(
@@ -268,7 +411,7 @@ impl<'a> Emitter<'a> {
                     self.show(ty)
                 )
             });
-            self.insert(ssa::Instruction::alloca_dynamic(span, ty, witness))
+            self.insert(Instruction::alloca_dynamic(span, ty, witness))
                 .unwrap()
         }
     }
@@ -334,7 +477,7 @@ impl<'a> Emitter<'a> {
                 let dictionary = &self.hir_arena[n.value];
                 let base = self.lower_as_place(dictionary);
 
-                self.insert(ssa::Instruction::project(
+                self.insert(Instruction::project(
                     node.span,
                     base,
                     n.index.as_index(),
@@ -353,10 +496,10 @@ impl<'a> Emitter<'a> {
                     .collect();
                 arguments.push(result_storage.clone());
 
-                self.insert(ssa::Instruction::call(node.span, f, arguments));
+                self.insert(Instruction::call(node.span, f, arguments));
 
                 if n.ty.returns_place() {
-                    self.insert(ssa::Instruction::load(node.span, result_storage))
+                    self.insert(Instruction::load(node.span, result_storage))
                         .unwrap()
                 } else {
                     result_storage
@@ -364,6 +507,26 @@ impl<'a> Emitter<'a> {
             }
 
             K::StaticApply(n) => {
+                if let Some(intrinsic) = self.uninit_intrinsic(n.function) {
+                    return match intrinsic {
+                        // `assume_init`/`assume_init_mut` reinterpret the argument's storage as
+                        // initialized: the result place is the argument's place (an identity).
+                        UninitIntrinsic::AssumeInit | UninitIntrinsic::AssumeInitMut => {
+                            self.lower_as_place(&self.hir_arena[n.arguments[0].value])
+                        }
+                        // `uninit`/`write_init` produce a value: materialize it into a temporary.
+                        UninitIntrinsic::Uninit | UninitIntrinsic::WriteInit => {
+                            let storage = self.alloca_storage(node.span, node.ty);
+                            self.lower_uninit_intrinsic_into(
+                                node,
+                                n,
+                                intrinsic,
+                                Some(storage.clone()),
+                            );
+                            storage
+                        }
+                    };
+                }
                 let (fi, mi) = match n.function {
                     FunctionId::Local(i) => (i, self.module.module_id()),
                     FunctionId::Import(i) => imported_function(i, self.module, self.session),
@@ -383,7 +546,7 @@ impl<'a> Emitter<'a> {
                 self.insert(Instruction::call(node.span, f, arguments));
 
                 if n.ty.returns_place() {
-                    self.insert(ssa::Instruction::load(node.span, result_storage))
+                    self.insert(Instruction::load(node.span, result_storage))
                         .unwrap()
                 } else {
                     result_storage
@@ -412,8 +575,7 @@ impl<'a> Emitter<'a> {
         }
         self.assert_statically_sized(node.ty);
         let place = self.lower_as_place(node);
-        self.insert(ssa::Instruction::load(node.span, place))
-            .unwrap()
+        self.insert(Instruction::load(node.span, place)).unwrap()
     }
 
     /// Lowers `arg` to its call operand: a pointer to the argument's storage.
@@ -485,29 +647,35 @@ impl<'a> Emitter<'a> {
 
     /// Stores the register `value` into `dest` if a destination is present; a `None` `dest`
     /// discards the value.
-    fn store_into_if(
+    fn store_into_if_needed(
         &mut self,
         span: Location,
         value: ssa::Value,
         destination: Option<ssa::Value>,
     ) {
         if let Some(d) = destination {
-            self.insert(ssa::Instruction::store(span, value, d));
+            self.insert(Instruction::store(span, value, d));
         }
     }
 
     /// Inserts a `store` instruction to store `v` at `destination`.
     fn store(&mut self, span: Location, v: ssa::Value, destination: ssa::Value) {
-        self.insert(ssa::Instruction::store(span, v, destination));
+        self.insert(Instruction::store(span, v, destination));
     }
 
     /// Inserts an allocation of `f`'s result storage and returns its address.
+    ///
+    /// For void return types, no static allocation is inserted; we use the special value UnitPlace.
     fn allocate_result(&mut self, node: &ENode, f: &FnType) -> ssa::Value {
-        match f.return_convention {
-            FnReturnConvention::Value => self.alloca_storage(node.span, node.ty),
-            FnReturnConvention::Place => self
-                .insert(ssa::Instruction::alloca_place(node.span, node.ty))
-                .unwrap(),
+        if f.ret == Type::unit() {
+            ssa::value::Value::UnitPlace
+        } else {
+            match f.return_convention {
+                FnReturnConvention::Value => self.alloca_storage(node.span, node.ty),
+                FnReturnConvention::Place => self
+                    .insert(Instruction::alloca_place(node.span, node.ty))
+                    .unwrap(),
+            }
         }
     }
 
@@ -518,9 +686,7 @@ impl<'a> Emitter<'a> {
         let place = self.lower_as_place(node);
         if let Some(dest) = destination {
             self.assert_statically_sized(node.ty);
-            let v = self
-                .insert(ssa::Instruction::load(node.span, place))
-                .unwrap();
+            let v = self.insert(Instruction::load(node.span, place)).unwrap();
             self.store(node.span, v, dest);
         }
     }
@@ -551,7 +717,7 @@ impl<'a> Emitter<'a> {
                 // We lower the scrutinee before the case blocks so that its value can be used in all conditions.
                 let scrutinee = self.lower_as_register(&self.hir_arena[n.value]);
 
-                self.insert(ssa::Instruction::br(node.span, blocks.heads[0]));
+                self.insert(Instruction::br(node.span, blocks.heads[0]));
 
                 // Lower the alternatives. Each alternative stores its value directly into `dest`.
                 for (i, (c, a)) in n.alternatives.iter().enumerate() {
@@ -571,29 +737,24 @@ impl<'a> Emitter<'a> {
                     // Compare the condition with the scrutinee and, depending on the result, branch to
                     // either the body of the current alternative or the next head.
                     let v = self
-                        .insert(ssa::Instruction::compare_eq(
+                        .insert(Instruction::compare_eq(
                             node.span,
                             scrutinee.clone(),
                             alternative_pattern,
                         ))
                         .unwrap();
-                    self.insert(ssa::Instruction::condbr(
-                        node.span,
-                        v,
-                        blocks.bodies[i],
-                        next,
-                    ));
+                    self.insert(Instruction::condbr(node.span, v, blocks.bodies[i], next));
 
                     // Lower the body of the alternative into the destination.
                     self.context.point = InsertionPoint::End(blocks.bodies[i]);
                     self.lower_value_into(&self.hir_arena[*a], destination.clone());
-                    self.insert(ssa::Instruction::br(node.span, blocks.tail));
+                    self.insert(Instruction::br(node.span, blocks.tail));
                 }
 
                 // Default case.
                 self.context.point = InsertionPoint::End(blocks.default);
                 self.lower_value_into(&self.hir_arena[n.default], destination.clone());
-                self.insert(ssa::Instruction::br(node.span, blocks.tail));
+                self.insert(Instruction::br(node.span, blocks.tail));
 
                 // Tail. The value has already been stored into `dest`.
                 self.context.point = InsertionPoint::End(blocks.tail);
@@ -603,12 +764,12 @@ impl<'a> Emitter<'a> {
                 if n.as_primitive_ty::<()>().is_some() {
                     // Storing void would be redundant.
                 } else if let Some(value) = self.lower_as_primitive(n) {
-                    self.store_into_if(node.span, value, destination);
+                    self.store_into_if_needed(node.span, value, destination);
                 } else {
                     let s = self.show(node.ty);
                     panic!(
                         "lowering is unimplemented for node of kind '{:?}' of type {:?}",
-                        n, s
+                        node.kind, s
                     )
                 }
             }
@@ -633,8 +794,8 @@ impl<'a> Emitter<'a> {
                 if destination.is_some() {
                     self.assert_statically_sized(node.ty);
                     let p = self.place_of_local(n.id);
-                    let v = self.insert(ssa::Instruction::load(node.span, p)).unwrap();
-                    self.store_into_if(node.span, v, destination);
+                    let v = self.insert(Instruction::load(node.span, p)).unwrap();
+                    self.store_into_if_needed(node.span, v, destination);
                 }
             }
 
@@ -655,27 +816,29 @@ impl<'a> Emitter<'a> {
                         let place = self.place_of_local(n.id);
                         self.lower_value_into(&self.hir_arena[n.value], Some(place));
                     }
-                    Some(ResolvedLocalClone::Static(_f)) => {
-                        // let (fi, mi) = match f {
-                        //     FunctionId::Local(i) => (i, self.module.module_id()),
-                        //     FunctionId::Import(i) => imported_function(i, self.module, self.session),
-                        // };
-                        // let f = self.demand_function(fi, mi);
-                        // let mut arguments: Vec<ssa::Value> = vec![];
+                    Some(ResolvedLocalClone::Static(f)) => {
+                        // Clone the source place into the local's (uninitialized) owned storage
+                        // through the statically known clone function `f`.
+                        let (fi, mi) = match f {
+                            FunctionId::Local(i) => (i, self.module.module_id()),
+                            FunctionId::Import(i) => imported_function(i, self.module, self.session),
+                        };
+                        let f = self.demand_function(fi, mi);
 
-                        // for arg in &n.arguments {
-                        //     arguments.push(self.lower_argument(arg));
-                        // }
+                        let target = self.place_of_local(n.id);
+                        let source = self.lower_as_place(&self.hir_arena[n.value]);
 
-                        // assert_eq!(node.ty, n.ty.ret);
-                        // arguments.push(self.call_out_ptr(node, dest));
-                        // self.insert(ssa::Instruction::call(node.span, f, arguments, n.ty.ret));
-                        todo!("StoreLocal initialization via Value::clone is not lowered yet")
-                        // see https://github.com/enlightware/ferlium/issues/151
+                        self.insert(Instruction::call(node.span, f, [source, target, ssa::Value::UnitPlace]));
                     }
-                    Some(ResolvedLocalClone::Dictionary(_)) => {
-                        todo!("StoreLocal initialization via Value::clone is not lowered yet")
-                        // see https://github.com/enlightware/ferlium/issues/151
+                    Some(ResolvedLocalClone::Dictionary(dictionary)) => {
+                        // Clone the source place into the local's (uninitialized) owned storage
+                        // through the `Value::clone` method loaded from the dictionary parameter.
+                        let cloned_ty = self.local_declaration(n.id).ty;
+                        let target = self.place_of_local(n.id);
+                        let source = self.lower_as_place(&self.hir_arena[n.value]);
+                        self.lower_value_clone_via_dictionary(
+                            node.span, dictionary, cloned_ty, source, target,
+                        );
                     }
                 }
                 // `StoreLocal` is `()`-typed: nothing to store into `dest`.
@@ -688,9 +851,29 @@ impl<'a> Emitter<'a> {
                     ResolvedLocalClone::TrivialCopy(_) => {
                         self.lower_value_into(&self.hir_arena[n.source], destination);
                     }
-                    // `Value::clone(source, &mut target)` dispatch is deferred.
-                    ResolvedLocalClone::Static(_) | ResolvedLocalClone::Dictionary(_) => {
-                        todo!("CloneValue via Value::clone (Static/Dictionary) is not lowered yet")
+                    ResolvedLocalClone::Static(f) => {
+                        // Clone the source place into the local's (uninitialized) owned storage
+                        // through the statically known clone function `f`.
+                        let (fi, mi) = match f {
+                            FunctionId::Local(i) => (i, self.module.module_id()),
+                            FunctionId::Import(i) => imported_function(i, self.module, self.session),
+                        };
+                        let f = self.demand_function(fi, mi);
+
+                        let source = self.lower_as_place(&self.hir_arena[n.source]);
+
+                        self.insert(Instruction::call(node.span, f, [source, destination.unwrap(), ssa::Value::UnitPlace]));
+                    }
+                    ResolvedLocalClone::Dictionary(dictionary) => {
+                        // Materialize an owned snapshot by cloning the source place into a fresh
+                        // target through the `Value::clone` method loaded from the dictionary
+                        // parameter. A `None` destination still needs target storage to clone into.
+                        let target =
+                            destination.unwrap_or_else(|| self.alloca_storage(node.span, node.ty));
+                        let source = self.lower_as_place(&self.hir_arena[n.source]);
+                        self.lower_value_clone_via_dictionary(
+                            node.span, dictionary, node.ty, source, target,
+                        );
                     }
                 }
             }
@@ -702,8 +885,8 @@ impl<'a> Emitter<'a> {
                     if destination.is_some() {
                         self.assert_statically_sized(node.ty);
                         let p = self.place_of_local(n.id);
-                        let v = self.insert(ssa::Instruction::load(node.span, p)).unwrap();
-                        self.store_into_if(node.span, v, destination);
+                        let v = self.insert(Instruction::load(node.span, p)).unwrap();
+                        self.store_into_if_needed(node.span, v, destination);
                     }
                 }
                 ResolvedTakeLocalValueMode::CloneBorrowed(_) => {
@@ -712,6 +895,9 @@ impl<'a> Emitter<'a> {
             },
 
             K::StaticApply(n) => {
+                if let Some(intrinsic) = self.uninit_intrinsic(n.function) {
+                    return self.lower_uninit_intrinsic_into(node, n, intrinsic, destination);
+                }
                 if n.ty.returns_place() {
                     return self.lower_place_call_into(node, destination);
                 }
@@ -730,12 +916,12 @@ impl<'a> Emitter<'a> {
 
                 assert_eq!(node.ty, n.ty.ret);
                 arguments.push(destination.unwrap_or_else(|| self.allocate_result(node, &n.ty)));
-                self.insert(ssa::Instruction::call(node.span, f, arguments));
+                self.insert(Instruction::call(node.span, f, arguments));
             }
 
             K::GetDictionary(d) => {
                 let dict = self.lower_dictionary(d);
-                self.store_into_if(node.span, dict, destination);
+                self.store_into_if_needed(node.span, dict, destination);
             }
 
             K::Apply(n) => {
@@ -749,7 +935,7 @@ impl<'a> Emitter<'a> {
                     .map(|arg| self.lower_argument(arg))
                     .collect();
                 arguments.push(destination.unwrap_or_else(|| self.allocate_result(node, &n.ty)));
-                self.insert(ssa::Instruction::call(node.span, f, arguments));
+                self.insert(Instruction::call(node.span, f, arguments));
             }
 
             K::Project(_) => {
@@ -758,8 +944,8 @@ impl<'a> Emitter<'a> {
                 if destination.is_some() {
                     self.assert_statically_sized(node.ty);
                     let fp = self.lower_as_place(node);
-                    let v = self.insert(ssa::Instruction::load(node.span, fp)).unwrap();
-                    self.store_into_if(node.span, v, destination);
+                    let v = self.insert(Instruction::load(node.span, fp)).unwrap();
+                    self.store_into_if_needed(node.span, v, destination);
                 }
             }
 
@@ -793,8 +979,8 @@ impl<'a> Emitter<'a> {
                 // place. Copy it into the destination if one is requested.
                 if destination.is_some() {
                     let p = self.context.extra_parameters[&n.extra_parameter].clone();
-                    let v = self.insert(ssa::Instruction::load(node.span, p)).unwrap();
-                    self.store_into_if(node.span, v, destination);
+                    let v = self.insert(Instruction::load(node.span, p)).unwrap();
+                    self.store_into_if_needed(node.span, v, destination);
                 }
             }
 
@@ -807,7 +993,7 @@ impl<'a> Emitter<'a> {
                 let dictionary = self.lower_as_place(&self.hir_arena[n.dictionary]);
                 let method_ty = Type::function_type(n.ty.clone());
                 let method_place = self
-                    .insert(ssa::Instruction::project(
+                    .insert(Instruction::project(
                         node.span,
                         dictionary,
                         n.entry_index.as_index(),
@@ -815,18 +1001,64 @@ impl<'a> Emitter<'a> {
                     ))
                     .unwrap();
                 let method = self
-                    .insert(ssa::Instruction::load(node.span, method_place))
+                    .insert(Instruction::load(node.span, method_place))
                     .unwrap();
 
                 let mut arguments: Vec<ssa::Value> =
                     n.arguments.iter().map(|a| self.lower_argument(a)).collect();
                 arguments.push(destination.unwrap_or_else(|| self.allocate_result(node, &n.ty)));
-                self.insert(ssa::Instruction::call(node.span, method, arguments));
+                self.insert(Instruction::call(node.span, method, arguments));
             }
 
             // Runtime guards have no SSA representation yet; they lower to nothing.
             K::CheckCallDepth | K::CheckFuel => {}
 
+            K::Tuple(ns) => {
+                let d = destination.expect("ignored tuple construction not yet implemented");
+                let mut values = vec![];
+
+                for (i, n) in ns.iter().enumerate() {
+                    let node = &self.hir_arena[*n];
+                    let f = self
+                        .insert(Instruction::project(
+                            node.span,
+                            d.clone(),
+                            i,
+                            node.ty.clone(),
+                        ))
+                        .unwrap();
+
+                    values.push(self.lower_value_into(&node, Some(f)));
+                }
+            }
+
+            K::Record(ns) => {
+                let d = destination.expect("ignored record construction not yet implemented");
+                let mut values = vec![];
+
+                for (i, n) in ns.iter().enumerate() {
+                    let node = &self.hir_arena[*n];
+                    let f = self
+                        .insert(Instruction::project(
+                            node.span,
+                            d.clone(),
+                            i,
+                            node.ty.clone(),
+                        ))
+                        .unwrap();
+
+                    values.push(self.lower_value_into(&node, Some(f)));
+                }
+            }
+
+            K::Uninit => self.store(
+                node.span,
+                ssa::Value::Uninit(ShownType {
+                    ty: node.ty.clone(),
+                    name: self.show(node.ty),
+                }),
+                destination.expect("discarded uninit construction is not yet implemented"),
+            ),
             _ => {
                 todo!(
                     "lowering is unimplemented for node of kind '{:?}'",
@@ -848,6 +1080,13 @@ impl<'a> Emitter<'a> {
             Some(ssa::Value::Integer(containers::b(Int::from_u32(*n))))
         } else if let Some(n) = native.as_primitive_ty::<i32>() {
             Some(ssa::Value::Integer(containers::b(Int::from_i32(*n))))
+        } else if let Some(x) = native.as_primitive_ty::<Float>() {
+            // A `Float` is always finite and never NaN, so it converts to a `NotNan` infallibly.
+            Some(ssa::Value::Float(
+                NotNan::new(x.into_inner()).expect("a Float is never NaN"),
+            ))
+        } else if let Some(s) = native.as_primitive_ty::<crate::std::string::String>() {
+            Some(ssa::Value::String(s.clone()))
         } else {
             native
                 .as_primitive_ty::<bool>()
@@ -856,7 +1095,7 @@ impl<'a> Emitter<'a> {
     }
 
     /// Inserts `s` at the current insertion point, and returns its result register, if any.
-    fn insert(&mut self, s: ssa::Instruction) -> Option<ssa::Value> {
+    fn insert(&mut self, s: Instruction) -> Option<ssa::Value> {
         let i = match &self.context.point {
             InsertionPoint::End(b) => self.context.function.block_mut(*b).append(s),
         };
