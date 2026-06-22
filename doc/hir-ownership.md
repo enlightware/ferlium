@@ -11,7 +11,7 @@ This document is about source-level ownership semantics and the HIR operations t
 # Values, Places, and Locals
 
 A HIR expression either produces an owned value, denotes a caller-rooted place in existing storage, or drives a scoped yielded place.
-Caller-rooted place-like nodes include `LoadLocal`, projections (`Project`, `ProjectAt`), and call nodes whose `FnType` has `FnReturnConvention::AddressorPlace`.
+Caller-rooted place-like nodes include `LoadLocal`, projections (`Project`, `ProjectAt`), and call nodes whose selected function has `FnReturnConvention::AddressorPlace`.
 SSA must not treat every `LoadLocal` as an owned read: ownership transfer, clone, and copy are explicit HIR operations.
 
 When a place-producing projection or call needs a non-place base, HIR generation stores that base in an explicit owned temporary local first.
@@ -19,7 +19,8 @@ The consumer then uses a normal place rooted at that temporary, and the surround
 
 Addressor-place functions are place-like nodes.
 Native definitions may declare `FnReturnConvention::AddressorPlace` directly, and source subscript members without `yield` infer that convention from their body shape.
-After HIR construction the function type is the source of truth: consumers handle any call node with that convention like a place when a place is required, or materialize it with `CloneValue` when an owned value is required.
+A subscript bundle does not have a `FnType`; each selected `ref` or `mut` member is emitted as a member function whose `FnType` carries the return convention.
+After HIR construction the selected member function type is the source of truth: consumers handle any call node with `AddressorPlace` like a place when a place is required, or materialize it with `CloneValue` when an owned value is required.
 The returned place is an expression-local capability, not a storable reference value.
 HIR must not store a raw place in a local, aggregate, closure capture, or normal value return.
 
