@@ -300,10 +300,47 @@ impl FunctionAstIndex {
     }
 }
 
+/// Index of a subscript in an AST-local subscript list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, new)]
+pub struct SubscriptAstIndex(usize);
+
+impl SubscriptAstIndex {
+    pub fn as_index(self) -> usize {
+        self.0
+    }
+}
+
+/// Index of a member in an AST-local subscript member list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, new)]
+pub struct SubscriptMemberAstIndex(usize);
+
+impl SubscriptMemberAstIndex {
+    pub fn as_index(self) -> usize {
+        self.0
+    }
+}
+
+/// Index of a module implementation body participating in module-level SCCs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ModuleImplementationAstIndex {
+    Function(FunctionAstIndex),
+    SubscriptMember {
+        subscript: SubscriptAstIndex,
+        member: SubscriptMemberAstIndex,
+    },
+}
+
 /// A strongly connected component of AST-local functions.
 #[derive(Debug, Clone)]
 pub struct FunctionScc {
     pub functions: Vec<FunctionAstIndex>,
+    pub recursive: bool,
+}
+
+/// A strongly connected component of AST-local module implementation bodies.
+#[derive(Debug, Clone)]
+pub struct ModuleImplementationScc {
+    pub implementations: Vec<ModuleImplementationAstIndex>,
     pub recursive: bool,
 }
 

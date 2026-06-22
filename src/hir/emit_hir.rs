@@ -21,21 +21,24 @@ use ustr::Ustr;
 use crate::{
     ast::{self, *},
     compiler::{CompilationCapabilities, error::InternalCompilationError},
-    containers::iterable_to_string,
+    containers::{b, iterable_to_string},
     format::FormatWith,
     hir::{self, UNodeArena},
     hir::{
         dictionary::{DictElaborationCtx, ExtraParameters},
         elaboration::elaborate_generated_functions,
-        emit_functions::{EmitFunctionOptions, EmitTraitCtx, emit_functions},
-        emit_subscripts::emit_subscripts,
+        emit_functions::{
+            EmitFunctionInput, EmitFunctionKind, EmitTraitCtx, SubscriptMemberAttachment,
+            emit_functions,
+        },
+        emit_subscripts::{predeclare_subscripts, synthetic_subscript_member_function},
         emit_value_impl::emit_auto_value_impls,
     },
     internal_compilation_error,
     module::{
-        ConcreteTraitImplKey, LocalFunctionId, LocalImplId, Module, ModuleEnv, ModuleFunction,
-        ModuleId, PendingModuleFunction, TraitImpl, UModuleFunction, build_dictionary_value,
-        id::Id,
+        ConcreteTraitImplKey, LocalFunctionId, LocalImplId, LocalSubscriptId, Module, ModuleEnv,
+        ModuleFunction, ModuleId, PendingModuleFunction, TraitImpl, UModuleFunction,
+        build_dictionary_value, id::Id,
     },
     std::value::{
         is_function_surface_only_value_trait_application, is_value_trait_for_function_type,
@@ -423,6 +426,93 @@ pub enum EmitModuleFrom {
     Existing(B<Module>),
 }
 
+enum ModuleImplementationEmission<'a> {
+    Function(&'a ast::DModuleFunction),
+    SubscriptMember {
+        function: B<ast::DModuleFunction>,
+        kind: EmitFunctionKind,
+        attachments: Vec<SubscriptMemberAttachment>,
+    },
+}
+
+impl<'a> ModuleImplementationEmission<'a> {
+    fn input(&'a self) -> EmitFunctionInput<'a> {
+        match self {
+            ModuleImplementationEmission::Function(function) => EmitFunctionInput::normal(function),
+            ModuleImplementationEmission::SubscriptMember {
+                function,
+                kind,
+                attachments,
+            } => EmitFunctionInput {
+                function,
+                kind: *kind,
+                subscript_attachments: attachments,
+            },
+        }
+    }
+
+    fn function(&self) -> &ast::DModuleFunction {
+        match self {
+            ModuleImplementationEmission::Function(function) => function,
+            ModuleImplementationEmission::SubscriptMember { function, .. } => function,
+        }
+    }
+}
+
+fn subscript_member_attachments(
+    subscript_id: LocalSubscriptId,
+    member: &ast::SubscriptMember<ast::Desugared>,
+) -> Vec<SubscriptMemberAttachment> {
+    let mut attachments = Vec::with_capacity(2);
+    if member.mode.ref_member {
+        attachments.push(SubscriptMemberAttachment {
+            subscript_id,
+            is_mut_member: false,
+            span: member.span,
+        });
+    }
+    if member.mode.mut_member {
+        attachments.push(SubscriptMemberAttachment {
+            subscript_id,
+            is_mut_member: true,
+            span: member.span,
+        });
+    }
+    attachments
+}
+
+fn module_implementation_emissions<'a>(
+    source: &'a ast::DModule,
+    subscript_ids: &[LocalSubscriptId],
+    scc: &ast::ModuleImplementationScc,
+) -> Vec<ModuleImplementationEmission<'a>> {
+    scc.implementations
+        .iter()
+        .map(|implementation| match *implementation {
+            ast::ModuleImplementationAstIndex::Function(index) => {
+                ModuleImplementationEmission::Function(&source.functions[index.as_index()])
+            }
+            ast::ModuleImplementationAstIndex::SubscriptMember { subscript, member } => {
+                let subscript_def = &source.subscripts[subscript.as_index()];
+                let member_def = &subscript_def.members[member.as_index()];
+                ModuleImplementationEmission::SubscriptMember {
+                    function: b(synthetic_subscript_member_function(
+                        subscript_def,
+                        member_def,
+                    )),
+                    kind: EmitFunctionKind::SubscriptMember {
+                        requires_mutable_yield: member_def.mode.mut_member,
+                    },
+                    attachments: subscript_member_attachments(
+                        subscript_ids[subscript.as_index()],
+                        member_def,
+                    ),
+                }
+            }
+        })
+        .collect()
+}
+
 /// Emit HIR for the given module.
 /// Optionally merge with an existing module (when compiling std).
 pub fn emit_module(
@@ -588,53 +678,45 @@ pub(crate) fn emit_module_with_capabilities(
 
     emit_auto_value_impls(&mut output, &mut solver_arena, others, &source.impls)?;
 
-    // Process each functions' SCC one by one.
-    for mut scc in sorted_sccs.into_iter().rev() {
-        scc.functions.sort(); // for compatibility due to bug in effect tracking
+    let subscript_ids = predeclare_subscripts(&mut output, &source)?;
 
-        // Extract functions from the SCC.
-        let functions = || {
-            scc.functions
-                .iter()
-                .map(|idx| &source.functions[idx.as_index()])
-        };
+    // Process each implementation SCC one by one.
+    for mut scc in sorted_sccs.into_iter().rev() {
+        // Keep the existing deterministic intra-SCC order used as a compatibility workaround for
+        // effect tracking. Mixed function/subscript-member SCCs are intentionally included here.
+        scc.implementations.sort();
+        let emissions = module_implementation_emissions(&source, &subscript_ids, &scc);
         let recursive_function_names = if scc.recursive {
-            functions().map(|function| function.name.0).collect()
+            emissions
+                .iter()
+                .map(|emission| emission.function().name.0)
+                .collect()
         } else {
             FxHashSet::default()
         };
         if log_enabled!(log::Level::Debug) {
-            let names = functions().map(|f| f.name.0).collect::<Vec<_>>();
+            let names = emissions
+                .iter()
+                .map(|emission| emission.function().name.0)
+                .collect::<Vec<_>>();
             log::debug!(
-                "Processing circularly dependent functions: {}",
+                "Processing circularly dependent implementations: {}",
                 iterable_to_string(names, ", ")
             );
         }
 
-        // Emit the corresponding functions.
+        // Emit the corresponding implementation bodies.
         emit_functions(
             &mut output,
             &mut solver_arena,
-            functions,
+            || emissions.iter().map(ModuleImplementationEmission::input),
             &desugared_arena,
             others,
             None,
             &recursive_function_names,
-            EmitFunctionOptions {
-                capabilities,
-                ..Default::default()
-            },
+            capabilities,
         )?;
     }
-
-    emit_subscripts(
-        &mut output,
-        &mut solver_arena,
-        &source,
-        &desugared_arena,
-        others,
-        capabilities,
-    )?;
 
     // Process trait implementations
     for (imp_idx, imp) in source.impls.iter().enumerate() {
@@ -686,7 +768,7 @@ pub(crate) fn emit_module_with_capabilities(
 
         // Emit the functions.
         debug_assert_eq!(functions.len(), trait_def.methods.len());
-        let functions = || functions.iter().copied();
+        let functions = || functions.iter().copied().map(EmitFunctionInput::normal);
         let trait_ctx = EmitTraitCtx {
             trait_id,
             trait_def,
@@ -715,10 +797,7 @@ pub(crate) fn emit_module_with_capabilities(
             others,
             Some(trait_ctx),
             &recursive_function_names,
-            EmitFunctionOptions {
-                capabilities,
-                ..Default::default()
-            },
+            capabilities,
         )?
         .unwrap();
 

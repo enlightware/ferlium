@@ -514,6 +514,136 @@ fn run_experimental_subscript_source(src: &str) -> ferlium::hir::value::Value {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn module_function_can_use_later_named_subscript() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        fn read(slot: &mut int) -> int {
+            slot->[cell]
+        }
+
+        subscript cell(slot: &mut int) -> int {
+            ref {
+                let local = slot;
+                yield local
+            }
+        }
+
+        let mut slot = 8;
+        read(slot)
+    "# });
+
+    assert_val_eq!(value, int(8));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn module_function_and_subscript_member_can_be_mutually_recursive() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        fn read(slot: &mut int, depth: int) -> int {
+            if depth == 0 {
+                slot
+            } else {
+                slot->[cell](depth - 1)
+            }
+        }
+
+        subscript cell(slot: &mut int, depth: int) -> int {
+            ref {
+                let local = read(slot, depth);
+                yield local
+            }
+        }
+
+        let mut slot = 13;
+        read(slot, 1)
+    "# });
+
+    assert_val_eq!(value, int(13));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn subscript_member_can_depend_on_same_subscript_bundle() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        subscript cell(slot: &mut int, depth: int) -> int {
+            ref {
+                let local = if depth == 0 {
+                    slot
+                } else {
+                    slot->[cell](depth - 1)
+                };
+                yield local
+            }
+        }
+
+        let mut slot = 21;
+        slot->[cell](2)
+    "# });
+
+    assert_val_eq!(value, int(21));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn subscript_members_can_be_mutually_recursive_across_bundles() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        subscript left(slot: &mut int, depth: int) -> int {
+            ref {
+                let local = if depth == 0 {
+                    slot
+                } else {
+                    slot->[right](depth - 1)
+                };
+                yield local
+            }
+        }
+
+        subscript right(slot: &mut int, depth: int) -> int {
+            ref {
+                let local = if depth == 0 {
+                    slot
+                } else {
+                    slot->[left](depth - 1)
+                };
+                yield local
+            }
+        }
+
+        let mut slot = 34;
+        slot->[left](3)
+    "# });
+
+    assert_val_eq!(value, int(34));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn recursive_shared_ref_mut_subscript_member_attaches_for_reads_and_writes() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        subscript cell(slot: &mut int, depth: int, log: &mut int) -> int {
+            ref mut {
+                log = log + 1;
+                let mut local = if depth == 0 {
+                    slot
+                } else {
+                    slot->[cell](depth - 1, log)
+                };
+                yield local;
+                slot = local;
+                log = log + 10
+            }
+        }
+
+        let mut slot = 5;
+        let mut log = 0;
+        slot->[cell](2, log) += 1;
+        (slot, log)
+    "# });
+
+    assert_val_eq!(value, expected_tuple([int(6), int(33)]));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn named_subscript_rvalue_uses_ref_member_and_runs_epilogue() {
     let value = run_experimental_subscript_source(indoc! { r#"
         subscript probe(slot: &mut int, log: &mut int) -> int {

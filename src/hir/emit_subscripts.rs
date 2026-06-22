@@ -7,13 +7,8 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 use crate::{
-    FxHashSet, Location, Modules,
-    ast::{self, DExprArena},
-    compiler::{CompilationCapabilities, error::InternalCompilationError},
-    hir::{
-        NodeArena,
-        emit_functions::{EmitFunctionKind, EmitFunctionOptions, emit_functions},
-    },
+    Location, ast,
+    compiler::error::InternalCompilationError,
     internal_compilation_error,
     module::{
         LocalFunctionId, LocalSubscriptId, Module,
@@ -23,48 +18,16 @@ use crate::{
     types::{mutability::MutType, r#type::FnArgType},
 };
 
-pub(super) fn emit_subscripts(
+pub(super) fn predeclare_subscripts(
     output: &mut Module,
-    solver_arena: &mut NodeArena,
     source: &ast::DModule,
-    desugared_arena: &DExprArena,
-    others: &Modules,
-    capabilities: CompilationCapabilities,
-) -> Result<(), InternalCompilationError> {
+) -> Result<Vec<LocalSubscriptId>, InternalCompilationError> {
+    let mut ids = Vec::with_capacity(source.subscripts.len());
     for subscript in &source.subscripts {
         validate_subscript_members(subscript)?;
-
-        let subscript_id = add_empty_subscript_bundle(output, subscript)?;
-        for member in &subscript.members {
-            let needs_mutable_place = member.mode.mut_member;
-            let suffix = member_function_suffix(member);
-            let synthetic = synthetic_subscript_member_function(subscript, member, suffix);
-            let start_index = output.functions.len();
-            emit_functions(
-                output,
-                solver_arena,
-                || std::iter::once(&synthetic),
-                desugared_arena,
-                others,
-                None,
-                &FxHashSet::default(),
-                EmitFunctionOptions {
-                    capabilities,
-                    kind: EmitFunctionKind::SubscriptMember {
-                        requires_mutable_yield: needs_mutable_place,
-                    },
-                },
-            )?;
-            let member_function = LocalFunctionId::from_index(start_index);
-            if member.mode.ref_member {
-                attach_subscript_member(output, subscript_id, member_function, false, member.span)?;
-            }
-            if member.mode.mut_member {
-                attach_subscript_member(output, subscript_id, member_function, true, member.span)?;
-            }
-        }
+        ids.push(add_empty_subscript_bundle(output, subscript)?);
     }
-    Ok(())
+    Ok(ids)
 }
 
 fn validate_subscript_members(
@@ -136,11 +99,11 @@ fn subscript_signature(
     })
 }
 
-fn synthetic_subscript_member_function(
+pub(super) fn synthetic_subscript_member_function(
     subscript: &ast::DSubscriptDefinition,
     member: &ast::SubscriptMember<ast::Desugared>,
-    suffix: &str,
 ) -> ast::DModuleFunction {
+    let suffix = member_function_suffix(member);
     ast::DModuleFunction {
         visibility: Visibility::Module,
         name: (
@@ -161,11 +124,11 @@ fn synthetic_subscript_member_function(
 
 fn member_function_suffix(member: &ast::SubscriptMember<ast::Desugared>) -> &'static str {
     if member.mode.ref_member && member.mode.mut_member {
-        "$ref_mut"
+        "ref_mut"
     } else if member.mode.ref_member {
-        "$ref"
+        "ref"
     } else {
-        "$mut"
+        "mut"
     }
 }
 
@@ -184,7 +147,7 @@ fn add_empty_subscript_bundle(
     ))
 }
 
-fn attach_subscript_member(
+pub(super) fn attach_subscript_member(
     output: &mut Module,
     subscript_id: LocalSubscriptId,
     function: LocalFunctionId,

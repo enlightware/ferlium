@@ -75,10 +75,12 @@ pub fn desugar_expr_with_empty_ctx(
     modules_used: &mut FxHashSet<ModuleId>,
 ) -> Result<(DExprId, DExprArena), InternalCompilationError> {
     let empty_fn_map = FxHashMap::default();
+    let empty_subscript_map = FxHashMap::default();
     let generic_ty_params = GenericTyParams::default();
     let generic_eff_params = GenericEffParams::default();
     let mut ctx = DesugarCtx::new(
         &empty_fn_map,
+        &empty_subscript_map,
         module_env,
         &generic_ty_params,
         &generic_eff_params,
@@ -189,6 +191,9 @@ pub(crate) fn desugar(
         }
         NamedSubscript(data) => {
             let data = *data;
+            if let Some(member_deps) = ctx.subscript_map.get(&data.name.0) {
+                ctx.fn_deps.extend(member_deps.iter().copied());
+            }
             ExprKind::named_subscript(
                 desugar(
                     data.receiver,

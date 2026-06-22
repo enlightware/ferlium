@@ -882,7 +882,7 @@ impl PModule {
         output: &mut Module,
         others: &Modules,
         parsed_arena: &PExprArena,
-    ) -> Result<(DModule, DExprArena, FnSccs), InternalCompilationError> {
+    ) -> Result<(DModule, DExprArena, ModuleImplementationSccs), InternalCompilationError> {
         // Flatten uses from self and check for conflicts with local definitions.
         let local_names = self.own_symbols().collect();
         let PModule {
@@ -915,24 +915,31 @@ impl PModule {
             .enumerate()
             .map(|(index, func)| (func.name.0, index))
             .collect::<FxHashMap<_, _>>();
+        let subscript_member_nodes = subscript_member_nodes(functions.len(), &subscripts);
+        let subscript_map = subscript_map(&subscripts, &subscript_member_nodes);
+        let module_implementation_indices =
+            module_implementation_indices(functions.len(), &subscript_member_nodes);
         let mut desugared_arena = new_desugared_arena_sized_from_parsed_arena(parsed_arena);
-        let (functions, fn_dep_graph): (_, Vec<_>) = process_results(
-            functions.into_iter().map(|f| {
-                f.desugar(
-                    &fn_map,
-                    &env,
-                    parsed_arena,
-                    &mut desugared_arena,
-                    &mut modules_used,
-                )
-            }),
-            |iter| iter.unzip(),
-        )?;
+        let (functions, function_dep_graph): (Vec<ast::DModuleFunction>, Vec<DepGraphNode>) =
+            process_results(
+                functions.into_iter().map(|f| {
+                    f.desugar(
+                        &fn_map,
+                        &subscript_map,
+                        &env,
+                        parsed_arena,
+                        &mut desugared_arena,
+                        &mut modules_used,
+                    )
+                }),
+                |iter| iter.unzip(),
+            )?;
         let subscripts = subscripts
             .into_iter()
             .map(|s| {
                 s.desugar(
                     &fn_map,
+                    &subscript_map,
                     &env,
                     parsed_arena,
                     &mut desugared_arena,
@@ -940,8 +947,15 @@ impl PModule {
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let sccs = find_strongly_connected_components(&fn_dep_graph);
-        let sorted_sccs = function_sccs(&fn_dep_graph, topological_sort_sccs(&fn_dep_graph, &sccs));
+        let (subscripts, subscript_dep_graphs): (Vec<_>, Vec<_>) = subscripts.into_iter().unzip();
+        let mut impl_dep_graph = function_dep_graph;
+        impl_dep_graph.extend(subscript_dep_graphs.into_iter().flatten());
+        let sccs = find_strongly_connected_components(&impl_dep_graph);
+        let sorted_sccs = module_implementation_sccs(
+            &module_implementation_indices,
+            &impl_dep_graph,
+            topological_sort_sccs(&impl_dep_graph, &sccs),
+        );
 
         // Desugar trait implementations
         let impls = impls
@@ -964,17 +978,73 @@ impl PModule {
     }
 }
 
-fn function_sccs(fn_dep_graph: &[DepGraphNode], sccs: Vec<Vec<usize>>) -> FnSccs {
+fn subscript_member_nodes(
+    function_count: usize,
+    subscripts: &[ast::PSubscriptDefinition],
+) -> Vec<Vec<usize>> {
+    let mut next = function_count;
+    subscripts
+        .iter()
+        .map(|subscript| {
+            subscript
+                .members
+                .iter()
+                .map(|_| {
+                    let index = next;
+                    next += 1;
+                    index
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn subscript_map(
+    subscripts: &[ast::PSubscriptDefinition],
+    subscript_member_nodes: &[Vec<usize>],
+) -> SubscriptMap {
+    let mut map = FxHashMap::default();
+    for (index, subscript) in subscripts.iter().enumerate() {
+        map.entry(subscript.name.0)
+            .or_insert_with(Vec::new)
+            .extend(subscript_member_nodes[index].iter().copied());
+    }
+    map
+}
+
+fn module_implementation_indices(
+    function_count: usize,
+    subscript_member_nodes: &[Vec<usize>],
+) -> Vec<ast::ModuleImplementationAstIndex> {
+    let mut indices = (0..function_count)
+        .map(|index| ast::ModuleImplementationAstIndex::Function(ast::FunctionAstIndex::new(index)))
+        .collect::<Vec<_>>();
+    for (subscript_index, member_nodes) in subscript_member_nodes.iter().enumerate() {
+        indices.extend(member_nodes.iter().enumerate().map(|(member_index, _)| {
+            ast::ModuleImplementationAstIndex::SubscriptMember {
+                subscript: ast::SubscriptAstIndex::new(subscript_index),
+                member: ast::SubscriptMemberAstIndex::new(member_index),
+            }
+        }));
+    }
+    indices
+}
+
+fn module_implementation_sccs(
+    module_implementation_indices: &[ast::ModuleImplementationAstIndex],
+    dep_graph: &[DepGraphNode],
+    sccs: Vec<Vec<usize>>,
+) -> ModuleImplementationSccs {
     sccs.into_iter()
-        .map(|functions| {
-            let recursive = functions.len() > 1
-                || functions
+        .map(|implementations| {
+            let recursive = implementations.len() > 1
+                || implementations
                     .first()
-                    .is_some_and(|index| fn_dep_graph[*index].0.contains(index));
-            ast::FunctionScc {
-                functions: functions
+                    .is_some_and(|index| dep_graph[*index].0.contains(index));
+            ast::ModuleImplementationScc {
+                implementations: implementations
                     .into_iter()
-                    .map(ast::FunctionAstIndex::new)
+                    .map(|index| module_implementation_indices[index])
                     .collect(),
                 recursive,
             }
@@ -1195,6 +1265,7 @@ impl PModuleFunction {
     pub fn desugar(
         self,
         fn_map: &FnMap,
+        subscript_map: &SubscriptMap,
         env: &ModuleEnv<'_>,
         parsed_arena: &PExprArena,
         desugared_arena: &mut DExprArena,
@@ -1203,6 +1274,7 @@ impl PModuleFunction {
         let generic_ty_params = GenericTyParams::default();
         self.desugar_with_ty_params(
             fn_map,
+            subscript_map,
             env,
             &generic_ty_params,
             &GenericEffParams::default(),
@@ -1216,6 +1288,7 @@ impl PModuleFunction {
     pub(crate) fn desugar_with_ty_params(
         self,
         fn_map: &FnMap,
+        subscript_map: &SubscriptMap,
         env: &ModuleEnv<'_>,
         generic_ty_params: &GenericTyParams,
         generic_eff_params: &GenericEffParams,
@@ -1225,6 +1298,7 @@ impl PModuleFunction {
     ) -> Result<(DModuleFunction, DepGraphNode), InternalCompilationError> {
         self.desugar_with_ty_and_eff_params(
             fn_map,
+            subscript_map,
             env,
             generic_ty_params,
             generic_eff_params,
@@ -1238,6 +1312,7 @@ impl PModuleFunction {
     pub(crate) fn desugar_with_ty_and_eff_params(
         self,
         fn_map: &FnMap,
+        subscript_map: &SubscriptMap,
         env: &ModuleEnv<'_>,
         generic_ty_params: &GenericTyParams,
         outer_generic_eff_params: &GenericEffParams,
@@ -1265,6 +1340,7 @@ impl PModuleFunction {
         let locals: Vec<_> = self.args.iter().map(|arg| arg.name.0).collect();
         let mut ctx = DesugarCtx::new_with_locals(
             fn_map,
+            subscript_map,
             locals,
             env,
             &generic_ty_params,
@@ -1380,11 +1456,12 @@ impl ast::PSubscriptDefinition {
     pub fn desugar(
         self,
         fn_map: &FnMap,
+        subscript_map: &SubscriptMap,
         env: &ModuleEnv<'_>,
         parsed_arena: &PExprArena,
         desugared_arena: &mut DExprArena,
         modules_used: &mut FxHashSet<ModuleId>,
-    ) -> Result<ast::DSubscriptDefinition, InternalCompilationError> {
+    ) -> Result<(ast::DSubscriptDefinition, Vec<DepGraphNode>), InternalCompilationError> {
         let generic_ty_params = extend_generic_ty_params(
             &GenericTyParams::default(),
             self.generic_params.type_params(),
@@ -1442,12 +1519,13 @@ impl ast::PSubscriptDefinition {
             modules_used,
         )?;
 
-        let members = self
+        let members_and_deps = self
             .members
             .into_iter()
             .map(|member| {
                 let mut ctx = DesugarCtx::new_with_locals(
                     fn_map,
+                    subscript_map,
                     locals.clone(),
                     env,
                     &generic_ty_params,
@@ -1460,25 +1538,32 @@ impl ast::PSubscriptDefinition {
                     desugared_arena,
                     modules_used,
                 )?;
-                Ok(ast::SubscriptMember {
-                    mode: member.mode,
-                    body,
-                    span: member.span,
-                })
+                Ok((
+                    ast::SubscriptMember {
+                        mode: member.mode,
+                        body,
+                        span: member.span,
+                    },
+                    DepGraphNode(ctx.fn_deps.into_iter().collect()),
+                ))
             })
             .collect::<Result<Vec<_>, InternalCompilationError>>()?;
+        let (members, deps): (Vec<_>, Vec<_>) = members_and_deps.into_iter().unzip();
 
-        Ok(ast::SubscriptDefinition {
-            visibility: self.visibility,
-            name: self.name,
-            generic_params: self.generic_params,
-            args,
-            args_span: self.args_span,
-            ret_ty,
-            where_clause,
-            members,
-            span: self.span,
-            doc: self.doc,
-        })
+        Ok((
+            ast::SubscriptDefinition {
+                visibility: self.visibility,
+                name: self.name,
+                generic_params: self.generic_params,
+                args,
+                args_span: self.args_span,
+                ret_ty,
+                where_clause,
+                members,
+                span: self.span,
+                doc: self.doc,
+            },
+            deps,
+        ))
     }
 }

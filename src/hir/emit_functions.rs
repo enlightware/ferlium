@@ -8,7 +8,7 @@
 //
 use crate::{
     FxHashMap, FxHashSet, Location, Modules,
-    ast::{self, DExprArena, DModuleFunction, DModuleFunctionArg},
+    ast::{self, DExprArena, DModuleFunctionArg},
     compiler::{
         CompilationCapabilities,
         error::{AttributeTarget, InternalCompilationError, InvalidAttributeKind, UnsafeFeature},
@@ -30,9 +30,9 @@ use crate::{
     },
     internal_compilation_error,
     module::{
-        FunctionId, GENERATED_LAMBDA_PREFIX, LocalDecl, LocalDeclId, LocalFunctionId, Module,
-        ModuleEnv, ModuleFunction, ModuleFunctionSpans, ModuleId, PendingFunctionBody,
-        PendingModuleFunction, TraitId, Visibility, id::Id,
+        FunctionId, GENERATED_LAMBDA_PREFIX, LocalDecl, LocalDeclId, LocalFunctionId,
+        LocalSubscriptId, Module, ModuleEnv, ModuleFunction, ModuleFunctionSpans, ModuleId,
+        PendingFunctionBody, PendingModuleFunction, TraitId, Visibility, id::Id,
     },
     std::{STD_MODULE_ID, new_module_using_std},
     types::{
@@ -96,18 +96,36 @@ struct FunctionAttributes {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-pub(super) struct EmitFunctionOptions {
-    pub(super) capabilities: CompilationCapabilities,
-    pub(super) kind: EmitFunctionKind,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
 pub(super) enum EmitFunctionKind {
     #[default]
     Normal,
     SubscriptMember {
         requires_mutable_yield: bool,
     },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct SubscriptMemberAttachment {
+    pub(super) subscript_id: LocalSubscriptId,
+    pub(super) is_mut_member: bool,
+    pub(super) span: Location,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct EmitFunctionInput<'a> {
+    pub(super) function: &'a ast::DModuleFunction,
+    pub(super) kind: EmitFunctionKind,
+    pub(super) subscript_attachments: &'a [SubscriptMemberAttachment],
+}
+
+impl<'a> EmitFunctionInput<'a> {
+    pub(super) fn normal(function: &'a ast::DModuleFunction) -> Self {
+        Self {
+            function,
+            kind: EmitFunctionKind::Normal,
+            subscript_attachments: &[],
+        }
+    }
 }
 
 impl EmitFunctionKind {
@@ -292,13 +310,14 @@ fn default_unconstrained_diverging_returns_to_never<'func, I>(
     ty_inf: &mut UnifiedTypeInference,
     inputs: DivergingReturnDefaultingInputs<'_, I>,
 ) where
-    I: Iterator<Item = &'func DModuleFunction>,
+    I: Iterator<Item = EmitFunctionInput<'func>>,
 {
-    for ((function, id), explicit_root_tys) in inputs
+    for ((input, id), explicit_root_tys) in inputs
         .ast_functions
         .zip(inputs.local_fns.iter())
         .zip(inputs.function_explicit_root_tys.iter())
     {
+        let function = input.function;
         if function.ret_ty.is_some() {
             continue;
         }
@@ -370,10 +389,10 @@ pub(super) fn emit_functions<'a, F, I>(
     others: &Modules,
     trait_ctx: Option<EmitTraitCtx>,
     recursive_function_names: &FxHashSet<Ustr>,
-    options: EmitFunctionOptions,
+    capabilities: CompilationCapabilities,
 ) -> Result<Option<EmitTraitOutput>, InternalCompilationError>
 where
-    I: Iterator<Item = &'a DModuleFunction>,
+    I: Iterator<Item = EmitFunctionInput<'a>>,
     F: Fn() -> I,
 {
     // First pass, populate the function table and allocate fresh mono type variables.
@@ -561,20 +580,23 @@ where
     let mut function_annotation_substs = Vec::new();
     let mut function_explicit_root_tys = Vec::new();
     let mut function_attrs = Vec::new();
-    for ast::ModuleFunction {
-        visibility,
-        name,
-        generic_params,
-        args,
-        args_span,
-        ret_ty,
-        where_clause,
-        attributes,
-        span,
-        doc,
-        ..
-    } in ast_functions()
-    {
+    let mut function_kinds = Vec::new();
+    let mut subscript_attachments: Vec<Vec<SubscriptMemberAttachment>> = Vec::new();
+    for input in ast_functions() {
+        let ast::ModuleFunction {
+            visibility,
+            name,
+            generic_params,
+            args,
+            args_span,
+            ret_ty,
+            where_clause,
+            attributes,
+            span,
+            doc,
+            ..
+        } = input.function;
+        let kind = input.kind;
         // Create type and mutability variables for the arguments.
         // Note: the type quantifiers and constraints are left empty.
         // They will be filled in the second pass.
@@ -654,7 +676,7 @@ where
         let attrs =
             validate_function_attributes(attributes, name.0, output.module_id() == STD_MODULE_ID)?;
         let effects = ty_inf.fresh_effect_var_ty();
-        let return_convention = options.kind.return_convention(attrs);
+        let return_convention = kind.return_convention(attrs);
         let fn_type = FnType::new_with_return_convention(
             args_ty,
             ret_ty_ty,
@@ -721,7 +743,7 @@ where
             let placeholder_id = placeholder_ids[local_fns.len()];
             output.functions[placeholder_id.as_index()] = descr;
             placeholder_id
-        } else if trait_ctx.is_some() || options.kind.force_anonymous() {
+        } else if trait_ctx.is_some() || kind.force_anonymous() {
             output.add_function_anonymous(descr)
         } else if attrs.returns_place {
             output.add_private_unsafe_function(name.0, descr)
@@ -732,6 +754,20 @@ where
         function_annotation_substs.push(annotation_subst);
         function_explicit_root_tys.push(explicit_root_tys);
         function_attrs.push(attrs);
+        function_kinds.push(kind);
+        subscript_attachments.push(input.subscript_attachments.to_vec());
+    }
+
+    for (attachment, id) in subscript_attachments.iter().zip(local_fns.iter()) {
+        for attachment in attachment {
+            super::emit_subscripts::attach_subscript_member(
+                output,
+                attachment.subscript_id,
+                *id,
+                attachment.is_mut_member,
+                attachment.span,
+            )?;
+        }
     }
 
     // Associated lambdas for functions emitted while lowering closure expressions.
@@ -741,19 +777,21 @@ where
 
     let recursive_function_ids = ast_functions()
         .zip(local_fns.iter())
-        .filter_map(|(function, id)| {
+        .filter_map(|(input, id)| {
             recursive_function_names
-                .contains(&function.name.0)
+                .contains(&input.function.name.0)
                 .then_some(FunctionId::Local(*id))
         })
         .collect::<FxHashSet<_>>();
 
     // Second pass, infer types and emit function bodies.
-    for (((function, id), annotation_subst), attrs) in ast_functions()
+    for ((((input, id), annotation_subst), attrs), kind) in ast_functions()
         .zip(local_fns.iter())
         .zip(function_annotation_substs.iter())
         .zip(function_attrs.iter())
+        .zip(function_kinds.iter().copied())
     {
+        let function = input.function;
         let descr = output.get_function_by_id(*id).unwrap();
         let module_env = ModuleEnv::new(output, others);
         let mut new_import_slots = vec![];
@@ -782,7 +820,7 @@ where
             desugared_arena,
             &mut fn_arena,
         );
-        ty_env.compilation_capabilities = options.capabilities;
+        ty_env.compilation_capabilities = capabilities;
         if descr
             .definition
             .ty_scheme
@@ -793,15 +831,13 @@ where
             ty_env.yield_context = Some(crate::types::typing_env::YieldTypingContext::new(
                 expected_ret_ty,
                 expected_span,
-                options.kind.requires_mutable_yield(),
+                kind.requires_mutable_yield(),
             ));
         }
         let mut fn_node_id = ty_inf.check_expr(
             &mut ty_env,
             function.body,
-            options
-                .kind
-                .body_expected_ty(descr.definition.ty_scheme.ty.ret),
+            kind.body_expected_ty(descr.definition.ty_scheme.ty.ret),
             MutType::constant(),
             expected_span,
         )?;
@@ -1336,10 +1372,11 @@ where
 
         // For each function: filter constraints, check unbounds, finalize type scheme.
         let mut used_constraints: FxHashSet<PubTypeConstraintPtr> = FxHashSet::default();
-        for ((function, id), explicit_root_tys) in ast_functions()
+        for ((input, id), explicit_root_tys) in ast_functions()
             .zip(local_fns.iter())
             .zip(function_explicit_root_tys.iter())
         {
+            let function = input.function;
             let descr = &output.functions[id.as_index()];
             let pending = pending_functions
                 .get(id)

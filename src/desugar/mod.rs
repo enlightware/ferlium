@@ -58,8 +58,10 @@ impl crate::graph::Node for DepGraphNode {
 }
 
 pub type FnSccs = Vec<ast::FunctionScc>;
+pub type ModuleImplementationSccs = Vec<ast::ModuleImplementationScc>;
 
 type FnMap = FxHashMap<Ustr, usize>;
+type SubscriptMap = FxHashMap<Ustr, Vec<usize>>;
 type FnDeps = FxHashSet<usize>;
 type GenericTyParams = FxHashMap<Ustr, TypeVar>;
 type GenericEffParams = FxHashMap<Ustr, EffectVar>;
@@ -105,6 +107,8 @@ fn desugar_fn_effects(
 struct DesugarCtx<'a> {
     /// All functions in the current module, set empty if we are not in a module
     fn_map: &'a FnMap,
+    /// All subscript member implementation nodes for each named subscript in the current module.
+    subscript_map: &'a SubscriptMap,
     /// Indices from fn_map's keys that are used in this expression
     fn_deps: FnDeps,
     /// Locals for desugaring and function dependencies collection
@@ -122,12 +126,14 @@ struct DesugarCtx<'a> {
 impl<'a> DesugarCtx<'a> {
     fn new(
         fn_map: &'a FnMap,
+        subscript_map: &'a SubscriptMap,
         module_env: &'a ModuleEnv<'a>,
         generic_ty_params: &'a GenericTyParams,
         generic_eff_params: &'a GenericEffParams,
     ) -> Self {
         Self {
             fn_map,
+            subscript_map,
             fn_deps: FxHashSet::default(),
             locals: Vec::new(),
             module_env,
@@ -138,6 +144,7 @@ impl<'a> DesugarCtx<'a> {
     }
     fn new_with_locals(
         fn_map: &'a FnMap,
+        subscript_map: &'a SubscriptMap,
         locals: Vec<Ustr>,
         module_env: &'a ModuleEnv<'a>,
         generic_ty_params: &'a GenericTyParams,
@@ -145,6 +152,7 @@ impl<'a> DesugarCtx<'a> {
     ) -> Self {
         Self {
             fn_map,
+            subscript_map,
             fn_deps: FxHashSet::default(),
             locals,
             module_env,
