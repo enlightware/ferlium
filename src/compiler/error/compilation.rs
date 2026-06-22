@@ -420,6 +420,162 @@ impl InvalidAttributeKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscriptMemberRole {
+    Ref,
+    Mut,
+}
+
+impl SubscriptMemberRole {
+    pub fn keyword(self) -> &'static str {
+        match self {
+            Self::Ref => "ref",
+            Self::Mut => "mut",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvalidSubscriptDefinitionKind {
+    EmptyBundle,
+    DuplicateMember(SubscriptMemberRole),
+    SharedMemberCombinedWithSeparateMembers,
+    ParameterMissingType,
+    DuplicateAttachedMember,
+    ScopedMemberMustYieldExactlyOnce,
+    AddressorMustReturnExplicitly,
+    AddressorReturnMustBePlace,
+    AddressorReturnMustBeCallerRooted,
+    AddressorReturnMustBeRootedInBaseParameter,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscriptDefinitionSubject {
+    Subscript(Ustr),
+    SubscriptMember(Ustr),
+    AddressorFunction(Option<Ustr>),
+}
+
+impl SubscriptDefinitionSubject {
+    fn description(self) -> String {
+        match self {
+            Self::Subscript(name) => format!("Subscript `{name}`"),
+            Self::SubscriptMember(name) => format!("Subscript `{name}` member"),
+            Self::AddressorFunction(Some(name)) => format!("Addressor function `{name}`"),
+            Self::AddressorFunction(None) => "This addressor function".into(),
+        }
+    }
+}
+
+impl InvalidSubscriptDefinitionKind {
+    pub fn message(self, subject: SubscriptDefinitionSubject) -> String {
+        let subject = subject.description();
+        match self {
+            Self::EmptyBundle => {
+                format!("{subject} must define at least one `ref`, `mut`, or `ref mut` member")
+            }
+            Self::DuplicateMember(role) => {
+                format!(
+                    "{subject} defines more than one `{}` member",
+                    role.keyword()
+                )
+            }
+            Self::SharedMemberCombinedWithSeparateMembers => {
+                format!(
+                    "{subject} uses a `ref mut` member, so it cannot also define separate `ref` or `mut` members"
+                )
+            }
+            Self::ParameterMissingType => {
+                format!("{subject} parameters must have explicit types")
+            }
+            Self::DuplicateAttachedMember => {
+                format!("{subject} has a duplicate generated member attachment")
+            }
+            Self::ScopedMemberMustYieldExactlyOnce => {
+                format!("{subject} must contain exactly one `yield`")
+            }
+            Self::AddressorMustReturnExplicitly => {
+                format!("{subject} must return explicitly")
+            }
+            Self::AddressorReturnMustBePlace => {
+                format!("{subject} must return a place")
+            }
+            Self::AddressorReturnMustBeCallerRooted => {
+                format!("{subject} must return a place rooted in caller storage")
+            }
+            Self::AddressorReturnMustBeRootedInBaseParameter => {
+                format!("{subject} must return a place derived from its first parameter")
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvalidSubscriptUseKind {
+    ExperimentalFeatureNotEnabled,
+    UnknownSubscript,
+    MissingMember(SubscriptMemberRole),
+}
+
+impl InvalidSubscriptUseKind {
+    pub fn message(self, name: Ustr) -> String {
+        match self {
+            Self::ExperimentalFeatureNotEnabled => {
+                format!(
+                    "Named subscript access `{name}` is experimental; enable experimental features to use it"
+                )
+            }
+            Self::UnknownSubscript => format!("Unknown named subscript `{name}`"),
+            Self::MissingMember(role) => {
+                format!(
+                    "Named subscript `{name}` has no `{}` member",
+                    role.keyword()
+                )
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvalidYieldKind {
+    OutsideSubscriptMember,
+    NotAPlace,
+    NotAccessorOwned,
+}
+
+impl InvalidYieldKind {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::OutsideSubscriptMember => "yield is only supported inside subscript members",
+            Self::NotAPlace => "yield expression must be a place",
+            Self::NotAccessorOwned => {
+                "yield expression must be rooted in storage owned by the subscript member"
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnsupportedSubscriptFeatureKind {
+    YieldInsideLoop,
+    YieldInNonBlockStructuredControlFlow,
+    MultipleMutableSubscriptArguments,
+}
+
+impl UnsupportedSubscriptFeatureKind {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::YieldInsideLoop => "yield inside a loop is not supported yet",
+            Self::YieldInNonBlockStructuredControlFlow => {
+                "yield in subscript members must be directly inside block-structured code"
+            }
+            Self::MultipleMutableSubscriptArguments => {
+                "passing more than one named subscript as mutable arguments in one call is not supported yet"
+            }
+        }
+    }
+}
+
 /// A scope of error messages, either internal within the compiler, or external for users.
 pub trait Scope: Sized {
     type Type: Debug + Clone;
@@ -929,6 +1085,24 @@ pub enum CompilationErrorImpl<S: Scope> {
         scope: ast::Path,
         variable: Ustr,
         cause: PropertyAccess,
+        span: Location,
+    },
+    InvalidSubscriptDefinition {
+        subject: SubscriptDefinitionSubject,
+        kind: InvalidSubscriptDefinitionKind,
+        span: Location,
+    },
+    InvalidSubscriptUse {
+        name: Ustr,
+        kind: InvalidSubscriptUseKind,
+        span: Location,
+    },
+    InvalidYield {
+        kind: InvalidYieldKind,
+        span: Location,
+    },
+    UnsupportedSubscriptFeature {
+        kind: UnsupportedSubscriptFeatureKind,
         span: Location,
     },
     Unsupported {
@@ -1792,6 +1966,22 @@ impl FormatWith<SourceTable> for CompilationError {
                     variable
                 )
             }
+            InvalidSubscriptDefinition {
+                subject,
+                kind,
+                span,
+            } => {
+                write!(f, "{} in {}", kind.message(*subject), fmt_span(span))
+            }
+            InvalidSubscriptUse { name, kind, span } => {
+                write!(f, "{} in {}", kind.message(*name), fmt_span(span))
+            }
+            InvalidYield { kind, span } => {
+                write!(f, "{} in {}", kind.message(), fmt_span(span))
+            }
+            UnsupportedSubscriptFeature { kind, span } => {
+                write!(f, "Unsupported: {} in {}", kind.message(), fmt_span(span))
+            }
             Unsupported { span, reason } => {
                 write!(f, "Unsupported: {} in {}", reason, fmt_span(span))
             }
@@ -2418,6 +2608,22 @@ impl CompilationError {
                 cause,
                 span,
             }),
+            InvalidSubscriptDefinition {
+                subject,
+                kind,
+                span,
+            } => compilation_error!(InvalidSubscriptDefinition {
+                subject,
+                kind,
+                span
+            }),
+            InvalidSubscriptUse { name, kind, span } => {
+                compilation_error!(InvalidSubscriptUse { name, kind, span })
+            }
+            InvalidYield { kind, span } => compilation_error!(InvalidYield { kind, span }),
+            UnsupportedSubscriptFeature { kind, span } => {
+                compilation_error!(UnsupportedSubscriptFeature { kind, span })
+            }
             Unsupported { span, reason } => compilation_error!(Unsupported { span, reason }),
             /*UnresolvedImport {
                 function_path,

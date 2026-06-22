@@ -13,8 +13,10 @@ use crate::{
         PatternKind, PatternVar, PropertyAccess, RecordField, RecordFields, UnnamedArg, UstrSpan,
     },
     compiler::error::{
-        DuplicatedFieldContext, InternalCompilationError, InvalidLoopControlKind, LoopControlKind,
-        UnsafeFeature, WhatIsNotAProductType, WhichProductTypeIsNot,
+        DuplicatedFieldContext, InternalCompilationError, InvalidLoopControlKind,
+        InvalidSubscriptDefinitionKind, InvalidSubscriptUseKind, InvalidYieldKind, LoopControlKind,
+        SubscriptDefinitionSubject, SubscriptMemberRole, UnsafeFeature,
+        UnsupportedSubscriptFeatureKind, WhatIsNotAProductType, WhichProductTypeIsNot,
     },
     containers::{SVec2, b, continuous_hashmap_to_vec},
     format::FormatWith,
@@ -1017,9 +1019,13 @@ impl TypeInference {
                 let effects = env.ir_arena[node_id].effects.clone();
                 let return_value = if env.expected_return_convention.returns_place() {
                     if ty != Type::never() && !node_is_place_reference(env.ir_arena, node_id) {
-                        return Err(internal_compilation_error!(Unsupported {
+                        return Err(internal_compilation_error!(InvalidSubscriptDefinition {
+                            subject: env.subscript_member_name.map_or(
+                                SubscriptDefinitionSubject::AddressorFunction(env.function_name),
+                                SubscriptDefinitionSubject::SubscriptMember,
+                            ),
+                            kind: InvalidSubscriptDefinitionKind::AddressorReturnMustBePlace,
                             span: sp(*expr),
-                            reason: "addressor return expression must be a place".into(),
                         }));
                     }
                     node_id
@@ -1035,15 +1041,15 @@ impl TypeInference {
             }
             Yield(expr) => {
                 if !env.loop_frames.is_empty() {
-                    return Err(internal_compilation_error!(Unsupported {
+                    return Err(internal_compilation_error!(UnsupportedSubscriptFeature {
+                        kind: UnsupportedSubscriptFeatureKind::YieldInsideLoop,
                         span: expr_span,
-                        reason: "yield inside a loop is not supported".into(),
                     }));
                 }
                 let Some(yield_context) = &env.yield_context else {
-                    return Err(internal_compilation_error!(Unsupported {
+                    return Err(internal_compilation_error!(InvalidYield {
+                        kind: InvalidYieldKind::OutsideSubscriptMember,
                         span: expr_span,
-                        reason: "yield is only supported inside subscript members".into(),
                     }));
                 };
                 let expected_ty = yield_context.expected_ty;
@@ -1053,9 +1059,9 @@ impl TypeInference {
                 let ty = env.ir_arena[node_id].ty;
                 let operand_span = env.ir_arena[node_id].span;
                 if ty != Type::never() && !node_is_place_reference(env.ir_arena, node_id) {
-                    return Err(internal_compilation_error!(Unsupported {
+                    return Err(internal_compilation_error!(InvalidYield {
+                        kind: InvalidYieldKind::NotAPlace,
                         span: operand_span,
-                        reason: "yield expression must be a place".into(),
                     }));
                 }
                 self.add_same_type_with_sub_effects_constraint(
@@ -1976,14 +1982,14 @@ impl TypeInference {
 
     fn ensure_named_subscript_access_allowed(
         env: &TypingEnv,
+        name: Ustr,
         span: Location,
     ) -> Result<(), InternalCompilationError> {
         if !env.compilation_capabilities.allow_experimental {
-            return Err(internal_compilation_error!(Unsupported {
+            return Err(internal_compilation_error!(InvalidSubscriptUse {
+                name,
+                kind: InvalidSubscriptUseKind::ExperimentalFeatureNotEnabled,
                 span,
-                reason:
-                    "named subscript access is experimental; enable experimental features to use it"
-                        .into(),
             }));
         }
         Ok(())
@@ -2137,9 +2143,10 @@ impl TypeInference {
         mode: SubscriptAccessMode,
     ) -> Result<SubscriptMember, InternalCompilationError> {
         let Some(subscript) = env.module_env.current.get_subscript(data.name.0) else {
-            return Err(internal_compilation_error!(Unsupported {
+            return Err(internal_compilation_error!(InvalidSubscriptUse {
+                name: data.name.0,
+                kind: InvalidSubscriptUseKind::UnknownSubscript,
                 span: data.name.1,
-                reason: format!("unknown named subscript `{}`", data.name.0),
             }));
         };
         let member = match mode {
@@ -2147,16 +2154,14 @@ impl TypeInference {
             SubscriptAccessMode::Mut => subscript.mut_member.as_ref(),
         };
         member.cloned().ok_or_else(|| {
-            let member_name = match mode {
-                SubscriptAccessMode::Ref => "ref",
-                SubscriptAccessMode::Mut => "mut",
+            let role = match mode {
+                SubscriptAccessMode::Ref => SubscriptMemberRole::Ref,
+                SubscriptAccessMode::Mut => SubscriptMemberRole::Mut,
             };
-            internal_compilation_error!(Unsupported {
+            internal_compilation_error!(InvalidSubscriptUse {
+                name: data.name.0,
+                kind: InvalidSubscriptUseKind::MissingMember(role),
                 span: data.name.1,
-                reason: format!(
-                    "named subscript `{}` has no {member_name} member",
-                    data.name.0
-                ),
             })
         })
     }
@@ -2194,7 +2199,7 @@ impl TypeInference {
         expr_span: Location,
         receiver_override: Option<NamedSubscriptReceiverOverride>,
     ) -> Result<PreparedNamedSubscriptAccessor, InternalCompilationError> {
-        Self::ensure_named_subscript_access_allowed(env, expr_span)?;
+        Self::ensure_named_subscript_access_allowed(env, data.name.0, expr_span)?;
         let member = self.named_subscript_member(env, data, mode)?;
         let function_data = env
             .module_env
@@ -2917,11 +2922,9 @@ impl TypeInference {
                 continue;
             };
             if found.is_some() {
-                return Err(internal_compilation_error!(Unsupported {
+                return Err(internal_compilation_error!(UnsupportedSubscriptFeature {
+                    kind: UnsupportedSubscriptFeatureKind::MultipleMutableSubscriptArguments,
                     span: data.name.1,
-                    reason:
-                        "passing more than one named subscript as mutable arguments in one call is not supported yet"
-                            .into(),
                 }));
             }
             found = Some((index, (**data).clone()));

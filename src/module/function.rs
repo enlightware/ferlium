@@ -12,7 +12,9 @@
 use crate::{
     Location,
     ast::UstrSpan,
-    compiler::error::InternalCompilationError,
+    compiler::error::{
+        InternalCompilationError, InvalidSubscriptDefinitionKind, SubscriptDefinitionSubject,
+    },
     containers::b,
     define_id_type,
     format::FormatWith,
@@ -472,6 +474,8 @@ define_id_type!(
 /// A local function whose body has not yet been elaborated into final HIR.
 #[derive(Debug, Clone)]
 pub struct PendingModuleFunction {
+    pub name: Option<Ustr>,
+    pub subscript_member_name: Option<Ustr>,
     pub definition: FunctionDefinition,
     pub code: PendingScriptFunction,
     pub spans: Option<ModuleFunctionSpans>,
@@ -564,7 +568,19 @@ impl PendingModuleFunction {
         spans: Option<ModuleFunctionSpans>,
         locals: Vec<ULocalDecl>,
     ) -> Self {
+        Self::new_with_name(None, definition, code, spans, locals)
+    }
+
+    pub fn new_with_name(
+        name: Option<Ustr>,
+        definition: FunctionDefinition,
+        code: PendingScriptFunction,
+        spans: Option<ModuleFunctionSpans>,
+        locals: Vec<ULocalDecl>,
+    ) -> Self {
         Self {
+            name,
+            subscript_member_name: None,
             definition,
             code,
             spans,
@@ -579,12 +595,29 @@ impl PendingModuleFunction {
         spans: Option<ModuleFunctionSpans>,
         locals: Vec<ULocalDecl>,
     ) -> Self {
-        Self::new(
+        Self::from_body_with_name(None, definition, body, runtime_arg_count, spans, locals)
+    }
+
+    pub(crate) fn from_body_with_name(
+        name: Option<Ustr>,
+        definition: FunctionDefinition,
+        body: PendingFunctionBody,
+        runtime_arg_count: usize,
+        spans: Option<ModuleFunctionSpans>,
+        locals: Vec<ULocalDecl>,
+    ) -> Self {
+        Self::new_with_name(
+            name,
             definition,
             body.into_script_function(runtime_arg_count),
             spans,
             locals,
         )
+    }
+
+    pub(crate) fn with_subscript_member_name(mut self, subscript_name: Ustr) -> Self {
+        self.subscript_member_name = Some(subscript_name);
+        self
     }
 
     pub fn assign_local_slots(&mut self) {
@@ -624,9 +657,10 @@ impl PendingModuleFunction {
             .collect::<Result<Vec<_>, _>>()?;
         if self.definition.returns_place() {
             if self.code.arena[root].ty != Type::never() {
-                return Err(internal_compilation_error!(Unsupported {
+                return Err(internal_compilation_error!(InvalidSubscriptDefinition {
+                    subject: self.subscript_definition_subject(),
+                    kind: InvalidSubscriptDefinitionKind::AddressorMustReturnExplicitly,
                     span: self.code.arena[root].span,
-                    reason: "addressor-place functions must return explicitly".into(),
                 }));
             }
             let visible_arg_count = self.definition.arg_names.len();
@@ -643,7 +677,12 @@ impl PendingModuleFunction {
                         .expect("runtime argument count should include visible arguments"),
                 )
             };
-            check_place_return_roots(&self.code.arena, root, base_parameter_index)?;
+            check_place_return_roots(
+                &self.code.arena,
+                root,
+                base_parameter_index,
+                self.subscript_definition_subject(),
+            )?;
         }
         check_borrows(&self.code.arena, root)?;
         let elaborated = elaborate_hir(&self.code.arena, root, dst_arena, ctx, &self.locals)?;
@@ -664,6 +703,13 @@ impl PendingModuleFunction {
             locals,
         );
         Ok((function, elaborated))
+    }
+
+    fn subscript_definition_subject(&self) -> SubscriptDefinitionSubject {
+        self.subscript_member_name.map_or(
+            SubscriptDefinitionSubject::AddressorFunction(self.name),
+            SubscriptDefinitionSubject::SubscriptMember,
+        )
     }
 }
 

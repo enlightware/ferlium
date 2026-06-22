@@ -11,7 +11,10 @@ use super::harness::{TestSession, expected_tuple, int, string};
 use ferlium::{
     SourceId,
     ast::{PExprKind, SubscriptMemberMode},
-    compiler::error::{CompilationErrorImpl, RuntimeErrorKind},
+    compiler::error::{
+        CompilationErrorImpl, InvalidSubscriptDefinitionKind, InvalidYieldKind, RuntimeErrorKind,
+        SubscriptDefinitionSubject, UnsupportedSubscriptFeatureKind,
+    },
     module::{YieldProvenance, id::Id},
     parse_module_and_expr,
     std::math::int_type,
@@ -318,7 +321,7 @@ fn addressor_subscript_rejects_direct_by_value_parameter_root() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn addressor_subscript_rejects_owned_local_return_root() {
-    assert_experimental_compile_error_reason(
+    assert_invalid_subscript_definition(
         indoc! { r#"
             subscript cell(value: int) -> int {
                 ref {
@@ -327,14 +330,15 @@ fn addressor_subscript_rejects_owned_local_return_root() {
                 }
             }
         "# },
-        "addressor rooted in the base parameter",
+        SubscriptDefinitionSubject::SubscriptMember(ustr("cell")),
+        InvalidSubscriptDefinitionKind::AddressorReturnMustBeRootedInBaseParameter,
     );
 }
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn addressor_subscript_rejects_addressor_rooted_in_owned_local() {
-    assert_experimental_compile_error_reason(
+    assert_invalid_subscript_definition(
         indoc! { r#"
             subscript first(values: &mut [int]) -> int {
                 ref {
@@ -343,14 +347,15 @@ fn addressor_subscript_rejects_addressor_rooted_in_owned_local() {
                 }
             }
         "# },
-        "addressor rooted in the base parameter",
+        SubscriptDefinitionSubject::SubscriptMember(ustr("first")),
+        InvalidSubscriptDefinitionKind::AddressorReturnMustBeRootedInBaseParameter,
     );
 }
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn addressor_subscript_rejects_addressor_rooted_in_non_base_parameter() {
-    assert_experimental_compile_error_reason(
+    assert_invalid_subscript_definition(
         indoc! { r#"
             subscript first(first_values: &mut [int], values: &mut [int]) -> int {
                 ref {
@@ -358,14 +363,15 @@ fn addressor_subscript_rejects_addressor_rooted_in_non_base_parameter() {
                 }
             }
         "# },
-        "addressor rooted in the base parameter",
+        SubscriptDefinitionSubject::SubscriptMember(ustr("first")),
+        InvalidSubscriptDefinitionKind::AddressorReturnMustBeRootedInBaseParameter,
     );
 }
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn addressor_subscript_rejects_generic_parameter_return_root() {
-    assert_experimental_compile_error_reason(
+    assert_invalid_subscript_definition(
         indoc! { r#"
             subscript cell<A>(value: A) -> A {
                 ref {
@@ -373,14 +379,15 @@ fn addressor_subscript_rejects_generic_parameter_return_root() {
                 }
             }
         "# },
-        "addressor rooted in the base parameter",
+        SubscriptDefinitionSubject::SubscriptMember(ustr("cell")),
+        InvalidSubscriptDefinitionKind::AddressorReturnMustBeRootedInBaseParameter,
     );
 }
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn addressor_subscript_rejects_implicit_tail_return() {
-    assert_experimental_compile_error_reason(
+    assert_invalid_subscript_definition(
         indoc! { r#"
             subscript first(values: &mut [int]) -> int {
                 ref {
@@ -388,21 +395,23 @@ fn addressor_subscript_rejects_implicit_tail_return() {
                 }
             }
         "# },
-        "must return explicitly",
+        SubscriptDefinitionSubject::SubscriptMember(ustr("first")),
+        InvalidSubscriptDefinitionKind::AddressorMustReturnExplicitly,
     );
 }
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn addressor_subscript_rejects_empty_member_body() {
-    assert_experimental_compile_error_reason(
+    assert_invalid_subscript_definition(
         indoc! { r#"
             subscript cell() -> () {
                 ref {
                 }
             }
         "# },
-        "must return explicitly",
+        SubscriptDefinitionSubject::SubscriptMember(ustr("cell")),
+        InvalidSubscriptDefinitionKind::AddressorMustReturnExplicitly,
     );
 }
 
@@ -565,17 +574,17 @@ fn rejects_yield_inside_user_closure() {
         "# })
         .into_inner()
     {
-        CompilationErrorImpl::Unsupported { reason, .. } => {
-            assert!(reason.contains("yield is only supported inside subscript members"));
+        CompilationErrorImpl::InvalidYield { kind, .. } => {
+            assert_eq!(kind, InvalidYieldKind::OutsideSubscriptMember);
         }
-        other => panic!("expected unsupported yield error, got {other:?}"),
+        other => panic!("expected invalid yield error, got {other:?}"),
     }
 }
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn rejects_yield_inside_closure_nested_in_subscript_member() {
-    assert_experimental_compile_error_reason(
+    assert_invalid_yield(
         indoc! { r#"
             subscript cell(value: int) -> int {
                 ref {
@@ -584,7 +593,7 @@ fn rejects_yield_inside_closure_nested_in_subscript_member() {
                 }
             }
         "# },
-        "yield is only supported inside subscript members",
+        InvalidYieldKind::OutsideSubscriptMember,
     );
 }
 
@@ -712,15 +721,35 @@ fn assert_experimental_compile_error(src: &str) {
     assert!(experimental_session().try_compile(src).is_err());
 }
 
-fn assert_experimental_compile_error_reason(src: &str, expected_reason: &str) {
+fn assert_invalid_subscript_definition(
+    src: &str,
+    expected_subject: SubscriptDefinitionSubject,
+    expected_kind: InvalidSubscriptDefinitionKind,
+) {
     match experimental_session().fail_compilation(src).into_inner() {
-        CompilationErrorImpl::Unsupported { reason, .. } => {
-            assert!(
-                reason.contains(expected_reason),
-                "expected reason to contain `{expected_reason}`, got `{reason}`"
-            );
+        CompilationErrorImpl::InvalidSubscriptDefinition { subject, kind, .. } => {
+            assert_eq!(subject, expected_subject);
+            assert_eq!(kind, expected_kind);
         }
-        other => panic!("expected unsupported compile error, got {other:?}"),
+        other => panic!("expected invalid subscript definition error, got {other:?}"),
+    }
+}
+
+fn assert_invalid_yield(src: &str, expected_kind: InvalidYieldKind) {
+    match experimental_session().fail_compilation(src).into_inner() {
+        CompilationErrorImpl::InvalidYield { kind, .. } => {
+            assert_eq!(kind, expected_kind);
+        }
+        other => panic!("expected invalid yield error, got {other:?}"),
+    }
+}
+
+fn assert_unsupported_subscript_feature(src: &str, expected_kind: UnsupportedSubscriptFeatureKind) {
+    match experimental_session().fail_compilation(src).into_inner() {
+        CompilationErrorImpl::UnsupportedSubscriptFeature { kind, .. } => {
+            assert_eq!(kind, expected_kind);
+        }
+        other => panic!("expected unsupported subscript feature error, got {other:?}"),
     }
 }
 
@@ -943,7 +972,7 @@ fn named_subscript_can_be_passed_as_mutable_function_argument() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn rejects_multiple_named_subscripts_as_mutable_function_arguments() {
-    assert_experimental_compile_error_reason(
+    assert_unsupported_subscript_feature(
         indoc! { r#"
             fn add_to_both(first: &mut int, second: &mut int) {
                 first = first + 1;
@@ -962,7 +991,7 @@ fn rejects_multiple_named_subscripts_as_mutable_function_arguments() {
             let mut second = 2;
             add_to_both(first->[cell], second->[cell])
         "# },
-        "more than one named subscript as mutable arguments",
+        UnsupportedSubscriptFeatureKind::MultipleMutableSubscriptArguments,
     );
 }
 

@@ -8,7 +8,10 @@
 //
 use crate::{
     Location, ast,
-    compiler::error::InternalCompilationError,
+    compiler::error::{
+        InternalCompilationError, InvalidSubscriptDefinitionKind, SubscriptDefinitionSubject,
+        SubscriptMemberRole,
+    },
     internal_compilation_error,
     module::{
         LocalFunctionId, LocalSubscriptId, Module,
@@ -34,9 +37,10 @@ fn validate_subscript_members(
     subscript: &ast::DSubscriptDefinition,
 ) -> Result<(), InternalCompilationError> {
     if subscript.members.is_empty() {
-        return Err(internal_compilation_error!(Unsupported {
+        return Err(internal_compilation_error!(InvalidSubscriptDefinition {
+            subject: SubscriptDefinitionSubject::Subscript(subscript.name.0),
+            kind: InvalidSubscriptDefinitionKind::EmptyBundle,
             span: subscript.span,
-            reason: "subscript must define at least one member".into(),
         }));
     }
 
@@ -44,26 +48,28 @@ fn validate_subscript_members(
     let mut mut_member_seen = false;
     for member in &subscript.members {
         if member.mode.ref_member && member.mode.mut_member && subscript.members.len() > 1 {
-            return Err(internal_compilation_error!(Unsupported {
+            return Err(internal_compilation_error!(InvalidSubscriptDefinition {
+                subject: SubscriptDefinitionSubject::Subscript(subscript.name.0),
+                kind: InvalidSubscriptDefinitionKind::SharedMemberCombinedWithSeparateMembers,
                 span: member.span,
-                reason: "`ref mut` subscript member cannot be combined with separate `ref` or `mut` members"
-                    .into(),
             }));
         }
         if member.mode.ref_member {
             if ref_member_seen {
-                return Err(internal_compilation_error!(Unsupported {
+                return Err(internal_compilation_error!(InvalidSubscriptDefinition {
+                    subject: SubscriptDefinitionSubject::Subscript(subscript.name.0),
+                    kind: InvalidSubscriptDefinitionKind::DuplicateMember(SubscriptMemberRole::Ref,),
                     span: member.span,
-                    reason: "duplicate `ref` subscript member".into(),
                 }));
             }
             ref_member_seen = true;
         }
         if member.mode.mut_member {
             if mut_member_seen {
-                return Err(internal_compilation_error!(Unsupported {
+                return Err(internal_compilation_error!(InvalidSubscriptDefinition {
+                    subject: SubscriptDefinitionSubject::Subscript(subscript.name.0),
+                    kind: InvalidSubscriptDefinitionKind::DuplicateMember(SubscriptMemberRole::Mut,),
                     span: member.span,
-                    reason: "duplicate `mut` subscript member".into(),
                 }));
             }
             mut_member_seen = true;
@@ -80,9 +86,10 @@ fn subscript_signature(
         .iter()
         .map(|arg| {
             let Some((mut_ty, ty, _span)) = arg.ty else {
-                return Err(internal_compilation_error!(Unsupported {
+                return Err(internal_compilation_error!(InvalidSubscriptDefinition {
+                    subject: SubscriptDefinitionSubject::Subscript(subscript.name.0),
+                    kind: InvalidSubscriptDefinitionKind::ParameterMissingType,
                     span: arg.name.1,
-                    reason: "subscript parameters must have explicit types".into(),
                 }));
             };
             Ok(FnArgType::new(ty, mut_ty.unwrap_or_else(MutType::constant)))
@@ -159,6 +166,7 @@ pub(super) fn attach_subscript_member(
         function,
         provenance,
     };
+    let subscript_name = output.get_subscript_name_by_id(subscript_id);
     let subscript = output
         .subscripts
         .get_mut(subscript_id.as_index())
@@ -169,9 +177,13 @@ pub(super) fn attach_subscript_member(
         &mut subscript.ref_member
     };
     if slot.is_some() {
-        return Err(internal_compilation_error!(Unsupported {
+        return Err(internal_compilation_error!(InvalidSubscriptDefinition {
+            subject: subscript_name.map_or(
+                SubscriptDefinitionSubject::AddressorFunction(None),
+                SubscriptDefinitionSubject::Subscript,
+            ),
+            kind: InvalidSubscriptDefinitionKind::DuplicateAttachedMember,
             span,
-            reason: "duplicate subscript member".into(),
         }));
     }
     *slot = Some(member);

@@ -558,6 +558,18 @@ impl Module {
         })
     }
 
+    /// Get a local subscript name by ID (slow, iterates over the def table).
+    pub fn get_subscript_name_by_id(&self, id: LocalSubscriptId) -> Option<Ustr> {
+        self.def_table
+            .iter()
+            .find(|(def, _)| {
+                def.kind
+                    .as_subscript()
+                    .is_some_and(|subscript| *subscript == id)
+            })
+            .and_then(|(_, name)| *name)
+    }
+
     /// Get a local function by ID
     pub fn get_function_by_id(&self, id: LocalFunctionId) -> Option<&ModuleFunction> {
         self.functions.get(id.as_index())

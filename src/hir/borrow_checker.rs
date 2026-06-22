@@ -10,7 +10,10 @@ use ustr::Ustr;
 
 use crate::{
     Location,
-    compiler::error::InternalCompilationError,
+    compiler::error::{
+        InternalCompilationError, InvalidSubscriptDefinitionKind, InvalidYieldKind,
+        SubscriptDefinitionSubject,
+    },
     hir::{CallArgument, Node, NodeArena, NodeId, NodeKind},
     internal_compilation_error,
     module::{LocalDeclId, ULocalDecl, id::Id},
@@ -177,8 +180,9 @@ pub fn check_place_return_roots(
     arena: &NodeArena,
     node_id: NodeId,
     base_parameter_index: Option<usize>,
+    subject: SubscriptDefinitionSubject,
 ) -> Result<(), InternalCompilationError> {
-    check_place_return_roots_in_node(arena, node_id, base_parameter_index)
+    check_place_return_roots_in_node(arena, node_id, base_parameter_index, subject)
 }
 
 pub fn check_yield_roots(
@@ -214,9 +218,9 @@ fn check_yield_root(
     }
 
     let Some(origin) = returned_place_origin(arena, node_id) else {
-        return Err(internal_compilation_error!(Unsupported {
+        return Err(internal_compilation_error!(InvalidYield {
+            kind: InvalidYieldKind::NotAccessorOwned,
             span: arena[node_id].span,
-            reason: "yield expression must be rooted in accessor-owned storage".into(),
         }));
     };
 
@@ -229,9 +233,9 @@ fn check_yield_root(
             Ok(())
         }
         PlaceOrigin::Direct(_) | PlaceOrigin::Addressor(_) => {
-            Err(internal_compilation_error!(Unsupported {
+            Err(internal_compilation_error!(InvalidYield {
+                kind: InvalidYieldKind::NotAccessorOwned,
                 span: arena[node_id].span,
-                reason: "yield expression must be rooted in accessor-owned storage".into(),
             }))
         }
     }
@@ -241,13 +245,14 @@ fn check_place_return_roots_in_node(
     arena: &NodeArena,
     node_id: NodeId,
     base_parameter_index: Option<usize>,
+    subject: SubscriptDefinitionSubject,
 ) -> Result<(), InternalCompilationError> {
     let node = &arena[node_id];
     if let NodeKind::Return(value) = &node.kind {
-        check_place_return_root(arena, *value, base_parameter_index)?;
+        check_place_return_root(arena, *value, base_parameter_index, subject)?;
     }
     for child in node.kind.child_node_ids() {
-        check_place_return_roots_in_node(arena, child, base_parameter_index)?;
+        check_place_return_roots_in_node(arena, child, base_parameter_index, subject)?;
     }
     Ok(())
 }
@@ -256,15 +261,17 @@ fn check_place_return_root(
     arena: &NodeArena,
     node_id: NodeId,
     base_parameter_index: Option<usize>,
+    subject: SubscriptDefinitionSubject,
 ) -> Result<(), InternalCompilationError> {
     if arena[node_id].ty == Type::never() {
         return Ok(());
     }
 
     let Some(origin) = returned_place_origin(arena, node_id) else {
-        return Err(internal_compilation_error!(Unsupported {
+        return Err(internal_compilation_error!(InvalidSubscriptDefinition {
+            subject,
+            kind: InvalidSubscriptDefinitionKind::AddressorReturnMustBeCallerRooted,
             span: arena[node_id].span,
-            reason: "addressor return expression must be rooted in caller storage".into(),
         }));
     };
 
@@ -273,11 +280,10 @@ fn check_place_return_root(
             Ok(())
         }
         PlaceOrigin::Direct(_) | PlaceOrigin::Addressor(_) => {
-            Err(internal_compilation_error!(Unsupported {
+            Err(internal_compilation_error!(InvalidSubscriptDefinition {
+                subject,
+                kind: InvalidSubscriptDefinitionKind::AddressorReturnMustBeRootedInBaseParameter,
                 span: arena[node_id].span,
-                reason:
-                    "addressor return expression must come from an addressor rooted in the base parameter"
-                        .into(),
             }))
         }
     }

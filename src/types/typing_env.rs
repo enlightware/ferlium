@@ -143,6 +143,12 @@ pub struct TypingEnv<'m> {
     pub(crate) expected_return_ty: Option<(Type, Location)>,
     /// The return convention of the enclosing function.
     pub(crate) expected_return_convention: FnReturnConvention,
+    /// Source or synthetic name of the function currently being inferred.
+    #[new(default)]
+    pub(crate) function_name: Option<Ustr>,
+    /// Source subscript name when the current function is a subscript member.
+    #[new(default)]
+    pub(crate) subscript_member_name: Option<Ustr>,
     /// The substitution to use for explicit generic parameters in current annotations.
     pub(crate) annotation_subst: Option<&'m InstSubst>,
     /// The active loop frames, used for type-checking loop control flow.

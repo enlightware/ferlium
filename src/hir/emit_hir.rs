@@ -592,6 +592,7 @@ fn module_implementation_emissions<'a>(
                         member_def,
                     )),
                     kind: EmitFunctionKind::SubscriptMember {
+                        subscript_name: subscript_def.name.0,
                         provenance,
                         requires_mutable_yield: member_def.mode.mut_member,
                     },

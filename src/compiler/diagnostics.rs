@@ -117,6 +117,10 @@ pub(crate) fn diagnostics_from_error(
         }
         | UnsafeFeatureUseNotAllowed { span, .. }
         | InvalidLoopControl { span, .. }
+        | InvalidSubscriptDefinition { span, .. }
+        | InvalidSubscriptUse { span, .. }
+        | InvalidYield { span, .. }
+        | UnsupportedSubscriptFeature { span, .. }
         | Unsupported { span, .. }
         | ReturnOutsideFunction { span }
         | CircularImportDependency { span, .. }

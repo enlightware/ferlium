@@ -11,7 +11,11 @@ use crate::{
     ast::{self, DExprArena, DModuleFunctionArg},
     compiler::{
         CompilationCapabilities,
-        error::{AttributeTarget, InternalCompilationError, InvalidAttributeKind, UnsafeFeature},
+        error::{
+            AttributeTarget, InternalCompilationError, InvalidAttributeKind,
+            InvalidSubscriptDefinitionKind, SubscriptDefinitionSubject, UnsafeFeature,
+            UnsupportedSubscriptFeatureKind,
+        },
     },
     containers::{SVec2, b},
     format::FormatWith,
@@ -99,6 +103,7 @@ pub(super) enum EmitFunctionKind {
     #[default]
     Normal,
     SubscriptMember {
+        subscript_name: Ustr,
         provenance: YieldProvenance,
         requires_mutable_yield: bool,
     },
@@ -168,6 +173,7 @@ impl EmitFunctionKind {
             EmitFunctionKind::SubscriptMember {
                 provenance: YieldProvenance::YieldedOnce,
                 requires_mutable_yield,
+                ..
             } => requires_mutable_yield,
             EmitFunctionKind::SubscriptMember {
                 provenance: YieldProvenance::AddressorPlace,
@@ -824,6 +830,10 @@ where
             desugared_arena,
             &mut fn_arena,
         );
+        ty_env.function_name = Some(function.name.0);
+        if let EmitFunctionKind::SubscriptMember { subscript_name, .. } = kind {
+            ty_env.subscript_member_name = Some(subscript_name);
+        }
         ty_env.compilation_capabilities = capabilities;
         if descr
             .definition
@@ -861,18 +871,25 @@ where
             .requires_yield_driver()
             && yield_node_id.is_none()
         {
-            return Err(internal_compilation_error!(Unsupported {
+            return Err(internal_compilation_error!(InvalidSubscriptDefinition {
+                subject: match kind {
+                    EmitFunctionKind::SubscriptMember { subscript_name, .. } => {
+                        SubscriptDefinitionSubject::SubscriptMember(subscript_name)
+                    }
+                    EmitFunctionKind::Normal => {
+                        SubscriptDefinitionSubject::AddressorFunction(Some(function.name.0))
+                    }
+                },
+                kind: InvalidSubscriptDefinitionKind::ScopedMemberMustYieldExactlyOnce,
                 span: function.span,
-                reason: "subscript member bodies must contain exactly one yield".into(),
             }));
         }
         if let Some(yield_node_id) = yield_node_id
             && !yield_path_is_block_structured(&fn_arena, fn_node_id, yield_node_id)
         {
-            return Err(internal_compilation_error!(Unsupported {
+            return Err(internal_compilation_error!(UnsupportedSubscriptFeature {
+                kind: UnsupportedSubscriptFeatureKind::YieldInNonBlockStructuredControlFlow,
                 span: fn_arena[yield_node_id].span,
-                reason: "yield in subscript members must be directly inside block-structured code"
-                    .into(),
             }));
         }
         fn_node_id = wrap_body_with_call_depth_check_if_recursive(
@@ -899,13 +916,17 @@ where
             &fn_arena[fn_node_id].effects,
             &descr.definition.ty_scheme.ty.effects,
         );
-        let pending = PendingModuleFunction::from_body(
+        let mut pending = PendingModuleFunction::from_body_with_name(
+            Some(function.name.0),
             descr.definition.clone(),
             PendingFunctionBody::new(fn_arena, fn_node_id).with_yield_node_id(yield_node_id),
             descr.definition.arg_names.len(),
             descr.spans.clone(),
             locals,
         );
+        if let EmitFunctionKind::SubscriptMember { subscript_name, .. } = kind {
+            pending = pending.with_subscript_member_name(subscript_name);
+        }
         set_pending_function(output, &mut pending_functions, *id, pending);
         output.import_fn_slots.extend(new_import_slots);
         output.type_deps.extend(new_type_deps);

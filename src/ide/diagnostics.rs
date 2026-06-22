@@ -802,6 +802,22 @@ pub(super) fn compilation_error_to_data(
                 format!("Unknown property `{scope}.{variable}`"),
             )]
         }
+        InvalidSubscriptDefinition {
+            subject,
+            kind,
+            span,
+        } => {
+            vec![error_data_from_location(span, kind.message(*subject))]
+        }
+        InvalidSubscriptUse { name, kind, span } => {
+            vec![error_data_from_location(span, kind.message(*name))]
+        }
+        InvalidYield { kind, span } => {
+            vec![error_data_from_location(span, kind.message().to_string())]
+        }
+        UnsupportedSubscriptFeature { kind, span } => {
+            vec![error_data_from_location(span, kind.message().to_string())]
+        }
         Unsupported { span, reason } => vec![error_data_from_location(span, reason.to_string())],
         CircularImportDependency {
             origin,
