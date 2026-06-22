@@ -947,6 +947,111 @@ fn array_index_receiver_can_drive_addressor_subscript() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn yielded_subscript_result_field_can_be_assigned_by_mutable_consumer() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        subscript first(items: &mut [{other: int, value: int}], log: &mut int) -> {other: int, value: int} {
+            ref mut {
+                log = log + 1;
+                let mut local = items[0];
+                yield local;
+                items[0] = local;
+                log = log + 10
+            }
+        }
+
+        let mut items = [{value: 5, other: 8}];
+        let mut log = 0;
+        items->[first](log).value = 13;
+        (items[0].value, items[0].other, log)
+    "# });
+
+    assert_val_eq!(value, expected_tuple([int(13), int(8), int(11)]));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn yielded_subscript_result_field_compound_assignment_uses_single_projection() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        subscript first(items: &mut [{other: int, value: int}], log: &mut int) -> {other: int, value: int} {
+            ref mut {
+                log = log + 1;
+                let mut local = items[0];
+                yield local;
+                items[0] = local;
+                log = log + 10
+            }
+        }
+
+        let mut items = [{value: 5, other: 8}];
+        let mut log = 0;
+        items->[first](log).value += 2;
+        (items[0].value, items[0].other, log)
+    "# });
+
+    assert_val_eq!(value, expected_tuple([int(7), int(8), int(11)]));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn field_receiver_can_drive_yielded_subscript_and_index() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        subscript row(rows: &mut [[int]], index: int, log: &mut int) -> [int] {
+            ref mut {
+                log = log + 1;
+                let mut local = rows[index];
+                yield local;
+                rows[index] = local;
+                log = log + 10
+            }
+        }
+
+        let mut table = {rows: [[1, 2], [3, 4]], tag: 99};
+        let mut log = 0;
+        table.rows->[row](0, log)[1] += 10;
+        (table.rows[0][0], table.rows[0][1], table.rows[1][0], table.tag, log)
+    "# });
+
+    assert_val_eq!(
+        value,
+        expected_tuple([int(1), int(12), int(3), int(99), int(11)])
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn named_subscripts_separated_by_field_unwind_lifo() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        subscript outer(holder: &mut {other: int, slot: int}, log: &mut int) -> {other: int, slot: int} {
+            mut {
+                log = log * 10 + 1;
+                let mut local = holder;
+                yield local;
+                holder = local;
+                log = log * 10 + 2
+            }
+        }
+
+        subscript inner(slot: &mut int, log: &mut int) -> int {
+            mut {
+                log = log * 10 + 3;
+                let mut local = slot;
+                yield local;
+                slot = local;
+                log = log * 10 + 4
+            }
+        }
+
+        let mut holder = {slot: 5, other: 8};
+        let mut log = 0;
+        holder->[outer](log).slot->[inner](log) += 2;
+        (holder.slot, holder.other, log)
+    "# });
+
+    assert_val_eq!(value, expected_tuple([int(7), int(8), int(1342)]));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn named_subscript_can_be_passed_as_mutable_function_argument() {
     let value = run_experimental_subscript_source(indoc! { r#"
         fn bump(slot: &mut int) {
@@ -967,6 +1072,33 @@ fn named_subscript_can_be_passed_as_mutable_function_argument() {
     "# });
 
     assert_val_eq!(value, int(6));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn named_subscript_field_can_be_passed_as_mutable_function_argument() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        fn bump(slot: &mut int) {
+            slot = slot + 1
+        }
+
+        subscript cell(holder: &mut {other: int, slot: int}, log: &mut int) -> {other: int, slot: int} {
+            ref mut {
+                log = log + 1;
+                let mut local = holder;
+                yield local;
+                holder = local;
+                log = log + 10
+            }
+        }
+
+        let mut holder = {slot: 5, other: 8};
+        let mut log = 0;
+        bump(holder->[cell](log).slot);
+        (holder.slot, holder.other, log)
+    "# });
+
+    assert_val_eq!(value, expected_tuple([int(6), int(8), int(11)]));
 }
 
 #[test]

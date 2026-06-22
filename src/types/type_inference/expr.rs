@@ -136,6 +136,8 @@ pub struct TypeInference {
     /// Memoised results of `TrivialCopy` solver probes keyed by the queried concrete type.
     /// `TraitSolverProbe::from_module` clones the module's impl table on every call, so this cache avoids re-cloning when the same type is checked repeatedly during a single inference pass.
     trivial_copy_cache: FxHashMap<Type, bool>,
+    /// Memoised by AST expression to avoid re-walking subscript-free access chains at each suffix level.
+    access_chain_contains_named_subscript_cache: FxHashMap<DExprId, bool>,
     next_loop_id: LoopId,
 }
 
@@ -206,18 +208,32 @@ struct NamedSubscriptReceiverOverride {
 }
 
 #[derive(Clone, Debug)]
-enum NamedSubscriptPlaceStep {
+enum AccessChainStep {
+    Field {
+        name: UstrSpan,
+        base_span: Location,
+        expr_span: Location,
+    },
     Index {
         index: DExprId,
         array_span: Location,
         expr_span: Location,
     },
+    NamedSubscript {
+        data: ast::NamedSubscriptData<Desugared>,
+    },
+    Project {
+        index: (usize, Location),
+        base_span: Location,
+        expr_span: Location,
+    },
 }
 
 #[derive(Clone, Debug)]
-struct NamedSubscriptPlace {
-    root: ast::NamedSubscriptData<Desugared>,
-    steps: Vec<NamedSubscriptPlaceStep>,
+struct AccessChain {
+    root: DExprId,
+    steps: Vec<AccessChainStep>,
+    first_named_span: Location,
 }
 
 type WithYieldedBodyBuilder<'a> = Box<
@@ -697,6 +713,11 @@ impl TypeInference {
         let expr = &env.ast_arena[expr_id];
         let expr_span = expr.span;
         let sp = |id: DExprId| env.ast_arena[id].span;
+        if Self::is_access_chain_expr(&expr.kind)
+            && let Some(chain) = self.access_chain_containing_named_subscript(env, expr_id)
+        {
+            return self.infer_access_chain_read(env, chain, expr_span);
+        }
         let (node, ty, mut_ty, effects) = match &expr.kind {
             Literal(value, ty) => (
                 K::Immediate(value.clone()),
@@ -1226,8 +1247,8 @@ impl TypeInference {
                     }
                 }
             }
-            NamedSubscript(data) => {
-                return self.infer_named_subscript_read(env, data, expr_span);
+            NamedSubscript(_) => {
+                unreachable!("named subscript reads are handled by access-chain interception")
             }
             Block(exprs) => {
                 assert!(!exprs.is_empty());
@@ -1269,17 +1290,8 @@ impl TypeInference {
                 (node, ty, MutType::constant(), effects)
             }
             Assign(data) => {
-                if let ExprKind::NamedSubscript(subscript) = &env.ast_arena[data.place].kind {
-                    return self.infer_named_subscript_assign(
-                        env,
-                        subscript,
-                        data.sign_span,
-                        data.value,
-                        expr_span,
-                    );
-                }
-                if let Some(place) = self.named_subscript_place(env, data.place) {
-                    return self.infer_named_subscript_place_assign(
+                if let Some(place) = self.access_chain_containing_named_subscript(env, data.place) {
+                    return self.infer_access_chain_assign(
                         env,
                         place,
                         data.sign_span,
@@ -1372,18 +1384,8 @@ impl TypeInference {
                 }
             }
             AssignOp(data) => {
-                if let ExprKind::NamedSubscript(subscript) = &env.ast_arena[data.place].kind {
-                    return self.infer_named_subscript_assign_op(
-                        env,
-                        subscript,
-                        data.sign_span,
-                        &data.op_path,
-                        data.value,
-                        expr_span,
-                    );
-                }
-                if let Some(place) = self.named_subscript_place(env, data.place) {
-                    return self.infer_named_subscript_place_assign_op(
+                if let Some(place) = self.access_chain_containing_named_subscript(env, data.place) {
+                    return self.infer_access_chain_assign_op(
                         env,
                         place,
                         data.sign_span,
@@ -2172,22 +2174,104 @@ impl TypeInference {
             .collect()
     }
 
-    fn named_subscript_place(&self, env: &TypingEnv, expr: DExprId) -> Option<NamedSubscriptPlace> {
+    fn is_access_chain_expr(expr: &ExprKind<Desugared>) -> bool {
+        matches!(
+            expr,
+            ExprKind::FieldAccess(_)
+                | ExprKind::Index(_)
+                | ExprKind::NamedSubscript(_)
+                | ExprKind::Project(_)
+        )
+    }
+
+    fn access_chain_contains_named_subscript(&mut self, env: &TypingEnv, expr: DExprId) -> bool {
+        if let Some(contains) = self
+            .access_chain_contains_named_subscript_cache
+            .get(&expr)
+            .copied()
+        {
+            return contains;
+        }
+
+        let contains = match &env.ast_arena[expr].kind {
+            ExprKind::NamedSubscript(_) => true,
+            ExprKind::FieldAccess(data) => {
+                self.access_chain_contains_named_subscript(env, data.expr)
+            }
+            ExprKind::Index(data) => self.access_chain_contains_named_subscript(env, data.array),
+            ExprKind::Project(data) => self.access_chain_contains_named_subscript(env, data.expr),
+            _ => false,
+        };
+        self.access_chain_contains_named_subscript_cache
+            .insert(expr, contains);
+        contains
+    }
+
+    fn access_chain_containing_named_subscript(
+        &mut self,
+        env: &TypingEnv,
+        expr: DExprId,
+    ) -> Option<AccessChain> {
+        if !self.access_chain_contains_named_subscript(env, expr) {
+            return None;
+        }
+
+        let mut steps = Vec::new();
+        let mut first_named_span = None;
+        let root = self.collect_access_chain_steps(env, expr, &mut steps, &mut first_named_span);
+        first_named_span.map(|first_named_span| AccessChain {
+            root,
+            steps,
+            first_named_span,
+        })
+    }
+
+    fn collect_access_chain_steps(
+        &self,
+        env: &TypingEnv,
+        expr: DExprId,
+        steps: &mut Vec<AccessChainStep>,
+        first_named_span: &mut Option<Location>,
+    ) -> DExprId {
         match &env.ast_arena[expr].kind {
-            ExprKind::NamedSubscript(data) => Some(NamedSubscriptPlace {
-                root: (**data).clone(),
-                steps: Vec::new(),
-            }),
+            ExprKind::FieldAccess(data) => {
+                let root = self.collect_access_chain_steps(env, data.expr, steps, first_named_span);
+                steps.push(AccessChainStep::Field {
+                    name: data.name,
+                    base_span: env.ast_arena[data.expr].span,
+                    expr_span: env.ast_arena[expr].span,
+                });
+                root
+            }
             ExprKind::Index(data) => {
-                let mut place = self.named_subscript_place(env, data.array)?;
-                place.steps.push(NamedSubscriptPlaceStep::Index {
+                let root =
+                    self.collect_access_chain_steps(env, data.array, steps, first_named_span);
+                steps.push(AccessChainStep::Index {
                     index: data.index,
                     array_span: env.ast_arena[data.array].span,
                     expr_span: env.ast_arena[expr].span,
                 });
-                Some(place)
+                root
             }
-            _ => None,
+            ExprKind::NamedSubscript(data) => {
+                let root =
+                    self.collect_access_chain_steps(env, data.receiver, steps, first_named_span);
+                first_named_span.get_or_insert(data.name.1);
+                steps.push(AccessChainStep::NamedSubscript {
+                    data: (**data).clone(),
+                });
+                root
+            }
+            ExprKind::Project(data) => {
+                let root = self.collect_access_chain_steps(env, data.expr, steps, first_named_span);
+                steps.push(AccessChainStep::Project {
+                    index: data.index,
+                    base_span: env.ast_arena[data.expr].span,
+                    expr_span: env.ast_arena[expr].span,
+                });
+                root
+            }
+            _ => expr,
         }
     }
 
@@ -2368,67 +2452,6 @@ impl TypeInference {
         env.cur_locals.truncate(env_size);
     }
 
-    fn infer_named_subscript_with_yielded_body(
-        &mut self,
-        env: &mut TypingEnv,
-        data: &ast::NamedSubscriptData<Desugared>,
-        mode: SubscriptAccessMode,
-        expr_span: Location,
-        build_body: impl FnOnce(
-            &mut Self,
-            &mut TypingEnv,
-            NodeId,
-            Type,
-        ) -> Result<(NodeId, Type), InternalCompilationError>,
-    ) -> Result<(NodeId, MutType), InternalCompilationError> {
-        self.infer_named_subscript_with_yielded_body_boxed(
-            env,
-            data,
-            mode,
-            expr_span,
-            Box::new(build_body),
-        )
-    }
-
-    fn infer_named_subscript_with_yielded_body_boxed(
-        &mut self,
-        env: &mut TypingEnv,
-        data: &ast::NamedSubscriptData<Desugared>,
-        mode: SubscriptAccessMode,
-        expr_span: Location,
-        build_body: WithYieldedBodyBuilder<'_>,
-    ) -> Result<(NodeId, MutType), InternalCompilationError> {
-        if mode == SubscriptAccessMode::Mut
-            && let ExprKind::NamedSubscript(receiver) = &env.ast_arena[data.receiver].kind.clone()
-        {
-            return self.infer_named_subscript_with_yielded_body_boxed(
-                env,
-                receiver,
-                SubscriptAccessMode::Mut,
-                expr_span,
-                Box::new(move |this, env, receiver_node, receiver_ty| {
-                    let (node, _) = this.infer_named_subscript_with_yielded_body_with_receiver(
-                        env,
-                        data,
-                        mode,
-                        expr_span,
-                        Some(NamedSubscriptReceiverOverride {
-                            node: receiver_node,
-                            ty: receiver_ty,
-                            mut_ty: MutType::mutable(),
-                        }),
-                        build_body,
-                    )?;
-                    Ok((node, env.ir_arena[node].ty))
-                }),
-            );
-        }
-
-        self.infer_named_subscript_with_yielded_body_with_receiver(
-            env, data, mode, expr_span, None, build_body,
-        )
-    }
-
     fn infer_named_subscript_with_yielded_body_with_receiver(
         &mut self,
         env: &mut TypingEnv,
@@ -2484,10 +2507,92 @@ impl TypeInference {
         Ok((node, MutType::constant()))
     }
 
-    fn infer_named_subscript_place_with_body(
+    fn infer_field_from_record_node(
         &mut self,
         env: &mut TypingEnv,
-        place: NamedSubscriptPlace,
+        record_node_id: NodeId,
+        record_mut: MutType,
+        base_span: Location,
+        name: UstrSpan,
+        expr_span: Location,
+    ) -> Result<(NodeId, Type, MutType), InternalCompilationError> {
+        let effects = env.ir_arena[record_node_id].effects.clone();
+        let record_node_ty = env.ir_arena[record_node_id].ty;
+        if record_node_ty == Type::never() {
+            let node =
+                self.alloc_diverging_prefix_node(env, vec![record_node_id], effects, expr_span);
+            return Ok((node, Type::never(), MutType::constant()));
+        }
+
+        let record_ty = self.fresh_type_var_ty();
+        let (field, field_span) = name;
+        self.add_pub_constraint(PubTypeConstraint::new_have_trait(
+            repr_trait_id(env),
+            vec![record_node_ty],
+            vec![record_ty],
+            vec![],
+            field_span,
+        ));
+        let element_ty = self.fresh_type_var_ty();
+        self.add_pub_constraint(PubTypeConstraint::new_record_field_is(
+            record_ty, base_span, field, field_span, element_ty,
+        ));
+        let node = env.ir_arena.alloc(hir::Node::new(
+            NodeKind::FieldAccess(HirFieldAccess::new(record_node_id, field)),
+            element_ty,
+            effects,
+            expr_span,
+        ));
+        Ok((node, element_ty, record_mut))
+    }
+
+    fn infer_project_from_tuple_node(
+        &mut self,
+        env: &mut TypingEnv,
+        tuple_node_id: NodeId,
+        tuple_mut: MutType,
+        base_span: Location,
+        index: (usize, Location),
+        expr_span: Location,
+    ) -> Result<(NodeId, Type, MutType), InternalCompilationError> {
+        let effects = env.ir_arena[tuple_node_id].effects.clone();
+        let tuple_node_ty = env.ir_arena[tuple_node_id].ty;
+        if tuple_node_ty == Type::never() {
+            let node =
+                self.alloc_diverging_prefix_node(env, vec![tuple_node_id], effects, expr_span);
+            return Ok((node, Type::never(), MutType::constant()));
+        }
+
+        let tuple_ty = self.fresh_type_var_ty();
+        let (index, index_span) = index;
+        self.add_pub_constraint(PubTypeConstraint::new_have_trait(
+            repr_trait_id(env),
+            vec![tuple_node_ty],
+            vec![tuple_ty],
+            vec![],
+            index_span,
+        ));
+        let element_ty = self.fresh_type_var_ty();
+        self.add_pub_constraint(PubTypeConstraint::new_tuple_at_index_is(
+            tuple_ty, base_span, index, index_span, element_ty,
+        ));
+        let node = env.ir_arena.alloc(hir::Node::new(
+            NodeKind::Project(HirProject::new(
+                tuple_node_id,
+                ProjectionIndex::from_index(index),
+            )),
+            element_ty,
+            effects,
+            expr_span,
+        ));
+        Ok((node, element_ty, tuple_mut))
+    }
+
+    fn infer_access_chain_with_body(
+        &mut self,
+        env: &mut TypingEnv,
+        place: AccessChain,
+        mode: SubscriptAccessMode,
         expr_span: Location,
         build_body: impl FnOnce(
             &mut Self,
@@ -2496,90 +2601,146 @@ impl TypeInference {
             Type,
         ) -> Result<(NodeId, Type), InternalCompilationError>,
     ) -> Result<(NodeId, MutType), InternalCompilationError> {
-        self.infer_named_subscript_with_yielded_body(
+        let (root_node, root_mut) = self.infer_expr(env, place.root)?;
+        let root_ty = env.ir_arena[root_node].ty;
+        self.infer_access_chain_steps_with_body(
             env,
-            &place.root,
-            SubscriptAccessMode::Mut,
+            &place.steps,
+            0,
+            root_node,
+            root_ty,
+            root_mut,
+            mode,
             expr_span,
-            move |this, env, mut place_node, mut place_ty| {
-                let mut place_mut = MutType::mutable();
-                for step in place.steps {
-                    match step {
-                        NamedSubscriptPlaceStep::Index {
-                            index,
-                            array_span,
-                            expr_span,
-                        } => {
-                            let (indexed_node, indexed_ty, indexed_mut) = this
-                                .infer_index_from_array_node(
-                                    env, place_node, place_mut, array_span, index, expr_span,
-                                )?;
-                            place_node = indexed_node;
-                            place_ty = indexed_ty;
-                            place_mut = indexed_mut;
-                        }
-                    }
-                }
-                build_body(this, env, place_node, place_ty)
-            },
+            Box::new(build_body),
         )
     }
 
-    fn infer_named_subscript_place_assign(
+    #[allow(clippy::too_many_arguments)]
+    fn infer_access_chain_steps_with_body<'a>(
         &mut self,
         env: &mut TypingEnv,
-        place: NamedSubscriptPlace,
-        sign_span: Location,
-        value: DExprId,
+        steps: &'a [AccessChainStep],
+        step_index: usize,
+        place_node: NodeId,
+        place_ty: Type,
+        place_mut: MutType,
+        mode: SubscriptAccessMode,
         expr_span: Location,
+        build_body: WithYieldedBodyBuilder<'a>,
     ) -> Result<(NodeId, MutType), InternalCompilationError> {
-        self.infer_named_subscript_place_with_body(
-            env,
-            place,
-            expr_span,
-            |this, env, place, place_ty| {
-                Ok((
-                    this.infer_assign_to_place(env, place, place_ty, value, sign_span, expr_span)?,
-                    Type::unit(),
-                ))
-            },
-        )
-    }
+        if step_index == steps.len() {
+            let (node, _ty) = build_body(self, env, place_node, place_ty)?;
+            return Ok((node, MutType::constant()));
+        }
 
-    fn infer_named_subscript_place_assign_op(
-        &mut self,
-        env: &mut TypingEnv,
-        place: NamedSubscriptPlace,
-        sign_span: Location,
-        op_path: &ast::Path,
-        value: DExprId,
-        expr_span: Location,
-    ) -> Result<(NodeId, MutType), InternalCompilationError> {
-        self.infer_named_subscript_place_with_body(
-            env,
-            place,
-            expr_span,
-            |this, env, place, place_ty| {
-                let value = this.infer_static_apply_with_lhs_place(
-                    env, place, place_ty, op_path, sign_span, value, expr_span,
+        match &steps[step_index] {
+            AccessChainStep::Field {
+                name,
+                base_span,
+                expr_span: step_span,
+            } => {
+                let (next_node, next_ty, next_mut) = self.infer_field_from_record_node(
+                    env, place_node, place_mut, *base_span, *name, *step_span,
                 )?;
-                Ok((
-                    this.assign_value_node_to_place(env, place, value, expr_span),
-                    Type::unit(),
-                ))
-            },
-        )
+                self.infer_access_chain_steps_with_body(
+                    env,
+                    steps,
+                    step_index + 1,
+                    next_node,
+                    next_ty,
+                    next_mut,
+                    mode,
+                    expr_span,
+                    build_body,
+                )
+            }
+            AccessChainStep::Index {
+                index,
+                array_span,
+                expr_span: step_span,
+            } => {
+                let (next_node, next_ty, next_mut) = self.infer_index_from_array_node(
+                    env,
+                    place_node,
+                    place_mut,
+                    *array_span,
+                    *index,
+                    *step_span,
+                )?;
+                self.infer_access_chain_steps_with_body(
+                    env,
+                    steps,
+                    step_index + 1,
+                    next_node,
+                    next_ty,
+                    next_mut,
+                    mode,
+                    expr_span,
+                    build_body,
+                )
+            }
+            AccessChainStep::Project {
+                index,
+                base_span,
+                expr_span: step_span,
+            } => {
+                let (next_node, next_ty, next_mut) = self.infer_project_from_tuple_node(
+                    env, place_node, place_mut, *base_span, *index, *step_span,
+                )?;
+                self.infer_access_chain_steps_with_body(
+                    env,
+                    steps,
+                    step_index + 1,
+                    next_node,
+                    next_ty,
+                    next_mut,
+                    mode,
+                    expr_span,
+                    build_body,
+                )
+            }
+            AccessChainStep::NamedSubscript { data } => self
+                .infer_named_subscript_with_yielded_body_with_receiver(
+                    env,
+                    data,
+                    mode,
+                    expr_span,
+                    Some(NamedSubscriptReceiverOverride {
+                        node: place_node,
+                        ty: place_ty,
+                        mut_ty: place_mut,
+                    }),
+                    Box::new(move |this, env, place, place_ty| {
+                        let (node, _) = this.infer_access_chain_steps_with_body(
+                            env,
+                            steps,
+                            step_index + 1,
+                            place,
+                            place_ty,
+                            // The accessor member selection above has already enforced `mode`.
+                            // The internal binding must be mutable so subsequent direct
+                            // field/index/project steps can describe the consumer's final place.
+                            MutType::mutable(),
+                            mode,
+                            expr_span,
+                            build_body,
+                        )?;
+                        Ok((node, env.ir_arena[node].ty))
+                    }),
+                ),
+        }
     }
 
-    fn infer_named_subscript_read(
+    fn infer_access_chain_read(
         &mut self,
         env: &mut TypingEnv,
-        data: &ast::NamedSubscriptData<Desugared>,
+        place: AccessChain,
         expr_span: Location,
     ) -> Result<(NodeId, MutType), InternalCompilationError> {
-        self.infer_named_subscript_with_yielded_body(
+        self.infer_access_chain_with_body(
             env,
-            data,
+            place,
             SubscriptAccessMode::Ref,
             expr_span,
             |this, env, place, place_ty| {
@@ -2591,17 +2752,17 @@ impl TypeInference {
         )
     }
 
-    fn infer_named_subscript_assign(
+    fn infer_access_chain_assign(
         &mut self,
         env: &mut TypingEnv,
-        data: &ast::NamedSubscriptData<Desugared>,
+        place: AccessChain,
         sign_span: Location,
         value: DExprId,
         expr_span: Location,
     ) -> Result<(NodeId, MutType), InternalCompilationError> {
-        self.infer_named_subscript_with_yielded_body(
+        self.infer_access_chain_with_body(
             env,
-            data,
+            place,
             SubscriptAccessMode::Mut,
             expr_span,
             |this, env, place, place_ty| {
@@ -2613,18 +2774,18 @@ impl TypeInference {
         )
     }
 
-    fn infer_named_subscript_assign_op(
+    fn infer_access_chain_assign_op(
         &mut self,
         env: &mut TypingEnv,
-        data: &ast::NamedSubscriptData<Desugared>,
+        place: AccessChain,
         sign_span: Location,
         op_path: &ast::Path,
         value: DExprId,
         expr_span: Location,
     ) -> Result<(NodeId, MutType), InternalCompilationError> {
-        self.infer_named_subscript_with_yielded_body(
+        self.infer_access_chain_with_body(
             env,
-            data,
+            place,
             SubscriptAccessMode::Mut,
             expr_span,
             |this, env, place, place_ty| {
@@ -2902,12 +3063,12 @@ impl TypeInference {
         }
     }
 
-    fn mutable_named_subscript_static_call_arg(
-        &self,
+    fn mutable_access_chain_static_call_arg(
+        &mut self,
         env: &TypingEnv,
         args: &[DExprId],
         target: &PreparedStaticCallTarget,
-    ) -> Result<Option<(usize, ast::NamedSubscriptData<Desugared>)>, InternalCompilationError> {
+    ) -> Result<Option<(usize, AccessChain)>, InternalCompilationError> {
         let arg_passing = self.argument_passing_for_args(
             &target.inst_fn_ty.args,
             &target.abi_arg_tys,
@@ -2918,34 +3079,34 @@ impl TypeInference {
             if !matches!(passing, PendingArgPassing::MutableRef) {
                 continue;
             }
-            let ExprKind::NamedSubscript(data) = &env.ast_arena[*arg].kind else {
+            let Some(place) = self.access_chain_containing_named_subscript(env, *arg) else {
                 continue;
             };
             if found.is_some() {
                 return Err(internal_compilation_error!(UnsupportedSubscriptFeature {
                     kind: UnsupportedSubscriptFeatureKind::MultipleMutableSubscriptArguments,
-                    span: data.name.1,
+                    span: place.first_named_span,
                 }));
             }
-            found = Some((index, (**data).clone()));
+            found = Some((index, place));
         }
         Ok(found)
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn infer_static_apply_with_mutable_named_subscript_arg(
+    fn infer_static_apply_with_mutable_access_chain_arg(
         &mut self,
         env: &mut TypingEnv,
         target: PreparedStaticCallTarget,
         args: &[DExprId],
-        subscript_arg_index: usize,
-        subscript: ast::NamedSubscriptData<Desugared>,
+        access_chain_arg_index: usize,
+        access_chain: AccessChain,
         path_span: Location,
         expr_span: Location,
     ) -> Result<(NodeKind, Type, MutType, EffType), InternalCompilationError> {
-        let (node_id, mut_ty) = self.infer_named_subscript_with_yielded_body(
+        let (node_id, mut_ty) = self.infer_access_chain_with_body(
             env,
-            &subscript,
+            access_chain,
             SubscriptAccessMode::Mut,
             expr_span,
             move |this, env, place, place_ty| {
@@ -2953,7 +3114,7 @@ impl TypeInference {
                 let mut effects = Vec::with_capacity(args.len());
                 let mut diverges = false;
                 for (index, (arg, arg_ty)) in args.iter().zip(&target.inst_fn_ty.args).enumerate() {
-                    let node_id = if index == subscript_arg_index {
+                    let node_id = if index == access_chain_arg_index {
                         this.add_sub_type_constraint(place_ty, expr_span, arg_ty.ty, path_span);
                         this.add_mut_be_at_least_constraint(
                             MutType::mutable(),
@@ -3915,11 +4076,17 @@ impl TypeInference {
                 args_span(),
                 arguments_unnamed,
             )? {
-                if let Some((index, subscript)) =
-                    self.mutable_named_subscript_static_call_arg(env, args, &target)?
+                if let Some((index, access_chain)) =
+                    self.mutable_access_chain_static_call_arg(env, args, &target)?
                 {
-                    return self.infer_static_apply_with_mutable_named_subscript_arg(
-                        env, target, args, index, subscript, path_span, expr_span,
+                    return self.infer_static_apply_with_mutable_access_chain_arg(
+                        env,
+                        target,
+                        args,
+                        index,
+                        access_chain,
+                        path_span,
+                        expr_span,
                     );
                 }
                 let (args_node_ids, args_effects, args_diverge) =
