@@ -216,8 +216,8 @@ impl<'a> EvalCtx<'a> {
     }
 
     fn reserve_current_frame_slots(&mut self, locals: &[LocalDecl]) {
-        if let Some(last) = locals.last() {
-            self.ensure_environment_slot(self.frame_base + last.slot.as_index());
+        if let Some(max_slot) = locals.iter().map(|local| local.slot.as_index()).max() {
+            self.ensure_environment_slot(self.frame_base + max_slot);
         }
     }
 
@@ -2497,8 +2497,8 @@ fn combine_with_yielded_body_and_epilogue(
             Ok(body)
         }
         (Ok(body), Ok(epilogue @ ControlFlow::Transfer(_))) => {
-            discard_control_flow_value(body);
-            Ok(epilogue)
+            discard_control_flow_value(epilogue);
+            Ok(body)
         }
         (Ok(body), Err(err)) => {
             discard_control_flow_value(body);
@@ -2508,7 +2508,10 @@ fn combine_with_yielded_body_and_epilogue(
             value.discard_storage();
             Err(err)
         }
-        (Err(_), Ok(epilogue @ ControlFlow::Transfer(_))) => Ok(epilogue),
+        (Err(err), Ok(epilogue @ ControlFlow::Transfer(_))) => {
+            discard_control_flow_value(epilogue);
+            Err(err)
+        }
         (Err(_), Err(epilogue_err)) => Err(epilogue_err),
     }
 }
@@ -3288,15 +3291,19 @@ mod tests {
 
     use crate::{
         CompilerSession, Location,
+        compiler::error::RuntimeErrorKind,
         containers::{SVec2, b},
-        eval::{ControlFlow, ControlTransfer, EvalCtx, eval_args, eval_node, eval_nodes},
+        eval::{
+            ControlFlow, ControlTransfer, EvalCtx, RuntimeError,
+            combine_with_yielded_body_and_epilogue, cont, eval_args, eval_node, eval_nodes, ret,
+        },
         hir::{
             self, CallArgument, ENode, ENodeArena, Elaborated, LoopId, NodeKind,
             function::{
                 FunctionDefinition, ResolvedArgPassing, ResolvedValueArgPassing, ScriptFunction,
             },
             hir_syn,
-            value::{LiteralValue, NativeDisplay},
+            value::{LiteralValue, NativeDisplay, Value},
         },
         module::{
             LocalDecl, LocalDeclId, LocalFunctionId, Module, ModuleFunction, ModuleId, Path,
@@ -3348,6 +3355,36 @@ mod tests {
 
     fn eval_drop_tracked_count() -> usize {
         EVAL_DROP_TRACKED_COUNT.load(Ordering::Relaxed)
+    }
+
+    #[test]
+    fn with_yielded_body_value_wins_over_epilogue_transfer() {
+        let result = combine_with_yielded_body_and_epilogue(
+            cont(Value::native(1 as Int)),
+            ret(Value::native(2 as Int)),
+        )
+        .expect("epilogue transfer should not fail body result");
+
+        let ControlFlow::Continue(value) = result else {
+            panic!("expected body value to win over epilogue transfer");
+        };
+        assert_eq!(value.into_primitive_ty::<Int>(), Some(1));
+    }
+
+    #[test]
+    fn with_yielded_body_error_wins_over_epilogue_transfer() {
+        let result = combine_with_yielded_body_and_epilogue(
+            Err(RuntimeError::new_native(RuntimeErrorKind::Aborted(Some(
+                "body".into(),
+            )))),
+            ret(Value::native(2 as Int)),
+        );
+
+        let err = result.expect_err("expected body error to win over epilogue transfer");
+        assert_eq!(
+            err.kind,
+            RuntimeErrorKind::Aborted(Some("body".to_string()))
+        );
     }
 
     fn local(name: &str, mut_ty: MutType, ty: Type, span: Location) -> LocalDecl {

@@ -53,6 +53,6 @@ subscript cell(slot: &mut int) -> int {
 
 When `ref mut` is used, it is the whole bundle body: it cannot be combined with separate `ref` or `mut` members.
 
-Each member must contain exactly one reachable `yield`, and that `yield` must yield a place. A `mut` member must yield a mutable place. `yield` inside loops is rejected so the accessor can suspend at most once.
+Each member must contain exactly one reachable `yield`, and that `yield` must yield a place. A `mut` member must yield a mutable place. For now, the `yield` path must be block-structured: the yield may be nested in blocks, but not inside conditionals, matches, or loops.
 
 Named subscript access is currently accepted only when experimental features are enabled. The syntax is intended for standard-library work, tests, and design experiments such as generalized record-like projections.

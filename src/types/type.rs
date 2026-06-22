@@ -499,14 +499,10 @@ impl FnReturnConvention {
     }
 
     pub fn can_satisfy(self, expected: Self) -> bool {
-        self.capability_rank() >= expected.capability_rank()
-    }
-
-    fn capability_rank(self) -> u8 {
-        match self {
-            Self::Value => 0,
-            Self::YieldedOnce => 1,
-            Self::AddressorPlace => 2,
+        match expected {
+            Self::Value => matches!(self, Self::Value | Self::AddressorPlace),
+            Self::YieldedOnce => matches!(self, Self::YieldedOnce | Self::AddressorPlace),
+            Self::AddressorPlace => matches!(self, Self::AddressorPlace),
         }
     }
 }
@@ -3109,6 +3105,21 @@ mod tests {
             bare_native_type::<SyntheticContainer>(),
             vec![element_ty],
         )))
+    }
+
+    #[test]
+    fn yielded_once_return_convention_does_not_satisfy_value() {
+        assert!(FnReturnConvention::Value.can_satisfy(FnReturnConvention::Value));
+        assert!(!FnReturnConvention::Value.can_satisfy(FnReturnConvention::YieldedOnce));
+        assert!(!FnReturnConvention::Value.can_satisfy(FnReturnConvention::AddressorPlace));
+
+        assert!(!FnReturnConvention::YieldedOnce.can_satisfy(FnReturnConvention::Value));
+        assert!(FnReturnConvention::YieldedOnce.can_satisfy(FnReturnConvention::YieldedOnce));
+        assert!(!FnReturnConvention::YieldedOnce.can_satisfy(FnReturnConvention::AddressorPlace));
+
+        assert!(FnReturnConvention::AddressorPlace.can_satisfy(FnReturnConvention::Value));
+        assert!(FnReturnConvention::AddressorPlace.can_satisfy(FnReturnConvention::YieldedOnce));
+        assert!(FnReturnConvention::AddressorPlace.can_satisfy(FnReturnConvention::AddressorPlace));
     }
 
     /// Wrap a `TypeKind` in an `InternedType` with an empty summary, for tests

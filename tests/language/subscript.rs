@@ -14,6 +14,8 @@ use ferlium::{
     compiler::error::RuntimeErrorKind,
     module::id::Id,
     parse_module_and_expr,
+    std::math::int_type,
+    types::effects::{PrimitiveEffect, effect},
 };
 use indoc::indoc;
 use test_log::test;
@@ -225,6 +227,10 @@ fn compiled_module_exposes_subscript_by_name() {
     let subscript = module
         .get_subscript(ustr("cell"))
         .expect("subscript should be available by source name");
+    assert_eq!(subscript.signature.arg_names, vec![ustr("value")]);
+    assert_eq!(subscript.signature.args.len(), 1);
+    assert_eq!(subscript.signature.args[0].ty, int_type());
+    assert_eq!(subscript.signature.ret, int_type());
     assert!(subscript.ref_member.is_some());
     assert!(subscript.mut_member.is_none());
 }
@@ -396,6 +402,37 @@ fn rejects_multiple_reachable_yields() {
             "# })
             .is_err()
     );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn rejects_single_yield_nested_in_if() {
+    assert_experimental_compile_error(indoc! { r#"
+        subscript cell(value: int) -> int {
+            ref {
+                let local = value;
+                if true {
+                    yield local
+                }
+            }
+        }
+    "# });
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn rejects_single_yield_nested_in_match() {
+    assert_experimental_compile_error(indoc! { r#"
+        subscript cell(value: int) -> int {
+            ref {
+                let local = value;
+                match true {
+                    true => yield local,
+                    _ => ()
+                }
+            }
+        }
+    "# });
 }
 
 #[test]
@@ -682,6 +719,31 @@ fn named_subscript_assignment_uses_mut_member_effects() {
             slot->[probe] = 7
         })
     "# });
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn named_subscript_instantiates_member_effect_variables_at_use_site() {
+    let mut session = experimental_session();
+    let compiled = session.compile(indoc! { r#"
+        subscript cell<! E>(slot: &mut int, callback: () -> () ! E) -> int {
+            ref {
+                callback();
+                let local = slot;
+                yield local
+            }
+        }
+
+        let mut slot = 1;
+        slot->[cell](|| effects::read())
+    "# });
+
+    let module = session.session().expect_fresh_module(compiled.module_id);
+    let expr = compiled
+        .expr
+        .expect("compiled source should have an expression");
+    let effects = module.hir_arena[expr.expr].effects.clone();
+    assert_eq!(effects, effect(PrimitiveEffect::Read));
 }
 
 #[test]

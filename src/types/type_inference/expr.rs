@@ -181,6 +181,16 @@ struct BuiltStaticCall {
     effects: EffType,
 }
 
+struct PreparedStaticCallTarget {
+    callee: CheckedStaticCallee,
+    inst_fn_ty: FnType,
+    inst_data: hir::FnInstData,
+    abi_arg_tys: Vec<FnArgType>,
+    visible_arg_passing: Option<Vec<ResolvedArgPassing>>,
+    result_mut_ty: MutType,
+    have_trait_constraint: Option<PubTypeConstraint>,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SubscriptAccessMode {
     Ref,
@@ -2092,14 +2102,13 @@ impl TypeInference {
             }));
         }
 
-        let (mut inst_fn_ty, inst_data, _subst) = definition.ty_scheme.instantiate_with_fresh_vars(
+        let (inst_fn_ty, inst_data, _subst) = definition.ty_scheme.instantiate_with_fresh_vars(
             self,
             data.name.1,
             None,
             env.module_env,
         );
-        let member_effects = member.effects.clone();
-        inst_fn_ty.effects = member_effects.clone();
+        let member_effects = inst_fn_ty.effects.clone();
         let (mut args_node_ids, args_effects, args_diverge) =
             if let Some(receiver) = receiver_override {
                 let mut node_ids = Vec::with_capacity(args.len());
@@ -2462,6 +2471,134 @@ impl TypeInference {
         ))
     }
 
+    fn prepare_static_call_target(
+        &mut self,
+        env: &mut TypingEnv,
+        path: &ast::Path,
+        path_span: Location,
+        arg_count: usize,
+        got_span: Location,
+        arguments_unnamed: UnnamedArg,
+    ) -> Result<Option<PreparedStaticCallTarget>, InternalCompilationError> {
+        if let Some((_module_name, trait_descr)) = env.module_env.get_trait_method(path)? {
+            let (trait_id, method_index, definition) = trait_descr;
+            let trait_def = env.module_env.trait_def(trait_id);
+            if is_compiler_callable_only_method(trait_id, trait_def, method_index) {
+                return Err(compiler_only_trait_method_use_error(
+                    trait_id,
+                    trait_def,
+                    method_index,
+                    path_span,
+                ));
+            }
+            if definition.ty_scheme.ty.args.len() != arg_count {
+                return Err(internal_compilation_error!(WrongNumberOfArguments {
+                    expected: definition.ty_scheme.ty.args.len(),
+                    expected_span: path_span,
+                    got: arg_count,
+                    got_span,
+                }));
+            }
+
+            let trait_ty_var_count = trait_def.type_var_count();
+            let trait_input_type_count = trait_def.input_type_count();
+            let trait_eff_var_count = trait_def.output_effect_count();
+            let (inst_fn_ty, inst_data, subst) = definition.ty_scheme.instantiate_with_fresh_vars(
+                self,
+                path_span,
+                Some((trait_ty_var_count, trait_eff_var_count)),
+                env.module_env,
+            );
+            assert!(
+                inst_data.dicts_req.is_empty(),
+                "Instantiation data for trait method is not supported yet."
+            );
+
+            let mut mapper = BitmapInstantiationMapper::new(&subst);
+            for constraint in &trait_def.constraints {
+                let mut constraint = constraint.map(&mut mapper);
+                constraint.instantiate_location(path_span);
+                self.add_pub_constraint(constraint);
+            }
+
+            let output_effs = (0..trait_eff_var_count)
+                .map(|i| subst.1.get(&EffectVar::new(i)).cloned().unwrap())
+                .collect::<Vec<_>>();
+            let mut trait_tys = continuous_hashmap_to_vec(subst.0).unwrap();
+            assert_eq!(trait_tys.len(), trait_ty_var_count as usize);
+            let output_tys = trait_tys.split_off(trait_input_type_count as usize);
+            let input_tys = trait_tys;
+            let have_trait_constraint = PubTypeConstraint::new_have_trait(
+                trait_id,
+                input_tys.clone(),
+                output_tys,
+                output_effs,
+                path_span,
+            );
+
+            return Ok(Some(PreparedStaticCallTarget {
+                callee: CheckedStaticCallee::TraitMethod {
+                    trait_id,
+                    method_index,
+                    method_path: path.clone(),
+                    method_span: path_span,
+                    arguments_unnamed,
+                    input_tys,
+                },
+                abi_arg_tys: inst_fn_ty.args.clone(),
+                inst_fn_ty,
+                inst_data,
+                visible_arg_passing: None,
+                result_mut_ty: MutType::constant(),
+                have_trait_constraint: Some(have_trait_constraint),
+            }));
+        }
+
+        let Some((definition, function, _module_id, runtime_arg_passing)) = env
+            .get_function(path)?
+            .map(|(definition, function, module_id, runtime_arg_passing)| {
+                (definition.clone(), function, module_id, runtime_arg_passing)
+            })
+        else {
+            return Ok(None);
+        };
+        if definition.ty_scheme.ty.args.len() != arg_count {
+            return Err(internal_compilation_error!(WrongNumberOfArguments {
+                expected: definition.ty_scheme.ty.args.len(),
+                expected_span: path_span,
+                got: arg_count,
+                got_span,
+            }));
+        }
+
+        let (inst_fn_ty, inst_data, _subst) =
+            definition
+                .ty_scheme
+                .instantiate_with_fresh_vars(self, path_span, None, env.module_env);
+        let visible_arg_passing =
+            visible_arg_passing_from_runtime(runtime_arg_passing.as_deref(), &inst_data, arg_count)
+                .map(<[_]>::to_vec);
+        let result_mut_ty = if inst_fn_ty.returns_place() {
+            MutType::mutable()
+        } else {
+            MutType::constant()
+        };
+        Ok(Some(PreparedStaticCallTarget {
+            callee: CheckedStaticCallee::Function {
+                function,
+                function_path: Some(path.clone()),
+                function_span: path_span,
+                argument_names: arguments_unnamed.filter_args(&definition.arg_names),
+            },
+            abi_arg_tys: definition.ty_scheme.ty.args.clone(),
+            inst_fn_ty,
+            inst_data,
+            visible_arg_passing,
+            result_mut_ty,
+            have_trait_constraint: None,
+        }))
+    }
+
     fn build_static_call_from_checked_args(
         &mut self,
         env: &mut TypingEnv,
@@ -2562,168 +2699,39 @@ impl TypeInference {
         rhs: DExprId,
         expr_span: Location,
     ) -> Result<NodeId, InternalCompilationError> {
-        if let Some((_module_name, trait_descr)) = env.module_env.get_trait_method(path)? {
-            let (trait_id, method_index, definition) = trait_descr;
-            let trait_def = env.module_env.trait_def(trait_id);
-            if is_compiler_callable_only_method(trait_id, trait_def, method_index) {
-                return Err(compiler_only_trait_method_use_error(
-                    trait_id,
-                    trait_def,
-                    method_index,
-                    path_span,
-                ));
-            }
-            if definition.ty_scheme.ty.args.len() != 2 {
-                return Err(internal_compilation_error!(WrongNumberOfArguments {
-                    expected: definition.ty_scheme.ty.args.len(),
-                    expected_span: path_span,
-                    got: 2,
-                    got_span: expr_span,
-                }));
-            }
-
-            let trait_ty_var_count = trait_def.type_var_count();
-            let trait_input_type_count = trait_def.input_type_count();
-            let trait_eff_var_count = trait_def.output_effect_count();
-            let trait_constraints = trait_def.constraints.clone();
-            let (inst_fn_ty, inst_data, subst) = definition.ty_scheme.instantiate_with_fresh_vars(
-                self,
-                path_span,
-                Some((trait_ty_var_count, trait_eff_var_count)),
-                env.module_env,
-            );
-            assert!(
-                inst_data.dicts_req.is_empty(),
-                "Instantiation data for trait method is not supported yet."
-            );
-            let mut mapper = BitmapInstantiationMapper::new(&subst);
-            trait_constraints.iter().for_each(|constraint| {
-                let mut constraint = constraint.map(&mut mapper);
-                constraint.instantiate_location(path_span);
-                self.add_pub_constraint(constraint);
-            });
-
-            let args_node_ids = vec![
-                self.yielded_binding_load(env, binding, binding_ty, expr_span),
-                self.check_expr(
-                    env,
-                    rhs,
-                    inst_fn_ty.args[1].ty,
-                    inst_fn_ty.args[1].mut_ty,
-                    path_span,
-                )?,
-            ];
-            self.add_sub_type_constraint(binding_ty, expr_span, inst_fn_ty.args[0].ty, path_span);
-            self.add_mut_be_at_least_constraint(
-                MutType::mutable(),
-                expr_span,
-                inst_fn_ty.args[0].mut_ty,
-                path_span,
-            );
-
-            let output_effs = (0..trait_eff_var_count)
-                .map(|i| subst.1.get(&EffectVar::new(i)).cloned().unwrap())
-                .collect::<Vec<_>>();
-            let mut trait_tys = continuous_hashmap_to_vec(subst.0).unwrap();
-            assert_eq!(trait_tys.len(), trait_ty_var_count as usize);
-            let output_tys = trait_tys.split_off(trait_input_type_count as usize);
-            let input_tys = trait_tys;
-            self.add_pub_constraint(PubTypeConstraint::new_have_trait(
-                trait_id,
-                input_tys.clone(),
-                output_tys,
-                output_effs,
-                path_span,
-            ));
-
-            let call = self.build_static_call_from_checked_args(
-                env,
-                StaticCallFromCheckedArgs {
-                    callee: CheckedStaticCallee::TraitMethod {
-                        trait_id,
-                        method_index,
-                        method_path: path.clone(),
-                        method_span: path_span,
-                        arguments_unnamed: UnnamedArg::All,
-                        input_tys,
-                    },
-                    abi_arg_tys: inst_fn_ty.args.clone(),
-                    inst_fn_ty,
-                    inst_data,
-                    args_node_ids,
-                    visible_arg_passing: None,
-                    result_mut_ty: MutType::constant(),
-                },
-                expr_span,
-            );
-            return Ok(env.ir_arena.alloc(hir::Node::new(
-                call.node,
-                call.ty,
-                call.effects,
-                expr_span,
-            )));
-        }
-
-        let Some((definition, function, _module_id, runtime_arg_passing)) = env
-            .get_function(path)?
-            .map(|(definition, function, module_id, runtime_arg_passing)| {
-                (definition.clone(), function, module_id, runtime_arg_passing)
-            })
+        let Some(target) =
+            self.prepare_static_call_target(env, path, path_span, 2, expr_span, UnnamedArg::All)?
         else {
             return Err(internal_compilation_error!(Unsupported {
                 span: path_span,
                 reason: format!("unknown compound-assignment operator `{path}`"),
             }));
         };
-        if definition.ty_scheme.ty.args.len() != 2 {
-            return Err(internal_compilation_error!(WrongNumberOfArguments {
-                expected: definition.ty_scheme.ty.args.len(),
-                expected_span: path_span,
-                got: 2,
-                got_span: expr_span,
-            }));
-        }
-        let (inst_fn_ty, inst_data, _subst) =
-            definition
-                .ty_scheme
-                .instantiate_with_fresh_vars(self, path_span, None, env.module_env);
+        let lhs_arg = target.inst_fn_ty.args[0];
+        let rhs_arg = target.inst_fn_ty.args[1];
         let args_node_ids = vec![
             self.yielded_binding_load(env, binding, binding_ty, expr_span),
-            self.check_expr(
-                env,
-                rhs,
-                inst_fn_ty.args[1].ty,
-                inst_fn_ty.args[1].mut_ty,
-                path_span,
-            )?,
+            self.check_expr(env, rhs, rhs_arg.ty, rhs_arg.mut_ty, path_span)?,
         ];
-        self.add_sub_type_constraint(binding_ty, expr_span, inst_fn_ty.args[0].ty, path_span);
+        self.add_sub_type_constraint(binding_ty, expr_span, lhs_arg.ty, path_span);
         self.add_mut_be_at_least_constraint(
             MutType::mutable(),
             expr_span,
-            inst_fn_ty.args[0].mut_ty,
+            lhs_arg.mut_ty,
             path_span,
         );
-        let visible_arg_passing = visible_arg_passing_from_runtime(
-            runtime_arg_passing.as_deref(),
-            &inst_data,
-            args_node_ids.len(),
-        )
-        .map(<[_]>::to_vec);
+        if let Some(constraint) = target.have_trait_constraint {
+            self.add_pub_constraint(constraint);
+        }
         let call = self.build_static_call_from_checked_args(
             env,
             StaticCallFromCheckedArgs {
-                callee: CheckedStaticCallee::Function {
-                    function,
-                    function_path: Some(path.clone()),
-                    function_span: path_span,
-                    argument_names: UnnamedArg::All.filter_args(&definition.arg_names),
-                },
-                abi_arg_tys: definition.ty_scheme.ty.args.clone(),
-                inst_fn_ty,
-                inst_data,
+                callee: target.callee,
+                abi_arg_tys: target.abi_arg_tys,
+                inst_fn_ty: target.inst_fn_ty,
+                inst_data: target.inst_data,
                 args_node_ids,
-                visible_arg_passing,
+                visible_arg_passing: target.visible_arg_passing,
                 result_mut_ty: MutType::constant(),
             },
             expr_span,
@@ -3578,147 +3586,34 @@ impl TypeInference {
             || Location::fuse(args.iter().map(|arg| env.ast_arena[*arg].span)).unwrap_or(path_span);
         // Get the function and its type from the environment.
         Ok(
-            if let Some((_module_name, trait_descr)) = env.module_env.get_trait_method(path)? {
-                let (trait_id, method_index, definition) = trait_descr;
-                let trait_def = env.module_env.trait_def(trait_id);
-                if is_compiler_callable_only_method(trait_id, trait_def, method_index) {
-                    return Err(compiler_only_trait_method_use_error(
-                        trait_id,
-                        trait_def,
-                        method_index,
-                        path_span,
-                    ));
-                }
-                let trait_ty_var_count = trait_def.type_var_count();
-                let trait_input_type_count = trait_def.input_type_count();
-                let trait_eff_var_count = trait_def.output_effect_count();
-                let trait_constraints = trait_def.constraints.clone();
-                // Validate the number of arguments
-                if definition.ty_scheme.ty.args.len() != args.len() {
-                    return Err(internal_compilation_error!(WrongNumberOfArguments {
-                        expected: definition.ty_scheme.ty.args.len(),
-                        expected_span: path_span,
-                        got: args.len(),
-                        got_span: args_span(),
-                    }));
-                }
-                // Instantiate its type scheme
-                let (inst_fn_ty, inst_data, subst) =
-                    definition.ty_scheme.instantiate_with_fresh_vars(
-                        self,
-                        path_span,
-                        Some((trait_ty_var_count, trait_eff_var_count)),
-                        env.module_env,
-                    );
-                assert!(
-                    inst_data.dicts_req.is_empty(),
-                    "Instantiation data for trait method is not supported yet."
-                );
-                // Instantiate the constraints and add them to our list.
-                let mut mapper = BitmapInstantiationMapper::new(&subst);
-                trait_constraints.iter().for_each(|constraint| {
-                    let mut constraint = constraint.map(&mut mapper);
-                    constraint.instantiate_location(path_span);
-                    self.add_pub_constraint(constraint);
-                });
-                // Make sure the types of the trait arguments match the expected types
+            if let Some(target) = self.prepare_static_call_target(
+                env,
+                path,
+                path_span,
+                args.len(),
+                args_span(),
+                arguments_unnamed,
+            )? {
                 let (args_node_ids, args_effects, args_diverge) =
-                    self.check_exprs_until_never(env, args, &inst_fn_ty.args, path_span)?;
+                    self.check_exprs_until_never(env, args, &target.inst_fn_ty.args, path_span)?;
                 if args_diverge {
                     let nodes =
                         self.value_evaluation_prefix_nodes_for_many(env.ir_arena, args_node_ids);
                     self.diverging_prefix_result(env, nodes, args_effects)
                 } else {
-                    let output_effs = (0..trait_eff_var_count)
-                        .map(|i| subst.1.get(&EffectVar::new(i)).cloned().unwrap())
-                        .collect::<Vec<_>>();
-                    let mut trait_tys = continuous_hashmap_to_vec(subst.0).unwrap();
-                    assert_eq!(trait_tys.len(), trait_ty_var_count as usize);
-                    let output_tys = trait_tys.split_off(trait_input_type_count as usize);
-                    let input_tys = trait_tys;
-                    self.add_pub_constraint(PubTypeConstraint::new_have_trait(
-                        trait_id,
-                        input_tys.clone(),
-                        output_tys,
-                        output_effs,
-                        path_span,
-                    ));
+                    if let Some(constraint) = target.have_trait_constraint {
+                        self.add_pub_constraint(constraint);
+                    }
                     let call = self.build_static_call_from_checked_args(
                         env,
                         StaticCallFromCheckedArgs {
-                            callee: CheckedStaticCallee::TraitMethod {
-                                trait_id,
-                                method_index,
-                                method_path: path.clone(),
-                                method_span: path_span,
-                                arguments_unnamed,
-                                input_tys,
-                            },
-                            abi_arg_tys: inst_fn_ty.args.clone(),
-                            inst_fn_ty,
-                            inst_data,
+                            callee: target.callee,
+                            abi_arg_tys: target.abi_arg_tys,
+                            inst_fn_ty: target.inst_fn_ty,
+                            inst_data: target.inst_data,
                             args_node_ids,
-                            visible_arg_passing: None,
-                            result_mut_ty: MutType::constant(),
-                        },
-                        expr_span,
-                    );
-                    (call.node, call.ty, call.mut_ty, call.effects)
-                }
-            } else if let Some((definition, function, _module_id, runtime_arg_passing)) = env
-                .get_function(path)?
-                .map(|(definition, function, module_id, runtime_arg_passing)| {
-                    (definition.clone(), function, module_id, runtime_arg_passing)
-                })
-            {
-                if definition.ty_scheme.ty.args.len() != args.len() {
-                    return Err(internal_compilation_error!(WrongNumberOfArguments {
-                        expected: definition.ty_scheme.ty.args.len(),
-                        expected_span: path_span,
-                        got: args.len(),
-                        got_span: args_span(),
-                    }));
-                }
-                // Instantiate its type scheme
-                let (inst_fn_ty, inst_data, _subst) = definition
-                    .ty_scheme
-                    .instantiate_with_fresh_vars(self, path_span, None, env.module_env);
-                // Get argument names if any
-                let argument_names = arguments_unnamed.filter_args(&definition.arg_names);
-                // Get the code and make sure the types of its arguments match the expected types
-                let (args_node_ids, args_effects, args_diverge) =
-                    self.check_exprs_until_never(env, args, &inst_fn_ty.args, path_span)?;
-                if args_diverge {
-                    let nodes =
-                        self.value_evaluation_prefix_nodes_for_many(env.ir_arena, args_node_ids);
-                    self.diverging_prefix_result(env, nodes, args_effects)
-                } else {
-                    let visible_arg_passing = visible_arg_passing_from_runtime(
-                        runtime_arg_passing.as_deref(),
-                        &inst_data,
-                        args_node_ids.len(),
-                    )
-                    .map(<[_]>::to_vec);
-                    let mut_ty = if inst_fn_ty.returns_place() {
-                        MutType::mutable()
-                    } else {
-                        MutType::constant()
-                    };
-                    let call = self.build_static_call_from_checked_args(
-                        env,
-                        StaticCallFromCheckedArgs {
-                            callee: CheckedStaticCallee::Function {
-                                function,
-                                function_path: Some(path.clone()),
-                                function_span: path_span,
-                                argument_names,
-                            },
-                            abi_arg_tys: definition.ty_scheme.ty.args.clone(),
-                            inst_fn_ty,
-                            inst_data,
-                            args_node_ids,
-                            visible_arg_passing,
-                            result_mut_ty: mut_ty,
+                            visible_arg_passing: target.visible_arg_passing,
+                            result_mut_ty: target.result_mut_ty,
                         },
                         expr_span,
                     );

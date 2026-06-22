@@ -100,7 +100,7 @@ This is compatible with the current calling convention: non-trivial source-level
 Blocks evaluate every node in `Block.body` in order.
 Only the tail node is the block's value, but non-tail nodes are still semantic evaluation steps and must not be skipped by HIR consumers.
 Inside a yielded-once accessor body, `Yield(place)` has type `never` because it suspends the accessor until the caller-side `WithYielded` driver resumes the epilogue.
-HIR construction enforces a single reachable yield for such bodies; consumers may rely on that invariant.
+HIR construction enforces a single reachable, block-structured yield for such bodies; consumers may rely on that invariant.
 
 HIR generation makes discard cleanup explicit for non-tail values that need semantic `Value::drop`.
 In that case, the generation stores the discarded value in a generated owned local, wraps that store in a block, and records the local in that wrapper's `Block.cleanup`.

@@ -229,6 +229,23 @@ fn node_references_any_function(
         .any(|child| node_references_any_function(arena, child, targets))
 }
 
+fn yield_path_is_block_structured(
+    arena: &NodeArena,
+    node_id: hir::NodeId,
+    yield_node_id: hir::NodeId,
+) -> bool {
+    if node_id == yield_node_id {
+        return true;
+    }
+    match &arena[node_id].kind {
+        hir::NodeKind::Block(block) => block
+            .body
+            .iter()
+            .any(|child| yield_path_is_block_structured(arena, *child, yield_node_id)),
+        _ => false,
+    }
+}
+
 fn wrap_body_with_call_depth_check_if_recursive(
     ty_inf: &mut TypeInference,
     arena: &mut NodeArena,
@@ -807,6 +824,15 @@ where
             return Err(internal_compilation_error!(Unsupported {
                 span: function.span,
                 reason: "subscript member bodies must contain exactly one yield".into(),
+            }));
+        }
+        if let Some(yield_node_id) = yield_node_id
+            && !yield_path_is_block_structured(&fn_arena, fn_node_id, yield_node_id)
+        {
+            return Err(internal_compilation_error!(Unsupported {
+                span: fn_arena[yield_node_id].span,
+                reason: "yield in subscript members must be directly inside block-structured code"
+                    .into(),
             }));
         }
         fn_node_id = wrap_body_with_call_depth_check_if_recursive(

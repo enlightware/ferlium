@@ -44,20 +44,17 @@ use crate::{
     define_id_type,
     format::{FormatWith, write_identifier},
     hir::{
-        self, ENodeArena,
-        emit_functions::EmitTraitOutput,
-        function::{Function, FunctionDefinition},
-        value::LiteralValue,
+        self, ENodeArena, emit_functions::EmitTraitOutput, function::Function, value::LiteralValue,
     },
     internal_compilation_error,
     module::id::{Id, NamedIndexed},
     types::{
-        effects::EffType,
         r#trait::Trait,
         r#type::{
-            LocalTypeAliasId, Type, TypeAliasEntry, TypeAliases, TypeDef, TypeDefSlot,
+            FnArgType, LocalTypeAliasId, Type, TypeAliasEntry, TypeAliases, TypeDef, TypeDefSlot,
             TypeDisplayEnv, TypeKind, TypeVar,
         },
+        type_scheme::PubTypeConstraint,
     },
 };
 
@@ -78,12 +75,6 @@ define_id_type!(
     LocalSubscriptId
 );
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SubscriptMemberKind {
-    Ref,
-    Mut,
-}
-
 /// Provenance class for a subscript member's place-producing function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum YieldProvenance {
@@ -97,14 +88,29 @@ pub enum YieldProvenance {
 #[derive(Debug, Clone)]
 pub struct SubscriptMember {
     pub function: LocalFunctionId,
-    pub effects: EffType,
     pub provenance: YieldProvenance,
 }
 
-/// A named subscript bundle with a shared signature and optional read/write members.
+/// Shared, effect-free source signature for a named subscript bundle.
+#[derive(Debug, Clone)]
+pub struct SubscriptSignature {
+    pub args: Vec<FnArgType>,
+    pub ret: Type,
+    pub generic_params: Vec<UstrSpan>,
+    pub generic_effect_params: Vec<UstrSpan>,
+    pub arg_names: Vec<Ustr>,
+    pub constraints: Vec<PubTypeConstraint>,
+    pub doc: Option<String>,
+}
+
+/// A named subscript bundle with optional read/write members.
+///
+/// This is intentionally not a `FunctionDefinition`: ref and mut members are
+/// separate implementations with independent effects. The future first-class
+/// projection capability is `SubscriptType`; see `doc/subscripts-design.md`.
 #[derive(Debug, Clone)]
 pub struct SubscriptDefinition {
-    pub definition: FunctionDefinition,
+    pub signature: SubscriptSignature,
     pub ref_member: Option<SubscriptMember>,
     pub mut_member: Option<SubscriptMember>,
 }

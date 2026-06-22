@@ -5,6 +5,67 @@ use crate::ast::{self, AssignOpData, Desugared};
 use crate::containers::b;
 use crate::parser::helpers::ext_b;
 
+enum DesugaredAssignmentKind<'a> {
+    Assign,
+    AssignOp(&'a ast::Path),
+}
+
+fn desugar_property_index_assignment(
+    desugared_arena: &mut DExprArena,
+    place: DExprId,
+    sign_span: Location,
+    value: DExprId,
+    expr_span: Location,
+    kind: DesugaredAssignmentKind<'_>,
+) -> Option<DExprId> {
+    let index = desugared_arena[place].kind.as_index().cloned()?;
+    if !desugared_arena[index.array].kind.is_property_path() {
+        return None;
+    }
+
+    /*
+        Desugar:
+            @scope.property[expr1] = expr2
+        into:
+            {
+                let mut $tmp = @scope.property;
+                $tmp[expr1] = expr2;
+                @scope.property = $tmp;
+            }
+    */
+    let let_stmt = desugared_arena.alloc(DExpr::new(
+        ExprKind::let_(
+            DLetPattern::binding((ustr("$tmp"), expr_span), MutVal::mutable()),
+            index.array,
+            None,
+        ),
+        expr_span,
+    ));
+    let tmp_expr = desugared_arena.alloc(DExpr::single_identifier(ustr("$tmp"), expr_span));
+    let index_expr = desugared_arena.alloc(DExpr::new(
+        ExprKind::index(tmp_expr, index.index),
+        expr_span,
+    ));
+    let assign_tmp_stmt = desugared_arena.alloc(DExpr::new(
+        match kind {
+            DesugaredAssignmentKind::Assign => ExprKind::assign(index_expr, sign_span, value),
+            DesugaredAssignmentKind::AssignOp(op_path) => {
+                ExprKind::assign_op(index_expr, sign_span, op_path.clone(), value)
+            }
+        },
+        expr_span,
+    ));
+    let tmp_expr = desugared_arena.alloc(DExpr::single_identifier(ustr("$tmp"), expr_span));
+    let assign_back_stmt = desugared_arena.alloc(DExpr::new(
+        ExprKind::assign(index.array, sign_span, tmp_expr),
+        expr_span,
+    ));
+    Some(desugared_arena.alloc(DExpr::new(
+        ExprKind::Block(vec![let_stmt, assign_tmp_stmt, assign_back_stmt]),
+        expr_span,
+    )))
+}
+
 /// Desugar a single parsed expression ID into a desugared expression ID.
 /// Reads from `parsed_arena` and writes into `desugared_arena`.
 pub fn desugar_expr_with_empty_ctx(
@@ -160,46 +221,15 @@ pub(crate) fn desugar(
             } = *data;
             let place = desugar(place, ctx, parsed_arena, desugared_arena, modules_used)?;
             let value = desugar(value, ctx, parsed_arena, desugared_arena, modules_used)?;
-            let index_data = desugared_arena[place].kind.as_index().cloned();
-            if let Some(index) = index_data {
-                if desugared_arena[index.array].kind.is_property_path() {
-                    /*
-                        Desugar:
-                            @scope.property[expr1] = expr2
-                        into:
-                            {
-                                let mut tmp = @scope.property;
-                                tmp[expr1] = expr2;
-                                @scope.property = tmp;
-                            }
-                    */
-                    let let_stmt = desugared_arena.alloc(DExpr::new(
-                        ExprKind::let_(
-                            DLetPattern::binding((ustr("tmp"), expr_span), MutVal::mutable()),
-                            index.array,
-                            None,
-                        ),
-                        expr_span,
-                    ));
-                    let tmp_expr =
-                        desugared_arena.alloc(DExpr::single_identifier(ustr("tmp"), expr_span));
-                    let index_expr = desugared_arena.alloc(DExpr::new(
-                        ExprKind::index(tmp_expr, index.index),
-                        expr_span,
-                    ));
-                    let assign_tmp_stmt = desugared_arena.alloc(DExpr::new(
-                        ExprKind::assign(index_expr, sign_span, value),
-                        expr_span,
-                    ));
-                    let assign_back_stmt = desugared_arena.alloc(DExpr::new(
-                        ExprKind::assign(index.array, sign_span, tmp_expr),
-                        expr_span,
-                    ));
-                    return Ok(desugared_arena.alloc(DExpr::new(
-                        Block(vec![let_stmt, assign_tmp_stmt, assign_back_stmt]),
-                        expr_span,
-                    )));
-                }
+            if let Some(node) = desugar_property_index_assignment(
+                desugared_arena,
+                place,
+                sign_span,
+                value,
+                expr_span,
+                DesugaredAssignmentKind::Assign,
+            ) {
+                return Ok(node);
             }
             ExprKind::assign(place, sign_span, value)
         }
@@ -213,8 +243,8 @@ pub(crate) fn desugar(
             let place = desugar(place, ctx, parsed_arena, desugared_arena, modules_used)?;
             let value = desugar(value, ctx, parsed_arena, desugared_arena, modules_used)?;
             if desugared_arena[place].kind.is_property_path() {
-                let func = desugared_arena
-                    .alloc(DExpr::new(ExprKind::identifier(op_path.clone()), sign_span));
+                let func =
+                    desugared_arena.alloc(DExpr::new(ExprKind::identifier(op_path), sign_span));
                 let apply = desugared_arena.alloc(DExpr::new(
                     ExprKind::apply(func, vec![place, value], UnnamedArg::All),
                     expr_span,
@@ -224,36 +254,15 @@ pub(crate) fn desugar(
                     expr_span,
                 )));
             }
-            let index_data = desugared_arena[place].kind.as_index().cloned();
-            if let Some(index) = index_data {
-                if desugared_arena[index.array].kind.is_property_path() {
-                    let let_stmt = desugared_arena.alloc(DExpr::new(
-                        ExprKind::let_(
-                            DLetPattern::binding((ustr("tmp"), expr_span), MutVal::mutable()),
-                            index.array,
-                            None,
-                        ),
-                        expr_span,
-                    ));
-                    let tmp_expr =
-                        desugared_arena.alloc(DExpr::single_identifier(ustr("tmp"), expr_span));
-                    let index_expr = desugared_arena.alloc(DExpr::new(
-                        ExprKind::index(tmp_expr, index.index),
-                        expr_span,
-                    ));
-                    let assign_tmp_stmt = desugared_arena.alloc(DExpr::new(
-                        ExprKind::assign_op(index_expr, sign_span, op_path, value),
-                        expr_span,
-                    ));
-                    let assign_back_stmt = desugared_arena.alloc(DExpr::new(
-                        ExprKind::assign(index.array, sign_span, tmp_expr),
-                        expr_span,
-                    ));
-                    return Ok(desugared_arena.alloc(DExpr::new(
-                        Block(vec![let_stmt, assign_tmp_stmt, assign_back_stmt]),
-                        expr_span,
-                    )));
-                }
+            if let Some(node) = desugar_property_index_assignment(
+                desugared_arena,
+                place,
+                sign_span,
+                value,
+                expr_span,
+                DesugaredAssignmentKind::AssignOp(&op_path),
+            ) {
+                return Ok(node);
             }
             ExprKind::assign_op(place, sign_span, op_path, value)
         }

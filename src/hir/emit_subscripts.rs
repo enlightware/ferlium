@@ -13,20 +13,14 @@ use crate::{
     hir::{
         NodeArena,
         emit_functions::{EmitFunctionKind, EmitFunctionOptions, emit_functions},
-        function::FunctionDefinition,
     },
     internal_compilation_error,
     module::{
         LocalFunctionId, LocalSubscriptId, Module,
         SubscriptDefinition as ModuleSubscriptDefinition, SubscriptMember as ModuleSubscriptMember,
-        Visibility, YieldProvenance, id::Id,
+        SubscriptSignature, Visibility, YieldProvenance, id::Id,
     },
-    types::{
-        effects::no_effects,
-        mutability::MutType,
-        r#type::{FnArgType, FnReturnConvention, FnType},
-        type_scheme::TypeScheme,
-    },
+    types::{mutability::MutType, r#type::FnArgType},
 };
 
 pub(super) fn emit_subscripts(
@@ -115,9 +109,9 @@ fn validate_subscript_members(
     Ok(())
 }
 
-fn subscript_signature_definition(
+fn subscript_signature(
     subscript: &ast::DSubscriptDefinition,
-) -> Result<FunctionDefinition, InternalCompilationError> {
+) -> Result<SubscriptSignature, InternalCompilationError> {
     let args = subscript
         .args
         .iter()
@@ -131,18 +125,15 @@ fn subscript_signature_definition(
             Ok(FnArgType::new(ty, mut_ty.unwrap_or_else(MutType::constant)))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let fn_ty = FnType::new_with_return_convention(
+    Ok(SubscriptSignature {
         args,
-        subscript.ret_ty.0,
-        no_effects(),
-        FnReturnConvention::YieldedOnce,
-    );
-    Ok(FunctionDefinition::new_with_generic_params(
-        TypeScheme::new_infer_quantifiers(fn_ty),
-        subscript.generic_params.type_params().to_vec(),
-        subscript.args.iter().map(|arg| arg.name.0).collect(),
-        subscript.doc.clone(),
-    ))
+        ret: subscript.ret_ty.0,
+        generic_params: subscript.generic_params.type_params().to_vec(),
+        generic_effect_params: subscript.generic_params.effect_params().to_vec(),
+        arg_names: subscript.args.iter().map(|arg| arg.name.0).collect(),
+        constraints: subscript.where_clause.clone(),
+        doc: subscript.doc.clone(),
+    })
 }
 
 fn synthetic_subscript_member_function(
@@ -185,7 +176,7 @@ fn add_empty_subscript_bundle(
     Ok(output.add_subscript(
         subscript.name.0,
         ModuleSubscriptDefinition {
-            definition: subscript_signature_definition(subscript)?,
+            signature: subscript_signature(subscript)?,
             ref_member: None,
             mut_member: None,
         },
@@ -200,10 +191,8 @@ fn attach_subscript_member(
     is_mut_member: bool,
     span: Location,
 ) -> Result<(), InternalCompilationError> {
-    let function_def = &output.functions[function.as_index()].definition;
     let member = ModuleSubscriptMember {
         function,
-        effects: function_def.ty_scheme.ty.effects.clone(),
         provenance: YieldProvenance::YieldedOnce,
     };
     let subscript = output
