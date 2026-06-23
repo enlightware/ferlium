@@ -372,7 +372,7 @@ pub(crate) fn replace_flaky_ids(s: impl AsRef<str>) -> String {
                 }
                 if j > second_digits && j < bytes.len() && bytes[j] == b'>' {
                     result.push_str(&s[segment_start..i]);
-                    result.push_str("...");
+                    result.push_str("<...>");
                     i = j + 1;
                     segment_start = i;
                     continue;

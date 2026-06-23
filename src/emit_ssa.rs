@@ -33,13 +33,29 @@ use crate::{
 
 /// Emits the textual representation of the low-level (aka SSA) ferlium IR of `module`.
 ///
+/// Every lowerable local function of `module` is emitted, including the (anonymous) member
+/// functions of its subscripts. Bodiless (native) functions and inline-only `YieldedOnce`
+/// subscript members — which have no standalone SSA form and are consumed at their `WithYielded`
+/// site — are skipped.
+///
 /// Intended for testing & debugging.
 pub fn emit_ssa(module: &Module, others: &Modules, session: &CompilerSession) -> String {
-    let mut functions: Vec<(Ustr, LocalFunctionId)> = module
-        .own_symbols()
-        .filter_map(|n| module.get_local_function_id(n).map(|f| (n, f)))
+    let mut functions: Vec<(Ustr, LocalFunctionId)> = (0..module.function_count())
+        .map(LocalFunctionId::from_index)
+        .filter_map(|id| {
+            let f = module.get_function_by_id(id)?;
+            // Only script functions have a body to lower.
+            f.code.as_ref().as_script()?;
+            // A `YieldedOnce` member is inline-only: emitted at its `WithYielded` site, never here.
+            if f.definition.return_convention() == FnReturnConvention::YieldedOnce {
+                return None;
+            }
+            // A subscript member resolves to its subscript's name; truly anonymous functions are skipped.
+            let name = module.get_function_name_by_id(id)?;
+            Some((name, id))
+        })
         .collect();
-    functions.sort_by_key(|(name, _)| *name);
+    functions.sort_by_key(|(name, id)| (*name, id.as_index()));
     functions
         .into_iter()
         .map(|(_, f)| Emitter::emit_ssa_fn(f, module, others, session))
@@ -70,6 +86,19 @@ fn imported_function(
         }
         module::ImportFunctionTarget::TraitImplMethod { key, index } => {
             m.get_impl_data_by_trait_key(key).unwrap().methods[index.as_index()]
+        }
+        &module::function::ImportFunctionTarget::SubscriptMember { name, mut_member } => {
+            // Resolve the subscript bundle, then select the ref or mut member's function.
+            let subscript = m.get_subscript(name).expect("imported subscript not found");
+            let member = if mut_member {
+                &subscript.mut_member
+            } else {
+                &subscript.ref_member
+            };
+            member
+                .as_ref()
+                .expect("imported subscript member must exist")
+                .function
         }
     };
     (fi, mi)
@@ -127,7 +156,7 @@ struct Emitter<'a> {
 /// Builds the SSA IR of the function `source` of `module` and returns the lowered function.
 ///
 /// This is the shared entry point used both by the textual SSA dump (`emit_ssa`) and by backends
-/// such as the WASM emitter that consume the lowered `ssa::Function` directly.
+/// (such as the WASM emitter) that consume the lowered `ssa::Function` directly.
 pub fn build_ssa_function(
     source: LocalFunctionId,
     module: &Module,
@@ -240,6 +269,7 @@ impl<'a> Emitter<'a> {
                 value_witnesses,
                 loop_results: HashMap::new(),
                 return_destination,
+                returns_place: f.definition.returns_place(),
             },
             hir_arena: &module.hir_arena,
             session,
@@ -248,10 +278,32 @@ impl<'a> Emitter<'a> {
         // Allocate frame storage for every `Owned` local and bind it to its `alloca` place.
         emitter.allocate_owned_locals();
 
-        // The body of the function stores its result into the return out-pointer and then returns.
-        let ret_dest = emitter.context.return_destination.clone();
-        emitter.lower_value_into(code, Some(ret_dest));
-        emitter.insert(Instruction::ret(emitter.context.span));
+        // Lower the body, dispatching on the function's return convention.
+        match f.definition.return_convention() {
+            // A value-returning function stores its result into the return out-pointer.
+            FnReturnConvention::Value => {
+                let ret_dest = emitter.context.return_destination.clone();
+                emitter.lower_value_into(code, Some(ret_dest));
+            }
+            // An addressor function returns a caller-rooted place. Its body is `never`-typed and
+            // ends in `return <place-expr>` (enforced at `FunctionDefinition::returns_place`
+            // validation); the embedded `Return` stores the place pointer into the return
+            // out-pointer. Driving with no destination avoids a spurious value store.
+            FnReturnConvention::AddressorPlace => {
+                emitter.lower_value_into(code, None);
+            }
+            // A `YieldedOnce` member has no standalone SSA semantics: it is consumed inline at its
+            // `WithYielded` site. It must never be emitted as a callable.
+            FnReturnConvention::YieldedOnce => panic!(
+                "a YieldedOnce subscript member is inline-only and must never be emitted standalone; \
+                 it is consumed structurally at its WithYielded site"
+            ),
+        }
+
+        // Append the trailing `ret`.
+        if !emitter.current_block_is_terminated() {
+            emitter.insert(Instruction::ret(emitter.context.span));
+        }
 
         emitter.context.function
     }
@@ -269,7 +321,7 @@ impl<'a> Emitter<'a> {
     /// Lowers an indirect `Value::clone(source, target)` call dispatched through the dictionary
     /// extra parameter `dictionary`.
     ///
-    /// `source` is the place of the value to clone and `target` is the (uninitialized) destination
+    /// `source` is the place of the value to clone, and `target` is the (uninitialized) destination
     /// place the clone initializes. `cloned_ty` is the cloned value's type `T`, used to resolve the
     /// dictionary's `clone` slot. The clone method returns `()`, so a throwaway unit return
     /// out-pointer is appended to the call per the ABI.
@@ -293,7 +345,7 @@ impl<'a> Emitter<'a> {
             ))
             .unwrap();
         let method = self.insert(Instruction::load(span, method_place)).unwrap();
-        self.insert(Instruction::call(span, method, [source, target, ssa::Value::UnitPlace]));
+        self.insert(Instruction::call(span, method, [source, target]));
     }
 
     /// Returns the runtime dictionary entry index and function type of the `Value::clone` method
@@ -302,7 +354,7 @@ impl<'a> Emitter<'a> {
         let env = ModuleEnv::new(self.module, self.others);
         let value_trait_id = env.expect_std_trait_id(VALUE_TRAIT_NAME);
         let trait_def = env.trait_def(value_trait_id);
-        let dict_ty = trait_def.get_dictionary_type_for_tys(&[cloning], &[]);
+        let dict_ty = trait_def.get_dictionary_type_for_tys(&[cloning], &[], &[]);
         let entry_index = trait_def
             .dictionary_method_index(VALUE_CLONE_METHOD_INDEX)
             .as_index();
@@ -453,8 +505,8 @@ impl<'a> Emitter<'a> {
 
     /// Lowers `node` as a place.
     ///
-    /// If possible, lowers directly as a place, otherwise lowers a values into stack storage and
-    /// returns its address.
+    /// If possible, lowers directly as a place, otherwise lowers a value into stack storage,
+    /// returning its address.
     fn lower_as_place(&mut self, node: &ENode) -> ssa::Value {
         // let ty = node.ty;
         // let place = self
@@ -553,6 +605,32 @@ impl<'a> Emitter<'a> {
                 }
             }
 
+            K::CallDictionaryMethod(n) => {
+                // A place-returning method dispatched through a dictionary: project+load the
+                // method, call it with a place out-pointer, then load the returned place.
+                let (method, mut arguments) = self.lower_dictionary_method_target(node, n);
+                let result_storage = self.allocate_result(node, &n.ty);
+                arguments.push(result_storage.clone());
+                self.insert(Instruction::call(node.span, method, arguments));
+                if n.ty.returns_place() {
+                    self.insert(Instruction::load(node.span, result_storage))
+                        .unwrap()
+                } else {
+                    result_storage
+                }
+            }
+
+            K::WithPlace(n) => {
+                // An addressor subscript site: bind the accessor's place, then the body (a
+                // `LoadLocal` of the binding, possibly projected) is itself a place.
+                self.bind_local_for_with_place(n);
+                self.lower_as_place(&self.hir_arena[n.body])
+            }
+
+            K::WithYielded(_) => {
+                panic!("WithYielded should be just lowered as an inlining.")
+            }
+
             // A value-producing node is materialized into a temporary place.
             _ => {
                 let storage = self.alloca_storage(node.span, node.ty);
@@ -562,9 +640,19 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    /// Lowers the addressor `place` of a [`hir::WithPlace`] and binds its non-owning `binding`
+    /// local to that place, so the driver `body` can read it through `LoadLocal(binding)`.
+    ///
+    /// Mirrors the interpreter's `eval_with_place`: the binding aliases existing caller-rooted
+    /// storage, so no store is emitted (the same shape as a non-owning `StoreLocal` alias).
+    fn bind_local_for_with_place(&mut self, n: &hir::WithPlace<Elaborated>) {
+        let place = self.lower_as_place(&self.hir_arena[n.place]);
+        self.context.locals.insert(n.binding, place);
+    }
+
     /// Lowers `node` as a register value (a loaded scalar / value held directly in an SSA register).
     ///
-    /// A primitive immediate is produced directly; any other node is lowered as a place and the
+    /// A primitive immediate is produced directly; any other node is lowered as a place, and the
     /// value is `load`ed from it.
     fn lower_as_register(&mut self, node: &ENode) -> ssa::Value {
         use hir::NodeKind as K;
@@ -663,6 +751,31 @@ impl<'a> Emitter<'a> {
         self.insert(Instruction::store(span, v, destination));
     }
 
+    /// Projects the method function reference out of `n`'s dictionary place, loads it, and lowers
+    /// the call's runtime arguments to their place operands. Returns `(method, arguments)` ready
+    /// to be completed with a result out-pointer and emitted as a `call`.
+    fn lower_dictionary_method_target(
+        &mut self,
+        node: &ENode,
+        n: &hir::CallDictionaryMethod<Elaborated>,
+    ) -> (ssa::Value, Vec<ssa::Value>) {
+        let dictionary = self.lower_as_place(&self.hir_arena[n.dictionary]);
+        let method_ty = Type::function_type(n.ty.clone());
+        let method_place = self
+            .insert(Instruction::project(
+                node.span,
+                dictionary,
+                n.entry_index.as_index(),
+                method_ty,
+            ))
+            .unwrap();
+        let method = self
+            .insert(Instruction::load(node.span, method_place))
+            .unwrap();
+        let arguments = n.arguments.iter().map(|a| self.lower_argument(a)).collect();
+        (method, arguments)
+    }
+
     /// Inserts an allocation of `f`'s result storage and returns its address.
     ///
     /// For void return types, no static allocation is inserted; we use the special value UnitPlace.
@@ -672,9 +785,10 @@ impl<'a> Emitter<'a> {
         } else {
             match f.return_convention {
                 FnReturnConvention::Value => self.alloca_storage(node.span, node.ty),
-                FnReturnConvention::Place => self
+                FnReturnConvention::AddressorPlace => self
                     .insert(Instruction::alloca_place(node.span, node.ty))
                     .unwrap(),
+                FnReturnConvention::YieldedOnce => todo!("YieldedOnce return convention"),
             }
         }
     }
@@ -812,7 +926,7 @@ impl<'a> Emitter<'a> {
                 }
                 let clone = self.local_declaration(n.id).clone;
                 match clone {
-                    None | Some(ResolvedLocalClone::TrivialCopy(_)) => {
+                    None | Some(ResolvedLocalClone::TrivialCopy) => {
                         let place = self.place_of_local(n.id);
                         self.lower_value_into(&self.hir_arena[n.value], Some(place));
                     }
@@ -821,14 +935,16 @@ impl<'a> Emitter<'a> {
                         // through the statically known clone function `f`.
                         let (fi, mi) = match f {
                             FunctionId::Local(i) => (i, self.module.module_id()),
-                            FunctionId::Import(i) => imported_function(i, self.module, self.session),
+                            FunctionId::Import(i) => {
+                                imported_function(i, self.module, self.session)
+                            }
                         };
                         let f = self.demand_function(fi, mi);
 
                         let target = self.place_of_local(n.id);
                         let source = self.lower_as_place(&self.hir_arena[n.value]);
 
-                        self.insert(Instruction::call(node.span, f, [source, target, ssa::Value::UnitPlace]));
+                        self.insert(Instruction::call(node.span, f, [source, target]));
                     }
                     Some(ResolvedLocalClone::Dictionary(dictionary)) => {
                         // Clone the source place into the local's (uninitialized) owned storage
@@ -848,7 +964,7 @@ impl<'a> Emitter<'a> {
                 match n.clone {
                     // A trivial copy: load the source place and store it into the destination. A later
                     // ABI pass may relax this to direct passing where physically possible.
-                    ResolvedLocalClone::TrivialCopy(_) => {
+                    ResolvedLocalClone::TrivialCopy => {
                         self.lower_value_into(&self.hir_arena[n.source], destination);
                     }
                     ResolvedLocalClone::Static(f) => {
@@ -856,13 +972,19 @@ impl<'a> Emitter<'a> {
                         // through the statically known clone function `f`.
                         let (fi, mi) = match f {
                             FunctionId::Local(i) => (i, self.module.module_id()),
-                            FunctionId::Import(i) => imported_function(i, self.module, self.session),
+                            FunctionId::Import(i) => {
+                                imported_function(i, self.module, self.session)
+                            }
                         };
                         let f = self.demand_function(fi, mi);
 
                         let source = self.lower_as_place(&self.hir_arena[n.source]);
 
-                        self.insert(Instruction::call(node.span, f, [source, destination.unwrap(), ssa::Value::UnitPlace]));
+                        self.insert(Instruction::call(
+                            node.span,
+                            f,
+                            [source, destination.unwrap()],
+                        ));
                     }
                     ResolvedLocalClone::Dictionary(dictionary) => {
                         // Materialize an owned snapshot by cloning the source place into a fresh
@@ -985,27 +1107,14 @@ impl<'a> Emitter<'a> {
             }
 
             K::CallDictionaryMethod(n) => {
+                // A place-returning method is resolved as a place and copied into the destination,
+                // like any other place-returning call.
                 if n.ty.returns_place() {
-                    todo!("place-returning dictionary method calls are not lowered yet")
+                    return self.lower_place_call_into(node, destination);
                 }
-                // Project the method's storage out of the dictionary place, load the function
-                // reference, then call it.
-                let dictionary = self.lower_as_place(&self.hir_arena[n.dictionary]);
-                let method_ty = Type::function_type(n.ty.clone());
-                let method_place = self
-                    .insert(Instruction::project(
-                        node.span,
-                        dictionary,
-                        n.entry_index.as_index(),
-                        method_ty,
-                    ))
-                    .unwrap();
-                let method = self
-                    .insert(Instruction::load(node.span, method_place))
-                    .unwrap();
-
-                let mut arguments: Vec<ssa::Value> =
-                    n.arguments.iter().map(|a| self.lower_argument(a)).collect();
+                // Project the method out of the dictionary, load it, then call it into the
+                // destination (or a throwaway result for a discarded call).
+                let (method, mut arguments) = self.lower_dictionary_method_target(node, n);
                 arguments.push(destination.unwrap_or_else(|| self.allocate_result(node, &n.ty)));
                 self.insert(Instruction::call(node.span, method, arguments));
             }
@@ -1059,6 +1168,39 @@ impl<'a> Emitter<'a> {
                 }),
                 destination.expect("discarded uninit construction is not yet implemented"),
             ),
+
+            K::WithPlace(n) => {
+                // An addressor subscript site: bind the accessor's place, then lower the body
+                // (which reads the binding) into the destination.
+                self.bind_local_for_with_place(n);
+                self.lower_value_into(&self.hir_arena[n.body], destination);
+            }
+
+            K::WithYielded(_) => {
+                panic!("WithYielded should be just lowered as an inlining.")
+            }
+
+            K::Return(n) => {
+                // `return <expr>` writes into the function's return out-pointer and terminates,
+                // ignoring the ambient `destination`. Mirrors the interpreter's `eval_return`:
+                // a place-returning function returns the `*T` place pointer; otherwise the value.
+                let operand = &self.hir_arena[*n];
+                let dest = self.context.return_destination.clone();
+                if self.context.returns_place {
+                    let place = self.lower_as_place(operand);
+                    self.store(node.span, place, dest);
+                } else {
+                    self.lower_value_into(operand, Some(dest));
+                }
+                self.insert(Instruction::ret(node.span));
+            }
+
+            K::Yield(_) => {
+                // `Yield` is consumed structurally by its `WithYielded` driver (Stage 4) and must
+                // never be reached through generic lowering.
+                panic!("Yield reached outside its WithYielded accessor");
+            }
+
             _ => {
                 todo!(
                     "lowering is unimplemented for node of kind '{:?}'",
@@ -1102,6 +1244,14 @@ impl<'a> Emitter<'a> {
         self.context.function.definition(i)
     }
 
+    /// Returns whether the current insertion block already ends in a terminator (e.g. a `ret`
+    /// emitted by an explicit `return`), so callers can avoid inserting after a terminator.
+    fn current_block_is_terminated(&self) -> bool {
+        match &self.context.point {
+            InsertionPoint::End(b) => self.context.function.block(*b).is_terminated(),
+        }
+    }
+
     /// Returns a textual representation of `x`.
     fn show<T: FormatWith<ModuleEnv<'a>>>(&self, x: T) -> String {
         let e = ModuleEnv::new(self.module, self.others);
@@ -1140,6 +1290,11 @@ struct InsertionContext {
 
     /// The return out-pointer (the last parameter) into which the function writes its result.
     return_destination: ssa::Value,
+
+    /// Whether the lowered function itself returns a place (`FnReturnConvention::AddressorPlace`).
+    /// When set, `return <expr>` lowers `<expr>` as a place and stores that pointer into the
+    /// `**T` return out-pointer (mirrors the interpreter's `EvalCtx::returns_place`).
+    returns_place: bool,
 }
 
 /// Where an instruction should be inserted in a basic block.

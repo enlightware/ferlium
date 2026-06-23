@@ -111,10 +111,10 @@ impl DictionaryReq {
                 trait_id,
                 input_tys,
                 output_tys,
-                ..
+                output_effs,
             } => env
                 .trait_def(*trait_id)
-                .get_dictionary_type_for_tys(input_tys, output_tys),
+                .get_dictionary_type_for_tys(input_tys, output_tys, output_effs),
         }
     }
 }

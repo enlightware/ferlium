@@ -1098,7 +1098,7 @@ fn generic_apply() {
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_ssa("fn f(x) { x * 2 }"),
-        r#"fn f(%p0: @extra ((A, A) -> A, (A, A) -> A, (A, A) -> A, (A) -> A, (A) -> A, (A) -> A, (int) -> A), %p1: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A, &mut Uninit<A>) -> (), (&mut A) -> (), int, int), %p2: @arg & A, %p3: @ret A):
+        r#"fn f(%p0: @extra ((A, A) -> A, (A, A) -> A, (A, A) -> A, (A) -> A, (A) -> A, (A) -> A, (int) -> A), %p1: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A) -> A, (&mut A) -> (), int, int), %p2: @arg & A, %p3: @ret A):
   0:
     %r0 = alloca A using %p1
     %r1 = project 6 from %p0
@@ -1174,7 +1174,7 @@ fn generic_multiple_ops_reuse_witness() {
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_ssa("fn f(x) { x * x + x }"),
-        r#"fn f(%p0: @extra ((A, A) -> A, (A, A) -> A, (A, A) -> A, (A) -> A, (A) -> A, (A) -> A, (int) -> A), %p1: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A, &mut Uninit<A>) -> (), (&mut A) -> (), int, int), %p2: @arg & A, %p3: @ret A):
+        r#"fn f(%p0: @extra ((A, A) -> A, (A, A) -> A, (A, A) -> A, (A) -> A, (A) -> A, (A) -> A, (int) -> A), %p1: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A) -> A, (&mut A) -> (), int, int), %p2: @arg & A, %p3: @ret A):
   0:
     %r0 = alloca A using %p1
     %r1 = project 2 from %p0
@@ -1195,7 +1195,7 @@ fn generic_comparison() {
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_ssa("fn f(x, y) { x == y }"),
-        r#"fn f(%p0: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A, &mut Uninit<A>) -> (), (&mut A) -> (), int, int), %p1: @arg & A, %p2: @arg & A, %p3: @ret bool):
+        r#"fn f(%p0: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A) -> A, (&mut A) -> (), int, int), %p1: @arg & A, %p2: @arg & A, %p3: @ret bool):
   0:
     %r0 = project 0 from %p0
     %r1 = load %r0
@@ -1264,34 +1264,30 @@ fn construct_struct() {
 
     assert_eq_sans_flake!(
         ssa,
-        r#"fn Value<0-4044>::clone(%p0: @arg & A, %p1: @arg &mut Uninit<A>, %p2: @ret ()):
+        r#"fn Value<...>::clone(%p0: @arg & A, %p1: @ret A):
   0:
     %r0 = project 0 from %p1
-    %r1 = store Uninit<int> to %r0
-    %r2 = project 1 from %p1
-    %r3 = store Uninit<int> to %r2
-    %r4 = project 0 from %p0
-    %r5 = project 0 from %p1
-    %r6 = call std::Value<0-6>::clone(%r4, %r5, &())
-    %r7 = project 1 from %p0
-    %r8 = project 1 from %p1
-    %r9 = call std::Value<0-6>::clone(%r7, %r8, &())
-    %r10 = ret
+    %r1 = project 0 from %p0
+    %r2 = call std::Value<...>::clone(%r1, %r0)
+    %r3 = project 1 from %p1
+    %r4 = project 1 from %p0
+    %r5 = call std::Value<...>::clone(%r4, %r3)
+    %r6 = ret
 
-fn Value<0-4044>::drop(%p0: @arg &mut A, %p1: @ret ()):
+fn Value<...>::drop(%p0: @arg &mut A, %p1: @ret ()):
   0:
     %r0 = project 0 from %p0
-    %r1 = call std::Value<0-6>::drop(%r0, &())
+    %r1 = call std::Value<...>::drop(%r0, &())
     %r2 = project 1 from %p0
-    %r3 = call std::Value<0-6>::drop(%r2, &())
+    %r3 = call std::Value<...>::drop(%r2, &())
     %r4 = ret
 
-fn Value<0-4044>::eq(%p0: @arg & A, %p1: @arg & A, %p2: @ret bool):
+fn Value<...>::eq(%p0: @arg & A, %p1: @arg & A, %p2: @ret bool):
   0:
     %r0 = project 0 from %p0
     %r1 = project 0 from %p1
     %r2 = alloca bool
-    %r3 = call std::Value<0-6>::eq(%r0, %r1, %r2)
+    %r3 = call std::Value<...>::eq(%r0, %r1, %r2)
     %r4 = load %r2
     %r5 = br 1
   1:
@@ -1301,7 +1297,7 @@ fn Value<0-4044>::eq(%p0: @arg & A, %p1: @arg & A, %p2: @ret bool):
     %r8 = project 1 from %p0
     %r9 = project 1 from %p1
     %r10 = alloca bool
-    %r11 = call std::Value<0-6>::eq(%r8, %r9, %r10)
+    %r11 = call std::Value<...>::eq(%r8, %r9, %r10)
     %r12 = load %r10
     %r13 = br 5
   3:
@@ -1321,15 +1317,15 @@ fn Value<0-4044>::eq(%p0: @arg & A, %p1: @arg & A, %p2: @ret bool):
   8:
     %r20 = br 4
 
-fn Value<0-4044>::hash(%p0: @arg & A, %p1: @arg &mut hasher, %p2: @ret ()):
+fn Value<...>::hash(%p0: @arg & A, %p1: @arg &mut hasher, %p2: @ret ()):
   0:
     %r0 = project 0 from %p0
-    %r1 = call std::Value<0-6>::hash(%r0, %p1, &())
+    %r1 = call std::Value<...>::hash(%r0, %p1, &())
     %r2 = project 1 from %p0
-    %r3 = call std::Value<0-6>::hash(%r2, %p1, &())
+    %r3 = call std::Value<...>::hash(%r2, %p1, &())
     %r4 = ret
 
-fn Value<0-4044>::to_string(%p0: @arg & A, %p1: @ret string):
+fn Value<...>::to_string(%p0: @arg & A, %p1: @ret string):
   0:
     %r0 = alloca string
     %r1 = alloca string
@@ -1346,7 +1342,7 @@ fn Value<0-4044>::to_string(%p0: @arg & A, %p1: @ret string):
     %r12 = store ": " to %r2
     %r13 = call std::string_push_str(%r0, %r2, &())
     %r14 = project 0 from %p0
-    %r15 = call std::Value<0-6>::to_string(%r14, %r3)
+    %r15 = call std::Value<...>::to_string(%r14, %r3)
     %r16 = call std::string_push_str(%r0, %r3, &())
     %r17 = store ", " to %r4
     %r18 = call std::string_push_str(%r0, %r4, &())
@@ -1355,7 +1351,7 @@ fn Value<0-4044>::to_string(%p0: @arg & A, %p1: @ret string):
     %r21 = store ": " to %r6
     %r22 = call std::string_push_str(%r0, %r6, &())
     %r23 = project 1 from %p0
-    %r24 = call std::Value<0-6>::to_string(%r23, %r7)
+    %r24 = call std::Value<...>::to_string(%r23, %r7)
     %r25 = call std::string_push_str(%r0, %r7, &())
     %r26 = store " }" to %r8
     %r27 = call std::string_push_str(%r0, %r8, &())
@@ -1363,34 +1359,30 @@ fn Value<0-4044>::to_string(%p0: @arg & A, %p1: @ret string):
     %r29 = store %r28 to %p1
     %r30 = ret
 
-fn Value<0-4046>::clone(%p0: @arg & Wrapper, %p1: @arg &mut Uninit<Wrapper>, %p2: @ret ()):
+fn Value<...>::clone(%p0: @arg & Wrapper, %p1: @ret Wrapper):
   0:
     %r0 = project 0 from %p1
-    %r1 = store Uninit<A> to %r0
-    %r2 = project 1 from %p1
-    %r3 = store Uninit<A> to %r2
-    %r4 = project 0 from %p0
-    %r5 = project 0 from %p1
-    %r6 = call <test>::Value<0-4044>::clone(%r4, %r5, &())
-    %r7 = project 1 from %p0
-    %r8 = project 1 from %p1
-    %r9 = call <test>::Value<0-4044>::clone(%r7, %r8, &())
-    %r10 = ret
+    %r1 = project 0 from %p0
+    %r2 = call <test>::Value<...>::clone(%r1, %r0)
+    %r3 = project 1 from %p1
+    %r4 = project 1 from %p0
+    %r5 = call <test>::Value<...>::clone(%r4, %r3)
+    %r6 = ret
 
-fn Value<0-4046>::drop(%p0: @arg &mut Wrapper, %p1: @ret ()):
+fn Value<...>::drop(%p0: @arg &mut Wrapper, %p1: @ret ()):
   0:
     %r0 = project 0 from %p0
-    %r1 = call <test>::Value<0-4044>::drop(%r0, &())
+    %r1 = call <test>::Value<...>::drop(%r0, &())
     %r2 = project 1 from %p0
-    %r3 = call <test>::Value<0-4044>::drop(%r2, &())
+    %r3 = call <test>::Value<...>::drop(%r2, &())
     %r4 = ret
 
-fn Value<0-4046>::eq(%p0: @arg & Wrapper, %p1: @arg & Wrapper, %p2: @ret bool):
+fn Value<...>::eq(%p0: @arg & Wrapper, %p1: @arg & Wrapper, %p2: @ret bool):
   0:
     %r0 = project 0 from %p0
     %r1 = project 0 from %p1
     %r2 = alloca bool
-    %r3 = call <test>::Value<0-4044>::eq(%r0, %r1, %r2)
+    %r3 = call <test>::Value<...>::eq(%r0, %r1, %r2)
     %r4 = load %r2
     %r5 = br 1
   1:
@@ -1400,7 +1392,7 @@ fn Value<0-4046>::eq(%p0: @arg & Wrapper, %p1: @arg & Wrapper, %p2: @ret bool):
     %r8 = project 1 from %p0
     %r9 = project 1 from %p1
     %r10 = alloca bool
-    %r11 = call <test>::Value<0-4044>::eq(%r8, %r9, %r10)
+    %r11 = call <test>::Value<...>::eq(%r8, %r9, %r10)
     %r12 = load %r10
     %r13 = br 5
   3:
@@ -1420,15 +1412,15 @@ fn Value<0-4046>::eq(%p0: @arg & Wrapper, %p1: @arg & Wrapper, %p2: @ret bool):
   8:
     %r20 = br 4
 
-fn Value<0-4046>::hash(%p0: @arg & Wrapper, %p1: @arg &mut hasher, %p2: @ret ()):
+fn Value<...>::hash(%p0: @arg & Wrapper, %p1: @arg &mut hasher, %p2: @ret ()):
   0:
     %r0 = project 0 from %p0
-    %r1 = call <test>::Value<0-4044>::hash(%r0, %p1, &())
+    %r1 = call <test>::Value<...>::hash(%r0, %p1, &())
     %r2 = project 1 from %p0
-    %r3 = call <test>::Value<0-4044>::hash(%r2, %p1, &())
+    %r3 = call <test>::Value<...>::hash(%r2, %p1, &())
     %r4 = ret
 
-fn Value<0-4046>::to_string(%p0: @arg & Wrapper, %p1: @ret string):
+fn Value<...>::to_string(%p0: @arg & Wrapper, %p1: @ret string):
   0:
     %r0 = alloca string
     %r1 = alloca string
@@ -1445,7 +1437,7 @@ fn Value<0-4046>::to_string(%p0: @arg & Wrapper, %p1: @ret string):
     %r12 = store ": " to %r2
     %r13 = call std::string_push_str(%r0, %r2, &())
     %r14 = project 0 from %p0
-    %r15 = call <test>::Value<0-4044>::to_string(%r14, %r3)
+    %r15 = call <test>::Value<...>::to_string(%r14, %r3)
     %r16 = call std::string_push_str(%r0, %r3, &())
     %r17 = store ", " to %r4
     %r18 = call std::string_push_str(%r0, %r4, &())
@@ -1454,7 +1446,7 @@ fn Value<0-4046>::to_string(%p0: @arg & Wrapper, %p1: @ret string):
     %r21 = store ": " to %r6
     %r22 = call std::string_push_str(%r0, %r6, &())
     %r23 = project 1 from %p0
-    %r24 = call <test>::Value<0-4044>::to_string(%r23, %r7)
+    %r24 = call <test>::Value<...>::to_string(%r23, %r7)
     %r25 = call std::string_push_str(%r0, %r7, &())
     %r26 = store " }" to %r8
     %r27 = call std::string_push_str(%r0, %r8, &())
@@ -1467,11 +1459,11 @@ fn make_a(%p0: @ret A):
     %r0 = project 0 from %p0
     %r1 = alloca int
     %r2 = store int 1 to %r1
-    %r3 = call std::Num<0-6>::from_int(%r1, %r0)
+    %r3 = call std::Num<...>::from_int(%r1, %r0)
     %r4 = project 1 from %p0
     %r5 = alloca int
     %r6 = store int 2 to %r5
-    %r7 = call std::Num<0-6>::from_int(%r5, %r4)
+    %r7 = call std::Num<...>::from_int(%r5, %r4)
     %r8 = ret
 
 fn make_wrapper(%p0: @ret Wrapper):
@@ -1497,8 +1489,8 @@ fn copy_struct_with_explicit_clone() {
                 fn eq(left: Probe, right: Probe) -> bool { left.0 == right.0 }
                 fn to_string(value: Probe) -> string { to_string(value.0) }
                 fn hash(value: Probe, state: &mut hasher) { hash(value.0, state) }
-                fn clone(source: Probe, target: &mut Uninit<Probe>) {
-                    target = Probe(source.0 + 100);
+                fn clone(source: Probe) -> Probe {
+                    Probe(source.0 + 100)
                 }
                 fn drop(target: &mut Probe) {}
             }
@@ -1509,43 +1501,43 @@ fn copy_struct_with_explicit_clone() {
 
     assert_eq_sans_flake!(
         ssa,
-        r#"fn Value<0-4043>::clone(%p0: @arg & Probe, %p1: @arg &mut Uninit<Probe>, %p2: @ret ()):
+        r#"fn Value<...>::clone(%p0: @arg & Probe, %p1: @ret Probe):
   0:
     %r0 = alloca int
     %r1 = project 0 from %p1
     %r2 = alloca int
     %r3 = store int 100 to %r2
-    %r4 = call std::Num<0-6>::from_int(%r2, %r0)
+    %r4 = call std::Num<...>::from_int(%r2, %r0)
     %r5 = project 0 from %p0
-    %r6 = call std::Num<0-6>::add(%r5, %r0, %r1)
+    %r6 = call std::Num<...>::add(%r5, %r0, %r1)
     %r7 = ret
 
-fn Value<0-4043>::drop(%p0: @arg &mut Probe, %p1: @ret ()):
+fn Value<...>::drop(%p0: @arg &mut Probe, %p1: @ret ()):
   0:
     %r0 = ret
 
-fn Value<0-4043>::eq(%p0: @arg & Probe, %p1: @arg & Probe, %p2: @ret bool):
+fn Value<...>::eq(%p0: @arg & Probe, %p1: @arg & Probe, %p2: @ret bool):
   0:
     %r0 = project 0 from %p0
     %r1 = project 0 from %p1
-    %r2 = call std::Value<0-6>::eq(%r0, %r1, %p2)
+    %r2 = call std::Value<...>::eq(%r0, %r1, %p2)
     %r3 = ret
 
-fn Value<0-4043>::hash(%p0: @arg & Probe, %p1: @arg &mut hasher, %p2: @ret ()):
+fn Value<...>::hash(%p0: @arg & Probe, %p1: @arg &mut hasher, %p2: @ret ()):
   0:
     %r0 = project 0 from %p0
-    %r1 = call std::Value<0-6>::hash(%r0, %p1, %p2)
+    %r1 = call std::Value<...>::hash(%r0, %p1, %p2)
     %r2 = ret
 
-fn Value<0-4043>::to_string(%p0: @arg & Probe, %p1: @ret string):
+fn Value<...>::to_string(%p0: @arg & Probe, %p1: @ret string):
   0:
     %r0 = project 0 from %p0
-    %r1 = call std::Value<0-6>::to_string(%r0, %p1)
+    %r1 = call std::Value<...>::to_string(%r0, %p1)
     %r2 = ret
 
 fn f(%p0: @arg & Probe, %p1: @ret Probe):
   0:
-    %r0 = call <test>::Value<0-4043>::clone(%p0, %p1, &())
+    %r0 = call <test>::Value<...>::clone(%p0, %p1)
     %r1 = ret
 "#
     );
@@ -1558,11 +1550,11 @@ fn clone_value_generic_return() {
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_ssa("fn f<T>(x: T) -> T { x }"),
-        r#"fn f(%p0: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A, &mut Uninit<A>) -> (), (&mut A) -> (), int, int), %p1: @arg & A, %p2: @ret A):
+        r#"fn f(%p0: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A) -> A, (&mut A) -> (), int, int), %p1: @arg & A, %p2: @ret A):
   0:
     %r0 = project 3 from %p0
     %r1 = load %r0
-    %r2 = call %r1(%p1, %p2, &())
+    %r2 = call %r1(%p1, %p2)
     %r3 = ret
 "#,
     );
@@ -1575,7 +1567,7 @@ fn clone_value_generic_branch() {
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_ssa("fn f<T>(x: T) -> T { if true { x } else { x } }"),
-        r#"fn f(%p0: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A, &mut Uninit<A>) -> (), (&mut A) -> (), int, int), %p1: @arg & A, %p2: @ret A):
+        r#"fn f(%p0: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A) -> A, (&mut A) -> (), int, int), %p1: @arg & A, %p2: @ret A):
   0:
     %r0 = br 1
   1:
@@ -1584,12 +1576,12 @@ fn clone_value_generic_branch() {
   2:
     %r3 = project 3 from %p0
     %r4 = load %r3
-    %r5 = call %r4(%p1, %p2, &())
+    %r5 = call %r4(%p1, %p2)
     %r6 = br 4
   3:
     %r7 = project 3 from %p0
     %r8 = load %r7
-    %r9 = call %r8(%p1, %p2, &())
+    %r9 = call %r8(%p1, %p2)
     %r10 = br 4
   4:
     %r11 = ret
@@ -1605,12 +1597,12 @@ fn store_local_generic_clone_dictionary() {
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_ssa("fn g<T>(x: &mut T) {} fn f<T>(x: T) { let mut y = x; g(y); }"),
-        r#"fn f(%p0: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A, &mut Uninit<A>) -> (), (&mut A) -> (), int, int), %p1: @arg & A, %p2: @ret ()):
+        r#"fn f(%p0: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A) -> A, (&mut A) -> (), int, int), %p1: @arg & A, %p2: @ret ()):
   0:
     %r0 = alloca A using %p0
     %r1 = project 3 from %p0
     %r2 = load %r1
-    %r3 = call %r2(%p1, %r0, &())
+    %r3 = call %r2(%p1, %r0)
     %r4 = call <test>::g(%r0, &())
     %r5 = ret
 
@@ -1812,5 +1804,147 @@ fn variants() {
   0:
     %r0 = ret
 "#
+    );
+}
+
+#[test]
+fn named_subscript_read() {
+    let mut session = TestSession::new();
+    session.allow_experimental();
+    assert_eq_sans_flake!(
+        session.emit_ssa(
+            "subscript first(values: &mut [int]) -> int { ref mut { return values[0] } }\nfn f(a: &mut [int]) -> int { a->[first] }",
+        ),
+        r#"fn f(%p0: @arg &mut [int], %p1: @ret int):
+  0:
+    %r0 = alloca_place int
+    %r1 = call <test>::first(%p0, %r0)
+    %r2 = load %r0
+    %r3 = load %r2
+    %r4 = store %r3 to %p1
+    %r5 = ret
+
+fn first(%p0: @arg &mut [int], %p1: @ret int):
+  0:
+    %r0 = alloca int
+    %r1 = store int 0 to %r0
+    %r2 = alloca_place int
+    %r3 = call std::array_index(%p0, %r0, %r2)
+    %r4 = load %r2
+    %r5 = store %r4 to %p1
+    %r6 = ret
+"#,
+    );
+}
+
+#[test]
+fn named_subscript_assign() {
+    let mut session = TestSession::new();
+    session.allow_experimental();
+    assert_eq_sans_flake!(
+        session.emit_ssa(
+            "subscript first(values: &mut [int]) -> int { ref mut { return values[0] } }\nfn f(a: &mut [int], v: int) { a->[first] = v }",
+        ),
+        r#"fn f(%p0: @arg &mut [int], %p1: @arg int, %p2: @ret ()):
+  0:
+    %r0 = alloca_place int
+    %r1 = call <test>::first(%p0, %r0)
+    %r2 = load %r0
+    %r3 = load %p1
+    %r4 = store %r3 to %r2
+    %r5 = ret
+
+fn first(%p0: @arg &mut [int], %p1: @ret int):
+  0:
+    %r0 = alloca int
+    %r1 = store int 0 to %r0
+    %r2 = alloca_place int
+    %r3 = call std::array_index(%p0, %r0, %r2)
+    %r4 = load %r2
+    %r5 = store %r4 to %p1
+    %r6 = ret
+"#,
+    );
+}
+
+#[test]
+fn named_subscript_compound_assign() {
+    let mut session = TestSession::new();
+    session.allow_experimental();
+    assert_eq_sans_flake!(
+        session.emit_ssa(
+            "subscript first(values: &mut [int]) -> int { ref mut { return values[0] } }\nfn f(a: &mut [int], v: int) { a->[first] += v }",
+        ),
+        r#"fn f(%p0: @arg &mut [int], %p1: @arg int, %p2: @ret ()):
+  0:
+    %r0 = alloca_place int
+    %r1 = call <test>::first(%p0, %r0)
+    %r2 = load %r0
+    %r3 = call std::Num<...>::add(%r2, %p1, %r2)
+    %r4 = ret
+
+fn first(%p0: @arg &mut [int], %p1: @ret int):
+  0:
+    %r0 = alloca int
+    %r1 = store int 0 to %r0
+    %r2 = alloca_place int
+    %r3 = call std::array_index(%p0, %r0, %r2)
+    %r4 = load %r2
+    %r5 = store %r4 to %p1
+    %r6 = ret
+"#,
+    );
+}
+
+#[test]
+fn explicit_return_value() {
+    let mut session = TestSession::new();
+    assert_eq_sans_flake!(
+        session.emit_ssa("fn g(x: int) -> int { return x }"),
+        r#"fn g(%p0: @arg int, %p1: @ret int):
+  0:
+    %r0 = load %p0
+    %r1 = store %r0 to %p1
+    %r2 = ret
+"#,
+    );
+}
+
+#[test]
+fn addressor_subscript_member_returns_place() {
+    let mut session = TestSession::new();
+    session.allow_experimental();
+    // The addressor member is emitted by the top-level `emit_ssa` (subscript members are part of
+    // the module). Its body returns the *place pointer* through its return out-pointer: the final
+    // `store %r4 to %p1` writes the `*int` place into the `**int` slot.
+    assert_eq_sans_flake!(
+        session.emit_ssa(
+            "subscript first(values: &mut [int]) -> int { ref mut { return values[0] } }",
+        ),
+        r#"fn first(%p0: @arg &mut [int], %p1: @ret int):
+  0:
+    %r0 = alloca int
+    %r1 = store int 0 to %r0
+    %r2 = alloca_place int
+    %r3 = call std::array_index(%p0, %r0, %r2)
+    %r4 = load %r2
+    %r5 = store %r4 to %p1
+    %r6 = ret
+"#,
+    );
+}
+
+#[test]
+fn yielded_subscript_member_is_not_emitted_standalone() {
+    // A scoped (`yield`) member has YieldedOnce convention and no standalone SSA form: it is
+    // consumed inline at its WithYielded site. The top-level `emit_ssa` skips it, so a module
+    // defining only such a subscript lowers to nothing.
+    let mut session = TestSession::new();
+    session.allow_experimental();
+    assert_eq!(
+        session.emit_ssa(
+            "subscript cell(slot: &mut int) -> int { ref mut { let mut local = slot; yield local; slot = local } }",
+        ),
+        "",
     );
 }
