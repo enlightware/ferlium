@@ -250,6 +250,36 @@ You can combine `join` with other functions:
 join(chain(["Hello", "world"], ["how", "are", "you", "?"]), " ")
 ```
 
+### Building sequences in place
+
+Use `concat`, `chain`, and `join` when you want to produce a new value.
+Use the in-place functions when you are incrementally building a mutable string or array.
+
+```ferlium
+let mut text = "Hello";
+string_push_str(text, ", ");
+string_push_str(text, "world");
+text
+```
+
+```ferlium
+let mut xs = [];
+array_append(xs, 1);
+array_append(xs, 2);
+xs
+```
+
+For arrays, `array_prepend` inserts at the front:
+
+```ferlium
+let mut xs = [2, 3];
+array_prepend(xs, 1);
+xs
+```
+
+These functions require a mutable binding because they update the existing value.
+For repeated incremental construction, prefer the in-place functions instead of repeatedly concatenating intermediate values.
+
 ### Minimum and maximum
 
 Use `minimum` and `maximum` when the element type is ordered:

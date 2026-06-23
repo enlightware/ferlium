@@ -57,6 +57,7 @@ a
 ```
 
 The first program works; the second is rejected because `a` is not mutable.
+The same mutable-passing rule applies to other in-place builders such as `array_prepend` and `string_push_str`.
 
 You can also see mutable references in function type syntax. `&mut` is supported in function argument positions:
 

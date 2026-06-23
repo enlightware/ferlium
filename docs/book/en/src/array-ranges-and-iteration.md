@@ -165,6 +165,8 @@ for i in 2..5 {
 out
 ```
 
+For more on in-place array and string construction, see [Sequence Processing](./sequence-processing.md#building-sequences-in-place).
+
 ### Loop variable scope and expression result
 
 The loop variable is local to the loop body. The `for` expression itself evaluates to `()`.
