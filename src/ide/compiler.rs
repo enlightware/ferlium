@@ -135,7 +135,7 @@ impl Compiler {
     pub fn run_expr(&mut self) -> Option<ExecutionResult> {
         self.user_module.expr.as_ref().map(|expr| {
             let module_id = self.user_module.module_id;
-            let is_stale = self.session.modules().is_stale(module_id).unwrap();
+            let is_stale = self.session.modules().info(module_id).unwrap().is_stale();
             if is_stale {
                 let module_name = self
                     .session

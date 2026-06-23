@@ -19,7 +19,7 @@ pub use pipeline::parse_module_and_expr;
 pub(crate) use session::Modules;
 pub use session::{
     CompilationCapabilities, CompilationRevision, CompilerSession, ModuleAndExpr, ModuleInfo,
-    ModuleRegistry, ModuleSource, ModuleUpdateResult, SourceVersion,
+    ModuleRegistry, ModuleSource, SourceVersion,
 };
 
 #[doc(hidden)]
@@ -34,42 +34,42 @@ pub mod test_support {
     }
 
     pub fn module_entry_exists(session: &CompilerSession, module_id: ModuleId) -> bool {
-        session.modules.get(module_id).is_some()
+        session.modules().contains(module_id)
     }
 
     pub fn module_is_stale(session: &CompilerSession, module_id: ModuleId) -> Option<bool> {
-        Some(session.modules.get(module_id)?.is_stale())
+        Some(session.modules().info(module_id)?.is_stale())
     }
 
     pub fn module_has_compiled_version(
         session: &CompilerSession,
         module_id: ModuleId,
     ) -> Option<bool> {
-        Some(session.modules.get(module_id)?.module().is_some())
+        Some(session.modules().info(module_id)?.has_compiled_module())
     }
 
     pub fn module_source_version(
         session: &CompilerSession,
         module_id: ModuleId,
     ) -> Option<SourceVersion> {
-        session.modules.get(module_id)?.source_version()
+        session.modules().info(module_id)?.source_version()
     }
 
     pub fn module_compilation_revision(
         session: &CompilerSession,
         module_id: ModuleId,
     ) -> Option<CompilationRevision> {
-        Some(session.modules.get(module_id)?.compilation_revision())
+        Some(session.modules().info(module_id)?.compilation_revision())
     }
 
     pub fn module_diagnostics_len(session: &CompilerSession, module_id: ModuleId) -> Option<usize> {
-        Some(session.modules.get(module_id)?.diagnostics().len())
+        Some(session.modules().info(module_id)?.diagnostics().len())
     }
 
     pub fn module_latest_deps(
         session: &CompilerSession,
         module_id: ModuleId,
     ) -> Option<Vec<ModuleId>> {
-        Some(session.modules.get(module_id)?.latest_deps().to_vec())
+        Some(session.modules().info(module_id)?.latest_deps().to_vec())
     }
 }

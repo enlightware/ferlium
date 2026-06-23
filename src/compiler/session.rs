@@ -7,7 +7,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use ::std::{cell::RefCell, mem, sync::LazyLock};
+use ::std::{cell::RefCell, fmt, mem, sync::LazyLock};
 use derive_new::new;
 use itertools::Itertools;
 
@@ -78,39 +78,12 @@ define_id_type!(
     CompilationRevision
 );
 
-/// Metadata for a module registered in a [`CompilerSession`].
-#[derive(Debug, Clone)]
-pub struct ModuleInfo {
-    pub module_id: ModuleId,
-    /// Human-readable module path, if the module has one.
-    pub path: Option<Path>,
-    /// Latest source version for modules backed by Ferlium source.
-    pub source_version: Option<SourceVersion>,
-    /// Whether this module or one of its dependencies is currently stale.
-    pub stale: bool,
-    /// Whether a compiled module is available for semantic fallback.
-    pub has_compiled_module: bool,
-}
-
 /// Latest source snapshot for a source-backed module.
 #[derive(Debug, Clone, Copy)]
 pub struct ModuleSource<'a> {
     pub source_id: SourceId,
     pub source_version: SourceVersion,
     pub source: &'a str,
-}
-
-/// Result of replacing a module source and immediately attempting compilation.
-#[derive(Debug, Clone)]
-pub struct ModuleUpdateResult {
-    pub module_id: ModuleId,
-    /// Source version after the update. This is unchanged when the source text
-    /// is identical to the previous source text.
-    pub source_version: SourceVersion,
-    /// Compilation revision produced by the update attempt.
-    pub compilation_revision: CompilationRevision,
-    /// Diagnostics produced by the update attempt.
-    pub diagnostics: Vec<ModuleDiagnostic>,
 }
 
 /// All data needed to rebuild the module.
@@ -138,10 +111,6 @@ pub struct ModuleEntry {
     pub(crate) latest_deps: Vec<ModuleId>,
     /// Latest compilation attempt revision.
     pub(crate) compilation_revision: CompilationRevision,
-    /// Last successful source version, if this source-backed module has compiled fresh.
-    pub(crate) last_successful_source_version: Option<SourceVersion>,
-    /// Last successful compilation revision, if this module has compiled fresh.
-    pub(crate) last_successful_compilation_revision: Option<CompilationRevision>,
     /// Diagnostics from the latest compilation attempt.
     pub(crate) diagnostics: Vec<ModuleDiagnostic>,
     /// Whether this module or some of its dependencies failed to compile.
@@ -158,8 +127,6 @@ impl ModuleEntry {
             last_error: None,
             latest_deps: deps,
             compilation_revision: CompilationRevision::from_index(0),
-            last_successful_source_version: None,
-            last_successful_compilation_revision: Some(CompilationRevision::from_index(0)),
             diagnostics: Vec::new(),
             stale: false,
         }
@@ -172,15 +139,12 @@ impl ModuleEntry {
         compilation_revision: CompilationRevision,
     ) -> Self {
         let deps = module.deps().collect();
-        let source_version = src_info.source_version;
         ModuleEntry {
             src_info: Some(src_info),
             module: Some(module),
             last_error: None,
             latest_deps: deps,
             compilation_revision,
-            last_successful_source_version: Some(source_version),
-            last_successful_compilation_revision: Some(compilation_revision),
             diagnostics: Vec::new(),
             stale: false,
         }
@@ -198,8 +162,6 @@ impl ModuleEntry {
             last_error: None,
             latest_deps: deps,
             compilation_revision,
-            last_successful_source_version: None,
-            last_successful_compilation_revision: None,
             diagnostics: Vec::new(),
             stale: true,
         }
@@ -218,8 +180,6 @@ impl ModuleEntry {
             last_error: Some(error),
             latest_deps: vec![],
             compilation_revision,
-            last_successful_source_version: None,
-            last_successful_compilation_revision: None,
             diagnostics,
             stale: true,
         }
@@ -263,36 +223,63 @@ impl ModuleEntry {
         self.module.as_ref()
     }
 
-    pub fn is_stale(&self) -> bool {
-        self.stale
-    }
-
-    pub fn compilation_revision(&self) -> CompilationRevision {
-        self.compilation_revision
-    }
-
-    pub fn diagnostics(&self) -> &[ModuleDiagnostic] {
-        &self.diagnostics
-    }
-
-    pub fn source_version(&self) -> Option<SourceVersion> {
-        self.src_info.as_ref().map(|info| info.source_version)
-    }
-
-    pub fn latest_deps(&self) -> &[ModuleId] {
-        &self.latest_deps
-    }
-
-    pub fn last_successful_source_version(&self) -> Option<SourceVersion> {
-        self.last_successful_source_version
-    }
-
-    pub fn last_successful_compilation_revision(&self) -> Option<CompilationRevision> {
-        self.last_successful_compilation_revision
-    }
-
     pub(crate) fn next_compilation_revision(&self) -> CompilationRevision {
         CompilationRevision::from_index(self.compilation_revision.as_index() + 1)
+    }
+}
+
+/// Read-only metadata view over a registered module entry.
+#[derive(Clone, Copy)]
+pub struct ModuleInfo<'a> {
+    entry: &'a ModuleEntry,
+}
+
+impl fmt::Debug for ModuleInfo<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ModuleInfo")
+            .field("source_version", &self.source_version())
+            .field("compilation_revision", &self.compilation_revision())
+            .field("diagnostics", &self.diagnostics())
+            .field("latest_deps", &self.latest_deps())
+            .field("stale", &self.is_stale())
+            .field("has_compiled_module", &self.has_compiled_module())
+            .finish()
+    }
+}
+
+impl<'a> ModuleInfo<'a> {
+    fn new(entry: &'a ModuleEntry) -> Self {
+        Self { entry }
+    }
+
+    /// Latest source version for modules backed by Ferlium source.
+    pub fn source_version(&self) -> Option<SourceVersion> {
+        self.entry.src_info.as_ref().map(|info| info.source_version)
+    }
+
+    /// Latest compilation attempt revision.
+    pub fn compilation_revision(&self) -> CompilationRevision {
+        self.entry.compilation_revision
+    }
+
+    /// Diagnostics produced by the latest compilation attempt.
+    pub fn diagnostics(&self) -> &'a [ModuleDiagnostic] {
+        &self.entry.diagnostics
+    }
+
+    /// Dependencies discovered during the latest successful self build.
+    pub fn latest_deps(&self) -> &'a [ModuleId] {
+        &self.entry.latest_deps
+    }
+
+    /// Return whether this module or one of its dependencies is stale.
+    pub fn is_stale(&self) -> bool {
+        self.entry.stale
+    }
+
+    /// Return whether a compiled module is available for semantic fallback.
+    pub fn has_compiled_module(&self) -> bool {
+        self.entry.module.is_some()
     }
 }
 
@@ -319,6 +306,11 @@ impl<'a> ModuleRegistry<'a> {
     /// Return the compiled module for an ID, if one is available.
     pub fn get(self, module_id: ModuleId) -> Option<&'a Module> {
         self.modules.get(module_id)?.module()
+    }
+
+    /// Return read-only metadata for a registered module.
+    pub fn info(self, module_id: ModuleId) -> Option<ModuleInfo<'a>> {
+        Some(ModuleInfo::new(self.modules.get(module_id)?))
     }
 
     /// Return whether a module ID is registered in this session.
@@ -354,9 +346,13 @@ impl<'a> ModuleRegistry<'a> {
             .filter_map(|(path, entry)| entry.module().map(|module| (path, module)))
     }
 
-    /// Return whether a registered module is stale.
-    pub fn is_stale(self, module_id: ModuleId) -> Option<bool> {
-        Some(self.modules.get(module_id)?.is_stale())
+    /// Iterate over all registered module entries with their IDs and optional paths.
+    pub fn iter_entries(
+        self,
+    ) -> impl Iterator<Item = (ModuleId, Option<&'a Path>, ModuleInfo<'a>)> {
+        self.modules
+            .enumerate()
+            .map(|(module_id, entry, path)| (module_id, path, ModuleInfo::new(entry)))
     }
 
     /// Build a module environment for a compiled module in this registry.
@@ -454,20 +450,6 @@ impl CompilerSession {
         &self.modules
     }
 
-    /// List every module registered in this session.
-    pub fn list_modules(&self) -> Vec<ModuleInfo> {
-        self.modules
-            .enumerate()
-            .map(|(module_id, entry, path)| ModuleInfo {
-                module_id,
-                path: path.cloned(),
-                source_version: entry.src_info.as_ref().map(|info| info.source_version),
-                stale: entry.stale,
-                has_compiled_module: entry.module.is_some(),
-            })
-            .collect()
-    }
-
     /// Get the latest source snapshot for a source-backed module.
     pub fn get_module_source(&self, module_id: ModuleId) -> Option<ModuleSource<'_>> {
         let src_info = self.modules.get(module_id)?.src_info.as_ref()?;
@@ -505,12 +487,13 @@ impl CompilerSession {
     ///
     /// The source version only changes when the source text changes. The
     /// compilation revision changes for every compilation attempt, including an
-    /// update with identical source text.
+    /// update with identical source text. Query [`CompilerSession::modules`]
+    /// after a successful update to inspect the resulting module metadata.
     pub fn update_module_source(
         &mut self,
         module_id: ModuleId,
         new_source: &str,
-    ) -> Result<ModuleUpdateResult, String> {
+    ) -> Result<(), String> {
         let src_info = self
             .modules
             .get(module_id)
@@ -532,16 +515,7 @@ impl CompilerSession {
             self.capabilities,
             None,
         );
-        let entry = self
-            .modules
-            .get(module_id)
-            .expect("module must exist after update");
-        Ok(ModuleUpdateResult {
-            module_id,
-            source_version,
-            compilation_revision: entry.compilation_revision,
-            diagnostics: entry.diagnostics.clone(),
-        })
+        Ok(())
     }
 
     /// Get a module environment, with an empty module including the standard library

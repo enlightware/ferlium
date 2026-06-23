@@ -862,23 +862,25 @@ fn module_source_versions_and_compilation_revisions_are_tracked() {
         0
     );
 
-    let changed = session
+    session
         .update_module_source(module_id, "fn val() -> int { 2 }")
         .expect("source update should be accepted");
-    assert_eq!(changed.source_version.as_index(), 1);
-    assert_eq!(changed.compilation_revision.as_index(), 1);
-    assert!(changed.diagnostics.is_empty());
+    let changed = session.modules().info(module_id).unwrap();
+    assert_eq!(changed.source_version().unwrap().as_index(), 1);
+    assert_eq!(changed.compilation_revision().as_index(), 1);
+    assert!(changed.diagnostics().is_empty());
     assert_eq!(
         session.get_module_source(module_id).unwrap().source,
         "fn val() -> int { 2 }"
     );
 
-    let unchanged = session
+    session
         .update_module_source(module_id, "fn val() -> int { 2 }")
         .expect("same-source update should still compile");
-    assert_eq!(unchanged.source_version.as_index(), 1);
-    assert_eq!(unchanged.compilation_revision.as_index(), 2);
-    assert!(unchanged.diagnostics.is_empty());
+    let unchanged = session.modules().info(module_id).unwrap();
+    assert_eq!(unchanged.source_version().unwrap().as_index(), 1);
+    assert_eq!(unchanged.compilation_revision().as_index(), 2);
+    assert!(unchanged.diagnostics().is_empty());
 }
 
 #[test]
@@ -894,16 +896,17 @@ fn failed_module_source_update_records_diagnostics_and_keeps_last_good_module() 
         .expect("initial compile should succeed")
         .module_id;
 
-    let update = session
+    session
         .update_module_source(module_id, "this is not valid ferlium !!!")
         .expect("source update should be accepted even when compilation fails");
+    let update = session.modules().info(module_id).unwrap();
 
-    assert_eq!(update.source_version.as_index(), 1);
-    assert_eq!(update.compilation_revision.as_index(), 1);
-    assert!(!update.diagnostics.is_empty());
+    assert_eq!(update.source_version().unwrap().as_index(), 1);
+    assert_eq!(update.compilation_revision().as_index(), 1);
+    assert!(!update.diagnostics().is_empty());
     assert_eq!(
         module_diagnostics_len(&session, module_id).unwrap(),
-        update.diagnostics.len()
+        update.diagnostics().len()
     );
     assert!(module_is_stale(&session, module_id).unwrap());
     assert!(
