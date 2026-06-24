@@ -43,6 +43,13 @@ pub enum Value {
     /// A constant string value.
     String(crate::std::string::String),
 
+    /// A constant literal value (a scalar or a composite tuple/record), used as a `match` pattern.
+    /// Scalars also have dedicated variants above; this carries whole composite patterns — e.g.
+    /// `(true, true)` — that have no single scalar form, so a `match` can compare the whole scrutinee
+    /// against the whole pattern structurally (mirroring the HIR interpreter's `LiteralValue`
+    /// equality) instead of decomposing it.
+    Literal(crate::containers::B<crate::hir::value::LiteralValue>),
+
     /// An uninitialized value of type `T`.
     Uninit(ShownType),
 }
@@ -62,6 +69,7 @@ impl fmt::Display for Value {
             Value::Unit => write!(f, "()"),
             Value::Uninit(t) => write!(f, "Uninit<{}>", t.name),
             Value::String(s) => write!(f, "\"{}\"", s),
+            Value::Literal(lit) => write!(f, "{}", lit),
             Value::UnitPlace => write!(f, "&()"),
         }
     }
@@ -139,6 +147,26 @@ impl Integer {
             bits: i32::cast_unsigned(value).into(),
             width: IntWidth::FixedSize(32),
             signed: true,
+        }
+    }
+
+    /// Interprets `self` as a two's-complement integer and returns its value as an `isize`.
+    ///
+    /// Only the low `width` bits of `bits` are significant; a signed value is sign-extended from
+    /// that width. This is the bridge used by the SSA interpreter, which represents every integer
+    /// as the host `isize` (matching the HIR runtime representation of `int`).
+    pub fn to_isize(&self) -> isize {
+        match self.width {
+            IntWidth::PointerSized => self.bits as i64 as isize,
+            IntWidth::FixedSize(w) => {
+                let w = w as u32;
+                if self.signed && w < 64 {
+                    let shift = 64 - w;
+                    (((self.bits << shift) as i64) >> shift) as isize
+                } else {
+                    self.bits as isize
+                }
+            }
         }
     }
 }

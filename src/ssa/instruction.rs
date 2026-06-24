@@ -1,6 +1,8 @@
 use std::any::Any;
 use std::fmt;
 
+use ustr::Ustr;
+
 use crate::{
     Location, cached_primitive_ty, format::FormatWith, list, module::ModuleEnv, ssa,
     types::r#type::Type,
@@ -143,6 +145,30 @@ impl Instruction {
         }
     }
 
+    /// Creates a `variant` instruction, which builds a tagged variant *shell* of type `ty`: the
+    /// result is a register holding `Value::Variant { tag, <uninitialized payload> }`. The
+    /// constructing site stores the shell into the variant's destination and then fills the payload
+    /// in place through a projection of that destination (variant payload index `0`), so the
+    /// payload aggregate — which may be generic and thus have no `Value` layout witness — is never
+    /// materialized into a temporary.
+    pub fn variant(span: Location, tag: Ustr, t: Type) -> Self {
+        Instruction {
+            span,
+            operands: vec![],
+            kind: Box::new(Variant { tag, type_: t }),
+        }
+    }
+
+    /// Creates an `extract_tag` instruction, which reads the tag of the variant at the `variant`
+    /// place and yields it as an `int` register (matching the HIR interpreter's tag encoding).
+    pub fn extract_tag(span: Location, variant: ssa::Value) -> Self {
+        Instruction {
+            span,
+            operands: vec![variant],
+            kind: Box::new(ExtractTag {}),
+        }
+    }
+
     /// Creates a 'ret' instruction.
     ///
     /// The return value is not an operand: the function writes its result into the return
@@ -155,12 +181,65 @@ impl Instruction {
         }
     }
 
+    /// Creates a `stack_save` instruction, whose result is a marker for the current top of the
+    /// stack.
+    ///
+    /// Paired with `stack_restore`, this brackets a region (such as a loop body) so that the
+    /// temporaries it allocates are reclaimed on every back-edge and exit, bounding stack use.
+    pub fn stack_save(span: Location) -> Self {
+        Instruction {
+            span,
+            operands: vec![],
+            kind: Box::new(StackSave {}),
+        }
+    }
+
+    /// Creates a `stack_restore` instruction, which resets the top of the stack to `marker` (the
+    /// result of an earlier `stack_save`), reclaiming everything allocated since.
+    pub fn stack_restore(span: Location, marker: ssa::Value) -> Self {
+        Instruction {
+            span,
+            operands: vec![marker],
+            kind: Box::new(StackRestore {}),
+        }
+    }
+
     /// Creates a 'store' instruction with the given properties.
     pub fn store(span: Location, value: ssa::Value, destination: ssa::Value) -> Self {
         Instruction {
             span,
             operands: vec![value, destination],
             kind: Box::new(Store {}),
+        }
+    }
+
+    /// Creates a `memcpy` instruction, which copies the pointee of `source` (a place) into
+    /// `destination` (a place) directly, without first materializing it in a register.
+    ///
+    /// This is the fused form of a `load` immediately followed by a `store` of the loaded value: a
+    /// shallow, place-to-place copy. Non-trivial reads are wrapped in `Value::clone` by HIR before
+    /// reaching the emitter, so a `memcpy` (like a bare `load`) is a move for non-trivially-copyable
+    /// pointees and a copy for trivial ones.
+    pub fn memcpy(span: Location, source: ssa::Value, destination: ssa::Value) -> Self {
+        Instruction {
+            span,
+            operands: vec![source, destination],
+            kind: Box::new(Memcpy {}),
+        }
+    }
+
+    /// Creates a 'drop' instruction.
+    ///
+    /// Drops the pointee of `target` (a place) by invoking `callee` (a `Value::drop`
+    /// implementation, given either as a constant function reference or as a value loaded from a
+    /// dictionary), but **only if** the pointee is currently initialized. An already-uninitialized
+    /// (moved-out or never-initialized) pointee is left untouched. This init guard is what makes
+    /// the inline drops the emitter places at scope-exit edges run exactly once.
+    pub fn drop(span: Location, target: ssa::Value, callee: ssa::Value) -> Self {
+        Instruction {
+            span,
+            operands: vec![target, callee],
+            kind: Box::new(Drop {}),
         }
     }
 }
@@ -238,8 +317,30 @@ pub enum InstructionView<'a> {
     /// A return. The result, if any, has already been written through the return out-pointer.
     Ret,
 
+    /// A construction of a variant tagged `tag`, wrapping the value moved out of the payload place
+    /// at operand `0`.
+    Variant { tag: Ustr },
+
+    /// An extraction of the tag of the variant at the place given by operand `0`, yielded as an
+    /// `int` register.
+    ExtractTag,
+
     /// A store of operand `0` (a value) into operand `1` (a place).
     Store,
+
+    /// A place-to-place copy of the pointee of operand `0` (a place) into operand `1` (a place),
+    /// without materializing it in a register.
+    Memcpy,
+
+    /// A capture of the current top of the stack, yielded as a marker register.
+    StackSave,
+
+    /// A reset of the top of the stack to the marker at operand `0`.
+    StackRestore,
+
+    /// An init-guarded drop of the pointee at operand `0` (a place), invoking operand `1` (a
+    /// `Value::drop` callee) only if that pointee is currently initialized.
+    Drop,
 }
 
 /// The type of an instruction's result.
@@ -256,6 +357,10 @@ pub enum InstructionResult {
 
     /// A pointer to a type.
     Pointer(Box<InstructionResult>),
+
+    /// A backend-internal marker for a saved top of the stack (the result of `stack_save`). It is
+    /// not a Ferlium-expressible type; it is only consumed by a matching `stack_restore`.
+    StackMarker,
 
     /// The type of an isntruction that doesn't produce any value.
     Nothing,
@@ -507,6 +612,61 @@ impl InstructionKind for Ret {
     }
 }
 
+/// A variant shell construction in SSA.
+///
+/// Yields a `Value::Variant { tag, payload }` whose payload is left uninitialized; the constructing
+/// site fills the payload in place after storing the shell into the variant's destination. The
+/// memory model is the HIR interpreter's `Value::Variant`.
+struct Variant {
+    /// The tag of the constructed variant.
+    tag: Ustr,
+
+    /// The type of the constructed variant.
+    type_: Type,
+}
+
+impl InstructionKind for Variant {
+    fn result(&self, _whole: &Instruction) -> InstructionResult {
+        InstructionResult::Lowered(self.type_)
+    }
+
+    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
+        InstructionView::Variant { tag: self.tag }
+    }
+
+    fn fmt_within(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        whole: &Instruction,
+        _env: &ModuleEnv<'_>,
+    ) -> fmt::Result {
+        let _ = whole;
+        write!(f, "variant .{}", self.tag)
+    }
+}
+
+/// A variant tag extraction in SSA, reading the tag of the variant at the operand place as an `int`.
+struct ExtractTag {}
+
+impl InstructionKind for ExtractTag {
+    fn result(&self, _whole: &Instruction) -> InstructionResult {
+        InstructionResult::Lowered(cached_primitive_ty!(isize))
+    }
+
+    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
+        InstructionView::ExtractTag
+    }
+
+    fn fmt_within(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        whole: &Instruction,
+        _env: &ModuleEnv<'_>,
+    ) -> fmt::Result {
+        write!(f, "extract_tag {}", whole.operands[0])
+    }
+}
+
 /// A store instruction in SSA, which writes the contents of a register to memory.
 struct Store {}
 
@@ -522,6 +682,87 @@ impl InstructionKind for Store {
         _env: &ModuleEnv<'_>,
     ) -> fmt::Result {
         write!(f, "store {} to {}", whole.operands[0], whole.operands[1])
+    }
+}
+
+/// A place-to-place copy in SSA, which copies the pointee of the source place (operand `0`)
+/// into the destination place (operand `1`) without materializing it in a register.
+struct Memcpy {}
+
+impl InstructionKind for Memcpy {
+    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
+        InstructionView::Memcpy
+    }
+
+    fn fmt_within(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        whole: &Instruction,
+        _env: &ModuleEnv<'_>,
+    ) -> fmt::Result {
+        write!(f, "memcpy {} to {}", whole.operands[0], whole.operands[1])
+    }
+}
+
+/// A capture of the current top of the stack in SSA.
+struct StackSave {}
+
+impl InstructionKind for StackSave {
+    fn result(&self, _whole: &Instruction) -> InstructionResult {
+        InstructionResult::StackMarker
+    }
+
+    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
+        InstructionView::StackSave
+    }
+
+    fn fmt_within(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        _whole: &Instruction,
+        _env: &ModuleEnv<'_>,
+    ) -> fmt::Result {
+        write!(f, "stack_save")
+    }
+}
+
+/// A reset of the top of the stack to a previously saved marker in SSA.
+struct StackRestore {}
+
+impl InstructionKind for StackRestore {
+    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
+        InstructionView::StackRestore
+    }
+
+    fn fmt_within(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        whole: &Instruction,
+        _env: &ModuleEnv<'_>,
+    ) -> fmt::Result {
+        write!(f, "stack_restore {}", whole.operands[0])
+    }
+}
+
+/// An init-guarded drop in SSA.
+///
+/// Operand `0` is the place whose pointee is dropped; operand `1` is the `Value::drop` callee. The
+/// drop runs only if the pointee is initialized, so a value already moved out (left uninitialized)
+/// is skipped.
+struct Drop {}
+
+impl InstructionKind for Drop {
+    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
+        InstructionView::Drop
+    }
+
+    fn fmt_within(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        whole: &Instruction,
+        _env: &ModuleEnv<'_>,
+    ) -> fmt::Result {
+        write!(f, "drop {} via {}", whole.operands[0], whole.operands[1])
     }
 }
 

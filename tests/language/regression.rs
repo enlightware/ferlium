@@ -70,9 +70,10 @@ fn effect_polymorphic_function_parameter_arithmetic_does_not_panic() {
 //
 // Note: the bug only affected ModuleParser (not ModuleAndBlockContentParser used for user code),
 // so these user-code tests serve as documentation and regression guards for the pattern.
-#[test]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn if_else_after_match_expression() {
+// `array_peek_back` is a generic native call the SSA interpreter cannot lower yet, so this stays
+// HIR-only (emits `if_else_after_match_expression::hir`). Switch to `dual_test!` once SSA supports
+// generic native calls.
+hir_only_test!(if_else_after_match_expression {
     let mut session = TestSession::new();
     // `if cond { match ... } else { ... }` — true-branch ends with a match expression
     assert_val_eq!(
@@ -101,11 +102,12 @@ fn if_else_after_match_expression() {
         "# }),
         int(0)
     );
-}
+});
 
-#[test]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn if_else_after_nested_block_expression() {
+// `choose(flag)` is generic, which the SSA emitter cannot lower yet (generic values must move
+// through a Value dictionary witness), so this stays HIR-only. Switch to `dual_test!` once SSA
+// supports generic functions.
+hir_only_test!(if_else_after_nested_block_expression {
     let mut session = TestSession::new();
     // `if cond { { ... } } else { ... }` — true-branch ends with a nested block
     assert_val_eq!(
@@ -134,7 +136,40 @@ fn if_else_after_nested_block_expression() {
         "# }),
         int(2)
     );
-}
+});
+
+// Demonstrates a `dual_test!` that is green on BOTH backends: a fully concrete (monomorphic)
+// snippet, so the SSA backend can lower it. Emits `concrete_if_else_runs_on_both_backends::hir`
+// and `::ssa`.
+dual_test!(concrete_if_else_runs_on_both_backends {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            fn choose(flag: bool) -> int {
+                if flag {
+                    { 1 }
+                } else {
+                    2
+                }
+            }
+            choose(true)
+        "# }),
+        int(1)
+    );
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            fn choose(flag: bool) -> int {
+                if flag {
+                    { 1 }
+                } else {
+                    2
+                }
+            }
+            choose(false)
+        "# }),
+        int(2)
+    );
+});
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
@@ -396,4 +431,46 @@ fn broad_generic_alias_does_not_recurse_while_formatting_error() {
             fn b() -> {} {}
         "# })
         .expect_type_mismatch("()", "{  }");
+}
+
+// A `break` whose value itself diverges (e.g. `break return x`) terminates the current block while
+// lowering that value. The `break` handler must then skip its own unwind / `stack_restore` / jump
+// to the loop exit, otherwise the SSA emitter panics with "insertion after terminator".
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn break_with_diverging_value_does_not_insert_after_terminator() {
+    let mut session = TestSession::new();
+
+    // The break value is a bare `return`: the block is terminated by the `ret`.
+    assert_val_eq!(
+        session.run("fn run() -> int { loop { break return 7 } } run()"),
+        int(7)
+    );
+
+    // Several iterations (driven by `continue`) before the diverging `break return`.
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            fn run() -> int {
+                let mut i = 0;
+                loop {
+                    i += 1;
+                    if i < 3 { continue };
+                    break return i
+                }
+            }
+            run()
+        "# }),
+        int(3)
+    );
+
+    // The break value only diverges on one branch: when it falls through with a real value, the
+    // block is *not* terminated and the guard must still emit the jump to the loop exit.
+    assert_val_eq!(
+        session.run("fn run() -> int { let c = false; loop { break if c { return 1 } else { 2 } } } run()"),
+        int(2)
+    );
+    assert_val_eq!(
+        session.run("fn run() -> int { let c = true; loop { break if c { return 1 } else { 2 } } } run()"),
+        int(1)
+    );
 }

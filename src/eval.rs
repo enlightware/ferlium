@@ -494,7 +494,14 @@ impl<'a> EvalCtx<'a> {
         self.call_resolved_function_with_extra(function_id, extra_arguments, arguments, location)
     }
 
-    fn call_resolved_function_with_extra(
+    /// Calls the function `local_id` of `module_id` directly, taking the target module explicitly
+    /// rather than resolving it from the ambient `self.module_id`.
+    ///
+    /// This is the entry point for callers that already know the callee's module (such as the SSA
+    /// interpreter, whose IR is fully module-resolved): `call_function` rotates `self.module_id` in
+    /// and out around the call internally, so the caller never has to save/restore the ambient
+    /// module itself.
+    pub fn call_resolved_function_with_extra(
         &mut self,
         function_id: FunctionId,
         extra_arguments: Vec<FunctionHiddenArgValue>,
@@ -751,6 +758,11 @@ impl PlaceResult {
     fn into_place(self) -> Place {
         self.0
     }
+
+    /// Returns the place this addressor result denotes.
+    pub fn place(&self) -> &Place {
+        &self.0
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -835,7 +847,10 @@ impl Place {
         Ok(target)
     }
 
-    fn target_ref_allow_uninit<'c>(&self, ctx: &'c EvalCtx) -> Result<&'c Value, RuntimeErrorKind> {
+    pub(crate) fn target_ref_allow_uninit<'c>(
+        &self,
+        ctx: &'c EvalCtx,
+    ) -> Result<&'c Value, RuntimeErrorKind> {
         let mut path = self.path.iter().copied().collect::<VecDeque<_>>();
         let mut index = self.target;
         let mut target = loop {
@@ -1597,6 +1612,69 @@ fn drop_owned_locals_on_error_from(
     Ok(())
 }
 
+/// A trait dictionary handed to a `Value`-trait helper (clone/drop), in either of the two runtime
+/// forms the interpreters produce.
+///
+/// The HIR interpreter resolves dictionaries to interned [`TraitDictionaryId`]s and dispatches
+/// methods through the compiler's impl arena. The SSA interpreter — whose IR is meant to lower to a
+/// real backend — instead materializes a dictionary as a *witness table*: a `Value::Tuple` of the
+/// dictionary's method function values (in entry order) followed by its associated constants,
+/// reachable through a [`Place`]. `DictArg` lets the shared `Value` helpers serve both without the
+/// SSA backend having to reconstruct an interned id (a compiler-arena handle that does not exist in
+/// compiled code).
+///
+/// A bare [`TraitDictionaryId`] converts into the [`DictArg::Interned`] form, so existing HIR
+/// callers pass one unchanged.
+pub(crate) enum DictArg {
+    /// An interned dictionary resolved through the compiler session (HIR interpreter form).
+    Interned(TraitDictionaryId),
+    /// A place holding a materialized witness-table tuple (SSA interpreter form).
+    Witness(Place),
+}
+
+impl From<TraitDictionaryId> for DictArg {
+    fn from(dictionary: TraitDictionaryId) -> Self {
+        DictArg::Interned(dictionary)
+    }
+}
+
+impl DictArg {
+    /// Dispatches the method at `entry_index` with `arguments`, handling both dictionary forms.
+    ///
+    /// For the interned form this defers to [`call_dictionary_method`]; for the witness form it
+    /// reads the method function value straight out of the tuple at `entry_index` and calls it. A
+    /// witness method entry is materialized bare (no captured evidence), exactly as
+    /// [`call_dictionary_method`] reconstructs it from an interned dictionary.
+    fn call_method(
+        &self,
+        ctx: &mut EvalCtx,
+        entry_index: TraitDictionaryEntryIndex,
+        arguments: Vec<ValOrMut>,
+        span: Location,
+    ) -> EvalControlFlowResult {
+        match self {
+            DictArg::Interned(dictionary) => {
+                call_dictionary_method(ctx, *dictionary, entry_index, arguments, span)
+            }
+            DictArg::Witness(place) => {
+                let method = {
+                    let table = place
+                        .target_ref(ctx)
+                        .map_err(|err| RuntimeError::new(err, Some(span)))?;
+                    let entries = table
+                        .as_tuple()
+                        .expect("an SSA witness-table dictionary is a tuple value");
+                    let function = entries[entry_index.as_index()]
+                        .as_function()
+                        .expect("a witness-table method entry is a function value");
+                    FunctionValue::bare(function.function_id, function.module_id)
+                };
+                ctx.call_function_value(&method, arguments, span)
+            }
+        }
+    }
+}
+
 fn call_value_clone_with(
     ctx: &mut EvalCtx,
     source: ValOrMut,
@@ -1608,14 +1686,14 @@ fn call_value_clone_with(
 
 pub(crate) fn call_value_clone_for_temp(
     ctx: &mut EvalCtx,
-    dictionary: TraitDictionaryId,
+    dictionary: impl Into<DictArg>,
     source: ValOrMut,
     span: Location,
 ) -> Result<Value, RuntimeError> {
+    let dictionary = dictionary.into();
     call_value_clone_with(ctx, source, span, |ctx, arguments| {
-        call_dictionary_method(
+        dictionary.call_method(
             ctx,
-            dictionary,
             TraitDictionaryEntryIndex::from_index(VALUE_CLONE_METHOD_INDEX.as_index()),
             arguments,
             span,
@@ -1625,7 +1703,7 @@ pub(crate) fn call_value_clone_for_temp(
 
 pub(crate) fn call_value_clone_to_target(
     ctx: &mut EvalCtx,
-    dictionary: TraitDictionaryId,
+    dictionary: impl Into<DictArg>,
     source: ValOrMut,
     target: Place,
     span: Location,
@@ -1660,10 +1738,11 @@ fn call_value_clone_dispatch_for_temp(
 
 pub(crate) fn call_value_drop_for_temp(
     ctx: &mut EvalCtx,
-    dictionary: TraitDictionaryId,
+    dictionary: impl Into<DictArg>,
     target: ValOrMut,
     span: Location,
 ) -> EvalControlFlowResult {
+    let dictionary = dictionary.into();
     let (target_place, temp_index) = match target {
         ValOrMut::Mut(place) => (place, None),
         ValOrMut::Ref(_) => panic!("cannot drop shared reference storage"),
@@ -1678,9 +1757,8 @@ pub(crate) fn call_value_drop_for_temp(
             (place, Some(target_index))
         }
     };
-    let result = discard_call_result(call_dictionary_method(
+    let result = discard_call_result(dictionary.call_method(
         ctx,
-        dictionary,
         TraitDictionaryEntryIndex::from_index(VALUE_DROP_METHOD_INDEX.as_index()),
         vec![ValOrMut::Mut(target_place.clone())],
         span,

@@ -1,6 +1,5 @@
-use std::collections::HashMap;
+use crate::FxHashMap;
 use std::fmt;
-
 use ustr::Ustr;
 
 use crate::hir::function::ResolvedValueArgPassing;
@@ -58,7 +57,7 @@ pub struct Function {
     blocks: list::List<Option<BlockBounds>>,
 
     /// The use chains of the values in this function.
-    uses: HashMap<ssa::Value, Vec<Use>>,
+    uses: FxHashMap<ssa::Value, Vec<Use>>,
 }
 
 impl Function {
@@ -69,7 +68,7 @@ impl Function {
             parameters: Vec::new(),
             slots: list::List::new(),
             blocks: list::List::new(),
-            uses: HashMap::new(),
+            uses: FxHashMap::default(),
         }
     }
 
@@ -89,6 +88,14 @@ impl Function {
     /// is the entry block.
     pub fn blocks(&self) -> impl Iterator<Item = BlockIdentity> + '_ {
         self.blocks.addresses()
+    }
+
+    /// Returns the identity of this function's entry block.
+    pub fn entry(&self) -> BlockIdentity {
+        self.blocks
+            .addresses()
+            .next()
+            .expect("a lowered function has at least an entry block")
     }
 
     /// Returns the value of `i`.
