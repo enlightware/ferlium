@@ -67,6 +67,99 @@ fn user_defined_trait_impls_are_callable() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn user_defined_trait_methods_are_callable_through_trait_path() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! {r#"
+            trait Double<Self> {
+                fn double(value: Self) -> Self;
+            }
+
+            impl Double for int {
+                fn double(value: int) -> int {
+                    value * 2
+                }
+            }
+
+            Double::double(21)
+        "#}),
+        int(42)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn functions_shadow_unqualified_trait_methods() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! {r#"
+            trait Pick<Self> {
+                fn pick(value: Self) -> int;
+            }
+
+            impl Pick for int {
+                fn pick(value: int) -> int {
+                    1
+                }
+            }
+
+            fn pick(value: int) -> int {
+                value + 41
+            }
+
+            pick(1) * 10 + Pick::pick(1)
+        "#}),
+        int(421)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn unqualified_trait_method_ambiguity_is_an_error() {
+    let mut session = TestSession::new();
+    let err = session
+        .fail_compilation(indoc! {r#"
+            trait Left<Self> {
+                fn pick(value: Self) -> int;
+            }
+
+            trait Right<Self> {
+                fn pick(value: Self) -> int;
+            }
+
+            impl Left for int {
+                fn pick(value: int) -> int {
+                    1
+                }
+            }
+
+            impl Right for int {
+                fn pick(value: int) -> int {
+                    2
+                }
+            }
+
+            pick(0)
+        "#})
+        .into_inner();
+
+    match err {
+        CompilationErrorImpl::AmbiguousTraitMethod {
+            method_name,
+            trait_refs,
+            ..
+        } => {
+            assert_eq!(method_name, ustr("pick"));
+            assert_eq!(trait_refs.len(), 2);
+            assert!(trait_refs.iter().any(|name| name == "Left"));
+            assert!(trait_refs.iter().any(|name| name == "Right"));
+        }
+        other => panic!("expected AmbiguousTraitMethod, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn std_trait_methods_are_first_class_values() {
     let mut session = TestSession::new();
     assert_val_eq!(
@@ -228,7 +321,7 @@ fn user_defined_traits_store_outputs_constraints_and_effects() {
 
         impl Project for <Self = string |-> Output = int> {
             fn project_via_trait(value: string) -> int {
-                testing::project(value)
+                testing::TestAssoc::project(value)
             }
         }
     "#};

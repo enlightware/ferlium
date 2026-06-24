@@ -71,13 +71,11 @@ fn repr_trait_id(env: &TypingEnv<'_>) -> crate::module::TraitId {
 }
 
 fn split_inferred_trait_associated_const_path(path: &ast::Path) -> Option<(ast::Path, UstrSpan)> {
-    let [(trait_name, trait_span), associated_const] = path.segments.as_slice() else {
+    let (associated_const, trait_segments) = path.segments.split_last()?;
+    if trait_segments.is_empty() {
         return None;
-    };
-    Some((
-        ast::Path::single(*trait_name, *trait_span),
-        *associated_const,
-    ))
+    }
+    Some((ast::Path::new(trait_segments.to_vec()), *associated_const))
 }
 
 use super::{
@@ -737,6 +735,29 @@ impl TypeInference {
                     let node = K::LoadLocal(hir::LoadLocal { id });
                     (node, local.ty, local.mut_ty, no_effects())
                 }
+                // Retrieve the function from the environment, if it exists
+                else if let Some((definition, function, _module_id, _runtime_arg_passing)) = env
+                    .get_function(path)?
+                    .map(|(definition, function, module_id, runtime_arg_passing)| {
+                        (definition.clone(), function, module_id, runtime_arg_passing)
+                    })
+                {
+                    let (fn_ty, inst_data, _subst) = definition
+                        .ty_scheme
+                        .instantiate_with_fresh_vars(self, expr_span, None, env.module_env);
+                    let node = K::GetFunction(b(hir::GetFunction {
+                        function,
+                        function_path: path.clone(),
+                        function_span: expr_span,
+                        inst_data,
+                    }));
+                    (
+                        node,
+                        Type::function_type(fn_ty),
+                        MutType::constant(),
+                        no_effects(),
+                    )
+                }
                 // Retrieve the trait method from the environment, if it exists
                 else if let Some((_module_name, trait_descr)) =
                     env.module_env.get_trait_method(path)?
@@ -799,29 +820,6 @@ impl TypeInference {
                     (
                         node,
                         Type::function_type(inst_fn_ty),
-                        MutType::constant(),
-                        no_effects(),
-                    )
-                }
-                // Retrieve the function from the environment, if it exists
-                else if let Some((definition, function, _module_id, _runtime_arg_passing)) = env
-                    .get_function(path)?
-                    .map(|(definition, function, module_id, runtime_arg_passing)| {
-                        (definition.clone(), function, module_id, runtime_arg_passing)
-                    })
-                {
-                    let (fn_ty, inst_data, _subst) = definition
-                        .ty_scheme
-                        .instantiate_with_fresh_vars(self, expr_span, None, env.module_env);
-                    let node = K::GetFunction(b(hir::GetFunction {
-                        function,
-                        function_path: path.clone(),
-                        function_span: expr_span,
-                        inst_data,
-                    }));
-                    (
-                        node,
-                        Type::function_type(fn_ty),
                         MutType::constant(),
                         no_effects(),
                     )
@@ -2855,6 +2853,54 @@ impl TypeInference {
         got_span: Location,
         arguments_unnamed: UnnamedArg,
     ) -> Result<Option<PreparedStaticCallTarget>, InternalCompilationError> {
+        if let Some((definition, function, _module_id, runtime_arg_passing)) = env
+            .get_function(path)?
+            .map(|(definition, function, module_id, runtime_arg_passing)| {
+                (definition.clone(), function, module_id, runtime_arg_passing)
+            })
+        {
+            if definition.ty_scheme.ty.args.len() != arg_count {
+                return Err(internal_compilation_error!(WrongNumberOfArguments {
+                    expected: definition.ty_scheme.ty.args.len(),
+                    expected_span: path_span,
+                    got: arg_count,
+                    got_span,
+                }));
+            }
+
+            let (inst_fn_ty, inst_data, _subst) = definition.ty_scheme.instantiate_with_fresh_vars(
+                self,
+                path_span,
+                None,
+                env.module_env,
+            );
+            let visible_arg_passing = visible_arg_passing_from_runtime(
+                runtime_arg_passing.as_deref(),
+                &inst_data,
+                arg_count,
+            )
+            .map(<[_]>::to_vec);
+            let result_mut_ty = if inst_fn_ty.returns_place() {
+                MutType::mutable()
+            } else {
+                MutType::constant()
+            };
+            return Ok(Some(PreparedStaticCallTarget {
+                callee: CheckedStaticCallee::Function {
+                    function,
+                    function_path: Some(path.clone()),
+                    function_span: path_span,
+                    argument_names: arguments_unnamed.filter_args(&definition.arg_names),
+                },
+                abi_arg_tys: definition.ty_scheme.ty.args.clone(),
+                inst_fn_ty,
+                inst_data,
+                visible_arg_passing,
+                result_mut_ty,
+                have_trait_constraint: None,
+            }));
+        }
+
         if let Some((_module_name, trait_descr)) = env.module_env.get_trait_method(path)? {
             let (trait_id, method_index, definition) = trait_descr;
             let trait_def = env.module_env.trait_def(trait_id);
@@ -2929,49 +2975,7 @@ impl TypeInference {
             }));
         }
 
-        let Some((definition, function, _module_id, runtime_arg_passing)) = env
-            .get_function(path)?
-            .map(|(definition, function, module_id, runtime_arg_passing)| {
-                (definition.clone(), function, module_id, runtime_arg_passing)
-            })
-        else {
-            return Ok(None);
-        };
-        if definition.ty_scheme.ty.args.len() != arg_count {
-            return Err(internal_compilation_error!(WrongNumberOfArguments {
-                expected: definition.ty_scheme.ty.args.len(),
-                expected_span: path_span,
-                got: arg_count,
-                got_span,
-            }));
-        }
-
-        let (inst_fn_ty, inst_data, _subst) =
-            definition
-                .ty_scheme
-                .instantiate_with_fresh_vars(self, path_span, None, env.module_env);
-        let visible_arg_passing =
-            visible_arg_passing_from_runtime(runtime_arg_passing.as_deref(), &inst_data, arg_count)
-                .map(<[_]>::to_vec);
-        let result_mut_ty = if inst_fn_ty.returns_place() {
-            MutType::mutable()
-        } else {
-            MutType::constant()
-        };
-        Ok(Some(PreparedStaticCallTarget {
-            callee: CheckedStaticCallee::Function {
-                function,
-                function_path: Some(path.clone()),
-                function_span: path_span,
-                argument_names: arguments_unnamed.filter_args(&definition.arg_names),
-            },
-            abi_arg_tys: definition.ty_scheme.ty.args.clone(),
-            inst_fn_ty,
-            inst_data,
-            visible_arg_passing,
-            result_mut_ty,
-            have_trait_constraint: None,
-        }))
+        Ok(None)
     }
 
     fn build_static_call_from_checked_args(

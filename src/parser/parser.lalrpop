@@ -1388,23 +1388,23 @@ RangeOp: Vec<&'static str> = {
 }
 
 UnaryOp: Vec<&'static str> = {
-    "-" => vec!["std", "neg"],
+    "-" => vec!["std", "Num", "neg"],
     "not" => vec!["std", "not"],
     <l:@L> "!" <r:@R> =>? error("for readability, use the \"not\" keyword instead of the C-style ! operator".into(), span(l, r, source_id)),
 }
 
 MulOp: Vec<&'static str> = {
-    "*" => vec!["std", "mul"],
-    "/" => vec!["std", "div"],
+    "*" => vec!["std", "Num", "mul"],
+    "/" => vec!["std", "Div", "div"],
 }
 
 AddOp: Vec<&'static str> = {
-    "+" => vec!["std", "add"],
-    "-" => vec!["std", "sub"],
+    "+" => vec!["std", "Num", "add"],
+    "-" => vec!["std", "Num", "sub"],
 }
 
 CompOp: Vec<&'static str> = {
-    "==" => vec!["std", "eq"],
+    "==" => vec!["std", "Value", "eq"],
     "!=" => vec!["std", "ne"],
     "<=" => vec!["std", "le"],
     "<" => vec!["std", "lt"],
@@ -1480,10 +1480,10 @@ StringToken: &'input str = r#"\"([^\\\"]|\\.)*\""# => <>;
 FormattedString: ExprKind = r#"f\"([^\\\"]|\\.)*\""# => formatted_string(<>);
 
 OpEqual: Vec<&'static str> = {
-    "+=" => vec!["std", "add"],
-    "-=" => vec!["std", "sub"],
-    "*=" => vec!["std", "mul"],
-    "/=" => vec!["std", "div"],
+    "+=" => vec!["std", "Num", "add"],
+    "-=" => vec!["std", "Num", "sub"],
+    "*=" => vec!["std", "Num", "mul"],
+    "/=" => vec!["std", "Div", "div"],
 }
 
 // Macros

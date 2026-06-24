@@ -94,6 +94,7 @@ pub(crate) fn diagnostics_from_error(
         ImportNotFound(site) => vec![site.span],
         TypeNotFound(span)
         | TraitNotFound(span)
+        | AmbiguousTraitMethod { span, .. }
         | InvalidGenericParams { span, .. }
         | InvalidTraitConstraint { span, .. }
         | InvalidTraitDefinition { span, .. }

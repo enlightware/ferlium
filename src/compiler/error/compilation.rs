@@ -984,6 +984,11 @@ pub enum CompilationErrorImpl<S: Scope> {
         input_tys: Vec<S::Type>,
         fn_span: Location,
     },
+    AmbiguousTraitMethod {
+        method_name: Ustr,
+        trait_refs: Vec<S::TraitName>,
+        span: Location,
+    },
     MethodsNotPartOfTrait {
         trait_ref: S::TraitName,
         spans: Vec<Location>,
@@ -1307,6 +1312,18 @@ impl FormatWith<SourceTable> for CompilationError {
             }
             TraitNotFound(span) => {
                 write!(f, "Cannot find trait {} in this scope", fmt_span(span))
+            }
+            AmbiguousTraitMethod {
+                method_name,
+                trait_refs,
+                span,
+            } => {
+                write!(
+                    f,
+                    "Trait method `{method_name}` is ambiguous between traits `{}` in {}",
+                    trait_refs.iter().format("`, `"),
+                    fmt_span(span)
+                )
             }
             InvalidGenericParams { owner, kind, span } => {
                 write!(f, "{} in {}", kind.message(*owner), fmt_span(span))
@@ -2068,6 +2085,18 @@ impl CompilationError {
             TypeNotFound(span) => compilation_error!(TypeNotFound(span)),
             EffectNotFound { name, span } => compilation_error!(EffectNotFound { name, span }),
             TraitNotFound(span) => compilation_error!(TraitNotFound(span)),
+            AmbiguousTraitMethod {
+                method_name,
+                trait_refs,
+                span,
+            } => compilation_error!(AmbiguousTraitMethod {
+                method_name,
+                trait_refs: trait_refs
+                    .into_iter()
+                    .map(|trait_ref| env.trait_name(trait_ref).to_string())
+                    .collect(),
+                span,
+            }),
             InvalidGenericParams { owner, kind, span } => {
                 compilation_error!(InvalidGenericParams { owner, kind, span })
             }

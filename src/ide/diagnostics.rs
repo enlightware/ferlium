@@ -167,6 +167,17 @@ pub(super) fn compilation_error_to_data(
             span,
             format!("Cannot find trait `{}` in this scope", fmt_span(span)),
         )],
+        AmbiguousTraitMethod {
+            method_name,
+            trait_refs,
+            span,
+        } => vec![error_data_from_location(
+            span,
+            format!(
+                "Trait method `{method_name}` is ambiguous between traits `{}`",
+                trait_refs.iter().format("`, `")
+            ),
+        )],
         InvalidGenericParams { owner, kind, span } => {
             vec![error_data_from_location(span, kind.message(*owner))]
         }

@@ -188,7 +188,7 @@ fn private_repr_type_can_be_named_and_used_through_public_trait_impls() {
             }
 
             pub fn result() -> int {
-                base::to_int(roundtrip(base::make(5)))
+                base::ToInt::to_int(roundtrip(base::make(5)))
             }
         "# },
     );
@@ -381,7 +381,140 @@ fn public_trait_method_is_visible_across_modules() {
     compile_module(
         &mut session,
         "user",
-        "pub fn result() -> int { base::to_int(42) }",
+        "pub fn result() -> int { base::ToInt::to_int(42) }",
+    );
+
+    assert_val_eq!(session.run("user::result()"), int(42));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn module_qualified_method_name_does_not_resolve_trait_method() {
+    let mut session = TestSession::new();
+
+    compile_module(
+        &mut session,
+        "base",
+        indoc! { r#"
+            pub trait ToInt<Self> {
+                fn to_int(value: Self) -> int;
+            }
+
+            impl ToInt for int {
+                fn to_int(value: int) -> int {
+                    value
+                }
+            }
+        "# },
+    );
+
+    assert!(
+        session
+            .try_compile_module("user", "pub fn result() -> int { base::to_int(42) }")
+            .is_err(),
+        "module-qualified method names must not scan traits in the module"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn imported_trait_method_is_visible_through_trait_path() {
+    let mut session = TestSession::new();
+
+    compile_module(
+        &mut session,
+        "base",
+        indoc! { r#"
+            pub trait ToInt<Self> {
+                fn to_int(value: Self) -> int;
+            }
+
+            impl ToInt for int {
+                fn to_int(value: int) -> int {
+                    value
+                }
+            }
+        "# },
+    );
+    compile_module(
+        &mut session,
+        "user",
+        indoc! { r#"
+            use base::ToInt;
+
+            pub fn result() -> int {
+                ToInt::to_int(42)
+            }
+        "# },
+    );
+
+    assert_val_eq!(session.run("user::result()"), int(42));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn unrelated_explicit_import_does_not_make_trait_method_unqualified() {
+    let mut session = TestSession::new();
+
+    compile_module(
+        &mut session,
+        "base",
+        indoc! { r#"
+            pub fn helper() -> int {
+                0
+            }
+
+            pub trait ToInt<Self> {
+                fn to_int(value: Self) -> int;
+            }
+
+            impl ToInt for int {
+                fn to_int(value: int) -> int {
+                    value
+                }
+            }
+        "# },
+    );
+
+    assert!(
+        session
+            .try_compile_module(
+                "user",
+                indoc! { r#"
+                    use base::helper;
+
+                    pub fn result() -> int {
+                        to_int(42)
+                    }
+                "# },
+            )
+            .is_err(),
+        "importing one symbol must not expose unrelated trait methods as unqualified calls"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn module_qualified_inferred_trait_associated_const_resolves() {
+    let mut session = TestSession::new();
+
+    compile_module(
+        &mut session,
+        "base",
+        indoc! { r#"
+            pub trait HasConst<Self> {
+                const C: Self;
+            }
+
+            impl HasConst for int {
+                const C = 42;
+            }
+        "# },
+    );
+    compile_module(
+        &mut session,
+        "user",
+        "pub fn result() -> int { base::HasConst::C }",
     );
 
     assert_val_eq!(session.run("user::result()"), int(42));
@@ -403,7 +536,10 @@ fn private_trait_method_is_hidden_across_modules() {
     );
     assert!(
         session
-            .try_compile_module("user", "pub fn result() -> int { let f = base::hidden; 0 }",)
+            .try_compile_module(
+                "user",
+                "pub fn result() -> int { let f = base::Hidden::hidden; 0 }",
+            )
             .is_err(),
         "methods of module-local traits should not be visible across modules"
     );
@@ -471,7 +607,7 @@ fn impl_for_private_type_is_not_visible_across_modules() {
                 "user",
                 indoc! { r#"
                     pub fn result() -> int {
-                        base::to_int(base::make_hidden())
+                        base::ToInt::to_int(base::make_hidden())
                     }
                 "# },
             )
@@ -517,7 +653,7 @@ fn public_impl_can_use_private_helper_impls_from_defining_module() {
         "user",
         indoc! { r#"
             pub fn result() -> int {
-                base::public_value(base::Wrapper(1))
+                base::Public::public_value(base::Wrapper(1))
             }
         "# },
     );
@@ -527,7 +663,7 @@ fn public_impl_can_use_private_helper_impls_from_defining_module() {
         session
             .try_compile_module(
                 "hidden_user",
-                "pub fn result() -> int { base::hidden_value(base::Wrapper(1)) }",
+                "pub fn result() -> int { base::Hidden::hidden_value(base::Wrapper(1)) }",
             )
             .is_err(),
         "private helper trait methods should remain hidden across modules"

@@ -493,40 +493,128 @@ impl<'m> ModuleEnv<'m> {
         path: &'m ast::Path,
     ) -> Result<Option<(Option<ModuleId>, TraitMethodDescription<'m>)>, InternalCompilationError>
     {
-        self.find_member_by_path(&path.segments, &|name, module, require_accessible| {
-            self.trait_method_in_module(name, module, require_accessible)
-        })
+        match path.segments.as_slice() {
+            [] => Ok(None),
+            [(method_name, span)] => self.get_unqualified_trait_method(*method_name, *span),
+            segments => {
+                let ((method_name, _), trait_segments) = segments.split_last().unwrap();
+                let Some((module_id, trait_id)) = self
+                    .get_module_member(trait_segments, &|name, module| {
+                        module.get_trait_id(ustr(name))
+                    })?
+                else {
+                    return Ok(None);
+                };
+                Ok(self
+                    .trait_method_in_trait(trait_id, *method_name)
+                    .map(|method| (module_id, method)))
+            }
+        }
     }
 
-    fn trait_method_in_module(
+    fn get_unqualified_trait_method(
         &'m self,
-        name: &'m str,
+        method_name: Ustr,
+        span: Location,
+    ) -> Result<Option<(Option<ModuleId>, TraitMethodDescription<'m>)>, InternalCompilationError>
+    {
+        let mut matches = Vec::new();
+        self.collect_trait_methods_from_module(None, self.current, method_name, &mut matches);
+
+        for (trait_name, use_data) in &self.current.uses.explicits {
+            if let Some((module_id, entry)) = self.modules.get_by_name(&use_data.module)
+                && let Some(module) = entry.module()
+                && let Some(trait_id) = module.get_trait_id(*trait_name)
+                && module.is_trait_accessible_from(trait_id, self.current.module_id(), self.modules)
+                && let Some(method) = Self::trait_method_in_definition(
+                    trait_id,
+                    module.trait_def(trait_id),
+                    method_name,
+                )
+            {
+                matches.push((Some(module_id), method));
+            }
+        }
+
+        for use_data in &self.current.uses.wildcards {
+            if let Some((module_id, entry)) = self.modules.get_by_name(&use_data.module)
+                && let Some(module) = entry.module()
+            {
+                self.collect_trait_methods_from_module(
+                    Some(module_id),
+                    module,
+                    method_name,
+                    &mut matches,
+                );
+            }
+        }
+
+        matches.sort_by_key(|(_, (trait_id, _, _))| (trait_id.module.0, trait_id.index.0));
+        matches.dedup_by_key(|(_, (trait_id, _, _))| *trait_id);
+
+        match matches.len() {
+            0 => Ok(None),
+            1 => Ok(matches.pop()),
+            _ => Err(internal_compilation_error!(AmbiguousTraitMethod {
+                method_name,
+                trait_refs: matches
+                    .into_iter()
+                    .map(|(_, (trait_id, _, _))| trait_id)
+                    .collect(),
+                span,
+            })),
+        }
+    }
+
+    fn collect_trait_methods_from_module(
+        &'m self,
+        module_id: Option<ModuleId>,
         module: &'m Module,
-        require_accessible_trait: bool,
-    ) -> Option<TraitMethodDescription<'m>> {
-        module.trait_iter().find_map(|(trait_id, trait_def)| {
-            if require_accessible_trait
+        method_name: Ustr,
+        matches: &mut Vec<(Option<ModuleId>, TraitMethodDescription<'m>)>,
+    ) {
+        for (trait_id, trait_def) in module.trait_iter() {
+            if module_id.is_some()
                 && !module.is_trait_accessible_from(
                     trait_id,
                     self.current.module_id(),
                     self.modules,
                 )
             {
-                return None;
+                continue;
             }
+            if let Some(method) = Self::trait_method_in_definition(trait_id, trait_def, method_name)
+            {
+                matches.push((module_id, method));
+            }
+        }
+    }
 
-            trait_def
-                .methods
-                .iter()
-                .enumerate()
-                .find_map(|(index, function)| {
-                    if function.0 == name {
-                        Some((trait_id, TraitMethodIndex::from_index(index), &function.1))
-                    } else {
-                        None
-                    }
-                })
-        })
+    fn trait_method_in_trait(
+        &'m self,
+        trait_id: TraitId,
+        method_name: Ustr,
+    ) -> Option<TraitMethodDescription<'m>> {
+        let trait_def = self.trait_def(trait_id);
+        Self::trait_method_in_definition(trait_id, trait_def, method_name)
+    }
+
+    fn trait_method_in_definition(
+        trait_id: TraitId,
+        trait_def: &'m Trait,
+        method_name: Ustr,
+    ) -> Option<TraitMethodDescription<'m>> {
+        trait_def
+            .methods
+            .iter()
+            .enumerate()
+            .find_map(|(index, function)| {
+                if function.0 == method_name {
+                    Some((trait_id, TraitMethodIndex::from_index(index), &function.1))
+                } else {
+                    None
+                }
+            })
     }
 
     /// Get a member of a module, by first looking in the current module, and then in others, considering the path.

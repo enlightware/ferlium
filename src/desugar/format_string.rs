@@ -50,7 +50,12 @@ fn variable_to_string(
         ExprKind::Identifier(crate::ast::Path::single(ustr(var_name), var_span)),
         var_span,
     ));
-    let kind = syn_static_apply_path(["std", "to_string"], var_span, vec![var_expr], arena);
+    let kind = syn_static_apply_path(
+        ["std", "Value", "to_string"],
+        var_span,
+        vec![var_expr],
+        arena,
+    );
     Ok(arena.alloc(Expr::new(kind, var_span)))
 }
 

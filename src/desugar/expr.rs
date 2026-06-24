@@ -586,7 +586,7 @@ fn inferred_collection_type(
     modules_used: &mut FxHashSet<ModuleId>,
 ) -> Result<Type, InternalCompilationError> {
     let ty = ast::PType::AppliedPath {
-        path: std_path(name, span),
+        path: std_path(&[name], span),
         args: (0..arg_count).map(|_| (ast::PType::Infer, span)).collect(),
         effect_args: vec![],
     };
@@ -600,12 +600,32 @@ fn inferred_collection_type(
     )
 }
 
-fn std_path(name: &str, span: Location) -> Path {
-    Path::new(vec![(ustr("std"), span), (ustr(name), span)])
+fn std_path(segments: &[&str], span: Location) -> Path {
+    Path::new(
+        std::iter::once("std")
+            .chain(segments.iter().copied())
+            .map(|segment| (ustr(segment), span))
+            .collect(),
+    )
 }
 
 fn std_identifier(name: &str, span: Location, arena: &mut DExprArena) -> DExprId {
-    arena.alloc(DExpr::new(ExprKind::identifier(std_path(name, span)), span))
+    arena.alloc(DExpr::new(
+        ExprKind::identifier(std_path(&[name], span)),
+        span,
+    ))
+}
+
+fn std_trait_identifier(
+    trait_name: &str,
+    item_name: &str,
+    span: Location,
+    arena: &mut DExprArena,
+) -> DExprId {
+    arena.alloc(DExpr::new(
+        ExprKind::identifier(std_path(&[trait_name, item_name], span)),
+        span,
+    ))
 }
 
 fn collect_as(
@@ -614,7 +634,7 @@ fn collect_as(
     span: Location,
     arena: &mut DExprArena,
 ) -> ExprKind<Desugared> {
-    let iter = std_identifier("iter", span, arena);
+    let iter = std_trait_identifier("Seq", "iter", span, arena);
     let iterator = arena.alloc(DExpr::new(
         ExprKind::apply(iter, vec![collection], UnnamedArg::First),
         span,
@@ -628,7 +648,7 @@ fn collect_as(
 }
 
 fn empty_as(ty: Type, span: Location, arena: &mut DExprArena) -> ExprKind<Desugared> {
-    let empty = std_identifier("empty", span, arena);
+    let empty = std_trait_identifier("Empty", "empty", span, arena);
     let value = arena.alloc(DExpr::new(
         ExprKind::apply(empty, vec![], UnnamedArg::None),
         span,

@@ -540,6 +540,25 @@ fn recursive_generic_alias_ide_annotations_do_not_leak_borrowed_argument_temps()
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn ide_annotations_hide_generated_operator_argument_names() {
+    let src = indoc! { r#"
+        fn ops(a: float, b: float) {
+            (a + b, a * b, a / b, -a, a == b)
+        }
+    "# };
+    let mut compiler = compile_source(src);
+    let annotated = annotated_ide_source(&mut compiler, src);
+
+    assert!(
+        !annotated.contains("left:")
+            && !annotated.contains("right:")
+            && !annotated.contains("value:"),
+        "operator annotations should not expose generated trait-method argument names:\n{annotated}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_index_ide_annotations_do_not_expose_generated_place_call() {
     let src = indoc! { r#"
         fn first() {
