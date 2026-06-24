@@ -813,17 +813,14 @@ fn generic_apply() {
   0:
     %r0 = alloca A using %p1
     %r1 = project 6 from %p0
-    %r2 = load %r1
-    %r3 = alloca int
-    %r4 = store int 2 to %r3
-    %r5 = call %r2(%r3, %r0)
-    %r6 = project 2 from %p0
-    %r7 = load %r6
-    %r8 = call %r7(%p2, %r0, %p3)
-    %r9 = project 4 from %p1
-    %r10 = load %r9
-    %r11 = drop %r0 via %r10
-    %r12 = ret
+    %r2 = alloca int
+    %r3 = store int 2 to %r2
+    %r4 = call %r1(%r2, %r0)
+    %r5 = project 2 from %p0
+    %r6 = call %r5(%p2, %r0, %p3)
+    %r7 = project 4 from %p1
+    %r8 = drop %r0 via %r7
+    %r9 = ret
 "#,
     );
 }
@@ -835,9 +832,101 @@ fn dynamic_apply() {
         session.emit_ssa("fn apply_fn(f, x: int) { f(x) }"),
         r#"fn apply_fn(%p0: @arg & (int) -> A ! e₀, %p1: @arg int, %p2: @ret A):
   0:
-    %r0 = load %p0
-    %r1 = call %r0(%p1, %p2)
+    %r0 = call %p0(%p1, %p2)
+    %r1 = ret
+"#,
+    );
+}
+
+#[test]
+fn value_capturing_closure() {
+    // A value-capturing closure (no hidden dictionary evidence): the captured `b` is snapshotted
+    // into a temporary (`memcpy %r0 to %r5`), bundled into the closure value by `build_closure`, the
+    // closure is called by borrowing its place (`call %r1`, no intervening load — so it survives
+    // repeated calls and is dropped once), and dropped at scope exit through the generated
+    // `Value::drop` for the closure type (whose body lowers `drop_closure_env`). The lambda body
+    // reads its captured environment slot (`%p0`) directly.
+    let mut session = TestSession::new();
+    assert_eq_sans_flake!(
+        session.emit_ssa("fn capture() -> int { let b = 1; let g = || b; g() }"),
+        r#"fn $_ferlium_function_value_drop(%p0: @arg &mut A, %p1: @ret ()):
+  0:
+    %r0 = drop_closure_env %p0
+    %r1 = ret
+
+fn $lambda$1(%p0: @arg &mut int, %p1: @ret int):
+  0:
+    %r0 = memcpy %p0 to %p1
+    %r1 = ret
+
+fn Value<...>::clone(%p0: @arg & (int,), %p1: @ret (int,)):
+  0:
+    %r0 = project 0 from %p1
+    %r1 = project 0 from %p0
+    %r2 = call std::Value<...>::clone(%r1, %r0)
+    %r3 = ret
+
+fn Value<...>::drop(%p0: @arg &mut (int,), %p1: @ret ()):
+  0:
+    %r0 = project 0 from %p0
+    %r1 = call std::Value<...>::drop(%r0, &())
     %r2 = ret
+
+fn Value<...>::eq(%p0: @arg & (int,), %p1: @arg & (int,), %p2: @ret bool):
+  0:
+    %r0 = project 0 from %p0
+    %r1 = project 0 from %p1
+    %r2 = alloca bool
+    %r3 = call std::Value<...>::eq(%r0, %r1, %r2)
+    %r4 = br 1
+  1:
+    %r5 = comp_eq %r2 i1 1
+    %r6 = condbr %r5, %b2, &b3
+  2:
+    %r7 = store i1 1 to %p2
+    %r8 = br 4
+  3:
+    %r9 = store i1 0 to %p2
+    %r10 = br 4
+  4:
+    %r11 = ret
+
+fn Value<...>::hash(%p0: @arg & (int,), %p1: @arg &mut hasher, %p2: @ret ()):
+  0:
+    %r0 = project 0 from %p0
+    %r1 = call std::Value<...>::hash(%r0, %p1, &())
+    %r2 = ret
+
+fn Value<...>::to_string(%p0: @arg & (int,), %p1: @ret string):
+  0:
+    %r0 = alloca string
+    %r1 = alloca string
+    %r2 = alloca string
+    %r3 = store "(" to %r0
+    %r4 = project 0 from %p0
+    %r5 = call std::Value<...>::to_string(%r4, %r1)
+    %r6 = call std::string_push_str(%r0, %r1, &())
+    %r7 = drop %r1 via std::Value<...>::drop
+    %r8 = store ")" to %r2
+    %r9 = call std::string_push_str(%r0, %r2, &())
+    %r10 = drop %r2 via std::Value<...>::drop
+    %r11 = memcpy %r0 to %p1
+    %r12 = ret
+
+fn capture(%p0: @ret int):
+  0:
+    %r0 = alloca int
+    %r1 = alloca () -> int
+    %r2 = alloca int
+    %r3 = store int 1 to %r2
+    %r4 = call std::Num<...>::from_int(%r2, %r0)
+    %r5 = alloca int
+    %r6 = memcpy %r0 to %r5
+    %r7 = build_closure <test>::$lambda$1(%r5)
+    %r8 = store %r7 to %r1
+    %r9 = call %r1(%p0)
+    %r10 = drop %r1 via <test>::$_ferlium_function_value_drop
+    %r11 = ret
 "#,
     );
 }
@@ -856,9 +945,8 @@ fn generic_two_same_type_params() {
         r#"fn f(%p0: @extra ((A, A) -> A, (A, A) -> A, (A, A) -> A, (A) -> A, (A) -> A, (A) -> A, (int) -> A), %p1: @arg & A, %p2: @arg & A, %p3: @ret A):
   0:
     %r0 = project 0 from %p0
-    %r1 = load %r0
-    %r2 = call %r1(%p1, %p2, %p3)
-    %r3 = ret
+    %r1 = call %r0(%p1, %p2, %p3)
+    %r2 = ret
 "#,
     );
 }
@@ -873,9 +961,8 @@ fn generic_higher_order_function_param() {
         session.emit_ssa("fn apply(f: (A) -> A, x) { f(x) }"),
         r#"fn apply(%p0: @arg & (A) -> A ! e₀, %p1: @arg & A, %p2: @ret A):
   0:
-    %r0 = load %p0
-    %r1 = call %r0(%p1, %p2)
-    %r2 = ret
+    %r0 = call %p0(%p1, %p2)
+    %r1 = ret
 "#,
     );
 }
@@ -892,15 +979,12 @@ fn generic_multiple_ops_reuse_witness() {
   0:
     %r0 = alloca A using %p1
     %r1 = project 2 from %p0
-    %r2 = load %r1
-    %r3 = call %r2(%p2, %p2, %r0)
-    %r4 = project 0 from %p0
-    %r5 = load %r4
-    %r6 = call %r5(%r0, %p2, %p3)
-    %r7 = project 4 from %p1
-    %r8 = load %r7
-    %r9 = drop %r0 via %r8
-    %r10 = ret
+    %r2 = call %r1(%p2, %p2, %r0)
+    %r3 = project 0 from %p0
+    %r4 = call %r3(%r0, %p2, %p3)
+    %r5 = project 4 from %p1
+    %r6 = drop %r0 via %r5
+    %r7 = ret
 "#,
     );
 }
@@ -915,9 +999,8 @@ fn generic_comparison() {
         r#"fn f(%p0: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A) -> A, (&mut A) -> (), int, int), %p1: @arg & A, %p2: @arg & A, %p3: @ret bool):
   0:
     %r0 = project 0 from %p0
-    %r1 = load %r0
-    %r2 = call %r1(%p1, %p2, %p3)
-    %r3 = ret
+    %r1 = call %r0(%p1, %p2, %p3)
+    %r2 = ret
 "#,
     );
 }
@@ -1265,9 +1348,8 @@ fn clone_value_generic_return() {
         r#"fn f(%p0: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A) -> A, (&mut A) -> (), int, int), %p1: @arg & A, %p2: @ret A):
   0:
     %r0 = project 3 from %p0
-    %r1 = load %r0
-    %r2 = call %r1(%p1, %p2)
-    %r3 = ret
+    %r1 = call %r0(%p1, %p2)
+    %r2 = ret
 "#,
     );
 }
@@ -1287,16 +1369,14 @@ fn clone_value_generic_branch() {
     %r2 = condbr %r1, %b2, &b3
   2:
     %r3 = project 3 from %p0
-    %r4 = load %r3
-    %r5 = call %r4(%p1, %p2)
-    %r6 = br 4
+    %r4 = call %r3(%p1, %p2)
+    %r5 = br 4
   3:
-    %r7 = project 3 from %p0
-    %r8 = load %r7
-    %r9 = call %r8(%p1, %p2)
-    %r10 = br 4
+    %r6 = project 3 from %p0
+    %r7 = call %r6(%p1, %p2)
+    %r8 = br 4
   4:
-    %r11 = ret
+    %r9 = ret
 "#,
     );
 }
@@ -1313,13 +1393,11 @@ fn store_local_generic_clone_dictionary() {
   0:
     %r0 = alloca A using %p0
     %r1 = project 3 from %p0
-    %r2 = load %r1
-    %r3 = call %r2(%p1, %r0)
-    %r4 = call <test>::g(%r0, &())
-    %r5 = project 4 from %p0
-    %r6 = load %r5
-    %r7 = drop %r0 via %r6
-    %r8 = ret
+    %r2 = call %r1(%p1, %r0)
+    %r3 = call <test>::g(%r0, &())
+    %r4 = project 4 from %p0
+    %r5 = drop %r0 via %r4
+    %r6 = ret
 
 fn g(%p0: @arg &mut A, %p1: @ret ()):
   0:
@@ -1471,13 +1549,11 @@ fn reassign_generic() {
   0:
     %r0 = alloca A using %p0
     %r1 = project 3 from %p0
-    %r2 = load %r1
-    %r3 = call %r2(%p2, %r0)
-    %r4 = project 4 from %p0
-    %r5 = load %r4
-    %r6 = drop %p1 via %r5
-    %r7 = memcpy %r0 to %p1
-    %r8 = ret
+    %r2 = call %r1(%p2, %r0)
+    %r3 = project 4 from %p0
+    %r4 = drop %p1 via %r3
+    %r5 = memcpy %r0 to %p1
+    %r6 = ret
 "#
     )
 }

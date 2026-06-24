@@ -16,7 +16,7 @@ use test_log::test;
 
 use indoc::indoc;
 
-use crate::harness::{TestSession, int};
+use crate::harness::{TestSession, float, int};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
@@ -169,6 +169,63 @@ dual_test!(concrete_if_else_runs_on_both_backends {
         "# }),
         int(2)
     );
+});
+
+// Value-capturing closures (no hidden dictionary evidence) lower to SSA and run on both backends.
+// Each case captures by value and is called, exercising `build_closure`, the per-call environment
+// clone (so mutations of the captured outer binding after capture do not leak in), the statelessness
+// of repeated calls, and the deep copy of a captured mutable array. Generic / dictionary-carrying
+// closures (e.g. `|x| x`, `|x| x + b`) are not lowered to SSA yet and stay in the HIR-only
+// `simple::lambda` / `simple::closures` tests.
+dual_test!(value_capturing_closures_run_on_both_backends {
+    let mut session = TestSession::new();
+    // Basic capture by value.
+    assert_val_eq!(session.run("let a = 3.3; let f = || a; f()"), float(3.3));
+    assert_val_eq!(session.run("let a = 3; let f = || a; f()"), int(3));
+    // The captured environment is a snapshot: mutating the outer binding after capture is invisible.
+    assert_val_eq!(session.run("let mut a = 1; let f = || a; a = 2; f()"), int(1));
+    // A closure is stateless across calls: each call sees a fresh copy of the captured environment.
+    assert_val_eq!(session.run("let mut a = 1; let f = || { a = 2; a }; f(); a"), int(1));
+    assert_val_eq!(
+        session.run("let mut a = 1; let f = || { a = a + 1; a }; f() + f()"),
+        int(4)
+    );
+    // A captured mutable array is deep-copied into the environment.
+    assert_val_eq!(session.run("let mut a = [1]; let f = || a[0]; a[0] = 2; f()"), int(1));
+});
+
+// Record field access on a *generic* (row-polymorphic) record lowers to SSA and runs on both
+// backends. The field offset is a hidden field-index dictionary parameter, so `v.x` is a `ProjectAt`
+// projecting the base place at a run-time index (loaded from that parameter) — never a materialized
+// temporary, so the generic field type needs no `Value` layout witness. These exercise: the field
+// index as a dictionary-method argument (`v.x + v.y`); a statically-sized field read in value
+// position (`v.x + 1`); a generic field cloned through its `Value` dictionary (`v.x` alone); the
+// field offset shifting with leading fields (`{name, x, …, y, …}`); and forwarding a field-index
+// parameter into a callee (`b` calls `a`, a `LoadFieldIndex` argument). Generic functions made
+// first-class (e.g. `(s,).0`) still carry closure dictionary captures and stay HIR-only in
+// `simple::records`.
+dual_test!(record_field_access_runs_on_both_backends {
+    let mut session = TestSession::new();
+    // A generic field passed as a dictionary-method (`+`) argument, by place.
+    assert_val_eq!(session.run("fn s(v) { v.x + v.y } s({x:1, y:2})"), int(3));
+    // A generic field cloned through its `Value` dictionary (`v.x` returned alone).
+    assert_val_eq!(session.run("fn s(v) { v.x } s({x:1})"), int(1));
+    // A statically-sized field read in value position (`v.x` is an `int` here).
+    assert_val_eq!(session.run("fn s(v) { v.x + 1 } s({x:1})"), int(2));
+    // The field offset shifts past leading and interleaved fields.
+    assert_val_eq!(
+        session.run("fn s(v) { v.x + v.y } s({name: \"toto\", x:1, z: true, y:2, noise: (1,2)})"),
+        int(3)
+    );
+    // Field access nested through another generic call (`sq` applied to projected fields).
+    assert_val_eq!(
+        session.run("fn sq(x) { x * x } fn l2(v) { sq(v.x) + sq(v.y) } l2({x:1, y:2})"),
+        int(5)
+    );
+    // Forwarding a field-index parameter into a callee: `b`'s call to `a` passes a `LoadFieldIndex`.
+    assert_val_eq!(session.run("fn a(x) { x.a } fn b(x) { a(x) } b({a:3})"), int(3));
+    // A let-bound generic lambda monomorphized at its single call site (static `Project`).
+    assert_val_eq!(session.run("let f = |x| x.a; f({a:1})"), int(1));
 });
 
 #[test]

@@ -4,7 +4,9 @@ use std::fmt;
 use ustr::Ustr;
 
 use crate::{
-    Location, cached_primitive_ty, format::FormatWith, list, module::ModuleEnv, ssa,
+    Location, cached_primitive_ty, format::FormatWith, list,
+    module::{ModuleEnv, TraitDictionaryId},
+    ssa::{self, value::FunctionReference},
     types::r#type::Type,
 };
 
@@ -87,6 +89,26 @@ impl Instruction {
     /// A call yields no register: a callee with a non-`()` result writes it through the return
     /// out-pointer passed as the call's last operand. `result` records the callee's logical return
     /// type as IR metadata.
+    ///
+    /// ## Callee contract
+    ///
+    /// Every callable is a function value — a code identity that may additionally carry *hidden
+    /// evidence* (the dictionaries/field-indices a generic instantiation needs) and an owned
+    /// *closure environment*. Bare functions, dictionary/witness-table methods, and closures are all
+    /// the same kind of value and are called the same way.
+    ///
+    /// The `callee` operand (operand `0`) is therefore **one of two forms**:
+    /// - a constant [`ssa::Value::Function`] — a direct call to a statically known function (no
+    ///   hidden evidence, no environment); or
+    /// - the **place** of a function value — a function-typed local or parameter, a closure, or a
+    ///   method slot `project`ed out of a dictionary/witness-table tuple.
+    ///
+    /// A function value is **never loaded into a register to be called**; it is always referenced in
+    /// place and read *by reference*. This keeps the contract uniform and, crucially, never copies or
+    /// moves a non-trivially-copyable closure environment out of its storage. The callee is applied
+    /// uniformly: its hidden evidence and (per-call cloned) environment, if any, are prepended ahead
+    /// of the visible arguments; a bare function value adds nothing. The same contract governs the
+    /// [`drop`](Self::drop) callee.
     pub fn call<T: IntoIterator<Item = ssa::Value>>(
         span: Location,
         callee: ssa::Value,
@@ -142,6 +164,19 @@ impl Instruction {
             span,
             operands: vec![source],
             kind: Box::new(Project { index: i, ty }),
+        }
+    }
+
+    /// Creates a `project_at` instruction accessing the aggregate place `source` at the **run-time**
+    /// field index held in the `index` register (an `int` loaded from a field-index dictionary
+    /// parameter). It mirrors `project`, but the index is an operand rather than a static constant:
+    /// it lowers a record field access on a generic (row-polymorphic) record (`hir::ProjectAt`),
+    /// where the field offset is only known at run time. Like `project`, the result is a place.
+    pub fn project_at(span: Location, source: ssa::Value, index: ssa::Value, ty: Type) -> Self {
+        Instruction {
+            span,
+            operands: vec![source, index],
+            kind: Box::new(ProjectAt { ty }),
         }
     }
 
@@ -230,16 +265,64 @@ impl Instruction {
 
     /// Creates a 'drop' instruction.
     ///
-    /// Drops the pointee of `target` (a place) by invoking `callee` (a `Value::drop`
-    /// implementation, given either as a constant function reference or as a value loaded from a
-    /// dictionary), but **only if** the pointee is currently initialized. An already-uninitialized
+    /// Drops the pointee of `target` (a place) by invoking the `Value::drop` implementation named by
+    /// `callee`, but **only if** the pointee is currently initialized. An already-uninitialized
     /// (moved-out or never-initialized) pointee is left untouched. This init guard is what makes
     /// the inline drops the emitter places at scope-exit edges run exactly once.
+    ///
+    /// `callee` follows the same contract as the [`call`](Self::call) callee: it is either a constant
+    /// [`ssa::Value::Function`] or the **place** of a function value (e.g. the `Value::drop` method
+    /// slot `project`ed out of a dictionary), read by reference and never loaded into a register.
     pub fn drop(span: Location, target: ssa::Value, callee: ssa::Value) -> Self {
         Instruction {
             span,
             operands: vec![target, callee],
             kind: Box::new(Drop {}),
+        }
+    }
+
+    /// Creates a `build_closure` instruction, which bundles a function with its captured environment
+    /// into a first-class closure value.
+    ///
+    /// `function` identifies the closure's target (lambda) function; `env_dict` is the `Value`
+    /// dictionary witnessing how to clone/drop the captured environment (`None` when there are no
+    /// captures). The operands are the capture places, in target-parameter order. The result is a
+    /// register holding the closure value (a runtime `FunctionValue`).
+    pub fn build_closure(
+        span: Location,
+        function: FunctionReference,
+        env_dict: Option<TraitDictionaryId>,
+        ty: Type,
+        captures: Vec<ssa::Value>,
+    ) -> Self {
+        Instruction {
+            span,
+            operands: captures,
+            kind: Box::new(BuildClosure {
+                function,
+                env_dict,
+                ty,
+            }),
+        }
+    }
+
+    /// Creates a `clone_closure_env` instruction, which deep-clones the captured environment of the
+    /// closure at the place given by `source`, yielding a fresh closure value of type `ty`.
+    pub fn clone_closure_env(span: Location, source: ssa::Value, ty: Type) -> Self {
+        Instruction {
+            span,
+            operands: vec![source],
+            kind: Box::new(CloneClosureEnv { ty }),
+        }
+    }
+
+    /// Creates a `drop_closure_env` instruction, which drops the owned captured environment of the
+    /// closure at the place given by `target`.
+    pub fn drop_closure_env(span: Location, target: ssa::Value) -> Self {
+        Instruction {
+            span,
+            operands: vec![target],
+            kind: Box::new(DropClosureEnv {}),
         }
     }
 }
@@ -292,8 +375,10 @@ pub enum InstructionView<'a> {
     /// A stack allocation of a pointer to an instance of `pointing_to`.
     AllocaPlace { pointing_to: Type },
 
-    /// A function call. Operand `0` is the callee; the remaining operands are the arguments,
-    /// the last of which is the return out-pointer for a non-`()` result.
+    /// A function call. Operand `0` is the callee — a constant [`ssa::Value::Function`] or the place
+    /// of a function value, read by reference (see [`Instruction::call`] for the full callee
+    /// contract). The remaining operands are the arguments, the last of which is the return
+    /// out-pointer for a non-`()` result.
     Call,
 
     /// An equality comparison of operands `0` and `1`.
@@ -313,6 +398,10 @@ pub enum InstructionView<'a> {
 
     /// A projection of field `index` (of type `ty`) out of the aggregate place at operand `0`.
     Project { index: usize, ty: Type },
+
+    /// A projection (of type `ty`) out of the aggregate place at operand `0`, at the run-time field
+    /// index held in the `int` register at operand `1`.
+    ProjectAt { ty: Type },
 
     /// A return. The result, if any, has already been written through the return out-pointer.
     Ret,
@@ -339,8 +428,24 @@ pub enum InstructionView<'a> {
     StackRestore,
 
     /// An init-guarded drop of the pointee at operand `0` (a place), invoking operand `1` (a
-    /// `Value::drop` callee) only if that pointee is currently initialized.
+    /// `Value::drop` callee — a constant function or a function-value place, per the
+    /// [`Instruction::call`] callee contract) only if that pointee is currently initialized.
     Drop,
+
+    /// A construction of a closure value bundling the target `function`, the `Value` dictionary
+    /// `env_dict` for cloning/dropping the captured environment (if any), and the capture places
+    /// (the instruction's operands, in target-parameter order).
+    BuildClosure {
+        function: &'a FunctionReference,
+        env_dict: Option<TraitDictionaryId>,
+    },
+
+    /// A deep clone of the captured environment of the closure at the place given by operand `0`,
+    /// yielding a fresh closure value.
+    CloneClosureEnv,
+
+    /// A drop of the owned captured environment of the closure at the place given by operand `0`.
+    DropClosureEnv,
 }
 
 /// The type of an instruction's result.
@@ -590,6 +695,41 @@ impl InstructionKind for Project {
     }
 }
 
+/// A dynamic-index project instruction in SSA.
+///
+/// Like [`Project`], but the field index is a run-time operand (operand `1`, an `int` register)
+/// rather than a static constant. It lowers a record field access on a generic (row-polymorphic)
+/// record, where the field offset is supplied by a field-index dictionary parameter.
+struct ProjectAt {
+    /// The type of the projected value.
+    ty: Type,
+}
+
+impl InstructionKind for ProjectAt {
+    fn result(&self, _whole: &Instruction) -> InstructionResult {
+        // The aggregate operand is a place and the result is a place: a pointer to the projected
+        // element. A register value is obtained by `load`ing the result.
+        InstructionResult::pointer_to(InstructionResult::Lowered(self.ty))
+    }
+
+    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
+        InstructionView::ProjectAt { ty: self.ty }
+    }
+
+    fn fmt_within(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        whole: &Instruction,
+        _env: &ModuleEnv<'_>,
+    ) -> fmt::Result {
+        write!(
+            f,
+            "project at {} from {}",
+            whole.operands[1], whole.operands[0]
+        )
+    }
+}
+
 /// A return instruction in SSA.
 struct Ret {}
 
@@ -763,6 +903,95 @@ impl InstructionKind for Drop {
         _env: &ModuleEnv<'_>,
     ) -> fmt::Result {
         write!(f, "drop {} via {}", whole.operands[0], whole.operands[1])
+    }
+}
+
+/// A closure construction in SSA.
+///
+/// Bundles a function reference with its captured environment (the operand places, in
+/// target-parameter order) into a runtime `FunctionValue`. `env_dict` is the `Value` dictionary
+/// used to clone/drop the captured environment.
+struct BuildClosure {
+    /// The closure's target (lambda) function.
+    function: FunctionReference,
+
+    /// The `Value` dictionary for cloning/dropping the captured environment (`None` when there are
+    /// no captures).
+    env_dict: Option<TraitDictionaryId>,
+
+    /// The type of the constructed closure value.
+    ty: Type,
+}
+
+impl InstructionKind for BuildClosure {
+    fn result(&self, _whole: &Instruction) -> InstructionResult {
+        InstructionResult::Lowered(self.ty)
+    }
+
+    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
+        InstructionView::BuildClosure {
+            function: &self.function,
+            env_dict: self.env_dict,
+        }
+    }
+
+    fn fmt_within(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        whole: &Instruction,
+        _env: &ModuleEnv<'_>,
+    ) -> fmt::Result {
+        write!(f, "build_closure {}(", self.function.name)?;
+        for (i, op) in whole.operands.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "{}", op)?;
+        }
+        write!(f, ")")
+    }
+}
+
+/// A deep clone of a closure's captured environment in SSA, yielding a fresh closure value.
+struct CloneClosureEnv {
+    /// The type of the cloned closure value.
+    ty: Type,
+}
+
+impl InstructionKind for CloneClosureEnv {
+    fn result(&self, _whole: &Instruction) -> InstructionResult {
+        InstructionResult::Lowered(self.ty)
+    }
+
+    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
+        InstructionView::CloneClosureEnv
+    }
+
+    fn fmt_within(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        whole: &Instruction,
+        _env: &ModuleEnv<'_>,
+    ) -> fmt::Result {
+        write!(f, "clone_closure_env {}", whole.operands[0])
+    }
+}
+
+/// A drop of a closure's owned captured environment in SSA.
+struct DropClosureEnv {}
+
+impl InstructionKind for DropClosureEnv {
+    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
+        InstructionView::DropClosureEnv
+    }
+
+    fn fmt_within(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        whole: &Instruction,
+        _env: &ModuleEnv<'_>,
+    ) -> fmt::Result {
+        write!(f, "drop_closure_env {}", whole.operands[0])
     }
 }
 

@@ -11,8 +11,9 @@ use test_log::test;
 use indoc::indoc;
 
 use crate::harness::{
-    TestSession, bool, float, get_array_property_value, get_property_value, int,
-    set_array_property_value, set_property_value, string, unit, variant_0, variant_t1, variant_tn,
+    Backend, TestSession, bool, enter_backend, float, get_array_property_value, get_property_value,
+    int, set_array_property_value, set_property_value, string, unit, variant_0, variant_t1,
+    variant_tn,
 };
 use ferlium::{
     compiler::error::{
@@ -1157,6 +1158,11 @@ fn value_function_arity_for_static_std_function_value() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn lambda() {
+    // Many of these lambdas are generic (e.g. `|x| x`, `|x, y| x + y`) or escape a generic scope
+    // (`fn a() { |x| x + x }`), so they carry hidden dictionary evidence that the SSA backend does
+    // not lower yet (Milestone 1 covers value-capturing closures only). Run HIR-only for now; the
+    // SSA-lowerable subset is covered by `regression::value_capturing_closures_run_on_both_backends`.
+    let _backend = enter_backend(Backend::Hir);
     let mut session = TestSession::new();
     assert_val_eq!(session.run("let f = || 1; f()"), int(1));
     assert_val_eq!(session.run("let f = | | 1; f()"), int(1));
@@ -1211,6 +1217,11 @@ fn lambda() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn closures() {
+    // Several of these closures are generic or escape a generic scope (e.g. `fn f() { let b = 1;
+    // |x| x + b }`), carrying hidden dictionary evidence the SSA backend does not lower yet
+    // (Milestone 1 covers value-capturing closures only). Run HIR-only for now; the SSA-lowerable
+    // subset is covered by `regression::value_capturing_closures_run_on_both_backends`.
+    let _backend = enter_backend(Backend::Hir);
     let mut session = TestSession::new();
     // Basic capture.
     assert_val_eq!(session.run("let a = 3.3; let f = || a; f()"), float(3.3));
@@ -1432,6 +1443,13 @@ fn first_class_functions() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn records() {
+    // Several of these snippets make a generic function or generic-bodied lambda first-class (e.g.
+    // `(e,).0(..)`, `let a = e; a(..)`, `((s,).0)(..)`, `fn l(v) { ((|v| v.x)(v), ..) }`), so the
+    // resulting closure value carries hidden field-index dictionary evidence that the SSA backend
+    // does not lower yet (Milestone 1 covers value-capturing closures only). Run HIR-only for now;
+    // the SSA-lowerable subset (record field access on generic records via `ProjectAt`) is covered
+    // by `regression::record_field_access_runs_on_both_backends`.
+    let _backend = enter_backend(Backend::Hir);
     let mut session = TestSession::new();
     assert_val_eq!(session.run("{a:1}.a"), int(1));
     assert_val_eq!(session.run("{a:1, b:2}.a"), int(1));

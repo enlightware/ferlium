@@ -2,6 +2,7 @@ use crate::FxHashMap;
 use ordered_float::NotNan;
 use ustr::Ustr;
 
+use crate::hir::function::ResolvedArgPassing;
 use crate::module::{
     ExtraParameterId, ResolvedLocalClone, ResolvedLocalDrop, ResolvedTakeLocalValueMode,
 };
@@ -18,7 +19,7 @@ use crate::{
     },
     module::{
         self, FunctionId, ImportFunctionSlotId, LocalDeclId, LocalFunctionId, Module, ModuleEnv,
-        ModuleId, TraitDictionary, TraitImpl, TraitImplId, id::Id,
+        ModuleId, TraitDictionary, TraitDictionaryId, TraitImpl, TraitImplId, id::Id,
     },
     ssa::{self, BlockIdentity, value::FunctionReference},
     std::{
@@ -235,14 +236,28 @@ impl<'a> Emitter<'a> {
             lowered.add_parameter(req.to_dict_type_in_env(&env), ssa::ParameterTag::Dictionary);
         }
 
-        // Bind the argument locals. Every parameter is passed by pointer (the resolved passing is
-        // recorded in the signature only as the obligation a later backend may relax to direct
-        // passing per `doc/abi.md`), so each argument local is the place its incoming pointer
-        // denotes.
+        // Bind the runtime argument locals. For a plain function these are exactly the visible
+        // arguments; for a lowered closure (lambda) the captured-environment slots come first — they
+        // are the leading `LocalDecl`s but are not part of the surface `arg_names` — followed by the
+        // visible arguments. The closure's application passes each environment slot's place ahead of
+        // the visible argument places, matching this order. Every parameter is passed by pointer (the
+        // resolved passing is recorded in the signature only as the obligation a later backend may
+        // relax to direct passing per `doc/abi.md`), so each argument local is the place its incoming
+        // pointer denotes. `parameter_passing` describes only the visible arguments, so it is indexed
+        // relative to the first visible argument.
+        let runtime_arg_count = syntax.runtime_arg_count;
+        let visible_arg_count = f.definition.arg_names.len();
+        let capture_count = runtime_arg_count - visible_arg_count;
         let mut locals: FxHashMap<LocalDeclId, ssa::Value> = FxHashMap::default();
-        for i in 0..f.definition.arg_names.len() {
-            let resolved = f.parameter_passing[i];
-            lowered.add_parameter(f.locals[i].ty, ssa::ParameterTag::Parameter(resolved));
+        for i in 0..runtime_arg_count {
+            let passing = if i < capture_count {
+                // A captured-environment slot is handed to the body as a mutable reference into the
+                // (per-call cloned) environment.
+                ResolvedArgPassing::MutableRef
+            } else {
+                f.parameter_passing[i - capture_count]
+            };
+            lowered.add_parameter(f.locals[i].ty, ssa::ParameterTag::Parameter(passing));
             let param = ssa::Value::Parameter(extra_count + i);
             locals.insert(LocalDeclId::from_index(i), param);
         }
@@ -333,6 +348,46 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    /// Resolves a module-relative [`TraitImplId`] to a canonical [`TraitDictionaryId`].
+    ///
+    /// Mirrors [`crate::eval::EvalCtx::get_dictionary_id`]: a local impl belongs to the current
+    /// module, while an imported impl is resolved through its import slot.
+    fn dictionary_id(&self, dictionary: TraitImplId) -> TraitDictionaryId {
+        match dictionary {
+            TraitImplId::Local(id) => TraitDictionaryId {
+                module_id: self.module.module_id(),
+                impl_id: id,
+            },
+            TraitImplId::Import(id) => {
+                let slot = self.module.get_import_impl_slot(id).unwrap();
+                let imported = self.session.expect_fresh_module(slot.module);
+                let impl_id = imported
+                    .get_impl_id_by_trait_key(&slot.key)
+                    .expect("imported trait impl not found");
+                TraitDictionaryId {
+                    module_id: slot.module,
+                    impl_id,
+                }
+            }
+        }
+    }
+
+    /// Resolves the `Value` dictionary node witnessing how to clone/drop a closure's captured
+    /// environment to a canonical [`TraitDictionaryId`].
+    ///
+    /// In monomorphic code this node elaborates to a static `GetDictionary` whose impl is known at
+    /// lowering time. A *forwarded* env dictionary (a `LoadDictionary` of an enclosing extra
+    /// parameter, in generic code) has no static impl and is not lowered yet.
+    fn resolve_env_dictionary(&self, node: &ENode) -> TraitDictionaryId {
+        match &node.kind {
+            hir::NodeKind::GetDictionary(d) => self.dictionary_id(d.dictionary),
+            other => todo!(
+                "forwarded closure environment dictionary is not lowered to SSA yet: {:?}",
+                other
+            ),
+        }
+    }
+
     /// Lowers an indirect `Value::clone(source, target)` call dispatched through the dictionary
     /// extra parameter `dictionary`.
     ///
@@ -359,8 +414,10 @@ impl<'a> Emitter<'a> {
                 method_ty,
             ))
             .unwrap();
-        let method = self.insert(Instruction::load(span, method_place)).unwrap();
-        self.insert(Instruction::call(span, method, [source, target]));
+        // The callee is passed as the *place* of the method in the dictionary tuple; the call reads
+        // the function value by reference (it is never loaded into a register — see the `call`
+        // contract in `ssa::instruction`).
+        self.insert(Instruction::call(span, method_place, [source, target]));
     }
 
     /// Returns the runtime dictionary entry index and function type of the `Value` trait method
@@ -404,15 +461,16 @@ impl<'a> Emitter<'a> {
                 let dictionary_place = self.context.extra_parameters[&dictionary].clone();
                 let (entry_index, method_ty) =
                     self.value_method(VALUE_DROP_METHOD_INDEX, dropped_ty);
-                let method_place = self
-                    .insert(Instruction::project(
-                        span,
-                        dictionary_place,
-                        entry_index,
-                        method_ty,
-                    ))
-                    .unwrap();
-                self.insert(Instruction::load(span, method_place)).unwrap()
+                // The callee is the *place* of the `Value::drop` method in the dictionary tuple; the
+                // `drop` reads the function value by reference (never loaded — same callee contract
+                // as `call`).
+                self.insert(Instruction::project(
+                    span,
+                    dictionary_place,
+                    entry_index,
+                    method_ty,
+                ))
+                .unwrap()
             }
         };
         self.insert(Instruction::drop(span, place, callee));
@@ -550,15 +608,25 @@ impl<'a> Emitter<'a> {
     /// Allocates frame storage for every [`LocalStorage::Owned`] local of the lowered function and
     /// binds it to its `alloca` place.
     ///
-    /// Arguments are `NonOwning` and keep their by-value parameter binding. Non-owning, non-argument
-    /// locals (aliases) are bound to their initializer's place when their `StoreLocal` is lowered.
+    /// Arguments are `NonOwning` and keep their by-value parameter binding. A lowered closure's
+    /// captured-environment slots are `Owned` (the body owns the cloned environment) but are *also*
+    /// parameters, already bound to their incoming pointers by the parameter loop; they must keep
+    /// that binding rather than be re-allocated, so locals already bound (the runtime arguments) are
+    /// skipped here. Non-owning, non-argument locals (aliases) are bound to their initializer's place
+    /// when their `StoreLocal` is lowered.
     fn allocate_owned_locals(&mut self) {
         let f = self.module.get_function_by_id(self.context.source).unwrap();
         let owned: Vec<(LocalDeclId, Type)> = f
             .locals
             .iter()
             .enumerate()
-            .filter(|(_, l)| l.owns_storage())
+            .filter(|(i, l)| {
+                l.owns_storage()
+                    && !self
+                        .context
+                        .locals
+                        .contains_key(&LocalDeclId::from_index(*i))
+            })
             .map(|(i, l)| (LocalDeclId::from_index(i), l.ty))
             .collect();
         for (id, ty) in owned {
@@ -805,7 +873,12 @@ impl<'a> Emitter<'a> {
     fn node_yields_place(&self, node: &ENode) -> bool {
         use hir::NodeKind as K;
         match &node.kind {
-            K::LoadLocal(_) | K::LoadDictionary(_) | K::Project(_) | K::WithPlace(_) => true,
+            K::LoadLocal(_)
+            | K::LoadDictionary(_)
+            | K::LoadFieldIndex(_)
+            | K::Project(_)
+            | K::ProjectAt(_)
+            | K::WithPlace(_) => true,
             K::Apply(n) => n.ty.returns_place(),
             K::StaticApply(n) => n.ty.returns_place(),
             K::CallDictionaryMethod(n) => n.ty.returns_place(),
@@ -831,6 +904,12 @@ impl<'a> Emitter<'a> {
                 self.context.extra_parameters[&n.extra_parameter].clone()
             }
 
+            K::LoadFieldIndex(n) => {
+                // A field-index parameter (an `int` passed by pointer) is already a place, forwarded
+                // unchanged as the dictionary argument of a downstream generic-record access.
+                self.context.extra_parameters[&n.extra_parameter].clone()
+            }
+
             K::Project(n) => {
                 let dictionary = &self.hir_arena[n.value];
                 let base = self.lower_as_place(dictionary);
@@ -844,9 +923,29 @@ impl<'a> Emitter<'a> {
                 .unwrap()
             }
 
+            K::ProjectAt(n) => {
+                // A field access on a generic (row-polymorphic) record: project the base place at
+                // the run-time field offset held in the field-index dictionary parameter `n.index`.
+                // That parameter is a place (a pointer to an `int`); load it to get the index, then
+                // project. Mirrors the HIR interpreter's `eval_project_at`, which pushes the loaded
+                // index onto the base place's path - no temporary, so the (possibly generic) field
+                // type needs no `Value` layout witness.
+                let base = self.lower_as_place(&self.hir_arena[n.value]);
+                let index_param = self.context.extra_parameters[&n.index].clone();
+                let index = self
+                    .insert(Instruction::load(node.span, index_param))
+                    .unwrap();
+                self.insert(Instruction::project_at(node.span, base, index, node.ty))
+                    .unwrap()
+            }
+
             K::Apply(n) => {
                 let result_storage = self.allocate_result(node, &n.ty);
-                let f = self.lower_as_register(&self.hir_arena[n.function]);
+                // The callee is lowered as a *place*: a function value (in particular a closure) is
+                // borrowed in place and read by reference at the call, so it survives repeated calls
+                // (`f() + f()`) and is dropped once by its scope cleanup — mirroring the HIR
+                // interpreter's `eval_apply`, which calls through a borrow of the function value.
+                let f = self.lower_as_place(&self.hir_arena[n.function]);
                 let mut arguments: Vec<ssa::Value> = n
                     .arguments
                     .iter()
@@ -983,21 +1082,6 @@ impl<'a> Emitter<'a> {
         self.context.locals.insert(n.binding, place);
     }
 
-    /// Lowers `node` as a register value (a loaded scalar / value held directly in an SSA register).
-    ///
-    /// A primitive immediate is produced directly; any other node is lowered as a place, and the
-    /// value is `load`ed from it.
-    fn lower_as_register(&mut self, node: &ENode) -> ssa::Value {
-        use hir::NodeKind as K;
-        if let K::Immediate(n) = &node.kind
-            && let Some(prim) = self.lower_as_primitive(n)
-        {
-            return prim;
-        }
-        self.assert_statically_sized(node.ty);
-        let place = self.lower_as_place(node);
-        self.insert(Instruction::load(node.span, place)).unwrap()
-    }
 
     /// Lowers a `Case` scrutinee to an operand `comp_eq` reads *non-consumingly*.
     ///
@@ -1137,6 +1221,9 @@ impl<'a> Emitter<'a> {
     ) -> (ssa::Value, Vec<ssa::Value>) {
         let dictionary = self.lower_as_place(&self.hir_arena[n.dictionary]);
         let method_ty = Type::function_type(n.ty.clone());
+        // The callee is the *place* of the method in the dictionary tuple; the call reads the
+        // function value by reference rather than loading it into a register (see the `call`
+        // contract in `ssa::instruction`).
         let method_place = self
             .insert(Instruction::project(
                 node.span,
@@ -1145,11 +1232,8 @@ impl<'a> Emitter<'a> {
                 method_ty,
             ))
             .unwrap();
-        let method = self
-            .insert(Instruction::load(node.span, method_place))
-            .unwrap();
         let arguments = n.arguments.iter().map(|a| self.lower_argument(a)).collect();
-        (method, arguments)
+        (method_place, arguments)
     }
 
     /// Inserts an allocation of the result storage for a call to a function of type `f` and returns
@@ -1444,11 +1528,86 @@ impl<'a> Emitter<'a> {
                 self.store_into_if_needed(node.span, dict, destination);
             }
 
+            K::GetFunction(n) => {
+                // A first-class reference to a (non-generic) function: lower to a constant function
+                // value and store it into the destination. A generic function used first-class is
+                // wrapped by elaboration in a `BuildClosure` carrying its dictionary captures, so a
+                // bare `GetFunction` never needs evidence here.
+                let (fi, mi) = self.resolve_function(n.function);
+                let f = ssa::Value::Function(self.demand_function(fi, mi));
+                self.store_into_if_needed(node.span, f, destination);
+            }
+
+            K::BuildClosure(n) => {
+                // Build a first-class closure value bundling the target function with its captured
+                // environment. The target's body receives the captures as leading by-pointer
+                // parameters (after any dictionary parameters), so the closure carries them and the
+                // SSA `call` prepends their places at every application (see the interpreter).
+                //
+                // Milestone 1 handles value-capturing closures only. A generic function used
+                // first-class — or a generic-bodied lambda — carries `dictionary_captures` (hidden
+                // evidence the body needs); those are not lowered yet.
+                if !n.dictionary_captures.is_empty() {
+                    todo!("closure dictionary captures are not lowered to SSA yet");
+                }
+
+                // Resolve the target function reference out of the inner `GetFunction`.
+                let function_node = &self.hir_arena[n.function];
+                let hir::NodeKind::GetFunction(g) = &function_node.kind else {
+                    panic!("BuildClosure.function must be a GetFunction");
+                };
+                let (fi, mi) = self.resolve_function(g.function);
+                let fref = self.demand_function(fi, mi);
+
+                // The `Value` dictionary witnessing how to clone/drop the captured environment.
+                let env_dict = n
+                    .captures_value_dictionary
+                    .map(|d| self.resolve_env_dictionary(&self.hir_arena[d]));
+
+                // Lower each capture to the place of its (already owned) value; the closure moves
+                // them into its environment.
+                let captures: Vec<ssa::Value> = n
+                    .captures
+                    .iter()
+                    .map(|c| self.lower_as_place(&self.hir_arena[*c]))
+                    .collect();
+
+                let closure = self
+                    .insert(Instruction::build_closure(
+                        node.span, fref, env_dict, node.ty, captures,
+                    ))
+                    .unwrap();
+                self.store_into_if_needed(node.span, closure, destination);
+            }
+
+            K::CloneClosureEnv(n) => {
+                // Deep-clone the captured environment of the source closure, yielding a fresh
+                // closure value. This is the body of the generated `Value::clone` for a function
+                // type; it is lowered value-returning, so the clone is stored into the destination.
+                let source = self.lower_as_place(&self.hir_arena[n.source]);
+                let cloned = self
+                    .insert(Instruction::clone_closure_env(node.span, source, node.ty))
+                    .unwrap();
+                self.store_into_if_needed(node.span, cloned, destination);
+            }
+
+            K::DropClosureEnv(n) => {
+                // Drop the owned captured environment of the target closure. This is the body of the
+                // generated `Value::drop` for a function type; it is `()`-typed, so nothing is
+                // stored into the destination.
+                let target = self.lower_as_place(&self.hir_arena[n.target]);
+                self.insert(Instruction::drop_closure_env(node.span, target));
+            }
+
             K::Apply(n) => {
                 if n.ty.returns_place() {
                     return self.lower_place_call_into(node, destination);
                 }
-                let f = self.lower_as_register(&self.hir_arena[n.function]);
+                // The callee is lowered as a *place*: a function value (in particular a closure) is
+                // borrowed in place and read by reference at the call, so it survives repeated calls
+                // (`f() + f()`) and is dropped once by its scope cleanup — mirroring the HIR
+                // interpreter's `eval_apply`, which calls through a borrow of the function value.
+                let f = self.lower_as_place(&self.hir_arena[n.function]);
                 let mut arguments: Vec<ssa::Value> = n
                     .arguments
                     .iter()
@@ -1458,9 +1617,12 @@ impl<'a> Emitter<'a> {
                 self.insert(Instruction::call(node.span, f, arguments));
             }
 
-            K::Project(_) => {
+            K::Project(_) | K::ProjectAt(_) => {
                 // A projection is a place: copy the field place into the destination (trivial copy;
-                // non-trivial reads are wrapped in `CloneValue` by HIR).
+                // non-trivial reads are wrapped in `CloneValue` by HIR). A bare projection reaching
+                // here therefore has a statically sized field type — a generic field is only read
+                // through the `Value` dictionary clone of its enclosing `CloneValue`, which lowers
+                // the projection as a place (`lower_as_place`) instead.
                 if destination.is_some() {
                     self.assert_statically_sized(node.ty);
                     let fp = self.lower_as_place(node);
