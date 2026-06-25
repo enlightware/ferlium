@@ -1,0 +1,35 @@
+name: Commit message policy
+
+on: [pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  no-ai-coauthors:
+    name: No AI co-author attribution
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Reject AI co-author attribution
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git log --format=%B "${{ github.event.pull_request.base.sha }}..HEAD" > /tmp/commit-messages.txt
+
+          if grep -Eiq '(^Co-authored-by:.*(Claude|Anthropic|ChatGPT|OpenAI|Codex|Cursor|Copilot)|Generated with Claude Code|Claude-Session:)' /tmp/commit-messages.txt; then
+            echo "AI tools must not be listed in commit attribution trailers or generated-by metadata."
+            echo "Please rewrite the affected commit message(s)."
+            echo
+            echo "For example:"
+            echo "  git rebase -i origin/${{ github.base_ref }}"
+            echo
+            echo "Then change 'pick' to 'reword' for the affected commits."
+            exit 1
+          fi
