@@ -21,6 +21,7 @@ use crate::{
     types::r#type::TypeKind,
 };
 use itertools::{Itertools, multiunzip};
+use ustr::ustr;
 
 use crate::{
     ast::{Pattern, PatternKind, PatternType},
@@ -636,17 +637,32 @@ impl TypeInference {
                 let default_id = alternatives.pop().unwrap().1;
                 (alternatives, default_id, effects)
             };
-            let case_ret_ty = if Self::case_arms_all_never(env, &alternatives, default_id) {
-                Type::never()
-            } else {
-                return_ty
-            };
-            let node = K::Case(b(hir::Case {
-                value: condition_node_id,
-                alternatives,
-                default: default_id,
-            }));
-            (node, case_ret_ty, MutType::constant(), effects)
+
+            // Materialize the scrutinee if needed.
+            let (kind, case_ty, case_effects) = self.consume_value_by_shared_ref(
+                env,
+                condition_node_id,
+                condition_ty,
+                match_span,
+                ustr("$match_scrutinee"),
+                move |_this, env, scrutinee| {
+                    let case_ret_ty = if Self::case_arms_all_never(env, &alternatives, default_id) {
+                        Type::never()
+                    } else {
+                        return_ty
+                    };
+                    (
+                        K::Case(b(hir::Case {
+                            value: scrutinee,
+                            alternatives,
+                            default: default_id,
+                        })),
+                        case_ret_ty,
+                        effects,
+                    )
+                },
+            );
+            (kind, case_ty, MutType::constant(), case_effects)
         })
     }
 

@@ -581,3 +581,31 @@ fn array_index_ide_annotations_do_not_expose_generated_place_call() {
         "array index annotations should not expose generated addressor-place call details, got:\n{annotated}"
     );
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn match_on_temporary_scrutinee_acquires_value_obligation() {
+    // A non-place temporary scrutinee (here the call result `f(x)`) is materialized into an owned,
+    // dropped local, so its type acquires a `Value` obligation.
+    let src = "fn ho(f, x) { match f(x) { 0 => 1, _ => 2 } }";
+    let mut compiler = compile_source(src);
+    let annotations = annotation_hints(&mut compiler);
+    assert!(
+        annotations.contains("Value"),
+        "expected the matched temporary's type to acquire a `Value` obligation, got: {annotations}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn match_on_place_scrutinee_adds_no_value_obligation() {
+    // Dual of the test above: a place scrutinee (the parameter `x`) already owns its storage, is
+    // matched in place, and must NOT acquire a spurious `Value` obligation.
+    let src = "fn g(x) { match x { 0 => 1, _ => 2 } }";
+    let mut compiler = compile_source(src);
+    let annotations = annotation_hints(&mut compiler);
+    assert!(
+        !annotations.contains("Value"),
+        "a place scrutinee must not acquire a `Value` obligation, got: {annotations}"
+    );
+}

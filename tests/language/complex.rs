@@ -104,6 +104,22 @@ fn exprs_in_match() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn match_on_temporary_scrutinee() {
+    // The scrutinee is a non-place temporary (a call result), materialized into an owned, dropped
+    // local before matching; it must still match correctly against an arm and the default.
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run("fn ho(f, x) { match f(x) { 1 => 10, _ => 20 } } ho(|z| z, 1)"),
+        int(10)
+    );
+    assert_val_eq!(
+        session.run("fn ho(f, x) { match f(x) { 1 => 10, _ => 20 } } ho(|z| z, 5)"),
+        int(20)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn record_wildcards_in_match() {
     let mut session = TestSession::new();
     assert_val_eq!(
