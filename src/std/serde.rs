@@ -430,9 +430,6 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
             let data_value_ty = data_value_type();
             let array_ty = array_type(data_value_ty);
             let value_trait_id = solver.std_trait_id(VALUE_TRAIT_NAME);
-            let data_value_dictionary_ty = solver
-                .trait_def(value_trait_id)
-                .get_dictionary_type_for_tys(&[data_value_ty], &[], &[]);
             let data_value_clone =
                 PendingLocalClone::Resolved(ResolvedLocalClone::Static(solver.solve_impl_method(
                     value_trait_id,
@@ -441,8 +438,6 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                     span,
                     arena,
                 )?));
-            let data_value_dictionary =
-                solver.solve_impl(value_trait_id, &[data_value_ty], span, arena)?;
             // store it at 1
             let (store_array, l_array_id) = store_new_local(
                 get_array,
@@ -465,11 +460,6 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                         arena,
                         immediate(LiteralValue::new_native(i as isize)),
                         int_type(),
-                    );
-                    let dictionary_node = n(
-                        arena,
-                        get_dictionary(data_value_dictionary),
-                        data_value_dictionary_ty,
                     );
                     let array_index = solver.get_subscript_member(
                         span,
@@ -505,7 +495,7 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                             function: array_index,
                             function_path: None,
                             function_span: span,
-                            extra_arguments: vec![dictionary_node],
+                            extra_arguments: vec![],
                             arguments,
                             argument_names: vec![ustr("array"), ustr("index")],
                             ty,
