@@ -3442,6 +3442,33 @@ impl TypeInference {
         self.block_or_cleanup_scope(prefix, drops)
     }
 
+    /// Builds a consumer that reads `value` by shared reference. A non-place `value` needing a
+    /// semantic drop is first bound to an owned `name` temporary dropped after the consumer (so it
+    /// acquires a `Value` obligation, like a shared-ref call argument); a place or trivially-copyable
+    /// `value` is consumed in place. `build_consumer` receives the node to consume — `value` or the
+    /// `LoadLocal` of its temporary — and returns its `(kind, type, effects)`.
+    pub(crate) fn consume_value_by_shared_ref(
+        &mut self,
+        env: &mut TypingEnv,
+        value: NodeId,
+        ty: Type,
+        span: Location,
+        name: Ustr,
+        build_consumer: impl FnOnce(&mut Self, &mut TypingEnv, NodeId) -> (NodeKind, Type, EffType),
+    ) -> (NodeKind, Type, EffType) {
+        if node_is_place_reference(env.ir_arena, value)
+            || !self.node_value_needs_semantic_drop(env, value, ty, span)
+        {
+            return build_consumer(self, env, value);
+        }
+        let temp_start = env.cur_locals.len();
+        let (store, load) = self.store_owned_temp(env, value, ty, span, name);
+        let (kind, consumer_ty, consumer_effects) = build_consumer(self, env, load);
+        let consumer = hir::Node::new(kind, consumer_ty, consumer_effects.clone(), span);
+        let block = self.wrap_call_with_temp_drops(env, temp_start, vec![store], consumer);
+        (block, consumer_ty, consumer_effects)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn wrap_owned_value_with_temp_drops(
         &mut self,
