@@ -1,10 +1,39 @@
+//! SSA instructions and their contracts.
+//!
+//! # Operand and result contract
+//!
+//! Each instruction carries a flat `operands: Vec<ssa::Value>` whose length and per-position meaning
+//! are fixed by the instruction kind (documented on each `Instruction::*` constructor below and
+//! checked by [`Instruction::verify`]). An operand falls into one of four runtime *roles*; which role
+//! a given position expects is part of the contract, but it is **not** recoverable from the
+//! `ssa::Value` variant alone (a `Register`/`Parameter` can bind any of them), so the role is
+//! enforced where the operand is consumed — by the interpreter's `place_operand` / `value_operand` /
+//! `dict_operand` / `stack_marker_operand` resolvers:
+//!
+//! - **place** — a pointer into storage (the result of an `alloca`/`project`/`dict_entry`, or an
+//!   incoming by-pointer parameter). Consumed by `load`, `store`, `project`, `drop`, etc.
+//! - **value** — a materialized register or constant (the result of a `load`/`comp_eq`, or a literal
+//!   constant). A non-trivially-copyable value has *exactly one* consuming use; reading it again is a
+//!   mis-lowering the interpreter catches.
+//! - **dictionary** — a symbolic trait dictionary (evidence), consumed by `dict_entry`/`call` and
+//!   never materialized as a value.
+//! - **stack marker** — a saved stack top produced by `stack_save`, consumed only by `stack_restore`.
+//!
+//! An instruction either defines a single result register (`InstructionResult` other than `Nothing`)
+//! or defines nothing; a result-less instruction's slot must never be read. Three kinds are
+//! *terminators* (`ret`, `br`, `condbr`): a terminator appears exactly once, as the last instruction
+//! of its block, and every other instruction is a non-terminator. These structural invariants are
+//! verified per function by the interpreter (see `Interpreter::verify_function`).
+
 use std::any::Any;
 use std::fmt;
 
 use ustr::Ustr;
 
 use crate::{
-    Location, cached_primitive_ty, format::FormatWith, list,
+    Location, cached_primitive_ty,
+    format::FormatWith,
+    list,
     module::ModuleEnv,
     ssa::{self, value::FunctionReference},
     types::r#type::Type,
@@ -45,6 +74,97 @@ impl Instruction {
         self.kind.view(self)
     }
 
+    /// Verifies the structural contract of this instruction in isolation: the operand **arity** (and,
+    /// for `alloca`/`memcpy`, the optional run-time-layout witness) plus terminator consistency.
+    ///
+    /// This is the machine-checkable core of the per-instruction contracts documented on each
+    /// constructor below. The interpreter runs it over every instruction of a function before
+    /// executing it (see `Interpreter::verify_function`), so malformed IR fails fast with a precise
+    /// message instead of an out-of-bounds operand index or silently corrupted interpreter state —
+    /// the moral equivalent of the undefined behavior such IR would cause in a real backend.
+    ///
+    /// Operand *role* (place vs value vs dictionary vs marker) is intentionally **not** checked here:
+    /// it is not recoverable from the `ssa::Value` variant (a `Register`/`Parameter` binds any role),
+    /// so it is enforced at point of use by the interpreter's operand resolvers.
+    pub fn verify(&self) {
+        let n = self.operands.len();
+        use InstructionView as V;
+        match self.view() {
+            // 1 operand (the layout witness) iff `ty` is not statically sized, else none.
+            V::Alloca { witness, .. } => assert_eq!(
+                n,
+                witness.is_some() as usize,
+                "alloca carries the run-time-layout witness iff its type is not statically sized"
+            ),
+            V::AllocaPlace { .. } => assert_eq!(n, 0, "alloca_place takes no operands"),
+            // [callee, args.., ret-out-pointer?]: at least the callee.
+            V::Call => assert!(n >= 1, "call needs at least the callee operand"),
+            V::CompareEqual => assert_eq!(n, 2, "compare_eq compares exactly two operands"),
+            V::ConditionalBranch { .. } => {
+                assert_eq!(n, 1, "condbr takes exactly the condition operand")
+            }
+            V::UnconditionalBranch { .. } => assert_eq!(n, 0, "br takes no operands"),
+            V::Load => assert_eq!(n, 1, "load takes exactly the source place"),
+            V::Project { .. } => assert_eq!(n, 1, "project takes exactly the aggregate place"),
+            V::ProjectAt { .. } => assert_eq!(
+                n, 2,
+                "project_at takes the aggregate place and the run-time index register"
+            ),
+            V::DictEntry { .. } => {
+                assert_eq!(
+                    n, 1,
+                    "dict_entry takes exactly the symbolic dictionary operand"
+                )
+            }
+            V::Ret => assert_eq!(
+                n, 0,
+                "ret takes no operands (the result is written through the return out-pointer)"
+            ),
+            V::Variant { .. } => {
+                assert_eq!(
+                    n, 0,
+                    "variant builds an uninitialized shell and takes no operands"
+                )
+            }
+            V::ExtractTag => assert_eq!(n, 1, "extract_tag takes exactly the variant place"),
+            V::Store => assert_eq!(n, 2, "store takes the value and the destination place"),
+            // [source, destination] plus the layout witness iff the pointee is dynamically sized.
+            V::Memcpy => assert!(
+                n == 2 || n == 3,
+                "memcpy takes source and destination places, plus the layout witness iff dynamic"
+            ),
+            V::StackSave => assert_eq!(n, 0, "stack_save takes no operands"),
+            V::StackRestore => assert_eq!(n, 1, "stack_restore takes exactly the saved marker"),
+            V::Drop => assert_eq!(
+                n, 2,
+                "drop takes the target place and the Value::drop callee"
+            ),
+            // [hidden_dicts.., captures.., env_dict?]: at least the hidden dicts and optional env dict.
+            V::BuildClosure {
+                num_hidden_dicts,
+                has_env_dict,
+                ..
+            } => assert!(
+                n >= num_hidden_dicts + has_env_dict as usize,
+                "build_closure needs at least its hidden dictionaries and the optional env dictionary"
+            ),
+            V::CloneClosureEnv => {
+                assert_eq!(n, 1, "clone_closure_env takes exactly the closure place")
+            }
+            V::DropClosureEnv => {
+                assert_eq!(n, 1, "drop_closure_env takes exactly the closure place")
+            }
+        }
+        assert_eq!(
+            self.is_terminator(),
+            matches!(
+                self.view(),
+                V::Ret | V::ConditionalBranch { .. } | V::UnconditionalBranch { .. }
+            ),
+            "is_terminator must agree with the instruction kind (only ret/br/condbr terminate)"
+        );
+    }
+
     /// Creates an `alloca` instruction for storage whose size is known at compile time.
     pub fn alloca(span: Location, ty: Type) -> Self {
         Instruction {
@@ -67,6 +187,8 @@ impl Instruction {
         }
     }
 
+    /// Creates an `alloca_place` instruction: stack storage for a *pointer* to an instance of
+    /// `pointing_to`. No operands; the result is the place of that pointer slot.
     pub fn alloca_place(span: Location, pointing_to: Type) -> Self {
         Instruction {
             span,
@@ -75,7 +197,9 @@ impl Instruction {
         }
     }
 
-    /// Creates a 'br' instruction with the given properties.
+    /// Creates a `br` (unconditional branch) instruction transferring control to `target`.
+    ///
+    /// A terminator; takes no operands. `target` must be an existing block of the same function.
     pub fn br(span: Location, target: ssa::BlockIdentity) -> Self {
         Instruction {
             span,
@@ -123,7 +247,13 @@ impl Instruction {
         }
     }
 
-    /// Creates a `compare_eq` instruction with the given properties.
+    /// Creates a `compare_eq` instruction comparing operands `0` (`v1`) and `1` (`v2`) for structural
+    /// equality, yielding a `bool` register.
+    ///
+    /// Both operands are read **non-consumingly** as literal snapshots (a place is borrowed, never
+    /// moved), so this is the comparison of a lowered `match`: the scrutinee stays live for the
+    /// remaining alternatives and the arm body. Each operand must have a literal form (a scalar
+    /// constant, or a place/register whose pointee is a scalar or composite literal).
     pub fn compare_eq(span: Location, v1: ssa::Value, v2: ssa::Value) -> Self {
         Instruction {
             span,
@@ -132,7 +262,11 @@ impl Instruction {
         }
     }
 
-    /// Creates a `condbr` instruction with the given properties.
+    /// Creates a `condbr` (conditional branch) instruction: branches to `on_success` if operand `0`
+    /// (`condition`) is `true`, otherwise to `on_failure`.
+    ///
+    /// A terminator. The single operand is a **value** that must resolve to a `bool`; both targets
+    /// must be existing blocks of the same function.
     pub fn condbr(
         span: Location,
         condition: ssa::Value,
@@ -149,7 +283,14 @@ impl Instruction {
         }
     }
 
-    /// Creates a 'load' instruction with the given properties.
+    /// Creates a `load` instruction reading the value at the place `source` (operand `0`) into a
+    /// register.
+    ///
+    /// `source` must be a **place** whose pointee is currently initialized. A trivially-copyable
+    /// pointee (scalar/function) is copied, leaving the place intact; any other pointee is *moved*
+    /// out, leaving the place uninitialized — so a non-trivial place has exactly one consuming load.
+    /// HIR wraps non-trivial reads that must not move in `Value::clone`, so a bare `load` is always a
+    /// move-or-copy, never an aliasing read.
     pub fn load(span: Location, source: ssa::Value) -> Self {
         Instruction {
             span,
@@ -158,7 +299,13 @@ impl Instruction {
         }
     }
 
-    /// Creates a 'project' instruction accessing the tuple `source` at index `i`
+    /// Creates a `project` instruction yielding the **place** of field `i` (of type `ty`) of the
+    /// aggregate place `source` (operand `0`).
+    ///
+    /// `source` must be a place whose pointee is an aggregate with more than `i` fields (or generic
+    /// storage that grows to that shape on the first field store); the result is a place, computed
+    /// without reading or moving the aggregate. `i` is a compile-time-constant field index — see
+    /// [`project_at`](Self::project_at) for the run-time-index form.
     pub fn project(span: Location, source: ssa::Value, i: usize, ty: Type) -> Self {
         Instruction {
             span,
@@ -255,7 +402,12 @@ impl Instruction {
         }
     }
 
-    /// Creates a 'store' instruction with the given properties.
+    /// Creates a `store` instruction writing the **value** operand `0` (`value`) into the **place**
+    /// operand `1` (`destination`), discarding (dropping the storage of) any prior contents.
+    ///
+    /// Yields no register. `value` is consumed (moved, for a non-trivial value); `destination` must
+    /// be a place — generic storage materializes its enclosing aggregate skeleton on demand so a
+    /// field store is addressable.
     pub fn store(span: Location, value: ssa::Value, destination: ssa::Value) -> Self {
         Instruction {
             span,
@@ -457,8 +609,10 @@ pub enum InstructionView<'a> {
     /// A return. The result, if any, has already been written through the return out-pointer.
     Ret,
 
-    /// A construction of a variant tagged `tag`, wrapping the value moved out of the payload place
-    /// at operand `0`.
+    /// A construction of a tagged variant *shell* (`tag` with an uninitialized payload), yielded as a
+    /// register. Takes **no operands**: the payload is filled in place through a projection of the
+    /// shell's destination, so a generic payload is never materialized in a temporary (see
+    /// [`Instruction::variant`]).
     Variant { tag: Ustr },
 
     /// An extraction of the tag of the variant at the place given by operand `0`, yielded as an
@@ -814,7 +968,11 @@ impl InstructionKind for DictEntry {
         whole: &Instruction,
         _env: &ModuleEnv<'_>,
     ) -> fmt::Result {
-        write!(f, "dict_entry {} from {}", self.entry_index, whole.operands[0])
+        write!(
+            f,
+            "dict_entry {} from {}",
+            self.entry_index, whole.operands[0]
+        )
     }
 }
 

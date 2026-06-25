@@ -33,9 +33,11 @@ use ferlium::{
     },
     types::type_scheme::{PubTypeConstraint, TypeScheme},
 };
+use regex::Regex;
 use std::{
     cell::{Cell, RefCell},
     fmt,
+    sync::LazyLock,
     sync::atomic::AtomicIsize,
 };
 use ustr::ustr;
@@ -201,6 +203,17 @@ fn compare_native_values(actual: &Value, expected: &Value, path: &str) -> Result
             Ok(())
         } else {
             Err(format!("{path}: expected {expected}, got {actual}"))
+        };
+    }
+
+    if let (Some(actual), Some(expected)) = (
+        actual.as_primitive_ty::<ferlium::std::hash::HashValue>(),
+        expected.as_primitive_ty::<ferlium::std::hash::HashValue>(),
+    ) {
+        return if actual == expected {
+            Ok(())
+        } else {
+            Err(format!("{path}: expected {expected:?}, got {actual:?}"))
         };
     }
 
@@ -406,40 +419,17 @@ macro_rules! assert_val_eq {
 }
 
 /// Replaces every interned-id marker of the form `<number-number>` (e.g. `<0-6>`, `<0-4043>`) with
-/// `...`, so that textual assertions don't flake on the non-deterministic ids embedded in dumps.
+/// `<...>`, so that textual assertions don't flake on the non-deterministic ids embedded in dumps.
+///
+/// Also normalizes the *module id* of an SSA dictionary operand `dict(m<number>:i<number>)` to
+/// `dict(m<...>:i<number>)`: the module id is assigned by module load order (so it shifts as the
+/// std prelude grows), whereas the trailing impl id is an index within a fixed module and stays
+/// deterministic, so it is preserved.
 pub(crate) fn replace_flaky_ids(s: impl AsRef<str>) -> String {
-    let s = s.as_ref();
-    let bytes = s.as_bytes();
-    let mut result = String::with_capacity(s.len());
-    let mut i = 0;
-    let mut segment_start = 0;
-    while i < bytes.len() {
-        // Try to match `<digits-digits>` starting at `i`.
-        if bytes[i] == b'<' {
-            let mut j = i + 1;
-            let first_digits = j;
-            while j < bytes.len() && bytes[j].is_ascii_digit() {
-                j += 1;
-            }
-            if j > first_digits && j < bytes.len() && bytes[j] == b'-' {
-                j += 1;
-                let second_digits = j;
-                while j < bytes.len() && bytes[j].is_ascii_digit() {
-                    j += 1;
-                }
-                if j > second_digits && j < bytes.len() && bytes[j] == b'>' {
-                    result.push_str(&s[segment_start..i]);
-                    result.push_str("<...>");
-                    i = j + 1;
-                    segment_start = i;
-                    continue;
-                }
-            }
-        }
-        i += 1;
-    }
-    result.push_str(&s[segment_start..]);
-    result
+    static INTERNED_ID: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<\d+-\d+>").unwrap());
+    static MODULE_ID: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"dict\(m\d+:").unwrap());
+    let s = MODULE_ID.replace_all(s.as_ref(), "dict(m<...>:");
+    INTERNED_ID.replace_all(&s, "<...>").into_owned()
 }
 
 /// Like `assert_eq!`, but first replaces every interned-id marker (`<number-number>`) in both sides
@@ -485,16 +475,14 @@ macro_rules! dual_test {
             #[::test_log::test]
             #[cfg_attr(target_arch = "wasm32", ::wasm_bindgen_test::wasm_bindgen_test)]
             fn hir() {
-                let _backend_guard =
-                    $crate::harness::enter_backend($crate::harness::Backend::Hir);
+                let _backend_guard = $crate::harness::enter_backend($crate::harness::Backend::Hir);
                 $body
             }
 
             #[::test_log::test]
             #[cfg_attr(target_arch = "wasm32", ::wasm_bindgen_test::wasm_bindgen_test)]
             fn ssa() {
-                let _backend_guard =
-                    $crate::harness::enter_backend($crate::harness::Backend::Ssa);
+                let _backend_guard = $crate::harness::enter_backend($crate::harness::Backend::Ssa);
                 $body
             }
         }
@@ -514,8 +502,7 @@ macro_rules! hir_only_test {
             #[::test_log::test]
             #[cfg_attr(target_arch = "wasm32", ::wasm_bindgen_test::wasm_bindgen_test)]
             fn hir() {
-                let _backend_guard =
-                    $crate::harness::enter_backend($crate::harness::Backend::Hir);
+                let _backend_guard = $crate::harness::enter_backend($crate::harness::Backend::Hir);
                 $body
             }
         }
@@ -1444,7 +1431,7 @@ impl TestSession {
     }
 
     /// Lower `src` to SSA, interpret its `fn main`, and return the rendered result.
-    pub fn eval_ssa(&mut self, src: &str) -> String {
+    pub fn _eval_ssa(&mut self, src: &str) -> String {
         self.session.eval_ssa("<test>", src)
     }
 

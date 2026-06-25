@@ -696,16 +696,27 @@ impl<'a> Emitter<'a> {
     /// Lowers an aggregate (tuple or record) into `destination` by projecting each field of the
     /// destination place and lowering the corresponding node into it.
     ///
-    /// `what` names the aggregate kind for the not-yet-implemented panic when no destination is
-    /// requested.
+    /// With no destination the aggregate is built for effects only (e.g. a tuple/record literal in
+    /// non-tail statement position): it is materialized into a throwaway temporary so each field's
+    /// side effects are still lowered. The temporary's own drop, if any, is emitted by the
+    /// enclosing block's cleanup scope.
     fn lower_aggregate_into(
         &mut self,
+        node: &ENode,
         fields: &[hir::ENodeId],
         destination: Option<ssa::Value>,
-        what: &str,
     ) {
-        let d = destination
-            .unwrap_or_else(|| panic!("ignored {what} construction not yet implemented"));
+        let d = destination.unwrap_or_else(|| self.alloca_storage(node.span, node.ty));
+        if fields.is_empty() {
+            // A zero-field aggregate (an empty `struct`/record) has no field store to mark its
+            // storage live, so the interpreter could not tell a constructed value from
+            // uninitialized storage (both have an empty run-time shape) and would skip its
+            // `Value::drop`. Store an empty-tuple literal explicitly — mirroring the HIR
+            // interpreter's `build record {}`, which yields and stores a live empty aggregate.
+            let empty = ssa::Value::Literal(containers::b(LiteralValue::new_tuple(vec![])));
+            self.store(node.span, empty, d);
+            return;
+        }
         for (i, n) in fields.iter().enumerate() {
             let field = &self.hir_arena[*n];
             let f = self
@@ -729,8 +740,11 @@ impl<'a> Emitter<'a> {
         ids: &[hir::ENodeId],
         destination: Option<ssa::Value>,
     ) {
-        let dest =
-            destination.unwrap_or_else(|| panic!("ignored array construction not yet implemented"));
+        // With no destination the array is built for effects only (e.g. a literal in non-tail
+        // statement position): it is materialized into a throwaway temporary so each element's side
+        // effects are still lowered. The temporary's own drop, if any, is emitted by the enclosing
+        // block's cleanup scope.
+        let dest = destination.unwrap_or_else(|| self.alloca_storage(node.span, node.ty));
         let span = node.span;
         let len = ids.len();
 
@@ -803,7 +817,13 @@ impl<'a> Emitter<'a> {
 
         // Store the scalar header fields: a freshly built array is contiguous and full, so
         // `capacity == len == N` and `start == 0`.
-        self.store_int_field(span, &dest, capacity_index, fields[capacity_index].1, len as isize);
+        self.store_int_field(
+            span,
+            &dest,
+            capacity_index,
+            fields[capacity_index].1,
+            len as isize,
+        );
         self.store_int_field(span, &dest, len_index, fields[len_index].1, len as isize);
         self.store_int_field(span, &dest, start_index, fields[start_index].1, 0);
     }
@@ -1100,7 +1120,6 @@ impl<'a> Emitter<'a> {
         self.context.locals.insert(n.binding, place);
     }
 
-
     /// Lowers a `Case` scrutinee to an operand `comp_eq` reads *non-consumingly*.
     ///
     /// An immediate scalar stays a primitive constant; everything else is taken as its **place** (a
@@ -1243,7 +1262,12 @@ impl<'a> Emitter<'a> {
                     self.show(ty)
                 )
             });
-            self.insert(Instruction::memcpy_dynamic(span, source, destination, witness));
+            self.insert(Instruction::memcpy_dynamic(
+                span,
+                source,
+                destination,
+                witness,
+            ));
         }
     }
 
@@ -1371,7 +1395,11 @@ impl<'a> Emitter<'a> {
                     self.context.point = InsertionPoint::End(blocks.heads[i]);
                     let pattern = self.lower_case_pattern(c);
                     let eq = self
-                        .insert(Instruction::compare_eq(node.span, scrutinee.clone(), pattern))
+                        .insert(Instruction::compare_eq(
+                            node.span,
+                            scrutinee.clone(),
+                            pattern,
+                        ))
                         .unwrap();
                     self.insert(Instruction::condbr(node.span, eq, blocks.bodies[i], next));
 
@@ -1396,9 +1424,11 @@ impl<'a> Emitter<'a> {
             }
 
             K::Immediate(n) => {
-                if n.as_primitive_ty::<()>().is_some() {
-                    // Storing void would be redundant.
-                } else if let Some(value) = self.lower_as_primitive(n) {
+                // A unit immediate lowers to `ssa::Value::Unit` like any other primitive: it stores
+                // a live `()` into a real destination slot (a no-op into the phantom unit place), so a
+                // unit *leaf* of an aggregate — e.g. the `((),)` payload of `Continue(())` — is never
+                // left uninitialized.
+                if let Some(value) = self.lower_as_primitive(n) {
                     self.store_into_if_needed(node.span, value, destination);
                 } else {
                     let s = self.show(node.ty);
@@ -1807,14 +1837,7 @@ impl<'a> Emitter<'a> {
                 let payload_place = self
                     .insert(Instruction::project(node.span, dest, 0, payload.ty))
                     .unwrap();
-                if payload.ty == Type::unit() {
-                    // A unit payload stores nothing through `lower_value_into`, so write it
-                    // explicitly: the constructed variant must match the HIR interpreter's
-                    // `Variant { tag, () }` rather than leave the payload uninitialized.
-                    self.store(node.span, ssa::Value::Unit, payload_place);
-                } else {
-                    self.lower_value_into(payload, Some(payload_place));
-                }
+                self.lower_value_into(payload, Some(payload_place));
             }
 
             K::LoadDictionary(n) => {
@@ -1842,9 +1865,9 @@ impl<'a> Emitter<'a> {
             // Runtime guards have no SSA representation yet; they lower to nothing.
             K::CheckCallDepth | K::CheckFuel => {}
 
-            K::Tuple(ns) => self.lower_aggregate_into(ns, destination, "tuple"),
+            K::Tuple(ns) => self.lower_aggregate_into(node, ns, destination),
 
-            K::Record(ns) => self.lower_aggregate_into(ns, destination, "record"),
+            K::Record(ns) => self.lower_aggregate_into(node, ns, destination),
 
             K::Uninit => self.store(
                 node.span,

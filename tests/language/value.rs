@@ -1714,3 +1714,100 @@ fn discarded_bool_struct_temporary_runs_semantic_drop() {
     "#;
     assert_val_eq!(session.run(source), int(1));
 }
+
+/// An empty `struct` whose `Value::drop` records a side effect. A zero-field aggregate has no
+/// run-time leaf in which to record liveness, so the SSA interpreter must distinguish a constructed
+/// value (represented as `Tuple([])`) from uninitialized/dropped storage (a flat `Uninit`) the same
+/// way the HIR interpreter does — these tests pin that down on both backends.
+const EMPTY_VALUE_STRUCT: &str = r#"
+    struct E {}
+    impl Value for E {
+        fn eq(left: E, right: E) -> bool { true }
+        fn to_string(value: E) -> string { "" }
+        fn hash(value: E, state: &mut hasher) { }
+        fn clone(source: E) -> E { E{} }
+        fn drop(target: &mut E) { testing::record_tracked_drop(1); }
+    }
+"#;
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn owned_empty_struct_is_dropped_once_at_scope_exit() {
+    let mut session = TestSession::new();
+    let source = format!(
+        "{EMPTY_VALUE_STRUCT}
+        fn g() {{ let x = E{{}}; }}
+        testing::reset_tracked_drops();
+        g();
+        testing::tracked_drop_log()"
+    );
+    // Exactly one drop: the owned `x` is dropped when its scope exits.
+    assert_val_eq!(session.run(&source), int(1));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn reassigned_empty_struct_drops_old_and_final_value() {
+    let mut session = TestSession::new();
+    let source = format!(
+        "{EMPTY_VALUE_STRUCT}
+        fn g() {{ let mut x = E{{}}; x = E{{}}; }}
+        testing::reset_tracked_drops();
+        g();
+        testing::tracked_drop_log()"
+    );
+    // The log appends a digit per drop (`old * 10 + 1`): the overwritten value, then the final one.
+    // Two drops, neither double-counted — confirms drop-at-most-once survives the empty-aggregate
+    // skeleton/`Uninit` round-trip.
+    assert_val_eq!(session.run(&source), int(11));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn moved_empty_struct_is_dropped_once_by_the_new_owner() {
+    let mut session = TestSession::new();
+    let source = format!(
+        "{EMPTY_VALUE_STRUCT}
+        fn mk() -> E {{ E{{}} }}
+        fn g() {{ let y = mk(); }}
+        testing::reset_tracked_drops();
+        g();
+        testing::tracked_drop_log()"
+    );
+    // Constructed in `mk`, moved out to `y`: the moved-from source is left uninitialized and not
+    // re-dropped, so exactly one drop runs (at `y`'s scope exit).
+    assert_val_eq!(session.run(&source), int(1));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn empty_struct_field_is_dropped_with_its_record() {
+    let mut session = TestSession::new();
+    let source = format!(
+        "{EMPTY_VALUE_STRUCT}
+        struct W {{ e: E, n: int }}
+        fn g() {{ let w = W{{ e: E{{}}, n: 3 }}; }}
+        testing::reset_tracked_drops();
+        g();
+        testing::tracked_drop_log()"
+    );
+    // The empty-struct field is constructed in place and dropped exactly once with its owner.
+    assert_val_eq!(session.run(&source), int(1));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn unconstructed_empty_struct_is_not_dropped() {
+    let mut session = TestSession::new();
+    let source = format!(
+        "{EMPTY_VALUE_STRUCT}
+        fn f(c: bool) -> int {{ if c {{ let x = E{{}}; 1 }} else {{ 2 }} }}
+        testing::reset_tracked_drops();
+        f(false);
+        testing::tracked_drop_log()"
+    );
+    // The `else` branch never constructs `x`. Its storage stays uninitialized (a flat `Uninit`,
+    // never the live `Tuple([])` marker), so no drop runs — matching the HIR interpreter. This is
+    // the case the SSA storage seeding must get right: an empty aggregate is *not* seeded `Tuple([])`.
+    assert_val_eq!(session.run(&source), int(0));
+}

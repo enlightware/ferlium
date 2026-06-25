@@ -70,10 +70,7 @@ fn effect_polymorphic_function_parameter_arithmetic_does_not_panic() {
 //
 // Note: the bug only affected ModuleParser (not ModuleAndBlockContentParser used for user code),
 // so these user-code tests serve as documentation and regression guards for the pattern.
-// `array_peek_back` is a generic native call the SSA interpreter cannot lower yet, so this stays
-// HIR-only (emits `if_else_after_match_expression::hir`). Switch to `dual_test!` once SSA supports
-// generic native calls.
-hir_only_test!(if_else_after_match_expression {
+dual_test!(if_else_after_match_expression {
     let mut session = TestSession::new();
     // `if cond { match ... } else { ... }` — true-branch ends with a match expression
     assert_val_eq!(
@@ -104,10 +101,7 @@ hir_only_test!(if_else_after_match_expression {
     );
 });
 
-// `choose(flag)` is generic, which the SSA emitter cannot lower yet (generic values must move
-// through a Value dictionary witness), so this stays HIR-only. Switch to `dual_test!` once SSA
-// supports generic functions.
-hir_only_test!(if_else_after_nested_block_expression {
+dual_test!(if_else_after_nested_block_expression {
     let mut session = TestSession::new();
     // `if cond { { ... } } else { ... }` — true-branch ends with a nested block
     assert_val_eq!(

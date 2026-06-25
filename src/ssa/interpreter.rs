@@ -143,6 +143,8 @@ impl<'a> Interpreter<'a> {
             others,
             self.session,
         ));
+        #[cfg(debug_assertions)]
+        verify_function(&f);
         self.cache.insert(key, f.clone());
         f
     }
@@ -224,7 +226,9 @@ impl<'a> Interpreter<'a> {
                     .dictionary_value(id)
                     .entry(TraitDictionaryEntryIndex::from_index(entry_index));
                 let value = match entry {
-                    TraitDictionaryEntry::Method(function) => Value::function(function, id.module_id),
+                    TraitDictionaryEntry::Method(function) => {
+                        Value::function(function, id.module_id)
+                    }
                     TraitDictionaryEntry::AssociatedConst(lit) => lit.into_value(),
                 };
                 let place = self.alloc_cell(value);
@@ -364,7 +368,7 @@ impl<'a> Interpreter<'a> {
             let v = target
                 .target_ref_allow_uninit(&self.ctx)
                 .expect("drop target must be addressable");
-            is_all_uninit(v)
+            is_drop_husk(v)
         };
         if skip {
             return Ok(());
@@ -410,7 +414,7 @@ impl<'a> Interpreter<'a> {
             .target_mut(&mut self.ctx)
             .expect("drop target must be addressable");
         let husk = std::mem::replace(slot, Value::uninit());
-        let skeleton = uninit_like(&husk);
+        let skeleton = husk_like(&husk);
         *target
             .target_mut(&mut self.ctx)
             .expect("drop target must be addressable") = skeleton;
@@ -495,8 +499,12 @@ impl<'a> Interpreter<'a> {
             // other parameter binds to its by-pointer place. Classifying by the callee's tag (rather
             // than guessing from the operand's runtime binding) is essential: a value operand must
             // bind as a place even if it could superficially resolve to a dictionary.
-            let param_tags: Vec<ssa::ParameterTag> =
-                self.function(key).parameters().iter().map(|p| p.tag).collect();
+            let param_tags: Vec<ssa::ParameterTag> = self
+                .function(key)
+                .parameters()
+                .iter()
+                .map(|p| p.tag)
+                .collect();
             let offset = leading.len();
             let mut args: Vec<Binding> = Vec::with_capacity(offset + arg_ops.len());
             args.extend(leading);
@@ -772,7 +780,9 @@ impl<'a> Interpreter<'a> {
         // SAFETY: `env_ptr` targets the source closure's environment, which lives in its heap box
         // (stable across `environment` growth); `call_value_clone_for_temp` borrows `ctx` only.
         let closure_env = match env_dict {
-            Some(dict) => call_value_clone_for_temp(&mut self.ctx, dict, ValOrMut::Ref(env_ptr), span)?,
+            Some(dict) => {
+                call_value_clone_for_temp(&mut self.ctx, dict, ValOrMut::Ref(env_ptr), span)?
+            }
             None => Value::unit(),
         };
         Ok(Value::function_value(FunctionValue {
@@ -861,13 +871,18 @@ impl<'a> Interpreter<'a> {
         // held read guard.
         let kind = (*ty.data()).clone();
         match kind {
-            TypeKind::Tuple(elems) => Value::tuple(
+            // Aggregates are seeded as a husk skeleton of (recursively) shaped husk fields, funneled
+            // through `aggregate_husk` so a zero-field aggregate (an empty `struct`/record) collapses
+            // to a flat `Uninit` rather than `Tuple([])`: never-constructed storage must read back as
+            // a husk, while `Tuple([])` is reserved for a *live* empty aggregate written explicitly at
+            // construction (see `doc/ssa-uninit-tracking.md`).
+            TypeKind::Tuple(elems) => aggregate_husk(
                 elems
                     .iter()
                     .map(|e| self.shaped_uninitialized_value(*e))
                     .collect::<Vec<_>>(),
             ),
-            TypeKind::Record(fields) => Value::tuple(
+            TypeKind::Record(fields) => aggregate_husk(
                 fields
                     .iter()
                     .map(|(_, t)| self.shaped_uninitialized_value(*t))
@@ -1056,9 +1071,19 @@ impl<'a> Interpreter<'a> {
                 "a symbolic dictionary is evidence, not a value: it is consumed as a dictionary \
                  operand (see `dict_operand`)/call argument, never read with `value_operand`"
             ),
-            ssa::Value::Literal(_) => unreachable!(
-                "a `Literal` is only ever a `comp_eq` pattern, read through `operand_literal`"
-            ),
+            // The *only* `Literal` ever read as a value operand is the live empty-aggregate marker
+            // (`Tuple([])`) that `lower_aggregate_into` stores to construct an empty `struct`/record
+            // (see `doc/ssa-uninit-tracking.md`). A `comp_eq` pattern literal — the other producer of
+            // `ssa::Value::Literal` — is read non-consumingly through `operand_literal` and never
+            // materialized here. The assertion keeps that invariant load-bearing: a stray non-empty
+            // literal reaching this arm is a lowering bug, not something to silently materialize.
+            ssa::Value::Literal(lit) => {
+                debug_assert!(
+                    matches!(&**lit, LiteralValue::Tuple(fields) if fields.is_empty()),
+                    "the only Literal value operand is the empty-aggregate marker, got {lit:?}"
+                );
+                (**lit).clone().into_value()
+            }
             ssa::Value::UnitPlace => panic!("&() is a place, not a value"),
         }
     }
@@ -1068,7 +1093,8 @@ impl<'a> Interpreter<'a> {
     /// `match` must never move its scrutinee — it stays live for the remaining alternatives and the
     /// arm body — so this mirrors the HIR interpreter's `eval_case`, which reads the scrutinee by
     /// reference and compares its `to_literal_value()`.
-    fn operand_literal(// todo do part-wise comparison instead
+    fn operand_literal(
+        // todo do part-wise comparison instead
         &self,
         slots: &FxHashMap<ssa::Value, Binding>,
         v: &ssa::Value,
@@ -1192,7 +1218,9 @@ fn grow_value_to_path(value: &mut Value, path: &[isize]) {
     };
     // A flat `Uninit` cell along the path is an unmaterialized aggregate: grow it into a tuple
     // skeleton so the field becomes addressable. (`Buffer`s and variant payloads are already
-    // shaped, so only `Uninit` needs this.)
+    // shaped, so only `Uninit` needs this.) The path is non-empty here (guarded above), so the
+    // `Tuple` arm below immediately pushes at least one `Uninit` leaf: this never leaves a bare
+    // `Tuple([])`, upholding the empty-aggregate invariant (see `doc/ssa-uninit-tracking.md`).
     if matches!(value, Value::Uninit) {
         *value = Value::tuple(Vec::<Value>::new());
     }
@@ -1221,23 +1249,163 @@ fn grow_value_to_path(value: &mut Value, path: &[isize]) {
     }
 }
 
-/// Returns `true` iff `v` carries nothing live to drop: a flat `Uninit`, or an aggregate whose every
-/// leaf is (recursively) uninitialized.
-fn is_all_uninit(v: &Value) -> bool {
+/// Wraps the husk skeletons of an aggregate's `fields` into a husk value.
+///
+/// This is **the** chokepoint for the empty-aggregate invariant (see `doc/ssa-uninit-tracking.md`):
+/// a zero-field aggregate husk collapses to a flat `Uninit`, never `Tuple([])`. `Tuple([])` is
+/// reserved for a *live* empty aggregate (an empty `struct`/record), so no husk may ever be one —
+/// otherwise never-constructed or already-drained storage would look live and be dropped. Every
+/// husk-skeleton builder funnels empties through here, so the invariant holds by construction rather
+/// than by remembering to special-case empties at each site.
+fn aggregate_husk(fields: Vec<Value>) -> Value {
+    if fields.is_empty() {
+        Value::uninit()
+    } else {
+        Value::tuple(fields)
+    }
+}
+
+/// Returns `true` iff `v` is a *husk* — it carries nothing live to drop: a flat `Uninit`, or a
+/// non-empty aggregate whose every leaf is (recursively) a husk. Used by `exec_drop` to run each
+/// `Value::drop` at most once.
+///
+/// This is the one site that *reads* the empty-aggregate invariant (`aggregate_husk` enforces the
+/// other half): a `Tuple([])` is **live**, not a husk. A zero-field aggregate has no leaf in which to
+/// record liveness, so a live one is `Tuple([])` while a husked one is flat `Uninit`; the
+/// `!fields.is_empty()` guard keeps the vacuously-true `[].iter().all(..)` from misclassifying a
+/// constructed empty struct as a husk (which would skip its `Value::drop`, diverging from the HIR
+/// interpreter — see `doc/ssa-uninit-tracking.md`).
+fn is_drop_husk(v: &Value) -> bool {
     match v {
         Value::Uninit => true,
-        Value::Tuple(fields) => fields.iter().all(is_all_uninit),
+        Value::Tuple(fields) => !fields.is_empty() && fields.iter().all(is_drop_husk),
         _ => false,
     }
 }
 
-/// Returns an uninitialized value mirroring the aggregate *skeleton* of `v`: a `Tuple` becomes a
-/// `Tuple` of (recursively) uninitialized leaves; anything else becomes a flat `Uninit`. Used to
-/// leave drained storage reinitializable field-by-field after a drop.
-fn uninit_like(v: &Value) -> Value {
+/// Returns a husk mirroring the aggregate *skeleton* of `v`: a `Tuple` becomes a `Tuple` of
+/// (recursively) husked leaves — collapsing to flat `Uninit` when empty, via `aggregate_husk` —
+/// and anything else becomes a flat `Uninit`. Used to leave drained storage reinitializable
+/// field-by-field after a drop, while guaranteeing it reads back as a husk (so it is never dropped
+/// twice).
+fn husk_like(v: &Value) -> Value {
     match v {
-        Value::Tuple(fields) => Value::tuple(fields.iter().map(uninit_like).collect::<Vec<_>>()),
+        Value::Tuple(fields) => aggregate_husk(fields.iter().map(husk_like).collect::<Vec<_>>()),
         _ => Value::uninit(),
     }
 }
 
+/// Verifies the structural well-formedness of a freshly built SSA function (debug builds only),
+/// before it is executed or cached.
+///
+/// A real backend (or this interpreter) would exhibit undefined behavior on malformed IR — falling
+/// off the end of a block, jumping into an empty block, or indexing a missing operand. This pass
+/// turns each such case into an immediate, precisely-located panic at build time:
+///
+/// - every instruction satisfies its operand contract ([`ssa::Instruction::verify`]);
+/// - a *terminator* appears exactly once per non-empty block, as its last instruction, and no other
+///   instruction terminates (so control neither falls off the end nor stops mid-block);
+/// - every branch target is an existing, non-empty block (so execution always lands on a real
+///   instruction), and the entry block is non-empty.
+#[cfg(debug_assertions)]
+fn verify_function(func: &ssa::Function) {
+    let block_ids: Vec<BlockIdentity> = func.blocks().collect();
+
+    let non_empty = |b: BlockIdentity| !func.block(b).is_empty();
+    let target_ok = |b: BlockIdentity| block_ids.contains(&b) && non_empty(b);
+
+    assert!(
+        non_empty(func.entry()),
+        "SSA function `{}`: the entry block is empty",
+        func.name
+    );
+
+    for b in &block_ids {
+        let b = *b;
+        let instructions: Vec<InstructionIdentity> = func.block(b).instructions().collect();
+        // An allocated-but-unused block carries no execution contract; only non-empty blocks do.
+        if instructions.is_empty() {
+            continue;
+        }
+        let last = instructions.len() - 1;
+        for (k, &i) in instructions.iter().enumerate() {
+            let instr = func.at(i);
+            instr.verify();
+            assert_eq!(
+                instr.is_terminator(),
+                k == last,
+                "SSA function `{}` block {}: a terminator must be the block's last instruction and \
+                 appear exactly once (instruction {} of {})",
+                func.name,
+                b.raw(),
+                k,
+                instructions.len()
+            );
+        }
+        // The last instruction terminates (checked above); validate its branch targets.
+        match func.at(instructions[last]).view() {
+            InstructionView::ConditionalBranch {
+                on_success,
+                on_failure,
+            } => assert!(
+                target_ok(on_success) && target_ok(on_failure),
+                "SSA function `{}` block {}: condbr targets a missing or empty block",
+                func.name,
+                b.raw()
+            ),
+            InstructionView::UnconditionalBranch { target } => assert!(
+                target_ok(target),
+                "SSA function `{}` block {}: br targets a missing or empty block",
+                func.name,
+                b.raw()
+            ),
+            _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod husk_invariant_tests {
+    //! Pins the empty-aggregate invariant of `doc/ssa-uninit-tracking.md`: a husk is never
+    //! `Tuple([])`, which is reserved for a *live* empty aggregate.
+    use super::{aggregate_husk, husk_like, is_drop_husk};
+    use crate::hir::value::Value;
+
+    /// The chokepoint collapses a zero-field aggregate husk to flat `Uninit`, never `Tuple([])`.
+    #[test]
+    fn aggregate_husk_collapses_empty_to_uninit() {
+        assert!(matches!(aggregate_husk(vec![]), Value::Uninit));
+        // A non-empty aggregate husk stays a tuple of husks.
+        assert!(matches!(aggregate_husk(vec![Value::uninit()]), Value::Tuple(f) if f.len() == 1));
+    }
+
+    /// A live empty aggregate (`Tuple([])`) is **live**, not a husk; a flat `Uninit` and a non-empty
+    /// all-`Uninit` skeleton are husks.
+    #[test]
+    fn is_drop_husk_treats_empty_tuple_as_live() {
+        assert!(!is_drop_husk(&Value::empty_tuple()));
+        assert!(is_drop_husk(&Value::uninit()));
+        assert!(is_drop_husk(&Value::tuple(vec![
+            Value::uninit(),
+            Value::uninit()
+        ])));
+        // Any live leaf makes the aggregate live.
+        assert!(!is_drop_husk(&Value::tuple(vec![
+            Value::uninit(),
+            Value::unit()
+        ])));
+    }
+
+    /// Draining never leaves a `Tuple([])`: an empty live aggregate husks to flat `Uninit`, so the
+    /// same storage cannot be dropped twice. A non-empty aggregate keeps its addressable skeleton.
+    #[test]
+    fn husk_like_flattens_empty_and_reads_back_as_husk() {
+        let drained_empty = husk_like(&Value::empty_tuple());
+        assert!(matches!(drained_empty, Value::Uninit));
+        assert!(is_drop_husk(&drained_empty));
+
+        let drained_pair = husk_like(&Value::tuple(vec![Value::unit(), Value::unit()]));
+        assert!(matches!(&drained_pair, Value::Tuple(f) if f.len() == 2));
+        assert!(is_drop_husk(&drained_pair));
+    }
+}

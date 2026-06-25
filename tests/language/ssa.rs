@@ -386,7 +386,8 @@ fn array_index_assign() {
     %r3 = call std::array_index(%p0, %r0, %r2)
     %r4 = load %r2
     %r5 = store i1 1 to %r4
-    %r6 = ret
+    %r6 = store () to %p1
+    %r7 = ret
 "#,
     );
 }
@@ -453,7 +454,8 @@ fn place_call_discarded() {
     %r2 = alloca_place int
     %r3 = call std::array_index(%p0, %r0, %r2)
     %r4 = load %r2
-    %r5 = ret
+    %r5 = store () to %p1
+    %r6 = ret
 "#,
     );
 }
@@ -502,7 +504,8 @@ fn place_call_as_shared_ref_argument() {
 
 fn g(%p0: @arg & [int], %p1: @ret ()):
   0:
-    %r0 = ret
+    %r0 = store () to %p1
+    %r1 = ret
 "#,
     );
 }
@@ -526,7 +529,8 @@ fn place_call_as_mutable_ref_argument() {
 
 fn g(%p0: @arg &mut [int], %p1: @ret ()):
   0:
-    %r0 = ret
+    %r0 = store () to %p1
+    %r1 = ret
 "#,
     );
 }
@@ -626,7 +630,8 @@ fn shared_ref_param_non_trivial() {
         session.emit_ssa("fn f(s: string) { }"),
         r#"fn f(%p0: @arg & string, %p1: @ret ()):
   0:
-    %r0 = ret
+    %r0 = store () to %p1
+    %r1 = ret
 "#,
     );
 }
@@ -640,7 +645,8 @@ fn shared_ref_param_generic() {
         session.emit_ssa("fn f(x) { }"),
         r#"fn f(%p0: @arg & A, %p1: @ret ()):
   0:
-    %r0 = ret
+    %r0 = store () to %p1
+    %r1 = ret
 "#,
     );
 }
@@ -659,7 +665,8 @@ fn shared_ref_argument_passes_place() {
 
 fn u(%p0: @arg & string, %p1: @ret ()):
   0:
-    %r0 = ret
+    %r0 = store () to %p1
+    %r1 = ret
 "#,
     );
 }
@@ -735,14 +742,15 @@ fn call_mutable_reference_argument_passes_owned_local_place() {
         ),
         r#"fn callee(%p0: @arg &mut int, %p1: @ret ()):
   0:
-    %r0 = ret
+    %r0 = store () to %p1
+    %r1 = ret
 
 fn caller(%p0: @ret ()):
   0:
     %r0 = alloca int
     %r1 = alloca int
     %r2 = store int 0 to %r1
-    %r3 = call std::Num<0-6>::from_int(%r1, %r0)
+    %r3 = call std::Num<...>::from_int(%r1, %r0)
     %r4 = call <test>::callee(%r0, %p0)
     %r5 = ret
 "#,
@@ -768,18 +776,19 @@ fn call_passes_all_argument_conventions() {
         ),
         r#"fn callee(%p0: @arg int, %p1: @arg &mut int, %p2: @arg & string, %p3: @ret ()):
   0:
-    %r0 = ret
+    %r0 = store () to %p3
+    %r1 = ret
 
 fn caller(%p0: @arg & string, %p1: @ret ()):
   0:
     %r0 = alloca int
     %r1 = alloca int
     %r2 = store int 0 to %r1
-    %r3 = call std::Num<0-6>::from_int(%r1, %r0)
+    %r3 = call std::Num<...>::from_int(%r1, %r0)
     %r4 = alloca int
     %r5 = store int 1 to %r4
     %r6 = alloca int
-    %r7 = call std::Num<0-6>::from_int(%r4, %r6)
+    %r7 = call std::Num<...>::from_int(%r4, %r6)
     %r8 = call <test>::callee(%r6, %r0, %p0, %p1)
     %r9 = ret
 "#,
@@ -795,8 +804,9 @@ fn mutable_reference_parameter() {
   0:
     %r0 = alloca int
     %r1 = store int 2 to %r0
-    %r2 = call std::Num<0-6>::from_int(%r0, %p0)
-    %r3 = ret
+    %r2 = call std::Num<...>::from_int(%r0, %p0)
+    %r3 = store () to %p1
+    %r4 = ret
 "#,
     );
 }
@@ -857,25 +867,26 @@ fn $lambda$1(%p0: @arg &mut int, %p1: @ret int):
     %r0 = memcpy %p0 to %p1
     %r1 = ret
 
-fn Value<0-148>::clone(%p0: @arg & (int,), %p1: @ret (int,)):
+fn Value<...>::clone(%p0: @arg & (int,), %p1: @ret (int,)):
   0:
     %r0 = project 0 from %p1
     %r1 = project 0 from %p0
-    %r2 = call std::Value<0-5>::clone(%r1, %r0)
+    %r2 = call std::Value<...>::clone(%r1, %r0)
     %r3 = ret
 
-fn Value<0-148>::drop(%p0: @arg &mut (int,), %p1: @ret ()):
+fn Value<...>::drop(%p0: @arg &mut (int,), %p1: @ret ()):
   0:
     %r0 = project 0 from %p0
-    %r1 = call std::Value<0-5>::drop(%r0, &())
-    %r2 = ret
+    %r1 = call std::Value<...>::drop(%r0, &())
+    %r2 = store () to %p1
+    %r3 = ret
 
-fn Value<0-148>::eq(%p0: @arg & (int,), %p1: @arg & (int,), %p2: @ret bool):
+fn Value<...>::eq(%p0: @arg & (int,), %p1: @arg & (int,), %p2: @ret bool):
   0:
     %r0 = project 0 from %p0
     %r1 = project 0 from %p1
     %r2 = alloca bool
-    %r3 = call std::Value<0-5>::eq(%r0, %r1, %r2)
+    %r3 = call std::Value<...>::eq(%r0, %r1, %r2)
     %r4 = br 1
   1:
     %r5 = comp_eq %r2 i1 1
@@ -889,25 +900,26 @@ fn Value<0-148>::eq(%p0: @arg & (int,), %p1: @arg & (int,), %p2: @ret bool):
   4:
     %r11 = ret
 
-fn Value<0-148>::hash(%p0: @arg & (int,), %p1: @arg &mut hasher, %p2: @ret ()):
+fn Value<...>::hash(%p0: @arg & (int,), %p1: @arg &mut hasher, %p2: @ret ()):
   0:
     %r0 = project 0 from %p0
-    %r1 = call std::Value<0-5>::hash(%r0, %p1, &())
-    %r2 = ret
+    %r1 = call std::Value<...>::hash(%r0, %p1, &())
+    %r2 = store () to %p2
+    %r3 = ret
 
-fn Value<0-148>::to_string(%p0: @arg & (int,), %p1: @ret string):
+fn Value<...>::to_string(%p0: @arg & (int,), %p1: @ret string):
   0:
     %r0 = alloca string
     %r1 = alloca string
     %r2 = alloca string
     %r3 = store "(" to %r0
     %r4 = project 0 from %p0
-    %r5 = call std::Value<0-5>::to_string(%r4, %r1)
+    %r5 = call std::Value<...>::to_string(%r4, %r1)
     %r6 = call std::string_push_str(%r0, %r1, &())
-    %r7 = drop %r1 via std::Value<0-2>::drop
+    %r7 = drop %r1 via std::Value<...>::drop
     %r8 = store ")" to %r2
     %r9 = call std::string_push_str(%r0, %r2, &())
-    %r10 = drop %r2 via std::Value<0-2>::drop
+    %r10 = drop %r2 via std::Value<...>::drop
     %r11 = memcpy %r0 to %p1
     %r12 = ret
 
@@ -917,10 +929,10 @@ fn capture(%p0: @ret int):
     %r1 = alloca () -> int
     %r2 = alloca int
     %r3 = store int 1 to %r2
-    %r4 = call std::Num<0-5>::from_int(%r2, %r0)
+    %r4 = call std::Num<...>::from_int(%r2, %r0)
     %r5 = alloca int
     %r6 = memcpy %r0 to %r5
-    %r7 = build_closure <test>::$lambda$1(%r5, dict(m7:i0))
+    %r7 = build_closure <test>::$lambda$1(%r5, dict(m<...>:i0))
     %r8 = store %r7 to %r1
     %r9 = call %r1(%p0)
     %r10 = drop %r1 via <test>::$_ferlium_function_value_drop
@@ -1063,7 +1075,8 @@ fn Value<...>::drop(%p0: @arg &mut A, %p1: @ret ()):
     %r1 = call std::Value<...>::drop(%r0, &())
     %r2 = project 1 from %p0
     %r3 = call std::Value<...>::drop(%r2, &())
-    %r4 = ret
+    %r4 = store () to %p1
+    %r5 = ret
 
 fn Value<...>::eq(%p0: @arg & A, %p1: @arg & A, %p2: @ret bool):
   0:
@@ -1104,7 +1117,8 @@ fn Value<...>::hash(%p0: @arg & A, %p1: @arg &mut hasher, %p2: @ret ()):
     %r1 = call std::Value<...>::hash(%r0, %p1, &())
     %r2 = project 1 from %p0
     %r3 = call std::Value<...>::hash(%r2, %p1, &())
-    %r4 = ret
+    %r4 = store () to %p2
+    %r5 = ret
 
 fn Value<...>::to_string(%p0: @arg & A, %p1: @ret string):
   0:
@@ -1163,7 +1177,8 @@ fn Value<...>::drop(%p0: @arg &mut Wrapper, %p1: @ret ()):
     %r1 = call <test>::Value<...>::drop(%r0, &())
     %r2 = project 1 from %p0
     %r3 = call <test>::Value<...>::drop(%r2, &())
-    %r4 = ret
+    %r4 = store () to %p1
+    %r5 = ret
 
 fn Value<...>::eq(%p0: @arg & Wrapper, %p1: @arg & Wrapper, %p2: @ret bool):
   0:
@@ -1204,7 +1219,8 @@ fn Value<...>::hash(%p0: @arg & Wrapper, %p1: @arg &mut hasher, %p2: @ret ()):
     %r1 = call <test>::Value<...>::hash(%r0, %p1, &())
     %r2 = project 1 from %p0
     %r3 = call <test>::Value<...>::hash(%r2, %p1, &())
-    %r4 = ret
+    %r4 = store () to %p2
+    %r5 = ret
 
 fn Value<...>::to_string(%p0: @arg & Wrapper, %p1: @ret string):
   0:
@@ -1307,7 +1323,8 @@ fn copy_struct_with_explicit_clone() {
 
 fn Value<...>::drop(%p0: @arg &mut Probe, %p1: @ret ()):
   0:
-    %r0 = ret
+    %r0 = store () to %p1
+    %r1 = ret
 
 fn Value<...>::eq(%p0: @arg & Probe, %p1: @arg & Probe, %p2: @ret bool):
   0:
@@ -1393,13 +1410,15 @@ fn store_local_generic_clone_dictionary() {
     %r1 = dict_entry 3 from %p0
     %r2 = call %r1(%p1, %r0)
     %r3 = call <test>::g(%r0, &())
-    %r4 = dict_entry 4 from %p0
-    %r5 = drop %r0 via %r4
-    %r6 = ret
+    %r4 = store () to %p2
+    %r5 = dict_entry 4 from %p0
+    %r6 = drop %r0 via %r5
+    %r7 = ret
 
 fn g(%p0: @arg &mut A, %p1: @ret ()):
   0:
-    %r0 = ret
+    %r0 = store () to %p1
+    %r1 = ret
 "#,
     );
 }
@@ -1508,7 +1527,8 @@ fn reassign_mutable_ref_param_from_local() {
     %r0 = alloca int
     %r1 = store int 1 to %r0
     %r2 = memcpy %r0 to %p0
-    %r3 = ret
+    %r3 = store () to %p1
+    %r4 = ret
 "#,
     );
 }
@@ -1528,7 +1548,8 @@ fn reassign_array_element_from_param() {
     %r3 = call std::array_index(%p0, %r0, %r2)
     %r4 = load %r2
     %r5 = memcpy %p1 to %r4
-    %r6 = ret
+    %r6 = store () to %p2
+    %r7 = ret
 "#,
     );
 }
@@ -1711,7 +1732,8 @@ fn variants() {
         session.emit_ssa("fn f(x: Y | X(string)) { let r = x; } "),
         r#"fn f(%p0: @arg & X (string) | Y, %p1: @ret ()):
   0:
-    %r0 = ret
+    %r0 = store () to %p1
+    %r1 = ret
 "#
     );
 }
@@ -1897,3 +1919,73 @@ dual_test!(closure_forwarding_enclosing_generic_dict_runs {
     );
 });
 
+// A tuple/record/array literal in non-tail statement position has no destination — its value is
+// discarded. Lowering must still materialize it into a throwaway temporary so each element's side
+// effects are emitted (it used to `panic!("ignored … construction not yet implemented")`).
+
+#[test]
+fn discarded_tuple_construction_lowers_into_throwaway_temp() {
+    // The discarded `(x, x)` is built into a fresh `alloca (int, int)`; both fields are still
+    // written, then `x` is returned into the out-pointer.
+    let mut session = TestSession::new();
+    assert_eq_sans_flake!(
+        session.emit_ssa("fn f(x: int) { (x, x); x }"),
+        r#"fn f(%p0: @arg int, %p1: @ret int):
+  0:
+    %r0 = alloca (int, int)
+    %r1 = project 0 from %r0
+    %r2 = memcpy %p0 to %r1
+    %r3 = project 1 from %r0
+    %r4 = memcpy %p0 to %r3
+    %r5 = memcpy %p0 to %p1
+    %r6 = ret
+"#,
+    );
+}
+
+#[test]
+fn discarded_record_construction_lowers_into_throwaway_temp() {
+    // As for the tuple, the discarded `{ a: x, b: x }` is materialized into a fresh record temp so
+    // both field writes still happen.
+    let mut session = TestSession::new();
+    assert_eq_sans_flake!(
+        session.emit_ssa("fn f(x: int) { { a: x, b: x }; x }"),
+        r#"fn f(%p0: @arg int, %p1: @ret int):
+  0:
+    %r0 = alloca { a: int, b: int }
+    %r1 = project 0 from %r0
+    %r2 = memcpy %p0 to %r1
+    %r3 = project 1 from %r0
+    %r4 = memcpy %p0 to %r3
+    %r5 = memcpy %p0 to %p1
+    %r6 = ret
+"#,
+    );
+}
+
+// Each discarded literal must still *evaluate* every element, so a side effect inside an element
+// (here a counter mutation) is observable after the discarded construction.
+
+dual_test!(discarded_tuple_evaluates_elements {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run("fn f() { let mut c = 0; ({ c = c + 1; c }, { c = c + 1; c }); c } f()"),
+        int(2)
+    );
+});
+
+dual_test!(discarded_array_evaluates_elements {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run("fn f() { let mut c = 0; [{ c = c + 1; c }, { c = c + 1; c }]; c } f()"),
+        int(2)
+    );
+});
+
+dual_test!(discarded_record_evaluates_elements {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run("fn f() { let mut c = 0; { a: { c = c + 1; c }, b: { c = c + 1; c } }; c } f()"),
+        int(2)
+    );
+});
