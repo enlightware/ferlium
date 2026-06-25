@@ -5,7 +5,7 @@ use ustr::Ustr;
 
 use crate::{
     Location, cached_primitive_ty, format::FormatWith, list,
-    module::{ModuleEnv, TraitDictionaryId},
+    module::ModuleEnv,
     ssa::{self, value::FunctionReference},
     types::r#type::Type,
 };
@@ -167,6 +167,22 @@ impl Instruction {
         }
     }
 
+    /// Creates a `dict_entry` instruction: the symbolic analog of `project` for a trait dictionary.
+    ///
+    /// `dict` is a symbolic dictionary operand (a constant [`ssa::Value::Dictionary`] or a forwarded
+    /// dictionary `Parameter`). The instruction yields the **place** of entry `entry_index` of that
+    /// dictionary — a method function value, or an associated const — of type `ty`. `call`, `drop`,
+    /// and `memcpy` consume that place exactly as they consume a `project` result, so a later
+    /// tuple-lowering pass rewrites `dict_entry N from <symbolic dict>` to
+    /// `project N from <materialized witness-table tuple>` one-for-one.
+    pub fn dict_entry(span: Location, dict: ssa::Value, entry_index: usize, ty: Type) -> Self {
+        Instruction {
+            span,
+            operands: vec![dict],
+            kind: Box::new(DictEntry { entry_index, ty }),
+        }
+    }
+
     /// Creates a `project_at` instruction accessing the aggregate place `source` at the **run-time**
     /// field index held in the `index` register (an `int` loaded from a field-index dictionary
     /// parameter). It mirrors `project`, but the index is an operand rather than a static constant:
@@ -263,6 +279,24 @@ impl Instruction {
         }
     }
 
+    /// Creates a `memcpy` instruction for a value whose size is known only at run time: a move of a
+    /// generic (bare-type-variable-typed) pointee. `witness` is the place of the `Value` dictionary
+    /// witnessing the run-time layout of the moved value (its `SIZE`/`ALIGN`), exactly as for
+    /// [`alloca_dynamic`](Self::alloca_dynamic). The SSA interpreter moves the value shape-agnostically
+    /// (the witness is metadata it ignores); a real backend uses the witness to size the copy.
+    pub fn memcpy_dynamic(
+        span: Location,
+        source: ssa::Value,
+        destination: ssa::Value,
+        witness: ssa::Value,
+    ) -> Self {
+        Instruction {
+            span,
+            operands: vec![source, destination, witness],
+            kind: Box::new(Memcpy {}),
+        }
+    }
+
     /// Creates a 'drop' instruction.
     ///
     /// Drops the pointee of `target` (a place) by invoking the `Value::drop` implementation named by
@@ -284,23 +318,35 @@ impl Instruction {
     /// Creates a `build_closure` instruction, which bundles a function with its captured environment
     /// into a first-class closure value.
     ///
-    /// `function` identifies the closure's target (lambda) function; `env_dict` is the `Value`
-    /// dictionary witnessing how to clone/drop the captured environment (`None` when there are no
-    /// captures). The operands are the capture places, in target-parameter order. The result is a
-    /// register holding the closure value (a runtime `FunctionValue`).
+    /// `function` identifies the closure's target (lambda) function. `hidden_dicts` are the symbolic
+    /// dictionary operands for the lambda body's hidden `@extra` parameters (the dictionary captures,
+    /// in target-parameter order); each is a constant [`ssa::Value::Dictionary`] or a forwarded
+    /// dictionary `Parameter`. `env_dict` is the symbolic `Value` dictionary used to clone/drop the
+    /// captured value environment (`None` iff there are no value captures). `captures` are the
+    /// value-capture places, in target-parameter order.
+    ///
+    /// Operand layout is `[hidden_dicts…, captures…, env_dict?]`. The result is a register holding
+    /// the closure value (a runtime `FunctionValue`).
     pub fn build_closure(
         span: Location,
         function: FunctionReference,
-        env_dict: Option<TraitDictionaryId>,
+        hidden_dicts: Vec<ssa::Value>,
+        env_dict: Option<ssa::Value>,
         ty: Type,
         captures: Vec<ssa::Value>,
     ) -> Self {
+        let num_hidden_dicts = hidden_dicts.len();
+        let has_env_dict = env_dict.is_some();
+        let mut operands = hidden_dicts;
+        operands.extend(captures);
+        operands.extend(env_dict);
         Instruction {
             span,
-            operands: captures,
+            operands,
             kind: Box::new(BuildClosure {
                 function,
-                env_dict,
+                num_hidden_dicts,
+                has_env_dict,
                 ty,
             }),
         }
@@ -403,6 +449,11 @@ pub enum InstructionView<'a> {
     /// index held in the `int` register at operand `1`.
     ProjectAt { ty: Type },
 
+    /// The place of entry `entry_index` (of type `ty`) of the symbolic dictionary at operand `0`.
+    /// The symbolic analog of `Project`: a method function value or an associated const, kept
+    /// dictionary-symbolic until a later tuple-lowering pass rewrites it to `Project`.
+    DictEntry { entry_index: usize, ty: Type },
+
     /// A return. The result, if any, has already been written through the return out-pointer.
     Ret,
 
@@ -432,12 +483,15 @@ pub enum InstructionView<'a> {
     /// [`Instruction::call`] callee contract) only if that pointee is currently initialized.
     Drop,
 
-    /// A construction of a closure value bundling the target `function`, the `Value` dictionary
-    /// `env_dict` for cloning/dropping the captured environment (if any), and the capture places
-    /// (the instruction's operands, in target-parameter order).
+    /// A construction of a closure value bundling the target `function` with its captured
+    /// environment. Operand layout is `[hidden_dicts…, captures…, env_dict?]`: `num_hidden_dicts`
+    /// leading symbolic dictionary operands feed the lambda body's hidden `@extra` parameters, the
+    /// value-capture places follow, and a trailing symbolic `Value`-dictionary operand (present iff
+    /// `has_env_dict`) clones/drops the captured value environment.
     BuildClosure {
         function: &'a FunctionReference,
-        env_dict: Option<TraitDictionaryId>,
+        num_hidden_dicts: usize,
+        has_env_dict: bool,
     },
 
     /// A deep clone of the captured environment of the closure at the place given by operand `0`,
@@ -730,6 +784,40 @@ impl InstructionKind for ProjectAt {
     }
 }
 
+/// A dictionary-entry instruction in SSA: the symbolic analog of [`Project`] for a trait
+/// dictionary (see [`Instruction::dict_entry`]).
+struct DictEntry {
+    /// The index of the entry within the dictionary (methods first, then associated consts).
+    entry_index: usize,
+
+    /// The type of the entry (a method's function type, or an associated const's type).
+    ty: Type,
+}
+
+impl InstructionKind for DictEntry {
+    fn result(&self, _whole: &Instruction) -> InstructionResult {
+        // Like `Project`: the result is the place of the entry; a register value is obtained by
+        // `load`ing it, and a method callee is read by reference at the `call`/`drop`.
+        InstructionResult::pointer_to(InstructionResult::Lowered(self.ty))
+    }
+
+    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
+        InstructionView::DictEntry {
+            entry_index: self.entry_index,
+            ty: self.ty,
+        }
+    }
+
+    fn fmt_within(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        whole: &Instruction,
+        _env: &ModuleEnv<'_>,
+    ) -> fmt::Result {
+        write!(f, "dict_entry {} from {}", self.entry_index, whole.operands[0])
+    }
+}
+
 /// A return instruction in SSA.
 struct Ret {}
 
@@ -840,7 +928,11 @@ impl InstructionKind for Memcpy {
         whole: &Instruction,
         _env: &ModuleEnv<'_>,
     ) -> fmt::Result {
-        write!(f, "memcpy {} to {}", whole.operands[0], whole.operands[1])
+        write!(f, "memcpy {} to {}", whole.operands[0], whole.operands[1])?;
+        if let Some(witness) = whole.operands.get(2) {
+            write!(f, " using {}", witness)?;
+        }
+        Ok(())
     }
 }
 
@@ -908,16 +1000,21 @@ impl InstructionKind for Drop {
 
 /// A closure construction in SSA.
 ///
-/// Bundles a function reference with its captured environment (the operand places, in
-/// target-parameter order) into a runtime `FunctionValue`. `env_dict` is the `Value` dictionary
-/// used to clone/drop the captured environment.
+/// Bundles a function reference with its captured environment into a runtime `FunctionValue`.
+/// Operand layout is `[hidden_dicts…, captures…, env_dict?]`: `num_hidden_dicts` leading symbolic
+/// dictionary operands feed the lambda body's hidden `@extra` parameters, the value-capture places
+/// follow, and a trailing symbolic `Value`-dictionary operand (present iff `has_env_dict`) clones/
+/// drops the captured value environment.
 struct BuildClosure {
     /// The closure's target (lambda) function.
     function: FunctionReference,
 
-    /// The `Value` dictionary for cloning/dropping the captured environment (`None` when there are
-    /// no captures).
-    env_dict: Option<TraitDictionaryId>,
+    /// Number of leading symbolic dictionary operands feeding the lambda body's `@extra` params.
+    num_hidden_dicts: usize,
+
+    /// Whether the final operand is the symbolic `Value` dictionary for the captured environment
+    /// (`true` iff there are value captures).
+    has_env_dict: bool,
 
     /// The type of the constructed closure value.
     ty: Type,
@@ -931,7 +1028,8 @@ impl InstructionKind for BuildClosure {
     fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
         InstructionView::BuildClosure {
             function: &self.function,
-            env_dict: self.env_dict,
+            num_hidden_dicts: self.num_hidden_dicts,
+            has_env_dict: self.has_env_dict,
         }
     }
 

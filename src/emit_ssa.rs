@@ -19,7 +19,7 @@ use crate::{
     },
     module::{
         self, FunctionId, ImportFunctionSlotId, LocalDeclId, LocalFunctionId, Module, ModuleEnv,
-        ModuleId, TraitDictionary, TraitDictionaryId, TraitImpl, TraitImplId, id::Id,
+        ModuleId, TraitDictionaryId, TraitImplId, id::Id,
     },
     ssa::{self, BlockIdentity, value::FunctionReference},
     std::{
@@ -372,22 +372,6 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// Resolves the `Value` dictionary node witnessing how to clone/drop a closure's captured
-    /// environment to a canonical [`TraitDictionaryId`].
-    ///
-    /// In monomorphic code this node elaborates to a static `GetDictionary` whose impl is known at
-    /// lowering time. A *forwarded* env dictionary (a `LoadDictionary` of an enclosing extra
-    /// parameter, in generic code) has no static impl and is not lowered yet.
-    fn resolve_env_dictionary(&self, node: &ENode) -> TraitDictionaryId {
-        match &node.kind {
-            hir::NodeKind::GetDictionary(d) => self.dictionary_id(d.dictionary),
-            other => todo!(
-                "forwarded closure environment dictionary is not lowered to SSA yet: {:?}",
-                other
-            ),
-        }
-    }
-
     /// Lowers an indirect `Value::clone(source, target)` call dispatched through the dictionary
     /// extra parameter `dictionary`.
     ///
@@ -403,20 +387,19 @@ impl<'a> Emitter<'a> {
         source: ssa::Value,
         target: ssa::Value,
     ) {
-        // The dictionary parameter is itself a place (a pointer to the dictionary tuple).
-        let dictionary_place = self.context.extra_parameters[&dictionary].clone();
+        // The dictionary is a forwarded `@extra` parameter — a symbolic dictionary operand.
+        let dictionary = self.context.extra_parameters[&dictionary].clone();
         let (entry_index, method_ty) = self.value_method(VALUE_CLONE_METHOD_INDEX, cloned_ty);
         let method_place = self
-            .insert(Instruction::project(
+            .insert(Instruction::dict_entry(
                 span,
-                dictionary_place,
+                dictionary,
                 entry_index,
                 method_ty,
             ))
             .unwrap();
-        // The callee is passed as the *place* of the method in the dictionary tuple; the call reads
-        // the function value by reference (it is never loaded into a register — see the `call`
-        // contract in `ssa::instruction`).
+        // The callee is the place of the `Value::clone` method entry; the call reads the function
+        // value by reference (never loaded into a register — see the `call` contract).
         self.insert(Instruction::call(span, method_place, [source, target]));
     }
 
@@ -458,15 +441,15 @@ impl<'a> Emitter<'a> {
         let callee = match spec {
             DropSpec::Static(fref) => ssa::Value::Function(fref),
             DropSpec::Dictionary(dictionary) => {
-                let dictionary_place = self.context.extra_parameters[&dictionary].clone();
+                // The dictionary is a forwarded `@extra` parameter — a symbolic dictionary operand.
+                let dictionary = self.context.extra_parameters[&dictionary].clone();
                 let (entry_index, method_ty) =
                     self.value_method(VALUE_DROP_METHOD_INDEX, dropped_ty);
-                // The callee is the *place* of the `Value::drop` method in the dictionary tuple; the
-                // `drop` reads the function value by reference (never loaded — same callee contract
-                // as `call`).
-                self.insert(Instruction::project(
+                // The callee is the place of the `Value::drop` method entry; the `drop` reads the
+                // function value by reference (never loaded — same callee contract as `call`).
+                self.insert(Instruction::dict_entry(
                     span,
-                    dictionary_place,
+                    dictionary,
                     entry_index,
                     method_ty,
                 ))
@@ -878,6 +861,7 @@ impl<'a> Emitter<'a> {
             | K::LoadFieldIndex(_)
             | K::Project(_)
             | K::ProjectAt(_)
+            | K::GetDictionaryMethod(_)
             | K::WithPlace(_) => true,
             K::Apply(n) => n.ty.returns_place(),
             K::StaticApply(n) => n.ty.returns_place(),
@@ -911,16 +895,35 @@ impl<'a> Emitter<'a> {
             }
 
             K::Project(n) => {
-                let dictionary = &self.hir_arena[n.value];
-                let base = self.lower_as_place(dictionary);
-
-                self.insert(Instruction::project(
-                    node.span,
-                    base,
-                    n.index.as_index(),
-                    node.ty,
-                ))
-                .unwrap()
+                let base_node = &self.hir_arena[n.value];
+                // A projection whose base is a dictionary extracts a dictionary entry (a method or
+                // associated const — `TraitDictionaryEntry` has no nested-dictionary variant, so a
+                // dictionary base is always a `GetDictionary`/`LoadDictionary` node). It lowers to
+                // the symbolic `dict_entry`, not a tuple `project`: a forwarded dictionary is an
+                // interned id, not a place to index into. A non-dictionary base (a tuple/record
+                // place) keeps the ordinary `project`.
+                if matches!(
+                    base_node.kind,
+                    hir::NodeKind::GetDictionary(_) | hir::NodeKind::LoadDictionary(_)
+                ) {
+                    let dict = self.lower_dictionary_operand(base_node);
+                    self.insert(Instruction::dict_entry(
+                        node.span,
+                        dict,
+                        n.index.as_index(),
+                        node.ty,
+                    ))
+                    .unwrap()
+                } else {
+                    let base = self.lower_as_place(base_node);
+                    self.insert(Instruction::project(
+                        node.span,
+                        base,
+                        n.index.as_index(),
+                        node.ty,
+                    ))
+                    .unwrap()
+                }
             }
 
             K::ProjectAt(n) => {
@@ -988,7 +991,7 @@ impl<'a> Emitter<'a> {
                 let f = ssa::Value::Function(self.demand_function(fi, mi));
                 let mut arguments: Vec<ssa::Value> = vec![];
                 for x in &n.extra_arguments {
-                    arguments.push(self.lower_as_place(&self.hir_arena[*x]));
+                    arguments.push(self.lower_extra_argument(&self.hir_arena[*x]));
                 }
                 for arg in &n.arguments {
                     arguments.push(self.lower_as_place(&self.hir_arena[arg.value]));
@@ -1020,6 +1023,21 @@ impl<'a> Emitter<'a> {
                 } else {
                     result_storage
                 }
+            }
+
+            K::GetDictionaryMethod(n) => {
+                // A trait method taken as a first-class value through a (generic) dictionary: the
+                // symbolic analog of projecting the method out of the witness table. `dict_entry`
+                // yields the place of the method's (bare) function value, which the consumer reads
+                // by reference at the call — exactly like a `project`ed method slot.
+                let dictionary = self.lower_dictionary_operand(&self.hir_arena[n.dictionary]);
+                self.insert(Instruction::dict_entry(
+                    node.span,
+                    dictionary,
+                    n.entry_index.as_index(),
+                    node.ty,
+                ))
+                .unwrap()
             }
 
             K::WithPlace(n) => {
@@ -1136,47 +1154,39 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// Returns a copy of the dictionary value held by `t`, paired with the `ModuleId` of the module
-    /// that owns the impl (and thus the modules its methods resolve against).
-    fn dictionary_value(&self, t: &GetDictionary) -> (TraitDictionary, ModuleId) {
-        match t.dictionary {
-            TraitImplId::Local(id) => (
-                self.dictionary_value_from_trait(self.module.get_impl_data(id)),
-                self.module.module_id(),
-            ),
-            TraitImplId::Import(id) => {
-                let slot = self.module.get_import_impl_slot(id).unwrap();
-                let other_module = self.others.get(slot.module).unwrap().module().unwrap();
-                (
-                    self.dictionary_value_from_trait(
-                        other_module.get_impl_data_by_trait_key(&slot.key),
-                    ),
-                    other_module.module_id(),
-                )
-            }
-        }
-    }
-
-    /// Returns a copy of the dictionary value of `t`.
-    fn dictionary_value_from_trait(&self, t: Option<&TraitImpl>) -> TraitDictionary {
-        t.unwrap().dictionary_value.clone()
-    }
-
-    /// Returns the SSA Dictionary lowered from `n`.
+    /// Returns the symbolic SSA dictionary lowered from `n`: the canonical interned handle of the
+    /// impl that satisfies it. The dictionary is kept symbolic (not materialized into a witness-table
+    /// tuple); the SSA interpreter dispatches through it via `DictArg::Interned`, and a future
+    /// tuple-lowering pass rebuilds the table from the impl arena.
     fn lower_dictionary(&mut self, n: &GetDictionary) -> ssa::Value {
-        let (d, m) = self.dictionary_value(n);
-        let mut entries: Vec<ssa::Value> = d
-            .methods()
-            .iter()
-            .map(|x| ssa::Value::Function(self.demand_function(*x, m)))
-            .collect();
-        for value in d.associated_const_values() {
-            let value = self
-                .lower_as_primitive(value)
-                .expect("dictionary associated const must be a primitive value");
-            entries.push(value);
+        ssa::Value::Dictionary(self.dictionary_id(n.dictionary))
+    }
+
+    /// Lowers a HIR dictionary node to a symbolic SSA dictionary operand.
+    ///
+    /// A static `GetDictionary` becomes a `Dictionary(id)` constant; a forwarded `LoadDictionary`
+    /// becomes the `@extra` parameter slot it arrives in (a `Parameter`). The dictionary is never
+    /// materialized into a witness-table tuple. (Dictionary entries are only methods and associated
+    /// consts — `TraitDictionaryEntry` has no nested-dictionary variant — so a dictionary operand is
+    /// always one of these two node kinds.)
+    fn lower_dictionary_operand(&self, node: &ENode) -> ssa::Value {
+        use hir::NodeKind as K;
+        match &node.kind {
+            K::GetDictionary(d) => ssa::Value::Dictionary(self.dictionary_id(d.dictionary)),
+            K::LoadDictionary(n) => self.context.extra_parameters[&n.extra_parameter].clone(),
+            other => panic!("expected a trait dictionary node, got {:?}", other),
         }
-        ssa::Value::Dictionary(entries)
+    }
+
+    /// Lowers a call's extra (evidence) argument to its SSA operand: a trait dictionary becomes a
+    /// symbolic dictionary operand (`lower_dictionary_operand`), while field-index evidence (an
+    /// `int`, from `LoadFieldIndex` or an `Immediate`) is lowered as a place as before.
+    fn lower_extra_argument(&mut self, node: &ENode) -> ssa::Value {
+        use hir::NodeKind as K;
+        match &node.kind {
+            K::GetDictionary(_) | K::LoadDictionary(_) => self.lower_dictionary_operand(node),
+            _ => self.lower_as_place(node),
+        }
     }
 
     /// Stores the register `value` into `dest` if a destination is present; a `None` `dest`
@@ -1211,6 +1221,32 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    /// Moves the whole pointee of `source` into `destination`, choosing a plain `memcpy` for a
+    /// statically-sized value or a witnessed `memcpy_dynamic` for a generic (dynamically-sized) one.
+    ///
+    /// Unlike a *copy*, a move transfers ownership wholesale and needs no `Value::clone`; a generic
+    /// move is therefore a byte-move whose size the witness supplies (the interpreter moves the value
+    /// shape-agnostically and ignores the witness).
+    fn move_value_into(
+        &mut self,
+        span: Location,
+        source: ssa::Value,
+        destination: ssa::Value,
+        ty: Type,
+    ) {
+        if self.is_statically_sized(ty) {
+            self.insert(Instruction::memcpy(span, source, destination));
+        } else {
+            let witness = self.value_dictionary(ty).unwrap_or_else(|| {
+                panic!(
+                    "no Value dictionary witnesses the layout of the generic value of type {} moved out",
+                    self.show(ty)
+                )
+            });
+            self.insert(Instruction::memcpy_dynamic(span, source, destination, witness));
+        }
+    }
+
     /// Projects the method function reference out of `n`'s dictionary place, loads it, and lowers
     /// the call's runtime arguments to their place operands. Returns `(method, arguments)` ready
     /// to be completed with a result out-pointer and emitted as a `call`.
@@ -1219,13 +1255,12 @@ impl<'a> Emitter<'a> {
         node: &ENode,
         n: &hir::CallDictionaryMethod<Elaborated>,
     ) -> (ssa::Value, Vec<ssa::Value>) {
-        let dictionary = self.lower_as_place(&self.hir_arena[n.dictionary]);
+        let dictionary = self.lower_dictionary_operand(&self.hir_arena[n.dictionary]);
         let method_ty = Type::function_type(n.ty.clone());
-        // The callee is the *place* of the method in the dictionary tuple; the call reads the
-        // function value by reference rather than loading it into a register (see the `call`
-        // contract in `ssa::instruction`).
+        // The callee is the place of the method entry; the call reads the function value by
+        // reference rather than loading it into a register (see the `call` contract).
         let method_place = self
-            .insert(Instruction::project(
+            .insert(Instruction::dict_entry(
                 node.span,
                 dictionary,
                 n.entry_index.as_index(),
@@ -1489,15 +1524,44 @@ impl<'a> Emitter<'a> {
             K::TakeLocalValue(n) => match n.mode {
                 ResolvedTakeLocalValueMode::MoveOwned => {
                     // Move the owned value out: copy the place into the destination, skipping the
-                    // local's lexical drop (cleanup is deferred).
-                    if destination.is_some() {
-                        self.assert_statically_sized(node.ty);
-                        let p = self.place_of_local(n.id);
-                        self.memcpy_into_if_needed(node.span, p, destination);
+                    // local's lexical drop (cleanup is deferred). A move transfers the value
+                    // wholesale, so a generic (dynamically-sized) value needs no `Value::clone` —
+                    // just a witnessed dynamic memcpy; a statically-sized one uses a plain memcpy.
+                    if let Some(destination) = destination {
+                        let source = self.place_of_local(n.id);
+                        self.move_value_into(node.span, source, destination, node.ty);
                     }
                 }
-                ResolvedTakeLocalValueMode::CloneBorrowed(_) => {
-                    todo!("TakeLocalValue CloneBorrowed is not lowered yet")
+                ResolvedTakeLocalValueMode::CloneBorrowed(clone) => {
+                    // Take a non-owning alias by cloning (or copying) its borrowed value into the
+                    // destination, leaving the aliased storage intact. Mirrors `CloneValue`, but the
+                    // source is the local's place. A `None` destination discards the result, so the
+                    // clone (a pure `Value::clone`) is elided.
+                    if let Some(destination) = destination {
+                        match clone {
+                            ResolvedLocalClone::TrivialCopy => {
+                                self.assert_statically_sized(node.ty);
+                                let source = self.place_of_local(n.id);
+                                self.memcpy_into_if_needed(node.span, source, Some(destination));
+                            }
+                            ResolvedLocalClone::Static(f) => {
+                                let (fi, mi) = self.resolve_function(f);
+                                let f = ssa::Value::Function(self.demand_function(fi, mi));
+                                let source = self.place_of_local(n.id);
+                                self.insert(Instruction::call(node.span, f, [source, destination]));
+                            }
+                            ResolvedLocalClone::Dictionary(dictionary) => {
+                                let source = self.place_of_local(n.id);
+                                self.lower_value_clone_via_dictionary(
+                                    node.span,
+                                    dictionary,
+                                    node.ty,
+                                    source,
+                                    destination,
+                                );
+                            }
+                        }
+                    }
                 }
             },
 
@@ -1512,7 +1576,7 @@ impl<'a> Emitter<'a> {
                 let f = ssa::Value::Function(self.demand_function(fi, mi));
                 let mut arguments: Vec<ssa::Value> = vec![];
                 for x in &n.extra_arguments {
-                    arguments.push(self.lower_as_place(&self.hir_arena[*x]));
+                    arguments.push(self.lower_extra_argument(&self.hir_arena[*x]));
                 }
                 for arg in &n.arguments {
                     arguments.push(self.lower_argument(arg));
@@ -1540,16 +1604,20 @@ impl<'a> Emitter<'a> {
 
             K::BuildClosure(n) => {
                 // Build a first-class closure value bundling the target function with its captured
-                // environment. The target's body receives the captures as leading by-pointer
-                // parameters (after any dictionary parameters), so the closure carries them and the
-                // SSA `call` prepends their places at every application (see the interpreter).
+                // environment. The target's body receives, as leading by-pointer parameters, first
+                // its hidden `@extra` dictionaries and then the value captures; the closure carries
+                // both and the SSA `call` prepends them at every application (see the interpreter).
                 //
-                // Milestone 1 handles value-capturing closures only. A generic function used
-                // first-class — or a generic-bodied lambda — carries `dictionary_captures` (hidden
-                // evidence the body needs); those are not lowered yet.
-                if !n.dictionary_captures.is_empty() {
-                    todo!("closure dictionary captures are not lowered to SSA yet");
-                }
+                // Hidden dictionary captures and the environment's own `Value` dictionary are kept
+                // symbolic (a static `Dictionary(id)` or a forwarded `@extra` parameter), so both
+                // statically-resolved and generic-forwarded closures lower uniformly.
+
+                // The hidden dictionary/evidence captures the lambda body needs, in order.
+                let hidden_dicts: Vec<ssa::Value> = n
+                    .dictionary_captures
+                    .iter()
+                    .map(|d| self.lower_extra_argument(&self.hir_arena[*d]))
+                    .collect();
 
                 // Resolve the target function reference out of the inner `GetFunction`.
                 let function_node = &self.hir_arena[n.function];
@@ -1559,10 +1627,11 @@ impl<'a> Emitter<'a> {
                 let (fi, mi) = self.resolve_function(g.function);
                 let fref = self.demand_function(fi, mi);
 
-                // The `Value` dictionary witnessing how to clone/drop the captured environment.
+                // The symbolic `Value` dictionary used to clone/drop the captured value environment
+                // (`None` when there are no value captures).
                 let env_dict = n
                     .captures_value_dictionary
-                    .map(|d| self.resolve_env_dictionary(&self.hir_arena[d]));
+                    .map(|d| self.lower_dictionary_operand(&self.hir_arena[d]));
 
                 // Lower each capture to the place of its (already owned) value; the closure moves
                 // them into its environment.
@@ -1574,7 +1643,12 @@ impl<'a> Emitter<'a> {
 
                 let closure = self
                     .insert(Instruction::build_closure(
-                        node.span, fref, env_dict, node.ty, captures,
+                        node.span,
+                        fref,
+                        hidden_dicts,
+                        env_dict,
+                        node.ty,
+                        captures,
                     ))
                     .unwrap();
                 self.store_into_if_needed(node.span, closure, destination);
@@ -1797,9 +1871,9 @@ impl<'a> Emitter<'a> {
                 // index, then copy the value into the destination (if one is requested).
                 // Mirrors the interpreter's `eval_get_dictionary_associated_const`.
                 if destination.is_some() {
-                    let dictionary = self.lower_as_place(&self.hir_arena[c.dictionary]);
+                    let dictionary = self.lower_dictionary_operand(&self.hir_arena[c.dictionary]);
                     let const_place = self
-                        .insert(Instruction::project(
+                        .insert(Instruction::dict_entry(
                             node.span,
                             dictionary,
                             c.entry_index.as_index(),
@@ -1807,6 +1881,16 @@ impl<'a> Emitter<'a> {
                         ))
                         .unwrap();
                     self.memcpy_into_if_needed(node.span, const_place, destination);
+                }
+            }
+
+            K::GetDictionaryMethod(_) => {
+                // A trait method as a first-class value: take its `dict_entry` place (see
+                // `lower_as_place`) and copy the (trivially-copyable, bare) function value into the
+                // destination, like reading any other dictionary entry.
+                if destination.is_some() {
+                    let method_place = self.lower_as_place(node);
+                    self.memcpy_into_if_needed(node.span, method_place, destination);
                 }
             }
             K::Return(n) => {

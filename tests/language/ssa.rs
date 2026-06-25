@@ -2,7 +2,7 @@ use test_log::test;
 
 use ferlium::{format::FormatWith, module::ShowModuleWithOptions};
 
-use crate::harness::TestSession;
+use crate::harness::{TestSession, int};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
@@ -217,30 +217,28 @@ fn factorial() {
     %r3 = alloca bool
     %r4 = alloca int
     %r5 = store int 1 to %r4
-    %r6 = call std::Num<...>::from_int(%r4, %r0)
-    %r7 = alloca ((int, int) -> Ordering,)
-    %r8 = store (std::Ord<...>::cmp) to %r7
-    %r9 = call std::gt(%r7, %p0, %r0, %r3)
-    %r10 = br 1
+    %r6 = call std::Num<0-5>::from_int(%r4, %r0)
+    %r7 = call std::gt(dict(m0:i20), %p0, %r0, %r3)
+    %r8 = br 1
   1:
-    %r11 = comp_eq %r3 i1 1
-    %r12 = condbr %r11, %b2, &b3
+    %r9 = comp_eq %r3 i1 1
+    %r10 = condbr %r9, %b2, &b3
   2:
-    %r13 = alloca int
-    %r14 = alloca int
-    %r15 = store int 1 to %r14
-    %r16 = call std::Num<...>::from_int(%r14, %r1)
-    %r17 = call std::Num<...>::sub(%p0, %r1, %r13)
-    %r18 = call <test>::factorial(%r13, %r2)
-    %r19 = call std::Num<...>::mul(%p0, %r2, %p1)
-    %r20 = br 4
+    %r11 = alloca int
+    %r12 = alloca int
+    %r13 = store int 1 to %r12
+    %r14 = call std::Num<0-5>::from_int(%r12, %r1)
+    %r15 = call std::Num<0-5>::sub(%p0, %r1, %r11)
+    %r16 = call <test>::factorial(%r11, %r2)
+    %r17 = call std::Num<0-5>::mul(%p0, %r2, %p1)
+    %r18 = br 4
   3:
-    %r21 = alloca int
-    %r22 = store int 1 to %r21
-    %r23 = call std::Num<...>::from_int(%r21, %p1)
-    %r24 = br 4
+    %r19 = alloca int
+    %r20 = store int 1 to %r19
+    %r21 = call std::Num<0-5>::from_int(%r19, %p1)
+    %r22 = br 4
   4:
-    %r25 = ret
+    %r23 = ret
 "#
     );
 }
@@ -812,13 +810,13 @@ fn generic_apply() {
         r#"fn f(%p0: @extra ((A, A) -> A, (A, A) -> A, (A, A) -> A, (A) -> A, (A) -> A, (A) -> A, (int) -> A), %p1: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A) -> A, (&mut A) -> (), int, int), %p2: @arg & A, %p3: @ret A):
   0:
     %r0 = alloca A using %p1
-    %r1 = project 6 from %p0
+    %r1 = dict_entry 6 from %p0
     %r2 = alloca int
     %r3 = store int 2 to %r2
     %r4 = call %r1(%r2, %r0)
-    %r5 = project 2 from %p0
+    %r5 = dict_entry 2 from %p0
     %r6 = call %r5(%p2, %r0, %p3)
-    %r7 = project 4 from %p1
+    %r7 = dict_entry 4 from %p1
     %r8 = drop %r0 via %r7
     %r9 = ret
 "#,
@@ -859,25 +857,25 @@ fn $lambda$1(%p0: @arg &mut int, %p1: @ret int):
     %r0 = memcpy %p0 to %p1
     %r1 = ret
 
-fn Value<...>::clone(%p0: @arg & (int,), %p1: @ret (int,)):
+fn Value<0-148>::clone(%p0: @arg & (int,), %p1: @ret (int,)):
   0:
     %r0 = project 0 from %p1
     %r1 = project 0 from %p0
-    %r2 = call std::Value<...>::clone(%r1, %r0)
+    %r2 = call std::Value<0-5>::clone(%r1, %r0)
     %r3 = ret
 
-fn Value<...>::drop(%p0: @arg &mut (int,), %p1: @ret ()):
+fn Value<0-148>::drop(%p0: @arg &mut (int,), %p1: @ret ()):
   0:
     %r0 = project 0 from %p0
-    %r1 = call std::Value<...>::drop(%r0, &())
+    %r1 = call std::Value<0-5>::drop(%r0, &())
     %r2 = ret
 
-fn Value<...>::eq(%p0: @arg & (int,), %p1: @arg & (int,), %p2: @ret bool):
+fn Value<0-148>::eq(%p0: @arg & (int,), %p1: @arg & (int,), %p2: @ret bool):
   0:
     %r0 = project 0 from %p0
     %r1 = project 0 from %p1
     %r2 = alloca bool
-    %r3 = call std::Value<...>::eq(%r0, %r1, %r2)
+    %r3 = call std::Value<0-5>::eq(%r0, %r1, %r2)
     %r4 = br 1
   1:
     %r5 = comp_eq %r2 i1 1
@@ -891,25 +889,25 @@ fn Value<...>::eq(%p0: @arg & (int,), %p1: @arg & (int,), %p2: @ret bool):
   4:
     %r11 = ret
 
-fn Value<...>::hash(%p0: @arg & (int,), %p1: @arg &mut hasher, %p2: @ret ()):
+fn Value<0-148>::hash(%p0: @arg & (int,), %p1: @arg &mut hasher, %p2: @ret ()):
   0:
     %r0 = project 0 from %p0
-    %r1 = call std::Value<...>::hash(%r0, %p1, &())
+    %r1 = call std::Value<0-5>::hash(%r0, %p1, &())
     %r2 = ret
 
-fn Value<...>::to_string(%p0: @arg & (int,), %p1: @ret string):
+fn Value<0-148>::to_string(%p0: @arg & (int,), %p1: @ret string):
   0:
     %r0 = alloca string
     %r1 = alloca string
     %r2 = alloca string
     %r3 = store "(" to %r0
     %r4 = project 0 from %p0
-    %r5 = call std::Value<...>::to_string(%r4, %r1)
+    %r5 = call std::Value<0-5>::to_string(%r4, %r1)
     %r6 = call std::string_push_str(%r0, %r1, &())
-    %r7 = drop %r1 via std::Value<...>::drop
+    %r7 = drop %r1 via std::Value<0-2>::drop
     %r8 = store ")" to %r2
     %r9 = call std::string_push_str(%r0, %r2, &())
-    %r10 = drop %r2 via std::Value<...>::drop
+    %r10 = drop %r2 via std::Value<0-2>::drop
     %r11 = memcpy %r0 to %p1
     %r12 = ret
 
@@ -919,10 +917,10 @@ fn capture(%p0: @ret int):
     %r1 = alloca () -> int
     %r2 = alloca int
     %r3 = store int 1 to %r2
-    %r4 = call std::Num<...>::from_int(%r2, %r0)
+    %r4 = call std::Num<0-5>::from_int(%r2, %r0)
     %r5 = alloca int
     %r6 = memcpy %r0 to %r5
-    %r7 = build_closure <test>::$lambda$1(%r5)
+    %r7 = build_closure <test>::$lambda$1(%r5, dict(m7:i0))
     %r8 = store %r7 to %r1
     %r9 = call %r1(%p0)
     %r10 = drop %r1 via <test>::$_ferlium_function_value_drop
@@ -944,7 +942,7 @@ fn generic_two_same_type_params() {
         session.emit_ssa("fn f(x, y) { x + y }"),
         r#"fn f(%p0: @extra ((A, A) -> A, (A, A) -> A, (A, A) -> A, (A) -> A, (A) -> A, (A) -> A, (int) -> A), %p1: @arg & A, %p2: @arg & A, %p3: @ret A):
   0:
-    %r0 = project 0 from %p0
+    %r0 = dict_entry 0 from %p0
     %r1 = call %r0(%p1, %p2, %p3)
     %r2 = ret
 "#,
@@ -978,11 +976,11 @@ fn generic_multiple_ops_reuse_witness() {
         r#"fn f(%p0: @extra ((A, A) -> A, (A, A) -> A, (A, A) -> A, (A) -> A, (A) -> A, (A) -> A, (int) -> A), %p1: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A) -> A, (&mut A) -> (), int, int), %p2: @arg & A, %p3: @ret A):
   0:
     %r0 = alloca A using %p1
-    %r1 = project 2 from %p0
+    %r1 = dict_entry 2 from %p0
     %r2 = call %r1(%p2, %p2, %r0)
-    %r3 = project 0 from %p0
+    %r3 = dict_entry 0 from %p0
     %r4 = call %r3(%r0, %p2, %p3)
-    %r5 = project 4 from %p1
+    %r5 = dict_entry 4 from %p1
     %r6 = drop %r0 via %r5
     %r7 = ret
 "#,
@@ -998,7 +996,7 @@ fn generic_comparison() {
         session.emit_ssa("fn f(x, y) { x == y }"),
         r#"fn f(%p0: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A) -> A, (&mut A) -> (), int, int), %p1: @arg & A, %p2: @arg & A, %p3: @ret bool):
   0:
-    %r0 = project 0 from %p0
+    %r0 = dict_entry 0 from %p0
     %r1 = call %r0(%p1, %p2, %p3)
     %r2 = ret
 "#,
@@ -1347,7 +1345,7 @@ fn clone_value_generic_return() {
         session.emit_ssa("fn f<T>(x: T) -> T { x }"),
         r#"fn f(%p0: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A) -> A, (&mut A) -> (), int, int), %p1: @arg & A, %p2: @ret A):
   0:
-    %r0 = project 3 from %p0
+    %r0 = dict_entry 3 from %p0
     %r1 = call %r0(%p1, %p2)
     %r2 = ret
 "#,
@@ -1368,11 +1366,11 @@ fn clone_value_generic_branch() {
     %r1 = comp_eq i1 1 i1 1
     %r2 = condbr %r1, %b2, &b3
   2:
-    %r3 = project 3 from %p0
+    %r3 = dict_entry 3 from %p0
     %r4 = call %r3(%p1, %p2)
     %r5 = br 4
   3:
-    %r6 = project 3 from %p0
+    %r6 = dict_entry 3 from %p0
     %r7 = call %r6(%p1, %p2)
     %r8 = br 4
   4:
@@ -1392,10 +1390,10 @@ fn store_local_generic_clone_dictionary() {
         r#"fn f(%p0: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A) -> A, (&mut A) -> (), int, int), %p1: @arg & A, %p2: @ret ()):
   0:
     %r0 = alloca A using %p0
-    %r1 = project 3 from %p0
+    %r1 = dict_entry 3 from %p0
     %r2 = call %r1(%p1, %r0)
     %r3 = call <test>::g(%r0, &())
-    %r4 = project 4 from %p0
+    %r4 = dict_entry 4 from %p0
     %r5 = drop %r0 via %r4
     %r6 = ret
 
@@ -1548,9 +1546,9 @@ fn reassign_generic() {
         r#"fn set(%p0: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A) -> A, (&mut A) -> (), int, int), %p1: @arg &mut A, %p2: @arg & A, %p3: @ret ()):
   0:
     %r0 = alloca A using %p0
-    %r1 = project 3 from %p0
+    %r1 = dict_entry 3 from %p0
     %r2 = call %r1(%p2, %r0)
-    %r3 = project 4 from %p0
+    %r3 = dict_entry 4 from %p0
     %r4 = drop %p1 via %r3
     %r5 = memcpy %r0 to %p1
     %r6 = ret
@@ -1856,3 +1854,46 @@ fn yielded_subscript_member_is_not_emitted_standalone() {
         "",
     );
 }
+
+#[test]
+fn closure_over_generic_in_concrete_caller() {
+    // 2a: a generic function used first-class in a CONCRETE caller. The dictionary the generic
+    // needs is statically known, so it is captured as a symbolic `dict(...)` operand on
+    // `build_closure` (a leading hidden-dictionary operand; there are no value captures).
+    let mut session = TestSession::new();
+    let out = session.emit_ssa("fn id<T>(x: T) -> T { x } fn use_id() -> int { let f = id; f(5) }");
+    assert!(
+        out.contains("build_closure <test>::id(dict("),
+        "expected a symbolic dict operand on build_closure, got:\n{out}"
+    );
+}
+
+#[test]
+fn closure_forwarding_enclosing_generic_dict() {
+    // 2b: a generic-bodied lambda built inside a generic function forwards that function's own
+    // dictionary `@extra` parameters. `build_closure` carries the forwarded `%p` dict operands
+    // (the hidden dicts and the trailing env dictionary) alongside the cloned value capture.
+    let mut session = TestSession::new();
+    let out = session.emit_ssa("fn adder(n) { |x| x + n }");
+    assert!(
+        out.contains("build_closure <test>::$lambda$1(%p0, %p1, %p2, %r0, %p1)"),
+        "expected forwarded %p dict operands on build_closure, got:\n{out}"
+    );
+}
+
+dual_test!(closure_over_generic_in_concrete_caller_runs {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run("fn id<T>(x: T) -> T { x } let f = id; f(5)"),
+        int(5)
+    );
+});
+
+dual_test!(closure_forwarding_enclosing_generic_dict_runs {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run("fn adder(n) { |x| x + n } let a = adder(10); a(5)"),
+        int(15)
+    );
+});
+

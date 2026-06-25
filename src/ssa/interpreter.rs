@@ -20,12 +20,18 @@ use crate::{
     },
     hir::{
         function::{ResolvedArgPassing, ResolvedValueArgPassing},
-        value::{FunctionValue, LiteralValue, Value},
+        value::{FunctionHiddenArgValue, FunctionValue, LiteralValue, Value},
     },
-    module::{LocalFunctionId, ModuleEnv, ModuleId, TraitDictionaryId},
+    module::{
+        LocalFunctionId, ModuleEnv, ModuleId, TraitDictionaryId, id::Id,
+        trait_impl::TraitDictionaryEntry,
+    },
     ssa::{self, BlockIdentity, InstructionIdentity, InstructionView, value::FunctionReference},
     std::buffer,
-    types::r#type::{Type, TypeKind},
+    types::{
+        r#trait::TraitDictionaryEntryIndex,
+        r#type::{Type, TypeKind},
+    },
 };
 
 /// A key uniquely identifying a function across modules.
@@ -46,6 +52,10 @@ pub struct FunctionKey {
 enum Binding {
     Value(Value),
     Place(Place),
+    /// A symbolic trait dictionary (an interned id), the binding of a `Dictionary` constant or a
+    /// forwarded dictionary `@extra` parameter. Dispatched through `DictArg::Interned`; never
+    /// materialized into a tuple.
+    Dictionary(TraitDictionaryId),
     /// A saved top of the stack (the `environment` length), the result of a `stack_save`.
     StackMarker(usize),
 }
@@ -203,6 +213,24 @@ impl<'a> Interpreter<'a> {
                 slots.insert(def.unwrap(), Binding::Place(place));
                 Step::Advance
             }
+            InstructionView::DictEntry { entry_index, .. } => {
+                // The symbolic analog of `Project`: resolve the dictionary operand to its interned
+                // id, read entry `entry_index` (a method function value or an associated const)
+                // straight from the impl arena, and materialize it into a fresh cell whose place is
+                // bound — so `call`/`drop`/`memcpy` consume it exactly as a `project` result.
+                let id = self.dict_operand(slots, &instr.operands[0]);
+                let entry = self
+                    .ctx
+                    .dictionary_value(id)
+                    .entry(TraitDictionaryEntryIndex::from_index(entry_index));
+                let value = match entry {
+                    TraitDictionaryEntry::Method(function) => Value::function(function, id.module_id),
+                    TraitDictionaryEntry::AssociatedConst(lit) => lit.into_value(),
+                };
+                let place = self.alloc_cell(value);
+                slots.insert(def.unwrap(), Binding::Place(place));
+                Step::Advance
+            }
             InstructionView::Load => {
                 let place = self.place_operand(slots, &instr.operands[0]);
                 let v = self.load(&place)?;
@@ -292,8 +320,18 @@ impl<'a> Interpreter<'a> {
                 self.restore_stack(marker);
                 Step::Advance
             }
-            InstructionView::BuildClosure { function, env_dict } => {
-                let closure = self.exec_build_closure(slots, &instr.operands, function, env_dict)?;
+            InstructionView::BuildClosure {
+                function,
+                num_hidden_dicts,
+                has_env_dict,
+            } => {
+                let closure = self.exec_build_closure(
+                    slots,
+                    &instr.operands,
+                    function,
+                    num_hidden_dicts,
+                    has_env_dict,
+                )?;
                 slots.insert(def.unwrap(), Binding::Value(closure));
                 Step::Advance
             }
@@ -401,7 +439,7 @@ impl<'a> Interpreter<'a> {
 
         // A constant function reference is a direct (bare) call.
         if let ssa::Value::Function(r) = callee_op {
-            return self.exec_resolved_call(slots, r.module, r.identity, &[], arg_ops, span);
+            return self.exec_resolved_call(slots, r.module, r.identity, Vec::new(), arg_ops, span);
         }
 
         // Otherwise the callee operand is the place of a first-class function value, read by
@@ -422,19 +460,20 @@ impl<'a> Interpreter<'a> {
         if is_closure {
             self.exec_closure_call(slots, &place, arg_ops, span)
         } else {
-            self.exec_resolved_call(slots, module_id, function_id, &[], arg_ops, span)
+            self.exec_resolved_call(slots, module_id, function_id, Vec::new(), arg_ops, span)
         }
     }
 
-    /// Calls the resolved function `(callee_module, callee_identity)` with `env_places` (a closure's
-    /// captured-environment slots, empty for a non-closure call) prepended ahead of the visible
-    /// arguments `arg_ops` (the last of which is the return out-pointer).
+    /// Calls the resolved function `(callee_module, callee_identity)` with `leading` (a closure's
+    /// prepended `@extra` dictionary evidence and captured-environment slots, in signature order;
+    /// empty for a non-closure call) ahead of the visible arguments `arg_ops` (the last of which is
+    /// the return out-pointer).
     fn exec_resolved_call(
         &mut self,
         slots: &mut FxHashMap<ssa::Value, Binding>,
         callee_module: ModuleId,
         callee_identity: LocalFunctionId,
-        env_places: &[Place],
+        leading: Vec<Binding>,
         arg_ops: &[ssa::Value],
         span: Location,
     ) -> Result<(), RuntimeError> {
@@ -449,14 +488,31 @@ impl<'a> Interpreter<'a> {
         let is_script = f.code.as_script().is_some();
 
         if is_script {
-            // Uniform by-pointer ABI: the captured-environment slots (if any) come first, then the
-            // argument places straight through (the last is the callee's return out-pointer).
-            let mut args: Vec<Binding> = Vec::with_capacity(env_places.len() + arg_ops.len());
-            for place in env_places {
-                args.push(Binding::Place(place.clone()));
-            }
-            for op in arg_ops {
-                args.push(Binding::Place(self.place_operand(slots, op)));
+            // Uniform by-pointer ABI: the prepended closure evidence/environment bindings come
+            // first, then the argument operands straight through (the last is the return
+            // out-pointer). Each argument operand is classified by the callee's *static* parameter
+            // tag — a `Dictionary` parameter binds to the operand's interned dictionary id, every
+            // other parameter binds to its by-pointer place. Classifying by the callee's tag (rather
+            // than guessing from the operand's runtime binding) is essential: a value operand must
+            // bind as a place even if it could superficially resolve to a dictionary.
+            let param_tags: Vec<ssa::ParameterTag> =
+                self.function(key).parameters().iter().map(|p| p.tag).collect();
+            let offset = leading.len();
+            let mut args: Vec<Binding> = Vec::with_capacity(offset + arg_ops.len());
+            args.extend(leading);
+            for (k, op) in arg_ops.iter().enumerate() {
+                let binding = match param_tags.get(offset + k) {
+                    // An extra parameter is either a trait dictionary (binds to its interned id) or
+                    // field-index evidence (an `int` passed by place) — both share the `Dictionary`
+                    // tag, so the operand disambiguates them. A non-extra (visible/return) parameter
+                    // is always a by-pointer place, never reinterpreted as a dictionary.
+                    Some(ssa::ParameterTag::Dictionary) => match self.try_dict_operand(slots, op) {
+                        Some(id) => Binding::Dictionary(id),
+                        None => Binding::Place(self.place_operand(slots, op)),
+                    },
+                    _ => Binding::Place(self.place_operand(slots, op)),
+                };
+                args.push(binding);
             }
             self.run_function(key, args)?;
             return Ok(());
@@ -465,7 +521,7 @@ impl<'a> Interpreter<'a> {
         // A closure over a *native* function would have to prepend its environment ahead of the
         // native's visible arguments; this is not needed yet (lambda bodies are always scripts).
         assert!(
-            env_places.is_empty(),
+            leading.is_empty(),
             "a closure over a native function is not lowered to SSA yet"
         );
 
@@ -487,12 +543,15 @@ impl<'a> Interpreter<'a> {
         let ret_place = self.place_operand(slots, &ret_op[0]);
 
         let mut args: Vec<ValOrMut> = Vec::with_capacity(extra_count + n_vis);
-        // Extra arguments are `Value` dictionaries, materialized as witness-table tuples. Pass each
-        // by reference to its place; the native reads the witness table from it (mirroring how the
-        // HIR interpreter passes a dictionary by reference). `dictionary_from_arg` distinguishes
-        // this form from the HIR's interned-dictionary form.
+        // Extra arguments: a symbolic trait dictionary is passed as interned evidence
+        // (`ValOrMut::Dictionary`), exactly as the HIR interpreter passes a dictionary; field-index
+        // evidence (an `int`) is passed by reference to its place.
         for op in extra_ops {
-            args.push(ValOrMut::Mut(self.place_operand(slots, op)));
+            let arg = match self.try_dict_operand(slots, op) {
+                Some(id) => ValOrMut::Dictionary(id),
+                None => ValOrMut::Mut(self.place_operand(slots, op)),
+            };
+            args.push(arg);
         }
         // Visible arguments, marshaled per the callee's resolved passing.
         for (arg_passing, op) in passing.iter().zip(visible_ops) {
@@ -539,31 +598,46 @@ impl<'a> Interpreter<'a> {
         arg_ops: &[ssa::Value],
         span: Location,
     ) -> Result<(), RuntimeError> {
-        let (module_id, function_id, env_len, env_dict, env_ptr) = {
+        let (module_id, function_id, hidden_args, env_len, env_dict, env_ptr) = {
             let fv = place
                 .target_ref(&self.ctx)
                 .expect("closure call of an invalid place")
                 .as_function()
                 .expect("closure call on a non-function");
-            // Milestone 1 supports value-capturing closures; hidden dictionary evidence is not
-            // lowered yet (a generic function or generic-bodied lambda used first-class).
-            assert!(
-                fv.hidden_args.is_empty(),
-                "closure hidden dictionaries are not lowered to SSA yet"
-            );
             (
                 fv.module_id,
                 fv.function_id,
+                fv.hidden_args.clone(),
                 fv.closure_env_len,
                 fv.closure_env_value_dictionary,
                 &fv.closure_env as *const Value,
             )
         };
 
-        // Clone the captured environment into a fresh environment temporary. `env_ptr` points into
-        // the closure's heap box (stable across `environment` growth). The marker captured before
-        // the clone lets us reclaim the temporary — and the callee's frame storage — afterwards.
+        // The marker captured before allocating any temporary (the hidden field-index evidence
+        // cells and the cloned environment) lets us reclaim them — and the callee's frame storage —
+        // afterwards.
         let marker = self.ctx.environment.len();
+
+        // Prepend the closure's hidden `@extra` dictionary evidence, in signature order: a trait
+        // dictionary binds to its interned id; field-index evidence is materialized into an `int`
+        // cell and passed by place. These come ahead of the environment slots, matching the lambda
+        // signature `[@extra dicts…, captures…, visible…, ret]`.
+        let mut leading: Vec<Binding> = Vec::with_capacity(hidden_args.len() + env_len);
+        for arg in &hidden_args {
+            match arg {
+                FunctionHiddenArgValue::TraitDictionary(id) => {
+                    leading.push(Binding::Dictionary(*id));
+                }
+                FunctionHiddenArgValue::FieldIndex(index) => {
+                    let place = self.alloc_cell(Value::native(*index));
+                    leading.push(Binding::Place(place));
+                }
+            }
+        }
+
+        // Clone the captured environment into a fresh environment temporary. `env_ptr` points into
+        // the closure's heap box (stable across `environment` growth).
         let cloned_env = match env_dict {
             // SAFETY: `env_ptr` targets the closure's environment, which lives in its heap box (stable
             // across `environment` growth) at `place`; `call_value_clone_for_temp` borrows `ctx`, and
@@ -574,15 +648,15 @@ impl<'a> Interpreter<'a> {
             None => Value::uninit(),
         };
         let env_idx = self.alloc_cell(cloned_env).target;
-        let env_places: Vec<Place> = (0..env_len)
-            .map(|i| Place {
+        for i in 0..env_len {
+            leading.push(Binding::Place(Place {
                 target: env_idx,
                 path: vec![i as isize],
-            })
-            .collect();
+            }));
+        }
 
         let call_result =
-            self.exec_resolved_call(slots, module_id, function_id, &env_places, arg_ops, span);
+            self.exec_resolved_call(slots, module_id, function_id, leading, arg_ops, span);
 
         // Drop the cloned environment temporary (running the captures' `Value::drop`), then reclaim
         // every cell allocated since the marker (the temporary's husk and the callee's frame). The
@@ -611,25 +685,58 @@ impl<'a> Interpreter<'a> {
         call_result.and(drop_result)
     }
 
-    /// Builds a closure value from the target `function`, the captured-environment places (the
-    /// instruction operands, moved into the environment tuple), and the `Value` dictionary
-    /// `env_dict` used to clone/drop that environment.
+    /// Builds a closure value from the target `function` and its `[hidden_dicts…, captures…,
+    /// env_dict?]` operands (the `build_closure` layout). The hidden dictionary operands become the
+    /// closure's `hidden_args` (interned evidence — a `TraitDictionary` id, or a `FieldIndex` read
+    /// from an `int` place); the capture places are loaded into the environment tuple; the trailing
+    /// symbolic `env_dict` operand becomes the `Value` dictionary that clones/drops that environment.
     fn exec_build_closure(
         &mut self,
         slots: &mut FxHashMap<ssa::Value, Binding>,
         operands: &[ssa::Value],
         function: &FunctionReference,
-        env_dict: Option<TraitDictionaryId>,
+        num_hidden_dicts: usize,
+        has_env_dict: bool,
     ) -> Result<Value, RuntimeError> {
-        let mut captures: Vec<Value> = Vec::with_capacity(operands.len());
-        for op in operands {
+        let (hidden_ops, rest) = operands.split_at(num_hidden_dicts);
+        let (capture_ops, env_dict_op) = if has_env_dict {
+            rest.split_at(rest.len() - 1)
+        } else {
+            (rest, &[][..])
+        };
+
+        // Hidden dictionary/evidence captures → interned `FunctionHiddenArgValue`s.
+        let mut hidden_args: Vec<FunctionHiddenArgValue> = Vec::with_capacity(hidden_ops.len());
+        for op in hidden_ops {
+            let arg = match self.try_dict_operand(slots, op) {
+                Some(id) => FunctionHiddenArgValue::TraitDictionary(id),
+                None => {
+                    // Field-index evidence: an `int` carried by a place.
+                    let place = self.place_operand(slots, op);
+                    let index = *self
+                        .load(&place)?
+                        .as_primitive_ty::<isize>()
+                        .expect("a field-index evidence capture must be an int");
+                    FunctionHiddenArgValue::FieldIndex(index)
+                }
+            };
+            hidden_args.push(arg);
+        }
+
+        // Value captures → the owned environment tuple.
+        let mut captures: Vec<Value> = Vec::with_capacity(capture_ops.len());
+        for op in capture_ops {
             let place = self.place_operand(slots, op);
             captures.push(self.load(&place)?);
         }
+
+        // The symbolic `Value` dictionary for the captured environment (`None` iff no captures).
+        let env_dict = env_dict_op.first().map(|op| self.dict_operand(slots, op));
+
         let closure = FunctionValue::closure(
             function.identity,
             function.module,
-            vec![],
+            hidden_args,
             captures,
             env_dict,
         );
@@ -645,7 +752,7 @@ impl<'a> Interpreter<'a> {
         span: Location,
     ) -> Result<Value, RuntimeError> {
         let place = self.place_operand(slots, operand);
-        let (function_id, module_id, closure_env_len, env_dict, env_ptr) = {
+        let (function_id, module_id, hidden_args, closure_env_len, env_dict, env_ptr) = {
             let source = place
                 .target_ref(&self.ctx)
                 .expect("clone_closure_env of an invalid place")
@@ -654,6 +761,9 @@ impl<'a> Interpreter<'a> {
             (
                 source.function_id,
                 source.module_id,
+                // Hidden dictionary/evidence is trivially-copyable evidence (`FunctionHiddenArgValue`
+                // is `Copy`); carry it through to the cloned closure unchanged.
+                source.hidden_args.clone(),
                 source.closure_env_len,
                 source.closure_env_value_dictionary,
                 &source.closure_env as *const Value,
@@ -668,7 +778,7 @@ impl<'a> Interpreter<'a> {
         Ok(Value::function_value(FunctionValue {
             function_id,
             module_id,
-            hidden_args: vec![],
+            hidden_args,
             closure_env,
             closure_env_len,
             closure_env_value_dictionary: env_dict,
@@ -843,6 +953,34 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    /// Resolves a symbolic dictionary operand to its interned `TraitDictionaryId`, if it is one: a
+    /// constant `Dictionary(id)`, or a `Parameter`/`Register` bound to `Binding::Dictionary(id)`.
+    fn try_dict_operand(
+        &self,
+        slots: &FxHashMap<ssa::Value, Binding>,
+        v: &ssa::Value,
+    ) -> Option<TraitDictionaryId> {
+        match v {
+            ssa::Value::Dictionary(id) => Some(*id),
+            ssa::Value::Register(_) | ssa::Value::Parameter(_) => match slots.get(v) {
+                Some(Binding::Dictionary(id)) => Some(*id),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Resolves a symbolic dictionary operand to its interned `TraitDictionaryId`, panicking if the
+    /// operand is not a dictionary.
+    fn dict_operand(
+        &self,
+        slots: &FxHashMap<ssa::Value, Binding>,
+        v: &ssa::Value,
+    ) -> TraitDictionaryId {
+        self.try_dict_operand(slots, v)
+            .unwrap_or_else(|| panic!("operand {v} is not a symbolic dictionary"))
+    }
+
     /// Resolves a place-typed operand to its `Place`.
     fn place_operand(&self, slots: &FxHashMap<ssa::Value, Binding>, v: &ssa::Value) -> Place {
         match v {
@@ -857,6 +995,9 @@ impl<'a> Interpreter<'a> {
                     .unwrap_or_else(|| panic!("expected a place but {v} is bound to a value")),
                 Some(Binding::StackMarker(_)) => {
                     panic!("expected a place but {v} is bound to a stack marker")
+                }
+                Some(Binding::Dictionary(_)) => {
+                    panic!("expected a place but {v} is bound to a symbolic dictionary")
                 }
                 None => panic!("unbound place operand {v}"),
             },
@@ -896,6 +1037,9 @@ impl<'a> Interpreter<'a> {
                 Some(Binding::StackMarker(_)) => {
                     panic!("expected a value but {v} is bound to a stack marker")
                 }
+                Some(Binding::Dictionary(_)) => {
+                    panic!("expected a value but {v} is bound to a symbolic dictionary")
+                }
                 None => panic!("unbound value operand {v}"),
             },
             ssa::Value::Boolean(b) => Value::native(*b),
@@ -908,16 +1052,10 @@ impl<'a> Interpreter<'a> {
                 crate::std::math::Float::new(f.into_inner())
                     .expect("an SSA Float constant is always finite"),
             ),
-            ssa::Value::Dictionary(entries) => {
-                // A dictionary is materialized as a tuple of its (bridged) entries: method function
-                // references, associated constants, and nested dictionaries.
-                let entries = entries.clone();
-                let mut vals: Vec<Value> = Vec::with_capacity(entries.len());
-                for e in &entries {
-                    vals.push(self.value_operand(slots, e));
-                }
-                Value::tuple(vals)
-            }
+            ssa::Value::Dictionary(_) => panic!(
+                "a symbolic dictionary is evidence, not a value: it is consumed as a dictionary \
+                 operand (see `dict_operand`)/call argument, never read with `value_operand`"
+            ),
             ssa::Value::Literal(_) => unreachable!(
                 "a `Literal` is only ever a `comp_eq` pattern, read through `operand_literal`"
             ),
@@ -944,6 +1082,9 @@ impl<'a> Interpreter<'a> {
                 Some(Binding::Value(val)) => val.to_literal_value(),
                 Some(Binding::StackMarker(_)) => {
                     panic!("comp_eq operand {v} is bound to a stack marker")
+                }
+                Some(Binding::Dictionary(_)) => {
+                    panic!("comp_eq operand {v} is bound to a symbolic dictionary")
                 }
                 None => panic!("unbound comp_eq operand {v}"),
             },

@@ -1,12 +1,11 @@
 use std::fmt;
 
-use itertools::Itertools;
 use ordered_float::NotNan;
 use ustr::Ustr;
 
 use crate::types::r#type::Type;
 use crate::{
-    module::{LocalFunctionId, ModuleId},
+    module::{LocalFunctionId, ModuleId, TraitDictionaryId},
     ssa,
 };
 
@@ -16,8 +15,14 @@ pub enum Value {
     /// A constant boolean
     Boolean(bool),
 
-    /// A dictionary value
-    Dictionary(Vec<ssa::Value>),
+    /// A symbolic trait dictionary, identified by the canonical handle of the impl that satisfies
+    /// it. The dictionary is kept symbolic (an interned id) rather than materialized into a tuple of
+    /// method function values and associated consts; the SSA interpreter dispatches through it via
+    /// `DictArg::Interned`, and a later tuple-lowering pass (for a real backend) rebuilds the witness
+    /// table from the impl arena exactly as `Emitter::lower_dictionary` did. A *forwarded* dictionary
+    /// (one a generic function received as an extra parameter) is instead represented by the
+    /// `Parameter` slot it arrives in, not by this variant.
+    Dictionary(TraitDictionaryId),
 
     /// A constant finite float (`float`), represented as an `f64` that is never NaN.
     Float(NotNan<f64>),
@@ -58,8 +63,8 @@ impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Value::Boolean(i) => write!(f, "i1 {}", *i as u8),
-            Value::Dictionary(i) => {
-                write!(f, "({})", i.iter().map(|v| format!("{}", v)).join(", "))
+            Value::Dictionary(id) => {
+                write!(f, "dict(m{}:i{})", id.module_id, id.impl_id)
             }
             Value::Float(x) => write!(f, "float {}", x.into_inner()),
             Value::Function(i) => write!(f, "{}", i.name),
