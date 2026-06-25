@@ -22,6 +22,12 @@ Contribution is done through pull requests.
 
 You can live discuss with us on Zulip: [ferlium.zulipchat.com](https://ferlium.zulipchat.com)
 
+## AI-assisted contributions
+
+AI tools may be used to assist development, but they must not be listed as authors, co-authors, copyright holders, or contributors.
+
+The human submitter is responsible for reviewing, understanding, testing, and licensing the contribution, and for granting the necessary rights under the project's contribution terms.
+
 ## Contributor License Agreement (CLA)
 
 Before we can accept your contributions, you need to sign a [Contributor License Agreement (CLA)](https://gist.github.com/stephanemagnenat/687894020a6df8d9e1ebda4514987abe).
@@ -34,3 +40,5 @@ When you submit a pull request for the first time, CLA Assistant will ask you to
 1. When the pull request performs the standard checks, you will see that the `license/cla` check has run, and requests users to sign the CLA.
 2. Click "**Details**", and you will be directed to the CLA Assistant tool, where you can read the CLA, fill out the required personal details, and sign it.
 3. Once you have clicked "**I agree**", navigate back to the Pull request, and see that the CLA Assistant check has passed.
+
+AI tools cannot sign or satisfy the project CLA; the human contributor remains the sole contributor of record.
