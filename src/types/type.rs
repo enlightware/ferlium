@@ -507,7 +507,7 @@ where
 /// controls whether and how the immediate call result may be consumed as a
 /// place before being materialized.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
-pub enum FnReturnConvention {
+pub enum CallResultConvention {
     #[default]
     Value,
     /// A scoped, callee-rooted yielded place. It must be consumed through a
@@ -520,7 +520,7 @@ pub enum FnReturnConvention {
     AddressorPlace,
 }
 
-impl FnReturnConvention {
+impl CallResultConvention {
     pub fn returns_borrow(self) -> bool {
         matches!(self, Self::YieldedOnce | Self::AddressorPlace)
     }
@@ -552,7 +552,7 @@ pub struct FnType {
     pub args: Vec<FnArgType>,
     pub ret: Type,
     pub effects: EffType,
-    pub return_convention: FnReturnConvention,
+    pub return_convention: CallResultConvention,
 }
 
 impl FnType {
@@ -561,7 +561,7 @@ impl FnType {
             args,
             ret,
             effects,
-            return_convention: FnReturnConvention::Value,
+            return_convention: CallResultConvention::Value,
         }
     }
 
@@ -569,7 +569,7 @@ impl FnType {
         args: Vec<FnArgType>,
         ret: Type,
         effects: EffType,
-        return_convention: FnReturnConvention,
+        return_convention: CallResultConvention,
     ) -> Self {
         Self {
             args,
@@ -591,7 +591,7 @@ impl FnType {
                 .collect(),
             ret,
             effects,
-            return_convention: FnReturnConvention::Value,
+            return_convention: CallResultConvention::Value,
         }
     }
 
@@ -606,7 +606,7 @@ impl FnType {
                 .collect(),
             ret,
             effects,
-            return_convention: FnReturnConvention::Value,
+            return_convention: CallResultConvention::Value,
         }
     }
 
@@ -3302,17 +3302,23 @@ mod tests {
 
     #[test]
     fn yielded_once_return_convention_does_not_satisfy_value() {
-        assert!(FnReturnConvention::Value.can_satisfy(FnReturnConvention::Value));
-        assert!(!FnReturnConvention::Value.can_satisfy(FnReturnConvention::YieldedOnce));
-        assert!(!FnReturnConvention::Value.can_satisfy(FnReturnConvention::AddressorPlace));
+        assert!(CallResultConvention::Value.can_satisfy(CallResultConvention::Value));
+        assert!(!CallResultConvention::Value.can_satisfy(CallResultConvention::YieldedOnce));
+        assert!(!CallResultConvention::Value.can_satisfy(CallResultConvention::AddressorPlace));
 
-        assert!(!FnReturnConvention::YieldedOnce.can_satisfy(FnReturnConvention::Value));
-        assert!(FnReturnConvention::YieldedOnce.can_satisfy(FnReturnConvention::YieldedOnce));
-        assert!(!FnReturnConvention::YieldedOnce.can_satisfy(FnReturnConvention::AddressorPlace));
+        assert!(!CallResultConvention::YieldedOnce.can_satisfy(CallResultConvention::Value));
+        assert!(CallResultConvention::YieldedOnce.can_satisfy(CallResultConvention::YieldedOnce));
+        assert!(
+            !CallResultConvention::YieldedOnce.can_satisfy(CallResultConvention::AddressorPlace)
+        );
 
-        assert!(FnReturnConvention::AddressorPlace.can_satisfy(FnReturnConvention::Value));
-        assert!(FnReturnConvention::AddressorPlace.can_satisfy(FnReturnConvention::YieldedOnce));
-        assert!(FnReturnConvention::AddressorPlace.can_satisfy(FnReturnConvention::AddressorPlace));
+        assert!(CallResultConvention::AddressorPlace.can_satisfy(CallResultConvention::Value));
+        assert!(
+            CallResultConvention::AddressorPlace.can_satisfy(CallResultConvention::YieldedOnce)
+        );
+        assert!(
+            CallResultConvention::AddressorPlace.can_satisfy(CallResultConvention::AddressorPlace)
+        );
     }
 
     /// Wrap a `TypeKind` in an `InternedType` with an empty summary, for tests

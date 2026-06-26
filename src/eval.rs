@@ -3190,7 +3190,7 @@ mod tests {
         types::{
             effects::EffType,
             mutability::MutType,
-            r#type::{FnArgType, FnReturnConvention, FnType, Type},
+            r#type::{CallResultConvention, FnArgType, FnType, Type},
             type_scheme::TypeScheme,
         },
     };
@@ -3324,7 +3324,7 @@ mod tests {
             vec![FnArgType::new(int_ty, MutType::mutable())],
             int_ty,
             EffType::empty(),
-            FnReturnConvention::YieldedOnce,
+            CallResultConvention::YieldedOnce,
         );
         let mut accessor_locals = vec![
             local("log", MutType::mutable(), int_ty, span),
@@ -3418,7 +3418,7 @@ mod tests {
             vec![FnArgType::new(int_ty, MutType::mutable())],
             int_ty,
             EffType::empty(),
-            FnReturnConvention::YieldedOnce,
+            CallResultConvention::YieldedOnce,
         );
         let accessor_id = LocalFunctionId::from_index(0);
         let accessor_call = node(
@@ -3577,7 +3577,7 @@ mod tests {
             vec![],
             int_ty,
             EffType::empty(),
-            FnReturnConvention::YieldedOnce,
+            CallResultConvention::YieldedOnce,
         );
         let accessor_call = node(
             &mut arena,

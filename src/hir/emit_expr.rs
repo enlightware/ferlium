@@ -34,7 +34,7 @@ use crate::{
     types::{
         effects::EffType,
         trait_solver::{TraitSolver, trait_solver_from_module},
-        r#type::{FnReturnConvention, Type, TypeInstSubst, TypeVar},
+        r#type::{CallResultConvention, Type, TypeInstSubst, TypeVar},
         type_inference::{
             defaulting::DefaultingScope, expr::TypeInference, unify::UnifiedTypeInference,
         },
@@ -135,7 +135,7 @@ fn emit_expr_unsafe_inner(
         &mut new_deps,
         module_env,
         None,
-        FnReturnConvention::Value,
+        CallResultConvention::Value,
         None,
         vec![],
         true,

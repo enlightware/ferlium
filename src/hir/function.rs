@@ -33,7 +33,7 @@ use crate::{
     hir::{self, ENodeId, NodeArena, NodeId, UNodeArena, UNodeId},
     module::{ELocalDecl, ModuleEnv, ModuleFunction, ULocalDecl},
     types::effects::EffType,
-    types::r#type::{FnArgType, FnReturnConvention, FnType, Type, fmt_fn_type_with_arg_names},
+    types::r#type::{CallResultConvention, FnArgType, FnType, Type, fmt_fn_type_with_arg_names},
     types::type_like::TypeLike,
     types::type_mapper::TypeMapper,
     types::type_scheme::{PubTypeConstraint, TypeScheme},
@@ -150,7 +150,7 @@ impl FunctionDefinition {
         }
     }
 
-    pub fn return_convention(&self) -> FnReturnConvention {
+    pub fn return_convention(&self) -> CallResultConvention {
         self.ty_scheme.ty.return_convention
     }
 

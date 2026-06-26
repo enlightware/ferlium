@@ -21,7 +21,7 @@ use crate::{
         mutability::{MutType, MutVal, MutVar, MutVarKey},
         recursive_equation::{RecursiveEquationError, try_intern_recursive_equation},
         trait_solver::{ConstraintAssumptions, TraitSolver},
-        r#type::{FnReturnConvention, FnType, TyVarKey, Type, TypeInstSubst, TypeKind, TypeVar},
+        r#type::{CallResultConvention, FnType, TyVarKey, Type, TypeInstSubst, TypeKind, TypeVar},
         type_like::TypeLike,
         type_scheme::PubTypeConstraint,
     },
@@ -41,8 +41,8 @@ pub enum SubOrSameType {
 }
 
 fn return_convention_can_satisfy(
-    current: FnReturnConvention,
-    expected: FnReturnConvention,
+    current: CallResultConvention,
+    expected: CallResultConvention,
     sub_or_same: SubOrSameType,
 ) -> bool {
     match sub_or_same {

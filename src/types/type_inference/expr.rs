@@ -53,7 +53,8 @@ use crate::{
         r#trait::{Trait, TraitMethodIndex},
         trait_solver::{TraitSolver, TraitSolverProbe},
         r#type::{
-            FnArgType, FnReturnConvention, FnType, TyVarKey, Type, TypeInstSubst, TypeKind, TypeVar,
+            CallResultConvention, FnArgType, FnType, TyVarKey, Type, TypeInstSubst, TypeKind,
+            TypeVar,
         },
         type_like::TypeLike,
         type_mapper::{BitmapInstantiationMapper, TypeMapper},
@@ -599,7 +600,7 @@ impl TypeInference {
             Some((ret_ty, env.ast_arena[body].span)),
             expected_fn_ty
                 .as_ref()
-                .map_or(FnReturnConvention::Value, |fn_ty| fn_ty.return_convention),
+                .map_or(CallResultConvention::Value, |fn_ty| fn_ty.return_convention),
             env.annotation_subst,
             vec![],
             env.fuel_checks_enabled,
@@ -1166,7 +1167,7 @@ impl TypeInference {
                             _ => {
                                 // First-class place-returning functions are not supported yet:
                                 // unresolved dynamic callees are inferred as value-returning calls.
-                                FnReturnConvention::Value
+                                CallResultConvention::Value
                             }
                         };
                         let abi_args = match &*env.ir_arena[func_node_id].ty.data() {

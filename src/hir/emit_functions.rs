@@ -45,7 +45,7 @@ use crate::{
         mutability::MutType,
         r#trait::{Trait, TraitMethodIndex},
         trait_solver::{TraitSolver, trait_solver_from_module},
-        r#type::{FnArgType, FnReturnConvention, FnType, Type, TypeInstSubst, TypeVar},
+        r#type::{CallResultConvention, FnArgType, FnType, Type, TypeInstSubst, TypeVar},
         type_constraints::named_type_constraints_in_types,
         type_inference::{
             defaulting::{ConstraintBoundary, DefaultingScope},
@@ -136,17 +136,17 @@ impl<'a> EmitFunctionInput<'a> {
 }
 
 impl EmitFunctionKind {
-    fn return_convention(self) -> FnReturnConvention {
+    fn return_convention(self) -> CallResultConvention {
         match self {
-            EmitFunctionKind::Normal => FnReturnConvention::Value,
+            EmitFunctionKind::Normal => CallResultConvention::Value,
             EmitFunctionKind::SubscriptMember {
                 provenance: YieldProvenance::YieldedOnce,
                 ..
-            } => FnReturnConvention::YieldedOnce,
+            } => CallResultConvention::YieldedOnce,
             EmitFunctionKind::SubscriptMember {
                 provenance: YieldProvenance::AddressorPlace,
                 ..
-            } => FnReturnConvention::AddressorPlace,
+            } => CallResultConvention::AddressorPlace,
         }
     }
 

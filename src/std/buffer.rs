@@ -29,7 +29,7 @@ use crate::{
     std::core_traits_names::{INSPECT_TRAIT_NAME, VALUE_TRAIT_NAME},
     types::{
         effects::no_effects,
-        r#type::{FnArgType, FnReturnConvention, FnType, Type, bare_native_type},
+        r#type::{CallResultConvention, FnArgType, FnType, Type, bare_native_type},
         type_scheme::{PubTypeConstraint, TypeScheme},
     },
 };
@@ -203,7 +203,7 @@ fn buffer_slot_descr() -> ModuleFunction {
         ],
         gen0,
         no_effects(),
-        FnReturnConvention::AddressorPlace,
+        CallResultConvention::AddressorPlace,
     );
     ModuleFunction::new(
         FunctionDefinition::new_with_generic_params_and_attributes(

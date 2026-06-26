@@ -38,7 +38,7 @@ use crate::{
     types::mutability::MutVal,
     types::r#trait::{Deriver, Trait, TraitMethodIndex},
     types::trait_solver::TraitSolver,
-    types::r#type::{FnArgType, FnReturnConvention, FnType, Type, TypeKind, tuple_type},
+    types::r#type::{CallResultConvention, FnArgType, FnType, Type, TypeKind, tuple_type},
     types::type_like::TypeLike,
 };
 
@@ -478,7 +478,7 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                         ],
                         data_value_ty,
                         EffType::empty(),
-                        FnReturnConvention::AddressorPlace,
+                        CallResultConvention::AddressorPlace,
                     );
                     let mut arguments = arguments;
                     let prepared = prepare_generated_call_arguments_with_locals(
