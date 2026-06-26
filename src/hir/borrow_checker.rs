@@ -388,13 +388,13 @@ impl Node {
                 for arg in &app.arguments {
                     check_borrows(arena, arg.value)?;
                 }
-                check_arguments(&app.ty.args, &app.arguments, arena, app.function_span)?;
+                check_arguments(&app.ty.fn_ty.args, &app.arguments, arena, app.function_span)?;
             }
             TraitMethodApply(app) => {
                 for arg in &app.arguments {
                     check_borrows(arena, arg.value)?;
                 }
-                check_arguments(&app.ty.args, &app.arguments, arena, app.method_span)?;
+                check_arguments(&app.ty.fn_ty.args, &app.arguments, arena, app.method_span)?;
             }
             GetFunction(_) => {}
             GetTraitMethod(_) | GetTraitAssociatedConst(_) | GetTraitDictionary(_) => {}
@@ -408,7 +408,7 @@ impl Node {
                     check_borrows(arena, arg.value)?;
                 }
                 check_arguments(
-                    &node.ty.args,
+                    &node.ty.fn_ty.args,
                     &node.arguments,
                     arena,
                     arena[node.dictionary].span,

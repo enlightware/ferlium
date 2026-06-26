@@ -552,31 +552,11 @@ pub struct FnType {
     pub args: Vec<FnArgType>,
     pub ret: Type,
     pub effects: EffType,
-    pub return_convention: CallResultConvention,
 }
 
 impl FnType {
     pub fn new(args: Vec<FnArgType>, ret: Type, effects: EffType) -> Self {
-        Self {
-            args,
-            ret,
-            effects,
-            return_convention: CallResultConvention::Value,
-        }
-    }
-
-    pub fn new_with_return_convention(
-        args: Vec<FnArgType>,
-        ret: Type,
-        effects: EffType,
-        return_convention: CallResultConvention,
-    ) -> Self {
-        Self {
-            args,
-            ret,
-            effects,
-            return_convention,
-        }
+        Self { args, ret, effects }
     }
 
     pub fn new_mut_resolved(
@@ -591,7 +571,6 @@ impl FnType {
                 .collect(),
             ret,
             effects,
-            return_convention: CallResultConvention::Value,
         }
     }
 
@@ -606,12 +585,7 @@ impl FnType {
                 .collect(),
             ret,
             effects,
-            return_convention: CallResultConvention::Value,
         }
-    }
-
-    pub fn returns_place(&self) -> bool {
-        self.return_convention.returns_place()
     }
 
     pub fn as_locals_no_bound<'a>(
@@ -633,7 +607,52 @@ impl FnType {
     fn local_cmp(&self, other: &Self) -> Ordering {
         compare_by(&self.args, &other.args, FnArgType::local_cmp)
             .then(self.ret.local_cmp(&other.ret))
-            .then(self.return_convention.cmp(&other.return_convention))
+    }
+}
+
+/// Type and result convention of a selected callable implementation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, new)]
+pub struct CallImplType {
+    pub fn_ty: FnType,
+    pub result_convention: CallResultConvention,
+}
+
+impl CallImplType {
+    pub fn value(fn_ty: FnType) -> Self {
+        Self::new(fn_ty, CallResultConvention::Value)
+    }
+
+    pub fn returns_place(&self) -> bool {
+        self.result_convention.returns_place()
+    }
+
+    pub fn ret(&self) -> Type {
+        self.fn_ty.ret
+    }
+
+    pub fn effects(&self) -> &EffType {
+        &self.fn_ty.effects
+    }
+}
+
+impl TypeLike for CallImplType {
+    fn visit(&self, visitor: &mut impl TypeInnerVisitor) {
+        self.fn_ty.visit(visitor);
+    }
+
+    fn map(&self, f: &mut impl TypeMapper) -> Self {
+        Self {
+            fn_ty: self.fn_ty.map(f),
+            result_convention: self.result_convention,
+        }
+    }
+
+    fn fill_with_input_effect_vars(&self, vars: &mut FxHashSet<EffectVar>) {
+        self.fn_ty.fill_with_input_effect_vars(vars);
+    }
+
+    fn fill_with_output_effect_vars(&self, vars: &mut FxHashSet<EffectVar>) {
+        self.fn_ty.fill_with_output_effect_vars(vars);
     }
 }
 
@@ -659,7 +678,6 @@ impl TypeLike for FnType {
                 .collect(),
             ret: self.ret.map(f),
             effects: f.map_effect_type(&self.effects),
-            return_convention: self.return_convention,
         }
     }
 
@@ -687,9 +705,21 @@ impl FormatWith<ModuleEnv<'_>> for FnType {
     }
 }
 
+impl FormatWith<ModuleEnv<'_>> for CallImplType {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
+        fmt_call_impl_type_with_env(self, f, env)
+    }
+}
+
 impl FormatWith<TypeDisplayEnv<'_, '_>> for FnType {
     fn fmt_with(&self, f: &mut fmt::Formatter, env: &TypeDisplayEnv<'_, '_>) -> fmt::Result {
         fmt_fn_type_with_env(self, f, env)
+    }
+}
+
+impl FormatWith<TypeDisplayEnv<'_, '_>> for CallImplType {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &TypeDisplayEnv<'_, '_>) -> fmt::Result {
+        fmt_call_impl_type_with_env(self, f, env)
     }
 }
 
@@ -703,13 +733,32 @@ impl FormatWith<QualifiedNameEnv<'_>> for FnType {
             arg.fmt_with(f, env)?;
         }
         write!(f, ") -> ")?;
-        if self.returns_place() {
-            write!(f, "place ")?;
-        }
         self.ret.fmt_with(f, env)?;
         if !self.effects.is_empty() {
             write!(f, " ! ")?;
             format_effect_binding_value(&self.effects, f)?;
+        }
+        Ok(())
+    }
+}
+
+impl FormatWith<QualifiedNameEnv<'_>> for CallImplType {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &QualifiedNameEnv<'_>) -> fmt::Result {
+        write!(f, "(")?;
+        for (i, arg) in self.fn_ty.args.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            arg.fmt_with(f, env)?;
+        }
+        write!(f, ") -> ")?;
+        if self.returns_place() {
+            write!(f, "place ")?;
+        }
+        self.fn_ty.ret.fmt_with(f, env)?;
+        if !self.fn_ty.effects.is_empty() {
+            write!(f, " ! ")?;
+            format_effect_binding_value(&self.fn_ty.effects, f)?;
         }
         Ok(())
     }
@@ -729,11 +778,33 @@ where
         arg.fmt_with(f, env)?;
     }
     write!(f, ") -> ")?;
+    function.ret.fmt_with(f, env)?;
+    format_function_effect_suffix_with_env(&env.displayed_effects(&function.effects), f, env)
+}
+
+fn fmt_call_impl_type_with_env<Env>(
+    function: &CallImplType,
+    f: &mut fmt::Formatter,
+    env: &Env,
+) -> fmt::Result
+where
+    FnArgType: FormatWith<Env>,
+    Type: FormatWith<Env>,
+    Env: TypeFormatEnv,
+{
+    write!(f, "(")?;
+    for (i, arg) in function.fn_ty.args.iter().enumerate() {
+        if i > 0 {
+            write!(f, ", ")?;
+        }
+        arg.fmt_with(f, env)?;
+    }
+    write!(f, ") -> ")?;
     if function.returns_place() {
         write!(f, "place ")?;
     }
-    function.ret.fmt_with(f, env)?;
-    format_function_effect_suffix_with_env(&env.displayed_effects(&function.effects), f, env)
+    function.fn_ty.ret.fmt_with(f, env)?;
+    format_function_effect_suffix_with_env(&env.displayed_effects(&function.fn_ty.effects), f, env)
 }
 
 pub(crate) fn fmt_fn_type_with_arg_names<Env>(
@@ -756,11 +827,35 @@ where
         arg_ty.fmt_with(f, env)?;
     }
     write!(f, ") -> ")?;
-    if fn_ty.returns_place() {
-        write!(f, "place ")?;
-    }
     fn_ty.ret.fmt_with(f, env)?;
     format_function_effect_suffix_with_env(&env.displayed_effects(&fn_ty.effects), f, env)
+}
+
+pub(crate) fn fmt_call_impl_type_with_arg_names<Env>(
+    call_ty: &CallImplType,
+    arg_names: &[Ustr],
+    f: &mut fmt::Formatter,
+    env: &Env,
+) -> fmt::Result
+where
+    FnArgType: FormatWith<Env>,
+    Type: FormatWith<Env>,
+    Env: TypeFormatEnv,
+{
+    write!(f, "(")?;
+    for (i, (arg_ty, arg_name)) in call_ty.fn_ty.args.iter().zip(arg_names).enumerate() {
+        if i > 0 {
+            write!(f, ", ")?;
+        }
+        write!(f, "{arg_name}: ")?;
+        arg_ty.fmt_with(f, env)?;
+    }
+    write!(f, ") -> ")?;
+    if call_ty.returns_place() {
+        write!(f, "place ")?;
+    }
+    call_ty.fn_ty.ret.fmt_with(f, env)?;
+    format_function_effect_suffix_with_env(&env.displayed_effects(&call_ty.fn_ty.effects), f, env)
 }
 
 pub(crate) fn format_effect_binding_value_with_env<Env>(
@@ -2459,11 +2554,7 @@ impl Ord for TypeKind {
             (Variant(a), Variant(b)) => a.cmp(b),
             (Tuple(a), Tuple(b)) => a.cmp(b),
             (Record(a), Record(b)) => a.cmp(b),
-            (Function(a), Function(b)) => a
-                .args
-                .cmp(&b.args)
-                .then_with(|| a.ret.cmp(&b.ret))
-                .then_with(|| a.return_convention.cmp(&b.return_convention)),
+            (Function(a), Function(b)) => a.args.cmp(&b.args).then_with(|| a.ret.cmp(&b.ret)),
             _ => self.rank().cmp(&other.rank()),
         }
     }
@@ -2638,9 +2729,7 @@ fn types_could_match(a: &TypeKind, b: &TypeKind) -> bool {
         (TypeKind::Variant(a), TypeKind::Variant(b)) => {
             a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.0 == y.0)
         }
-        (TypeKind::Function(a), TypeKind::Function(b)) => {
-            a.return_convention == b.return_convention
-        } // Could compare arity, but skip for now
+        (TypeKind::Function(_), TypeKind::Function(_)) => true, // Could compare arity, but skip for now
         (TypeKind::Native(a), TypeKind::Native(b)) => {
             a.bare_ty == b.bare_ty && a.arguments.len() == b.arguments.len()
         }

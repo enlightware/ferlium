@@ -138,7 +138,7 @@ pub struct SubscriptSignature {
 
 /// A named subscript bundle with optional read/write members.
 ///
-/// This is intentionally not a `FunctionDefinition`: ref and mut members are
+/// This is intentionally not a `CallableDefinition`: ref and mut members are
 /// separate implementations with independent effects. The future first-class
 /// projection capability is expected to be represented by a distinct
 /// `SubscriptType`.
@@ -442,7 +442,7 @@ impl Module {
         function: ModuleFunction,
     ) -> LocalSubscriptId {
         assert_eq!(
-            function.definition.ty_scheme.ty.return_convention,
+            function.definition.result_convention,
             CallResultConvention::AddressorPlace
         );
         let signature = SubscriptSignature {

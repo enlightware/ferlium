@@ -19,8 +19,8 @@ The consumer then uses a normal place rooted at that temporary, and the surround
 
 Addressor-place call nodes are place-like nodes.
 Native addressors are registered as subscript members when they model projection, and source subscript members without `yield` infer `CallResultConvention::AddressorPlace` from their body shape.
-A subscript bundle does not have a `FnType`; each selected `ref` or `mut` member is emitted as a member function whose implementation type carries the result convention.
-After HIR construction the selected member function type is the source of truth: consumers handle any call node with `AddressorPlace` like a place when a place is required, or materialize it with `CloneValue` when an owned value is required.
+A subscript bundle does not have a `FnType`; each selected `ref` or `mut` member is emitted as a member function whose definition and selected HIR call metadata carry the result convention.
+After HIR construction the selected call metadata is the source of truth: consumers handle any call node with `AddressorPlace` like a place when a place is required, or materialize it with `CloneValue` when an owned value is required.
 The returned place is an expression-local capability, not a storable reference value.
 HIR must not store a raw place in a local, aggregate, closure capture, or normal value return.
 

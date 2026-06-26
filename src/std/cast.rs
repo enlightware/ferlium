@@ -11,7 +11,7 @@ use crate::{
     Location,
     compiler::error::InternalCompilationError,
     hir,
-    hir::function::FunctionDefinition,
+    hir::function::CallableDefinition,
     module::{
         LocalDeclId, Module, PendingFunctionBody, PendingLocalClone, ResolvedLocalClone, TraitId,
         TraitImplId, id::Id,
@@ -25,7 +25,7 @@ use crate::{
 };
 use ustr::ustr;
 
-use FunctionDefinition as Def;
+use CallableDefinition as Def;
 
 #[derive(Debug, Clone)]
 struct SelfCastDeriver;

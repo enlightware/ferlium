@@ -518,7 +518,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                 let source_arguments = app
                     .arguments
                     .iter()
-                    .zip(&app.ty.args)
+                    .zip(&app.ty.fn_ty.args)
                     .map(|(arg, arg_ty)| (arg.value, arg.passing, arg_ty.ty));
                 Apply(b(hir::Application {
                     function: self.elaborate_node(src, function)?,
@@ -564,7 +564,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                 let source_arguments = app
                     .arguments
                     .iter()
-                    .zip(&app.ty.args)
+                    .zip(&app.ty.fn_ty.args)
                     .map(|(arg, arg_ty)| (arg.value, arg.passing, arg_ty.ty));
                 let source_extra_arguments = app.extra_arguments.iter().copied();
                 let mut extra_arguments = if !inst_data.dicts_req.is_empty() {
@@ -614,7 +614,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                 let source_arguments = || {
                     app.arguments
                         .iter()
-                        .zip(&app.ty.args)
+                        .zip(&app.ty.fn_ty.args)
                         .map(|(arg, arg_ty)| (arg.value, arg.passing, arg_ty.ty))
                 };
                 assert!(
@@ -994,7 +994,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                 let source_arguments = call
                     .arguments
                     .iter()
-                    .zip(&call.ty.args)
+                    .zip(&call.ty.fn_ty.args)
                     .map(|(arg, arg_ty)| (arg.value, arg.passing, arg_ty.ty));
                 CallDictionaryMethod(b(hir::CallDictionaryMethod {
                     dictionary: self.elaborate_node(src, dictionary)?,
@@ -1166,7 +1166,7 @@ mod tests {
             "Layout",
             "Compiler-only layout metadata.",
             Vec::<&str>::new(),
-            Vec::<(&str, crate::hir::function::FunctionDefinition)>::new(),
+            Vec::<(&str, crate::hir::function::CallableDefinition)>::new(),
         )
         .with_associated_consts([
             TraitAssociatedConst::new("SIZE", Type::primitive::<isize>(), "Size in bytes."),

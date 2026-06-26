@@ -237,11 +237,10 @@ impl EffectSolver {
                             self.table.union(fresh_eff_var, *var);
                         }
                     }
-                    let new_fn_ty = FnType::new_with_return_convention(
+                    let new_fn_ty = FnType::new(
                         fn_ty.args.clone(),
                         fn_ty.ret,
                         EffType::single_variable(fresh_eff_var),
-                        fn_ty.return_convention,
                     );
                     Type::function_type(new_fn_ty)
                 } else {

@@ -18,7 +18,7 @@ use crate::{
     compiler::error::InternalCompilationError,
     containers::b,
     hir::emit_value_impl::{function_value_method, generic_value_methods_for_type},
-    hir::function::FunctionDefinition,
+    hir::function::CallableDefinition,
     hir::function::{PendingArgPassing, PendingValueArgPassing, ResolvedValueArgPassing},
     hir::hir_syn::{get_dictionary, load_local},
     hir::{
@@ -45,7 +45,7 @@ use crate::{
     types::effects::{EffType, Effect, EffectVar},
     types::mutability::{MutType, MutVar},
     types::r#trait::{Trait, TraitAssociatedConstIndex, TraitMethodIndex},
-    types::r#type::{FnArgType, Type, TypeDef, TypeKind, TypeVar},
+    types::r#type::{CallImplType, FnArgType, Type, TypeDef, TypeKind, TypeVar},
     types::type_inference::unify::UnifiedTypeInference,
     types::type_like::{TypeLike, instantiate_types},
     types::type_mapper::{BitmapInstantiationMapper, TypeMapper},
@@ -1986,7 +1986,7 @@ impl<'a> TraitSolver<'a> {
     fn blanket_method_thunk_code_entry(
         &mut self,
         function_id: FunctionId,
-        definition: &FunctionDefinition,
+        definition: &CallableDefinition,
         constraint_dict_infos: &[(NodeKind, Type)],
         fn_span: Location,
     ) -> Result<(PendingFunctionBody, Vec<LocalDecl>), InternalCompilationError> {
@@ -2038,7 +2038,10 @@ impl<'a> TraitSolver<'a> {
             extra_arguments: constraint_dict_nodes,
             argument_names: definition.arg_names.clone(),
             arguments,
-            ty: definition.ty_scheme.ty.clone(),
+            ty: CallImplType::new(
+                definition.ty_scheme.ty.clone(),
+                definition.result_convention,
+            ),
             inst_data: FnInstData::none(),
         }));
         let apply_id = body_arena.alloc(Node::new(

@@ -17,7 +17,7 @@ use crate::{
     compiler::error::InternalCompilationError,
     containers::b,
     hir::function::{
-        Function, FunctionDefinition, PendingScriptFunction, UnaryNativeFnMN, UnaryNativeFnRN,
+        CallableDefinition, Function, PendingScriptFunction, UnaryNativeFnMN, UnaryNativeFnRN,
     },
     hir::value::{FunctionValue, LiteralValue, NativeValue, ustr_to_isize},
     hir::{self, CallArgument, NodeArena, NodeId},
@@ -48,7 +48,7 @@ use crate::{
         Deriver, Trait, TraitAssociatedConst, TraitAssociatedConstIndex, TraitMethodIndex,
     },
     types::trait_solver::TraitSolver,
-    types::r#type::{FnArgType, FnType, Type, TypeDef, TypeKind, tuple_type},
+    types::r#type::{CallImplType, FnArgType, FnType, Type, TypeDef, TypeKind, tuple_type},
     types::type_like::TypeLike,
 };
 
@@ -402,7 +402,7 @@ pub(crate) fn is_value_trait(trait_id: TraitId, trait_def: &Trait) -> bool {
     trait_id.module == STD_MODULE_ID && trait_def.name == VALUE_TRAIT_NAME
 }
 
-use FunctionDefinition as Def;
+use CallableDefinition as Def;
 
 pub(crate) type ValueCodeEntries = Vec<(PendingFunctionBody, Vec<LocalDecl>)>;
 
@@ -521,7 +521,7 @@ impl<'s, 'm> ValueBodyCtx<'s, 'm> {
                         method_span: span,
                         arguments,
                         arguments_unnamed: UnnamedArg::All,
-                        ty: fn_ty,
+                        ty: CallImplType::value(fn_ty),
                         input_tys: vec![input_ty],
                         inst_data: hir::FnInstData::none(),
                     },
@@ -2215,7 +2215,7 @@ pub fn inspect_trait() -> Trait {
         [],
         [(
             "inspect",
-            FunctionDefinition::new_infer_quantifiers(
+            CallableDefinition::new_infer_quantifiers(
                 inspect_ty,
                 ["value"],
                 "Returns an inspection representation of `value`.",

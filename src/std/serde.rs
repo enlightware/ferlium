@@ -17,7 +17,7 @@ use crate::{
     hir::value::{LiteralValue, ustr_to_isize},
     hir::{self, CallArgument, NodeArena, NodeId},
     hir::{
-        function::FunctionDefinition,
+        function::CallableDefinition,
         value_dispatch::{
             prepare_generated_call_arguments_with_locals, static_apply_generated_with_locals,
         },
@@ -38,7 +38,9 @@ use crate::{
     types::mutability::MutVal,
     types::r#trait::{Deriver, Trait, TraitMethodIndex},
     types::trait_solver::TraitSolver,
-    types::r#type::{CallResultConvention, FnArgType, FnType, Type, TypeKind, tuple_type},
+    types::r#type::{
+        CallImplType, CallResultConvention, FnArgType, FnType, Type, TypeKind, tuple_type,
+    },
     types::type_like::TypeLike,
 };
 
@@ -471,14 +473,13 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                         false,
                     )?;
                     let arguments = vec![get_array, index_node];
-                    let ty = FnType::new_with_return_convention(
+                    let ty = FnType::new(
                         vec![
                             FnArgType::new_by_val(array_ty),
                             FnArgType::new_by_val(int_type()),
                         ],
                         data_value_ty,
                         EffType::empty(),
-                        CallResultConvention::AddressorPlace,
                     );
                     let mut arguments = arguments;
                     let prepared = prepare_generated_call_arguments_with_locals(
@@ -501,7 +502,7 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                             extra_arguments: vec![],
                             arguments,
                             argument_names: vec![ustr("array"), ustr("index")],
-                            ty,
+                            ty: CallImplType::new(ty, CallResultConvention::AddressorPlace),
                             inst_data: hir::FnInstData::none(),
                         })),
                         data_value_ty,
@@ -693,7 +694,7 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
 pub fn add_to_module(to: &mut Module) {
     // Traits
     let var0_ty = Type::variable_id(0);
-    use FunctionDefinition as Def;
+    use CallableDefinition as Def;
 
     // Serialize trait
     let serialize_trait = Trait::new_with_self_input_type(

@@ -15,7 +15,7 @@ use crate::{
         CompilationCapabilities,
         error::{InternalCompilationError, UnsafeFeature},
     },
-    hir::function::{FunctionDefinition, ResolvedArgPassing},
+    hir::function::{CallableDefinition, ResolvedArgPassing},
     hir::{LoopId, NodeArena, NodeId},
     module::{
         FunctionId, LocalDecl, LocalDeclId, LocalFunctionId, ModuleEnv, ModuleId,
@@ -34,10 +34,10 @@ use derive_new::new;
 
 /// A trait method description as result of a lookup in the typing environment.
 /// The tuple contains the trait id, the method index in the trait, and the method definition.
-pub type TraitMethodDescription<'a> = (TraitId, TraitMethodIndex, &'a FunctionDefinition);
+pub type TraitMethodDescription<'a> = (TraitId, TraitMethodIndex, &'a CallableDefinition);
 
 pub type GetFunctionData<'a> = (
-    &'a FunctionDefinition,
+    &'a CallableDefinition,
     FunctionId,
     Option<ModuleId>,
     Option<Vec<ResolvedArgPassing>>,

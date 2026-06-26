@@ -3,7 +3,7 @@ use crate::desugar::types::{
     RecursiveAliasRef, RecursiveTypeBuilder, desugar_type_constraints_with_next_effect_var,
     extend_generic_eff_params, extend_generic_ty_params,
 };
-use crate::hir::function::FunctionDefinition;
+use crate::hir::function::CallableDefinition;
 use crate::module::Visibility;
 use crate::types::r#trait::{
     Trait, TraitAssociatedConst, TraitMethodSpans, TraitSpans, TraitValidationError,
@@ -1187,7 +1187,7 @@ impl ast::TraitMethod {
         generic_ty_params: &GenericTyParams,
         generic_eff_params: &GenericEffParams,
         modules_used: &mut FxHashSet<ModuleId>,
-    ) -> Result<(Ustr, FunctionDefinition), InternalCompilationError> {
+    ) -> Result<(Ustr, CallableDefinition), InternalCompilationError> {
         let args = self
             .args
             .iter()
@@ -1217,7 +1217,7 @@ impl ast::TraitMethod {
         let fn_ty = FnType::new(args, ret, effects);
         Ok((
             self.name.0,
-            FunctionDefinition::new(
+            CallableDefinition::new(
                 TypeScheme::new_infer_quantifiers(fn_ty),
                 self.args.into_iter().map(|arg| arg.name.0).collect(),
                 self.doc,

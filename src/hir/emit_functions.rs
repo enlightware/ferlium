@@ -30,7 +30,7 @@ use crate::{
             log_dropped_constraints_module, refresh_debug_info_for_functions, set_pending_function,
             substitute_and_canonicalize_functions,
         },
-        function::FunctionDefinition,
+        function::CallableDefinition,
     },
     internal_compilation_error,
     module::{
@@ -699,12 +699,7 @@ where
             validate_function_attributes(attributes, name.0, output.module_id() == STD_MODULE_ID)?;
         let effects = ty_inf.fresh_effect_var_ty();
         let return_convention = kind.return_convention();
-        let fn_type = FnType::new_with_return_convention(
-            args_ty,
-            ret_ty_ty,
-            effects.clone(),
-            return_convention,
-        );
+        let fn_type = FnType::new(args_ty, ret_ty_ty, effects.clone());
 
         // If we are emitting a trait implementation, make sure this function conforms to it.
         if let Some(trait_ctx) = &trait_ctx {
@@ -748,14 +743,15 @@ where
             span: *span,
         };
         let ty_scheme = TypeScheme::new_just_type(fn_type);
-        let definition = FunctionDefinition::new_with_generic_params_and_attributes(
+        let definition = CallableDefinition::new_with_generic_params_and_attributes(
             ty_scheme,
             generic_params.type_params().to_vec(),
             generic_params.effect_params().to_vec(),
             arg_names,
             doc.clone(),
             attributes.clone(),
-        );
+        )
+        .with_result_convention(return_convention);
         let descr = ModuleFunction::placeholder(definition, Some(spans));
         let id = if let Some(placeholder_ids) = trait_ctx
             .as_ref()
@@ -829,7 +825,7 @@ where
             &mut new_deps,
             module_env,
             Some((expected_ret_ty, expected_span)),
-            descr.definition.ty_scheme.ty.return_convention,
+            descr.definition.result_convention,
             (!annotation_subst.0.is_empty() || !annotation_subst.1.is_empty())
                 .then_some(annotation_subst),
             vec![],
@@ -847,13 +843,7 @@ where
             });
         }
         ty_env.compilation_capabilities = capabilities;
-        if descr
-            .definition
-            .ty_scheme
-            .ty
-            .return_convention
-            .requires_yield_driver()
-        {
+        if descr.definition.result_convention.requires_yield_driver() {
             ty_env.yield_context = Some(crate::types::typing_env::YieldTypingContext::new(
                 expected_ret_ty,
                 expected_span,
@@ -875,14 +865,7 @@ where
                     [node] => Some(*node),
                     _ => None,
                 });
-        if descr
-            .definition
-            .ty_scheme
-            .ty
-            .return_convention
-            .requires_yield_driver()
-            && yield_node_id.is_none()
-        {
+        if descr.definition.result_convention.requires_yield_driver() && yield_node_id.is_none() {
             return Err(internal_compilation_error!(InvalidSubscriptDefinition {
                 subject: match kind {
                     EmitFunctionKind::SubscriptMember { subscript_name, .. } => {

@@ -303,7 +303,7 @@ fn subscript_member_without_yield_is_addressor_place() {
     let function = module
         .get_function_by_id(ref_member.function)
         .expect("subscript member function should exist");
-    assert!(function.definition.ty_scheme.ty.returns_place());
+    assert!(function.definition.returns_place());
 }
 
 #[test]

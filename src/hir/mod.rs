@@ -59,7 +59,7 @@ use crate::{
     module::ModuleEnv,
     types::effects::EffType,
     types::never::Never,
-    types::r#type::{FnType, Type, TypeVar},
+    types::r#type::{CallImplType, Type, TypeVar},
 };
 
 /// A phase of HIR compilation.
@@ -533,7 +533,7 @@ pub struct GetFunction {
 pub struct Application<P: HirPhase = Unelaborated> {
     pub function: NodeId<P>,
     pub arguments: Vec<CallArgument<P>>,
-    pub ty: FnType,
+    pub ty: CallImplType,
 }
 
 /// Call a statically known function.
@@ -546,7 +546,7 @@ pub struct StaticApplication<P: HirPhase = Unelaborated> {
     pub arguments: Vec<CallArgument<P>>,
     /// Optional source/debug names for visible arguments; same length as `arguments`.
     pub argument_names: Vec<Ustr>,
-    pub ty: FnType,
+    pub ty: CallImplType,
     pub inst_data: FnInstData,
 }
 
@@ -559,7 +559,7 @@ pub struct TraitMethodApplication<P: HirPhase = Unelaborated> {
     pub method_span: Location,
     pub arguments: Vec<CallArgument<P>>,
     pub arguments_unnamed: UnnamedArg,
-    pub ty: FnType,
+    pub ty: CallImplType,
     pub input_tys: Vec<Type>,
     pub inst_data: FnInstData,
 }
@@ -646,7 +646,7 @@ pub struct CallDictionaryMethod<P: HirPhase = Unelaborated> {
     pub dictionary: NodeId<P>,
     pub entry_index: TraitDictionaryEntryIndex,
     pub arguments: Vec<CallArgument<P>>,
-    pub ty: FnType,
+    pub ty: CallImplType,
 }
 
 // Control flow payloads.

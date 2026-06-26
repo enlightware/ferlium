@@ -17,7 +17,7 @@ use ferlium::{
     hir::{
         NodeKind,
         function::{
-            Function, FunctionDefinition, ResolvedArgPassing, ResolvedValueArgPassing,
+            CallableDefinition, Function, ResolvedArgPassing, ResolvedValueArgPassing,
             UnaryNativeFnNN,
         },
         value::LiteralValue,
@@ -606,7 +606,7 @@ fn concrete_impl_stores_associated_const_values() {
         value
     }
 
-    let method = FunctionDefinition::new_infer_quantifiers(
+    let method = CallableDefinition::new_infer_quantifiers(
         FnType::new_by_val([Type::variable_id(0)], Type::variable_id(0), no_effects()),
         ["value"],
         "Returns the value.",

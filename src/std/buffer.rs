@@ -19,8 +19,8 @@ use crate::{
     },
     hir::{
         function::{
-            BinaryNativeFnRMN, BinaryNativeFnRRN, Callable, ContextNativeFn, Function,
-            FunctionDefinition, ResolvedArgPassing, ResolvedValueArgPassing, UnaryNativeFnMN,
+            BinaryNativeFnRMN, BinaryNativeFnRRN, Callable, CallableDefinition, ContextNativeFn,
+            Function, ResolvedArgPassing, ResolvedValueArgPassing, UnaryNativeFnMN,
             UnaryNativeFnRN,
         },
         value::{NativeValueType, Value},
@@ -129,7 +129,7 @@ fn native_function(
     code: impl Callable + Clone + 'static,
 ) -> ModuleFunction {
     ModuleFunction::new(
-        FunctionDefinition::new(
+        CallableDefinition::new(
             TypeScheme::new_infer_quantifiers_with_constraints(ty, constraints.into()),
             arg_names.into_iter().map(ustr::Ustr::from).collect(),
             Some(String::from(doc)),
@@ -196,24 +196,24 @@ fn buffer_slot(mut args: ValOrMutArgs, _ctx: &mut EvalCtx) -> EvalControlFlowRes
 
 fn buffer_slot_descr() -> ModuleFunction {
     let gen0 = Type::variable_id(0);
-    let ty = FnType::new_with_return_convention(
+    let ty = FnType::new(
         vec![
             FnArgType::new_by_val(buffer_type(gen0)),
             FnArgType::new_by_val(super::math::int_type()),
         ],
         gen0,
         no_effects(),
-        CallResultConvention::AddressorPlace,
     );
     ModuleFunction::new(
-        FunctionDefinition::new_with_generic_params_and_attributes(
+        CallableDefinition::new_with_generic_params_and_attributes(
             TypeScheme::new_infer_quantifiers(ty),
             Vec::new(),
             Vec::new(),
             vec![ustr("buffer"), ustr("index")],
             Some(String::from("Returns the place for a buffer slot.")),
             Vec::new(),
-        ),
+        )
+        .with_result_convention(CallResultConvention::AddressorPlace),
         Box::new(ContextNativeFn::new(
             "buffer_slot",
             &[],

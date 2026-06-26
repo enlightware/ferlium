@@ -1442,7 +1442,7 @@ fn eval_call_dictionary_method_with(
     let mut arguments = eval_or_return!(eval_args_fn(
         arena,
         &node.arguments,
-        &node.ty.args,
+        &node.ty.fn_ty.args,
         ctx,
         locals,
     ));
@@ -1926,7 +1926,7 @@ fn eval_static_apply_with(
     let mut arguments = eval_or_return!(eval_args_fn(
         arena,
         &app.arguments,
-        &app.ty.args,
+        &app.ty.fn_ty.args,
         ctx,
         locals
     ));
@@ -2320,7 +2320,7 @@ fn eval_accessor_until_yield(
                 return Ok(ControlFlow::Transfer(transfer));
             }
         };
-    let mut arguments = match eval_args(arena, &app.arguments, &app.ty.args, ctx, locals)? {
+    let mut arguments = match eval_args(arena, &app.arguments, &app.ty.fn_ty.args, ctx, locals)? {
         ControlFlow::Continue(arguments) => arguments,
         ControlFlow::Transfer(transfer) => {
             ctx.truncate_environment_storage(temp_start);
@@ -3222,7 +3222,7 @@ mod tests {
         hir::{
             self, CallArgument, ENode, ENodeArena, Elaborated, LoopId, NodeKind,
             function::{
-                FunctionDefinition, ResolvedArgPassing, ResolvedValueArgPassing, ScriptFunction,
+                CallableDefinition, ResolvedArgPassing, ResolvedValueArgPassing, ScriptFunction,
             },
             hir_syn,
             value::{LiteralValue, NativeDisplay, Value},
@@ -3323,8 +3323,8 @@ mod tests {
     fn function_definition(
         fn_ty: FnType,
         arg_names: impl IntoIterator<Item = &'static str>,
-    ) -> FunctionDefinition {
-        FunctionDefinition::new(
+    ) -> CallableDefinition {
+        CallableDefinition::new(
             TypeScheme::new_infer_quantifiers(fn_ty),
             arg_names.into_iter().map(ustr).collect(),
             None,
@@ -3365,11 +3365,10 @@ mod tests {
             span,
         );
 
-        let accessor_fn_ty = FnType::new_with_return_convention(
+        let accessor_fn_ty = FnType::new(
             vec![FnArgType::new(int_ty, MutType::mutable())],
             int_ty,
             EffType::empty(),
-            CallResultConvention::YieldedOnce,
         );
         let mut accessor_locals = vec![
             local("log", MutType::mutable(), int_ty, span),
@@ -3459,18 +3458,18 @@ mod tests {
         );
         let load_caller_log_for_arg =
             node(&mut arena, hir_syn::load_local(caller_log), int_ty, span);
-        let accessor_fn_ty = FnType::new_with_return_convention(
+        let accessor_fn_ty = FnType::new(
             vec![FnArgType::new(int_ty, MutType::mutable())],
             int_ty,
             EffType::empty(),
-            CallResultConvention::YieldedOnce,
         );
         let accessor_id = LocalFunctionId::from_index(0);
         let accessor_call = node(
             &mut arena,
-            hir_syn::static_apply(
+            hir_syn::static_apply_with_result_convention(
                 crate::module::FunctionId::new(test_module_id, accessor_id),
                 accessor_fn_ty.clone(),
+                CallResultConvention::YieldedOnce,
                 vec![CallArgument {
                     value: load_caller_log_for_arg,
                     passing: ResolvedArgPassing::MutableRef,
@@ -3618,17 +3617,13 @@ mod tests {
         );
 
         let accessor_id = LocalFunctionId::from_index(0);
-        let accessor_fn_ty = FnType::new_with_return_convention(
-            vec![],
-            int_ty,
-            EffType::empty(),
-            CallResultConvention::YieldedOnce,
-        );
+        let accessor_fn_ty = FnType::new(vec![], int_ty, EffType::empty());
         let accessor_call = node(
             &mut arena,
-            hir_syn::static_apply(
+            hir_syn::static_apply_with_result_convention(
                 crate::module::FunctionId::new(test_module_id, accessor_id),
                 accessor_fn_ty.clone(),
+                CallResultConvention::YieldedOnce,
                 Vec::new(),
                 span,
             ),

@@ -21,7 +21,7 @@ use crate::{
         InternalCompilationError, InvalidTraitDefinitionKind, UnsupportedTraitDefinitionKind,
     },
     format::{FormatWith, write_with_separator_and_format_fn},
-    hir::function::{FunctionDefinition, FunctionDisplayContext},
+    hir::function::{CallableDefinition, FunctionDisplayContext},
     module::{ModuleEnv, TraitId, TraitImplId, id::Id},
     types::effects::{EffType, EffectVar, EffectsInstSubst},
     types::trait_solver::TraitSolver,
@@ -135,7 +135,7 @@ pub struct Trait {
     /// The constraints on the trait, for example related to the associated types.
     pub constraints: Vec<PubTypeConstraint>,
     /// The methods provided by the trait.
-    pub methods: Vec<(Ustr, FunctionDefinition)>,
+    pub methods: Vec<(Ustr, CallableDefinition)>,
     /// Compiler-defined associated consts provided by implementations.
     pub associated_consts: Vec<TraitAssociatedConst>,
     /// The trait derivers
@@ -184,7 +184,7 @@ impl Trait {
         doc: &str,
         input_type_names: impl Into<Vec<&'a str>>,
         output_type_names: impl Into<Vec<&'a str>>,
-        methods: impl Into<Vec<(&'a str, FunctionDefinition)>>,
+        methods: impl Into<Vec<(&'a str, CallableDefinition)>>,
     ) -> Self {
         let input_type_names = input_type_names.into();
         assert!(
@@ -224,7 +224,7 @@ impl Trait {
         name: &str,
         doc: &str,
         output_type_names: impl Into<Vec<&'a str>>,
-        methods: impl Into<Vec<(&'a str, FunctionDefinition)>>,
+        methods: impl Into<Vec<(&'a str, CallableDefinition)>>,
     ) -> Self {
         Self::new(name, doc, ["Self"], output_type_names, methods)
     }
@@ -235,7 +235,7 @@ impl Trait {
         input_type_names: impl Into<Vec<&'a str>>,
         output_type_names: impl Into<Vec<&'a str>>,
         constraints: impl Into<Vec<PubTypeConstraint>>,
-        methods: impl Into<Vec<(&'a str, FunctionDefinition)>>,
+        methods: impl Into<Vec<(&'a str, CallableDefinition)>>,
     ) -> Self {
         let input_type_names = input_type_names.into();
         assert!(
@@ -380,7 +380,7 @@ impl Trait {
     }
 
     /// Return the method at the given trait method index.
-    pub fn method(&self, index: TraitMethodIndex) -> &(Ustr, FunctionDefinition) {
+    pub fn method(&self, index: TraitMethodIndex) -> &(Ustr, CallableDefinition) {
         &self.methods[index.as_index()]
     }
 
@@ -537,13 +537,14 @@ impl Trait {
         input_tys: &[Type],
         output_tys: &[Type],
         output_effs: &[EffType],
-    ) -> Vec<FunctionDefinition> {
+    ) -> Vec<CallableDefinition> {
         let inst_subst = self.param_subst_for(input_tys, output_tys, output_effs);
         let mut mapper = BitmapInstantiationMapper::new(&inst_subst);
         self.methods
             .iter()
-            .map(|(_, def)| FunctionDefinition {
+            .map(|(_, def)| CallableDefinition {
                 ty_scheme: def.ty_scheme.map_simplified(&mut mapper),
+                result_convention: def.result_convention,
                 generic_params: def.generic_params.clone(),
                 generic_effect_params: def.generic_effect_params.clone(),
                 arg_names: def.arg_names.clone(),
@@ -771,7 +772,7 @@ mod tests {
             ["Result"],
             [(
                 "add",
-                FunctionDefinition::new_infer_quantifiers(
+                CallableDefinition::new_infer_quantifiers(
                     fn_ty,
                     ["lhs", "rhs", "output"],
                     "Add values.",
@@ -802,7 +803,7 @@ mod tests {
             ["Output"],
             [(
                 "project",
-                FunctionDefinition::new_infer_quantifiers(fn_ty, ["value"], "Project a value."),
+                CallableDefinition::new_infer_quantifiers(fn_ty, ["value"], "Project a value."),
             )],
         )
         .with_output_effects(["E"]);

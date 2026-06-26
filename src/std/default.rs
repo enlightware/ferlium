@@ -12,7 +12,7 @@ use crate::{
     compiler::error::InternalCompilationError,
     containers::b,
     hir::{
-        self, NodeArena, NodeId, function::FunctionDefinition,
+        self, NodeArena, NodeId, function::CallableDefinition,
         value_dispatch::static_apply_generated_with_locals,
     },
     module::{Module, PendingFunctionBody, TraitId, TraitImplId},
@@ -24,7 +24,7 @@ use crate::{
     types::type_like::TypeLike,
 };
 
-use FunctionDefinition as Def;
+use CallableDefinition as Def;
 
 #[derive(Debug, Clone)]
 struct EnumDefaultDeriver;

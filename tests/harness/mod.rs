@@ -11,7 +11,7 @@ use ferlium::{
     compiler::error::{CompilationError, RuntimeErrorKind},
     eval::{ControlFlow, EvalResult, RuntimeError, eval_node},
     hir::function::{
-        BinaryNativeFnNNV, BinaryNativeFnRMN, BinaryNativeFnRRN, Function, FunctionDefinition,
+        BinaryNativeFnNNV, BinaryNativeFnRMN, BinaryNativeFnRRN, CallableDefinition, Function,
         NullaryNativeFnN, NullaryNativeFnV, UnaryNativeFnMN, UnaryNativeFnNN, UnaryNativeFnNV,
         UnaryNativeFnRN, UnaryNativeFnVN, UnaryNativeFnVV,
     },
@@ -355,7 +355,7 @@ fn test_assoc_trait() -> Trait {
         ["Output"],
         [(
             "project",
-            FunctionDefinition::new_infer_quantifiers(
+            CallableDefinition::new_infer_quantifiers(
                 FnType::new_by_val([Type::variable_id(0)], Type::variable_id(1), no_effects()),
                 ["value"],
                 "Projects a test-only associated output type.",
@@ -371,7 +371,7 @@ fn test_witnessed_project_trait() -> Trait {
         ["Output"],
         [(
             "witness_project",
-            FunctionDefinition::new_infer_quantifiers(
+            CallableDefinition::new_infer_quantifiers(
                 FnType::new_by_val([Type::variable_id(0)], Type::variable_id(1), no_effects()),
                 ["value"],
                 "Projects the output witnessed by a constrained named type.",
@@ -387,7 +387,7 @@ fn test_eff_trait() -> Trait {
         ["Output"],
         [(
             "eff_project",
-            FunctionDefinition::new_infer_quantifiers(
+            CallableDefinition::new_infer_quantifiers(
                 FnType::new_by_val(
                     [Type::variable_id(0)],
                     Type::variable_id(1),
@@ -409,7 +409,7 @@ fn test_eff_pair_trait() -> Trait {
         [
             (
                 "eff_pair_first",
-                FunctionDefinition::new_infer_quantifiers(
+                CallableDefinition::new_infer_quantifiers(
                     FnType::new_by_val(
                         [Type::variable_id(0)],
                         int_type(),
@@ -421,7 +421,7 @@ fn test_eff_pair_trait() -> Trait {
             ),
             (
                 "eff_pair_second",
-                FunctionDefinition::new_infer_quantifiers(
+                CallableDefinition::new_infer_quantifiers(
                     FnType::new_by_val(
                         [Type::variable_id(0)],
                         int_type(),
@@ -443,7 +443,7 @@ fn test_eff_join_trait() -> Trait {
         Vec::<&str>::new(),
         [(
             "eff_join",
-            FunctionDefinition::new_infer_quantifiers(
+            CallableDefinition::new_infer_quantifiers(
                 FnType::new_by_val(
                     [Type::variable_id(0)],
                     int_type(),
@@ -1230,7 +1230,7 @@ impl TestSession {
     }
 
     /// Compile and get a specific function definition
-    pub fn compile_and_get_fn_def(&mut self, src: &str, fn_name: &str) -> FunctionDefinition {
+    pub fn compile_and_get_fn_def(&mut self, src: &str, fn_name: &str) -> CallableDefinition {
         let module = self.compile_and_get_module(src);
         module
             .get_function(ustr(fn_name))

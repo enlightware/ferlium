@@ -19,7 +19,7 @@ use crate::{
     define_id_type,
     format::FormatWith,
     hir::borrow_checker::{check_borrows, check_place_return_roots, check_yield_roots},
-    hir::function::{Function, FunctionDefinition, PendingScriptFunction, ResolvedArgPassing},
+    hir::function::{CallableDefinition, Function, PendingScriptFunction, ResolvedArgPassing},
     hir::{
         ENodeArena, ENodeId, Elaborated, HirPhase, NodeId, UNodeArena, UNodeId, Unelaborated,
         function::ScriptFunction,
@@ -422,7 +422,7 @@ define_id_type!(
 pub struct PendingModuleFunction {
     pub name: Option<Ustr>,
     pub subscript_member_name: Option<Ustr>,
-    pub definition: FunctionDefinition,
+    pub definition: CallableDefinition,
     pub code: PendingScriptFunction,
     pub spans: Option<ModuleFunctionSpans>,
     /// Local variable declarations for the function body, including arguments and any variables declared within the function.
@@ -465,7 +465,7 @@ impl PendingFunctionBody {
 /// A local function inside a module after HIR elaboration.
 #[derive(Debug, Clone)]
 pub struct ModuleFunction {
-    pub definition: FunctionDefinition,
+    pub definition: CallableDefinition,
     pub code: Function,
     /// High-level argument passing requirements for each visible parameter.
     ///
@@ -482,7 +482,7 @@ pub struct ModuleFunction {
 pub type EModuleFunction = ModuleFunction;
 
 fn parameter_passing_from_code(
-    definition: &FunctionDefinition,
+    definition: &CallableDefinition,
     code: &Function,
 ) -> Vec<ResolvedArgPassing> {
     let parameter_passing = code
@@ -494,7 +494,7 @@ fn parameter_passing_from_code(
 }
 
 fn check_parameter_passing_len(
-    definition: &FunctionDefinition,
+    definition: &CallableDefinition,
     parameter_passing: &[ResolvedArgPassing],
 ) {
     let expected = definition.arg_names.len();
@@ -509,7 +509,7 @@ fn check_parameter_passing_len(
 
 impl PendingModuleFunction {
     pub fn new(
-        definition: FunctionDefinition,
+        definition: CallableDefinition,
         code: PendingScriptFunction,
         spans: Option<ModuleFunctionSpans>,
         locals: Vec<ULocalDecl>,
@@ -519,7 +519,7 @@ impl PendingModuleFunction {
 
     pub fn new_with_name(
         name: Option<Ustr>,
-        definition: FunctionDefinition,
+        definition: CallableDefinition,
         code: PendingScriptFunction,
         spans: Option<ModuleFunctionSpans>,
         locals: Vec<ULocalDecl>,
@@ -535,7 +535,7 @@ impl PendingModuleFunction {
     }
 
     pub(crate) fn from_body(
-        definition: FunctionDefinition,
+        definition: CallableDefinition,
         body: PendingFunctionBody,
         runtime_arg_count: usize,
         spans: Option<ModuleFunctionSpans>,
@@ -546,7 +546,7 @@ impl PendingModuleFunction {
 
     pub(crate) fn from_body_with_name(
         name: Option<Ustr>,
-        definition: FunctionDefinition,
+        definition: CallableDefinition,
         body: PendingFunctionBody,
         runtime_arg_count: usize,
         spans: Option<ModuleFunctionSpans>,
@@ -661,7 +661,7 @@ impl PendingModuleFunction {
 
 impl ModuleFunction {
     pub fn new_elaborated(
-        definition: FunctionDefinition,
+        definition: CallableDefinition,
         code: Function,
         parameter_passing: Vec<ResolvedArgPassing>,
         spans: Option<ModuleFunctionSpans>,
@@ -680,7 +680,7 @@ impl ModuleFunction {
     }
 
     pub fn new(
-        definition: FunctionDefinition,
+        definition: CallableDefinition,
         code: Function,
         spans: Option<ModuleFunctionSpans>,
         locals: Vec<ULocalDecl>,
@@ -703,7 +703,7 @@ impl ModuleFunction {
 
     /// Constructs a function whose debug info will be populated by a later `refresh_debug_info` call after locals have reached their final form.
     pub fn new_without_debug_info(
-        definition: FunctionDefinition,
+        definition: CallableDefinition,
         code: Function,
         spans: Option<ModuleFunctionSpans>,
         locals: Vec<ULocalDecl>,
@@ -723,11 +723,11 @@ impl ModuleFunction {
         }
     }
 
-    pub fn new_without_spans_nor_locals(definition: FunctionDefinition, code: Function) -> Self {
+    pub fn new_without_spans_nor_locals(definition: CallableDefinition, code: Function) -> Self {
         Self::new_without_debug_info(definition, code, None, Vec::new())
     }
 
-    pub fn placeholder(definition: FunctionDefinition, spans: Option<ModuleFunctionSpans>) -> Self {
+    pub fn placeholder(definition: CallableDefinition, spans: Option<ModuleFunctionSpans>) -> Self {
         Self {
             definition,
             code: b(crate::hir::function::VoidFunction),

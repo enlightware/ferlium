@@ -494,7 +494,7 @@ fn array_index_return_preserves_place_tail() {
     let array_index = module
         .get_function_by_id(array_index_id)
         .expect("std array_index subscript member should be valid");
-    assert!(array_index.definition.ty_scheme.ty.returns_place());
+    assert!(array_index.definition.returns_place());
     let entry = array_index.get_code_entry().unwrap();
     let return_value = find_return_value(&module.hir_arena, entry).unwrap();
     assert!(is_place_reference(&module.hir_arena, return_value));

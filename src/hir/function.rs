@@ -33,7 +33,10 @@ use crate::{
     hir::{self, ENodeId, NodeArena, NodeId, UNodeArena, UNodeId},
     module::{ELocalDecl, ModuleEnv, ModuleFunction, ULocalDecl},
     types::effects::EffType,
-    types::r#type::{CallResultConvention, FnArgType, FnType, Type, fmt_fn_type_with_arg_names},
+    types::r#type::{
+        CallImplType, CallResultConvention, FnArgType, FnType, Type,
+        fmt_call_impl_type_with_arg_names,
+    },
     types::type_like::TypeLike,
     types::type_mapper::TypeMapper,
     types::type_scheme::{PubTypeConstraint, TypeScheme},
@@ -59,8 +62,9 @@ impl<'a, 'm> FunctionDisplayContext<'a, 'm> {
 
 /// The definition of a function, to be used in modules, traits and IDEs.
 #[derive(Debug, Clone)]
-pub struct FunctionDefinition {
+pub struct CallableDefinition {
     pub ty_scheme: TypeScheme<FnType>,
+    pub result_convention: CallResultConvention,
     pub generic_params: Vec<UstrSpan>,
     pub generic_effect_params: Vec<UstrSpan>,
     pub arg_names: Vec<Ustr>,
@@ -68,10 +72,11 @@ pub struct FunctionDefinition {
     pub attributes: Vec<Attribute>,
 }
 
-impl FunctionDefinition {
+impl CallableDefinition {
     pub fn new(ty_scheme: TypeScheme<FnType>, arg_names: Vec<Ustr>, doc: Option<String>) -> Self {
         Self {
             ty_scheme,
+            result_convention: CallResultConvention::Value,
             generic_params: vec![],
             generic_effect_params: vec![],
             arg_names,
@@ -88,6 +93,7 @@ impl FunctionDefinition {
     ) -> Self {
         Self {
             ty_scheme,
+            result_convention: CallResultConvention::Value,
             generic_params,
             generic_effect_params: vec![],
             arg_names,
@@ -106,6 +112,7 @@ impl FunctionDefinition {
     ) -> Self {
         Self {
             ty_scheme,
+            result_convention: CallResultConvention::Value,
             generic_params,
             generic_effect_params,
             arg_names,
@@ -120,8 +127,9 @@ impl FunctionDefinition {
         doc: &str,
     ) -> Self {
         let arg_names = arg_names.into_iter().map(Ustr::from).collect();
-        FunctionDefinition {
+        CallableDefinition {
             ty_scheme: TypeScheme::new_infer_quantifiers(fn_ty),
+            result_convention: CallResultConvention::Value,
             generic_params: vec![],
             generic_effect_params: vec![],
             arg_names,
@@ -137,11 +145,12 @@ impl FunctionDefinition {
         doc: &str,
     ) -> Self {
         let arg_names = arg_names.into_iter().map(Ustr::from).collect();
-        FunctionDefinition {
+        CallableDefinition {
             ty_scheme: TypeScheme::new_infer_quantifiers_with_constraints(
                 fn_ty,
                 constraints.into(),
             ),
+            result_convention: CallResultConvention::Value,
             generic_params: vec![],
             generic_effect_params: vec![],
             arg_names,
@@ -151,18 +160,23 @@ impl FunctionDefinition {
     }
 
     pub fn return_convention(&self) -> CallResultConvention {
-        self.ty_scheme.ty.return_convention
+        self.result_convention
     }
 
     pub fn returns_place(&self) -> bool {
         self.return_convention().returns_place()
     }
 
-    /// The signature of the function is the type scheme and the argument names.
+    pub fn with_result_convention(mut self, result_convention: CallResultConvention) -> Self {
+        self.result_convention = result_convention;
+        self
+    }
+
+    /// The signature of the callable is the type scheme, result convention, and argument names.
     /// Strictly speaking, the argument names are not part of the signature,
-    /// but we assume that the semantics of the function changes if they are changed.
-    pub fn signature(&self) -> (&TypeScheme<FnType>, &[Ustr]) {
-        (&self.ty_scheme, &self.arg_names)
+    /// but we assume that the semantics of the callable changes if they are changed.
+    pub fn signature(&self) -> (&TypeScheme<FnType>, CallResultConvention, &[Ustr]) {
+        (&self.ty_scheme, self.result_convention, &self.arg_names)
     }
 
     /// Get a hash of the function signature for quick comparison of interfaces.
@@ -251,7 +265,12 @@ impl FunctionDefinition {
             .ty_scheme
             .type_display_env(context.module_env, &ty_var_names)
             .with_eff_var_names(&eff_var_names);
-        fmt_fn_type_with_arg_names(&self.ty_scheme.ty, &self.arg_names, f, &type_env)?;
+        fmt_call_impl_type_with_arg_names(
+            &CallImplType::new(self.ty_scheme.ty.clone(), self.result_convention),
+            &self.arg_names,
+            f,
+            &type_env,
+        )?;
         if !self.ty_scheme.is_just_type_and_effects() {
             write!(f, " ")?;
             self.ty_scheme
@@ -262,14 +281,15 @@ impl FunctionDefinition {
     }
 }
 
-impl TypeLike for FunctionDefinition {
+impl TypeLike for CallableDefinition {
     fn visit(&self, visitor: &mut impl TypeInnerVisitor) {
         self.ty_scheme.visit(visitor);
     }
 
     fn map(&self, f: &mut impl TypeMapper) -> Self {
-        FunctionDefinition {
+        CallableDefinition {
             ty_scheme: self.ty_scheme.map(f),
+            result_convention: self.result_convention,
             generic_params: self.generic_params.clone(),
             generic_effect_params: self.generic_effect_params.clone(),
             arg_names: self.arg_names.clone(),
@@ -279,7 +299,7 @@ impl TypeLike for FunctionDefinition {
     }
 }
 
-impl FormatWith<ModuleEnv<'_>> for (&FunctionDefinition, Ustr) {
+impl FormatWith<ModuleEnv<'_>> for (&CallableDefinition, Ustr) {
     fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv<'_>) -> std::fmt::Result {
         self.0.fmt_with_name_and_module_env(f, self.1, "", env)?;
         Ok(())
@@ -998,7 +1018,7 @@ macro_rules! n_ary_native_fn {
 
             pub fn description_with_ty_scheme(f: for<'a> fn($($arg::Output<'a>),*) -> O::Input, arg_names: [&'static str; count!($($arg)*)], doc: &'static str, ty_scheme: TypeScheme<FnType>) -> ModuleFunction {
                 ModuleFunction::new(
-                    FunctionDefinition::new(
+                    CallableDefinition::new(
                         ty_scheme,
                         arg_names.into_iter().map(Ustr::from).collect(),
                         Some(String::from(doc)),

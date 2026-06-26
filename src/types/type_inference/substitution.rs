@@ -9,7 +9,7 @@ use crate::{
     types::{
         effects::{EffType, Effect, EffectVar, EffectsInstSubst},
         mutability::{MutType, MutVar},
-        r#type::{FnType, Type, TypeInstSubst, TypeKind, TypeVar},
+        r#type::{CallImplType, FnType, Type, TypeInstSubst, TypeKind, TypeVar},
         type_scheme::PubTypeConstraint,
         type_substitution::{
             TypeSubstituer, substitute_fn_type, substitute_fn_type_in_place, substitute_type,
@@ -90,6 +90,10 @@ impl UnifiedTypeInference {
 
     pub fn substitute_in_fn_type_in_place(&mut self, fn_ty: &mut FnType) {
         substitute_fn_type_in_place(fn_ty, &mut SubstituteTypes::new(self));
+    }
+
+    pub fn substitute_in_call_impl_type_in_place(&mut self, call_ty: &mut CallImplType) {
+        self.substitute_in_fn_type_in_place(&mut call_ty.fn_ty);
     }
 
     pub fn substitute_in_mut_type(&mut self, mut_ty: MutType) -> MutType {
@@ -210,14 +214,14 @@ impl UnifiedTypeInference {
         use hir::NodeKind::*;
         match &mut arena[node_id].kind {
             Apply(app) => {
-                self.substitute_in_fn_type_in_place(&mut app.ty);
+                self.substitute_in_call_impl_type_in_place(&mut app.ty);
             }
             StaticApply(app) => {
-                self.substitute_in_fn_type_in_place(&mut app.ty);
+                self.substitute_in_call_impl_type_in_place(&mut app.ty);
                 self.substitute_in_fn_inst_data(&mut app.inst_data);
             }
             TraitMethodApply(app) => {
-                self.substitute_in_fn_type_in_place(&mut app.ty);
+                self.substitute_in_call_impl_type_in_place(&mut app.ty);
                 self.substitute_in_types_in_place(&mut app.input_tys);
                 self.substitute_in_fn_inst_data(&mut app.inst_data);
             }

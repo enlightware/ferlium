@@ -25,7 +25,7 @@ use crate::{
         Project as HirProject, ProjectAt as HirProjectAt, StoreLocal, Variant as HirVariant,
         addressor_place_base_argument_index,
         function::{
-            FunctionDefinition, PendingArgPassing, PendingValueArgPassing, ResolvedArgPassing,
+            CallableDefinition, PendingArgPassing, PendingValueArgPassing, ResolvedArgPassing,
             ResolvedValueArgPassing, unresolved_arg_passing_for_args,
         },
         node_is_place_reference, place_resolution_may_create_temp,
@@ -53,8 +53,8 @@ use crate::{
         r#trait::{Trait, TraitMethodIndex},
         trait_solver::{TraitSolver, TraitSolverProbe},
         r#type::{
-            CallResultConvention, FnArgType, FnType, TyVarKey, Type, TypeInstSubst, TypeKind,
-            TypeVar,
+            CallImplType, CallResultConvention, FnArgType, FnType, TyVarKey, Type, TypeInstSubst,
+            TypeKind, TypeVar,
         },
         type_like::TypeLike,
         type_mapper::{BitmapInstantiationMapper, TypeMapper},
@@ -153,6 +153,7 @@ struct PreparedCallArguments {
 struct StaticCallFromCheckedArgs {
     callee: CheckedStaticCallee,
     inst_fn_ty: FnType,
+    result_convention: CallResultConvention,
     inst_data: hir::FnInstData,
     args_node_ids: Vec<NodeId>,
     abi_arg_tys: Vec<FnArgType>,
@@ -187,6 +188,7 @@ struct BuiltStaticCall {
 struct PreparedStaticCallTarget {
     callee: CheckedStaticCallee,
     inst_fn_ty: FnType,
+    result_convention: CallResultConvention,
     inst_data: hir::FnInstData,
     abi_arg_tys: Vec<FnArgType>,
     visible_arg_passing: Option<Vec<ResolvedArgPassing>>,
@@ -598,9 +600,7 @@ impl TypeInference {
             env.new_deps,
             env.module_env,
             Some((ret_ty, env.ast_arena[body].span)),
-            expected_fn_ty
-                .as_ref()
-                .map_or(CallResultConvention::Value, |fn_ty| fn_ty.return_convention),
+            CallResultConvention::Value,
             env.annotation_subst,
             vec![],
             env.fuel_checks_enabled,
@@ -642,7 +642,7 @@ impl TypeInference {
             span,
         };
         let function = PendingModuleFunction::from_body(
-            FunctionDefinition::new(ty_scheme, arg_names, None),
+            CallableDefinition::new(ty_scheme, arg_names, None),
             PendingFunctionBody::new(fn_arena, code_id),
             runtime_arg_count,
             Some(spans),
@@ -1166,25 +1166,12 @@ impl TypeInference {
                         // Allocate a fresh variable for the return type and effects of the function
                         let ret_ty = self.fresh_type_var_ty();
                         let call_effects = self.fresh_effect_var_ty();
-                        let return_convention = match &*env.ir_arena[func_node_id].ty.data() {
-                            TypeKind::Function(fn_ty) => fn_ty.return_convention,
-                            _ => {
-                                // First-class place-returning functions are not supported yet:
-                                // unresolved dynamic callees are inferred as value-returning calls.
-                                CallResultConvention::Value
-                            }
-                        };
                         let abi_args = match &*env.ir_arena[func_node_id].ty.data() {
                             TypeKind::Function(fn_ty) => Some(fn_ty.args.clone()),
                             _ => None,
                         };
                         // Build the function type
-                        let app_ty = FnType::new_with_return_convention(
-                            args_tys.clone(),
-                            ret_ty,
-                            call_effects.clone(),
-                            return_convention,
-                        );
+                        let app_ty = FnType::new(args_tys.clone(), ret_ty, call_effects.clone());
                         let func_ty = Type::function_type(app_ty.clone());
                         self.add_sub_type_constraint(
                             env.ir_arena[func_node_id].ty,
@@ -1235,7 +1222,7 @@ impl TypeInference {
                         let call = K::Apply(b(hir::Application {
                             function,
                             arguments: prepared_arguments.arguments,
-                            ty: app_ty,
+                            ty: CallImplType::value(app_ty),
                         }));
                         let call =
                             hir::Node::new(call, ret_ty, combined_effects.clone(), expr_span);
@@ -2145,7 +2132,7 @@ impl TypeInference {
             extra_arguments: Vec::new(),
             arguments: prepared_arguments.arguments,
             argument_names: vec![ustr("array"), ustr("index")],
-            ty: inst_fn_ty,
+            ty: CallImplType::new(inst_fn_ty, definition.result_convention),
             inst_data,
         }));
         let call = hir::Node::new(call, element_ty, combined_effects.clone(), expr_span);
@@ -2402,7 +2389,7 @@ impl TypeInference {
             extra_arguments: Vec::new(),
             arguments: prepared_arguments.arguments,
             argument_names: definition.arg_names.clone(),
-            ty: inst_fn_ty,
+            ty: CallImplType::new(inst_fn_ty, definition.result_convention),
             inst_data,
         }));
         let call = hir::Node::new(call, ret_ty, combined_effects.clone(), expr_span);
@@ -2905,7 +2892,7 @@ impl TypeInference {
                 arg_count,
             )
             .map(<[_]>::to_vec);
-            let result_mut_ty = if inst_fn_ty.returns_place() {
+            let result_mut_ty = if definition.result_convention.returns_place() {
                 MutType::mutable()
             } else {
                 MutType::constant()
@@ -2919,6 +2906,7 @@ impl TypeInference {
                 },
                 abi_arg_tys: definition.ty_scheme.ty.args.clone(),
                 inst_fn_ty,
+                result_convention: definition.result_convention,
                 inst_data,
                 visible_arg_passing,
                 result_mut_ty,
@@ -2993,9 +2981,14 @@ impl TypeInference {
                 },
                 abi_arg_tys: inst_fn_ty.args.clone(),
                 inst_fn_ty,
+                result_convention: definition.result_convention,
                 inst_data,
                 visible_arg_passing: None,
-                result_mut_ty: MutType::constant(),
+                result_mut_ty: if definition.result_convention.returns_place() {
+                    MutType::mutable()
+                } else {
+                    MutType::constant()
+                },
                 have_trait_constraint: Some(have_trait_constraint),
             }));
         }
@@ -3055,7 +3048,7 @@ impl TypeInference {
                 extra_arguments: Vec::new(),
                 arguments: prepared_arguments.arguments,
                 argument_names,
-                ty: call.inst_fn_ty,
+                ty: CallImplType::new(call.inst_fn_ty, call.result_convention),
                 inst_data: call.inst_data,
             })),
             CheckedStaticCallee::TraitMethod {
@@ -3072,7 +3065,7 @@ impl TypeInference {
                 method_span,
                 arguments: prepared_arguments.arguments,
                 arguments_unnamed,
-                ty: call.inst_fn_ty,
+                ty: CallImplType::new(call.inst_fn_ty, call.result_convention),
                 input_tys,
                 inst_data: call.inst_data,
             })),
@@ -3182,6 +3175,7 @@ impl TypeInference {
                         callee: target.callee,
                         abi_arg_tys: target.abi_arg_tys,
                         inst_fn_ty: target.inst_fn_ty,
+                        result_convention: target.result_convention,
                         inst_data: target.inst_data,
                         args_node_ids,
                         visible_arg_passing: target.visible_arg_passing,
@@ -3240,6 +3234,7 @@ impl TypeInference {
                 callee: target.callee,
                 abi_arg_tys: target.abi_arg_tys,
                 inst_fn_ty: target.inst_fn_ty,
+                result_convention: target.result_convention,
                 inst_data: target.inst_data,
                 args_node_ids,
                 visible_arg_passing: target.visible_arg_passing,
@@ -4161,6 +4156,7 @@ impl TypeInference {
                             callee: target.callee,
                             abi_arg_tys: target.abi_arg_tys,
                             inst_fn_ty: target.inst_fn_ty,
+                            result_convention: target.result_convention,
                             inst_data: target.inst_data,
                             args_node_ids,
                             visible_arg_passing: target.visible_arg_passing,

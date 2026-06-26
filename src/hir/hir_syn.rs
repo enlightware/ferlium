@@ -18,7 +18,7 @@ use crate::{
     },
     std::string::String as FerliumString,
     types::mutability::{MutType, MutVal},
-    types::r#type::{FnType, Type},
+    types::r#type::{CallImplType, CallResultConvention, FnType, Type},
 };
 use std::str::FromStr;
 use ustr::{Ustr, ustr};
@@ -58,7 +58,7 @@ pub fn static_apply_with_argument_passing(
             .map(|i| ustr(&format!("arg{i}")))
             .collect(),
         arguments,
-        ty,
+        ty: CallImplType::value(ty),
         inst_data: hir::FnInstData::none(),
     }))
 }
@@ -166,6 +166,17 @@ pub fn static_apply<P: HirPhase>(
     arguments: Vec<CallArgument<P>>,
     span: Location,
 ) -> NodeKind<P> {
+    static_apply_with_result_convention(function, ty, CallResultConvention::Value, arguments, span)
+}
+
+#[allow(dead_code)]
+pub fn static_apply_with_result_convention<P: HirPhase>(
+    function: FunctionId,
+    ty: FnType,
+    result_convention: CallResultConvention,
+    arguments: Vec<CallArgument<P>>,
+    span: Location,
+) -> NodeKind<P> {
     K::StaticApply(b(hir::StaticApplication {
         function,
         function_path: None,
@@ -175,7 +186,7 @@ pub fn static_apply<P: HirPhase>(
             .map(|i| ustr(&format!("arg{i}")))
             .collect(),
         arguments,
-        ty,
+        ty: CallImplType::new(ty, result_convention),
         inst_data: hir::FnInstData::none(),
     }))
 }
