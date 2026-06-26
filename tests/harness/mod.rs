@@ -1319,6 +1319,17 @@ impl TestSession {
         self.backend
     }
 
+    /// Pins this session to the HIR interpreter only, regardless of the thread-local default.
+    ///
+    /// An escape hatch for a snippet that uses a feature the SSA backend cannot lower yet (e.g. a
+    /// subscript `yield` / `WithYielded`), so a `Backend::Both` session would otherwise crash in the
+    /// SSA lowering. Prefer [`hir_only_test!`](crate::hir_only_test) for a whole test; this is for the
+    /// experimental sessions that build their own `TestSession`.
+    #[allow(dead_code)] // Escape-hatch API for tests; not exercised by every test binary.
+    pub fn restrict_to_hir(&mut self) {
+        self.backend = Backend::Hir;
+    }
+
     pub fn allow_experimental(&mut self) {
         self.session.set_allow_experimental(true);
     }
@@ -1479,23 +1490,49 @@ impl TestSession {
                 // HIR only: the returned value is the HIR result.
                 Backend::Hir => self.eval_hir(module_id, &expr)?,
                 // SSA only: the returned value is the SSA result, so its assertions check the SSA
-                // backend directly. Features SSA cannot lower yet fail loudly on the `::ssa` case.
-                Backend::Ssa => self.session.run_expr_via_ssa(module_id, &expr),
-                // Both (legacy default): run each backend and assert they agree, returning the HIR
-                // result. SSA features that are not yet supported surface the gap on the test.
+                // backend directly. A raised runtime error surfaces as `Error::Runtime`, so
+                // `fail_run`/`try_run_value` observe it exactly as for the HIR backend. Features SSA
+                // cannot lower yet fail loudly on the `::ssa` case.
+                Backend::Ssa => self
+                    .session
+                    .run_expr_via_ssa(module_id, &expr)
+                    .map_err(Error::Runtime)?,
+                // Both (legacy default): run each backend and assert their *outcomes* agree — equal
+                // values, or equal runtime-error kinds — returning the HIR result. This is what gives
+                // the SSA error path coverage: a failing snippet now exercises both backends (the
+                // SSA run is no longer short-circuited by the HIR error).
                 Backend::Both => {
                     // Snapshot the externally-mutable `@props` fixtures so the SSA run observes the
                     // same preconditions as the HIR run. Without this, a snippet that mutates a
                     // fixture would apply its effect twice (once per backend) and the two backends
                     // would diverge spuriously. See `PropertyFixtures`.
                     let fixtures = PropertyFixtures::capture();
-                    let hir_value = self.eval_hir(module_id, &expr)?;
+                    let hir_result = self.eval_hir(module_id, &expr);
                     fixtures.restore();
-                    let ssa_value = self.session.run_expr_via_ssa(module_id, &expr);
-                    if let Err(message) = compare_values(&ssa_value, &hir_value, "value") {
-                        panic!("SSA backend diverged from the HIR interpreter: {message}");
+                    let ssa_result = self
+                        .session
+                        .run_expr_via_ssa(module_id, &expr)
+                        .map_err(Error::Runtime);
+                    match (&hir_result, &ssa_result) {
+                        (Ok(hir_value), Ok(ssa_value)) => {
+                            if let Err(message) = compare_values(ssa_value, hir_value, "value") {
+                                panic!("SSA backend diverged from the HIR interpreter: {message}");
+                            }
+                        }
+                        (Err(Error::Runtime(hir_err)), Err(Error::Runtime(ssa_err))) => {
+                            assert_eq!(
+                                ssa_err.kind(),
+                                hir_err.kind(),
+                                "SSA backend raised a different runtime error than the HIR \
+                                 interpreter"
+                            );
+                        }
+                        (hir, ssa) => panic!(
+                            "SSA backend diverged from the HIR interpreter: one produced a value \
+                             and the other a runtime error (HIR: {hir:?}, SSA: {ssa:?})"
+                        ),
                     }
-                    hir_value
+                    hir_result?
                 }
             };
             Ok(RunValue {

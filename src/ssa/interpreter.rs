@@ -14,6 +14,7 @@ use rustc_hash::FxHashMap;
 use crate::{
     CompilerSession, Location,
     emit_ssa::build_ssa_function,
+    compiler::error::RuntimeErrorKind,
     eval::{
         ControlFlow, EvalCtx, Place, PlaceResult, RuntimeError, ValOrMut,
         call_value_clone_for_temp, call_value_drop_for_temp,
@@ -58,6 +59,13 @@ enum Binding {
     Dictionary(TraitDictionaryId),
     /// A saved top of the stack (the `environment` length), the result of a `stack_save`.
     StackMarker(usize),
+    /// An open scoped projection (the result of a `project`): the exposed yielded place — used by the
+    /// body exactly like a `Place` binding — together with the suspended accessor frame that
+    /// `end_project` resumes. Removed from the register map by its `end_project`.
+    Projected {
+        place: Place,
+        frame: Box<SuspendedFrame>,
+    },
 }
 
 /// The control-flow effect of executing a single instruction.
@@ -68,6 +76,53 @@ enum Step {
     Goto(BlockIdentity),
     /// Return from the current function (the result is already in the return out-pointer).
     Return,
+    /// Resume the unwind that this frame's cleanup pad interrupted: hand the in-flight error back to
+    /// the caller so propagation continues up the stack.
+    ///
+    /// When a fallible call raises, the error does not leave the frame immediately — control is first
+    /// diverted to a cleanup pad (the `invoke`'s unwind edge) which runs the frame's drops. That pad
+    /// has *paused* the unwind. After the drops, this step (the pad's `resume` terminator) lets it
+    /// continue: the same error — stashed when control entered the pad — is returned to the caller,
+    /// which catches it at the originating call site and runs its own pad. The error is *continued*,
+    /// not newly raised, which is why it is `resume` and not a throw.
+    Resume,
+    /// Suspend the current frame at a `yield`, exposing the carried place to the driving `project`.
+    /// The frame's registers and stack cells stay live; `end_project` later resumes it (mirrors the
+    /// HIR interpreter's `ControlTransfer::Yield`).
+    Suspend(Place),
+}
+
+/// The outcome of running a frame's instruction loop ([`Interpreter::run_loop`]): it either ran to a
+/// `ret`/`resume` (`Completed`) or hit a `yield` (`Suspended`), in which case the live register map
+/// and the resume point are handed back so a later `end_project` can continue the accessor's slide.
+enum FrameOutcome {
+    Completed,
+    Suspended {
+        /// The yielded place (`yield`'s operand), exposed as the `project`'s result.
+        place: Place,
+        /// The block holding the instructions after the `yield`.
+        block: BlockIdentity,
+        /// The index of the first post-`yield` instruction within `block`.
+        idx: usize,
+        /// The accessor frame's live register/parameter bindings.
+        slots: FxHashMap<ssa::Value, Binding>,
+    },
+}
+
+/// A suspended `YieldedOnce` accessor frame, kept alive between a `project` and its `end_project`
+/// (the SSA analog of the HIR interpreter's `SuspendedAccessor`).
+struct SuspendedFrame {
+    /// The accessor function.
+    key: FunctionKey,
+    /// The block to resume into (the one containing the `yield`).
+    block: BlockIdentity,
+    /// The index of the first post-`yield` instruction within `block`.
+    idx: usize,
+    /// The accessor frame's live register/parameter bindings.
+    slots: FxHashMap<ssa::Value, Binding>,
+    /// The `environment` length captured at the `project`, so `end_project` reclaims the accessor's
+    /// stack cells once its slide completes (mirrors `truncate_environment_storage`).
+    frame_top: usize,
 }
 
 /// `Place::target` sentinel for the non-dereferenceable unit place (`&()`).
@@ -97,8 +152,14 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    /// Runs the no-argument entry function `main_id` of `module_id` and returns its result value.
-    pub fn run_main(&mut self, module_id: ModuleId, main_id: LocalFunctionId) -> Value {
+    /// Runs the no-argument entry function `main_id` of `module_id` and returns its result value, or
+    /// the [`RuntimeError`] it raised. A raised error has already unwound the callee's frames through
+    /// their cleanup pads (dropping live locals), so propagating it here leaks nothing live.
+    pub fn run_main(
+        &mut self,
+        module_id: ModuleId,
+        main_id: LocalFunctionId,
+    ) -> Result<Value, RuntimeError> {
         let key = FunctionKey {
             module: module_id,
             identity: main_id,
@@ -122,12 +183,11 @@ impl<'a> Interpreter<'a> {
             .ret;
         let init = self.shaped_uninitialized_value(ret_ty);
         let ret = self.alloc_cell(init);
-        self.run_function(key, vec![Binding::Place(ret.clone())])
-            .expect("SSA interpretation failed");
+        self.run_function(key, vec![Binding::Place(ret.clone())])?;
         let slot = ret
             .target_mut(&mut self.ctx)
             .expect("return cell must be addressable");
-        std::mem::replace(slot, Value::uninit())
+        Ok(std::mem::replace(slot, Value::uninit()))
     }
 
     /// Returns the lowered SSA body of `key`, building and caching it on first use.
@@ -151,26 +211,84 @@ impl<'a> Interpreter<'a> {
 
     /// Runs `key`'s body with the given parameter bindings (in slot order). The function writes its
     /// result through the return out-pointer parameter, so this returns no value.
+    ///
+    /// Guards the call depth exactly like the HIR interpreter (`EvalCtx::check_call_depth`): the SSA
+    /// interpreter interprets a script callee by *recursing in Rust*, so an unbounded recursion would
+    /// overflow the real Rust stack instead of raising [`RuntimeErrorKind::CallDepthLimitExceeded`].
+    /// Bounding it at the same `call_depth_limit` keeps the two backends in agreement on deeply
+    /// recursive programs.
     fn run_function(&mut self, key: FunctionKey, args: Vec<Binding>) -> Result<(), RuntimeError> {
+        if self.ctx.call_depth >= self.ctx.call_depth_limit {
+            return Err(RuntimeError::new_native(
+                RuntimeErrorKind::CallDepthLimitExceeded {
+                    limit: self.ctx.call_depth_limit,
+                },
+            ));
+        }
+        self.ctx.call_depth += 1;
+        let result = self.run_frame(key, args);
+        self.ctx.call_depth -= 1;
+        result
+    }
+
+    /// Runs one already-depth-checked call frame (see [`run_function`](Self::run_function)). A plain
+    /// call frame must run to completion: suspending out of it (a `YieldedOnce` accessor reached
+    /// other than through a `project`) is a lowering bug.
+    fn run_frame(&mut self, key: FunctionKey, args: Vec<Binding>) -> Result<(), RuntimeError> {
         let func = self.function(key);
         let mut slots: FxHashMap<ssa::Value, Binding> = FxHashMap::default();
         for (i, b) in args.into_iter().enumerate() {
             slots.insert(ssa::Value::Parameter(i), b);
         }
+        match self.run_loop(&func, slots, func.entry(), 0)? {
+            FrameOutcome::Completed => Ok(()),
+            FrameOutcome::Suspended { .. } => {
+                panic!("a frame suspended outside a `project` driver (YieldedOnce called as a plain function)")
+            }
+        }
+    }
 
-        let mut block = func.entry();
+    /// Runs `func`'s instruction stream starting at `(block, idx)` with the given live `slots`, until
+    /// it either completes (`ret`/`resume`) or suspends at a `yield`. Used both for a fresh frame
+    /// (from its entry) and to resume a suspended accessor's slide (from after its `yield`).
+    fn run_loop(
+        &mut self,
+        func: &ssa::Function,
+        mut slots: FxHashMap<ssa::Value, Binding>,
+        mut block: BlockIdentity,
+        mut idx: usize,
+    ) -> Result<FrameOutcome, RuntimeError> {
         let mut instructions: Vec<InstructionIdentity> = func.block(block).instructions().collect();
-        let mut idx = 0;
+        // The error in flight through this frame's cleanup pads: set when an `invoke` diverts control
+        // to its unwind pad, taken when the chain of pads ends in a `resume` that re-raises it. It is
+        // always consumed (at `resume`) before the `Err` leaves this frame, so a nested call's own
+        // in-flight error never overlaps with this one.
+        let mut pending: Option<RuntimeError> = None;
         loop {
             let i = instructions[idx];
-            match self.exec(func.as_ref(), &mut slots, i)? {
+            match self.exec(func, &mut slots, &mut pending, i)? {
                 Step::Advance => idx += 1,
                 Step::Goto(b) => {
                     block = b;
                     instructions = func.block(block).instructions().collect();
                     idx = 0;
                 }
-                Step::Return => return Ok(()),
+                Step::Return => return Ok(FrameOutcome::Completed),
+                Step::Resume => {
+                    return Err(pending
+                        .take()
+                        .expect("resume reached without an in-flight error"));
+                }
+                // Suspend at the `yield`: hand back the live frame and the resume point (the
+                // instruction right after the `yield`) for a later `end_project`.
+                Step::Suspend(place) => {
+                    return Ok(FrameOutcome::Suspended {
+                        place,
+                        block,
+                        idx: idx + 1,
+                        slots,
+                    });
+                }
             }
         }
     }
@@ -180,6 +298,7 @@ impl<'a> Interpreter<'a> {
         &mut self,
         func: &ssa::Function,
         slots: &mut FxHashMap<ssa::Value, Binding>,
+        pending: &mut Option<RuntimeError>,
         i: InstructionIdentity,
     ) -> Result<Step, RuntimeError> {
         let instr = func.at(i);
@@ -197,26 +316,21 @@ impl<'a> Interpreter<'a> {
                 slots.insert(def.unwrap(), Binding::Place(place));
                 Step::Advance
             }
-            InstructionView::Project { index, .. } => {
-                let mut place = self.place_operand(slots, &instr.operands[0]);
-                place.path.push(index as isize);
-                slots.insert(def.unwrap(), Binding::Place(place));
-                Step::Advance
-            }
-            InstructionView::ProjectAt { .. } => {
-                // Like `Project`, but the field index is read from operand `1` (an `int` register
-                // loaded from a field-index dictionary parameter) rather than a static constant.
+            InstructionView::Subfield { .. } => {
+                // The field index is the `int` value at operand `1` — a constant for a static field,
+                // or a register holding a run-time offset (loaded from a field-index dictionary
+                // parameter for a row-polymorphic record). Either way it resolves to an `isize`.
                 let mut place = self.place_operand(slots, &instr.operands[0]);
                 let index = self.value_operand(slots, &instr.operands[1]);
                 let index = *index
                     .as_primitive_ty::<isize>()
-                    .expect("project_at index must be an int");
+                    .expect("subfield index must be an int");
                 place.path.push(index);
                 slots.insert(def.unwrap(), Binding::Place(place));
                 Step::Advance
             }
             InstructionView::DictEntry { entry_index, .. } => {
-                // The symbolic analog of `Project`: resolve the dictionary operand to its interned
+                // The symbolic analog of `Subfield`: resolve the dictionary operand to its interned
                 // id, read entry `entry_index` (a method function value or an associated const)
                 // straight from the impl arena, and materialize it into a fresh cell whose place is
                 // bound — so `call`/`drop`/`memcpy` consume it exactly as a `project` result.
@@ -309,6 +423,58 @@ impl<'a> Interpreter<'a> {
             InstructionView::Call => {
                 self.exec_call(slots, &instr.operands, span)?;
                 Step::Advance
+            }
+            InstructionView::Invoke { normal, unwind } => {
+                // A fallible call: on a raised error, stash it and divert to the cleanup pad rather
+                // than propagating straight out of the frame. The pad drops this frame's live locals
+                // (husk-skipping anything already dropped/moved) and ends in `br <outer pad>` or
+                // `resume`, the latter re-raising `pending` to the caller (see the loop in
+                // `run_function`). On normal completion control falls through to the continuation.
+                match self.exec_call(slots, &instr.operands, span) {
+                    Ok(()) => Step::Goto(normal),
+                    Err(err) => {
+                        *pending = Some(err);
+                        Step::Goto(unwind)
+                    }
+                }
+            }
+            InstructionView::Resume => Step::Resume,
+            InstructionView::Project { ty } => {
+                // Enter a scoped subscript: run the accessor to its `yield`, bind the exposed place
+                // (and the suspended frame) to this register, and continue with the body.
+                self.exec_project(slots, &instr.operands, def.unwrap(), ty)?;
+                Step::Advance
+            }
+            InstructionView::Yield => {
+                // Suspend the accessor, exposing the place at operand `0` to the driving `project`.
+                let place = self.place_operand(slots, &instr.operands[0]);
+                Step::Suspend(place)
+            }
+            InstructionView::EndProject => {
+                // Leave a scoped subscript: resume the accessor's slide to completion and reclaim its
+                // frame. Reached on the normal path and inside cleanup pads (epilogue-on-unwind).
+                let SuspendedFrame {
+                    key,
+                    block,
+                    idx,
+                    slots: acc_slots,
+                    frame_top,
+                } = match slots.remove(&instr.operands[0]) {
+                    Some(Binding::Projected { frame, .. }) => *frame,
+                    _ => panic!("end_project operand is not an open projection"),
+                };
+                let func = self.function(key);
+                let result = self.run_loop(&func, acc_slots, block, idx);
+                // The accessor frame is torn down whichever way its slide ends: drop the depth it
+                // held since the `project` and reclaim its stack cells, then surface any slide error.
+                self.ctx.call_depth -= 1;
+                self.restore_stack(frame_top);
+                match result? {
+                    FrameOutcome::Completed => Step::Advance,
+                    FrameOutcome::Suspended { .. } => {
+                        panic!("a YieldedOnce accessor yielded more than once")
+                    }
+                }
             }
             InstructionView::Drop => {
                 self.exec_drop(slots, &instr.operands, span)?;
@@ -465,6 +631,101 @@ impl<'a> Interpreter<'a> {
             self.exec_closure_call(slots, &place, arg_ops, span)
         } else {
             self.exec_resolved_call(slots, module_id, function_id, Vec::new(), arg_ops, span)
+        }
+    }
+
+    /// Executes a `project` instruction `[callee, args.., ret-out]`: runs the `YieldedOnce` accessor
+    /// `callee` to its `yield`, keeping the accessor frame live, and binds `def` to the exposed
+    /// yielded place plus the suspended frame (a [`Binding::Projected`]). Mirrors the HIR
+    /// interpreter's `call_accessor_until_yield`: the call depth incremented here stays held until the
+    /// matching `end_project` resumes the slide and tears the frame down.
+    fn exec_project(
+        &mut self,
+        slots: &mut FxHashMap<ssa::Value, Binding>,
+        operands: &[ssa::Value],
+        def: ssa::Value,
+        _ty: Type,
+    ) -> Result<(), RuntimeError> {
+        // A subscript accessor is always a direct static reference to its (script) member function.
+        let key = match &operands[0] {
+            ssa::Value::Function(r) => FunctionKey {
+                module: r.module,
+                identity: r.identity,
+            },
+            other => panic!("project callee must be a static function reference, got {other:?}"),
+        };
+
+        // Marshal the argument operands by the callee's static parameter tags — identical to the
+        // script branch of `exec_resolved_call` (an extra parameter binds to its interned dictionary
+        // or by-pointer place; every other operand, including the unused return out-pointer, binds to
+        // its place).
+        let param_tags: Vec<ssa::ParameterTag> = self
+            .function(key)
+            .parameters()
+            .iter()
+            .map(|p| p.tag)
+            .collect();
+        let arg_ops = &operands[1..];
+        let mut args: Vec<Binding> = Vec::with_capacity(arg_ops.len());
+        for (k, op) in arg_ops.iter().enumerate() {
+            let binding = match param_tags.get(k) {
+                Some(ssa::ParameterTag::Dictionary) => match self.try_dict_operand(slots, op) {
+                    Some(id) => Binding::Dictionary(id),
+                    None => Binding::Place(self.place_operand(slots, op)),
+                },
+                _ => Binding::Place(self.place_operand(slots, op)),
+            };
+            args.push(binding);
+        }
+
+        // Enter the accessor frame (depth-guarded like `run_function`), recording the stack top so
+        // `end_project` can later reclaim the accessor's cells.
+        if self.ctx.call_depth >= self.ctx.call_depth_limit {
+            return Err(RuntimeError::new_native(
+                RuntimeErrorKind::CallDepthLimitExceeded {
+                    limit: self.ctx.call_depth_limit,
+                },
+            ));
+        }
+        self.ctx.call_depth += 1;
+        let frame_top = self.ctx.environment.len();
+        let func = self.function(key);
+        let mut acc_slots: FxHashMap<ssa::Value, Binding> = FxHashMap::default();
+        for (i, b) in args.into_iter().enumerate() {
+            acc_slots.insert(ssa::Value::Parameter(i), b);
+        }
+        match self.run_loop(&func, acc_slots, func.entry(), 0) {
+            Ok(FrameOutcome::Suspended {
+                place,
+                block,
+                idx,
+                slots: acc_slots,
+            }) => {
+                // Keep the depth incremented: the accessor frame is still live (resumed at
+                // `end_project`).
+                slots.insert(
+                    def,
+                    Binding::Projected {
+                        place,
+                        frame: Box::new(SuspendedFrame {
+                            key,
+                            block,
+                            idx,
+                            slots: acc_slots,
+                            frame_top,
+                        }),
+                    },
+                );
+                Ok(())
+            }
+            Ok(FrameOutcome::Completed) => {
+                self.ctx.call_depth -= 1;
+                panic!("a YieldedOnce accessor returned without yielding")
+            }
+            Err(err) => {
+                self.ctx.call_depth -= 1;
+                Err(err)
+            }
         }
     }
 
@@ -1001,6 +1262,9 @@ impl<'a> Interpreter<'a> {
         match v {
             ssa::Value::Register(_) | ssa::Value::Parameter(_) => match slots.get(v) {
                 Some(Binding::Place(p)) => p.clone(),
+                // An open scoped projection (a `project` result) is used as the place it exposes,
+                // exactly like a `Place` binding, until its `end_project` removes it.
+                Some(Binding::Projected { place, .. }) => place.clone(),
                 // A place produced by an `AddressorPlace` function (e.g. `buffer_slot`) is bridged
                 // through an ordinary value cell as a `PlaceResult` native; unwrap it back to the
                 // place it denotes so it can be projected/loaded/stored like any other place.
@@ -1049,6 +1313,9 @@ impl<'a> Interpreter<'a> {
                     },
                 },
                 Some(Binding::Place(_)) => panic!("expected a value but {v} is bound to a place"),
+                Some(Binding::Projected { .. }) => {
+                    panic!("expected a value but {v} is bound to an open projection (a place)")
+                }
                 Some(Binding::StackMarker(_)) => {
                     panic!("expected a value but {v} is bound to a stack marker")
                 }
@@ -1104,6 +1371,10 @@ impl<'a> Interpreter<'a> {
                 Some(Binding::Place(p)) => p
                     .target_ref(&self.ctx)
                     .expect("comp_eq of an invalid place")
+                    .to_literal_value(),
+                Some(Binding::Projected { place, .. }) => place
+                    .target_ref(&self.ctx)
+                    .expect("comp_eq of an invalid open projection")
                     .to_literal_value(),
                 Some(Binding::Value(val)) => val.to_literal_value(),
                 Some(Binding::StackMarker(_)) => {
@@ -1356,6 +1627,12 @@ fn verify_function(func: &ssa::Function) {
             InstructionView::UnconditionalBranch { target } => assert!(
                 target_ok(target),
                 "SSA function `{}` block {}: br targets a missing or empty block",
+                func.name,
+                b.raw()
+            ),
+            InstructionView::Invoke { normal, unwind } => assert!(
+                target_ok(normal) && target_ok(unwind),
+                "SSA function `{}` block {}: invoke targets a missing or empty block",
                 func.name,
                 b.raw()
             ),

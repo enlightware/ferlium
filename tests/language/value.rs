@@ -1308,6 +1308,83 @@ fn generic_value_drop_runs_on_runtime_error() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn fallible_value_clone_impl_is_rejected() {
+    // The SSA emitter lowers synthesized `Value::clone`/`Value::drop` calls as plain `call`s with no
+    // cleanup-pad unwind edge. That is sound only because these methods cannot raise: a `Value` impl
+    // whose `clone`/`drop` body is fallible is a compile error (the trait declares an empty effect
+    // row). This pins the invariant the SSA lowering relies on.
+    let mut session = TestSession::new();
+    session.fail_compilation(
+        r#"
+        struct Probe(int)
+        impl Value for Probe {
+            fn eq(left: Probe, right: Probe) -> bool { left.0 == right.0 }
+            fn to_string(value: Probe) -> string { to_string(value.0) }
+            fn hash(value: Probe, state: &mut hasher) { hash(value.0, state) }
+            fn clone(source: Probe) -> Probe { Probe(idiv(1, 0)) }
+            fn drop(target: &mut Probe) {}
+        }
+        Probe(1).0
+        "#,
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn nested_scope_drops_run_innermost_first_on_runtime_error() {
+    // An abort in an inner block unwinds through both scopes' cleanup pads: the inner local is
+    // dropped first, then the outer one. Runs under both backends, so the SSA landing-pad chain is
+    // checked against the HIR interpreter's frame unwind.
+    let mut session = TestSession::new();
+    let source = format!(
+        r#"
+        {}
+        fn run() -> int {{
+            let outer = Probe(1);
+            {{
+                let inner = Probe(2);
+                idiv(1, 0)
+            }}
+        }}
+        testing::reset_tracked_drops();
+        run()
+        "#,
+        tracked_probe_value_impl()
+    );
+    assert_eq!(session.fail_run(&source), RuntimeErrorKind::DivisionByZero);
+    // Drops, in order: inner Probe(2), then outer Probe(1) → the digit sequence 21.
+    assert_val_eq!(session.run("testing::tracked_drop_log()"), int(21));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn cross_frame_drops_run_callee_first_on_runtime_error() {
+    // An abort deep in a callee unwinds the callee's frame (running its pad) before re-raising into
+    // the caller's frame (running its pad): the callee local is dropped first, then the caller's.
+    let mut session = TestSession::new();
+    let source = format!(
+        r#"
+        {}
+        fn g() -> int {{
+            let c = Probe(3);
+            idiv(1, 0)
+        }}
+        fn run() -> int {{
+            let a = Probe(1);
+            g()
+        }}
+        testing::reset_tracked_drops();
+        run()
+        "#,
+        tracked_probe_value_impl()
+    );
+    assert_eq!(session.fail_run(&source), RuntimeErrorKind::DivisionByZero);
+    // Drops, in order: callee Probe(3), then caller Probe(1) → the digit sequence 31.
+    assert_val_eq!(session.run("testing::tracked_drop_log()"), int(31));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn auto_derived_struct_value_clone_uses_field_clone() {
     let mut session = TestSession::new();
     assert_val_eq!(

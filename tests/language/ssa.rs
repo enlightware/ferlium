@@ -548,7 +548,7 @@ fn projection_of_place_call() {
     %r2 = alloca_place (int, bool)
     %r3 = call std::array_index(%p0, %r0, %r2)
     %r4 = load %r2
-    %r5 = project 1 from %r4
+    %r5 = subfield int 1 from %r4
     %r6 = memcpy %r5 to %p1
     %r7 = ret
 "#,
@@ -869,22 +869,22 @@ fn $lambda$1(%p0: @arg &mut int, %p1: @ret int):
 
 fn Value<...>::clone(%p0: @arg & (int,), %p1: @ret (int,)):
   0:
-    %r0 = project 0 from %p1
-    %r1 = project 0 from %p0
+    %r0 = subfield int 0 from %p1
+    %r1 = subfield int 0 from %p0
     %r2 = call std::Value<...>::clone(%r1, %r0)
     %r3 = ret
 
 fn Value<...>::drop(%p0: @arg &mut (int,), %p1: @ret ()):
   0:
-    %r0 = project 0 from %p0
+    %r0 = subfield int 0 from %p0
     %r1 = call std::Value<...>::drop(%r0, &())
     %r2 = store () to %p1
     %r3 = ret
 
 fn Value<...>::eq(%p0: @arg & (int,), %p1: @arg & (int,), %p2: @ret bool):
   0:
-    %r0 = project 0 from %p0
-    %r1 = project 0 from %p1
+    %r0 = subfield int 0 from %p0
+    %r1 = subfield int 0 from %p1
     %r2 = alloca bool
     %r3 = call std::Value<...>::eq(%r0, %r1, %r2)
     %r4 = br 1
@@ -902,7 +902,7 @@ fn Value<...>::eq(%p0: @arg & (int,), %p1: @arg & (int,), %p2: @ret bool):
 
 fn Value<...>::hash(%p0: @arg & (int,), %p1: @arg &mut hasher, %p2: @ret ()):
   0:
-    %r0 = project 0 from %p0
+    %r0 = subfield int 0 from %p0
     %r1 = call std::Value<...>::hash(%r0, %p1, &())
     %r2 = store () to %p2
     %r3 = ret
@@ -913,7 +913,7 @@ fn Value<...>::to_string(%p0: @arg & (int,), %p1: @ret string):
     %r1 = alloca string
     %r2 = alloca string
     %r3 = store "(" to %r0
-    %r4 = project 0 from %p0
+    %r4 = subfield int 0 from %p0
     %r5 = call std::Value<...>::to_string(%r4, %r1)
     %r6 = call std::string_push_str(%r0, %r1, &())
     %r7 = drop %r1 via std::Value<...>::drop
@@ -1061,27 +1061,27 @@ fn construct_struct() {
         ssa,
         r#"fn Value<...>::clone(%p0: @arg & A, %p1: @ret A):
   0:
-    %r0 = project 0 from %p1
-    %r1 = project 0 from %p0
+    %r0 = subfield int 0 from %p1
+    %r1 = subfield int 0 from %p0
     %r2 = call std::Value<...>::clone(%r1, %r0)
-    %r3 = project 1 from %p1
-    %r4 = project 1 from %p0
+    %r3 = subfield int 1 from %p1
+    %r4 = subfield int 1 from %p0
     %r5 = call std::Value<...>::clone(%r4, %r3)
     %r6 = ret
 
 fn Value<...>::drop(%p0: @arg &mut A, %p1: @ret ()):
   0:
-    %r0 = project 0 from %p0
+    %r0 = subfield int 0 from %p0
     %r1 = call std::Value<...>::drop(%r0, &())
-    %r2 = project 1 from %p0
+    %r2 = subfield int 1 from %p0
     %r3 = call std::Value<...>::drop(%r2, &())
     %r4 = store () to %p1
     %r5 = ret
 
 fn Value<...>::eq(%p0: @arg & A, %p1: @arg & A, %p2: @ret bool):
   0:
-    %r0 = project 0 from %p0
-    %r1 = project 0 from %p1
+    %r0 = subfield int 0 from %p0
+    %r1 = subfield int 0 from %p1
     %r2 = alloca bool
     %r3 = call std::Value<...>::eq(%r0, %r1, %r2)
     %r4 = br 1
@@ -1089,8 +1089,8 @@ fn Value<...>::eq(%p0: @arg & A, %p1: @arg & A, %p2: @ret bool):
     %r5 = comp_eq %r2 i1 1
     %r6 = condbr %r5, %b2, &b3
   2:
-    %r7 = project 1 from %p0
-    %r8 = project 1 from %p1
+    %r7 = subfield int 1 from %p0
+    %r8 = subfield int 1 from %p1
     %r9 = alloca bool
     %r10 = call std::Value<...>::eq(%r7, %r8, %r9)
     %r11 = br 5
@@ -1113,9 +1113,9 @@ fn Value<...>::eq(%p0: @arg & A, %p1: @arg & A, %p2: @ret bool):
 
 fn Value<...>::hash(%p0: @arg & A, %p1: @arg &mut hasher, %p2: @ret ()):
   0:
-    %r0 = project 0 from %p0
+    %r0 = subfield int 0 from %p0
     %r1 = call std::Value<...>::hash(%r0, %p1, &())
-    %r2 = project 1 from %p0
+    %r2 = subfield int 1 from %p0
     %r3 = call std::Value<...>::hash(%r2, %p1, &())
     %r4 = store () to %p2
     %r5 = ret
@@ -1138,7 +1138,7 @@ fn Value<...>::to_string(%p0: @arg & A, %p1: @ret string):
     %r13 = store ": " to %r2
     %r14 = call std::string_push_str(%r0, %r2, &())
     %r15 = drop %r2 via std::Value<...>::drop
-    %r16 = project 0 from %p0
+    %r16 = subfield int 0 from %p0
     %r17 = call std::Value<...>::to_string(%r16, %r3)
     %r18 = call std::string_push_str(%r0, %r3, &())
     %r19 = drop %r3 via std::Value<...>::drop
@@ -1151,7 +1151,7 @@ fn Value<...>::to_string(%p0: @arg & A, %p1: @ret string):
     %r26 = store ": " to %r6
     %r27 = call std::string_push_str(%r0, %r6, &())
     %r28 = drop %r6 via std::Value<...>::drop
-    %r29 = project 1 from %p0
+    %r29 = subfield int 1 from %p0
     %r30 = call std::Value<...>::to_string(%r29, %r7)
     %r31 = call std::string_push_str(%r0, %r7, &())
     %r32 = drop %r7 via std::Value<...>::drop
@@ -1163,27 +1163,27 @@ fn Value<...>::to_string(%p0: @arg & A, %p1: @ret string):
 
 fn Value<...>::clone(%p0: @arg & Wrapper, %p1: @ret Wrapper):
   0:
-    %r0 = project 0 from %p1
-    %r1 = project 0 from %p0
+    %r0 = subfield int 0 from %p1
+    %r1 = subfield int 0 from %p0
     %r2 = call <test>::Value<...>::clone(%r1, %r0)
-    %r3 = project 1 from %p1
-    %r4 = project 1 from %p0
+    %r3 = subfield int 1 from %p1
+    %r4 = subfield int 1 from %p0
     %r5 = call <test>::Value<...>::clone(%r4, %r3)
     %r6 = ret
 
 fn Value<...>::drop(%p0: @arg &mut Wrapper, %p1: @ret ()):
   0:
-    %r0 = project 0 from %p0
+    %r0 = subfield int 0 from %p0
     %r1 = call <test>::Value<...>::drop(%r0, &())
-    %r2 = project 1 from %p0
+    %r2 = subfield int 1 from %p0
     %r3 = call <test>::Value<...>::drop(%r2, &())
     %r4 = store () to %p1
     %r5 = ret
 
 fn Value<...>::eq(%p0: @arg & Wrapper, %p1: @arg & Wrapper, %p2: @ret bool):
   0:
-    %r0 = project 0 from %p0
-    %r1 = project 0 from %p1
+    %r0 = subfield int 0 from %p0
+    %r1 = subfield int 0 from %p1
     %r2 = alloca bool
     %r3 = call <test>::Value<...>::eq(%r0, %r1, %r2)
     %r4 = br 1
@@ -1191,8 +1191,8 @@ fn Value<...>::eq(%p0: @arg & Wrapper, %p1: @arg & Wrapper, %p2: @ret bool):
     %r5 = comp_eq %r2 i1 1
     %r6 = condbr %r5, %b2, &b3
   2:
-    %r7 = project 1 from %p0
-    %r8 = project 1 from %p1
+    %r7 = subfield int 1 from %p0
+    %r8 = subfield int 1 from %p1
     %r9 = alloca bool
     %r10 = call <test>::Value<...>::eq(%r7, %r8, %r9)
     %r11 = br 5
@@ -1215,9 +1215,9 @@ fn Value<...>::eq(%p0: @arg & Wrapper, %p1: @arg & Wrapper, %p2: @ret bool):
 
 fn Value<...>::hash(%p0: @arg & Wrapper, %p1: @arg &mut hasher, %p2: @ret ()):
   0:
-    %r0 = project 0 from %p0
+    %r0 = subfield int 0 from %p0
     %r1 = call <test>::Value<...>::hash(%r0, %p1, &())
-    %r2 = project 1 from %p0
+    %r2 = subfield int 1 from %p0
     %r3 = call <test>::Value<...>::hash(%r2, %p1, &())
     %r4 = store () to %p2
     %r5 = ret
@@ -1240,7 +1240,7 @@ fn Value<...>::to_string(%p0: @arg & Wrapper, %p1: @ret string):
     %r13 = store ": " to %r2
     %r14 = call std::string_push_str(%r0, %r2, &())
     %r15 = drop %r2 via std::Value<...>::drop
-    %r16 = project 0 from %p0
+    %r16 = subfield int 0 from %p0
     %r17 = call <test>::Value<...>::to_string(%r16, %r3)
     %r18 = call std::string_push_str(%r0, %r3, &())
     %r19 = drop %r3 via std::Value<...>::drop
@@ -1253,7 +1253,7 @@ fn Value<...>::to_string(%p0: @arg & Wrapper, %p1: @ret string):
     %r26 = store ": " to %r6
     %r27 = call std::string_push_str(%r0, %r6, &())
     %r28 = drop %r6 via std::Value<...>::drop
-    %r29 = project 1 from %p0
+    %r29 = subfield int 1 from %p0
     %r30 = call <test>::Value<...>::to_string(%r29, %r7)
     %r31 = call std::string_push_str(%r0, %r7, &())
     %r32 = drop %r7 via std::Value<...>::drop
@@ -1265,11 +1265,11 @@ fn Value<...>::to_string(%p0: @arg & Wrapper, %p1: @ret string):
 
 fn make_a(%p0: @ret A):
   0:
-    %r0 = project 0 from %p0
+    %r0 = subfield int 0 from %p0
     %r1 = alloca int
     %r2 = store int 1 to %r1
     %r3 = call std::Num<...>::from_int(%r1, %r0)
-    %r4 = project 1 from %p0
+    %r4 = subfield int 1 from %p0
     %r5 = alloca int
     %r6 = store int 2 to %r5
     %r7 = call std::Num<...>::from_int(%r5, %r4)
@@ -1277,9 +1277,9 @@ fn make_a(%p0: @ret A):
 
 fn make_wrapper(%p0: @ret Wrapper):
   0:
-    %r0 = project 0 from %p0
+    %r0 = subfield int 0 from %p0
     %r1 = call <test>::make_a(%r0)
-    %r2 = project 1 from %p0
+    %r2 = subfield int 1 from %p0
     %r3 = call <test>::make_a(%r2)
     %r4 = ret
 "#
@@ -1313,11 +1313,11 @@ fn copy_struct_with_explicit_clone() {
         r#"fn Value<...>::clone(%p0: @arg & Probe, %p1: @ret Probe):
   0:
     %r0 = alloca int
-    %r1 = project 0 from %p1
+    %r1 = subfield int 0 from %p1
     %r2 = alloca int
     %r3 = store int 100 to %r2
     %r4 = call std::Num<...>::from_int(%r2, %r0)
-    %r5 = project 0 from %p0
+    %r5 = subfield int 0 from %p0
     %r6 = call std::Num<...>::add(%r5, %r0, %r1)
     %r7 = ret
 
@@ -1328,20 +1328,20 @@ fn Value<...>::drop(%p0: @arg &mut Probe, %p1: @ret ()):
 
 fn Value<...>::eq(%p0: @arg & Probe, %p1: @arg & Probe, %p2: @ret bool):
   0:
-    %r0 = project 0 from %p0
-    %r1 = project 0 from %p1
+    %r0 = subfield int 0 from %p0
+    %r1 = subfield int 0 from %p1
     %r2 = call std::Value<...>::eq(%r0, %r1, %p2)
     %r3 = ret
 
 fn Value<...>::hash(%p0: @arg & Probe, %p1: @arg &mut hasher, %p2: @ret ()):
   0:
-    %r0 = project 0 from %p0
+    %r0 = subfield int 0 from %p0
     %r1 = call std::Value<...>::hash(%r0, %p1, %p2)
     %r2 = ret
 
 fn Value<...>::to_string(%p0: @arg & Probe, %p1: @ret string):
   0:
-    %r0 = project 0 from %p0
+    %r0 = subfield int 0 from %p0
     %r1 = call std::Value<...>::to_string(%r0, %p1)
     %r2 = ret
 
@@ -1863,19 +1863,201 @@ fn addressor_subscript_member_returns_place() {
 }
 
 #[test]
-fn yielded_subscript_member_is_not_emitted_standalone() {
-    // A scoped (`yield`) member has YieldedOnce convention and no standalone SSA form: it is
-    // consumed inline at its WithYielded site. The top-level `emit_ssa` skips it, so a module
-    // defining only such a subscript lowers to nothing.
+fn yielded_subscript_member_emitted_standalone() {
+    // A scoped (`yield`) member has YieldedOnce convention and is emitted standalone as a suspendable
+    // accessor: its ramp (`let mut local = slot`) runs, the `yield` exposes the place of `local`, and
+    // the slide (`slot = local`) runs only when the driver resumes via `end_project`.
     let mut session = TestSession::new();
     session.allow_experimental();
-    assert_eq!(
+    assert_eq_sans_flake!(
         session.emit_ssa(
             "subscript cell(slot: &mut int) -> int { ref mut { let mut local = slot; yield local; slot = local } }",
         ),
-        "",
+        r#"fn cell(%p0: @arg &mut int, %p1: @ret int):
+  0:
+    %r0 = alloca int
+    %r1 = memcpy %p0 to %r0
+    %r2 = yield %r0
+    %r3 = memcpy %r0 to %p0
+    %r4 = ret
+"#,
     );
 }
+
+/// A `yield`-based subscript member, used by the read/assign/compound-assign golden tests below.
+const CELL_SUBSCRIPT: &str =
+    "subscript cell(slot: &mut int) -> int { ref mut { let mut local = slot; yield local; slot = local } }\n";
+
+#[test]
+fn yielded_subscript_read() {
+    // A read `a->[cell]` runs the accessor to its yield with `project` (exposing the yielded place),
+    // copies the value out, then `end_project` runs the slide.
+    let mut session = TestSession::new();
+    session.allow_experimental();
+    assert_eq_sans_flake!(
+        session.emit_ssa(&format!("{CELL_SUBSCRIPT}fn f(a: &mut int) -> int {{ a->[cell] }}")),
+        r#"fn cell(%p0: @arg &mut int, %p1: @ret int):
+  0:
+    %r0 = alloca int
+    %r1 = memcpy %p0 to %r0
+    %r2 = yield %r0
+    %r3 = memcpy %r0 to %p0
+    %r4 = ret
+
+fn f(%p0: @arg &mut int, %p1: @ret int):
+  0:
+    %r0 = project <test>::cell(%p0)
+    %r1 = memcpy %r0 to %p1
+    %r2 = end_project %r0
+    %r3 = ret
+"#,
+    );
+}
+
+#[test]
+fn yielded_subscript_assign() {
+    // An assignment `a->[cell] = v` writes through the yielded place, then `end_project` runs the
+    // slide (the accessor's write-back).
+    let mut session = TestSession::new();
+    session.allow_experimental();
+    assert_eq_sans_flake!(
+        session.emit_ssa(&format!(
+            "{CELL_SUBSCRIPT}fn f(a: &mut int, v: int) {{ a->[cell] = v }}"
+        )),
+        r#"fn cell(%p0: @arg &mut int, %p1: @ret int):
+  0:
+    %r0 = alloca int
+    %r1 = memcpy %p0 to %r0
+    %r2 = yield %r0
+    %r3 = memcpy %r0 to %p0
+    %r4 = ret
+
+fn f(%p0: @arg &mut int, %p1: @arg int, %p2: @ret ()):
+  0:
+    %r0 = project <test>::cell(%p0)
+    %r1 = memcpy %p1 to %r0
+    %r2 = end_project %r0
+    %r3 = ret
+"#,
+    );
+}
+
+#[test]
+fn yielded_subscript_compound_assign() {
+    // A compound assignment `a->[cell] += v` reads and writes the single yielded place inside one
+    // projection, then `end_project` runs the slide.
+    let mut session = TestSession::new();
+    session.allow_experimental();
+    assert_eq_sans_flake!(
+        session.emit_ssa(&format!(
+            "{CELL_SUBSCRIPT}fn f(a: &mut int, v: int) {{ a->[cell] += v }}"
+        )),
+        r#"fn cell(%p0: @arg &mut int, %p1: @ret int):
+  0:
+    %r0 = alloca int
+    %r1 = memcpy %p0 to %r0
+    %r2 = yield %r0
+    %r3 = memcpy %r0 to %p0
+    %r4 = ret
+
+fn f(%p0: @arg &mut int, %p1: @arg int, %p2: @ret ()):
+  0:
+    %r0 = project <test>::cell(%p0)
+    %r1 = call std::Num<...>::add(%r0, %p1, %r0)
+    %r2 = end_project %r0
+    %r3 = ret
+"#,
+    );
+}
+
+#[test]
+fn yielded_subscript_fallible_body_runs_slide_on_unwind() {
+    // When the body of a scoped subscript can raise (here a fallible `/`), the write into the yielded
+    // place is an `invoke`: on the error edge it diverts to a cleanup pad that runs `end_project` (the
+    // accessor slide) before `resume`ing the unwind to the caller — the slide runs on the error path,
+    // matching the HIR interpreter's epilogue-on-transfer.
+    let mut session = TestSession::new();
+    session.allow_experimental();
+    assert_eq_sans_flake!(
+        session.emit_ssa(&format!(
+            "{CELL_SUBSCRIPT}fn f(a: &mut int, v: int, w: int) {{ a->[cell] = idiv(v, w) }}"
+        )),
+        r#"fn cell(%p0: @arg &mut int, %p1: @ret int):
+  0:
+    %r0 = alloca int
+    %r1 = memcpy %p0 to %r0
+    %r2 = yield %r0
+    %r3 = memcpy %r0 to %p0
+    %r4 = ret
+
+fn f(%p0: @arg &mut int, %p1: @arg int, %p2: @arg int, %p3: @ret ()):
+  0:
+    %r0 = project <test>::cell(%p0)
+    %r1 = invoke std::idiv(%p1, %p2, %r0) -> b2 unwind b1
+  1:
+    %r4 = end_project %r0
+    %r5 = resume
+  2:
+    %r2 = end_project %r0
+    %r3 = ret
+"#,
+    );
+}
+
+// Dual-backend value tests for the scoped (`yield`) subscript: each runs under both the HIR and the
+// SSA interpreter and asserts they agree, so the SSA `project`/`yield`/`end_project` suspend-resume
+// matches the HIR interpreter's `WithYielded` drive (including the slide write-back and the error
+// path).
+
+dual_test!(yielded_subscript_read_runs {
+    let mut session = TestSession::new();
+    session.allow_experimental();
+    // A read returns the yielded value; the slide write-back is a no-op for the read.
+    assert_val_eq!(
+        session.run(&format!(
+            "{CELL_SUBSCRIPT}fn read(a: &mut int) -> int {{ a->[cell] }}\nfn driver() -> int {{ let mut x = 7; read(x) }}\ndriver()"
+        )),
+        int(7)
+    );
+});
+
+dual_test!(yielded_subscript_assign_runs_slide_writeback {
+    let mut session = TestSession::new();
+    session.allow_experimental();
+    // The assignment writes through the yielded place; the slide (`slot = local`) writes the new
+    // value back, so the caller's `x` observes it.
+    assert_val_eq!(
+        session.run(&format!(
+            "{CELL_SUBSCRIPT}fn set(a: &mut int, v: int) {{ a->[cell] = v }}\nfn driver() -> int {{ let mut x = 0; set(x, 42); x }}\ndriver()"
+        )),
+        int(42)
+    );
+});
+
+dual_test!(yielded_subscript_compound_assign_runs_slide_writeback {
+    let mut session = TestSession::new();
+    session.allow_experimental();
+    // A compound assignment reads and writes the single yielded place, then the slide writes back.
+    assert_val_eq!(
+        session.run(&format!(
+            "{CELL_SUBSCRIPT}fn bump(a: &mut int) {{ a->[cell] += 10 }}\nfn driver() -> int {{ let mut x = 5; bump(x); x }}\ndriver()"
+        )),
+        int(15)
+    );
+});
+
+dual_test!(yielded_subscript_body_error_propagates {
+    let mut session = TestSession::new();
+    session.allow_experimental();
+    // A raise in the body unwinds out of the projection on both backends (the SSA pad runs the slide
+    // then `resume`s); the outcomes agree — a `DivisionByZero` runtime error.
+    assert_eq!(
+        session.fail_run(&format!(
+            "{CELL_SUBSCRIPT}fn bad(a: &mut int, w: int) {{ a->[cell] = idiv(1, w) }}\nfn driver() -> int {{ let mut x = 5; bad(x, 0); x }}\ndriver()"
+        )),
+        ferlium::compiler::error::RuntimeErrorKind::DivisionByZero,
+    );
+});
 
 #[test]
 fn closure_over_generic_in_concrete_caller() {
@@ -1933,9 +2115,9 @@ fn discarded_tuple_construction_lowers_into_throwaway_temp() {
         r#"fn f(%p0: @arg int, %p1: @ret int):
   0:
     %r0 = alloca (int, int)
-    %r1 = project 0 from %r0
+    %r1 = subfield int 0 from %r0
     %r2 = memcpy %p0 to %r1
-    %r3 = project 1 from %r0
+    %r3 = subfield int 1 from %r0
     %r4 = memcpy %p0 to %r3
     %r5 = memcpy %p0 to %p1
     %r6 = ret
@@ -1953,9 +2135,9 @@ fn discarded_record_construction_lowers_into_throwaway_temp() {
         r#"fn f(%p0: @arg int, %p1: @ret int):
   0:
     %r0 = alloca { a: int, b: int }
-    %r1 = project 0 from %r0
+    %r1 = subfield int 0 from %r0
     %r2 = memcpy %p0 to %r1
-    %r3 = project 1 from %r0
+    %r3 = subfield int 1 from %r0
     %r4 = memcpy %p0 to %r3
     %r5 = memcpy %p0 to %p1
     %r6 = ret

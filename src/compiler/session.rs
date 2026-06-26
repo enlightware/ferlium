@@ -1035,7 +1035,9 @@ impl CompilerSession {
 
         let value = {
             let mut interp = Interpreter::new(module_id, self);
-            interp.run_main(module_id, main_id)
+            interp
+                .run_main(module_id, main_id)
+                .unwrap_or_else(|error| panic!("SSA interpretation raised a runtime error: {error:?}"))
         };
 
         if ret_ty == Type::unit() {
@@ -1053,7 +1055,14 @@ impl CompilerSession {
     /// already elaborated into the module's arena) so the function-oriented SSA lowering and
     /// interpreter run it unchanged. Used by the test harness to exercise every snippet through the
     /// SSA backend in addition to the HIR interpreter.
-    pub fn run_expr_via_ssa(&mut self, module_id: ModuleId, expr: &CompiledExpr) -> Value {
+    ///
+    /// Returns the resulting value, or the [`RuntimeError`](crate::eval::RuntimeError) the snippet
+    /// raised — so the harness can assert error parity with the HIR interpreter on failing snippets.
+    pub fn run_expr_via_ssa(
+        &mut self,
+        module_id: ModuleId,
+        expr: &CompiledExpr,
+    ) -> Result<Value, crate::eval::RuntimeError> {
         use crate::hir::function::{Function, FunctionDefinition, ScriptFunction};
         use crate::ssa::interpreter::Interpreter;
         use crate::types::effects::no_effects;

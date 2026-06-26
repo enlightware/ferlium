@@ -10,8 +10,8 @@
 //! enforced where the operand is consumed — by the interpreter's `place_operand` / `value_operand` /
 //! `dict_operand` / `stack_marker_operand` resolvers:
 //!
-//! - **place** — a pointer into storage (the result of an `alloca`/`project`/`dict_entry`, or an
-//!   incoming by-pointer parameter). Consumed by `load`, `store`, `project`, `drop`, etc.
+//! - **place** — a pointer into storage (the result of an `alloca`/`subfield`/`dict_entry`, or an
+//!   incoming by-pointer parameter). Consumed by `load`, `store`, `subfield`, `drop`, etc.
 //! - **value** — a materialized register or constant (the result of a `load`/`comp_eq`, or a literal
 //!   constant). A non-trivially-copyable value has *exactly one* consuming use; reading it again is a
 //!   mis-lowering the interpreter catches.
@@ -99,16 +99,23 @@ impl Instruction {
             V::AllocaPlace { .. } => assert_eq!(n, 0, "alloca_place takes no operands"),
             // [callee, args.., ret-out-pointer?]: at least the callee.
             V::Call => assert!(n >= 1, "call needs at least the callee operand"),
+            // Same operand layout as `call`; the unwind/normal targets are kind data, not operands.
+            V::Invoke { .. } => assert!(n >= 1, "invoke needs at least the callee operand"),
+            V::Resume => assert_eq!(n, 0, "resume takes no operands"),
+            // [callee, args.., ret-out-pointer]: same operand layout as `call`. The yielded place is
+            // exposed as this instruction's result register, not through an operand.
+            V::Project { .. } => assert!(n >= 1, "project needs at least the callee operand"),
+            V::Yield => assert_eq!(n, 1, "yield takes exactly the place to expose"),
+            V::EndProject => assert_eq!(n, 1, "end_project takes exactly the projected place"),
             V::CompareEqual => assert_eq!(n, 2, "compare_eq compares exactly two operands"),
             V::ConditionalBranch { .. } => {
                 assert_eq!(n, 1, "condbr takes exactly the condition operand")
             }
             V::UnconditionalBranch { .. } => assert_eq!(n, 0, "br takes no operands"),
             V::Load => assert_eq!(n, 1, "load takes exactly the source place"),
-            V::Project { .. } => assert_eq!(n, 1, "project takes exactly the aggregate place"),
-            V::ProjectAt { .. } => assert_eq!(
+            V::Subfield { .. } => assert_eq!(
                 n, 2,
-                "project_at takes the aggregate place and the run-time index register"
+                "subfield takes the aggregate place and the int field-index value"
             ),
             V::DictEntry { .. } => {
                 assert_eq!(
@@ -159,9 +166,14 @@ impl Instruction {
             self.is_terminator(),
             matches!(
                 self.view(),
-                V::Ret | V::ConditionalBranch { .. } | V::UnconditionalBranch { .. }
+                V::Ret
+                    | V::ConditionalBranch { .. }
+                    | V::UnconditionalBranch { .. }
+                    | V::Invoke { .. }
+                    | V::Resume
             ),
-            "is_terminator must agree with the instruction kind (only ret/br/condbr terminate)"
+            "is_terminator must agree with the instruction kind (only ret/br/condbr/invoke/resume \
+             terminate)"
         );
     }
 
@@ -247,6 +259,107 @@ impl Instruction {
         }
     }
 
+    /// Creates an `invoke` instruction: a *fallible* call that, on a raised [`RuntimeError`], diverts
+    /// control to the `unwind` cleanup landing pad instead of propagating straight out of the frame.
+    ///
+    /// A terminator with two successors (the SSA analog of LLVM `invoke`): on normal completion
+    /// control transfers to `normal` (the continuation block holding the instructions that follow the
+    /// call); on a raised error it transfers to `unwind` (a pad block that drops the frame's still-live
+    /// locals and then `br`s to an enclosing pad or `resume`s). The operand layout is identical to
+    /// [`call`](Self::call) (`[callee, args.., ret-out]`) and the callee contract is the same; only
+    /// *fallible* calls that have cleanup to run on the error path are lowered as `invoke` — an
+    /// infallible call, or one with nothing to clean up in its frame, stays a plain [`call`](Self::call).
+    ///
+    /// [`RuntimeError`]: crate::eval::RuntimeError
+    pub fn invoke<T: IntoIterator<Item = ssa::Value>>(
+        span: Location,
+        callee: ssa::Value,
+        arguments: T,
+        normal: ssa::BlockIdentity,
+        unwind: ssa::BlockIdentity,
+    ) -> Self {
+        let mut operands = vec![callee];
+        operands.extend(arguments);
+        Instruction {
+            span,
+            operands,
+            kind: Box::new(Invoke { normal, unwind }),
+        }
+    }
+
+    /// Creates a `resume` instruction, which *continues* the unwind a cleanup pad interrupted: it
+    /// hands the in-flight [`RuntimeError`] back to this function's caller so propagation carries on
+    /// up the stack.
+    ///
+    /// Named after LLVM's `resume` (the third of `invoke`/`landingpad`/`resume`). It is not a *throw*:
+    /// the error was already raised — by the original fallible call — and is merely *paused* while the
+    /// pad runs the frame's drops. `resume` lifts that pause. A terminator with no successors (like
+    /// [`ret`](Self::ret)): it is the last instruction of an outermost cleanup pad, reached after that
+    /// pad and the pads it chains from have dropped the frame's live locals. The caller's
+    /// [`invoke`](Self::invoke) at the originating call site catches the resumed error and routes it
+    /// into the caller's own pad — giving the cross-frame unwind.
+    ///
+    /// [`RuntimeError`]: crate::eval::RuntimeError
+    pub fn resume(span: Location) -> Self {
+        Instruction {
+            span,
+            operands: vec![],
+            kind: Box::new(Resume {}),
+        }
+    }
+
+    /// Creates a `project` instruction: the *enter* half of a scoped (`YieldedOnce`) subscript
+    /// access. It runs the subscript accessor `callee` (a `YieldedOnce` member) to its single
+    /// `yield`, suspending the accessor frame, and **exposes the yielded place as this instruction's
+    /// result register** (a place of pointee type `ty`). The body that uses the place runs next; the
+    /// matching [`end_project`](Self::end_project), keyed by this result register, resumes the
+    /// accessor's slide (epilogue).
+    ///
+    /// Operands are `[callee, args..]` with the same callee contract as [`call`](Self::call), where
+    /// `args` are the accessor's extra (dictionary) and visible arguments. Unlike `call` there is no
+    /// trailing return out-pointer: the accessor's nominal return is unused on the yielded path (the
+    /// place flows out as this instruction's result register). Mirrors the HIR interpreter's
+    /// `call_accessor_until_yield`.
+    pub fn project<T: IntoIterator<Item = ssa::Value>>(
+        span: Location,
+        callee: ssa::Value,
+        arguments: T,
+        ty: Type,
+    ) -> Self {
+        let mut operands = vec![callee];
+        operands.extend(arguments);
+        Instruction {
+            span,
+            operands,
+            kind: Box::new(Project { ty }),
+        }
+    }
+
+    /// Creates a `yield` instruction: inside a `YieldedOnce` accessor body, it exposes the **place**
+    /// at operand `0` to the driving [`project`](Self::project) site and suspends the accessor frame.
+    /// The instructions after it form the accessor's slide (epilogue), reached only when the matching
+    /// [`end_project`](Self::end_project) resumes the frame. Mirrors the HIR `Yield`.
+    pub fn r#yield(span: Location, place: ssa::Value) -> Self {
+        Instruction {
+            span,
+            operands: vec![place],
+            kind: Box::new(Yield {}),
+        }
+    }
+
+    /// Creates an `end_project` instruction: the *leave* half of a scoped subscript access. Operand
+    /// `0` is the place a [`project`](Self::project) exposed; this resumes that suspended accessor
+    /// from after its `yield`, runs its slide to completion, and reclaims the accessor frame. Mirrors
+    /// the HIR interpreter's `resume_suspended_accessor_epilogue`. Distinct from the unwind
+    /// [`resume`](Self::resume).
+    pub fn end_project(span: Location, place: ssa::Value) -> Self {
+        Instruction {
+            span,
+            operands: vec![place],
+            kind: Box::new(EndProject {}),
+        }
+    }
+
     /// Creates a `compare_eq` instruction comparing operands `0` (`v1`) and `1` (`v2`) for structural
     /// equality, yielding a `bool` register.
     ///
@@ -299,29 +412,34 @@ impl Instruction {
         }
     }
 
-    /// Creates a `project` instruction yielding the **place** of field `i` (of type `ty`) of the
-    /// aggregate place `source` (operand `0`).
+    /// Creates a `subfield` instruction yielding the **place** of the field (of type `ty`) of the
+    /// aggregate place `source` (operand `0`) at the field index given by the `int` value `index`
+    /// (operand `1`).
     ///
-    /// `source` must be a place whose pointee is an aggregate with more than `i` fields (or generic
-    /// storage that grows to that shape on the first field store); the result is a place, computed
-    /// without reading or moving the aggregate. `i` is a compile-time-constant field index — see
-    /// [`project_at`](Self::project_at) for the run-time-index form.
-    pub fn project(span: Location, source: ssa::Value, i: usize, ty: Type) -> Self {
+    /// `source` must be a place whose pointee is an aggregate with more than `index` fields (or
+    /// generic storage that grows to that shape on the first field store); the result is a place,
+    /// computed without reading or moving the aggregate. `index` is an ordinary `int` value operand —
+    /// usually a compile-time-constant [`ssa::Value::Integer`] (a tuple/record field at a known
+    /// position), but a register when the offset is only known at run time (a row-polymorphic record
+    /// field, from `hir::ProjectAt`, where the offset comes from a field-index dictionary parameter).
+    /// Keeping the index a value operand — rather than splitting static and dynamic forms — matches
+    /// how a backend (LLVM `getelementptr`) takes the index as an IR value regardless.
+    pub fn subfield(span: Location, source: ssa::Value, index: ssa::Value, ty: Type) -> Self {
         Instruction {
             span,
-            operands: vec![source],
-            kind: Box::new(Project { index: i, ty }),
+            operands: vec![source, index],
+            kind: Box::new(Subfield { ty }),
         }
     }
 
-    /// Creates a `dict_entry` instruction: the symbolic analog of `project` for a trait dictionary.
+    /// Creates a `dict_entry` instruction: the symbolic analog of `subfield` for a trait dictionary.
     ///
     /// `dict` is a symbolic dictionary operand (a constant [`ssa::Value::Dictionary`] or a forwarded
     /// dictionary `Parameter`). The instruction yields the **place** of entry `entry_index` of that
     /// dictionary — a method function value, or an associated const — of type `ty`. `call`, `drop`,
-    /// and `memcpy` consume that place exactly as they consume a `project` result, so a later
+    /// and `memcpy` consume that place exactly as they consume a `subfield` result, so a later
     /// tuple-lowering pass rewrites `dict_entry N from <symbolic dict>` to
-    /// `project N from <materialized witness-table tuple>` one-for-one.
+    /// `subfield N from <materialized witness-table tuple>` one-for-one.
     pub fn dict_entry(span: Location, dict: ssa::Value, entry_index: usize, ty: Type) -> Self {
         Instruction {
             span,
@@ -330,18 +448,6 @@ impl Instruction {
         }
     }
 
-    /// Creates a `project_at` instruction accessing the aggregate place `source` at the **run-time**
-    /// field index held in the `index` register (an `int` loaded from a field-index dictionary
-    /// parameter). It mirrors `project`, but the index is an operand rather than a static constant:
-    /// it lowers a record field access on a generic (row-polymorphic) record (`hir::ProjectAt`),
-    /// where the field offset is only known at run time. Like `project`, the result is a place.
-    pub fn project_at(span: Location, source: ssa::Value, index: ssa::Value, ty: Type) -> Self {
-        Instruction {
-            span,
-            operands: vec![source, index],
-            kind: Box::new(ProjectAt { ty }),
-        }
-    }
 
     /// Creates a `variant` instruction, which builds a tagged variant *shell* of type `ty`: the
     /// result is a register holding `Value::Variant { tag, <uninitialized payload> }`. The
@@ -579,6 +685,33 @@ pub enum InstructionView<'a> {
     /// out-pointer for a non-`()` result.
     Call,
 
+    /// A *fallible* function call (operands as for [`Call`](InstructionView::Call)) that terminates
+    /// its block with two successors: `normal` on completion, `unwind` on a raised error. The
+    /// `unwind` target is a cleanup landing pad. See [`Instruction::invoke`].
+    Invoke {
+        normal: ssa::BlockIdentity,
+        unwind: ssa::BlockIdentity,
+    },
+
+    /// Continues the unwind a cleanup pad interrupted, handing the in-flight error back to the caller
+    /// (not a fresh throw — see [`Instruction::resume`]). Terminates an outermost cleanup pad; no
+    /// successors.
+    Resume,
+
+    /// The *enter* half of a scoped (`YieldedOnce`) subscript access: runs the accessor (operands as
+    /// for [`Call`](InstructionView::Call)) to its `yield` and exposes the yielded place (of pointee
+    /// type `ty`) as this instruction's result register. See [`Instruction::project`].
+    Project { ty: Type },
+
+    /// Inside a `YieldedOnce` accessor body: exposes the place at operand `0` to the driving
+    /// `project` and suspends the accessor frame. See [`Instruction::r#yield`].
+    Yield,
+
+    /// The *leave* half of a scoped subscript access: resumes the accessor a `project` (the place at
+    /// operand `0`) suspended, running its slide and reclaiming its frame. See
+    /// [`Instruction::end_project`].
+    EndProject,
+
     /// An equality comparison of operands `0` and `1`.
     CompareEqual,
 
@@ -594,16 +727,14 @@ pub enum InstructionView<'a> {
     /// A load of the value at the place given by operand `0`.
     Load,
 
-    /// A projection of field `index` (of type `ty`) out of the aggregate place at operand `0`.
-    Project { index: usize, ty: Type },
-
-    /// A projection (of type `ty`) out of the aggregate place at operand `0`, at the run-time field
-    /// index held in the `int` register at operand `1`.
-    ProjectAt { ty: Type },
+    /// A projection (of type `ty`) out of the aggregate place at operand `0`, at the field index
+    /// given by the `int` value at operand `1` (a constant for a static field, or a register for a
+    /// run-time offset).
+    Subfield { ty: Type },
 
     /// The place of entry `entry_index` (of type `ty`) of the symbolic dictionary at operand `0`.
-    /// The symbolic analog of `Project`: a method function value or an associated const, kept
-    /// dictionary-symbolic until a later tuple-lowering pass rewrites it to `Project`.
+    /// The symbolic analog of `Subfield`: a method function value or an associated const, kept
+    /// dictionary-symbolic until a later tuple-lowering pass rewrites it to `Subfield`.
     DictEntry { entry_index: usize, ty: Type },
 
     /// A return. The result, if any, has already been written through the return out-pointer.
@@ -778,14 +909,153 @@ impl InstructionKind for Call {
         whole: &Instruction,
         _env: &ModuleEnv<'_>,
     ) -> fmt::Result {
-        write!(f, "call {}(", whole.operands[0])?;
-        for i in 1..whole.operands.len() {
-            if i > 1 {
-                write!(f, ", ")?;
-            }
-            write!(f, "{}", whole.operands[i])?;
+        write!(f, "call ")?;
+        fmt_callee_and_args(f, whole)
+    }
+}
+
+/// Writes a call's `callee(arg, arg, …)` operand list — the part shared by `call` and `invoke`
+/// formatting (operand `0` is the callee; the rest are the arguments).
+fn fmt_callee_and_args(f: &mut fmt::Formatter<'_>, whole: &Instruction) -> fmt::Result {
+    write!(f, "{}(", whole.operands[0])?;
+    for i in 1..whole.operands.len() {
+        if i > 1 {
+            write!(f, ", ")?;
         }
-        write!(f, ")")
+        write!(f, "{}", whole.operands[i])?;
+    }
+    write!(f, ")")
+}
+
+/// A fallible function call in SSA that diverts to a cleanup pad on a raised error (see
+/// [`Instruction::invoke`]).
+struct Invoke {
+    /// The continuation block, branched to on normal completion of the call.
+    normal: ssa::BlockIdentity,
+
+    /// The cleanup landing pad, branched to when the call raises a `RuntimeError`.
+    unwind: ssa::BlockIdentity,
+}
+
+impl InstructionKind for Invoke {
+    fn is_terminator(&self) -> bool {
+        true
+    }
+
+    fn result(&self, _whole: &Instruction) -> InstructionResult {
+        // Like `Call`: no register; a non-`()` result is written through the return out-pointer.
+        InstructionResult::Nothing
+    }
+
+    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
+        InstructionView::Invoke {
+            normal: self.normal,
+            unwind: self.unwind,
+        }
+    }
+
+    fn fmt_within(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        whole: &Instruction,
+        _env: &ModuleEnv<'_>,
+    ) -> fmt::Result {
+        write!(f, "invoke ")?;
+        fmt_callee_and_args(f, whole)?;
+        write!(
+            f,
+            " -> b{} unwind b{}",
+            self.normal.raw(),
+            self.unwind.raw()
+        )
+    }
+}
+
+/// Continues the unwind a cleanup pad interrupted, handing the in-flight error back to the caller and
+/// terminating an outermost cleanup pad in SSA (see [`Instruction::resume`]).
+struct Resume {}
+
+impl InstructionKind for Resume {
+    fn is_terminator(&self) -> bool {
+        true
+    }
+
+    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
+        InstructionView::Resume
+    }
+
+    fn fmt_within(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        _whole: &Instruction,
+        _env: &ModuleEnv<'_>,
+    ) -> fmt::Result {
+        write!(f, "resume")
+    }
+}
+
+/// The *enter* half of a scoped (`YieldedOnce`) subscript access (see [`Instruction::project`]).
+struct Project {
+    /// The pointee type of the exposed yielded place.
+    ty: Type,
+}
+
+impl InstructionKind for Project {
+    fn result(&self, _whole: &Instruction) -> InstructionResult {
+        // The result is the yielded place: a pointer to the projected element. A register value is
+        // obtained by `load`ing it.
+        InstructionResult::pointer_to(InstructionResult::Lowered(self.ty))
+    }
+
+    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
+        InstructionView::Project { ty: self.ty }
+    }
+
+    fn fmt_within(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        whole: &Instruction,
+        _env: &ModuleEnv<'_>,
+    ) -> fmt::Result {
+        write!(f, "project ")?;
+        fmt_callee_and_args(f, whole)
+    }
+}
+
+/// Exposes a yielded place and suspends a `YieldedOnce` accessor (see [`Instruction::r#yield`]).
+struct Yield {}
+
+impl InstructionKind for Yield {
+    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
+        InstructionView::Yield
+    }
+
+    fn fmt_within(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        whole: &Instruction,
+        _env: &ModuleEnv<'_>,
+    ) -> fmt::Result {
+        write!(f, "yield {}", whole.operands[0])
+    }
+}
+
+/// The *leave* half of a scoped subscript access: resumes the accessor slide (see
+/// [`Instruction::end_project`]).
+struct EndProject {}
+
+impl InstructionKind for EndProject {
+    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
+        InstructionView::EndProject
+    }
+
+    fn fmt_within(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        whole: &Instruction,
+        _env: &ModuleEnv<'_>,
+    ) -> fmt::Result {
+        write!(f, "end_project {}", whole.operands[0])
     }
 }
 
@@ -870,16 +1140,14 @@ impl InstructionKind for Load {
     }
 }
 
-/// A project instruction in SSA.
-struct Project {
-    /// The index to project the tuple to
-    index: usize,
-
+/// A subfield instruction in SSA: the **place** of a field of an aggregate, at the `int` index value
+/// (operand `1`) — a constant for a static field or a register for a run-time offset.
+struct Subfield {
     /// The type of the projected value
     ty: Type,
 }
 
-impl InstructionKind for Project {
+impl InstructionKind for Subfield {
     fn result(&self, _whole: &Instruction) -> InstructionResult {
         // The operand is a place (pointer to the aggregate) and the result is a place: a pointer to
         // the projected element. A register value is obtained by `load`ing the result.
@@ -887,10 +1155,7 @@ impl InstructionKind for Project {
     }
 
     fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
-        InstructionView::Project {
-            index: self.index,
-            ty: self.ty,
-        }
+        InstructionView::Subfield { ty: self.ty }
     }
 
     fn fmt_within(
@@ -899,46 +1164,11 @@ impl InstructionKind for Project {
         whole: &Instruction,
         _env: &ModuleEnv<'_>,
     ) -> fmt::Result {
-        write!(f, "project {} from {}", self.index, whole.operands[0])
+        write!(f, "subfield {} from {}", whole.operands[1], whole.operands[0])
     }
 }
 
-/// A dynamic-index project instruction in SSA.
-///
-/// Like [`Project`], but the field index is a run-time operand (operand `1`, an `int` register)
-/// rather than a static constant. It lowers a record field access on a generic (row-polymorphic)
-/// record, where the field offset is supplied by a field-index dictionary parameter.
-struct ProjectAt {
-    /// The type of the projected value.
-    ty: Type,
-}
-
-impl InstructionKind for ProjectAt {
-    fn result(&self, _whole: &Instruction) -> InstructionResult {
-        // The aggregate operand is a place and the result is a place: a pointer to the projected
-        // element. A register value is obtained by `load`ing the result.
-        InstructionResult::pointer_to(InstructionResult::Lowered(self.ty))
-    }
-
-    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
-        InstructionView::ProjectAt { ty: self.ty }
-    }
-
-    fn fmt_within(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        whole: &Instruction,
-        _env: &ModuleEnv<'_>,
-    ) -> fmt::Result {
-        write!(
-            f,
-            "project at {} from {}",
-            whole.operands[1], whole.operands[0]
-        )
-    }
-}
-
-/// A dictionary-entry instruction in SSA: the symbolic analog of [`Project`] for a trait
+/// A dictionary-entry instruction in SSA: the symbolic analog of [`Subfield`] for a trait
 /// dictionary (see [`Instruction::dict_entry`]).
 struct DictEntry {
     /// The index of the entry within the dictionary (methods first, then associated consts).
@@ -950,7 +1180,7 @@ struct DictEntry {
 
 impl InstructionKind for DictEntry {
     fn result(&self, _whole: &Instruction) -> InstructionResult {
-        // Like `Project`: the result is the place of the entry; a register value is obtained by
+        // Like `Subfield`: the result is the place of the entry; a register value is obtained by
         // `load`ing it, and a method callee is read by reference at the `call`/`drop`.
         InstructionResult::pointer_to(InstructionResult::Lowered(self.ty))
     }

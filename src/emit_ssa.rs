@@ -28,15 +28,18 @@ use crate::{
         math::Float,
         value::{VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX, type_has_static_layout},
     },
-    types::r#type::Type,
+    types::{
+        effects::{EffType, Effect, PrimitiveEffect},
+        r#type::Type,
+    },
 };
 
 /// Emits the textual representation of the low-level (aka SSA) ferlium IR of `module`.
 ///
 /// Every lowerable local function of `module` is emitted, including the (anonymous) member
-/// functions of its subscripts. Bodiless (native) functions and inline-only `YieldedOnce`
-/// subscript members — which have no standalone SSA form and are consumed at their `WithYielded`
-/// site — are skipped.
+/// functions of its subscripts. A `YieldedOnce` subscript member is emitted standalone as a
+/// suspendable function (its `yield` exposes the yielded place to the driving `project`). Only
+/// bodiless (native) functions are skipped.
 ///
 /// Intended for testing and debugging.
 pub fn emit_ssa(module: &Module, others: &Modules, session: &CompilerSession) -> String {
@@ -46,10 +49,6 @@ pub fn emit_ssa(module: &Module, others: &Modules, session: &CompilerSession) ->
             let f = module.get_function_by_id(id)?;
             // Only script functions have a body to lower.
             f.code.as_ref().as_script()?;
-            // A `YieldedOnce` member is inline-only: emitted at its `WithYielded` site, never here.
-            if f.definition.return_convention() == FnReturnConvention::YieldedOnce {
-                return None;
-            }
             // A subscript member resolves to its subscript's name; truly anonymous functions are skipped.
             let name = module.get_function_name_by_id(id)?;
             Some((name, id))
@@ -290,6 +289,7 @@ impl<'a> Emitter<'a> {
                 return_destination,
                 returns_place: f.definition.returns_place(),
                 scopes: Vec::new(),
+                pending_pads: Vec::new(),
             },
             hir_arena: &module.hir_arena,
             session,
@@ -312,18 +312,26 @@ impl<'a> Emitter<'a> {
             FnReturnConvention::AddressorPlace => {
                 emitter.lower_value_into(code, None);
             }
-            // A `YieldedOnce` member has no standalone SSA semantics: it is consumed inline at its
-            // `WithYielded` site. It must never be emitted as a callable.
-            FnReturnConvention::YieldedOnce => panic!(
-                "a YieldedOnce subscript member is inline-only and must never be emitted standalone; \
-                 it is consumed structurally at its WithYielded site"
-            ),
+            // A `YieldedOnce` member is a suspendable accessor: its body is `never`-typed, runs its
+            // ramp, and ends (in block-structured position) at a `Yield(place)` that exposes the
+            // yielded place and suspends; the instructions after the yield are the slide (epilogue),
+            // reached when the driving `WithYielded` resumes via `end_project`. Like an addressor it
+            // produces no value, so it is driven with no destination (the `Yield` itself exposes the
+            // place; no spurious value store).
+            FnReturnConvention::YieldedOnce => {
+                emitter.lower_value_into(code, None);
+            }
         }
 
         // Append the trailing `ret`.
         if !emitter.current_block_is_terminated() {
             emitter.insert(Instruction::ret(emitter.context.span));
         }
+
+        // Emit the bodies of any deferred cleanup landing pads. Done last, after the body's final
+        // block is terminated, so each pad is filled as a contiguous instruction range (see
+        // `fill_pending_pads`).
+        emitter.fill_pending_pads();
 
         emitter.context.function
     }
@@ -399,7 +407,9 @@ impl<'a> Emitter<'a> {
             ))
             .unwrap();
         // The callee is the place of the `Value::clone` method entry; the call reads the function
-        // value by reference (never loaded into a register — see the `call` contract).
+        // value by reference (never loaded into a register — see the `call` contract). A plain
+        // `call`, not an `invoke`: `Value::clone` is infallible by its trait contract (a fallible
+        // clone impl is a compile error), so the clone can never raise and needs no cleanup pad.
         self.insert(Instruction::call(span, method_place, [source, target]));
     }
 
@@ -462,7 +472,7 @@ impl<'a> Emitter<'a> {
     /// Pushes a new lexical scope whose drop obligations are the owned, non-`Skip` locals listed in
     /// `cleanup` (in declaration order).
     fn enter_scope(&mut self, cleanup: &[LocalDeclId]) {
-        let mut drops = Vec::new();
+        let mut actions = Vec::new();
         for &local in cleanup {
             let decl = self.local_declaration(local);
             if !decl.owns_storage() {
@@ -475,30 +485,48 @@ impl<'a> Emitter<'a> {
             let dropped_ty = decl.ty;
             let place = self.place_of_local(local);
             if let Some(spec) = self.resolve_drop(drop) {
-                drops.push(DropObligation {
+                actions.push(CleanupAction::Drop(DropObligation {
                     place,
                     dropped_ty,
                     spec,
-                });
+                }));
             }
         }
-        self.context.scopes.push(Scope { drops });
+        self.context.scopes.push(Scope { actions, pad: None });
     }
 
-    /// Pops the innermost scope, emitting its drops in reverse declaration order (normal scope exit).
+    /// Pushes the dedicated scope a `WithYielded` opens: its sole cleanup action is the `end_project`
+    /// that runs the accessor slide for the projection `place`. Lowering the body inside this scope
+    /// makes the slide run after the body's own drops, on every exit (normal, transfer, error pad).
+    fn enter_projection_scope(&mut self, place: ssa::Value) {
+        self.context.scopes.push(Scope {
+            actions: vec![CleanupAction::EndProject { place }],
+            pad: None,
+        });
+    }
+
+    /// Emits a single cleanup action (a drop, or the `end_project` that runs an accessor slide). Does
+    /// nothing if the current block is already terminated, mirroring `emit_drop`.
+    fn emit_cleanup(&mut self, span: Location, action: CleanupAction) {
+        match action {
+            CleanupAction::Drop(o) => self.emit_drop(span, o.place, o.dropped_ty, o.spec),
+            CleanupAction::EndProject { place } => {
+                if !self.current_block_is_terminated() {
+                    self.insert(Instruction::end_project(span, place));
+                }
+            }
+        }
+    }
+
+    /// Pops the innermost scope, emitting its cleanup in reverse declaration order (normal scope exit).
     fn exit_scope(&mut self, span: Location) {
         let scope = self
             .context
             .scopes
             .pop()
             .expect("exit_scope without a matching enter_scope");
-        for obligation in scope.drops.into_iter().rev() {
-            self.emit_drop(
-                span,
-                obligation.place,
-                obligation.dropped_ty,
-                obligation.spec,
-            );
+        for action in scope.actions.into_iter().rev() {
+            self.emit_cleanup(span, action);
         }
     }
 
@@ -517,19 +545,13 @@ impl<'a> Emitter<'a> {
     /// The scopes are left on the stack: the block becomes terminated by the transfer's following
     /// terminator, so the skipped `exit_scope` calls become no-ops on the dead edge.
     fn emit_unwind_drops(&mut self, span: Location, to_depth: usize) {
-        let obligations: Vec<(ssa::Value, Type, DropSpec)> = self.context.scopes[to_depth..]
+        let actions: Vec<CleanupAction> = self.context.scopes[to_depth..]
             .iter()
             .rev()
-            .flat_map(|scope| {
-                scope
-                    .drops
-                    .iter()
-                    .rev()
-                    .map(|o| (o.place.clone(), o.dropped_ty, o.spec))
-            })
+            .flat_map(|scope| scope.actions.iter().rev().cloned())
             .collect();
-        for (place, dropped_ty, spec) in obligations {
-            self.emit_drop(span, place, dropped_ty, spec);
+        for action in actions {
+            self.emit_cleanup(span, action);
         }
     }
 
@@ -537,6 +559,101 @@ impl<'a> Emitter<'a> {
     /// `return`).
     fn emit_return_drops(&mut self, span: Location) {
         self.emit_unwind_drops(span, 0);
+    }
+
+    /// Allocates (or returns the cached) cleanup pad the current scope's fallible calls should unwind
+    /// to, plus the outer pads it chains to. The pad blocks are created empty here and recorded in
+    /// `pending_pads`; their bodies are emitted at function finalization (see `fill_pending_pads`),
+    /// because a block is a contiguous range in the shared instruction arena and so cannot be filled
+    /// in the middle of lowering another block. Returns `None` when no enclosing scope has drop
+    /// obligations — the frame has nothing to clean up, so a raised error propagates straight to the
+    /// caller and the call stays a plain `call`.
+    fn innermost_pad(&mut self, span: Location) -> Option<BlockIdentity> {
+        let depth = self
+            .context
+            .scopes
+            .iter()
+            .rposition(|scope| !scope.actions.is_empty())?;
+        Some(self.allocate_pad(depth, span))
+    }
+
+    /// Allocates the cleanup pad block for the scope at `depth` (memoized on the scope), recursively
+    /// allocating the chain of enclosing pads, and records each in `pending_pads` for later filling.
+    /// The chained pads, innermost first, drop every live frame local exactly once on the error path
+    /// — mirroring the inline unwinding `emit_unwind_drops`/`emit_return_drops` perform for
+    /// `break`/`return`, but reached via an `invoke`'s unwind edge.
+    fn allocate_pad(&mut self, depth: usize, span: Location) -> BlockIdentity {
+        if let Some(pad) = self.context.scopes[depth].pad {
+            return pad;
+        }
+        let pad = self.context.function.add_block().id();
+        // Record the pad on its scope before recursing, so the (strictly outward) chain is memoized
+        // against re-entry.
+        self.context.scopes[depth].pad = Some(pad);
+
+        // The pad of the nearest enclosing scope with obligations, if any.
+        let outer = self.context.scopes[..depth]
+            .iter()
+            .rposition(|scope| !scope.actions.is_empty())
+            .map(|outer_depth| self.allocate_pad(outer_depth, span));
+
+        // Capture this scope's actions (reversed: last-declared runs first) while the scope is still
+        // live; the body is emitted later by `fill_pending_pads`.
+        let actions: Vec<CleanupAction> = self.context.scopes[depth]
+            .actions
+            .iter()
+            .rev()
+            .cloned()
+            .collect();
+        self.context.pending_pads.push(PendingPad {
+            block: pad,
+            actions,
+            outer,
+            span,
+        });
+        pad
+    }
+
+    /// Emits the bodies of all deferred cleanup pads, at function finalization. Each pad block is
+    /// empty until now, so filling them here — after the body's last block is terminated — keeps every
+    /// block a contiguous instruction range. A pad runs its (init-guarded) drops, then `br`s to its
+    /// outer pad or `resume`s.
+    fn fill_pending_pads(&mut self) {
+        let pads = std::mem::take(&mut self.context.pending_pads);
+        for pad in pads {
+            self.context.point = InsertionPoint::End(pad.block);
+            for action in pad.actions {
+                self.emit_cleanup(pad.span, action);
+            }
+            match pad.outer {
+                Some(outer_pad) => self.insert(Instruction::br(pad.span, outer_pad)),
+                None => self.insert(Instruction::resume(pad.span)),
+            };
+        }
+    }
+
+    /// Emits a call to `callee` whose evaluation carries `effects`. A call that those effects mark
+    /// *fallible* (see [`effects_are_fallible`]) and that has an enclosing cleanup pad is lowered as an
+    /// `invoke` whose unwind edge runs that pad (dropping the frame's live locals before the error
+    /// propagates), with lowering continuing in a fresh continuation block; any other call is a plain
+    /// `call`. This is the only place `invoke` is introduced, and the single point at which a call's
+    /// fallibility is decided — so no call site can forget to request an unwind edge.
+    fn emit_call(
+        &mut self,
+        span: Location,
+        callee: ssa::Value,
+        arguments: Vec<ssa::Value>,
+        effects: &EffType,
+    ) {
+        if effects_are_fallible(effects) {
+            if let Some(pad) = self.innermost_pad(span) {
+                let cont = self.context.function.add_block().id();
+                self.insert(Instruction::invoke(span, callee, arguments, cont, pad));
+                self.context.point = InsertionPoint::End(cont);
+                return;
+            }
+        }
+        self.insert(Instruction::call(span, callee, arguments));
     }
 
     /// Recognizes a call to a trusted `Uninit<T>` standard-library intrinsic, which the emitter
@@ -720,7 +837,7 @@ impl<'a> Emitter<'a> {
         for (i, n) in fields.iter().enumerate() {
             let field = &self.hir_arena[*n];
             let f = self
-                .insert(Instruction::project(field.span, d.clone(), i, field.ty))
+                .insert(Instruction::subfield(field.span, d.clone(), int_constant(i as isize), field.ty))
                 .unwrap();
             self.lower_value_into(field, Some(f));
         }
@@ -781,10 +898,10 @@ impl<'a> Emitter<'a> {
         // `data = buffer_with_capacity(N)` (the returned `Buffer<A>` is written through the call's
         // out-pointer).
         let data_place = self
-            .insert(Instruction::project(
+            .insert(Instruction::subfield(
                 span,
                 dest.clone(),
-                data_index,
+                int_constant(data_index as isize),
                 fields[data_index].1,
             ))
             .unwrap();
@@ -860,7 +977,7 @@ impl<'a> Emitter<'a> {
         value: isize,
     ) {
         let place = self
-            .insert(Instruction::project(span, dest.clone(), index, ty))
+            .insert(Instruction::subfield(span, dest.clone(), int_constant(index as isize), ty))
             .unwrap();
         self.insert(Instruction::store(span, int_constant(value), place));
     }
@@ -936,10 +1053,10 @@ impl<'a> Emitter<'a> {
                     .unwrap()
                 } else {
                     let base = self.lower_as_place(base_node);
-                    self.insert(Instruction::project(
+                    self.insert(Instruction::subfield(
                         node.span,
                         base,
-                        n.index.as_index(),
+                        int_constant(n.index.as_index() as isize),
                         node.ty,
                     ))
                     .unwrap()
@@ -958,7 +1075,7 @@ impl<'a> Emitter<'a> {
                 let index = self
                     .insert(Instruction::load(node.span, index_param))
                     .unwrap();
-                self.insert(Instruction::project_at(node.span, base, index, node.ty))
+                self.insert(Instruction::subfield(node.span, base, index, node.ty))
                     .unwrap()
             }
 
@@ -976,7 +1093,7 @@ impl<'a> Emitter<'a> {
                     .collect();
                 arguments.push(result_storage.clone());
 
-                self.insert(Instruction::call(node.span, f, arguments));
+                self.emit_call(node.span, f, arguments, &node.effects);
 
                 if n.ty.returns_place() {
                     self.insert(Instruction::load(node.span, result_storage))
@@ -1020,7 +1137,7 @@ impl<'a> Emitter<'a> {
                 let result_storage = self.allocate_result(node, &n.ty);
                 arguments.push(result_storage.clone());
 
-                self.insert(Instruction::call(node.span, f, arguments));
+                self.emit_call(node.span, f, arguments, &node.effects);
 
                 if n.ty.returns_place() {
                     self.insert(Instruction::load(node.span, result_storage))
@@ -1036,7 +1153,7 @@ impl<'a> Emitter<'a> {
                 let (method, mut arguments) = self.lower_dictionary_method_target(node, n);
                 let result_storage = self.allocate_result(node, &n.ty);
                 arguments.push(result_storage.clone());
-                self.insert(Instruction::call(node.span, method, arguments));
+                self.emit_call(node.span, method, arguments, &node.effects);
                 if n.ty.returns_place() {
                     self.insert(Instruction::load(node.span, result_storage))
                         .unwrap()
@@ -1097,17 +1214,49 @@ impl<'a> Emitter<'a> {
                 place
             }
 
-            K::WithYielded(_) => {
-                panic!("WithYielded should be just lowered as an inlining.")
-            }
-
-            // A value-producing node is materialized into a temporary place.
+            // A value-producing node — including a `WithYielded`, whose result is a *copy* of the
+            // yielded value taken while the accessor is suspended, not the (transient) yielded place
+            // itself — is materialized into a temporary place.
             _ => {
                 let storage = self.alloca_storage(node.span, node.ty);
                 self.lower_value_into(node, Some(storage.clone()));
                 storage
             }
         }
+    }
+
+    /// Lowers the *enter* half of a [`hir::WithYielded`]: runs the accessor (a `StaticApply` of the
+    /// `YieldedOnce` member) to its `yield` with a `project`, binds the non-owning `binding` local to
+    /// the exposed place, and opens the dedicated scope whose `end_project` runs the accessor slide on
+    /// exit. The caller then lowers `n.body` and `exit_scope`s. Mirrors `eval_with_yielded`.
+    fn lower_with_yielded_enter(&mut self, n: &hir::WithYielded<Elaborated>) {
+        let accessor = &self.hir_arena[n.accessor];
+        let app = match &accessor.kind {
+            hir::NodeKind::StaticApply(app) => app,
+            other => panic!("a WithYielded accessor must be a StaticApply of a YieldedOnce member, got {other:?}"),
+        };
+        let (fi, mi) = self.resolve_function(app.function);
+        let callee = ssa::Value::Function(self.demand_function(fi, mi));
+        let mut arguments: Vec<ssa::Value> = vec![];
+        for x in &app.extra_arguments {
+            arguments.push(self.lower_extra_argument(&self.hir_arena[*x]));
+        }
+        for arg in &app.arguments {
+            arguments.push(self.lower_as_place(&self.hir_arena[arg.value]));
+        }
+        // The exposed place's pointee type is the binding's (element) type. `project` runs the ramp
+        // to the yield and binds the yielded place to its result register.
+        //
+        // NOTE: the ramp is lowered as a plain `project` even when fallible; a ramp raise propagates
+        // straight out without running the caller's cleanup pad. The current `let`/`inout` accessors
+        // have infallible ramps, so this is not yet exercised; a fallible-ramp accessor would need an
+        // `invoke`-style `project` (a follow-up), the same way `emit_call` chooses `invoke`.
+        let element_ty = self.local_declaration(n.binding).ty;
+        let place = self
+            .insert(Instruction::project(accessor.span, callee, arguments, element_ty))
+            .unwrap();
+        self.context.locals.insert(n.binding, place.clone());
+        self.enter_projection_scope(place);
     }
 
     /// Lowers the addressor `place` of a [`hir::WithPlace`] and binds its non-owning `binding`
@@ -1304,7 +1453,9 @@ impl<'a> Emitter<'a> {
     /// - [`FnReturnConvention::AddressorPlace`] allocates a slot holding the returned place pointer
     ///   (`alloca_place`).
     ///
-    /// [`FnReturnConvention::YieldedOnce`] is never reached here (such members are inlined).
+    /// [`FnReturnConvention::YieldedOnce`] is never reached here: a yielded member is entered with a
+    /// `project` (which exposes the yielded place as its own result register), never called for a
+    /// result through this helper.
     fn allocate_result(&mut self, node: &ENode, f: &FnType) -> ssa::Value {
         if f.ret == Type::unit() {
             ssa::value::Value::UnitPlace
@@ -1314,7 +1465,9 @@ impl<'a> Emitter<'a> {
                 FnReturnConvention::AddressorPlace => self
                     .insert(Instruction::alloca_place(node.span, node.ty))
                     .unwrap(),
-                FnReturnConvention::YieldedOnce => todo!("YieldedOnce return convention"),
+                FnReturnConvention::YieldedOnce => {
+                    panic!("a YieldedOnce member is entered via `project`, never called for a result")
+                }
             }
         }
     }
@@ -1500,6 +1653,10 @@ impl<'a> Emitter<'a> {
                         let target = self.place_of_local(n.id);
                         let source = self.lower_as_place(&self.hir_arena[n.value]);
 
+                        // A plain `call`, not an `invoke`: `Value::clone` is declared with an empty
+                        // effect row (a fallible clone impl is a compile error —
+                        // `TraitMethodEffectMismatch`), so the clone can never raise and needs no
+                        // cleanup-pad unwind edge.
                         self.insert(Instruction::call(node.span, f, [source, target]));
                     }
                     Some(ResolvedLocalClone::Dictionary(dictionary)) => {
@@ -1531,6 +1688,8 @@ impl<'a> Emitter<'a> {
 
                         let source = self.lower_as_place(&self.hir_arena[n.source]);
 
+                        // A plain `call`: `Value::clone` is infallible by its trait contract (see the
+                        // `StoreLocal` clone above), so no unwind edge is needed.
                         self.insert(Instruction::call(
                             node.span,
                             f,
@@ -1578,6 +1737,7 @@ impl<'a> Emitter<'a> {
                                 let (fi, mi) = self.resolve_function(f);
                                 let f = ssa::Value::Function(self.demand_function(fi, mi));
                                 let source = self.place_of_local(n.id);
+                                // Plain `call`: `Value::clone` is infallible by its trait contract.
                                 self.insert(Instruction::call(node.span, f, [source, destination]));
                             }
                             ResolvedLocalClone::Dictionary(dictionary) => {
@@ -1614,7 +1774,7 @@ impl<'a> Emitter<'a> {
 
                 assert_eq!(node.ty, n.ty.ret);
                 arguments.push(destination.unwrap_or_else(|| self.allocate_result(node, &n.ty)));
-                self.insert(Instruction::call(node.span, f, arguments));
+                self.emit_call(node.span, f, arguments, &node.effects);
             }
 
             K::GetDictionary(d) => {
@@ -1718,7 +1878,7 @@ impl<'a> Emitter<'a> {
                     .map(|arg| self.lower_argument(arg))
                     .collect();
                 arguments.push(destination.unwrap_or_else(|| self.allocate_result(node, &n.ty)));
-                self.insert(Instruction::call(node.span, f, arguments));
+                self.emit_call(node.span, f, arguments, &node.effects);
             }
 
             K::Project(_) | K::ProjectAt(_) => {
@@ -1835,7 +1995,7 @@ impl<'a> Emitter<'a> {
                     .unwrap();
                 self.store(node.span, shell, dest.clone());
                 let payload_place = self
-                    .insert(Instruction::project(node.span, dest, 0, payload.ty))
+                    .insert(Instruction::subfield(node.span, dest, int_constant(0), payload.ty))
                     .unwrap();
                 self.lower_value_into(payload, Some(payload_place));
             }
@@ -1859,7 +2019,7 @@ impl<'a> Emitter<'a> {
                 // destination (or a throwaway result for a discarded call).
                 let (method, mut arguments) = self.lower_dictionary_method_target(node, n);
                 arguments.push(destination.unwrap_or_else(|| self.allocate_result(node, &n.ty)));
-                self.insert(Instruction::call(node.span, method, arguments));
+                self.emit_call(node.span, method, arguments, &node.effects);
             }
 
             // Runtime guards have no SSA representation yet; they lower to nothing.
@@ -1885,8 +2045,15 @@ impl<'a> Emitter<'a> {
                 self.lower_value_into(&self.hir_arena[n.body], destination);
             }
 
-            K::WithYielded(_) => {
-                panic!("WithYielded should be just lowered as an inlining.")
+            K::WithYielded(n) => {
+                // A scoped subscript site: `project` the accessor to its yield and bind the yielded
+                // place, lower the body (which reads/writes the binding) into the destination, then
+                // `exit_scope` emits the `end_project` that runs the accessor slide. The slide also
+                // runs on a transfer or error out of the body (the scope's cleanup action is part of
+                // the unwind/pad path). Mirrors `eval_with_yielded`.
+                self.lower_with_yielded_enter(n);
+                self.lower_value_into(&self.hir_arena[n.body], destination);
+                self.exit_scope(node.span);
             }
 
             K::GetDictionaryAssociatedConst(c) => {
@@ -1935,10 +2102,14 @@ impl<'a> Emitter<'a> {
                 self.insert(Instruction::ret(node.span));
             }
 
-            K::Yield(_) => {
-                // `Yield` is consumed structurally by its `WithYielded` driver (Stage 4) and must
-                // never be reached through generic lowering.
-                panic!("Yield reached outside its WithYielded accessor");
+            K::Yield(place_node) => {
+                // Inside a `YieldedOnce` accessor body: expose the yielded place to the driving
+                // `project` and suspend. The place flows out through the `yield` (not the return
+                // out-pointer), so the ambient `destination` is irrelevant — the accessor is driven
+                // with none. Mirrors the HIR interpreter's `eval_yield`. The instructions emitted
+                // after this (the slide) run only when `end_project` resumes the accessor.
+                let place = self.lower_as_place(&self.hir_arena[*place_node]);
+                self.insert(Instruction::r#yield(node.span, place));
             }
 
             K::Array(ids) => self.lower_array_into(node, ids, destination),
@@ -2042,11 +2213,58 @@ struct InsertionContext {
     /// instructions at every control-transfer edge that unwinds the scope: a normal block exit
     /// drops its own scope, and a `return` drops all enclosing scopes.
     scopes: Vec<Scope>,
+
+    /// Cleanup landing pads whose bodies are emitted at function finalization rather than where they
+    /// are referenced. A pad block is *allocated* (empty) the moment a fallible `invoke` needs to
+    /// name it, but cannot be *filled* there: a block is a contiguous range in the shared instruction
+    /// arena, so emitting the pad's drops mid-body would splice them into the block being lowered.
+    /// Each pad therefore captures its drop obligations (and the outer pad it chains to) up front and
+    /// is filled, contiguously, after the body is fully lowered (see `fill_pending_pads`).
+    pending_pads: Vec<PendingPad>,
 }
 
-/// A lexical scope's deferred drop obligations (in declaration order).
+/// A cleanup landing pad awaiting its body (see `InsertionContext::pending_pads`).
+struct PendingPad {
+    /// The (allocated, initially empty) pad block.
+    block: BlockIdentity,
+
+    /// This scope's cleanup actions to run in the pad, already reversed (innermost-declared last runs
+    /// first), captured when the pad was allocated and the scope was still live.
+    actions: Vec<CleanupAction>,
+
+    /// The pad of the nearest enclosing scope with obligations, branched to after this pad's actions;
+    /// `None` for the outermost pad, which `resume`s instead (re-raising to the caller).
+    outer: Option<BlockIdentity>,
+
+    /// The span the pad's actions are attributed to (the first fallible call that needed the pad).
+    span: Location,
+}
+
+/// A lexical scope's deferred cleanup actions (in declaration order).
 struct Scope {
-    drops: Vec<DropObligation>,
+    /// The cleanup to run when the scope exits — owned-local drops, and, for the dedicated scope a
+    /// `WithYielded` opens, the `end_project` that runs the accessor slide. Run in reverse order on
+    /// every exit (normal, transfer, and the error pad), so the slide runs after the body's own
+    /// drops, on every path — matching the HIR interpreter's epilogue-on-exit.
+    actions: Vec<CleanupAction>,
+
+    /// The cleanup landing pad for this scope, built lazily the first time a fallible call nested in
+    /// it needs an unwind edge (see `allocate_pad`). The pad runs this scope's actions (reverse
+    /// declaration order, init-guarded) and then chains to the nearest enclosing scope's pad or, if
+    /// none, `resume`s — re-raising the in-flight error to the caller. `None` until built (a scope
+    /// with no obligations, or one no fallible call unwinds through, never gets one).
+    pad: Option<BlockIdentity>,
+}
+
+/// A single deferred cleanup action run on scope exit, transfer, and the error pad.
+#[derive(Clone)]
+enum CleanupAction {
+    /// Drop an owned local (init-guarded `Value::drop`).
+    Drop(DropObligation),
+
+    /// Close a scoped subscript: run the accessor slide and reclaim its frame (`end_project` of the
+    /// place a `project` exposed). The projection binding is non-owning, so there is no drop.
+    EndProject { place: ssa::Value },
 }
 
 /// The lowering targets of an enclosing loop, used to resolve `break`/`continue` to it.
@@ -2073,10 +2291,19 @@ struct LoopFrame {
 
 /// A single deferred drop: the place to drop, the type of its pointee (to resolve a dictionary
 /// `Value::drop` method), and how to dispatch the drop.
+#[derive(Clone)]
 struct DropObligation {
     place: ssa::Value,
     dropped_ty: Type,
     spec: DropSpec,
+}
+
+/// Whether a call whose evaluation carries `effects` may raise a runtime error, and so needs an
+/// unwind edge to a cleanup pad. A concrete `Fallible` primitive effect is exact; an unresolved
+/// effect variable is treated conservatively as potentially fallible, so a generic callee that
+/// instantiates fallibly still runs its caller's cleanup on the error path.
+fn effects_are_fallible(effects: &EffType) -> bool {
+    effects.contains(Effect::Primitive(PrimitiveEffect::Fallible)) || effects.has_variables()
 }
 
 /// How a `Value::drop` is dispatched for a drop obligation.
@@ -2089,6 +2316,7 @@ enum DropSpec {
 }
 
 /// Where an instruction should be inserted in a basic block.
+#[derive(Clone, Copy)]
 enum InsertionPoint {
     /// The end of a basic block.
     End(BlockIdentity),
