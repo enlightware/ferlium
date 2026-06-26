@@ -142,11 +142,11 @@ impl EmitFunctionKind {
             EmitFunctionKind::SubscriptMember {
                 provenance: YieldProvenance::YieldedOnce,
                 ..
-            } => CallResultConvention::YieldedOnce,
+            } => CallResultConvention::YIELDED_ONCE,
             EmitFunctionKind::SubscriptMember {
                 provenance: YieldProvenance::AddressorPlace,
                 ..
-            } => CallResultConvention::AddressorPlace,
+            } => CallResultConvention::ADDRESSOR_PLACE,
         }
     }
 

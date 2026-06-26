@@ -502,7 +502,7 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                             extra_arguments: vec![],
                             arguments,
                             argument_names: vec![ustr("array"), ustr("index")],
-                            ty: CallImplType::new(ty, CallResultConvention::AddressorPlace),
+                            ty: CallImplType::new(ty, CallResultConvention::ADDRESSOR_PLACE),
                             inst_data: hir::FnInstData::none(),
                         })),
                         data_value_ty,

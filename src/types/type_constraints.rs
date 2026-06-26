@@ -71,6 +71,12 @@ impl<'a> NamedTypeConstraintCollector<'a> {
                 }
                 self.collect_type(fn_ty.ret);
             }
+            TypeKind::Subscript(subscript) => {
+                for arg in subscript.args {
+                    self.collect_type(arg.ty);
+                }
+                self.collect_type(subscript.ret);
+            }
             TypeKind::Named(named_ty) => self.collect_named_type(&named_ty),
             TypeKind::Variable(_) | TypeKind::Never => {}
         }

@@ -21,7 +21,7 @@ use crate::{
         mutability::{MutType, MutVal, MutVar, MutVarKey},
         recursive_equation::{RecursiveEquationError, try_intern_recursive_equation},
         trait_solver::{ConstraintAssumptions, TraitSolver},
-        r#type::{FnType, TyVarKey, Type, TypeInstSubst, TypeKind, TypeVar},
+        r#type::{FnType, SubscriptMemberType, TyVarKey, Type, TypeInstSubst, TypeKind, TypeVar},
         type_like::TypeLike,
         type_scheme::PubTypeConstraint,
     },
@@ -585,17 +585,17 @@ impl UnifiedTypeInference {
         expected_span: Location,
     ) -> Result<(), InternalCompilationError> {
         self.unify_same_type_with_sub_effects(current, current_span, expected, expected_span)?;
-        self.unify_equal_function_effects(current, current_span, expected, expected_span)
+        self.unify_equal_callable_effects(current, current_span, expected, expected_span)
     }
 
-    fn unify_equal_function_effects(
+    fn unify_equal_callable_effects(
         &mut self,
         current: Type,
         current_span: Location,
         expected: Type,
         expected_span: Location,
     ) -> Result<(), InternalCompilationError> {
-        self.unify_equal_function_effects_inner(
+        self.unify_equal_callable_effects_inner(
             current,
             current_span,
             expected,
@@ -604,7 +604,7 @@ impl UnifiedTypeInference {
         )
     }
 
-    fn unify_equal_function_effects_inner(
+    fn unify_equal_callable_effects_inner(
         &mut self,
         current: Type,
         current_span: Location,
@@ -633,7 +633,7 @@ impl UnifiedTypeInference {
                     expected_span,
                 )?;
                 for (current_arg, expected_arg) in current_fn.args.iter().zip(&expected_fn.args) {
-                    self.unify_equal_function_effects_inner(
+                    self.unify_equal_callable_effects_inner(
                         current_arg.ty,
                         current_span,
                         expected_arg.ty,
@@ -641,7 +641,7 @@ impl UnifiedTypeInference {
                         visited,
                     )?;
                 }
-                self.unify_equal_function_effects_inner(
+                self.unify_equal_callable_effects_inner(
                     current_fn.ret,
                     current_span,
                     expected_fn.ret,
@@ -649,9 +649,41 @@ impl UnifiedTypeInference {
                     visited,
                 )
             }
+            (Subscript(current_subscript), Subscript(expected_subscript)) => {
+                self.unify_equal_subscript_member_effects(
+                    current_subscript.ref_member.as_ref(),
+                    current_span,
+                    expected_subscript.ref_member.as_ref(),
+                    expected_span,
+                )?;
+                self.unify_equal_subscript_member_effects(
+                    current_subscript.mut_member.as_ref(),
+                    current_span,
+                    expected_subscript.mut_member.as_ref(),
+                    expected_span,
+                )?;
+                for (current_arg, expected_arg) in
+                    current_subscript.args.iter().zip(&expected_subscript.args)
+                {
+                    self.unify_equal_callable_effects_inner(
+                        current_arg.ty,
+                        current_span,
+                        expected_arg.ty,
+                        expected_span,
+                        visited,
+                    )?;
+                }
+                self.unify_equal_callable_effects_inner(
+                    current_subscript.ret,
+                    current_span,
+                    expected_subscript.ret,
+                    expected_span,
+                    visited,
+                )
+            }
             (Tuple(current_items), Tuple(expected_items)) => {
                 for (current_item, expected_item) in current_items.into_iter().zip(expected_items) {
-                    self.unify_equal_function_effects_inner(
+                    self.unify_equal_callable_effects_inner(
                         current_item,
                         current_span,
                         expected_item,
@@ -665,7 +697,7 @@ impl UnifiedTypeInference {
                 for ((_, current_field), (_, expected_field)) in
                     current_fields.into_iter().zip(expected_fields)
                 {
-                    self.unify_equal_function_effects_inner(
+                    self.unify_equal_callable_effects_inner(
                         current_field,
                         current_span,
                         expected_field,
@@ -679,7 +711,7 @@ impl UnifiedTypeInference {
                 for ((_, current_payload), (_, expected_payload)) in
                     current_variants.into_iter().zip(expected_variants)
                 {
-                    self.unify_equal_function_effects_inner(
+                    self.unify_equal_callable_effects_inner(
                         current_payload,
                         current_span,
                         expected_payload,
@@ -693,7 +725,7 @@ impl UnifiedTypeInference {
                 for (current_param, expected_param) in
                     current_named.params.into_iter().zip(expected_named.params)
                 {
-                    self.unify_equal_function_effects_inner(
+                    self.unify_equal_callable_effects_inner(
                         current_param,
                         current_span,
                         expected_param,
@@ -893,6 +925,56 @@ impl UnifiedTypeInference {
                     sub_or_same,
                 )
             }
+            (Subscript(cur), Subscript(exp)) => {
+                if cur.args.len() != exp.args.len() || !cur.can_satisfy_members(&exp) {
+                    return Err(internal_compilation_error!(TypeMismatch {
+                        current_ty,
+                        current_span,
+                        expected_ty,
+                        expected_span,
+                        sub_or_same,
+                    }));
+                }
+                for ((index, cur_arg), exp_arg) in cur.args.iter().enumerate().zip(exp.args.iter())
+                {
+                    // Contravariance of argument types.
+                    self.unify_mut_must_be_at_least_or_equal(
+                        exp_arg.mut_ty,
+                        current_span,
+                        cur_arg.mut_ty,
+                        expected_span,
+                        MutabilityMustBeContext::FnTypeArg(index),
+                        sub_or_same,
+                    )?;
+                    self.unify_sub_or_same_type(
+                        exp_arg.ty,
+                        current_span,
+                        cur_arg.ty,
+                        expected_span,
+                        sub_or_same,
+                    )?;
+                }
+                self.add_subscript_member_effect_dep(
+                    cur.ref_member.as_ref(),
+                    current_span,
+                    exp.ref_member.as_ref(),
+                    expected_span,
+                )?;
+                self.add_subscript_member_effect_dep(
+                    cur.mut_member.as_ref(),
+                    current_span,
+                    exp.mut_member.as_ref(),
+                    expected_span,
+                )?;
+                // Covariance of return type.
+                self.unify_sub_or_same_type(
+                    cur.ret,
+                    current_span,
+                    exp.ret,
+                    expected_span,
+                    sub_or_same,
+                )
+            }
             (Named(cur), Named(exp)) => {
                 if cur.def != exp.def {
                     return Err(internal_compilation_error!(NamedTypeMismatch {
@@ -965,11 +1047,11 @@ impl UnifiedTypeInference {
                 })
             })?
         } else {
-            // If the type is a function type with concrete (non-variable) effects,
+            // If the type is a first-class callable-like type with concrete effects,
             // we need to generalize those effects to preserve effect polymorphism.
-            // Otherwise, the concrete effects would be "baked in" and the function
-            // parameter couldn't contribute its effect variable to the parent function.
-            self.generalize_function_effects(ty)
+            // Otherwise, the concrete effects would be "baked in" and the value
+            // couldn't contribute its effect variable to the parent function.
+            self.generalize_effectful_callable_type(ty)
         };
         self.ty_unification_table
             .unify_var_value(var, Some(ty))
@@ -984,8 +1066,8 @@ impl UnifiedTypeInference {
             })
     }
 
-    fn generalize_function_effects(&mut self, ty: Type) -> Type {
-        self.effects.generalize_function_effects(ty)
+    fn generalize_effectful_callable_type(&mut self, ty: Type) -> Type {
+        self.effects.generalize_effectful_callable_type(ty)
     }
 
     fn unify_tuple_project(
@@ -1553,6 +1635,40 @@ impl UnifiedTypeInference {
     ) -> Result<(), InternalCompilationError> {
         self.effects
             .add_effect_dep(current, current_span, target, target_span)
+    }
+
+    fn add_subscript_member_effect_dep(
+        &mut self,
+        current: Option<&SubscriptMemberType>,
+        current_span: Location,
+        target: Option<&SubscriptMemberType>,
+        target_span: Location,
+    ) -> Result<(), InternalCompilationError> {
+        let Some(target) = target else {
+            return Ok(());
+        };
+        let Some(current) = current else {
+            return Ok(());
+        };
+        self.add_effect_dep(&current.effects, current_span, &target.effects, target_span)
+    }
+
+    fn unify_equal_subscript_member_effects(
+        &mut self,
+        current: Option<&SubscriptMemberType>,
+        current_span: Location,
+        target: Option<&SubscriptMemberType>,
+        target_span: Location,
+    ) -> Result<(), InternalCompilationError> {
+        match (current, target) {
+            (Some(current), Some(target)) => self.unify_same_effect(
+                current.effects.clone(),
+                current_span,
+                target.effects.clone(),
+                target_span,
+            ),
+            _ => Ok(()),
+        }
     }
 
     pub fn finalize_effect_dependencies(&mut self) -> Result<(), InternalCompilationError> {

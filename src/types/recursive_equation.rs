@@ -103,6 +103,13 @@ impl Validation {
                 fn_ty.args.iter().all(|arg| self.validate(arg.ty, guarded))
                     && self.validate(fn_ty.ret, guarded)
             }
+            Subscript(subscript) => {
+                subscript
+                    .args
+                    .iter()
+                    .all(|arg| self.validate(arg.ty, guarded))
+                    && self.validate(subscript.ret, guarded)
+            }
             Named(named) => named
                 .params
                 .iter()

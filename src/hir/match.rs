@@ -47,9 +47,10 @@ fn is_definitely_uninhabited(ty: Type, env: &TypingEnv) -> bool {
             let data = ty.data();
             match &*data {
                 TypeKind::Never => return true,
-                TypeKind::Variable(_) | TypeKind::Native(_) | TypeKind::Function(_) => {
-                    return false;
-                }
+                TypeKind::Variable(_)
+                | TypeKind::Native(_)
+                | TypeKind::Function(_)
+                | TypeKind::Subscript(_) => return false,
                 _ => data.clone(),
             }
         };
@@ -65,7 +66,8 @@ fn is_definitely_uninhabited(ty: Type, env: &TypingEnv) -> bool {
             TypeKind::Never
             | TypeKind::Variable(_)
             | TypeKind::Native(_)
-            | TypeKind::Function(_) => unreachable!(),
+            | TypeKind::Function(_)
+            | TypeKind::Subscript(_) => unreachable!(),
         };
         seen.pop();
         result

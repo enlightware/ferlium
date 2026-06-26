@@ -443,7 +443,7 @@ impl Module {
     ) -> LocalSubscriptId {
         assert_eq!(
             function.definition.result_convention,
-            CallResultConvention::AddressorPlace
+            CallResultConvention::ADDRESSOR_PLACE
         );
         let signature = SubscriptSignature {
             args: function.definition.ty_scheme.ty.args.clone(),
@@ -1457,6 +1457,13 @@ impl Module {
                     .iter()
                     .all(|arg| self.is_type_visible_by(arg.ty, others, is_named_type_visible))
                     && self.is_type_visible_by(function.ret, others, is_named_type_visible)
+            }
+            Subscript(subscript) => {
+                subscript
+                    .args
+                    .iter()
+                    .all(|arg| self.is_type_visible_by(arg.ty, others, is_named_type_visible))
+                    && self.is_type_visible_by(subscript.ret, others, is_named_type_visible)
             }
             Named(named) => {
                 self.is_type_def_ref_visible_by(named.def, others, is_named_type_visible)

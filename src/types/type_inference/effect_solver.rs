@@ -10,7 +10,7 @@ use crate::{
     parser::location::Location,
     types::{
         effects::{EffType, Effect, EffectVar, EffectVarKey},
-        r#type::{FnType, Type, TypeKind},
+        r#type::{FnType, SubscriptMemberType, SubscriptType, Type, TypeKind},
     },
 };
 use ustr::Ustr;
@@ -210,39 +210,38 @@ impl EffectSolver {
         if root != var { Some(root) } else { None }
     }
 
-    /// Generalize concrete effects in a function type to effect variables.
+    /// Generalize concrete effects in first-class callable-like types to effect variables.
     ///
-    /// This is needed when unifying a type variable with a function type, to
-    /// preserve effect polymorphism.
-    pub(super) fn generalize_function_effects(&mut self, ty: Type) -> Type {
+    /// This is needed when unifying a type variable with a function or subscript
+    /// type, to preserve effect polymorphism.
+    pub(super) fn generalize_effectful_callable_type(&mut self, ty: Type) -> Type {
         use TypeKind::*;
         let ty_data = ty.data();
         match &*ty_data {
             Function(fn_ty) => {
                 let fn_ty = fn_ty.clone();
                 drop(ty_data);
-                let has_primitive_effects = fn_ty.effects.iter().any(|e| e.is_primitive());
-                if has_primitive_effects {
-                    let fresh_eff_var = self.table.new_key(None);
-                    for eff in fn_ty.effects.iter() {
-                        if eff.is_primitive() {
-                            self.pending_dependencies.push(PendingEffectDependency {
-                                source: EffType::single(eff),
-                                source_span: Location::new_synthesized(),
-                                target: fresh_eff_var,
-                                target_span: Location::new_synthesized(),
-                                origin: EffectConstraintOrigin::Inference,
-                            });
-                        } else if let Some(var) = eff.as_variable() {
-                            self.table.union(fresh_eff_var, *var);
-                        }
-                    }
-                    let new_fn_ty = FnType::new(
-                        fn_ty.args.clone(),
-                        fn_ty.ret,
-                        EffType::single_variable(fresh_eff_var),
-                    );
+                if let Some(effects) = self.generalize_effect_type(&fn_ty.effects) {
+                    let new_fn_ty = FnType::new(fn_ty.args.clone(), fn_ty.ret, effects);
                     Type::function_type(new_fn_ty)
+                } else {
+                    ty
+                }
+            }
+            Subscript(subscript) => {
+                let subscript = subscript.clone();
+                drop(ty_data);
+                let (ref_member, ref_changed) =
+                    self.generalize_subscript_member(subscript.ref_member.as_ref());
+                let (mut_member, mut_changed) =
+                    self.generalize_subscript_member(subscript.mut_member.as_ref());
+                if ref_changed || mut_changed {
+                    Type::subscript_type(SubscriptType::new(
+                        subscript.args.clone(),
+                        subscript.ret,
+                        ref_member,
+                        mut_member,
+                    ))
                 } else {
                     ty
                 }
@@ -252,6 +251,44 @@ impl EffectSolver {
                 ty
             }
         }
+    }
+
+    fn generalize_subscript_member(
+        &mut self,
+        member: Option<&SubscriptMemberType>,
+    ) -> (Option<SubscriptMemberType>, bool) {
+        let Some(member) = member else {
+            return (None, false);
+        };
+        match self.generalize_effect_type(&member.effects) {
+            Some(effects) => (
+                Some(SubscriptMemberType::new(effects, member.result_convention)),
+                true,
+            ),
+            None => (Some(member.clone()), false),
+        }
+    }
+
+    fn generalize_effect_type(&mut self, effects: &EffType) -> Option<EffType> {
+        let has_primitive_effects = effects.iter().any(|e| e.is_primitive());
+        if !has_primitive_effects {
+            return None;
+        }
+        let fresh_eff_var = self.table.new_key(None);
+        for eff in effects.iter() {
+            if eff.is_primitive() {
+                self.pending_dependencies.push(PendingEffectDependency {
+                    source: EffType::single(eff),
+                    source_span: Location::new_synthesized(),
+                    target: fresh_eff_var,
+                    target_span: Location::new_synthesized(),
+                    origin: EffectConstraintOrigin::Inference,
+                });
+            } else if let Some(var) = eff.as_variable() {
+                self.table.union(fresh_eff_var, *var);
+            }
+        }
+        Some(EffType::single_variable(fresh_eff_var))
     }
 
     /// Require the selected implementation's output effect to fit in the

@@ -3469,7 +3469,7 @@ mod tests {
             hir_syn::static_apply_with_result_convention(
                 crate::module::FunctionId::new(test_module_id, accessor_id),
                 accessor_fn_ty.clone(),
-                CallResultConvention::YieldedOnce,
+                CallResultConvention::YIELDED_ONCE,
                 vec![CallArgument {
                     value: load_caller_log_for_arg,
                     passing: ResolvedArgPassing::MutableRef,
@@ -3623,7 +3623,7 @@ mod tests {
             hir_syn::static_apply_with_result_convention(
                 crate::module::FunctionId::new(test_module_id, accessor_id),
                 accessor_fn_ty.clone(),
-                CallResultConvention::YieldedOnce,
+                CallResultConvention::YIELDED_ONCE,
                 Vec::new(),
                 span,
             ),

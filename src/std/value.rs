@@ -251,6 +251,14 @@ fn layout_for_value_type(
             return Ok(layout);
         }
         Function(_) => ValueLayout::native::<FunctionValue>(),
+        Subscript(_) => {
+            drop(ty_data);
+            active.remove(&ty);
+            return Err(internal_compilation_error!(Internal {
+                error: "cannot compute Value layout for first-class subscript type before subscript values have a runtime representation".to_string(),
+                span,
+            }));
+        }
         Never => ValueLayout::product([]),
         Variable(_) => {
             drop(ty_data);
@@ -312,6 +320,7 @@ fn value_type_is_resolved_ignoring_function_surface(
     use TypeKind::*;
     let resolved = match &*ty_data {
         Function(_) => true,
+        Subscript(_) => false,
         Tuple(member_tys) => {
             let member_tys = member_tys.clone();
             drop(ty_data);

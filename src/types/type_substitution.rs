@@ -12,7 +12,10 @@ use crate::{
     containers::b,
     types::effects::EffType,
     types::mutability::MutType,
-    types::r#type::{FnArgType, FnType, NamedType, NativeType, Type, TypeKind, store_types},
+    types::r#type::{
+        FnArgType, FnType, NamedType, NativeType, SubscriptMemberType, SubscriptType, Type,
+        TypeKind, store_types,
+    },
     types::type_like::TypeLike,
     types::type_mapper::{SimpleInstantiationMapper, TypeMapper},
 };
@@ -201,6 +204,9 @@ fn substitute_type_rec(
                 .collect(),
         ),
         Function(fn_ty) => Function(b(substitute_fn_type_rec(&fn_ty, substituer, output, seen))),
+        Subscript(subscript) => Subscript(b(substitute_subscript_type_rec(
+            &subscript, substituer, output, seen,
+        ))),
         Named(NamedType {
             def: decl,
             params: args,
@@ -264,6 +270,9 @@ fn map_type_rec(
                 .collect(),
         ),
         Function(fn_ty) => Function(b(map_fn_type_rec(&fn_ty, mapper, output, seen))),
+        Subscript(subscript) => {
+            Subscript(b(map_subscript_type_rec(&subscript, mapper, output, seen)))
+        }
         Named(NamedType {
             def,
             params,
@@ -300,19 +309,54 @@ fn map_fn_type_rec(
     output: &mut Vec<TypeKind>,
     seen: &mut FxHashMap<Type, u32>,
 ) -> FnType {
-    let args = fn_ty
-        .args
-        .iter()
+    let args = map_fn_arg_types_rec(&fn_ty.args, mapper, output, seen);
+    let ret = map_type_rec(fn_ty.ret, mapper, output, seen);
+    let effects = mapper.map_effect_type(&fn_ty.effects);
+    FnType::new(args, ret, effects)
+}
+
+fn map_fn_arg_types_rec(
+    args: &[FnArgType],
+    mapper: &mut impl TypeMapper,
+    output: &mut Vec<TypeKind>,
+    seen: &mut FxHashMap<Type, u32>,
+) -> Vec<FnArgType> {
+    args.iter()
         .map(|arg| {
             FnArgType::new(
                 map_type_rec(arg.ty, mapper, output, seen),
                 mapper.map_mut_type(arg.mut_ty),
             )
         })
-        .collect();
-    let ret = map_type_rec(fn_ty.ret, mapper, output, seen);
-    let effects = mapper.map_effect_type(&fn_ty.effects);
-    FnType::new(args, ret, effects)
+        .collect()
+}
+
+fn map_subscript_type_rec(
+    subscript: &SubscriptType,
+    mapper: &mut impl TypeMapper,
+    output: &mut Vec<TypeKind>,
+    seen: &mut FxHashMap<Type, u32>,
+) -> SubscriptType {
+    let args = map_fn_arg_types_rec(&subscript.args, mapper, output, seen);
+    let ret = map_type_rec(subscript.ret, mapper, output, seen);
+    SubscriptType::new(
+        args,
+        ret,
+        map_subscript_member_type(subscript.ref_member.as_ref(), mapper),
+        map_subscript_member_type(subscript.mut_member.as_ref(), mapper),
+    )
+}
+
+fn map_subscript_member_type(
+    member: Option<&SubscriptMemberType>,
+    mapper: &mut impl TypeMapper,
+) -> Option<SubscriptMemberType> {
+    member.map(|member| {
+        SubscriptMemberType::new(
+            mapper.map_effect_type(&member.effects),
+            member.result_convention,
+        )
+    })
 }
 
 fn substitute_types_rec(
@@ -332,17 +376,52 @@ fn substitute_fn_type_rec(
     output: &mut Vec<TypeKind>,
     seen: &mut FxHashMap<Type, u32>,
 ) -> FnType {
-    let args = fn_ty
-        .args
-        .iter()
+    let args = substitute_fn_arg_types_rec(&fn_ty.args, substituer, output, seen);
+    let ret = substitute_type_rec(fn_ty.ret, substituer, output, seen);
+    let effects = substituer.substitute_effect_type(&fn_ty.effects);
+    FnType::new(args, ret, effects)
+}
+
+fn substitute_fn_arg_types_rec(
+    args: &[FnArgType],
+    substituer: &mut impl TypeSubstituer,
+    output: &mut Vec<TypeKind>,
+    seen: &mut FxHashMap<Type, u32>,
+) -> Vec<FnArgType> {
+    args.iter()
         .map(|arg| {
             FnArgType::new(
                 substitute_type_rec(arg.ty, substituer, output, seen),
                 substituer.substitute_mut_type(arg.mut_ty),
             )
         })
-        .collect();
-    let ret = substitute_type_rec(fn_ty.ret, substituer, output, seen);
-    let effects = substituer.substitute_effect_type(&fn_ty.effects);
-    FnType::new(args, ret, effects)
+        .collect()
+}
+
+fn substitute_subscript_type_rec(
+    subscript: &SubscriptType,
+    substituer: &mut impl TypeSubstituer,
+    output: &mut Vec<TypeKind>,
+    seen: &mut FxHashMap<Type, u32>,
+) -> SubscriptType {
+    let args = substitute_fn_arg_types_rec(&subscript.args, substituer, output, seen);
+    let ret = substitute_type_rec(subscript.ret, substituer, output, seen);
+    SubscriptType::new(
+        args,
+        ret,
+        substitute_subscript_member_type(subscript.ref_member.as_ref(), substituer),
+        substitute_subscript_member_type(subscript.mut_member.as_ref(), substituer),
+    )
+}
+
+fn substitute_subscript_member_type(
+    member: Option<&SubscriptMemberType>,
+    substituer: &mut impl TypeSubstituer,
+) -> Option<SubscriptMemberType> {
+    member.map(|member| {
+        SubscriptMemberType::new(
+            substituer.substitute_effect_type(&member.effects),
+            member.result_convention,
+        )
+    })
 }

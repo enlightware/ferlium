@@ -500,7 +500,36 @@ where
     arg.ty.fmt_with(f, env)
 }
 
-/// How a function call yields its result.
+/// How a subscript member exposes its projected place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum SubscriptResultConvention {
+    /// A scoped, callee-rooted yielded place. It must be consumed through a
+    /// `WithYielded` driver and cannot escape as caller-rooted storage.
+    YieldedOnce,
+    /// A caller-rooted place, used by selected native or source subscript
+    /// member implementations. This is the strongest subscript result
+    /// convention because it can also satisfy scoped-yield consumers.
+    AddressorPlace,
+}
+
+impl SubscriptResultConvention {
+    pub fn returns_caller_rooted_place(self) -> bool {
+        matches!(self, Self::AddressorPlace)
+    }
+
+    pub fn requires_yield_driver(self) -> bool {
+        matches!(self, Self::YieldedOnce)
+    }
+
+    pub fn can_satisfy(self, expected: Self) -> bool {
+        match expected {
+            Self::YieldedOnce => matches!(self, Self::YieldedOnce | Self::AddressorPlace),
+            Self::AddressorPlace => matches!(self, Self::AddressorPlace),
+        }
+    }
+}
+
+/// How a selected callable implementation yields its result.
 ///
 /// Borrow-returning conventions are call-result conventions, not first-class
 /// reference types. The return value still has type `ret`; the convention only
@@ -510,27 +539,29 @@ where
 pub enum CallResultConvention {
     #[default]
     Value,
-    /// A scoped, callee-rooted yielded place. It must be consumed through a
-    /// `WithYielded` driver and cannot escape as caller-rooted storage.
-    YieldedOnce,
-    /// A caller-rooted place, used by selected native or source subscript
-    /// member implementations. This is the strongest
-    /// borrow-returning convention because it can also satisfy scoped-yield
-    /// consumers.
-    AddressorPlace,
+    Subscript(SubscriptResultConvention),
 }
 
 impl CallResultConvention {
+    pub const YIELDED_ONCE: Self = Self::Subscript(SubscriptResultConvention::YieldedOnce);
+    pub const ADDRESSOR_PLACE: Self = Self::Subscript(SubscriptResultConvention::AddressorPlace);
+
     pub fn returns_borrow(self) -> bool {
-        matches!(self, Self::YieldedOnce | Self::AddressorPlace)
+        matches!(self, Self::Subscript(_))
     }
 
     pub fn returns_caller_rooted_place(self) -> bool {
-        matches!(self, Self::AddressorPlace)
+        match self {
+            Self::Value => false,
+            Self::Subscript(convention) => convention.returns_caller_rooted_place(),
+        }
     }
 
     pub fn requires_yield_driver(self) -> bool {
-        matches!(self, Self::YieldedOnce)
+        match self {
+            Self::Value => false,
+            Self::Subscript(convention) => convention.requires_yield_driver(),
+        }
     }
 
     pub fn returns_place(self) -> bool {
@@ -538,10 +569,11 @@ impl CallResultConvention {
     }
 
     pub fn can_satisfy(self, expected: Self) -> bool {
-        match expected {
-            Self::Value => matches!(self, Self::Value | Self::AddressorPlace),
-            Self::YieldedOnce => matches!(self, Self::YieldedOnce | Self::AddressorPlace),
-            Self::AddressorPlace => matches!(self, Self::AddressorPlace),
+        match (self, expected) {
+            (Self::Value, Self::Value) => true,
+            (Self::Subscript(SubscriptResultConvention::AddressorPlace), Self::Value) => true,
+            (Self::Subscript(current), Self::Subscript(expected)) => current.can_satisfy(expected),
+            _ => false,
         }
     }
 }
@@ -635,6 +667,63 @@ impl CallImplType {
     }
 }
 
+/// Type-level capability for one member of a subscript.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, new)]
+pub struct SubscriptMemberType {
+    pub effects: EffType,
+    pub result_convention: SubscriptResultConvention,
+}
+
+impl SubscriptMemberType {
+    fn can_satisfy(&self, expected: &Self) -> bool {
+        self.result_convention
+            .can_satisfy(expected.result_convention)
+    }
+}
+
+/// First-class type of a subscript/projection capability.
+///
+/// This is intentionally distinct from `FnType`: a subscript is selected and
+/// consumed as a place-producing projection capability, not called as an
+/// ordinary function.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, new)]
+pub struct SubscriptType {
+    pub args: Vec<FnArgType>,
+    pub ret: Type,
+    pub ref_member: Option<SubscriptMemberType>,
+    pub mut_member: Option<SubscriptMemberType>,
+}
+
+impl SubscriptType {
+    fn members(&self) -> impl Iterator<Item = &SubscriptMemberType> {
+        self.ref_member.iter().chain(self.mut_member.iter())
+    }
+
+    fn local_cmp(&self, other: &Self) -> Ordering {
+        compare_by(&self.args, &other.args, FnArgType::local_cmp)
+            .then(self.ret.local_cmp(&other.ret))
+            .then(self.ref_member.cmp(&other.ref_member))
+            .then(self.mut_member.cmp(&other.mut_member))
+    }
+
+    pub(crate) fn can_satisfy_members(&self, expected: &Self) -> bool {
+        member_can_satisfy(&self.ref_member, &expected.ref_member)
+            && member_can_satisfy(&self.mut_member, &expected.mut_member)
+    }
+}
+
+fn member_can_satisfy(
+    current: &Option<SubscriptMemberType>,
+    expected: &Option<SubscriptMemberType>,
+) -> bool {
+    match expected {
+        None => true,
+        Some(expected) => current
+            .as_ref()
+            .is_some_and(|current| current.can_satisfy(expected)),
+    }
+}
+
 impl TypeLike for CallImplType {
     fn visit(&self, visitor: &mut impl TypeInnerVisitor) {
         self.fn_ty.visit(visitor);
@@ -693,9 +782,63 @@ impl TypeLike for FnType {
     }
 }
 
+impl TypeLike for SubscriptType {
+    fn visit(&self, visitor: &mut impl TypeInnerVisitor) {
+        self.args.iter().for_each(|arg| {
+            visitor.visit_mut_ty(arg.mut_ty);
+            arg.ty.data().visit(visitor)
+        });
+        self.ret.data().visit(visitor);
+        for member in self.members() {
+            visitor.visit_eff_ty(&member.effects);
+        }
+    }
+
+    fn map(&self, f: &mut impl TypeMapper) -> Self {
+        Self {
+            args: self
+                .args
+                .iter()
+                .map(|arg| FnArgType {
+                    ty: arg.ty.map(f),
+                    mut_ty: f.map_mut_type(arg.mut_ty),
+                })
+                .collect(),
+            ret: self.ret.map(f),
+            ref_member: self.ref_member.as_ref().map(|member| SubscriptMemberType {
+                effects: f.map_effect_type(&member.effects),
+                result_convention: member.result_convention,
+            }),
+            mut_member: self.mut_member.as_ref().map(|member| SubscriptMemberType {
+                effects: f.map_effect_type(&member.effects),
+                result_convention: member.result_convention,
+            }),
+        }
+    }
+
+    fn fill_with_input_effect_vars(&self, vars: &mut FxHashSet<EffectVar>) {
+        for arg in &self.args {
+            arg.ty.fill_with_inner_effect_vars(vars);
+        }
+        self.ret.fill_with_inner_effect_vars(vars);
+    }
+
+    fn fill_with_output_effect_vars(&self, vars: &mut FxHashSet<EffectVar>) {
+        for member in self.members() {
+            member.effects.fill_with_inner_effect_vars(vars);
+        }
+    }
+}
+
 impl CastableToType for FnType {
     fn to_type(&self) -> Type {
         Type::function_type(self.clone())
+    }
+}
+
+impl CastableToType for SubscriptType {
+    fn to_type(&self) -> Type {
+        Type::subscript_type(self.clone())
     }
 }
 
@@ -711,6 +854,12 @@ impl FormatWith<ModuleEnv<'_>> for CallImplType {
     }
 }
 
+impl FormatWith<ModuleEnv<'_>> for SubscriptType {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
+        fmt_subscript_type_with_env(self, f, env)
+    }
+}
+
 impl FormatWith<TypeDisplayEnv<'_, '_>> for FnType {
     fn fmt_with(&self, f: &mut fmt::Formatter, env: &TypeDisplayEnv<'_, '_>) -> fmt::Result {
         fmt_fn_type_with_env(self, f, env)
@@ -720,6 +869,12 @@ impl FormatWith<TypeDisplayEnv<'_, '_>> for FnType {
 impl FormatWith<TypeDisplayEnv<'_, '_>> for CallImplType {
     fn fmt_with(&self, f: &mut fmt::Formatter, env: &TypeDisplayEnv<'_, '_>) -> fmt::Result {
         fmt_call_impl_type_with_env(self, f, env)
+    }
+}
+
+impl FormatWith<TypeDisplayEnv<'_, '_>> for SubscriptType {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &TypeDisplayEnv<'_, '_>) -> fmt::Result {
+        fmt_subscript_type_with_env(self, f, env)
     }
 }
 
@@ -739,6 +894,12 @@ impl FormatWith<QualifiedNameEnv<'_>> for FnType {
             format_effect_binding_value(&self.effects, f)?;
         }
         Ok(())
+    }
+}
+
+impl FormatWith<QualifiedNameEnv<'_>> for SubscriptType {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &QualifiedNameEnv<'_>) -> fmt::Result {
+        fmt_subscript_type_with_qualified_name_env(self, f, env)
     }
 }
 
@@ -805,6 +966,99 @@ where
     }
     function.fn_ty.ret.fmt_with(f, env)?;
     format_function_effect_suffix_with_env(&env.displayed_effects(&function.fn_ty.effects), f, env)
+}
+
+fn fmt_subscript_type_with_env<Env>(
+    subscript: &SubscriptType,
+    f: &mut fmt::Formatter,
+    env: &Env,
+) -> fmt::Result
+where
+    FnArgType: FormatWith<Env>,
+    Type: FormatWith<Env>,
+    Env: TypeFormatEnv,
+{
+    fmt_subscript_type_signature(
+        subscript,
+        f,
+        |arg, f| arg.fmt_with(f, env),
+        |ty, f| ty.fmt_with(f, env),
+    )?;
+    fmt_subscript_type_members(subscript, f, |effects, f| {
+        format_function_effect_suffix_with_env(&env.displayed_effects(effects), f, env)
+    })
+}
+
+fn fmt_subscript_type_with_qualified_name_env(
+    subscript: &SubscriptType,
+    f: &mut fmt::Formatter,
+    env: &QualifiedNameEnv<'_>,
+) -> fmt::Result {
+    fmt_subscript_type_signature(
+        subscript,
+        f,
+        |arg, f| arg.fmt_with(f, env),
+        |ty, f| ty.fmt_with(f, env),
+    )?;
+    fmt_subscript_type_members(subscript, f, |effects, f| {
+        if effects.is_empty() {
+            Ok(())
+        } else {
+            write!(f, " ! ")?;
+            format_effect_binding_value(effects, f)
+        }
+    })
+}
+
+fn fmt_subscript_type_signature(
+    subscript: &SubscriptType,
+    f: &mut fmt::Formatter,
+    mut fmt_arg: impl FnMut(&FnArgType, &mut fmt::Formatter) -> fmt::Result,
+    mut fmt_ret: impl FnMut(Type, &mut fmt::Formatter) -> fmt::Result,
+) -> fmt::Result {
+    write!(f, "subscript (")?;
+    for (i, arg) in subscript.args.iter().enumerate() {
+        if i > 0 {
+            write!(f, ", ")?;
+        }
+        fmt_arg(arg, f)?;
+    }
+    write!(f, ") -> ")?;
+    fmt_ret(subscript.ret, f)
+}
+
+fn fmt_subscript_type_members(
+    subscript: &SubscriptType,
+    f: &mut fmt::Formatter,
+    mut fmt_effects: impl FnMut(&EffType, &mut fmt::Formatter) -> fmt::Result,
+) -> fmt::Result {
+    write!(f, " {{")?;
+    let mut needs_separator = false;
+    if let Some(member) = &subscript.ref_member {
+        write!(f, " ref")?;
+        format_subscript_member_result_convention(member.result_convention, f)?;
+        fmt_effects(&member.effects, f)?;
+        needs_separator = true;
+    }
+    if let Some(member) = &subscript.mut_member {
+        if needs_separator {
+            write!(f, ";")?;
+        }
+        write!(f, " mut")?;
+        format_subscript_member_result_convention(member.result_convention, f)?;
+        fmt_effects(&member.effects, f)?;
+    }
+    write!(f, " }}")
+}
+
+fn format_subscript_member_result_convention(
+    convention: SubscriptResultConvention,
+    f: &mut fmt::Formatter,
+) -> fmt::Result {
+    match convention {
+        SubscriptResultConvention::YieldedOnce => write!(f, " yielded"),
+        SubscriptResultConvention::AddressorPlace => write!(f, " place"),
+    }
 }
 
 pub(crate) fn fmt_fn_type_with_arg_names<Env>(
@@ -987,6 +1241,10 @@ impl Type {
         TypeKind::Function(b(ty)).store()
     }
 
+    pub fn subscript_type(ty: SubscriptType) -> Self {
+        TypeKind::Subscript(b(ty)).store()
+    }
+
     pub fn function_by_val_with_effects(
         args: impl IntoIterator<Item = Self>,
         ret: Self,
@@ -1058,6 +1316,10 @@ impl Type {
 
     pub fn is_function(self) -> bool {
         matches!(&*self.data(), TypeKind::Function(_))
+    }
+
+    pub fn is_subscript(self) -> bool {
+        matches!(&*self.data(), TypeKind::Subscript(_))
     }
 
     pub fn data<'t>(self) -> TypeDataRef<'t> {
@@ -1909,6 +2171,8 @@ pub enum TypeKind {
     Record(Vec<(Ustr, Type)>),
     /// A function type
     Function(B<FnType>),
+    /// A first-class subscript/projection capability type
+    Subscript(B<SubscriptType>),
     /// A named newtype, with its instantiated type-arguments
     Named(NamedType),
     /// Bottom type
@@ -1986,6 +2250,13 @@ impl TypeKind {
                         .all(|arg| go(arg.ty, ty_var, env, seen_named, in_variant))
                         && go(function.ret, ty_var, env, seen_named, in_variant)
                 }
+                TypeKind::Subscript(subscript) => {
+                    subscript
+                        .args
+                        .iter()
+                        .all(|arg| go(arg.ty, ty_var, env, seen_named, in_variant))
+                        && go(subscript.ret, ty_var, env, seen_named, in_variant)
+                }
                 TypeKind::Named(named) => {
                     if in_variant {
                         return true;
@@ -2047,6 +2318,7 @@ impl TypeKind {
                     .collect::<Vec<_>>(),
             ),
             Function(fn_type) => Type::function_type(fn_type.map(f)),
+            Subscript(subscript) => Type::subscript_type(subscript.map(f)),
             Named(NamedType {
                 def: decl,
                 params: args,
@@ -2085,6 +2357,7 @@ impl TypeKind {
             Tuple(types) => types.iter().for_each(|ty| process_ty(*ty, visitor)),
             Record(fields) => fields.iter().for_each(|(_, ty)| process_ty(*ty, visitor)),
             Function(fn_type) => fn_type.visit(visitor),
+            Subscript(subscript) => subscript.visit(visitor),
             Named(NamedType {
                 params: args,
                 effect_params,
@@ -2132,6 +2405,12 @@ impl TypeKind {
                 }
                 f(function.ret);
             }
+            Subscript(subscript) => {
+                for arg in &subscript.args {
+                    f(arg.ty);
+                }
+                f(subscript.ret);
+            }
             Named(NamedType { params, .. }) => {
                 for &ty in params {
                     f(ty);
@@ -2170,6 +2449,12 @@ impl TypeKind {
                     f(&mut arg.ty);
                 }
                 f(&mut function.ret);
+            }
+            Subscript(subscript) => {
+                for arg in &mut subscript.args {
+                    f(&mut arg.ty);
+                }
+                f(&mut subscript.ret);
             }
             Named(named) => {
                 for ty in &mut named.params {
@@ -2215,6 +2500,7 @@ impl TypeKind {
                 a_s.cmp(b_s).then(a_t.local_cmp(b_t))
             }),
             (Function(a), Function(b)) => a.local_cmp(b),
+            (Subscript(a), Subscript(b)) => a.local_cmp(b),
             _ => self.rank().cmp(&other.rank()),
         }
     }
@@ -2247,8 +2533,9 @@ impl TypeKind {
             Tuple(_) => 4,
             Record(_) => 5,
             Function(_) => 6,
-            Named(_) => 7,
-            Never => 8,
+            Subscript(_) => 7,
+            Named(_) => 8,
+            Never => 9,
         }
     }
 
@@ -2330,6 +2617,7 @@ where
     Env: TypeFormatEnv,
     FnType: FormatWith<Env>,
     NativeType: FormatWith<Env>,
+    SubscriptType: FormatWith<Env>,
     Type: FormatWith<Env>,
 {
     use TypeKind::*;
@@ -2389,6 +2677,7 @@ where
             write!(f, " }}")
         }
         Function(function) => function.fmt_with(f, env),
+        Subscript(subscript) => subscript.fmt_with(f, env),
         Named(NamedType {
             def,
             params: args,
@@ -2501,6 +2790,7 @@ fn fmt_type_kind_with_qualified_name_env(
             write!(f, " }}")
         }
         Function(function) => function.fmt_with(f, env),
+        Subscript(subscript) => subscript.fmt_with(f, env),
         Named(NamedType {
             def,
             params: args,
@@ -2555,6 +2845,12 @@ impl Ord for TypeKind {
             (Tuple(a), Tuple(b)) => a.cmp(b),
             (Record(a), Record(b)) => a.cmp(b),
             (Function(a), Function(b)) => a.args.cmp(&b.args).then_with(|| a.ret.cmp(&b.ret)),
+            (Subscript(a), Subscript(b)) => a
+                .args
+                .cmp(&b.args)
+                .then_with(|| a.ret.cmp(&b.ret))
+                .then_with(|| a.ref_member.cmp(&b.ref_member))
+                .then_with(|| a.mut_member.cmp(&b.mut_member)),
             _ => self.rank().cmp(&other.rank()),
         }
     }
@@ -2730,6 +3026,11 @@ fn types_could_match(a: &TypeKind, b: &TypeKind) -> bool {
             a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.0 == y.0)
         }
         (TypeKind::Function(_), TypeKind::Function(_)) => true, // Could compare arity, but skip for now
+        (TypeKind::Subscript(a), TypeKind::Subscript(b)) => {
+            a.args.len() == b.args.len()
+                && a.ref_member.is_some() == b.ref_member.is_some()
+                && a.mut_member.is_some() == b.mut_member.is_some()
+        }
         (TypeKind::Native(a), TypeKind::Native(b)) => {
             a.bare_ty == b.bare_ty && a.arguments.len() == b.arguments.len()
         }
@@ -2786,6 +3087,16 @@ fn type_kinds_match_with_mapping(
         }
         (TypeKind::Function(a), TypeKind::Function(b)) => {
             a.effects == b.effects
+                && a.args.len() == b.args.len()
+                && a.args.iter().zip(&b.args).all(|(a, b)| {
+                    a.mut_ty == b.mut_ty
+                        && type_matches_with_mapping(a.ty, b.ty, world_idx, mapping)
+                })
+                && type_matches_with_mapping(a.ret, b.ret, world_idx, mapping)
+        }
+        (TypeKind::Subscript(a), TypeKind::Subscript(b)) => {
+            a.ref_member == b.ref_member
+                && a.mut_member == b.mut_member
                 && a.args.len() == b.args.len()
                 && a.args.iter().zip(&b.args).all(|(a, b)| {
                     a.mut_ty == b.mut_ty
@@ -3211,6 +3522,22 @@ impl TypeUniverse {
                 }
                 self.fold_child(fn_ty.ret, summary, visited, &mut lookup);
             }
+            Subscript(subscript) => {
+                for arg in &subscript.args {
+                    if let Some(var) = arg.mut_ty.as_variable() {
+                        summary.free_mut_vars.insert(*var);
+                    }
+                    self.fold_child(arg.ty, summary, visited, &mut lookup);
+                }
+                for member in subscript.members() {
+                    for eff in member.effects.iter() {
+                        if let Some(var) = eff.as_variable() {
+                            summary.free_eff_vars.insert(*var);
+                        }
+                    }
+                }
+                self.fold_child(subscript.ret, summary, visited, &mut lookup);
+            }
             Native(g) => {
                 for ty in &g.arguments {
                     self.fold_child(*ty, summary, visited, &mut lookup);
@@ -3369,11 +3696,18 @@ pub struct TypeNames {
 mod tests {
     use crate::{
         CompilerSession,
+        parser::location::Location,
         std::{
             array::array_type,
             logic::bool_type,
             math::{Int, int_type},
             string::string_type,
+        },
+        types::{
+            effects::{EffType, Effect, EffectsInstSubst, PrimitiveEffect},
+            type_inference::unify::UnifiedTypeInference,
+            type_like::TypeLike,
+            type_mapper::SimpleInstantiationMapper,
         },
     };
 
@@ -3392,21 +3726,221 @@ mod tests {
     #[test]
     fn yielded_once_return_convention_does_not_satisfy_value() {
         assert!(CallResultConvention::Value.can_satisfy(CallResultConvention::Value));
-        assert!(!CallResultConvention::Value.can_satisfy(CallResultConvention::YieldedOnce));
-        assert!(!CallResultConvention::Value.can_satisfy(CallResultConvention::AddressorPlace));
+        assert!(!CallResultConvention::Value.can_satisfy(CallResultConvention::YIELDED_ONCE));
+        assert!(!CallResultConvention::Value.can_satisfy(CallResultConvention::ADDRESSOR_PLACE));
 
-        assert!(!CallResultConvention::YieldedOnce.can_satisfy(CallResultConvention::Value));
-        assert!(CallResultConvention::YieldedOnce.can_satisfy(CallResultConvention::YieldedOnce));
+        assert!(!CallResultConvention::YIELDED_ONCE.can_satisfy(CallResultConvention::Value));
+        assert!(CallResultConvention::YIELDED_ONCE.can_satisfy(CallResultConvention::YIELDED_ONCE));
         assert!(
-            !CallResultConvention::YieldedOnce.can_satisfy(CallResultConvention::AddressorPlace)
+            !CallResultConvention::YIELDED_ONCE.can_satisfy(CallResultConvention::ADDRESSOR_PLACE)
         );
 
-        assert!(CallResultConvention::AddressorPlace.can_satisfy(CallResultConvention::Value));
+        assert!(CallResultConvention::ADDRESSOR_PLACE.can_satisfy(CallResultConvention::Value));
         assert!(
-            CallResultConvention::AddressorPlace.can_satisfy(CallResultConvention::YieldedOnce)
+            CallResultConvention::ADDRESSOR_PLACE.can_satisfy(CallResultConvention::YIELDED_ONCE)
         );
         assert!(
-            CallResultConvention::AddressorPlace.can_satisfy(CallResultConvention::AddressorPlace)
+            CallResultConvention::ADDRESSOR_PLACE
+                .can_satisfy(CallResultConvention::ADDRESSOR_PLACE)
+        );
+    }
+
+    fn test_subscript_member(result_convention: SubscriptResultConvention) -> SubscriptMemberType {
+        SubscriptMemberType::new(EffType::empty(), result_convention)
+    }
+
+    fn test_ref_subscript_type(arg: Type, ret: Type) -> SubscriptType {
+        SubscriptType::new(
+            vec![FnArgType::new_by_val(arg)],
+            ret,
+            Some(test_subscript_member(
+                SubscriptResultConvention::AddressorPlace,
+            )),
+            None,
+        )
+    }
+
+    fn test_ref_mut_subscript_type(arg: Type, ret: Type) -> SubscriptType {
+        SubscriptType::new(
+            vec![FnArgType::new_by_val(arg)],
+            ret,
+            Some(test_subscript_member(
+                SubscriptResultConvention::AddressorPlace,
+            )),
+            Some(test_subscript_member(
+                SubscriptResultConvention::AddressorPlace,
+            )),
+        )
+    }
+
+    #[test]
+    fn subscript_type_is_distinct_from_function_type() {
+        let arg_ty = int_type();
+        let ret_ty = bool_type();
+        let fn_ty = Type::function_by_val([arg_ty], ret_ty);
+        let subscript_ty = Type::subscript_type(test_ref_subscript_type(arg_ty, ret_ty));
+
+        assert!(fn_ty.is_function());
+        assert!(subscript_ty.is_subscript());
+        assert_ne!(fn_ty, subscript_ty);
+    }
+
+    #[test]
+    fn subscript_type_with_mut_member_satisfies_ref_only_capability() {
+        let actual = Type::subscript_type(test_ref_mut_subscript_type(int_type(), bool_type()));
+        let expected = Type::subscript_type(test_ref_subscript_type(int_type(), bool_type()));
+
+        UnifiedTypeInference::default()
+            .unify_sub_type(
+                actual,
+                Location::new_synthesized(),
+                expected,
+                Location::new_synthesized(),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn subscript_type_without_mut_member_does_not_satisfy_mut_capability() {
+        let actual = Type::subscript_type(test_ref_subscript_type(int_type(), bool_type()));
+        let expected = Type::subscript_type(SubscriptType::new(
+            vec![FnArgType::new_by_val(int_type())],
+            bool_type(),
+            None,
+            Some(test_subscript_member(
+                SubscriptResultConvention::AddressorPlace,
+            )),
+        ));
+
+        let result = UnifiedTypeInference::default().unify_sub_type(
+            actual,
+            Location::new_synthesized(),
+            expected,
+            Location::new_synthesized(),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn subscript_type_tracks_member_effect_variables() {
+        let effect_var = EffectVar::new(0);
+        let subscript_ty = Type::subscript_type(SubscriptType::new(
+            vec![FnArgType::new_by_val(int_type())],
+            bool_type(),
+            Some(SubscriptMemberType::new(
+                EffType::single_variable(effect_var),
+                SubscriptResultConvention::YieldedOnce,
+            )),
+            Some(SubscriptMemberType::new(
+                EffType::single_primitive(PrimitiveEffect::Write),
+                SubscriptResultConvention::YieldedOnce,
+            )),
+        ));
+
+        let summary = subscript_ty.summary();
+        assert!(summary.free_eff_vars.contains(effect_var));
+    }
+
+    #[test]
+    fn subscript_type_member_effects_are_checked_independently() {
+        let actual = Type::subscript_type(SubscriptType::new(
+            vec![FnArgType::new_by_val(int_type())],
+            bool_type(),
+            Some(SubscriptMemberType::new(
+                EffType::single_primitive(PrimitiveEffect::Read),
+                SubscriptResultConvention::AddressorPlace,
+            )),
+            Some(SubscriptMemberType::new(
+                EffType::single_primitive(PrimitiveEffect::Write),
+                SubscriptResultConvention::AddressorPlace,
+            )),
+        ));
+        let ref_only_expected = Type::subscript_type(SubscriptType::new(
+            vec![FnArgType::new_by_val(int_type())],
+            bool_type(),
+            Some(SubscriptMemberType::new(
+                EffType::single_primitive(PrimitiveEffect::Read),
+                SubscriptResultConvention::AddressorPlace,
+            )),
+            None,
+        ));
+
+        UnifiedTypeInference::default()
+            .unify_sub_type(
+                actual,
+                Location::new_synthesized(),
+                ref_only_expected,
+                Location::new_synthesized(),
+            )
+            .unwrap();
+
+        let wrong_ref_expected = Type::subscript_type(SubscriptType::new(
+            vec![FnArgType::new_by_val(int_type())],
+            bool_type(),
+            Some(SubscriptMemberType::new(
+                EffType::single_primitive(PrimitiveEffect::Write),
+                SubscriptResultConvention::AddressorPlace,
+            )),
+            Some(SubscriptMemberType::new(
+                EffType::single_primitive(PrimitiveEffect::Write),
+                SubscriptResultConvention::AddressorPlace,
+            )),
+        ));
+        let result = UnifiedTypeInference::default().unify_sub_type(
+            actual,
+            Location::new_synthesized(),
+            wrong_ref_expected,
+            Location::new_synthesized(),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn subscript_type_instantiation_reaches_args_return_and_member_effects() {
+        let arg_var = TypeVar::new(0);
+        let ret_var = TypeVar::new(1);
+        let effect_var = EffectVar::new(0);
+        let subscript_ty = Type::subscript_type(SubscriptType::new(
+            vec![FnArgType::new_by_val(Type::variable(arg_var))],
+            Type::variable(ret_var),
+            Some(SubscriptMemberType::new(
+                EffType::single_variable(effect_var),
+                SubscriptResultConvention::YieldedOnce,
+            )),
+            None,
+        ));
+        let ty_subst = FxHashMap::from_iter([(arg_var, int_type()), (ret_var, bool_type())]);
+        let eff_subst = EffectsInstSubst::from_iter([(
+            effect_var,
+            EffType::single_primitive(PrimitiveEffect::Read),
+        )]);
+        let subst = (ty_subst, eff_subst);
+        let mut mapper = SimpleInstantiationMapper::new(&subst);
+
+        let mapped = subscript_ty.map(&mut mapper);
+        let mapped_data = mapped.data();
+        let TypeKind::Subscript(mapped_subscript) = &*mapped_data else {
+            panic!("subscript type instantiation must preserve TypeKind::Subscript");
+        };
+
+        assert_eq!(mapped_subscript.args[0].ty, int_type());
+        assert_eq!(mapped_subscript.ret, bool_type());
+        assert_eq!(
+            mapped_subscript
+                .ref_member
+                .as_ref()
+                .unwrap()
+                .effects
+                .clone(),
+            EffType::single_primitive(PrimitiveEffect::Read)
+        );
+        assert!(
+            mapped_subscript
+                .ref_member
+                .as_ref()
+                .unwrap()
+                .effects
+                .contains(Effect::Primitive(PrimitiveEffect::Read))
         );
     }
 
