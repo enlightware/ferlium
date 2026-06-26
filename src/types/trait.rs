@@ -389,23 +389,6 @@ impl Trait {
         &self.associated_consts[index.as_index()]
     }
 
-    /// Return the qualified method name for the given method index, e.g., "TraitName<…>::method_name"
-    /// using the interned indices of the provided types.
-    pub fn qualified_method_name(&self, index: TraitMethodIndex, input_tys: &[Type]) -> String {
-        let mut s = format!("{}<", self.name);
-        for (i, ty) in input_tys.iter().enumerate() {
-            if i > 0 {
-                s.push_str(", ");
-            }
-            if let Some(world) = ty.world() {
-                s.push_str(format!("{}-", world).as_str());
-            }
-            s.push_str(format!("{}", ty.index()).as_str());
-        }
-        s.push_str(&format!(">::{}", self.method(index).0));
-        s
-    }
-
     /// Validate the trait, ensuring that its method signatures adhere to the limitations of the current implementation.
     pub fn validate(&self) {
         self.try_validate()

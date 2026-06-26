@@ -556,6 +556,16 @@ pub fn add_to_module(to: &mut Module) {
     let default_trait_id = to.expect_std_trait_id_in_current_module(DEFAULT_TRAIT_NAME);
     let empty_trait_id = to.expect_std_trait_id_in_current_module(EMPTY_TRAIT_NAME);
     // Note: string alias is added in core.rs
+    to.add_type_alias_str_with_doc(
+        "string_iterator",
+        string_iter_type(),
+        "An iterator over the characters of a string.",
+    );
+    to.add_type_alias_str_with_doc(
+        "string_split_iterator",
+        string_split_iter_type(),
+        "An iterator over substrings produced by splitting a string.",
+    );
 
     to.add_concrete_impl_no_locals(
         value_trait_id,
@@ -757,16 +767,6 @@ pub fn add_to_module(to: &mut Module) {
     );
 
     // Iterator
-    to.add_type_alias_str_with_doc(
-        "string_iterator",
-        string_iter_type(),
-        "An iterator over the characters of a string.",
-    );
-    to.add_type_alias_str_with_doc(
-        "string_split_iterator",
-        string_split_iter_type(),
-        "An iterator over substrings produced by splitting a string.",
-    );
     to.add_function(ustr("string_iter"), String::iter_descr());
     to.add_function(ustr("string_split_iterator"), String::split_iter_descr());
     to.add_function(

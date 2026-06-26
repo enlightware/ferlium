@@ -16,7 +16,8 @@ use crate::{
     },
     internal_compilation_error,
     module::{
-        LocalFunctionId, Module, ModuleEnv, PendingModuleFunction, TypeDefId, Visibility, id::Id,
+        LocalFunctionId, Module, ModuleEnv, PendingModuleFunction, QualifiedNameEnv, TypeDefId,
+        Visibility, id::Id,
     },
     std::core_traits_names::VALUE_TRAIT_NAME,
     std::value::{
@@ -81,12 +82,23 @@ pub(crate) fn generic_value_methods_for_type(
     let (definitions, method_names) = {
         let trait_def = solver.trait_def(trait_id);
         let definitions = trait_def.instantiate_for_tys(input_tys, &[], &[]);
+        let qualified_name_env = solver.qualified_name_env();
         let method_names = (0..definitions.len())
             .map(|index| {
                 let method_index = TraitMethodIndex::from_index(index);
                 Ustr::from(&format!(
                     "{}-generic",
-                    trait_def.qualified_method_name(method_index, input_tys)
+                    qualified_name_env.disambiguated_impl_method_name(
+                        trait_id,
+                        trait_def,
+                        method_index,
+                        input_tys,
+                        &[],
+                        &[],
+                        0,
+                        0,
+                        &[],
+                    )
                 ))
             })
             .collect::<Vec<_>>();
@@ -323,12 +335,23 @@ pub(super) fn emit_auto_value_impls(
         let quantifiers = (0..ty_var_count).map(TypeVar::new).collect::<Vec<_>>();
         let (definitions, method_names) = {
             let env = ModuleEnv::new(output, others);
+            let qualified_name_env = QualifiedNameEnv::new_from_module(output, others);
             let trait_def = env.trait_def(value_trait_id);
             let definitions = trait_def.instantiate_for_tys(&[input_ty], &[], &[]);
             let method_names = (0..definitions.len())
                 .map(|index| {
                     let method_index = TraitMethodIndex::from_index(index);
-                    Ustr::from(&trait_def.qualified_method_name(method_index, &[input_ty]))
+                    Ustr::from(&qualified_name_env.disambiguated_impl_method_name(
+                        value_trait_id,
+                        trait_def,
+                        method_index,
+                        &[input_ty],
+                        &[],
+                        &[],
+                        ty_var_count,
+                        0,
+                        &constraints,
+                    ))
                 })
                 .collect::<Vec<_>>();
             (definitions, method_names)

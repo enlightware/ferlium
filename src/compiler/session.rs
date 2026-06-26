@@ -405,7 +405,10 @@ impl CompilerSession {
         let std_module = ferlium_std::std_module(&mut source_table);
         let std_name = module::Path::single_str("std");
         modules.insert(std_name, ModuleEntry::new_fresh_raw(std_module));
-        let empty_std_user = new_module_using_std(modules.next_id());
+        let empty_std_user = new_module_using_std(
+            modules.next_id(),
+            module::Path::single_str("$empty_std_user"),
+        );
         let empty_std_user = modules.insert(
             module::Path::single_str("$empty_std_user"),
             ModuleEntry::new_fresh_raw(empty_std_user),
@@ -553,6 +556,7 @@ impl CompilerSession {
             module_ast,
             &arena,
             module.module_id(),
+            module.path().clone(),
             &self.modules,
             emit_from,
             self.capabilities,
@@ -910,7 +914,8 @@ impl CompilerSession {
         // If debug logging is enabled, prepare an AST inspector that logs the ASTs.
         let uses = Uses::new_with_std();
         let output = if log::log_enabled!(log::Level::Debug) {
-            let dbg_module = new_module_using_std(self.modules.next_id());
+            let dbg_module =
+                new_module_using_std(self.modules.next_id(), Path::single_str("$debug"));
             let ast_inspector = |module_ast: &ast::PModule,
                                  expr_ast: Option<ast::PExprId>,
                                  arena: &ast::PExprArena,

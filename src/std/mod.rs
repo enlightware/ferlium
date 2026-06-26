@@ -39,7 +39,7 @@ pub mod value;
 pub(crate) static STD_MODULE_ID: ModuleId = ModuleId(0);
 
 pub fn std_module(source_table: &mut SourceTable) -> Module {
-    let mut module = Module::new(STD_MODULE_ID);
+    let mut module = Module::new(STD_MODULE_ID, module::Path::single_str("std"));
     // Built-in or derivable
     value::add_to_module(&mut module);
     default::add_to_module(&mut module);
@@ -62,8 +62,8 @@ pub fn std_module(source_table: &mut SourceTable) -> Module {
     prelude::add_ferlium_serialization_prelude(module, source_table, STD_MODULE_ID)
 }
 
-pub fn new_module_using_std(module_id: ModuleId) -> Module {
-    let mut new_module = Module::new(module_id);
+pub fn new_module_using_std(module_id: ModuleId, path: module::Path) -> Module {
+    let mut new_module = Module::new(module_id, path);
     new_module.add_wildcard_use(module::Path::single_str("std"), Location::new_synthesized());
     new_module
 }

@@ -10,6 +10,7 @@ use crate::{
     Location,
     ast::{self, UstrSpan},
     compiler::error::InternalCompilationError,
+    format::FormatWith,
     internal_compilation_error,
     module::{
         Module, ModuleFunction, ModuleId, Modules, TraitId, TypeDefId,
@@ -18,8 +19,12 @@ use crate::{
         type_alias_name::{find_generic_alias_name, find_generic_alias_name_with},
     },
     std::STD_MODULE_ID,
+    types::effects::EffType,
     types::r#trait::{Trait, TraitMethodIndex},
-    types::r#type::{BareNativeTypeB, Type, TypeAliasEntry, TypeDef},
+    types::r#type::{
+        BareNativeTypeB, NativeType, Type, TypeAliasEntry, TypeAliases, TypeDef, TypeDefSlot,
+    },
+    types::type_scheme::PubTypeConstraint,
     types::typing_env::TraitMethodDescription,
 };
 use ustr::{Ustr, ustr};
@@ -51,6 +56,316 @@ fn unavailable_trait<T>(id: TraitId) -> T {
 pub struct ModuleEnv<'m> {
     pub(crate) current: &'m Module,
     pub(crate) modules: &'m Modules,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ModuleIdentity<'m> {
+    pub(crate) id: ModuleId,
+    pub(crate) path: &'m Path,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CurrentTypeItems<'m> {
+    pub(crate) module: ModuleIdentity<'m>,
+    pub(crate) type_aliases: &'m TypeAliases,
+    pub(crate) type_defs: &'m [TypeDefSlot],
+    pub(crate) traits: &'m [Trait],
+}
+
+impl<'m> CurrentTypeItems<'m> {
+    pub(crate) fn new(
+        module: ModuleIdentity<'m>,
+        type_aliases: &'m TypeAliases,
+        type_defs: &'m [TypeDefSlot],
+        traits: &'m [Trait],
+    ) -> Self {
+        Self {
+            module,
+            type_aliases,
+            type_defs,
+            traits,
+        }
+    }
+
+    pub(crate) fn new_from_module(current: &'m Module) -> Self {
+        Self::new(
+            ModuleIdentity {
+                id: current.module_id(),
+                path: current.path(),
+            },
+            &current.type_aliases,
+            current.type_defs.as_slice(),
+            current.traits.as_slice(),
+        )
+    }
+
+    pub(crate) fn type_def(self, id: TypeDefId) -> Option<&'m TypeDef> {
+        if id.module == self.module.id {
+            self.type_defs
+                .get(id.index.as_index())
+                .map(TypeDefSlot::def)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn trait_def(self, id: TraitId) -> Option<&'m Trait> {
+        if id.module == self.module.id {
+            self.traits.get(id.index.as_index())
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct QualifiedNameEnv<'m> {
+    pub(crate) current: CurrentTypeItems<'m>,
+    pub(crate) modules: &'m Modules,
+}
+
+impl<'m> QualifiedNameEnv<'m> {
+    pub(crate) fn new(current: CurrentTypeItems<'m>, modules: &'m Modules) -> Self {
+        Self { current, modules }
+    }
+
+    pub(crate) fn new_from_module(current: &'m Module, modules: &'m Modules) -> Self {
+        Self::new(CurrentTypeItems::new_from_module(current), modules)
+    }
+
+    fn format_module_prefix(&self, module_id: ModuleId) -> String {
+        if module_id == self.current.module.id {
+            self.current.module.path.to_string()
+        } else {
+            self.modules
+                .get_name(module_id)
+                .map(ToString::to_string)
+                .unwrap_or_else(|| format!("#{module_id}"))
+        }
+    }
+
+    pub(crate) fn type_def_name(&self, id: TypeDefId) -> Option<Ustr> {
+        if id.module == self.current.module.id {
+            self.current
+                .type_defs
+                .get(id.index.as_index())
+                .map(TypeDefSlot::name)
+        } else {
+            self.modules
+                .get(id.module)
+                .and_then(|entry| entry.module())
+                .and_then(|module| module.try_type_def_name(id))
+        }
+    }
+
+    pub(crate) fn format_type_def_id(&self, id: TypeDefId) -> String {
+        let name = self
+            .type_def_name(id)
+            .map(|name| name.to_string())
+            .unwrap_or_else(|| format!("#{}", id.index));
+        format!("{}::{name}", self.format_module_prefix(id.module))
+    }
+
+    pub(crate) fn trait_name(&self, id: TraitId) -> Option<Ustr> {
+        if id.module == self.current.module.id {
+            self.current
+                .traits
+                .get(id.index.as_index())
+                .map(|trait_def| trait_def.name)
+        } else {
+            self.modules
+                .get(id.module)
+                .and_then(|entry| entry.module())
+                .and_then(|module| module.try_trait_name(id))
+        }
+    }
+
+    pub(crate) fn format_trait_id(&self, id: TraitId, fallback: Ustr) -> String {
+        let name = self.trait_name(id).unwrap_or(fallback).to_string();
+        format!("{}::{name}", self.format_module_prefix(id.module))
+    }
+
+    pub(crate) fn bare_native_name(&self, native: &BareNativeTypeB) -> Option<String> {
+        if let Some(name) = self.current.type_aliases.get_bare_native_name(native) {
+            return Some(format!(
+                "{}::{name}",
+                self.format_module_prefix(self.current.module.id)
+            ));
+        }
+
+        self.modules.iter_named().find_map(|(mod_path, entry)| {
+            entry.module().and_then(|module| {
+                module
+                    .type_aliases
+                    .get_bare_native_name(native)
+                    .map(|ty_name| format!("{mod_path}::{ty_name}"))
+            })
+        })
+    }
+
+    pub(crate) fn native_type_name(&self, native: &NativeType) -> Option<String> {
+        if let Some(name) = self.current.type_aliases.get_native_name(native) {
+            return Some(format!(
+                "{}::{name}",
+                self.format_module_prefix(self.current.module.id)
+            ));
+        }
+
+        self.modules.iter_named().find_map(|(mod_path, entry)| {
+            entry.module().and_then(|module| {
+                module
+                    .type_aliases
+                    .get_native_name(native)
+                    .map(|ty_name| format!("{mod_path}::{ty_name}"))
+            })
+        })
+    }
+
+    pub(crate) fn format_type(&self, ty: Type) -> String {
+        ty.format_with(self).to_string()
+    }
+
+    fn format_effect(eff: &EffType) -> String {
+        match eff.as_single() {
+            Some(effect) => effect.to_string(),
+            None if eff.is_empty() => "()".to_string(),
+            None => format!("({eff})"),
+        }
+    }
+
+    fn format_constraint(&self, constraint: &PubTypeConstraint) -> String {
+        match constraint {
+            PubTypeConstraint::TupleAtIndexIs {
+                tuple_ty,
+                index,
+                element_ty,
+                ..
+            } => format!(
+                "tuple-at-index({}, {}, {})",
+                self.format_type(*tuple_ty),
+                index,
+                self.format_type(*element_ty)
+            ),
+            PubTypeConstraint::RecordFieldIs {
+                record_ty,
+                field,
+                element_ty,
+                ..
+            } => format!(
+                "record-field({}, {}, {})",
+                self.format_type(*record_ty),
+                field,
+                self.format_type(*element_ty)
+            ),
+            PubTypeConstraint::TypeHasVariant {
+                variant_ty,
+                tag,
+                payload_ty,
+                ..
+            } => format!(
+                "type-has-variant({}, {}, {})",
+                self.format_type(*variant_ty),
+                tag,
+                self.format_type(*payload_ty)
+            ),
+            PubTypeConstraint::HaveTrait {
+                trait_id,
+                input_tys,
+                output_tys,
+                output_effs,
+                ..
+            } => format!(
+                "have-trait({}, inputs=[{}], outputs=[{}], effects=[{}])",
+                self.format_trait_id(*trait_id, ustr("#trait")),
+                self.format_type_list(input_tys),
+                self.format_type_list(output_tys),
+                Self::format_effect_list(output_effs)
+            ),
+        }
+    }
+
+    fn format_type_list(&self, tys: &[Type]) -> String {
+        tys.iter()
+            .map(|ty| self.format_type(*ty))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    fn format_effect_list(effs: &[EffType]) -> String {
+        effs.iter()
+            .map(Self::format_effect)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    fn format_constraint_list(&self, constraints: &[PubTypeConstraint]) -> String {
+        constraints
+            .iter()
+            .map(|constraint| self.format_constraint(constraint))
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+
+    fn stable_hash_64(input: &str) -> u64 {
+        const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+        const FNV_PRIME: u64 = 0x100000001b3;
+
+        let mut hash = FNV_OFFSET;
+        for byte in input.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        hash
+    }
+
+    pub(crate) fn qualified_method_name(
+        &self,
+        trait_id: TraitId,
+        trait_def: &Trait,
+        index: TraitMethodIndex,
+        input_tys: &[Type],
+    ) -> String {
+        let mut s = format!("{}<", self.format_trait_id(trait_id, trait_def.name));
+        for (i, ty) in input_tys.iter().enumerate() {
+            if i > 0 {
+                s.push_str(", ");
+            }
+            s.push_str(&self.format_type(*ty));
+        }
+        s.push_str(&format!(">::{}", trait_def.method(index).0));
+        s
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn disambiguated_impl_method_name(
+        &self,
+        trait_id: TraitId,
+        trait_def: &Trait,
+        index: TraitMethodIndex,
+        input_tys: &[Type],
+        output_tys: &[Type],
+        output_effs: &[EffType],
+        ty_var_count: u32,
+        eff_var_count: u32,
+        constraints: &[PubTypeConstraint],
+    ) -> String {
+        let readable_name = self.qualified_method_name(trait_id, trait_def, index, input_tys);
+        let canonical_identity = format!(
+            "trait={}; method={}; inputs=[{}]; outputs=[{}]; effects=[{}]; ty_vars={}; eff_vars={}; constraints=[{}]",
+            self.format_trait_id(trait_id, trait_def.name),
+            trait_def.method(index).0,
+            self.format_type_list(input_tys),
+            self.format_type_list(output_tys),
+            Self::format_effect_list(output_effs),
+            ty_var_count,
+            eff_var_count,
+            self.format_constraint_list(constraints)
+        );
+        format!(
+            "{readable_name}#impl:{:08x}",
+            Self::stable_hash_64(&canonical_identity) as u32
+        )
+    }
 }
 
 impl<'m> ModuleEnv<'m> {

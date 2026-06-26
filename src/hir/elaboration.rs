@@ -1143,8 +1143,8 @@ mod tests {
         hir::function::Function,
         hir::{GetTraitAssociatedConst, value::LiteralValue},
         module::{
-            FunctionCollector, LocalDecl, LocalTraitId, ModuleId, PendingFunctionCollector,
-            TraitId, TraitImpls, id::Id,
+            CurrentTypeItems, FunctionCollector, LocalDecl, LocalTraitId, Module, ModuleId, Path,
+            PendingFunctionCollector, QualifiedNameEnv, TraitId, TraitImpls, id::Id,
         },
         types::{
             r#trait::{Trait, TraitAssociatedConst, TraitAssociatedConstIndex},
@@ -1202,6 +1202,10 @@ mod tests {
             span,
         ));
 
+        let modules = Modules::new();
+        let mut current_module = Module::new(ModuleId(0), Path::single_str("$elaboration_test"));
+        current_module.traits = traits.clone();
+        let qualified_name_env = QualifiedNameEnv::new_from_module(&current_module, &modules);
         let mut impls = TraitImpls::new(ModuleId(0));
         let mut fn_collector = FunctionCollector::new(0);
         impls.add_concrete_raw(
@@ -1216,14 +1220,12 @@ mod tests {
             ],
             Vec::<(Function, Vec<LocalDecl>)>::new(),
             &mut fn_collector,
+            &qualified_name_env,
         );
-        let modules = Modules::new();
-        let type_defs = Vec::new();
         let mut import_fn_slots = Vec::new();
         let mut import_impl_slots = Vec::new();
         let mut solver = TraitSolver::new(
-            crate::types::trait_solver::CurrentTypeDefs::new(ModuleId(0), &type_defs),
-            &traits,
+            CurrentTypeItems::new_from_module(&current_module),
             &mut impls,
             FxHashMap::default(),
             &mut import_fn_slots,
@@ -1268,12 +1270,12 @@ mod tests {
 
         let mut impls = TraitImpls::new(ModuleId(0));
         let modules = Modules::new();
-        let type_defs = Vec::new();
+        let mut current_module = Module::new(ModuleId(0), Path::single_str("$elaboration_test"));
+        current_module.traits = traits.clone();
         let mut import_fn_slots = Vec::new();
         let mut import_impl_slots = Vec::new();
         let mut solver = TraitSolver::new(
-            crate::types::trait_solver::CurrentTypeDefs::new(ModuleId(0), &type_defs),
-            &traits,
+            CurrentTypeItems::new_from_module(&current_module),
             &mut impls,
             FxHashMap::default(),
             &mut import_fn_slots,

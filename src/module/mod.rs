@@ -60,6 +60,40 @@ use crate::{
 
 pub(crate) const GENERATED_LAMBDA_PREFIX: &str = "$lambda$";
 
+macro_rules! qualified_name_env_from_module_fields {
+    ($module:expr, $modules:expr) => {
+        QualifiedNameEnv::new(
+            CurrentTypeItems::new(
+                ModuleIdentity {
+                    id: $module.module_id(),
+                    path: &$module.path,
+                },
+                &$module.type_aliases,
+                $module.type_defs.as_slice(),
+                $module.traits.as_slice(),
+            ),
+            $modules,
+        )
+    };
+}
+
+pub(crate) fn unique_generated_name(base_name: Ustr, mut exists: impl FnMut(Ustr) -> bool) -> Ustr {
+    let base_name = base_name.to_string();
+    let mut suffix = 0;
+    loop {
+        let candidate = if suffix == 0 {
+            base_name.clone()
+        } else {
+            format!("{base_name}-{suffix}")
+        };
+        let candidate = Ustr::from(&candidate);
+        if !exists(candidate) {
+            return candidate;
+        }
+        suffix += 1;
+    }
+}
+
 define_id_type!(
     /// ID of a module within a CompilerSession
     ModuleId
@@ -270,6 +304,7 @@ impl ops::IndexMut<usize> for TypeDefSlots {
 /// with the exception of uses which is also accessed directly by desugar.
 #[derive(Debug, Clone)]
 pub struct Module {
+    pub(crate) path: Path,
     pub(crate) import_fn_slots: Vec<ImportFunctionSlot>,
     pub(crate) import_impl_slots: Vec<ImportImplSlot>,
     // Dependencies from type import
@@ -288,7 +323,7 @@ pub struct Module {
     pub(crate) subscripts: Vec<SubscriptDefinition>,
 
     // Type system content
-    type_aliases: TypeAliases,
+    pub(crate) type_aliases: TypeAliases,
     pub(crate) type_defs: TypeDefSlots,
     pub(crate) traits: Traits,
     pub(crate) impls: TraitImpls,
@@ -299,8 +334,9 @@ pub struct Module {
 
 impl Module {
     /// Create a new empty module with the given ID, store the id in impls for later use.
-    pub fn new(module_id: ModuleId) -> Self {
+    pub fn new(module_id: ModuleId, path: Path) -> Self {
         Self {
+            path,
             import_fn_slots: Vec::new(),
             import_impl_slots: Vec::new(),
             type_deps: FxHashSet::default(),
@@ -318,8 +354,9 @@ impl Module {
     }
 
     /// Create a new empty module with the given ID and specified uses, store the id in impls for later use.
-    pub fn from_uses(module_id: ModuleId, uses: Uses) -> Self {
+    pub fn from_uses(module_id: ModuleId, path: Path, uses: Uses) -> Self {
         Self {
+            path,
             import_fn_slots: Vec::new(),
             import_impl_slots: Vec::new(),
             type_deps: FxHashSet::default(),
@@ -339,6 +376,10 @@ impl Module {
     /// Get this module's ID.
     pub fn module_id(&self) -> ModuleId {
         self.impls.module_id
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     // Imports
@@ -477,6 +518,8 @@ impl Module {
         new_name: Ustr,
         visibility: Visibility,
     ) {
+        let new_name =
+            unique_generated_name(new_name, |name| self.def_table.get_by_name(&name).is_some());
         self.def_table
             .insert(new_name, Def::new(DefKind::Function(id), visibility));
     }
@@ -1040,6 +1083,8 @@ impl Module {
             .map(|f| (f, Vec::new()))
             .collect();
         let mut fn_collector = FunctionCollector::new(self.functions.len());
+        let modules = Modules::new();
+        let qualified_name_env = qualified_name_env_from_module_fields!(self, &modules);
         self.impls.add_concrete_raw(
             trait_id,
             trait_def,
@@ -1049,6 +1094,7 @@ impl Module {
             associated_const_values,
             functions,
             &mut fn_collector,
+            &qualified_name_env,
         );
         self.add_collected_functions(fn_collector);
     }
@@ -1074,6 +1120,8 @@ impl Module {
             .map(|f| (f, Vec::new()))
             .collect();
         let mut fn_collector = FunctionCollector::new(self.functions.len());
+        let modules = Modules::new();
+        let qualified_name_env = qualified_name_env_from_module_fields!(self, &modules);
         self.impls.add_blanket_raw(
             trait_id,
             trait_def,
@@ -1083,6 +1131,7 @@ impl Module {
             associated_const_values,
             functions,
             &mut fn_collector,
+            &qualified_name_env,
         );
         self.add_collected_functions(fn_collector);
     }
@@ -1122,7 +1171,7 @@ impl Module {
         output_tys: impl Into<Vec<Type>>,
         associated_const_values: impl Into<Vec<LiteralValue>>,
         functions: impl Into<Vec<Function>>,
-    ) {
+    ) -> LocalImplId {
         let functions: Vec<_> = functions
             .into()
             .into_iter()
@@ -1135,7 +1184,7 @@ impl Module {
             output_tys,
             associated_const_values,
             functions,
-        );
+        )
     }
 
     /// Add a concrete trait implementation to this module, with raw functions.
@@ -1154,6 +1203,8 @@ impl Module {
         let trait_def = &self.traits[trait_id.index.as_index()];
         // Add the impl, collecting new functions
         let mut fn_collector = FunctionCollector::new(self.functions.len());
+        let modules = Modules::new();
+        let qualified_name_env = qualified_name_env_from_module_fields!(self, &modules);
         self.impls.add_concrete_raw(
             trait_id,
             trait_def,
@@ -1163,6 +1214,7 @@ impl Module {
             associated_const_values,
             functions,
             &mut fn_collector,
+            &qualified_name_env,
         );
         self.add_collected_functions(fn_collector);
     }
@@ -1179,10 +1231,12 @@ impl Module {
         output_tys: impl Into<Vec<Type>>,
         associated_const_values: impl Into<Vec<LiteralValue>>,
         functions: impl Into<Vec<(Function, Vec<LocalDecl>)>>,
-    ) {
+    ) -> LocalImplId {
         // Add the impl, collecting new functions
         let mut fn_collector = FunctionCollector::new(self.functions.len());
-        self.impls.add_concrete_raw(
+        let modules = Modules::new();
+        let qualified_name_env = qualified_name_env_from_module_fields!(self, &modules);
+        let impl_id = self.impls.add_concrete_raw(
             trait_id,
             trait_def,
             input_tys,
@@ -1191,8 +1245,10 @@ impl Module {
             associated_const_values,
             functions,
             &mut fn_collector,
+            &qualified_name_env,
         );
         self.add_collected_functions(fn_collector);
+        impl_id
     }
 
     /// Add a blanket trait implementation to this module, with raw functions and no local variables.
@@ -1237,6 +1293,8 @@ impl Module {
         let trait_def = &self.traits[trait_id.index.as_index()];
         // Add the impl, collecting new functions
         let mut fn_collector = FunctionCollector::new(self.functions.len());
+        let modules = Modules::new();
+        let qualified_name_env = qualified_name_env_from_module_fields!(self, &modules);
         self.impls.add_blanket_raw(
             trait_id,
             trait_def,
@@ -1246,6 +1304,7 @@ impl Module {
             associated_const_values,
             functions,
             &mut fn_collector,
+            &qualified_name_env,
         );
         self.add_collected_functions(fn_collector);
     }
@@ -1999,6 +2058,29 @@ pub(crate) fn fmt_ordered_quantifiers(f: &mut fmt::Formatter<'_>, count: u32) ->
         write!(f, "{}", TypeVar::new(i))?;
     }
     write!(f, ">")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unique_generated_name_adds_collision_suffixes() {
+        let existing = FxHashSet::from_iter([
+            ustr("generated#impl:12345678"),
+            ustr("generated#impl:12345678-1"),
+        ]);
+
+        assert_eq!(
+            unique_generated_name(ustr("fresh#impl:12345678"), |name| existing.contains(&name)),
+            ustr("fresh#impl:12345678")
+        );
+        assert_eq!(
+            unique_generated_name(ustr("generated#impl:12345678"), |name| existing
+                .contains(&name)),
+            ustr("generated#impl:12345678-2")
+        );
+    }
 }
 
 // impl FormatWith<ModuleEnv<'_>> for LocalFunction {

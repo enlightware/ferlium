@@ -51,9 +51,11 @@ use crate::containers::compare_by;
 use crate::containers::{B, DenseBitSet, SVec2, b};
 use crate::format::type_variable_index_to_string_latin;
 use crate::graph;
-use crate::module::ModuleEnv;
+use crate::module::{ModuleEnv, QualifiedNameEnv};
 use crate::sync::SyncPhantomData;
-use crate::types::effects::{EffType, Effect, EffectVar, PrimitiveEffect};
+use crate::types::effects::{
+    EffType, Effect, EffectVar, PrimitiveEffect, format_effect_binding_value,
+};
 use crate::types::mutability::{MutType, MutVar};
 use crate::types::type_scheme::TypeScheme;
 
@@ -124,6 +126,15 @@ pub trait BareNativeType: DynClone + DynEq + Send + Sync {
 
 impl FormatWith<ModuleEnv<'_>> for BareNativeTypeB {
     fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
+        match env.bare_native_name(self) {
+            Some(name) => write!(f, "{name}"),
+            None => write!(f, "{}", self.as_ref().type_name()),
+        }
+    }
+}
+
+impl FormatWith<QualifiedNameEnv<'_>> for BareNativeTypeB {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &QualifiedNameEnv<'_>) -> fmt::Result {
         match env.bare_native_name(self) {
             Some(name) => write!(f, "{name}"),
             None => write!(f, "{}", self.as_ref().type_name()),
@@ -239,6 +250,26 @@ impl FormatWith<ModuleEnv<'_>> for NativeType {
 impl FormatWith<TypeDisplayEnv<'_, '_>> for NativeType {
     fn fmt_with(&self, f: &mut fmt::Formatter, env: &TypeDisplayEnv<'_, '_>) -> fmt::Result {
         fmt_native_type_with_env(self, f, env)
+    }
+}
+
+impl FormatWith<QualifiedNameEnv<'_>> for NativeType {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &QualifiedNameEnv<'_>) -> fmt::Result {
+        if let Some(name) = env.native_type_name(self) {
+            return write!(f, "{name}");
+        }
+        self.bare_ty.fmt_with(f, env)?;
+        if !self.arguments.is_empty() {
+            write!(f, "<")?;
+            for (i, ty) in self.arguments.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                ty.fmt_with(f, env)?;
+            }
+            write!(f, ">")?;
+        }
+        Ok(())
     }
 }
 
@@ -454,6 +485,13 @@ impl FormatWith<TypeDisplayEnv<'_, '_>> for FnArgType {
     }
 }
 
+impl FormatWith<QualifiedNameEnv<'_>> for FnArgType {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &QualifiedNameEnv<'_>) -> fmt::Result {
+        self.mut_ty.format_in_fn_arg(f)?;
+        self.ty.fmt_with(f, env)
+    }
+}
+
 fn fmt_fn_arg_type_with_env<Env>(arg: &FnArgType, f: &mut fmt::Formatter, env: &Env) -> fmt::Result
 where
     Type: FormatWith<Env>,
@@ -652,6 +690,28 @@ impl FormatWith<ModuleEnv<'_>> for FnType {
 impl FormatWith<TypeDisplayEnv<'_, '_>> for FnType {
     fn fmt_with(&self, f: &mut fmt::Formatter, env: &TypeDisplayEnv<'_, '_>) -> fmt::Result {
         fmt_fn_type_with_env(self, f, env)
+    }
+}
+
+impl FormatWith<QualifiedNameEnv<'_>> for FnType {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &QualifiedNameEnv<'_>) -> fmt::Result {
+        write!(f, "(")?;
+        for (i, arg) in self.args.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            arg.fmt_with(f, env)?;
+        }
+        write!(f, ") -> ")?;
+        if self.returns_place() {
+            write!(f, "place ")?;
+        }
+        self.ret.fmt_with(f, env)?;
+        if !self.effects.is_empty() {
+            write!(f, " ! ")?;
+            format_effect_binding_value(&self.effects, f)?;
+        }
+        Ok(())
     }
 }
 
@@ -1046,6 +1106,16 @@ impl FormatWith<TypeDisplayEnv<'_, '_>> for Type {
     }
 }
 
+impl FormatWith<QualifiedNameEnv<'_>> for Type {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &QualifiedNameEnv<'_>) -> fmt::Result {
+        self.with_cycle_detection(
+            |ty, (f, env)| ty.data().fmt_with(f, env),
+            |_, (f, _)| write!(f, "Self"),
+            (f, env),
+        )
+    }
+}
+
 fn fmt_type_with_env<Env>(ty: &Type, f: &mut fmt::Formatter, env: &Env) -> fmt::Result
 where
     Env: TypeFormatEnv,
@@ -1144,6 +1214,20 @@ impl TypeAliases {
 
     pub fn get_name(&self, ty: Type) -> Option<Ustr> {
         self.type_to_name.get(&ty).copied()
+    }
+
+    pub fn get_native_name(&self, native: &NativeType) -> Option<Ustr> {
+        self.entries.iter().find_map(|entry| {
+            if !entry.generic_params.is_empty() {
+                return None;
+            }
+            match &*entry.ty.data() {
+                TypeKind::Native(alias_native) if alias_native.as_ref() == native => {
+                    Some(entry.name)
+                }
+                _ => None,
+            }
+        })
     }
 
     pub fn get_entry(&self, id: LocalTypeAliasId) -> &TypeAliasEntry {
@@ -2140,6 +2224,12 @@ impl FormatWith<TypeDisplayEnv<'_, '_>> for TypeKind {
     }
 }
 
+impl FormatWith<QualifiedNameEnv<'_>> for TypeKind {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &QualifiedNameEnv<'_>) -> fmt::Result {
+        fmt_type_kind_with_qualified_name_env(self, f, env)
+    }
+}
+
 fn fmt_type_kind_with_env<Env>(kind: &TypeKind, f: &mut fmt::Formatter, env: &Env) -> fmt::Result
 where
     Env: TypeFormatEnv,
@@ -2247,6 +2337,108 @@ where
                             write!(f, ", ")?;
                         }
                         format_effect_binding_value_with_env(eff, f, env)?;
+                    }
+                }
+                write!(f, ">")?;
+            }
+            Ok(())
+        }
+        Never => write!(f, "never"),
+    }
+}
+
+fn fmt_type_kind_with_qualified_name_env(
+    kind: &TypeKind,
+    f: &mut fmt::Formatter,
+    env: &QualifiedNameEnv<'_>,
+) -> fmt::Result {
+    use TypeKind::*;
+    match kind {
+        Variable(var) => write!(f, "{var}"),
+        Native(native) => native.fmt_with(f, env),
+        Variant(types) => {
+            for (i, (name, ty)) in types.iter().enumerate() {
+                if i > 0 {
+                    write!(f, " | ")?;
+                }
+                write_identifier(f, name.as_str())?;
+                if *ty != Type::unit() {
+                    write!(f, " ")?;
+                    let ty_data = ty.data();
+                    if let Tuple(tuple_ty) = &*ty_data {
+                        if tuple_ty.len() == 1 {
+                            write!(f, "(")?;
+                            tuple_ty[0].fmt_with(f, env)?;
+                            write!(f, ")")?;
+                        } else {
+                            ty.fmt_with(f, env)?;
+                        }
+                    } else {
+                        ty.fmt_with(f, env)?;
+                    }
+                }
+            }
+            Ok(())
+        }
+        Tuple(elements) => {
+            write!(f, "(")?;
+            for (i, ty) in elements.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                ty.fmt_with(f, env)?;
+                if elements.len() == 1 {
+                    write!(f, ",")?;
+                }
+            }
+            write!(f, ")")
+        }
+        Record(fields) => {
+            write!(f, "{{ ")?;
+            for (i, (name, ty)) in fields.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                write_identifier(f, name.as_str())?;
+                write!(f, ": ")?;
+                ty.fmt_with(f, env)?;
+            }
+            write!(f, " }}")
+        }
+        Function(function) => function.fmt_with(f, env),
+        Named(NamedType {
+            def,
+            params: args,
+            effect_params: _,
+        }) if *def == crate::std::array::array_type_def() && args.len() == 1 => {
+            write!(f, "[")?;
+            args[0].fmt_with(f, env)?;
+            write!(f, "]")
+        }
+        Named(NamedType {
+            def,
+            params: args,
+            effect_params,
+        }) => {
+            write!(f, "{}", env.format_type_def_id(*def))?;
+            if !args.is_empty() || !effect_params.is_empty() {
+                write!(f, "<")?;
+                for (i, ty) in args.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    ty.fmt_with(f, env)?;
+                }
+                if !effect_params.is_empty() {
+                    if !args.is_empty() {
+                        write!(f, " ")?;
+                    }
+                    write!(f, "! ")?;
+                    for (i, eff) in effect_params.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        format_effect_binding_value(eff, f)?;
                     }
                 }
                 write!(f, ">")?;

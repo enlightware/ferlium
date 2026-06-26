@@ -22,10 +22,7 @@ use ferlium::{
         },
         value::LiteralValue,
     },
-    module::{
-        FunctionCollector, LocalDecl, LocalTraitId, ModuleId, TraitDictionaryEntry, TraitId,
-        TraitImpls,
-    },
+    module::{Module, ModuleId, Path, TraitDictionaryEntry, TraitId},
     types::{
         effects::{PrimitiveEffect, effect, no_effects},
         r#trait::{
@@ -624,15 +621,12 @@ fn concrete_impl_stores_associated_const_values() {
         TraitAssociatedConst::new("SIZE", Type::primitive::<isize>(), "Size in bytes."),
         TraitAssociatedConst::new("ALIGN", Type::primitive::<isize>(), "Alignment in bytes."),
     ]);
-    let trait_id = TraitId::new(ModuleId(0), LocalTraitId(0));
-    let mut impls = TraitImpls::new(ModuleId(0));
-    let mut fn_collector = FunctionCollector::new(0);
-
-    let impl_id = impls.add_concrete_raw(
-        trait_id.clone(),
+    let mut module = Module::new(ModuleId(0), Path::single_str("$trait_impl_test"));
+    let trait_id = TraitId::new(ModuleId(0), module.add_trait(trait_def.clone()));
+    let impl_id = module.add_concrete_impl_for_trait_def(
+        trait_id,
         &trait_def,
         [Type::unit()],
-        [],
         [],
         [
             LiteralValue::new_native(0isize),
@@ -640,11 +634,12 @@ fn concrete_impl_stores_associated_const_values() {
         ],
         [(
             Box::new(UnaryNativeFnNN::new(unit_identity)) as Function,
-            Vec::<LocalDecl>::new(),
+            Vec::new(),
         )],
-        &mut fn_collector,
     );
-    let imp = impls.get_impl_by_local_id(impl_id);
+    let imp = module
+        .get_impl_data(impl_id)
+        .expect("concrete impl should be registered");
 
     assert_eq!(
         trait_def.dictionary_method_index(TraitMethodIndex(0)),
@@ -674,7 +669,7 @@ fn concrete_impl_stores_associated_const_values() {
         imp.associated_const_value(TraitAssociatedConstIndex(1)),
         Some(LiteralValue::new_native(1isize))
     );
-    assert_eq!(fn_collector.new_elements.len(), 1);
+    assert_eq!(module.function_count(), 1);
 
     assert!(matches!(
         imp.dictionary_value.entry(TraitDictionaryEntryIndex(0)),

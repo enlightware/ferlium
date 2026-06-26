@@ -78,14 +78,23 @@ pub(crate) fn compile_with_source_id(
     // its compiled module with a dummy so the new compilation cannot see the
     // old version of itself.
     let next_module_id = modules.next_id();
+    let module_path = match &module_ref {
+        ModuleRef::ByPath(path) => path.clone(),
+        ModuleRef::Existing(id) => modules
+            .get_name(*id)
+            .unwrap_or_else(|| panic!("module {id} has no registered path"))
+            .clone(),
+    };
     let (module_id, old_module, compilation_revision) = match &module_ref {
         ModuleRef::ByPath(path) => {
             if let Some((id, entry)) = modules.get_mut_by_name(path) {
                 let compilation_revision = entry.next_compilation_revision();
-                let old = entry
-                    .module
-                    .as_mut()
-                    .map(|m| mem::replace(m, Module::new(next_module_id)));
+                let old = entry.module.as_mut().map(|m| {
+                    mem::replace(
+                        m,
+                        Module::new(next_module_id, Path::single_str("$recompile_placeholder")),
+                    )
+                });
                 (id, old, compilation_revision)
             } else {
                 (next_module_id, None, CompilationRevision::from_index(0))
@@ -98,10 +107,15 @@ pub(crate) fn compile_with_source_id(
                     .get_mut(id)
                     .map_or((None, CompilationRevision::from_index(0)), |e| {
                         let compilation_revision = e.next_compilation_revision();
-                        let old = e
-                            .module
-                            .as_mut()
-                            .map(|m| mem::replace(m, Module::new(next_module_id)));
+                        let old = e.module.as_mut().map(|m| {
+                            mem::replace(
+                                m,
+                                Module::new(
+                                    next_module_id,
+                                    Path::single_str("$recompile_placeholder"),
+                                ),
+                            )
+                        });
                         (old, compilation_revision)
                     });
             (id, old, compilation_revision)
@@ -164,6 +178,7 @@ pub(crate) fn compile_with_source_id(
         module_ast,
         &arena,
         module_id,
+        module_path.clone(),
         modules,
         emit_from,
         capabilities,
@@ -171,7 +186,7 @@ pub(crate) fn compile_with_source_id(
         Ok(result) => result,
         Err(error) => {
             // Resolve types in the error, to provide better error messages.
-            let mut module = new_module_using_std(module_id);
+            let mut module = new_module_using_std(module_id, module_path.clone());
             if let Ok((module_ast, _, arena)) = parse_module_and_expr(src_code, source_id, false) {
                 let _ = module_ast.desugar(&mut module, modules, &arena);
             }
@@ -438,12 +453,20 @@ pub(crate) fn add_code_to_module(
 
     // Emit HIR for the module.
     let prev_to = to.clone();
+    let module_path = prev_to.path().clone();
     let emit_from = EmitModuleFrom::Existing(b(to));
-    let module =
-        emit_module(module_ast, &arena, module_id, other_modules, emit_from).map_err(|error| {
-            let env = ModuleEnv::new(&prev_to, other_modules);
-            CompilationError::resolve_types(error, &env, source_table)
-        })?;
+    let module = emit_module(
+        module_ast,
+        &arena,
+        module_id,
+        module_path,
+        other_modules,
+        emit_from,
+    )
+    .map_err(|error| {
+        let env = ModuleEnv::new(&prev_to, other_modules);
+        CompilationError::resolve_types(error, &env, source_table)
+    })?;
 
     Ok(module)
 }

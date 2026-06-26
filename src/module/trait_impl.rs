@@ -23,7 +23,7 @@ use crate::{
     hir::value::LiteralValue,
     module::{
         LocalDecl, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleId, PendingModuleFunction,
-        TraitId, Visibility, id::Id,
+        QualifiedNameEnv, TraitId, Visibility, id::Id, unique_generated_name,
     },
     parser::location::Location,
     types::effects::{EffType, EffectVar, format_effect_binding_value},
@@ -261,24 +261,47 @@ pub struct PendingFunctionCollector {
 }
 
 impl FunctionCollector {
+    fn existing_index_for_name(&self, name: Ustr) -> Option<usize> {
+        self.new_elements
+            .iter()
+            .position(|&(fn_name, _)| fn_name == name)
+    }
+
+    pub(crate) fn unique_generated_name(&self, base_name: Ustr) -> Ustr {
+        unique_generated_name(base_name, |name| {
+            self.existing_index_for_name(name).is_some()
+        })
+    }
+
     pub fn next_id(&self) -> LocalFunctionId {
         LocalFunctionId::from_index(self.initial_count + self.new_elements.len())
     }
 
     pub fn push(&mut self, name: Ustr, mut function: ModuleFunction) {
+        let name = self.unique_generated_name(name);
         function.assign_local_slots();
         self.new_elements.push((name, function));
     }
 
     pub fn get_function(&self, name: Ustr) -> Option<LocalFunctionId> {
-        self.new_elements
-            .iter()
-            .position(|&(fn_name, _)| fn_name == name)
+        self.existing_index_for_name(name)
             .map(|i| LocalFunctionId::from_index(self.initial_count + i))
     }
 }
 
 impl PendingFunctionCollector {
+    fn existing_index_for_name(&self, name: Ustr) -> Option<usize> {
+        self.new_elements
+            .iter()
+            .position(|(fn_name, _, _)| *fn_name == name)
+    }
+
+    pub(crate) fn unique_generated_name(&self, base_name: Ustr) -> Ustr {
+        unique_generated_name(base_name, |name| {
+            self.existing_index_for_name(name).is_some()
+        })
+    }
+
     pub fn next_id(&self) -> LocalFunctionId {
         LocalFunctionId::from_index(self.initial_count + self.new_elements.len())
     }
@@ -293,6 +316,7 @@ impl PendingFunctionCollector {
         mut function: PendingModuleFunction,
         visibility: Visibility,
     ) {
+        let name = self.unique_generated_name(name);
         function.assign_local_slots();
         self.new_elements.push((name, Some(function), visibility));
     }
@@ -302,6 +326,7 @@ impl PendingFunctionCollector {
     }
 
     pub fn reserve_with_visibility(&mut self, name: Ustr, visibility: Visibility) {
+        let name = self.unique_generated_name(name);
         self.new_elements.push((name, None, visibility));
     }
 
@@ -315,9 +340,7 @@ impl PendingFunctionCollector {
     }
 
     pub fn get_function(&self, name: Ustr) -> Option<LocalFunctionId> {
-        self.new_elements
-            .iter()
-            .position(|(fn_name, _, _)| *fn_name == name)
+        self.existing_index_for_name(name)
             .map(|i| LocalFunctionId::from_index(self.initial_count + i))
     }
 }
@@ -354,7 +377,7 @@ impl TraitImpls {
     /// and that the constraints are satisfied.
     /// An empty `output_effs` defaults to all-empty output effects.
     #[allow(clippy::too_many_arguments)]
-    pub fn add_concrete_raw(
+    pub(crate) fn add_concrete_raw(
         &mut self,
         trait_id: TraitId,
         trait_def: &Trait,
@@ -364,6 +387,7 @@ impl TraitImpls {
         associated_const_values: impl Into<Vec<LiteralValue>>,
         functions: impl Into<Vec<(Function, Vec<LocalDecl>)>>,
         fn_collector: &mut FunctionCollector,
+        qualified_name_env: &QualifiedNameEnv<'_>,
     ) -> LocalImplId {
         let input_tys = input_tys.into();
         let output_tys = output_tys.into();
@@ -392,6 +416,7 @@ impl TraitImpls {
             associated_const_values,
             functions,
             fn_collector,
+            qualified_name_env,
         )
     }
 
@@ -399,7 +424,7 @@ impl TraitImpls {
     /// The caller is responsible to ensure that the input and output types match the trait definition
     /// and that the constraints are satisfied.
     #[allow(clippy::too_many_arguments)]
-    pub fn add_concrete(
+    pub(crate) fn add_concrete(
         &mut self,
         trait_id: TraitId,
         trait_def: &Trait,
@@ -409,6 +434,7 @@ impl TraitImpls {
         associated_const_values: impl Into<Vec<LiteralValue>>,
         functions: Vec<ModuleFunction>,
         fn_collector: &mut FunctionCollector,
+        qualified_name_env: &QualifiedNameEnv<'_>,
     ) -> LocalImplId {
         let output_effs = trait_def.impl_output_effs_or_pure_defaults(output_effs);
         let associated_const_values = associated_const_values.into();
@@ -423,8 +449,18 @@ impl TraitImpls {
 
         // Add to local functions, collect their IDs and build the overall interface hash.
         let namer = |method_index: usize| {
-            trait_def
-                .qualified_method_name(TraitMethodIndex::from_index(method_index), &input_tys)
+            qualified_name_env
+                .disambiguated_impl_method_name(
+                    trait_id,
+                    trait_def,
+                    TraitMethodIndex::from_index(method_index),
+                    &input_tys,
+                    &output_tys,
+                    &output_effs,
+                    0,
+                    0,
+                    &[],
+                )
                 .into()
         };
         let (methods, method_tys) = Self::bundle_module_functions(functions, fn_collector, namer);
@@ -454,7 +490,7 @@ impl TraitImpls {
     /// Add a concrete trait implementation whose methods still need HIR elaboration.
     /// The caller is responsible to provide functions whose definitions match the trait instance.
     #[allow(clippy::too_many_arguments)]
-    pub fn add_concrete_pending(
+    pub(crate) fn add_concrete_pending(
         &mut self,
         trait_id: TraitId,
         trait_def: &Trait,
@@ -464,6 +500,7 @@ impl TraitImpls {
         associated_const_values: impl Into<Vec<LiteralValue>>,
         functions: Vec<PendingModuleFunction>,
         fn_collector: &mut PendingFunctionCollector,
+        qualified_name_env: &QualifiedNameEnv<'_>,
     ) -> LocalImplId {
         let output_effs = trait_def.impl_output_effs_or_pure_defaults(output_effs);
         let associated_const_values = associated_const_values.into();
@@ -476,8 +513,18 @@ impl TraitImpls {
         );
 
         let namer = |method_index: usize| {
-            trait_def
-                .qualified_method_name(TraitMethodIndex::from_index(method_index), &input_tys)
+            qualified_name_env
+                .disambiguated_impl_method_name(
+                    trait_id,
+                    trait_def,
+                    TraitMethodIndex::from_index(method_index),
+                    &input_tys,
+                    &output_tys,
+                    &output_effs,
+                    0,
+                    0,
+                    &[],
+                )
                 .into()
         };
         let (methods, method_tys) =
@@ -524,7 +571,7 @@ impl TraitImpls {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn add_blanket_raw(
+    pub(crate) fn add_blanket_raw(
         &mut self,
         trait_id: TraitId,
         trait_def: &Trait,
@@ -534,6 +581,7 @@ impl TraitImpls {
         associated_const_values: impl Into<Vec<LiteralValue>>,
         functions: impl Into<Vec<(Function, Vec<LocalDecl>)>>,
         fn_collector: &mut FunctionCollector,
+        qualified_name_env: &QualifiedNameEnv<'_>,
     ) -> LocalImplId {
         let output_tys = output_tys.into();
         let output_effs = trait_def.impl_output_effs_or_pure_defaults(output_effs.into());
@@ -562,11 +610,12 @@ impl TraitImpls {
             associated_const_values,
             functions,
             fn_collector,
+            qualified_name_env,
         )
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn add_blanket(
+    pub(crate) fn add_blanket(
         &mut self,
         trait_id: TraitId,
         trait_def: &Trait,
@@ -576,6 +625,7 @@ impl TraitImpls {
         associated_const_values: impl Into<Vec<LiteralValue>>,
         functions: Vec<ModuleFunction>,
         fn_collector: &mut FunctionCollector,
+        qualified_name_env: &QualifiedNameEnv<'_>,
     ) -> LocalImplId {
         let output_effs = trait_def.impl_output_effs_or_pure_defaults(output_effs);
         let associated_const_values = associated_const_values.into();
@@ -590,10 +640,17 @@ impl TraitImpls {
 
         // Add to local functions, collect their IDs and build the overall interface hash.
         let namer = |method_index: usize| {
-            trait_def
-                .qualified_method_name(
+            qualified_name_env
+                .disambiguated_impl_method_name(
+                    trait_id,
+                    trait_def,
                     TraitMethodIndex::from_index(method_index),
                     &sub_key.input_tys,
+                    &output_tys,
+                    &output_effs,
+                    sub_key.ty_var_count,
+                    sub_key.eff_var_count,
+                    &sub_key.constraints,
                 )
                 .into()
         };

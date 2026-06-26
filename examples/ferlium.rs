@@ -471,7 +471,7 @@ fn console_print(message: &FerliumString) {
 }
 
 fn console_module(module_id: ModuleId) -> Module {
-    let mut module = new_module_using_std(module_id);
+    let mut module = new_module_using_std(module_id, Path::single_str("$console"));
     module.add_function(
         ustr("print"),
         UnaryNativeFnRN::description_with_default_ty(
@@ -538,7 +538,8 @@ fn process_input(
     // AST debug output for REPL
     if is_repl {
         if let Ok((module_ast, expr_ast, arena)) = &parsed {
-            let dbg_module = new_module_using_std(session.modules().next_id());
+            let dbg_module =
+                new_module_using_std(session.modules().next_id(), Path::single_str("$debug"));
             let module_env = session.modules().env_for(&dbg_module);
             if !module_ast.is_empty() {
                 println!(

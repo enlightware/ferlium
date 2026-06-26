@@ -11,7 +11,6 @@ use std::{borrow::Cow, iter::repeat, mem};
 
 use crate::{FxHashMap, FxHashSet, Modules, types::type_scheme::PubTypeConstraint};
 
-use derive_new::new;
 use ustr::Ustr;
 
 use crate::{
@@ -27,13 +26,13 @@ use crate::{
     },
     internal_compilation_error,
     module::{
-        self, BlanketImpls, BlanketTraitImplKey, BlanketTraitImpls, ConcreteTraitImplKey, Def,
-        DefKind, DefTable, FunctionId, ImportFunctionSlot, ImportFunctionSlotId,
-        ImportFunctionTarget, ImportImplSlot, ImportImplSlotId, LocalDecl, LocalDeclId,
-        LocalFunctionId, LocalImplId, Module, ModuleEnv, ModuleFunction, ModuleId,
-        PendingFunctionBody, PendingFunctionCollector, PendingModuleFunction, ResolvedValueLayout,
-        TraitDictionary, TraitId, TraitImpl, TraitImplId, TraitImpls, TraitKey, TypeDefId,
-        build_dictionary_value, id::Id,
+        self, BlanketImpls, BlanketTraitImplKey, BlanketTraitImpls, ConcreteTraitImplKey,
+        CurrentTypeItems, Def, DefKind, DefTable, FunctionId, ImportFunctionSlot,
+        ImportFunctionSlotId, ImportFunctionTarget, ImportImplSlot, ImportImplSlotId, LocalDecl,
+        LocalDeclId, LocalFunctionId, LocalImplId, Module, ModuleEnv, ModuleFunction, ModuleId,
+        PendingFunctionBody, PendingFunctionCollector, PendingModuleFunction, QualifiedNameEnv,
+        ResolvedValueLayout, TraitDictionary, TraitId, TraitImpl, TraitImplId, TraitImpls,
+        TraitKey, TypeDefId, build_dictionary_value, id::Id, unique_generated_name,
     },
     std::{
         STD_MODULE_ID,
@@ -47,7 +46,7 @@ use crate::{
     types::effects::{EffType, Effect, EffectVar},
     types::mutability::{MutType, MutVar},
     types::r#trait::{Trait, TraitAssociatedConstIndex, TraitMethodIndex},
-    types::r#type::{FnArgType, Type, TypeDef, TypeDefSlot, TypeKind, TypeVar},
+    types::r#type::{FnArgType, Type, TypeDef, TypeKind, TypeVar},
     types::type_inference::unify::UnifiedTypeInference,
     types::type_like::{TypeLike, instantiate_types},
     types::type_mapper::{BitmapInstantiationMapper, TypeMapper},
@@ -56,36 +55,13 @@ use crate::{
 #[cfg(debug_assertions)]
 use crate::types::type_visitor::AllVarsCollector;
 
-/// Type definitions owned by the module currently being solved.
-#[derive(Clone, Copy, Debug)]
-pub struct CurrentTypeDefs<'a> {
-    module_id: ModuleId,
-    slots: &'a [TypeDefSlot],
-}
-
-impl<'a> CurrentTypeDefs<'a> {
-    pub(crate) fn new(module_id: ModuleId, slots: &'a [TypeDefSlot]) -> Self {
-        Self { module_id, slots }
-    }
-
-    fn get(self, id: TypeDefId) -> Option<&'a TypeDef> {
-        if id.module == self.module_id {
-            self.slots.get(id.index.as_index()).map(TypeDefSlot::def)
-        } else {
-            None
-        }
-    }
-}
-
 /// Trait solving is performed by this structure, mutating it by caching intermediate results.
 #[allow(clippy::too_many_arguments)]
-#[derive(Debug, new)]
+#[derive(Debug)]
 #[must_use = "call .commit() to store the created functions"]
 pub struct TraitSolver<'a> {
-    /// Current module type definitions.
-    pub current_type_defs: CurrentTypeDefs<'a>,
-    /// Current module trait definitions.
-    pub current_traits: &'a [Trait],
+    /// Current module type-level items. Kept separately from `others` because the current module can be mid-compilation and not yet committed.
+    pub(crate) current_type_items: CurrentTypeItems<'a>,
     /// Current module implementations.
     pub impls: &'a mut TraitImpls,
     /// Current module functions available by name.
@@ -99,18 +75,42 @@ pub struct TraitSolver<'a> {
     /// Other modules available for fetching trait implementations and normal functions (read only).
     pub(crate) others: &'a Modules,
     /// Current recursion depth of the trait solver.
-    #[new(default)]
     pub recursion_depth: usize,
     /// Current stack of trait implementations being solved, for cycle detection.
-    #[new(default)]
     pub solving_stack: FxHashSet<(TraitId, Vec<Type>)>,
     /// Partially known trait applications currently being improved, for cycle detection.
-    #[new(default)]
     active_improvements: FxHashSet<TraitImprovementKey>,
     /// Stack of defining modules for imported blanket impls currently being materialized.
     /// Only the top module's private impls are visible.
-    #[new(default)]
     private_impl_scope: Vec<ModuleId>,
+}
+
+impl<'a> TraitSolver<'a> {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        current_type_items: CurrentTypeItems<'a>,
+        impls: &'a mut TraitImpls,
+        current_functions: FxHashMap<Ustr, LocalFunctionId>,
+        import_fn_slots: &'a mut Vec<ImportFunctionSlot>,
+        import_impl_slots: &'a mut Vec<ImportImplSlot>,
+        fn_collector: PendingFunctionCollector,
+        others: &'a Modules,
+    ) -> Self {
+        debug_assert_eq!(current_type_items.module.id, impls.module_id);
+        Self {
+            current_type_items,
+            impls,
+            current_functions,
+            import_fn_slots,
+            import_impl_slots,
+            fn_collector,
+            others,
+            recursion_depth: 0,
+            solving_stack: FxHashSet::default(),
+            active_improvements: FxHashSet::default(),
+            private_impl_scope: Vec::new(),
+        }
+    }
 }
 
 const TRAIT_SOLVER_RECURSION_LIMIT: usize = 128;
@@ -157,11 +157,15 @@ macro_rules! trait_solver_from_module {
             crate::types::trait_solver::current_function_map(&$module.def_table);
         let function_count = $module.functions.len();
         TraitSolver::new(
-            crate::types::trait_solver::CurrentTypeDefs::new(
-                $module.module_id(),
+            crate::module::CurrentTypeItems::new(
+                crate::module::ModuleIdentity {
+                    id: $module.module_id(),
+                    path: &$module.path,
+                },
+                &$module.type_aliases,
                 $module.type_defs.as_slice(),
+                $module.traits.as_slice(),
             ),
-            $module.traits.as_slice(),
             &mut $module.impls,
             current_functions,
             &mut $module.import_fn_slots,
@@ -175,8 +179,7 @@ pub(crate) use trait_solver_from_module;
 
 /// Scratch overlay for running trait-solver queries without mutating a real module.
 pub(crate) struct TraitSolverProbe<'a> {
-    current_type_defs: CurrentTypeDefs<'a>,
-    current_traits: &'a [Trait],
+    current_type_items: CurrentTypeItems<'a>,
     impls: Cow<'a, TraitImpls>,
     current_functions: FxHashMap<Ustr, LocalFunctionId>,
     import_fn_slots: Vec<ImportFunctionSlot>,
@@ -465,11 +468,7 @@ impl<'a> ConstraintAssumptions<'a> {
 impl<'a> TraitSolverProbe<'a> {
     pub(crate) fn from_module(module: &'a Module, others: &'a Modules) -> Self {
         Self {
-            current_type_defs: CurrentTypeDefs::new(
-                module.module_id(),
-                module.type_defs.as_slice(),
-            ),
-            current_traits: module.traits.as_slice(),
+            current_type_items: CurrentTypeItems::new_from_module(module),
             impls: Cow::Borrowed(&module.impls),
             current_functions: current_function_map(&module.def_table),
             import_fn_slots: module.import_fn_slots.clone(),
@@ -487,8 +486,7 @@ impl<'a> TraitSolverProbe<'a> {
             .concrete_key_to_id
             .retain(|_, id| impls.data[id.as_index()].public);
         Self {
-            current_type_defs: solver.current_type_defs,
-            current_traits: solver.current_traits,
+            current_type_items: solver.current_type_items,
             impls: Cow::Owned(impls),
             current_functions: solver.current_functions.clone(),
             import_fn_slots: solver.import_fn_slots.clone(),
@@ -507,8 +505,7 @@ impl<'a> TraitSolverProbe<'a> {
             PendingFunctionCollector::new(initial_count),
         );
         let mut solver = TraitSolver::new(
-            self.current_type_defs,
-            self.current_traits,
+            self.current_type_items,
             self.impls.to_mut(),
             mem::take(&mut self.current_functions),
             &mut self.import_fn_slots,
@@ -548,12 +545,7 @@ impl TraitOutputQuery for TraitSolverProbe<'_> {
         output_tys: &[Type],
         output_effs: &[EffType],
     ) -> bool {
-        let trait_def = trait_def_from_parts(
-            self.current_type_defs.module_id,
-            self.current_traits,
-            self.others,
-            trait_id,
-        );
+        let trait_def = trait_def_from_parts(self.current_type_items, self.others, trait_id);
         is_compiler_provided_no_output_trait_application(
             trait_id,
             trait_def,
@@ -682,14 +674,11 @@ enum BlanketImplMatch {
 }
 
 fn trait_def_from_parts<'a>(
-    current_module_id: ModuleId,
-    current_traits: &'a [Trait],
+    current: CurrentTypeItems<'a>,
     others: &'a Modules,
     id: TraitId,
 ) -> &'a Trait {
-    if id.module == current_module_id
-        && let Some(trait_def) = current_traits.get(id.index.as_index())
-    {
+    if let Some(trait_def) = current.trait_def(id) {
         return trait_def;
     }
     others
@@ -743,7 +732,7 @@ impl<'a> TraitSolver<'a> {
         id: TypeDefId,
         access_span: Location,
     ) -> Result<(), InternalCompilationError> {
-        if id.module != self.current_type_defs.module_id && self.type_def(id).has_private_repr() {
+        if id.module != self.current_type_items.module.id && self.type_def(id).has_private_repr() {
             return Err(internal_compilation_error!(PrivateReprAccess {
                 type_def: id,
                 access_span,
@@ -753,20 +742,16 @@ impl<'a> TraitSolver<'a> {
     }
 
     pub fn trait_def(&self, id: TraitId) -> &Trait {
-        trait_def_from_parts(
-            self.current_type_defs.module_id,
-            self.current_traits,
-            self.others,
-            id,
-        )
+        trait_def_from_parts(self.current_type_items, self.others, id)
     }
 
     pub fn std_trait_id(&self, name: &str) -> TraitId {
         // The solver only keeps the current module's trait definitions, not its
         // definition table, so current-std lookups cannot use the symbol table.
-        if self.current_type_defs.module_id == STD_MODULE_ID
+        if self.current_type_items.module.id == STD_MODULE_ID
             && let Some((index, _)) = self
-                .current_traits
+                .current_type_items
+                .traits
                 .iter()
                 .enumerate()
                 .find(|(_, trait_def)| trait_def.name == name)
@@ -780,13 +765,17 @@ impl<'a> TraitSolver<'a> {
     }
 
     pub fn type_def(&self, id: TypeDefId) -> &TypeDef {
-        self.current_type_defs.get(id).unwrap_or_else(|| {
+        self.current_type_items.type_def(id).unwrap_or_else(|| {
             self.others
                 .get(id.module)
                 .and_then(|entry| entry.module())
                 .unwrap_or_else(|| panic!("Type definition module #{} is unavailable", id.module))
                 .type_def(id)
         })
+    }
+
+    pub(crate) fn qualified_name_env(&self) -> QualifiedNameEnv<'_> {
+        QualifiedNameEnv::new(self.current_type_items, self.others)
     }
 
     pub(crate) fn solve_concrete_trivial_copy_layout(
@@ -1849,6 +1838,7 @@ impl<'a> TraitSolver<'a> {
         let mut ids = Vec::with_capacity(self.fn_collector.new_elements.len());
         for (name, function, visibility) in self.fn_collector.new_elements.drain(..) {
             let id = LocalFunctionId::from_index(functions.len());
+            let name = unique_generated_name(name, |name| def_table.get_by_name(&name).is_some());
             def_table.insert(name, Def::new(DefKind::Function(id), visibility));
             let function = function.expect("committing a reserved generated function without code");
             functions.push(function.placeholder());
@@ -1867,12 +1857,7 @@ impl<'a> TraitSolver<'a> {
         input_types: impl Into<Vec<Type>>,
         output_types: impl Into<Vec<Type>>,
     ) -> LocalImplId {
-        let trait_def = trait_def_from_parts(
-            self.current_type_defs.module_id,
-            self.current_traits,
-            self.others,
-            trait_id,
-        );
+        let trait_def = trait_def_from_parts(self.current_type_items, self.others, trait_id);
         let input_types = input_types.into();
         let output_types = output_types.into();
         let output_effs = trait_def.impl_output_effs_or_pure_defaults(vec![]);
@@ -1884,6 +1869,7 @@ impl<'a> TraitSolver<'a> {
         let runtime_arg_count = definition.arg_names.len();
         let function =
             PendingModuleFunction::from_body(definition, body, runtime_arg_count, None, locals);
+        let qualified_name_env = QualifiedNameEnv::new(self.current_type_items, self.others);
         self.impls.add_concrete_pending(
             trait_id,
             trait_def,
@@ -1893,6 +1879,7 @@ impl<'a> TraitSolver<'a> {
             [],
             vec![function],
             &mut self.fn_collector,
+            &qualified_name_env,
         )
     }
 
@@ -1923,12 +1910,7 @@ impl<'a> TraitSolver<'a> {
         associated_const_values: impl Into<Vec<LiteralValue>>,
     ) -> LocalImplId {
         let associated_const_values = associated_const_values.into();
-        let trait_def = trait_def_from_parts(
-            self.current_type_defs.module_id,
-            self.current_traits,
-            self.others,
-            trait_id,
-        );
+        let trait_def = trait_def_from_parts(self.current_type_items, self.others, trait_id);
         trait_def.validate_impl_shape(
             input_types,
             output_types,
@@ -1944,8 +1926,19 @@ impl<'a> TraitSolver<'a> {
             let method_index = TraitMethodIndex::from_index(method_index);
             let id = self.fn_collector.next_id();
             let ty = Type::function_type(definition.ty_scheme.ty.clone());
-            let name = trait_def
-                .qualified_method_name(method_index, input_types)
+            let name = self
+                .qualified_name_env()
+                .disambiguated_impl_method_name(
+                    trait_id,
+                    trait_def,
+                    method_index,
+                    input_types,
+                    output_types,
+                    output_effs,
+                    0,
+                    0,
+                    &[],
+                )
                 .into();
             self.fn_collector.reserve(name);
             methods.push(id);
@@ -1984,12 +1977,7 @@ impl<'a> TraitSolver<'a> {
         code_entries: impl Into<Vec<(PendingFunctionBody, Vec<LocalDecl>)>>,
     ) {
         let methods = self.impls.data[impl_id.as_index()].methods.clone();
-        let trait_def = trait_def_from_parts(
-            self.current_type_defs.module_id,
-            self.current_traits,
-            self.others,
-            trait_id,
-        );
+        let trait_def = trait_def_from_parts(self.current_type_items, self.others, trait_id);
         let definitions = trait_def.instantiate_for_tys(input_types, output_types, output_effs);
 
         for ((method_id, definition), (body, locals)) in methods
@@ -2146,8 +2134,12 @@ impl<'a> TraitSolver<'a> {
     /// Print all known implementations for the given trait id.
     fn log_debug_impls(&self, trait_id: TraitId) {
         log::debug!("In current module:");
-        let mut fake_current = Module::new(self.current_type_defs.module_id);
-        fake_current.traits = self.current_traits.to_vec();
+        let mut fake_current = Module::new(
+            self.current_type_items.module.id,
+            self.current_type_items.module.path.clone(),
+        );
+        fake_current.type_aliases = self.current_type_items.type_aliases.clone();
+        fake_current.traits = self.current_type_items.traits.to_vec();
         let env = ModuleEnv::new(&fake_current, self.others);
         self.impls.log_debug_impls_headers(trait_id, env);
         for (module_path, entry) in self.others.iter_named() {
@@ -2572,12 +2564,8 @@ impl<'a> TraitSolver<'a> {
                     };
                     let imp = &impls.data[impl_id.as_index()];
                     let associated_const_values = {
-                        let trait_def = trait_def_from_parts(
-                            self.current_type_defs.module_id,
-                            self.current_traits,
-                            self.others,
-                            trait_id,
-                        );
+                        let trait_def =
+                            trait_def_from_parts(self.current_type_items, self.others, trait_id);
                         materialized_associated_const_values(
                             trait_id,
                             trait_def,
@@ -2592,12 +2580,8 @@ impl<'a> TraitSolver<'a> {
                     // importing it and closing over the constraint dictionaries.
                     let trait_key =
                         TraitKey::Blanket(BlanketTraitImplKey::new(trait_id, sub_key.clone()));
-                    let trait_def = trait_def_from_parts(
-                        self.current_type_defs.module_id,
-                        self.current_traits,
-                        self.others,
-                        trait_id,
-                    );
+                    let trait_def =
+                        trait_def_from_parts(self.current_type_items, self.others, trait_id);
                     let definitions =
                         trait_def.instantiate_for_tys(input_tys, &output_tys, &output_effs);
                     let gen_functions = imp.methods.clone(); // clone to avoid borrowing issues
@@ -2644,7 +2628,17 @@ impl<'a> TraitSolver<'a> {
                             );
                             let name = Ustr::from(&format!(
                                 "{}-thunk",
-                                trait_def.qualified_method_name(method_index, input_tys)
+                                self.qualified_name_env().disambiguated_impl_method_name(
+                                    trait_id,
+                                    trait_def,
+                                    method_index,
+                                    input_tys,
+                                    &output_tys,
+                                    &output_effs,
+                                    sub_key.ty_var_count,
+                                    sub_key.eff_var_count,
+                                    &sub_key.constraints,
+                                )
                             ));
                             let id = self.fn_collector.next_id();
                             self.fn_collector.push(name, function);
@@ -2711,12 +2705,8 @@ impl<'a> TraitSolver<'a> {
                         (imp.associated_const_values.clone(), imp.methods.clone())
                     };
                 let associated_const_values = {
-                    let trait_def = trait_def_from_parts(
-                        self.current_type_defs.module_id,
-                        self.current_traits,
-                        self.others,
-                        trait_id,
-                    );
+                    let trait_def =
+                        trait_def_from_parts(self.current_type_items, self.others, trait_id);
                     materialized_associated_const_values(
                         trait_id,
                         trait_def,
@@ -2754,13 +2744,9 @@ impl<'a> TraitSolver<'a> {
                 // importing it and closing over the constraint dictionaries.
                 let trait_key =
                     TraitKey::Blanket(BlanketTraitImplKey::new(trait_id, sub_key.clone()));
-                let definitions = trait_def_from_parts(
-                    self.current_type_defs.module_id,
-                    self.current_traits,
-                    self.others,
-                    trait_id,
-                )
-                .instantiate_for_tys(input_tys, &output_tys, &output_effs);
+                let definitions =
+                    trait_def_from_parts(self.current_type_items, self.others, trait_id)
+                        .instantiate_for_tys(input_tys, &output_tys, &output_effs);
                 let code_entries = gen_functions
                     .iter()
                     .zip(definitions)

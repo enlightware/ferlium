@@ -37,8 +37,8 @@ use crate::{
     internal_compilation_error,
     module::{
         ConcreteTraitImplKey, LocalFunctionId, LocalImplId, LocalSubscriptId, Module, ModuleEnv,
-        ModuleFunction, ModuleId, PendingModuleFunction, TraitImpl, UModuleFunction,
-        YieldProvenance, build_dictionary_value, id::Id,
+        ModuleFunction, ModuleId, Path as ModulePath, PendingModuleFunction, TraitImpl,
+        UModuleFunction, YieldProvenance, build_dictionary_value, id::Id,
     },
     std::value::{
         is_function_surface_only_value_trait_application, is_value_trait_for_function_type,
@@ -613,6 +613,7 @@ pub fn emit_module(
     source: ast::PModule,
     parsed_arena: &PExprArena,
     module_id: ModuleId,
+    module_path: ModulePath,
     others: &Modules,
     emit_from: EmitModuleFrom,
 ) -> Result<Module, InternalCompilationError> {
@@ -620,6 +621,7 @@ pub fn emit_module(
         source,
         parsed_arena,
         module_id,
+        module_path,
         others,
         emit_from,
         CompilationCapabilities::default(),
@@ -630,6 +632,7 @@ pub(crate) fn emit_module_with_capabilities(
     source: ast::PModule,
     parsed_arena: &PExprArena,
     module_id: ModuleId,
+    module_path: ModulePath,
     others: &Modules,
     emit_from: EmitModuleFrom,
     capabilities: CompilationCapabilities,
@@ -639,7 +642,7 @@ pub(crate) fn emit_module_with_capabilities(
 
     // First desugar the module.
     let mut output = match emit_from {
-        EmitModuleFrom::Uses(uses) => Module::from_uses(module_id, uses),
+        EmitModuleFrom::Uses(uses) => Module::from_uses(module_id, module_path, uses),
         EmitModuleFrom::Existing(module) => *module,
     };
     let (source, desugared_arena, sorted_sccs) =

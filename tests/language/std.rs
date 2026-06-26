@@ -59,6 +59,32 @@ fn print_std_formats_empty_associated_effect_bindings() {
         !rendered.contains("IterEffect = >"),
         "printed std must not render an empty associated effect binding without a value:\n{rendered}"
     );
+
+    let rendered_all = session
+        .session()
+        .std_module()
+        .format_with(&ShowModuleWithOptions::new(
+            session.session().modules(),
+            false,
+            true,
+        ))
+        .to_string();
+    assert!(
+        rendered_all.contains("fn std::Value<std::string_iterator>::eq#impl:"),
+        "expected generated string iterator impl function name to use the public alias, got:\n{rendered_all}"
+    );
+    assert!(
+        rendered_all.contains("fn std::Value<std::string_split_iterator>::eq#impl:"),
+        "expected generated string split iterator impl function name to use the public alias, got:\n{rendered_all}"
+    );
+    assert!(
+        !rendered_all.contains("fn std::Value<ferlium::types::type::BareNativeTypeImpl<ferlium::std::string::StringIterator>>::"),
+        "generated string iterator impl function names should not leak Rust native type names:\n{rendered_all}"
+    );
+    assert!(
+        !rendered_all.contains("fn std::Value<ferlium::types::type::BareNativeTypeImpl<ferlium::std::string::StringSplitIterator>>::"),
+        "generated string split iterator impl function names should not leak Rust native type names:\n{rendered_all}"
+    );
 }
 
 fn assert_compiled_fn_signature(

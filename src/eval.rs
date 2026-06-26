@@ -23,9 +23,9 @@ use crate::{
     hir::value::{FunctionHiddenArgValue, FunctionValue, NativeValue, NativeValueType, Value},
     module::{
         ELocalDecl as LocalDecl, ExtraParameterId, FunctionId, LocalDebugVisibility, LocalDeclId,
-        LocalFunctionId, ModuleFunction, ModuleId, ProjectionIndex, ResolvedLocalClone,
-        ResolvedLocalDrop, ResolvedTakeLocalValueMode, ResolvedValueLayout, TraitDictionary,
-        TraitDictionaryEntry, TraitDictionaryId, TraitImplId,
+        LocalFunctionId, ModuleFunction, ModuleId, ProjectionIndex, QualifiedNameEnv,
+        ResolvedLocalClone, ResolvedLocalDrop, ResolvedTakeLocalValueMode, ResolvedValueLayout,
+        TraitDictionary, TraitDictionaryEntry, TraitDictionaryId, TraitImplId,
     },
     std::buffer,
     types::{
@@ -1100,10 +1100,16 @@ impl BacktraceFrame {
                 match &slot.target {
                     TraitImplMethod { key, index } => {
                         let trait_def = module.trait_def(key.trait_id());
+                        let qualified_name_env = QualifiedNameEnv::new_from_module(module, modules);
                         write!(
                             f,
                             "{}",
-                            trait_def.qualified_method_name(*index, key.input_tys())
+                            qualified_name_env.qualified_method_name(
+                                key.trait_id(),
+                                trait_def,
+                                *index,
+                                key.input_tys(),
+                            )
                         )?
                     }
                     NamedFunction(fn_name) => write!(f, "{module_path}::{fn_name}")?,
@@ -3396,8 +3402,9 @@ mod tests {
     fn eval_args_test_session() -> (CompilerSession, ModuleId) {
         let mut session = CompilerSession::new();
         let module_id = ModuleId::from_index(2);
-        let module = Module::new(module_id);
-        let registered = session.register_module(Path::single_str("$eval_args_test"), module);
+        let path = Path::single_str("$eval_args_test");
+        let module = Module::new(module_id, path.clone());
+        let registered = session.register_module(path, module);
         assert_eq!(registered, module_id);
         (session, module_id)
     }
@@ -3672,13 +3679,14 @@ mod tests {
             .map(LocalDecl::into_elaborated)
             .collect::<Vec<_>>();
 
-        let mut module = Module::new(ModuleId::from_index(2));
+        let path = Path::single_str("$with_yielded_test");
+        let mut module = Module::new(ModuleId::from_index(2), path.clone());
         module.hir_arena = arena;
         let registered_accessor = module.add_function(ustr("accessor"), accessor_function);
         assert_eq!(registered_accessor, accessor_id);
 
         let mut session = CompilerSession::new();
-        let module_id = session.register_module(Path::single_str("$with_yielded_test"), module);
+        let module_id = session.register_module(path, module);
         let module = session.expect_fresh_module(module_id);
         let result = eval_node(
             &module.hir_arena,
@@ -3792,14 +3800,14 @@ mod tests {
             .map(LocalDecl::into_elaborated)
             .collect::<Vec<_>>();
 
-        let mut module = Module::new(ModuleId::from_index(2));
+        let path = Path::single_str("$with_yielded_return_test");
+        let mut module = Module::new(ModuleId::from_index(2), path.clone());
         module.hir_arena = arena;
         let registered_accessor = module.add_function(ustr("accessor"), accessor_function);
         assert_eq!(registered_accessor, accessor_id);
 
         let mut session = CompilerSession::new();
-        let module_id =
-            session.register_module(Path::single_str("$with_yielded_return_test"), module);
+        let module_id = session.register_module(path, module);
         let module = session.expect_fresh_module(module_id);
         let result = eval_node(
             &module.hir_arena,
@@ -3902,14 +3910,14 @@ mod tests {
             .map(LocalDecl::into_elaborated)
             .collect::<Vec<_>>();
 
-        let mut module = Module::new(ModuleId::from_index(2));
+        let path = Path::single_str("$with_yielded_lifo_test");
+        let mut module = Module::new(ModuleId::from_index(2), path.clone());
         module.hir_arena = arena;
         assert_eq!(module.add_function(ustr("outer"), outer_function), outer_id);
         assert_eq!(module.add_function(ustr("inner"), inner_function), inner_id);
 
         let mut session = CompilerSession::new();
-        let module_id =
-            session.register_module(Path::single_str("$with_yielded_lifo_test"), module);
+        let module_id = session.register_module(path, module);
         let module = session.expect_fresh_module(module_id);
         let result = eval_node(
             &module.hir_arena,

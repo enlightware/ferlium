@@ -360,6 +360,135 @@ fn generated_function_value_methods_and_lambdas_are_private() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generated_trait_method_names_use_qualified_type_names() {
+    let mut session = TestSession::new();
+    let module_id = compile_module(
+        &mut session,
+        "base",
+        indoc! { r#"
+            pub trait ToInt<Self> {
+                fn to_int(value: Self) -> int;
+            }
+
+            pub struct Wrapped(int)
+
+            impl ToInt for int {
+                fn to_int(value: int) -> int {
+                    value
+                }
+            }
+
+            impl ToInt for Wrapped {
+                fn to_int(value: Wrapped) -> int {
+                    value.0
+                }
+            }
+        "# },
+    );
+    let module = session.session().expect_fresh_module(module_id);
+    let names = module
+        .iter_named_functions()
+        .map(|(name, _)| name.to_string())
+        .collect::<Vec<_>>();
+    let to_int_names = names
+        .iter()
+        .filter(|name| name.starts_with("base::ToInt<"))
+        .collect::<Vec<_>>();
+
+    assert!(
+        names
+            .iter()
+            .any(|name| name.starts_with("base::ToInt<std::int>::to_int#impl:")),
+        "expected native impl name in {names:?}"
+    );
+    assert!(
+        names
+            .iter()
+            .any(|name| name.starts_with("base::ToInt<base::Wrapped>::to_int#impl:"))
+    );
+    assert!(
+        to_int_names
+            .iter()
+            .all(|name| !name.split('<').skip(1).any(|part| part
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_digit())
+                && part.contains('-'))),
+        "generated trait method names should not contain interned type identities: {names:?}"
+    );
+    assert!(
+        to_int_names.iter().all(|name| {
+            let hash = name.split("#impl:").nth(1).unwrap_or_default();
+            hash.len() == 8 && hash.chars().all(|ch| ch.is_ascii_hexdigit())
+        }),
+        "generated impl names should use an 8-character hash suffix: {to_int_names:?}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generated_trait_method_names_disambiguate_impl_outputs() {
+    let mut session = TestSession::new();
+    let module_id = compile_module(
+        &mut session,
+        "base",
+        indoc! { r#"
+            pub trait Adapter<Self |-> Output> {
+                fn adapt(value: Self) -> Output;
+            }
+
+            impl<A> Adapter for <Self = [A] |-> Output = [A]>
+            where
+                A: Value
+            {
+                fn adapt(value: [A]) -> [A] {
+                    value
+                }
+            }
+
+            impl<A> Adapter for <Self = [A] |-> Output = ArrayIterator<A>>
+            where
+                A: Value
+            {
+                fn adapt(value: [A]) -> ArrayIterator<A> {
+                    iter(value)
+                }
+            }
+        "# },
+    );
+    let module = session.session().expect_fresh_module(module_id);
+    let adapter_names = module
+        .iter_named_functions()
+        .map(|(name, _)| name.to_string())
+        .filter(|name| name.starts_with("base::Adapter<[A]>::adapt"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        adapter_names.len(),
+        2,
+        "expected both Adapter impl methods in {adapter_names:?}"
+    );
+    assert!(
+        adapter_names.iter().all(|name| name.contains("#impl:")),
+        "generated impl names should include stable disambiguators: {adapter_names:?}"
+    );
+    assert_ne!(
+        adapter_names[0], adapter_names[1],
+        "impl methods with the same readable prefix but different outputs must not collide"
+    );
+    assert_eq!(
+        adapter_names
+            .iter()
+            .map(|name| name.split("#impl:").next().unwrap())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        1,
+        "test should exercise identical readable prefixes: {adapter_names:?}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn public_trait_method_is_visible_across_modules() {
     let mut session = TestSession::new();
 

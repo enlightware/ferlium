@@ -36,7 +36,8 @@ use crate::{
     module::{
         FunctionId, GENERATED_LAMBDA_PREFIX, LocalDecl, LocalDeclId, LocalFunctionId,
         LocalSubscriptId, Module, ModuleEnv, ModuleFunction, ModuleFunctionSpans, ModuleId,
-        PendingFunctionBody, PendingModuleFunction, TraitId, Visibility, YieldProvenance, id::Id,
+        PendingFunctionBody, PendingModuleFunction, QualifiedNameEnv, TraitId, Visibility,
+        YieldProvenance, id::Id,
     },
     std::{STD_MODULE_ID, new_module_using_std},
     types::{
@@ -1039,7 +1040,8 @@ where
                 .filter(|c| !is_compiler_provided_value_constraint(c, module_env))
                 .collect();
             if !remaining_orphans.is_empty() {
-                let fake_current = new_module_using_std(ModuleId(0));
+                let fake_current =
+                    new_module_using_std(ModuleId(0), crate::module::Path::single_str("$debug"));
                 let env = ModuleEnv::new(&fake_current, others);
                 return Err(internal_compilation_error!(Internal {
                     error: format!(
@@ -1122,6 +1124,7 @@ where
         // and override them with the trait's effects.
         // This ensures ABI consistency: the calling convention is determined by the trait definition.
         let trait_ctx = trait_ctx.unwrap();
+        let trait_id = trait_ctx.trait_id;
         let trait_def = &trait_ctx.trait_def;
         let trait_effect_subst = trait_def.effect_param_subst_for_effs(&trait_output.output_effs);
         for (i, id) in local_fns.iter().enumerate() {
@@ -1253,8 +1256,19 @@ where
             }
 
             // Name the function
-            let name = trait_def
-                .qualified_method_name(method_index, &trait_output.input_tys)
+            let qualified_name_env = QualifiedNameEnv::new_from_module(output, others);
+            let name = qualified_name_env
+                .disambiguated_impl_method_name(
+                    trait_id,
+                    trait_def,
+                    method_index,
+                    &trait_output.input_tys,
+                    &trait_output.output_tys,
+                    &trait_output.output_effs,
+                    trait_output.ty_var_count,
+                    trait_output.eff_var_count,
+                    &trait_output.constraints,
+                )
                 .into();
             output.name_function(*id, name);
         }
@@ -1355,7 +1369,8 @@ where
                 .filter(|c| !is_compiler_provided_value_constraint(c, module_env))
                 .collect();
             if !remaining_orphans.is_empty() {
-                let fake_current = new_module_using_std(ModuleId(0));
+                let fake_current =
+                    new_module_using_std(ModuleId(0), crate::module::Path::single_str("$debug"));
                 let env = ModuleEnv::new(&fake_current, others);
                 return Err(internal_compilation_error!(Internal {
                     error: format!(

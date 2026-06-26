@@ -629,7 +629,7 @@ fn testing_module(
     value_trait_id: TraitId,
     value_trait_def: &Trait,
 ) -> Module {
-    let mut module = Module::new(module_id);
+    let mut module = Module::new(module_id, Path::single_str("testing"));
     let test_assoc_trait = test_assoc_trait();
     let test_witnessed_project_trait = test_witnessed_project_trait();
     let test_assoc_trait_id = TraitId::new(module_id, module.add_trait(test_assoc_trait));
@@ -913,7 +913,7 @@ fn testing_module(
 }
 
 fn test_effect_module(module_id: ModuleId) -> Module {
-    let mut module = Module::new(module_id);
+    let mut module = Module::new(module_id, Path::single_str("effects"));
     module.add_function(
         "read".into(),
         NullaryNativeFnN::description_with_default_ty(
@@ -1015,7 +1015,7 @@ fn int_vec_from_array_value(value: &Value) -> Vec<isize> {
 }
 
 fn test_property_module(module_id: ModuleId) -> Module {
-    let mut module = Module::new(module_id);
+    let mut module = Module::new(module_id, Path::single_str("props"));
     module.add_function(
         "@get my_scope.my_var".into(),
         NullaryNativeFnN::description_with_default_ty(
