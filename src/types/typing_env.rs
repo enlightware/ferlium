@@ -18,9 +18,9 @@ use crate::{
     hir::function::{FunctionDefinition, ResolvedArgPassing},
     hir::{LoopId, NodeArena, NodeId},
     module::{
-        FunctionId, ImportFunctionSlot, ImportFunctionSlotId, ImportFunctionTarget, LocalDecl,
-        LocalDeclId, LocalFunctionId, ModuleEnv, ModuleId, SubscriptDefinition, SubscriptMember,
-        TraitId, TypeDefLookupResult, UModuleFunction, id::Id,
+        FunctionId, LocalDecl, LocalDeclId, LocalFunctionId, ModuleEnv, ModuleId,
+        SubscriptDefinition, SubscriptMember, TraitId, TypeDefLookupResult, UModuleFunction,
+        id::Id,
     },
     std::{STD_MODULE_ID, array::array_type as std_array_type},
     types::r#trait::TraitMethodIndex,
@@ -95,35 +95,6 @@ fn select_subscript_member(
     .unwrap_or_else(|| panic!("std subscript {subscript_name} member should be available"))
 }
 
-fn import_targets_equal(left: &ImportFunctionTarget, right: &ImportFunctionTarget) -> bool {
-    match (left, right) {
-        (ImportFunctionTarget::NamedFunction(left), ImportFunctionTarget::NamedFunction(right)) => {
-            left == right
-        }
-        (
-            ImportFunctionTarget::SubscriptMember {
-                name: left_name,
-                mut_member: left_mut_member,
-            },
-            ImportFunctionTarget::SubscriptMember {
-                name: right_name,
-                mut_member: right_mut_member,
-            },
-        ) => left_name == right_name && left_mut_member == right_mut_member,
-        (
-            ImportFunctionTarget::TraitImplMethod {
-                key: left_key,
-                index: left_index,
-            },
-            ImportFunctionTarget::TraitImplMethod {
-                key: right_key,
-                index: right_index,
-            },
-        ) => left_key == right_key && left_index == right_index,
-        _ => false,
-    }
-}
-
 /// A typing environment, mapping local variable names to types.
 #[derive(new)]
 #[allow(clippy::too_many_arguments)]
@@ -133,10 +104,8 @@ pub struct TypingEnv<'m> {
     pub(crate) all_locals: &'m mut Vec<LocalDecl>,
     /// The local variables existing in this environment.
     pub(crate) cur_locals: Vec<LocalDeclId>,
-    /// The extra import slots that can be filled during type checking.
-    pub(crate) new_import_slots: &'m mut Vec<ImportFunctionSlot>,
-    /// The type dependencies that can be filled during type checking.
-    pub(crate) new_type_deps: &'m mut FxHashSet<ModuleId>,
+    /// Module dependencies discovered during type checking.
+    pub(crate) new_deps: &'m mut FxHashSet<ModuleId>,
     /// The program and the module we are currently compiling.
     pub(crate) module_env: ModuleEnv<'m>,
     /// The expected return type of the enclosing function (for type-checking `return` statements).
@@ -176,7 +145,7 @@ impl<'m> TypingEnv<'m> {
 
     pub fn array_type(&mut self, element_ty: Type) -> Type {
         if self.current_module_id() != STD_MODULE_ID {
-            self.new_type_deps.insert(STD_MODULE_ID);
+            self.new_deps.insert(STD_MODULE_ID);
         }
         std_array_type(element_ty)
     }
@@ -213,38 +182,11 @@ impl<'m> TypingEnv<'m> {
             .map(|index| self.cur_locals[index])
     }
 
-    fn import_function(
-        &mut self,
-        module_id: ModuleId,
-        function_name: Ustr,
-    ) -> ImportFunctionSlotId {
-        self.import_function_target(
-            module_id,
-            ImportFunctionTarget::NamedFunction(function_name),
-        )
-    }
-
-    fn import_function_target(
-        &mut self,
-        module_id: ModuleId,
-        target: ImportFunctionTarget,
-    ) -> ImportFunctionSlotId {
-        self.module_env
-            .current
-            .iter_import_fn_slots()
-            .position(|slot| {
-                slot.module == module_id && import_targets_equal(&slot.target, &target)
-            })
-            .map(|index| ImportFunctionSlotId(index as u32))
-            .unwrap_or_else(|| {
-                let slot_index = (self.module_env.current.import_fn_slot_count()
-                    + self.new_import_slots.len()) as u32;
-                self.new_import_slots.push(ImportFunctionSlot {
-                    module: module_id,
-                    target,
-                });
-                ImportFunctionSlotId(slot_index)
-            })
+    fn function_id(&mut self, module_id: ModuleId, function_id: LocalFunctionId) -> FunctionId {
+        if module_id != self.current_module_id() {
+            self.new_deps.insert(module_id);
+        }
+        FunctionId::new(module_id, function_id)
     }
 
     pub fn get_function(
@@ -273,7 +215,6 @@ impl<'m> TypingEnv<'m> {
         }
 
         Ok(if let Some(module_id) = module_id_opt {
-            let id = self.import_function(module_id, function_name);
             let source_module = self
                 .module_env
                 .modules
@@ -282,10 +223,11 @@ impl<'m> TypingEnv<'m> {
                 .module
                 .as_ref()
                 .unwrap();
-            let function = source_module.get_function(function_name).unwrap();
+            let id = source_module.get_local_function_id(function_name).unwrap();
+            let function = source_module.get_function_by_id(id).unwrap();
             Some((
                 &function.definition,
-                FunctionId::Import(id),
+                self.function_id(module_id, id),
                 Some(module_id),
                 function.code.runtime_argument_passing().map(<[_]>::to_vec),
             ))
@@ -298,7 +240,7 @@ impl<'m> TypingEnv<'m> {
             let function = self.module_env.current.get_function_by_id(id).unwrap();
             Some((
                 &function.definition,
-                FunctionId::Local(id),
+                self.function_id(self.current_module_id(), id),
                 None,
                 function.code.runtime_argument_passing().map(<[_]>::to_vec),
             ))
@@ -320,12 +262,11 @@ impl<'m> TypingEnv<'m> {
             let function = self.module_env.current.get_function_by_id(id).unwrap();
             (
                 &function.definition,
-                FunctionId::Local(id),
+                self.function_id(self.current_module_id(), id),
                 None,
                 function.code.runtime_argument_passing().map(<[_]>::to_vec),
             )
         } else {
-            let id = self.import_function(STD_MODULE_ID, function_name);
             let source_module = self
                 .module_env
                 .modules
@@ -334,12 +275,15 @@ impl<'m> TypingEnv<'m> {
                 .module
                 .as_ref()
                 .unwrap();
+            let id = source_module
+                .get_local_function_id(function_name)
+                .unwrap_or_else(|| panic!("std function {function_name} should be available"));
             let function = source_module
                 .get_function(function_name)
                 .unwrap_or_else(|| panic!("std function {function_name} should be available"));
             (
                 &function.definition,
-                FunctionId::Import(id),
+                self.function_id(STD_MODULE_ID, id),
                 Some(STD_MODULE_ID),
                 function.code.runtime_argument_passing().map(<[_]>::to_vec),
             )
@@ -368,7 +312,7 @@ impl<'m> TypingEnv<'m> {
                 member,
                 (
                     &function.definition,
-                    FunctionId::Local(member.function),
+                    self.function_id(self.current_module_id(), member.function),
                     None,
                     function.code.runtime_argument_passing().map(<[_]>::to_vec),
                 ),
@@ -386,13 +330,6 @@ impl<'m> TypingEnv<'m> {
                 .get_subscript(subscript_name)
                 .unwrap_or_else(|| panic!("std subscript {subscript_name} should be available"));
             let member = select_subscript_member(subscript, subscript_name, mut_member);
-            let id = self.import_function_target(
-                STD_MODULE_ID,
-                ImportFunctionTarget::SubscriptMember {
-                    name: subscript_name,
-                    mut_member,
-                },
-            );
             let function = source_module
                 .get_function_by_id(member.function)
                 .expect("std subscript function id should be valid");
@@ -401,7 +338,7 @@ impl<'m> TypingEnv<'m> {
                 member,
                 (
                     &function.definition,
-                    FunctionId::Import(id),
+                    self.function_id(STD_MODULE_ID, member.function),
                     Some(STD_MODULE_ID),
                     function.code.runtime_argument_passing().map(<[_]>::to_vec),
                 ),
@@ -417,7 +354,7 @@ impl<'m> TypingEnv<'m> {
         let result = self.module_env.type_def_for_construction(path)?;
         Ok(result.map(|td| {
             if let Some(module_id) = td.0 {
-                self.new_type_deps.insert(module_id);
+                self.new_deps.insert(module_id);
             }
             td.1
         }))

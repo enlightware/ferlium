@@ -21,7 +21,7 @@ use ustr::Ustr;
 use crate::{
     containers::{B, IntoSVec2, SVec2, b},
     format::write_with_separator,
-    module::{LocalFunctionId, ModuleId, TraitDictionaryId},
+    module::{FunctionId, TraitDictionaryId},
 };
 
 // Support for primitive values
@@ -130,8 +130,7 @@ pub enum FunctionHiddenArgValue {
 /// Ferlium values.
 #[derive(Debug)]
 pub struct FunctionValue {
-    pub function_id: LocalFunctionId,
-    pub module_id: ModuleId,
+    pub function: FunctionId,
     /// Hidden dictionary/evidence arguments supplied separately from value arguments.
     pub hidden_args: Vec<FunctionHiddenArgValue>,
     /// Owned source-level closure environment, stored as a tuple value.
@@ -143,10 +142,9 @@ pub struct FunctionValue {
 }
 
 impl FunctionValue {
-    pub fn bare(function_id: LocalFunctionId, module_id: ModuleId) -> Self {
+    pub fn bare(function: FunctionId) -> Self {
         Self {
-            function_id,
-            module_id,
+            function,
             hidden_args: Vec::new(),
             closure_env: Value::uninit(),
             closure_env_len: 0,
@@ -155,8 +153,7 @@ impl FunctionValue {
     }
 
     pub fn closure(
-        function_id: LocalFunctionId,
-        module_id: ModuleId,
+        function: FunctionId,
         hidden_args: Vec<FunctionHiddenArgValue>,
         captures: Vec<Value>,
         closure_env_value_dictionary: Option<TraitDictionaryId>,
@@ -164,8 +161,7 @@ impl FunctionValue {
         let closure_env_len = captures.len();
         debug_assert_eq!(closure_env_value_dictionary.is_some(), closure_env_len > 0);
         Self {
-            function_id,
-            module_id,
+            function,
             hidden_args,
             closure_env: if captures.is_empty() {
                 Value::uninit()
@@ -273,8 +269,8 @@ impl Value {
         Self::tuple(Vec::<Value>::new())
     }
 
-    pub fn function(function: LocalFunctionId, module: ModuleId) -> Self {
-        Self::function_value(FunctionValue::bare(function, module))
+    pub fn function(function: FunctionId) -> Self {
+        Self::function_value(FunctionValue::bare(function))
     }
 
     pub fn function_value(function: FunctionValue) -> Self {
@@ -514,7 +510,7 @@ impl Display for LiteralValue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::module::{LocalImplId, id::Id};
+    use crate::module::{LocalFunctionId, LocalImplId, ModuleId, id::Id};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use ustr::ustr;
 
@@ -571,8 +567,7 @@ mod tests {
             Value::native(RustDropTracked),
             Value::raw_variant(ustr("Payload"), Value::native(RustDropTracked)),
             Value::function_value(FunctionValue::closure(
-                LocalFunctionId::from_index(0),
-                ModuleId::from_index(0),
+                FunctionId::new(ModuleId::from_index(0), LocalFunctionId::from_index(0)),
                 Vec::new(),
                 vec![Value::native(RustDropTracked)],
                 Some(dictionary),

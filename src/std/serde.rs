@@ -332,7 +332,10 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
             &[],
             [(PendingFunctionBody::new(body_arena, root), locals)],
         );
-        Ok(Some(TraitImplId::Local(impl_id)))
+        Ok(Some(TraitImplId::new(
+            solver.current_type_items.module.id,
+            impl_id,
+        )))
     }
 }
 
@@ -668,7 +671,10 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
             &[],
             [(PendingFunctionBody::new(body_arena, root), locals)],
         );
-        Ok(Some(TraitImplId::Local(impl_id)))
+        Ok(Some(TraitImplId::new(
+            solver.current_type_items.module.id,
+            impl_id,
+        )))
     }
 }
 

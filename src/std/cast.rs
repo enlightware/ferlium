@@ -82,7 +82,10 @@ impl Deriver for SelfCastDeriver {
             input_types,
             [],
         );
-        Ok(Some(TraitImplId::Local(local_impl_id)))
+        Ok(Some(TraitImplId::new(
+            solver.current_type_items.module.id,
+            local_impl_id,
+        )))
 
         // TODO: optimize away the cast entirely in the compiler
         // TODO: add same-code optimization passes in module building to reduce duplications generated here

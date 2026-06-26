@@ -90,8 +90,10 @@ fn resolve_value_method_dispatch(
     span: Location,
     missing_dictionary_msg: &str,
 ) -> Result<ResolvedValueMethodDispatch, InternalCompilationError> {
+    let current_module = ctx.trait_solver.current_type_items.module.id;
     if ty.is_function() {
-        return Ok(ResolvedValueMethodDispatch::Static(FunctionId::Local(
+        return Ok(ResolvedValueMethodDispatch::Static(FunctionId::new(
+            current_module,
             function_value_method(ctx.trait_solver, method_index, span)?,
         )));
     }
@@ -99,7 +101,8 @@ fn resolve_value_method_dispatch(
         let value_trait_id = ctx.trait_solver.std_trait_id(VALUE_TRAIT_NAME);
         let methods =
             generic_value_methods_for_type(ctx.trait_solver, value_trait_id, &[ty], span, arena)?;
-        return Ok(ResolvedValueMethodDispatch::Static(FunctionId::Local(
+        return Ok(ResolvedValueMethodDispatch::Static(FunctionId::new(
+            current_module,
             methods[usize::from(method_index)],
         )));
     }
@@ -457,7 +460,8 @@ fn resolve_generated_temp_drop(
         return Ok(ResolvedLocalDrop::Skip);
     }
     if is_function_surface_only_value_type(ty) {
-        return Ok(ResolvedLocalDrop::Static(FunctionId::Local(
+        return Ok(ResolvedLocalDrop::Static(FunctionId::new(
+            trait_solver.current_type_items.module.id,
             function_value_method(trait_solver, VALUE_DROP_METHOD_INDEX, span)?,
         )));
     }

@@ -124,8 +124,7 @@ fn emit_expr_unsafe_inner(
 
     // Infer the expression with the existing locals.
     let initial_local_count = locals.len();
-    let mut new_import_slots = vec![];
-    let mut new_type_deps = FxHashSet::default();
+    let mut new_deps = FxHashSet::default();
     let mut lambda_functions = vec![];
     let mut pending_functions = PendingModuleFunctions::default();
     LocalDecl::assign_sequential_slots(&mut locals);
@@ -133,8 +132,7 @@ fn emit_expr_unsafe_inner(
     let mut ty_env = TypingEnv::new(
         &mut locals,
         cur_locals,
-        &mut new_import_slots,
-        &mut new_type_deps,
+        &mut new_deps,
         module_env,
         None,
         FnReturnConvention::Value,
@@ -163,9 +161,8 @@ fn emit_expr_unsafe_inner(
             id
         })
         .collect::<Vec<_>>();
-    module.import_fn_slots.extend(new_import_slots);
-    module.type_deps.extend(new_type_deps);
-    module.type_deps.extend(modules_used);
+    module.deps.extend(new_deps);
+    module.deps.extend(modules_used);
 
     // Perform the unification.
     let mut solver = trait_solver_from_module!(module, others);

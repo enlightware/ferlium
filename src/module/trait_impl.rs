@@ -42,22 +42,17 @@ define_id_type!(
     LocalImplId
 );
 
-define_id_type!(
-    /// Import slot ID for cross-module trait implementation dictionaries.
-    ImportImplSlotId
-);
-
 /// An identifier for a trait implementation
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum TraitImplId {
-    /// Local trait implementation in a module
-    Local(LocalImplId),
-    /// Imported trait implementation through an import slot
-    Import(ImportImplSlotId),
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, new)]
+pub struct TraitImplId {
+    /// Module owning the implementation.
+    pub module: ModuleId,
+    /// Implementation index within the owning module.
+    pub impl_id: LocalImplId,
 }
 
 /// Canonical runtime handle to a trait dictionary body owned by a compiled module.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, new)]
 pub struct TraitDictionaryId {
     pub module_id: ModuleId,
     pub impl_id: LocalImplId,
@@ -65,39 +60,27 @@ pub struct TraitDictionaryId {
 
 impl FormatWith<ModuleEnv<'_>> for TraitImplId {
     fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv<'_>) -> std::fmt::Result {
-        match *self {
-            TraitImplId::Local(id) => {
-                let imp = env.current.get_impl_data(id).unwrap();
-                if let Some(key) = env.current.get_impl_trait_key_by_id(id) {
-                    write!(f, "local dictionary ")?;
-                    format_impl_header_by_key(f, &key, imp, env)?;
-                    write!(f, " (#{id})")
-                } else {
-                    write!(f, "local anonymous dictionary (#{id})")
-                }
-            }
-            TraitImplId::Import(id) => {
-                let slot = env.current.get_import_impl_slot(id).unwrap();
-                let module_id = slot.module;
-                let module_name = env
-                    .modules
-                    .get_name(module_id)
-                    .unwrap_or_else(|| panic!("imported module {module_id} not found"));
-                write!(f, "imported dictionary {module_name}::<")?;
-                format_impl_header_by_import_slot(f, slot, env)?;
-                write!(f, "> (slot #{id})")
-            }
+        let module = if self.module == env.current.module_id() {
+            env.current
+        } else {
+            env.modules
+                .get(self.module)
+                .and_then(|entry| entry.module.as_ref())
+                .unwrap_or_else(|| panic!("dictionary module {} not found", self.module))
+        };
+        let imp = module.get_impl_data(self.impl_id).unwrap();
+        let module_name = env
+            .modules
+            .get_name(self.module)
+            .unwrap_or_else(|| panic!("dictionary module {} has no path", self.module));
+        if let Some(key) = module.get_impl_trait_key_by_id(self.impl_id) {
+            write!(f, "dictionary {module_name}::")?;
+            format_impl_header_by_key(f, &key, imp, env)?;
+            write!(f, " (#{})", self.impl_id)
+        } else {
+            write!(f, "anonymous dictionary {module_name}::#{}", self.impl_id)
         }
     }
-}
-
-/// Import slot that can be resolved to a trait dictionary from another module
-#[derive(Debug, Clone)]
-pub struct ImportImplSlot {
-    /// ID of the module to import from
-    pub module: ModuleId,
-    /// The key of the trait impl in that module
-    pub key: TraitKey,
 }
 
 /// A vector of trait definitions.
@@ -1094,33 +1077,5 @@ fn format_impl_fn(
     if show_code {
         function.fmt_code_ind(f, env, 2, 1)?;
     }
-    Ok(())
-}
-
-pub fn format_impl_header_by_import_slot_id(
-    f: &mut fmt::Formatter,
-    id: ImportImplSlotId,
-    env: &ModuleEnv<'_>,
-) -> fmt::Result {
-    let slot = env.current.get_import_impl_slot(id).unwrap();
-    format_impl_header_by_import_slot(f, slot, env)
-}
-
-pub fn format_impl_header_by_import_slot(
-    f: &mut fmt::Formatter,
-    slot: &ImportImplSlot,
-    env: &ModuleEnv<'_>,
-) -> fmt::Result {
-    let key = &slot.key;
-    let imp = &env
-        .modules
-        .get(slot.module)
-        .expect("imported module not found")
-        .module
-        .as_ref()
-        .expect("compiled module not found")
-        .get_impl_data_by_trait_key(key)
-        .expect("imported trait impl not found");
-    format_impl_header_by_key(f, key, imp, env)?;
     Ok(())
 }

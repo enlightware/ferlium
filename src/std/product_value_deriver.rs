@@ -129,13 +129,14 @@ impl Deriver for ProductValueDeriver {
         };
 
         Ok(root.map(|root| {
-            TraitImplId::Local(solver.add_concrete_impl_from_code(
+            let impl_id = solver.add_concrete_impl_from_code(
                 PendingFunctionBody::new(body_arena, root),
                 locals,
                 trait_id,
                 input_types,
                 [],
-            ))
+            );
+            TraitImplId::new(solver.current_type_items.module.id, impl_id)
         }))
     }
 }

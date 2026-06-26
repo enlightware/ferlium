@@ -26,13 +26,12 @@ use crate::{
     },
     internal_compilation_error,
     module::{
-        self, BlanketImpls, BlanketTraitImplKey, BlanketTraitImpls, ConcreteTraitImplKey,
-        CurrentTypeItems, Def, DefKind, DefTable, FunctionId, ImportFunctionSlot,
-        ImportFunctionSlotId, ImportFunctionTarget, ImportImplSlot, ImportImplSlotId, LocalDecl,
-        LocalDeclId, LocalFunctionId, LocalImplId, Module, ModuleEnv, ModuleFunction, ModuleId,
-        PendingFunctionBody, PendingFunctionCollector, PendingModuleFunction, QualifiedNameEnv,
-        ResolvedValueLayout, TraitDictionary, TraitId, TraitImpl, TraitImplId, TraitImpls,
-        TraitKey, TypeDefId, build_dictionary_value, id::Id, unique_generated_name,
+        self, BlanketImpls, BlanketTraitImpls, ConcreteTraitImplKey, CurrentTypeItems, Def,
+        DefKind, DefTable, FunctionId, LocalDecl, LocalDeclId, LocalFunctionId, LocalImplId,
+        Module, ModuleEnv, ModuleFunction, ModuleId, PendingFunctionBody, PendingFunctionCollector,
+        PendingModuleFunction, QualifiedNameEnv, ResolvedValueLayout, TraitDictionary, TraitId,
+        TraitImpl, TraitImplId, TraitImpls, TypeDefId, build_dictionary_value, id::Id,
+        unique_generated_name,
     },
     std::{
         STD_MODULE_ID,
@@ -66,10 +65,8 @@ pub struct TraitSolver<'a> {
     pub impls: &'a mut TraitImpls,
     /// Current module functions available by name.
     pub current_functions: FxHashMap<Ustr, LocalFunctionId>,
-    /// Current module function import slots.
-    pub import_fn_slots: &'a mut Vec<ImportFunctionSlot>,
-    /// Current module trait import slots.
-    pub import_impl_slots: &'a mut Vec<ImportImplSlot>,
+    /// Current module dependencies discovered while solving.
+    pub deps: &'a mut FxHashSet<ModuleId>,
     /// Collector for newly created current module functions.
     pub fn_collector: PendingFunctionCollector,
     /// Other modules available for fetching trait implementations and normal functions (read only).
@@ -91,8 +88,7 @@ impl<'a> TraitSolver<'a> {
         current_type_items: CurrentTypeItems<'a>,
         impls: &'a mut TraitImpls,
         current_functions: FxHashMap<Ustr, LocalFunctionId>,
-        import_fn_slots: &'a mut Vec<ImportFunctionSlot>,
-        import_impl_slots: &'a mut Vec<ImportImplSlot>,
+        deps: &'a mut FxHashSet<ModuleId>,
         fn_collector: PendingFunctionCollector,
         others: &'a Modules,
     ) -> Self {
@@ -101,8 +97,7 @@ impl<'a> TraitSolver<'a> {
             current_type_items,
             impls,
             current_functions,
-            import_fn_slots,
-            import_impl_slots,
+            deps,
             fn_collector,
             others,
             recursion_depth: 0,
@@ -168,8 +163,7 @@ macro_rules! trait_solver_from_module {
             ),
             &mut $module.impls,
             current_functions,
-            &mut $module.import_fn_slots,
-            &mut $module.import_impl_slots,
+            &mut $module.deps,
             crate::module::PendingFunctionCollector::new(function_count),
             $program,
         )
@@ -182,8 +176,7 @@ pub(crate) struct TraitSolverProbe<'a> {
     current_type_items: CurrentTypeItems<'a>,
     impls: Cow<'a, TraitImpls>,
     current_functions: FxHashMap<Ustr, LocalFunctionId>,
-    import_fn_slots: Vec<ImportFunctionSlot>,
-    import_impl_slots: Vec<ImportImplSlot>,
+    deps: FxHashSet<ModuleId>,
     fn_collector: PendingFunctionCollector,
     active_improvements: FxHashSet<TraitImprovementKey>,
     private_impl_scope: Vec<ModuleId>,
@@ -471,8 +464,7 @@ impl<'a> TraitSolverProbe<'a> {
             current_type_items: CurrentTypeItems::new_from_module(module),
             impls: Cow::Borrowed(&module.impls),
             current_functions: current_function_map(&module.def_table),
-            import_fn_slots: module.import_fn_slots.clone(),
-            import_impl_slots: module.import_impl_slots.clone(),
+            deps: module.deps.clone(),
             fn_collector: PendingFunctionCollector::new(module.functions.len()),
             active_improvements: FxHashSet::default(),
             private_impl_scope: Vec::new(),
@@ -489,8 +481,7 @@ impl<'a> TraitSolverProbe<'a> {
             current_type_items: solver.current_type_items,
             impls: Cow::Owned(impls),
             current_functions: solver.current_functions.clone(),
-            import_fn_slots: solver.import_fn_slots.clone(),
-            import_impl_slots: solver.import_impl_slots.clone(),
+            deps: solver.deps.clone(),
             fn_collector: solver.fn_collector.clone(),
             active_improvements: solver.active_improvements.clone(),
             private_impl_scope: solver.private_impl_scope.clone(),
@@ -508,8 +499,7 @@ impl<'a> TraitSolverProbe<'a> {
             self.current_type_items,
             self.impls.to_mut(),
             mem::take(&mut self.current_functions),
-            &mut self.import_fn_slots,
-            &mut self.import_impl_slots,
+            &mut self.deps,
             fn_collector,
             self.others,
         );
@@ -2081,27 +2071,27 @@ impl<'a> TraitSolver<'a> {
     /// Get a concrete trait implementation by its key, without performing any solving.
     /// This searches in current module first, then in other modules.
     /// Only public implementations from other modules are considered.
-    /// If found in other modules, the import slots are updated.
+    /// If found in other modules, the value dependencies are updated.
     pub fn get_concrete_impl(&mut self, key: &ConcreteTraitImplKey) -> Option<TraitImplId> {
         if let Some(id) = self.impls.concrete_key_to_id.get(key) {
-            return Some(TraitImplId::Local(*id));
+            return Some(TraitImplId::new(self.current_type_items.module.id, *id));
         }
-        // Search other modules; separate immutable search from mutable slot update.
         let found = self.others.enumerates().find_map(|(module_id, entry, _)| {
             entry.module().and_then(|module| {
                 let impls = &module.impls;
                 impls.concrete_key_to_id.get(key).and_then(|id| {
                     let imp = &impls.data[id.as_index()];
                     if self.can_use_other_impl(module_id, imp) {
-                        Some((module_id, TraitKey::Concrete(key.clone())))
+                        Some((module_id, *id))
                     } else {
                         None
                     }
                 })
             })
         });
-        found.map(|(module_id, trait_key)| {
-            TraitImplId::Import(self.import_impl_dictionary(module_id, trait_key))
+        found.map(|(module_id, impl_id)| {
+            self.deps.insert(module_id);
+            TraitImplId::new(module_id, impl_id)
         })
     }
 
@@ -2201,7 +2191,10 @@ impl<'a> TraitSolver<'a> {
         } else {
             self.impls.add_anonymous_dictionary_struct(imp)
         };
-        Ok((TraitImplId::Local(impl_id), dictionary_ty_for_use))
+        Ok((
+            TraitImplId::new(self.current_type_items.module.id, impl_id),
+            dictionary_ty_for_use,
+        ))
     }
 
     fn compiler_provided_value_dictionary_node_kind(
@@ -2410,7 +2403,10 @@ impl<'a> TraitSolver<'a> {
                 };
                 self.impls.add_concrete_struct(key, imp)
             };
-            return Ok(TraitImplId::Local(local_id));
+            return Ok(TraitImplId::new(
+                self.current_type_items.module.id,
+                local_id,
+            ));
         }
 
         // If a concrete implementation is found, return it.
@@ -2578,8 +2574,6 @@ impl<'a> TraitSolver<'a> {
 
                     // Then, for every function in the blanket implementation, if needed create a thunk function
                     // importing it and closing over the constraint dictionaries.
-                    let trait_key =
-                        TraitKey::Blanket(BlanketTraitImplKey::new(trait_id, sub_key.clone()));
                     let trait_def =
                         trait_def_from_parts(self.current_type_items, self.others, trait_id);
                     let definitions =
@@ -2601,15 +2595,8 @@ impl<'a> TraitSolver<'a> {
                         } else {
                             // Yes, get the function id for doing the call to the generic function.
                             let function_id = match imp_module_id {
-                                Some(module_id) => {
-                                    let slot_id = self.import_impl_method(
-                                        module_id,
-                                        trait_key.clone(),
-                                        method_index,
-                                    );
-                                    FunctionId::Import(slot_id)
-                                }
-                                None => FunctionId::Local(*fn_id),
+                                Some(module_id) => self.function_id(module_id, *fn_id),
+                                None => self.function_id(self.current_type_items.module.id, *fn_id),
                             };
 
                             let (body, locals) = self.blanket_method_thunk_code_entry(
@@ -2683,7 +2670,7 @@ impl<'a> TraitSolver<'a> {
                     if imp_module_id.is_some() {
                         self.private_impl_scope.pop();
                     }
-                    return Ok(TraitImplId::Local(local_impl_id));
+                    return Ok(self.impl_id(self.current_type_items.module.id, local_impl_id));
                 }
 
                 // Value blanket impls may be recursive, so reserve the concrete impl before
@@ -2742,27 +2729,16 @@ impl<'a> TraitSolver<'a> {
 
                 // Then, for every function in the blanket implementation, if needed create a thunk function
                 // importing it and closing over the constraint dictionaries.
-                let trait_key =
-                    TraitKey::Blanket(BlanketTraitImplKey::new(trait_id, sub_key.clone()));
                 let definitions =
                     trait_def_from_parts(self.current_type_items, self.others, trait_id)
                         .instantiate_for_tys(input_tys, &output_tys, &output_effs);
                 let code_entries = gen_functions
                     .iter()
                     .zip(definitions)
-                    .enumerate()
-                    .map(|(method_index, (fn_id, def))| {
-                        let method_index = TraitMethodIndex::from_index(method_index);
+                    .map(|(fn_id, def)| {
                         let function_id = match imp_module_id {
-                            Some(module_id) => {
-                                let slot_id = self.import_impl_method(
-                                    module_id,
-                                    trait_key.clone(),
-                                    method_index,
-                                );
-                                FunctionId::Import(slot_id)
-                            }
-                            None => FunctionId::Local(*fn_id),
+                            Some(module_id) => self.function_id(module_id, *fn_id),
+                            None => self.function_id(self.current_type_items.module.id, *fn_id),
                         };
 
                         self.blanket_method_thunk_code_entry(
@@ -2786,7 +2762,7 @@ impl<'a> TraitSolver<'a> {
                 if imp_module_id.is_some() {
                     self.private_impl_scope.pop();
                 }
-                return Ok(TraitImplId::Local(local_impl_id));
+                return Ok(self.impl_id(self.current_type_items.module.id, local_impl_id));
             }
         }
 
@@ -2834,19 +2810,8 @@ impl<'a> TraitSolver<'a> {
         arena: &mut NodeArena,
     ) -> Result<FunctionId, InternalCompilationError> {
         let impl_id = self.solve_impl(trait_id, input_tys, fn_span, arena)?;
-        use TraitImplId::*;
-        Ok(match impl_id {
-            Local(id) => {
-                FunctionId::Local(self.impls.data[id.as_index()].methods[index.as_index()])
-            }
-            Import(slot_id) => {
-                let slot = &self.import_impl_slots[slot_id.as_index()];
-                let module_id = slot.module;
-                let key = slot.key.as_concrete().unwrap();
-                let key = TraitKey::Concrete(key.clone());
-                FunctionId::Import(self.import_impl_method(module_id, key, index))
-            }
-        })
+        let method_id = self.get_impl_data_by_id(impl_id).methods[index.as_index()];
+        Ok(self.function_id(impl_id.module, method_id))
     }
 
     /// Get the output types for the given trait id and input types.
@@ -2935,31 +2900,24 @@ impl<'a> TraitSolver<'a> {
 
     /// Get a specific trait implementation data by its id.
     pub fn get_impl_data_by_id(&self, impl_id: TraitImplId) -> &TraitImpl {
-        use TraitImplId::*;
-        match impl_id {
-            Local(id) => &self.impls.data[id.as_index()],
-            Import(slot_id) => {
-                let slot = &self.import_impl_slots[slot_id.as_index()];
-                let module_id = slot.module;
-                let key = slot.key.as_concrete().unwrap();
-                let other_impls = &self
-                    .others
-                    .get(module_id)
-                    .unwrap_or_else(|| panic!("imported module #{module_id} not found"))
-                    .module
-                    .as_ref()
-                    .unwrap()
-                    .impls;
-                let id = other_impls.concrete_key_to_id.get(key).unwrap_or_else(|| {
-                    panic!("imported trait impl {key:?} not found in module #{module_id}")
-                });
-                &other_impls.data[id.as_index()]
-            }
+        if impl_id.module == self.current_type_items.module.id
+            && let Some(imp) = self.impls.data.get(impl_id.impl_id.as_index())
+        {
+            return imp;
         }
+        &self
+            .others
+            .get(impl_id.module)
+            .unwrap_or_else(|| panic!("module #{} not found", impl_id.module))
+            .module
+            .as_ref()
+            .unwrap()
+            .impls
+            .data[impl_id.impl_id.as_index()]
     }
 
     /// Get a specific function from a given module.
-    /// If necessary, the import slots are updated.
+    /// If necessary, the value dependencies are updated.
     pub fn get_function(
         &mut self,
         use_site: Location,
@@ -2979,15 +2937,13 @@ impl<'a> TraitSolver<'a> {
             .get_by_name(module_path)
             .ok_or_else(module_not_found_error)?;
         let module = entry.module().ok_or_else(module_not_found_error)?;
-        module.get_function(function_name).ok_or_else(|| {
+        let function_id = module.get_local_function_id(function_name).ok_or_else(|| {
             internal_compilation_error!(Internal {
                 error: format!("Function {function_name} not found in module {module_path}"),
                 span: use_site
             })
         })?;
-        Ok(FunctionId::Import(
-            self.import_function(module_id, function_name),
-        ))
+        Ok(self.function_id(module_id, function_id))
     }
 
     /// Get a function from the current module if it is defined locally, otherwise import it.
@@ -2999,16 +2955,16 @@ impl<'a> TraitSolver<'a> {
     ) -> Result<FunctionId, InternalCompilationError> {
         // We are only interested in named functions, not trait impl functions or lambdas, so we can ignore fn_collector.
         // if let Some(local_id) = self.fn_collector.get_function(function_name) {
-        //     return Ok(FunctionId::Local(local_id));
+        //     return Ok(self.function_id(self.current_type_items.module.id, local_id));
         // }
         if let Some(local_id) = self.current_functions.get(&function_name).copied() {
-            return Ok(FunctionId::Local(local_id));
+            return Ok(self.function_id(self.current_type_items.module.id, local_id));
         }
         self.get_function(use_site, module_path, function_name)
     }
 
     /// Get a specific subscript member from a given module.
-    /// If necessary, the import slots are updated.
+    /// If necessary, the value dependencies are updated.
     pub fn get_subscript_member(
         &mut self,
         use_site: Location,
@@ -3040,7 +2996,7 @@ impl<'a> TraitSolver<'a> {
         } else {
             subscript.ref_member.as_ref()
         };
-        if member.is_none() {
+        let Some(member) = member else {
             let member_name = if mut_member { "mut" } else { "ref" };
             return Err(internal_compilation_error!(Internal {
                 error: format!(
@@ -3048,90 +3004,22 @@ impl<'a> TraitSolver<'a> {
                 ),
                 span: use_site
             }));
+        };
+        Ok(self.function_id(module_id, member.function))
+    }
+
+    fn function_id(&mut self, module_id: ModuleId, function_id: LocalFunctionId) -> FunctionId {
+        if module_id != self.current_type_items.module.id {
+            self.deps.insert(module_id);
         }
-        Ok(FunctionId::Import(self.import_function_target(
-            module_id,
-            ImportFunctionTarget::SubscriptMember {
-                name: subscript_name,
-                mut_member,
-            },
-        )))
+        FunctionId::new(module_id, function_id)
     }
 
-    /// Import a function from another module, possibly updating the import slots.
-    /// The function is assumed to exist.
-    fn import_function(
-        &mut self,
-        module_id: ModuleId,
-        function_name: Ustr,
-    ) -> ImportFunctionSlotId {
-        self.import_function_target(
-            module_id,
-            ImportFunctionTarget::NamedFunction(function_name),
-        )
-    }
-
-    fn import_function_target(
-        &mut self,
-        module_id: ModuleId,
-        target: ImportFunctionTarget,
-    ) -> ImportFunctionSlotId {
-        self.import_fn_slots
-            .iter()
-            .position(|slot| slot.module == module_id && slot.target == target)
-            .map(ImportFunctionSlotId::from_index)
-            .unwrap_or_else(|| {
-                let index = self.import_fn_slots.len();
-                self.import_fn_slots.push(ImportFunctionSlot {
-                    module: module_id,
-                    target,
-                });
-                ImportFunctionSlotId::from_index(index)
-            })
-    }
-
-    /// Import a trait impl method from another module, possibly updating the import slots.
-    /// The trait impl is assumed to exist and the method index to be correct.
-    fn import_impl_method(
-        &mut self,
-        module_id: ModuleId,
-        key: TraitKey,
-        method_index: TraitMethodIndex,
-    ) -> ImportFunctionSlotId {
-        self.import_fn_slots
-            .iter()
-            .position(|slot| slot.module == module_id &&
-                matches!(&slot.target, ImportFunctionTarget::TraitImplMethod { key: k, index: i } if k == &key && *i == method_index)
-            )
-            .map(ImportFunctionSlotId::from_index)
-            .unwrap_or_else(|| {
-                let index = self.import_fn_slots.len();
-                self.import_fn_slots.push(ImportFunctionSlot {
-                    module: module_id,
-                    target: ImportFunctionTarget::TraitImplMethod {
-                        key,
-                        index: method_index,
-                    },
-                });
-                ImportFunctionSlotId::from_index(index)
-            })
-    }
-
-    /// Import a trait impl dictionary from another module, possibly updating the import slots.
-    /// The trait key is assumed to exist.
-    fn import_impl_dictionary(&mut self, module_id: ModuleId, key: TraitKey) -> ImportImplSlotId {
-        self.import_impl_slots
-            .iter()
-            .position(|slot| slot.module == module_id && slot.key == key)
-            .map(ImportImplSlotId::from_index)
-            .unwrap_or_else(|| {
-                let index = self.import_impl_slots.len();
-                self.import_impl_slots.push(ImportImplSlot {
-                    module: module_id,
-                    key,
-                });
-                ImportImplSlotId::from_index(index)
-            })
+    fn impl_id(&mut self, module_id: ModuleId, impl_id: LocalImplId) -> TraitImplId {
+        if module_id != self.current_type_items.module.id {
+            self.deps.insert(module_id);
+        }
+        TraitImplId::new(module_id, impl_id)
     }
 }
 

@@ -270,16 +270,10 @@ pub(crate) fn compare_values(actual: &Value, expected: &Value, path: &str) -> Re
             )
         }
         (Value::Function(actual), Value::Function(expected)) => {
-            if actual.function_id != expected.function_id {
+            if actual.function != expected.function {
                 return Err(format!(
-                    "{path}: expected function id {}, got {}",
-                    expected.function_id, actual.function_id
-                ));
-            }
-            if actual.module_id != expected.module_id {
-                return Err(format!(
-                    "{path}: expected module {}, got {}",
-                    expected.module_id, actual.module_id
+                    "{path}: expected function {:?}, got {:?}",
+                    expected.function, actual.function
                 ));
             }
             if actual.hidden_args.len() != expected.hidden_args.len() {

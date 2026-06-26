@@ -1226,6 +1226,51 @@ fn dependency_query_apis_report_direct_reverse_and_affected_modules() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn imported_trait_impl_records_value_dependency() {
+    let mut session = CompilerSession::new();
+    let base_id = session
+        .compile(
+            indoc! { r#"
+                pub trait ToInt<Self> {
+                    fn to_int(value: Self) -> int;
+                }
+
+                impl ToInt for int {
+                    fn to_int(value: int) -> int {
+                        value
+                    }
+                }
+            "# },
+            "base",
+            Path::single_str("base"),
+        )
+        .expect("base should compile")
+        .module_id;
+    let user_id = session
+        .compile(
+            indoc! { r#"
+                use base::ToInt;
+
+                pub fn result() -> int {
+                    ToInt::to_int(42)
+                }
+            "# },
+            "user",
+            Path::single_str("user"),
+        )
+        .expect("user should compile")
+        .module_id;
+
+    assert!(
+        module_latest_deps(&session, user_id)
+            .unwrap()
+            .contains(&base_id)
+    );
+    assert_eq!(session.get_module_reverse_deps(base_id), vec![user_id]);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn value_to_string_renders_int_correctly() {
     let mut session = CompilerSession::new();
     let module_id = session

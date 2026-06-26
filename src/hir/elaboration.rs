@@ -570,11 +570,11 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                 let mut extra_arguments = if !inst_data.dicts_req.is_empty() {
                     self.elaborate_extra_args_from_inst_data(&inst_data, function_span)?
                         .0
-                } else if let FunctionId::Local(id) = function
+                } else if function.module == self.ctx.trait_solver.current_type_items.module.id
                     && let Some(extra_arg_kinds) = self
                         .ctx
                         .module_inst_data
-                        .and_then(|inst_data| inst_data.get(&id))
+                        .and_then(|inst_data| inst_data.get(&function.function))
                         .map(|inst_data| {
                             extra_arg_kind_for_module_function(
                                 &inst_data.requirements,
@@ -638,11 +638,14 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                 };
                 if is_value_function || resolved {
                     let function = if is_value_function {
-                        FunctionId::Local(function_value_method(
-                            self.ctx.trait_solver,
-                            method_index,
-                            method_span,
-                        )?)
+                        FunctionId::new(
+                            self.ctx.trait_solver.current_type_items.module.id,
+                            function_value_method(
+                                self.ctx.trait_solver,
+                                method_index,
+                                method_span,
+                            )?,
+                        )
                     } else {
                         self.ctx.trait_solver.solve_impl_method(
                             trait_id,
@@ -742,11 +745,13 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                         self.elaborate_extra_args_from_inst_data(&get_fn.inst_data, node_span)?;
                     get_fn.inst_data.dicts_req.clear();
                     captures
-                } else if let FunctionId::Local(fn_local_id) = get_fn.function {
+                } else if get_fn.function.module
+                    == self.ctx.trait_solver.current_type_items.module.id
+                {
                     if let Some(extra_arg_kinds) = self
                         .ctx
                         .module_inst_data
-                        .and_then(|inst_data| inst_data.get(&fn_local_id))
+                        .and_then(|inst_data| inst_data.get(&get_fn.function.function))
                         .filter(|inst_data| !inst_data.is_empty())
                         .map(|inst_data| {
                             extra_arg_kind_for_module_function(
@@ -800,11 +805,14 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                 };
                 if is_value_function || resolved {
                     let function = if is_value_function {
-                        FunctionId::Local(function_value_method(
-                            self.ctx.trait_solver,
-                            method_index,
-                            method_span,
-                        )?)
+                        FunctionId::new(
+                            self.ctx.trait_solver.current_type_items.module.id,
+                            function_value_method(
+                                self.ctx.trait_solver,
+                                method_index,
+                                method_span,
+                            )?,
+                        )
                     } else {
                         self.ctx.trait_solver.solve_impl_method(
                             trait_id,
@@ -1222,14 +1230,12 @@ mod tests {
             &mut fn_collector,
             &qualified_name_env,
         );
-        let mut import_fn_slots = Vec::new();
-        let mut import_impl_slots = Vec::new();
+        let mut deps = FxHashSet::default();
         let mut solver = TraitSolver::new(
             CurrentTypeItems::new_from_module(&current_module),
             &mut impls,
             FxHashMap::default(),
-            &mut import_fn_slots,
-            &mut import_impl_slots,
+            &mut deps,
             PendingFunctionCollector::new(0),
             &modules,
         );
@@ -1272,14 +1278,12 @@ mod tests {
         let modules = Modules::new();
         let mut current_module = Module::new(ModuleId(0), Path::single_str("$elaboration_test"));
         current_module.traits = traits.clone();
-        let mut import_fn_slots = Vec::new();
-        let mut import_impl_slots = Vec::new();
+        let mut deps = FxHashSet::default();
         let mut solver = TraitSolver::new(
             CurrentTypeItems::new_from_module(&current_module),
             &mut impls,
             FxHashMap::default(),
-            &mut import_fn_slots,
-            &mut import_impl_slots,
+            &mut deps,
             PendingFunctionCollector::new(0),
             &modules,
         );

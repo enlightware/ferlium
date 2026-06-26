@@ -341,7 +341,7 @@ fn default_unconstrained_diverging_returns_to_never<'func, I>(
         let body_is_never = pending.code.arena[pending.code.entry_node_id].ty == Type::never();
         let unproductive_recursive = inputs
             .recursive_function_ids
-            .contains(&FunctionId::Local(*id))
+            .contains(&FunctionId::new(output.module_id(), *id))
             && node_references_any_function(
                 &pending.code.arena,
                 pending.code.entry_node_id,
@@ -791,7 +791,7 @@ where
         .filter_map(|(input, id)| {
             recursive_function_names
                 .contains(&input.function.name.0)
-                .then_some(FunctionId::Local(*id))
+                .then_some(FunctionId::new(output.module_id(), *id))
         })
         .collect::<FxHashSet<_>>();
 
@@ -805,8 +805,7 @@ where
         let function = input.function;
         let descr = output.get_function_by_id(*id).unwrap();
         let module_env = ModuleEnv::new(output, others);
-        let mut new_import_slots = vec![];
-        let mut new_type_deps = FxHashSet::default();
+        let mut new_deps = FxHashSet::default();
         let expected_ret_ty = descr.definition.ty_scheme.ty.ret;
         let expected_span = descr.spans.as_ref().unwrap().args_span;
         let mut lambda_functions = vec![];
@@ -817,8 +816,7 @@ where
         let mut ty_env = TypingEnv::new(
             &mut locals,
             cur_locals,
-            &mut new_import_slots,
-            &mut new_type_deps,
+            &mut new_deps,
             module_env,
             Some((expected_ret_ty, expected_span)),
             descr.definition.ty_scheme.ty.return_convention,
@@ -929,8 +927,7 @@ where
             pending = pending.with_subscript_member_name(subscript_name);
         }
         set_pending_function(output, &mut pending_functions, *id, pending);
-        output.import_fn_slots.extend(new_import_slots);
-        output.type_deps.extend(new_type_deps);
+        output.deps.extend(new_deps);
     }
     let module_env = ModuleEnv::new(output, others);
     ty_inf.log_debug_constraints(module_env);

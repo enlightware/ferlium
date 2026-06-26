@@ -594,8 +594,7 @@ impl TypeInference {
         let mut inner_env = TypingEnv::new(
             &mut fn_all_locals,
             fn_cur_locals,
-            env.new_import_slots,
-            env.new_type_deps,
+            env.new_deps,
             env.module_env,
             Some((ret_ty, env.ast_arena[body].span)),
             expected_fn_ty
@@ -651,7 +650,7 @@ impl TypeInference {
         let function_id = env.collect_lambda_module_function(function);
         let fn_node_id = env.ir_arena.alloc(N::new(
             K::GetFunction(b(hir::GetFunction {
-                function: FunctionId::Local(function_id),
+                function: FunctionId::new(env.current_module_id(), function_id),
                 function_path: ast::Path::single(ustr("<lambda>"), span),
                 function_span: span,
                 inst_data: hir::FnInstData::none(),
@@ -2371,7 +2370,7 @@ impl TypeInference {
             visible_arg_passing,
         );
         let call = NodeKind::StaticApply(b(hir::StaticApplication {
-            function: FunctionId::Local(member.function),
+            function: FunctionId::new(env.current_module_id(), member.function),
             function_path: None,
             function_span: data.name.1,
             extra_arguments: Vec::new(),

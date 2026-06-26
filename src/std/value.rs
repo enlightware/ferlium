@@ -465,8 +465,10 @@ impl<'s, 'm> ValueBodyCtx<'s, 'm> {
         };
 
         if is_function_value {
-            let function =
-                FunctionId::Local(function_value_method(self.solver, method_index, span)?);
+            let function = FunctionId::new(
+                self.solver.current_type_items.module.id,
+                function_value_method(self.solver, method_index, span)?,
+            );
             let effects = fn_ty.effects.clone();
             let prepared = prepare_generated_call_arguments_with_locals(
                 arena,
@@ -1193,7 +1195,10 @@ impl Deriver for InspectDeriver {
             &[],
             [(PendingFunctionBody::new(body_arena, root), locals)],
         );
-        Ok(Some(TraitImplId::Local(impl_id)))
+        Ok(Some(TraitImplId::new(
+            ctx.solver.current_type_items.module.id,
+            impl_id,
+        )))
     }
 }
 
@@ -1902,8 +1907,10 @@ fn derive_function_value_impl(
     )
     .with_associated_const_values(associated_const_values);
     let key = ConcreteTraitImplKey::new(trait_id, input_types.to_vec());
-    Ok(TraitImplId::Local(
-        solver.impls.add_concrete_struct(key, imp),
+    let impl_id = solver.impls.add_concrete_struct(key, imp);
+    Ok(TraitImplId::new(
+        solver.current_type_items.module.id,
+        impl_id,
     ))
 }
 
@@ -2039,7 +2046,10 @@ fn derive_structural_value_impl(
         &[],
         [eq, to_string, hash, clone, drop],
     );
-    Ok(Some(TraitImplId::Local(impl_id)))
+    Ok(Some(TraitImplId::new(
+        solver.current_type_items.module.id,
+        impl_id,
+    )))
 }
 
 pub(crate) fn derive_generic_value_code_entries(

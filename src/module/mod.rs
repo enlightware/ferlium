@@ -11,8 +11,7 @@
 //!
 //! This module implements the following architecture where:
 //! - Each compiled module version is an Rc<Module>
-//! - Cross-module references go through import slots + a relink step
-//! - Call sites use local integer IDs for local calls or ImportFunctionSlotId/ImportTraitSlotId for external calls
+//! - Cross-module references carry the owning module ID with the local item ID.
 
 pub mod debug_info;
 pub mod function;
@@ -305,10 +304,8 @@ impl ops::IndexMut<usize> for TypeDefSlots {
 #[derive(Debug, Clone)]
 pub struct Module {
     pub(crate) path: Path,
-    pub(crate) import_fn_slots: Vec<ImportFunctionSlot>,
-    pub(crate) import_impl_slots: Vec<ImportImplSlot>,
-    // Dependencies from type import
-    pub(crate) type_deps: FxHashSet<ModuleId>,
+    /// Modules referenced by IDs in compiled module data.
+    pub(crate) deps: FxHashSet<ModuleId>,
 
     pub(crate) uses: Uses,
 
@@ -337,9 +334,7 @@ impl Module {
     pub fn new(module_id: ModuleId, path: Path) -> Self {
         Self {
             path,
-            import_fn_slots: Vec::new(),
-            import_impl_slots: Vec::new(),
-            type_deps: FxHashSet::default(),
+            deps: FxHashSet::default(),
             uses: Uses::default(),
             def_table: DefTable::new(),
             unsafe_items: FxHashSet::default(),
@@ -357,9 +352,7 @@ impl Module {
     pub fn from_uses(module_id: ModuleId, path: Path, uses: Uses) -> Self {
         Self {
             path,
-            import_fn_slots: Vec::new(),
-            import_impl_slots: Vec::new(),
-            type_deps: FxHashSet::default(),
+            deps: FxHashSet::default(),
             uses,
             def_table: DefTable::new(),
             unsafe_items: FxHashSet::default(),
@@ -382,36 +375,9 @@ impl Module {
         &self.path
     }
 
-    // Imports
-
-    /// Get a function import slot by ID
-    pub fn get_import_fn_slot(&self, slot_id: ImportFunctionSlotId) -> Option<&ImportFunctionSlot> {
-        self.import_fn_slots.get(slot_id.as_index())
-    }
-
-    /// Iterate over all function import slots in this module.
-    pub fn iter_import_fn_slots(&self) -> impl Iterator<Item = &ImportFunctionSlot> {
-        self.import_fn_slots.iter()
-    }
-
-    /// Return the number of function import slots in this module.
-    pub fn import_fn_slot_count(&self) -> usize {
-        self.import_fn_slots.len()
-    }
-
-    /// Get a trait implementation import slot by ID
-    pub fn get_import_impl_slot(&self, slot_id: ImportImplSlotId) -> Option<&ImportImplSlot> {
-        self.import_impl_slots.get(slot_id.as_index())
-    }
-
     /// Modules this module depends on
     pub fn deps(&self) -> impl Iterator<Item = ModuleId> {
-        self.type_deps
-            .iter()
-            .copied()
-            .chain(self.import_fn_slots.iter().map(|slot| slot.module))
-            .chain(self.import_impl_slots.iter().map(|slot| slot.module))
-            .unique()
+        self.deps.iter().copied()
     }
 
     // Uses
@@ -1389,7 +1355,6 @@ impl Module {
     /// Check if this module is "empty" (has no meaningful content)
     pub fn is_empty(&self) -> bool {
         self.functions.is_empty()
-            && self.import_fn_slots.is_empty()
             && self.type_aliases.is_empty()
             && self.type_defs.is_empty()
             && self.traits.is_empty()

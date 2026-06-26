@@ -30,9 +30,8 @@ use crate::{
         value_dispatch::elaborate_local_ownership_and_value_dispatches,
     },
     internal_compilation_error,
-    module::{FunctionDebugInfo, ModuleEnv, ModuleId, TraitKey, format_impl_header_by_key, id::Id},
+    module::{FunctionDebugInfo, ModuleEnv, ModuleId, id::Id},
     types::mutability::MutType,
-    types::r#trait::TraitMethodIndex,
     types::r#type::{FnArgType, Type},
 };
 
@@ -45,92 +44,39 @@ define_id_type!(
 );
 
 define_id_type!(
-    /// Import slot ID for cross-module function references
-    ImportFunctionSlotId
-);
-
-define_id_type!(
     /// Slot offset within a function call's local runtime frame.
     LocalFrameSlot
 );
 
 /// An identifier for a function
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum FunctionId {
-    /// Local function in a module
-    Local(LocalFunctionId),
-    /// Imported function through an import slot
-    Import(ImportFunctionSlotId),
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, new)]
+pub struct FunctionId {
+    /// Module owning the function.
+    pub module: ModuleId,
+    /// Function index within the owning module.
+    pub function: LocalFunctionId,
 }
 
 impl FormatWith<ModuleEnv<'_>> for FunctionId {
     fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv<'_>) -> std::fmt::Result {
-        match *self {
-            FunctionId::Local(id) => {
-                let name = env.current.get_function_name_by_id(id).unwrap();
-                write!(f, "local function {name} (#{id})")
-            }
-            FunctionId::Import(id) => {
-                let slot = &env.current.get_import_fn_slot(id).unwrap();
-                let module_id = slot.module;
-                let module_name = env
-                    .modules
-                    .get_name(module_id)
-                    .expect("imported module not found");
-                write!(f, "imported function {module_name}::")?;
-                let function_name = match &slot.target {
-                    ImportFunctionTarget::TraitImplMethod { key, index } => {
-                        let name = env.trait_def(key.trait_id()).method(*index).0;
-                        let imp = env
-                            .modules
-                            .get(module_id)
-                            .expect("imported module not found")
-                            .module
-                            .as_ref()
-                            .expect("compiled module not found")
-                            .get_impl_data_by_trait_key(key)
-                            .expect("imported trait impl not found");
-                        write!(f, "<")?;
-                        format_impl_header_by_key(f, key, imp, env)?;
-                        write!(f, ">::")?;
-                        name
-                    }
-                    ImportFunctionTarget::NamedFunction(name) => *name,
-                    ImportFunctionTarget::SubscriptMember { name, mut_member } => {
-                        let member = if *mut_member { "mut" } else { "ref" };
-                        write!(f, "{name}::{member} (slot #{id})")?;
-                        return Ok(());
-                    }
-                };
-                write!(f, "{function_name} (slot #{id})")
-            }
-        }
+        let module = if self.module == env.current.module_id() {
+            env.current
+        } else {
+            env.modules
+                .get(self.module)
+                .and_then(|entry| entry.module.as_ref())
+                .expect("function module not found")
+        };
+        let name = module
+            .get_function_name_by_id(self.function)
+            .unwrap_or_else(|| Ustr::from("<anonymous>"));
+        let module_name = env
+            .modules
+            .get_name(self.module)
+            .map(ToString::to_string)
+            .unwrap_or_else(|| format!("#{}", self.module));
+        write!(f, "function {module_name}::{name} (#{})", self.function)
     }
-}
-
-/// Target of a function import slot
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ImportFunctionTarget {
-    /// Name of the function in the target module
-    NamedFunction(Ustr),
-    /// Member function of a named subscript in the target module.
-    SubscriptMember { name: Ustr, mut_member: bool },
-    /// Trait method to import
-    TraitImplMethod {
-        /// The concrete trait implementation key
-        key: TraitKey,
-        /// Index of the method in the trait
-        index: TraitMethodIndex,
-    },
-}
-
-/// Import slot that can be resolved to a function from another module
-#[derive(Debug, Clone)]
-pub struct ImportFunctionSlot {
-    /// ID of the module to import from
-    pub module: ModuleId,
-    /// The target function in that module
-    pub target: ImportFunctionTarget,
 }
 
 /// A module function argument span, with the span of the optional type ascription.

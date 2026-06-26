@@ -964,7 +964,7 @@ impl PModule {
             .collect::<Result<_, _>>()?;
 
         // Build result
-        output.type_deps.extend(modules_used);
+        output.deps.extend(modules_used);
         let module = DModule {
             traits: vec![],
             functions,

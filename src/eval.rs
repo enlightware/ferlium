@@ -23,9 +23,9 @@ use crate::{
     hir::value::{FunctionHiddenArgValue, FunctionValue, NativeValue, NativeValueType, Value},
     module::{
         ELocalDecl as LocalDecl, ExtraParameterId, FunctionId, LocalDebugVisibility, LocalDeclId,
-        LocalFunctionId, ModuleFunction, ModuleId, ProjectionIndex, QualifiedNameEnv,
-        ResolvedLocalClone, ResolvedLocalDrop, ResolvedTakeLocalValueMode, ResolvedValueLayout,
-        TraitDictionary, TraitDictionaryEntry, TraitDictionaryId, TraitImplId,
+        ModuleFunction, ModuleId, ProjectionIndex, ResolvedLocalClone, ResolvedLocalDrop,
+        ResolvedTakeLocalValueMode, ResolvedValueLayout, TraitDictionary, TraitDictionaryEntry,
+        TraitDictionaryId, TraitImplId,
     },
     std::buffer,
     types::{
@@ -37,8 +37,6 @@ use crate::{
     Modules,
     hir::{self, CallArgument, ENodeArena, ENodeId, Elaborated, LoopId, NodeKind},
 };
-
-use crate::module::ImportFunctionTarget;
 
 pub const DEFAULT_INTERACTIVE_FUEL_LIMIT: usize = 100_000;
 
@@ -333,73 +331,10 @@ impl<'a> EvalCtx<'a> {
         }
     }
 
-    /// Get a function's local id and module for a FunctionId at runtime.
-    pub fn get_function_local_id(&self, function: FunctionId) -> (LocalFunctionId, ModuleId) {
-        use FunctionId::*;
-        match function {
-            Local(id) => (id, self.module_id),
-            Import(id) => {
-                let module = self.compiler_session.expect_fresh_module(self.module_id);
-                let slot = module
-                    .get_import_fn_slot(id)
-                    .unwrap_or_else(|| panic!("imported function slot not found: {}", id));
-                let module_id = slot.module;
-                let module = self.compiler_session.expect_fresh_module(module_id);
-                let target_module_id = module_id;
-                use ImportFunctionTarget::*;
-                let local_id = match &slot.target {
-                    TraitImplMethod { key, index } => {
-                        let imp = module.get_impl_data_by_trait_key(key).unwrap_or_else(|| {
-                            panic!(
-                                "imported trait impl not found: {:?} in module #{}",
-                                key, module_id
-                            )
-                        });
-                        imp.methods[index.as_index()]
-                    }
-                    &NamedFunction(fn_name) => {
-                        module.get_local_function_id(fn_name).unwrap_or_else(|| {
-                            panic!(
-                                "imported function not found: {} in module #{}",
-                                fn_name, module_id
-                            )
-                        })
-                    }
-                    &SubscriptMember { name, mut_member } => {
-                        let subscript = module.get_subscript(name).unwrap_or_else(|| {
-                            panic!(
-                                "imported subscript not found: {} in module #{}",
-                                name, module_id
-                            )
-                        });
-                        let member = if mut_member {
-                            subscript.mut_member.as_ref()
-                        } else {
-                            subscript.ref_member.as_ref()
-                        }
-                        .unwrap_or_else(|| {
-                            let member = if mut_member { "mut" } else { "ref" };
-                            panic!(
-                                "imported subscript member not found: {}::{} in module #{}",
-                                name, member, module_id
-                            )
-                        });
-                        member.function
-                    }
-                };
-                (local_id, target_module_id)
-            }
-        }
-    }
-
     /// Get a function's code and module for a FunctionId at runtime.
-    pub fn get_module_function(
-        &self,
-        local_id: LocalFunctionId,
-        module_id: ModuleId,
-    ) -> &ModuleFunction {
-        let module = self.compiler_session.expect_fresh_module(module_id);
-        module.get_function_by_id(local_id).unwrap()
+    pub fn get_module_function(&self, function: FunctionId) -> &ModuleFunction {
+        let module = self.compiler_session.expect_fresh_module(function.module);
+        module.get_function_by_id(function.function).unwrap()
     }
 
     fn function_value_visible_argument_types(
@@ -409,7 +344,7 @@ impl<'a> EvalCtx<'a> {
         // Dynamic calls must use the actual callee signature. A dictionary
         // method value can have surface type `(A, A) -> R` while its runtime
         // `FunctionValue` points at a concrete method such as `Ord<int>::cmp`.
-        self.get_module_function(function_value.function_id, function_value.module_id)
+        self.get_module_function(function_value.function)
             .definition
             .ty_scheme
             .ty
@@ -419,25 +354,7 @@ impl<'a> EvalCtx<'a> {
 
     /// Resolve a module-relative impl reference to a canonical runtime dictionary ID.
     pub fn get_dictionary_id(&self, dictionary: TraitImplId) -> TraitDictionaryId {
-        let module = self.compiler_session.expect_fresh_module(self.module_id);
-        use TraitImplId::*;
-        match dictionary {
-            Local(id) => TraitDictionaryId {
-                module_id: self.module_id,
-                impl_id: id,
-            },
-            Import(id) => {
-                let slot = module.get_import_impl_slot(id).unwrap();
-                let imported_module = self.compiler_session.expect_fresh_module(slot.module);
-                let impl_id = imported_module
-                    .get_impl_id_by_trait_key(&slot.key)
-                    .unwrap_or_else(|| panic!("imported trait impl not found: {:?}", slot.key));
-                TraitDictionaryId {
-                    module_id: slot.module,
-                    impl_id,
-                }
-            }
-        }
+        TraitDictionaryId::new(dictionary.module, dictionary.impl_id)
     }
 
     pub fn dictionary_value(&self, dictionary: TraitDictionaryId) -> &TraitDictionary {
@@ -457,8 +374,7 @@ impl<'a> EvalCtx<'a> {
         arguments: Vec<ValOrMut>,
         location: Location,
     ) -> EvalControlFlowResult {
-        let local_id = function_value.function_id;
-        let module_id = function_value.module_id;
+        let function_id = function_value.function;
 
         let closure_env_dictionary = function_value
             .closure_env_value_dictionary
@@ -497,20 +413,8 @@ impl<'a> EvalCtx<'a> {
         };
 
         let result = self
-            .call_function(
-                local_id,
-                module_id,
-                function_value.hidden_args.clone(),
-                arguments,
-            )
-            .map_err(|err| {
-                err.with_frame(
-                    module_id,
-                    FunctionId::Local(local_id),
-                    self.environment.len(),
-                    location,
-                )
-            });
+            .call_function(function_id, function_value.hidden_args.clone(), arguments)
+            .map_err(|err| err.with_frame(function_id, location));
 
         if let Some(target) = closure_env_temp {
             let drop_result = call_value_drop_for_temp(
@@ -557,64 +461,40 @@ impl<'a> EvalCtx<'a> {
         arguments: Vec<ValOrMut>,
         location: Location,
     ) -> EvalControlFlowResult {
-        let (local_id, module_id) = self.get_function_local_id(function_id);
-
-        self.call_resolved_function_with_extra(
-            local_id,
-            module_id,
-            extra_arguments,
-            arguments,
-            location,
-        )
+        self.call_resolved_function_with_extra(function_id, extra_arguments, arguments, location)
     }
 
     fn call_resolved_function_with_extra(
         &mut self,
-        local_id: LocalFunctionId,
-        module_id: ModuleId,
+        function_id: FunctionId,
         extra_arguments: Vec<FunctionHiddenArgValue>,
         arguments: Vec<ValOrMut>,
         location: Location,
     ) -> EvalControlFlowResult {
-        self.call_function(local_id, module_id, extra_arguments, arguments)
-            .map_err(|err| {
-                err.with_frame(
-                    module_id,
-                    FunctionId::Local(local_id),
-                    self.environment.len(),
-                    location,
-                )
-            })
+        self.call_function(function_id, extra_arguments, arguments)
+            .map_err(|err| err.with_frame(function_id, location))
     }
 
     fn call_resolved_accessor_until_yield_with_extra(
         &mut self,
-        local_id: LocalFunctionId,
-        module_id: ModuleId,
+        function_id: FunctionId,
         extra_arguments: Vec<FunctionHiddenArgValue>,
         arguments: Vec<ValOrMut>,
         location: Location,
     ) -> Result<(SuspendedAccessor, Place), RuntimeError> {
-        self.call_accessor_until_yield(local_id, module_id, extra_arguments, arguments)
-            .map_err(|err| {
-                err.with_frame(
-                    module_id,
-                    FunctionId::Local(local_id),
-                    self.environment.len(),
-                    location,
-                )
-            })
+        self.call_accessor_until_yield(function_id, extra_arguments, arguments)
+            .map_err(|err| err.with_frame(function_id, location))
     }
 
     fn call_accessor_until_yield(
         &mut self,
-        local_id: LocalFunctionId,
-        mut module_id: ModuleId,
+        function_id: FunctionId,
         extra_arguments: Vec<FunctionHiddenArgValue>,
         arguments: Vec<ValOrMut>,
     ) -> Result<(SuspendedAccessor, Place), RuntimeError> {
         self.check_stack_limit(self.environment.len(), None)?;
-        let target_module_id = module_id;
+        let local_id = function_id.function;
+        let mut module_id = function_id.module;
         mem::swap(&mut self.module_id, &mut module_id);
 
         let module = self.compiler_session.expect_fresh_module(self.module_id);
@@ -650,8 +530,7 @@ impl<'a> EvalCtx<'a> {
                 mem::swap(&mut self.module_id, &mut module_id);
                 Ok((
                     SuspendedAccessor {
-                        local_id,
-                        module_id: target_module_id,
+                        function: function_id,
                         frame_base,
                         old_frame_base,
                         previous_returns_place,
@@ -707,14 +586,7 @@ impl<'a> EvalCtx<'a> {
         location: Location,
     ) -> EvalControlFlowResult {
         self.resume_suspended_accessor_epilogue_inner(suspension)
-            .map_err(|err| {
-                err.with_frame(
-                    suspension.module_id,
-                    FunctionId::Local(suspension.local_id),
-                    suspension.frame_base,
-                    location,
-                )
-            })
+            .map_err(|err| err.with_frame(suspension.function, location))
     }
 
     fn resume_suspended_accessor_epilogue_inner(
@@ -727,14 +599,16 @@ impl<'a> EvalCtx<'a> {
         let caller_extra_frame_base = self.extra_frame_base;
 
         self.frame_base = suspension.frame_base;
-        self.module_id = suspension.module_id;
+        self.module_id = suspension.function.module;
         self.returns_place = false;
         self.extra_frame_base = suspension.extra_start;
 
         let module = self
             .compiler_session
-            .expect_fresh_module(suspension.module_id);
-        let function_data = module.get_function_by_id(suspension.local_id).unwrap();
+            .expect_fresh_module(suspension.function.module);
+        let function_data = module
+            .get_function_by_id(suspension.function.function)
+            .unwrap();
         let script = function_data
             .code
             .as_script()
@@ -772,12 +646,13 @@ impl<'a> EvalCtx<'a> {
     /// Call a function along with its correct module context.
     fn call_function(
         &mut self,
-        local_id: LocalFunctionId,
-        mut module_id: ModuleId,
+        function_id: FunctionId,
         extra_arguments: Vec<FunctionHiddenArgValue>,
         arguments: Vec<ValOrMut>,
     ) -> EvalControlFlowResult {
         self.check_stack_limit(self.environment.len(), None)?;
+        let local_id = function_id.function;
+        let mut module_id = function_id.module;
         // Use the new module for the duration of the function call.
         mem::swap(&mut self.module_id, &mut module_id);
 
@@ -850,8 +725,7 @@ impl PlaceResult {
 
 #[derive(Debug, Clone, Copy)]
 struct SuspendedAccessor {
-    local_id: LocalFunctionId,
-    module_id: ModuleId,
+    function: FunctionId,
     frame_base: usize,
     old_frame_base: usize,
     previous_returns_place: bool,
@@ -1064,10 +938,7 @@ impl ControlFlow<Value> {
 
 #[derive(Debug, Clone)]
 pub struct BacktraceFrame {
-    module_id: ModuleId,
     function_id: FunctionId,
-    #[allow(dead_code)]
-    frame_base: usize,
     call_site: Location,
 }
 impl BacktraceFrame {
@@ -1078,51 +949,24 @@ impl BacktraceFrame {
         suspended_at: Option<Location>,
     ) -> std::fmt::Result {
         let (source_table, modules) = data;
-        let mut module_path = modules
-            .get_name(self.module_id)
-            .map(|name| format!("{name}"))
-            .unwrap_or("<unknown>".to_string());
-        let module = &modules
-            .get(self.module_id)
+        let module = modules
+            .get(self.function_id.module)
             .unwrap()
             .module
             .as_ref()
             .unwrap();
-        match self.function_id {
-            FunctionId::Local(id) => {
-                let local_name = module.get_function_name_by_id(id).unwrap();
-                write!(f, "{module_path}::{local_name}")?
-            }
-            FunctionId::Import(id) => {
-                let slot = module.get_import_fn_slot(id).unwrap();
-                module_path = format!("{}", slot.module);
-                use ImportFunctionTarget::*;
-                match &slot.target {
-                    TraitImplMethod { key, index } => {
-                        let trait_def = module.trait_def(key.trait_id());
-                        let qualified_name_env = QualifiedNameEnv::new_from_module(module, modules);
-                        write!(
-                            f,
-                            "{}",
-                            qualified_name_env.qualified_method_name(
-                                key.trait_id(),
-                                trait_def,
-                                *index,
-                                key.input_tys(),
-                            )
-                        )?
-                    }
-                    NamedFunction(fn_name) => write!(f, "{module_path}::{fn_name}")?,
-                    SubscriptMember { name, mut_member } => {
-                        let member = if *mut_member { "mut" } else { "ref" };
-                        write!(f, "{module_path}::{name}::{member}")?
-                    }
-                }
-            }
-        };
+        let function_module_path = modules
+            .get_name(self.function_id.module)
+            .map(|name| format!("{name}"))
+            .unwrap_or_else(|| format!("#{}", self.function_id.module));
+        let function_name = module
+            .get_function_name_by_id(self.function_id.function)
+            .map(|name| name.to_string())
+            .unwrap_or_else(|| format!("#{}", self.function_id.function));
+        write!(f, "{function_module_path}::{function_name}")?;
         write!(f, " at {}", self.call_site.format_with(source_table))?;
-        if let (FunctionId::Local(id), Some(suspended_at)) = (self.function_id, suspended_at)
-            && let Some(function) = module.get_function_by_id(id)
+        if let Some(suspended_at) = suspended_at
+            && let Some(function) = module.get_function_by_id(self.function_id.function)
         {
             let locals = function
                 .debug_info
@@ -1175,18 +1019,10 @@ impl RuntimeError {
         }
     }
 
-    pub fn with_frame(
-        self,
-        module_id: ModuleId,
-        function_id: FunctionId,
-        frame_base: usize,
-        location: Location,
-    ) -> Self {
+    pub fn with_frame(self, function_id: FunctionId, location: Location) -> Self {
         let mut backtrace = self.backtrace;
         backtrace.push(BacktraceFrame {
-            module_id,
             function_id,
-            frame_base,
             call_site: location,
         });
         Self {
@@ -1324,10 +1160,7 @@ pub fn eval_node_with_ctx(
         | GetTraitDictionary(_) => {
             panic!("unelaborated trait operation should not be executed");
         }
-        GetFunction(get_fn) => {
-            let (function, module_id) = ctx.get_function_local_id(get_fn.function);
-            cont(Value::function(function, module_id))
-        }
+        GetFunction(get_fn) => cont(Value::function(get_fn.function)),
         GetDictionary(_) | LoadDictionary(_) => {
             panic!("dictionary metadata should not be evaluated as a Value")
         }
@@ -1401,8 +1234,7 @@ fn eval_build_closure(
         eval_node_with_ctx(arena, build_closure.function, ctx, locals)?.into_value();
     let function_value = function_value.into_function().unwrap();
     let function_value = FunctionValue::closure(
-        function_value.function_id,
-        function_value.module_id,
+        function_value.function,
         hidden_args,
         captures,
         captures_value_dictionary,
@@ -1542,7 +1374,7 @@ fn call_dictionary_method(
     else {
         panic!("attempted to call a non-method dictionary entry");
     };
-    let function_value = FunctionValue::bare(function, dictionary.module_id);
+    let function_value = FunctionValue::bare(FunctionId::new(dictionary.module_id, function));
     ctx.call_function_value(&function_value, arguments, span)
 }
 
@@ -1557,7 +1389,10 @@ fn eval_get_dictionary_method(
     else {
         panic!("attempted to get a non-method dictionary entry as a function");
     };
-    cont(Value::function(function, dictionary.module_id))
+    cont(Value::function(FunctionId::new(
+        dictionary.module_id,
+        function,
+    )))
 }
 
 fn eval_get_dictionary_associated_const(
@@ -1898,14 +1733,7 @@ fn eval_clone_closure_env(
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
     let owned_source;
-    let (
-        function_id,
-        module_id,
-        hidden_args,
-        closure_env_ptr,
-        closure_env_len,
-        closure_env_value_dictionary,
-    ) = {
+    let (function, hidden_args, closure_env_ptr, closure_env_len, closure_env_value_dictionary) = {
         let source = if let Some(place) =
             eval_or_return!(try_eval_node_as_place(arena, node.source, ctx, locals))
         {
@@ -1920,8 +1748,7 @@ fn eval_clone_closure_env(
         };
 
         (
-            source.function_id,
-            source.module_id,
+            source.function,
             source.hidden_args.clone(),
             &source.closure_env as *const Value,
             source.closure_env_len,
@@ -1934,8 +1761,7 @@ fn eval_clone_closure_env(
         Value::unit()
     };
     let target_function = FunctionValue {
-        function_id,
-        module_id,
+        function,
         hidden_args,
         closure_env,
         closure_env_len,
@@ -2090,7 +1916,6 @@ fn eval_static_apply_with(
     locals: &[LocalDecl],
     eval_args_fn: EvalArgsFn,
 ) -> EvalControlFlowResult {
-    let (local_id, module_id) = ctx.get_function_local_id(app.function);
     let temp_start = ctx.environment.len();
     let extra_arguments = eval_or_return!(eval_function_hidden_arg_nodes(
         arena,
@@ -2106,8 +1931,7 @@ fn eval_static_apply_with(
         locals
     ));
     let result = ctx.call_resolved_function_with_extra(
-        local_id,
-        module_id,
+        app.function,
         extra_arguments,
         arguments.take_arguments(),
         span,
@@ -2487,7 +2311,6 @@ fn eval_accessor_until_yield(
     let NodeKind::StaticApply(app) = &arena[accessor].kind else {
         panic!("WithYielded accessor must be a static accessor call");
     };
-    let (local_id, module_id) = ctx.get_function_local_id(app.function);
     let temp_start = ctx.environment.len();
     let extra_arguments =
         match eval_function_hidden_arg_nodes(arena, &app.extra_arguments, ctx, locals)? {
@@ -2505,8 +2328,7 @@ fn eval_accessor_until_yield(
         }
     };
     match ctx.call_resolved_accessor_until_yield_with_extra(
-        local_id,
-        module_id,
+        app.function,
         extra_arguments,
         arguments.take_arguments(),
         span,
@@ -3541,6 +3363,7 @@ mod tests {
         let span = Location::new_synthesized();
         let int_ty = int_type();
         let mut arena = ENodeArena::default();
+        let test_module_id = ModuleId::from_index(2);
 
         let accessor_log = LocalDeclId::from_index(0);
         let accessor_scratch = LocalDeclId::from_index(1);
@@ -3601,7 +3424,7 @@ mod tests {
         let accessor_call = node(
             &mut arena,
             hir_syn::static_apply(
-                crate::module::FunctionId::Local(accessor_id),
+                crate::module::FunctionId::new(test_module_id, accessor_id),
                 accessor_fn_ty.clone(),
                 vec![CallArgument {
                     value: load_caller_log_for_arg,
@@ -3680,7 +3503,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         let path = Path::single_str("$with_yielded_test");
-        let mut module = Module::new(ModuleId::from_index(2), path.clone());
+        let mut module = Module::new(test_module_id, path.clone());
         module.hir_arena = arena;
         let registered_accessor = module.add_function(ustr("accessor"), accessor_function);
         assert_eq!(registered_accessor, accessor_id);
@@ -3712,6 +3535,7 @@ mod tests {
         let span = Location::new_synthesized();
         let int_ty = int_type();
         let mut arena = ENodeArena::default();
+        let test_module_id = ModuleId::from_index(2);
 
         let accessor_scratch = LocalDeclId::from_index(0);
         let caller_binding = LocalDeclId::from_index(0);
@@ -3758,7 +3582,7 @@ mod tests {
         let accessor_call = node(
             &mut arena,
             hir_syn::static_apply(
-                crate::module::FunctionId::Local(accessor_id),
+                crate::module::FunctionId::new(test_module_id, accessor_id),
                 accessor_fn_ty.clone(),
                 Vec::new(),
                 span,
@@ -3801,7 +3625,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         let path = Path::single_str("$with_yielded_return_test");
-        let mut module = Module::new(ModuleId::from_index(2), path.clone());
+        let mut module = Module::new(test_module_id, path.clone());
         module.hir_arena = arena;
         let registered_accessor = module.add_function(ustr("accessor"), accessor_function);
         assert_eq!(registered_accessor, accessor_id);
@@ -3831,6 +3655,7 @@ mod tests {
         let span = Location::new_synthesized();
         let int_ty = int_type();
         let mut arena = ENodeArena::default();
+        let test_module_id = ModuleId::from_index(2);
 
         let caller_log = LocalDeclId::from_index(0);
         let outer_binding = LocalDeclId::from_index(1);
@@ -3852,7 +3677,7 @@ mod tests {
         let outer_call = node(
             &mut arena,
             hir_syn::static_apply(
-                crate::module::FunctionId::Local(outer_id),
+                crate::module::FunctionId::new(test_module_id, outer_id),
                 outer_fn_ty,
                 vec![CallArgument {
                     value: outer_log_arg,
@@ -3867,7 +3692,7 @@ mod tests {
         let inner_call = node(
             &mut arena,
             hir_syn::static_apply(
-                crate::module::FunctionId::Local(inner_id),
+                crate::module::FunctionId::new(test_module_id, inner_id),
                 inner_fn_ty,
                 vec![CallArgument {
                     value: inner_log_arg,
@@ -3911,7 +3736,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         let path = Path::single_str("$with_yielded_lifo_test");
-        let mut module = Module::new(ModuleId::from_index(2), path.clone());
+        let mut module = Module::new(test_module_id, path.clone());
         module.hir_arena = arena;
         assert_eq!(module.add_function(ustr("outer"), outer_function), outer_id);
         assert_eq!(module.add_function(ustr("inner"), inner_function), inner_id);
