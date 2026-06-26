@@ -11,32 +11,32 @@ This document is about source-level ownership semantics and the HIR operations t
 # Values, Places, and Locals
 
 A HIR expression either produces an owned value, denotes a caller-rooted place in existing storage, or drives a scoped yielded place.
-Caller-rooted place-like nodes include `LoadLocal`, projections (`Project`, `ProjectAt`), and call nodes whose selected function has `FnReturnConvention::AddressorPlace`.
+Caller-rooted place-like nodes include `LoadLocal`, projections (`Project`, `ProjectAt`), and call nodes whose selected implementation has `CallResultConvention::AddressorPlace`.
 SSA must not treat every `LoadLocal` as an owned read: ownership transfer, clone, and copy are explicit HIR operations.
 
 When a place-producing projection or call needs a non-place base, HIR generation stores that base in an explicit owned temporary local first.
 The consumer then uses a normal place rooted at that temporary, and the surrounding `Block.cleanup` releases the temporary after the consumer.
 
-Addressor-place functions are place-like nodes.
-Native definitions may declare `FnReturnConvention::AddressorPlace` directly, and source subscript members without `yield` infer that convention from their body shape.
-A subscript bundle does not have a `FnType`; each selected `ref` or `mut` member is emitted as a member function whose `FnType` carries the return convention.
+Addressor-place call nodes are place-like nodes.
+Native addressors are registered as subscript members when they model projection, and source subscript members without `yield` infer `CallResultConvention::AddressorPlace` from their body shape.
+A subscript bundle does not have a `FnType`; each selected `ref` or `mut` member is emitted as a member function whose implementation type carries the result convention.
 After HIR construction the selected member function type is the source of truth: consumers handle any call node with `AddressorPlace` like a place when a place is required, or materialize it with `CloneValue` when an owned value is required.
 The returned place is an expression-local capability, not a storable reference value.
 HIR must not store a raw place in a local, aggregate, closure capture, or normal value return.
 
 Subscript members split by body shape.
-A member that contains `yield` uses `FnReturnConvention::YieldedOnce`.
+A member that contains `yield` uses `CallResultConvention::YieldedOnce`.
 The yielded place is valid only while the accessor frame is suspended, so HIR must consume the call through `WithYielded { accessor, binding, body }`.
 `WithYielded` runs the accessor to its single `Yield(place)`, binds that place to an internal non-owning `binding`, evaluates `body`, then resumes the accessor epilogue.
 The binding is not source-visible storage and must not be captured, returned, or stored as a value.
 If `body` exits by return, break, continue, or runtime error, the accessor epilogue and normal frame cleanup still run before the transfer continues.
 If the accessor fails before yielding, no yielded binding exists and no post-yield epilogue runs.
 
-A member without `yield` uses `FnReturnConvention::AddressorPlace` and keeps caller-rooted projection behavior.
+A member without `yield` uses `CallResultConvention::AddressorPlace` and keeps caller-rooted projection behavior.
 When a named subscript use must evaluate an addressor projection exactly once, HIR uses `WithPlace { place, binding, body }`.
 `WithPlace` evaluates `place` as a caller-rooted place, binds it to an internal non-owning `binding`, and evaluates `body`.
 It does not suspend an accessor and has no epilogue.
-Std `array_index` is now a source subscript with `AddressorPlace` provenance; source array-index syntax resolves that subscript and lowers through the addressor path.
+Std `array_index` is a source subscript with `AddressorPlace` provenance, backed by the private native `buffer_slot` subscript; source array-index syntax resolves `array_index` and lowers through the addressor path.
 
 `LocalDecl` is the ownership metadata for a local:
 

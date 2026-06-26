@@ -49,7 +49,7 @@ subscript array_index<A>(array: [A], index: int) -> A {
 	ref mut {
 		let len = array_len(array);
 		let resolved = array_resolve_index(index, len);
-		return effects_unsafe { buffer_slot(array.data, array_wrap_index(array.capacity, array.start + resolved)) };
+		return effects_unsafe { array.data->[buffer_slot](array_wrap_index(array.capacity, array.start + resolved)) };
 	}
 }
 

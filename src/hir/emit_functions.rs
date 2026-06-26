@@ -60,7 +60,7 @@ use crate::{
             PubTypeConstraint, TypeScheme, extra_parameters_from_constraints, normalize_types,
         },
         type_visitor::{TyVarsCollector, collect_ty_vars},
-        typing_env::TypingEnv,
+        typing_env::{SubscriptMemberTypingContext, TypingEnv},
     },
 };
 
@@ -180,6 +180,16 @@ impl EmitFunctionKind {
                 provenance: YieldProvenance::AddressorPlace,
                 ..
             } => false,
+        }
+    }
+
+    fn requires_mutable_place(self) -> bool {
+        match self {
+            EmitFunctionKind::Normal => false,
+            EmitFunctionKind::SubscriptMember {
+                requires_mutable_yield,
+                ..
+            } => requires_mutable_yield,
         }
     }
 }
@@ -831,7 +841,10 @@ where
         );
         ty_env.function_name = Some(function.name.0);
         if let EmitFunctionKind::SubscriptMember { subscript_name, .. } = kind {
-            ty_env.subscript_member_name = Some(subscript_name);
+            ty_env.subscript_member = Some(SubscriptMemberTypingContext {
+                name: subscript_name,
+                requires_mutable_place: kind.requires_mutable_place(),
+            });
         }
         ty_env.compilation_capabilities = capabilities;
         if descr

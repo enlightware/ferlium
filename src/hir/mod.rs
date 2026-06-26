@@ -167,6 +167,7 @@ pub(crate) fn node_is_place_reference(arena: &NodeArena, node_id: NodeId) -> boo
         StaticApply(app) => app.ty.returns_place(),
         TraitMethodApply(app) => app.ty.returns_place(),
         CallDictionaryMethod(call) => call.ty.returns_place(),
+        WithPlace(node) => node_is_place_reference(arena, node.body),
         Block(block) => block
             .tail_node()
             .is_some_and(|node| node_is_place_reference(arena, node)),
@@ -227,6 +228,7 @@ pub(crate) fn place_resolution_may_create_temp(arena: &NodeArena, node_id: NodeI
                 .iter()
                 .any(|arg| place_resolution_may_create_temp(arena, arg.value))
         }
+        WithPlace(_) => true,
         Block(block) => {
             let tail = block.tail_node();
             !block.cleanup.is_empty()

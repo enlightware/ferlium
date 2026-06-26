@@ -524,7 +524,7 @@ pub fn add_to_module(to: &mut Module) {
         [],
         [Box::new(UnaryNativeFnRN::new(buffer_to_string)) as Function],
     );
-    to.add_private_unsafe_function(ustr("buffer_slot"), buffer_slot_descr());
+    to.add_private_unsafe_addressor_subscript(ustr("buffer_slot"), buffer_slot_descr());
     to.add_private_unsafe_function(ustr("buffer_with_capacity"), buffer_with_capacity_descr());
     to.add_private_unsafe_function(
         ustr("buffer_clone_value_into"),

@@ -327,6 +327,7 @@ fn returned_place_origin(arena: &NodeArena, node_id: NodeId) -> Option<PlaceOrig
         CallDictionaryMethod(call) if call.ty.returns_place() => {
             addressor_base_origin(arena, &call.arguments)
         }
+        WithPlace(node) => returned_place_origin(arena, node.place),
         Block(block) => block
             .body
             .last()

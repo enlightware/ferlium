@@ -472,6 +472,7 @@ fn array_index_return_preserves_place_tail() {
             NodeKind::LoadLocal(_) | NodeKind::Project(_) | NodeKind::ProjectAt(_) => true,
             NodeKind::Apply(app) => app.ty.returns_place(),
             NodeKind::StaticApply(app) => app.ty.returns_place(),
+            NodeKind::WithPlace(node) => is_place_reference(arena, node.body),
             NodeKind::Block(block) => block
                 .body
                 .last()
@@ -544,6 +545,50 @@ fn array_index_is_registered_as_source_addressor_subscript() {
     assert_eq!(mut_member.function, array_index_id);
     assert_eq!(ref_member.provenance, YieldProvenance::AddressorPlace);
     assert_eq!(mut_member.provenance, YieldProvenance::AddressorPlace);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn buffer_slot_is_registered_as_native_addressor_subscript() {
+    let mut source_table = SourceTable::default();
+    let module = std_module(&mut source_table);
+    assert!(
+        module.get_function(ustr("buffer_slot")).is_none(),
+        "buffer_slot should be a private subscript, not a named function"
+    );
+
+    let subscript = module
+        .get_subscript(ustr("buffer_slot"))
+        .expect("buffer_slot native subscript should be registered");
+    let ref_member = subscript.ref_member.as_ref().unwrap();
+    let mut_member = subscript.mut_member.as_ref().unwrap();
+    assert_eq!(ref_member.function, mut_member.function);
+    assert_eq!(ref_member.provenance, YieldProvenance::AddressorPlace);
+    assert_eq!(mut_member.provenance, YieldProvenance::AddressorPlace);
+
+    let buffer_slot = module
+        .get_function_by_id(ref_member.function)
+        .expect("buffer_slot subscript member function id should be valid");
+    assert_eq!(
+        module.get_function_name_by_id(ref_member.function),
+        Some(ustr("buffer_slot"))
+    );
+    assert_eq!(
+        subscript.signature.args,
+        buffer_slot.definition.ty_scheme.ty.args
+    );
+    assert_eq!(
+        subscript.signature.ret,
+        buffer_slot.definition.ty_scheme.ty.ret
+    );
+    assert_eq!(
+        subscript.signature.arg_names,
+        buffer_slot.definition.arg_names
+    );
+    assert_eq!(
+        subscript.signature.generic_params,
+        buffer_slot.definition.generic_params
+    );
 }
 
 #[test]

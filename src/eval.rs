@@ -1183,7 +1183,7 @@ pub fn eval_node_with_ctx(
         Return(node) => eval_return(arena, *node, ctx, locals),
         Yield(node) => eval_yield(arena, *node, ctx, locals),
         WithYielded(node) => eval_with_yielded(arena, node, arena[node_id].span, ctx, locals),
-        WithPlace(node) => eval_with_place(arena, node, arena[node_id].span, ctx, locals),
+        WithPlace(node) => eval_with_place(arena, node, ctx, locals),
         Block(block) => eval_block(arena, block, ctx, locals),
         Assign(assignment) => eval_assign(arena, node_id, assignment, ctx, locals),
         Tuple(nodes) | Record(nodes) => eval_tuple(arena, nodes, ctx, locals),
@@ -2374,22 +2374,62 @@ fn combine_with_yielded_body_and_epilogue(
 fn eval_with_place(
     arena: &ENodeArena,
     node: &hir::WithPlace<Elaborated>,
-    _span: Location,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
+    eval_with_bound_place(arena, node, ctx, locals, |ctx| {
+        eval_node_with_ctx(arena, node.body, ctx, locals)
+    })
+}
+
+fn eval_with_bound_place<T>(
+    arena: &ENodeArena,
+    node: &hir::WithPlace<Elaborated>,
+    ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
+    body: impl FnOnce(&mut EvalCtx) -> Result<ControlFlow<T>, RuntimeError>,
+) -> Result<ControlFlow<T>, RuntimeError> {
     ctx.reserve_current_frame_slots(locals);
     let temp_start = ctx.environment.len();
-    let Some(place) = eval_or_return!(try_eval_node_as_place(arena, node.place, ctx, locals))
-    else {
-        panic!("WithPlace input must evaluate to a place");
+    let place = match try_eval_node_as_place(arena, node.place, ctx, locals)? {
+        ControlFlow::Continue(Some(place)) => place,
+        ControlFlow::Continue(None) => {
+            panic!("WithPlace input must evaluate to a place");
+        }
+        ControlFlow::Transfer(transfer) => return Ok(ControlFlow::Transfer(transfer)),
     };
 
     let binding_index = local_environment_index(ctx, locals, node.binding);
     ctx.set_environment_entry(binding_index, ValOrMut::Mut(place));
-    let body_result = eval_node_with_ctx(arena, node.body, ctx, locals);
+    let body_result = body(ctx);
     ctx.set_environment_entry(binding_index, ValOrMut::Val(Value::uninit()));
     ctx.truncate_environment_storage(temp_start);
+    body_result
+}
+
+#[inline(never)]
+fn try_eval_with_place_as_place(
+    arena: &ENodeArena,
+    node: &hir::WithPlace<Elaborated>,
+    ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
+) -> Result<ControlFlow<Option<Place>>, RuntimeError> {
+    let body_result =
+        eval_with_bound_place(
+            arena,
+            node,
+            ctx,
+            locals,
+            |ctx| match try_eval_node_as_place(arena, node.body, ctx, locals)? {
+                ControlFlow::Continue(place) => Ok(ControlFlow::Continue(
+                    place.map(|place| place.resolved(ctx)),
+                )),
+                ControlFlow::Transfer(transfer) => Ok(ControlFlow::Transfer(transfer)),
+            },
+        );
+    if let Ok(ControlFlow::Continue(None)) = body_result {
+        panic!("WithPlace body must evaluate to a place");
+    }
     body_result
 }
 
@@ -2736,6 +2776,7 @@ fn place_resolution_depends_on_addressor_place(arena: &ENodeArena, node_id: ENod
         NodeKind::CallDictionaryMethod(call) => call.ty.returns_place(),
         NodeKind::Project(node) => place_resolution_depends_on_addressor_place(arena, node.value),
         NodeKind::ProjectAt(node) => place_resolution_depends_on_addressor_place(arena, node.value),
+        NodeKind::WithPlace(node) => place_resolution_depends_on_addressor_place(arena, node.place),
         NodeKind::Block(block) => block
             .body
             .last()
@@ -3101,6 +3142,9 @@ fn try_eval_node_as_place(
             }
             return Ok(ControlFlow::Continue(place));
         }
+        WithPlace(node) => {
+            return try_eval_with_place_as_place(arena, node, ctx, locals);
+        }
         LoadLocal(node) => {
             // By using frame_base here, we allow to access parent frames
             // when the Place is used in a child function.
@@ -3147,6 +3191,7 @@ fn node_may_resolve_to_place(arena: &ENodeArena, node_id: ENodeId) -> bool {
         {
             node_may_resolve_to_place(arena, node.source)
         }
+        NodeKind::WithPlace(node) => node_may_resolve_to_place(arena, node.body),
         NodeKind::Block(block) => nodes_may_resolve_to_place(arena, &block.body),
         _ => false,
     }

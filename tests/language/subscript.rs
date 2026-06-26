@@ -817,6 +817,30 @@ fn addressor_named_subscript_assignment_writes_direct_place() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn mut_addressor_return_selects_mut_member_of_nested_subscript() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        subscript inner(values: &mut [int]) -> int {
+            mut {
+                return values[0]
+            }
+        }
+
+        subscript outer(values: &mut [int]) -> int {
+            mut {
+                return values->[inner]
+            }
+        }
+
+        let mut values = [8];
+        values->[outer] = 13;
+        values[0]
+    "# });
+
+    assert_val_eq!(value, int(13));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn addressor_named_subscript_compound_assignment_uses_single_place() {
     let value = run_experimental_subscript_source(indoc! { r#"
         subscript first(values: &mut [int], log: &mut int) -> int {

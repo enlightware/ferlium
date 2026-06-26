@@ -50,6 +50,12 @@ pub type GetSubscriptMemberData<'a> = (
 );
 pub type GetSubscriptMemberWithPathData<'a> = (ast::Path, GetSubscriptMemberData<'a>);
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SubscriptMemberTypingContext {
+    pub(crate) name: Ustr,
+    pub(crate) requires_mutable_place: bool,
+}
+
 #[derive(Debug, new)]
 pub struct LoopFrame {
     pub(crate) label: LoopId,
@@ -115,9 +121,9 @@ pub struct TypingEnv<'m> {
     /// Source or synthetic name of the function currently being inferred.
     #[new(default)]
     pub(crate) function_name: Option<Ustr>,
-    /// Source subscript name when the current function is a subscript member.
+    /// Source subscript member currently being inferred.
     #[new(default)]
-    pub(crate) subscript_member_name: Option<Ustr>,
+    pub(crate) subscript_member: Option<SubscriptMemberTypingContext>,
     /// The substitution to use for explicit generic parameters in current annotations.
     pub(crate) annotation_subst: Option<&'m InstSubst>,
     /// The active loop frames, used for type-checking loop control flow.

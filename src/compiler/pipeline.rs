@@ -27,7 +27,7 @@ use crate::{
     graph,
     hir::{
         emit_expr::emit_expr_with_capabilities,
-        emit_hir::{EmitModuleFrom, emit_module, emit_module_with_capabilities},
+        emit_hir::{EmitModuleFrom, emit_module_with_capabilities},
     },
     module::{Module, ModuleEnv, ModuleId, Path, Uses, id::Id},
     parser::{self, describe_parse_error},
@@ -428,15 +428,16 @@ pub fn parse_module_and_expr(
     Ok((module_and_expr.0, module_and_expr.1, arena))
 }
 
-/// Compile a source code, given some other Modules, and it to an existing module, or an error.
-/// Allow unstable features as this is typically not user code.
-pub(crate) fn add_code_to_module(
+/// Compile source code into an existing module with explicit compiler capabilities.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn add_code_to_module_with_capabilities(
     source_name: &str,
     code: &str,
     to: Module,
     module_id: ModuleId,
     other_modules: &Modules,
     source_table: &mut SourceTable,
+    capabilities: CompilationCapabilities,
 ) -> Result<Module, CompilationError> {
     // Parse the source code.
     let source_id = source_table.add_source(source_name.to_string(), code.to_string());
@@ -455,13 +456,14 @@ pub(crate) fn add_code_to_module(
     let prev_to = to.clone();
     let module_path = prev_to.path().clone();
     let emit_from = EmitModuleFrom::Existing(b(to));
-    let module = emit_module(
+    let module = emit_module_with_capabilities(
         module_ast,
         &arena,
         module_id,
         module_path,
         other_modules,
         emit_from,
+        capabilities,
     )
     .map_err(|error| {
         let env = ModuleEnv::new(&prev_to, other_modules);

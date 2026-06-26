@@ -513,8 +513,8 @@ pub enum CallResultConvention {
     /// A scoped, callee-rooted yielded place. It must be consumed through a
     /// `WithYielded` driver and cannot escape as caller-rooted storage.
     YieldedOnce,
-    /// A caller-rooted place, used by addressor functions and addressor
-    /// subscript members such as array indexing. This is the strongest
+    /// A caller-rooted place, used by selected native or source subscript
+    /// member implementations. This is the strongest
     /// borrow-returning convention because it can also satisfy scoped-yield
     /// consumers.
     AddressorPlace,

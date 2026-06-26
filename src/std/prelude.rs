@@ -8,7 +8,7 @@
 //
 
 use crate::{
-    Modules, add_code_to_module,
+    CompilationCapabilities, Modules, add_code_to_module_with_capabilities,
     format::FormatWithData,
     module::{Module, ModuleId},
     parser::location::SourceTable,
@@ -28,14 +28,25 @@ fn add_chunks(
     failure_context: &str,
 ) -> Module {
     let other_modules = Modules::default();
+    let capabilities = CompilationCapabilities {
+        allow_experimental: true,
+    };
     for (name, code) in chunks {
-        to = add_code_to_module(name, code, to, module_id, &other_modules, source_table)
-            .unwrap_or_else(|e| {
-                panic!(
-                    "Failed to {failure_context}: {}",
-                    FormatWithData::new(&e, source_table)
-                )
-            });
+        to = add_code_to_module_with_capabilities(
+            name,
+            code,
+            to,
+            module_id,
+            &other_modules,
+            source_table,
+            capabilities,
+        )
+        .unwrap_or_else(|e| {
+            panic!(
+                "Failed to {failure_context}: {}",
+                FormatWithData::new(&e, source_table)
+            )
+        });
     }
     to
 }

@@ -50,8 +50,8 @@ use crate::{
     types::{
         r#trait::Trait,
         r#type::{
-            FnArgType, LocalTypeAliasId, Type, TypeAliasEntry, TypeAliases, TypeDef, TypeDefSlot,
-            TypeDisplayEnv, TypeKind, TypeVar,
+            CallResultConvention, FnArgType, LocalTypeAliasId, Type, TypeAliasEntry, TypeAliases,
+            TypeDef, TypeDefSlot, TypeDisplayEnv, TypeKind, TypeVar,
         },
         type_scheme::PubTypeConstraint,
     },
@@ -431,6 +431,40 @@ impl Module {
         function: ModuleFunction,
     ) -> LocalFunctionId {
         let id = self.add_function_with_visibility(name, function, Visibility::Module);
+        self.unsafe_items.insert(name);
+        id
+    }
+
+    /// Add a private unsafe native addressor as a shared ref/mut subscript member.
+    pub(crate) fn add_private_unsafe_addressor_subscript(
+        &mut self,
+        name: Ustr,
+        function: ModuleFunction,
+    ) -> LocalSubscriptId {
+        assert_eq!(
+            function.definition.ty_scheme.ty.return_convention,
+            CallResultConvention::AddressorPlace
+        );
+        let signature = SubscriptSignature {
+            args: function.definition.ty_scheme.ty.args.clone(),
+            ret: function.definition.ty_scheme.ty.ret,
+            generic_params: function.definition.generic_params.clone(),
+            generic_effect_params: function.definition.generic_effect_params.clone(),
+            arg_names: function.definition.arg_names.clone(),
+            constraints: function.definition.ty_scheme.constraints.clone(),
+            doc: function.definition.doc.clone(),
+        };
+        let function = self.add_function_anonymous(function);
+        let member = SubscriptMember {
+            function,
+            provenance: YieldProvenance::AddressorPlace,
+        };
+        let subscript = SubscriptDefinition {
+            signature,
+            ref_member: Some(member.clone()),
+            mut_member: Some(member),
+        };
+        let id = self.add_subscript(name, subscript, Visibility::Module);
         self.unsafe_items.insert(name);
         id
     }

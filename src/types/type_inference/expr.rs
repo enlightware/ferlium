@@ -1039,9 +1039,13 @@ impl TypeInference {
                 let return_value = if env.expected_return_convention.returns_place() {
                     if ty != Type::never() && !node_is_place_reference(env.ir_arena, node_id) {
                         return Err(internal_compilation_error!(InvalidSubscriptDefinition {
-                            subject: env.subscript_member_name.map_or(
+                            subject: env.subscript_member.map_or(
                                 SubscriptDefinitionSubject::AddressorFunction(env.function_name),
-                                SubscriptDefinitionSubject::SubscriptMember,
+                                |subscript_member| {
+                                    SubscriptDefinitionSubject::SubscriptMember(
+                                        subscript_member.name,
+                                    )
+                                },
                             ),
                             kind: InvalidSubscriptDefinitionKind::AddressorReturnMustBePlace,
                             span: sp(*expr),
@@ -1926,6 +1930,27 @@ impl TypeInference {
         expr: DExprId,
     ) -> Result<NodeId, InternalCompilationError> {
         let expr_span = env.ast_arena[expr].span;
+        if Self::is_access_chain_expr(&env.ast_arena[expr].kind)
+            && let Some(chain) = self.access_chain_containing_named_subscript(env, expr)
+        {
+            let mode = if env
+                .subscript_member
+                .is_some_and(|subscript_member| subscript_member.requires_mutable_place)
+            {
+                SubscriptAccessMode::Mut
+            } else {
+                SubscriptAccessMode::Ref
+            };
+            return self
+                .infer_access_chain_with_body(
+                    env,
+                    chain,
+                    mode,
+                    expr_span,
+                    |_, _, place, place_ty| Ok((place, place_ty)),
+                )
+                .map(|(node, _)| node);
+        }
         match env.ast_arena[expr].kind.clone() {
             ExprKind::EffectsUnsafe(inner) => {
                 if env.current_module_id() != STD_MODULE_ID {

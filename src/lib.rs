@@ -27,7 +27,7 @@ mod sync;
 pub mod types;
 
 pub(crate) use compiler::Modules;
-pub(crate) use compiler::add_code_to_module;
+pub(crate) use compiler::add_code_to_module_with_capabilities;
 pub use compiler::error::{CompilationError, LocatedError};
 pub use compiler::{
     CompilationCapabilities, CompilationRevision, CompilerSession, ModuleAndExpr, ModuleDiagnostic,
