@@ -87,7 +87,7 @@ fn console_print(message: &FerliumString) {
 }
 
 fn console_module(module_id: ModuleId) -> Module {
-    let mut module = Module::new(module_id);
+    let mut module = Module::new(module_id, Path::single_str("console"));
     module.add_function(
         ustr("print"),
         UnaryNativeFnRN::description_with_default_ty(
