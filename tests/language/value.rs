@@ -226,6 +226,27 @@ fn call_argument_temp_is_dropped_when_later_argument_breaks() {
     assert_val_eq!(session.run(&source), int(86));
 }
 
+// A `match` materializes its scrutinee into an owned local; when an arm binds the payload by
+// reference (so the scrutinee stays live), that local must be dropped on block exit.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn match_scrutinee_temporary_is_dropped() {
+    let mut session = TestSession::new();
+    let source = format!(
+        r#"
+        {}
+        testing::reset_tracked_drops();
+        match Some(Probe(7)) {{
+            Some(p) => p.0,
+            None => 0,
+        }};
+        testing::tracked_drop_log()
+        "#,
+        tracked_probe_value_impl()
+    );
+    assert_val_eq!(session.run(&source), int(7));
+}
+
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn lexical_drop_runs_on_loop_continue() {

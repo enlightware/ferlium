@@ -590,7 +590,9 @@ impl TypeInference {
             let effects = self.make_dependent_effect([store_eff, case_node_eff]);
             let node = K::Block(b(hir::Block {
                 body: b(SVec2::from_vec(vec![store_variant_node_id, case_node_id])),
-                cleanup: Vec::new(),
+                // The materialized scrutinee is an owned local; drop it when the block exits or a
+                // resource-owning scrutinee leaks (a `Skip`-drop one resolves to no drop).
+                cleanup: vec![l_match_condition],
             }));
             (node, case_ret_ty, MutType::constant(), effects)
         } else {
