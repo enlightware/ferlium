@@ -20,10 +20,11 @@
 //! - **stack marker** — a saved stack top produced by `stack_save`, consumed only by `stack_restore`.
 //!
 //! An instruction either defines a single result register (`InstructionResult` other than `Nothing`)
-//! or defines nothing; a result-less instruction's slot must never be read. Three kinds are
-//! *terminators* (`ret`, `br`, `condbr`): a terminator appears exactly once, as the last instruction
-//! of its block, and every other instruction is a non-terminator. These structural invariants are
-//! verified per function by the interpreter (see `Interpreter::verify_function`).
+//! or defines nothing; a result-less instruction's slot must never be read. Some kinds are
+//! *terminators* (`ret`, `br`, `condbr`, `invoke`, `resume` — each reports this via its own
+//! `is_terminator`): a terminator appears exactly once, as the last instruction of its block, and
+//! every other instruction is a non-terminator. These structural invariants are verified per function
+//! by the interpreter (see `Interpreter::verify_function`).
 
 use std::any::Any;
 use std::fmt;
@@ -74,107 +75,17 @@ impl Instruction {
         self.kind.view(self)
     }
 
-    /// Verifies the structural contract of this instruction in isolation: the operand **arity** (and,
-    /// for `alloca`/`memcpy`, the optional run-time-layout witness) plus terminator consistency.
+    /// Verifies the structural contract of this instruction in isolation by delegating to its kind's
+    /// own [`InstructionKind::verify`] (the operand **arity**, and the data-dependent operand count
+    /// for `alloca`/`memcpy`/`build_closure`).
     ///
     /// This is the machine-checkable core of the per-instruction contracts documented on each
     /// constructor below. The interpreter runs it over every instruction of a function before
     /// executing it (see `Interpreter::verify_function`), so malformed IR fails fast with a precise
     /// message instead of an out-of-bounds operand index or silently corrupted interpreter state —
     /// the moral equivalent of the undefined behavior such IR would cause in a real backend.
-    ///
-    /// Operand *role* (place vs value vs dictionary vs marker) is intentionally **not** checked here:
-    /// it is not recoverable from the `ssa::Value` variant (a `Register`/`Parameter` binds any role),
-    /// so it is enforced at point of use by the interpreter's operand resolvers.
     pub fn verify(&self) {
-        let n = self.operands.len();
-        use InstructionView as V;
-        match self.view() {
-            // 1 operand (the layout witness) iff `ty` is not statically sized, else none.
-            V::Alloca { witness, .. } => assert_eq!(
-                n,
-                witness.is_some() as usize,
-                "alloca carries the run-time-layout witness iff its type is not statically sized"
-            ),
-            V::AllocaPlace { .. } => assert_eq!(n, 0, "alloca_place takes no operands"),
-            // [callee, args.., ret-out-pointer?]: at least the callee.
-            V::Call => assert!(n >= 1, "call needs at least the callee operand"),
-            // Same operand layout as `call`; the unwind/normal targets are kind data, not operands.
-            V::Invoke { .. } => assert!(n >= 1, "invoke needs at least the callee operand"),
-            V::Resume => assert_eq!(n, 0, "resume takes no operands"),
-            // [callee, args.., ret-out-pointer]: same operand layout as `call`. The yielded place is
-            // exposed as this instruction's result register, not through an operand.
-            V::Project { .. } => assert!(n >= 1, "project needs at least the callee operand"),
-            V::Yield => assert_eq!(n, 1, "yield takes exactly the place to expose"),
-            V::EndProject => assert_eq!(n, 1, "end_project takes exactly the projected place"),
-            V::CompareEqual => assert_eq!(n, 2, "compare_eq compares exactly two operands"),
-            V::ConditionalBranch { .. } => {
-                assert_eq!(n, 1, "condbr takes exactly the condition operand")
-            }
-            V::UnconditionalBranch { .. } => assert_eq!(n, 0, "br takes no operands"),
-            V::Load => assert_eq!(n, 1, "load takes exactly the source place"),
-            V::Subfield { .. } => assert_eq!(
-                n, 2,
-                "subfield takes the aggregate place and the int field-index value"
-            ),
-            V::DictEntry { .. } => {
-                assert_eq!(
-                    n, 1,
-                    "dict_entry takes exactly the symbolic dictionary operand"
-                )
-            }
-            V::Ret => assert_eq!(
-                n, 0,
-                "ret takes no operands (the result is written through the return out-pointer)"
-            ),
-            V::Variant { .. } => {
-                assert_eq!(
-                    n, 0,
-                    "variant builds an uninitialized shell and takes no operands"
-                )
-            }
-            V::ExtractTag => assert_eq!(n, 1, "extract_tag takes exactly the variant place"),
-            V::Store => assert_eq!(n, 2, "store takes the value and the destination place"),
-            // [source, destination] plus the layout witness iff the pointee is dynamically sized.
-            V::Memcpy => assert!(
-                n == 2 || n == 3,
-                "memcpy takes source and destination places, plus the layout witness iff dynamic"
-            ),
-            V::StackSave => assert_eq!(n, 0, "stack_save takes no operands"),
-            V::StackRestore => assert_eq!(n, 1, "stack_restore takes exactly the saved marker"),
-            V::Drop => assert_eq!(
-                n, 2,
-                "drop takes the target place and the Value::drop callee"
-            ),
-            // [hidden_dicts.., captures.., env_dict?]: at least the hidden dicts and optional env dict.
-            V::BuildClosure {
-                num_hidden_dicts,
-                has_env_dict,
-                ..
-            } => assert!(
-                n >= num_hidden_dicts + has_env_dict as usize,
-                "build_closure needs at least its hidden dictionaries and the optional env dictionary"
-            ),
-            V::CloneClosureEnv => {
-                assert_eq!(n, 1, "clone_closure_env takes exactly the closure place")
-            }
-            V::DropClosureEnv => {
-                assert_eq!(n, 1, "drop_closure_env takes exactly the closure place")
-            }
-        }
-        assert_eq!(
-            self.is_terminator(),
-            matches!(
-                self.view(),
-                V::Ret
-                    | V::ConditionalBranch { .. }
-                    | V::UnconditionalBranch { .. }
-                    | V::Invoke { .. }
-                    | V::Resume
-            ),
-            "is_terminator must agree with the instruction kind (only ret/br/condbr/invoke/resume \
-             terminate)"
-        );
+        self.kind.verify(self);
     }
 
     /// Creates an `alloca` instruction for storage whose size is known at compile time.
@@ -448,7 +359,6 @@ impl Instruction {
         }
     }
 
-
     /// Creates a `variant` instruction, which builds a tagged variant *shell* of type `ty`: the
     /// result is a register holding `Value::Variant { tag, <uninitialized payload> }`. The
     /// constructing site stores the shell into the variant's destination and then fills the payload
@@ -529,6 +439,13 @@ impl Instruction {
     /// shallow, place-to-place copy. Non-trivial reads are wrapped in `Value::clone` by HIR before
     /// reaching the emitter, so a `memcpy` (like a bare `load`) is a move for non-trivially-copyable
     /// pointees and a copy for trivial ones.
+    ///
+    /// **Requirement:** the pointee must have a **statically known layout** — a real backend sizes the
+    /// copy from the type alone. A value whose size depends on a bare type variable (a generic move)
+    /// has no static layout and must instead use [`memcpy_dynamic`](Self::memcpy_dynamic), which
+    /// carries the run-time-layout `Value` dictionary witness (the emitter's `move_value_into` chooses
+    /// between the two). The SSA interpreter would happily `memcpy` a generic boxed `Value`, but
+    /// emitting one would be IR a code generator could not lower.
     pub fn memcpy(span: Location, source: ssa::Value, destination: ssa::Value) -> Self {
         Instruction {
             span,
@@ -648,6 +565,17 @@ pub trait InstructionKind: Any {
     fn is_terminator(&self) -> bool {
         false
     }
+
+    /// Asserts the structural well-formedness of `whole` (whose kind-specific part is `self`): its
+    /// operand **arity** and, where the layout is data-dependent (`alloca`/`memcpy`/`build_closure`),
+    /// the operand count that the kind's own metadata implies.
+    ///
+    /// Each concrete instruction owns its own contract here rather than in a central registry, so a
+    /// new instruction cannot be added without stating how many operands it takes, and the check sits
+    /// next to the constructor that establishes it. Operand *role* (place vs value vs dictionary vs
+    /// marker) is intentionally not checked — it is not recoverable from the `ssa::Value` variant, so
+    /// it is enforced at point of use by the interpreter's operand resolvers.
+    fn verify(&self, whole: &Instruction);
 
     /// Returns a borrowed, kind-discriminated view of `self`, which is the kind-specific part of
     /// `whole`. Backends match on this view to lower the instruction.
@@ -835,6 +763,13 @@ struct Alloca {
 }
 
 impl InstructionKind for Alloca {
+    fn verify(&self, whole: &Instruction) {
+        assert!(
+            whole.operands.len() <= 1,
+            "alloca takes the run-time-layout witness iff its type is not statically sized (0 or 1 operand)"
+        );
+    }
+
     fn result(&self, _whole: &Instruction) -> InstructionResult {
         InstructionResult::pointer_to(InstructionResult::Lowered(self.ty))
     }
@@ -867,6 +802,10 @@ pub struct AllocaPlace {
 }
 
 impl InstructionKind for AllocaPlace {
+    fn verify(&self, whole: &Instruction) {
+        assert!(whole.operands.is_empty(), "alloca_place takes no operands");
+    }
+
     fn result(&self, _whole: &Instruction) -> InstructionResult {
         InstructionResult::pointer_to(InstructionResult::pointer_to(InstructionResult::Lowered(
             self.pointing_to,
@@ -893,6 +832,13 @@ impl InstructionKind for AllocaPlace {
 struct Call {}
 
 impl InstructionKind for Call {
+    fn verify(&self, whole: &Instruction) {
+        assert!(
+            !whole.operands.is_empty(),
+            "call needs at least the callee operand"
+        );
+    }
+
     fn result(&self, _whole: &Instruction) -> InstructionResult {
         // Calls do not yield a register: a callee with a non-`()` result writes it through the
         // return out-pointer passed as the call's last operand.
@@ -938,6 +884,13 @@ struct Invoke {
 }
 
 impl InstructionKind for Invoke {
+    fn verify(&self, whole: &Instruction) {
+        assert!(
+            !whole.operands.is_empty(),
+            "invoke needs at least the callee operand"
+        );
+    }
+
     fn is_terminator(&self) -> bool {
         true
     }
@@ -976,6 +929,10 @@ impl InstructionKind for Invoke {
 struct Resume {}
 
 impl InstructionKind for Resume {
+    fn verify(&self, whole: &Instruction) {
+        assert!(whole.operands.is_empty(), "resume takes no operands");
+    }
+
     fn is_terminator(&self) -> bool {
         true
     }
@@ -1001,6 +958,13 @@ struct Project {
 }
 
 impl InstructionKind for Project {
+    fn verify(&self, whole: &Instruction) {
+        assert!(
+            !whole.operands.is_empty(),
+            "project needs at least the callee operand"
+        );
+    }
+
     fn result(&self, _whole: &Instruction) -> InstructionResult {
         // The result is the yielded place: a pointer to the projected element. A register value is
         // obtained by `load`ing it.
@@ -1026,6 +990,14 @@ impl InstructionKind for Project {
 struct Yield {}
 
 impl InstructionKind for Yield {
+    fn verify(&self, whole: &Instruction) {
+        assert_eq!(
+            whole.operands.len(),
+            1,
+            "yield takes exactly the place to expose"
+        );
+    }
+
     fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
         InstructionView::Yield
     }
@@ -1045,6 +1017,14 @@ impl InstructionKind for Yield {
 struct EndProject {}
 
 impl InstructionKind for EndProject {
+    fn verify(&self, whole: &Instruction) {
+        assert_eq!(
+            whole.operands.len(),
+            1,
+            "end_project takes exactly the projected place"
+        );
+    }
+
     fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
         InstructionView::EndProject
     }
@@ -1063,6 +1043,14 @@ impl InstructionKind for EndProject {
 struct CompareEqual {}
 
 impl InstructionKind for CompareEqual {
+    fn verify(&self, whole: &Instruction) {
+        assert_eq!(
+            whole.operands.len(),
+            2,
+            "compare_eq compares exactly two operands"
+        );
+    }
+
     fn result(&self, _whole: &Instruction) -> InstructionResult {
         InstructionResult::Lowered(cached_primitive_ty!(bool))
     }
@@ -1091,6 +1079,14 @@ struct ConditionalBranch {
 }
 
 impl InstructionKind for ConditionalBranch {
+    fn verify(&self, whole: &Instruction) {
+        assert_eq!(
+            whole.operands.len(),
+            1,
+            "condbr takes exactly the condition operand"
+        );
+    }
+
     fn is_terminator(&self) -> bool {
         true
     }
@@ -1122,6 +1118,14 @@ impl InstructionKind for ConditionalBranch {
 struct Load {}
 
 impl InstructionKind for Load {
+    fn verify(&self, whole: &Instruction) {
+        assert_eq!(
+            whole.operands.len(),
+            1,
+            "load takes exactly the source place"
+        );
+    }
+
     fn result(&self, whole: &Instruction) -> InstructionResult {
         InstructionResult::pointee_of(InstructionResult::Same(whole.operands[0].clone()))
     }
@@ -1148,6 +1152,14 @@ struct Subfield {
 }
 
 impl InstructionKind for Subfield {
+    fn verify(&self, whole: &Instruction) {
+        assert_eq!(
+            whole.operands.len(),
+            2,
+            "subfield takes the aggregate place and the int field-index value"
+        );
+    }
+
     fn result(&self, _whole: &Instruction) -> InstructionResult {
         // The operand is a place (pointer to the aggregate) and the result is a place: a pointer to
         // the projected element. A register value is obtained by `load`ing the result.
@@ -1164,7 +1176,11 @@ impl InstructionKind for Subfield {
         whole: &Instruction,
         _env: &ModuleEnv<'_>,
     ) -> fmt::Result {
-        write!(f, "subfield {} from {}", whole.operands[1], whole.operands[0])
+        write!(
+            f,
+            "subfield {} from {}",
+            whole.operands[1], whole.operands[0]
+        )
     }
 }
 
@@ -1179,6 +1195,14 @@ struct DictEntry {
 }
 
 impl InstructionKind for DictEntry {
+    fn verify(&self, whole: &Instruction) {
+        assert_eq!(
+            whole.operands.len(),
+            1,
+            "dict_entry takes exactly the symbolic dictionary operand"
+        );
+    }
+
     fn result(&self, _whole: &Instruction) -> InstructionResult {
         // Like `Subfield`: the result is the place of the entry; a register value is obtained by
         // `load`ing it, and a method callee is read by reference at the `call`/`drop`.
@@ -1210,6 +1234,13 @@ impl InstructionKind for DictEntry {
 struct Ret {}
 
 impl InstructionKind for Ret {
+    fn verify(&self, whole: &Instruction) {
+        assert!(
+            whole.operands.is_empty(),
+            "ret takes no operands (the result is written through the return out-pointer)"
+        );
+    }
+
     fn is_terminator(&self) -> bool {
         true
     }
@@ -1242,6 +1273,13 @@ struct Variant {
 }
 
 impl InstructionKind for Variant {
+    fn verify(&self, whole: &Instruction) {
+        assert!(
+            whole.operands.is_empty(),
+            "variant builds an uninitialized shell and takes no operands"
+        );
+    }
+
     fn result(&self, _whole: &Instruction) -> InstructionResult {
         InstructionResult::Lowered(self.type_)
     }
@@ -1265,6 +1303,14 @@ impl InstructionKind for Variant {
 struct ExtractTag {}
 
 impl InstructionKind for ExtractTag {
+    fn verify(&self, whole: &Instruction) {
+        assert_eq!(
+            whole.operands.len(),
+            1,
+            "extract_tag takes exactly the variant place"
+        );
+    }
+
     fn result(&self, _whole: &Instruction) -> InstructionResult {
         InstructionResult::Lowered(cached_primitive_ty!(isize))
     }
@@ -1287,6 +1333,14 @@ impl InstructionKind for ExtractTag {
 struct Store {}
 
 impl InstructionKind for Store {
+    fn verify(&self, whole: &Instruction) {
+        assert_eq!(
+            whole.operands.len(),
+            2,
+            "store takes the value and the destination place"
+        );
+    }
+
     fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
         InstructionView::Store
     }
@@ -1306,6 +1360,13 @@ impl InstructionKind for Store {
 struct Memcpy {}
 
 impl InstructionKind for Memcpy {
+    fn verify(&self, whole: &Instruction) {
+        assert!(
+            matches!(whole.operands.len(), 2 | 3),
+            "memcpy takes source and destination places, plus the layout witness iff dynamic"
+        );
+    }
+
     fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
         InstructionView::Memcpy
     }
@@ -1328,6 +1389,10 @@ impl InstructionKind for Memcpy {
 struct StackSave {}
 
 impl InstructionKind for StackSave {
+    fn verify(&self, whole: &Instruction) {
+        assert!(whole.operands.is_empty(), "stack_save takes no operands");
+    }
+
     fn result(&self, _whole: &Instruction) -> InstructionResult {
         InstructionResult::StackMarker
     }
@@ -1350,6 +1415,14 @@ impl InstructionKind for StackSave {
 struct StackRestore {}
 
 impl InstructionKind for StackRestore {
+    fn verify(&self, whole: &Instruction) {
+        assert_eq!(
+            whole.operands.len(),
+            1,
+            "stack_restore takes exactly the saved marker"
+        );
+    }
+
     fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
         InstructionView::StackRestore
     }
@@ -1372,6 +1445,14 @@ impl InstructionKind for StackRestore {
 struct Drop {}
 
 impl InstructionKind for Drop {
+    fn verify(&self, whole: &Instruction) {
+        assert_eq!(
+            whole.operands.len(),
+            2,
+            "drop takes the target place and the Value::drop callee"
+        );
+    }
+
     fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
         InstructionView::Drop
     }
@@ -1409,6 +1490,13 @@ struct BuildClosure {
 }
 
 impl InstructionKind for BuildClosure {
+    fn verify(&self, whole: &Instruction) {
+        assert!(
+            whole.operands.len() >= self.num_hidden_dicts + self.has_env_dict as usize,
+            "build_closure needs at least its hidden dictionaries and the optional env dictionary"
+        );
+    }
+
     fn result(&self, _whole: &Instruction) -> InstructionResult {
         InstructionResult::Lowered(self.ty)
     }
@@ -1445,6 +1533,14 @@ struct CloneClosureEnv {
 }
 
 impl InstructionKind for CloneClosureEnv {
+    fn verify(&self, whole: &Instruction) {
+        assert_eq!(
+            whole.operands.len(),
+            1,
+            "clone_closure_env takes exactly the closure place"
+        );
+    }
+
     fn result(&self, _whole: &Instruction) -> InstructionResult {
         InstructionResult::Lowered(self.ty)
     }
@@ -1467,6 +1563,14 @@ impl InstructionKind for CloneClosureEnv {
 struct DropClosureEnv {}
 
 impl InstructionKind for DropClosureEnv {
+    fn verify(&self, whole: &Instruction) {
+        assert_eq!(
+            whole.operands.len(),
+            1,
+            "drop_closure_env takes exactly the closure place"
+        );
+    }
+
     fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
         InstructionView::DropClosureEnv
     }
@@ -1487,6 +1591,10 @@ struct UnconditionalBranch {
 }
 
 impl InstructionKind for UnconditionalBranch {
+    fn verify(&self, whole: &Instruction) {
+        assert!(whole.operands.is_empty(), "br takes no operands");
+    }
+
     fn is_terminator(&self) -> bool {
         true
     }

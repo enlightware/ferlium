@@ -13,8 +13,8 @@ use rustc_hash::FxHashMap;
 
 use crate::{
     CompilerSession, Location,
-    emit_ssa::build_ssa_function,
     compiler::error::RuntimeErrorKind,
+    emit_ssa::build_ssa_function,
     eval::{
         ControlFlow, EvalCtx, Place, PlaceResult, RuntimeError, ValOrMut,
         call_value_clone_for_temp, call_value_drop_for_temp,
@@ -109,6 +109,24 @@ enum FrameOutcome {
     },
 }
 
+/// Which side of a call the storage-state contract (`doc/ssa-ir.md` §4.3) is being checked on.
+#[cfg(debug_assertions)]
+#[derive(Clone, Copy)]
+enum CallPhase {
+    Before,
+    After,
+}
+
+#[cfg(debug_assertions)]
+impl std::fmt::Display for CallPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            CallPhase::Before => "before",
+            CallPhase::After => "after",
+        })
+    }
+}
+
 /// A suspended `YieldedOnce` accessor frame, kept alive between a `project` and its `end_project`
 /// (the SSA analog of the HIR interpreter's `SuspendedAccessor`).
 struct SuspendedFrame {
@@ -123,13 +141,6 @@ struct SuspendedFrame {
     /// The `environment` length captured at the `project`, so `end_project` reclaims the accessor's
     /// stack cells once its slide completes (mirrors `truncate_environment_storage`).
     frame_top: usize,
-}
-
-/// `Place::target` sentinel for the non-dereferenceable unit place (`&()`).
-const UNIT_PLACE: usize = usize::MAX;
-
-fn is_unit_place(place: &Place) -> bool {
-    place.target == UNIT_PLACE
 }
 
 /// The state of an SSA interpreter.
@@ -243,7 +254,9 @@ impl<'a> Interpreter<'a> {
         match self.run_loop(&func, slots, func.entry(), 0)? {
             FrameOutcome::Completed => Ok(()),
             FrameOutcome::Suspended { .. } => {
-                panic!("a frame suspended outside a `project` driver (YieldedOnce called as a plain function)")
+                panic!(
+                    "a frame suspended outside a `project` driver (YieldedOnce called as a plain function)"
+                )
             }
         }
     }
@@ -547,15 +560,12 @@ impl<'a> Interpreter<'a> {
             .expect("drop callee not found");
         if f.code.as_script().is_some() {
             // A script `Value::drop(&mut self)` in the uniform by-pointer ABI: `drop(self, ())`.
+            // The `()` return out-pointer is a fresh unit cell the drop writes its `()` result into
+            // (discarded afterward).
+            let unit_ret = self.alloc_cell(Value::unit());
             self.run_function(
                 FunctionKey { module, identity },
-                vec![
-                    Binding::Place(target.clone()),
-                    Binding::Place(Place {
-                        target: UNIT_PLACE,
-                        path: vec![],
-                    }),
-                ],
+                vec![Binding::Place(target.clone()), Binding::Place(unit_ret)],
             )?;
         } else {
             // Delegate to the HIR interpreter with the callee's module given explicitly; the
@@ -729,6 +739,99 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    /// Pairs each by-pointer-bound parameter with the place it was bound to, for the call-boundary
+    /// contract check. `Dictionary`-interned bindings (a symbolic trait dictionary, which has no
+    /// pointee) are dropped; everything place-bound — visible arguments, the return out-pointer, and
+    /// field-index evidence — is kept with its tag.
+    #[cfg(debug_assertions)]
+    fn call_boundary(
+        tags: &[ssa::ParameterTag],
+        args: &[Binding],
+    ) -> Vec<(ssa::ParameterTag, Place)> {
+        tags.iter()
+            .zip(args)
+            .filter_map(|(tag, binding)| match binding {
+                Binding::Place(place) => Some((*tag, place.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Asserts the storage-state contract at a script-call boundary (debug only; `doc/ssa-ir.md`
+    /// §4.3): a `&mut`/`&`/trivial-copy argument points at a **live** value both before and after the
+    /// call; the return out-pointer is **fresh** (an uninitialized husk, or a unit cell that carries
+    /// nothing to drop) before the call and **fully initialized** when the callee returns normally.
+    /// Evidence (an interned dictionary or a field-index `int`) is not value storage and is skipped.
+    #[cfg(debug_assertions)]
+    fn check_call_boundary(&self, boundary: &[(ssa::ParameterTag, Place)], phase: CallPhase) {
+        for (tag, place) in boundary {
+            // Read the pointee. A place that projects through (or ends at) uninitialized storage has
+            // no value to read — `boundary_pointee` returns `None`, which the check treats as a husk
+            // (the slot is simply not initialized).
+            let is_husk = self.boundary_pointee(place).map_or(true, is_drop_husk);
+            match tag {
+                // A `&mut`/`&`/trivial-copy argument must point at a live value, before and after.
+                ssa::ParameterTag::Parameter(passing) => assert!(
+                    !is_husk,
+                    "SSA call boundary: an argument passed as {passing:?} is a husk {phase} the \
+                     call; a `&mut`/`&`/trivial-copy argument must point at a live value",
+                ),
+                // The return out-pointer must be fully initialized when the callee returns normally.
+                // (There is no *precondition* on `@ret` here: a resource-owning `@ret` being
+                // overwritten is caught precisely by the `store` discard invariant, and overwriting a
+                // resource-free slot — e.g. the in-place `a = a + b` — is sound.)
+                ssa::ParameterTag::Return => {
+                    if matches!(phase, CallPhase::After) {
+                        assert!(
+                            !is_husk,
+                            "SSA call boundary: the return out-pointer must be fully initialized when \
+                             the callee returns normally",
+                        );
+                    }
+                }
+                ssa::ParameterTag::Dictionary => {}
+            }
+        }
+    }
+
+    /// Reads the value at `place` for the call-boundary check, returning `None` when the place
+    /// projects through (or ends at) uninitialized storage — that slot is simply not initialized,
+    /// which the contract treats as a husk. Unlike [`Place::target_ref_allow_uninit`], this never
+    /// panics on an uninitialized (or otherwise non-navigable) intermediate.
+    #[cfg(debug_assertions)]
+    fn boundary_pointee(&self, place: &Place) -> Option<&Value> {
+        let mut path: VecDeque<isize> = place.path.iter().copied().collect();
+        let mut index = place.target;
+        let mut target = loop {
+            match self.ctx.environment.get(index)? {
+                ValOrMut::Val(t) => break t,
+                // SAFETY: the referent outlives the borrow, as in `target_ref_allow_uninit`.
+                ValOrMut::Ref(t) => break unsafe { &**t },
+                ValOrMut::Mut(p) => {
+                    index = p.target;
+                    for &i in p.path.iter().rev() {
+                        path.push_front(i);
+                    }
+                }
+                ValOrMut::Dictionary(_) => return None,
+            }
+        };
+        for &i in &path {
+            target = match target {
+                Value::Tuple(t) => t.get(i as usize)?,
+                Value::Variant(v) if i == 0 => &v.value,
+                Value::Native(p) => p
+                    .as_ref()
+                    .as_any()
+                    .downcast_ref::<buffer::Buffer>()?
+                    .get_signed(i)?,
+                // `Uninit` (or any non-compound) along the path: the slot is not initialized.
+                _ => return None,
+            };
+        }
+        Some(target)
+    }
+
     /// Calls the resolved function `(callee_module, callee_identity)` with `leading` (a closure's
     /// prepended `@extra` dictionary evidence and captured-environment slots, in signature order;
     /// empty for a non-closure call) ahead of the visible arguments `arg_ops` (the last of which is
@@ -783,7 +886,19 @@ impl<'a> Interpreter<'a> {
                 };
                 args.push(binding);
             }
+            // Check the storage-state contract at the call boundary (debug only; see `doc/ssa-ir.md`
+            // §4.3). Only the *visible* operand arguments and the return out-pointer are checked: the
+            // leading closure-environment slots (`[..offset]`) are excluded, because the body may
+            // legitimately consume a captured value, leaving its (per-call cloned) slot a husk.
+            #[cfg(debug_assertions)]
+            let boundary = Self::call_boundary(&param_tags[offset..], &args[offset..]);
+            #[cfg(debug_assertions)]
+            self.check_call_boundary(&boundary, CallPhase::Before);
             self.run_function(key, args)?;
+            // Reached only on a *normal* return — an error `?`-propagated above, so the post-condition
+            // (which holds only on normal completion) is not checked on the error path.
+            #[cfg(debug_assertions)]
+            self.check_call_boundary(&boundary, CallPhase::After);
             return Ok(());
         }
 
@@ -1212,6 +1327,15 @@ impl<'a> Interpreter<'a> {
     fn restore_stack(&mut self, marker: usize) {
         while self.ctx.environment.len() > marker {
             if let Some(ValOrMut::Val(v)) = self.ctx.environment.pop() {
+                // Reclaiming storage by popping the stack is the interpreter freeing the Rust value;
+                // a real backend only moves the stack pointer and frees nothing. So a cell reclaimed
+                // this way must already carry nothing that owns resources — a husk or a
+                // `TrivialCopy` value — otherwise the emitter leaked it (it owed an explicit `drop`).
+                debug_assert!(
+                    is_reclaimable(&v),
+                    "SSA leak: stack_restore reclaims a live resource-owning value (a missing \
+                     explicit drop): {v:?}",
+                );
                 v.discard_storage();
             }
         }
@@ -1280,10 +1404,6 @@ impl<'a> Interpreter<'a> {
                 }
                 None => panic!("unbound place operand {v}"),
             },
-            ssa::Value::UnitPlace => Place {
-                target: UNIT_PLACE,
-                path: vec![],
-            },
             other => panic!("operand {other:?} is not a place"),
         }
     }
@@ -1327,7 +1447,9 @@ impl<'a> Interpreter<'a> {
             ssa::Value::Boolean(b) => Value::native(*b),
             ssa::Value::Integer(i) => Value::native(i.to_isize()),
             ssa::Value::Unit => Value::unit(),
-            ssa::Value::String(s) => Value::native(s.clone()),
+            // A `"…"` constant materializes as a *static literal* string: its bytes live in the data
+            // segment (`cap == 0`), so it owns no heap and needs no drop (see `owns_resources`).
+            ssa::Value::String(s) => Value::native(s.clone().into_static_literal()),
             ssa::Value::Function(r) => Value::function(r.identity, r.module),
             ssa::Value::Uninit(_) => Value::uninit(),
             ssa::Value::Float(f) => Value::native(
@@ -1351,7 +1473,6 @@ impl<'a> Interpreter<'a> {
                 );
                 (**lit).clone().into_value()
             }
-            ssa::Value::UnitPlace => panic!("&() is a place, not a value"),
         }
     }
 
@@ -1398,9 +1519,6 @@ impl<'a> Interpreter<'a> {
     /// Reads the value at `place`, copying a trivially copyable value or moving a non-trivial one
     /// out of memory (leaving the cell uninitialized).
     fn load(&mut self, place: &Place) -> Result<Value, RuntimeError> {
-        if is_unit_place(place) {
-            return Ok(Value::unit());
-        }
         let copy = read_copy(
             place
                 .target_ref(&self.ctx)
@@ -1419,10 +1537,6 @@ impl<'a> Interpreter<'a> {
 
     /// Writes `v` into the cell denoted by `place`, discarding any prior contents.
     fn store(&mut self, v: Value, place: &Place) -> Result<(), RuntimeError> {
-        if is_unit_place(place) {
-            v.discard_storage();
-            return Ok(());
-        }
         // Generic (`alloca A`) storage is allocated flat-`Uninit` because its concrete aggregate
         // shape is unknown statically. A field store materializes the enclosing `Tuple` skeleton on
         // demand so the leaf is addressable.
@@ -1431,6 +1545,15 @@ impl<'a> Interpreter<'a> {
             .target_mut(&mut self.ctx)
             .expect("store to an invalid place");
         let old = std::mem::replace(slot, v);
+        // Overwriting the slot drops the old Rust value here, but a real backend just writes the new
+        // bytes and frees nothing. So the overwritten value must own no resources — a husk, or a
+        // `TrivialCopy` value written in place (e.g. `a = a + b`); a live resource-owning value would
+        // be a leak the emitter owed an explicit `drop` for.
+        debug_assert!(
+            is_reclaimable(&old),
+            "SSA leak: store overwrites a live resource-owning value (a missing explicit drop): \
+             {old:?}",
+        );
         old.discard_storage();
         Ok(())
     }
@@ -1554,6 +1677,41 @@ fn is_drop_husk(v: &Value) -> bool {
     }
 }
 
+/// Whether `v` owns any resource that an explicit semantic `drop` must release — heap storage (a
+/// `string`, an array's `Buffer`, …) or a closure's captured environment — anywhere inside it.
+///
+/// This is the property the interpreter's `discard_storage` papers over: it frees these Rust values,
+/// but a real backend frees nothing on a stack-pop or a slot overwrite. A value that owns *no*
+/// resource (a husk; a scalar `int`/`bool`/`float`/`()`; an aggregate or variant built only from
+/// such; a bare function) is genuinely free to discard — `read_copy` recognises the trivially-copyable
+/// leaves, and the recursion covers aggregates, variants, and closure environments.
+fn owns_resources(v: &Value) -> bool {
+    match v {
+        Value::Uninit => false,
+        Value::Tuple(fields) => fields.iter().any(owns_resources),
+        Value::Variant(variant) => owns_resources(&variant.value),
+        // A closure with a captured environment owns it (released by `drop_closure_env`); a bare
+        // function (no environment) owns nothing.
+        Value::Function(f) => f.closure_env_len != 0,
+        // A *static literal* string owns no heap (its bytes are in the data segment, `cap == 0`), so
+        // it is free to discard; an *owned* string owns a heap buffer and must be dropped.
+        Value::Native(_) if v.as_primitive_ty::<crate::std::string::String>().is_some() => !v
+            .as_primitive_ty::<crate::std::string::String>()
+            .unwrap()
+            .is_static_literal(),
+        // A scalar native (`read_copy` is `Some`) owns nothing; any other native — an array `Buffer`,
+        // … — owns heap storage.
+        Value::Native(_) => read_copy(v).is_none(),
+    }
+}
+
+/// Whether `v` can be reclaimed by simply discarding its storage (a stack-pop or a slot overwrite)
+/// without leaking — i.e. it [owns no resource](owns_resources). Anything that owns a resource must
+/// be released by an explicit semantic `drop`, never silently discarded.
+fn is_reclaimable(v: &Value) -> bool {
+    !owns_resources(v)
+}
+
 /// Returns a husk mirroring the aggregate *skeleton* of `v`: a `Tuple` becomes a `Tuple` of
 /// (recursively) husked leaves — collapsing to flat `Uninit` when empty, via `aggregate_husk` —
 /// and anything else becomes a flat `Uninit`. Used to leave drained storage reinitializable
@@ -1594,10 +1752,16 @@ fn verify_function(func: &ssa::Function) {
     for b in &block_ids {
         let b = *b;
         let instructions: Vec<InstructionIdentity> = func.block(b).instructions().collect();
-        // An allocated-but-unused block carries no execution contract; only non-empty blocks do.
-        if instructions.is_empty() {
-            continue;
-        }
+        // Every block must be non-empty and therefore (with the terminator-iff-last check below) end
+        // in a terminator: an empty block is a malformed CFG. The emitter allocates blocks before
+        // filling them, but always fills them (with code, a fall-through `br`, or the trailing `ret`
+        // at finalization), so a leftover empty block is a lowering bug, not a tolerated state.
+        assert!(
+            !instructions.is_empty(),
+            "SSA function `{}` block {}: a block must not be empty (it must end in a terminator)",
+            func.name,
+            b.raw()
+        );
         let last = instructions.len() - 1;
         for (k, &i) in instructions.iter().enumerate() {
             let instr = func.at(i);

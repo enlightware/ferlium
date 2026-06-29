@@ -42,9 +42,6 @@ pub enum Value {
     /// A unit value.
     Unit,
 
-    /// A pointer to a unit value. Must not be dereferenced.
-    UnitPlace,
-
     /// A constant string value.
     String(crate::std::string::String),
 
@@ -75,7 +72,6 @@ impl fmt::Display for Value {
             Value::Uninit(t) => write!(f, "Uninit<{}>", t.name),
             Value::String(s) => write!(f, "\"{}\"", s),
             Value::Literal(lit) => write!(f, "{}", lit),
-            Value::UnitPlace => write!(f, "&()"),
         }
     }
 }

@@ -108,22 +108,6 @@ fn imported_function(
     (fi, mi)
 }
 
-/// A standard-library intrinsic operating on trusted `Uninit<T>` storage.
-///
-/// These intrinsics have no script body; the SSA emitter lowers them inline as memory operations
-/// (`Uninit<T>` has the same layout as `T`, so the conversions are reinterpretations).
-#[derive(Clone, Copy)]
-enum UninitIntrinsic {
-    /// `uninit() -> Uninit<T>`: produces uninitialized storage.
-    Uninit,
-    /// `write_init(target: &mut Uninit<T>, value: T)`: moves `value` into `target`.
-    WriteInit,
-    /// `assume_init(value: Uninit<T>) -> T`: moves the initialized value out of its storage.
-    AssumeInit,
-    /// `assume_init_mut(target: &mut Uninit<T>) -> &mut T`: reinterprets storage as initialized.
-    AssumeInitMut,
-}
-
 /// The SSA blocks involved in the lowering of a case in a match expression.
 struct CaseBlocks {
     /// The head blocks for the conditions.
@@ -656,55 +640,6 @@ impl<'a> Emitter<'a> {
         self.insert(Instruction::call(span, callee, arguments));
     }
 
-    /// Recognizes a call to a trusted `Uninit<T>` standard-library intrinsic, which the emitter
-    /// lowers inline as a memory operation rather than as an opaque (bodyless) call.
-    fn uninit_intrinsic(&self, function: FunctionId) -> Option<UninitIntrinsic> {
-        let (fi, mi) = self.resolve_function(function);
-        if mi != STD_MODULE_ID {
-            return None;
-        }
-        let module = self.session.expect_fresh_module(mi);
-        let name = module.get_function_name_by_id(fi)?;
-        match name.as_str() {
-            "uninit" => Some(UninitIntrinsic::Uninit),
-            "write_init" => Some(UninitIntrinsic::WriteInit),
-            "assume_init" => Some(UninitIntrinsic::AssumeInit),
-            "assume_init_mut" => Some(UninitIntrinsic::AssumeInitMut),
-            _ => None,
-        }
-    }
-
-    /// Lowers a trusted `Uninit<T>` intrinsic call in destination-passing (value) position.
-    fn lower_uninit_intrinsic_into(
-        &mut self,
-        node: &ENode,
-        n: &hir::StaticApplication<Elaborated>,
-        intrinsic: UninitIntrinsic,
-        destination: Option<ssa::Value>,
-    ) {
-        match intrinsic {
-            // `uninit()` yields uninitialized storage: leave `destination` uninitialized.
-            UninitIntrinsic::Uninit => {}
-            // `write_init(target, value)` moves `value` into `target`'s storage. It is `()`-typed,
-            // so nothing is stored into `destination`.
-            UninitIntrinsic::WriteInit => {
-                let target = self.lower_as_place(&self.hir_arena[n.arguments[0].value]);
-                self.lower_value_into(&self.hir_arena[n.arguments[1].value], Some(target));
-            }
-            // `assume_init(value)` reinterprets the storage as initialized and moves the value out;
-            // the value lives in the argument's place, so copy it into `destination`.
-            UninitIntrinsic::AssumeInit => {
-                if destination.is_some() {
-                    self.assert_statically_sized(node.ty);
-                    let place = self.lower_as_place(&self.hir_arena[n.arguments[0].value]);
-                    self.memcpy_into_if_needed(node.span, place, destination);
-                }
-            }
-            // `assume_init_mut` is place-returning; lower it through the place path.
-            UninitIntrinsic::AssumeInitMut => self.lower_place_call_into(node, destination),
-        }
-    }
-
     /// Allocates frame storage for every [`LocalStorage::Owned`] local of the lowered function and
     /// binds it to its `alloca` place.
     ///
@@ -837,7 +772,12 @@ impl<'a> Emitter<'a> {
         for (i, n) in fields.iter().enumerate() {
             let field = &self.hir_arena[*n];
             let f = self
-                .insert(Instruction::subfield(field.span, d.clone(), int_constant(i as isize), field.ty))
+                .insert(Instruction::subfield(
+                    field.span,
+                    d.clone(),
+                    int_constant(i as isize),
+                    field.ty,
+                ))
                 .unwrap();
             self.lower_value_into(field, Some(f));
         }
@@ -977,7 +917,12 @@ impl<'a> Emitter<'a> {
         value: isize,
     ) {
         let place = self
-            .insert(Instruction::subfield(span, dest.clone(), int_constant(index as isize), ty))
+            .insert(Instruction::subfield(
+                span,
+                dest.clone(),
+                int_constant(index as isize),
+                ty,
+            ))
             .unwrap();
         self.insert(Instruction::store(span, int_constant(value), place));
     }
@@ -1104,26 +1049,6 @@ impl<'a> Emitter<'a> {
             }
 
             K::StaticApply(n) => {
-                if let Some(intrinsic) = self.uninit_intrinsic(n.function) {
-                    return match intrinsic {
-                        // `assume_init`/`assume_init_mut` reinterpret the argument's storage as
-                        // initialized: the result place is the argument's place (an identity).
-                        UninitIntrinsic::AssumeInit | UninitIntrinsic::AssumeInitMut => {
-                            self.lower_as_place(&self.hir_arena[n.arguments[0].value])
-                        }
-                        // `uninit`/`write_init` produce a value: materialize it into a temporary.
-                        UninitIntrinsic::Uninit | UninitIntrinsic::WriteInit => {
-                            let storage = self.alloca_storage(node.span, node.ty);
-                            self.lower_uninit_intrinsic_into(
-                                node,
-                                n,
-                                intrinsic,
-                                Some(storage.clone()),
-                            );
-                            storage
-                        }
-                    };
-                }
                 let (fi, mi) = self.resolve_function(n.function);
                 let f = ssa::Value::Function(self.demand_function(fi, mi));
                 let mut arguments: Vec<ssa::Value> = vec![];
@@ -1206,7 +1131,10 @@ impl<'a> Emitter<'a> {
                     self.lower_value_into(&self.hir_arena[*s], None);
                 }
                 let place = if self.current_block_is_terminated() {
-                    ssa::Value::UnitPlace
+                    // Dead code: a leading statement terminated the block, so the tail place is
+                    // unreachable. Return an arbitrary valid place (the return out-pointer) that is
+                    // never consumed.
+                    self.context.return_destination.clone()
                 } else {
                     self.lower_as_place(&self.hir_arena[*tail])
                 };
@@ -1233,7 +1161,9 @@ impl<'a> Emitter<'a> {
         let accessor = &self.hir_arena[n.accessor];
         let app = match &accessor.kind {
             hir::NodeKind::StaticApply(app) => app,
-            other => panic!("a WithYielded accessor must be a StaticApply of a YieldedOnce member, got {other:?}"),
+            other => panic!(
+                "a WithYielded accessor must be a StaticApply of a YieldedOnce member, got {other:?}"
+            ),
         };
         let (fi, mi) = self.resolve_function(app.function);
         let callee = ssa::Value::Function(self.demand_function(fi, mi));
@@ -1253,7 +1183,12 @@ impl<'a> Emitter<'a> {
         // `invoke`-style `project` (a follow-up), the same way `emit_call` chooses `invoke`.
         let element_ty = self.local_declaration(n.binding).ty;
         let place = self
-            .insert(Instruction::project(accessor.span, callee, arguments, element_ty))
+            .insert(Instruction::project(
+                accessor.span,
+                callee,
+                arguments,
+                element_ty,
+            ))
             .unwrap();
         self.context.locals.insert(n.binding, place.clone());
         self.enter_projection_scope(place);
@@ -1448,8 +1383,9 @@ impl<'a> Emitter<'a> {
     /// its address. `node` supplies the span and the concrete result type for the allocation.
     ///
     /// The allocation depends on `f`'s return convention:
-    /// - a void (`()`) return type needs no storage and resolves to the special value `UnitPlace`;
-    /// - [`FnReturnConvention::Value`] allocates storage for the returned value (`alloca`);
+    /// - [`FnReturnConvention::Value`] allocates storage for the returned value (`alloca`) — including
+    ///   a unit return, which allocates a (zero-sized) `()` cell the callee initializes with the live
+    ///   unit value, so every result, unit or not, flows through a real cell;
     /// - [`FnReturnConvention::AddressorPlace`] allocates a slot holding the returned place pointer
     ///   (`alloca_place`).
     ///
@@ -1457,17 +1393,13 @@ impl<'a> Emitter<'a> {
     /// `project` (which exposes the yielded place as its own result register), never called for a
     /// result through this helper.
     fn allocate_result(&mut self, node: &ENode, f: &FnType) -> ssa::Value {
-        if f.ret == Type::unit() {
-            ssa::value::Value::UnitPlace
-        } else {
-            match f.return_convention {
-                FnReturnConvention::Value => self.alloca_storage(node.span, node.ty),
-                FnReturnConvention::AddressorPlace => self
-                    .insert(Instruction::alloca_place(node.span, node.ty))
-                    .unwrap(),
-                FnReturnConvention::YieldedOnce => {
-                    panic!("a YieldedOnce member is entered via `project`, never called for a result")
-                }
+        match f.return_convention {
+            FnReturnConvention::Value => self.alloca_storage(node.span, node.ty),
+            FnReturnConvention::AddressorPlace => self
+                .insert(Instruction::alloca_place(node.span, node.ty))
+                .unwrap(),
+            FnReturnConvention::YieldedOnce => {
+                panic!("a YieldedOnce member is entered via `project`, never called for a result")
             }
         }
     }
@@ -1610,7 +1542,12 @@ impl<'a> Emitter<'a> {
                     let temp = self.alloca_storage(value_span, value_ty);
                     self.lower_value_into(&self.hir_arena[n.value], Some(temp.clone()));
                     self.emit_drop(node.span, place.clone(), dropped_ty, spec);
-                    self.memcpy_into_if_needed(node.span, temp, Some(place));
+                    // The fresh temporary is *moved* into the destination (it is consumed, not read
+                    // again). A move is shape-agnostic, so it works for a generic `value_ty` too —
+                    // `move_value_into` carries the run-time-layout witness via `memcpy_dynamic` when
+                    // the type is not statically sized, unlike a bare `memcpy` (which requires a known
+                    // layout — see `Instruction::memcpy`).
+                    self.move_value_into(node.span, temp, place, value_ty);
                 } else {
                     self.lower_value_into(&self.hir_arena[n.value], Some(place));
                 }
@@ -1756,9 +1693,6 @@ impl<'a> Emitter<'a> {
             },
 
             K::StaticApply(n) => {
-                if let Some(intrinsic) = self.uninit_intrinsic(n.function) {
-                    return self.lower_uninit_intrinsic_into(node, n, intrinsic, destination);
-                }
                 if n.ty.returns_place() {
                     return self.lower_place_call_into(node, destination);
                 }
@@ -1995,7 +1929,12 @@ impl<'a> Emitter<'a> {
                     .unwrap();
                 self.store(node.span, shell, dest.clone());
                 let payload_place = self
-                    .insert(Instruction::subfield(node.span, dest, int_constant(0), payload.ty))
+                    .insert(Instruction::subfield(
+                        node.span,
+                        dest,
+                        int_constant(0),
+                        payload.ty,
+                    ))
                     .unwrap();
                 self.lower_value_into(payload, Some(payload_place));
             }

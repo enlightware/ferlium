@@ -24,9 +24,11 @@ pub enum ParameterTag {
     /// This is used to pass generic parameter witnesses.
     Dictionary,
 
-    /// The place where the return value (if any) shall be stored.
-    ///
-    /// The storage is allocated by the caller. This parameter is present iff the function returns a non-void result.
+    /// The caller-allocated out-pointer through which the function returns its result (see the
+    /// return conventions in `doc/ssa-ir.md`): a value (`Value`), a place pointer (`AddressorPlace`),
+    /// or — for a unit return — a `()` cell. Present on every lowered function as the last parameter;
+    /// a `YieldedOnce` accessor keeps it for ABI uniformity but does not write through it (its yielded
+    /// place flows out via the driving `project`).
     Return,
 }
 

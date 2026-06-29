@@ -153,7 +153,10 @@ fn dictionary_from_arg(arg: ValOrMut, ctx: &mut EvalCtx<'_>) -> Result<DictArg, 
             // accept a place holding a tuple as the SSA witness table.
             if let Some(dictionary) = try_dictionary_from_place(&place, ctx) {
                 Ok(DictArg::Interned(dictionary))
-            } else if place.target_ref(ctx).is_ok_and(|value| value.as_tuple().is_some()) {
+            } else if place
+                .target_ref(ctx)
+                .is_ok_and(|value| value.as_tuple().is_some())
+            {
                 Ok(DictArg::Witness(place))
             } else {
                 Err(invalid())

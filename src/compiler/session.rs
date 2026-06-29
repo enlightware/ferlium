@@ -1035,9 +1035,9 @@ impl CompilerSession {
 
         let value = {
             let mut interp = Interpreter::new(module_id, self);
-            interp
-                .run_main(module_id, main_id)
-                .unwrap_or_else(|error| panic!("SSA interpretation raised a runtime error: {error:?}"))
+            interp.run_main(module_id, main_id).unwrap_or_else(|error| {
+                panic!("SSA interpretation raised a runtime error: {error:?}")
+            })
         };
 
         if ret_ty == Type::unit() {

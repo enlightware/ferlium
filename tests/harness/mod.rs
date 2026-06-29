@@ -418,22 +418,23 @@ macro_rules! assert_val_eq {
     }};
 }
 
-/// Replaces every interned-id marker of the form `<number-number>` (e.g. `<0-6>`, `<0-4043>`) with
-/// `<...>`, so that textual assertions don't flake on the non-deterministic ids embedded in dumps.
-///
-/// Also normalizes the *module id* of an SSA dictionary operand `dict(m<number>:i<number>)` to
+/// Normalizes the *module id* of an SSA dictionary operand `dict(m<number>:i<number>)` to
 /// `dict(m<...>:i<number>)`: the module id is assigned by module load order (so it shifts as the
 /// std prelude grows), whereas the trailing impl id is an index within a fixed module and stays
 /// deterministic, so it is preserved.
+///
+/// Trait-impl method names used to embed non-deterministic interned ids (e.g. `Num<0-6>`); these
+/// are now fully-qualified type names plus a deterministic `#impl:<hash>` head hash (see
+/// commit 2231b61), so they need no normalization.
 pub(crate) fn replace_flaky_ids(s: impl AsRef<str>) -> String {
-    static INTERNED_ID: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<\d+-\d+>").unwrap());
     static MODULE_ID: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"dict\(m\d+:").unwrap());
-    let s = MODULE_ID.replace_all(s.as_ref(), "dict(m<...>:");
-    INTERNED_ID.replace_all(&s, "<...>").into_owned()
+    MODULE_ID
+        .replace_all(s.as_ref(), "dict(m<...>:")
+        .into_owned()
 }
 
-/// Like `assert_eq!`, but first replaces every interned-id marker (`<number-number>`) in both sides
-/// with `...`, so the comparison ignores non-deterministic ids that would otherwise cause flakes.
+/// Like `assert_eq!`, but normalizes both sides with [`replace_flaky_ids`] first, so the comparison
+/// ignores the non-deterministic module id that would otherwise cause flakes.
 #[macro_export]
 macro_rules! assert_eq_sans_flake {
     ($lhs:expr, $rhs:expr $(,)?) => {{

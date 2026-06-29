@@ -11,9 +11,8 @@ use test_log::test;
 use indoc::indoc;
 
 use crate::harness::{
-    TestSession, bool, float, get_array_property_value, get_property_value,
-    int, set_array_property_value, set_property_value, string, unit, variant_0, variant_t1,
-    variant_tn,
+    TestSession, bool, float, get_array_property_value, get_property_value, int,
+    set_array_property_value, set_property_value, string, unit, variant_0, variant_t1, variant_tn,
 };
 use ferlium::{
     compiler::error::{

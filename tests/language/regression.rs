@@ -517,11 +517,15 @@ fn break_with_diverging_value_does_not_insert_after_terminator() {
     // The break value only diverges on one branch: when it falls through with a real value, the
     // block is *not* terminated and the guard must still emit the jump to the loop exit.
     assert_val_eq!(
-        session.run("fn run() -> int { let c = false; loop { break if c { return 1 } else { 2 } } } run()"),
+        session.run(
+            "fn run() -> int { let c = false; loop { break if c { return 1 } else { 2 } } } run()"
+        ),
         int(2)
     );
     assert_val_eq!(
-        session.run("fn run() -> int { let c = true; loop { break if c { return 1 } else { 2 } } } run()"),
+        session.run(
+            "fn run() -> int { let c = true; loop { break if c { return 1 } else { 2 } } } run()"
+        ),
         int(1)
     );
 }
