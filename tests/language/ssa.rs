@@ -2,7 +2,7 @@ use test_log::test;
 
 use ferlium::{format::FormatWith, module::ShowModuleWithOptions};
 
-use crate::harness::{TestSession, int};
+use crate::harness::{TestSession, bool, expected_tuple, int};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
@@ -2228,5 +2228,36 @@ fn discarded_record_evaluates_elements() {
     assert_val_eq!(
         session.run("fn f() { let mut c = 0; { a: { c = c + 1; c }, b: { c = c + 1; c } }; c } f()"),
         int(2)
+    );
+}
+
+
+
+
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn assign_aggregate_swap_matches_hir() {
+    // An assignment whose right-hand side reads the destination it overwrites must agree across
+    // both backends. Every aggregate destination carries a drop obligation, so lowering routes the
+    // right-hand side through a fresh temporary before moving it into the destination; this pins
+    // that the move-not-alias path is correct for tuples, records, arrays, variants, and the
+    // scalar-call (no-drop) case. The HIR/SSA parity check inside `run` is the real assertion.
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run("fn f() { let mut a = (true, false); a = (a.1, a.0); a } f()"),
+        expected_tuple([bool(false), bool(true)])
+    );
+    assert_val_eq!(
+        session.run("fn f() { let mut a = {x: 1, y: 2}; a = {x: a.y, y: a.x}; (a.x, a.y) } f()"),
+        expected_tuple([int(2), int(1)])
+    );
+    assert_val_eq!(
+        session.run("fn f() { let mut a = [1, 2]; a = [a[1], a[0]]; a } f()"),
+        session.run("[2, 1]")
+    );
+    assert_val_eq!(
+        session.run("fn f() { let mut a = (1, 2); a = (a.0 + a.1, a.0); a } f()"),
+        expected_tuple([int(3), int(1)])
     );
 }

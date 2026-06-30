@@ -1888,3 +1888,60 @@ fn unconstructed_empty_struct_is_not_dropped() {
     // the case the SSA storage seeding must get right: an empty aggregate is *not* seeded `Tuple([])`.
     assert_val_eq!(session.run(&source), int(0));
 }
+
+
+
+
+
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn all_unit_aggregate_with_custom_drop_is_dropped() {
+    // A struct whose only field is `()` is the case that makes the SSA husk rule treat a unit leaf
+    // as *live*: its run-time storage is `Tuple([Native(())])`, and if `is_drop_husk` classified a
+    // unit leaf as a husk, this aggregate would look dead and its `Value::drop` would be skipped —
+    // diverging from the HIR interpreter. This pins that the custom drop runs exactly once.
+    let mut session = TestSession::new();
+    let source = r#"
+        struct Marker(())
+        impl Value for Marker {
+            fn eq(l: Marker, r: Marker) -> bool { true }
+            fn to_string(v: Marker) -> string { "m" }
+            fn hash(v: Marker, s: &mut hasher) { () }
+            fn clone(s: Marker) -> Marker { Marker(()) }
+            fn drop(t: &mut Marker) { testing::record_tracked_drop(9) }
+        }
+        testing::reset_tracked_drops();
+        { let m = Marker(()); (); };
+        testing::tracked_drop_log()
+    "#;
+    assert_val_eq!(session.run(source), int(9));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn aggregate_with_unit_field_dropped_once_on_error_after_field_borrow() {
+    // Reading a field of an owned aggregate that also has a `()` field borrows the field (it is not
+    // moved out), so the aggregate stays fully live and its unwind-pad drop runs exactly once. This
+    // guards against an over-drop of `Tuple([.., unit])` storage on the error path: the unit leaf
+    // keeps `is_drop_husk` from treating the live aggregate as a husk, while the (never-produced)
+    // partially-moved state would be the only way it could go wrong. Runs under both backends.
+    let mut session = TestSession::new();
+    let source = format!(
+        r#"
+        {}
+        struct Pair(Probe, ())
+        fn read(p: Pair) -> int {{ p.0.0 }}
+        fn run() -> int {{
+            let pair = Pair(Probe(7), ());
+            read(pair);
+            idiv(1, 0)
+        }}
+        testing::reset_tracked_drops();
+        run()
+        "#,
+        tracked_probe_value_impl()
+    );
+    assert_eq!(session.fail_run(&source), RuntimeErrorKind::DivisionByZero);
+    assert_val_eq!(session.run("testing::tracked_drop_log()"), int(7));
+}
