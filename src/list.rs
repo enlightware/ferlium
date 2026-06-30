@@ -46,18 +46,18 @@ impl<T> List<T> {
         self.storage.capacity()
     }
 
-    /// Returns the position of the first element.
+    /// Returns the position of the first element, if any.
     pub fn first_address(&self) -> Option<Address> {
-        if self.storage.is_empty() {
+        if self.is_empty() {
             None
         } else {
             Some(Address::new(self.head_offset))
         }
     }
 
-    /// Returns position of the last element.
+    /// Returns position of the last element, if any.
     pub fn last_address(&self) -> Option<Address> {
-        if self.storage.is_empty() {
+        if self.is_empty() {
             None
         } else {
             Some(Address::new(self.tail_offset))
@@ -117,7 +117,7 @@ impl<T> List<T> {
             self.head_offset = 0;
             self.tail_offset = 0;
             self.free_offset = 1;
-            self.storage = vec![Bucket::new(!0, !0, x)];
+            self.storage.push(Bucket::new(!0, !0, x));
             Address::new(0)
         }
         // Has the list been emptied?
@@ -559,6 +559,34 @@ mod tests {
         xs.insert_after(a, "b");
         xs.insert_after(a, "c");
         assert!(xs.iter().eq(vec!["a", "c", "b"].iter()));
+    }
+
+    #[test]
+    fn test_first_last_address_after_emptied() {
+        let mut xs = List::<&str>::new();
+        let a = xs.append("a");
+        xs.remove(a);
+        assert!(xs.is_empty());
+
+        // An emptied list has no first/last element, even though its backing storage retains the
+        // freed bucket. Returning the stale `!0` head/tail sentinel here yields an out-of-bounds
+        // `Address`, and iterating it panics.
+        assert_eq!(xs.first_address(), None);
+        assert_eq!(xs.last_address(), None);
+        assert_eq!(xs.iter().count(), 0);
+        assert_eq!(xs.addresses().count(), 0);
+    }
+
+    #[test]
+    fn test_reserve_before_first_append() {
+        let mut xs = List::<&str>::new();
+        xs.reserve(48);
+
+        // Reserving capacity must survive the first append: per `reserve`'s contract the next 48
+        // insertions happen "without reallocating its storage".
+        xs.append("a");
+        assert!(xs.capacity() >= 48);
+        assert_eq!(xs[xs.first_address().unwrap()], "a");
     }
 
     #[test]
