@@ -298,6 +298,36 @@ impl<'a> EvalCtx<'a> {
         }
     }
 
+    pub(crate) fn assert_no_owned_local_leaks_before_truncate(
+        &self,
+        locals: &[LocalDecl],
+        len: usize,
+        span: Location,
+    ) {
+        #[cfg(debug_assertions)]
+        {
+            for local in locals.iter().filter(|local| local.owns_storage()) {
+                let index = self.frame_base + local.slot.as_index();
+                if index < len || index >= self.environment.len() {
+                    continue;
+                }
+                match &self.environment[index] {
+                    ValOrMut::Val(Value::Uninit) => {}
+                    ValOrMut::Val(_) => {
+                        panic!(
+                            "owned local `{}` left initialized at scope exit before environment \
+                             truncation at {:?}; missing block cleanup or move",
+                            local.name.0, span,
+                        );
+                    }
+                    ValOrMut::Dictionary(_) | ValOrMut::Ref(_) | ValOrMut::Mut(_) => {}
+                }
+            }
+        }
+        #[cfg(not(debug_assertions))]
+        let _ = (locals, len, span);
+    }
+
     fn ensure_environment_slot(&mut self, index: usize) {
         while self.environment.len() <= index {
             self.environment.push(ValOrMut::Val(Value::uninit()));
@@ -2558,6 +2588,11 @@ fn eval_block(
                 if let Some(value) = last_value.take() {
                     value.discard_storage();
                 }
+                ctx.assert_no_owned_local_leaks_before_truncate(
+                    locals,
+                    env_size,
+                    arena[*node].span,
+                );
                 ctx.truncate_environment_storage(env_size);
                 return Err(err);
             }
@@ -2573,11 +2608,21 @@ fn eval_block(
                 if matches!(transfer, ControlFlow::Transfer(ControlTransfer::Yield(_))) {
                     return Ok(transfer);
                 }
+                ctx.assert_no_owned_local_leaks_before_truncate(
+                    locals,
+                    env_size,
+                    arena[*node].span,
+                );
                 ctx.truncate_environment_storage(env_size);
                 return Ok(transfer);
             }
         }
     }
+    let span = nodes
+        .last()
+        .map(|node| arena[*node].span)
+        .unwrap_or_else(Location::new_synthesized);
+    ctx.assert_no_owned_local_leaks_before_truncate(locals, env_size, span);
     ctx.truncate_environment_storage(env_size);
     cont(last_value.unwrap_or_else(Value::unit))
 }
@@ -2623,8 +2668,16 @@ fn eval_block_with_cleanup(
                     value.discard_storage();
                 }
                 let cleanup = drop_cleanup_locals(ctx, locals, cleanup_drops, arena[*node].span);
+                if let Err(err) = cleanup {
+                    ctx.truncate_environment_storage(env_size);
+                    return Err(err);
+                }
+                ctx.assert_no_owned_local_leaks_before_truncate(
+                    locals,
+                    env_size,
+                    arena[*node].span,
+                );
                 ctx.truncate_environment_storage(env_size);
-                cleanup?;
                 return Err(err);
             }
             Ok(ControlFlow::Continue(val)) => {
@@ -2640,8 +2693,16 @@ fn eval_block_with_cleanup(
                     return Ok(transfer);
                 }
                 let cleanup = drop_cleanup_locals(ctx, locals, cleanup_drops, arena[*node].span);
+                if let Err(err) = cleanup {
+                    ctx.truncate_environment_storage(env_size);
+                    return Err(err);
+                }
+                ctx.assert_no_owned_local_leaks_before_truncate(
+                    locals,
+                    env_size,
+                    arena[*node].span,
+                );
                 ctx.truncate_environment_storage(env_size);
-                cleanup?;
                 return Ok(transfer);
             }
         }
@@ -2651,8 +2712,12 @@ fn eval_block_with_cleanup(
         .map(|node| arena[*node].span)
         .unwrap_or_else(Location::new_synthesized);
     let cleanup = drop_cleanup_locals(ctx, locals, cleanup_drops, span);
+    if let Err(err) = cleanup {
+        ctx.truncate_environment_storage(env_size);
+        return Err(err);
+    }
+    ctx.assert_no_owned_local_leaks_before_truncate(locals, env_size, span);
     ctx.truncate_environment_storage(env_size);
-    cleanup?;
     cont(last_value.unwrap_or_else(Value::unit))
 }
 
@@ -3360,7 +3425,14 @@ mod tests {
         );
         let accessor_entry = node(
             arena,
-            hir_syn::block([store_scratch, yield_scratch, assign_log]),
+            NodeKind::Block(b(hir::Block {
+                body: b(SVec2::from_vec(vec![
+                    store_scratch,
+                    yield_scratch,
+                    assign_log,
+                ])),
+                cleanup: vec![accessor_scratch],
+            })),
             Type::unit(),
             span,
         );
@@ -3444,7 +3516,14 @@ mod tests {
         );
         let accessor_entry = node(
             &mut arena,
-            hir_syn::block([store_scratch, yield_scratch, assign_log]),
+            NodeKind::Block(b(hir::Block {
+                body: b(SVec2::from_vec(vec![
+                    store_scratch,
+                    yield_scratch,
+                    assign_log,
+                ])),
+                cleanup: vec![accessor_scratch],
+            })),
             Type::unit(),
             span,
         );
@@ -3509,7 +3588,10 @@ mod tests {
         );
         let caller_entry = node(
             &mut arena,
-            hir_syn::block([store_caller_log, with_yielded, tuple]),
+            NodeKind::Block(b(hir::Block {
+                body: b(SVec2::from_vec(vec![store_caller_log, with_yielded, tuple])),
+                cleanup: vec![caller_log, caller_result],
+            })),
             Type::tuple([int_ty, int_ty]),
             span,
         );
@@ -3611,7 +3693,14 @@ mod tests {
         );
         let accessor_entry = node(
             &mut arena,
-            hir_syn::block([store_scratch, yield_scratch, epilogue_tracked]),
+            NodeKind::Block(b(hir::Block {
+                body: b(SVec2::from_vec(vec![
+                    store_scratch,
+                    yield_scratch,
+                    epilogue_tracked,
+                ])),
+                cleanup: vec![accessor_scratch],
+            })),
             eval_drop_tracked_type(),
             span,
         );
@@ -3759,7 +3848,14 @@ mod tests {
         let load_log = node(&mut arena, hir_syn::load_local(caller_log), int_ty, span);
         let caller_entry = node(
             &mut arena,
-            hir_syn::block([store_log, outer_with_yielded, load_log]),
+            NodeKind::Block(b(hir::Block {
+                body: b(SVec2::from_vec(vec![
+                    store_log,
+                    outer_with_yielded,
+                    load_log,
+                ])),
+                cleanup: vec![caller_log],
+            })),
             int_ty,
             span,
         );
@@ -3873,6 +3969,43 @@ mod tests {
 
         assert_eq!(eval_drop_tracked_count(), 1);
         value.discard_storage();
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "owned local `leaked` left initialized at scope exit")]
+    fn debug_scope_truncation_detects_missing_owned_local_cleanup() {
+        let span = Location::new_synthesized();
+        let leaked = LocalDeclId::from_index(0);
+        let mut arena = ENodeArena::default();
+        let value = node(&mut arena, hir_syn::native(()), Type::unit(), span);
+        let store = node(
+            &mut arena,
+            hir_syn::store_local_to(value, leaked),
+            Type::unit(),
+            span,
+        );
+        let tail = node(&mut arena, hir_syn::native(()), Type::unit(), span);
+        let block = node(
+            &mut arena,
+            NodeKind::Block(b(hir::Block {
+                body: b(SVec2::from_vec(vec![store, tail])),
+                cleanup: Vec::new(),
+            })),
+            Type::unit(),
+            span,
+        );
+        let mut locals = [owned_local(
+            "leaked",
+            MutType::constant(),
+            Type::unit(),
+            span,
+        )];
+        LocalDecl::assign_sequential_slots(&mut locals);
+        let locals = locals.map(LocalDecl::into_elaborated);
+        let session = CompilerSession::new();
+
+        let _ = eval_node(&arena, block, ModuleId::from_index(0), &locals, &session);
     }
 
     #[test]
