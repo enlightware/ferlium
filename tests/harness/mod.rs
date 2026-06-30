@@ -35,64 +35,12 @@ use ferlium::{
 };
 use regex::Regex;
 use std::{
-    cell::{Cell, RefCell},
+    cell::RefCell,
     fmt,
     sync::LazyLock,
     sync::atomic::AtomicIsize,
 };
 use ustr::ustr;
-
-/// Which interpreter backend a [`TestSession`] exercises when running a snippet.
-///
-/// A session reads the *current* backend (a thread-local set by [`enter_backend`], driven by the
-/// [`dual_test!`](crate::dual_test) macro) at construction time, so a plain `TestSession::new()`
-/// inside a `dual_test!` body automatically picks up that case's backend with no body edits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Backend {
-    /// Run only the HIR interpreter; the returned value is the HIR result.
-    Hir,
-    /// Run only the SSA interpreter; the returned value is the SSA result.
-    Ssa,
-    /// Run both interpreters and assert they agree (legacy default for un-migrated `#[test]`s).
-    /// The returned value is the HIR result.
-    Both,
-}
-
-thread_local! {
-    /// The backend a `TestSession::new()` on this thread will adopt. Defaults to [`Backend::Both`]
-    /// so any test *not* wrapped in [`dual_test!`](crate::dual_test) keeps the fused dual-run that
-    /// asserts the two backends agree.
-    static CURRENT_BACKEND: Cell<Backend> = const { Cell::new(Backend::Both) };
-}
-
-/// Returns the backend a `TestSession::new()` would currently adopt on this thread.
-pub fn current_backend() -> Backend {
-    CURRENT_BACKEND.get()
-}
-
-/// Sets the current thread's backend. Prefer [`enter_backend`], which restores the previous value
-/// on scope exit (including on a panicking test).
-pub fn set_current_backend(backend: Backend) {
-    CURRENT_BACKEND.set(backend);
-}
-
-/// Restores the thread-local backend to [`Backend::Both`] when dropped, so a backend selected by
-/// one test never leaks into another should the test harness reuse the thread.
-#[must_use = "the guard restores the backend only when dropped; bind it to a local"]
-pub struct BackendGuard;
-
-impl Drop for BackendGuard {
-    fn drop(&mut self) {
-        set_current_backend(Backend::Both);
-    }
-}
-
-/// Selects `backend` for the current thread until the returned guard is dropped (e.g. at the end of
-/// a test, or when it unwinds on panic).
-pub fn enter_backend(backend: Backend) -> BackendGuard {
-    set_current_backend(backend);
-    BackendGuard
-}
 
 #[derive(Debug)]
 pub enum Error {
@@ -447,67 +395,6 @@ macro_rules! assert_eq_sans_flake {
         let rhs = $crate::harness::replace_flaky_ids($rhs);
         assert_eq!(lhs, rhs, $($arg)+);
     }};
-}
-
-/// Defines one test that runs against *both* interpreter backends, emitting two distinct test
-/// cases: `<name>::hir` and `<name>::ssa`. Inside the body, a plain `TestSession::new()` adopts the
-/// case's backend automatically (no body edits needed) — `assert_val_eq!`, `run`, `try_run`, etc.
-/// then check that backend's result.
-///
-/// ```ignore
-/// dual_test!(arithmetic {
-///     let mut session = TestSession::new();
-///     assert_val_eq!(session.run("1 + 2"), int(3));
-/// });
-/// // runs as `arithmetic::hir` and `arithmetic::ssa`
-/// ```
-///
-/// Use this for value-running tests. Pure golden tests (`emit_ssa` text) or `fail_compilation`
-/// cases don't depend on the backend and should stay as ordinary `#[test]`s. When a feature isn't
-/// lowerable to SSA yet, use [`hir_only_test!`] (whole test) or an inline
-/// `if session.backend() == Backend::Ssa { return; }` guard.
-#[macro_export]
-macro_rules! dual_test {
-    ($name:ident $body:block) => {
-        mod $name {
-            #[allow(unused_imports)]
-            use super::*;
-
-            #[::test_log::test]
-            #[cfg_attr(target_arch = "wasm32", ::wasm_bindgen_test::wasm_bindgen_test)]
-            fn hir() {
-                let _backend_guard = $crate::harness::enter_backend($crate::harness::Backend::Hir);
-                $body
-            }
-
-            #[::test_log::test]
-            #[cfg_attr(target_arch = "wasm32", ::wasm_bindgen_test::wasm_bindgen_test)]
-            fn ssa() {
-                let _backend_guard = $crate::harness::enter_backend($crate::harness::Backend::Ssa);
-                $body
-            }
-        }
-    };
-}
-
-/// Like [`dual_test!`], but emits only the `<name>::hir` case. Use for features the SSA backend
-/// cannot lower yet, so the HIR coverage stays green without a failing `::ssa` case. Switch the
-/// invocation to `dual_test!` once SSA supports the feature.
-#[macro_export]
-macro_rules! hir_only_test {
-    ($name:ident $body:block) => {
-        mod $name {
-            #[allow(unused_imports)]
-            use super::*;
-
-            #[::test_log::test]
-            #[cfg_attr(target_arch = "wasm32", ::wasm_bindgen_test::wasm_bindgen_test)]
-            fn hir() {
-                let _backend_guard = $crate::harness::enter_backend($crate::harness::Backend::Hir);
-                $body
-            }
-        }
-    };
 }
 
 fn test_assoc_trait() -> Trait {
@@ -1147,7 +1034,7 @@ fn set_array_property_value_value_ref(value: &Value) {
 
 /// A snapshot of the harness's externally-mutable `@props` fixtures (`my_scope.my_var` and
 /// `my_scope.my_array`), used to give both backends the same preconditions in the fused
-/// [`Backend::Both`] dual-run.
+/// HIR-and-SSA dual-run.
 ///
 /// That run executes one snippet through the HIR interpreter and then through the SSA interpreter in
 /// a single pass. A snippet that mutates an `@props` fixture (e.g. `@props::my_scope.my_var += 1`)
@@ -1264,14 +1151,12 @@ fn add_deep_modules(session: &mut CompilerSession) {
 #[derive(Debug)]
 pub struct TestSession {
     session: CompilerSession,
-    /// The interpreter backend this session runs snippets through (see [`Backend`]).
-    backend: Backend,
 }
 impl TestSession {
     /// Create a new test session with std, testing, effects and props modules registered.
     ///
-    /// The session adopts the thread's [`current_backend`]; inside a [`dual_test!`](crate::dual_test)
-    /// body this is the case's backend, and otherwise [`Backend::Both`] (fused dual-run).
+    /// Every snippet run through the session is executed on *both* the HIR and SSA interpreters,
+    /// which are asserted to agree (see [`TestSession::try_compile_and_run_value`]).
     pub fn new() -> Self {
         let mut compiler_session = CompilerSession::new();
         let std_iterator_trait = compiler_session
@@ -1300,35 +1185,12 @@ impl TestSession {
         add_deep_modules(&mut compiler_session);
         Self {
             session: compiler_session,
-            backend: current_backend(),
         }
     }
 
     /// Get the compiler session of this test session.
     pub fn session(&self) -> &CompilerSession {
         &self.session
-    }
-
-    /// The interpreter backend this session runs snippets through.
-    ///
-    /// Useful as an inline escape hatch for a feature the SSA backend cannot run yet:
-    /// `if session.backend() == Backend::Ssa { return; }` keeps the `::hir` case meaningful while
-    /// the `::ssa` case is a no-op. Prefer [`hir_only_test!`](crate::hir_only_test) when a whole
-    /// test should skip SSA.
-    #[allow(dead_code)] // Escape-hatch API for tests; not exercised by every test binary.
-    pub fn backend(&self) -> Backend {
-        self.backend
-    }
-
-    /// Pins this session to the HIR interpreter only, regardless of the thread-local default.
-    ///
-    /// An escape hatch for a snippet that uses a feature the SSA backend cannot lower yet (e.g. a
-    /// subscript `yield` / `WithYielded`), so a `Backend::Both` session would otherwise crash in the
-    /// SSA lowering. Prefer [`hir_only_test!`](crate::hir_only_test) for a whole test; this is for the
-    /// experimental sessions that build their own `TestSession`.
-    #[allow(dead_code)] // Escape-hatch API for tests; not exercised by every test binary.
-    pub fn restrict_to_hir(&mut self) {
-        self.backend = Backend::Hir;
     }
 
     pub fn allow_experimental(&mut self) {
@@ -1484,57 +1346,44 @@ impl TestSession {
         let ModuleAndExpr { module_id, expr } =
             self.try_compile(src).map_err(Error::Compilation)?;
 
-        // Run the expression if any, through the backend(s) this session selects (see `Backend`).
+        // Run the expression if any, through *both* interpreters, asserting their *outcomes* agree —
+        // equal values, or equal runtime-error kinds — and returning the HIR result. Running both on
+        // every snippet gives the SSA backend full coverage, including the error path: a failing
+        // snippet exercises both backends rather than short-circuiting on the HIR error.
         if let Some(expr) = expr {
             let ty = expr.ty.ty;
-            let value = match self.backend {
-                // HIR only: the returned value is the HIR result.
-                Backend::Hir => self.eval_hir(module_id, &expr)?,
-                // SSA only: the returned value is the SSA result, so its assertions check the SSA
-                // backend directly. A raised runtime error surfaces as `Error::Runtime`, so
-                // `fail_run`/`try_run_value` observe it exactly as for the HIR backend. Features SSA
-                // cannot lower yet fail loudly on the `::ssa` case.
-                Backend::Ssa => self
+            let value = {
+                // Snapshot the externally-mutable `@props` fixtures so the SSA run observes the
+                // same preconditions as the HIR run. Without this, a snippet that mutates a
+                // fixture would apply its effect twice (once per backend) and the two backends
+                // would diverge spuriously. See `PropertyFixtures`.
+                let fixtures = PropertyFixtures::capture();
+                let hir_result = self.eval_hir(module_id, &expr);
+                fixtures.restore();
+                let ssa_result = self
                     .session
                     .run_expr_via_ssa(module_id, &expr)
-                    .map_err(Error::Runtime)?,
-                // Both (legacy default): run each backend and assert their *outcomes* agree — equal
-                // values, or equal runtime-error kinds — returning the HIR result. This is what gives
-                // the SSA error path coverage: a failing snippet now exercises both backends (the
-                // SSA run is no longer short-circuited by the HIR error).
-                Backend::Both => {
-                    // Snapshot the externally-mutable `@props` fixtures so the SSA run observes the
-                    // same preconditions as the HIR run. Without this, a snippet that mutates a
-                    // fixture would apply its effect twice (once per backend) and the two backends
-                    // would diverge spuriously. See `PropertyFixtures`.
-                    let fixtures = PropertyFixtures::capture();
-                    let hir_result = self.eval_hir(module_id, &expr);
-                    fixtures.restore();
-                    let ssa_result = self
-                        .session
-                        .run_expr_via_ssa(module_id, &expr)
-                        .map_err(Error::Runtime);
-                    match (&hir_result, &ssa_result) {
-                        (Ok(hir_value), Ok(ssa_value)) => {
-                            if let Err(message) = compare_values(ssa_value, hir_value, "value") {
-                                panic!("SSA backend diverged from the HIR interpreter: {message}");
-                            }
+                    .map_err(Error::Runtime);
+                match (&hir_result, &ssa_result) {
+                    (Ok(hir_value), Ok(ssa_value)) => {
+                        if let Err(message) = compare_values(ssa_value, hir_value, "value") {
+                            panic!("SSA backend diverged from the HIR interpreter: {message}");
                         }
-                        (Err(Error::Runtime(hir_err)), Err(Error::Runtime(ssa_err))) => {
-                            assert_eq!(
-                                ssa_err.kind(),
-                                hir_err.kind(),
-                                "SSA backend raised a different runtime error than the HIR \
-                                 interpreter"
-                            );
-                        }
-                        (hir, ssa) => panic!(
-                            "SSA backend diverged from the HIR interpreter: one produced a value \
-                             and the other a runtime error (HIR: {hir:?}, SSA: {ssa:?})"
-                        ),
                     }
-                    hir_result?
+                    (Err(Error::Runtime(hir_err)), Err(Error::Runtime(ssa_err))) => {
+                        assert_eq!(
+                            ssa_err.kind(),
+                            hir_err.kind(),
+                            "SSA backend raised a different runtime error than the HIR \
+                             interpreter"
+                        );
+                    }
+                    (hir, ssa) => panic!(
+                        "SSA backend diverged from the HIR interpreter: one produced a value \
+                         and the other a runtime error (HIR: {hir:?}, SSA: {ssa:?})"
+                    ),
                 }
+                hir_result?
             };
             Ok(RunValue {
                 module_id,

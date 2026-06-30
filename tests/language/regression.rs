@@ -70,7 +70,9 @@ fn effect_polymorphic_function_parameter_arithmetic_does_not_panic() {
 //
 // Note: the bug only affected ModuleParser (not ModuleAndBlockContentParser used for user code),
 // so these user-code tests serve as documentation and regression guards for the pattern.
-dual_test!(if_else_after_match_expression {
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn if_else_after_match_expression() {
     let mut session = TestSession::new();
     // `if cond { match ... } else { ... }` — true-branch ends with a match expression
     assert_val_eq!(
@@ -99,9 +101,11 @@ dual_test!(if_else_after_match_expression {
         "# }),
         int(0)
     );
-});
+}
 
-dual_test!(if_else_after_nested_block_expression {
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn if_else_after_nested_block_expression() {
     let mut session = TestSession::new();
     // `if cond { { ... } } else { ... }` — true-branch ends with a nested block
     assert_val_eq!(
@@ -130,12 +134,13 @@ dual_test!(if_else_after_nested_block_expression {
         "# }),
         int(2)
     );
-});
+}
 
-// Demonstrates a `dual_test!` that is green on BOTH backends: a fully concrete (monomorphic)
-// snippet, so the SSA backend can lower it. Emits `concrete_if_else_runs_on_both_backends::hir`
-// and `::ssa`.
-dual_test!(concrete_if_else_runs_on_both_backends {
+// A fully concrete (monomorphic) snippet, so the SSA backend can lower it. Like every snippet run
+// through a `TestSession`, it executes on both the HIR and SSA interpreters, which must agree.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn concrete_if_else_runs_on_both_backends() {
     let mut session = TestSession::new();
     assert_val_eq!(
         session.run(indoc! { r#"
@@ -163,7 +168,7 @@ dual_test!(concrete_if_else_runs_on_both_backends {
         "# }),
         int(2)
     );
-});
+}
 
 // Value-capturing closures (no hidden dictionary evidence) lower to SSA and run on both backends.
 // Each case captures by value and is called, exercising `build_closure`, the per-call environment
@@ -171,7 +176,9 @@ dual_test!(concrete_if_else_runs_on_both_backends {
 // of repeated calls, and the deep copy of a captured mutable array. Generic / dictionary-carrying
 // closures (e.g. `|x| x`, `|x| x + b`) are not lowered to SSA yet and stay in the HIR-only
 // `simple::lambda` / `simple::closures` tests.
-dual_test!(value_capturing_closures_run_on_both_backends {
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn value_capturing_closures_run_on_both_backends() {
     let mut session = TestSession::new();
     // Basic capture by value.
     assert_val_eq!(session.run("let a = 3.3; let f = || a; f()"), float(3.3));
@@ -186,7 +193,7 @@ dual_test!(value_capturing_closures_run_on_both_backends {
     );
     // A captured mutable array is deep-copied into the environment.
     assert_val_eq!(session.run("let mut a = [1]; let f = || a[0]; a[0] = 2; f()"), int(1));
-});
+}
 
 // Record field access on a *generic* (row-polymorphic) record lowers to SSA and runs on both
 // backends. The field offset is a hidden field-index dictionary parameter, so `v.x` is a `ProjectAt`
@@ -198,7 +205,9 @@ dual_test!(value_capturing_closures_run_on_both_backends {
 // parameter into a callee (`b` calls `a`, a `LoadFieldIndex` argument). Generic functions made
 // first-class (e.g. `(s,).0`) still carry closure dictionary captures and stay HIR-only in
 // `simple::records`.
-dual_test!(record_field_access_runs_on_both_backends {
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn record_field_access_runs_on_both_backends() {
     let mut session = TestSession::new();
     // A generic field passed as a dictionary-method (`+`) argument, by place.
     assert_val_eq!(session.run("fn s(v) { v.x + v.y } s({x:1, y:2})"), int(3));
@@ -220,7 +229,7 @@ dual_test!(record_field_access_runs_on_both_backends {
     assert_val_eq!(session.run("fn a(x) { x.a } fn b(x) { a(x) } b({a:3})"), int(3));
     // A let-bound generic lambda monomorphized at its single call site (static `Project`).
     assert_val_eq!(session.run("let f = |x| x.a; f({a:1})"), int(1));
-});
+}
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]

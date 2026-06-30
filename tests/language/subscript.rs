@@ -1551,10 +1551,6 @@ fn parameterized_named_subscript_instantiates_at_use_sites() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn named_subscript_body_error_runs_epilogue_before_propagating() {
     let mut session = experimental_session();
-    // Subscript `yield` (WithYielded) is not lowered to SSA yet, so this aborting snippet can only be
-    // validated on the HIR interpreter. (It passed before only because the old `Backend::Both` run
-    // short-circuited on the HIR error and never reached the SSA backend.)
-    session.restrict_to_hir();
     let source = indoc! { r#"
         subscript cell(slot: &mut int) -> int {
             mut {
@@ -1583,10 +1579,6 @@ fn named_subscript_body_error_runs_epilogue_before_propagating() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn named_subscript_prologue_error_skips_epilogue() {
     let mut session = experimental_session();
-    // Subscript `yield` (WithYielded) is not lowered to SSA yet, so this aborting snippet can only be
-    // validated on the HIR interpreter. (It passed before only because the old `Backend::Both` run
-    // short-circuited on the HIR error and never reached the SSA backend.)
-    session.restrict_to_hir();
     let source = indoc! { r#"
         subscript cell(slot: &mut int) -> int {
             mut {

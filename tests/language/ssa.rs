@@ -2050,7 +2050,9 @@ fn f(%p0: @arg &mut int, %p1: @arg int, %p2: @arg int, %p3: @ret ()):
 // matches the HIR interpreter's `WithYielded` drive (including the slide write-back and the error
 // path).
 
-dual_test!(yielded_subscript_read_runs {
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn yielded_subscript_read_runs() {
     let mut session = TestSession::new();
     session.allow_experimental();
     // A read returns the yielded value; the slide write-back is a no-op for the read.
@@ -2060,9 +2062,11 @@ dual_test!(yielded_subscript_read_runs {
         )),
         int(7)
     );
-});
+}
 
-dual_test!(yielded_subscript_assign_runs_slide_writeback {
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn yielded_subscript_assign_runs_slide_writeback() {
     let mut session = TestSession::new();
     session.allow_experimental();
     // The assignment writes through the yielded place; the slide (`slot = local`) writes the new
@@ -2073,9 +2077,11 @@ dual_test!(yielded_subscript_assign_runs_slide_writeback {
         )),
         int(42)
     );
-});
+}
 
-dual_test!(yielded_subscript_compound_assign_runs_slide_writeback {
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn yielded_subscript_compound_assign_runs_slide_writeback() {
     let mut session = TestSession::new();
     session.allow_experimental();
     // A compound assignment reads and writes the single yielded place, then the slide writes back.
@@ -2085,9 +2091,11 @@ dual_test!(yielded_subscript_compound_assign_runs_slide_writeback {
         )),
         int(15)
     );
-});
+}
 
-dual_test!(yielded_subscript_body_error_propagates {
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn yielded_subscript_body_error_propagates() {
     let mut session = TestSession::new();
     session.allow_experimental();
     // A raise in the body unwinds out of the projection on both backends (the SSA pad runs the slide
@@ -2098,7 +2106,7 @@ dual_test!(yielded_subscript_body_error_propagates {
         )),
         ferlium::compiler::error::RuntimeErrorKind::DivisionByZero,
     );
-});
+}
 
 #[test]
 fn closure_over_generic_in_concrete_caller() {
@@ -2126,21 +2134,25 @@ fn closure_forwarding_enclosing_generic_dict() {
     );
 }
 
-dual_test!(closure_over_generic_in_concrete_caller_runs {
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn closure_over_generic_in_concrete_caller_runs() {
     let mut session = TestSession::new();
     assert_val_eq!(
         session.run("fn id<T>(x: T) -> T { x } let f = id; f(5)"),
         int(5)
     );
-});
+}
 
-dual_test!(closure_forwarding_enclosing_generic_dict_runs {
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn closure_forwarding_enclosing_generic_dict_runs() {
     let mut session = TestSession::new();
     assert_val_eq!(
         session.run("fn adder(n) { |x| x + n } let a = adder(10); a(5)"),
         int(15)
     );
-});
+}
 
 // A tuple/record/array literal in non-tail statement position has no destination — its value is
 // discarded. Lowering must still materialize it into a throwaway temporary so each element's side
@@ -2189,26 +2201,32 @@ fn discarded_record_construction_lowers_into_throwaway_temp() {
 // Each discarded literal must still *evaluate* every element, so a side effect inside an element
 // (here a counter mutation) is observable after the discarded construction.
 
-dual_test!(discarded_tuple_evaluates_elements {
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn discarded_tuple_evaluates_elements() {
     let mut session = TestSession::new();
     assert_val_eq!(
         session.run("fn f() { let mut c = 0; ({ c = c + 1; c }, { c = c + 1; c }); c } f()"),
         int(2)
     );
-});
+}
 
-dual_test!(discarded_array_evaluates_elements {
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn discarded_array_evaluates_elements() {
     let mut session = TestSession::new();
     assert_val_eq!(
         session.run("fn f() { let mut c = 0; [{ c = c + 1; c }, { c = c + 1; c }]; c } f()"),
         int(2)
     );
-});
+}
 
-dual_test!(discarded_record_evaluates_elements {
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn discarded_record_evaluates_elements() {
     let mut session = TestSession::new();
     assert_val_eq!(
         session.run("fn f() { let mut c = 0; { a: { c = c + 1; c }, b: { c = c + 1; c } }; c } f()"),
         int(2)
     );
-});
+}

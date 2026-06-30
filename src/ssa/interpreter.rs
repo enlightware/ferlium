@@ -24,7 +24,7 @@ use crate::{
         value::{FunctionHiddenArgValue, FunctionValue, LiteralValue, Value},
     },
     module::{
-        LocalFunctionId, ModuleEnv, ModuleId, TraitDictionaryId, id::Id,
+        FunctionId, LocalFunctionId, ModuleEnv, ModuleId, TraitDictionaryId, id::Id,
         trait_impl::TraitDictionaryEntry,
     },
     ssa::{self, BlockIdentity, InstructionIdentity, InstructionView, value::FunctionReference},
@@ -353,9 +353,10 @@ impl<'a> Interpreter<'a> {
                     .dictionary_value(id)
                     .entry(TraitDictionaryEntryIndex::from_index(entry_index));
                 let value = match entry {
-                    TraitDictionaryEntry::Method(function) => {
-                        Value::function(function, id.module_id)
-                    }
+                    TraitDictionaryEntry::Method(function) => Value::function(FunctionId {
+                        module: id.module_id,
+                        function,
+                    }),
                     TraitDictionaryEntry::AssociatedConst(lit) => lit.into_value(),
                 };
                 let place = self.alloc_cell(value);
@@ -572,8 +573,10 @@ impl<'a> Interpreter<'a> {
             // delegate rotates its own ambient module internally, so the SSA interpreter never
             // touches `ctx.module_id` (its IR is fully module-resolved).
             let result = self.ctx.call_resolved_function_with_extra(
-                identity,
-                module,
+                FunctionId {
+                    module,
+                    function: identity,
+                },
                 vec![],
                 vec![ValOrMut::Mut(target.clone())],
                 span,
@@ -632,8 +635,8 @@ impl<'a> Interpreter<'a> {
                 .as_function()
                 .expect("indirect call on a non-function value");
             (
-                fv.module_id,
-                fv.function_id,
+                fv.function.module,
+                fv.function.function,
                 fv.closure_env_len != 0 || !fv.hidden_args.is_empty(),
             )
         };
@@ -955,8 +958,10 @@ impl<'a> Interpreter<'a> {
         // rotates its own ambient module internally, so the SSA interpreter never touches
         // `ctx.module_id` (its IR is fully module-resolved).
         let result = self.ctx.call_resolved_function_with_extra(
-            callee_identity,
-            callee_module,
+            FunctionId {
+                module: callee_module,
+                function: callee_identity,
+            },
             vec![],
             args,
             span,
@@ -989,8 +994,8 @@ impl<'a> Interpreter<'a> {
                 .as_function()
                 .expect("closure call on a non-function");
             (
-                fv.module_id,
-                fv.function_id,
+                fv.function.module,
+                fv.function.function,
                 fv.hidden_args.clone(),
                 fv.closure_env_len,
                 fv.closure_env_value_dictionary,
@@ -1118,8 +1123,10 @@ impl<'a> Interpreter<'a> {
         let env_dict = env_dict_op.first().map(|op| self.dict_operand(slots, op));
 
         let closure = FunctionValue::closure(
-            function.identity,
-            function.module,
+            FunctionId {
+                module: function.module,
+                function: function.identity,
+            },
             hidden_args,
             captures,
             env_dict,
@@ -1136,15 +1143,14 @@ impl<'a> Interpreter<'a> {
         span: Location,
     ) -> Result<Value, RuntimeError> {
         let place = self.place_operand(slots, operand);
-        let (function_id, module_id, hidden_args, closure_env_len, env_dict, env_ptr) = {
+        let (function, hidden_args, closure_env_len, env_dict, env_ptr) = {
             let source = place
                 .target_ref(&self.ctx)
                 .expect("clone_closure_env of an invalid place")
                 .as_function()
                 .expect("clone_closure_env of a non-function value");
             (
-                source.function_id,
-                source.module_id,
+                source.function,
                 // Hidden dictionary/evidence is trivially-copyable evidence (`FunctionHiddenArgValue`
                 // is `Copy`); carry it through to the cloned closure unchanged.
                 source.hidden_args.clone(),
@@ -1162,8 +1168,7 @@ impl<'a> Interpreter<'a> {
             None => Value::unit(),
         };
         Ok(Value::function_value(FunctionValue {
-            function_id,
-            module_id,
+            function,
             hidden_args,
             closure_env,
             closure_env_len,
@@ -1226,7 +1231,7 @@ impl<'a> Interpreter<'a> {
             .expect("drop callee of an invalid place")
             .as_function()
             .expect("drop callee on a non-function value");
-        (fv.module_id, fv.function_id)
+        (fv.function.module, fv.function.function)
     }
 
     /// Builds an uninitialized value with the run-time *shape* of `ty`: a tuple/record/named
@@ -1450,7 +1455,10 @@ impl<'a> Interpreter<'a> {
             // A `"…"` constant materializes as a *static literal* string: its bytes live in the data
             // segment (`cap == 0`), so it owns no heap and needs no drop (see `owns_resources`).
             ssa::Value::String(s) => Value::native(s.clone().into_static_literal()),
-            ssa::Value::Function(r) => Value::function(r.identity, r.module),
+            ssa::Value::Function(r) => Value::function(FunctionId {
+                module: r.module,
+                function: r.identity,
+            }),
             ssa::Value::Uninit(_) => Value::uninit(),
             ssa::Value::Float(f) => Value::native(
                 crate::std::math::Float::new(f.into_inner())
@@ -1587,8 +1595,7 @@ fn read_copy(v: &Value) -> Option<Value> {
         && fv.closure_env_len == 0
     {
         return Some(Value::function_value(FunctionValue {
-            function_id: fv.function_id,
-            module_id: fv.module_id,
+            function: fv.function,
             hidden_args: fv.hidden_args.clone(),
             closure_env: Value::uninit(),
             closure_env_len: 0,

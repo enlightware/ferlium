@@ -1667,7 +1667,7 @@ impl DictArg {
                     let function = entries[entry_index.as_index()]
                         .as_function()
                         .expect("a witness-table method entry is a function value");
-                    FunctionValue::bare(function.function_id, function.module_id)
+                    FunctionValue::bare(function.function)
                 };
                 ctx.call_function_value(&method, arguments, span)
             }

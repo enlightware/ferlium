@@ -18,8 +18,8 @@ use crate::{
         dictionary::DictionaryReq, value::LiteralValue,
     },
     module::{
-        self, FunctionId, ImportFunctionSlotId, LocalDeclId, LocalFunctionId, Module, ModuleEnv,
-        ModuleId, TraitDictionaryId, TraitImplId, id::Id,
+        self, FunctionId, LocalDeclId, LocalFunctionId, Module, ModuleEnv, ModuleId,
+        TraitDictionaryId, TraitImplId, id::Id,
     },
     ssa::{self, BlockIdentity, value::FunctionReference},
     std::{
@@ -73,39 +73,6 @@ fn function_name(f: LocalFunctionId, module: &Module, others: &Modules) -> Ustr 
     let qualified_module = others.get_name(module.module_id()).unwrap();
     let function = e.current.get_function_name_by_id(f).unwrap();
     format!("{}::{}", qualified_module, function).into()
-}
-
-/// Returns the `LocalFunctionId` and `ModuleId` corresponding to an `ImportFunctionSlotId`.
-fn imported_function(
-    f: ImportFunctionSlotId,
-    module: &Module,
-    session: &CompilerSession,
-) -> (LocalFunctionId, ModuleId) {
-    let sl = module.get_import_fn_slot(f).unwrap();
-    let mi = sl.module;
-    let m = session.expect_fresh_module(mi);
-    let fi = match &sl.target {
-        module::ImportFunctionTarget::NamedFunction(name) => {
-            m.get_local_function_id(*name).unwrap()
-        }
-        module::ImportFunctionTarget::TraitImplMethod { key, index } => {
-            m.get_impl_data_by_trait_key(key).unwrap().methods[index.as_index()]
-        }
-        &module::function::ImportFunctionTarget::SubscriptMember { name, mut_member } => {
-            // Resolve the subscript bundle, then select the ref or mut member's function.
-            let subscript = m.get_subscript(name).expect("imported subscript not found");
-            let member = if mut_member {
-                &subscript.mut_member
-            } else {
-                &subscript.ref_member
-            };
-            member
-                .as_ref()
-                .expect("imported subscript member must exist")
-                .function
-        }
-    };
-    (fi, mi)
 }
 
 /// The SSA blocks involved in the lowering of a case in a match expression.
@@ -331,36 +298,16 @@ impl<'a> Emitter<'a> {
     }
 
     /// Resolves a [`FunctionId`] to the `(LocalFunctionId, ModuleId)` pair identifying the function
-    /// within its defining module: local functions belong to the current module, while imports are
-    /// resolved through their import slot.
+    /// within its defining module. `FunctionId` is module-qualified, so this just reads its fields.
     fn resolve_function(&self, function: FunctionId) -> (LocalFunctionId, ModuleId) {
-        match function {
-            FunctionId::Local(i) => (i, self.module.module_id()),
-            FunctionId::Import(i) => imported_function(i, self.module, self.session),
-        }
+        (function.function, function.module)
     }
 
-    /// Resolves a module-relative [`TraitImplId`] to a canonical [`TraitDictionaryId`].
-    ///
-    /// Mirrors [`crate::eval::EvalCtx::get_dictionary_id`]: a local impl belongs to the current
-    /// module, while an imported impl is resolved through its import slot.
+    /// Resolves a module-qualified [`TraitImplId`] to a canonical [`TraitDictionaryId`].
     fn dictionary_id(&self, dictionary: TraitImplId) -> TraitDictionaryId {
-        match dictionary {
-            TraitImplId::Local(id) => TraitDictionaryId {
-                module_id: self.module.module_id(),
-                impl_id: id,
-            },
-            TraitImplId::Import(id) => {
-                let slot = self.module.get_import_impl_slot(id).unwrap();
-                let imported = self.session.expect_fresh_module(slot.module);
-                let impl_id = imported
-                    .get_impl_id_by_trait_key(&slot.key)
-                    .expect("imported trait impl not found");
-                TraitDictionaryId {
-                    module_id: slot.module,
-                    impl_id,
-                }
-            }
+        TraitDictionaryId {
+            module_id: dictionary.module,
+            impl_id: dictionary.impl_id,
         }
     }
 
