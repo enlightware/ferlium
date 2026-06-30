@@ -375,10 +375,23 @@ impl Node {
                     arena[app.function].span,
                 )?;
             }
+            SubscriptApply(app) => {
+                check_borrows(arena, app.subscript)?;
+                for arg in &app.arguments {
+                    check_borrows(arena, arg.value)?;
+                }
+                check_arguments(&app.ty.fn_ty.args, &app.arguments, arena, self.span)?;
+            }
             CloneClosureEnv(node) => {
                 check_borrows(arena, node.source)?;
             }
             DropClosureEnv(node) => {
+                check_borrows(arena, node.target)?;
+            }
+            CloneSubscriptValue(node) => {
+                check_borrows(arena, node.source)?;
+            }
+            DropSubscriptValue(node) => {
                 check_borrows(arena, node.target)?;
             }
             CloneValue(node) => {
@@ -396,7 +409,7 @@ impl Node {
                 }
                 check_arguments(&app.ty.fn_ty.args, &app.arguments, arena, app.method_span)?;
             }
-            GetFunction(_) => {}
+            GetFunction(_) | GetSubscript(_) => {}
             GetTraitMethod(_) | GetTraitAssociatedConst(_) | GetTraitDictionary(_) => {}
             GetDictionary(_) => {}
             LoadDictionary(_) | LoadFieldIndex(_) => {}

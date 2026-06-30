@@ -538,6 +538,18 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                     target: self.elaborate_node(src, target)?,
                 })
             }
+            CloneSubscriptValue(node) => {
+                let source = node.source;
+                CloneSubscriptValue(hir::CloneSubscriptValue {
+                    source: self.elaborate_node(src, source)?,
+                })
+            }
+            DropSubscriptValue(node) => {
+                let target = node.target;
+                DropSubscriptValue(hir::DropSubscriptValue {
+                    target: self.elaborate_node(src, target)?,
+                })
+            }
             CloneValue(node) => {
                 let source = node.source;
                 let mut clone = node.clone;
@@ -600,6 +612,22 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                     argument_names,
                     ty,
                     inst_data,
+                }))
+            }
+            SubscriptApply(app) => {
+                let subscript = app.subscript;
+                let mut_member = app.mut_member;
+                let ty = app.ty.clone();
+                let source_arguments = app
+                    .arguments
+                    .iter()
+                    .zip(&app.ty.fn_ty.args)
+                    .map(|(arg, arg_ty)| (arg.value, arg.passing, arg_ty.ty));
+                SubscriptApply(b(hir::SubscriptApplication {
+                    subscript: self.elaborate_node(src, subscript)?,
+                    mut_member,
+                    arguments: self.elaborate_call_arguments(src, source_arguments, node_span)?,
+                    ty,
                 }))
             }
             TraitMethodApply(app) => {
@@ -785,6 +813,13 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                         captures_value_dictionary: None,
                     }))
                 }
+            }
+            GetSubscript(get_subscript) => {
+                assert!(
+                    get_subscript.inst_data.dicts_req.is_empty(),
+                    "first-class subscript values with hidden evidence should be rejected during type inference"
+                );
+                GetSubscript(get_subscript.clone())
             }
             GetTraitMethod(get_method) => {
                 let trait_id = get_method.trait_id;

@@ -514,6 +514,7 @@ impl InvalidSubscriptDefinitionKind {
 pub enum InvalidSubscriptUseKind {
     ExperimentalFeatureNotEnabled,
     UnknownSubscript,
+    ValueIsNotSubscript,
     MissingMember(SubscriptMemberRole),
 }
 
@@ -526,6 +527,9 @@ impl InvalidSubscriptUseKind {
                 )
             }
             Self::UnknownSubscript => format!("Unknown named subscript `{name}`"),
+            Self::ValueIsNotSubscript => {
+                format!("Value `{name}` cannot be used as a subscript")
+            }
             Self::MissingMember(role) => {
                 format!(
                     "Named subscript `{name}` has no `{}` member",
@@ -560,6 +564,7 @@ pub enum UnsupportedSubscriptFeatureKind {
     YieldInsideLoop,
     YieldInNonBlockStructuredControlFlow,
     MultipleMutableSubscriptArguments,
+    FirstClassSubscriptWithHiddenEvidence,
 }
 
 impl UnsupportedSubscriptFeatureKind {
@@ -571,6 +576,9 @@ impl UnsupportedSubscriptFeatureKind {
             }
             Self::MultipleMutableSubscriptArguments => {
                 "passing more than one named subscript as mutable arguments in one call is not supported yet"
+            }
+            Self::FirstClassSubscriptWithHiddenEvidence => {
+                "first-class subscript values that capture generic constraint evidence are not supported yet"
             }
         }
     }
@@ -710,6 +718,7 @@ pub struct ImportSite {
 pub enum UnsafeFeature {
     EffectsUnsafe,
     Function(Ustr),
+    Subscript(Ustr),
     TypeAlias(Ustr),
     FunctionAttribute(Ustr),
     TypeAttribute(Ustr),
@@ -720,6 +729,7 @@ impl Display for UnsafeFeature {
         match self {
             UnsafeFeature::EffectsUnsafe => write!(f, "`effects_unsafe`"),
             UnsafeFeature::Function(name) => write!(f, "function `{name}`"),
+            UnsafeFeature::Subscript(name) => write!(f, "subscript `{name}`"),
             UnsafeFeature::TypeAlias(name) => write!(f, "type alias `{name}`"),
             UnsafeFeature::FunctionAttribute(name) => write!(f, "function attribute `#[{name}]`"),
             UnsafeFeature::TypeAttribute(name) => write!(f, "type attribute `#[{name}]`"),

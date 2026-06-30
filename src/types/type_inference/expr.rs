@@ -53,8 +53,9 @@ use crate::{
         r#trait::{Trait, TraitMethodIndex},
         trait_solver::{TraitSolver, TraitSolverProbe},
         r#type::{
-            CallImplType, CallResultConvention, FnArgType, FnType, TyVarKey, Type, TypeInstSubst,
-            TypeKind, TypeVar,
+            CallImplType, CallResultConvention, FnArgType, FnType, SubscriptMemberType,
+            SubscriptResultConvention, SubscriptType, TyVarKey, Type, TypeInstSubst, TypeKind,
+            TypeVar,
         },
         type_like::TypeLike,
         type_mapper::{BitmapInstantiationMapper, TypeMapper},
@@ -202,6 +203,7 @@ enum SubscriptAccessMode {
     Mut,
 }
 
+#[derive(Clone, Copy)]
 struct NamedSubscriptReceiverOverride {
     node: NodeId,
     ty: Type,
@@ -754,6 +756,40 @@ impl TypeInference {
                     (
                         node,
                         Type::function_type(fn_ty),
+                        MutType::constant(),
+                        no_effects(),
+                    )
+                }
+                // Retrieve the subscript from the environment, if it exists.
+                else if let Some((subscript, subscript_id, _module_id)) = env
+                    .get_subscript(path)?
+                    .map(|(subscript, subscript_id, module_id)| {
+                        (subscript.clone(), subscript_id, module_id)
+                    })
+                {
+                    Self::ensure_named_subscript_access_allowed(
+                        env,
+                        path.segments.last().expect("non-empty subscript path").0,
+                        expr_span,
+                    )?;
+                    let owner = env.subscript_owner_module(subscript_id);
+                    let (subscript_ty, inst_data, _subst) = subscript
+                        .type_scheme(owner)
+                        .instantiate_with_fresh_vars(self, expr_span, None, env.module_env);
+                    if !inst_data.dicts_req.is_empty() {
+                        return Err(internal_compilation_error!(UnsupportedSubscriptFeature {
+                            kind: UnsupportedSubscriptFeatureKind::FirstClassSubscriptWithHiddenEvidence,
+                            span: expr_span,
+                        }));
+                    }
+                    let node = K::GetSubscript(b(hir::GetSubscript {
+                        subscript: subscript_id,
+                        subscript_path: path.clone(),
+                        inst_data,
+                    }));
+                    (
+                        node,
+                        Type::subscript_type(subscript_ty),
                         MutType::constant(),
                         no_effects(),
                     )
@@ -2293,6 +2329,11 @@ impl TypeInference {
         expr_span: Location,
         receiver_override: Option<NamedSubscriptReceiverOverride>,
     ) -> Result<PreparedNamedSubscriptAccessor, InternalCompilationError> {
+        if let Some(prepared) =
+            self.infer_subscript_value_accessor_call(env, data, mode, expr_span, receiver_override)?
+        {
+            return Ok(prepared);
+        }
         Self::ensure_named_subscript_access_allowed(env, data.name.0, expr_span)?;
         let member = self.named_subscript_member(env, data, mode)?;
         let function_data = env
@@ -2323,41 +2364,14 @@ impl TypeInference {
             env.module_env,
         );
         let member_effects = inst_fn_ty.effects.clone();
-        let (mut args_node_ids, args_effects, args_diverge) =
-            if let Some(receiver) = receiver_override {
-                let mut node_ids = Vec::with_capacity(args.len());
-                let mut effects = Vec::with_capacity(args.len());
-                let mut diverges = false;
-                for (index, (arg, arg_ty)) in args.iter().zip(&inst_fn_ty.args).enumerate() {
-                    let node_id = if index == 0 {
-                        self.add_sub_type_constraint(
-                            receiver.ty,
-                            env.ir_arena[receiver.node].span,
-                            arg_ty.ty,
-                            data.name.1,
-                        );
-                        self.add_mut_be_at_least_constraint(
-                            receiver.mut_ty,
-                            env.ir_arena[receiver.node].span,
-                            arg_ty.mut_ty,
-                            data.name.1,
-                        );
-                        receiver.node
-                    } else {
-                        self.check_expr(env, *arg, arg_ty.ty, arg_ty.mut_ty, data.name.1)?
-                    };
-                    let ty = env.ir_arena[node_id].ty;
-                    effects.push(env.ir_arena[node_id].effects.clone());
-                    node_ids.push(node_id);
-                    if ty == Type::never() {
-                        diverges = true;
-                        break;
-                    }
-                }
-                (node_ids, self.make_dependent_effect(&effects), diverges)
-            } else {
-                self.check_exprs_until_never(env, &args, &inst_fn_ty.args, data.name.1)?
-            };
+        let (mut args_node_ids, args_effects, args_diverge) = self
+            .check_named_subscript_args_until_never(
+                env,
+                &args,
+                &inst_fn_ty.args,
+                receiver_override,
+                data.name.1,
+            )?;
         if args_diverge {
             let nodes = self.value_evaluation_prefix_nodes_for_many(env.ir_arena, args_node_ids);
             let effects = self.make_dependent_effect([&args_effects, &member_effects]);
@@ -2411,6 +2425,289 @@ impl TypeInference {
             effects: combined_effects,
             provenance: member.provenance,
         }))
+    }
+
+    fn infer_subscript_value_accessor_call(
+        &mut self,
+        env: &mut TypingEnv,
+        data: &ast::NamedSubscriptData<Desugared>,
+        mode: SubscriptAccessMode,
+        expr_span: Location,
+        receiver_override: Option<NamedSubscriptReceiverOverride>,
+    ) -> Result<Option<PreparedNamedSubscriptAccessor>, InternalCompilationError> {
+        // Keep this path aligned with `infer_named_subscript_accessor_call`:
+        // both prepare the same receiver-first accessor shape, but this one
+        // starts from a first-class subscript value instead of a statically
+        // resolved member function.
+        let Some(local_id) = env.get_variable_id(data.name.0.as_ref()) else {
+            return Ok(None);
+        };
+        Self::ensure_named_subscript_access_allowed(env, data.name.0, expr_span)?;
+
+        let local = &env.all_locals[local_id.as_index()];
+        let subscript_node = env.ir_arena.alloc(hir::Node::new(
+            NodeKind::LoadLocal(hir::LoadLocal { id: local_id }),
+            local.ty,
+            no_effects(),
+            data.name.1,
+        ));
+        let args = Self::named_subscript_args(data);
+        let subscript_ty_data = local.ty.data().clone();
+        let (subscript_ty, member_effects, result_convention, provenance) = match subscript_ty_data
+        {
+            TypeKind::Subscript(subscript_ty) => {
+                let subscript_ty = (*subscript_ty).clone();
+                let Some(member_ty) = (match mode {
+                    SubscriptAccessMode::Ref => subscript_ty.ref_member.as_ref(),
+                    SubscriptAccessMode::Mut => subscript_ty.mut_member.as_ref(),
+                }) else {
+                    let role = match mode {
+                        SubscriptAccessMode::Ref => SubscriptMemberRole::Ref,
+                        SubscriptAccessMode::Mut => SubscriptMemberRole::Mut,
+                    };
+                    return Err(internal_compilation_error!(InvalidSubscriptUse {
+                        name: data.name.0,
+                        kind: InvalidSubscriptUseKind::MissingMember(role),
+                        span: data.name.1,
+                    }));
+                };
+                let member_effects = member_ty.effects.clone();
+                let result_convention =
+                    CallResultConvention::Subscript(member_ty.result_convention);
+                let provenance = match member_ty.result_convention {
+                    SubscriptResultConvention::YieldedOnce => YieldProvenance::YieldedOnce,
+                    SubscriptResultConvention::AddressorPlace => YieldProvenance::AddressorPlace,
+                };
+                (subscript_ty, member_effects, result_convention, provenance)
+            }
+            TypeKind::Variable(_) => {
+                // A non-owning local here is an abstract capability parameter
+                // whose type can still be inferred as `SubscriptType`. An owned
+                // local, such as `let cell = 0`, must stay an ordinary value and
+                // produce the usual "value is not a subscript" diagnostic.
+                if local.may_own_storage() {
+                    return Err(internal_compilation_error!(InvalidSubscriptUse {
+                        name: data.name.0,
+                        kind: InvalidSubscriptUseKind::ValueIsNotSubscript,
+                        span: data.name.1,
+                    }));
+                }
+                let member_effects = self.fresh_effect_var_ty();
+                let subscript_ty = self.abstract_yielded_subscript_type(
+                    env,
+                    mode,
+                    &args,
+                    member_effects.clone(),
+                    receiver_override.as_ref().map(|receiver| receiver.mut_ty),
+                );
+                self.add_sub_type_constraint(
+                    local.ty,
+                    data.name.1,
+                    Type::subscript_type(subscript_ty.clone()),
+                    data.name.1,
+                );
+                (
+                    subscript_ty,
+                    member_effects,
+                    CallResultConvention::YIELDED_ONCE,
+                    YieldProvenance::YieldedOnce,
+                )
+            }
+            _ => {
+                return Err(internal_compilation_error!(InvalidSubscriptUse {
+                    name: data.name.0,
+                    kind: InvalidSubscriptUseKind::ValueIsNotSubscript,
+                    span: data.name.1,
+                }));
+            }
+        };
+        let inst_fn_ty = FnType::new(
+            subscript_ty.args.clone(),
+            subscript_ty.ret,
+            member_effects.clone(),
+        );
+        if inst_fn_ty.args.len() != args.len() {
+            return Err(internal_compilation_error!(WrongNumberOfArguments {
+                expected: inst_fn_ty.args.len(),
+                expected_span: data.name.1,
+                got: args.len(),
+                got_span: Location::fuse(args.iter().map(|arg| env.ast_arena[*arg].span))
+                    .unwrap_or(expr_span),
+            }));
+        }
+
+        let (mut args_node_ids, args_effects, args_diverge) = self
+            .check_named_subscript_args_until_never(
+                env,
+                &args,
+                &inst_fn_ty.args,
+                receiver_override,
+                data.name.1,
+            )?;
+        let subscript_effects = env.ir_arena[subscript_node].effects.clone();
+        if args_diverge {
+            let nodes = self
+                .value_evaluation_prefix_nodes(env.ir_arena, subscript_node)
+                .into_iter()
+                .chain(self.value_evaluation_prefix_nodes_for_many(env.ir_arena, args_node_ids))
+                .collect::<Vec<_>>();
+            let effects =
+                self.make_dependent_effect([&subscript_effects, &args_effects, &member_effects]);
+            return Ok(Some(PreparedNamedSubscriptAccessor::DivergedBeforeYield(
+                self.alloc_diverging_prefix_node(env, nodes, effects, expr_span),
+            )));
+        }
+
+        let ret_ty = inst_fn_ty.ret;
+        let combined_effects =
+            self.make_dependent_effect([&subscript_effects, &args_effects, &member_effects]);
+        let temp_start_index = env.cur_locals.len();
+        let mut temp_stores = Vec::new();
+        let subscript = if node_is_place_reference(env.ir_arena, subscript_node) {
+            let prepared = self.prepare_place_for_consumer(env, subscript_node, expr_span);
+            temp_stores.extend(prepared.prefix);
+            prepared.place
+        } else {
+            let (store, load) = self.store_owned_temp(
+                env,
+                subscript_node,
+                env.ir_arena[subscript_node].ty,
+                expr_span,
+                ustr("$subscript"),
+            );
+            temp_stores.push(store);
+            load
+        };
+        let prepared_arguments = self.prepare_call_arguments(
+            env,
+            &mut args_node_ids,
+            &inst_fn_ty.args,
+            &inst_fn_ty.args,
+            expr_span,
+            None,
+        );
+        temp_stores.extend(prepared_arguments.temp_stores);
+        let call = NodeKind::SubscriptApply(b(hir::SubscriptApplication {
+            subscript,
+            mut_member: matches!(mode, SubscriptAccessMode::Mut),
+            arguments: prepared_arguments.arguments,
+            ty: CallImplType::new(inst_fn_ty, result_convention),
+        }));
+        let call = hir::Node::new(call, ret_ty, combined_effects.clone(), expr_span);
+        let node = self.wrap_call_with_temp_drops(env, temp_start_index, temp_stores, call);
+        let node = env.ir_arena.alloc(hir::Node::new(
+            node,
+            ret_ty,
+            combined_effects.clone(),
+            expr_span,
+        ));
+        Ok(Some(PreparedNamedSubscriptAccessor::Ready(
+            NamedSubscriptCall {
+                node,
+                ty: ret_ty,
+                effects: combined_effects,
+                provenance,
+            },
+        )))
+    }
+
+    fn check_named_subscript_args_until_never(
+        &mut self,
+        env: &mut TypingEnv,
+        args: &[DExprId],
+        arg_tys: &[FnArgType],
+        receiver_override: Option<NamedSubscriptReceiverOverride>,
+        expected_span: Location,
+    ) -> Result<(Vec<NodeId>, EffType, bool), InternalCompilationError> {
+        let Some(receiver) = receiver_override else {
+            return self.check_exprs_until_never(env, args, arg_tys, expected_span);
+        };
+
+        let mut node_ids = Vec::with_capacity(args.len());
+        let mut effects = Vec::with_capacity(args.len());
+        let mut diverges = false;
+        for (index, (arg, arg_ty)) in args.iter().zip(arg_tys).enumerate() {
+            let node_id = if index == 0 {
+                self.add_sub_type_constraint(
+                    receiver.ty,
+                    env.ir_arena[receiver.node].span,
+                    arg_ty.ty,
+                    expected_span,
+                );
+                self.add_mut_be_at_least_constraint(
+                    receiver.mut_ty,
+                    env.ir_arena[receiver.node].span,
+                    arg_ty.mut_ty,
+                    expected_span,
+                );
+                receiver.node
+            } else {
+                self.check_expr(env, *arg, arg_ty.ty, arg_ty.mut_ty, expected_span)?
+            };
+            let ty = env.ir_arena[node_id].ty;
+            effects.push(env.ir_arena[node_id].effects.clone());
+            node_ids.push(node_id);
+            if ty == Type::never() {
+                diverges = true;
+                break;
+            }
+        }
+        let combined_effects = self.make_dependent_effect(&effects);
+        Ok((node_ids, combined_effects, diverges))
+    }
+
+    fn abstract_yielded_subscript_type(
+        &mut self,
+        env: &TypingEnv,
+        mode: SubscriptAccessMode,
+        args: &[DExprId],
+        member_effects: EffType,
+        receiver_mut_ty: Option<MutType>,
+    ) -> SubscriptType {
+        let member =
+            SubscriptMemberType::new(member_effects, SubscriptResultConvention::YieldedOnce);
+        let (ref_member, mut_member) = match mode {
+            SubscriptAccessMode::Ref => (Some(member), None),
+            SubscriptAccessMode::Mut => (None, Some(member)),
+        };
+        SubscriptType::new(
+            args.iter()
+                .enumerate()
+                .map(|(index, arg)| {
+                    if index == 0
+                        && let Some(mut_ty) = receiver_mut_ty
+                    {
+                        FnArgType::new(self.fresh_type_var_ty(), mut_ty)
+                    } else {
+                        FnArgType::new(
+                            self.fresh_type_var_ty(),
+                            self.abstract_subscript_arg_mut_ty(env, *arg),
+                        )
+                    }
+                })
+                .collect(),
+            self.fresh_type_var_ty(),
+            ref_member,
+            mut_member,
+        )
+    }
+
+    fn abstract_subscript_arg_mut_ty(&mut self, env: &TypingEnv, arg: DExprId) -> MutType {
+        // Phase 2: allow possibly-mutable bindings here by threading their mutability
+        // variable into the inferred `SubscriptType` argument mode. That requires
+        // preventing ordinary value-expression checking from prematurely solving the
+        // same variable to constant; a shared call/subscript argument-passing helper is
+        // the right place for that broader fix.
+        if let ExprKind::Identifier(path) = &env.ast_arena[arg].kind
+            && let [(name, _)] = &path.segments[..]
+            && let Some(local_id) = env.get_variable_id(name)
+        {
+            let local_mut_ty = env.all_locals[local_id.as_index()].mut_ty;
+            if local_mut_ty.is_mutable() {
+                return MutType::mutable();
+            }
+        }
+        self.fresh_mut_var_ty()
     }
 
     fn alloc_diverging_prefix_node(
@@ -2803,7 +3100,7 @@ impl TypeInference {
                     env, place, place_ty, op_path, sign_span, value, expr_span,
                 )?;
                 Ok((
-                    this.assign_value_node_to_place(env, place, value, expr_span),
+                    this.assign_value_node_to_place(env, place, place_ty, value, expr_span),
                     Type::unit(),
                 ))
             },
@@ -2826,13 +3123,14 @@ impl TypeInference {
             place_ty,
             sign_span,
         );
-        Ok(self.assign_value_node_to_place(env, place, value_id, expr_span))
+        Ok(self.assign_value_node_to_place(env, place, place_ty, value_id, expr_span))
     }
 
     fn assign_value_node_to_place(
         &mut self,
         env: &mut TypingEnv,
         place: NodeId,
+        place_ty: Type,
         value: NodeId,
         expr_span: Location,
     ) -> NodeId {
@@ -2844,6 +3142,15 @@ impl TypeInference {
         let value_effects = env.ir_arena[value].effects.clone();
         let place_effects = env.ir_arena[place].effects.clone();
         let effects = self.make_dependent_effect([&value_effects, &place_effects]);
+        if self.type_needs_semantic_drop(env, place_ty, expr_span) && !place_ty.is_function() {
+            self.add_pub_constraint(PubTypeConstraint::new_have_trait(
+                value_trait_id(env),
+                vec![place_ty],
+                vec![],
+                vec![],
+                expr_span,
+            ));
+        }
         env.ir_arena.alloc(hir::Node::new(
             NodeKind::Assign(hir::Assignment {
                 place,

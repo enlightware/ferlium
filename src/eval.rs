@@ -20,17 +20,19 @@ use crate::{
     compiler::error::RuntimeErrorKind,
     format::{FormatWith, write_with_separator},
     hir::function::{ResolvedArgPassing, ResolvedValueArgPassing, TrivialCopy},
-    hir::value::{FunctionHiddenArgValue, FunctionValue, NativeValue, NativeValueType, Value},
+    hir::value::{
+        FunctionValue, HiddenEvidenceArgValue, NativeValue, NativeValueType, SubscriptValue, Value,
+    },
     module::{
         ELocalDecl as LocalDecl, ExtraParameterId, FunctionId, LocalDebugVisibility, LocalDeclId,
         ModuleFunction, ModuleId, ProjectionIndex, ResolvedLocalClone, ResolvedLocalDrop,
-        ResolvedTakeLocalValueMode, ResolvedValueLayout, TraitDictionary, TraitDictionaryEntry,
-        TraitDictionaryId, TraitImplId,
+        ResolvedTakeLocalValueMode, ResolvedValueLayout, SubscriptId, TraitDictionary,
+        TraitDictionaryEntry, TraitDictionaryId, TraitImplId,
     },
     std::buffer,
     types::{
         r#trait::{TraitDictionaryEntryIndex, TraitMethodIndex},
-        r#type::{FnArgType, Type, TypeKind, bare_native_type},
+        r#type::{CallResultConvention, FnArgType, Type, TypeKind, bare_native_type},
     },
 };
 use crate::{
@@ -169,10 +171,10 @@ impl FormatWith<EvalCtx<'_>> for ValOrMut {
     }
 }
 
-fn evidence_arg_to_val_or_mut(arg: FunctionHiddenArgValue) -> ValOrMut {
+fn evidence_arg_to_val_or_mut(arg: HiddenEvidenceArgValue) -> ValOrMut {
     match arg {
-        FunctionHiddenArgValue::TraitDictionary(dictionary) => ValOrMut::Dictionary(dictionary),
-        FunctionHiddenArgValue::FieldIndex(index) => ValOrMut::Val(Value::native(index)),
+        HiddenEvidenceArgValue::TraitDictionary(dictionary) => ValOrMut::Dictionary(dictionary),
+        HiddenEvidenceArgValue::FieldIndex(index) => ValOrMut::Val(Value::native(index)),
     }
 }
 
@@ -184,7 +186,7 @@ pub struct EvalCtx<'a> {
     /// base of current stack frame in `environment`
     pub frame_base: usize,
     /// hidden dictionary/evidence parameters for all stack frames
-    extra_parameters: Vec<FunctionHiddenArgValue>,
+    extra_parameters: Vec<HiddenEvidenceArgValue>,
     /// base of current stack frame in `extra_parameters`
     extra_frame_base: usize,
     /// current function call depth
@@ -382,6 +384,29 @@ impl<'a> EvalCtx<'a> {
             .clone()
     }
 
+    fn subscript_member_function(&self, subscript: SubscriptId, mut_member: bool) -> FunctionId {
+        let module = self.compiler_session.expect_fresh_module(subscript.module);
+        let subscript_def = module
+            .get_subscript_by_id(subscript.subscript)
+            .expect("subscript value should reference an existing subscript");
+        let member = if mut_member {
+            subscript_def.mut_member.as_ref()
+        } else {
+            subscript_def.ref_member.as_ref()
+        }
+        .expect("subscript application should reference an available member");
+        FunctionId::new(subscript.module, member.function)
+    }
+
+    fn function_result_convention(&self, function: FunctionId) -> CallResultConvention {
+        self.compiler_session
+            .expect_fresh_module(function.module)
+            .get_function_by_id(function.function)
+            .expect("function id should reference an existing function")
+            .definition
+            .return_convention()
+    }
+
     /// Resolve a module-relative impl reference to a canonical runtime dictionary ID.
     pub fn get_dictionary_id(&self, dictionary: TraitImplId) -> TraitDictionaryId {
         TraitDictionaryId::new(dictionary.module, dictionary.impl_id)
@@ -487,7 +512,7 @@ impl<'a> EvalCtx<'a> {
     pub fn call_function_id_with_extra(
         &mut self,
         function_id: FunctionId,
-        extra_arguments: Vec<FunctionHiddenArgValue>,
+        extra_arguments: Vec<HiddenEvidenceArgValue>,
         arguments: Vec<ValOrMut>,
         location: Location,
     ) -> EvalControlFlowResult {
@@ -497,7 +522,7 @@ impl<'a> EvalCtx<'a> {
     fn call_resolved_function_with_extra(
         &mut self,
         function_id: FunctionId,
-        extra_arguments: Vec<FunctionHiddenArgValue>,
+        extra_arguments: Vec<HiddenEvidenceArgValue>,
         arguments: Vec<ValOrMut>,
         location: Location,
     ) -> EvalControlFlowResult {
@@ -508,7 +533,7 @@ impl<'a> EvalCtx<'a> {
     fn call_resolved_accessor_until_yield_with_extra(
         &mut self,
         function_id: FunctionId,
-        extra_arguments: Vec<FunctionHiddenArgValue>,
+        extra_arguments: Vec<HiddenEvidenceArgValue>,
         arguments: Vec<ValOrMut>,
         location: Location,
     ) -> Result<(SuspendedAccessor, Place), RuntimeError> {
@@ -519,7 +544,7 @@ impl<'a> EvalCtx<'a> {
     fn call_accessor_until_yield(
         &mut self,
         function_id: FunctionId,
-        extra_arguments: Vec<FunctionHiddenArgValue>,
+        extra_arguments: Vec<HiddenEvidenceArgValue>,
         arguments: Vec<ValOrMut>,
     ) -> Result<(SuspendedAccessor, Place), RuntimeError> {
         self.check_stack_limit(self.environment.len(), None)?;
@@ -677,7 +702,7 @@ impl<'a> EvalCtx<'a> {
     fn call_function(
         &mut self,
         function_id: FunctionId,
-        extra_arguments: Vec<FunctionHiddenArgValue>,
+        extra_arguments: Vec<HiddenEvidenceArgValue>,
         arguments: Vec<ValOrMut>,
     ) -> EvalControlFlowResult {
         self.check_stack_limit(self.environment.len(), None)?;
@@ -761,6 +786,40 @@ struct SuspendedAccessor {
     previous_returns_place: bool,
     old_extra_frame_base: usize,
     extra_start: usize,
+}
+
+#[derive(Debug, Clone)]
+struct AccessorEpilogue {
+    member: AccessorMemberEpilogue,
+    cleanup_scopes: Vec<Vec<LocalDeclId>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum AccessorMemberEpilogue {
+    Suspended(SuspendedAccessor),
+    None,
+}
+
+impl AccessorEpilogue {
+    fn suspended(suspension: SuspendedAccessor) -> Self {
+        Self {
+            member: AccessorMemberEpilogue::Suspended(suspension),
+            cleanup_scopes: Vec::new(),
+        }
+    }
+
+    fn none() -> Self {
+        Self {
+            member: AccessorMemberEpilogue::None,
+            cleanup_scopes: Vec::new(),
+        }
+    }
+
+    fn push_cleanup_scope(&mut self, cleanup: &[LocalDeclId]) {
+        if !cleanup.is_empty() {
+            self.cleanup_scopes.push(cleanup.to_vec());
+        }
+    }
 }
 
 fn invalid_buffer_index(index: isize, len: usize) -> RuntimeErrorKind {
@@ -1182,8 +1241,14 @@ pub fn eval_node_with_ctx(
         DropClosureEnv(node) => {
             eval_drop_closure_env(arena, node, arena[node_id].span, ctx, locals)
         }
+        CloneSubscriptValue(node) => {
+            eval_clone_subscript_value(arena, node, arena[node_id].span, ctx, locals)
+        }
+        DropSubscriptValue(node) => eval_drop_subscript_value(arena, node, ctx, locals),
         CloneValue(node) => eval_clone_value(arena, node, arena[node_id].span, ctx, locals),
         StaticApply(app) => eval_static_apply(arena, app, node.span, ctx, locals),
+        SubscriptApply(app) => eval_subscript_apply(arena, app, node.span, ctx, locals),
+        GetSubscript(get_subscript) => cont(Value::subscript(get_subscript.subscript)),
         TraitMethodApply(_)
         | GetTraitMethod(_)
         | GetTraitAssociatedConst(_)
@@ -1277,22 +1342,22 @@ fn eval_function_hidden_arg_node(
     node: ENodeId,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
-) -> Result<ControlFlow<FunctionHiddenArgValue>, RuntimeError> {
+) -> Result<ControlFlow<HiddenEvidenceArgValue>, RuntimeError> {
     if let NodeKind::LoadFieldIndex(load) = &arena[node].kind {
-        return Ok(ControlFlow::Continue(FunctionHiddenArgValue::FieldIndex(
+        return Ok(ControlFlow::Continue(HiddenEvidenceArgValue::FieldIndex(
             field_index_from_extra_parameter(ctx, load.extra_parameter),
         )));
     }
     if let Some(dictionary) = try_dictionary_metadata_node(arena, node, ctx) {
         return Ok(ControlFlow::Continue(
-            FunctionHiddenArgValue::TraitDictionary(dictionary),
+            HiddenEvidenceArgValue::TraitDictionary(dictionary),
         ));
     }
     let value = eval_or_return!(eval_node_with_ctx(arena, node, ctx, locals));
     let Some(index) = value.into_primitive_ty::<isize>() else {
         panic!("expected hidden function evidence to be a trait dictionary or field index");
     };
-    Ok(ControlFlow::Continue(FunctionHiddenArgValue::FieldIndex(
+    Ok(ControlFlow::Continue(HiddenEvidenceArgValue::FieldIndex(
         index,
     )))
 }
@@ -1302,7 +1367,7 @@ fn eval_function_hidden_arg_nodes(
     nodes: &[ENodeId],
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
-) -> Result<ControlFlow<Vec<FunctionHiddenArgValue>>, RuntimeError> {
+) -> Result<ControlFlow<Vec<HiddenEvidenceArgValue>>, RuntimeError> {
     // Hidden-argument values are Copy (dictionary ids / field indices) and own no storage.
     eval_sequence(
         nodes.iter().copied(),
@@ -1334,8 +1399,8 @@ fn try_dictionary_metadata_node(
     match &arena[node].kind {
         NodeKind::GetDictionary(get_dict) => Some(ctx.get_dictionary_id(get_dict.dictionary)),
         NodeKind::LoadDictionary(load) => match extra_parameter_value(ctx, load.extra_parameter) {
-            FunctionHiddenArgValue::TraitDictionary(dictionary) => Some(dictionary),
-            FunctionHiddenArgValue::FieldIndex(_) => {
+            HiddenEvidenceArgValue::TraitDictionary(dictionary) => Some(dictionary),
+            HiddenEvidenceArgValue::FieldIndex(_) => {
                 panic!("expected dictionary extra parameter")
             }
         },
@@ -1367,8 +1432,8 @@ fn dictionary_from_extra_parameter(
     extra_parameter: ExtraParameterId,
 ) -> TraitDictionaryId {
     match extra_parameter_value(ctx, extra_parameter) {
-        FunctionHiddenArgValue::TraitDictionary(dictionary) => dictionary,
-        FunctionHiddenArgValue::FieldIndex(_) => panic!(
+        HiddenEvidenceArgValue::TraitDictionary(dictionary) => dictionary,
+        HiddenEvidenceArgValue::FieldIndex(_) => panic!(
             "expected extra parameter {} to contain trait dictionary metadata",
             extra_parameter.as_index()
         ),
@@ -1377,8 +1442,8 @@ fn dictionary_from_extra_parameter(
 
 fn field_index_from_extra_parameter(ctx: &EvalCtx, extra_parameter: ExtraParameterId) -> isize {
     match extra_parameter_value(ctx, extra_parameter) {
-        FunctionHiddenArgValue::FieldIndex(index) => index,
-        FunctionHiddenArgValue::TraitDictionary(_) => panic!(
+        HiddenEvidenceArgValue::FieldIndex(index) => index,
+        HiddenEvidenceArgValue::TraitDictionary(_) => panic!(
             "expected extra parameter {} to contain a field index",
             extra_parameter.as_index()
         ),
@@ -1388,7 +1453,7 @@ fn field_index_from_extra_parameter(ctx: &EvalCtx, extra_parameter: ExtraParamet
 fn extra_parameter_value(
     ctx: &EvalCtx,
     extra_parameter: ExtraParameterId,
-) -> FunctionHiddenArgValue {
+) -> HiddenEvidenceArgValue {
     ctx.extra_parameters[ctx.extra_frame_base + extra_parameter.as_index()]
 }
 
@@ -1831,6 +1896,35 @@ fn eval_drop_closure_env(
 }
 
 #[inline(never)]
+fn eval_clone_subscript_value(
+    arena: &ENodeArena,
+    node: &hir::CloneSubscriptValue<Elaborated>,
+    span: Location,
+    ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
+) -> EvalControlFlowResult {
+    cont(Value::subscript_value(eval_or_return!(
+        eval_subscript_value(arena, node.source, span, ctx, locals)
+    )))
+}
+
+#[inline(never)]
+fn eval_drop_subscript_value(
+    arena: &ENodeArena,
+    node: &hir::DropSubscriptValue<Elaborated>,
+    ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
+) -> EvalControlFlowResult {
+    let target = eval_or_return!(eval_node_as_place(arena, node.target, ctx, locals));
+    let target = target
+        .target_mut(ctx)
+        .map_err(|err| RuntimeError::new(err, Some(arena[node.target].span)))?;
+    let value = mem::replace(target, Value::uninit());
+    value.discard_storage();
+    cont(Value::unit())
+}
+
+#[inline(never)]
 fn eval_clone_value(
     arena: &ENodeArena,
     node: &hir::CloneValue<Elaborated>,
@@ -1902,10 +1996,87 @@ fn eval_apply(
     // from being mutably aliased by the call arguments.
     let function_value = unsafe { &*function_value };
     let args_ty = ctx.function_value_visible_argument_types(function_value);
-    let temp_start = ctx.environment.len();
-    let mut arguments = eval_or_return!(eval_args(arena, &app.arguments, &args_ty, ctx, locals));
-    let result = ctx.call_function_value(function_value, arguments.take_arguments(), span);
-    finish_call(ctx, temp_start, result)
+    eval_resolved_runtime_call_with_args(
+        arena,
+        RuntimeCallArguments::new(&app.arguments, &args_ty, eval_args),
+        ResolvedRuntimeCall::FunctionValue(function_value),
+        span,
+        ctx,
+        locals,
+    )
+}
+
+fn eval_subscript_value<'a>(
+    arena: &ENodeArena,
+    subscript: ENodeId,
+    span: Location,
+    ctx: &mut EvalCtx<'a>,
+    locals: &[LocalDecl],
+) -> Result<ControlFlow<SubscriptValue>, RuntimeError> {
+    if let Some(place) = eval_or_return!(try_eval_node_as_place(arena, subscript, ctx, locals)) {
+        let value = place
+            .target_ref(ctx)
+            .map_err(|err| RuntimeError::new(err, Some(span)))?
+            .as_subscript()
+            .unwrap();
+        return Ok(ControlFlow::Continue((**value).clone()));
+    }
+    let value = eval_or_return!(eval_node_with_ctx(arena, subscript, ctx, locals));
+    Ok(ControlFlow::Continue(*value.into_subscript().unwrap()))
+}
+
+fn eval_subscript_apply_with(
+    arena: &ENodeArena,
+    app: &hir::SubscriptApplication<Elaborated>,
+    span: Location,
+    ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
+    eval_args_fn: EvalArgsFn,
+) -> EvalControlFlowResult {
+    let subscript_value = eval_or_return!(eval_subscript_value(
+        arena,
+        app.subscript,
+        span,
+        ctx,
+        locals
+    ));
+    let SubscriptValue {
+        subscript,
+        hidden_args,
+    } = subscript_value;
+    let call = ResolvedRuntimeCall::FunctionId {
+        function: ctx.subscript_member_function(subscript, app.mut_member),
+        extra_arguments: hidden_args,
+    };
+    eval_resolved_runtime_call_with_args(
+        arena,
+        RuntimeCallArguments::new(&app.arguments, &app.ty.fn_ty.args, eval_args_fn),
+        call,
+        span,
+        ctx,
+        locals,
+    )
+}
+
+#[inline(never)]
+fn eval_subscript_apply(
+    arena: &ENodeArena,
+    app: &hir::SubscriptApplication<Elaborated>,
+    span: Location,
+    ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
+) -> EvalControlFlowResult {
+    eval_subscript_apply_with(arena, app, span, ctx, locals, eval_args)
+}
+
+fn eval_addressor_place_subscript_apply(
+    arena: &ENodeArena,
+    app: &hir::SubscriptApplication<Elaborated>,
+    span: Location,
+    ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
+) -> EvalControlFlowResult {
+    eval_subscript_apply_with(arena, app, span, ctx, locals, eval_addressor_place_args)
 }
 
 #[inline(never)]
@@ -1946,26 +2117,109 @@ fn eval_static_apply_with(
     locals: &[LocalDecl],
     eval_args_fn: EvalArgsFn,
 ) -> EvalControlFlowResult {
-    let temp_start = ctx.environment.len();
     let extra_arguments = eval_or_return!(eval_function_hidden_arg_nodes(
         arena,
         &app.extra_arguments,
         ctx,
         locals,
     ));
-    let mut arguments = eval_or_return!(eval_args_fn(
+    eval_resolved_runtime_call_with_args(
         arena,
-        &app.arguments,
-        &app.ty.fn_ty.args,
+        RuntimeCallArguments::new(&app.arguments, &app.ty.fn_ty.args, eval_args_fn),
+        ResolvedRuntimeCall::FunctionId {
+            function: app.function,
+            extra_arguments,
+        },
+        span,
+        ctx,
+        locals,
+    )
+}
+
+enum ResolvedRuntimeCall<'a> {
+    FunctionValue(&'a FunctionValue),
+    FunctionId {
+        function: FunctionId,
+        extra_arguments: Vec<HiddenEvidenceArgValue>,
+    },
+}
+
+impl ResolvedRuntimeCall<'_> {
+    fn call(
+        self,
+        ctx: &mut EvalCtx,
+        arguments: Vec<ValOrMut>,
+        span: Location,
+    ) -> EvalControlFlowResult {
+        match self {
+            Self::FunctionValue(function_value) => {
+                ctx.call_function_value(function_value, arguments, span)
+            }
+            Self::FunctionId {
+                function,
+                extra_arguments,
+            } => ctx.call_resolved_function_with_extra(function, extra_arguments, arguments, span),
+        }
+    }
+
+    fn call_accessor_until_yield(
+        self,
+        ctx: &mut EvalCtx,
+        arguments: Vec<ValOrMut>,
+        span: Location,
+    ) -> Result<(SuspendedAccessor, Place), RuntimeError> {
+        match self {
+            Self::FunctionValue(_) => panic!("first-class function value is not an accessor call"),
+            Self::FunctionId {
+                function,
+                extra_arguments,
+            } => ctx.call_resolved_accessor_until_yield_with_extra(
+                function,
+                extra_arguments,
+                arguments,
+                span,
+            ),
+        }
+    }
+}
+
+struct RuntimeCallArguments<'a> {
+    arguments: &'a [CallArgument<Elaborated>],
+    arg_tys: &'a [FnArgType],
+    eval_args: EvalArgsFn,
+}
+
+impl<'a> RuntimeCallArguments<'a> {
+    fn new(
+        arguments: &'a [CallArgument<Elaborated>],
+        arg_tys: &'a [FnArgType],
+        eval_args: EvalArgsFn,
+    ) -> Self {
+        Self {
+            arguments,
+            arg_tys,
+            eval_args,
+        }
+    }
+}
+
+fn eval_resolved_runtime_call_with_args(
+    arena: &ENodeArena,
+    arguments: RuntimeCallArguments<'_>,
+    call: ResolvedRuntimeCall<'_>,
+    span: Location,
+    ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
+) -> EvalControlFlowResult {
+    let temp_start = ctx.environment.len();
+    let mut arguments = eval_or_return!((arguments.eval_args)(
+        arena,
+        arguments.arguments,
+        arguments.arg_tys,
         ctx,
         locals
     ));
-    let result = ctx.call_resolved_function_with_extra(
-        app.function,
-        extra_arguments,
-        arguments.take_arguments(),
-        span,
-    );
+    let result = call.call(ctx, arguments.take_arguments(), span);
     finish_call(ctx, temp_start, result)
 }
 
@@ -2313,7 +2567,7 @@ fn eval_with_yielded(
 ) -> EvalControlFlowResult {
     ctx.reserve_current_frame_slots(locals);
     let temp_start = ctx.environment.len();
-    let (suspension, yielded_place) = eval_or_return!(eval_accessor_until_yield(
+    let (epilogue, yielded_place) = eval_or_return!(eval_accessor_until_yield(
         arena,
         node.accessor,
         span,
@@ -2326,7 +2580,18 @@ fn eval_with_yielded(
     let body_result = eval_node_with_ctx(arena, node.body, ctx, locals);
     ctx.set_environment_entry(binding_index, ValOrMut::Val(Value::uninit()));
 
-    let epilogue_result = ctx.resume_suspended_accessor_epilogue(suspension, span);
+    let mut epilogue_result = match epilogue.member {
+        AccessorMemberEpilogue::Suspended(suspension) => {
+            ctx.resume_suspended_accessor_epilogue(suspension, span)
+        }
+        AccessorMemberEpilogue::None => cont(Value::unit()),
+    };
+    for cleanup in epilogue.cleanup_scopes {
+        if let Err(err) = drop_cleanup_locals(ctx, locals, &cleanup, span) {
+            epilogue_result = Err(err);
+            break;
+        }
+    }
     ctx.truncate_environment_storage(temp_start);
     combine_with_yielded_body_and_epilogue(body_result, epilogue_result)
 }
@@ -2337,36 +2602,142 @@ fn eval_accessor_until_yield(
     span: Location,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
-) -> Result<ControlFlow<(SuspendedAccessor, Place)>, RuntimeError> {
-    let NodeKind::StaticApply(app) = &arena[accessor].kind else {
-        panic!("WithYielded accessor must be a static accessor call");
+) -> Result<ControlFlow<(AccessorEpilogue, Place)>, RuntimeError> {
+    if let NodeKind::Block(block) = &arena[accessor].kind {
+        return eval_block_accessor_until_yield(arena, block, span, ctx, locals);
+    }
+
+    enum AccessorCall<'a> {
+        Static(&'a hir::StaticApplication<Elaborated>),
+        Subscript(&'a hir::SubscriptApplication<Elaborated>),
+    }
+
+    let call = match &arena[accessor].kind {
+        NodeKind::StaticApply(app) => AccessorCall::Static(app),
+        NodeKind::SubscriptApply(app) => AccessorCall::Subscript(app),
+        _ => panic!("WithYielded accessor must be an accessor call"),
     };
     let temp_start = ctx.environment.len();
-    let extra_arguments =
-        match eval_function_hidden_arg_nodes(arena, &app.extra_arguments, ctx, locals)? {
-            ControlFlow::Continue(arguments) => arguments,
-            ControlFlow::Transfer(transfer) => {
-                ctx.truncate_environment_storage(temp_start);
-                return Ok(ControlFlow::Transfer(transfer));
-            }
-        };
-    let mut arguments = match eval_args(arena, &app.arguments, &app.ty.fn_ty.args, ctx, locals)? {
+    let (call, result_convention, arguments, arg_tys) = match call {
+        AccessorCall::Static(app) => {
+            let extra_arguments =
+                match eval_function_hidden_arg_nodes(arena, &app.extra_arguments, ctx, locals)? {
+                    ControlFlow::Continue(arguments) => arguments,
+                    ControlFlow::Transfer(transfer) => {
+                        ctx.truncate_environment_storage(temp_start);
+                        return Ok(ControlFlow::Transfer(transfer));
+                    }
+                };
+            (
+                ResolvedRuntimeCall::FunctionId {
+                    function: app.function,
+                    extra_arguments,
+                },
+                app.ty.result_convention,
+                &app.arguments,
+                &app.ty.fn_ty.args,
+            )
+        }
+        AccessorCall::Subscript(app) => {
+            let subscript_value =
+                match eval_subscript_value(arena, app.subscript, span, ctx, locals)? {
+                    ControlFlow::Continue(value) => value,
+                    ControlFlow::Transfer(transfer) => {
+                        ctx.truncate_environment_storage(temp_start);
+                        return Ok(ControlFlow::Transfer(transfer));
+                    }
+                };
+            let function = ctx.subscript_member_function(subscript_value.subscript, app.mut_member);
+            (
+                ResolvedRuntimeCall::FunctionId {
+                    function,
+                    extra_arguments: subscript_value.hidden_args,
+                },
+                ctx.function_result_convention(function),
+                &app.arguments,
+                &app.ty.fn_ty.args,
+            )
+        }
+    };
+    let eval_args_fn = if result_convention.returns_place() {
+        eval_addressor_place_args
+    } else {
+        eval_args
+    };
+    let mut arguments = match eval_args_fn(arena, arguments, arg_tys, ctx, locals)? {
         ControlFlow::Continue(arguments) => arguments,
         ControlFlow::Transfer(transfer) => {
             ctx.truncate_environment_storage(temp_start);
             return Ok(ControlFlow::Transfer(transfer));
         }
     };
-    match ctx.call_resolved_accessor_until_yield_with_extra(
-        app.function,
-        extra_arguments,
-        arguments.take_arguments(),
-        span,
-    ) {
-        Ok(suspension) => Ok(ControlFlow::Continue(suspension)),
+    if result_convention.returns_place() {
+        let result = call.call(ctx, arguments.take_arguments(), span);
+        ctx.truncate_environment_storage(temp_start);
+        return Ok(control_flow_into_addressor_place(result?)
+            .map_continue(|place| (AccessorEpilogue::none(), place)));
+    }
+    match call.call_accessor_until_yield(ctx, arguments.take_arguments(), span) {
+        Ok((suspension, place)) => Ok(ControlFlow::Continue((
+            AccessorEpilogue::suspended(suspension),
+            place,
+        ))),
         Err(err) => {
             ctx.truncate_environment_storage(temp_start);
             Err(err)
+        }
+    }
+}
+
+fn eval_block_accessor_until_yield(
+    arena: &ENodeArena,
+    block: &hir::Block<Elaborated>,
+    span: Location,
+    ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
+) -> Result<ControlFlow<(AccessorEpilogue, Place)>, RuntimeError> {
+    let Some((&tail, prefix)) = block.body.split_last() else {
+        panic!("WithYielded accessor block must contain an accessor call");
+    };
+    let env_size = ctx.environment.len();
+    for node in prefix {
+        match eval_node_with_ctx(arena, *node, ctx, locals) {
+            Ok(ControlFlow::Continue(value)) => value.discard_storage(),
+            Ok(transfer) => {
+                if let Err(err) =
+                    drop_cleanup_locals(ctx, locals, &block.cleanup, arena[*node].span)
+                {
+                    ctx.truncate_environment_storage(env_size);
+                    return Err(err);
+                }
+                ctx.truncate_environment_storage(env_size);
+                return Ok(transfer.map_continue(unreachable_continue));
+            }
+            Err(err) => {
+                if let Err(cleanup_err) =
+                    drop_cleanup_locals(ctx, locals, &block.cleanup, arena[*node].span)
+                {
+                    ctx.truncate_environment_storage(env_size);
+                    return Err(cleanup_err);
+                }
+                ctx.truncate_environment_storage(env_size);
+                return Err(err);
+            }
+        }
+    }
+
+    match eval_accessor_until_yield(arena, tail, span, ctx, locals)? {
+        ControlFlow::Continue((mut epilogue, place)) => {
+            epilogue.push_cleanup_scope(&block.cleanup);
+            Ok(ControlFlow::Continue((epilogue, place)))
+        }
+        ControlFlow::Transfer(transfer) => {
+            if let Err(err) = drop_cleanup_locals(ctx, locals, &block.cleanup, arena[tail].span) {
+                ctx.truncate_environment_storage(env_size);
+                return Err(err);
+            }
+            ctx.truncate_environment_storage(env_size);
+            Ok(ControlFlow::Transfer(transfer))
         }
     }
 }
@@ -2838,6 +3209,7 @@ fn place_resolution_depends_on_addressor_place(arena: &ENodeArena, node_id: ENod
     match &arena[node_id].kind {
         NodeKind::Apply(app) => app.ty.returns_place(),
         NodeKind::StaticApply(app) => app.ty.returns_place(),
+        NodeKind::SubscriptApply(app) => app.ty.returns_place(),
         NodeKind::CallDictionaryMethod(call) => call.ty.returns_place(),
         NodeKind::Project(node) => place_resolution_depends_on_addressor_place(arena, node.value),
         NodeKind::ProjectAt(node) => place_resolution_depends_on_addressor_place(arena, node.value),
@@ -3185,6 +3557,10 @@ fn try_eval_node_as_place(
             let result = eval_addressor_place_static_apply(arena, app, node.span, ctx, locals)?;
             return Ok(control_flow_into_addressor_place(result).map_continue(Some));
         }
+        SubscriptApply(app) if app.ty.returns_place() => {
+            let result = eval_addressor_place_subscript_apply(arena, app, node.span, ctx, locals)?;
+            return Ok(control_flow_into_addressor_place(result).map_continue(Some));
+        }
         CallDictionaryMethod(call) if call.ty.returns_place() => {
             let result =
                 eval_addressor_place_call_dictionary_method(arena, call, node.span, ctx, locals)?;
@@ -3247,6 +3623,7 @@ fn node_may_resolve_to_place(arena: &ENodeArena, node_id: ENodeId) -> bool {
         NodeKind::ProjectAt(node) => node_may_resolve_to_place(arena, node.value),
         NodeKind::Apply(app) => app.ty.returns_place(),
         NodeKind::StaticApply(app) => app.ty.returns_place(),
+        NodeKind::SubscriptApply(app) => app.ty.returns_place(),
         NodeKind::CallDictionaryMethod(call) => call.ty.returns_place(),
         NodeKind::CloneValue(node)
             if matches!(

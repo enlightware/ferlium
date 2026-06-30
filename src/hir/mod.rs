@@ -37,7 +37,7 @@ use crate::{
     module::{
         ExtraParameterId, FunctionId, LocalCloneMetadata, LocalDecl, LocalDeclId,
         PendingLocalClone, PendingLocalDrop, PendingTakeLocalValueMode, ProjectionIndex,
-        ResolvedLocalClone, ResolvedLocalDrop, ResolvedTakeLocalValueMode,
+        ResolvedLocalClone, ResolvedLocalDrop, ResolvedTakeLocalValueMode, SubscriptId,
         TakeLocalValueModeMetadata, TraitId, TraitImplId, id::Id,
     },
     types::r#trait::{TraitAssociatedConstIndex, TraitDictionaryEntryIndex, TraitMethodIndex},
@@ -483,6 +483,18 @@ pub struct DropClosureEnv<P: HirPhase = Unelaborated> {
     pub target: NodeId<P>,
 }
 
+/// Clone a first-class subscript value.
+#[derive(Debug, Clone, Copy)]
+pub struct CloneSubscriptValue<P: HirPhase = Unelaborated> {
+    pub source: NodeId<P>,
+}
+
+/// Drop a first-class subscript value.
+#[derive(Debug, Clone, Copy)]
+pub struct DropSubscriptValue<P: HirPhase = Unelaborated> {
+    pub target: NodeId<P>,
+}
+
 // Calls and function value payloads.
 
 /// A visible call argument together with its resolved or deferred passing mode.
@@ -528,10 +540,27 @@ pub struct GetFunction {
     pub inst_data: FnInstData,
 }
 
+/// Load a statically known subscript as a first-class value.
+#[derive(Debug, Clone)]
+pub struct GetSubscript {
+    pub subscript: SubscriptId,
+    pub subscript_path: ast::Path,
+    pub inst_data: FnInstData,
+}
+
 /// Call a first-class function value.
 #[derive(Debug, Clone)]
 pub struct Application<P: HirPhase = Unelaborated> {
     pub function: NodeId<P>,
+    pub arguments: Vec<CallArgument<P>>,
+    pub ty: CallImplType,
+}
+
+/// Apply a first-class subscript capability.
+#[derive(Debug, Clone)]
+pub struct SubscriptApplication<P: HirPhase = Unelaborated> {
+    pub subscript: NodeId<P>,
+    pub mut_member: bool,
     pub arguments: Vec<CallArgument<P>>,
     pub ty: CallImplType,
 }
@@ -721,12 +750,20 @@ pub enum NodeKind<P: HirPhase = Unelaborated> {
     CloneClosureEnv(CloneClosureEnv<P>),
     /// Drop the owned closure environment stored in `target`.
     DropClosureEnv(DropClosureEnv<P>),
+    /// Clone a first-class subscript value.
+    CloneSubscriptValue(CloneSubscriptValue<P>),
+    /// Drop a first-class subscript value.
+    DropSubscriptValue(DropSubscriptValue<P>),
 
     // Calls and function values.
     /// Load a statically known function as a first-class value.
     GetFunction(B<GetFunction>),
+    /// Load a statically known subscript as a first-class value.
+    GetSubscript(B<GetSubscript>),
     /// Call a first-class function value.
     Apply(B<Application<P>>),
+    /// Apply a first-class subscript capability.
+    SubscriptApply(B<SubscriptApplication<P>>),
     /// Call a statically known function.
     StaticApply(B<StaticApplication<P>>),
     /// Call a trait method before dictionary passing resolves it.
@@ -787,6 +824,7 @@ impl NodeKind {
             Immediate(_)
             | Uninit
             | GetFunction(_)
+            | GetSubscript(_)
             | GetTraitMethod(_)
             | GetTraitAssociatedConst(_)
             | GetTraitDictionary(_)
@@ -812,8 +850,15 @@ impl NodeKind {
                 v.extend(app.arguments.iter().map(|arg| arg.value));
                 v
             }
+            SubscriptApply(app) => {
+                let mut v: SVec4<NodeId> = smallvec![app.subscript];
+                v.extend(app.arguments.iter().map(|arg| arg.value));
+                v
+            }
             CloneClosureEnv(node) => smallvec![node.source],
             DropClosureEnv(node) => smallvec![node.target],
+            CloneSubscriptValue(node) => smallvec![node.source],
+            DropSubscriptValue(node) => smallvec![node.target],
             CloneValue(node) => smallvec![node.source],
             StaticApply(app) => app
                 .extra_arguments
@@ -1121,12 +1166,33 @@ impl<P: HirPhase> Node<P> {
                     writeln!(f, "{indent_str})")?;
                 }
             }
+            SubscriptApply(app) => {
+                writeln!(f, "{indent_str}eval subscript")?;
+                format_ind(arena, app.subscript, f, locals, env, spacing, indent + 1)?;
+                if app.arguments.is_empty() {
+                    writeln!(f, "{indent_str}and apply to ()")?;
+                } else {
+                    writeln!(f, "{indent_str}and apply to (")?;
+                    for arg in &app.arguments {
+                        format_ind(arena, arg.value, f, locals, env, spacing, indent + 1)?;
+                    }
+                    writeln!(f, "{indent_str})")?;
+                }
+            }
             CloneClosureEnv(node) => {
                 writeln!(f, "{indent_str}clone closure env")?;
                 format_ind(arena, node.source, f, locals, env, spacing, indent + 1)?;
             }
             DropClosureEnv(node) => {
                 writeln!(f, "{indent_str}drop closure env")?;
+                format_ind(arena, node.target, f, locals, env, spacing, indent + 1)?;
+            }
+            CloneSubscriptValue(node) => {
+                writeln!(f, "{indent_str}clone subscript value")?;
+                format_ind(arena, node.source, f, locals, env, spacing, indent + 1)?;
+            }
+            DropSubscriptValue(node) => {
+                writeln!(f, "{indent_str}drop subscript value")?;
                 format_ind(arena, node.target, f, locals, env, spacing, indent + 1)?;
             }
             CloneValue(node) => {
@@ -1166,6 +1232,13 @@ impl<P: HirPhase> Node<P> {
             }
             GetFunction(get_fn) => {
                 writeln!(f, "{indent_str}get {}", get_fn.function.format_with(env))?;
+            }
+            GetSubscript(get_subscript) => {
+                writeln!(
+                    f,
+                    "{indent_str}get subscript {}",
+                    get_subscript.subscript_path
+                )?;
             }
             GetTraitMethod(get_method) => {
                 get_method.format_ind(arena, f, locals, env, spacing, indent, &indent_str)?;
@@ -1458,12 +1531,32 @@ impl<P: HirPhase> Node<P> {
                     }
                 }
             }
+            SubscriptApply(app) => {
+                if let Some(ty) = type_at(arena, app.subscript, pos) {
+                    return Some(ty);
+                }
+                for arg in &app.arguments {
+                    if let Some(ty) = type_at(arena, arg.value, pos) {
+                        return Some(ty);
+                    }
+                }
+            }
             CloneClosureEnv(node) => {
                 if let Some(ty) = type_at(arena, node.source, pos) {
                     return Some(ty);
                 }
             }
             DropClosureEnv(node) => {
+                if let Some(ty) = type_at(arena, node.target, pos) {
+                    return Some(ty);
+                }
+            }
+            CloneSubscriptValue(node) => {
+                if let Some(ty) = type_at(arena, node.source, pos) {
+                    return Some(ty);
+                }
+            }
+            DropSubscriptValue(node) => {
                 if let Some(ty) = type_at(arena, node.target, pos) {
                     return Some(ty);
                 }
@@ -1485,8 +1578,8 @@ impl<P: HirPhase> Node<P> {
                     return Some(ty);
                 }
             }
-            GetFunction(_) => {
-                // GetFunction nodes don't contain child expressions with types
+            GetFunction(_) | GetSubscript(_) => {
+                // These nodes don't contain child expressions with types.
             }
             GetTraitMethod(_) => {
                 // GetTraitMethod nodes don't contain child expressions with types
@@ -1667,10 +1760,18 @@ impl Node {
                     unbound_ty_vars(arena, arg.value, result, ignore);
                 }
             }
+            SubscriptApply(app) => {
+                unbound_ty_vars(arena, app.subscript, result, ignore);
+                for arg in &app.arguments {
+                    unbound_ty_vars(arena, arg.value, result, ignore);
+                }
+            }
             CloneClosureEnv(node) => {
                 unbound_ty_vars(arena, node.source, result, ignore);
             }
             DropClosureEnv(node) => unbound_ty_vars(arena, node.target, result, ignore),
+            CloneSubscriptValue(node) => unbound_ty_vars(arena, node.source, result, ignore),
+            DropSubscriptValue(node) => unbound_ty_vars(arena, node.target, result, ignore),
             CloneValue(node) => unbound_ty_vars(arena, node.source, result, ignore),
             StaticApply(app) => {
                 for arg in &app.arguments {
@@ -1682,7 +1783,7 @@ impl Node {
                     unbound_ty_vars(arena, arg.value, result, ignore);
                 }
             }
-            GetFunction(_) => {
+            GetFunction(_) | GetSubscript(_) => {
                 // no need to look into the value's type as it is already in this node's type
             }
             GetTraitMethod(_) => {}

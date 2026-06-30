@@ -24,6 +24,18 @@ Array indexing is implemented as a standard-library subscript, and it composes w
 rows->[row](0)[1]
 ```
 
+Subscript names are first-class values, distinct from functions:
+
+```ferlium
+let first_slot = first;
+values->[first_slot]
+```
+
+Inside `->[name]`, a visible local named `name` is treated as a subscript value. Otherwise `name` is resolved as a named subscript in the module environment.
+Unannotated function parameters used this way infer a first-class subscript capability type.
+Abstract first-class subscript use is driven through the yielded interface; addressor-place subscripts are adapted with empty brackets when passed to that interface.
+First-class subscript values that must capture generic constraint evidence are not implemented yet; use those subscripts directly by name for now.
+
 If the subscript result itself should be called as a function, parenthesize the subscript access:
 
 ```ferlium

@@ -95,6 +95,7 @@ fn value_shape(value: &Value) -> &'static str {
         Value::Variant(_) => "variant value",
         Value::Tuple(_) => "tuple value",
         Value::Function(_) => "function value",
+        Value::Subscript(_) => "subscript value",
     }
 }
 

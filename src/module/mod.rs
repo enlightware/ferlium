@@ -50,10 +50,11 @@ use crate::{
     types::{
         r#trait::Trait,
         r#type::{
-            CallResultConvention, FnArgType, LocalTypeAliasId, Type, TypeAliasEntry, TypeAliases,
-            TypeDef, TypeDefSlot, TypeDisplayEnv, TypeKind, TypeVar,
+            CallResultConvention, FnArgType, LocalTypeAliasId, SubscriptMemberType,
+            SubscriptResultConvention, SubscriptType, Type, TypeAliasEntry, TypeAliases, TypeDef,
+            TypeDefSlot, TypeDisplayEnv, TypeKind, TypeVar,
         },
-        type_scheme::PubTypeConstraint,
+        type_scheme::{PubTypeConstraint, TypeScheme},
     },
 };
 
@@ -108,6 +109,15 @@ define_id_type!(
     LocalSubscriptId
 );
 
+/// A fully-qualified reference to a subscript bundle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, new)]
+pub struct SubscriptId {
+    /// Module owning the subscript.
+    pub module: ModuleId,
+    /// Subscript index within the owning module.
+    pub subscript: LocalSubscriptId,
+}
+
 /// Provenance class for a subscript member's place-producing function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum YieldProvenance {
@@ -139,14 +149,49 @@ pub struct SubscriptSignature {
 /// A named subscript bundle with optional read/write members.
 ///
 /// This is intentionally not a `CallableDefinition`: ref and mut members are
-/// separate implementations with independent effects. The future first-class
-/// projection capability is expected to be represented by a distinct
-/// `SubscriptType`.
+/// separate implementations with independent effects. First-class projection
+/// capabilities are represented by the distinct `SubscriptType`.
 #[derive(Debug, Clone)]
 pub struct SubscriptDefinition {
     pub signature: SubscriptSignature,
     pub ref_member: Option<SubscriptMember>,
     pub mut_member: Option<SubscriptMember>,
+}
+
+impl SubscriptDefinition {
+    /// Derive the first-class capability type scheme for this subscript bundle.
+    pub fn type_scheme(&self, owner: &Module) -> TypeScheme<SubscriptType> {
+        TypeScheme::new_infer_quantifiers_with_constraints(
+            SubscriptType::new(
+                self.signature.args.clone(),
+                self.signature.ret,
+                subscript_member_type(owner, self.ref_member.as_ref()),
+                subscript_member_type(owner, self.mut_member.as_ref()),
+            ),
+            self.signature.constraints.clone(),
+        )
+    }
+}
+
+fn subscript_member_type(
+    owner: &Module,
+    member: Option<&SubscriptMember>,
+) -> Option<SubscriptMemberType> {
+    let member = member?;
+    let function = owner
+        .get_function_by_id(member.function)
+        .expect("subscript member function should exist");
+    Some(SubscriptMemberType::new(
+        function.definition.ty_scheme.ty.effects.clone(),
+        subscript_result_convention(member.provenance),
+    ))
+}
+
+fn subscript_result_convention(provenance: YieldProvenance) -> SubscriptResultConvention {
+    match provenance {
+        YieldProvenance::YieldedOnce => SubscriptResultConvention::YieldedOnce,
+        YieldProvenance::AddressorPlace => SubscriptResultConvention::AddressorPlace,
+    }
 }
 
 /// A reference to a definition, consisting of the module ID and the definition index within that module.

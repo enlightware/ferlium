@@ -20,6 +20,9 @@ The consumer then uses a normal place rooted at that temporary, and the surround
 Addressor-place call nodes are place-like nodes.
 Native addressors are registered as subscript members when they model projection, and source subscript members without `yield` infer `SubscriptResultConvention::AddressorPlace` from their body shape.
 A subscript bundle does not have a `FnType`; each selected `ref` or `mut` member is emitted as a member function whose definition and selected HIR call metadata carry the wrapper call result convention.
+First-class subscript values currently carry the bundle identity; support for captured hidden evidence is reserved for generic constrained subscript values.
+`SubscriptApply` selects a member at the use site and carries the same selected call metadata.
+When a first-class subscript is used through an inferred abstract capability, the selected HIR call uses the yielded interface; a concrete addressor-place member may still be adapted by the runtime driver with no epilogue.
 After HIR construction the selected call metadata is the source of truth: consumers handle any call node with `AddressorPlace` like a place when a place is required, or materialize it with `CloneValue` when an owned value is required.
 The returned place is an expression-local capability, not a storable reference value.
 HIR must not store a raw place in a local, aggregate, closure capture, or normal value return.
@@ -33,7 +36,7 @@ If `body` exits by return, break, continue, or runtime error, the accessor epilo
 If the accessor fails before yielding, no yielded binding exists and no post-yield epilogue runs.
 
 A member without `yield` uses `SubscriptResultConvention::AddressorPlace`, exposed on selected HIR calls as `CallResultConvention::ADDRESSOR_PLACE`, and keeps caller-rooted projection behavior.
-When a named subscript use must evaluate an addressor projection exactly once, HIR uses `WithPlace { place, binding, body }`.
+When a subscript use must evaluate an addressor projection exactly once, HIR uses `WithPlace { place, binding, body }`.
 `WithPlace` evaluates `place` as a caller-rooted place, binds it to an internal non-owning `binding`, and evaluates `body`.
 It does not suspend an accessor and has no epilogue.
 Std `array_index` is a source subscript with `AddressorPlace` provenance, backed by the private native `buffer_slot` subscript; source array-index syntax resolves `array_index` and lowers through the addressor path.
@@ -72,7 +75,7 @@ Current lowering applies these rules in the main ownership-sensitive contexts:
 - Function calls use the explicit argument passing rules described below.
 - Assignment targets may consume projections and addressor-place calls directly as places, subject to the usual mutability checks.
 - Projections and addressor-place calls of non-place bases use explicit owned temporaries when consumed as places; if an owned result is needed, that place is then wrapped in `CloneValue`.
-- Named subscript reads, assignments, and compound assignments use one projection driver: `WithYielded` for scoped members and `WithPlace` for addressor members.
+- Subscript reads, assignments, and compound assignments use one projection driver: `WithYielded` for scoped members and `WithPlace` for addressor members.
   Compound assignment reads and writes the internal binding inside that single projection instead of duplicating the accessor.
 
 # Drops and Cleanup

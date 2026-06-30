@@ -18,9 +18,9 @@ use crate::{
     hir::function::{CallableDefinition, ResolvedArgPassing},
     hir::{LoopId, NodeArena, NodeId},
     module::{
-        FunctionId, LocalDecl, LocalDeclId, LocalFunctionId, ModuleEnv, ModuleId,
-        SubscriptDefinition, SubscriptMember, TraitId, TypeDefLookupResult, UModuleFunction,
-        id::Id,
+        FunctionId, LocalDecl, LocalDeclId, LocalFunctionId, Module, ModuleEnv, ModuleId,
+        SubscriptDefinition, SubscriptId, SubscriptMember, TraitId, TypeDefLookupResult,
+        UModuleFunction, id::Id,
     },
     std::{STD_MODULE_ID, array::array_type as std_array_type},
     types::r#trait::TraitMethodIndex,
@@ -43,6 +43,7 @@ pub type GetFunctionData<'a> = (
     Option<Vec<ResolvedArgPassing>>,
 );
 pub type GetFunctionWithPathData<'a> = (ast::Path, GetFunctionData<'a>);
+pub type GetSubscriptData<'a> = (&'a SubscriptDefinition, SubscriptId, Option<ModuleId>);
 pub type GetSubscriptMemberData<'a> = (
     &'a SubscriptDefinition,
     &'a SubscriptMember,
@@ -251,6 +252,73 @@ impl<'m> TypingEnv<'m> {
                 function.code.runtime_argument_passing().map(<[_]>::to_vec),
             ))
         })
+    }
+
+    pub fn get_subscript(
+        &mut self,
+        path: &ast::Path,
+    ) -> Result<Option<GetSubscriptData<'_>>, InternalCompilationError> {
+        if path.is_empty() {
+            return Ok(None);
+        }
+
+        let (module_id_opt, subscript_name) =
+            match self.module_env.subscript_name_with_module(path)? {
+                Some(k) => k,
+                None => return Ok(None),
+            };
+        if self
+            .module_env
+            .is_unsafe_item_unavailable_in_current_context(module_id_opt, subscript_name)
+        {
+            return Err(
+                InternalCompilationError::new_unsafe_feature_use_not_allowed(
+                    UnsafeFeature::Subscript(subscript_name),
+                    path.span().unwrap_or_else(Location::new_synthesized),
+                ),
+            );
+        }
+
+        Ok(if let Some(module_id) = module_id_opt {
+            let source_module = self
+                .module_env
+                .modules
+                .get(module_id)
+                .unwrap()
+                .module
+                .as_ref()
+                .unwrap();
+            let id = source_module
+                .get_local_subscript_id(subscript_name)
+                .expect("resolved subscript should exist");
+            let subscript = source_module.get_subscript_by_id(id).unwrap();
+            self.new_deps.insert(module_id);
+            Some((subscript, SubscriptId::new(module_id, id), Some(module_id)))
+        } else {
+            let id = self
+                .module_env
+                .current
+                .get_local_subscript_id(subscript_name)
+                .expect("resolved subscript should exist");
+            let subscript = self.module_env.current.get_subscript_by_id(id).unwrap();
+            Some((
+                subscript,
+                SubscriptId::new(self.current_module_id(), id),
+                None,
+            ))
+        })
+    }
+
+    pub fn subscript_owner_module(&self, subscript_id: SubscriptId) -> &Module {
+        if subscript_id.module == self.current_module_id() {
+            self.module_env.current
+        } else {
+            self.module_env
+                .modules
+                .get(subscript_id.module)
+                .and_then(|entry| entry.module.as_ref())
+                .expect("subscript module should be loaded")
+        }
     }
 
     pub fn get_std_function(

@@ -782,6 +782,290 @@ fn module_function_can_use_later_named_subscript() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn first_class_addressor_subscript_value_reads_and_writes() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        subscript first(values: &mut [int]) -> int {
+            ref mut {
+                return values[0]
+            }
+        }
+
+        let first_slot = first;
+        let mut values = [8];
+        let before = values->[first_slot];
+        values->[first_slot] = 13;
+        before + values[0]
+    "# });
+
+    assert_val_eq!(value, int(21));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn first_class_yielded_subscript_value_runs_epilogue() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        subscript cell(slot: &mut int, log: &mut int) -> int {
+            mut {
+                log = log + 1;
+                let mut local = slot;
+                yield local;
+                slot = local;
+                log = log * 10
+            }
+        }
+
+        let cell_slot = cell;
+        let mut slot = 5;
+        let mut log = 0;
+        slot->[cell_slot](log) += 7;
+        slot + log
+    "# });
+
+    assert_val_eq!(value, int(22));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn first_class_addressor_subscript_parameter_is_inferred_and_adapted_to_yielded_interface() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        subscript first(values: &mut [int]) -> int {
+            ref mut {
+                return values[0]
+            }
+        }
+
+        fn read(slot) -> int {
+            let mut values = [9];
+            values->[slot]
+        }
+
+        let first_slot = first;
+        read(first_slot)
+    "# });
+
+    assert_val_eq!(value, int(9));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn first_class_yielded_subscript_parameter_is_inferred_and_runs_epilogue() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        subscript cell(slot: &mut int) -> int {
+            mut {
+                let mut local = slot;
+                yield local;
+                slot = local
+            }
+        }
+
+        fn bump(accessor) -> int {
+            let mut slot = 5;
+            slot->[accessor] += 7;
+            slot
+        }
+
+        let accessor = cell;
+        bump(accessor)
+    "# });
+
+    assert_val_eq!(value, int(12));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn first_class_addressor_subscript_parameter_assignment_is_inferred() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        subscript first(values: &mut [int]) -> int {
+            ref mut {
+                return values[0]
+            }
+        }
+
+        fn set_first(slot) -> int {
+            let mut values = [5];
+            values->[slot] = 8;
+            values[0]
+        }
+
+        let first_slot = first;
+        set_first(first_slot)
+    "# });
+
+    assert_val_eq!(value, int(8));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn first_class_yielded_subscript_parameter_assignment_is_inferred() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        subscript cell(slot: &mut int, log: &mut int) -> int {
+            mut {
+                log = log + 1;
+                let mut local = slot;
+                yield local;
+                slot = local;
+                log = log * 10
+            }
+        }
+
+        fn set_cell(accessor, log: &mut int) -> int {
+            let mut slot = 5;
+            slot->[accessor](log) = 8;
+            slot + log
+        }
+
+        let accessor = cell;
+        let mut log = 0;
+        set_cell(accessor, log)
+    "# });
+
+    assert_val_eq!(value, int(18));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn first_class_yielded_subscript_parameter_extra_mut_arg_is_inferred() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        subscript cell(slot: &mut int, log: &mut int) -> int {
+            mut {
+                log = log + 1;
+                let mut local = slot;
+                yield local;
+                slot = local;
+                log = log * 10
+            }
+        }
+
+        fn bump(accessor, log: &mut int) -> int {
+            let mut slot = 5;
+            slot->[accessor](log) += 7;
+            slot + log
+        }
+
+        let accessor = cell;
+        let mut log = 0;
+        bump(accessor, log)
+    "# });
+
+    assert_val_eq!(value, int(22));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn named_subscript_non_receiver_closure_arg_uses_expected_type() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        subscript cell(slot: &mut int, callback: (int) -> int) -> int {
+            ref {
+                let local = callback(slot);
+                yield local
+            }
+        }
+
+        let mut slot = 5;
+        slot->[cell](|x| x + 1)
+    "# });
+
+    assert_val_eq!(value, int(6));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn first_class_subscript_value_is_not_a_function() {
+    assert_experimental_compile_error(indoc! { r#"
+        subscript cell(slot: &mut int) -> int {
+            ref mut {
+                return slot
+            }
+        }
+
+        let cell_slot = cell;
+        let mut slot = 5;
+        cell_slot(slot)
+    "# });
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn first_class_subscript_parameter_requires_selected_member() {
+    assert_experimental_compile_error(indoc! { r#"
+        subscript first(values: &mut [int]) -> int {
+            ref {
+                return values[0]
+            }
+        }
+
+        fn take(slot: &mut int) {}
+
+        fn use_slot(slot) {
+            let mut values = [5];
+            take(values->[slot])
+        }
+
+        let first_slot = first;
+        use_slot(first_slot)
+    "# });
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn named_subscript_local_shadow_must_be_subscript_value() {
+    match experimental_session()
+        .fail_compilation(indoc! { r#"
+            subscript cell(values: &mut [int]) -> int {
+                ref mut {
+                    return values[0]
+                }
+            }
+
+            let cell = 0;
+            let mut values = [5];
+            values->[cell]
+        "# })
+        .into_inner()
+    {
+        CompilationErrorImpl::InvalidSubscriptUse { name, kind, .. } => {
+            assert_eq!(name, ustr("cell"));
+            assert_eq!(
+                kind,
+                ferlium::compiler::error::InvalidSubscriptUseKind::ValueIsNotSubscript
+            );
+        }
+        other => panic!("expected invalid subscript use error, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn first_class_subscript_assignment_requires_mut_member() {
+    match experimental_session()
+        .fail_compilation(indoc! { r#"
+            subscript cell(values: &mut [int]) -> int {
+                ref {
+                    return values[0]
+                }
+            }
+
+            let cell_slot = cell;
+            let mut values = [5];
+            values->[cell_slot] = 8
+        "# })
+        .into_inner()
+    {
+        CompilationErrorImpl::InvalidSubscriptUse { name, kind, .. } => {
+            assert_eq!(name, ustr("cell_slot"));
+            assert_eq!(
+                kind,
+                ferlium::compiler::error::InvalidSubscriptUseKind::MissingMember(
+                    ferlium::compiler::error::SubscriptMemberRole::Mut,
+                )
+            );
+        }
+        other => panic!("expected invalid subscript use error, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn addressor_named_subscript_rvalue_reads_direct_place() {
     let value = run_experimental_subscript_source(indoc! { r#"
         subscript first(values: &mut [int]) -> int {
@@ -1545,6 +1829,35 @@ fn parameterized_named_subscript_instantiates_at_use_sites() {
     "# });
 
     assert_val_eq!(value, expected_tuple([int(5), string("new")]));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn rejects_first_class_subscript_with_hidden_evidence_for_now() {
+    assert_unsupported_subscript_feature(
+        indoc! { r#"
+            subscript cell<T>(slot: &mut T) -> T
+            where
+                T: Value
+            {
+                ref {
+                    let local = slot;
+                    yield local
+                }
+
+                mut {
+                    let mut local = slot;
+                    yield local;
+                    slot = local
+                }
+            }
+
+            let cell_slot = cell;
+            let mut text = "old";
+            text->[cell_slot] = "new"
+        "# },
+        UnsupportedSubscriptFeatureKind::FirstClassSubscriptWithHiddenEvidence,
+    );
 }
 
 #[test]

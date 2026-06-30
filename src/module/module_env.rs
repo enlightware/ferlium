@@ -743,6 +743,26 @@ impl<'m> ModuleEnv<'m> {
         })
     }
 
+    /// Resolve a subscript path to the source module and local subscript name, applying visibility rules.
+    pub fn subscript_name_with_module(
+        &self,
+        path: &ast::Path,
+    ) -> Result<Option<(Option<ModuleId>, Ustr)>, InternalCompilationError> {
+        self.find_member_by_path(&path.segments, &|name, module, require_accessible| {
+            if require_accessible
+                && !module.is_symbol_accessible_from(ustr(name), self.current.module_id())
+            {
+                return None;
+            }
+
+            let name = ustr(name);
+            module
+                .get_local_subscript_id(name)
+                .is_some()
+                .then_some(name)
+        })
+    }
+
     /// Get the trait definition associated to a trait id.
     pub fn trait_def(&self, id: TraitId) -> &Trait {
         self.try_trait_def(id)

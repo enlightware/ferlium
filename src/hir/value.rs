@@ -21,7 +21,7 @@ use ustr::Ustr;
 use crate::{
     containers::{B, IntoSVec2, SVec2, b},
     format::write_with_separator,
-    module::{FunctionId, TraitDictionaryId},
+    module::{FunctionId, SubscriptId, TraitDictionaryId},
 };
 
 // Support for primitive values
@@ -111,12 +111,12 @@ impl VariantValue {
     }
 }
 
-/// Hidden constraint evidence captured by first-class generic functions.
+/// Hidden constraint evidence captured by first-class capabilities.
 ///
 /// Typeclass constraints are represented as dictionaries. Field indices are
 /// also passed here because they are hidden evidence for generic projection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FunctionHiddenArgValue {
+pub enum HiddenEvidenceArgValue {
     TraitDictionary(TraitDictionaryId),
     FieldIndex(isize),
 }
@@ -132,7 +132,7 @@ pub enum FunctionHiddenArgValue {
 pub struct FunctionValue {
     pub function: FunctionId,
     /// Hidden dictionary/evidence arguments supplied separately from value arguments.
-    pub hidden_args: Vec<FunctionHiddenArgValue>,
+    pub hidden_args: Vec<HiddenEvidenceArgValue>,
     /// Owned source-level closure environment, stored as a tuple value.
     pub closure_env: Value,
     pub closure_env_len: usize,
@@ -154,7 +154,7 @@ impl FunctionValue {
 
     pub fn closure(
         function: FunctionId,
-        hidden_args: Vec<FunctionHiddenArgValue>,
+        hidden_args: Vec<HiddenEvidenceArgValue>,
         captures: Vec<Value>,
         closure_env_value_dictionary: Option<TraitDictionaryId>,
     ) -> Self {
@@ -182,6 +182,28 @@ impl FunctionValue {
     }
 }
 
+/// Runtime representation of a first-class subscript capability.
+///
+/// Subscript values carry implementation identity plus reserved hidden evidence.
+/// Receiver and index/application arguments belong to subscript application,
+/// not to the value itself.
+#[derive(Debug, Clone)]
+pub struct SubscriptValue {
+    pub subscript: SubscriptId,
+    /// Hidden dictionary/evidence arguments supplied separately from value arguments.
+    /// Source-level first-class subscripts currently reject cases that would fill this.
+    pub hidden_args: Vec<HiddenEvidenceArgValue>,
+}
+
+impl SubscriptValue {
+    pub fn bare(subscript: SubscriptId) -> Self {
+        Self {
+            subscript,
+            hidden_args: Vec::new(),
+        }
+    }
+}
+
 /// A value in the system.
 ///
 /// Runtime duplication must go through generated Ferlium `Value::clone`
@@ -199,6 +221,8 @@ pub enum Value {
     Tuple(ManuallyDrop<B<SVec2<Value>>>),
     /// A first-class function
     Function(ManuallyDrop<B<FunctionValue>>),
+    /// A first-class subscript capability
+    Subscript(ManuallyDrop<B<SubscriptValue>>),
 }
 
 impl Value {
@@ -237,7 +261,7 @@ impl Value {
                     .map(Value::to_literal_value)
                     .collect::<Option<Vec<_>>>()?,
             )),
-            Self::Uninit | Self::Variant(_) | Self::Function(_) => None,
+            Self::Uninit | Self::Variant(_) | Self::Function(_) | Self::Subscript(_) => None,
         }
     }
 
@@ -275,6 +299,14 @@ impl Value {
 
     pub fn function_value(function: FunctionValue) -> Self {
         Self::Function(ManuallyDrop::new(b(function)))
+    }
+
+    pub fn subscript(subscript: SubscriptId) -> Self {
+        Self::subscript_value(SubscriptValue::bare(subscript))
+    }
+
+    pub fn subscript_value(subscript: SubscriptValue) -> Self {
+        Self::Subscript(ManuallyDrop::new(b(subscript)))
     }
 
     pub fn is_tuple(&self) -> bool {
@@ -390,6 +422,27 @@ impl Value {
         }
     }
 
+    pub fn as_subscript(&self) -> Option<&B<SubscriptValue>> {
+        match self {
+            Self::Subscript(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn as_subscript_mut(&mut self) -> Option<&mut B<SubscriptValue>> {
+        match self {
+            Self::Subscript(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn into_subscript(self) -> Option<B<SubscriptValue>> {
+        match self {
+            Self::Subscript(value) => Some(ManuallyDrop::into_inner(value)),
+            _ => None,
+        }
+    }
+
     /// Reclaim the boxed interpreter storage for a value whose logical
     /// Ferlium-level drop has already run, without invoking `Value::drop` again.
     pub fn discard_storage(self) {
@@ -411,6 +464,9 @@ impl Value {
                 let mut value = ManuallyDrop::into_inner(value);
                 let closure_env = std::mem::replace(&mut value.closure_env, Value::uninit());
                 closure_env.discard_storage();
+            }
+            Self::Subscript(value) => {
+                drop(ManuallyDrop::into_inner(value));
             }
         }
     }
@@ -571,6 +627,10 @@ mod tests {
                 Vec::new(),
                 vec![Value::native(RustDropTracked)],
                 Some(dictionary),
+            )),
+            Value::subscript(SubscriptId::new(
+                ModuleId::from_index(0),
+                crate::module::LocalSubscriptId::from_index(0),
             )),
         ]);
 

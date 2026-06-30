@@ -552,10 +552,22 @@ fn node_variable_type_annotations<Env>(
                 variable_type_annotations(arena, arg.value, result, locals, env);
             }
         }
+        SubscriptApply(app) => {
+            variable_type_annotations(arena, app.subscript, result, locals, env);
+            for arg in &app.arguments {
+                variable_type_annotations(arena, arg.value, result, locals, env);
+            }
+        }
         CloneClosureEnv(node) => {
             variable_type_annotations(arena, node.source, result, locals, env);
         }
         DropClosureEnv(node) => {
+            variable_type_annotations(arena, node.target, result, locals, env);
+        }
+        CloneSubscriptValue(node) => {
+            variable_type_annotations(arena, node.source, result, locals, env);
+        }
+        DropSubscriptValue(node) => {
             variable_type_annotations(arena, node.target, result, locals, env);
         }
         CloneValue(node) => {
@@ -578,7 +590,7 @@ fn node_variable_type_annotations<Env>(
         TraitMethodApply(_) => {
             // There is no TraitMethodApply left in the final HIR.
         }
-        GetFunction(_) => {}
+        GetFunction(_) | GetSubscript(_) => {}
         GetTraitMethod(_) => {
             // There is no GetTraitMethod left in the final IR.
         }

@@ -19,7 +19,7 @@ use crate::{
     hir::function::{
         CallableDefinition, Function, PendingScriptFunction, UnaryNativeFnMN, UnaryNativeFnRN,
     },
-    hir::value::{FunctionValue, LiteralValue, NativeValue, ustr_to_isize},
+    hir::value::{FunctionValue, LiteralValue, NativeValue, SubscriptValue, ustr_to_isize},
     hir::{self, CallArgument, NodeArena, NodeId},
     hir::{
         emit_value_impl::function_value_method,
@@ -251,14 +251,7 @@ fn layout_for_value_type(
             return Ok(layout);
         }
         Function(_) => ValueLayout::native::<FunctionValue>(),
-        Subscript(_) => {
-            drop(ty_data);
-            active.remove(&ty);
-            return Err(internal_compilation_error!(Internal {
-                error: "cannot compute Value layout for first-class subscript type before subscript values have a runtime representation".to_string(),
-                span,
-            }));
-        }
+        Subscript(_) => ValueLayout::native::<SubscriptValue>(),
         Never => ValueLayout::product([]),
         Variable(_) => {
             drop(ty_data);
@@ -319,8 +312,7 @@ fn value_type_is_resolved_ignoring_function_surface(
     let ty_data = ty.data();
     use TypeKind::*;
     let resolved = match &*ty_data {
-        Function(_) => true,
-        Subscript(_) => false,
+        Function(_) | Subscript(_) => true,
         Tuple(member_tys) => {
             let member_tys = member_tys.clone();
             drop(ty_data);
@@ -715,6 +707,28 @@ fn function_value_drop_body(ty: Type, arena: &mut NodeArena) -> (NodeId, Vec<Loc
     )];
     let root = function_value_drop_root(ty, target_id, arena);
     (root, locals)
+}
+
+fn subscript_value_clone_root(ty: Type, source_id: LocalDeclId, arena: &mut NodeArena) -> NodeId {
+    use hir::hir_syn::*;
+
+    let source = alloc_synth_node(arena, load_local(source_id), ty);
+    alloc_synth_node(
+        arena,
+        hir::NodeKind::CloneSubscriptValue(hir::CloneSubscriptValue { source }),
+        ty,
+    )
+}
+
+fn subscript_value_drop_root(ty: Type, target_id: LocalDeclId, arena: &mut NodeArena) -> NodeId {
+    use hir::hir_syn::*;
+
+    let target = alloc_synth_node(arena, load_local(target_id), ty);
+    alloc_synth_node(
+        arena,
+        hir::NodeKind::DropSubscriptValue(hir::DropSubscriptValue { target }),
+        Type::unit(),
+    )
 }
 
 pub(crate) fn function_value_method_function(
@@ -1126,6 +1140,10 @@ fn derive_structural_text_body(
             drop(ty_data);
             Some((string_lit(arena, "<function>"), locals))
         }
+        Subscript(_) => {
+            drop(ty_data);
+            Some((string_lit(arena, "<subscript>"), locals))
+        }
         _ => {
             drop(ty_data);
             None
@@ -1384,6 +1402,10 @@ fn derive_value_eq_body(
             drop(ty_data);
             Some(n(arena, native(false), bool_ty))
         }
+        Subscript(_) => {
+            drop(ty_data);
+            Some(n(arena, native(false), bool_ty))
+        }
         _ => {
             drop(ty_data);
             None
@@ -1572,6 +1594,14 @@ fn derive_value_hash_body(
             ];
             Some((n(arena, block(statements), unit_ty), locals))
         }
+        Subscript(_) => {
+            drop(ty_data);
+            let statements = vec![
+                build_write_string(arena, ctx.solver, &mut locals, "<subscript>")?,
+                n(arena, native(()), unit_ty),
+            ];
+            Some((n(arena, block(statements), unit_ty), locals))
+        }
         _ => {
             drop(ty_data);
             None
@@ -1681,6 +1711,10 @@ fn derive_value_clone_body(
         Function(_) => {
             drop(ty_data);
             function_value_clone_root(ty, source_id, arena)
+        }
+        Subscript(_) => {
+            drop(ty_data);
+            subscript_value_clone_root(ty, source_id, arena)
         }
         Named(named) => {
             let named = named.clone();
@@ -1832,6 +1866,10 @@ fn derive_value_drop_body(
             drop(ty_data);
             function_value_drop_root(ty, target_id, arena)
         }
+        Subscript(_) => {
+            drop(ty_data);
+            subscript_value_drop_root(ty, target_id, arena)
+        }
         Named(named) => {
             let named = named.clone();
             drop(ty_data);
@@ -1947,6 +1985,7 @@ fn derive_structural_value_impl(
             | TypeKind::Record(_)
             | TypeKind::Variant(_)
             | TypeKind::Function(_)
+            | TypeKind::Subscript(_)
             | TypeKind::Named(_)
     );
     drop(ty_data);
