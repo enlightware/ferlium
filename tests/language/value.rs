@@ -227,8 +227,7 @@ fn call_argument_temp_is_dropped_when_later_argument_breaks() {
 }
 
 // A `match` materializes its scrutinee into an owned local; when an arm binds the payload by
-// reference (so the scrutinee stays live), that local must be dropped on block exit. Regression for
-// the scrutinee being omitted from the block's cleanup.
+// reference (so the scrutinee stays live), that local must be dropped on block exit.
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn match_scrutinee_temporary_is_dropped() {
