@@ -246,6 +246,24 @@ fn serialize_with_type_ascription() {
     );
 }
 
+// Exercises the three `deserialize` shapes (variant, record, array) that materialize an owned
+// `DataValue` local. Round-trips string content through each.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn json_roundtrip_variant_record_array_with_strings() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(r#"(json_decode(json_encode(Some("hi"))): None | Some(string))"#),
+        some(string("hi"))
+    );
+    assert_val_eq!(
+        session.run(
+            r#"(json_decode(json_encode({ tag: "x", items: ["a", "b"] })): { items: [string], tag: string }).tag"#
+        ),
+        string("x")
+    );
+}
+
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn json_serialization_roundtrip() {

@@ -520,8 +520,12 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                 .collect::<Result<SVec2<_>, _>>()?;
             // build the tuple node
             let build_tuple = n(arena, tuple(build_elements), ty);
-            // assemble the final node
-            Some(n(arena, block([store_array, build_tuple]), ty))
+            // `array` is read, not consumed, so it is still live here and must be dropped.
+            Some(n(
+                arena,
+                block_with_cleanup([store_array, build_tuple], vec![l_array_id]),
+                ty,
+            ))
         } else if let TypeKind::Record(fields) = ty_data {
             /*
             Example source code for deserialization of a record:
@@ -584,8 +588,12 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                 .collect::<Result<SVec2<_>, _>>()?;
             // build the record node
             let build_record = n(arena, record(build_elements), ty);
-            // assemble the final node
-            Some(n(arena, block([store_record, build_record]), ty))
+            // `record` is read, not consumed, so it is still live here and must be dropped.
+            Some(n(
+                arena,
+                block_with_cleanup([store_record, build_record], vec![l_record_id]),
+                ty,
+            ))
         } else if let TypeKind::Variant(variants) = ty_data {
             // Deserialize explicit enum variant data, while the helper also accepts the
             // adjacent-tagged record shape produced by the JSON codec.
@@ -654,8 +662,12 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
             // build the match node
             let panic_node = build_panic(arena, &mut locals, solver, "Unknown enum variant tag")?;
             let match_type = n(arena, case(get_name, variant_cases, panic_node), ty);
-            // assemble the final node
-            Some(n(arena, block([store_variant, match_type]), ty))
+            // `variant` is read, not consumed (the match borrows `variant.name`), so it must be dropped.
+            Some(n(
+                arena,
+                block_with_cleanup([store_variant, match_type], vec![l_variant_id]),
+                ty,
+            ))
         } else {
             None // deserialization of rest not yet supported
         };
