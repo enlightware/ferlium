@@ -218,3 +218,17 @@ pub fn block<P: HirPhase>(statements: impl IntoSVec2<NodeId<P>>) -> NodeKind<P> 
         cleanup: Vec::new(),
     }))
 }
+
+/// Like [`block`], but the listed owned locals are dropped when the block exits.
+///
+/// Generated HIR that leaves an owned local live at the tail must list it here, or it leaks:
+/// synthesized blocks don't get the type-checker's automatic per-scope cleanup.
+pub fn block_with_cleanup<P: HirPhase>(
+    statements: impl IntoSVec2<NodeId<P>>,
+    cleanup: Vec<LocalDeclId>,
+) -> NodeKind<P> {
+    K::Block(b(hir::Block {
+        body: b(statements.into_svec2()),
+        cleanup,
+    }))
+}
