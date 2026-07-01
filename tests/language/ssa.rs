@@ -75,7 +75,7 @@ fn call_functions() {
     %r3 = store int 2 to %r2
     %r4 = call std::std::Num<std::int>::from_int#impl:25eabc6b(%r2, %r0)
     %r5 = call std::std::Num<std::int>::mul#impl:a3604103(%r0, %p0, %r1)
-    %r6 = memcpy %r1 to %p1
+    %r6 = move %r1 to %p1
     %r7 = ret
 "#
     );
@@ -275,7 +275,7 @@ fn place_call_into_alias_local_branch() {
     %r16 = memcpy %r15 to %r0
     %r17 = br 4
   4:
-    %r18 = memcpy %r0 to %p1
+    %r18 = move %r0 to %p1
     %r19 = ret
 "#,
     );
@@ -335,7 +335,7 @@ fn iter1_let_mut_move_return() {
     %r4 = store int 1 to %r3
     %r5 = call std::std::Num<std::int>::from_int#impl:25eabc6b(%r3, %r1)
     %r6 = call std::std::Num<std::int>::add#impl:7665d3ee(%r0, %r1, %r0)
-    %r7 = memcpy %r0 to %p1
+    %r7 = move %r0 to %p1
     %r8 = ret
 "#,
     );
@@ -434,7 +434,7 @@ fn place_call_into_owned_local() {
     %r9 = store int 1 to %r8
     %r10 = call std::std::Num<std::int>::from_int#impl:25eabc6b(%r8, %r1)
     %r11 = call std::std::Num<std::int>::add#impl:7665d3ee(%r0, %r1, %r0)
-    %r12 = memcpy %r0 to %p1
+    %r12 = move %r0 to %p1
     %r13 = ret
 "#,
     );
@@ -940,7 +940,7 @@ fn std::Value<(std::int,)>::to_string#impl:30b07f9c(%p0: @arg & (int,), %p1: @re
     %r10 = alloca ()
     %r11 = call std::string_push_str(%r0, %r2, %r10)
     %r12 = drop %r2 via std::std::Value<std::string>::drop#impl:1d429675
-    %r13 = memcpy %r0 to %p1
+    %r13 = move %r0 to %p1
     %r14 = ret
 "#,
     );
@@ -1195,7 +1195,7 @@ fn std::Value<<test>::A>::to_string#impl:78412598(%p0: @arg & A, %p1: @ret strin
     %r41 = alloca ()
     %r42 = call std::string_push_str(%r0, %r8, %r41)
     %r43 = drop %r8 via std::std::Value<std::string>::drop#impl:1d429675
-    %r44 = memcpy %r0 to %p1
+    %r44 = move %r0 to %p1
     %r45 = ret
 
 fn std::Value<<test>::Wrapper>::clone#impl:e02c4c62(%p0: @arg & Wrapper, %p1: @ret Wrapper):
@@ -1309,7 +1309,7 @@ fn std::Value<<test>::Wrapper>::to_string#impl:7f6f6750(%p0: @arg & Wrapper, %p1
     %r41 = alloca ()
     %r42 = call std::string_push_str(%r0, %r8, %r41)
     %r43 = drop %r8 via std::std::Value<std::string>::drop#impl:1d429675
-    %r44 = memcpy %r0 to %p1
+    %r44 = move %r0 to %p1
     %r45 = ret
 "#
     );
@@ -1463,7 +1463,7 @@ fn return_local_int_move() {
   0:
     %r0 = alloca int
     %r1 = store int 42 to %r0
-    %r2 = memcpy %r0 to %p0
+    %r2 = move %r0 to %p0
     %r3 = ret
 "#,
     );
@@ -1487,7 +1487,7 @@ fn reassign_local_literal() {
     %r2 = alloca int
     %r3 = store int 2 to %r2
     %r4 = call std::std::Num<std::int>::from_int#impl:25eabc6b(%r2, %r0)
-    %r5 = memcpy %r0 to %p0
+    %r5 = move %r0 to %p0
     %r6 = ret
 "#,
     );
@@ -1505,7 +1505,7 @@ fn reassign_local_from_param() {
     %r0 = alloca int
     %r1 = store int 0 to %r0
     %r2 = memcpy %p0 to %r0
-    %r3 = memcpy %r0 to %p1
+    %r3 = move %r0 to %p1
     %r4 = ret
 "#,
     );
@@ -1541,7 +1541,7 @@ fn reassign_in_branches() {
     %r14 = store () to %r1
     %r15 = br 4
   4:
-    %r16 = memcpy %r0 to %p1
+    %r16 = move %r0 to %p1
     %r17 = ret
 "#,
     );
@@ -1603,24 +1603,21 @@ fn reassign_generic() {
     %r2 = call %r1(%p2, %r0)
     %r3 = dict_entry 4 from %p0
     %r4 = drop %p1 via %r3
-    %r5 = memcpy %r0 to %p1 using %p0
+    %r5 = move %r0 to %p1 using %p0
     %r6 = store () to %p3
     %r7 = ret
 "#
     )
 }
 
-// A `()`-returning function's return out-pointer starts a **husk** (uninitialized) — it is *not*
-// pre-seeded live — so the body must write the single `()` result into it before a normal return.
-// A body that fails to do so is caught by the call-boundary check ("`@ret` must be fully initialized
-// when the callee returns normally"). The following tests pin that every `()`-typed tail shape whose
-// node does not itself produce a value into the destination (an assignment, a `let`, a closure-env
-// drop) still initializes `@ret`. Before the fix these left `@ret` uninitialized and trapped.
+// A `()`-returning function's `@ret` starts a husk, so the body must write `()` into it; a body that
+// forgets is caught by the call-boundary check. These pin that a `()`-typed tail which produces no
+// value itself (an assignment, a closure-env drop) still initializes `@ret`.
 
 #[test]
 fn void_body_tail_assignment_writes_ret() {
-    // Body tail is a bare assignment through a `&mut` (no trailing `;`), so the assignment itself is
-    // the `()`-typed tail. It writes `store () to %p1` before returning.
+    // Body tail is a bare assignment (no trailing `;`), so the assignment is the `()`-typed tail.
+    let mut session = TestSession::new();
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
         session.emit_ssa("fn set(a: &mut int, v: int) { a = v }"),
@@ -1631,8 +1628,7 @@ fn void_body_tail_assignment_writes_ret() {
     %r2 = ret
 "#,
     );
-    // And it runs: the caller observes the write, and the boundary check (that `@ret` is initialized)
-    // passes.
+    // And it runs (the caller observes the write; the boundary check passes).
     assert_val_eq!(
         session.run("fn set(a: &mut int, v: int) { a = v }\nfn driver() -> int { let mut x = 0; set(x, 5); x }\ndriver()"),
         int(5)
@@ -1641,10 +1637,8 @@ fn void_body_tail_assignment_writes_ret() {
 
 #[test]
 fn reassign_local_literal_overwrites_resource_free_in_place() {
-    // The relaxed `store` invariant: a `store`/call result may overwrite storage that owns no live
-    // resource (a scalar reassigned in place), which `store` never drops. Only overwriting a
-    // resource-owning value without a prior `drop` is a lowering bug. This exercises the in-place
-    // scalar overwrite that the strict "target must be a husk" rule would (wrongly) forbid.
+    // `store` may overwrite storage that owns no resource (a scalar reassigned in place) and drops
+    // nothing; only overwriting a resource-owner without a prior `drop` is a bug.
     let mut session = TestSession::new();
     assert_val_eq!(
         session.run("fn f() -> int { let mut i = 0; i = 1; i = i + 40; i } f()"),
@@ -1793,7 +1787,7 @@ fn copy_int_param_to_local() {
     %r4 = store int 1 to %r3
     %r5 = call std::std::Num<std::int>::from_int#impl:25eabc6b(%r3, %r1)
     %r6 = call std::std::Num<std::int>::add#impl:7665d3ee(%r0, %r1, %r0)
-    %r7 = memcpy %r0 to %p1
+    %r7 = move %r0 to %p1
     %r8 = ret
 "#,
     );

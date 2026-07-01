@@ -73,7 +73,7 @@ impl Instruction {
 
     /// Verifies the structural contract of this instruction in isolation by delegating to its kind's
     /// own [`InstructionKind::verify`] (the operand **arity**, and the data-dependent operand count
-    /// for `alloca`/`memcpy`/`build_closure`).
+    /// for `alloca`/`move`/`build_closure`).
     pub fn verify(&self) {
         self.kind.verify(self);
     }
@@ -423,20 +423,17 @@ impl Instruction {
         }
     }
 
-    /// Creates a `memcpy` instruction, which copies the pointee of `source` (a place) into
-    /// `destination` (a place) directly, without first materializing it in a register.
+    /// Creates a `memcpy` instruction: a pure, **source-preserving** copy of the pointee of `source`
+    /// (a place) into `destination` (a place), without first materializing it in a register.
     ///
-    /// This is the fused form of a `load` immediately followed by a `store` of the loaded value: a
-    /// shallow, place-to-place copy. Non-trivial reads are wrapped in `Value::clone` by HIR before
-    /// reaching the emitter, so a `memcpy` (like a bare `load`) is a move for non-trivially-copyable
-    /// pointees and a copy for trivial ones.
+    /// The pointee must **own no resource** — a scalar, a bare function, or an aggregate built only
+    /// from such. Any resource-owning copy is lowered through `Value::clone` (a `call`) by HIR before
+    /// reaching the emitter, and an ownership transfer uses [`move_value`](Self::move_value); a bare
+    /// `memcpy` never moves its source out.
     ///
     /// **Requirement:** the pointee must have a **statically known layout** — a real backend sizes the
-    /// copy from the type alone. A value whose size depends on a bare type variable (a generic move)
-    /// has no static layout and must instead use [`memcpy_dynamic`](Self::memcpy_dynamic), which
-    /// carries the run-time-layout `Value` dictionary witness (the emitter's `move_value_into` chooses
-    /// between the two). The SSA interpreter would happily `memcpy` a generic boxed `Value`, but
-    /// emitting one would be IR a code generator could not lower.
+    /// copy from the type alone. Copies are always statically sized; a generic transfer is a
+    /// [`move_dynamic`](Self::move_dynamic), never a `memcpy`.
     pub fn memcpy(span: Location, source: ssa::Value, destination: ssa::Value) -> Self {
         Instruction {
             span,
@@ -445,12 +442,25 @@ impl Instruction {
         }
     }
 
-    /// Creates a `memcpy` instruction for a value whose size is known only at run time: a move of a
+    /// Creates a `move` instruction: a **source-consuming** ownership transfer of the whole pointee of
+    /// `source` (a place) into `destination` (a place). The source is left moved-out. For a
+    /// statically-sized pointee; a generic (run-time-layout) transfer uses
+    /// [`move_dynamic`](Self::move_dynamic). Unlike a copy, a move needs no `Value::clone`; unlike
+    /// `memcpy`, it consumes the source.
+    pub fn move_value(span: Location, source: ssa::Value, destination: ssa::Value) -> Self {
+        Instruction {
+            span,
+            operands: vec![source, destination],
+            kind: Box::new(Move {}),
+        }
+    }
+
+    /// Creates a `move` instruction for a value whose size is known only at run time: a move of a
     /// generic (bare-type-variable-typed) pointee. `witness` is the place of the `Value` dictionary
     /// witnessing the run-time layout of the moved value (its `SIZE`/`ALIGN`), exactly as for
     /// [`alloca_dynamic`](Self::alloca_dynamic). The SSA interpreter moves the value shape-agnostically
     /// (the witness is metadata it ignores); a real backend uses the witness to size the copy.
-    pub fn memcpy_dynamic(
+    pub fn move_dynamic(
         span: Location,
         source: ssa::Value,
         destination: ssa::Value,
@@ -459,7 +469,7 @@ impl Instruction {
         Instruction {
             span,
             operands: vec![source, destination, witness],
-            kind: Box::new(Memcpy {}),
+            kind: Box::new(Move {}),
         }
     }
 
@@ -558,7 +568,7 @@ pub trait InstructionKind: Any {
     }
 
     /// Asserts the structural well-formedness of `whole` (whose kind-specific part is `self`): its
-    /// operand **arity** and, where the layout is data-dependent (`alloca`/`memcpy`/`build_closure`),
+    /// operand **arity** and, where the layout is data-dependent (`alloca`/`move`/`build_closure`),
     /// the operand count that the kind's own metadata implies.
     ///
     /// Each concrete instruction owns its own contract here rather than in a central registry, so a
@@ -675,6 +685,11 @@ pub enum InstructionView<'a> {
     /// A place-to-place copy of the pointee of operand `0` (a place) into operand `1` (a place),
     /// without materializing it in a register.
     Memcpy,
+
+    /// A source-consuming place-to-place move of the pointee of operand `0` into operand `1`.
+    /// `witness` is the run-time-layout `Value` dictionary place iff the pointee is not statically
+    /// sized (absent for a statically-sized move).
+    Move { witness: Option<&'a ssa::Value> },
 
     /// A capture of the current top of the stack, yielded as a marker register.
     StackSave,
@@ -1349,9 +1364,10 @@ struct Memcpy {}
 
 impl InstructionKind for Memcpy {
     fn verify(&self, whole: &Instruction) {
-        assert!(
-            matches!(whole.operands.len(), 2 | 3),
-            "memcpy takes source and destination places, plus the layout witness iff dynamic"
+        assert_eq!(
+            whole.operands.len(),
+            2,
+            "memcpy is a pure copy of a statically-sized, owns-nothing pointee: source and destination only"
         );
     }
 
@@ -1365,7 +1381,35 @@ impl InstructionKind for Memcpy {
         whole: &Instruction,
         _env: &ModuleEnv<'_>,
     ) -> fmt::Result {
-        write!(f, "memcpy {} to {}", whole.operands[0], whole.operands[1])?;
+        write!(f, "memcpy {} to {}", whole.operands[0], whole.operands[1])
+    }
+}
+
+/// A source-consuming move (ownership transfer) of the pointee of operand `0` into operand `1`. The
+/// layout witness (operand `2`) is present iff the pointee is not statically sized — mirrors `Alloca`.
+struct Move {}
+
+impl InstructionKind for Move {
+    fn verify(&self, whole: &Instruction) {
+        assert!(
+            matches!(whole.operands.len(), 2 | 3),
+            "move takes source and destination places, plus the layout witness iff dynamic"
+        );
+    }
+
+    fn view<'a>(&'a self, whole: &'a Instruction) -> InstructionView<'a> {
+        InstructionView::Move {
+            witness: whole.operands.get(2),
+        }
+    }
+
+    fn fmt_within(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        whole: &Instruction,
+        _env: &ModuleEnv<'_>,
+    ) -> fmt::Result {
+        write!(f, "move {} to {}", whole.operands[0], whole.operands[1])?;
         if let Some(witness) = whole.operands.get(2) {
             write!(f, " using {}", witness)?;
         }

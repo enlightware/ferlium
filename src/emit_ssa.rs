@@ -1284,8 +1284,8 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// Moves the whole pointee of `source` into `destination`, choosing a plain `memcpy` for a
-    /// statically-sized value or a witnessed `memcpy_dynamic` for a generic (dynamically-sized) one.
+    /// Moves the whole pointee of `source` into `destination`, choosing a plain `move` for a
+    /// statically-sized value or a witnessed `move_dynamic` for a generic (dynamically-sized) one.
     ///
     /// Unlike a *copy*, a move transfers ownership wholesale and needs no `Value::clone`; a generic
     /// move is therefore a byte-move whose size the witness supplies (the interpreter moves the value
@@ -1298,7 +1298,7 @@ impl<'a> Emitter<'a> {
         ty: Type,
     ) {
         if self.is_statically_sized(ty) {
-            self.insert(Instruction::memcpy(span, source, destination));
+            self.insert(Instruction::move_value(span, source, destination));
         } else {
             let witness = self.value_dictionary(ty).unwrap_or_else(|| {
                 panic!(
@@ -1306,7 +1306,7 @@ impl<'a> Emitter<'a> {
                     self.show(ty)
                 )
             });
-            self.insert(Instruction::memcpy_dynamic(
+            self.insert(Instruction::move_dynamic(
                 span,
                 source,
                 destination,
@@ -1504,9 +1504,9 @@ impl<'a> Emitter<'a> {
                     self.emit_drop(node.span, place.clone(), dropped_ty, spec);
                     // The fresh temporary is *moved* into the destination (it is consumed, not read
                     // again). A move is shape-agnostic, so it works for a generic `value_ty` too —
-                    // `move_value_into` carries the run-time-layout witness via `memcpy_dynamic` when
-                    // the type is not statically sized, unlike a bare `memcpy` (which requires a known
-                    // layout — see `Instruction::memcpy`).
+                    // `move_value_into` carries the run-time-layout witness via `move_dynamic` when
+                    // the type is not statically sized, unlike a bare `move` (which requires a known
+                    // layout — see `Instruction::move_value`).
                     self.move_value_into(node.span, temp, place, value_ty);
                 } else {
                     self.lower_value_into(&self.hir_arena[n.value], Some(place));
@@ -1609,10 +1609,10 @@ impl<'a> Emitter<'a> {
 
             K::TakeLocalValue(n) => match n.mode {
                 ResolvedTakeLocalValueMode::MoveOwned => {
-                    // Move the owned value out: copy the place into the destination, skipping the
+                    // Move the owned value out: transfer the place into the destination, skipping the
                     // local's lexical drop (cleanup is deferred). A move transfers the value
                     // wholesale, so a generic (dynamically-sized) value needs no `Value::clone` —
-                    // just a witnessed dynamic memcpy; a statically-sized one uses a plain memcpy.
+                    // just a witnessed `move_dynamic`; a statically-sized one uses a plain `move`.
                     if let Some(destination) = destination {
                         let source = self.place_of_local(n.id);
                         self.move_value_into(node.span, source, destination, node.ty);

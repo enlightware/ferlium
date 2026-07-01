@@ -376,8 +376,31 @@ impl<'a> Interpreter<'a> {
                 Step::Advance
             }
             InstructionView::Memcpy => {
-                // The fused `load`+`store`: read the source place (copying a trivial pointee or
-                // moving a non-trivial one out) and write it straight into the destination place.
+                // A pure copy: the source pointee owns no resource (resource-owning copies are
+                // lowered through `Value::clone`), so `load`+`store` duplicates it — and for a
+                // scalar pointee `read_copy` leaves the source live. The debug assert enforces that
+                // contract: an owned pointee here would be a move mislabeled as a copy (which on a
+                // real backend is a shallow copy without drop-cancellation — a double-free / leak).
+                let source = self.place_operand(slots, &instr.operands[0]);
+                let destination = self.place_operand(slots, &instr.operands[1]);
+                debug_assert!(
+                    !owns_resources(
+                        source
+                            .target_ref(&self.ctx)
+                            .expect("memcpy of an invalid source place")
+                    ),
+                    "memcpy of a resource-owning pointee: a copy must be lowered through \
+                     Value::clone or emitted as a move (SSA mis-lowering)"
+                );
+                let v = self.load(&source)?;
+                self.store(v, &destination)?;
+                Step::Advance
+            }
+            InstructionView::Move { .. } => {
+                // A source-consuming move: read the source place out (leaving it uninitialized) and
+                // write it straight into the destination place. The optional layout witness is
+                // metadata a backend uses to size the copy; the interpreter moves shape-agnostically
+                // and ignores it.
                 let source = self.place_operand(slots, &instr.operands[0]);
                 let destination = self.place_operand(slots, &instr.operands[1]);
                 let v = self.load(&source)?;

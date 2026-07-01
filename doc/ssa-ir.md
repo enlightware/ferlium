@@ -6,10 +6,10 @@ It is the specification the interpreter's verifier checks and that a backend may
 
 Related documents — this one is the structural/contract reference; those are the deep dives:
 
-- `doc/hir-to-ssa.md` — how HIR nodes *lower* to these instructions (the mapping; this doc is the
-  target's contract).
 - `doc/abi.md` — the *physical* ABI (sizes, alignment, register/stack lowering). SSA records the
   high-level convention; the backend realizes it per `abi.md`.
+- `doc/hir-ownership.md` — the HIR ownership model (clone / copy / move / drop) that these
+  instructions realize.
 - `doc/ssa-uninit-tracking.md` — the liveness / husk model that defines what "initialized" means
   (referenced throughout §4.3).
 - `doc/ssa-error-propagation.md` — `invoke` / landing pad / `resume` unwinding (referenced in §5).
@@ -73,8 +73,8 @@ The role is therefore enforced where the operand is *consumed*, by the interpret
 
 | Role | Produced by | Consumed by | Resolver |
 |------|-------------|-------------|----------|
-| **place** | `alloca*`, `subfield`, `dict_entry`, `project`, by-pointer parameter | `load`, `store`, `memcpy`, `subfield`, `drop`, `call` callee, … | `place_operand` |
-| **value** | `load`, `compare_eq`, a constant | `store` value, `compare_eq`, `condbr` cond, … | `value_operand` |
+| **place** | `alloca*`, `subfield`, `dict_entry`, `project`, by-pointer parameter | `load`, `store`, `memcpy`, `move`, `subfield`, `drop`, `call` callee, … | `place_operand` |
+| **value** | `load`, `compare_eq`, `variant`, `extract_tag`, `build_closure`, `clone_closure_env`, a constant | `store` value, `compare_eq`, `condbr` cond, … | `value_operand` |
 | **dictionary** | `Dictionary` constant, forwarded `@extra` | `dict_entry`, `call`/`project` evidence args | `dict_operand` |
 | **stack marker** | `stack_save` | `stack_restore` | `stack_marker_operand` |
 
@@ -127,21 +127,17 @@ and after a call. "Initialized / live" and "husk" are the recursive, per-field n
   it is **fully initialized** — every leaf live. On an **error/unwind** exit (the callee raised before
   producing a result) it is left **husk**, and the caller must not read it — this is what lets a
   "returned" local that was never actually produced read back as a husk so its drop is skipped.
-  *Unit / empty-aggregate* returns are no exception: the `@ret` starts a **husk** like any other and
-  the body must write the explicit live marker (`Value::unit()` / `Tuple([])`) into it before a normal
-  return — a unit `@ret` is *not* pre-seeded live, so a body that fails to write it is caught by the
-  boundary check exactly as a missing scalar result would be.
-  (`AddressorPlace`'s `@ret` holds a place *pointer*, which is likewise written on normal return.)
+  *Unit / empty-aggregate* returns are no exception — the `@ret` starts a husk and the body must write
+  the live marker (`Value::unit()` / `Tuple([])`), so a body that forgets is caught here just like a
+  missing scalar result. (`AddressorPlace`'s `@ret` holds a place *pointer*, likewise written on return.)
 - **`&mut` (`MutableRef`) argument:** the pointee is **live before and after** the call. The callee
   borrows it exclusively and may overwrite it, but does not own it and so cannot move it out leaving a
   husk.
 - **`& ` (`SharedRef`) argument:** the pointee is **live before** and is not mutated.
 
-The unit handling follows from these: because units flow through real cells (there is no
-non-dereferenceable unit-place sentinel), a unit `@ret`/value is an ordinary cell that starts a husk
-and becomes a live `()` when written, and the invariants above apply uniformly with no special case.
-The recursive husk/liveness check (`is_drop_husk`) is what makes "fully initialized on exit"
-well-defined for aggregates.
+Units flow through real cells (there is no unit-place sentinel), so a unit `@ret`/value is an ordinary
+cell obeying the invariants above with no special case. The recursive husk/liveness check
+(`is_drop_husk`) is what makes "fully initialized on exit" well-defined for aggregates.
 
 > These boundary storage-state contracts are *semantic* (not yet machine-checked by `verify`). The
 > structural arity/terminator invariants in §2 and §6 are.
@@ -158,8 +154,9 @@ count. Roles: **p** = place, **v** = value, **d** = dictionary, **m** = stack ma
 | `alloca ty` | — (or `[witness:d-like place]` if `ty` is not statically sized) | place `*ty` | `n ≤ 1`; the witness is present iff `ty`'s layout is run-time (a generic `Value` dictionary place). |
 | `alloca_place ty` | — | place `**ty` | `n == 0`; a slot holding a *pointer* to a `ty` (used for `AddressorPlace`/`project` out-slots). |
 | `load` | `[src:p]` | value | `n == 1`; copies a trivially-copyable pointee or **moves** a non-trivial one out (leaving the cell `Uninit`). |
-| `store` | `[v, dst:p]` | — | `n == 2`; writes `v` into `dst`. **Drops nothing:** `dst` must hold no live resource — a husk, or a resource-free value overwritten in place (a scalar/unit reassignment). A resource-owning pointee must have been released by an explicit `drop` first. |
-| `memcpy` | `[src:p, dst:p]` (or `+[witness]` if dynamic) | — | `n ∈ {2,3}`; place-to-place copy/move without a register. **Requires a statically known pointee layout** (a backend sizes the copy from the type); a generic (run-time-layout) move must carry the `Value` dictionary `witness` as operand `2`. The emitter's `move_value_into` picks the form. |
+| `store` | `[v, dst:p]` | — | `n == 2`; writes `v` into `dst`. **Drops nothing:** `dst` must own no live resource (a husk, or a resource-free in-place overwrite) — a resource-owning pointee needs an explicit `drop` first. |
+| `memcpy` | `[src:p, dst:p]` | — | `n == 2`; a **source-preserving** place-to-place copy of an **owns-nothing**, statically-sized pointee (a scalar, a bare function, or an aggregate of such). A resource-owning value is never `memcpy`d — copying one is a `Value::clone` (a `call`), transferring one is a `move`. |
+| `move` | `[src:p, dst:p]` (or `+[witness:p]` if `src`'s layout is run-time) | — | `n ∈ {2,3}`; a **source-consuming** place-to-place ownership transfer of the pointee, leaving the source moved-out. Unlike `memcpy` it consumes the source; unlike a copy it needs no `Value::clone`. The witness (a generic `Value` dictionary place carrying `SIZE`/`ALIGN`) is present iff the pointee's layout is run-time, exactly as for `alloca` — the interpreter moves shape-agnostically and ignores it, a backend sizes the copy from it. The dynamic form prints `move … using {witness}`. |
 
 ### Aggregates & variants
 

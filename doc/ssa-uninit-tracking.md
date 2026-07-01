@@ -12,10 +12,11 @@ The HIR interpreter manipulates **whole values**. A local holds either a complet
 a move or drop drains the *entire* local to `Value::Uninit`. Liveness is therefore a flat question —
 "is this slot exactly `Uninit`?" — and that single check decides every drop.
 
-The SSA interpreter models a **memory-explicit** IR (`alloca` / `project` / `store` / `drop`), the
-shape an eventual code generator targets. Validating that lowering is the whole reason the SSA
-interpreter exists, so it must faithfully model how that IR touches storage: a single aggregate
-allocation is built, moved, and dropped **one field at a time**. Consequently a slot can sit in a
+The SSA interpreter models a **memory-explicit** IR (`alloca` / `project` / `store` / `load` /
+`move` / `drop`; see `doc/ssa-ir.md` §5), the shape an eventual code generator targets. It exists to
+validate that lowering, so it models how the IR touches storage: a single aggregate allocation is
+built, moved, and dropped **one field at a time** (a field is drained to `Uninit` by `move`, a
+non-trivial `load`, or `drop`; a `memcpy` preserves its source). Consequently a slot can sit in a
 *mixed* state — some fields live, some already gone — that no flat check can describe. For example,
 moving each field out of a struct individually leaves its storage with every field `Uninit` but the
 aggregate still structurally present; the local's scope-exit cleanup must recognise that as dead and
