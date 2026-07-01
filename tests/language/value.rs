@@ -1889,11 +1889,6 @@ fn unconstructed_empty_struct_is_not_dropped() {
     assert_val_eq!(session.run(&source), int(0));
 }
 
-
-
-
-
-
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn all_unit_aggregate_with_custom_drop_is_dropped() {

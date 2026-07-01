@@ -34,12 +34,7 @@ use ferlium::{
     types::type_scheme::{PubTypeConstraint, TypeScheme},
 };
 use regex::Regex;
-use std::{
-    cell::RefCell,
-    fmt,
-    sync::LazyLock,
-    sync::atomic::AtomicIsize,
-};
+use std::{cell::RefCell, fmt, sync::LazyLock, sync::atomic::AtomicIsize};
 use ustr::ustr;
 
 #[derive(Debug)]

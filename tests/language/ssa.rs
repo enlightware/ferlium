@@ -2226,14 +2226,11 @@ fn discarded_array_evaluates_elements() {
 fn discarded_record_evaluates_elements() {
     let mut session = TestSession::new();
     assert_val_eq!(
-        session.run("fn f() { let mut c = 0; { a: { c = c + 1; c }, b: { c = c + 1; c } }; c } f()"),
+        session
+            .run("fn f() { let mut c = 0; { a: { c = c + 1; c }, b: { c = c + 1; c } }; c } f()"),
         int(2)
     );
 }
-
-
-
-
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]

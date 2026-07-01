@@ -184,15 +184,24 @@ fn value_capturing_closures_run_on_both_backends() {
     assert_val_eq!(session.run("let a = 3.3; let f = || a; f()"), float(3.3));
     assert_val_eq!(session.run("let a = 3; let f = || a; f()"), int(3));
     // The captured environment is a snapshot: mutating the outer binding after capture is invisible.
-    assert_val_eq!(session.run("let mut a = 1; let f = || a; a = 2; f()"), int(1));
+    assert_val_eq!(
+        session.run("let mut a = 1; let f = || a; a = 2; f()"),
+        int(1)
+    );
     // A closure is stateless across calls: each call sees a fresh copy of the captured environment.
-    assert_val_eq!(session.run("let mut a = 1; let f = || { a = 2; a }; f(); a"), int(1));
+    assert_val_eq!(
+        session.run("let mut a = 1; let f = || { a = 2; a }; f(); a"),
+        int(1)
+    );
     assert_val_eq!(
         session.run("let mut a = 1; let f = || { a = a + 1; a }; f() + f()"),
         int(4)
     );
     // A captured mutable array is deep-copied into the environment.
-    assert_val_eq!(session.run("let mut a = [1]; let f = || a[0]; a[0] = 2; f()"), int(1));
+    assert_val_eq!(
+        session.run("let mut a = [1]; let f = || a[0]; a[0] = 2; f()"),
+        int(1)
+    );
 }
 
 // Record field access on a *generic* (row-polymorphic) record lowers to SSA and runs on both
@@ -226,7 +235,10 @@ fn record_field_access_runs_on_both_backends() {
         int(5)
     );
     // Forwarding a field-index parameter into a callee: `b`'s call to `a` passes a `LoadFieldIndex`.
-    assert_val_eq!(session.run("fn a(x) { x.a } fn b(x) { a(x) } b({a:3})"), int(3));
+    assert_val_eq!(
+        session.run("fn a(x) { x.a } fn b(x) { a(x) } b({a:3})"),
+        int(3)
+    );
     // A let-bound generic lambda monomorphized at its single call site (static `Project`).
     assert_val_eq!(session.run("let f = |x| x.a; f({a:1})"), int(1));
 }
