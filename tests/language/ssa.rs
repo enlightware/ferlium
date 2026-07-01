@@ -860,7 +860,8 @@ fn value_capturing_closure() {
         r#"fn $_ferlium_function_value_drop(%p0: @arg &mut A, %p1: @ret ()):
   0:
     %r0 = drop_closure_env %p0
-    %r1 = ret
+    %r1 = store () to %p1
+    %r2 = ret
 
 fn $lambda$1(%p0: @arg &mut int, %p1: @ret int):
   0:
@@ -1531,15 +1532,17 @@ fn reassign_in_branches() {
     %r6 = alloca int
     %r7 = store int 1 to %r6
     %r8 = call std::std::Num<std::int>::from_int#impl:25eabc6b(%r6, %r0)
-    %r9 = br 4
+    %r9 = store () to %r1
+    %r10 = br 4
   3:
-    %r10 = alloca int
-    %r11 = store int 2 to %r10
-    %r12 = call std::std::Num<std::int>::from_int#impl:25eabc6b(%r10, %r0)
-    %r13 = br 4
+    %r11 = alloca int
+    %r12 = store int 2 to %r11
+    %r13 = call std::std::Num<std::int>::from_int#impl:25eabc6b(%r11, %r0)
+    %r14 = store () to %r1
+    %r15 = br 4
   4:
-    %r14 = memcpy %r0 to %p1
-    %r15 = ret
+    %r16 = memcpy %r0 to %p1
+    %r17 = ret
 "#,
     );
 }
@@ -1601,9 +1604,52 @@ fn reassign_generic() {
     %r3 = dict_entry 4 from %p0
     %r4 = drop %p1 via %r3
     %r5 = memcpy %r0 to %p1 using %p0
-    %r6 = ret
+    %r6 = store () to %p3
+    %r7 = ret
 "#
     )
+}
+
+// A `()`-returning function's return out-pointer starts a **husk** (uninitialized) — it is *not*
+// pre-seeded live — so the body must write the single `()` result into it before a normal return.
+// A body that fails to do so is caught by the call-boundary check ("`@ret` must be fully initialized
+// when the callee returns normally"). The following tests pin that every `()`-typed tail shape whose
+// node does not itself produce a value into the destination (an assignment, a `let`, a closure-env
+// drop) still initializes `@ret`. Before the fix these left `@ret` uninitialized and trapped.
+
+#[test]
+fn void_body_tail_assignment_writes_ret() {
+    // Body tail is a bare assignment through a `&mut` (no trailing `;`), so the assignment itself is
+    // the `()`-typed tail. It writes `store () to %p1` before returning.
+    let mut session = TestSession::new();
+    assert_eq_sans_flake!(
+        session.emit_ssa("fn set(a: &mut int, v: int) { a = v }"),
+        r#"fn set(%p0: @arg &mut int, %p1: @arg int, %p2: @ret ()):
+  0:
+    %r0 = memcpy %p1 to %p0
+    %r1 = store () to %p2
+    %r2 = ret
+"#,
+    );
+    // And it runs: the caller observes the write, and the boundary check (that `@ret` is initialized)
+    // passes.
+    assert_val_eq!(
+        session.run("fn set(a: &mut int, v: int) { a = v }\nfn driver() -> int { let mut x = 0; set(x, 5); x }\ndriver()"),
+        int(5)
+    );
+}
+
+#[test]
+fn reassign_local_literal_overwrites_resource_free_in_place() {
+    // The relaxed `store` invariant: a `store`/call result may overwrite storage that owns no live
+    // resource (a scalar reassigned in place), which `store` never drops. Only overwriting a
+    // resource-owning value without a prior `drop` is a lowering bug. This exercises the in-place
+    // scalar overwrite that the strict "target must be a husk" rule would (wrongly) forbid.
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run("fn f() -> int { let mut i = 0; i = 1; i = i + 40; i } f()"),
+        int(41)
+    );
 }
 
 #[test]
@@ -1810,7 +1856,8 @@ fn named_subscript_assign() {
     %r1 = call <test>::first(%p0, %r0)
     %r2 = load %r0
     %r3 = memcpy %p1 to %r2
-    %r4 = ret
+    %r4 = store () to %p2
+    %r5 = ret
 
 fn first(%p0: @arg &mut [int], %p1: @ret int):
   0:
@@ -1839,7 +1886,8 @@ fn named_subscript_compound_assign() {
     %r1 = call <test>::first(%p0, %r0)
     %r2 = load %r0
     %r3 = call std::std::Num<std::int>::add#impl:7665d3ee(%r2, %p1, %r2)
-    %r4 = ret
+    %r4 = store () to %p2
+    %r5 = ret
 
 fn first(%p0: @arg &mut [int], %p1: @ret int):
   0:
@@ -1966,8 +2014,9 @@ fn f(%p0: @arg &mut int, %p1: @arg int, %p2: @ret ()):
   0:
     %r0 = project <test>::cell(%p0)
     %r1 = memcpy %p1 to %r0
-    %r2 = end_project %r0
-    %r3 = ret
+    %r2 = store () to %p2
+    %r3 = end_project %r0
+    %r4 = ret
 "#,
     );
 }
@@ -2005,8 +2054,9 @@ fn f(%p0: @arg &mut int, %p1: @arg int, %p2: @ret ()):
   0:
     %r0 = project <test>::cell(%p0)
     %r1 = call std::std::Num<std::int>::add#impl:7665d3ee(%r0, %p1, %r0)
-    %r2 = end_project %r0
-    %r3 = ret
+    %r2 = store () to %p2
+    %r3 = end_project %r0
+    %r4 = ret
 "#,
     );
 }
@@ -2036,11 +2086,12 @@ fn f(%p0: @arg &mut int, %p1: @arg int, %p2: @arg int, %p3: @ret ()):
     %r0 = project <test>::cell(%p0)
     %r1 = invoke std::idiv(%p1, %p2, %r0) -> b2 unwind b1
   1:
-    %r4 = end_project %r0
-    %r5 = resume
+    %r5 = end_project %r0
+    %r6 = resume
   2:
-    %r2 = end_project %r0
-    %r3 = ret
+    %r2 = store () to %p3
+    %r3 = end_project %r0
+    %r4 = ret
 "#,
     );
 }

@@ -560,10 +560,9 @@ impl<'a> Interpreter<'a> {
             .get_function_by_id(identity)
             .expect("drop callee not found");
         if f.code.as_script().is_some() {
-            // A script `Value::drop(&mut self)` in the uniform by-pointer ABI: `drop(self, ())`.
-            // The `()` return out-pointer is a fresh unit cell the drop writes its `()` result into
-            // (discarded afterward).
-            let unit_ret = self.alloc_cell(Value::unit());
+            // A script `Value::drop(&mut self)` in the uniform by-pointer ABI: `drop(self, ())`. Its
+            // `()` out-pointer starts a husk like any `@ret`; the drop body writes it (discarded after).
+            let unit_ret = self.alloc_cell(Value::uninit());
             self.run_function(
                 FunctionKey { module, identity },
                 vec![Binding::Place(target.clone()), Binding::Place(unit_ret)],
@@ -1240,12 +1239,6 @@ impl<'a> Interpreter<'a> {
     /// mirrors how an `alloca` of aggregate storage yields addressable field slots.) A `Named`
     /// type (e.g. a `struct`) is expanded to its underlying product shape first.
     fn shaped_uninitialized_value(&self, ty: Type) -> Value {
-        // Unit carries no data and is never written through the out-pointer (a unit-typed body
-        // stores nothing), so its cell must be seeded with the real native unit value rather than a
-        // flat `Uninit`: the result read back is `()`, matching the HIR interpreter.
-        if ty == Type::unit() {
-            return Value::unit();
-        }
         // Clone the kind out so the type-universe read guard held by `ty.data()` is released before
         // the recursion and (for `Named`) the `instantiated_shape` call below: the latter
         // interns the instantiated shape under a *write* lock, which would deadlock against a still-
@@ -1543,25 +1536,23 @@ impl<'a> Interpreter<'a> {
         })
     }
 
-    /// Writes `v` into the cell denoted by `place`, discarding any prior contents.
+    /// Writes `v` into the cell denoted by `place`. A `store` **drops nothing**: the overwritten
+    /// value must own no resource (a husk or a resource-free in-place reassignment); a resource-owner
+    /// here is a leak the emitter owed a `drop` for.
     fn store(&mut self, v: Value, place: &Place) -> Result<(), RuntimeError> {
-        // Generic (`alloca A`) storage is allocated flat-`Uninit` because its concrete aggregate
-        // shape is unknown statically. A field store materializes the enclosing `Tuple` skeleton on
-        // demand so the leaf is addressable.
+        // Generic (`alloca A`) storage starts flat-`Uninit`; a field store grows the enclosing
+        // `Tuple` skeleton on demand so the leaf is addressable.
         self.materialize_path(place);
         let slot = place
             .target_mut(&mut self.ctx)
             .expect("store to an invalid place");
         let old = std::mem::replace(slot, v);
-        // Overwriting the slot drops the old Rust value here, but a real backend just writes the new
-        // bytes and frees nothing. So the overwritten value must own no resources — a husk, or a
-        // `TrivialCopy` value written in place (e.g. `a = a + b`); a live resource-owning value would
-        // be a leak the emitter owed an explicit `drop` for.
         debug_assert!(
             is_reclaimable(&old),
             "SSA leak: store overwrites a live resource-owning value (a missing explicit drop): \
              {old:?}",
         );
+        // Reclaims interpreter-only storage (like a stack-pop); runs no `Value::drop`.
         old.discard_storage();
         Ok(())
     }

@@ -1261,6 +1261,15 @@ impl<'a> Emitter<'a> {
         self.insert(Instruction::store(span, v, destination));
     }
 
+    /// Writes `()` into the result slot of a `()`-yielding tail (an assignment, a `let`, a closure-env
+    /// drop) that produces no value itself, so a `()`-returning body ending in one still initializes
+    /// its (husk) `@ret`. A no-op for a `None` destination (statement position) or a terminated block.
+    fn store_unit_result(&mut self, span: Location, destination: Option<ssa::Value>) {
+        if !self.current_block_is_terminated() {
+            self.store_into_if_needed(span, ssa::Value::Unit, destination);
+        }
+    }
+
     /// Copies the pointee of the place `source` into `destination` as a single `memcpy` (the fused
     /// form of a `load` immediately followed by a `store` of the loaded value). A `None`
     /// `destination` discards the copy.
@@ -1502,7 +1511,8 @@ impl<'a> Emitter<'a> {
                 } else {
                     self.lower_value_into(&self.hir_arena[n.value], Some(place));
                 }
-                // `Assign` is `()`-typed: nothing to store into `dest`.
+                // `Assign` yields `()`; in value/tail position initialize the destination slot.
+                self.store_unit_result(node.span, destination);
             }
 
             K::LoadLocal(n) => {
@@ -1557,7 +1567,8 @@ impl<'a> Emitter<'a> {
                         );
                     }
                 }
-                // `StoreLocal` is `()`-typed: nothing to store into `dest`.
+                // `StoreLocal` yields `()`; in value/tail position initialize the destination slot.
+                self.store_unit_result(node.span, destination);
             }
 
             K::CloneValue(n) => {
@@ -1736,11 +1747,11 @@ impl<'a> Emitter<'a> {
             }
 
             K::DropClosureEnv(n) => {
-                // Drop the owned captured environment of the target closure. This is the body of the
-                // generated `Value::drop` for a function type; it is `()`-typed, so nothing is
-                // stored into the destination.
+                // Drop the owned captured environment of the target closure — the body of the
+                // generated `Value::drop` for a function type. It yields `()`.
                 let target = self.lower_as_place(&self.hir_arena[n.target]);
                 self.insert(Instruction::drop_closure_env(node.span, target));
+                self.store_unit_result(node.span, destination);
             }
 
             K::Apply(n) => {

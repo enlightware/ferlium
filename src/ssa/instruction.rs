@@ -409,11 +409,12 @@ impl Instruction {
     }
 
     /// Creates a `store` instruction writing the **value** operand `0` (`value`) into the **place**
-    /// operand `1` (`destination`), discarding (dropping the storage of) any prior contents.
+    /// operand `1` (`destination`).
     ///
-    /// Yields no register. `value` is consumed (moved, for a non-trivial value); `destination` must
-    /// be a place — generic storage materializes its enclosing aggregate skeleton on demand so a
-    /// field store is addressable.
+    /// A `store` **drops nothing**: `destination` must hold no live resource — a husk, or a
+    /// resource-free value overwritten in place — so the emitter owes an explicit `drop` before
+    /// overwriting a resource-owning pointee. Yields no register; `value` is consumed (moved, for a
+    /// non-trivial value).
     pub fn store(span: Location, value: ssa::Value, destination: ssa::Value) -> Self {
         Instruction {
             span,
@@ -1316,7 +1317,7 @@ impl InstructionKind for ExtractTag {
     }
 }
 
-/// A store instruction in SSA, which writes the contents of a register to memory.
+/// A store of a register value into a place, which drops nothing (see [`Instruction::store`]).
 struct Store {}
 
 impl InstructionKind for Store {

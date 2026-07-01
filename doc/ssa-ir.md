@@ -127,8 +127,10 @@ and after a call. "Initialized / live" and "husk" are the recursive, per-field n
   it is **fully initialized** — every leaf live. On an **error/unwind** exit (the callee raised before
   producing a result) it is left **husk**, and the caller must not read it — this is what lets a
   "returned" local that was never actually produced read back as a husk so its drop is skipped.
-  *Unit / empty-aggregate* returns are the degenerate case: with no field to carry liveness, the live
-  value is the explicit marker (`Value::unit()` / `Tuple([])`), so such a `@ret` is vacuously live.
+  *Unit / empty-aggregate* returns are no exception: the `@ret` starts a **husk** like any other and
+  the body must write the explicit live marker (`Value::unit()` / `Tuple([])`) into it before a normal
+  return — a unit `@ret` is *not* pre-seeded live, so a body that fails to write it is caught by the
+  boundary check exactly as a missing scalar result would be.
   (`AddressorPlace`'s `@ret` holds a place *pointer*, which is likewise written on normal return.)
 - **`&mut` (`MutableRef`) argument:** the pointee is **live before and after** the call. The callee
   borrows it exclusively and may overwrite it, but does not own it and so cannot move it out leaving a
@@ -136,9 +138,10 @@ and after a call. "Initialized / live" and "husk" are the recursive, per-field n
 - **`& ` (`SharedRef`) argument:** the pointee is **live before** and is not mutated.
 
 The unit handling follows from these: because units flow through real cells (there is no
-non-dereferenceable unit-place sentinel), a unit `@ret`/value is an ordinary live `()` cell, and the
-invariants above apply uniformly with no special case. The recursive husk/liveness check
-(`is_drop_husk`) is what makes "fully initialized on exit" well-defined for aggregates.
+non-dereferenceable unit-place sentinel), a unit `@ret`/value is an ordinary cell that starts a husk
+and becomes a live `()` when written, and the invariants above apply uniformly with no special case.
+The recursive husk/liveness check (`is_drop_husk`) is what makes "fully initialized on exit"
+well-defined for aggregates.
 
 > These boundary storage-state contracts are *semantic* (not yet machine-checked by `verify`). The
 > structural arity/terminator invariants in §2 and §6 are.
@@ -155,7 +158,7 @@ count. Roles: **p** = place, **v** = value, **d** = dictionary, **m** = stack ma
 | `alloca ty` | — (or `[witness:d-like place]` if `ty` is not statically sized) | place `*ty` | `n ≤ 1`; the witness is present iff `ty`'s layout is run-time (a generic `Value` dictionary place). |
 | `alloca_place ty` | — | place `**ty` | `n == 0`; a slot holding a *pointer* to a `ty` (used for `AddressorPlace`/`project` out-slots). |
 | `load` | `[src:p]` | value | `n == 1`; copies a trivially-copyable pointee or **moves** a non-trivial one out (leaving the cell `Uninit`). |
-| `store` | `[v, dst:p]` | — | `n == 2`; writes `v` into `dst`, discarding the prior contents. |
+| `store` | `[v, dst:p]` | — | `n == 2`; writes `v` into `dst`. **Drops nothing:** `dst` must hold no live resource — a husk, or a resource-free value overwritten in place (a scalar/unit reassignment). A resource-owning pointee must have been released by an explicit `drop` first. |
 | `memcpy` | `[src:p, dst:p]` (or `+[witness]` if dynamic) | — | `n ∈ {2,3}`; place-to-place copy/move without a register. **Requires a statically known pointee layout** (a backend sizes the copy from the type); a generic (run-time-layout) move must carry the `Value` dictionary `witness` as operand `2`. The emitter's `move_value_into` picks the form. |
 
 ### Aggregates & variants
