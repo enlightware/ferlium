@@ -66,11 +66,7 @@ impl Instruction {
         self.kind.is_terminator()
     }
 
-    /// Returns a borrowed, kind-discriminated view of this instruction.
-    ///
-    /// This lets backends (e.g. the WASM emitter) match on the instruction kind and read its
-    /// kind-specific data without exposing the concrete kind structs or depending on backend
-    /// types within this module.
+    /// Returns a kind-discriminated view of `self`.
     pub fn view(&self) -> InstructionView<'_> {
         self.kind.view(self)
     }
@@ -78,12 +74,6 @@ impl Instruction {
     /// Verifies the structural contract of this instruction in isolation by delegating to its kind's
     /// own [`InstructionKind::verify`] (the operand **arity**, and the data-dependent operand count
     /// for `alloca`/`memcpy`/`build_closure`).
-    ///
-    /// This is the machine-checkable core of the per-instruction contracts documented on each
-    /// constructor below. The interpreter runs it over every instruction of a function before
-    /// executing it (see `Interpreter::verify_function`), so malformed IR fails fast with a precise
-    /// message instead of an out-of-bounds operand index or silently corrupted interpreter state —
-    /// the moral equivalent of the undefined behavior such IR would cause in a real backend.
     pub fn verify(&self) {
         self.kind.verify(self);
     }
@@ -763,15 +753,15 @@ struct Alloca {
 }
 
 impl InstructionKind for Alloca {
+    fn result(&self, _whole: &Instruction) -> InstructionResult {
+        InstructionResult::pointer_to(InstructionResult::Lowered(self.ty))
+    }
+
     fn verify(&self, whole: &Instruction) {
         assert!(
             whole.operands.len() <= 1,
             "alloca takes the run-time-layout witness iff its type is not statically sized (0 or 1 operand)"
         );
-    }
-
-    fn result(&self, _whole: &Instruction) -> InstructionResult {
-        InstructionResult::pointer_to(InstructionResult::Lowered(self.ty))
     }
 
     fn view<'a>(&'a self, whole: &'a Instruction) -> InstructionView<'a> {
@@ -802,14 +792,14 @@ pub struct AllocaPlace {
 }
 
 impl InstructionKind for AllocaPlace {
-    fn verify(&self, whole: &Instruction) {
-        assert!(whole.operands.is_empty(), "alloca_place takes no operands");
-    }
-
     fn result(&self, _whole: &Instruction) -> InstructionResult {
         InstructionResult::pointer_to(InstructionResult::pointer_to(InstructionResult::Lowered(
             self.pointing_to,
         )))
+    }
+
+    fn verify(&self, whole: &Instruction) {
+        assert!(whole.operands.is_empty(), "alloca_place takes no operands");
     }
 
     fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
@@ -832,17 +822,17 @@ impl InstructionKind for AllocaPlace {
 struct Call {}
 
 impl InstructionKind for Call {
+    fn result(&self, _whole: &Instruction) -> InstructionResult {
+        // Calls do not yield a register: a callee with a non-`()` result writes it through the
+        // return out-pointer passed as the call's last operand.
+        InstructionResult::Nothing
+    }
+
     fn verify(&self, whole: &Instruction) {
         assert!(
             !whole.operands.is_empty(),
             "call needs at least the callee operand"
         );
-    }
-
-    fn result(&self, _whole: &Instruction) -> InstructionResult {
-        // Calls do not yield a register: a callee with a non-`()` result writes it through the
-        // return out-pointer passed as the call's last operand.
-        InstructionResult::Nothing
     }
 
     fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
@@ -884,20 +874,20 @@ struct Invoke {
 }
 
 impl InstructionKind for Invoke {
-    fn verify(&self, whole: &Instruction) {
-        assert!(
-            !whole.operands.is_empty(),
-            "invoke needs at least the callee operand"
-        );
+    fn result(&self, _whole: &Instruction) -> InstructionResult {
+        // Like `Call`: no register; a non-`()` result is written through the return out-pointer.
+        InstructionResult::Nothing
     }
 
     fn is_terminator(&self) -> bool {
         true
     }
 
-    fn result(&self, _whole: &Instruction) -> InstructionResult {
-        // Like `Call`: no register; a non-`()` result is written through the return out-pointer.
-        InstructionResult::Nothing
+    fn verify(&self, whole: &Instruction) {
+        assert!(
+            !whole.operands.is_empty(),
+            "invoke needs at least the callee operand"
+        );
     }
 
     fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
@@ -929,12 +919,12 @@ impl InstructionKind for Invoke {
 struct Resume {}
 
 impl InstructionKind for Resume {
-    fn verify(&self, whole: &Instruction) {
-        assert!(whole.operands.is_empty(), "resume takes no operands");
-    }
-
     fn is_terminator(&self) -> bool {
         true
+    }
+
+    fn verify(&self, whole: &Instruction) {
+        assert!(whole.operands.is_empty());
     }
 
     fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
@@ -958,17 +948,14 @@ struct Project {
 }
 
 impl InstructionKind for Project {
-    fn verify(&self, whole: &Instruction) {
-        assert!(
-            !whole.operands.is_empty(),
-            "project needs at least the callee operand"
-        );
-    }
-
     fn result(&self, _whole: &Instruction) -> InstructionResult {
         // The result is the yielded place: a pointer to the projected element. A register value is
-        // obtained by `load`ing it.
+        // obtained by loading it.
         InstructionResult::pointer_to(InstructionResult::Lowered(self.ty))
+    }
+
+    fn verify(&self, whole: &Instruction) {
+        assert!(!whole.operands.is_empty());
     }
 
     fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
@@ -1043,16 +1030,16 @@ impl InstructionKind for EndProject {
 struct CompareEqual {}
 
 impl InstructionKind for CompareEqual {
+    fn result(&self, _whole: &Instruction) -> InstructionResult {
+        InstructionResult::Lowered(cached_primitive_ty!(bool))
+    }
+
     fn verify(&self, whole: &Instruction) {
         assert_eq!(
             whole.operands.len(),
             2,
             "compare_eq compares exactly two operands"
         );
-    }
-
-    fn result(&self, _whole: &Instruction) -> InstructionResult {
-        InstructionResult::Lowered(cached_primitive_ty!(bool))
     }
 
     fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
@@ -1079,16 +1066,16 @@ struct ConditionalBranch {
 }
 
 impl InstructionKind for ConditionalBranch {
+    fn is_terminator(&self) -> bool {
+        true
+    }
+
     fn verify(&self, whole: &Instruction) {
         assert_eq!(
             whole.operands.len(),
             1,
             "condbr takes exactly the condition operand"
         );
-    }
-
-    fn is_terminator(&self) -> bool {
-        true
     }
 
     fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
@@ -1118,16 +1105,16 @@ impl InstructionKind for ConditionalBranch {
 struct Load {}
 
 impl InstructionKind for Load {
+    fn result(&self, whole: &Instruction) -> InstructionResult {
+        InstructionResult::pointee_of(InstructionResult::Same(whole.operands[0].clone()))
+    }
+
     fn verify(&self, whole: &Instruction) {
         assert_eq!(
             whole.operands.len(),
             1,
             "load takes exactly the source place"
         );
-    }
-
-    fn result(&self, whole: &Instruction) -> InstructionResult {
-        InstructionResult::pointee_of(InstructionResult::Same(whole.operands[0].clone()))
     }
 
     fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
@@ -1152,18 +1139,18 @@ struct Subfield {
 }
 
 impl InstructionKind for Subfield {
+    fn result(&self, _whole: &Instruction) -> InstructionResult {
+        // The operand is a place (pointer to the aggregate) and the result is a place: a pointer to
+        // the projected element. A register value is obtained by `load`ing the result.
+        InstructionResult::pointer_to(InstructionResult::Lowered(self.ty))
+    }
+
     fn verify(&self, whole: &Instruction) {
         assert_eq!(
             whole.operands.len(),
             2,
             "subfield takes the aggregate place and the int field-index value"
         );
-    }
-
-    fn result(&self, _whole: &Instruction) -> InstructionResult {
-        // The operand is a place (pointer to the aggregate) and the result is a place: a pointer to
-        // the projected element. A register value is obtained by `load`ing the result.
-        InstructionResult::pointer_to(InstructionResult::Lowered(self.ty))
     }
 
     fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
@@ -1195,18 +1182,18 @@ struct DictEntry {
 }
 
 impl InstructionKind for DictEntry {
+    fn result(&self, _whole: &Instruction) -> InstructionResult {
+        // Like `Subfield`: the result is the place of the entry; a register value is obtained by
+        // `load`ing it, and a method callee is read by reference at the `call`/`drop`.
+        InstructionResult::pointer_to(InstructionResult::Lowered(self.ty))
+    }
+
     fn verify(&self, whole: &Instruction) {
         assert_eq!(
             whole.operands.len(),
             1,
             "dict_entry takes exactly the symbolic dictionary operand"
         );
-    }
-
-    fn result(&self, _whole: &Instruction) -> InstructionResult {
-        // Like `Subfield`: the result is the place of the entry; a register value is obtained by
-        // `load`ing it, and a method callee is read by reference at the `call`/`drop`.
-        InstructionResult::pointer_to(InstructionResult::Lowered(self.ty))
     }
 
     fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
@@ -1234,15 +1221,15 @@ impl InstructionKind for DictEntry {
 struct Ret {}
 
 impl InstructionKind for Ret {
+    fn is_terminator(&self) -> bool {
+        true
+    }
+
     fn verify(&self, whole: &Instruction) {
         assert!(
             whole.operands.is_empty(),
             "ret takes no operands (the result is written through the return out-pointer)"
         );
-    }
-
-    fn is_terminator(&self) -> bool {
-        true
     }
 
     fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
@@ -1273,15 +1260,15 @@ struct Variant {
 }
 
 impl InstructionKind for Variant {
+    fn result(&self, _whole: &Instruction) -> InstructionResult {
+        InstructionResult::Lowered(self.type_)
+    }
+
     fn verify(&self, whole: &Instruction) {
         assert!(
             whole.operands.is_empty(),
             "variant builds an uninitialized shell and takes no operands"
         );
-    }
-
-    fn result(&self, _whole: &Instruction) -> InstructionResult {
-        InstructionResult::Lowered(self.type_)
     }
 
     fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
@@ -1303,16 +1290,16 @@ impl InstructionKind for Variant {
 struct ExtractTag {}
 
 impl InstructionKind for ExtractTag {
+    fn result(&self, _whole: &Instruction) -> InstructionResult {
+        InstructionResult::Lowered(cached_primitive_ty!(isize))
+    }
+
     fn verify(&self, whole: &Instruction) {
         assert_eq!(
             whole.operands.len(),
             1,
             "extract_tag takes exactly the variant place"
         );
-    }
-
-    fn result(&self, _whole: &Instruction) -> InstructionResult {
-        InstructionResult::Lowered(cached_primitive_ty!(isize))
     }
 
     fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
@@ -1389,12 +1376,12 @@ impl InstructionKind for Memcpy {
 struct StackSave {}
 
 impl InstructionKind for StackSave {
-    fn verify(&self, whole: &Instruction) {
-        assert!(whole.operands.is_empty(), "stack_save takes no operands");
-    }
-
     fn result(&self, _whole: &Instruction) -> InstructionResult {
         InstructionResult::StackMarker
+    }
+
+    fn verify(&self, whole: &Instruction) {
+        assert!(whole.operands.is_empty(), "stack_save takes no operands");
     }
 
     fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
@@ -1490,15 +1477,15 @@ struct BuildClosure {
 }
 
 impl InstructionKind for BuildClosure {
+    fn result(&self, _whole: &Instruction) -> InstructionResult {
+        InstructionResult::Lowered(self.ty)
+    }
+
     fn verify(&self, whole: &Instruction) {
         assert!(
             whole.operands.len() >= self.num_hidden_dicts + self.has_env_dict as usize,
             "build_closure needs at least its hidden dictionaries and the optional env dictionary"
         );
-    }
-
-    fn result(&self, _whole: &Instruction) -> InstructionResult {
-        InstructionResult::Lowered(self.ty)
     }
 
     fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
@@ -1533,16 +1520,16 @@ struct CloneClosureEnv {
 }
 
 impl InstructionKind for CloneClosureEnv {
+    fn result(&self, _whole: &Instruction) -> InstructionResult {
+        InstructionResult::Lowered(self.ty)
+    }
+
     fn verify(&self, whole: &Instruction) {
         assert_eq!(
             whole.operands.len(),
             1,
             "clone_closure_env takes exactly the closure place"
         );
-    }
-
-    fn result(&self, _whole: &Instruction) -> InstructionResult {
-        InstructionResult::Lowered(self.ty)
     }
 
     fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
@@ -1591,12 +1578,12 @@ struct UnconditionalBranch {
 }
 
 impl InstructionKind for UnconditionalBranch {
-    fn verify(&self, whole: &Instruction) {
-        assert!(whole.operands.is_empty(), "br takes no operands");
-    }
-
     fn is_terminator(&self) -> bool {
         true
+    }
+
+    fn verify(&self, whole: &Instruction) {
+        assert!(whole.operands.is_empty(), "br takes no operands");
     }
 
     fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {

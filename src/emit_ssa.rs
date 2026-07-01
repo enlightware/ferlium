@@ -303,6 +303,12 @@ impl<'a> Emitter<'a> {
         (function.function, function.module)
     }
 
+    /// Builds an [`ssa::Value`] referencing the given function.
+    fn function_value(&self, function: FunctionId) -> ssa::Value {
+        let (fi, mi) = self.resolve_function(function);
+        ssa::Value::Function(self.demand_function(fi, mi))
+    }
+
     /// Resolves a module-qualified [`TraitImplId`] to a canonical [`TraitDictionaryId`].
     fn dictionary_id(&self, dictionary: TraitImplId) -> TraitDictionaryId {
         TraitDictionaryId {
@@ -996,8 +1002,7 @@ impl<'a> Emitter<'a> {
             }
 
             K::StaticApply(n) => {
-                let (fi, mi) = self.resolve_function(n.function);
-                let f = ssa::Value::Function(self.demand_function(fi, mi));
+                let f = self.function_value(n.function);
                 let mut arguments: Vec<ssa::Value> = vec![];
                 for x in &n.extra_arguments {
                     arguments.push(self.lower_extra_argument(&self.hir_arena[*x]));
@@ -1112,8 +1117,7 @@ impl<'a> Emitter<'a> {
                 "a WithYielded accessor must be a StaticApply of a YieldedOnce member, got {other:?}"
             ),
         };
-        let (fi, mi) = self.resolve_function(app.function);
-        let callee = ssa::Value::Function(self.demand_function(fi, mi));
+        let callee = self.function_value(app.function);
         let mut arguments: Vec<ssa::Value> = vec![];
         for x in &app.extra_arguments {
             arguments.push(self.lower_extra_argument(&self.hir_arena[*x]));
@@ -1531,8 +1535,7 @@ impl<'a> Emitter<'a> {
                     Some(ResolvedLocalClone::Static(f)) => {
                         // Clone the source place into the local's (uninitialized) owned storage
                         // through the statically known clone function `f`.
-                        let (fi, mi) = self.resolve_function(f);
-                        let f = ssa::Value::Function(self.demand_function(fi, mi));
+                        let f = self.function_value(f);
 
                         let target = self.place_of_local(n.id);
                         let source = self.lower_as_place(&self.hir_arena[n.value]);
@@ -1567,8 +1570,7 @@ impl<'a> Emitter<'a> {
                     ResolvedLocalClone::Static(f) => {
                         // Clone the source place into the local's (uninitialized) owned storage
                         // through the statically known clone function `f`.
-                        let (fi, mi) = self.resolve_function(f);
-                        let f = ssa::Value::Function(self.demand_function(fi, mi));
+                        let f = self.function_value(f);
 
                         let source = self.lower_as_place(&self.hir_arena[n.source]);
 
@@ -1618,8 +1620,7 @@ impl<'a> Emitter<'a> {
                                 self.memcpy_into_if_needed(node.span, source, Some(destination));
                             }
                             ResolvedLocalClone::Static(f) => {
-                                let (fi, mi) = self.resolve_function(f);
-                                let f = ssa::Value::Function(self.demand_function(fi, mi));
+                                let f = self.function_value(f);
                                 let source = self.place_of_local(n.id);
                                 // Plain `call`: `Value::clone` is infallible by its trait contract.
                                 self.insert(Instruction::call(node.span, f, [source, destination]));
@@ -1643,8 +1644,7 @@ impl<'a> Emitter<'a> {
                 if n.ty.returns_place() {
                     return self.lower_place_call_into(node, destination);
                 }
-                let (fi, mi) = self.resolve_function(n.function);
-                let f = ssa::Value::Function(self.demand_function(fi, mi));
+                let f = self.function_value(n.function);
                 let mut arguments: Vec<ssa::Value> = vec![];
                 for x in &n.extra_arguments {
                     arguments.push(self.lower_extra_argument(&self.hir_arena[*x]));
@@ -1668,8 +1668,7 @@ impl<'a> Emitter<'a> {
                 // value and store it into the destination. A generic function used first-class is
                 // wrapped by elaboration in a `BuildClosure` carrying its dictionary captures, so a
                 // bare `GetFunction` never needs evidence here.
-                let (fi, mi) = self.resolve_function(n.function);
-                let f = ssa::Value::Function(self.demand_function(fi, mi));
+                let f = self.function_value(n.function);
                 self.store_into_if_needed(node.span, f, destination);
             }
 
