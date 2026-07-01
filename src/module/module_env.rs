@@ -7,13 +7,14 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 use crate::{
-    Location,
+    FxHashMap, Location,
     ast::{self, UstrSpan},
     compiler::error::InternalCompilationError,
     format::FormatWith,
     internal_compilation_error,
     module::{
-        Module, ModuleFunction, ModuleId, Modules, TraitId, TypeDefId,
+        Module, ModuleFunction, ModuleId, Modules, ProjectionEntry, ProjectionKey,
+        ProjectionOrigin, SubscriptId, TraitId, TypeDefId,
         id::Id,
         path::Path,
         type_alias_name::{find_generic_alias_name, find_generic_alias_name_with},
@@ -52,6 +53,18 @@ fn unavailable_trait<T>(id: TraitId) -> T {
     panic!("Trait #{}:{} is unavailable", id.module, id.index)
 }
 
+fn visible_projection_entry(
+    module: &Module,
+    current_module: ModuleId,
+    key: ProjectionKey,
+    entry: ProjectionEntry,
+) -> Option<ProjectionEntry> {
+    (module.module_id() == current_module || entry.visibility == crate::module::Visibility::Public)
+        .then_some(entry)
+        .filter(|entry| entry.origin == ProjectionOrigin::Explicit)
+        .filter(|_| module.get_projection_subscript(key).is_some())
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct ModuleEnv<'m> {
     pub(crate) current: &'m Module,
@@ -70,6 +83,7 @@ pub(crate) struct CurrentTypeItems<'m> {
     pub(crate) type_aliases: &'m TypeAliases,
     pub(crate) type_defs: &'m [TypeDefSlot],
     pub(crate) traits: &'m [Trait],
+    pub(crate) projection_subscripts: &'m FxHashMap<ProjectionKey, ProjectionEntry>,
 }
 
 impl<'m> CurrentTypeItems<'m> {
@@ -78,12 +92,14 @@ impl<'m> CurrentTypeItems<'m> {
         type_aliases: &'m TypeAliases,
         type_defs: &'m [TypeDefSlot],
         traits: &'m [Trait],
+        projection_subscripts: &'m FxHashMap<ProjectionKey, ProjectionEntry>,
     ) -> Self {
         Self {
             module,
             type_aliases,
             type_defs,
             traits,
+            projection_subscripts,
         }
     }
 
@@ -96,6 +112,7 @@ impl<'m> CurrentTypeItems<'m> {
             &current.type_aliases,
             current.type_defs.as_slice(),
             current.traits.as_slice(),
+            &current.projection_subscripts,
         )
     }
 
@@ -246,16 +263,17 @@ impl<'m> QualifiedNameEnv<'m> {
                 index,
                 self.format_type(*element_ty)
             ),
-            PubTypeConstraint::RecordFieldIs {
-                record_ty,
+            PubTypeConstraint::ProjectionSubscriptIs {
+                requirement,
                 field,
-                element_ty,
+                subscript_ty,
                 ..
             } => format!(
-                "record-field({}, {}, {})",
-                self.format_type(*record_ty),
+                "projection-subscript({:?}, {}, {}, {})",
+                requirement,
+                self.format_type(subscript_ty.receiver_ty()),
                 field,
-                self.format_type(*element_ty)
+                self.format_type(Type::subscript_type(subscript_ty.clone()))
             ),
             PubTypeConstraint::TypeHasVariant {
                 variant_ty,
@@ -621,6 +639,26 @@ impl<'m> ModuleEnv<'m> {
     pub fn try_type_def(&self, id: TypeDefId) -> Option<&TypeDef> {
         self.type_def_module(id)
             .and_then(|module| module.try_type_def(id))
+    }
+
+    /// Resolve an explicit projection implementation visible from the current module.
+    pub fn projection_subscript(&self, key: ProjectionKey) -> Option<SubscriptId> {
+        self.current
+            .get_projection_subscript(key)
+            .filter(|entry| entry.origin == ProjectionOrigin::Explicit)
+            .map(|entry| SubscriptId::new(self.current.module_id(), entry.subscript))
+            .or_else(|| {
+                self.modules.enumerate().find_map(|(module_id, entry, _)| {
+                    let module = entry.module()?;
+                    visible_projection_entry(
+                        module,
+                        self.current.module_id(),
+                        key,
+                        module.get_projection_subscript(key)?,
+                    )
+                    .map(|entry| SubscriptId::new(module_id, entry.subscript))
+                })
+            })
     }
 
     fn reject_inaccessible_private_repr(

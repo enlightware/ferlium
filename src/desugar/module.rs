@@ -916,7 +916,8 @@ impl PModule {
             .map(|(index, func)| (func.name.0, index))
             .collect::<FxHashMap<_, _>>();
         let subscript_member_nodes = subscript_member_nodes(functions.len(), &subscripts);
-        let subscript_map = subscript_map(&subscripts, &subscript_member_nodes);
+        let (subscript_map, projection_subscript_map) =
+            subscript_maps(&subscripts, &subscript_member_nodes);
         let module_implementation_indices =
             module_implementation_indices(functions.len(), &subscript_member_nodes);
         let mut desugared_arena = new_desugared_arena_sized_from_parsed_arena(parsed_arena);
@@ -926,6 +927,7 @@ impl PModule {
                     f.desugar(
                         &fn_map,
                         &subscript_map,
+                        &projection_subscript_map,
                         &env,
                         parsed_arena,
                         &mut desugared_arena,
@@ -940,6 +942,7 @@ impl PModule {
                 s.desugar(
                     &fn_map,
                     &subscript_map,
+                    &projection_subscript_map,
                     &env,
                     parsed_arena,
                     &mut desugared_arena,
@@ -999,17 +1002,24 @@ fn subscript_member_nodes(
         .collect()
 }
 
-fn subscript_map(
+fn subscript_maps(
     subscripts: &[ast::PSubscriptDefinition],
     subscript_member_nodes: &[Vec<usize>],
-) -> SubscriptMap {
-    let mut map = FxHashMap::default();
+) -> (SubscriptMap, SubscriptMap) {
+    let mut named = FxHashMap::default();
+    let mut projection = FxHashMap::default();
     for (index, subscript) in subscripts.iter().enumerate() {
-        map.entry(subscript.name.0)
+        let target = if subscript.projection_receiver.is_some() {
+            &mut projection
+        } else {
+            &mut named
+        };
+        target
+            .entry(subscript.name.0)
             .or_insert_with(Vec::new)
             .extend(subscript_member_nodes[index].iter().copied());
     }
-    map
+    (named, projection)
 }
 
 fn module_implementation_indices(
@@ -1262,10 +1272,12 @@ impl ast::TraitDefinition {
 }
 
 impl PModuleFunction {
+    #[allow(clippy::too_many_arguments)]
     pub fn desugar(
         self,
         fn_map: &FnMap,
         subscript_map: &SubscriptMap,
+        projection_subscript_map: &SubscriptMap,
         env: &ModuleEnv<'_>,
         parsed_arena: &PExprArena,
         desugared_arena: &mut DExprArena,
@@ -1275,6 +1287,7 @@ impl PModuleFunction {
         self.desugar_with_ty_params(
             fn_map,
             subscript_map,
+            projection_subscript_map,
             env,
             &generic_ty_params,
             &GenericEffParams::default(),
@@ -1289,6 +1302,7 @@ impl PModuleFunction {
         self,
         fn_map: &FnMap,
         subscript_map: &SubscriptMap,
+        projection_subscript_map: &SubscriptMap,
         env: &ModuleEnv<'_>,
         generic_ty_params: &GenericTyParams,
         generic_eff_params: &GenericEffParams,
@@ -1299,6 +1313,7 @@ impl PModuleFunction {
         self.desugar_with_ty_and_eff_params(
             fn_map,
             subscript_map,
+            projection_subscript_map,
             env,
             generic_ty_params,
             generic_eff_params,
@@ -1313,6 +1328,7 @@ impl PModuleFunction {
         self,
         fn_map: &FnMap,
         subscript_map: &SubscriptMap,
+        projection_subscript_map: &SubscriptMap,
         env: &ModuleEnv<'_>,
         generic_ty_params: &GenericTyParams,
         outer_generic_eff_params: &GenericEffParams,
@@ -1341,6 +1357,7 @@ impl PModuleFunction {
         let mut ctx = DesugarCtx::new_with_locals(
             fn_map,
             subscript_map,
+            projection_subscript_map,
             locals,
             env,
             &generic_ty_params,
@@ -1453,10 +1470,12 @@ impl PModuleFunction {
 }
 
 impl ast::PSubscriptDefinition {
+    #[allow(clippy::too_many_arguments)]
     pub fn desugar(
         self,
         fn_map: &FnMap,
         subscript_map: &SubscriptMap,
+        projection_subscript_map: &SubscriptMap,
         env: &ModuleEnv<'_>,
         parsed_arena: &PExprArena,
         desugared_arena: &mut DExprArena,
@@ -1526,6 +1545,7 @@ impl ast::PSubscriptDefinition {
                 let mut ctx = DesugarCtx::new_with_locals(
                     fn_map,
                     subscript_map,
+                    projection_subscript_map,
                     locals.clone(),
                     env,
                     &generic_ty_params,
@@ -1554,6 +1574,22 @@ impl ast::PSubscriptDefinition {
             ast::SubscriptDefinition {
                 visibility: self.visibility,
                 name: self.name,
+                projection_receiver: self
+                    .projection_receiver
+                    .map(|(ty, span)| {
+                        Ok((
+                            ty.desugar_with_ty_and_eff_params(
+                                span,
+                                false,
+                                env,
+                                &generic_ty_params,
+                                Some(&generic_eff_params),
+                                modules_used,
+                            )?,
+                            span,
+                        ))
+                    })
+                    .transpose()?,
                 generic_params: self.generic_params,
                 args,
                 args_span: self.args_span,

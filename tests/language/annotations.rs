@@ -137,15 +137,12 @@ fn light_annotations_keep_structural_constraints() {
     "# };
     let mut compiler = compile_source(src);
     let annotations = light_annotation_hints(&mut compiler);
-    let repr_pos = annotations.find("⇝");
-    let field_pos = annotations.find("name");
 
     assert!(
-        repr_pos.is_some()
-            && field_pos.is_some()
-            && repr_pos < field_pos
-            && !annotations.contains("Repr"),
-        "expected compact Repr and structural field constraints in light annotations, got: {annotations}"
+        annotations.contains("T: { name:")
+            && !annotations.contains("Repr")
+            && !annotations.contains("⇝"),
+        "expected compact direct structural field constraint in light annotations, got: {annotations}"
     );
 }
 
@@ -248,6 +245,34 @@ fn light_annotations_keep_generic_effect_binders_used_by_callable_effects() {
             && light.contains("f: () -> A ! e₀")
             && light.contains("-> A ! e₀"),
         "expected light annotations to keep callable effect binder and uses, got:\n{light}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn annotations_show_inferred_projection_subscript_evidence_effects() {
+    let src = indoc! { r#"
+        fn read_value(container) {
+            container.value
+        }
+    "# };
+    let mut compiler = compile_source(src);
+    let annotations = annotation_hints(&mut compiler);
+    let light_annotations = light_annotation_hints(&mut compiler);
+
+    assert!(
+        annotations.contains("A: { value: B (ref ! e₀), … }"),
+        "expected full annotations to show generated projection evidence as a record-like field, got: {annotations}"
+    );
+    assert!(
+        annotations.contains("-> B ! e₀"),
+        "expected function effect to depend on projection evidence, got: {annotations}"
+    );
+    assert!(
+        light_annotations.contains("A: { value: B ! e₀, … }")
+            && !light_annotations.contains("(ref")
+            && !light_annotations.contains("projection value uses subscript"),
+        "expected light annotations to keep compact record-style projection evidence, got: {light_annotations}"
     );
 }
 

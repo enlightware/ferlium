@@ -710,6 +710,13 @@ impl SubscriptType {
         member_can_satisfy(&self.ref_member, &expected.ref_member)
             && member_can_satisfy(&self.mut_member, &expected.mut_member)
     }
+
+    pub(crate) fn receiver_ty(&self) -> Type {
+        self.args
+            .first()
+            .expect("subscript type should have at least a receiver argument")
+            .ty
+    }
 }
 
 fn member_can_satisfy(

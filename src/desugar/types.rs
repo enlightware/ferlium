@@ -1652,11 +1652,13 @@ impl PTraitImpl {
             .map(|(index, func)| (func.name.0, index))
             .collect::<FxHashMap<_, _>>();
         let subscript_map = FxHashMap::default();
+        let projection_subscript_map = FxHashMap::default();
         let (functions, fn_dep_graph): (_, Vec<_>) = process_results(
             self.functions.into_iter().map(|f| {
                 f.desugar_with_ty_and_eff_params(
                     &fn_map,
                     &subscript_map,
+                    &projection_subscript_map,
                     env,
                     &generic_ty_params,
                     &generic_eff_params,

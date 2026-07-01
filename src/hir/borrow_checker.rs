@@ -62,12 +62,16 @@ impl Path {
             CallDictionaryMethod(call) if call.ty.returns_place() => {
                 Self::from_addressor_place_arguments(arena, &call.arguments)
             }
+            SubscriptApply(app) if app.ty.returns_place() => {
+                Self::from_addressor_place_arguments(arena, &app.arguments)
+            }
             Block(block) => {
                 let tail = block
                     .tail_node()
                     .expect("place block should have a tail expression");
                 Self::from_node(arena, tail)
             }
+            WithPlace(node) => Self::from_node(arena, node.place),
             LoadLocal(node) => Path {
                 variable: node.id.as_index(),
                 parts: Vec::new(),
@@ -104,7 +108,9 @@ impl Path {
 fn is_evidence_node(kind: &NodeKind) -> bool {
     matches!(
         kind,
-        NodeKind::GetDictionary(_) | NodeKind::LoadDictionary(_) | NodeKind::LoadFieldIndex(_)
+        NodeKind::GetDictionary(_)
+            | NodeKind::LoadDictionary(_)
+            | NodeKind::LoadSubscriptEvidence(_)
     )
 }
 
@@ -179,10 +185,11 @@ pub fn check_borrows(arena: &NodeArena, node_id: NodeId) -> Result<(), InternalC
 pub fn check_place_return_roots(
     arena: &NodeArena,
     node_id: NodeId,
+    locals: &[ULocalDecl],
     base_parameter_index: Option<usize>,
     subject: SubscriptDefinitionSubject,
 ) -> Result<(), InternalCompilationError> {
-    check_place_return_roots_in_node(arena, node_id, base_parameter_index, subject)
+    check_place_return_roots_in_node(arena, node_id, locals, base_parameter_index, subject)
 }
 
 pub fn check_yield_roots(
@@ -225,14 +232,15 @@ fn check_yield_root(
     };
 
     match origin {
-        PlaceOrigin::Direct(local_id)
-            if locals
-                .get(local_id.as_index())
-                .is_some_and(|local| local.may_own_storage()) =>
+        PlaceOrigin::Direct {
+            local: local_id, ..
+        } if locals
+            .get(local_id.as_index())
+            .is_some_and(|local| local.may_own_storage()) =>
         {
             Ok(())
         }
-        PlaceOrigin::Direct(_) | PlaceOrigin::Addressor(_) => {
+        PlaceOrigin::Direct { .. } | PlaceOrigin::Addressor(_) => {
             Err(internal_compilation_error!(InvalidYield {
                 kind: InvalidYieldKind::NotAccessorOwned,
                 span: arena[node_id].span,
@@ -244,15 +252,16 @@ fn check_yield_root(
 fn check_place_return_roots_in_node(
     arena: &NodeArena,
     node_id: NodeId,
+    locals: &[ULocalDecl],
     base_parameter_index: Option<usize>,
     subject: SubscriptDefinitionSubject,
 ) -> Result<(), InternalCompilationError> {
     let node = &arena[node_id];
     if let NodeKind::Return(value) = &node.kind {
-        check_place_return_root(arena, *value, base_parameter_index, subject)?;
+        check_place_return_root(arena, *value, locals, base_parameter_index, subject)?;
     }
     for child in node.kind.child_node_ids() {
-        check_place_return_roots_in_node(arena, child, base_parameter_index, subject)?;
+        check_place_return_roots_in_node(arena, child, locals, base_parameter_index, subject)?;
     }
     Ok(())
 }
@@ -260,6 +269,7 @@ fn check_place_return_roots_in_node(
 fn check_place_return_root(
     arena: &NodeArena,
     node_id: NodeId,
+    locals: &[ULocalDecl],
     base_parameter_index: Option<usize>,
     subject: SubscriptDefinitionSubject,
 ) -> Result<(), InternalCompilationError> {
@@ -276,10 +286,21 @@ fn check_place_return_root(
     };
 
     match origin {
+        PlaceOrigin::Direct {
+            local,
+            through_projection,
+        } if Some(local.as_index()) == base_parameter_index
+            && (through_projection
+                || locals
+                    .get(local.as_index())
+                    .is_some_and(|local| local.mut_ty.is_mutable())) =>
+        {
+            Ok(())
+        }
         PlaceOrigin::Addressor(local_id) if Some(local_id.as_index()) == base_parameter_index => {
             Ok(())
         }
-        PlaceOrigin::Direct(_) | PlaceOrigin::Addressor(_) => {
+        PlaceOrigin::Direct { .. } | PlaceOrigin::Addressor(_) => {
             Err(internal_compilation_error!(InvalidSubscriptDefinition {
                 subject,
                 kind: InvalidSubscriptDefinitionKind::AddressorReturnMustBeRootedInBaseParameter,
@@ -298,7 +319,10 @@ fn check_place_return_root(
 #[derive(Clone, Copy)]
 enum PlaceOrigin {
     /// A direct local place or projection rooted in a local.
-    Direct(LocalDeclId),
+    Direct {
+        local: LocalDeclId,
+        through_projection: bool,
+    },
     /// A place produced by an addressor call whose base is rooted in a local.
     Addressor(LocalDeclId),
 }
@@ -306,7 +330,7 @@ enum PlaceOrigin {
 impl PlaceOrigin {
     fn local(self) -> LocalDeclId {
         match self {
-            Self::Direct(local) | Self::Addressor(local) => local,
+            Self::Direct { local, .. } | Self::Addressor(local) => local,
         }
     }
 }
@@ -315,10 +339,22 @@ fn returned_place_origin(arena: &NodeArena, node_id: NodeId) -> Option<PlaceOrig
     let node = &arena[node_id];
     use NodeKind::*;
     match &node.kind {
-        LoadLocal(load) => Some(PlaceOrigin::Direct(load.id)),
-        Project(project) => returned_place_origin(arena, project.value),
-        FieldAccess(field_access) => returned_place_origin(arena, field_access.value),
-        ProjectAt(project) => returned_place_origin(arena, project.value),
+        LoadLocal(load) => Some(PlaceOrigin::Direct {
+            local: load.id,
+            through_projection: false,
+        }),
+        Project(project) => {
+            returned_place_origin(arena, project.value).map(|origin| PlaceOrigin::Direct {
+                local: origin.local(),
+                through_projection: true,
+            })
+        }
+        FieldAccess(field_access) => {
+            returned_place_origin(arena, field_access.value).map(|origin| PlaceOrigin::Direct {
+                local: origin.local(),
+                through_projection: true,
+            })
+        }
         StaticApply(app) if app.ty.returns_place() => addressor_base_origin(arena, &app.arguments),
         Apply(app) if app.ty.returns_place() => addressor_base_origin(arena, &app.arguments),
         TraitMethodApply(app) if app.ty.returns_place() => {
@@ -326,6 +362,9 @@ fn returned_place_origin(arena: &NodeArena, node_id: NodeId) -> Option<PlaceOrig
         }
         CallDictionaryMethod(call) if call.ty.returns_place() => {
             addressor_base_origin(arena, &call.arguments)
+        }
+        SubscriptApply(app) if app.ty.returns_place() => {
+            addressor_base_origin(arena, &app.arguments)
         }
         WithPlace(node) => returned_place_origin(arena, node.place),
         Block(block) => block
@@ -359,6 +398,12 @@ impl Node {
                 }
                 if let Some(dict) = build_closure.captures_value_dictionary {
                     check_borrows(arena, dict)?;
+                }
+            }
+            BuildSubscriptValue(build) => {
+                check_borrows(arena, build.subscript)?;
+                for &capture in &build.evidence_captures {
+                    check_borrows(arena, capture)?;
                 }
             }
             Apply(app) => {
@@ -412,7 +457,7 @@ impl Node {
             GetFunction(_) | GetSubscript(_) => {}
             GetTraitMethod(_) | GetTraitAssociatedConst(_) | GetTraitDictionary(_) => {}
             GetDictionary(_) => {}
-            LoadDictionary(_) | LoadFieldIndex(_) => {}
+            LoadDictionary(_) | LoadSubscriptEvidence(_) => {}
             GetDictionaryMethod(node) => check_borrows(arena, node.dictionary)?,
             GetDictionaryAssociatedConst(node) => check_borrows(arena, node.dictionary)?,
             CallDictionaryMethod(node) => {
@@ -462,9 +507,6 @@ impl Node {
             }
             Project(project) => {
                 check_borrows(arena, project.value)?;
-            }
-            ProjectAt(_) => {
-                panic!("ProjectAt should not be in the HIR at this point");
             }
             Variant(variant) => {
                 check_borrows(arena, variant.payload)?;

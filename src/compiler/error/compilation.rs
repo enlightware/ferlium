@@ -15,7 +15,7 @@ use crate::{
     ast,
     containers::iterable_to_string,
     format::{FormatWith, write_with_separator, write_with_separator_and_format_fn},
-    module::{ModuleId, TraitId, TypeDefId},
+    module::{ModuleId, SubscriptMemberKind, TraitId, TypeDefId},
     parser::location::{Location, SourceTable},
     types::type_inference::unify::SubOrSameType,
     types::type_scheme::PubTypeConstraint,
@@ -421,26 +421,18 @@ impl InvalidAttributeKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SubscriptMemberRole {
-    Ref,
-    Mut,
-}
-
-impl SubscriptMemberRole {
-    pub fn keyword(self) -> &'static str {
-        match self {
-            Self::Ref => "ref",
-            Self::Mut => "mut",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InvalidSubscriptDefinitionKind {
     EmptyBundle,
-    DuplicateMember(SubscriptMemberRole),
+    DuplicateMember(SubscriptMemberKind),
     SharedMemberCombinedWithSeparateMembers,
     ParameterMissingType,
+    ProjectionMissingReceiverParameter,
+    ProjectionReceiverMustBeNominal,
+    ProjectionReceiverGenericParametersMismatch,
+    ProjectionReceiverParameterMustBeUntyped,
+    ProjectionUnexpectedParameter,
+    DuplicateProjection,
+    ProjectionConflictsWithStructuralField,
     DuplicateAttachedMember,
     ScopedMemberMustYieldExactlyOnce,
     AddressorMustReturnExplicitly,
@@ -488,6 +480,31 @@ impl InvalidSubscriptDefinitionKind {
             Self::ParameterMissingType => {
                 format!("{subject} parameters must have explicit types")
             }
+            Self::ProjectionMissingReceiverParameter => {
+                format!("{subject} must bind exactly one projection receiver parameter")
+            }
+            Self::ProjectionReceiverMustBeNominal => {
+                format!("{subject} projection receiver must be a named type")
+            }
+            Self::ProjectionReceiverGenericParametersMismatch => {
+                format!(
+                    "{subject} projection receiver generic arguments must exactly match the receiver type parameters"
+                )
+            }
+            Self::ProjectionReceiverParameterMustBeUntyped => {
+                format!("{subject} projection receiver binding must not repeat the receiver type")
+            }
+            Self::ProjectionUnexpectedParameter => {
+                format!("{subject} projection header does not accept extra parameters")
+            }
+            Self::DuplicateProjection => {
+                format!("{subject} defines a projection that is already implemented")
+            }
+            Self::ProjectionConflictsWithStructuralField => {
+                format!(
+                    "{subject} cannot define an explicit projection for an accessible structural field"
+                )
+            }
             Self::DuplicateAttachedMember => {
                 format!("{subject} has a duplicate generated member attachment")
             }
@@ -515,7 +532,7 @@ pub enum InvalidSubscriptUseKind {
     ExperimentalFeatureNotEnabled,
     UnknownSubscript,
     ValueIsNotSubscript,
-    MissingMember(SubscriptMemberRole),
+    MissingMember(SubscriptMemberKind),
 }
 
 impl InvalidSubscriptUseKind {
@@ -564,7 +581,6 @@ pub enum UnsupportedSubscriptFeatureKind {
     YieldInsideLoop,
     YieldInNonBlockStructuredControlFlow,
     MultipleMutableSubscriptArguments,
-    FirstClassSubscriptWithHiddenEvidence,
 }
 
 impl UnsupportedSubscriptFeatureKind {
@@ -576,9 +592,6 @@ impl UnsupportedSubscriptFeatureKind {
             }
             Self::MultipleMutableSubscriptArguments => {
                 "passing more than one named subscript as mutable arguments in one call is not supported yet"
-            }
-            Self::FirstClassSubscriptWithHiddenEvidence => {
-                "first-class subscript values that capture generic constraint evidence are not supported yet"
             }
         }
     }
@@ -753,6 +766,12 @@ impl Display for LoopControlKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvalidRecordFieldContext {
+    StructuralField,
+    ProjectionFallback,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InvalidLoopControlKind {
     OutsideLoop,
     UnknownLabel { label: Ustr },
@@ -914,11 +933,13 @@ pub enum CompilationErrorImpl<S: Scope> {
         field_span: Location,
         record_ty: S::Type,
         record_span: Location,
+        ctx: InvalidRecordFieldContext,
     },
     InvalidRecordFieldAccess {
         field_span: Location,
         record_ty: S::Type,
         record_span: Location,
+        ctx: InvalidRecordFieldContext,
     },
     InvalidVariantName {
         name: Location,
@@ -1548,28 +1569,52 @@ impl FormatWith<SourceTable> for CompilationError {
                 field_span,
                 record_ty,
                 record_span,
-            } => {
-                write!(
-                    f,
-                    "Field {} not found in record {} of type `{}`",
-                    fmt_span(field_span),
-                    fmt_span(record_span),
-                    record_ty,
-                )
-            }
+                ctx,
+            } => match ctx {
+                InvalidRecordFieldContext::StructuralField => {
+                    write!(
+                        f,
+                        "Field {} not found in record {} of type `{}`",
+                        fmt_span(field_span),
+                        fmt_span(record_span),
+                        record_ty,
+                    )
+                }
+                InvalidRecordFieldContext::ProjectionFallback => {
+                    write!(
+                        f,
+                        "No projection or structural field {} found for {} of type `{}`",
+                        fmt_span(field_span),
+                        fmt_span(record_span),
+                        record_ty,
+                    )
+                }
+            },
             InvalidRecordFieldAccess {
                 field_span,
                 record_ty,
                 record_span,
-            } => {
-                write!(
-                    f,
-                    "Expected record due to {}, got `{}` in {}",
-                    fmt_span(field_span),
-                    record_ty,
-                    fmt_span(record_span)
-                )
-            }
+                ctx,
+            } => match ctx {
+                InvalidRecordFieldContext::StructuralField => {
+                    write!(
+                        f,
+                        "Expected record due to {}, got `{}` in {}",
+                        fmt_span(field_span),
+                        record_ty,
+                        fmt_span(record_span)
+                    )
+                }
+                InvalidRecordFieldContext::ProjectionFallback => {
+                    write!(
+                        f,
+                        "No projection field {} found for type `{}`, and structural field lookup in {} requires a record",
+                        fmt_span(field_span),
+                        record_ty,
+                        fmt_span(record_span)
+                    )
+                }
+            },
             InvalidVariantName { name, ty, valid } => {
                 write!(
                     f,
@@ -2298,19 +2343,23 @@ impl CompilationError {
                 field_span,
                 record_ty,
                 record_span,
+                ctx,
             } => compilation_error!(InvalidRecordField {
                 field_span,
                 record_ty: record_ty.format_with(env).to_string(),
                 record_span,
+                ctx,
             }),
             InvalidRecordFieldAccess {
                 field_span,
                 record_ty,
                 record_span,
+                ctx,
             } => compilation_error!(InvalidRecordFieldAccess {
                 field_span,
                 record_ty: record_ty.format_with(env).to_string(),
                 record_span,
+                ctx,
             }),
             InvalidVariantName { name, ty, .. } => compilation_error!(InvalidVariantName {
                 name,

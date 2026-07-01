@@ -38,10 +38,36 @@ use crate::{
     hir::FnInstData,
     hir::dictionary::{DictionaryReq, instantiate_dictionary_requirements},
     module::{ModuleEnv, TraitId},
-    types::effects::{EffType, EffectVar, EffectsInstSubst},
-    types::r#type::{Type, TypeDisplayEnv, TypeInstSubst, TypeVar},
+    types::effects::{EffType, EffectVar, EffectsInstSubst, no_effects},
+    types::r#type::{
+        FnArgType, SubscriptMemberType, SubscriptResultConvention, SubscriptType, Type,
+        TypeDisplayEnv, TypeInstSubst, TypeVar,
+    },
     types::type_inference::{expr::TypeInference, substitution::InstSubst},
 };
+
+/// Which projection implementations may satisfy projection evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ProjectionRequirementKind {
+    /// Only compiler-known structural record-field projection is acceptable.
+    Structural,
+    /// Any valid projection subscript is acceptable, including structural ones.
+    All,
+}
+
+impl ProjectionRequirementKind {
+    pub fn merge(self, other: Self) -> Self {
+        self.min(other)
+    }
+
+    pub fn accepts_user_defined_projection(self) -> bool {
+        matches!(self, Self::All)
+    }
+
+    pub fn is_structural_only(self) -> bool {
+        matches!(self, Self::Structural)
+    }
+}
 
 /// A constraint that can be part of a type scheme.
 /// This corresponds to a solved constraint in HM(X).
@@ -55,13 +81,16 @@ pub enum PubTypeConstraint {
         index_span: InstantiableLocation,
         element_ty: Type,
     },
-    /// Record field access constraint: record_ty.field = element_ty
-    RecordFieldIs {
-        record_ty: Type,
-        record_span: InstantiableLocation,
+    /// Runtime projection evidence needed for generic field access.
+    ///
+    /// The receiver type is the first argument of `subscript_ty`; it is not
+    /// stored separately because the evidence is the subscript value itself.
+    ProjectionSubscriptIs {
+        requirement: ProjectionRequirementKind,
+        receiver_span: InstantiableLocation,
         field: Ustr,
         field_span: InstantiableLocation,
-        element_ty: Type,
+        subscript_ty: SubscriptType,
     },
     /// Variant for type: variant_ty ⊇ tag(payload_ty)
     TypeHasVariant {
@@ -102,19 +131,42 @@ impl PubTypeConstraint {
         }
     }
 
-    pub fn new_record_field_is(
-        record_ty: Type,
-        record_span: Location,
+    pub fn new_structural_projection_subscript_is(
+        receiver_ty: Type,
+        receiver_span: Location,
         field: Ustr,
         field_span: Location,
-        element_ty: Type,
+        ret_ty: Type,
     ) -> Self {
-        Self::RecordFieldIs {
-            record_ty,
-            record_span: InstantiableLocation::new(record_span),
+        let member =
+            SubscriptMemberType::new(no_effects(), SubscriptResultConvention::AddressorPlace);
+        Self::ProjectionSubscriptIs {
+            requirement: ProjectionRequirementKind::Structural,
+            receiver_span: InstantiableLocation::new(receiver_span),
             field,
             field_span: InstantiableLocation::new(field_span),
-            element_ty,
+            subscript_ty: SubscriptType::new(
+                vec![FnArgType::new_by_val(receiver_ty)],
+                ret_ty,
+                Some(member.clone()),
+                Some(member),
+            ),
+        }
+    }
+
+    pub fn new_projection_subscript_is(
+        requirement: ProjectionRequirementKind,
+        receiver_span: Location,
+        field: Ustr,
+        field_span: Location,
+        subscript_ty: SubscriptType,
+    ) -> Self {
+        Self::ProjectionSubscriptIs {
+            requirement,
+            receiver_span: InstantiableLocation::new(receiver_span),
+            field,
+            field_span: InstantiableLocation::new(field_span),
+            subscript_ty,
         }
     }
 
@@ -154,7 +206,7 @@ impl PubTypeConstraint {
         use PubTypeConstraint::*;
         match self {
             TupleAtIndexIs { tuple_span, .. } => tuple_span.use_site,
-            RecordFieldIs { record_span, .. } => record_span.use_site,
+            ProjectionSubscriptIs { receiver_span, .. } => receiver_span.use_site,
             TypeHasVariant { variant_span, .. } => variant_span.use_site,
             HaveTrait { span, .. } => span.use_site,
         }
@@ -171,12 +223,12 @@ impl PubTypeConstraint {
                 tuple_span.instantiate(use_site);
                 index_span.instantiate(use_site);
             }
-            RecordFieldIs {
-                record_span,
+            ProjectionSubscriptIs {
+                receiver_span,
                 field_span,
                 ..
             } => {
-                record_span.instantiate(use_site);
+                receiver_span.instantiate(use_site);
                 field_span.instantiate(use_site);
             }
             TypeHasVariant {
@@ -220,21 +272,7 @@ impl PubTypeConstraint {
                     Some(constraint)
                 }
             }
-            RecordFieldIs {
-                record_ty,
-                field,
-                element_ty,
-                ..
-            } => {
-                if record_ty.is_constant() && element_ty.is_constant() {
-                    let record_ty_data = record_ty.data();
-                    let record_data = record_ty_data.as_record().unwrap();
-                    assert!(record_data.iter().find(|t| t.0 == *field).unwrap().1 == *element_ty);
-                    None
-                } else {
-                    Some(constraint)
-                }
-            }
+            ProjectionSubscriptIs { .. } => Some(constraint),
             TypeHasVariant {
                 variant_ty,
                 tag,
@@ -344,18 +382,18 @@ impl TypeLike for PubTypeConstraint {
                 index_span: index_span.clone(),
                 element_ty: element_ty.map(f),
             },
-            RecordFieldIs {
-                record_ty,
-                record_span,
+            ProjectionSubscriptIs {
+                requirement,
+                receiver_span,
                 field,
                 field_span,
-                element_ty,
-            } => RecordFieldIs {
-                record_ty: record_ty.map(f),
-                record_span: record_span.clone(),
+                subscript_ty,
+            } => ProjectionSubscriptIs {
+                requirement: *requirement,
+                receiver_span: receiver_span.clone(),
                 field: *field,
                 field_span: field_span.clone(),
-                element_ty: element_ty.map(f),
+                subscript_ty: subscript_ty.map(f),
             },
             TypeHasVariant {
                 variant_ty,
@@ -400,13 +438,8 @@ impl TypeLike for PubTypeConstraint {
                 tuple_ty.data().visit(visitor);
                 element_ty.data().visit(visitor);
             }
-            RecordFieldIs {
-                record_ty,
-                element_ty,
-                ..
-            } => {
-                record_ty.data().visit(visitor);
-                element_ty.data().visit(visitor);
+            ProjectionSubscriptIs { subscript_ty, .. } => {
+                subscript_ty.visit(visitor);
             }
             TypeHasVariant {
                 variant_ty,
@@ -467,19 +500,19 @@ impl PartialEq for PubTypeConstraint {
                 },
             ) => t_ty1 == t_ty2 && idx1 == idx2 && e_ty1 == e_ty2,
             (
-                RecordFieldIs {
-                    record_ty: r_ty1,
+                ProjectionSubscriptIs {
+                    requirement: r1,
                     field: f1,
-                    element_ty: e_ty1,
+                    subscript_ty: s_ty1,
                     ..
                 },
-                RecordFieldIs {
-                    record_ty: r_ty2,
+                ProjectionSubscriptIs {
+                    requirement: r2,
                     field: f2,
-                    element_ty: e_ty2,
+                    subscript_ty: s_ty2,
                     ..
                 },
-            ) => r_ty1 == r_ty2 && f1 == f2 && e_ty1 == e_ty2,
+            ) => r1 == r2 && f1 == f2 && s_ty1 == s_ty2,
             (
                 TypeHasVariant {
                     variant_ty: v_ty1,
@@ -529,15 +562,15 @@ impl Hash for PubTypeConstraint {
                 index.hash(state);
                 element_ty.hash(state);
             }
-            RecordFieldIs {
-                record_ty,
+            ProjectionSubscriptIs {
+                requirement,
                 field,
-                element_ty,
+                subscript_ty,
                 ..
             } => {
-                record_ty.hash(state);
+                requirement.hash(state);
                 field.hash(state);
-                element_ty.hash(state);
+                subscript_ty.hash(state);
             }
             TypeHasVariant {
                 variant_ty,
@@ -571,7 +604,7 @@ impl Hash for PubTypeConstraint {
     }
 }
 
-/// Aggregated TypeHasVariant or RecordFieldIs constraints.
+/// Aggregated TypeHasVariant constraints.
 pub type VariantConstraint = BTreeMap<Ustr, Type>;
 /// Aggregated TupleAtIndexIs constraints.
 pub type TupleConstraint = BTreeMap<usize, Type>;
@@ -995,15 +1028,16 @@ pub(crate) fn extra_parameters_from_constraints(
     let requirements = constraints
         .iter()
         .filter_map(|constraint| match constraint {
-            RecordFieldIs {
-                record_ty, field, ..
-            } => {
-                if !record_ty.data().is_variable() {
-                    None // This can happen when a record had only an effect variable, that later got resolved.
-                } else {
-                    Some(DictionaryReq::new_field_index(*record_ty, *field))
-                }
-            }
+            ProjectionSubscriptIs {
+                requirement,
+                field,
+                subscript_ty,
+                ..
+            } => Some(DictionaryReq::new_projection_subscript(
+                *requirement,
+                *field,
+                subscript_ty.clone(),
+            )),
             HaveTrait {
                 trait_id,
                 input_tys,
@@ -1019,14 +1053,12 @@ pub(crate) fn extra_parameters_from_constraints(
                         *trait_id, trait_def, input_tys, output_tys,
                     )
                 {
-                    return None;
-                }
-                if input_tys.iter().all(|ty| ty.is_trait_input_resolved()) {
+                    None
+                } else if input_tys.iter().all(|ty| ty.is_trait_input_resolved()) {
                     panic!(
                         "Type scheme with trait having only non-variable input types in constraints"
                     )
-                }
-                if !trait_def.has_runtime_dictionary_entries() {
+                } else if !trait_def.has_runtime_dictionary_entries() {
                     None // Marker traits have no runtime dictionary entries.
                 } else {
                     Some(DictionaryReq::new_trait_impl(

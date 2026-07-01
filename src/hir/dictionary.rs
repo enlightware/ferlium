@@ -7,21 +7,20 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use derive_new::new;
 use ustr::Ustr;
 
 use crate::{
     FxHashMap,
     format::FormatWith,
-    module::{LocalFunctionId, ModuleEnv, TraitId},
-    std::math::int_type,
+    module::{LocalFunctionId, ModuleEnv, PendingGeneratedStructuralProjectionSubscripts, TraitId},
     types::{
         effects::EffType,
         mutability::MutType,
         trait_solver::TraitSolver,
-        r#type::{Type, TypeVar},
+        r#type::{SubscriptType, Type, TypeVar},
         type_like::{TypeLike, instantiate_effect_types_in_place, instantiate_types_in_place},
         type_mapper::TypeMapper,
+        type_scheme::ProjectionRequirementKind,
         type_scheme_display::format_have_trait,
     },
 };
@@ -29,9 +28,10 @@ use crate::{
 /// A dictionary requirement, that will be passed as extra parameter to a function.
 #[derive(Clone, Debug)]
 pub enum DictionaryReq {
-    FieldIndex {
-        ty: Type,
+    ProjectionSubscript {
+        requirement: ProjectionRequirementKind,
         field: Ustr,
+        subscript_ty: SubscriptType,
     },
     TraitImpl {
         trait_id: TraitId,
@@ -43,8 +43,16 @@ pub enum DictionaryReq {
 }
 
 impl DictionaryReq {
-    pub fn new_field_index(ty: Type, field: Ustr) -> Self {
-        Self::FieldIndex { ty, field }
+    pub fn new_projection_subscript(
+        requirement: ProjectionRequirementKind,
+        field: Ustr,
+        subscript_ty: SubscriptType,
+    ) -> Self {
+        Self::ProjectionSubscript {
+            requirement,
+            field,
+            subscript_ty,
+        }
     }
 
     pub fn new_trait_impl(
@@ -72,8 +80,8 @@ impl DictionaryReq {
     pub(crate) fn instantiate_in_place<M: TypeMapper>(&mut self, mapper: &mut M) {
         use DictionaryReq::*;
         match self {
-            FieldIndex { ty, .. } => {
-                *ty = ty.map(mapper);
+            ProjectionSubscript { subscript_ty, .. } => {
+                *subscript_ty = subscript_ty.map(mapper);
             }
             TraitImpl {
                 input_tys,
@@ -90,7 +98,9 @@ impl DictionaryReq {
 
     pub fn to_dict_type(&self, trait_solver: &TraitSolver<'_>) -> Type {
         match self {
-            DictionaryReq::FieldIndex { .. } => int_type(),
+            DictionaryReq::ProjectionSubscript { subscript_ty, .. } => {
+                Type::subscript_type(subscript_ty.clone())
+            }
             DictionaryReq::TraitImpl {
                 trait_id,
                 input_tys,
@@ -108,15 +118,17 @@ impl PartialEq for DictionaryReq {
         use DictionaryReq::*;
         match (self, other) {
             (
-                FieldIndex {
-                    ty: ty1,
+                ProjectionSubscript {
+                    requirement: requirement1,
                     field: field1,
+                    subscript_ty: subscript_ty1,
                 },
-                FieldIndex {
-                    ty: ty2,
+                ProjectionSubscript {
+                    requirement: requirement2,
                     field: field2,
+                    subscript_ty: subscript_ty2,
                 },
-            ) => ty1 == ty2 && field1 == field2,
+            ) => requirement1 == requirement2 && field1 == field2 && subscript_ty1 == subscript_ty2,
             (
                 TraitImpl {
                     trait_id: tr1,
@@ -144,7 +156,17 @@ impl FormatWith<ModuleEnv<'_>> for DictionaryReq {
     ) -> std::fmt::Result {
         use DictionaryReq::*;
         match self {
-            FieldIndex { ty, field } => write!(f, "{} field {}", ty.format_with(env), field),
+            ProjectionSubscript {
+                field,
+                subscript_ty,
+                ..
+            } => write!(
+                f,
+                "{} projection {}: {}",
+                subscript_ty.receiver_ty().format_with(env),
+                field,
+                Type::subscript_type(subscript_ty.clone()).format_with(env)
+            ),
             TraitImpl {
                 trait_id,
                 input_tys,
@@ -177,18 +199,42 @@ impl ExtraParameters {
     }
 }
 
-pub fn find_field_dict_index(dicts: &ExtraParameters, var: TypeVar, field: &str) -> Option<usize> {
+pub fn find_projection_subscript_dict_index(
+    dicts: &ExtraParameters,
+    var: TypeVar,
+    field: &str,
+) -> Option<usize> {
     // Resolve the variable to its representation type if it is a different type variable.
     let var = dicts.repr_map.get(&var).unwrap_or(&var);
     let ty = Type::variable(*var);
     // Find the index of the dictionary that matches the type and field.
     dicts.requirements.iter().position(|dict| {
-        if let DictionaryReq::FieldIndex {
-            ty: ty2,
+        if let DictionaryReq::ProjectionSubscript {
             field: field2,
+            subscript_ty,
+            ..
         } = &dict
         {
-            *ty2 == ty && field2 == field
+            subscript_ty.receiver_ty() == ty && field2 == field
+        } else {
+            false
+        }
+    })
+}
+
+pub fn find_projection_subscript_dict_index_for_receiver_ty(
+    dicts: &ExtraParameters,
+    receiver_ty: Type,
+    field: &str,
+) -> Option<usize> {
+    dicts.requirements.iter().position(|dict| {
+        if let DictionaryReq::ProjectionSubscript {
+            field: requirement_field,
+            subscript_ty,
+            ..
+        } = dict
+        {
+            subscript_ty.receiver_ty() == receiver_ty && requirement_field == field
         } else {
             false
         }
@@ -274,7 +320,6 @@ pub(crate) fn instantiate_dictionary_requirements<M: TypeMapper>(
 pub type ModuleInstData = FxHashMap<LocalFunctionId, ExtraParameters>;
 
 /// Shared context for dictionary and value-dispatch elaboration.
-#[derive(new)]
 pub struct DictElaborationCtx<'d, 'sr, 'sm> {
     /// The dictionaries for the current expression being elaborated.
     pub dicts: &'d ExtraParameters,
@@ -283,4 +328,29 @@ pub struct DictElaborationCtx<'d, 'sr, 'sm> {
     pub module_inst_data: Option<&'d ModuleInstData>,
     /// The trait solver. The borrow lifetime is independent from `dicts`.
     pub trait_solver: &'sr mut TraitSolver<'sm>,
+    /// Generated structural projection subscripts needed while elaborating this function.
+    pub(crate) generated_projection_subscripts:
+        Option<PendingGeneratedStructuralProjectionSubscripts>,
+}
+
+impl<'d, 'sr, 'sm> DictElaborationCtx<'d, 'sr, 'sm> {
+    pub(crate) fn new_with_generated_projection_subscripts(
+        dicts: &'d ExtraParameters,
+        module_inst_data: Option<&'d ModuleInstData>,
+        trait_solver: &'sr mut TraitSolver<'sm>,
+        generated_projection_subscripts: PendingGeneratedStructuralProjectionSubscripts,
+    ) -> Self {
+        Self {
+            dicts,
+            module_inst_data,
+            trait_solver,
+            generated_projection_subscripts: Some(generated_projection_subscripts),
+        }
+    }
+
+    pub(crate) fn take_generated_projection_subscripts(
+        &mut self,
+    ) -> Option<PendingGeneratedStructuralProjectionSubscripts> {
+        self.generated_projection_subscripts.take()
+    }
 }

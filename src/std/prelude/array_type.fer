@@ -1,4 +1,5 @@
 /// A dynamic array supporting double ended queue operations.
+#[private_repr]
 #[no_derive_value]
 pub struct array<A> {
 	data: Buffer<A>,

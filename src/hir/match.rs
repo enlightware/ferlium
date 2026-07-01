@@ -13,8 +13,8 @@ use crate::{
     hir::hir_syn::store_new_local,
     internal_compilation_error,
     module::{
-        LocalDecl, LocalDeclId, LocalFrameSlot, ProjectionIndex, TypeDefId, TypeDefLookupResult,
-        id::Id,
+        LocalDecl, LocalDeclId, LocalFrameSlot, ProjectionIndex, SubscriptMemberKind, TypeDefId,
+        TypeDefLookupResult, id::Id,
     },
     std::core_traits_names::REPR_TRAIT_NAME,
     types::mutability::MutVal,
@@ -300,7 +300,7 @@ impl TypeInference {
                                             named_vars.iter().zip(inner_tys.iter())
                                         {
                                             self.add_pub_constraint(
-                                                PubTypeConstraint::new_record_field_is(
+                                                PubTypeConstraint::new_structural_projection_subscript_is(
                                                     variant_inner_ty,
                                                     pattern.span,
                                                     *name,
@@ -462,6 +462,7 @@ impl TypeInference {
                                     K::FieldAccess(FieldAccess::new(
                                         project_variant_inner_id,
                                         bind_var_names[i].0,
+                                        SubscriptMemberKind::Ref,
                                     ))
                                 };
                                 let project_inner_id = env.ir_arena.alloc(N::new(

@@ -28,8 +28,8 @@ use crate::{
     },
     internal_compilation_error,
     module::{
-        ELocalDecl, GENERATED_LAMBDA_PREFIX, LocalDecl, LocalDeclId, Module, ModuleEnv, Visibility,
-        id::Id,
+        ELocalDecl, GENERATED_LAMBDA_PREFIX, LocalDecl, LocalDeclId, Module, ModuleEnv,
+        PendingGeneratedStructuralProjectionSubscripts, Visibility, id::Id,
     },
     types::{
         effects::EffType,
@@ -403,8 +403,15 @@ fn emit_expr_unsafe_inner(
 
     // Do borrow checking and dictionary elaboration.
     let dicts = ty_scheme.extra_parameters(ModuleEnv::new(module, others));
+    let generated_projection_subscripts =
+        PendingGeneratedStructuralProjectionSubscripts::new(module);
     let mut solver = trait_solver_from_module!(module, &others);
-    let mut ctx = DictElaborationCtx::new(&dicts, None, &mut solver);
+    let mut ctx = DictElaborationCtx::new_with_generated_projection_subscripts(
+        &dicts,
+        None,
+        &mut solver,
+        generated_projection_subscripts,
+    );
     let local_count = locals.len();
     elaborate_local_ownership_and_value_dispatches(expr_arena, &mut locals, &mut ctx)?;
     check_borrows(expr_arena, node_id)?;
@@ -426,11 +433,15 @@ fn emit_expr_unsafe_inner(
             *lambda_id,
         )?;
     }
+    let generated_projection_subscripts = ctx.take_generated_projection_subscripts();
     let generated = solver.commit(
         &mut module.functions,
         &mut module.def_table,
         &mut pending_functions,
     );
+    if let Some(generated_projection_subscripts) = generated_projection_subscripts {
+        generated_projection_subscripts.commit(module);
+    }
     elaborate_generated_functions(module, others, &mut pending_functions, generated)?;
     assert_eq!(locals.len(), local_count);
     for lambda_id in lambda_functions {
@@ -517,15 +528,12 @@ fn first_unbound_type_in_constraints(
                     return Some(unbound);
                 }
             }
-            PubTypeConstraint::RecordFieldIs {
-                record_ty,
-                element_ty,
-                ..
-            } => {
-                if let Some(unbound) = in_type(*record_ty, span) {
-                    return Some(unbound);
-                }
-                if let Some(unbound) = in_type(*element_ty, span) {
+            PubTypeConstraint::ProjectionSubscriptIs { subscript_ty, .. } => {
+                if let Some(unbound) = subscript_ty
+                    .inner_ty_vars()
+                    .first()
+                    .map(|ty_var| (*ty_var, Type::subscript_type(subscript_ty.clone()), span))
+                {
                     return Some(unbound);
                 }
             }

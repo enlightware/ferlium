@@ -15,7 +15,7 @@ use ferlium::{
     },
     format::FormatWith,
     hir::{
-        NodeKind,
+        ENodeArena, ENodeId, NodeKind,
         function::{
             CallableDefinition, Function, ResolvedArgPassing, ResolvedValueArgPassing,
             UnaryNativeFnNN,
@@ -227,10 +227,7 @@ fn generic_trait_method_function_argument_keeps_source_place_passing() {
     let mut saw_shared_ref_local_arg = false;
     for (_, node) in module.hir_arena.iter() {
         if let NodeKind::StoreLocal(store) = &node.kind
-            && matches!(
-                module.hir_arena[store.value].kind,
-                NodeKind::GetDictionaryMethod(_)
-            )
+            && store_value_materializes_dictionary_method(&module.hir_arena, store.value)
         {
             saw_method_store = true;
         }
@@ -257,6 +254,16 @@ fn generic_trait_method_function_argument_keeps_source_place_passing() {
         saw_shared_ref_local_arg,
         "materialized generic trait method values should be passed by shared reference from a local",
     );
+}
+
+fn store_value_materializes_dictionary_method(arena: &ENodeArena, value: ENodeId) -> bool {
+    match &arena[value].kind {
+        NodeKind::GetDictionaryMethod(_) => true,
+        NodeKind::CloneValue(clone) => {
+            matches!(arena[clone.source].kind, NodeKind::GetDictionaryMethod(_))
+        }
+        _ => false,
+    }
 }
 
 #[test]
@@ -451,6 +458,33 @@ fn parent_trait_constraints_gate_blanket_impl_selection() {
             }
 
             child_value(Box(0))
+        "#}),
+        int(42)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn blanket_impl_structural_field_constraint_matches_named_struct() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! {r#"
+            trait ReadX<Self> {
+                fn read_x(value: Self) -> int;
+            }
+
+            impl<T> ReadX for T {
+                fn read_x(value: T) -> int {
+                    value.x
+                }
+            }
+
+            struct Point {
+                x: int,
+                y: string,
+            }
+
+            read_x(Point { x: 42, y: "ignored" })
         "#}),
         int(42)
     );

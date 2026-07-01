@@ -16,8 +16,8 @@ use crate::{
     },
     internal_compilation_error,
     module::{
-        LocalFunctionId, Module, ModuleEnv, PendingModuleFunction, QualifiedNameEnv, TypeDefId,
-        Visibility, id::Id,
+        LocalFunctionId, Module, ModuleEnv, PendingGeneratedStructuralProjectionSubscripts,
+        PendingModuleFunction, QualifiedNameEnv, TypeDefId, Visibility, id::Id,
     },
     std::core_traits_names::VALUE_TRAIT_NAME,
     std::value::{
@@ -370,15 +370,26 @@ pub(super) fn emit_auto_value_impls(
             let function =
                 PendingModuleFunction::from_body(definition, body, runtime_arg_count, None, locals);
             {
+                let generated_projection_subscripts =
+                    PendingGeneratedStructuralProjectionSubscripts::new(output);
                 let mut solver = trait_solver_from_module!(output, others);
-                let mut ctx = DictElaborationCtx::new(&dicts, None, &mut solver);
+                let mut ctx = DictElaborationCtx::new_with_generated_projection_subscripts(
+                    &dicts,
+                    None,
+                    &mut solver,
+                    generated_projection_subscripts,
+                );
                 let (function, _) =
                     function.check_borrows_and_elaborate_hir(&mut output.hir_arena, &mut ctx)?;
+                let generated_projection_subscripts = ctx.take_generated_projection_subscripts();
                 let generated = solver.commit(
                     &mut output.functions,
                     &mut output.def_table,
                     &mut pending_functions,
                 );
+                if let Some(generated_projection_subscripts) = generated_projection_subscripts {
+                    generated_projection_subscripts.commit(output);
+                }
                 elaborate_generated_functions(output, others, &mut pending_functions, generated)?;
                 let id = output.add_function_anonymous(function);
                 output.name_function(id, method_names[usize::from(method_index)]);

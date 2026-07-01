@@ -120,6 +120,7 @@ pub struct SubscriptMember<P: Phase> {
 pub struct SubscriptDefinition<P: Phase> {
     pub visibility: Visibility,
     pub name: UstrSpan,
+    pub projection_receiver: Option<TypeSpan<P>>,
     pub generic_params: GenericParams,
     pub args: Vec<ModuleFunctionArg<P>>,
     pub args_span: Location,
@@ -472,7 +473,12 @@ impl Module<Parsed> {
             .iter()
             .map(|trait_def| trait_def.name)
             .chain(self.functions.iter().map(|f| f.name))
-            .chain(self.subscripts.iter().map(|s| s.name))
+            .chain(
+                self.subscripts
+                    .iter()
+                    .filter(|s| s.projection_receiver.is_none())
+                    .map(|s| s.name),
+            )
             .chain(self.type_aliases.iter().map(|alias| alias.name))
             .chain(self.type_defs.iter().map(|def| def.name))
     }
@@ -613,6 +619,7 @@ fn fmt_subscript_definition<P: Phase>(
 ) -> fmt::Result {
     let SubscriptDefinition {
         name,
+        projection_receiver,
         generic_params,
         args,
         ret_ty,
@@ -628,8 +635,13 @@ fn fmt_subscript_definition<P: Phase>(
         }
     }
     write!(f, "    subscript ")?;
+    if let Some((receiver_ty, _)) = projection_receiver {
+        write!(f, "{}.", receiver_ty.format_with(env))?;
+    }
     write_identifier(f, name.0.as_str())?;
-    generic_params.format_source(f)?;
+    if projection_receiver.is_none() {
+        generic_params.format_source(f)?;
+    }
     write!(f, "(")?;
     for (i, arg) in args.iter().enumerate() {
         if i > 0 {

@@ -18,6 +18,7 @@ use crate::std::value::{VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX};
 use crate::{
     CompilerSession, FxHashMap, Location, ModuleRegistry, SourceId, SourceTable,
     compiler::error::RuntimeErrorKind,
+    containers::b,
     format::{FormatWith, write_with_separator},
     hir::function::{ResolvedArgPassing, ResolvedValueArgPassing, TrivialCopy},
     hir::value::{
@@ -174,7 +175,9 @@ impl FormatWith<EvalCtx<'_>> for ValOrMut {
 fn evidence_arg_to_val_or_mut(arg: HiddenEvidenceArgValue) -> ValOrMut {
     match arg {
         HiddenEvidenceArgValue::TraitDictionary(dictionary) => ValOrMut::Dictionary(dictionary),
-        HiddenEvidenceArgValue::FieldIndex(index) => ValOrMut::Val(Value::native(index)),
+        HiddenEvidenceArgValue::Subscript(subscript) => {
+            ValOrMut::Val(Value::subscript_value(*subscript))
+        }
     }
 }
 
@@ -568,7 +571,7 @@ impl<'a> EvalCtx<'a> {
         let extra_start = self.extra_parameters.len();
         self.extra_frame_base = extra_start;
         self.extra_parameters
-            .extend(extra_arguments.iter().copied());
+            .extend(extra_arguments.iter().cloned());
 
         let old_frame_base = self.frame_base;
         let frame_base = self.environment.len();
@@ -725,7 +728,7 @@ impl<'a> EvalCtx<'a> {
         if let Some(extra_start) = extra_start {
             self.extra_frame_base = extra_start;
             self.extra_parameters
-                .extend(extra_arguments.iter().copied());
+                .extend(extra_arguments.iter().cloned());
         }
         let arguments = if is_script || extra_arguments.is_empty() {
             arguments
@@ -888,7 +891,10 @@ impl Place {
                 }
                 Uninit => panic!("cannot access a field of an uninitialized value"),
                 Variant(_) => panic!("Cannot access a variant payload with a non-zero index"),
-                _ => panic!("Cannot access a non-compound value"),
+                _ => panic!(
+                    "Cannot access a non-compound value while following mutable place path: index {}, full place {:?}",
+                    index, self
+                ),
             };
         }
         Ok(target)
@@ -934,7 +940,10 @@ impl Place {
                 }
                 Uninit => panic!("cannot read a field of an uninitialized value"),
                 Variant(_) => panic!("Cannot access a variant payload with a non-zero index"),
-                _ => panic!("Cannot access a non-compound value"),
+                other => panic!(
+                    "Cannot access a non-compound value while following place path: target {:?}, index {}, full place {:?}",
+                    other, index, self
+                ),
             };
         }
         Ok(target)
@@ -1234,6 +1243,9 @@ pub fn eval_node_with_ctx(
         Immediate(immediate) => cont(immediate.clone().into_value()),
         Uninit => cont(Value::uninit()),
         BuildClosure(build_closure) => eval_build_closure(arena, build_closure, ctx, locals),
+        BuildSubscriptValue(build_subscript) => {
+            eval_build_subscript_value(arena, build_subscript, ctx, locals)
+        }
         Apply(app) => eval_apply(arena, app, node.span, ctx, locals),
         CloneClosureEnv(node) => {
             eval_clone_closure_env(arena, node, arena[node_id].span, ctx, locals)
@@ -1261,10 +1273,9 @@ pub fn eval_node_with_ctx(
         }
         CheckCallDepth => ctx.check_call_depth(node.span),
         CheckFuel => ctx.check_fuel(node.span),
-        LoadFieldIndex(node) => cont(Value::native(field_index_from_extra_parameter(
-            ctx,
-            node.extra_parameter,
-        ))),
+        LoadSubscriptEvidence(node) => cont(Value::subscript_value(
+            subscript_from_extra_parameter(ctx, node.extra_parameter),
+        )),
         GetDictionaryMethod(node) => eval_get_dictionary_method(arena, node, ctx),
         GetDictionaryAssociatedConst(node) => {
             eval_get_dictionary_associated_const(arena, node, ctx)
@@ -1284,7 +1295,6 @@ pub fn eval_node_with_ctx(
         Tuple(nodes) | Record(nodes) => eval_tuple(arena, nodes, ctx, locals),
         Project(node) => eval_project(arena, node_id, node.value, node.index, ctx, locals),
         FieldAccess(_) => panic!("field access should not be executed after elaboration"),
-        ProjectAt(node) => eval_project_at(arena, node_id, node.value, node.index, ctx, locals),
         Variant(node) => eval_variant(arena, node.tag, node.payload, ctx, locals),
         ExtractTag(node) => eval_extract_tag(arena, *node, ctx, locals),
         Array(nodes) => eval_array(arena, nodes, ctx, locals),
@@ -1310,12 +1320,12 @@ fn eval_build_closure(
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
-    let mut hidden_args = Vec::with_capacity(build_closure.dictionary_captures.len());
-    for &capture in &build_closure.dictionary_captures {
-        hidden_args.push(eval_or_return!(eval_function_hidden_arg_node(
-            arena, capture, ctx, locals
-        )));
-    }
+    let hidden_args = eval_or_return!(eval_hidden_evidence_arg_nodes(
+        arena,
+        &build_closure.dictionary_captures,
+        ctx,
+        locals,
+    ));
     let captures = eval_or_return!(eval_nodes(arena, &build_closure.captures, ctx, locals));
     let captures_value_dictionary = if let Some(dict) = build_closure.captures_value_dictionary {
         Some(eval_or_return!(eval_dictionary_metadata_node(
@@ -1337,16 +1347,37 @@ fn eval_build_closure(
     cont(Value::function_value(function_value))
 }
 
-fn eval_function_hidden_arg_node(
+#[inline(never)]
+fn eval_build_subscript_value(
+    arena: &ENodeArena,
+    build_subscript: &hir::BuildSubscriptValue<Elaborated>,
+    ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
+) -> EvalControlFlowResult {
+    let mut captured_hidden_args = eval_or_return!(eval_hidden_evidence_arg_nodes(
+        arena,
+        &build_subscript.evidence_captures,
+        ctx,
+        locals,
+    ));
+    let value = eval_node_with_ctx(arena, build_subscript.subscript, ctx, locals)?.into_value();
+    let mut subscript_value = *value.into_subscript().unwrap();
+    subscript_value
+        .hidden_args
+        .append(&mut captured_hidden_args);
+    cont(Value::subscript_value(subscript_value))
+}
+
+fn eval_hidden_evidence_arg_node(
     arena: &ENodeArena,
     node: ENodeId,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> Result<ControlFlow<HiddenEvidenceArgValue>, RuntimeError> {
-    if let NodeKind::LoadFieldIndex(load) = &arena[node].kind {
-        return Ok(ControlFlow::Continue(HiddenEvidenceArgValue::FieldIndex(
-            field_index_from_extra_parameter(ctx, load.extra_parameter),
-        )));
+    if let NodeKind::LoadSubscriptEvidence(load) = &arena[node].kind {
+        return Ok(ControlFlow::Continue(HiddenEvidenceArgValue::Subscript(b(
+            subscript_from_extra_parameter(ctx, load.extra_parameter),
+        ))));
     }
     if let Some(dictionary) = try_dictionary_metadata_node(arena, node, ctx) {
         return Ok(ControlFlow::Continue(
@@ -1354,26 +1385,25 @@ fn eval_function_hidden_arg_node(
         ));
     }
     let value = eval_or_return!(eval_node_with_ctx(arena, node, ctx, locals));
-    let Some(index) = value.into_primitive_ty::<isize>() else {
-        panic!("expected hidden function evidence to be a trait dictionary or field index");
+    let Some(subscript) = value.into_subscript() else {
+        panic!("expected hidden evidence to be a trait dictionary or subscript");
     };
-    Ok(ControlFlow::Continue(HiddenEvidenceArgValue::FieldIndex(
-        index,
+    Ok(ControlFlow::Continue(HiddenEvidenceArgValue::Subscript(
+        subscript,
     )))
 }
 
-fn eval_function_hidden_arg_nodes(
+fn eval_hidden_evidence_arg_nodes(
     arena: &ENodeArena,
     nodes: &[ENodeId],
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> Result<ControlFlow<Vec<HiddenEvidenceArgValue>>, RuntimeError> {
-    // Hidden-argument values are Copy (dictionary ids / field indices) and own no storage.
     eval_sequence(
         nodes.iter().copied(),
         nodes.len(),
         |_| {},
-        |node| eval_function_hidden_arg_node(arena, node, ctx, locals),
+        |node| eval_hidden_evidence_arg_node(arena, node, ctx, locals),
     )
 }
 
@@ -1400,7 +1430,7 @@ fn try_dictionary_metadata_node(
         NodeKind::GetDictionary(get_dict) => Some(ctx.get_dictionary_id(get_dict.dictionary)),
         NodeKind::LoadDictionary(load) => match extra_parameter_value(ctx, load.extra_parameter) {
             HiddenEvidenceArgValue::TraitDictionary(dictionary) => Some(dictionary),
-            HiddenEvidenceArgValue::FieldIndex(_) => {
+            HiddenEvidenceArgValue::Subscript(_) => {
                 panic!("expected dictionary extra parameter")
             }
         },
@@ -1433,18 +1463,21 @@ fn dictionary_from_extra_parameter(
 ) -> TraitDictionaryId {
     match extra_parameter_value(ctx, extra_parameter) {
         HiddenEvidenceArgValue::TraitDictionary(dictionary) => dictionary,
-        HiddenEvidenceArgValue::FieldIndex(_) => panic!(
+        HiddenEvidenceArgValue::Subscript(_) => panic!(
             "expected extra parameter {} to contain trait dictionary metadata",
             extra_parameter.as_index()
         ),
     }
 }
 
-fn field_index_from_extra_parameter(ctx: &EvalCtx, extra_parameter: ExtraParameterId) -> isize {
+fn subscript_from_extra_parameter(
+    ctx: &EvalCtx,
+    extra_parameter: ExtraParameterId,
+) -> SubscriptValue {
     match extra_parameter_value(ctx, extra_parameter) {
-        HiddenEvidenceArgValue::FieldIndex(index) => index,
+        HiddenEvidenceArgValue::Subscript(subscript) => *subscript,
         HiddenEvidenceArgValue::TraitDictionary(_) => panic!(
-            "expected extra parameter {} to contain a field index",
+            "expected extra parameter {} to contain subscript evidence",
             extra_parameter.as_index()
         ),
     }
@@ -1454,7 +1487,7 @@ fn extra_parameter_value(
     ctx: &EvalCtx,
     extra_parameter: ExtraParameterId,
 ) -> HiddenEvidenceArgValue {
-    ctx.extra_parameters[ctx.extra_frame_base + extra_parameter.as_index()]
+    ctx.extra_parameters[ctx.extra_frame_base + extra_parameter.as_index()].clone()
 }
 
 fn call_dictionary_method(
@@ -1935,12 +1968,15 @@ fn eval_clone_value(
     let clone = resolved_local_clone(&node.clone);
 
     if let ResolvedLocalClone::TrivialCopy = clone {
-        let layout = trivial_copy_layout(ctx, arena[node.source].ty, span);
-        let temp_start = ctx.environment.len();
-        let place = eval_or_return!(eval_node_as_place(arena, node.source, ctx, locals));
-        let result = copy_trivial_copy_value_from_place_layout(&place, layout, ctx, span);
-        ctx.truncate_environment_storage(temp_start);
-        return cont(result?);
+        if node_may_resolve_to_place(arena, node.source) {
+            let layout = trivial_copy_layout(ctx, arena[node.source].ty, span);
+            let temp_start = ctx.environment.len();
+            let place = eval_or_return!(eval_node_as_place(arena, node.source, ctx, locals));
+            let result = copy_trivial_copy_value_from_place_layout(&place, layout, ctx, span);
+            ctx.truncate_environment_storage(temp_start);
+            return cont(result?);
+        }
+        return eval_node_with_ctx(arena, node.source, ctx, locals);
     }
 
     let temp_start = ctx.environment.len();
@@ -2117,7 +2153,7 @@ fn eval_static_apply_with(
     locals: &[LocalDecl],
     eval_args_fn: EvalArgsFn,
 ) -> EvalControlFlowResult {
-    let extra_arguments = eval_or_return!(eval_function_hidden_arg_nodes(
+    let extra_arguments = eval_or_return!(eval_hidden_evidence_arg_nodes(
         arena,
         &app.extra_arguments,
         ctx,
@@ -2470,8 +2506,8 @@ fn copy_trivial_copy_value_from_place(
     // `ResolvedLocalClone::TrivialCopy` once values are stored in copyable slots.
     try_copy_trivial_copy_value_from_place(place, ty, ctx, span)?.ok_or_else(|| {
         panic!(
-            "attempted to materialize non-TrivialCopy local value without Value::clone: type {:?}, place {:?}",
-            ty, place
+            "attempted to materialize non-TrivialCopy local value without Value::clone: type {:?}, place {:?}, span {:?}",
+            ty, place, span
         );
     })
 }
@@ -2621,7 +2657,7 @@ fn eval_accessor_until_yield(
     let (call, result_convention, arguments, arg_tys) = match call {
         AccessorCall::Static(app) => {
             let extra_arguments =
-                match eval_function_hidden_arg_nodes(arena, &app.extra_arguments, ctx, locals)? {
+                match eval_hidden_evidence_arg_nodes(arena, &app.extra_arguments, ctx, locals)? {
                     ControlFlow::Continue(arguments) => arguments,
                     ControlFlow::Transfer(transfer) => {
                         ctx.truncate_environment_storage(temp_start);
@@ -2829,7 +2865,13 @@ fn try_eval_with_place_as_place(
             },
         );
     if let Ok(ControlFlow::Continue(None)) = body_result {
-        panic!("WithPlace body must evaluate to a place");
+        panic!(
+            "WithPlace body must evaluate to a place: place_kind {:?}, body_kind {:?}, body_ty {:?}, body_span {:?}",
+            arena[node.place].kind,
+            arena[node.body].kind,
+            arena[node.body].ty,
+            arena[node.body].span
+        );
     }
     body_result
 }
@@ -3166,45 +3208,6 @@ fn eval_project(
     )
 }
 
-#[inline(never)]
-fn eval_project_at(
-    arena: &ENodeArena,
-    node_id: ENodeId,
-    data: ENodeId,
-    index: ExtraParameterId,
-    ctx: &mut EvalCtx,
-    locals: &[LocalDecl],
-) -> EvalControlFlowResult {
-    if let Some(mut place) = eval_or_return!(try_eval_node_as_place(arena, data, ctx, locals)) {
-        let index = field_index_from_extra_parameter(ctx, index);
-        place.path.push(index);
-        if place_resolution_depends_on_addressor_place(arena, data) {
-            if let Some(value) = try_copy_trivial_copy_value_from_place(
-                &place,
-                arena[node_id].ty,
-                ctx,
-                arena[node_id].span,
-            )? {
-                return cont(value);
-            }
-        } else {
-            return cont(copy_trivial_copy_value_from_place(
-                &place,
-                arena[node_id].ty,
-                ctx,
-                arena[node_id].span,
-            )?);
-        }
-    }
-    let value = eval_or_return!(eval_node_with_ctx(arena, data, ctx, locals));
-    let index = field_index_from_extra_parameter(ctx, index);
-    cont(
-        value
-            .into_tuple_element(index as usize)
-            .unwrap_or_else(|| panic!("Cannot access field from a non-compound value")),
-    )
-}
-
 fn place_resolution_depends_on_addressor_place(arena: &ENodeArena, node_id: ENodeId) -> bool {
     match &arena[node_id].kind {
         NodeKind::Apply(app) => app.ty.returns_place(),
@@ -3212,7 +3215,6 @@ fn place_resolution_depends_on_addressor_place(arena: &ENodeArena, node_id: ENod
         NodeKind::SubscriptApply(app) => app.ty.returns_place(),
         NodeKind::CallDictionaryMethod(call) => call.ty.returns_place(),
         NodeKind::Project(node) => place_resolution_depends_on_addressor_place(arena, node.value),
-        NodeKind::ProjectAt(node) => place_resolution_depends_on_addressor_place(arena, node.value),
         NodeKind::WithPlace(node) => place_resolution_depends_on_addressor_place(arena, node.place),
         NodeKind::Block(block) => block
             .body
@@ -3412,7 +3414,8 @@ fn eval_call_arg(
                 }
                 Ok(ControlFlow::Continue(None)) => {
                     panic!(
-                        "shared-reference call argument should have been materialized as a local"
+                        "shared-reference call argument should have been materialized as a local: kind {:?}, ty {:?}, span {:?}",
+                        arena[arg].kind, arena[arg].ty, arena[arg].span
                     )
                 }
                 Ok(transfer) => Ok(transfer.map_continue(unreachable_continue)),
@@ -3539,16 +3542,6 @@ fn try_eval_node_as_place(
             place.path.push(node.index.as_index() as isize);
             place
         }
-        ProjectAt(node) => {
-            let Some(mut place) =
-                eval_or_return!(try_eval_node_as_place(arena, node.value, ctx, locals))
-            else {
-                return Ok(ControlFlow::Continue(None));
-            };
-            let index = field_index_from_extra_parameter(ctx, node.index);
-            place.path.push(index);
-            place
-        }
         Apply(app) if app.ty.returns_place() => {
             let result = eval_apply(arena, app, node.span, ctx, locals)?;
             return Ok(control_flow_into_addressor_place(result).map_continue(Some));
@@ -3570,7 +3563,7 @@ fn try_eval_node_as_place(
             if matches!(
                 node.clone,
                 ResolvedLocalClone::Static(_) | ResolvedLocalClone::Dictionary(_)
-            ) =>
+            ) && node_may_resolve_to_place(arena, node.source) =>
         {
             return try_eval_node_as_place(arena, node.source, ctx, locals);
         }
@@ -3583,7 +3576,7 @@ fn try_eval_node_as_place(
             }
             return Ok(ControlFlow::Continue(place));
         }
-        WithPlace(node) => {
+        WithPlace(node) if node_may_resolve_to_place(arena, node.body) => {
             return try_eval_with_place_as_place(arena, node, ctx, locals);
         }
         LoadLocal(node) => {
@@ -3620,7 +3613,6 @@ fn node_may_resolve_to_place(arena: &ENodeArena, node_id: ENodeId) -> bool {
     match &arena[node_id].kind {
         NodeKind::LoadLocal(_) => true,
         NodeKind::Project(node) => node_may_resolve_to_place(arena, node.value),
-        NodeKind::ProjectAt(node) => node_may_resolve_to_place(arena, node.value),
         NodeKind::Apply(app) => app.ty.returns_place(),
         NodeKind::StaticApply(app) => app.ty.returns_place(),
         NodeKind::SubscriptApply(app) => app.ty.returns_place(),

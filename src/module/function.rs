@@ -626,6 +626,7 @@ impl PendingModuleFunction {
             check_place_return_roots(
                 &self.code.arena,
                 root,
+                &self.locals,
                 base_parameter_index,
                 self.subscript_definition_subject(),
             )?;

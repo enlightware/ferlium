@@ -9,11 +9,12 @@ use crate::{
     types::{
         effects::{EffType, Effect, EffectVar, EffectsInstSubst},
         mutability::{MutType, MutVar},
-        r#type::{CallImplType, FnType, Type, TypeInstSubst, TypeKind, TypeVar},
+        r#type::{CallImplType, FnType, SubscriptType, Type, TypeInstSubst, TypeKind, TypeVar},
         type_scheme::PubTypeConstraint,
         type_substitution::{
-            TypeSubstituer, substitute_fn_type, substitute_fn_type_in_place, substitute_type,
-            substitute_type_fields_in_place, substitute_types, substitute_types_in_place,
+            TypeSubstituer, substitute_fn_type, substitute_fn_type_in_place,
+            substitute_subscript_type_in_place, substitute_type, substitute_type_fields_in_place,
+            substitute_types, substitute_types_in_place,
         },
     },
 };
@@ -90,6 +91,10 @@ impl UnifiedTypeInference {
 
     pub fn substitute_in_fn_type_in_place(&mut self, fn_ty: &mut FnType) {
         substitute_fn_type_in_place(fn_ty, &mut SubstituteTypes::new(self));
+    }
+
+    pub fn substitute_in_subscript_type_in_place(&mut self, subscript_ty: &mut SubscriptType) {
+        substitute_subscript_type_in_place(subscript_ty, &mut SubstituteTypes::new(self));
     }
 
     pub fn substitute_in_call_impl_type_in_place(&mut self, call_ty: &mut CallImplType) {
@@ -228,6 +233,9 @@ impl UnifiedTypeInference {
             GetFunction(get_fn) => {
                 self.substitute_in_fn_inst_data(&mut get_fn.inst_data);
             }
+            GetSubscript(get_subscript) => {
+                self.substitute_in_fn_inst_data(&mut get_subscript.inst_data);
+            }
             GetTraitMethod(get_method) => {
                 self.substitute_in_types_in_place(&mut get_method.input_tys);
                 self.substitute_in_types_in_place(&mut get_method.output_tys);
@@ -251,8 +259,8 @@ impl UnifiedTypeInference {
     fn substitute_in_fn_inst_data(&mut self, inst_data: &mut FnInstData) {
         for dict in &mut inst_data.dicts_req {
             match dict {
-                DictionaryReq::FieldIndex { ty, .. } => {
-                    *ty = self.substitute_in_type(*ty);
+                DictionaryReq::ProjectionSubscript { subscript_ty, .. } => {
+                    self.substitute_in_subscript_type_in_place(subscript_ty);
                 }
                 DictionaryReq::TraitImpl {
                     input_tys,
@@ -288,13 +296,8 @@ impl UnifiedTypeInference {
                 *tuple_ty = self.substitute_in_type(*tuple_ty);
                 *element_ty = self.substitute_in_type(*element_ty);
             }
-            RecordFieldIs {
-                record_ty,
-                element_ty,
-                ..
-            } => {
-                *record_ty = self.substitute_in_type(*record_ty);
-                *element_ty = self.substitute_in_type(*element_ty);
+            ProjectionSubscriptIs { subscript_ty, .. } => {
+                self.substitute_in_subscript_type_in_place(subscript_ty);
             }
             TypeHasVariant {
                 variant_ty,

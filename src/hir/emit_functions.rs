@@ -35,11 +35,11 @@ use crate::{
     internal_compilation_error,
     module::{
         FunctionId, GENERATED_LAMBDA_PREFIX, LocalDecl, LocalDeclId, LocalFunctionId,
-        LocalSubscriptId, Module, ModuleEnv, ModuleFunction, ModuleFunctionSpans, ModuleId,
-        PendingFunctionBody, PendingModuleFunction, QualifiedNameEnv, TraitId, Visibility,
-        YieldProvenance, id::Id,
+        LocalSubscriptId, Module, ModuleEnv, ModuleFunction, ModuleFunctionSpans,
+        PendingFunctionBody, PendingModuleFunction, ProjectionKey, QualifiedNameEnv, TraitId,
+        Visibility, YieldProvenance, id::Id,
     },
-    std::{STD_MODULE_ID, new_module_using_std},
+    std::STD_MODULE_ID,
     types::{
         effects::{PrimitiveEffect, effect},
         mutability::MutType,
@@ -105,6 +105,7 @@ pub(super) enum EmitFunctionKind {
     Normal,
     SubscriptMember {
         subscript_name: Ustr,
+        projection_key: Option<ProjectionKey>,
         provenance: YieldProvenance,
         requires_mutable_yield: bool,
     },
@@ -836,10 +837,16 @@ where
             &mut fn_arena,
         );
         ty_env.function_name = Some(function.name.0);
-        if let EmitFunctionKind::SubscriptMember { subscript_name, .. } = kind {
+        if let EmitFunctionKind::SubscriptMember {
+            subscript_name,
+            projection_key,
+            ..
+        } = kind
+        {
             ty_env.subscript_member = Some(SubscriptMemberTypingContext {
                 name: subscript_name,
                 requires_mutable_place: kind.requires_mutable_place(),
+                projection_key,
             });
         }
         ty_env.compilation_capabilities = capabilities;
@@ -850,13 +857,28 @@ where
                 kind.requires_mutable_yield(),
             ));
         }
-        let mut fn_node_id = ty_inf.check_expr(
-            &mut ty_env,
-            function.body,
-            kind.body_expected_ty(descr.definition.ty_scheme.ty.ret),
-            MutType::constant(),
-            expected_span,
-        )?;
+        let mut fn_node_id = if matches!(
+            kind,
+            EmitFunctionKind::SubscriptMember {
+                provenance: YieldProvenance::AddressorPlace,
+                ..
+            }
+        ) {
+            ty_inf.check_implicit_addressor_return_expr(
+                &mut ty_env,
+                function.body,
+                descr.definition.ty_scheme.ty.ret,
+                expected_span,
+            )?
+        } else {
+            ty_inf.check_expr(
+                &mut ty_env,
+                function.body,
+                kind.body_expected_ty(descr.definition.ty_scheme.ty.ret),
+                MutType::constant(),
+                expected_span,
+            )?
+        };
         let yield_node_id =
             ty_env
                 .yield_context
@@ -1033,13 +1055,10 @@ where
                 .filter(|c| !is_compiler_provided_value_constraint(c, module_env))
                 .collect();
             if !remaining_orphans.is_empty() {
-                let fake_current =
-                    new_module_using_std(ModuleId(0), crate::module::Path::single_str("$debug"));
-                let env = ModuleEnv::new(&fake_current, others);
                 return Err(internal_compilation_error!(Internal {
                     error: format!(
                         "Orphan constraints found in trait impl: {}",
-                        remaining_orphans.format_with(&env)
+                        remaining_orphans.format_with(&module_env)
                     ),
                     span: remaining_orphans[0].use_site(),
                 }));
@@ -1362,13 +1381,10 @@ where
                 .filter(|c| !is_compiler_provided_value_constraint(c, module_env))
                 .collect();
             if !remaining_orphans.is_empty() {
-                let fake_current =
-                    new_module_using_std(ModuleId(0), crate::module::Path::single_str("$debug"));
-                let env = ModuleEnv::new(&fake_current, others);
                 return Err(internal_compilation_error!(Internal {
                     error: format!(
                         "Orphan constraints found in module fn: {}",
-                        remaining_orphans.format_with(&env)
+                        remaining_orphans.format_with(&module_env)
                     ),
                     span: remaining_orphans[0].use_site(),
                 }));

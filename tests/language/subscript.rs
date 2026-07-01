@@ -12,9 +12,11 @@ use ferlium::{
     SourceId,
     ast::{PExprKind, SubscriptMemberMode},
     compiler::error::{
-        CompilationErrorImpl, InvalidSubscriptDefinitionKind, InvalidYieldKind, RuntimeErrorKind,
-        SubscriptDefinitionSubject, UnsupportedSubscriptFeatureKind,
+        CompilationErrorImpl, InvalidRecordFieldContext, InvalidSubscriptDefinitionKind,
+        InvalidYieldKind, MutabilityMustBeWhat, RuntimeErrorKind, SubscriptDefinitionSubject,
+        UnsupportedSubscriptFeatureKind,
     },
+    hir::{ENodeArena, ENodeId, NodeKind},
     module::{YieldProvenance, id::Id},
     parse_module_and_expr,
     std::math::int_type,
@@ -76,6 +78,28 @@ fn parses_shared_subscript_bundle_member() {
     assert_eq!(subscript.name.0, ustr("pixel"));
     assert_eq!(subscript.members.len(), 1);
     assert_eq!(subscript.members[0].mode, SubscriptMemberMode::ref_mut());
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn parses_projection_subscript_definition() {
+    let (module, _, _arena) = parse_module_and_expr(
+        indoc! { r#"
+            subscript Vec2.x(self) -> int {
+                ref mut {
+                    self.x
+                }
+            }
+        "# },
+        SourceId::from_index(1),
+        true,
+    )
+    .expect("projection subscript module should parse");
+
+    assert_eq!(module.subscripts.len(), 1);
+    let subscript = &module.subscripts[0];
+    assert_eq!(subscript.name.0, ustr("x"));
+    assert!(subscript.projection_receiver.is_some());
 }
 
 #[test]
@@ -287,7 +311,7 @@ fn subscript_member_without_yield_is_addressor_place() {
     let module = session.compile_and_get_module(indoc! { r#"
         subscript first(values: &mut [int]) -> int {
             ref mut {
-                return values[0]
+                values[0]
             }
         }
     "# });
@@ -312,7 +336,7 @@ fn addressor_subscript_rejects_direct_by_value_parameter_root() {
     assert_experimental_compile_error(indoc! { r#"
         subscript cell(value: int) -> int {
             ref {
-                return value
+                value
             }
         }
     "# });
@@ -326,7 +350,7 @@ fn addressor_subscript_rejects_owned_local_return_root() {
             subscript cell(value: int) -> int {
                 ref {
                     let local = value;
-                    return local
+                    local
                 }
             }
         "# },
@@ -343,7 +367,7 @@ fn addressor_subscript_rejects_addressor_rooted_in_owned_local() {
             subscript first(values: &mut [int]) -> int {
                 ref {
                     let local = values;
-                    return local[0]
+                    local[0]
                 }
             }
         "# },
@@ -359,7 +383,7 @@ fn addressor_subscript_rejects_addressor_rooted_in_non_base_parameter() {
         indoc! { r#"
             subscript first(first_values: &mut [int], values: &mut [int]) -> int {
                 ref {
-                    return values[0]
+                    values[0]
                 }
             }
         "# },
@@ -375,7 +399,7 @@ fn addressor_subscript_rejects_generic_parameter_return_root() {
         indoc! { r#"
             subscript cell<A>(value: A) -> A {
                 ref {
-                    return value
+                    value
                 }
             }
         "# },
@@ -386,17 +410,53 @@ fn addressor_subscript_rejects_generic_parameter_return_root() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn addressor_subscript_rejects_implicit_tail_return() {
+fn addressor_subscript_accepts_implicit_tail_place() {
+    let value = experimental_session().run(indoc! { r#"
+        subscript first(values: &mut [int]) -> int {
+            ref mut {
+                values[0]
+            }
+        }
+
+        let mut values = [1, 2];
+        values->[first] = 42;
+        values[0]
+    "# });
+
+    assert_val_eq!(value, int(42));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn addressor_subscript_accepts_explicit_return_place() {
+    let value = experimental_session().run(indoc! { r#"
+        subscript first(values: &mut [int]) -> int {
+            ref mut {
+                return values[0]
+            }
+        }
+
+        let mut values = [1, 2];
+        values->[first] = 42;
+        values[0]
+    "# });
+
+    assert_val_eq!(value, int(42));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn addressor_subscript_rejects_implicit_tail_value() {
     assert_invalid_subscript_definition(
         indoc! { r#"
-            subscript first(values: &mut [int]) -> int {
+            subscript cell() -> int {
                 ref {
-                    values[0]
+                    1
                 }
             }
         "# },
-        SubscriptDefinitionSubject::SubscriptMember(ustr("first")),
-        InvalidSubscriptDefinitionKind::AddressorMustReturnExplicitly,
+        SubscriptDefinitionSubject::SubscriptMember(ustr("cell")),
+        InvalidSubscriptDefinitionKind::AddressorReturnMustBePlace,
     );
 }
 
@@ -411,7 +471,7 @@ fn addressor_subscript_rejects_empty_member_body() {
             }
         "# },
         SubscriptDefinitionSubject::SubscriptMember(ustr("cell")),
-        InvalidSubscriptDefinitionKind::AddressorMustReturnExplicitly,
+        InvalidSubscriptDefinitionKind::AddressorReturnMustBePlace,
     );
 }
 
@@ -589,7 +649,7 @@ fn rejects_yield_inside_closure_nested_in_subscript_member() {
             subscript cell(value: int) -> int {
                 ref {
                     let f = || { yield value };
-                    return value
+                    value
                 }
             }
         "# },
@@ -711,6 +771,856 @@ fn rejects_named_subscript_arity_mismatch() {
     "# });
 }
 
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn explicit_private_repr_projection_reads_and_writes() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        #[private_repr]
+        struct Secret {
+            items: [int],
+        }
+
+        subscript Secret.value(self) -> int {
+            ref mut {
+                self.items[0]
+            }
+        }
+
+        let mut secret = Secret { items: [4] };
+        let before = secret.value;
+        secret.value = 9;
+        before + secret.value
+    "# });
+
+    assert_val_eq!(value, int(13));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn explicit_projection_can_share_field_name_across_receiver_types() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        #[private_repr]
+        struct A {
+            value: int,
+        }
+
+        #[private_repr]
+        struct B {
+            value: int,
+        }
+
+        subscript A.x(self) -> int {
+            ref mut {
+                self.value
+            }
+        }
+
+        subscript B.x(self) -> int {
+            ref mut {
+                self.value
+            }
+        }
+
+        let a = A { value: 2 };
+        let b = B { value: 5 };
+        a.x + b.x
+    "# });
+
+    assert_val_eq!(value, int(7));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn named_subscript_and_projection_can_share_source_name() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        #[private_repr]
+        struct Secret {
+            value: int,
+        }
+
+        subscript value(slot: &mut int) -> int {
+            ref mut {
+                slot
+            }
+        }
+
+        subscript Secret.value(self) -> int {
+            ref mut {
+                self.value
+            }
+        }
+
+        let mut slot = 3;
+        let secret = Secret { value: 8 };
+        slot->[value] + secret.value
+    "# });
+
+    assert_val_eq!(value, int(11));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn explicit_projection_can_be_passed_as_mutable_place() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        fn bump(slot: &mut int) {
+            slot = slot + 1
+        }
+
+        #[private_repr]
+        struct Secret {
+            items: [int],
+        }
+
+        subscript Secret.value(self) -> int {
+            ref mut {
+                self.items[0]
+            }
+        }
+
+        let mut secret = Secret { items: [4] };
+        bump(secret.value);
+        secret.value
+    "# });
+
+    assert_val_eq!(value, int(5));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_projection_receiver_reads_and_writes() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        #[private_repr]
+        struct Pair<A, B> {
+            left: A,
+            right: B,
+        }
+
+        subscript Pair<A, B>.left(self) -> A {
+            ref mut {
+                self.left
+            }
+        }
+
+        let mut pair = Pair { left: 2, right: "ignored" };
+        pair.left = 9;
+        pair.left
+    "# });
+
+    assert_val_eq!(value, int(9));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_projection_receiver_resolves_after_concrete_return_annotation() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        #[private_repr]
+        struct Pair<A, B> {
+            left: A,
+            right: B,
+        }
+
+        subscript Pair<A, B>.fake(self) -> int {
+            ref {
+                let mut local = 99;
+                yield local
+            }
+        }
+
+        fn make() -> Pair<int, string> {
+            Pair { left: 1, right: "ignored" }
+        }
+
+        let pair = make();
+        pair.fake
+    "# });
+
+    assert_val_eq!(value, int(99));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_projection_receiver_substitutes_result_type() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        #[private_repr]
+        struct Pair<A, B> {
+            left: A,
+            right: B,
+        }
+
+        subscript Pair<A, B>.left_value(self) -> A {
+            ref mut {
+                self.left
+            }
+        }
+
+        fn make() -> Pair<int, string> {
+            Pair { left: 41, right: "ignored" }
+        }
+
+        let mut pair = make();
+        pair.left_value + 1
+    "# });
+
+    assert_val_eq!(value, int(42));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn yielded_projection_assignment_runs_prologue_and_epilogue() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        #[private_repr]
+        struct Secret {
+            items: [int],
+        }
+
+        subscript Secret.value(self) -> int {
+            mut {
+                let mut local = self.items[0];
+                self.items[1] = self.items[1] + 1;
+                yield local;
+                self.items[0] = local;
+                self.items[1] = self.items[1] + 10
+            }
+        }
+
+        let mut secret = Secret { items: [2, 0] };
+        secret.value = 7;
+        secret.items[0] * 100 + secret.items[1]
+    "# });
+
+    assert_val_eq!(value, int(711));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn yielded_projection_mutable_argument_wraps_call_in_driver() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        fn bump(slot: &mut int) {
+            slot = slot + 1
+        }
+
+        #[private_repr]
+        struct Secret {
+            items: [int],
+        }
+
+        subscript Secret.value(self) -> int {
+            mut {
+                let mut local = self.items[0];
+                self.items[1] = self.items[1] + 1;
+                yield local;
+                self.items[0] = local;
+                self.items[1] = self.items[1] + 10
+            }
+        }
+
+        let mut secret = Secret { items: [4, 0] };
+        bump(secret.value);
+        secret.items[0] * 100 + secret.items[1]
+    "# });
+
+    assert_val_eq!(value, int(511));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn yielded_projection_mutable_argument_with_inferred_callee_mutability_commits() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        fn bump(slot) {
+            slot = slot + 1
+        }
+
+        fn bump_value<T>(value: &mut T) {
+            bump(value.value)
+        }
+
+        #[private_repr]
+        struct Secret {
+            items: [int],
+        }
+
+        subscript Secret.value(self) -> int {
+            mut {
+                let mut local = self.items[0];
+                self.items[1] = self.items[1] + 1;
+                yield local;
+                self.items[0] = local;
+                self.items[1] = self.items[1] + 10
+            }
+        }
+
+        let mut secret = Secret { items: [4, 0] };
+        bump_value(secret);
+        secret.items[0] * 100 + secret.items[1]
+    "# });
+
+    assert_val_eq!(value, int(511));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn module_function_can_use_later_projection_subscript() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        fn read_secret(secret: &mut Secret) -> int {
+            secret.value
+        }
+
+        #[private_repr]
+        struct Secret {
+            raw: int,
+        }
+
+        subscript Secret.value(self) -> int {
+            ref {
+                self.raw
+            }
+        }
+
+        let mut secret = Secret { raw: 12 };
+        read_secret(secret)
+    "# });
+
+    assert_val_eq!(value, int(12));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn projection_subscript_self_access_inside_lambda_is_rejected() {
+    assert_invalid_subscript_definition(
+        indoc! { r#"
+            #[private_repr]
+            struct Secret {
+                raw: int,
+            }
+
+            subscript Secret.value(self) -> int {
+                ref {
+                    let read = || self.value;
+                    read()
+                }
+            }
+        "# },
+        SubscriptDefinitionSubject::SubscriptMember(ustr("value")),
+        InvalidSubscriptDefinitionKind::AddressorReturnMustBePlace,
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn ref_only_addressor_projection_can_return_direct_field_place() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        #[private_repr]
+        struct Secret {
+            raw: int,
+        }
+
+        subscript Secret.value(self) -> int {
+            ref {
+                self.raw
+            }
+        }
+
+        let secret = Secret { raw: 5 };
+        secret.value
+    "# });
+
+    assert_val_eq!(value, int(5));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn private_repr_missing_projection_field_reports_field_error() {
+    assert_invalid_record_field(
+        indoc! { r#"
+            #[private_repr]
+            struct Secret {
+                raw: int,
+            }
+
+            fn read(secret: Secret) -> int {
+                secret.missing
+            }
+        "# },
+        InvalidRecordFieldContext::StructuralField,
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn projection_fallback_on_missing_record_field_reports_projection_context() {
+    assert_invalid_record_field(
+        indoc! { r#"
+            #[private_repr]
+            struct Secret {
+                raw: int,
+            }
+
+            fn read(value) -> int {
+                value.missing
+            }
+
+            read(Secret { raw: 1 })
+        "# },
+        InvalidRecordFieldContext::ProjectionFallback,
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn projection_fallback_on_tuple_newtype_reports_projection_context() {
+    assert_invalid_record_field(
+        indoc! { r#"
+            #[private_repr]
+            struct Secret(int)
+
+            fn read(value) -> int {
+                value.missing
+            }
+
+            read(Secret(1))
+        "# },
+        InvalidRecordFieldContext::ProjectionFallback,
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn projection_subscript_rejects_effect_parameterized_receiver_for_now() {
+    assert_invalid_subscript_definition(
+        indoc! { r#"
+            #[private_repr]
+            struct EffectBox<! E> {
+                run: () -> () ! E,
+            }
+
+            subscript EffectBox.value(self) -> int {
+                ref {
+                    1
+                }
+            }
+        "# },
+        SubscriptDefinitionSubject::Subscript(ustr("value")),
+        InvalidSubscriptDefinitionKind::ProjectionReceiverGenericParametersMismatch,
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn explicit_projection_read_does_not_require_mutable_receiver() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        #[private_repr]
+        struct Secret {
+            items: [int],
+        }
+
+        subscript Secret.value(self) -> int {
+            ref mut {
+                self.items[0]
+            }
+        }
+
+        let secret = Secret { items: [4] };
+        secret.value
+    "# });
+
+    assert_val_eq!(value, int(4));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn explicit_projection_write_requires_mutable_receiver() {
+    let mut session = experimental_session();
+    session
+        .fail_compilation(indoc! { r#"
+            #[private_repr]
+            struct Secret {
+                items: [int],
+            }
+
+            subscript Secret.value(self) -> int {
+                ref mut {
+                    self.items[0]
+                }
+            }
+
+            let secret = Secret { items: [4] };
+            secret.value = 9
+        "# })
+        .expect_mutability_must_be(MutabilityMustBeWhat::Mutable);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_projection_uses_explicit_private_repr_projection_evidence() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        fn read_value<T>(value: &mut T) -> int {
+            value.value
+        }
+
+        #[private_repr]
+        struct Secret {
+            items: [int],
+        }
+
+        subscript Secret.value(self) -> int {
+            ref mut {
+                self.items[0]
+            }
+        }
+
+        let mut secret = Secret { items: [7] };
+        read_value(secret)
+    "# });
+
+    assert_val_eq!(value, int(7));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_projection_read_uses_ref_member_effects_from_evidence() {
+    experimental_session().compile(indoc! { r#"
+        fn read_value<T>(value: &mut T) -> int {
+            value.value
+        }
+
+        #[private_repr]
+        struct Secret {
+            raw: int,
+        }
+
+        subscript Secret.value(self) -> int {
+            ref {
+                effects::read();
+                let local = self.raw;
+                yield local
+            }
+
+            mut {
+                effects::write();
+                let mut local = self.raw;
+                yield local;
+                self.raw = local
+            }
+        }
+
+        effects::take_read(|| {
+            let mut secret = Secret { raw: 7 };
+            read_value(secret);
+            ()
+        })
+    "# });
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_projection_write_uses_mut_member_effects_from_evidence() {
+    experimental_session()
+        .fail_compilation(indoc! { r#"
+            fn set_value<T>(value: &mut T, new_value: int) {
+                value.value = new_value
+            }
+
+            #[private_repr]
+            struct Secret {
+                raw: int,
+            }
+
+            subscript Secret.value(self) -> int {
+                ref {
+                    effects::read();
+                    let local = self.raw;
+                    yield local
+                }
+
+                mut {
+                    effects::write();
+                    let mut local = self.raw;
+                    yield local;
+                    self.raw = local
+                }
+            }
+
+            effects::take_read(|| {
+                let mut secret = Secret { raw: 7 };
+                set_value(secret, 9);
+                ()
+            })
+        "# })
+        .expect_invalid_effect_dependency(
+            effect(PrimitiveEffect::Write),
+            effect(PrimitiveEffect::Read),
+        );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_projection_read_accepts_ref_only_projection_evidence() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        fn read_value<T>(value: &mut T) -> int {
+            value.value
+        }
+
+        #[private_repr]
+        struct Secret {
+            items: [int],
+        }
+
+        subscript Secret.value(self) -> int {
+            ref {
+                self.items[0]
+            }
+        }
+
+        let mut secret = Secret { items: [7] };
+        read_value(secret)
+    "# });
+
+    assert_val_eq!(value, int(7));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_projection_read_runs_yielded_ref_driver() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        fn read_value<T>(value: &mut T) -> int {
+            value.value
+        }
+
+        #[private_repr]
+        struct Secret {
+            items: [int],
+        }
+
+        subscript Secret.value(self) -> int {
+            ref {
+                let mut local = self.items[0] + 1;
+                yield local;
+            }
+        }
+
+        let mut secret = Secret { items: [7, 0] };
+        read_value(secret)
+    "# });
+
+    assert_val_eq!(value, int(8));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_projection_write_runs_yielded_mut_driver() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        fn set_value<T>(value: &mut T, new_value: int) {
+            value.value = new_value
+        }
+
+        #[private_repr]
+        struct Secret {
+            items: [int],
+        }
+
+        subscript Secret.value(self) -> int {
+            mut {
+                let mut local = self.items[0];
+                self.items[1] = self.items[1] + 1;
+                yield local;
+                self.items[0] = local;
+                self.items[1] = self.items[1] + 10
+            }
+        }
+
+        let mut secret = Secret { items: [3, 0] };
+        set_value(secret, 8);
+        secret.items[0] * 100 + secret.items[1]
+    "# });
+
+    assert_val_eq!(value, int(811));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_projection_mutable_arg_runs_yielded_mut_driver() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        fn bump(slot: &mut int) {
+            slot = slot + 1
+        }
+
+        fn bump_value<T>(value: &mut T) {
+            bump(value.value)
+        }
+
+        #[private_repr]
+        struct Secret {
+            items: [int],
+        }
+
+        subscript Secret.value(self) -> int {
+            mut {
+                let mut local = self.items[0];
+                self.items[1] = self.items[1] + 1;
+                yield local;
+                self.items[0] = local;
+                self.items[1] = self.items[1] + 10
+            }
+        }
+
+        let mut secret = Secret { items: [4, 0] };
+        bump_value(secret);
+        secret.items[0] * 100 + secret.items[1]
+    "# });
+
+    assert_val_eq!(value, int(511));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn projection_subscript_rejects_accessible_structural_field_conflict() {
+    assert_invalid_subscript_definition(
+        indoc! { r#"
+            struct Point {
+                x: int,
+            }
+
+            subscript Point.x(self) -> int {
+                ref mut {
+                    self.x
+                }
+            }
+        "# },
+        SubscriptDefinitionSubject::Subscript(ustr("x")),
+        InvalidSubscriptDefinitionKind::ProjectionConflictsWithStructuralField,
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn projection_subscript_rejects_duplicate_receiver_field() {
+    assert_invalid_subscript_definition(
+        indoc! { r#"
+            #[private_repr]
+            struct Secret {
+                value: int,
+            }
+
+            subscript Secret.value(self) -> int {
+                ref mut {
+                    self.value
+                }
+            }
+
+            subscript Secret.value(self) -> int {
+                ref mut {
+                    self.value
+                }
+            }
+        "# },
+        SubscriptDefinitionSubject::Subscript(ustr("value")),
+        InvalidSubscriptDefinitionKind::DuplicateProjection,
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn projection_subscript_rejects_receiver_generic_order_mismatch() {
+    assert_invalid_subscript_definition(
+        indoc! { r#"
+            #[private_repr]
+            struct Pair<A, B> {
+                left: A,
+                right: B,
+            }
+
+            subscript Pair<B, A>.left(self) -> B {
+                ref mut {
+                    self.left
+                }
+            }
+        "# },
+        SubscriptDefinitionSubject::Subscript(ustr("left")),
+        InvalidSubscriptDefinitionKind::ProjectionReceiverGenericParametersMismatch,
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn projection_subscript_rejects_receiver_generic_arity_mismatch() {
+    assert_experimental_compile_error(indoc! { r#"
+            #[private_repr]
+            struct Pair<A, B> {
+                left: A,
+                right: B,
+            }
+
+            subscript Pair<A>.left(self) -> A {
+                ref mut {
+                    self.left
+                }
+            }
+        "# });
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn projection_subscript_receiver_parameter_must_be_untyped() {
+    assert_invalid_subscript_definition(
+        indoc! { r#"
+            #[private_repr]
+            struct Secret {
+                value: int,
+            }
+
+            subscript Secret.value(self: int) -> int {
+                ref mut {
+                    self.value
+                }
+            }
+        "# },
+        SubscriptDefinitionSubject::Subscript(ustr("value")),
+        InvalidSubscriptDefinitionKind::ProjectionReceiverParameterMustBeUntyped,
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn projection_subscript_requires_receiver_parameter() {
+    assert_invalid_subscript_definition(
+        indoc! { r#"
+            #[private_repr]
+            struct Secret {
+                value: int,
+            }
+
+            subscript Secret.value() -> int {
+                ref mut {
+                    1
+                }
+            }
+        "# },
+        SubscriptDefinitionSubject::Subscript(ustr("value")),
+        InvalidSubscriptDefinitionKind::ProjectionMissingReceiverParameter,
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn projection_subscript_rejects_extra_parameters() {
+    assert_invalid_subscript_definition(
+        indoc! { r#"
+            #[private_repr]
+            struct Secret {
+                value: int,
+            }
+
+            subscript Secret.value(self, other) -> int {
+                ref mut {
+                    self.value
+                }
+            }
+        "# },
+        SubscriptDefinitionSubject::Subscript(ustr("value")),
+        InvalidSubscriptDefinitionKind::ProjectionUnexpectedParameter,
+    );
+}
+
 fn experimental_session() -> TestSession {
     let mut session = TestSession::new();
     session.allow_experimental();
@@ -719,6 +1629,13 @@ fn experimental_session() -> TestSession {
 
 fn assert_experimental_compile_error(src: &str) {
     assert!(experimental_session().try_compile(src).is_err());
+}
+
+fn assert_invalid_record_field(src: &str, expected_ctx: InvalidRecordFieldContext) {
+    match experimental_session().fail_compilation(src).into_inner() {
+        CompilationErrorImpl::InvalidRecordField { ctx, .. } if ctx == expected_ctx => {}
+        other => panic!("expected invalid record field error, got {other:?}"),
+    }
 }
 
 fn assert_invalid_subscript_definition(
@@ -786,7 +1703,7 @@ fn first_class_addressor_subscript_value_reads_and_writes() {
     let value = run_experimental_subscript_source(indoc! { r#"
         subscript first(values: &mut [int]) -> int {
             ref mut {
-                return values[0]
+                values[0]
             }
         }
 
@@ -830,7 +1747,7 @@ fn first_class_addressor_subscript_parameter_is_inferred_and_adapted_to_yielded_
     let value = run_experimental_subscript_source(indoc! { r#"
         subscript first(values: &mut [int]) -> int {
             ref mut {
-                return values[0]
+                values[0]
             }
         }
 
@@ -877,7 +1794,7 @@ fn first_class_addressor_subscript_parameter_assignment_is_inferred() {
     let value = run_experimental_subscript_source(indoc! { r#"
         subscript first(values: &mut [int]) -> int {
             ref mut {
-                return values[0]
+                values[0]
             }
         }
 
@@ -974,7 +1891,7 @@ fn first_class_subscript_value_is_not_a_function() {
     assert_experimental_compile_error(indoc! { r#"
         subscript cell(slot: &mut int) -> int {
             ref mut {
-                return slot
+                slot
             }
         }
 
@@ -990,7 +1907,7 @@ fn first_class_subscript_parameter_requires_selected_member() {
     assert_experimental_compile_error(indoc! { r#"
         subscript first(values: &mut [int]) -> int {
             ref {
-                return values[0]
+                values[0]
             }
         }
 
@@ -1013,7 +1930,7 @@ fn named_subscript_local_shadow_must_be_subscript_value() {
         .fail_compilation(indoc! { r#"
             subscript cell(values: &mut [int]) -> int {
                 ref mut {
-                    return values[0]
+                    values[0]
                 }
             }
 
@@ -1041,7 +1958,7 @@ fn first_class_subscript_assignment_requires_mut_member() {
         .fail_compilation(indoc! { r#"
             subscript cell(values: &mut [int]) -> int {
                 ref {
-                    return values[0]
+                    values[0]
                 }
             }
 
@@ -1056,7 +1973,7 @@ fn first_class_subscript_assignment_requires_mut_member() {
             assert_eq!(
                 kind,
                 ferlium::compiler::error::InvalidSubscriptUseKind::MissingMember(
-                    ferlium::compiler::error::SubscriptMemberRole::Mut,
+                    ferlium::module::SubscriptMemberKind::Mut,
                 )
             );
         }
@@ -1070,7 +1987,7 @@ fn addressor_named_subscript_rvalue_reads_direct_place() {
     let value = run_experimental_subscript_source(indoc! { r#"
         subscript first(values: &mut [int]) -> int {
             ref mut {
-                return values[0]
+                values[0]
             }
         }
 
@@ -1087,7 +2004,7 @@ fn addressor_named_subscript_assignment_writes_direct_place() {
     let value = run_experimental_subscript_source(indoc! { r#"
         subscript first(values: &mut [int]) -> int {
             ref mut {
-                return values[0]
+                values[0]
             }
         }
 
@@ -1105,13 +2022,13 @@ fn mut_addressor_return_selects_mut_member_of_nested_subscript() {
     let value = run_experimental_subscript_source(indoc! { r#"
         subscript inner(values: &mut [int]) -> int {
             mut {
-                return values[0]
+                values[0]
             }
         }
 
         subscript outer(values: &mut [int]) -> int {
             mut {
-                return values->[inner]
+                values->[inner]
             }
         }
 
@@ -1130,7 +2047,7 @@ fn addressor_named_subscript_compound_assignment_uses_single_place() {
         subscript first(values: &mut [int], log: &mut int) -> int {
             ref mut {
                 log = log + 1;
-                return values[0]
+                values[0]
             }
         }
 
@@ -1237,7 +2154,7 @@ fn array_index_receiver_can_drive_addressor_subscript() {
         subscript first(values: &mut [int], log: &mut int) -> int {
             ref mut {
                 log = log + 1;
-                return values[0]
+                values[0]
             }
         }
 
@@ -1433,6 +2350,214 @@ fn rejects_multiple_named_subscripts_as_mutable_function_arguments() {
         "# },
         UnsupportedSubscriptFeatureKind::MultipleMutableSubscriptArguments,
     );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn multiple_mutable_addressor_projections_are_allowed_as_arguments() {
+    // Addressor-place projections lower to direct places, so several mutable ones can be driven
+    // around a single call. This used to be rejected by a pre-inference approximation that could
+    // not tell addressor projections from suspended ones.
+    let value = run_experimental_subscript_source(indoc! { r#"
+        fn add_to_both(first: &mut int, second: &mut int) {
+            first = first + 1;
+            second = second + 1
+        }
+
+        #[private_repr]
+        struct Cell {
+            v: int,
+        }
+
+        subscript Cell.value(self) -> int {
+            ref mut {
+                self.v
+            }
+        }
+
+        let mut a = Cell { v: 1 };
+        let mut b = Cell { v: 2 };
+        add_to_both(a.value, b.value);
+        (a.value, b.value)
+    "# });
+
+    assert_val_eq!(value, expected_tuple([int(2), int(3)]));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn rejects_multiple_mutable_yielded_projections_as_arguments() {
+    // Suspended (yield-based) projection accessors keep a call frame parked at their `yield`, and
+    // only one such frame can be resumed per call, so two mutable ones must be rejected. This is
+    // now detected from real accessor provenance rather than predicted before inference.
+    assert_unsupported_subscript_feature(
+        indoc! { r#"
+            fn add_to_both(first: &mut int, second: &mut int) {
+                first = first + 1;
+                second = second + 1
+            }
+
+            #[private_repr]
+            struct Secret {
+                v: int,
+            }
+
+            subscript Secret.value(self) -> int {
+                mut {
+                    let mut local = self.v;
+                    yield local;
+                    self.v = local
+                }
+            }
+
+            let mut a = Secret { v: 1 };
+            let mut b = Secret { v: 2 };
+            add_to_both(a.value, b.value)
+        "# },
+        UnsupportedSubscriptFeatureKind::MultipleMutableSubscriptArguments,
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn materialized_yielded_projection_in_non_driven_argument_does_not_count_as_call_driver() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        fn add(first: &mut int, second: int) {
+            first = first + second
+        }
+
+        #[private_repr]
+        struct Secret {
+            v: int,
+        }
+
+        subscript Secret.value(self) -> int {
+            ref {
+                let local = self.v;
+                yield local
+            }
+            mut {
+                let mut local = self.v;
+                yield local;
+                self.v = local
+            }
+        }
+
+        let mut first = Secret { v: 1 };
+        let mut second = Secret { v: 2 };
+        add(first.value, { let x = second.value; x });
+        first.value
+    "# });
+
+    assert_val_eq!(value, int(3));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn materialized_yielded_projection_in_driver_accessor_argument_does_not_count_as_call_driver() {
+    // The single driven argument `holder->[cell](s.value)` keeps one suspended accessor around the
+    // call; the accessor's own argument `s.value` materializes a yielded projection that completes
+    // before the call and must not be counted as a second suspended accessor.
+    let value = run_experimental_subscript_source(indoc! { r#"
+        fn bump(slot: &mut int) {
+            slot = slot + 1
+        }
+
+        subscript cell(slot: &mut int, extra: int) -> int {
+            mut {
+                let mut local = slot;
+                yield local;
+                slot = local + extra
+            }
+        }
+
+        #[private_repr]
+        struct Secret {
+            v: int,
+        }
+
+        subscript Secret.value(self) -> int {
+            ref {
+                let local = self.v;
+                yield local
+            }
+        }
+
+        let mut holder = 5;
+        let mut s = Secret { v: 10 };
+        bump(holder->[cell](s.value));
+        holder
+    "# });
+
+    // bump increments the yielded slot 5 -> 6, then the epilogue writes back 6 + extra(10) = 16.
+    assert_val_eq!(value, int(16));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn materialized_yielded_projection_in_driver_index_expression_does_not_count_as_call_driver() {
+    // Two mutable driven arguments: `s.value` is a suspended yielded projection (one frame parked
+    // around the call), while `values[idx.value]` is an addressor place that nests freely. The
+    // index expression `idx.value` materializes a yielded projection that completes before the
+    // call and must not be counted as a second suspended accessor.
+    let value = run_experimental_subscript_source(indoc! { r#"
+        fn add_to_both(first: &mut int, second: &mut int) {
+            first = first + 1;
+            second = second + 1
+        }
+
+        #[private_repr]
+        struct Secret {
+            v: int,
+        }
+
+        subscript Secret.value(self) -> int {
+            ref {
+                let local = self.v;
+                yield local
+            }
+            mut {
+                let mut local = self.v;
+                yield local;
+                self.v = local
+            }
+        }
+
+        let mut s = Secret { v: 5 };
+        let mut idx = Secret { v: 1 };
+        let mut values = [10, 20, 30];
+        add_to_both(s.value, values[idx.value]);
+        (s.value, values[1])
+    "# });
+
+    // s.value: 5 -> 6; values[idx.value=1]: 20 -> 21.
+    assert_val_eq!(value, expected_tuple([int(6), int(21)]));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn explicit_projection_passed_by_value_to_generic_is_materialized() {
+    // A by-value argument never needs the projection place kept live, so an explicit projection
+    // passed to a generic by-value parameter is materialized rather than driven as a place.
+    let value = run_experimental_subscript_source(indoc! { r#"
+        fn ident<T>(x: T) -> T { x }
+
+        #[private_repr]
+        struct Secret {
+            items: [int],
+        }
+
+        subscript Secret.value(self) -> int {
+            ref mut {
+                self.items[0]
+            }
+        }
+
+        let mut secret = Secret { items: [4] };
+        ident(secret.value)
+    "# });
+
+    assert_val_eq!(value, int(4));
 }
 
 #[test]
@@ -1833,9 +2958,8 @@ fn parameterized_named_subscript_instantiates_at_use_sites() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn rejects_first_class_subscript_with_hidden_evidence_for_now() {
-    assert_unsupported_subscript_feature(
-        indoc! { r#"
+fn first_class_subscript_value_captures_hidden_evidence() {
+    let value = run_experimental_subscript_source(indoc! { r#"
             subscript cell<T>(slot: &mut T) -> T
             where
                 T: Value
@@ -1853,10 +2977,101 @@ fn rejects_first_class_subscript_with_hidden_evidence_for_now() {
             }
 
             let cell_slot = cell;
-            let mut text = "old";
-            text->[cell_slot] = "new"
-        "# },
-        UnsupportedSubscriptFeatureKind::FirstClassSubscriptWithHiddenEvidence,
+            let copied_cell_slot = cell_slot;
+            let mut number = 5;
+            let before = number->[cell_slot];
+            number->[copied_cell_slot] = 7;
+            (before, number)
+        "# });
+
+    assert_val_eq!(value, expected_tuple([int(5), int(7)]));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn first_class_subscript_value_passes_captured_hidden_evidence() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+            subscript cell<T>(slot: &mut T) -> T
+            where
+                T: Value
+            {
+                ref {
+                    let local = slot;
+                    yield local
+                }
+
+                mut {
+                    let mut local = slot;
+                    yield local;
+                    slot = local
+                }
+            }
+
+            fn read_with(accessor) -> int {
+                let mut number = 5;
+                number->[accessor]
+            }
+
+            fn write_with(accessor) -> int {
+                let mut number = 5;
+                number->[accessor] = 8;
+                number
+            }
+
+            let accessor = cell;
+            (read_with(accessor), write_with(accessor))
+        "# });
+
+    assert_val_eq!(value, expected_tuple([int(5), int(8)]));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn first_class_subscript_value_hir_captures_hidden_evidence() {
+    fn contains_build_subscript_value_with_evidence(arena: &ENodeArena, node: ENodeId) -> bool {
+        match &arena[node].kind {
+            NodeKind::BuildSubscriptValue(build) if !build.evidence_captures.is_empty() => true,
+            _ => crate::harness::hir_child_nodes(arena, node)
+                .into_iter()
+                .any(|child| contains_build_subscript_value_with_evidence(arena, child)),
+        }
+    }
+
+    let mut session = experimental_session();
+    let module_id = session
+        .compile(indoc! { r#"
+            subscript cell<T>(slot: &mut T) -> T
+            where
+                T: Value
+            {
+                ref {
+                    let local = slot;
+                    yield local
+                }
+
+                mut {
+                    let mut local = slot;
+                    yield local;
+                    slot = local
+                }
+            }
+
+            fn use_cell() {
+                let cell_slot = cell;
+                let mut number = 5;
+                number->[cell_slot]
+            }
+        "# })
+        .module_id;
+    let module = session.session().expect_fresh_module(module_id);
+    let function = module
+        .get_function(ustr("use_cell"))
+        .expect("use_cell should be compiled");
+    let entry = function.get_code_entry().unwrap();
+
+    assert!(
+        contains_build_subscript_value_with_evidence(&module.hir_arena, entry),
+        "capturing a constrained first-class subscript should build hidden evidence"
     );
 }
 

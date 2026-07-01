@@ -14,6 +14,7 @@ use crate::ast::ExprArena;
 use crate::ast::ExprId;
 use crate::ast::ExprKind;
 use crate::ast::ForLoopData;
+use crate::ast::GenericParams;
 use crate::ast::MapLiteralEntry;
 use crate::ast::PEffect;
 use crate::ast::PExpr;
@@ -83,6 +84,53 @@ pub(crate) type TraitHeadArgsResult<L, T> = Result<
     ),
     ParseError<L, T, LocatedError>,
 >;
+
+pub(crate) type ParsedSubscriptHeader = (Option<PTypeSpan>, UstrSpan, GenericParams);
+pub(crate) type ParsedSubscriptHeaderTail = (Option<UstrSpan>, GenericParams, Option<Location>);
+pub(crate) type ParsedSubscriptHeaderAngleTail = (Option<UstrSpan>, GenericParams, Option<usize>);
+
+pub(crate) fn subscript_header(
+    name: UstrSpan,
+    tail: Option<ParsedSubscriptHeaderTail>,
+) -> ParsedSubscriptHeader {
+    let (field, generic_params, receiver_args_span) =
+        tail.unwrap_or((None, GenericParams::default(), None));
+    match field {
+        Some(field) => {
+            let receiver_span = receiver_args_span
+                .and_then(|span| Location::fuse([name.1, span]))
+                .unwrap_or(name.1);
+            let receiver_ty = if generic_params.type_params().is_empty() {
+                (PType::Path(Path::new(vec![name])), receiver_span)
+            } else {
+                let receiver_args = generic_params
+                    .type_params()
+                    .iter()
+                    .map(|arg| (PType::Path(Path::new(vec![*arg])), arg.1))
+                    .collect();
+                (
+                    PType::path_with_args(Path::new(vec![name]), receiver_args),
+                    receiver_span,
+                )
+            };
+            (Some(receiver_ty), field, generic_params)
+        }
+        None => (None, name, generic_params),
+    }
+}
+
+pub(crate) fn subscript_header_tail_with_generic_span(
+    left: usize,
+    tail: ParsedSubscriptHeaderAngleTail,
+    source_id: SourceId,
+) -> ParsedSubscriptHeaderTail {
+    let (field, generic_params, end) = tail;
+    (
+        field,
+        generic_params,
+        end.map(|end| span(left, end, source_id)),
+    )
+}
 
 pub(crate) fn validate_type_application_args<L, T>(
     args: AngleArgs,

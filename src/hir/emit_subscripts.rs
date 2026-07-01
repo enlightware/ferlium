@@ -10,25 +10,49 @@ use crate::{
     Location, ast,
     compiler::error::{
         InternalCompilationError, InvalidSubscriptDefinitionKind, SubscriptDefinitionSubject,
-        SubscriptMemberRole,
     },
     internal_compilation_error,
     module::{
-        LocalFunctionId, LocalSubscriptId, Module,
+        LocalFunctionId, LocalSubscriptId, Module, ModuleEnv, ProjectionKey, ProjectionOrigin,
         SubscriptDefinition as ModuleSubscriptDefinition, SubscriptMember as ModuleSubscriptMember,
-        SubscriptSignature, Visibility, YieldProvenance, id::Id,
+        SubscriptMemberKind, SubscriptSignature, Visibility, YieldProvenance, id::Id,
     },
-    types::{mutability::MutType, r#type::FnArgType},
+    types::{
+        mutability::MutType,
+        r#type::{FnArgType, Type, TypeKind},
+    },
 };
 
 pub(super) fn predeclare_subscripts(
     output: &mut Module,
     source: &ast::DModule,
+    others: &crate::Modules,
 ) -> Result<Vec<LocalSubscriptId>, InternalCompilationError> {
     let mut ids = Vec::with_capacity(source.subscripts.len());
     for subscript in &source.subscripts {
         validate_subscript_members(subscript)?;
-        ids.push(add_empty_subscript_bundle(output, subscript)?);
+        if let Some(key) = projection_key_for_subscript(output, others, subscript)? {
+            let env = ModuleEnv::new(output, others);
+            if output.get_projection_subscript(key).is_some()
+                || env.projection_subscript(key).is_some()
+            {
+                return Err(internal_compilation_error!(InvalidSubscriptDefinition {
+                    subject: SubscriptDefinitionSubject::Subscript(subscript.name.0),
+                    kind: InvalidSubscriptDefinitionKind::DuplicateProjection,
+                    span: subscript.name.1,
+                }));
+            }
+            ids.push(add_empty_projection_subscript_bundle(output, subscript)?);
+            let id = *ids.last().expect("just pushed subscript id");
+            output.add_projection_subscript(
+                key,
+                id,
+                subscript.visibility,
+                ProjectionOrigin::Explicit,
+            );
+        } else {
+            ids.push(add_empty_subscript_bundle(output, subscript)?);
+        }
     }
     Ok(ids)
 }
@@ -58,7 +82,7 @@ fn validate_subscript_members(
             if ref_member_seen {
                 return Err(internal_compilation_error!(InvalidSubscriptDefinition {
                     subject: SubscriptDefinitionSubject::Subscript(subscript.name.0),
-                    kind: InvalidSubscriptDefinitionKind::DuplicateMember(SubscriptMemberRole::Ref,),
+                    kind: InvalidSubscriptDefinitionKind::DuplicateMember(SubscriptMemberKind::Ref,),
                     span: member.span,
                 }));
             }
@@ -68,7 +92,7 @@ fn validate_subscript_members(
             if mut_member_seen {
                 return Err(internal_compilation_error!(InvalidSubscriptDefinition {
                     subject: SubscriptDefinitionSubject::Subscript(subscript.name.0),
-                    kind: InvalidSubscriptDefinitionKind::DuplicateMember(SubscriptMemberRole::Mut,),
+                    kind: InvalidSubscriptDefinitionKind::DuplicateMember(SubscriptMemberKind::Mut,),
                     span: member.span,
                 }));
             }
@@ -78,9 +102,147 @@ fn validate_subscript_members(
     Ok(())
 }
 
+fn projection_key_for_subscript(
+    output: &Module,
+    others: &crate::Modules,
+    subscript: &ast::DSubscriptDefinition,
+) -> Result<Option<ProjectionKey>, InternalCompilationError> {
+    let Some((receiver_ty, receiver_span)) = validate_projection_receiver_binding(subscript)?
+    else {
+        return Ok(None);
+    };
+    let env = ModuleEnv::new(output, others);
+    let receiver_type_def =
+        validate_projection_receiver_type(env, receiver_ty, subscript, receiver_span)?;
+    reject_accessible_structural_projection_conflict(
+        env,
+        receiver_ty,
+        subscript.name,
+        receiver_span,
+    )?;
+    Ok(Some(ProjectionKey::nominal(
+        receiver_type_def,
+        subscript.name.0,
+    )))
+}
+
+fn validate_projection_receiver_type(
+    env: ModuleEnv<'_>,
+    receiver_ty: Type,
+    subscript: &ast::DSubscriptDefinition,
+    receiver_span: Location,
+) -> Result<crate::module::TypeDefId, InternalCompilationError> {
+    let field = subscript.name;
+    let TypeKind::Named(named) = &*receiver_ty.data() else {
+        return Err(internal_compilation_error!(InvalidSubscriptDefinition {
+            subject: SubscriptDefinitionSubject::Subscript(field.0),
+            kind: InvalidSubscriptDefinitionKind::ProjectionReceiverMustBeNominal,
+            span: Location::fuse([field.1, receiver_span]).unwrap_or(field.1),
+        }));
+    };
+
+    let source_params = subscript.generic_params.type_params();
+    let expected_params = env.type_def_param_names(named.def).collect::<Vec<_>>();
+    let expected_effect_param_count = env.type_def_effect_param_count(named.def);
+    let params_match = named.params.len() == expected_params.len()
+        && source_params.len() == expected_params.len()
+        && named.effect_params.is_empty()
+        && expected_effect_param_count == 0
+        && subscript.generic_params.effect_params().is_empty()
+        && named
+            .params
+            .iter()
+            .enumerate()
+            .all(|(index, ty)| match &*ty.data() {
+                TypeKind::Variable(var) => {
+                    var.name() as usize == index && source_params[index].0 == expected_params[index]
+                }
+                _ => false,
+            });
+    if params_match {
+        return Ok(named.def);
+    }
+    Err(internal_compilation_error!(InvalidSubscriptDefinition {
+        subject: SubscriptDefinitionSubject::Subscript(field.0),
+        kind: InvalidSubscriptDefinitionKind::ProjectionReceiverGenericParametersMismatch,
+        span: Location::fuse([field.1, receiver_span]).unwrap_or(field.1),
+    }))
+}
+
+fn validate_projection_receiver_binding(
+    subscript: &ast::DSubscriptDefinition,
+) -> Result<Option<(Type, Location)>, InternalCompilationError> {
+    let Some((receiver_ty, receiver_span)) = subscript.projection_receiver else {
+        return Ok(None);
+    };
+    if subscript.args.is_empty() {
+        return Err(internal_compilation_error!(InvalidSubscriptDefinition {
+            subject: SubscriptDefinitionSubject::Subscript(subscript.name.0),
+            kind: InvalidSubscriptDefinitionKind::ProjectionMissingReceiverParameter,
+            span: subscript.args_span,
+        }));
+    };
+    if subscript.args.len() > 1 {
+        let extra_arg = &subscript.args[1];
+        return Err(internal_compilation_error!(InvalidSubscriptDefinition {
+            subject: SubscriptDefinitionSubject::Subscript(subscript.name.0),
+            kind: InvalidSubscriptDefinitionKind::ProjectionUnexpectedParameter,
+            span: extra_arg.name.1,
+        }));
+    }
+    let receiver_arg = &subscript.args[0];
+    if let Some((_mut_ty, _ty, ty_span)) = receiver_arg.ty {
+        return Err(internal_compilation_error!(InvalidSubscriptDefinition {
+            subject: SubscriptDefinitionSubject::Subscript(subscript.name.0),
+            kind: InvalidSubscriptDefinitionKind::ProjectionReceiverParameterMustBeUntyped,
+            span: ty_span,
+        }));
+    }
+    Ok(Some((receiver_ty, receiver_span)))
+}
+
+fn reject_accessible_structural_projection_conflict(
+    env: ModuleEnv<'_>,
+    receiver_ty: Type,
+    field: ast::UstrSpan,
+    receiver_span: Location,
+) -> Result<(), InternalCompilationError> {
+    let TypeKind::Named(named) = &*receiver_ty.data() else {
+        return Ok(());
+    };
+    let type_def = env.type_def(named.def);
+    if type_def.has_private_repr() {
+        return Ok(());
+    }
+    let shape = type_def.instantiated_shape_with_effects(&named.params, &named.effect_params);
+    if shape.data().as_record().is_some_and(|record| {
+        record
+            .iter()
+            .any(|(structural_field, _)| *structural_field == field.0)
+    }) {
+        return Err(internal_compilation_error!(InvalidSubscriptDefinition {
+            subject: SubscriptDefinitionSubject::Subscript(field.0),
+            kind: InvalidSubscriptDefinitionKind::ProjectionConflictsWithStructuralField,
+            span: Location::fuse([field.1, receiver_span]).unwrap_or(field.1),
+        }));
+    }
+    Ok(())
+}
+
 fn subscript_signature(
     subscript: &ast::DSubscriptDefinition,
 ) -> Result<SubscriptSignature, InternalCompilationError> {
+    if let Some((receiver_ty, _)) = validate_projection_receiver_binding(subscript)? {
+        return Ok(SubscriptSignature {
+            args: vec![FnArgType::new_by_val(receiver_ty)],
+            ret: subscript.ret_ty.0,
+            generic_params: subscript.generic_params.type_params().to_vec(),
+            generic_effect_params: subscript.generic_params.effect_params().to_vec(),
+            arg_names: vec![subscript.args[0].name.0],
+            constraints: subscript.where_clause.clone(),
+            doc: subscript.doc.clone(),
+        });
+    }
     let args = subscript
         .args
         .iter()
@@ -111,6 +273,17 @@ pub(super) fn synthetic_subscript_member_function(
     member: &ast::SubscriptMember<ast::Desugared>,
 ) -> ast::DModuleFunction {
     let suffix = member_function_suffix(member);
+    let args = if let Some((receiver_ty, receiver_span)) = subscript.projection_receiver {
+        let mut args = subscript.args.clone();
+        let receiver_arg = args
+            .first_mut()
+            .expect("projection subscript receiver binding should be validated before emission");
+        let receiver_mut_ty = member.mode.mut_member.then_some(MutType::mutable());
+        receiver_arg.ty = Some((receiver_mut_ty, receiver_ty, receiver_span));
+        args
+    } else {
+        subscript.args.clone()
+    };
     ast::DModuleFunction {
         visibility: Visibility::Module,
         name: (
@@ -118,7 +291,7 @@ pub(super) fn synthetic_subscript_member_function(
             member.span,
         ),
         generic_params: subscript.generic_params.clone(),
-        args: subscript.args.clone(),
+        args,
         args_span: subscript.args_span,
         ret_ty: Some(subscript.ret_ty),
         where_clause: subscript.where_clause.clone(),
@@ -152,6 +325,17 @@ fn add_empty_subscript_bundle(
         },
         subscript.visibility,
     ))
+}
+
+fn add_empty_projection_subscript_bundle(
+    output: &mut Module,
+    subscript: &ast::DSubscriptDefinition,
+) -> Result<LocalSubscriptId, InternalCompilationError> {
+    Ok(output.add_subscript_anonymous(ModuleSubscriptDefinition {
+        signature: subscript_signature(subscript)?,
+        ref_member: None,
+        mut_member: None,
+    }))
 }
 
 pub(super) fn attach_subscript_member(

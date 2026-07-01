@@ -113,12 +113,12 @@ impl VariantValue {
 
 /// Hidden constraint evidence captured by first-class capabilities.
 ///
-/// Typeclass constraints are represented as dictionaries. Field indices are
-/// also passed here because they are hidden evidence for generic projection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Typeclass constraints are represented as dictionaries. Projection
+/// constraints are represented as first-class subscript capabilities.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HiddenEvidenceArgValue {
     TraitDictionary(TraitDictionaryId),
-    FieldIndex(isize),
+    Subscript(B<SubscriptValue>),
 }
 
 /// Runtime representation of a first-class function.
@@ -184,14 +184,14 @@ impl FunctionValue {
 
 /// Runtime representation of a first-class subscript capability.
 ///
-/// Subscript values carry implementation identity plus reserved hidden evidence.
+/// Subscript values carry implementation identity plus captured hidden evidence.
 /// Receiver and index/application arguments belong to subscript application,
 /// not to the value itself.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubscriptValue {
     pub subscript: SubscriptId,
     /// Hidden dictionary/evidence arguments supplied separately from value arguments.
-    /// Source-level first-class subscripts currently reject cases that would fill this.
+    /// Generic structural projection uses this to capture generated subscript evidence.
     pub hidden_args: Vec<HiddenEvidenceArgValue>,
 }
 
@@ -566,7 +566,7 @@ impl Display for LiteralValue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::module::{LocalFunctionId, LocalImplId, ModuleId, id::Id};
+    use crate::module::{LocalFunctionId, LocalImplId, LocalSubscriptId, ModuleId, id::Id};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use ustr::ustr;
 
@@ -637,6 +637,24 @@ mod tests {
         assert_eq!(rust_drop_count(), 0);
         value.discard_storage();
         assert_eq!(rust_drop_count(), 3);
+    }
+
+    #[test]
+    fn subscript_value_hidden_args_can_hold_nested_subscript_evidence() {
+        let outer = SubscriptId::new(ModuleId::from_index(0), LocalSubscriptId::from_index(0));
+        let inner = SubscriptId::new(ModuleId::from_index(0), LocalSubscriptId::from_index(1));
+        let value = SubscriptValue {
+            subscript: outer,
+            hidden_args: vec![HiddenEvidenceArgValue::Subscript(b(SubscriptValue::bare(
+                inner,
+            )))],
+        };
+
+        let cloned = value.clone();
+        assert_eq!(cloned, value);
+
+        Value::subscript_value(value).discard_storage();
+        Value::subscript_value(cloned).discard_storage();
     }
 
     #[test]

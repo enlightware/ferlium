@@ -429,6 +429,24 @@ fn array_index_shared_ref_call_does_not_clone() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn array_representation_fields_are_private() {
+    let mut session = TestSession::new();
+    for source in [
+        "let array = [1, 2]; array.len",
+        "let mut array = [1, 2]; array.len = 3",
+        "let array = [1, 2]; array.capacity",
+        "let array = [1, 2]; array.start",
+        "let array = [1, 2]; array.data",
+    ] {
+        match session.fail_compilation(source).into_inner() {
+            CompilationErrorImpl::PrivateReprAccess { .. } => {}
+            other => panic!("expected private array representation field access, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_index_function_is_std_internal() {
     let mut session = TestSession::new();
     for source in [
@@ -469,7 +487,7 @@ fn array_index_return_preserves_place_tail() {
 
     fn is_place_reference(arena: &ENodeArena, node: ENodeId) -> bool {
         match &arena[node].kind {
-            NodeKind::LoadLocal(_) | NodeKind::Project(_) | NodeKind::ProjectAt(_) => true,
+            NodeKind::LoadLocal(_) | NodeKind::Project(_) => true,
             NodeKind::Apply(app) => app.ty.returns_place(),
             NodeKind::StaticApply(app) => app.ty.returns_place(),
             NodeKind::WithPlace(node) => is_place_reference(arena, node.body),
@@ -834,6 +852,25 @@ fn array_append() {
     assert_val_eq!(
         session.run("let mut a = [2]; array_append(a, 1); a"),
         int_a![2, 1]
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn array_index_read_in_generic_function_snapshots_before_assignment() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc::indoc! { r#"
+            fn swap(a, i, j) {
+                let temp = a[i];
+                a[i] = a[j];
+                a[j] = temp
+            }
+            let mut a = [2, 1];
+            swap(a, 0, 1);
+            a
+        "# }),
+        int_a![1, 2]
     );
 }
 

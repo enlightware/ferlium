@@ -12,6 +12,7 @@ use crate::{FxHashMap, FxHashSet};
 
 use enum_as_inner::EnumAsInner;
 use itertools::Itertools;
+use ustr::Ustr;
 
 use crate::{
     format::{FormatWith, FormatWithData, write_with_separator_and_format_fn},
@@ -97,18 +98,30 @@ where
             index,
             element_ty.format_with(env)
         ),
-        RecordFieldIs {
-            record_ty,
+        ProjectionSubscriptIs {
+            requirement,
             field,
-            element_ty,
+            subscript_ty,
             ..
-        } => write!(
-            f,
-            "{}.{} = {}",
-            record_ty.format_with(env),
-            field,
-            element_ty.format_with(env)
-        ),
+        } => {
+            if requirement.is_structural_only() {
+                write!(
+                    f,
+                    "{}.{} = {}",
+                    subscript_ty.receiver_ty().format_with(env),
+                    field,
+                    subscript_ty.ret.format_with(env)
+                )
+            } else {
+                write!(
+                    f,
+                    "{} projection {} uses {}",
+                    subscript_ty.receiver_ty().format_with(env),
+                    field,
+                    Type::subscript_type(subscript_ty.clone()).format_with(env)
+                )
+            }
+        }
         TypeHasVariant {
             variant_ty,
             tag,
@@ -143,8 +156,22 @@ where
 #[derive(Clone, EnumAsInner)]
 enum AggregatedConstraint {
     Tuple(TupleConstraint),
-    Record(VariantConstraint),
+    Record(RecordConstraint),
     Variant(VariantConstraint),
+}
+
+type RecordConstraint = BTreeMap<Ustr, AggregatedRecordField>;
+
+#[derive(Clone)]
+struct AggregatedRecordField {
+    ty: Type,
+    projection: Option<AggregatedProjectionField>,
+}
+
+#[derive(Clone, Default)]
+struct AggregatedProjectionField {
+    ref_effects: Option<EffType>,
+    mut_effects: Option<EffType>,
 }
 
 fn collect_aggregated_constraint(
@@ -166,18 +193,33 @@ fn collect_aggregated_constraint(
                 .unwrap()
                 .insert(*index, *element_ty);
         }
-        RecordFieldIs {
-            record_ty,
+        ProjectionSubscriptIs {
+            requirement,
             field,
-            element_ty,
+            subscript_ty,
             ..
         } => {
-            aggregated
-                .entry(*record_ty)
-                .or_insert_with(|| AggregatedConstraint::Record(VariantConstraint::new()))
+            let field_entry = aggregated
+                .entry(subscript_ty.receiver_ty())
+                .or_insert_with(|| AggregatedConstraint::Record(RecordConstraint::new()))
                 .as_record_mut()
                 .unwrap()
-                .insert(*field, *element_ty);
+                .entry(*field)
+                .or_insert_with(|| AggregatedRecordField {
+                    ty: subscript_ty.ret,
+                    projection: None,
+                });
+            if !requirement.is_structural_only() {
+                let projection = field_entry
+                    .projection
+                    .get_or_insert_with(AggregatedProjectionField::default);
+                if let Some(member) = &subscript_ty.ref_member {
+                    projection.ref_effects = Some(member.effects.clone());
+                }
+                if let Some(member) = &subscript_ty.mut_member {
+                    projection.mut_effects = Some(member.effects.clone());
+                }
+            }
         }
         TypeHasVariant {
             variant_ty,
@@ -232,8 +274,19 @@ where
         }
         AggregatedConstraint::Record(record) => {
             f.write_str("{ ")?;
-            for (field, element_ty) in record {
-                write!(f, "{}: {}, ", field, element_ty.format_with(env))?;
+            for (field, field_constraint) in record {
+                write!(f, "{}: {}", field, field_constraint.ty.format_with(env))?;
+                if let Some(projection) = field_constraint.projection {
+                    if env.is_light_effect_display() {
+                        if let Some(effects) = light_projection_effects(projection, env) {
+                            write!(f, " ! ")?;
+                            format_effect_binding_value_with_env(&effects, f, env)?;
+                        }
+                    } else {
+                        write_projection_member_effects(projection, f, env)?;
+                    }
+                }
+                f.write_str(", ")?;
             }
             f.write_str("… }")?;
         }
@@ -253,11 +306,61 @@ where
     Ok(())
 }
 
+fn write_projection_member_effects<Env>(
+    projection: AggregatedProjectionField,
+    f: &mut std::fmt::Formatter,
+    env: &Env,
+) -> std::fmt::Result
+where
+    Env: TypeFormatEnv,
+{
+    let mut parts = Vec::new();
+    if let Some(effects) = projection.ref_effects {
+        parts.push(("ref", effects));
+    }
+    if let Some(effects) = projection.mut_effects {
+        parts.push(("mut", effects));
+    }
+    if parts.is_empty() {
+        return Ok(());
+    }
+    f.write_str(" (")?;
+    let mut first = true;
+    for (role, effects) in parts {
+        write_constraint_separator(f, &mut first)?;
+        write!(f, "{role}")?;
+        let effects = env.displayed_effects(&effects);
+        if !effects.is_empty() {
+            write!(f, " ! ")?;
+            format_effect_binding_value_with_env(&effects, f, env)?;
+        }
+    }
+    f.write_str(")")
+}
+
+fn light_projection_effects<Env>(
+    projection: AggregatedProjectionField,
+    env: &Env,
+) -> Option<EffType>
+where
+    Env: TypeFormatEnv,
+{
+    let mut effects = EffType::empty();
+    if let Some(ref_effects) = projection.ref_effects {
+        effects.extend(&env.displayed_effects(&ref_effects));
+    }
+    if let Some(mut_effects) = projection.mut_effects {
+        effects.extend(&env.displayed_effects(&mut_effects));
+    }
+    (!effects.is_empty()).then_some(effects)
+}
+
 #[derive(Default)]
 struct DisplayConstraints<'a> {
     simple_trait_constraints: FxHashMap<Type, Vec<TraitId>>,
     other_trait_constraints: Vec<NonUnaryTraitConstraint<'a>>,
     structural_constraints: BTreeMap<Type, AggregatedConstraint>,
+    other_constraints: Vec<&'a PubTypeConstraint>,
 }
 
 #[derive(Clone, Copy)]
@@ -286,6 +389,7 @@ enum ConstraintDisplayItem<'a> {
         ty: Type,
         constraint: AggregatedConstraint,
     },
+    OtherConstraint(&'a PubTypeConstraint),
 }
 
 impl<'a> DisplayConstraints<'a> {
@@ -340,8 +444,8 @@ impl<'a> DisplayConstraints<'a> {
                 });
             }
             PubTypeConstraint::TupleAtIndexIs { .. }
-            | PubTypeConstraint::RecordFieldIs { .. }
-            | PubTypeConstraint::TypeHasVariant { .. } => {
+            | PubTypeConstraint::TypeHasVariant { .. }
+            | PubTypeConstraint::ProjectionSubscriptIs { .. } => {
                 collect_aggregated_constraint(&mut self.structural_constraints, constraint);
             }
         }
@@ -351,6 +455,7 @@ impl<'a> DisplayConstraints<'a> {
         self.simple_trait_constraints.is_empty()
             && self.other_trait_constraints.is_empty()
             && self.structural_constraints.is_empty()
+            && self.other_constraints.is_empty()
     }
 
     fn format<Env>(&self, f: &mut std::fmt::Formatter, env: &Env) -> std::fmt::Result
@@ -383,6 +488,12 @@ impl<'a> DisplayConstraints<'a> {
                 constraint: constraint.clone(),
             }
         }));
+        items.extend(
+            self.other_constraints
+                .iter()
+                .copied()
+                .map(ConstraintDisplayItem::OtherConstraint),
+        );
         items.sort_by_key(|item| item.sort_key(env));
 
         let mut first = true;
@@ -433,6 +544,15 @@ impl ConstraintDisplayItem<'_> {
                 aggregated_constraint_sort_name(constraint),
                 env,
             ),
+            Self::OtherConstraint(constraint) => {
+                let primary_ty = match constraint {
+                    PubTypeConstraint::ProjectionSubscriptIs { subscript_ty, .. } => {
+                        Some(subscript_ty.receiver_ty())
+                    }
+                    _ => None,
+                };
+                constraint_sort_key(3, primary_ty, "projection".to_string(), env)
+            }
         }
     }
 
@@ -466,6 +586,12 @@ impl ConstraintDisplayItem<'_> {
             Self::StructuralConstraint { ty, constraint } => {
                 write_aggregated_constraint(*ty, constraint.clone(), f, env)
             }
+            Self::OtherConstraint(constraint) => format_pub_type_constraint_with_style(
+                constraint,
+                f,
+                env,
+                TypeConstraintRenderStyle::WhereClause,
+            ),
         }
     }
 }

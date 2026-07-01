@@ -251,9 +251,22 @@ impl UnifiedTypeInference {
             self.normalize_remaining_constraints();
             let constraints = mem::take(&mut self.remaining_ty_constraints);
             let old_remaining_constraints = constraints.iter().collect::<FxHashSet<_>>();
-            let constraint_refs = constraints.iter().collect::<Vec<_>>();
-            self.remaining_ty_constraints =
-                self.unify_constraint_pass(&constraint_refs, |_| false, trait_solver, arena)?;
+            // Defaulting reuses the main constraint aggregation path so late
+            // projection and ADT constraints are canonicalized consistently.
+            let aggregation = self.aggregate_constraints_for_pass(constraints.iter())?;
+            let constraint_refs = aggregation
+                .constraints
+                .iter()
+                .map(|constraint| constraint.as_ref())
+                .collect::<Vec<_>>();
+            let mut remaining = self.unify_constraint_pass(
+                &constraint_refs,
+                |ty| aggregation.is_ty_adt(ty),
+                trait_solver,
+                arena,
+            )?;
+            self.substitute_in_constraints_in_place(&mut remaining);
+            self.remaining_ty_constraints = remaining;
             self.normalize_remaining_constraints();
             let new_remaining_constraints = self
                 .remaining_ty_constraints

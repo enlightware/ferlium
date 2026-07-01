@@ -25,8 +25,8 @@ use crate::{
     ast::{Attribute, UstrSpan},
     compiler::error::RuntimeErrorKind,
     eval::{
-        ControlFlow, EvalControlFlowResult, EvalCtx, RuntimeError, ValOrMut, ValOrMutArgs, cont,
-        drop_frame_owned_locals_on_error, eval_node_with_ctx,
+        ControlFlow, EvalControlFlowResult, EvalCtx, PlaceResult, RuntimeError, ValOrMut,
+        ValOrMutArgs, cont, drop_frame_owned_locals_on_error, eval_node_with_ctx,
     },
     format::{FormatWith, escape_identifier, format_generic_param_list, write_identifier},
     hir::value::{NativeValue, Value},
@@ -504,8 +504,7 @@ pub(crate) fn resolve_arg_passing_for_call<E, C>(
 }
 
 pub(crate) fn call_argument_may_need_temp(arena: &NodeArena, node_id: NodeId) -> bool {
-    !hir::node_is_place_reference(arena, node_id)
-        || hir::place_resolution_may_create_temp(arena, node_id)
+    !hir::node_is_stable_place_reference(arena, node_id)
 }
 
 /// An empty dummy function returning (), used as placeholder
@@ -753,6 +752,70 @@ impl Callable for ContextNativeFn {
     ) -> std::fmt::Result {
         let indent_str = format!("{}{}", "  ".repeat(spacing), "⎸ ".repeat(indent));
         write!(f, "{}{} @ {:p}", indent_str, self.name, self.function)
+    }
+}
+
+/// Compiler-generated addressor for a structural projection with a fixed field index.
+#[derive(Debug, Clone)]
+pub struct StructuralFieldAddressor {
+    index: isize,
+    runtime_argument_passing: Vec<ResolvedArgPassing>,
+}
+
+impl StructuralFieldAddressor {
+    pub fn new(index: usize) -> Self {
+        Self {
+            index: index as isize,
+            runtime_argument_passing: vec![ResolvedArgPassing::MutableRef],
+        }
+    }
+}
+
+impl Callable for StructuralFieldAddressor {
+    fn call(
+        &self,
+        mut args: Vec<ValOrMut>,
+        _ctx: &mut CallCtx,
+        _locals: &[ELocalDecl],
+    ) -> EvalControlFlowResult {
+        debug_assert_eq!(args.len(), 1);
+        let receiver = args.pop().expect("structural field receiver should exist");
+        let mut place = match receiver {
+            ValOrMut::Mut(place) => place,
+            ValOrMut::Val(value) => {
+                value.discard_storage();
+                return Err(RuntimeError::new_native(RuntimeErrorKind::InvalidArgument(
+                    "structural projection receiver".into(),
+                )));
+            }
+            ValOrMut::Ref(_) | ValOrMut::Dictionary(_) => {
+                return Err(RuntimeError::new_native(RuntimeErrorKind::InvalidArgument(
+                    "structural projection receiver".into(),
+                )));
+            }
+        };
+        place.path.push(self.index);
+        cont(Value::native(PlaceResult::new(place)))
+    }
+
+    fn runtime_argument_passing(&self) -> Option<&[ResolvedArgPassing]> {
+        Some(&self.runtime_argument_passing)
+    }
+
+    fn visible_parameter_passing(&self) -> Option<&[ResolvedArgPassing]> {
+        Some(&self.runtime_argument_passing)
+    }
+
+    fn format_ind(
+        &self,
+        f: &mut std::fmt::Formatter,
+        _locals: &[ELocalDecl],
+        _env: &ModuleEnv<'_>,
+        spacing: usize,
+        indent: usize,
+    ) -> std::fmt::Result {
+        let indent_str = format!("{}{}", "  ".repeat(spacing), "⎸ ".repeat(indent));
+        write!(f, "{}structural field addressor {}", indent_str, self.index)
     }
 }
 

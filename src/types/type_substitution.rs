@@ -150,6 +150,24 @@ pub fn substitute_fn_type_in_place(fn_ty: &mut FnType, substituer: &mut impl Typ
     fn_ty.ret = remap_local_type(fn_ty.ret, &new_tys);
 }
 
+/// Recursively substitute all inner types in a subscript type in place.
+pub fn substitute_subscript_type_in_place(
+    subscript_ty: &mut SubscriptType,
+    substituer: &mut impl TypeSubstituer,
+) {
+    let mut kinds = Vec::new();
+    let mut seen = FxHashMap::default();
+    *subscript_ty = substitute_subscript_type_rec(subscript_ty, substituer, &mut kinds, &mut seen);
+    if kinds.is_empty() {
+        return;
+    }
+    let new_tys = store_types(&kinds);
+    for arg in &mut subscript_ty.args {
+        arg.ty = remap_local_type(arg.ty, &new_tys);
+    }
+    subscript_ty.ret = remap_local_type(subscript_ty.ret, &new_tys);
+}
+
 fn remap_local_type(ty: Type, new_tys: &[Type]) -> Type {
     ty.world()
         .map_or_else(|| new_tys[ty.index() as usize], |_| ty)

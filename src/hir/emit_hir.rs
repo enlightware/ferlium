@@ -37,8 +37,9 @@ use crate::{
     internal_compilation_error,
     module::{
         ConcreteTraitImplKey, LocalFunctionId, LocalImplId, LocalSubscriptId, Module, ModuleEnv,
-        ModuleFunction, ModuleId, Path as ModulePath, PendingModuleFunction, TraitImpl,
-        UModuleFunction, YieldProvenance, build_dictionary_value, id::Id,
+        ModuleFunction, ModuleId, Path as ModulePath,
+        PendingGeneratedStructuralProjectionSubscripts, PendingModuleFunction, ProjectionKey,
+        TraitImpl, UModuleFunction, YieldProvenance, build_dictionary_value, id::Id,
     },
     std::value::{
         is_function_surface_only_value_trait_application, is_value_trait_for_function_type,
@@ -185,6 +186,9 @@ fn fill_node_effect_vars(
             fill_fn_inst_data_effect_vars(&app.inst_data, vars);
         }
         GetFunction(get_fn) => fill_fn_inst_data_effect_vars(&get_fn.inst_data, vars),
+        GetSubscript(get_subscript) => {
+            fill_fn_inst_data_effect_vars(&get_subscript.inst_data, vars)
+        }
         GetTraitMethod(get_method) => {
             get_method
                 .input_tys
@@ -231,8 +235,8 @@ fn fill_node_effect_vars(
 fn fill_fn_inst_data_effect_vars(inst_data: &hir::FnInstData, vars: &mut FxHashSet<EffectVar>) {
     for req in &inst_data.dicts_req {
         match req {
-            hir::dictionary::DictionaryReq::FieldIndex { ty, .. } => {
-                ty.fill_with_inner_effect_vars(vars);
+            hir::dictionary::DictionaryReq::ProjectionSubscript { subscript_ty, .. } => {
+                subscript_ty.fill_with_inner_effect_vars(vars);
             }
             hir::dictionary::DictionaryReq::TraitImpl {
                 input_tys,
@@ -397,8 +401,15 @@ pub(super) fn borrow_check_and_elaborate_dict(
     module_inst_data: &FxHashMap<LocalFunctionId, ExtraParameters>,
     id: &LocalFunctionId,
 ) -> Result<(), InternalCompilationError> {
+    let generated_projection_subscripts =
+        PendingGeneratedStructuralProjectionSubscripts::new(output);
     let mut solver = trait_solver_from_module!(output, others);
-    let mut ctx = DictElaborationCtx::new(dicts, Some(module_inst_data), &mut solver);
+    let mut ctx = DictElaborationCtx::new_with_generated_projection_subscripts(
+        dicts,
+        Some(module_inst_data),
+        &mut solver,
+        generated_projection_subscripts,
+    );
     for function_id in function_and_associated_lambdas(id, associated_lambdas) {
         let function_slot = &mut output.functions[function_id.as_index()];
         borrow_check_and_elaborate_pending_function(
@@ -409,11 +420,15 @@ pub(super) fn borrow_check_and_elaborate_dict(
             function_id,
         )?;
     }
+    let generated_projection_subscripts = ctx.take_generated_projection_subscripts();
     let generated = solver.commit(
         &mut output.functions,
         &mut output.def_table,
         pending_functions,
     );
+    if let Some(generated_projection_subscripts) = generated_projection_subscripts {
+        generated_projection_subscripts.commit(output);
+    }
     elaborate_generated_functions(output, others, pending_functions, generated)?;
     Ok(())
 }
@@ -593,6 +608,15 @@ fn module_implementation_emissions<'a>(
                     )),
                     kind: EmitFunctionKind::SubscriptMember {
                         subscript_name: subscript_def.name.0,
+                        projection_key: subscript_def.projection_receiver.map(
+                            |(receiver_ty, _)| {
+                                ProjectionKey::nominal_for_receiver_ty(
+                                    receiver_ty,
+                                    subscript_def.name.0,
+                                )
+                                .expect("projection subscript receiver should be a named type")
+                            },
+                        ),
                         provenance,
                         requires_mutable_yield: member_def.mode.mut_member,
                     },
@@ -775,7 +799,7 @@ pub(crate) fn emit_module_with_capabilities(
 
     emit_auto_value_impls(&mut output, &mut solver_arena, others, &source.impls)?;
 
-    let subscript_ids = predeclare_subscripts(&mut output, &source)?;
+    let subscript_ids = predeclare_subscripts(&mut output, &source, others)?;
 
     // Process each implementation SCC one by one.
     for mut scc in sorted_sccs.into_iter().rev() {

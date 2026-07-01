@@ -81,6 +81,7 @@ pub fn desugar_expr_with_empty_ctx(
     let mut ctx = DesugarCtx::new(
         &empty_fn_map,
         &empty_subscript_map,
+        &empty_subscript_map,
         module_env,
         &generic_ty_params,
         &generic_eff_params,
@@ -339,6 +340,9 @@ pub(crate) fn desugar(
         ),
         FieldAccess(data) => {
             let FieldAccessData { expr, name } = *data;
+            if let Some(member_deps) = ctx.projection_subscript_map.get(&name.0) {
+                ctx.fn_deps.extend(member_deps.iter().copied());
+            }
             ExprKind::field_access(
                 desugar(expr, ctx, parsed_arena, desugared_arena, modules_used)?,
                 name,

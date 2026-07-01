@@ -34,7 +34,8 @@ values->[first_slot]
 Inside `->[name]`, a visible local named `name` is treated as a subscript value. Otherwise `name` is resolved as a named subscript in the module environment.
 Unannotated function parameters used this way infer a first-class subscript capability type.
 Abstract first-class subscript use is driven through the yielded interface; addressor-place subscripts are adapted with empty brackets when passed to that interface.
-First-class subscript values that must capture generic constraint evidence are not implemented yet; use those subscripts directly by name for now.
+Generic projections also pass hidden first-class subscript evidence and select the `ref` or `mut` member required by the use site; if the receiver later resolves to a concrete structural field, elaboration collapses back to the direct/addressor path.
+Source-named subscript values capture the hidden generic evidence needed by their selected type.
 
 If the subscript result itself should be called as a function, parenthesize the subscript access:
 
@@ -47,28 +48,50 @@ Subscripts are declared as a single signature with one or two member bodies:
 ```ferlium
 subscript first(values: &mut [int]) -> int {
     ref {
-        return values[0]
+        values[0]
     }
 
     mut {
-        return values[0]
+        values[0]
     }
 }
 ```
+
+Subscripts can also be registered as dot projections for a named receiver type:
+
+```ferlium
+subscript Secret.value(self) -> int {
+    ref mut {
+        self.items[0]
+    }
+}
+```
+
+This makes `secret.value` resolve through the subscript. The qualified receiver (`Secret.value`) provides the projected type; `self` is only the receiver binding name and must not repeat the type. Generic receivers name the receiver type's own parameters in declaration order:
+
+```ferlium
+subscript Pair<A, B>.left(self) -> A {
+    ref mut {
+        self.left
+    }
+}
+```
+
+Explicit projections are rejected when they duplicate an accessible structural field. They are allowed for `#[private_repr]` types, where the representation field is an implementation detail.
 
 `ref` is selected for reads. `mut` is selected for assignment and compound assignment. A single shared member can serve both roles:
 
 ```ferlium
 subscript first(values: &mut [int]) -> int {
     ref mut {
-        return values[0]
+        values[0]
     }
 }
 ```
 
 When `ref mut` is used, it is the whole bundle body: it cannot be combined with separate `ref` or `mut` members.
 
-A member without `yield` is an addressor subscript. It returns a direct place in existing caller-visible storage. This is the shape used by standard array indexing.
+A member without `yield` is an addressor subscript. Its tail expression must be a place in existing caller-visible storage; explicit `return place` is also accepted. This is the shape used by standard array indexing and simple field-like projections.
 
 A member with `yield` is a scoped subscript:
 

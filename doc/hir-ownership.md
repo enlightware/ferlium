@@ -11,7 +11,7 @@ This document is about source-level ownership semantics and the HIR operations t
 # Values, Places, and Locals
 
 A HIR expression either produces an owned value, denotes a caller-rooted place in existing storage, or drives a scoped yielded place.
-Caller-rooted place-like nodes include `LoadLocal`, projections (`Project`, `ProjectAt`), and call nodes whose selected implementation has `CallResultConvention::ADDRESSOR_PLACE`.
+Caller-rooted place-like nodes include `LoadLocal`, direct projections (`Project`), and call nodes whose selected implementation has `CallResultConvention::ADDRESSOR_PLACE`.
 SSA must not treat every `LoadLocal` as an owned read: ownership transfer, clone, and copy are explicit HIR operations.
 
 When a place-producing projection or call needs a non-place base, HIR generation stores that base in an explicit owned temporary local first.
@@ -20,7 +20,10 @@ The consumer then uses a normal place rooted at that temporary, and the surround
 Addressor-place call nodes are place-like nodes.
 Native addressors are registered as subscript members when they model projection, and source subscript members without `yield` infer `SubscriptResultConvention::AddressorPlace` from their body shape.
 A subscript bundle does not have a `FnType`; each selected `ref` or `mut` member is emitted as a member function whose definition and selected HIR call metadata carry the wrapper call result convention.
-First-class subscript values currently carry the bundle identity; support for captured hidden evidence is reserved for generic constrained subscript values.
+First-class subscript values carry the bundle identity and can carry hidden evidence for constrained generic use.
+Generic projection evidence is passed as a real `SubscriptValue`; explicit projection subscripts can satisfy it directly, and the compiler generates internal addressor subscripts for structural fields when needed.
+Unelaborated generic `FieldAccess` records whether the use needs the `ref` or `mut` member; elaboration either lowers a still-generic receiver through that subscript evidence or collapses a receiver that has resolved concrete back to the direct field/addressor path.
+Generated structural projection values currently do not need captured hidden evidence themselves.
 `SubscriptApply` selects a member at the use site and carries the same selected call metadata.
 When a first-class subscript is used through an inferred abstract capability, the selected HIR call uses the yielded interface; a concrete addressor-place member may still be adapted by the runtime driver with no epilogue.
 After HIR construction the selected call metadata is the source of truth: consumers handle any call node with `AddressorPlace` like a place when a place is required, or materialize it with `CloneValue` when an owned value is required.

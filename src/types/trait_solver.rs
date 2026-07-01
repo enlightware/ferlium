@@ -7,7 +7,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use std::{borrow::Cow, iter::repeat, mem};
+use std::{borrow::Cow, iter::repeat, mem, rc::Rc};
 
 use crate::{FxHashMap, FxHashSet, Modules, types::type_scheme::PubTypeConstraint};
 
@@ -17,6 +17,7 @@ use crate::{
     Location,
     compiler::error::InternalCompilationError,
     containers::b,
+    hir::dictionary::DictionaryReq,
     hir::emit_value_impl::{function_value_method, generic_value_methods_for_type},
     hir::function::CallableDefinition,
     hir::function::{PendingArgPassing, PendingValueArgPassing, ResolvedValueArgPassing},
@@ -29,9 +30,9 @@ use crate::{
         self, BlanketImpls, BlanketTraitImpls, ConcreteTraitImplKey, CurrentTypeItems, Def,
         DefKind, DefTable, FunctionId, LocalDecl, LocalDeclId, LocalFunctionId, LocalImplId,
         Module, ModuleEnv, ModuleFunction, ModuleId, PendingFunctionBody, PendingFunctionCollector,
-        PendingModuleFunction, QualifiedNameEnv, ResolvedValueLayout, TraitDictionary, TraitId,
-        TraitImpl, TraitImplId, TraitImpls, TypeDefId, build_dictionary_value, id::Id,
-        unique_generated_name,
+        PendingModuleFunction, ProjectionKey, QualifiedNameEnv, ResolvedValueLayout,
+        TraitDictionary, TraitId, TraitImpl, TraitImplId, TraitImpls, TypeDefId,
+        build_dictionary_value, id::Id, unique_generated_name,
     },
     std::{
         STD_MODULE_ID,
@@ -45,7 +46,7 @@ use crate::{
     types::effects::{EffType, Effect, EffectVar},
     types::mutability::{MutType, MutVar},
     types::r#trait::{Trait, TraitAssociatedConstIndex, TraitMethodIndex},
-    types::r#type::{CallImplType, FnArgType, Type, TypeDef, TypeKind, TypeVar},
+    types::r#type::{CallImplType, FnArgType, SubscriptType, Type, TypeDef, TypeKind, TypeVar},
     types::type_inference::unify::UnifiedTypeInference,
     types::type_like::{TypeLike, instantiate_types},
     types::type_mapper::{BitmapInstantiationMapper, TypeMapper},
@@ -67,6 +68,8 @@ pub struct TraitSolver<'a> {
     pub current_functions: FxHashMap<Ustr, LocalFunctionId>,
     /// Current module dependencies discovered while solving.
     pub deps: &'a mut FxHashSet<ModuleId>,
+    /// Current-module projection subscript capability types, materialized eagerly for real solvers and lazily for probes.
+    current_projection_subscript_types: CurrentProjectionSubscriptTypes<'a>,
     /// Collector for newly created current module functions.
     pub fn_collector: PendingFunctionCollector,
     /// Other modules available for fetching trait implementations and normal functions (read only).
@@ -89,6 +92,7 @@ impl<'a> TraitSolver<'a> {
         impls: &'a mut TraitImpls,
         current_functions: FxHashMap<Ustr, LocalFunctionId>,
         deps: &'a mut FxHashSet<ModuleId>,
+        current_projection_subscript_types: CurrentProjectionSubscriptTypes<'a>,
         fn_collector: PendingFunctionCollector,
         others: &'a Modules,
     ) -> Self {
@@ -98,6 +102,7 @@ impl<'a> TraitSolver<'a> {
             impls,
             current_functions,
             deps,
+            current_projection_subscript_types,
             fn_collector,
             others,
             recursion_depth: 0,
@@ -150,6 +155,10 @@ macro_rules! trait_solver_from_module {
     ($module:expr, $program:expr) => {{
         let current_functions =
             crate::types::trait_solver::current_function_map(&$module.def_table);
+        let current_projection_subscript_types =
+            crate::types::trait_solver::CurrentProjectionSubscriptTypes::from_map(
+                crate::types::trait_solver::current_projection_subscript_type_map(&$module),
+            );
         let function_count = $module.functions.len();
         TraitSolver::new(
             crate::module::CurrentTypeItems::new(
@@ -160,10 +169,12 @@ macro_rules! trait_solver_from_module {
                 &$module.type_aliases,
                 $module.type_defs.as_slice(),
                 $module.traits.as_slice(),
+                &$module.projection_subscripts,
             ),
             &mut $module.impls,
             current_functions,
             &mut $module.deps,
+            current_projection_subscript_types,
             crate::module::PendingFunctionCollector::new(function_count),
             $program,
         )
@@ -176,6 +187,7 @@ pub(crate) struct TraitSolverProbe<'a> {
     current_type_items: CurrentTypeItems<'a>,
     impls: Cow<'a, TraitImpls>,
     current_functions: FxHashMap<Ustr, LocalFunctionId>,
+    current_projection_subscript_types: CurrentProjectionSubscriptTypes<'a>,
     deps: FxHashSet<ModuleId>,
     fn_collector: PendingFunctionCollector,
     active_improvements: FxHashSet<TraitImprovementKey>,
@@ -264,11 +276,85 @@ pub(crate) fn current_function_map(def_table: &DefTable) -> FxHashMap<Ustr, Loca
         .collect()
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct CurrentProjectionSubscriptTypes<'a> {
+    source: CurrentProjectionSubscriptTypeSource<'a>,
+    types: Option<Rc<FxHashMap<ProjectionKey, SubscriptType>>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CurrentProjectionSubscriptTypeSource<'a> {
+    Module(&'a Module),
+    Materialized,
+}
+
+impl<'a> CurrentProjectionSubscriptTypes<'a> {
+    pub(crate) fn from_module(module: &'a Module) -> Self {
+        Self {
+            source: CurrentProjectionSubscriptTypeSource::Module(module),
+            types: None,
+        }
+    }
+
+    pub(crate) fn from_map(types: FxHashMap<ProjectionKey, SubscriptType>) -> Self {
+        Self {
+            source: CurrentProjectionSubscriptTypeSource::Materialized,
+            types: Some(Rc::new(types)),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn empty() -> Self {
+        Self::from_map(FxHashMap::default())
+    }
+
+    fn get(&mut self, key: ProjectionKey) -> Option<SubscriptType> {
+        if self.types.is_none() {
+            let CurrentProjectionSubscriptTypeSource::Module(source) = self.source else {
+                return None;
+            };
+            self.types = Some(Rc::new(current_projection_subscript_type_map(source)));
+        }
+        self.types
+            .as_ref()
+            .and_then(|types| types.get(&key).cloned())
+    }
+
+    fn cache_materialized_types_from(&mut self, other: &CurrentProjectionSubscriptTypes<'_>) {
+        if let Some(types) = &other.types {
+            self.types = Some(Rc::clone(types));
+        }
+    }
+}
+
+pub(crate) fn current_projection_subscript_type_map(
+    module: &Module,
+) -> FxHashMap<ProjectionKey, SubscriptType> {
+    module
+        .projection_subscripts
+        .iter()
+        .filter_map(|(key, entry)| {
+            let subscript = module.get_subscript_by_id(entry.subscript)?;
+            Some((*key, subscript.type_scheme(module).ty))
+        })
+        .collect()
+}
+
 /// Stub `TraitOutputQuery` for paths that statically never invoke a query
 /// (concrete candidate matching only unifies types and never reaches `match_blanket_impl`).
 struct NeverProbe;
 
 impl TraitOutputQuery for NeverProbe {
+    fn unify_non_trait_constraint_query(
+        &mut self,
+        ty_inf: &mut UnifiedTypeInference,
+        constraint: &PubTypeConstraint,
+        _assumptions: ConstraintAssumptions<'_>,
+        _arena: &mut NodeArena,
+    ) -> Result<Option<PubTypeConstraint>, InternalCompilationError> {
+        ty_inf.unify_structural_pub_constraint(constraint)
+    }
+
     fn is_compiler_provided_no_output_trait_query(
         &mut self,
         _trait_id: TraitId,
@@ -314,6 +400,14 @@ impl TraitOutputQuery for NeverProbe {
 /// solver, which may materialize concrete impls, or against `TraitSolverProbe`,
 /// which answers the same questions through a scratch overlay.
 trait TraitOutputQuery {
+    fn unify_non_trait_constraint_query(
+        &mut self,
+        ty_inf: &mut UnifiedTypeInference,
+        constraint: &PubTypeConstraint,
+        assumptions: ConstraintAssumptions<'_>,
+        arena: &mut NodeArena,
+    ) -> Result<Option<PubTypeConstraint>, InternalCompilationError>;
+
     fn is_compiler_provided_no_output_trait_query(
         &mut self,
         trait_id: TraitId,
@@ -372,6 +466,17 @@ impl<'solver, 'a> LazyTraitSolverProbe<'solver, 'a> {
 }
 
 impl TraitOutputQuery for LazyTraitSolverProbe<'_, '_> {
+    fn unify_non_trait_constraint_query(
+        &mut self,
+        ty_inf: &mut UnifiedTypeInference,
+        constraint: &PubTypeConstraint,
+        assumptions: ConstraintAssumptions<'_>,
+        arena: &mut NodeArena,
+    ) -> Result<Option<PubTypeConstraint>, InternalCompilationError> {
+        self.probe()
+            .unify_non_trait_constraint_query(ty_inf, constraint, assumptions, arena)
+    }
+
     fn is_compiler_provided_no_output_trait_query(
         &mut self,
         trait_id: TraitId,
@@ -464,6 +569,9 @@ impl<'a> TraitSolverProbe<'a> {
             current_type_items: CurrentTypeItems::new_from_module(module),
             impls: Cow::Borrowed(&module.impls),
             current_functions: current_function_map(&module.def_table),
+            current_projection_subscript_types: CurrentProjectionSubscriptTypes::from_module(
+                module,
+            ),
             deps: module.deps.clone(),
             fn_collector: PendingFunctionCollector::new(module.functions.len()),
             active_improvements: FxHashSet::default(),
@@ -481,6 +589,7 @@ impl<'a> TraitSolverProbe<'a> {
             current_type_items: solver.current_type_items,
             impls: Cow::Owned(impls),
             current_functions: solver.current_functions.clone(),
+            current_projection_subscript_types: solver.current_projection_subscript_types.clone(),
             deps: solver.deps.clone(),
             fn_collector: solver.fn_collector.clone(),
             active_improvements: solver.active_improvements.clone(),
@@ -500,6 +609,7 @@ impl<'a> TraitSolverProbe<'a> {
             self.impls.to_mut(),
             mem::take(&mut self.current_functions),
             &mut self.deps,
+            self.current_projection_subscript_types.clone(),
             fn_collector,
             self.others,
         );
@@ -509,6 +619,8 @@ impl<'a> TraitSolverProbe<'a> {
         self.active_improvements = mem::take(&mut solver.active_improvements);
         self.private_impl_scope = mem::take(&mut solver.private_impl_scope);
         self.current_functions = mem::take(&mut solver.current_functions);
+        self.current_projection_subscript_types
+            .cache_materialized_types_from(&solver.current_projection_subscript_types);
         self.fn_collector = mem::replace(
             &mut solver.fn_collector,
             PendingFunctionCollector::new(initial_count),
@@ -528,6 +640,18 @@ impl<'a> TraitSolverProbe<'a> {
 }
 
 impl TraitOutputQuery for TraitSolverProbe<'_> {
+    fn unify_non_trait_constraint_query(
+        &mut self,
+        ty_inf: &mut UnifiedTypeInference,
+        constraint: &PubTypeConstraint,
+        assumptions: ConstraintAssumptions<'_>,
+        arena: &mut NodeArena,
+    ) -> Result<Option<PubTypeConstraint>, InternalCompilationError> {
+        self.with_solver(|solver| {
+            ty_inf.unify_pub_constraint(constraint, assumptions, |_| false, solver, arena)
+        })
+    }
+
     fn is_compiler_provided_no_output_trait_query(
         &mut self,
         trait_id: TraitId,
@@ -603,15 +727,11 @@ enum TraitImprovementCandidate {
     },
 }
 
-/// A nested trait constraint from a matched blanket impl after its inputs have
-/// been fully resolved.
-struct ResolvedTraitConstraint {
+/// A runtime hidden requirement from a matched blanket impl after substitution.
+struct ResolvedRuntimeRequirement {
     /// Original source order of the constraint in the blanket impl.
     index: usize,
-    trait_id: TraitId,
-    input_tys: Vec<Type>,
-    output_tys: Vec<Type>,
-    output_effs: Vec<EffType>,
+    req: DictionaryReq,
 }
 
 pub(crate) struct DerivedImplSnapshot {
@@ -655,11 +775,11 @@ enum BlanketImplMatch {
     /// constraints remain unresolved.
     Unknown,
     /// The blanket impl matches, yielding instantiated output types and effects
-    /// and the resolved nested trait constraints in source order.
+    /// and the resolved runtime hidden requirements in source order.
     Yes {
         output_tys: Vec<Type>,
         output_effs: Vec<EffType>,
-        resolved_constraints: Vec<ResolvedTraitConstraint>,
+        runtime_requirements: Vec<ResolvedRuntimeRequirement>,
     },
 }
 
@@ -761,6 +881,66 @@ impl<'a> TraitSolver<'a> {
                 .and_then(|entry| entry.module())
                 .unwrap_or_else(|| panic!("Type definition module #{} is unavailable", id.module))
                 .type_def(id)
+        })
+    }
+
+    pub(crate) fn projection_subscript_type(
+        &mut self,
+        receiver_ty: Type,
+        field: Ustr,
+    ) -> Option<SubscriptType> {
+        let (receiver_def, receiver_params) = {
+            let data = receiver_ty.data();
+            let TypeKind::Named(named) = &*data else {
+                return None;
+            };
+            (named.def, named.params.clone())
+        };
+        let key = ProjectionKey::nominal(receiver_def, field);
+        let subscript = self.projection_subscript_id(key)?;
+        let subscript_ty = if subscript.module == self.current_type_items.module.id {
+            self.current_projection_subscript_types.get(key)?
+        } else {
+            let module = self
+                .others
+                .get(subscript.module)
+                .and_then(|entry| entry.module())?;
+            module
+                .get_subscript_by_id(subscript.subscript)?
+                .type_scheme(module)
+                .ty
+        };
+        let subst = (
+            receiver_params
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(index, ty)| (TypeVar::new(index as u32), ty))
+                .collect(),
+            FxHashMap::default(),
+        );
+        Some(subscript_ty.instantiate_simple(&subst))
+    }
+
+    pub(crate) fn projection_subscript_id(
+        &mut self,
+        key: ProjectionKey,
+    ) -> Option<module::SubscriptId> {
+        if let Some(entry) = self.current_type_items.projection_subscripts.get(&key) {
+            return Some(module::SubscriptId::new(
+                self.current_type_items.module.id,
+                entry.subscript,
+            ));
+        }
+
+        self.others.enumerate().find_map(|(module_id, entry, _)| {
+            let module = entry.module()?;
+            let entry = module.get_projection_subscript(key)?;
+            if entry.visibility != module::Visibility::Public {
+                return None;
+            }
+            self.deps.insert(module_id);
+            Some(module::SubscriptId::new(module_id, entry.subscript))
         })
     }
 
@@ -1574,7 +1754,7 @@ impl<'a> TraitSolver<'a> {
             .into_iter()
             .enumerate()
             .collect::<Vec<_>>();
-        let mut resolved_constraints = Vec::new();
+        let mut runtime_requirements = Vec::new();
 
         // Then unify the instantiated blanket input and output types against
         // the requested trait application. Propagating output equalities before
@@ -1626,10 +1806,31 @@ impl<'a> TraitSolver<'a> {
                 )) = substituted_constraint.as_have_trait()
                 else {
                     debug_assert!(substituted_constraint.as_have_trait().is_none());
-                    if let Some(unresolved) =
-                        ty_inf.unify_structural_pub_constraint(&substituted_constraint)?
-                    {
+                    let runtime_requirement = match &substituted_constraint {
+                        PubTypeConstraint::ProjectionSubscriptIs {
+                            requirement,
+                            field,
+                            subscript_ty,
+                            ..
+                        } => Some(DictionaryReq::new_projection_subscript(
+                            *requirement,
+                            *field,
+                            subscript_ty.clone(),
+                        )),
+                        _ => None,
+                    };
+                    if let Some(unresolved) = query.unify_non_trait_constraint_query(
+                        ty_inf,
+                        &substituted_constraint,
+                        assumptions,
+                        arena,
+                    )? {
                         still_remaining.push((*constraint_index, unresolved));
+                    } else if let Some(req) = runtime_requirement {
+                        runtime_requirements.push(ResolvedRuntimeRequirement {
+                            index: *constraint_index,
+                            req,
+                        });
                     }
                     continue;
                 };
@@ -1715,12 +1916,14 @@ impl<'a> TraitSolver<'a> {
                         return Ok(BlanketImplMatch::No);
                     }
                 }
-                resolved_constraints.push(ResolvedTraitConstraint {
+                runtime_requirements.push(ResolvedRuntimeRequirement {
                     index: *constraint_index,
-                    trait_id,
-                    input_tys: constraint_inputs,
-                    output_tys: constraint_outputs,
-                    output_effs: constraint_output_effs,
+                    req: DictionaryReq::new_trait_impl(
+                        trait_id,
+                        constraint_inputs,
+                        constraint_outputs,
+                        constraint_output_effs,
+                    ),
                 });
             }
 
@@ -1764,12 +1967,14 @@ impl<'a> TraitSolver<'a> {
                             {
                                 return Ok(BlanketImplMatch::No);
                             }
-                            resolved_constraints.push(ResolvedTraitConstraint {
+                            runtime_requirements.push(ResolvedRuntimeRequirement {
                                 index: constraint_index,
-                                trait_id,
-                                input_tys: constraint_inputs,
-                                output_tys: constraint_outputs,
-                                output_effs: constraint_output_effs,
+                                req: DictionaryReq::new_trait_impl(
+                                    trait_id,
+                                    constraint_inputs,
+                                    constraint_outputs,
+                                    constraint_output_effs,
+                                ),
                             });
                         }
                         break;
@@ -1803,16 +2008,33 @@ impl<'a> TraitSolver<'a> {
             }
         }
 
-        resolved_constraints.sort_by_key(|constraint| constraint.index);
         if ty_inf.finalize_effect_dependencies().is_err() {
             return Ok(BlanketImplMatch::No);
         }
+        for requirement in &mut runtime_requirements {
+            match &mut requirement.req {
+                DictionaryReq::ProjectionSubscript { subscript_ty, .. } => {
+                    ty_inf.substitute_in_subscript_type_in_place(subscript_ty);
+                }
+                DictionaryReq::TraitImpl {
+                    input_tys,
+                    output_tys,
+                    output_effs,
+                    ..
+                } => {
+                    ty_inf.substitute_in_types_in_place(input_tys);
+                    ty_inf.substitute_in_types_in_place(output_tys);
+                    ty_inf.substitute_in_effect_types_in_place(output_effs);
+                }
+            }
+        }
+        runtime_requirements.sort_by_key(|requirement| requirement.index);
         ty_inf.substitute_in_types_in_place(&mut imp_output_tys);
         ty_inf.substitute_in_effect_types_in_place(&mut imp_output_effs);
         Ok(BlanketImplMatch::Yes {
             output_tys: imp_output_tys,
             output_effs: imp_output_effs,
-            resolved_constraints,
+            runtime_requirements,
         })
     }
 
@@ -1987,7 +2209,8 @@ impl<'a> TraitSolver<'a> {
         &mut self,
         function_id: FunctionId,
         definition: &CallableDefinition,
-        constraint_dict_infos: &[(NodeKind, Type)],
+        explicit_runtime_arg_infos: &[(NodeKind, Type)],
+        runtime_requirements: Vec<DictionaryReq>,
         fn_span: Location,
     ) -> Result<(PendingFunctionBody, Vec<LocalDecl>), InternalCompilationError> {
         let locals = definition.gen_locals_no_bounds(
@@ -1996,7 +2219,7 @@ impl<'a> TraitSolver<'a> {
         );
         let mut body_arena = NodeArena::default();
 
-        let constraint_dict_nodes = constraint_dict_infos
+        let explicit_runtime_args = explicit_runtime_arg_infos
             .iter()
             .map(|(kind, ty)| {
                 body_arena.alloc(Node::new(
@@ -2035,14 +2258,14 @@ impl<'a> TraitSolver<'a> {
             function: function_id,
             function_path: None,
             function_span: fn_span,
-            extra_arguments: constraint_dict_nodes,
+            extra_arguments: explicit_runtime_args,
             argument_names: definition.arg_names.clone(),
             arguments,
             ty: CallImplType::new(
                 definition.ty_scheme.ty.clone(),
                 definition.result_convention,
             ),
-            inst_data: FnInstData::none(),
+            inst_data: FnInstData::new(runtime_requirements),
         }));
         let apply_id = body_arena.alloc(Node::new(
             apply,
@@ -2222,49 +2445,131 @@ impl<'a> TraitSolver<'a> {
         Ok((get_dictionary(impl_id), dictionary_ty))
     }
 
-    fn materialize_constraint_dictionary_infos(
+    fn runtime_requirements_from_resolved(
+        &self,
+        resolved_requirements: &[ResolvedRuntimeRequirement],
+    ) -> Vec<DictionaryReq> {
+        resolved_requirements
+            .iter()
+            .filter_map(|resolved| match &resolved.req {
+                DictionaryReq::ProjectionSubscript { .. } => Some(resolved.req.clone()),
+                DictionaryReq::TraitImpl {
+                    trait_id,
+                    input_tys,
+                    output_tys,
+                    output_effs,
+                } => {
+                    let trait_def = self.trait_def(*trait_id);
+                    if !trait_def.has_runtime_dictionary_entries() {
+                        None
+                    } else {
+                        Some(DictionaryReq::new_trait_impl(
+                            *trait_id,
+                            input_tys.clone(),
+                            output_tys.clone(),
+                            output_effs.clone(),
+                        ))
+                    }
+                }
+            })
+            .collect()
+    }
+
+    fn validate_runtime_requirements(
         &mut self,
-        resolved_constraints: impl IntoIterator<Item = ResolvedTraitConstraint>,
+        resolved_requirements: &[ResolvedRuntimeRequirement],
         fn_span: Location,
         arena: &mut NodeArena,
         validate_outputs: bool,
-    ) -> Result<Option<Vec<(NodeKind, Type)>>, InternalCompilationError> {
-        let mut constraint_dict_infos = Vec::new();
-        for resolved_constraint in resolved_constraints {
+    ) -> Result<bool, InternalCompilationError> {
+        for resolved_requirement in resolved_requirements {
+            let DictionaryReq::TraitImpl {
+                trait_id,
+                input_tys,
+                output_tys,
+                output_effs,
+            } = &resolved_requirement.req
+            else {
+                continue;
+            };
             // Marker traits have no runtime dictionary entries.
-            if !self
-                .trait_def(resolved_constraint.trait_id)
-                .has_runtime_dictionary_entries()
-            {
+            if !self.trait_def(*trait_id).has_runtime_dictionary_entries() {
                 continue;
             }
             if self.is_compiler_provided_no_output_trait_query(
-                resolved_constraint.trait_id,
-                &resolved_constraint.input_tys,
-                &resolved_constraint.output_tys,
-                &resolved_constraint.output_effs,
+                *trait_id,
+                input_tys,
+                output_tys,
+                output_effs,
             ) {
-                let info = self.compiler_provided_value_dictionary_node_kind(
-                    arena,
-                    resolved_constraint.trait_id,
-                    &resolved_constraint.input_tys,
-                    fn_span,
+                self.compiler_provided_value_dictionary_node_kind(
+                    arena, *trait_id, input_tys, fn_span,
                 )?;
-                constraint_dict_infos.push(info);
                 continue;
             }
-            let dict_id = match self.solve_impl(
-                resolved_constraint.trait_id,
-                &resolved_constraint.input_tys,
-                fn_span,
-                arena,
-            ) {
+            let dict_id = match self.solve_impl(*trait_id, input_tys, fn_span, arena) {
                 Ok(functions) => functions,
                 Err(err) => {
                     log::debug!(
                         "Blanket impl constraint failed while solving {} for {:?}: {:?}",
-                        self.trait_def(resolved_constraint.trait_id).name,
-                        resolved_constraint.input_tys,
+                        self.trait_def(*trait_id).name,
+                        input_tys,
+                        err
+                    );
+                    return Ok(false);
+                }
+            };
+            let dict_impl_data = self.get_impl_data_by_id(dict_id);
+            if validate_outputs
+                && (dict_impl_data.output_tys != *output_tys
+                    || !dict_impl_data
+                        .output_effs
+                        .iter()
+                        .zip(output_effs.iter())
+                        .all(|(solved_eff, constraint_eff)| solved_eff == constraint_eff))
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn materialize_trait_runtime_arg_infos(
+        &mut self,
+        runtime_requirements: &[DictionaryReq],
+        fn_span: Location,
+        arena: &mut NodeArena,
+        validate_outputs: bool,
+    ) -> Result<Option<Vec<(NodeKind, Type)>>, InternalCompilationError> {
+        let mut infos = Vec::new();
+        for requirement in runtime_requirements {
+            let DictionaryReq::TraitImpl {
+                trait_id,
+                input_tys,
+                output_tys,
+                output_effs,
+            } = requirement
+            else {
+                continue;
+            };
+            if self.is_compiler_provided_no_output_trait_query(
+                *trait_id,
+                input_tys,
+                output_tys,
+                output_effs,
+            ) {
+                infos.push(self.compiler_provided_value_dictionary_node_kind(
+                    arena, *trait_id, input_tys, fn_span,
+                )?);
+                continue;
+            }
+            let dict_id = match self.solve_impl(*trait_id, input_tys, fn_span, arena) {
+                Ok(functions) => functions,
+                Err(err) => {
+                    log::debug!(
+                        "Blanket impl constraint failed while solving {} for {:?}: {:?}",
+                        self.trait_def(*trait_id).name,
+                        input_tys,
                         err
                     );
                     return Ok(None);
@@ -2272,18 +2577,18 @@ impl<'a> TraitSolver<'a> {
             };
             let dict_impl_data = self.get_impl_data_by_id(dict_id);
             if validate_outputs
-                && (dict_impl_data.output_tys != resolved_constraint.output_tys
+                && (dict_impl_data.output_tys != *output_tys
                     || !dict_impl_data
                         .output_effs
                         .iter()
-                        .zip(resolved_constraint.output_effs.iter())
+                        .zip(output_effs.iter())
                         .all(|(solved_eff, constraint_eff)| solved_eff == constraint_eff))
             {
                 return Ok(None);
             }
-            constraint_dict_infos.push((get_dictionary(dict_id), dict_impl_data.dictionary_ty));
+            infos.push((get_dictionary(dict_id), dict_impl_data.dictionary_ty));
         }
-        Ok(Some(constraint_dict_infos))
+        Ok(Some(infos))
     }
 
     /// Get a concrete trait implementation for the given trait id and input types.
@@ -2516,7 +2821,7 @@ impl<'a> TraitSolver<'a> {
                 let BlanketImplMatch::Yes {
                     output_tys,
                     output_effs,
-                    resolved_constraints,
+                    runtime_requirements: resolved_runtime_requirements,
                 } = blanket_match
                 else {
                     continue_impl_loop!();
@@ -2533,18 +2838,36 @@ impl<'a> TraitSolver<'a> {
 
                 // Non-Value blanket impls can materialize all constraint dictionaries up front.
                 if trait_id != value_trait_id {
-                    let Some(constraint_dict_infos) = self
-                        .materialize_constraint_dictionary_infos(
-                            resolved_constraints,
+                    let runtime_requirements =
+                        self.runtime_requirements_from_resolved(&resolved_runtime_requirements);
+                    let has_projection_requirement =
+                        runtime_requirements.iter().any(|requirement| {
+                            matches!(requirement, DictionaryReq::ProjectionSubscript { .. })
+                        });
+                    let explicit_runtime_arg_infos = if has_projection_requirement {
+                        if !self.validate_runtime_requirements(
+                            &resolved_runtime_requirements,
                             fn_span,
                             arena,
                             // `match_blanket_impl` already validated nested outputs against the
                             // current unifier; rechecking here is too strict for effect variables
                             // that are intentionally left to the caller's effect solver.
                             false,
+                        )? {
+                            continue_impl_loop!();
+                        }
+                        Vec::new()
+                    } else {
+                        let Some(infos) = self.materialize_trait_runtime_arg_infos(
+                            &runtime_requirements,
+                            fn_span,
+                            arena,
+                            false,
                         )?
-                    else {
-                        continue_impl_loop!();
+                        else {
+                            continue_impl_loop!();
+                        };
+                        infos
                     };
 
                     // Succeeded? First get the blanket implementation data and compute the output types.
@@ -2592,7 +2915,7 @@ impl<'a> TraitSolver<'a> {
                         let fn_ty = Type::function_type(def.ty_scheme.ty.clone());
 
                         // Is the generic function from another module, or do we need to pass constraint dictionaries?
-                        let id = if constraint_dict_infos.is_empty() && imp_module_id.is_none() {
+                        let id = if runtime_requirements.is_empty() && imp_module_id.is_none() {
                             // No, so we can just use the generic function as is.
                             *fn_id
                         } else {
@@ -2605,7 +2928,12 @@ impl<'a> TraitSolver<'a> {
                             let (body, locals) = self.blanket_method_thunk_code_entry(
                                 function_id,
                                 &def,
-                                &constraint_dict_infos,
+                                &explicit_runtime_arg_infos,
+                                if has_projection_requirement {
+                                    runtime_requirements.clone()
+                                } else {
+                                    Vec::new()
+                                },
                                 fn_span,
                             )?;
                             let runtime_arg_count = def.arg_names.len();
@@ -2717,17 +3045,36 @@ impl<'a> TraitSolver<'a> {
 
                 // Now that recursive self-references can resolve to the reserved impl,
                 // materialize the deferred constraint dictionaries.
-                let Some(constraint_dict_infos) = self.materialize_constraint_dictionary_infos(
-                    resolved_constraints,
-                    fn_span,
-                    arena,
-                    // Recursive `Value` materialization reserves a concrete impl before
-                    // resolving dictionaries, so keep the pre-existing post-check.
-                    true,
-                )?
-                else {
-                    self.rollback_derived_impl_state(materialization_snapshot);
-                    continue_impl_loop!();
+                let runtime_requirements =
+                    self.runtime_requirements_from_resolved(&resolved_runtime_requirements);
+                let has_projection_requirement = runtime_requirements.iter().any(|requirement| {
+                    matches!(requirement, DictionaryReq::ProjectionSubscript { .. })
+                });
+                let explicit_runtime_arg_infos = if has_projection_requirement {
+                    if !self.validate_runtime_requirements(
+                        &resolved_runtime_requirements,
+                        fn_span,
+                        arena,
+                        // Recursive `Value` materialization reserves a concrete impl before
+                        // resolving dictionaries, so keep the pre-existing post-check.
+                        true,
+                    )? {
+                        self.rollback_derived_impl_state(materialization_snapshot);
+                        continue_impl_loop!();
+                    }
+                    Vec::new()
+                } else {
+                    let Some(infos) = self.materialize_trait_runtime_arg_infos(
+                        &runtime_requirements,
+                        fn_span,
+                        arena,
+                        true,
+                    )?
+                    else {
+                        self.rollback_derived_impl_state(materialization_snapshot);
+                        continue_impl_loop!();
+                    };
+                    infos
                 };
 
                 // Then, for every function in the blanket implementation, if needed create a thunk function
@@ -2747,7 +3094,12 @@ impl<'a> TraitSolver<'a> {
                         self.blanket_method_thunk_code_entry(
                             function_id,
                             &def,
-                            &constraint_dict_infos,
+                            &explicit_runtime_arg_infos,
+                            if has_projection_requirement {
+                                runtime_requirements.clone()
+                            } else {
+                                Vec::new()
+                            },
                             fn_span,
                         )
                     })
@@ -3027,6 +3379,16 @@ impl<'a> TraitSolver<'a> {
 }
 
 impl TraitOutputQuery for TraitSolver<'_> {
+    fn unify_non_trait_constraint_query(
+        &mut self,
+        ty_inf: &mut UnifiedTypeInference,
+        constraint: &PubTypeConstraint,
+        assumptions: ConstraintAssumptions<'_>,
+        arena: &mut NodeArena,
+    ) -> Result<Option<PubTypeConstraint>, InternalCompilationError> {
+        ty_inf.unify_pub_constraint(constraint, assumptions, |_| false, self, arena)
+    }
+
     fn is_compiler_provided_no_output_trait_query(
         &mut self,
         trait_id: TraitId,

@@ -87,7 +87,24 @@ Function {
 }
 
 SubscriptDef {
-    visibility kw<'subscript'> Identifier GenericParams? '(' identifierWithOptTypeArgs ')' fnRet whereClause? '{' SubscriptMember* '}'
+    visibility kw<'subscript'> subscriptHeader '(' identifierWithOptTypeArgs ')' fnRet whereClause? '{' SubscriptMember* '}'
+}
+
+subscriptHeader {
+    Identifier subscriptHeaderTail?
+}
+
+subscriptHeaderTail {
+    '.' Identifier
+    | '<' subscriptHeaderAngleTail
+}
+
+subscriptHeaderAngleTail {
+    Identifier (',' Identifier)* '!' Identifier (',' Identifier)* '>'
+    | Identifier (',' Identifier)* '>' '.' Identifier
+    | Identifier (',' Identifier)* '>'
+    | '!' Identifier (',' Identifier)* '>'
+    | '>'
 }
 
 SubscriptMember {

@@ -22,12 +22,16 @@ use ferlium::{
     eval::{EvalCtx, eval_node_with_ctx},
     format::FormatWith,
     hir::value::Value,
+    hir::{ENodeArena, ENodeId, NodeKind},
     std::{
         array::array_type_generic,
         math::{float_type, int_type},
     },
-    types::mutability::MutType,
     types::r#type::{Type, TypeVar, tuple_type},
+    types::{
+        mutability::MutType,
+        type_scheme::{ProjectionRequirementKind, PubTypeConstraint},
+    },
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -1576,6 +1580,302 @@ fn records() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_record_projection_reads_through_subscript_evidence() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            fn get_x<T>(record: T) { record.x }
+            get_x({x: 40, y: 2})
+        "# }),
+        int(40)
+    );
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            fn get_x(record) { record.x }
+            get_x({x: 40, y: 2})
+        "# }),
+        int(40)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_record_projection_inferred_from_collection_loop_materializes_call_arg() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            fn max_amount(accounts) {
+                let mut amount = 0;
+                for account in accounts {
+                    if account.amount > amount {
+                        amount = account.amount;
+                    }
+                };
+                amount
+            }
+
+            max_amount([{amount: 1, name: "small"}, {amount: 7, name: "large"}])
+        "# }),
+        int(7)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_record_projection_assignment_writes_through_subscript_evidence() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            fn set_x<T>(mut record: T) {
+                record.x = 5;
+                record.x
+            }
+            set_x({x: 1, y: 2})
+        "# }),
+        int(5)
+    );
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            fn set_x(mut record) {
+                record.x = 5;
+                record.x
+            }
+            set_x({x: 1, y: 2})
+        "# }),
+        int(5)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_record_projection_compound_assignment_uses_subscript_evidence_once() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            fn bump_x<T>(mut record: T) {
+                record.x += 5;
+                record.x
+            }
+            bump_x({x: 1, y: 2})
+        "# }),
+        int(6)
+    );
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            fn bump_x(mut record) {
+                record.x += 5;
+                record.x
+            }
+            bump_x({x: 1, y: 2})
+        "# }),
+        int(6)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_record_projection_read_write_merges_subscript_evidence() {
+    let mut session = TestSession::new();
+    let module = session.compile_and_get_module(indoc! { r#"
+        fn read_then_write<T>(mut record: T) {
+            let old = record.x;
+            record.x = old + 1;
+            record.x
+        }
+
+        fn use_read_then_write() {
+            read_then_write({x: 4, y: "ignored"})
+        }
+    "# });
+    let function = module
+        .get_function(ustr::ustr("read_then_write"))
+        .expect("generic projection function should be compiled");
+    let projection_constraints = function
+        .definition
+        .ty_scheme
+        .constraints
+        .iter()
+        .filter_map(|constraint| match constraint {
+            PubTypeConstraint::ProjectionSubscriptIs {
+                requirement,
+                field,
+                subscript_ty,
+                ..
+            } => (*field == ustr::ustr("x")).then_some((*requirement, subscript_ty)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        projection_constraints.len(),
+        1,
+        "read and write uses of the same projection should share one evidence parameter"
+    );
+    let (requirement, subscript_ty) = projection_constraints[0];
+    assert_eq!(requirement, ProjectionRequirementKind::All);
+    assert!(subscript_ty.ref_member.is_some());
+    assert!(subscript_ty.mut_member.is_some());
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_record_wildcard_pattern_uses_structural_projection_evidence() {
+    let mut session = TestSession::new();
+    let module = session.compile_and_get_module(indoc! { r#"
+        fn is_zero_x(value) {
+            match value {
+                Some { x, .. } => x == 0,
+                _ => false,
+            }
+        }
+    "# });
+    let function = module
+        .get_function(ustr::ustr("is_zero_x"))
+        .expect("generic record pattern function should be compiled");
+    let projection_constraints = function
+        .definition
+        .ty_scheme
+        .constraints
+        .iter()
+        .filter_map(|constraint| match constraint {
+            PubTypeConstraint::ProjectionSubscriptIs {
+                requirement, field, ..
+            } => (*field == ustr::ustr("x")).then_some(*requirement),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        projection_constraints,
+        [ProjectionRequirementKind::Structural]
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_record_projection_rejects_incompatible_return_requirements() {
+    let mut session = TestSession::new();
+    match session
+        .fail_compilation(indoc! { r#"
+            fn incompatible(record) {
+                let as_int: int = record.x;
+                let as_string: string = record.x;
+                (as_int, as_string)
+            }
+
+            incompatible({x: 1})
+        "# })
+        .into_inner()
+    {
+        CompilationErrorImpl::TypeMismatch { .. } => {}
+        other => panic!("expected TypeMismatch, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_nominal_struct_projection_uses_subscript_evidence() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            struct Age(int)
+            fn unwrap_age<T>(age: T) { age.0 }
+            unwrap_age(Age(30))
+        "# }),
+        int(30)
+    );
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            struct Age(int)
+            fn unwrap_age(age) { age.0 }
+            unwrap_age(Age(30))
+        "# }),
+        int(30)
+    );
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            struct Person { name: string, age: int }
+            fn get_name<T>(person: T) { person.name }
+            get_name(Person { name: "John", age: 30 })
+        "# }),
+        string("John")
+    );
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            struct Person { name: string, age: int }
+            fn get_name(person) { person.name }
+            get_name(Person { name: "John", age: 30 })
+        "# }),
+        string("John")
+    );
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            struct Person { name: string, age: int }
+            fn set_age<T>(mut person: T) {
+                person.age = 31;
+                person.age
+            }
+            set_age(Person { name: "John", age: 30 })
+        "# }),
+        int(31)
+    );
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            struct Person { name: string, age: int }
+            fn set_age(mut person) {
+                person.age = 31;
+                person.age
+            }
+            set_age(Person { name: "John", age: 30 })
+        "# }),
+        int(31)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_record_projection_hir_uses_subscript_evidence() {
+    fn contains_subscript_evidence_apply(arena: &ENodeArena, node: ENodeId) -> bool {
+        match &arena[node].kind {
+            NodeKind::SubscriptApply(app) => {
+                matches!(
+                    arena[app.subscript].kind,
+                    NodeKind::LoadSubscriptEvidence(_)
+                ) || crate::harness::hir_child_nodes(arena, node)
+                    .into_iter()
+                    .any(|child| contains_subscript_evidence_apply(arena, child))
+            }
+            _ => crate::harness::hir_child_nodes(arena, node)
+                .into_iter()
+                .any(|child| contains_subscript_evidence_apply(arena, child)),
+        }
+    }
+
+    let mut session = TestSession::new();
+    let module_id = session
+        .compile(indoc! { r#"
+            fn get_x<T>(record: T) { record.x }
+            fn use_explicit_get_x() { get_x({x: 40, y: 2}) }
+            fn get_y(record) { record.y }
+            fn use_inferred_get_y() { get_y({x: 40, y: 2}) }
+        "# })
+        .module_id;
+    let module = session.session().expect_fresh_module(module_id);
+
+    for function_name in ["get_x", "get_y"] {
+        let function = module
+            .get_function(ustr::ustr(function_name))
+            .expect("projection function should be compiled");
+        let entry = function.get_code_entry().unwrap();
+        assert!(
+            contains_subscript_evidence_apply(&module.hir_arena, entry),
+            "{function_name} should apply hidden subscript evidence"
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn variants() {
     let mut session = TestSession::new();
     // tuple constructors
@@ -2642,7 +2942,9 @@ fn properties() {
         .unwrap();
     session
         .fail_compilation("@props::my_scope.my_var.a = 2")
-        .expect_mutability_must_be(MutabilityMustBeWhat::Mutable);
+        .into_inner()
+        .into_invalid_record_field_access()
+        .unwrap();
 
     // array value
     set_array_property_value(int_a![]);

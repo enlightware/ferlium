@@ -15,8 +15,8 @@ use std::{
 use crate::{
     CompilationError, Location, SourceId,
     compiler::error::{
-        CompilationErrorImpl, ImportKind, InfiniteTypeKind, MutabilityMustBeWhat,
-        WhatIsNotAProductType, WhichProductTypeIsNot,
+        CompilationErrorImpl, ImportKind, InfiniteTypeKind, InvalidRecordFieldContext,
+        MutabilityMustBeWhat, WhatIsNotAProductType, WhichProductTypeIsNot,
     },
     parser::location::SourceTable,
 };
@@ -349,26 +349,42 @@ pub(super) fn compilation_error_to_data(
         InvalidRecordField {
             field_span,
             record_ty,
+            ctx,
             ..
         } => {
             let field_name = fmt_span(field_span);
-            vec![error_data_from_location(
-                field_span,
-                format!("Field `{field_name}` not found in record `{record_ty}`"),
-            )]
+            let text = match ctx {
+                InvalidRecordFieldContext::StructuralField => {
+                    format!("Field `{field_name}` not found in record `{record_ty}`")
+                }
+                InvalidRecordFieldContext::ProjectionFallback => {
+                    format!(
+                        "No projection or structural field `{field_name}` found for `{record_ty}`"
+                    )
+                }
+            };
+            vec![error_data_from_location(field_span, text)]
         }
         InvalidRecordFieldAccess {
             field_span,
             record_ty,
+            ctx,
             ..
         } => {
             let field_name = fmt_span(field_span);
-            vec![error_data_from_location(
-                field_span,
-                format!(
-                    "Expected record because of `.{field_name}`, but `{record_ty}` was provided instead"
-                ),
-            )]
+            let text = match ctx {
+                InvalidRecordFieldContext::StructuralField => {
+                    format!(
+                        "Expected record because of `.{field_name}`, but `{record_ty}` was provided instead"
+                    )
+                }
+                InvalidRecordFieldContext::ProjectionFallback => {
+                    format!(
+                        "No projection `.{field_name}` found for `{record_ty}`, and structural field lookup requires a record"
+                    )
+                }
+            };
+            vec![error_data_from_location(field_span, text)]
         }
         InvalidVariantName { name, ty, valid } => {
             let name_text = fmt_span(name);

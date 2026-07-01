@@ -8,6 +8,7 @@
 //
 
 use crate::{FxHashMap, FxHashSet, Modules};
+use ustr::Ustr;
 
 use crate::{
     Location,
@@ -16,15 +17,17 @@ use crate::{
     hir::{
         dictionary::{
             DictElaborationCtx, DictionariesReq, DictionaryReq, ExtraParameters,
-            find_field_dict_index, find_trait_impl_dict_index,
+            find_projection_subscript_dict_index,
+            find_projection_subscript_dict_index_for_receiver_ty, find_trait_impl_dict_index,
         },
         value_dispatch::{resolve_arg_passing, resolve_local_clone, resolve_local_drop},
     },
     internal_compilation_error,
     module::{
-        ExtraParameterId, FunctionId, LocalDecl, LocalFunctionId, Module, ModuleEnv,
-        PendingLocalClone, PendingLocalDrop, PendingModuleFunction, PendingTakeLocalValueMode,
-        ProjectionIndex, TraitId, id::Id,
+        ExtraParameterId, FunctionId, GeneratedStructuralProjectionSpec, LocalDecl,
+        LocalFunctionId, Module, ModuleEnv, PendingLocalClone, PendingLocalDrop,
+        PendingModuleFunction, PendingTakeLocalValueMode, ProjectionIndex, ProjectionKey,
+        SubscriptId, SubscriptMemberKind, TraitId, id::Id,
     },
     types::r#trait::{TraitDictionaryEntryIndex, TraitMethodIndex},
     types::trait_solver::{TraitSolver, trait_solver_from_module},
@@ -37,19 +40,17 @@ use crate::{
     hir::value::LiteralValue,
     hir::{
         self, CallArgument, ENodeArena, ENodeId, Elaborated, Node, NodeArena, NodeKind,
-        Project as HirProject, ProjectAt as HirProjectAt, StaticApplication, UNodeArena, UNodeId,
-        Unelaborated, function::PendingArgPassing,
+        Project as HirProject, ResolvedArgPassing, StaticApplication, UNodeArena, UNodeId,
+        Unelaborated,
+        function::{PendingArgPassing, ResolvedValueArgPassing},
     },
-    std::{
-        math::int_type,
-        value::{
-            is_function_surface_only_value_trait_application, is_value_trait_for_function_type,
-            value_layout_associated_const_values,
-        },
+    std::value::{
+        is_function_surface_only_value_trait_application, is_value_trait_for_function_type,
+        value_layout_associated_const_values,
     },
     types::effects::{EffType, no_effects},
     types::mutability::MutType,
-    types::r#type::{FnArgType, Type, TypeKind},
+    types::r#type::{CallImplType, CallResultConvention, FnArgType, FnType, Type, TypeKind},
 };
 
 /// Build the use-site HIR expression for a generated `Value` dictionary.
@@ -151,6 +152,18 @@ fn dictionary_method_projection_data(
     (entry_index, function_ty)
 }
 
+fn get_projection_subscript_node_kind(
+    subscript: SubscriptId,
+    name: Ustr,
+    span: Location,
+) -> NodeKind {
+    NodeKind::GetSubscript(b(hir::GetSubscript {
+        subscript,
+        subscript_path: crate::ast::Path::new(vec![(name, span)]),
+        inst_data: hir::FnInstData::new(Vec::new()),
+    }))
+}
+
 fn extra_arg_kind_from_inst_data(
     inst_data: &hir::FnInstData,
     span: Location,
@@ -165,32 +178,80 @@ fn extra_arg_kind_from_inst_data(
         .map(|dict| {
             use DictionaryReq::*;
             let (node_kind, node_ty) = match dict {
-                FieldIndex { ty, field: name } => {
-                    let ty_data = ty.data();
-                    let node_kind = match &*ty_data {
+                ProjectionSubscript {
+                    requirement,
+                    field: name,
+                    subscript_ty,
+                } => {
+                    let ty = subscript_ty.receiver_ty();
+                    let expected_node_ty = Type::subscript_type(subscript_ty.clone());
+                    let expected_arg_ty = FnArgType::new_by_val(expected_node_ty);
+                    let generated = ctx
+                        .generated_projection_subscripts
+                        .as_mut()
+                        .expect("projection evidence generation requires module elaboration");
+                    let structural_key = ProjectionKey::structural(ty, *name);
+                    if let Some(subscript) = generated.get_existing(structural_key) {
+                        let node_kind = get_projection_subscript_node_kind(subscript, *name, span);
+                        return Ok((node_kind, expected_node_ty, expected_arg_ty));
+                    }
+                    if requirement.accepts_user_defined_projection()
+                        && let Some(key) = ProjectionKey::nominal_for_receiver_ty(ty, *name)
+                        && let Some(subscript) = ctx.trait_solver.projection_subscript_id(key)
+                    {
+                        let node_kind = get_projection_subscript_node_kind(subscript, *name, span);
+                        return Ok((node_kind, expected_node_ty, expected_arg_ty));
+                    }
+                    let ty_kind = ty.data().clone();
+                    let node_kind = match ty_kind {
                         Record(record) => {
-                            // Known type, get the index from the type and create an immediate with it.
                             let index = record.iter().position(|field| field.0 == *name).expect(
                                 "Field not found in type, type inference should have failed"
                             );
-                            K::Immediate(LiteralValue::new_native(index as isize))
+                            let subscript =
+                                generated.get_or_create(GeneratedStructuralProjectionSpec {
+                                    key: structural_key,
+                                    index,
+                                    field_ty: subscript_ty.ret,
+                                });
+                            get_projection_subscript_node_kind(subscript, *name, span)
+                        }
+                        Named(named) => {
+                            let shape = ctx
+                                .trait_solver
+                                .type_def(named.def)
+                                .instantiated_shape_with_effects(
+                                    &named.params,
+                                    &named.effect_params,
+                                );
+                            let shape_data = shape.data();
+                            let record = shape_data
+                                .as_record()
+                                .expect("ProjectionSubscript named receiver should have a record representation or explicit projection");
+                            let index = record.iter().position(|field| field.0 == *name).expect(
+                                "Field not found in type, type inference should have failed"
+                            );
+                            let subscript =
+                                generated.get_or_create(GeneratedStructuralProjectionSpec {
+                                    key: structural_key,
+                                    index,
+                                    field_ty: subscript_ty.ret,
+                                });
+                            get_projection_subscript_node_kind(subscript, *name, span)
                         }
                         Variable(var) => {
-                            // Variable, it must be in the input dictionaries, look for it.
-                            let var = *var;
-                            drop(ty_data);
-                            let index = find_field_dict_index(ctx.dicts, var, name).unwrap_or_else(
-                                || panic!("Dictionary for field \"{name}\" in type variable \"{var}\" not found, type inference should have failed"),
+                            let index = find_projection_subscript_dict_index(ctx.dicts, var, name).unwrap_or_else(
+                                || panic!("Projection subscript dictionary for field \"{name}\" in type variable \"{var}\" not found, type inference should have failed"),
                             );
-                            K::LoadFieldIndex(hir::LoadFieldIndex {
+                            K::LoadSubscriptEvidence(hir::LoadSubscriptEvidence {
                                 extra_parameter: ExtraParameterId::from_index(index),
                             })
                         }
                         _ => {
-                            panic!("FieldIndex dictionary should have a variable or record type");
+                            panic!("ProjectionSubscript dictionary should have a variable or record type");
                         }
                     };
-                    (node_kind, int_type())
+                    (node_kind, expected_node_ty)
                 }
                 TraitImpl { trait_id, input_tys, output_tys, output_effs } => {
                     let (node_kind, ty) = trait_dictionary_node_kind(
@@ -236,8 +297,8 @@ fn extra_arg_kind_for_module_function(
                 DictionaryReq::TraitImpl { .. } => {
                     NodeKind::LoadDictionary(hir::LoadDictionary { extra_parameter })
                 }
-                DictionaryReq::FieldIndex { .. } => {
-                    NodeKind::LoadFieldIndex(hir::LoadFieldIndex { extra_parameter })
+                DictionaryReq::ProjectionSubscript { .. } => {
+                    NodeKind::LoadSubscriptEvidence(hir::LoadSubscriptEvidence { extra_parameter })
                 }
             };
             (kind, ty, FnArgType::new(ty, MutType::constant()))
@@ -289,16 +350,28 @@ pub fn elaborate_generated_functions(
             .definition
             .ty_scheme
             .extra_parameters(ModuleEnv::new(module, others));
+        let generated_projection_subscripts =
+            crate::module::PendingGeneratedStructuralProjectionSubscripts::new(module);
         let mut solver = trait_solver_from_module!(module, others);
-        let mut ctx = DictElaborationCtx::new(&dicts, None, &mut solver);
+        let mut ctx = DictElaborationCtx::new_with_generated_projection_subscripts(
+            &dicts,
+            None,
+            &mut solver,
+            generated_projection_subscripts,
+        );
         let (elaborated, _) =
             function.check_borrows_and_elaborate_hir(&mut module.hir_arena, &mut ctx)?;
         module.functions[id.as_index()] = elaborated;
-        pending.extend(solver.commit(
+        let generated_projection_subscripts = ctx.take_generated_projection_subscripts();
+        let generated = solver.commit(
             &mut module.functions,
             &mut module.def_table,
             pending_functions,
-        ));
+        );
+        if let Some(generated_projection_subscripts) = generated_projection_subscripts {
+            generated_projection_subscripts.commit(module);
+        }
+        pending.extend(generated);
     }
     Ok(())
 }
@@ -376,9 +449,10 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
         use NodeKind::*;
         Ok(match kind {
             Immediate(value) => Immediate(value),
+            GetSubscript(get_subscript) => GetSubscript(get_subscript),
             GetDictionary(get_dict) => GetDictionary(get_dict),
             LoadDictionary(load) => LoadDictionary(load),
-            LoadFieldIndex(load) => LoadFieldIndex(load),
+            LoadSubscriptEvidence(load) => LoadSubscriptEvidence(load),
             _ => {
                 return Err(internal_compilation_error!(Internal {
                     error: "unexpected synthetic HIR node requiring recursive elaboration"
@@ -398,6 +472,117 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
     ) -> ENodeId {
         self.dst
             .alloc(Node::<Elaborated>::new(kind, ty, effects, span))
+    }
+
+    fn projection_evidence_field_access(
+        &mut self,
+        child: ENodeId,
+        field_name: Ustr,
+        access_mode: SubscriptMemberKind,
+        index: usize,
+        node_ty: Type,
+        node_span: Location,
+    ) -> NodeKind<Elaborated> {
+        use NodeKind::*;
+        let extra_parameter = ExtraParameterId::from_index(index);
+        let DictionaryReq::ProjectionSubscript { subscript_ty, .. } =
+            &self.ctx.dicts.requirements[index]
+        else {
+            panic!("Projection subscript dictionary index should reference projection evidence");
+        };
+        let member_ty = match access_mode {
+            SubscriptMemberKind::Ref => subscript_ty.ref_member.as_ref(),
+            SubscriptMemberKind::Mut => subscript_ty.mut_member.as_ref(),
+        }
+        .unwrap_or_else(|| {
+            panic!(
+                "Projection evidence for field \"{field_name}\" should contain the selected member"
+            )
+        });
+        let mut inst_fn_args = subscript_ty.args.clone();
+        if access_mode.mut_member() {
+            inst_fn_args[0].mut_ty = crate::types::mutability::MutType::mutable();
+        }
+        let subscript = self.alloc_elaborated_node(
+            LoadSubscriptEvidence(hir::LoadSubscriptEvidence { extra_parameter }),
+            Type::subscript_type(subscript_ty.clone()),
+            no_effects(),
+            node_span,
+        );
+        let passing = if access_mode.mut_member() {
+            ResolvedArgPassing::MutableRef
+        } else {
+            ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef)
+        };
+        SubscriptApply(b(hir::SubscriptApplication {
+            subscript,
+            mut_member: access_mode.mut_member(),
+            arguments: vec![CallArgument {
+                value: child,
+                passing,
+            }],
+            ty: CallImplType::new(
+                FnType::new(inst_fn_args, node_ty, member_ty.effects.clone()),
+                CallResultConvention::Subscript(member_ty.result_convention),
+            ),
+        }))
+    }
+
+    fn elaborated_node_is_place_reference(&self, node_id: ENodeId) -> bool {
+        // Elaborated HIR has no `FieldAccess`, `TraitMethodApply`, or
+        // `GetTraitMethod` nodes; keep this phase-specific rather than
+        // teaching the unelaborated place helper about elaboration payloads.
+        match &self.dst[node_id].kind {
+            NodeKind::LoadLocal(_) | NodeKind::Project(_) => true,
+            NodeKind::Apply(app) => app.ty.returns_place(),
+            NodeKind::SubscriptApply(app) => app.ty.returns_place(),
+            NodeKind::StaticApply(app) => app.ty.returns_place(),
+            NodeKind::CallDictionaryMethod(call) => call.ty.returns_place(),
+            NodeKind::WithPlace(node) => self.elaborated_node_is_place_reference(node.body),
+            NodeKind::Block(block) => block
+                .tail_node()
+                .is_some_and(|node| self.elaborated_node_is_place_reference(node)),
+            _ => false,
+        }
+    }
+
+    fn materialize_elaborated_place_value(
+        &mut self,
+        source: ENodeId,
+        ty: Type,
+        span: Location,
+    ) -> Result<ENodeId, InternalCompilationError> {
+        let effects = self.dst[source].effects.clone();
+        let clone = resolve_local_clone(&mut self.generated, self.ctx, ty, span)?;
+        Ok(self.alloc_elaborated_node(
+            NodeKind::CloneValue(hir::CloneValue { source, clone }),
+            ty,
+            effects,
+            span,
+        ))
+    }
+
+    fn inline_yielded_binding_body(
+        &mut self,
+        binding: crate::module::LocalDeclId,
+        place: ENodeId,
+        body: ENodeId,
+    ) -> Result<Option<NodeKind<Elaborated>>, InternalCompilationError> {
+        match &self.dst[body].kind {
+            NodeKind::LoadLocal(load) if load.id == binding => {
+                Ok(Some(self.dst[place].kind.clone()))
+            }
+            NodeKind::CloneValue(clone) => match &self.dst[clone.source].kind {
+                NodeKind::LoadLocal(load) if load.id == binding => {
+                    Ok(Some(NodeKind::CloneValue(hir::CloneValue {
+                        source: place,
+                        clone: clone.clone,
+                    })))
+                }
+                _ => Ok(None),
+            },
+            _ => Ok(None),
+        }
     }
 
     fn elaborate_node_iter(
@@ -510,6 +695,23 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                     dictionary_captures,
                     captures,
                     captures_value_dictionary,
+                }))
+            }
+            BuildSubscriptValue(build) => {
+                let mut evidence_captures =
+                    self.elaborate_node_iter(src, build.evidence_captures.iter().copied())?;
+                let subscript = self.elaborate_node(src, build.subscript)?;
+
+                let subscript = if let BuildSubscriptValue(inner) = &self.dst[subscript].kind {
+                    evidence_captures.splice(0..0, inner.evidence_captures.iter().copied());
+                    inner.subscript
+                } else {
+                    subscript
+                };
+
+                BuildSubscriptValue(b(hir::BuildSubscriptValue {
+                    subscript,
+                    evidence_captures,
                 }))
             }
             Apply(app) => {
@@ -815,11 +1017,29 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                 }
             }
             GetSubscript(get_subscript) => {
-                assert!(
-                    get_subscript.inst_data.dicts_req.is_empty(),
-                    "first-class subscript values with hidden evidence should be rejected during type inference"
-                );
-                GetSubscript(get_subscript.clone())
+                let mut get_subscript = (**get_subscript).clone();
+                let captures = if !get_subscript.inst_data.dicts_req.is_empty() {
+                    let (captures, _) = self
+                        .elaborate_extra_args_from_inst_data(&get_subscript.inst_data, node_span)?;
+                    get_subscript.inst_data.dicts_req.clear();
+                    captures
+                } else {
+                    Vec::new()
+                };
+                if captures.is_empty() {
+                    GetSubscript(b(get_subscript))
+                } else {
+                    let subscript = self.alloc_elaborated_node(
+                        GetSubscript(b(get_subscript)),
+                        node_ty,
+                        node_effects.clone(),
+                        node_span,
+                    );
+                    BuildSubscriptValue(b(hir::BuildSubscriptValue {
+                        subscript,
+                        evidence_captures: captures,
+                    }))
+                }
             }
             GetTraitMethod(get_method) => {
                 let trait_id = get_method.trait_id;
@@ -976,7 +1196,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
             }
             GetDictionary(get_dict) => GetDictionary(*get_dict),
             LoadDictionary(load) => LoadDictionary(*load),
-            LoadFieldIndex(load) => LoadFieldIndex(*load),
+            LoadSubscriptEvidence(load) => LoadSubscriptEvidence(*load),
             StoreLocal(store) => {
                 let value = store.value;
                 let id = store.id;
@@ -1098,36 +1318,52 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                 };
                 match &*ty_data {
                     Record(record) => {
-                        let index = record
-                            .iter()
-                            .position(|field| field.0 == field_name)
-                            .expect("Field not found in type, type inference should have failed");
-                        Project(HirProject::new(child, ProjectionIndex::from_index(index)))
+                        if let Some(index) = record.iter().position(|field| field.0 == field_name) {
+                            Project(HirProject::new(child, ProjectionIndex::from_index(index)))
+                        } else if let Some(index) =
+                            find_projection_subscript_dict_index_for_receiver_ty(
+                                self.ctx.dicts,
+                                child_ty,
+                                &field_name,
+                            )
+                        {
+                            self.projection_evidence_field_access(
+                                child,
+                                field_name,
+                                field_access.access_mode,
+                                index,
+                                node_ty,
+                                node_span,
+                            )
+                        } else {
+                            panic!("Field not found in type, type inference should have failed");
+                        }
                     }
                     Variable(var) => {
                         let var = *var;
                         drop(ty_data);
-                        let index = find_field_dict_index(self.ctx.dicts, var, &field_name)
+                        let access_mode = field_access.access_mode;
+                        let index = find_projection_subscript_dict_index(
+                            self.ctx.dicts,
+                            var,
+                            &field_name,
+                        )
                             .unwrap_or_else(
-                                || panic!("Dictionary for field \"{field_name}\" in type variable \"{var}\" not found, type inference should have failed"),
+                                || panic!("Projection subscript dictionary for field \"{field_name}\" in type variable \"{var}\" not found, type inference should have failed"),
                             );
-                        ProjectAt(HirProjectAt::new(
+                        self.projection_evidence_field_access(
                             child,
-                            ExtraParameterId::from_index(index),
-                        ))
+                            field_name,
+                            access_mode,
+                            index,
+                            node_ty,
+                            node_span,
+                        )
                     }
                     _ => {
                         panic!("FieldAccess should have a record or variable type");
                     }
                 }
-            }
-            ProjectAt(project) => {
-                let value = project.value;
-                let index = project.index;
-                ProjectAt(hir::ProjectAt {
-                    value: self.elaborate_node(src, value)?,
-                    index,
-                })
             }
             Variant(variant) => Variant(hir::Variant {
                 tag: variant.tag,
@@ -1160,11 +1396,33 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
             }),
             Continue(node) => Continue(hir::Continue { label: node.label }),
             Yield(node) => Yield(self.elaborate_node(src, *node)?),
-            WithYielded(node) => WithYielded(hir::WithYielded {
-                accessor: self.elaborate_node(src, node.accessor)?,
-                binding: node.binding,
-                body: self.elaborate_node(src, node.body)?,
-            }),
+            WithYielded(node) => {
+                let accessor = self.elaborate_node(src, node.accessor)?;
+                let body = self.elaborate_node(src, node.body)?;
+                if matches!(&self.dst[accessor].kind, Project(_)) {
+                    if let Some(inlined) =
+                        self.inline_yielded_binding_body(node.binding, accessor, body)?
+                    {
+                        inlined
+                    } else {
+                        WithPlace(hir::WithPlace {
+                            place: accessor,
+                            binding: node.binding,
+                            body,
+                        })
+                    }
+                } else {
+                    let mut body = body;
+                    if self.elaborated_node_is_place_reference(body) {
+                        body = self.materialize_elaborated_place_value(body, node_ty, node_span)?;
+                    }
+                    WithYielded(hir::WithYielded {
+                        accessor,
+                        binding: node.binding,
+                        body,
+                    })
+                }
+            }
             WithPlace(node) => WithPlace(hir::WithPlace {
                 place: self.elaborate_node(src, node.place)?,
                 binding: node.binding,
@@ -1187,11 +1445,13 @@ mod tests {
         hir::{GetTraitAssociatedConst, value::LiteralValue},
         module::{
             CurrentTypeItems, FunctionCollector, LocalDecl, LocalTraitId, Module, ModuleId, Path,
-            PendingFunctionCollector, QualifiedNameEnv, TraitId, TraitImpls, id::Id,
+            PendingFunctionCollector, PendingGeneratedStructuralProjectionSubscripts,
+            QualifiedNameEnv, TraitId, TraitImpls, id::Id,
         },
+        std::math::int_type,
         types::{
             r#trait::{Trait, TraitAssociatedConst, TraitAssociatedConstIndex},
-            trait_solver::TraitSolver,
+            trait_solver::{CurrentProjectionSubscriptTypes, TraitSolver},
             r#type::Type,
         },
     };
@@ -1271,6 +1531,7 @@ mod tests {
             &mut impls,
             FxHashMap::default(),
             &mut deps,
+            CurrentProjectionSubscriptTypes::empty(),
             PendingFunctionCollector::new(0),
             &modules,
         );
@@ -1278,7 +1539,14 @@ mod tests {
             requirements: vec![],
             repr_map: FxHashMap::default(),
         };
-        let mut ctx = DictElaborationCtx::new(&dicts, None, &mut solver);
+        let generated_projection_subscripts =
+            PendingGeneratedStructuralProjectionSubscripts::new(&current_module);
+        let mut ctx = DictElaborationCtx::new_with_generated_projection_subscripts(
+            &dicts,
+            None,
+            &mut solver,
+            generated_projection_subscripts,
+        );
 
         let mut elaborated_arena = ENodeArena::default();
         let elaborated = elaborate_hir(&arena, node, &mut elaborated_arena, &mut ctx, &[]).unwrap();
@@ -1319,6 +1587,7 @@ mod tests {
             &mut impls,
             FxHashMap::default(),
             &mut deps,
+            CurrentProjectionSubscriptTypes::empty(),
             PendingFunctionCollector::new(0),
             &modules,
         );
@@ -1331,7 +1600,14 @@ mod tests {
             )],
             repr_map: FxHashMap::default(),
         };
-        let mut ctx = DictElaborationCtx::new(&dicts, None, &mut solver);
+        let generated_projection_subscripts =
+            PendingGeneratedStructuralProjectionSubscripts::new(&current_module);
+        let mut ctx = DictElaborationCtx::new_with_generated_projection_subscripts(
+            &dicts,
+            None,
+            &mut solver,
+            generated_projection_subscripts,
+        );
 
         let mut elaborated_arena = ENodeArena::default();
         let elaborated = elaborate_hir(&arena, node, &mut elaborated_arena, &mut ctx, &[]).unwrap();

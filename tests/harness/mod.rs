@@ -16,6 +16,7 @@ use ferlium::{
         UnaryNativeFnRN, UnaryNativeFnVN, UnaryNativeFnVV,
     },
     hir::value::{LiteralValue, NativeValueType, Value},
+    hir::{ENodeArena, ENodeId, NodeKind},
     module::{BlanketTraitImplSubKey, Module, ModuleEnv, ModuleId, Path, TraitId},
     std::core_traits_names::{ITERATOR_TRAIT_NAME, VALUE_TRAIT_NAME},
     std::{
@@ -86,6 +87,35 @@ impl From<Value> for ExpectedValue {
 
 pub fn raw_value(value: impl Into<ExpectedValue>) -> Value {
     value.into().into_value()
+}
+
+pub fn hir_child_nodes(arena: &ENodeArena, node: ENodeId) -> Vec<ENodeId> {
+    // Lightweight white-box test traversal. Extend this when a test body needs
+    // to search through additional HIR node shapes.
+    match &arena[node].kind {
+        NodeKind::Block(block) => block.body.iter().copied().collect(),
+        NodeKind::Return(value) => vec![*value],
+        NodeKind::Project(project) => vec![project.value],
+        NodeKind::FieldAccess(_) => Vec::new(),
+        NodeKind::BuildSubscriptValue(build) => std::iter::once(build.subscript)
+            .chain(build.evidence_captures.iter().copied())
+            .collect(),
+        NodeKind::SubscriptApply(app) => std::iter::once(app.subscript)
+            .chain(app.arguments.iter().map(|arg| arg.value))
+            .collect(),
+        NodeKind::StaticApply(app) => app
+            .extra_arguments
+            .iter()
+            .copied()
+            .chain(app.arguments.iter().map(|arg| arg.value))
+            .collect(),
+        NodeKind::WithPlace(with_place) => vec![with_place.place, with_place.body],
+        NodeKind::WithYielded(with_yielded) => vec![with_yielded.accessor, with_yielded.body],
+        NodeKind::CloneValue(clone) => vec![clone.source],
+        NodeKind::StoreLocal(store) => vec![store.value],
+        NodeKind::Assign(assign) => vec![assign.place, assign.value],
+        _ => Vec::new(),
+    }
 }
 
 fn value_shape(value: &Value) -> &'static str {

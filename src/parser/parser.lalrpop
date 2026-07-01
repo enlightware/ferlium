@@ -267,11 +267,12 @@ Function: ModuleFunction = {
 }
 
 SubscriptDefinition: SubscriptDefinition = {
-    <doc:DOC_COMMENT*> <visibility:Visibility> <l:@L> "subscript" <name:Sp<UIdentifier>> <generic_params:GenericParams?> <al:@L> "(" <args:ModuleFunctionArgs> ")" <ret:SpFnRet<"P">> <where_clause:WhereClause?> <ar:@R> "{" <members:SubscriptMember*> "}" <r:@R> =>
+    <doc:DOC_COMMENT*> <visibility:Visibility> <l:@L> "subscript" <header:SubscriptHeader> <al:@L> "(" <args:ModuleFunctionArgs> ")" <ret:SpFnRet<"P">> <where_clause:WhereClause?> <ar:@R> "{" <members:SubscriptMember*> "}" <r:@R> => {
         SubscriptDefinition {
             visibility,
-            name,
-            generic_params: generic_params.unwrap_or_default(),
+            name: header.1,
+            projection_receiver: header.0,
+            generic_params: header.2,
             args,
             args_span: span(al, ar, source_id),
             ret_ty: ret,
@@ -279,7 +280,32 @@ SubscriptDefinition: SubscriptDefinition = {
             members,
             span: span(l, r, source_id),
             doc: parse_doc_comments(doc),
-        },
+        }
+    },
+}
+
+#[inline]
+SubscriptHeader: ParsedSubscriptHeader = {
+    <name:Sp<UIdentifier>> <tail:SubscriptHeaderTail?> => subscript_header(name, tail),
+}
+
+SubscriptHeaderTail: ParsedSubscriptHeaderTail = {
+    "." <field:Sp<UIdentifier>> => (Some(field), GenericParams::default(), None),
+    <l:@L> "<" <tail:SubscriptHeaderAngleTail> =>
+        subscript_header_tail_with_generic_span(l, tail, source_id),
+}
+
+SubscriptHeaderAngleTail: ParsedSubscriptHeaderAngleTail = {
+    <type_params:Sep1<Sp<UIdentifier>, ",">> "!" <effect_params:Sep1<Sp<UIdentifier>, ",">> ">" =>
+        (None, GenericParams::new(type_params, effect_params), None),
+    <type_params:Sep1<Sp<UIdentifier>, ",">> <r:@R> ">" "." <field:Sp<UIdentifier>> =>
+        (Some(field), GenericParams::new(type_params, vec![]), Some(r)),
+    <type_params:Sep1<Sp<UIdentifier>, ",">> ">" =>
+        (None, GenericParams::new(type_params, vec![]), None),
+    "!" <effect_params:Sep1<Sp<UIdentifier>, ",">> ">" =>
+        (None, GenericParams::new(vec![], effect_params), None),
+    ">" =>
+        (None, GenericParams::default(), None),
 }
 
 SubscriptMember: SubscriptMember<crate::ast::Parsed> = {

@@ -115,11 +115,6 @@ impl<'a> NamedTypeConstraintCollector<'a> {
                 element_ty,
                 ..
             }
-            | RecordFieldIs {
-                record_ty: tuple_ty,
-                element_ty,
-                ..
-            }
             | TypeHasVariant {
                 variant_ty: tuple_ty,
                 payload_ty: element_ty,
@@ -127,6 +122,11 @@ impl<'a> NamedTypeConstraintCollector<'a> {
             } => {
                 self.collect_type(*tuple_ty);
                 self.collect_type(*element_ty);
+            }
+            ProjectionSubscriptIs { subscript_ty, .. } => {
+                for ty_var in subscript_ty.inner_ty_vars() {
+                    self.collect_type(Type::variable(ty_var));
+                }
             }
             HaveTrait {
                 input_tys,

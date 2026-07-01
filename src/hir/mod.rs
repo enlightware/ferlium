@@ -38,7 +38,7 @@ use crate::{
         ExtraParameterId, FunctionId, LocalCloneMetadata, LocalDecl, LocalDeclId,
         PendingLocalClone, PendingLocalDrop, PendingTakeLocalValueMode, ProjectionIndex,
         ResolvedLocalClone, ResolvedLocalDrop, ResolvedTakeLocalValueMode, SubscriptId,
-        TakeLocalValueModeMetadata, TraitId, TraitImplId, id::Id,
+        SubscriptMemberKind, TakeLocalValueModeMetadata, TraitId, TraitImplId, id::Id,
     },
     types::r#trait::{TraitAssociatedConstIndex, TraitDictionaryEntryIndex, TraitMethodIndex},
     types::type_like::{
@@ -162,8 +162,9 @@ pub(crate) fn node_is_place_reference(arena: &NodeArena, node_id: NodeId) -> boo
         // type means the method is resolved at runtime; a fully-constant receiver lowers to a
         // freshly produced static function value, which is not a place.
         GetTraitMethod(method) => !method.input_tys.iter().all(Type::is_constant),
-        Project(_) | FieldAccess(_) | ProjectAt(_) => true,
+        Project(_) | FieldAccess(_) => true,
         Apply(app) => app.ty.returns_place(),
+        SubscriptApply(app) => app.ty.returns_place(),
         StaticApply(app) => app.ty.returns_place(),
         TraitMethodApply(app) => app.ty.returns_place(),
         CallDictionaryMethod(call) => call.ty.returns_place(),
@@ -188,10 +189,6 @@ pub(crate) fn place_resolution_may_create_temp(arena: &NodeArena, node_id: NodeI
         FieldAccess(field_access) => {
             !node_is_place_reference(arena, field_access.value)
                 || place_resolution_may_create_temp(arena, field_access.value)
-        }
-        ProjectAt(project) => {
-            !node_is_place_reference(arena, project.value)
-                || place_resolution_may_create_temp(arena, project.value)
         }
         Apply(app) if app.ty.returns_place() => {
             !node_is_place_reference(arena, app.function)
@@ -244,6 +241,21 @@ pub(crate) fn place_resolution_may_create_temp(arena: &NodeArena, node_id: NodeI
     }
 }
 
+/// Whether `node_id` is a place reference whose evaluation can expose that
+/// place directly, without prefix temporaries or cleanup scopes.
+pub(crate) fn node_is_stable_place_reference(arena: &NodeArena, node_id: NodeId) -> bool {
+    node_is_place_reference(arena, node_id) && !place_resolution_may_create_temp(arena, node_id)
+}
+
+/// Whether `node_id` is a stable place backed by ordinary storage.
+///
+/// Before dictionary elaboration, `GetTraitMethod` is place-like for method
+/// dispatch but does not itself name storage that can be borrowed directly.
+pub(crate) fn node_is_stable_storage_place_reference(arena: &NodeArena, node_id: NodeId) -> bool {
+    node_is_stable_place_reference(arena, node_id)
+        && !matches!(arena[node_id].kind, NodeKind::GetTraitMethod(_))
+}
+
 /// Resolve a deferred let-binding storage decision once mutability inference is complete.
 pub(crate) fn resolve_deferred_local_storage_shape(
     arena: &NodeArena,
@@ -259,16 +271,13 @@ pub(crate) fn resolve_deferred_local_storage_shape(
         .is_some_and(|mut_ty| !mut_ty.is_mutable());
     let can_alias_initializer = !deferred.binding_mutable
         && initializer_is_known_immutable
-        && node_is_place_reference(arena, deferred.initializer)
-        && !place_resolution_may_create_temp(arena, deferred.initializer);
+        && node_is_stable_place_reference(arena, deferred.initializer);
 
     if local.ty == Type::never() || can_alias_initializer {
         local.set_non_owning_storage();
         false
     } else {
-        if node_is_place_reference(arena, deferred.initializer)
-            && !place_resolution_may_create_temp(arena, deferred.initializer)
-        {
+        if node_is_stable_place_reference(arena, deferred.initializer) {
             local.clone = Some(PendingLocalClone::Unknown);
         }
         local.set_owned_storage(PendingLocalDrop::Unknown);
@@ -295,12 +304,14 @@ pub(crate) fn addressor_place_base_argument_index(
     base
 }
 
-/// Whether `kind` is a hidden evidence argument (trait dictionary or field index) rather than a value argument.
+/// Whether `kind` is a hidden evidence argument rather than a value argument.
 /// Evidence arguments are expected to form a contiguous prefix of a call's argument list; see [`addressor_place_base_argument_index`].
 fn is_evidence_node(kind: &NodeKind) -> bool {
     matches!(
         kind,
-        NodeKind::GetDictionary(_) | NodeKind::LoadDictionary(_) | NodeKind::LoadFieldIndex(_)
+        NodeKind::GetDictionary(_)
+            | NodeKind::LoadDictionary(_)
+            | NodeKind::LoadSubscriptEvidence(_)
     )
 }
 
@@ -364,6 +375,13 @@ pub struct BuildClosure<P: HirPhase = Unelaborated> {
     pub captures_value_dictionary: Option<NodeId<P>>,
 }
 
+/// Build a first-class subscript value from a subscript and captured hidden evidence.
+#[derive(Debug, Clone)]
+pub struct BuildSubscriptValue<P: HirPhase = Unelaborated> {
+    pub subscript: NodeId<P>,
+    pub evidence_captures: Vec<NodeId<P>>,
+}
+
 /// Build a variant value with a tag and payload.
 #[derive(Debug, Clone, Copy, new)]
 pub struct Variant<P: HirPhase = Unelaborated> {
@@ -385,13 +403,7 @@ pub struct Project<P: HirPhase = Unelaborated> {
 pub struct FieldAccess<P: HirPhase = Unelaborated> {
     pub value: NodeId<P>,
     pub field: Ustr,
-}
-
-/// Project a tuple-like value using a hidden field-index parameter.
-#[derive(Debug, Clone, Copy, new)]
-pub struct ProjectAt<P: HirPhase = Unelaborated> {
-    pub value: NodeId<P>,
-    pub index: ExtraParameterId,
+    pub access_mode: SubscriptMemberKind,
 }
 
 // Local storage and ownership payloads.
@@ -649,9 +661,9 @@ pub struct LoadDictionary {
     pub extra_parameter: ExtraParameterId,
 }
 
-/// Load a structural field index from a function hidden argument.
+/// Load a first-class subscript capability from a function hidden argument.
 #[derive(Debug, Clone, Copy)]
-pub struct LoadFieldIndex {
+pub struct LoadSubscriptEvidence {
     pub extra_parameter: ExtraParameterId,
 }
 
@@ -730,8 +742,6 @@ pub enum NodeKind<P: HirPhase = Unelaborated> {
     Project(Project<P>),
     /// Access a record-like value at a statically known field.
     FieldAccess(P::FieldAccess),
-    /// Project a tuple-like value using a hidden field-index parameter.
-    ProjectAt(ProjectAt<P>),
     /// Extract the tag of a variant as an isize, by casting the pointer to the string.
     ExtractTag(NodeId<P>),
 
@@ -742,6 +752,8 @@ pub enum NodeKind<P: HirPhase = Unelaborated> {
     StoreLocal(StoreLocal<P>),
     /// Take a local value as an owned result.
     TakeLocalValue(TakeLocalValue<P>),
+    /// Build a first-class subscript value with captured hidden evidence.
+    BuildSubscriptValue(B<BuildSubscriptValue<P>>),
     /// Assign a new value into an existing place.
     Assign(Assignment<P>),
     /// Materialize a value as an owned result, using the cheapest valid copy mode.
@@ -780,8 +792,8 @@ pub enum NodeKind<P: HirPhase = Unelaborated> {
     GetDictionary(GetDictionary),
     /// Load a trait dictionary from a function hidden argument.
     LoadDictionary(LoadDictionary),
-    /// Load a structural field index from a function hidden argument.
-    LoadFieldIndex(LoadFieldIndex),
+    /// Load a first-class subscript capability from a function hidden argument.
+    LoadSubscriptEvidence(LoadSubscriptEvidence),
     /// Look up a method function value from a trait dictionary.
     GetDictionaryMethod(GetDictionaryMethod<P>),
     /// Look up an associated const value from a trait dictionary.
@@ -830,7 +842,7 @@ impl NodeKind {
             | GetTraitDictionary(_)
             | GetDictionary(_)
             | LoadDictionary(_)
-            | LoadFieldIndex(_)
+            | LoadSubscriptEvidence(_)
             | TakeLocalValue(_)
             | LoadLocal(_)
             | CheckCallDepth
@@ -843,6 +855,11 @@ impl NodeKind {
                 if let Some(dict) = bc.captures_value_dictionary {
                     v.push(dict);
                 }
+                v
+            }
+            BuildSubscriptValue(build) => {
+                let mut v: SVec4<NodeId> = smallvec![build.subscript];
+                v.extend_from_slice(&build.evidence_captures);
                 v
             }
             Apply(app) => {
@@ -885,7 +902,6 @@ impl NodeKind {
             Assign(a) => smallvec![a.place, a.value],
             Project(node) => smallvec![node.value],
             FieldAccess(node) => smallvec![node.value],
-            ProjectAt(node) => smallvec![node.value],
             Variant(node) => smallvec![node.payload],
             Case(case) => {
                 let mut v: SVec4<NodeId> = SVec4::with_capacity(2 + case.alternatives.len());
@@ -1153,6 +1169,17 @@ impl<P: HirPhase> Node<P> {
                     format_ind(arena, dict, f, locals, env, spacing, indent + 1)?;
                 }
             }
+            BuildSubscriptValue(build) => {
+                writeln!(f, "{indent_str}build subscript value of")?;
+                format_ind(arena, build.subscript, f, locals, env, spacing, indent + 1)?;
+                if !build.evidence_captures.is_empty() {
+                    writeln!(f, "{indent_str}with evidence captures [")?;
+                    for &capture in &build.evidence_captures {
+                        format_ind(arena, capture, f, locals, env, spacing, indent + 1)?;
+                    }
+                    writeln!(f, "{indent_str}]")?;
+                }
+            }
             Apply(app) => {
                 writeln!(f, "{indent_str}eval")?;
                 format_ind(arena, app.function, f, locals, env, spacing, indent + 1)?;
@@ -1263,10 +1290,10 @@ impl<P: HirPhase> Node<P> {
                     load.extra_parameter.as_index()
                 )?;
             }
-            LoadFieldIndex(load) => {
+            LoadSubscriptEvidence(load) => {
                 writeln!(
                     f,
-                    "{indent_str}load field index extra parameter {}",
+                    "{indent_str}load subscript extra parameter {}",
                     load.extra_parameter.as_index()
                 )?;
             }
@@ -1444,15 +1471,6 @@ impl<P: HirPhase> Node<P> {
             FieldAccess(node) => {
                 node.format_ind(arena, f, locals, env, spacing, indent, &indent_str)?;
             }
-            ProjectAt(node) => {
-                writeln!(f, "{indent_str}access")?;
-                format_ind(arena, node.value, f, locals, env, spacing, indent + 1)?;
-                writeln!(
-                    f,
-                    "{indent_str}at field referenced by extra parameter {}",
-                    node.index.as_index()
-                )?;
-            }
             Variant(node) => {
                 writeln!(f, "{indent_str}variant with tag: {}", node.tag)?;
                 format_ind(arena, node.payload, f, locals, env, spacing, indent + 1)?;
@@ -1520,6 +1538,12 @@ impl<P: HirPhase> Node<P> {
                     return Some(ty);
                 }
                 // We do not look into captures as they are generated code.
+            }
+            BuildSubscriptValue(build) => {
+                if let Some(ty) = type_at(arena, build.subscript, pos) {
+                    return Some(ty);
+                }
+                // We do not look into evidence captures as they are generated code.
             }
             Apply(app) => {
                 if let Some(ty) = type_at(arena, app.function, pos) {
@@ -1593,7 +1617,7 @@ impl<P: HirPhase> Node<P> {
             GetDictionary(_) => {
                 // GetDictionary nodes don't contain child expressions with types
             }
-            LoadDictionary(_) | LoadFieldIndex(_) => {}
+            LoadDictionary(_) | LoadSubscriptEvidence(_) => {}
             GetDictionaryMethod(node) => {
                 if let Some(ty) = type_at(arena, node.dictionary, pos) {
                     return Some(ty);
@@ -1686,11 +1710,6 @@ impl<P: HirPhase> Node<P> {
                     return Some(ty);
                 }
             }
-            ProjectAt(node) => {
-                if let Some(ty) = type_at(arena, node.value, pos) {
-                    return Some(ty);
-                }
-            }
             Variant(node) => {
                 if let Some(ty) = type_at(arena, node.payload, pos) {
                     return Some(ty);
@@ -1755,6 +1774,9 @@ impl Node {
             BuildClosure(_) => {
                 // no need to look into the value's type as it is already in this node's type
             }
+            BuildSubscriptValue(_) => {
+                // no need to look into the value's type as it is already in this node's type
+            }
             Apply(app) => {
                 for arg in &app.arguments {
                     unbound_ty_vars(arena, arg.value, result, ignore);
@@ -1806,7 +1828,7 @@ impl Node {
             GetDictionary(_) => {
                 // no need to look into the dictionary's type as it is already in this node's type
             }
-            LoadDictionary(_) | LoadFieldIndex(_) => {}
+            LoadDictionary(_) | LoadSubscriptEvidence(_) => {}
             GetDictionaryMethod(node) => {
                 unbound_ty_vars(arena, node.dictionary, result, ignore);
             }
@@ -1848,9 +1870,6 @@ impl Node {
                 .iter()
                 .for_each(|&node| unbound_ty_vars(arena, node, result, ignore)),
             FieldAccess(node) => unbound_ty_vars(arena, node.value, result, ignore),
-            ProjectAt(_) => {
-                panic!("ProjectAt should not be in the HIR at this point");
-            }
             Variant(node) => unbound_ty_vars(arena, node.payload, result, ignore),
             ExtractTag(node) => unbound_ty_vars(arena, *node, result, ignore),
             Array(nodes) => nodes
@@ -1918,6 +1937,9 @@ pub(crate) fn instantiate_node_in_place<M: TypeMapper>(
         }
         GetFunction(get_fn) => {
             get_fn.inst_data.instantiate_in_place(mapper);
+        }
+        GetSubscript(get_subscript) => {
+            get_subscript.inst_data.instantiate_in_place(mapper);
         }
         GetTraitMethod(get_method) => {
             instantiate_types_in_place(&mut get_method.input_tys, mapper);

@@ -490,13 +490,8 @@ fn collect_callable_effect_vars_in_constraint(
             collect_callable_effect_vars_in_type(*tuple_ty, vars);
             collect_callable_effect_vars_in_type(*element_ty, vars);
         }
-        PubTypeConstraint::RecordFieldIs {
-            record_ty,
-            element_ty,
-            ..
-        } => {
-            collect_callable_effect_vars_in_type(*record_ty, vars);
-            collect_callable_effect_vars_in_type(*element_ty, vars);
+        PubTypeConstraint::ProjectionSubscriptIs { subscript_ty, .. } => {
+            collect_callable_effect_vars_in_type(Type::subscript_type(subscript_ty.clone()), vars);
         }
         PubTypeConstraint::TypeHasVariant {
             variant_ty,
@@ -545,6 +540,10 @@ fn node_variable_type_annotations<Env>(
         BuildClosure(build_closure) => {
             variable_type_annotations(arena, build_closure.function, result, locals, env);
             // We do not look into captures as they are generated code.
+        }
+        BuildSubscriptValue(build) => {
+            variable_type_annotations(arena, build.subscript, result, locals, env);
+            // We do not look into evidence captures as they are generated code.
         }
         Apply(app) => {
             variable_type_annotations(arena, app.function, result, locals, env);
@@ -601,7 +600,7 @@ fn node_variable_type_annotations<Env>(
             // There is no GetTraitDictionary left in the final IR.
         }
         GetDictionary(_) => {}
-        LoadDictionary(_) | LoadFieldIndex(_) => {}
+        LoadDictionary(_) | LoadSubscriptEvidence(_) => {}
         GetDictionaryMethod(node) => {
             variable_type_annotations(arena, node.dictionary, result, locals, env);
         }
@@ -665,7 +664,6 @@ fn node_variable_type_annotations<Env>(
             .iter()
             .for_each(|&node| variable_type_annotations(arena, node, result, locals, env)),
         FieldAccess(_) => {}
-        ProjectAt(project) => variable_type_annotations(arena, project.value, result, locals, env),
         Variant(variant) => variable_type_annotations(arena, variant.payload, result, locals, env),
         ExtractTag(node) => variable_type_annotations(arena, *node, result, locals, env),
         Array(nodes) => nodes

@@ -19,8 +19,8 @@ use crate::{
     hir::{LoopId, NodeArena, NodeId},
     module::{
         FunctionId, LocalDecl, LocalDeclId, LocalFunctionId, Module, ModuleEnv, ModuleId,
-        SubscriptDefinition, SubscriptId, SubscriptMember, TraitId, TypeDefLookupResult,
-        UModuleFunction, id::Id,
+        ProjectionKey, SubscriptDefinition, SubscriptId, SubscriptMember, TraitId,
+        TypeDefLookupResult, UModuleFunction, id::Id,
     },
     std::{STD_MODULE_ID, array::array_type as std_array_type},
     types::r#trait::TraitMethodIndex,
@@ -55,6 +55,7 @@ pub type GetSubscriptMemberWithPathData<'a> = (ast::Path, GetSubscriptMemberData
 pub(crate) struct SubscriptMemberTypingContext {
     pub(crate) name: Ustr,
     pub(crate) requires_mutable_place: bool,
+    pub(crate) projection_key: Option<ProjectionKey>,
 }
 
 #[derive(Debug, new)]

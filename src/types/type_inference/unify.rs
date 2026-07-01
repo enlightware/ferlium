@@ -1,11 +1,13 @@
+use std::borrow::Cow;
+
 use ena::unify::{InPlace, InPlaceUnificationTable, Snapshot};
 use ustr::Ustr;
 
 use crate::{
     FxHashMap, FxHashSet,
     compiler::error::{
-        ADTAccessType, InfiniteTypeKind, InternalCompilationError, MutabilityMustBeContext,
-        MutabilityMustBeWhat,
+        ADTAccessType, InfiniteTypeKind, InternalCompilationError, InvalidRecordFieldContext,
+        MutabilityMustBeContext, MutabilityMustBeWhat,
     },
     hir::NodeArena,
     internal_compilation_error,
@@ -17,11 +19,14 @@ use crate::{
         },
     },
     types::{
-        effects::{EffType, EffectVar},
+        effects::{EffType, EffectVar, no_effects},
         mutability::{MutType, MutVal, MutVar, MutVarKey},
         recursive_equation::{RecursiveEquationError, try_intern_recursive_equation},
         trait_solver::{ConstraintAssumptions, TraitSolver},
-        r#type::{FnType, SubscriptMemberType, TyVarKey, Type, TypeInstSubst, TypeKind, TypeVar},
+        r#type::{
+            FnArgType, FnType, SubscriptMemberType, SubscriptResultConvention, SubscriptType,
+            TyVarKey, Type, TypeInstSubst, TypeKind, TypeVar,
+        },
         type_like::TypeLike,
         type_scheme::PubTypeConstraint,
     },
@@ -55,6 +60,31 @@ pub struct UnifiedTypeInference {
     pub(super) remaining_ty_constraints: Vec<PubTypeConstraint>,
     pub(super) mut_unification_table: InPlaceUnificationTable<MutVarKey>,
     pub(super) effects: EffectSolver,
+}
+
+/// Canonical constraints and same-family indexes for one unification pass.
+pub(super) struct ConstraintPassAggregation<'a> {
+    pub(super) constraints: Vec<Cow<'a, PubTypeConstraint>>,
+    tuples_at_index_is: FxHashMap<Type, FxHashMap<usize, (Type, Location)>>,
+    records_field_is: FxHashMap<Type, FxHashMap<Ustr, (Type, Location)>>,
+    variants_are: FxHashMap<Type, FxHashMap<Ustr, (Type, Location)>>,
+}
+
+impl ConstraintPassAggregation<'_> {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            constraints: Vec::with_capacity(capacity),
+            tuples_at_index_is: FxHashMap::default(),
+            records_field_is: FxHashMap::default(),
+            variants_are: FxHashMap::default(),
+        }
+    }
+
+    pub(super) fn is_ty_adt(&self, ty: Type) -> bool {
+        self.tuples_at_index_is.contains_key(&ty)
+            || self.records_field_is.contains_key(&ty)
+            || self.variants_are.contains_key(&ty)
+    }
 }
 
 impl UnifiedTypeInference {
@@ -300,211 +330,19 @@ impl UnifiedTypeInference {
 
             loop {
                 // Loop as long as we make progress.
+                let old_remaining_constraints = remaining_constraints;
 
-                // Perform simplification for algebraic data type constraints.
-                // Check for incompatible constraints as well.
-                let mut tuples_at_index_is: FxHashMap<Type, FxHashMap<usize, (Type, Location)>> =
-                    FxHashMap::default();
-                let mut records_field_is: FxHashMap<Type, FxHashMap<Ustr, (Type, Location)>> =
-                    FxHashMap::default();
-                let mut variants_are: FxHashMap<Type, FxHashMap<Ustr, (Type, Location)>> =
-                    FxHashMap::default();
-                /// The outputs of an already-seen trait application: its output
-                /// types, output effects, and the location of its first use.
-                type HaveTraitOutputs = (Vec<Type>, Vec<EffType>, Location);
-                let mut have_traits: FxHashMap<
-                    (crate::module::TraitId, Vec<Type>),
-                    HaveTraitOutputs,
-                > = FxHashMap::default();
-                for constraint in &remaining_constraints {
-                    use PubTypeConstraint::*;
-                    match constraint {
-                        TupleAtIndexIs {
-                            tuple_ty,
-                            tuple_span,
-                            index,
-                            index_span,
-                            element_ty,
-                        } => {
-                            let tuple_ty = unified_ty_inf.normalize_type(*tuple_ty);
-                            let element_ty = unified_ty_inf.normalize_type(*element_ty);
-                            // tuple_span and index_span *must* originate from the same module
-                            let span =
-                                Location::fuse([tuple_span.use_site, index_span.use_site]).unwrap();
-                            if let Some(variant) = variants_are.get(&tuple_ty) {
-                                let variant_span = variant.iter().next().unwrap().1.1;
-                                return Err(InternalCompilationError::new_inconsistent_adt(
-                                    ADTAccessType::Variant,
-                                    variant_span,
-                                    ADTAccessType::TupleProject,
-                                    span,
-                                ));
-                            } else if let Some(record) = records_field_is.get(&tuple_ty) {
-                                let record_span = record.iter().next().unwrap().1.1;
-                                return Err(InternalCompilationError::new_inconsistent_adt(
-                                    ADTAccessType::RecordAccess,
-                                    record_span,
-                                    ADTAccessType::TupleProject,
-                                    span,
-                                ));
-                            } else if let Some(tuple) = tuples_at_index_is.get_mut(&tuple_ty) {
-                                if let Some((expected_ty, expected_span)) = tuple.get(index) {
-                                    unified_ty_inf.unify_same_type_with_sub_effects(
-                                        element_ty,
-                                        span,
-                                        *expected_ty,
-                                        *expected_span,
-                                    )?;
-                                } else {
-                                    tuple.insert(*index, (element_ty, span));
-                                }
-                            } else {
-                                let tuple = FxHashMap::from_iter([(*index, (element_ty, span))]);
-                                tuples_at_index_is.insert(tuple_ty, tuple);
-                            }
-                        }
-                        RecordFieldIs {
-                            record_ty,
-                            record_span,
-                            field,
-                            field_span,
-                            element_ty,
-                        } => {
-                            let record_ty = unified_ty_inf.normalize_type(*record_ty);
-                            let element_ty = unified_ty_inf.normalize_type(*element_ty);
-                            // record_span and field_span *must* originate from the same module
-                            let span = Location::fuse([record_span.use_site, field_span.use_site])
-                                .unwrap();
-                            if let Some(variant) = variants_are.get(&record_ty) {
-                                let variant_span = variant.iter().next().unwrap().1.1;
-                                return Err(InternalCompilationError::new_inconsistent_adt(
-                                    ADTAccessType::Variant,
-                                    variant_span,
-                                    ADTAccessType::TupleProject,
-                                    span,
-                                ));
-                            } else if let Some(tuple) = tuples_at_index_is.get(&record_ty) {
-                                let tuple_span = tuple.iter().next().unwrap().1.1;
-                                return Err(InternalCompilationError::new_inconsistent_adt(
-                                    ADTAccessType::TupleProject,
-                                    tuple_span,
-                                    ADTAccessType::RecordAccess,
-                                    span,
-                                ));
-                            } else if let Some(record) = records_field_is.get_mut(&record_ty) {
-                                if let Some((expected_ty, expected_span)) = record.get(field) {
-                                    unified_ty_inf.unify_same_type_with_sub_effects(
-                                        element_ty,
-                                        span,
-                                        *expected_ty,
-                                        *expected_span,
-                                    )?;
-                                } else {
-                                    record.insert(*field, (element_ty, span));
-                                }
-                            } else {
-                                let record = FxHashMap::from_iter([(*field, (element_ty, span))]);
-                                records_field_is.insert(record_ty, record);
-                            }
-                        }
-                        TypeHasVariant {
-                            variant_ty,
-                            variant_span,
-                            tag,
-                            payload_ty,
-                            payload_span,
-                        } => {
-                            let variant_ty = unified_ty_inf.normalize_type(*variant_ty);
-                            let payload_ty = unified_ty_inf.normalize_type(*payload_ty);
-                            // We observed that sometimes variant_span and payload_span come from different modules.
-                            // So we just use variant_span here.
-                            let span = variant_span.use_site;
-                            if let Some(tuple) = tuples_at_index_is.get(&variant_ty) {
-                                let index_span = tuple.iter().next().unwrap().1.1;
-                                return Err(InternalCompilationError::new_inconsistent_adt(
-                                    ADTAccessType::TupleProject,
-                                    index_span,
-                                    ADTAccessType::Variant,
-                                    span,
-                                ));
-                            } else if let Some(record) = records_field_is.get(&variant_ty) {
-                                let record_span = record.iter().next().unwrap().1.1;
-                                return Err(InternalCompilationError::new_inconsistent_adt(
-                                    ADTAccessType::RecordAccess,
-                                    record_span,
-                                    ADTAccessType::Variant,
-                                    span,
-                                ));
-                            } else if let Some(variants) = variants_are.get_mut(&variant_ty) {
-                                if let Some((expected_ty, expected_span)) = variants.get(tag) {
-                                    unified_ty_inf.unify_same_type_with_sub_effects(
-                                        payload_ty,
-                                        payload_span.use_site,
-                                        *expected_ty,
-                                        *expected_span,
-                                    )?;
-                                } else {
-                                    variants.insert(*tag, (payload_ty, span));
-                                }
-                            } else {
-                                let variant = FxHashMap::from_iter([(
-                                    *tag,
-                                    (payload_ty, payload_span.use_site),
-                                )]);
-                                variants_are.insert(variant_ty, variant);
-                            }
-                        }
-                        HaveTrait {
-                            trait_id,
-                            input_tys,
-                            output_tys,
-                            output_effs,
-                            span,
-                        } => {
-                            let input_types = unified_ty_inf.normalize_types(input_tys);
-                            let output_types = unified_ty_inf.normalize_types(output_tys);
-                            let output_effects =
-                                unified_ty_inf.substitute_in_effect_types(output_effs);
-                            let key = (*trait_id, input_types);
-                            if let Some(have_trait) = have_traits.get(&key) {
-                                assert_eq!(have_trait.0.len(), output_types.len());
-                                for (expected, actual) in
-                                    have_trait.0.iter().zip(output_types.iter())
-                                {
-                                    unified_ty_inf.unify_same_type_with_sub_effects(
-                                        *actual,
-                                        span.use_site,
-                                        *expected,
-                                        have_trait.2,
-                                    )?;
-                                }
-                                assert_eq!(have_trait.1.len(), output_effects.len());
-                                for (expected, actual) in
-                                    have_trait.1.iter().zip(output_effects.iter())
-                                {
-                                    unified_ty_inf.unify_same_effect(
-                                        actual.clone(),
-                                        span.use_site,
-                                        expected.clone(),
-                                        have_trait.2,
-                                    )?;
-                                }
-                            } else {
-                                have_traits
-                                    .insert(key, (output_types, output_effects, span.use_site));
-                            }
-                        }
-                    }
-                }
+                // Aggregate same-family constraints and check incompatible ADT views.
+                let aggregation = unified_ty_inf
+                    .aggregate_constraints_for_pass(old_remaining_constraints.iter())?;
 
                 // Perform unification.
-                let old_remaining_constraints = remaining_constraints;
-                let constraints = old_remaining_constraints.iter().collect::<Vec<_>>();
-                let is_ty_adt = |ty| {
-                    tuples_at_index_is.contains_key(&ty)
-                        || records_field_is.contains_key(&ty)
-                        || variants_are.contains_key(&ty)
-                };
+                let constraints = aggregation
+                    .constraints
+                    .iter()
+                    .map(|constraint| constraint.as_ref())
+                    .collect::<Vec<_>>();
+                let is_ty_adt = |ty| aggregation.is_ty_adt(ty);
                 let mut new_constraints = unified_ty_inf.unify_constraint_pass(
                     &constraints,
                     is_ty_adt,
@@ -1109,49 +947,69 @@ impl UnifiedTypeInference {
         }
     }
 
-    fn unify_record_field_access(
+    fn structural_projection_subscript_type(
         &mut self,
-        record_ty: Type,
-        record_span: Location,
+        receiver_ty: Type,
+        receiver_span: Location,
         field: Ustr,
         field_span: Location,
-        element_ty: Type,
-    ) -> Result<Option<PubTypeConstraint>, InternalCompilationError> {
-        let record_ty = self.normalize_type(record_ty);
-        let element_ty = self.normalize_type(element_ty);
-        let record_data = { record_ty.data().clone() };
-        match record_data {
-            // A type variable may or may not be a tuple, defer the unification
-            TypeKind::Variable(_) => Ok(Some(PubTypeConstraint::new_record_field_is(
-                record_ty,
-                record_span,
-                field,
-                field_span,
-                element_ty,
-            ))),
-            // A record, verify element type
-            TypeKind::Record(tys) => {
-                if let Some(ty) = tys
-                    .iter()
-                    .find_map(|(name, ty)| if *name == field { Some(*ty) } else { None })
-                {
-                    self.unify_same_type_with_sub_effects(ty, record_span, element_ty, field_span)?;
-                    Ok(None)
-                } else {
-                    Err(internal_compilation_error!(InvalidRecordField {
+        ctx: InvalidRecordFieldContext,
+        trait_solver: &mut TraitSolver<'_>,
+    ) -> Result<Option<SubscriptType>, InternalCompilationError> {
+        let receiver_ty = self.normalize_type(receiver_ty);
+        let receiver_data = receiver_ty.data().clone();
+        let field_ty = match receiver_data {
+            TypeKind::Variable(_) => return Ok(None),
+            TypeKind::Record(record) => record
+                .iter()
+                .find_map(|(name, ty)| (*name == field).then_some(*ty))
+                .ok_or_else(|| {
+                    internal_compilation_error!(InvalidRecordField {
                         field_span,
-                        record_ty,
-                        record_span,
-                    }))
-                }
+                        record_ty: receiver_ty,
+                        record_span: receiver_span,
+                        ctx: InvalidRecordFieldContext::StructuralField,
+                    })
+                })?,
+            TypeKind::Named(named) => {
+                trait_solver.reject_inaccessible_private_repr(named.def, field_span)?;
+                let shape = trait_solver
+                    .type_def(named.def)
+                    .instantiated_shape_with_effects(&named.params, &named.effect_params);
+                let shape_data = shape.data();
+                shape_data
+                    .as_record()
+                    .and_then(|record| {
+                        record
+                            .iter()
+                            .find_map(|(name, ty)| (*name == field).then_some(*ty))
+                    })
+                    .ok_or_else(|| {
+                        internal_compilation_error!(InvalidRecordField {
+                            field_span,
+                            record_ty: receiver_ty,
+                            record_span: receiver_span,
+                            ctx,
+                        })
+                    })?
             }
-            // Not a record, error
-            _ => Err(internal_compilation_error!(InvalidRecordFieldAccess {
-                record_ty,
-                record_span,
-                field_span,
-            })),
-        }
+            _ => {
+                return Err(internal_compilation_error!(InvalidRecordFieldAccess {
+                    record_ty: receiver_ty,
+                    record_span: receiver_span,
+                    field_span,
+                    ctx,
+                }));
+            }
+        };
+        let member =
+            SubscriptMemberType::new(no_effects(), SubscriptResultConvention::AddressorPlace);
+        Ok(Some(SubscriptType::new(
+            vec![FnArgType::new_by_val(receiver_ty)],
+            field_ty,
+            Some(member.clone()),
+            Some(member),
+        )))
     }
 
     fn unify_type_has_variant(
@@ -1361,7 +1219,329 @@ impl UnifiedTypeInference {
         Ok(new_constraints)
     }
 
-    fn unify_pub_constraint(
+    /// Aggregate same-family public constraints before running one unification pass.
+    pub(super) fn aggregate_constraints_for_pass<'a>(
+        &mut self,
+        constraints: impl IntoIterator<Item = &'a PubTypeConstraint>,
+    ) -> Result<ConstraintPassAggregation<'a>, InternalCompilationError> {
+        let constraints = constraints.into_iter();
+        let mut aggregation = ConstraintPassAggregation::with_capacity(constraints.size_hint().0);
+        let mut projection_indices = FxHashMap::<(Type, Ustr), usize>::default();
+        type HaveTraitOutputs = (Vec<Type>, Vec<EffType>, Location);
+        let mut have_traits: FxHashMap<(crate::module::TraitId, Vec<Type>), HaveTraitOutputs> =
+            FxHashMap::default();
+
+        for constraint in constraints {
+            use PubTypeConstraint::*;
+            match constraint {
+                TupleAtIndexIs {
+                    tuple_ty,
+                    tuple_span,
+                    index,
+                    index_span,
+                    element_ty,
+                } => {
+                    let tuple_ty = self.normalize_type(*tuple_ty);
+                    let element_ty = self.normalize_type(*element_ty);
+                    // tuple_span and index_span *must* originate from the same module
+                    let span = Location::fuse([tuple_span.use_site, index_span.use_site]).unwrap();
+                    if let Some(variant) = aggregation.variants_are.get(&tuple_ty) {
+                        let variant_span = variant.iter().next().unwrap().1.1;
+                        return Err(InternalCompilationError::new_inconsistent_adt(
+                            ADTAccessType::Variant,
+                            variant_span,
+                            ADTAccessType::TupleProject,
+                            span,
+                        ));
+                    } else if let Some(record) = aggregation.records_field_is.get(&tuple_ty) {
+                        let record_span = record.iter().next().unwrap().1.1;
+                        return Err(InternalCompilationError::new_inconsistent_adt(
+                            ADTAccessType::RecordAccess,
+                            record_span,
+                            ADTAccessType::TupleProject,
+                            span,
+                        ));
+                    } else if let Some(tuple) = aggregation.tuples_at_index_is.get_mut(&tuple_ty) {
+                        if let Some((expected_ty, expected_span)) = tuple.get(index) {
+                            self.unify_same_type_with_sub_effects(
+                                element_ty,
+                                span,
+                                *expected_ty,
+                                *expected_span,
+                            )?;
+                        } else {
+                            tuple.insert(*index, (element_ty, span));
+                        }
+                    } else {
+                        let tuple = FxHashMap::from_iter([(*index, (element_ty, span))]);
+                        aggregation.tuples_at_index_is.insert(tuple_ty, tuple);
+                    }
+                    aggregation.constraints.push(Cow::Borrowed(constraint));
+                }
+                ProjectionSubscriptIs {
+                    requirement,
+                    receiver_span,
+                    field,
+                    field_span,
+                    subscript_ty,
+                } => {
+                    let mut subscript_ty = subscript_ty.clone();
+                    self.substitute_in_subscript_type_in_place(&mut subscript_ty);
+                    let receiver_ty = self.normalize_type(subscript_ty.receiver_ty());
+                    let element_ty = self.normalize_type(subscript_ty.ret);
+                    let span = field_span.use_site;
+                    if let Some(variant) = aggregation.variants_are.get(&receiver_ty) {
+                        let variant_span = variant.iter().next().unwrap().1.1;
+                        return Err(InternalCompilationError::new_inconsistent_adt(
+                            ADTAccessType::Variant,
+                            variant_span,
+                            ADTAccessType::RecordAccess,
+                            span,
+                        ));
+                    } else if let Some(tuple) = aggregation.tuples_at_index_is.get(&receiver_ty) {
+                        let tuple_span = tuple.iter().next().unwrap().1.1;
+                        return Err(InternalCompilationError::new_inconsistent_adt(
+                            ADTAccessType::TupleProject,
+                            tuple_span,
+                            ADTAccessType::RecordAccess,
+                            span,
+                        ));
+                    } else if let Some(record) = aggregation.records_field_is.get_mut(&receiver_ty)
+                    {
+                        if let Some((expected_ty, expected_span)) = record.get(field) {
+                            self.unify_same_type_with_sub_effects(
+                                element_ty,
+                                span,
+                                *expected_ty,
+                                *expected_span,
+                            )?;
+                        } else {
+                            record.insert(*field, (element_ty, span));
+                        }
+                    } else {
+                        let record = FxHashMap::from_iter([(*field, (element_ty, span))]);
+                        aggregation.records_field_is.insert(receiver_ty, record);
+                    }
+
+                    let key = (receiver_ty, *field);
+                    let Some(&existing_index) = projection_indices.get(&key) else {
+                        projection_indices.insert(key, aggregation.constraints.len());
+                        aggregation.constraints.push(Cow::Owned(
+                            PubTypeConstraint::ProjectionSubscriptIs {
+                                requirement: *requirement,
+                                receiver_span: receiver_span.clone(),
+                                field: *field,
+                                field_span: field_span.clone(),
+                                subscript_ty,
+                            },
+                        ));
+                        continue;
+                    };
+
+                    let PubTypeConstraint::ProjectionSubscriptIs {
+                        receiver_span: existing_receiver_span,
+                        field_span: existing_field_span,
+                        subscript_ty: existing_subscript_ty,
+                        ..
+                    } = aggregation.constraints[existing_index].as_ref()
+                    else {
+                        unreachable!("projection index should reference a projection constraint");
+                    };
+                    let existing_receiver_span = existing_receiver_span.use_site;
+                    let existing_field_span = existing_field_span.use_site;
+                    let existing_subscript_ty = existing_subscript_ty.clone();
+                    self.unify_projection_subscript_signature(
+                        &existing_subscript_ty,
+                        existing_receiver_span,
+                        &subscript_ty,
+                        receiver_span.use_site,
+                    )?;
+                    self.unify_projection_subscript_members(
+                        &existing_subscript_ty,
+                        existing_field_span,
+                        &subscript_ty,
+                        field_span.use_site,
+                    )?;
+
+                    let PubTypeConstraint::ProjectionSubscriptIs {
+                        requirement: existing_requirement,
+                        subscript_ty: existing_subscript_ty,
+                        ..
+                    } = aggregation.constraints[existing_index].to_mut()
+                    else {
+                        unreachable!("projection index should reference a projection constraint");
+                    };
+                    *existing_requirement = existing_requirement.merge(*requirement);
+                    merge_projection_subscript_member_requirements(
+                        existing_subscript_ty,
+                        subscript_ty,
+                    );
+                }
+                TypeHasVariant {
+                    variant_ty,
+                    variant_span,
+                    tag,
+                    payload_ty,
+                    payload_span,
+                } => {
+                    let variant_ty = self.normalize_type(*variant_ty);
+                    let payload_ty = self.normalize_type(*payload_ty);
+                    // We observed that sometimes variant_span and payload_span come from different modules.
+                    // So we just use variant_span here.
+                    let span = variant_span.use_site;
+                    if let Some(tuple) = aggregation.tuples_at_index_is.get(&variant_ty) {
+                        let index_span = tuple.iter().next().unwrap().1.1;
+                        return Err(InternalCompilationError::new_inconsistent_adt(
+                            ADTAccessType::TupleProject,
+                            index_span,
+                            ADTAccessType::Variant,
+                            span,
+                        ));
+                    } else if let Some(record) = aggregation.records_field_is.get(&variant_ty) {
+                        let record_span = record.iter().next().unwrap().1.1;
+                        return Err(InternalCompilationError::new_inconsistent_adt(
+                            ADTAccessType::RecordAccess,
+                            record_span,
+                            ADTAccessType::Variant,
+                            span,
+                        ));
+                    } else if let Some(variants) = aggregation.variants_are.get_mut(&variant_ty) {
+                        if let Some((expected_ty, expected_span)) = variants.get(tag) {
+                            self.unify_same_type_with_sub_effects(
+                                payload_ty,
+                                payload_span.use_site,
+                                *expected_ty,
+                                *expected_span,
+                            )?;
+                        } else {
+                            variants.insert(*tag, (payload_ty, span));
+                        }
+                    } else {
+                        let variant =
+                            FxHashMap::from_iter([(*tag, (payload_ty, payload_span.use_site))]);
+                        aggregation.variants_are.insert(variant_ty, variant);
+                    }
+                    aggregation.constraints.push(Cow::Borrowed(constraint));
+                }
+                HaveTrait {
+                    trait_id,
+                    input_tys,
+                    output_tys,
+                    output_effs,
+                    span,
+                } => {
+                    let input_types = self.normalize_types(input_tys);
+                    let output_types = self.normalize_types(output_tys);
+                    let output_effects = self.substitute_in_effect_types(output_effs);
+                    let key = (*trait_id, input_types);
+                    if let Some(have_trait) = have_traits.get(&key) {
+                        assert_eq!(have_trait.0.len(), output_types.len());
+                        for (expected, actual) in have_trait.0.iter().zip(output_types.iter()) {
+                            self.unify_same_type_with_sub_effects(
+                                *actual,
+                                span.use_site,
+                                *expected,
+                                have_trait.2,
+                            )?;
+                        }
+                        assert_eq!(have_trait.1.len(), output_effects.len());
+                        for (expected, actual) in have_trait.1.iter().zip(output_effects.iter()) {
+                            self.unify_same_effect(
+                                actual.clone(),
+                                span.use_site,
+                                expected.clone(),
+                                have_trait.2,
+                            )?;
+                        }
+                    } else {
+                        have_traits.insert(key, (output_types, output_effects, span.use_site));
+                    }
+                    aggregation.constraints.push(Cow::Borrowed(constraint));
+                }
+            }
+        }
+        Ok(aggregation)
+    }
+
+    fn unify_projection_subscript_signature(
+        &mut self,
+        existing: &SubscriptType,
+        existing_span: Location,
+        incoming: &SubscriptType,
+        incoming_span: Location,
+    ) -> Result<(), InternalCompilationError> {
+        if existing.args.len() != incoming.args.len() {
+            return Err(internal_compilation_error!(Internal {
+                error: "Projection subscript constraints should have matching arity".into(),
+                span: incoming_span,
+            }));
+        }
+        for (index, (existing_arg, incoming_arg)) in
+            existing.args.iter().zip(&incoming.args).enumerate()
+        {
+            self.unify_same_type_with_sub_effects(
+                existing_arg.ty,
+                existing_span,
+                incoming_arg.ty,
+                incoming_span,
+            )?;
+            self.unify_mut_must_be_at_least_or_equal(
+                existing_arg.mut_ty,
+                existing_span,
+                incoming_arg.mut_ty,
+                incoming_span,
+                MutabilityMustBeContext::FnTypeArg(index),
+                SubOrSameType::SameTypeWithSubEffects,
+            )?;
+        }
+        self.unify_same_type_with_sub_effects(
+            existing.ret,
+            existing_span,
+            incoming.ret,
+            incoming_span,
+        )
+    }
+
+    fn unify_projection_subscript_members(
+        &mut self,
+        existing: &SubscriptType,
+        existing_span: Location,
+        incoming: &SubscriptType,
+        incoming_span: Location,
+    ) -> Result<(), InternalCompilationError> {
+        self.unify_projection_subscript_member(
+            existing.ref_member.as_ref(),
+            existing_span,
+            incoming.ref_member.as_ref(),
+            incoming_span,
+        )?;
+        self.unify_projection_subscript_member(
+            existing.mut_member.as_ref(),
+            existing_span,
+            incoming.mut_member.as_ref(),
+            incoming_span,
+        )
+    }
+
+    fn unify_projection_subscript_member(
+        &mut self,
+        existing: Option<&SubscriptMemberType>,
+        existing_span: Location,
+        incoming: Option<&SubscriptMemberType>,
+        incoming_span: Location,
+    ) -> Result<(), InternalCompilationError> {
+        let (Some(existing), Some(incoming)) = (existing, incoming) else {
+            return Ok(());
+        };
+        self.unify_same_effect(
+            existing.effects.clone(),
+            existing_span,
+            incoming.effects.clone(),
+            incoming_span,
+        )
+    }
+
+    pub(crate) fn unify_pub_constraint(
         &mut self,
         constraint: &PubTypeConstraint,
         assumptions: ConstraintAssumptions<'_>,
@@ -1389,6 +1569,56 @@ impl UnifiedTypeInference {
                 arena,
             );
         }
+        if let PubTypeConstraint::ProjectionSubscriptIs {
+            requirement,
+            receiver_span,
+            field,
+            field_span,
+            subscript_ty,
+        } = constraint
+        {
+            let mut subscript_ty = subscript_ty.clone();
+            self.substitute_in_subscript_type_in_place(&mut subscript_ty);
+            let receiver_ty = subscript_ty.receiver_ty();
+            if matches!(&*receiver_ty.data(), TypeKind::Variable(_)) {
+                return Ok(Some(PubTypeConstraint::ProjectionSubscriptIs {
+                    requirement: *requirement,
+                    receiver_span: receiver_span.clone(),
+                    field: *field,
+                    field_span: field_span.clone(),
+                    subscript_ty,
+                }));
+            }
+            let actual_subscript_ty = if requirement.accepts_user_defined_projection()
+                && let Some(actual_subscript_ty) =
+                    trait_solver.projection_subscript_type(receiver_ty, *field)
+            {
+                Some(actual_subscript_ty)
+            } else {
+                let ctx = if requirement.accepts_user_defined_projection() {
+                    InvalidRecordFieldContext::ProjectionFallback
+                } else {
+                    InvalidRecordFieldContext::StructuralField
+                };
+                self.structural_projection_subscript_type(
+                    receiver_ty,
+                    receiver_span.use_site,
+                    *field,
+                    field_span.use_site,
+                    ctx,
+                    trait_solver,
+                )?
+            };
+            let actual_subscript_ty =
+                actual_subscript_ty.expect("resolved projection receiver should produce evidence");
+            self.unify_sub_type(
+                Type::subscript_type(actual_subscript_ty),
+                receiver_span.use_site,
+                Type::subscript_type(subscript_ty),
+                field_span.use_site,
+            )?;
+            return Ok(None);
+        }
         self.unify_structural_pub_constraint(constraint)
     }
 
@@ -1411,19 +1641,6 @@ impl UnifiedTypeInference {
                 index_span.use_site,
                 *element_ty,
             ),
-            RecordFieldIs {
-                record_ty,
-                record_span,
-                field,
-                field_span,
-                element_ty,
-            } => self.unify_record_field_access(
-                *record_ty,
-                record_span.use_site,
-                *field,
-                field_span.use_site,
-                *element_ty,
-            ),
             TypeHasVariant {
                 variant_ty,
                 variant_span,
@@ -1437,6 +1654,28 @@ impl UnifiedTypeInference {
                 *payload_ty,
                 payload_span.use_site,
             ),
+            ProjectionSubscriptIs {
+                requirement,
+                receiver_span,
+                field,
+                field_span,
+                subscript_ty,
+            } => {
+                let mut subscript_ty = subscript_ty.clone();
+                self.substitute_in_subscript_type_in_place(&mut subscript_ty);
+                let receiver_ty = subscript_ty.receiver_ty();
+                if matches!(&*receiver_ty.data(), TypeKind::Variable(_)) {
+                    Ok(Some(PubTypeConstraint::ProjectionSubscriptIs {
+                        requirement: *requirement,
+                        receiver_span: receiver_span.clone(),
+                        field: *field,
+                        field_span: field_span.clone(),
+                        subscript_ty,
+                    }))
+                } else {
+                    Ok(None)
+                }
+            }
             HaveTrait { .. } => unreachable!("trait constraints are handled by the caller"),
         }
     }
@@ -1676,11 +1915,31 @@ impl UnifiedTypeInference {
     }
 }
 
+fn merge_projection_subscript_member_requirements(
+    existing: &mut SubscriptType,
+    incoming: SubscriptType,
+) {
+    merge_subscript_member_requirement(&mut existing.ref_member, incoming.ref_member);
+    merge_subscript_member_requirement(&mut existing.mut_member, incoming.mut_member);
+}
+
+fn merge_subscript_member_requirement(
+    existing: &mut Option<SubscriptMemberType>,
+    incoming: Option<SubscriptMemberType>,
+) {
+    match (existing, incoming) {
+        (_, None) => {}
+        (slot @ None, Some(incoming)) => *slot = Some(incoming),
+        (Some(existing), Some(incoming)) => {
+            existing.result_convention = existing.result_convention.max(incoming.result_convention);
+        }
+    }
+}
+
 fn constraint_solve_priority(constraint: &PubTypeConstraint, trait_solver: &TraitSolver<'_>) -> u8 {
     match constraint {
-        PubTypeConstraint::TupleAtIndexIs { .. }
-        | PubTypeConstraint::RecordFieldIs { .. }
-        | PubTypeConstraint::TypeHasVariant { .. } => 0,
+        PubTypeConstraint::TupleAtIndexIs { .. } | PubTypeConstraint::TypeHasVariant { .. } => 0,
+        PubTypeConstraint::ProjectionSubscriptIs { .. } => 5,
         PubTypeConstraint::HaveTrait {
             trait_id,
             output_tys,
