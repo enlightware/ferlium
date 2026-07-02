@@ -1714,3 +1714,58 @@ fn discarded_bool_struct_temporary_runs_semantic_drop() {
     "#;
     assert_val_eq!(session.run(source), int(1));
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn mutable_literal_initialized_local_drop_is_resolved_from_its_type() {
+    // A mutable binding can be reassigned an owned value, so its scope-exit drop must be
+    // resolved from its type; only an immutable binding may skip the drop based on its
+    // literal initializer.
+    let mut session = TestSession::new();
+    let module = session.compile_and_get_module(
+        r#"
+        fn go() -> string {
+            let ok = "a";
+            let mut s = "b";
+            s = string_concat(s, ok);
+            s
+        }
+        "#,
+    );
+    let go = module
+        .get_function_by_id(module.get_local_function_id(ustr("go")).unwrap())
+        .unwrap();
+    let drop_of = |name: &str| {
+        go.locals
+            .iter()
+            .find(|local| local.name.0 == ustr(name))
+            .unwrap_or_else(|| panic!("no local `{name}`"))
+            .local_drop()
+            .copied()
+    };
+    assert_eq!(drop_of("ok"), Some(ResolvedLocalDrop::Skip));
+    assert!(matches!(drop_of("s"), Some(ResolvedLocalDrop::Static(_))));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn reassigned_mutable_literal_initialized_local_is_dropped_at_scope_exit() {
+    // The end-to-end scenario behind the resolution rule above: after reassignment `s` owns
+    // the `string_concat` result, which must be dropped each iteration before the loop reuses
+    // the local's storage. An ownership-explicit backend (e.g. the SSA lowering) leaks the
+    // string on every iteration without that drop.
+    let mut session = TestSession::new();
+    let source = r#"
+        fn go() -> int {
+            let mut i = 0;
+            loop {
+                let mut s = "a";
+                s = string_concat(s, "b");
+                i = i + 1;
+                if i > 2 { break i }
+            }
+        }
+        go()
+    "#;
+    assert_val_eq!(session.run(source), int(3));
+}

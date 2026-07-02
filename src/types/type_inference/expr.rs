@@ -1028,9 +1028,13 @@ impl TypeInference {
                     expr_span,
                 );
                 if owns_storage {
-                    local.set_owned_storage(
-                        self.unresolved_or_skipped_drop_for_value(env, node_id, node_ty, expr_span),
-                    );
+                    local.set_owned_storage(self.unresolved_or_skipped_drop_for_value(
+                        env,
+                        node_id,
+                        node_ty,
+                        mut_val.is_mutable(),
+                        expr_span,
+                    ));
                 }
                 if defer_storage {
                     local.set_deferred_storage(DeferredLocalStorage {
@@ -4122,7 +4126,9 @@ impl TypeInference {
             None,
             span,
         );
-        local.set_owned_storage(self.unresolved_or_skipped_drop_for_value(env, value, ty, span));
+        local.set_owned_storage(
+            self.unresolved_or_skipped_drop_for_value(env, value, ty, false, span),
+        );
         let id = env.push_local(local);
 
         let value_effects = env.ir_arena[value].effects.clone();
@@ -4807,14 +4813,26 @@ impl TypeInference {
         !self.type_has_concrete_trivial_copy_impl(env, ty, span)
     }
 
+    /// Resolves the scope-exit drop of an owned binding initialized with `value`.
+    ///
+    /// An immutable binding holds its initializer for its whole lifetime, so drop necessity is
+    /// decided from the initializer value (e.g. a literal needs no drop even when its type is not
+    /// trivially copyable). A mutable binding can be reassigned an owned value, so its drop is
+    /// resolved from its type alone.
     fn unresolved_or_skipped_drop_for_value(
         &mut self,
         env: &mut TypingEnv,
         value: NodeId,
         ty: Type,
+        binding_mutable: bool,
         span: Location,
     ) -> PendingLocalDrop {
-        if self.node_value_needs_semantic_drop(env, value, ty, span) {
+        let needs_drop = if binding_mutable {
+            self.type_needs_semantic_drop(env, ty, span)
+        } else {
+            self.node_value_needs_semantic_drop(env, value, ty, span)
+        };
+        if needs_drop {
             self.add_value_constraint_for_unknown_drop(value_trait_id(env), ty, span);
             PendingLocalDrop::Unknown
         } else {
@@ -4831,8 +4849,10 @@ impl TypeInference {
         span: Location,
     ) {
         let owns_storage = !node_is_place_reference(env.ir_arena, value);
-        let drop =
-            owns_storage.then(|| self.unresolved_or_skipped_drop_for_value(env, value, ty, span));
+        let binding_mutable = env.all_locals[local_id.as_index()].mut_ty.is_mutable();
+        let drop = owns_storage.then(|| {
+            self.unresolved_or_skipped_drop_for_value(env, value, ty, binding_mutable, span)
+        });
 
         let local = &mut env.all_locals[local_id.as_index()];
         if let Some(drop) = drop {
