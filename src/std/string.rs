@@ -7,7 +7,9 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 use std::{
+    cmp::Ordering,
     fmt::{self, Display},
+    hash::Hash,
     ops::Deref,
     rc::Rc,
     str::FromStr,
@@ -50,15 +52,58 @@ use crate::{
 use super::option::{none, option_type, some};
 
 /// A UTF-8 encoded string type that supports Unicode grapheme clusters and normalization.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// The second field records whether this value is a **static literal** — a `"…"` constant whose
+/// bytes live in the program's data segment (`cap == 0` in the physical ABI, see `doc/abi.md`). Such
+/// a value owns no heap and needs no `drop`; any mutation copies it into an owned buffer first
+/// (clearing the flag). It is interpreter-only metadata: it is excluded from equality/ordering/hash
+/// (a literal `"a"` must equal a computed `"a"`) and lets the SSA interpreter tell a `Skip`-drop
+/// literal from an owned string when checking the no-silent-leak invariant.
+#[derive(Debug, Clone)]
 pub struct String(
     /// Referenced-counted and normalized UTF-8 string data.
     Rc<std::string::String>,
+    /// Whether this is a static literal (owns no heap; see the type doc).
+    bool,
 );
+
+impl PartialEq for String {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl Eq for String {}
+impl PartialOrd for String {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for String {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.0.cmp(&other.0)
+    }
+}
+impl Hash for String {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
 
 impl String {
     pub fn new(s: &str) -> Self {
-        Self(Rc::new(s.nfc().collect()))
+        Self(Rc::new(s.nfc().collect()), false)
+    }
+
+    /// Returns whether this string is a static literal (owns no heap; see the type doc).
+    pub fn is_static_literal(&self) -> bool {
+        self.1
+    }
+
+    /// Marks this string as a static literal (used when the SSA interpreter materializes a `"…"`
+    /// constant). The bytes are the same; only the ownership metadata changes.
+    pub fn into_static_literal(mut self) -> Self {
+        self.1 = true;
+        self
     }
 
     pub fn push_str(&mut self, value: &Self) {
@@ -74,10 +119,16 @@ impl String {
         } else {
             Rc::make_mut(&mut self.0).push_str(value.0.as_str());
         }
+        // A mutation copies a static literal into an owned buffer (`cap == 0` → owned), so the result
+        // is no longer a static literal.
+        self.1 = false;
     }
 
     pub fn concat(l: &Self, r: &Self) -> Self {
-        Self(Rc::new(l.0.chars().chain(r.0.chars()).nfc().collect()))
+        Self(
+            Rc::new(l.0.chars().chain(r.0.chars()).nfc().collect()),
+            false,
+        )
     }
 
     /// Returns the number of grapheme clusters (user-perceived characters) in the string.
@@ -112,7 +163,7 @@ impl String {
             // and slicing by grapheme clusters won't break that normalization,
             // so we can safely return the slice as-is without re-normalizing.
             let result = graphemes[start..end].concat();
-            Self(Rc::new(result))
+            Self(Rc::new(result), false)
         }
     }
 
@@ -125,9 +176,10 @@ impl String {
     }
 
     pub fn replace(&self, from: &Self, to: &Self) -> Self {
-        Self(Rc::new(
-            self.0.replace(from.as_ref(), to.as_ref()).nfc().collect(),
-        ))
+        Self(
+            Rc::new(self.0.replace(from.as_ref(), to.as_ref()).nfc().collect()),
+            false,
+        )
     }
 
     pub fn uppercase(&self) -> Self {
@@ -139,7 +191,7 @@ impl String {
     }
 
     pub fn trim(&self) -> Self {
-        Self(Rc::new(self.0.trim().to_owned()))
+        Self(Rc::new(self.0.trim().to_owned()), false)
     }
 
     fn starts_with(value: &Self, prefix: &Self) -> bool {
@@ -316,7 +368,7 @@ impl Display for String {
 
 impl Default for String {
     fn default() -> Self {
-        Self(Rc::new(std::string::String::new()))
+        Self(Rc::new(std::string::String::new()), false)
     }
 }
 
@@ -400,9 +452,10 @@ impl StringSplitIterator {
         if end <= start {
             String::default()
         } else {
-            String(Rc::new(
-                self.string[self.boundaries[start]..self.boundaries[end]].to_string(),
-            ))
+            String(
+                Rc::new(self.string[self.boundaries[start]..self.boundaries[end]].to_string()),
+                false,
+            )
         }
     }
 

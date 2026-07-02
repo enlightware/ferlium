@@ -10,6 +10,7 @@ use ferlium::{
     CompilerSession, FxHashSet, Location, ModuleAndExpr, SourceTable,
     compiler::error::{CompilationError, RuntimeErrorKind},
     eval::{ControlFlow, EvalResult, RuntimeError, eval_node},
+    hir::CompiledExpr,
     hir::function::{
         BinaryNativeFnNNV, BinaryNativeFnRMN, BinaryNativeFnRRN, CallableDefinition, Function,
         NullaryNativeFnN, NullaryNativeFnV, UnaryNativeFnMN, UnaryNativeFnNN, UnaryNativeFnNV,
@@ -32,7 +33,8 @@ use ferlium::{
     },
     types::type_scheme::{PubTypeConstraint, TypeScheme},
 };
-use std::{cell::RefCell, fmt, sync::atomic::AtomicIsize};
+use regex::Regex;
+use std::{cell::RefCell, fmt, sync::LazyLock, sync::atomic::AtomicIsize};
 use ustr::ustr;
 
 #[derive(Debug)]
@@ -144,6 +146,17 @@ fn compare_native_values(actual: &Value, expected: &Value, path: &str) -> Result
             Ok(())
         } else {
             Err(format!("{path}: expected {expected}, got {actual}"))
+        };
+    }
+
+    if let (Some(actual), Some(expected)) = (
+        actual.as_primitive_ty::<ferlium::std::hash::HashValue>(),
+        expected.as_primitive_ty::<ferlium::std::hash::HashValue>(),
+    ) {
+        return if actual == expected {
+            Ok(())
+        } else {
+            Err(format!("{path}: expected {expected:?}, got {actual:?}"))
         };
     }
 
@@ -345,6 +358,37 @@ macro_rules! assert_val_eq {
         let actual = $actual;
         let expected: $crate::harness::ExpectedValue = $expected.into();
         $crate::harness::assert_value_eq(&actual, expected.as_value());
+    }};
+}
+
+/// Normalizes the *module id* of an SSA dictionary operand `dict(m<number>:i<number>)` to
+/// `dict(m<...>:i<number>)`: the module id is assigned by module load order (so it shifts as the
+/// std prelude grows), whereas the trailing impl id is an index within a fixed module and stays
+/// deterministic, so it is preserved.
+///
+/// Trait-impl method names used to embed non-deterministic interned ids (e.g. `Num<0-6>`); these
+/// are now fully-qualified type names plus a deterministic `#impl:<hash>` head hash (see
+/// commit 2231b61), so they need no normalization.
+pub(crate) fn replace_flaky_ids(s: impl AsRef<str>) -> String {
+    static MODULE_ID: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"dict\(m\d+:").unwrap());
+    MODULE_ID
+        .replace_all(s.as_ref(), "dict(m<...>:")
+        .into_owned()
+}
+
+/// Like `assert_eq!`, but normalizes both sides with [`replace_flaky_ids`] first, so the comparison
+/// ignores the non-deterministic module id that would otherwise cause flakes.
+#[macro_export]
+macro_rules! assert_eq_sans_flake {
+    ($lhs:expr, $rhs:expr $(,)?) => {{
+        let lhs = $crate::harness::replace_flaky_ids($lhs);
+        let rhs = $crate::harness::replace_flaky_ids($rhs);
+        assert_eq!(lhs, rhs);
+    }};
+    ($lhs:expr, $rhs:expr, $($arg:tt)+) => {{
+        let lhs = $crate::harness::replace_flaky_ids($lhs);
+        let rhs = $crate::harness::replace_flaky_ids($rhs);
+        assert_eq!(lhs, rhs, $($arg)+);
     }};
 }
 
@@ -983,6 +1027,37 @@ fn set_array_property_value_value_ref(value: &Value) {
     INT_ARRAY_PROPERTY_VALUE.with(|cell| *cell.borrow_mut() = int_vec_from_array_value(value));
 }
 
+/// A snapshot of the harness's externally-mutable `@props` fixtures (`my_scope.my_var` and
+/// `my_scope.my_array`), used to give both backends the same preconditions in the fused
+/// HIR-and-SSA dual-run.
+///
+/// That run executes one snippet through the HIR interpreter and then through the SSA interpreter in
+/// a single pass. A snippet that mutates an `@props` fixture (e.g. `@props::my_scope.my_var += 1`)
+/// would otherwise apply that effect twice — once per backend — so the SSA run would start from the
+/// state the HIR run left behind, the two results would diverge spuriously, and the residual state
+/// would be doubly applied. Capturing the fixtures before the HIR run and restoring them before the
+/// SSA run lets both backends observe the same starting state and leaves exactly one logical
+/// application of the effects behind (matching a single interpreter run). These fixtures are the
+/// only program-mutable external state in the harness; the `effects` module's natives are no-ops.
+struct PropertyFixtures {
+    int_property: isize,
+    int_array_property: Vec<isize>,
+}
+
+impl PropertyFixtures {
+    fn capture() -> Self {
+        Self {
+            int_property: get_property_value(),
+            int_array_property: INT_ARRAY_PROPERTY_VALUE.with(|cell| cell.borrow().clone()),
+        }
+    }
+
+    fn restore(&self) {
+        set_property_value(self.int_property);
+        INT_ARRAY_PROPERTY_VALUE.with(|cell| *cell.borrow_mut() = self.int_array_property.clone());
+    }
+}
+
 fn int_vec_to_array_value(value: &[isize]) -> Value {
     let values = value.iter().copied().map(Value::native).collect::<Vec<_>>();
     array_value_from_vec(values)
@@ -1074,6 +1149,9 @@ pub struct TestSession {
 }
 impl TestSession {
     /// Create a new test session with std, testing, effects and props modules registered.
+    ///
+    /// Every snippet run through the session is executed on *both* the HIR and SSA interpreters,
+    /// which are asserted to agree (see [`TestSession::try_compile_and_run_value`]).
     pub fn new() -> Self {
         let mut compiler_session = CompilerSession::new();
         let std_iterator_trait = compiler_session
@@ -1217,6 +1295,15 @@ impl TestSession {
         self.session.compile(src, name, Path::single_str(name))
     }
 
+    pub fn emit_ssa(&mut self, src: &str) -> String {
+        self.session.emit_ssa("<test>", src)
+    }
+
+    /// Lower `src` to SSA, interpret its `fn main`, and return the rendered result.
+    pub fn _eval_ssa(&mut self, src: &str) -> String {
+        self.session.eval_ssa("<test>", src)
+    }
+
     /// Compile the src and return its module and expression
     pub fn compile(&mut self, src: &str) -> ModuleAndExpr {
         self.try_compile(src)
@@ -1239,24 +1326,65 @@ impl TestSession {
             .clone()
     }
 
+    /// Interpret the already-compiled top-level expression `expr` of `module_id` with the HIR
+    /// interpreter, returning its value.
+    fn eval_hir(&self, module_id: ModuleId, expr: &CompiledExpr) -> Result<Value, Error> {
+        let arena = &self.session.expect_fresh_module(module_id).hir_arena;
+        eval_node(arena, expr.expr, module_id, &expr.locals, &self.session)
+            .map(ControlFlow::into_value)
+            .map_err(Error::Runtime)
+    }
+
     /// Compile and run the src and return its typed execution result (either a value or an error)
     pub fn try_compile_and_run_value(&mut self, src: &str) -> CompileRunValueResult {
         // Compile the source.
         let ModuleAndExpr { module_id, expr } =
             self.try_compile(src).map_err(Error::Compilation)?;
 
-        // Run the expression if any.
+        // Run the expression if any, through *both* interpreters, asserting their *outcomes* agree —
+        // equal values, or equal runtime-error kinds — and returning the HIR result. Running both on
+        // every snippet gives the SSA backend full coverage, including the error path: a failing
+        // snippet exercises both backends rather than short-circuiting on the HIR error.
         if let Some(expr) = expr {
             let ty = expr.ty.ty;
-            let arena = &self.session.expect_fresh_module(module_id).hir_arena;
-            eval_node(arena, expr.expr, module_id, &expr.locals, &self.session)
-                .map(ControlFlow::into_value)
-                .map(|value| RunValue {
-                    module_id,
-                    value,
-                    ty,
-                })
-                .map_err(Error::Runtime)
+            let value = {
+                // Snapshot the externally-mutable `@props` fixtures so the SSA run observes the
+                // same preconditions as the HIR run. Without this, a snippet that mutates a
+                // fixture would apply its effect twice (once per backend) and the two backends
+                // would diverge spuriously. See `PropertyFixtures`.
+                let fixtures = PropertyFixtures::capture();
+                let hir_result = self.eval_hir(module_id, &expr);
+                fixtures.restore();
+                let ssa_result = self
+                    .session
+                    .run_expr_via_ssa(module_id, &expr)
+                    .map_err(Error::Runtime);
+                match (&hir_result, &ssa_result) {
+                    (Ok(hir_value), Ok(ssa_value)) => {
+                        if let Err(message) = compare_values(ssa_value, hir_value, "value") {
+                            panic!("SSA backend diverged from the HIR interpreter: {message}");
+                        }
+                    }
+                    (Err(Error::Runtime(hir_err)), Err(Error::Runtime(ssa_err))) => {
+                        assert_eq!(
+                            ssa_err.kind(),
+                            hir_err.kind(),
+                            "SSA backend raised a different runtime error than the HIR \
+                             interpreter"
+                        );
+                    }
+                    (hir, ssa) => panic!(
+                        "SSA backend diverged from the HIR interpreter: one produced a value \
+                         and the other a runtime error (HIR: {hir:?}, SSA: {ssa:?})"
+                    ),
+                }
+                hir_result?
+            };
+            Ok(RunValue {
+                module_id,
+                value,
+                ty,
+            })
         } else {
             Ok(RunValue {
                 module_id,

@@ -14,8 +14,9 @@ use crate::{
     Location,
     compiler::error::RuntimeErrorKind,
     eval::{
-        EvalControlFlowResult, EvalCtx, Place, PlaceResult, RuntimeError, ValOrMut, ValOrMutArgs,
-        call_value_clone_to_target, call_value_drop_for_temp, cont, try_dictionary_from_place,
+        DictArg, EvalControlFlowResult, EvalCtx, Place, PlaceResult, RuntimeError, ValOrMut,
+        ValOrMutArgs, call_value_clone_to_target, call_value_drop_for_temp, cont,
+        try_dictionary_from_place,
     },
     hir::{
         function::{
@@ -25,7 +26,7 @@ use crate::{
         },
         value::{NativeValueType, Value},
     },
-    module::{BlanketTraitImplSubKey, Module, ModuleFunction, TraitDictionaryId, TraitId},
+    module::{BlanketTraitImplSubKey, Module, ModuleFunction, TraitId},
     std::core_traits_names::{INSPECT_TRAIT_NAME, VALUE_TRAIT_NAME},
     types::{
         effects::no_effects,
@@ -140,24 +141,32 @@ fn native_function(
     )
 }
 
-fn dictionary_from_arg(
-    arg: ValOrMut,
-    ctx: &mut EvalCtx<'_>,
-) -> Result<TraitDictionaryId, RuntimeError> {
+fn dictionary_from_arg(arg: ValOrMut, ctx: &mut EvalCtx<'_>) -> Result<DictArg, RuntimeError> {
+    let invalid =
+        || RuntimeError::new_native(RuntimeErrorKind::InvalidArgument("dictionary".into()));
     match arg {
-        ValOrMut::Dictionary(dictionary) => Ok(dictionary),
-        ValOrMut::Mut(place) => try_dictionary_from_place(&place, ctx).ok_or_else(|| {
-            RuntimeError::new_native(RuntimeErrorKind::InvalidArgument("dictionary".into()))
-        }),
+        ValOrMut::Dictionary(dictionary) => Ok(DictArg::Interned(dictionary)),
+        ValOrMut::Mut(place) => {
+            // The HIR interpreter passes a dictionary by reference to a `ValOrMut::Dictionary`
+            // metadata entry; the SSA interpreter passes a reference to a materialized
+            // witness-table tuple. Prefer the interned id when the place resolves to one, otherwise
+            // accept a place holding a tuple as the SSA witness table.
+            if let Some(dictionary) = try_dictionary_from_place(&place, ctx) {
+                Ok(DictArg::Interned(dictionary))
+            } else if place
+                .target_ref(ctx)
+                .is_ok_and(|value| value.as_tuple().is_some())
+            {
+                Ok(DictArg::Witness(place))
+            } else {
+                Err(invalid())
+            }
+        }
         ValOrMut::Val(value) => {
             value.discard_storage();
-            Err(RuntimeError::new_native(RuntimeErrorKind::InvalidArgument(
-                "dictionary".into(),
-            )))
+            Err(invalid())
         }
-        ValOrMut::Ref(_) => Err(RuntimeError::new_native(RuntimeErrorKind::InvalidArgument(
-            "dictionary".into(),
-        ))),
+        ValOrMut::Ref(_) => Err(invalid()),
     }
 }
 

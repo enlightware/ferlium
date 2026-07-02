@@ -570,7 +570,7 @@ fn process_input(
         let module = session.expect_fresh_module(module_id);
         println!(
             "Module HIR:\n{}",
-            module.format_with(&ShowModuleWithOptions::new(session.modules(), false, false))
+            module.format_with(&ShowModuleWithOptions::new(session.modules(), true, true))
         );
         if let Some(expr) = expr.as_ref() {
             let module_env = session.modules().env_for(module);
@@ -622,6 +622,13 @@ fn process_input(
         if !is_repl {
             println!("No expression to evaluate.");
         }
+    }
+
+    let print_ssa: bool = env::args().any(|arg| arg == "--print-ssa");
+
+    if print_ssa {
+        let ssa = session.emit_ssa(name, input);
+        println!("{}", ssa);
     }
 
     Ok(module_id)
@@ -724,6 +731,7 @@ fn main() {
         println!();
         println!("Usage:");
         println!("  {} [--help|-h]        Show the help.", args[0]);
+        println!("  {} [--print-ssa]      Print the ssa output", args[0]);
         println!(
             "  {} [--print-std]      Print the standard library module (interactive mode only).",
             args[0]

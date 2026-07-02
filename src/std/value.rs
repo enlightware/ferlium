@@ -303,6 +303,23 @@ pub(crate) fn value_layout_associated_const_values(
     layout_for_value_type(ty, span, &mut FxHashSet::default(), env)?.associated_const_values(span)
 }
 
+/// Returns whether `ty` has a statically known run-time layout: its size and alignment can be
+/// computed without consulting a `Value` dictionary witness.
+///
+/// A type is statically sized unless it reaches a bare type variable outside a function surface.
+/// In particular a `Native` type such as `array<A>` (`[A]`) is statically sized even when generic:
+/// its run-time representation is a fixed-layout struct (a header plus a heap `Buffer` pointer)
+/// whose size is independent of its type arguments — exactly as `layout_for_value_type` treats a
+/// `Native` as a fixed-size leaf. Only a value *of* a bare type variable — or an aggregate that
+/// embeds one directly (e.g. `(A, int)`) — has a layout that depends on a run-time witness, the
+/// sole case in which `layout_for_value_type` fails.
+///
+/// Storage of a statically sized type may be allocated with a plain `alloca` and moved with direct
+/// `load`/`store`; everything else must go through its `Value` dictionary witness.
+pub(crate) fn type_has_static_layout(ty: Type, span: Location, env: &impl TypeLayoutEnv) -> bool {
+    layout_for_value_type(ty, span, &mut FxHashSet::default(), env).is_ok()
+}
+
 /// Return whether all unresolved variables in `ty` appear only in function types.
 /// `active` is the current recursion stack used to stop on recursive types.
 fn value_type_is_resolved_ignoring_function_surface(

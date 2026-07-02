@@ -19,7 +19,7 @@ use crate::{
         ModuleRef, compile_with_source_id, new_ast_arena_sized_from_source, parse_module_and_expr,
     },
     containers::b,
-    define_id_type,
+    define_id_type, emit_ssa,
     eval::{DEFAULT_INTERACTIVE_FUEL_LIMIT, EvalCtx, ValOrMut, eval_node_with_ctx},
     format::FormatWith,
     hir::CompiledExpr,
@@ -997,6 +997,99 @@ impl CompilerSession {
             self.capabilities,
             ast_inspector,
         )
+    }
+
+    /// Emits the SSA form for the given `source_name`
+    pub fn emit_ssa(&mut self, source_name: &str, src: &str) -> String {
+        let p = module::Path::single_str(source_name);
+        let i = self.compile(src, source_name, p).unwrap().module_id;
+        let module = self.expect_fresh_module(i);
+        emit_ssa::emit_ssa(module, self.raw_modules(), self)
+    }
+
+    /// Lowers `src` to SSA and interprets its `fn main` entry, returning a textual rendering of the
+    /// result. Used to check that the SSA lowering is semantically correct.
+    ///
+    /// The source must define a no-argument `fn main`; its lowered body (and the bodies of any
+    /// script functions it calls) is run by the SSA interpreter, while native (std) callees are
+    /// delegated to the HIR interpreter.
+    pub fn eval_ssa(&mut self, source_name: &str, src: &str) -> String {
+        use crate::ssa::interpreter::Interpreter;
+
+        let p = module::Path::single_str(source_name);
+        let module_id = self.compile(src, source_name, p).unwrap().module_id;
+        let (main_id, ret_ty) = {
+            let module = self.expect_fresh_module(module_id);
+            let main_id = module
+                .get_local_function_id(ustr::ustr("main"))
+                .expect("eval_ssa requires a `fn main` entry");
+            let ret_ty = module
+                .get_function_by_id(main_id)
+                .unwrap()
+                .definition
+                .ty_scheme
+                .ty
+                .ret;
+            (main_id, ret_ty)
+        };
+
+        let value = {
+            let mut interp = Interpreter::new(module_id, self);
+            interp.run_main(module_id, main_id).unwrap_or_else(|error| {
+                panic!("SSA interpretation raised a runtime error: {error:?}")
+            })
+        };
+
+        if ret_ty == Type::unit() {
+            value.discard_storage();
+            return "()".to_string();
+        }
+        self.value_to_inspect_text(module_id, value, ret_ty)
+            .unwrap_or_else(|error| panic!("rendering SSA result failed: {error}"))
+    }
+
+    /// Lowers the already-compiled top-level expression `expr` of `module_id` to SSA and interprets
+    /// it, returning the resulting value.
+    ///
+    /// The top-level expression is wrapped as a synthetic no-argument `fn main` (its HIR node is
+    /// already elaborated into the module's arena) so the function-oriented SSA lowering and
+    /// interpreter run it unchanged. Used by the test harness to exercise every snippet through the
+    /// SSA backend in addition to the HIR interpreter.
+    ///
+    /// Returns the resulting value, or the [`RuntimeError`](crate::eval::RuntimeError) the snippet
+    /// raised — so the harness can assert error parity with the HIR interpreter on failing snippets.
+    pub fn run_expr_via_ssa(
+        &mut self,
+        module_id: ModuleId,
+        expr: &CompiledExpr,
+    ) -> Result<Value, crate::eval::RuntimeError> {
+        use crate::hir::function::{CallableDefinition, Function, ScriptFunction};
+        use crate::ssa::interpreter::Interpreter;
+        use crate::types::effects::no_effects;
+        use crate::types::r#type::FnType;
+        use crate::types::type_scheme::TypeScheme;
+
+        let definition = CallableDefinition::new(
+            TypeScheme::new_infer_quantifiers(FnType::new_by_val([], expr.ty.ty, no_effects())),
+            vec![],
+            None,
+        );
+        let code: Function = b(ScriptFunction::new(expr.expr, 0));
+        let function =
+            ModuleFunction::new_elaborated(definition, code, vec![], None, expr.locals.clone());
+        let main_id = {
+            let entry = self
+                .modules
+                .get_mut(module_id)
+                .expect("module must be registered to run its expression via SSA");
+            let module = entry
+                .module
+                .as_mut()
+                .expect("module must be compiled to run its expression via SSA");
+            module.add_function(ustr::ustr("<ssa-main>"), function)
+        };
+        let mut interp = Interpreter::new(module_id, self);
+        interp.run_main(module_id, main_id)
     }
 
     /// Returns the entry for module_id, or panic if not found.

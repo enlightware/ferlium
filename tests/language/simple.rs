@@ -1889,6 +1889,58 @@ fn borrow_checker() {
         .expect_mutable_paths_overlap();
 }
 
+/// An assignment whose right-hand side reads the destination it overwrites — e.g. the in-place
+/// swap `a = (a.1, a.0)` — must observe the *old* value of every field it reads, not a partially
+/// overwritten one. The naive lowering of an aggregate right-hand side builds it field-by-field
+/// directly into the destination place; storing `a.1` into `a.0`'s slot first would clobber `a.0`
+/// before it is read for the second field, yielding `(a.1, a.1)` instead of the swap.
+///
+/// Both backends avoid this: the HIR interpreter's `eval_assign` materializes the whole value
+/// first, and the SSA emitter routes an assignment whose previous value needs a `Value::drop`
+/// through a fresh temporary (see `emit_ssa.rs` `K::Assign`). Every aggregate type carries a
+/// generated `Value::drop` — only the scalar `TrivialCopy` types (`int`, `bool`, `()`) skip it —
+/// so an aggregate right-hand side always takes that swap-safe path. The test session runs each
+/// snippet through *both* backends and asserts they agree, so a regression in either fails here.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn assign_rhs_aliasing_destination() {
+    let mut session = TestSession::new();
+
+    // Whole-tuple self-swap: the classic broken-swap shape.
+    assert_val_eq!(
+        session.run("let mut a = (1, 2); a = (a.1, a.0); a"),
+        int_tuple!(2, 1)
+    );
+
+    // A field read on one side combined with a fresh value on the other.
+    assert_val_eq!(
+        session.run("let mut a = (1, 2); a = (a.0 + a.1, a.0); a"),
+        int_tuple!(3, 1)
+    );
+
+    // Nested aggregate, reading across both nesting levels.
+    assert_val_eq!(
+        session.run("let mut a = ((1, 2), 3); a = ((a.1, a.0.0), a.0.1); a"),
+        tuple!(int_tuple!(3, 1), int(2))
+    );
+
+    // Record right-hand side rotating its own fields.
+    assert_val_eq!(
+        session.run("let mut a = {x: 1, y: 2}; a = {x: a.y, y: a.x}; (a.x, a.y)"),
+        int_tuple!(2, 1)
+    );
+
+    // Array literal right-hand side reading the destination's elements.
+    assert_val_eq!(
+        session.run("let mut a = [1, 2]; a = [a[1], a[0]]; a"),
+        int_a![2, 1]
+    );
+
+    // Reading the destination's storage before it is initialized is rejected at compile time, so
+    // the in-place lowering of an initializing assignment can never alias an old value.
+    session.fail_compilation("let mut a: (int, int); a = (a.1, a.0); a");
+}
+
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn execution_errors() {
