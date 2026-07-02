@@ -500,7 +500,7 @@ mod tests {
         xs.extend(vec!["a", "b"]);
 
         let ys = xs.addresses().map(|a| &xs[a]);
-        assert!(ys.eq(vec!["a", "b"].iter()));
+        assert!(ys.eq(["a", "b"].iter()));
 
         Ok(())
     }
@@ -510,17 +510,17 @@ mod tests {
         let mut xs = List::<&str>::new();
 
         xs.append("a");
-        assert!(xs.iter().eq(vec!["a"].iter()));
+        assert!(xs.iter().eq(["a"].iter()));
 
         let b = xs.append("b");
-        assert!(xs.iter().eq(vec!["a", "b"].iter()));
+        assert!(xs.iter().eq(["a", "b"].iter()));
 
         xs.append("c");
-        assert!(xs.iter().eq(vec!["a", "b", "c"].iter()));
+        assert!(xs.iter().eq(["a", "b", "c"].iter()));
 
         xs.remove(b);
         xs.append("d");
-        assert!(xs.iter().eq(vec!["a", "c", "d"].iter()));
+        assert!(xs.iter().eq(["a", "c", "d"].iter()));
     }
 
     #[test]
@@ -528,17 +528,17 @@ mod tests {
         let mut xs = List::<&str>::new();
 
         xs.prepend("a");
-        assert!(xs.iter().eq(vec!["a"].iter()));
+        assert!(xs.iter().eq(["a"].iter()));
 
         let b = xs.prepend("b");
-        assert!(xs.iter().eq(vec!["b", "a"].iter()));
+        assert!(xs.iter().eq(["b", "a"].iter()));
 
         xs.prepend("c");
-        assert!(xs.iter().eq(vec!["c", "b", "a"].iter()));
+        assert!(xs.iter().eq(["c", "b", "a"].iter()));
 
         xs.remove(b);
         xs.prepend("d");
-        assert!(xs.iter().eq(vec!["d", "c", "a"].iter()));
+        assert!(xs.iter().eq(["d", "c", "a"].iter()));
     }
 
     #[test]
@@ -548,7 +548,7 @@ mod tests {
         let a = xs.prepend("a");
         xs.insert_before(a, "b");
         xs.insert_before(a, "c");
-        assert!(xs.iter().eq(vec!["b", "c", "a"].iter()));
+        assert!(xs.iter().eq(["b", "c", "a"].iter()));
     }
 
     #[test]
@@ -558,7 +558,7 @@ mod tests {
         let a = xs.prepend("a");
         xs.insert_after(a, "b");
         xs.insert_after(a, "c");
-        assert!(xs.iter().eq(vec!["a", "c", "b"].iter()));
+        assert!(xs.iter().eq(["a", "c", "b"].iter()));
     }
 
     #[test]
@@ -600,7 +600,7 @@ mod tests {
         // Re-using an emptied bucket must restore the `!0` neighbor sentinels so that a later
         // removal does not index out of bounds.
         let b = xs.append("b");
-        assert!(xs.iter().eq(vec!["b"].iter()));
+        assert!(xs.iter().eq(["b"].iter()));
 
         xs.remove(b); // crash
         assert!(xs.is_empty());

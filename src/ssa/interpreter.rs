@@ -793,7 +793,7 @@ impl<'a> Interpreter<'a> {
             // Read the pointee. A place that projects through (or ends at) uninitialized storage has
             // no value to read — `boundary_pointee` returns `None`, which the check treats as a husk
             // (the slot is simply not initialized).
-            let is_husk = self.boundary_pointee(place).map_or(true, is_drop_husk);
+            let is_husk = self.boundary_pointee(place).is_none_or(is_drop_husk);
             match tag {
                 // A `&mut`/`&`/trivial-copy argument must point at a live value, before and after.
                 ssa::ParameterTag::Parameter(passing) => assert!(
