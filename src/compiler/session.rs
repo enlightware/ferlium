@@ -1063,13 +1063,13 @@ impl CompilerSession {
         module_id: ModuleId,
         expr: &CompiledExpr,
     ) -> Result<Value, crate::eval::RuntimeError> {
-        use crate::hir::function::{Function, FunctionDefinition, ScriptFunction};
+        use crate::hir::function::{CallableDefinition, Function, ScriptFunction};
         use crate::ssa::interpreter::Interpreter;
         use crate::types::effects::no_effects;
         use crate::types::r#type::FnType;
         use crate::types::type_scheme::TypeScheme;
 
-        let definition = FunctionDefinition::new(
+        let definition = CallableDefinition::new(
             TypeScheme::new_infer_quantifiers(FnType::new_by_val([], expr.ty.ty, no_effects())),
             vec![],
             None,

@@ -9,7 +9,7 @@ use crate::module::{
 use crate::ssa::Instruction;
 use crate::ssa::value::ShownType;
 use crate::types::r#trait::TraitMethodIndex;
-use crate::types::r#type::{FnReturnConvention, FnType};
+use crate::types::r#type::{CallImplType, CallResultConvention, SubscriptResultConvention};
 use crate::{
     CompilerSession, Location, Modules, containers,
     format::FormatWith,
@@ -252,15 +252,15 @@ impl<'a> Emitter<'a> {
         // Lower the body, dispatching on the function's return convention.
         match f.definition.return_convention() {
             // A value-returning function stores its result into the return out-pointer.
-            FnReturnConvention::Value => {
+            CallResultConvention::Value => {
                 let ret_dest = emitter.context.return_destination.clone();
                 emitter.lower_value_into(code, Some(ret_dest));
             }
             // An addressor function returns a caller-rooted place. Its body is `never`-typed and
-            // ends in `return <place-expr>` (enforced at `FunctionDefinition::returns_place`
+            // ends in `return <place-expr>` (enforced at `CallableDefinition::returns_place`
             // validation); the embedded `Return` stores the place pointer into the return
             // out-pointer. Driving with no destination avoids a spurious value store.
-            FnReturnConvention::AddressorPlace => {
+            CallResultConvention::Subscript(SubscriptResultConvention::AddressorPlace) => {
                 emitter.lower_value_into(code, None);
             }
             // A `YieldedOnce` member is a suspendable accessor: its body is `never`-typed, runs its
@@ -269,7 +269,7 @@ impl<'a> Emitter<'a> {
             // reached when the driving `WithYielded` resumes via `end_project`. Like an addressor it
             // produces no value, so it is driven with no destination (the `Yield` itself exposes the
             // place; no spurious value store).
-            FnReturnConvention::YieldedOnce => {
+            CallResultConvention::Subscript(SubscriptResultConvention::YieldedOnce) => {
                 emitter.lower_value_into(code, None);
             }
         }
@@ -809,7 +809,8 @@ impl<'a> Emitter<'a> {
         // Fill each slot in place: `buffer_slot(data, i)` yields the slot's place (an
         // `AddressorPlace` return), into which element `i` is lowered directly.
         if len > 0 {
-            let buffer_slot = ssa::Value::Function(self.demand_std_function("buffer_slot"));
+            let buffer_slot =
+                ssa::Value::Function(self.demand_std_subscript_mut_member("buffer_slot"));
             for (i, id) in ids.iter().enumerate() {
                 let index_arg = self.int_constant_place(span, i as isize);
                 let slot_out = self
@@ -847,6 +848,21 @@ impl<'a> Emitter<'a> {
             .get_local_function_id(Ustr::from(name))
             .unwrap_or_else(|| panic!("std function `{name}` not found"));
         self.demand_function(id, STD_MODULE_ID)
+    }
+
+    /// Returns the `FunctionReference` of the mutable member of the std-library addressor
+    /// subscript named `name`. Used to synthesize slot-place calls (e.g. `buffer_slot`), which are
+    /// registered as subscripts rather than plain functions.
+    fn demand_std_subscript_mut_member(&self, name: &str) -> FunctionReference {
+        let std_module = self.session.expect_fresh_module(STD_MODULE_ID);
+        let subscript = std_module
+            .get_subscript(Ustr::from(name))
+            .unwrap_or_else(|| panic!("std subscript `{name}` not found"));
+        let member = subscript
+            .mut_member
+            .as_ref()
+            .unwrap_or_else(|| panic!("std subscript `{name}` has no mut member"));
+        self.demand_function(member.function, STD_MODULE_ID)
     }
 
     /// Allocates a fresh `int` slot, stores the constant `value` into it, and returns its place.
@@ -1324,7 +1340,7 @@ impl<'a> Emitter<'a> {
         n: &hir::CallDictionaryMethod<Elaborated>,
     ) -> (ssa::Value, Vec<ssa::Value>) {
         let dictionary = self.lower_dictionary_operand(&self.hir_arena[n.dictionary]);
-        let method_ty = Type::function_type(n.ty.clone());
+        let method_ty = Type::function_type(n.ty.fn_ty.clone());
         // The callee is the place of the method entry; the call reads the function value by
         // reference rather than loading it into a register (see the `call` contract).
         let method_place = self
@@ -1342,23 +1358,23 @@ impl<'a> Emitter<'a> {
     /// Inserts an allocation of the result storage for a call to a function of type `f` and returns
     /// its address. `node` supplies the span and the concrete result type for the allocation.
     ///
-    /// The allocation depends on `f`'s return convention:
-    /// - [`FnReturnConvention::Value`] allocates storage for the returned value (`alloca`) — including
+    /// The allocation depends on `f`'s result convention:
+    /// - [`CallResultConvention::Value`] allocates storage for the returned value (`alloca`) — including
     ///   a unit return, which allocates a (zero-sized) `()` cell the callee initializes with the live
     ///   unit value, so every result, unit or not, flows through a real cell;
-    /// - [`FnReturnConvention::AddressorPlace`] allocates a slot holding the returned place pointer
-    ///   (`alloca_place`).
+    /// - [`SubscriptResultConvention::AddressorPlace`] allocates a slot holding the returned place
+    ///   pointer (`alloca_place`).
     ///
-    /// [`FnReturnConvention::YieldedOnce`] is never reached here: a yielded member is entered with a
-    /// `project` (which exposes the yielded place as its own result register), never called for a
-    /// result through this helper.
-    fn allocate_result(&mut self, node: &ENode, f: &FnType) -> ssa::Value {
-        match f.return_convention {
-            FnReturnConvention::Value => self.alloca_storage(node.span, node.ty),
-            FnReturnConvention::AddressorPlace => self
+    /// [`SubscriptResultConvention::YieldedOnce`] is never reached here: a yielded member is entered
+    /// with a `project` (which exposes the yielded place as its own result register), never called
+    /// for a result through this helper.
+    fn allocate_result(&mut self, node: &ENode, f: &CallImplType) -> ssa::Value {
+        match f.result_convention {
+            CallResultConvention::Value => self.alloca_storage(node.span, node.ty),
+            CallResultConvention::Subscript(SubscriptResultConvention::AddressorPlace) => self
                 .insert(Instruction::alloca_place(node.span, node.ty))
                 .unwrap(),
-            FnReturnConvention::YieldedOnce => {
+            CallResultConvention::Subscript(SubscriptResultConvention::YieldedOnce) => {
                 panic!("a YieldedOnce member is entered via `project`, never called for a result")
             }
         }
@@ -1664,7 +1680,7 @@ impl<'a> Emitter<'a> {
                     arguments.push(self.lower_argument(arg));
                 }
 
-                assert_eq!(node.ty, n.ty.ret);
+                assert_eq!(node.ty, n.ty.ret());
                 arguments.push(destination.unwrap_or_else(|| self.allocate_result(node, &n.ty)));
                 self.emit_call(node.span, f, arguments, &node.effects);
             }
@@ -2099,7 +2115,7 @@ struct InsertionContext {
     /// The return out-pointer (the last parameter) into which the function writes its result.
     return_destination: ssa::Value,
 
-    /// Whether the lowered function itself returns a place (`FnReturnConvention::AddressorPlace`).
+    /// Whether the lowered function itself returns a place (`SubscriptResultConvention::AddressorPlace`).
     /// When set, `return <expr>` lowers `<expr>` as a place and stores that pointer into the
     /// `**T` return out-pointer (mirrors the interpreter's `EvalCtx::returns_place`).
     returns_place: bool,
