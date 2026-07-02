@@ -1756,7 +1756,7 @@ fn reassigned_mutable_literal_initialized_local_is_dropped_at_scope_exit() {
     // string on every iteration without that drop.
     let mut session = TestSession::new();
     let source = r#"
-        fn go() -> int {
+        fn f() -> int {
             let mut i = 0;
             loop {
                 let mut s = "a";
@@ -1765,7 +1765,7 @@ fn reassigned_mutable_literal_initialized_local_is_dropped_at_scope_exit() {
                 if i > 2 { break i }
             }
         }
-        go()
+        f()
     "#;
     assert_val_eq!(session.run(source), int(3));
 }
