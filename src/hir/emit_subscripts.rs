@@ -232,10 +232,16 @@ fn reject_accessible_structural_projection_conflict(
 fn subscript_signature(
     subscript: &ast::DSubscriptDefinition,
 ) -> Result<SubscriptSignature, InternalCompilationError> {
+    let provisional_ret = || {
+        subscript
+            .ret_ty
+            .map(|(ret_ty, _)| ret_ty)
+            .unwrap_or_else(|| Type::variable_id(0))
+    };
     if let Some((receiver_ty, _)) = validate_projection_receiver_binding(subscript)? {
         return Ok(SubscriptSignature {
             args: vec![FnArgType::new_by_val(receiver_ty)],
-            ret: subscript.ret_ty.0,
+            ret: provisional_ret(),
             generic_params: subscript.generic_params.type_params().to_vec(),
             generic_effect_params: subscript.generic_params.effect_params().to_vec(),
             arg_names: vec![subscript.args[0].name.0],
@@ -246,20 +252,25 @@ fn subscript_signature(
     let args = subscript
         .args
         .iter()
-        .map(|arg| {
-            let Some((mut_ty, ty, _span)) = arg.ty else {
-                return Err(internal_compilation_error!(InvalidSubscriptDefinition {
-                    subject: SubscriptDefinitionSubject::Subscript(subscript.name.0),
-                    kind: InvalidSubscriptDefinitionKind::ParameterMissingType,
-                    span: arg.name.1,
-                }));
-            };
-            Ok(FnArgType::new(ty, mut_ty.unwrap_or_else(MutType::constant)))
+        .enumerate()
+        .map(|(index, arg)| {
+            if let Some((mut_ty, ty, _span)) = arg.ty {
+                FnArgType::new(ty, mut_ty.unwrap_or_else(MutType::constant))
+            } else {
+                // Source subscripts are predeclared before their SCC is emitted.
+                // Placeholder type vars start at 1 so var 0 remains available for a
+                // provisional omitted return; all placeholders are replaced by
+                // real fresh variables in emit_functions before real consumption.
+                FnArgType::new(
+                    Type::variable_id((index + 1) as u32),
+                    MutType::variable_id(index as u32),
+                )
+            }
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Vec<_>>();
     Ok(SubscriptSignature {
         args,
-        ret: subscript.ret_ty.0,
+        ret: provisional_ret(),
         generic_params: subscript.generic_params.type_params().to_vec(),
         generic_effect_params: subscript.generic_params.effect_params().to_vec(),
         arg_names: subscript.args.iter().map(|arg| arg.name.0).collect(),
@@ -293,7 +304,7 @@ pub(super) fn synthetic_subscript_member_function(
         generic_params: subscript.generic_params.clone(),
         args,
         args_span: subscript.args_span,
-        ret_ty: Some(subscript.ret_ty),
+        ret_ty: subscript.ret_ty,
         where_clause: subscript.where_clause.clone(),
         attributes: Vec::new(),
         body: member.body,

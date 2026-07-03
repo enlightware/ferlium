@@ -124,7 +124,7 @@ pub struct SubscriptDefinition<P: Phase> {
     pub generic_params: GenericParams,
     pub args: Vec<ModuleFunctionArg<P>>,
     pub args_span: Location,
-    pub ret_ty: TypeSpan<P>,
+    pub ret_ty: Option<TypeSpan<P>>,
     pub where_clause: Vec<P::WhereClause>,
     pub members: Vec<SubscriptMember<P>>,
     pub span: Location,
@@ -656,7 +656,10 @@ fn fmt_subscript_definition<P: Phase>(
             write!(f, "{}", ty.format_with(env))?;
         }
     }
-    write!(f, ") -> {}", ret_ty.0.format_with(env))?;
+    write!(f, ")")?;
+    if let Some((ret_ty, _)) = ret_ty {
+        write!(f, " -> {}", ret_ty.format_with(env))?;
+    }
     if !where_clause.is_empty() {
         write!(f, " where ")?;
         write_with_separator_and_format_fn(

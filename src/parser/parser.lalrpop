@@ -267,7 +267,7 @@ Function: ModuleFunction = {
 }
 
 SubscriptDefinition: SubscriptDefinition = {
-    <doc:DOC_COMMENT*> <visibility:Visibility> <l:@L> "subscript" <header:SubscriptHeader> <al:@L> "(" <args:ModuleFunctionArgs> ")" <ret:SpFnRet<"P">> <where_clause:WhereClause?> <ar:@R> "{" <members:SubscriptMember*> "}" <r:@R> => {
+    <doc:DOC_COMMENT*> <visibility:Visibility> <l:@L> "subscript" <header:SubscriptHeader> <al:@L> "(" <args:ModuleFunctionArgs> ")" <ret:SpFnRet<"P">?> <where_clause:WhereClause?> <ar:@R> "{" <members:SubscriptMember*> "}" <r:@R> => {
         SubscriptDefinition {
             visibility,
             name: header.1,

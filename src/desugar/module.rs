@@ -1505,17 +1505,22 @@ impl ast::PSubscriptDefinition {
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let ret_ty = (
-            self.ret_ty.0.desugar_with_ty_and_eff_params(
-                self.ret_ty.1,
-                false,
-                env,
-                &generic_ty_params,
-                Some(&generic_eff_params),
-                modules_used,
-            )?,
-            self.ret_ty.1,
-        );
+        let ret_ty = self
+            .ret_ty
+            .map(|(ret_ty, span)| {
+                Ok((
+                    ret_ty.desugar_with_ty_and_eff_params(
+                        span,
+                        false,
+                        env,
+                        &generic_ty_params,
+                        Some(&generic_eff_params),
+                        modules_used,
+                    )?,
+                    span,
+                ))
+            })
+            .transpose()?;
 
         let mut next_effect_var = generic_eff_params
             .values()
@@ -1524,7 +1529,11 @@ impl ast::PSubscriptDefinition {
                 args.iter()
                     .filter_map(|arg| arg.ty.map(|(_, ty, _)| ty))
                     .flat_map(|ty| ty.inner_effect_vars())
-                    .chain(ret_ty.0.inner_effect_vars())
+                    .chain(
+                        ret_ty
+                            .iter()
+                            .flat_map(|(ret_ty, _)| ret_ty.inner_effect_vars()),
+                    )
                     .map(|var| var.name() + 1),
             )
             .max()

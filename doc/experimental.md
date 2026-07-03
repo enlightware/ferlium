@@ -4,11 +4,11 @@ Ferlium has a small experimental feature gate for safe language features whose s
 
 Experimental features are not part of the stable source language. They may be renamed, moved, or removed without compatibility guarantees.
 
-## Named Subscripts
+## Source-Level Subscripts
 
-Named subscripts are an experimental projection mechanism. They give a name to
-place access that can either be a direct addressor projection or a scoped
-acquire/yield/release operation.
+Source-level subscripts name reusable place access. A subscript can behave like
+a direct field or index projection, or it can open a scoped access around a
+temporary resource.
 
 The temporary use-site syntax is receiver-first:
 
@@ -31,11 +31,10 @@ let first_slot = first;
 values->[first_slot]
 ```
 
-Inside `->[name]`, a visible local named `name` is treated as a subscript value. Otherwise `name` is resolved as a named subscript in the module environment.
-Unannotated function parameters used this way infer a first-class subscript capability type.
-Abstract first-class subscript use is driven through the yielded interface; addressor-place subscripts are adapted with empty brackets when passed to that interface.
-Generic projections also pass hidden first-class subscript evidence and select the `ref` or `mut` member required by the use site; if the receiver later resolves to a concrete structural field, elaboration collapses back to the direct/addressor path.
-Source-named subscript values capture the hidden generic evidence needed by their selected type.
+Inside `->[name]`, a visible local named `name` is treated as a subscript value.
+Otherwise `name` is resolved as a named subscript in the module environment.
+Unannotated function parameters used this way can infer a first-class subscript
+capability type.
 
 If the subscript result itself should be called as a function, parenthesize the subscript access:
 
@@ -56,6 +55,12 @@ subscript first(values: &mut [int]) -> int {
     }
 }
 ```
+
+As with functions, ordinary subscript parameter and result types may be inferred,
+and `_` can be used as a placeholder annotation. The `ref` and `mut` members
+constrain one shared signature. Projection subscripts are the exception for the
+receiver binding: `self` is just a name introduced by the qualified header and
+must not repeat the receiver type.
 
 Subscripts can also be registered as dot projections for a named receiver type:
 
@@ -107,4 +112,6 @@ subscript cell(slot: &mut int) -> int {
 
 The code before `yield` is the accessor prologue, and the code after `yield` is the epilogue. The caller uses the yielded place between those two parts. Scoped members must contain exactly one reachable `yield`, and that `yield` must yield a place. A `mut` member must yield a mutable place. For now, the `yield` path must be block-structured: the yield may be nested in blocks, but not inside conditionals, matches, or loops.
 
-Named subscript access is currently accepted only when experimental features are enabled. The syntax is intended for standard-library work, tests, and design experiments such as generalized record-like projections.
+The `->[name]` syntax and source-level projection subscript declarations require
+the experimental feature gate. They are intended for standard-library work,
+tests, and design experiments such as generalized record-like projections.

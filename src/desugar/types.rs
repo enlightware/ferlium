@@ -240,7 +240,9 @@ impl<'a, 'm> RecursiveTypeBuilder<'a, 'm> {
             Never => Type::never(),
             Unit => Type::unit(),
             Resolved(ty) => *ty,
-            Infer => Type::variable_id(0),
+            // `_` is an inference placeholder distinct from every named generic
+            // parameter, so give it a source variable above all in-scope generics.
+            Infer => Type::variable_id(next_free_generic_ty_var(&self.generic_ty_params)),
             Path(path) => self.desugar_path_without_args(path, span)?,
             AppliedPath {
                 path,
@@ -764,7 +766,10 @@ impl ast::PType {
             Never => Type::never(),
             Unit => Type::unit(),
             Resolved(ty) => *ty,
-            Infer => Type::variable_id(0), // always emit variable id 0 that will be replaced by fresh variables in type inference
+            // `_` desugars to a source variable above all in-scope generics so it
+            // never aliases a named generic parameter; it is replaced by a fresh
+            // variable during type inference.
+            Infer => Type::variable_id(next_free_generic_ty_var(generic_ty_params)),
             Path(path) => {
                 if let [(name, _)] = &path.segments[..]
                     && let Some(ty_var) = generic_ty_params.get(name)
@@ -1189,16 +1194,24 @@ fn invalid_generic_params_error(
 }
 
 /// Add newly declared generic type parameters to scope, assigning fresh type variables and rejecting duplicates.
+/// The first source type-variable id not used by any in-scope generic parameter.
+///
+/// `_` placeholders desugar to this so they never alias a named generic parameter
+/// (whose ids run `0..N`); the annotation mapper later freshens it independently.
+pub(crate) fn next_free_generic_ty_var(generic_ty_params: &GenericTyParams) -> u32 {
+    generic_ty_params
+        .values()
+        .map(TypeVar::name)
+        .max()
+        .map_or(0, |index| index + 1)
+}
+
 pub(crate) fn extend_generic_ty_params(
     existing: &GenericTyParams,
     generic_params: &[UstrSpan],
     owner: GenericParamsOwner,
 ) -> Result<GenericTyParams, InternalCompilationError> {
-    let next_index = existing
-        .values()
-        .map(TypeVar::name)
-        .max()
-        .map_or(0, |index| index + 1);
+    let next_index = next_free_generic_ty_var(existing);
     let mut generic_ty_params = existing.clone();
     for (generic_index, param) in generic_params.iter().enumerate() {
         let ty_var = TypeVar::new(next_index + generic_index as u32);

@@ -87,7 +87,7 @@ Function {
 }
 
 SubscriptDef {
-    visibility kw<'subscript'> subscriptHeader '(' identifierWithOptTypeArgs ')' fnRet whereClause? '{' SubscriptMember* '}'
+    visibility kw<'subscript'> subscriptHeader '(' identifierWithOptTypeArgs ')' fnRet? whereClause? '{' SubscriptMember* '}'
 }
 
 subscriptHeader {

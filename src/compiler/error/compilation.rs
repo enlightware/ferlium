@@ -425,7 +425,6 @@ pub enum InvalidSubscriptDefinitionKind {
     EmptyBundle,
     DuplicateMember(SubscriptMemberKind),
     SharedMemberCombinedWithSeparateMembers,
-    ParameterMissingType,
     ProjectionMissingReceiverParameter,
     ProjectionReceiverMustBeNominal,
     ProjectionReceiverGenericParametersMismatch,
@@ -476,9 +475,6 @@ impl InvalidSubscriptDefinitionKind {
                 format!(
                     "{subject} uses a `ref mut` member, so it cannot also define separate `ref` or `mut` members"
                 )
-            }
-            Self::ParameterMissingType => {
-                format!("{subject} parameters must have explicit types")
             }
             Self::ProjectionMissingReceiverParameter => {
                 format!("{subject} must bind exactly one projection receiver parameter")

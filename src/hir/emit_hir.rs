@@ -444,6 +444,7 @@ pub enum EmitModuleFrom {
 enum ModuleImplementationEmission<'a> {
     Function(&'a ast::DModuleFunction),
     SubscriptMember {
+        subscript: &'a ast::DSubscriptDefinition,
         function: B<ast::DModuleFunction>,
         kind: EmitFunctionKind,
         attachments: Vec<SubscriptMemberAttachment>,
@@ -455,12 +456,14 @@ impl<'a> ModuleImplementationEmission<'a> {
         match self {
             ModuleImplementationEmission::Function(function) => EmitFunctionInput::normal(function),
             ModuleImplementationEmission::SubscriptMember {
+                subscript,
                 function,
                 kind,
                 attachments,
             } => EmitFunctionInput {
                 function,
                 kind: *kind,
+                subscript: Some(subscript),
                 subscript_attachments: attachments,
             },
         }
@@ -602,11 +605,13 @@ fn module_implementation_emissions<'a>(
                 let member_def = &subscript_def.members[member.as_index()];
                 let provenance = subscript_member_provenance(member_def, desugared_arena);
                 ModuleImplementationEmission::SubscriptMember {
+                    subscript: subscript_def,
                     function: b(synthetic_subscript_member_function(
                         subscript_def,
                         member_def,
                     )),
                     kind: EmitFunctionKind::SubscriptMember {
+                        subscript_id: subscript_ids[subscript.as_index()],
                         subscript_name: subscript_def.name.0,
                         projection_key: subscript_def.projection_receiver.map(
                             |(receiver_ty, _)| {

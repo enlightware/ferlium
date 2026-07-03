@@ -36,8 +36,8 @@ use crate::{
     module::{
         FunctionId, GENERATED_LAMBDA_PREFIX, LocalDecl, LocalDeclId, LocalFunctionId,
         LocalSubscriptId, Module, ModuleEnv, ModuleFunction, ModuleFunctionSpans,
-        PendingFunctionBody, PendingModuleFunction, ProjectionKey, QualifiedNameEnv, TraitId,
-        Visibility, YieldProvenance, id::Id,
+        PendingFunctionBody, PendingModuleFunction, ProjectionKey, QualifiedNameEnv,
+        SubscriptSignature, TraitId, Visibility, YieldProvenance, id::Id,
     },
     std::STD_MODULE_ID,
     types::{
@@ -104,6 +104,7 @@ pub(super) enum EmitFunctionKind {
     #[default]
     Normal,
     SubscriptMember {
+        subscript_id: LocalSubscriptId,
         subscript_name: Ustr,
         projection_key: Option<ProjectionKey>,
         provenance: YieldProvenance,
@@ -123,6 +124,7 @@ pub(super) struct SubscriptMemberAttachment {
 pub(super) struct EmitFunctionInput<'a> {
     pub(super) function: &'a ast::DModuleFunction,
     pub(super) kind: EmitFunctionKind,
+    pub(super) subscript: Option<&'a ast::DSubscriptDefinition>,
     pub(super) subscript_attachments: &'a [SubscriptMemberAttachment],
 }
 
@@ -131,6 +133,7 @@ impl<'a> EmitFunctionInput<'a> {
         Self {
             function,
             kind: EmitFunctionKind::Normal,
+            subscript: None,
             subscript_attachments: &[],
         }
     }
@@ -317,6 +320,137 @@ fn wrap_body_with_call_depth_check_if_recursive(
         effects,
         block_span,
     ))
+}
+
+fn map_annotation_type(ty_inf: &mut TypeInference, ty: Type, annotation_subst: &InstSubst) -> Type {
+    ty.map(&mut AnnotationTypeMapper::new(
+        ty_inf,
+        Some(annotation_subst),
+    ))
+}
+
+fn map_subscript_return_type(
+    ty_inf: &mut TypeInference,
+    ret_ty: Option<(Type, Location)>,
+    annotation_subst: &InstSubst,
+) -> Type {
+    // An omitted return is a fresh variable, exactly like a function's; an explicit
+    // annotation (including `_`, which desugars to a variable above all generics) is
+    // mapped normally so `-> T` stays enforced.
+    match ret_ty {
+        None => ty_inf.fresh_type_var_ty(),
+        Some((ret_ty, _)) => map_annotation_type(ty_inf, ret_ty, annotation_subst),
+    }
+}
+
+fn map_annotation_mut_type(
+    ty_inf: &mut TypeInference,
+    mut_ty: MutType,
+    annotation_subst: &InstSubst,
+) -> MutType {
+    AnnotationTypeMapper::new(ty_inf, Some(annotation_subst)).map_mut_type(mut_ty)
+}
+
+fn subscript_signature_from_source(
+    ty_inf: &mut TypeInference,
+    subscript: &ast::DSubscriptDefinition,
+    annotation_subst: &InstSubst,
+) -> SubscriptSignature {
+    let (args, arg_names) = if let Some((receiver_ty, _)) = subscript.projection_receiver {
+        (
+            vec![FnArgType::new_by_val(map_annotation_type(
+                ty_inf,
+                receiver_ty,
+                annotation_subst,
+            ))],
+            vec![
+                subscript
+                    .args
+                    .first()
+                    .expect("projection receiver binding should be validated")
+                    .name
+                    .0,
+            ],
+        )
+    } else {
+        (
+            subscript
+                .args
+                .iter()
+                .map(|arg| {
+                    if let Some((mut_ty, ty, _)) = arg.ty {
+                        let mut_ty = mut_ty
+                            .map(|mut_ty| map_annotation_mut_type(ty_inf, mut_ty, annotation_subst))
+                            .unwrap_or_else(MutType::constant);
+                        FnArgType::new(map_annotation_type(ty_inf, ty, annotation_subst), mut_ty)
+                    } else {
+                        ty_inf.fresh_fn_arg()
+                    }
+                })
+                .collect(),
+            subscript.args.iter().map(|arg| arg.name.0).collect(),
+        )
+    };
+    let mut mapper = BitmapInstantiationMapper::new(annotation_subst);
+    let constraints = subscript
+        .where_clause
+        .iter()
+        .map(|constraint| constraint.map(&mut mapper))
+        .collect();
+    SubscriptSignature {
+        args,
+        ret: map_subscript_return_type(ty_inf, subscript.ret_ty, annotation_subst),
+        generic_params: subscript.generic_params.type_params().to_vec(),
+        generic_effect_params: subscript.generic_params.effect_params().to_vec(),
+        arg_names,
+        constraints,
+        doc: subscript.doc.clone(),
+    }
+}
+
+fn member_args_from_subscript_signature(
+    signature: &SubscriptSignature,
+    projection_receiver: bool,
+    mutable_member: bool,
+) -> Vec<FnArgType> {
+    let mut args = signature.args.clone();
+    if projection_receiver
+        && mutable_member
+        && let Some(receiver) = args.first_mut()
+    {
+        receiver.mut_ty = MutType::mutable();
+    }
+    args
+}
+
+fn update_subscript_signature_from_member_definition(
+    output: &mut Module,
+    subscript_id: LocalSubscriptId,
+    projection_receiver: bool,
+    member_definition: &CallableDefinition,
+) {
+    let mut args = member_definition.ty_scheme.ty.args.clone();
+    if projection_receiver {
+        if let Some(receiver) = args.first_mut() {
+            receiver.mut_ty = MutType::constant();
+        }
+    }
+    let subscript = &mut output.subscripts[subscript_id.as_index()];
+    subscript.signature = SubscriptSignature {
+        args,
+        ret: member_definition.ty_scheme.ty.ret,
+        generic_params: member_definition.generic_params.clone(),
+        generic_effect_params: member_definition.generic_effect_params.clone(),
+        arg_names: member_definition.arg_names.clone(),
+        constraints: member_definition.ty_scheme.constraints.clone(),
+        doc: member_definition.doc.clone(),
+    };
+}
+
+struct SharedSubscriptSignature {
+    signature: SubscriptSignature,
+    annotation_subst: InstSubst,
+    explicit_root_tys: Vec<Type>,
 }
 
 struct DivergingReturnDefaultingInputs<'ctx, I> {
@@ -604,6 +738,8 @@ where
     let mut function_explicit_root_tys = Vec::new();
     let mut function_attrs = Vec::new();
     let mut function_kinds = Vec::new();
+    let mut subscript_signatures: FxHashMap<LocalSubscriptId, SharedSubscriptSignature> =
+        FxHashMap::default();
     let mut subscript_attachments: Vec<Vec<SubscriptMemberAttachment>> = Vec::new();
     for input in ast_functions() {
         let ast::ModuleFunction {
@@ -650,24 +786,37 @@ where
                 }));
             }
         }
-        let mut annotation_subst: InstSubst = impl_annotation_subst.clone().unwrap_or_default();
-        let explicit_root_tys = generic_params
-            .type_params()
-            .iter()
-            .enumerate()
-            .map(|(index, _)| {
-                let source_var = TypeVar::new((outer_annotation_var_count + index) as u32);
-                let fresh_ty = ty_inf.fresh_type_var_ty();
-                annotation_subst.0.insert(source_var, fresh_ty);
-                fresh_ty
-            })
-            .collect::<Vec<_>>();
-        for (index, _) in generic_params.effect_params().iter().enumerate() {
-            let source_var = EffectVar::new((outer_annotation_eff_var_count + index) as u32);
-            let fresh_eff = ty_inf.fresh_effect_var_ty();
-            annotation_subst.1.insert(source_var, fresh_eff);
-        }
-        let args_ty = args
+        let cached_subscript_signature = match kind {
+            EmitFunctionKind::SubscriptMember { subscript_id, .. } => {
+                subscript_signatures.get(&subscript_id)
+            }
+            _ => None,
+        };
+        let mut annotation_subst = cached_subscript_signature
+            .map(|shared| shared.annotation_subst.clone())
+            .unwrap_or_else(|| impl_annotation_subst.clone().unwrap_or_default());
+        let mut explicit_root_tys = if let Some(shared) = cached_subscript_signature {
+            shared.explicit_root_tys.clone()
+        } else {
+            let explicit_root_tys = generic_params
+                .type_params()
+                .iter()
+                .enumerate()
+                .map(|(index, _)| {
+                    let source_var = TypeVar::new((outer_annotation_var_count + index) as u32);
+                    let fresh_ty = ty_inf.fresh_type_var_ty();
+                    annotation_subst.0.insert(source_var, fresh_ty);
+                    fresh_ty
+                })
+                .collect::<Vec<_>>();
+            for (index, _) in generic_params.effect_params().iter().enumerate() {
+                let source_var = EffectVar::new((outer_annotation_eff_var_count + index) as u32);
+                let fresh_eff = ty_inf.fresh_effect_var_ty();
+                annotation_subst.1.insert(source_var, fresh_eff);
+            }
+            explicit_root_tys
+        };
+        let mut args_ty = args
             .iter()
             .map(|arg| {
                 if let Some((mut_ty, ty, _)) = &arg.ty {
@@ -684,7 +833,7 @@ where
                 }
             })
             .collect();
-        let ret_ty_ty = if let Some((ret_ty, _)) = ret_ty {
+        let mut ret_ty_ty = if let Some((ret_ty, _)) = ret_ty {
             ret_ty.map(&mut AnnotationTypeMapper::new(
                 &mut ty_inf,
                 Some(&annotation_subst),
@@ -692,6 +841,36 @@ where
         } else {
             ty_inf.fresh_type_var_ty()
         };
+        if let EmitFunctionKind::SubscriptMember {
+            subscript_id,
+            projection_key,
+            requires_mutable_yield,
+            ..
+        } = kind
+        {
+            let subscript = input
+                .subscript
+                .expect("subscript member emission should carry its source bundle");
+            let shared_signature = subscript_signatures.entry(subscript_id).or_insert_with(|| {
+                let signature =
+                    subscript_signature_from_source(&mut ty_inf, subscript, &annotation_subst);
+                SharedSubscriptSignature {
+                    signature,
+                    annotation_subst: annotation_subst.clone(),
+                    explicit_root_tys: explicit_root_tys.clone(),
+                }
+            });
+            annotation_subst = shared_signature.annotation_subst.clone();
+            explicit_root_tys = shared_signature.explicit_root_tys.clone();
+            let signature = shared_signature.signature.clone();
+            output.subscripts[subscript_id.as_index()].signature = signature.clone();
+            args_ty = member_args_from_subscript_signature(
+                &signature,
+                projection_key.is_some(),
+                requires_mutable_yield,
+            );
+            ret_ty_ty = signature.ret;
+        }
         let mut mapper = BitmapInstantiationMapper::new(&annotation_subst);
         for constraint in where_clause {
             ty_inf.add_pub_constraint(constraint.map(&mut mapper));
@@ -1575,7 +1754,7 @@ where
         }
 
         // Fifth pass, normalize the type schemes, substitute the types in the functions.
-        for id in local_fns.iter() {
+        for (input, id) in ast_functions().zip(local_fns.iter()) {
             let descr = &mut output.functions[id.as_index()];
             let subst = descr.definition.ty_scheme.normalize();
             let normalized_scheme = descr.definition.ty_scheme.clone();
@@ -1596,6 +1775,20 @@ where
                 pending.definition = descr.definition.clone();
                 instantiate_function_descr_in_place(pending, &mut mapper);
                 default_body_only_effects_in_function_descr(pending);
+            }
+            if let EmitFunctionKind::SubscriptMember {
+                subscript_id,
+                projection_key,
+                ..
+            } = input.kind
+            {
+                let definition = output.functions[id.as_index()].definition.clone();
+                update_subscript_signature_from_member_definition(
+                    output,
+                    subscript_id,
+                    projection_key.is_some(),
+                    &definition,
+                );
             }
         }
 

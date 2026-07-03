@@ -7,7 +7,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use super::harness::{TestSession, expected_tuple, int, string};
+use super::harness::{TestSession, expected_array_infer, expected_tuple, int, string};
 use ferlium::{
     SourceId,
     ast::{PExprKind, SubscriptMemberMode},
@@ -1677,6 +1677,239 @@ fn run_experimental_subscript_source(src: &str) -> ferlium::hir::value::Value {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn infers_addressor_subscript_argument_and_return_types() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        subscript cell(slot) {
+            ref mut {
+                slot
+            }
+        }
+
+        let mut slot = 41;
+        slot->[cell] += 1;
+        slot
+    "# });
+
+    assert_val_eq!(value, int(42));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn infers_projection_subscript_return_type() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        #[private_repr]
+        struct Secret {
+            value: int,
+        }
+
+        subscript Secret.value(self) {
+            ref mut {
+                self.value
+            }
+        }
+
+        let mut secret = Secret { value: 41 };
+        secret.value += 1;
+        secret.value
+    "# });
+
+    assert_val_eq!(value, int(42));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn infers_yielded_subscript_argument_and_return_types() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        subscript cell(value, log) {
+            ref {
+                let local = value + 0;
+                yield local
+            }
+            mut {
+                log = log + 1;
+                let mut local = value + 0;
+                yield local;
+                log = log + 10
+            }
+        }
+
+        let mut log = 0;
+        let result = 40->[cell](log);
+        (result, log)
+    "# });
+
+    assert_val_eq!(value, expected_tuple([int(40), int(0)]));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn subscript_signature_accepts_placeholder_annotations() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        subscript cell(slot: &mut _) -> _ {
+            ref mut {
+                slot
+            }
+        }
+
+        let mut slot = 41;
+        slot->[cell] += 1;
+        slot
+    "# });
+
+    assert_val_eq!(value, int(42));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn subscript_signature_can_mix_inferred_concrete_and_placeholder_annotations() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        subscript cell(slot, offsets: [_], scale: int) {
+            ref {
+                let local = slot + offsets[0] * scale;
+                yield local
+            }
+            mut {
+                let mut local = slot + offsets[0] * scale;
+                yield local;
+                slot = local
+            }
+        }
+
+        let mut slot = 10;
+        let read = slot->[cell]([2], 3);
+        slot->[cell]([2], 3) = 20;
+        (read, slot)
+    "# });
+
+    assert_val_eq!(value, expected_tuple([int(16), int(20)]));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn mut_only_subscript_can_infer_shared_signature() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        subscript cell(slot) {
+            mut {
+                slot
+            }
+        }
+
+        let mut slot = 0;
+        slot->[cell] = 42;
+        slot
+    "# });
+
+    assert_val_eq!(value, int(42));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn separate_members_share_inferred_generic_subscript_signature() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        subscript cell<T>(slot: &mut T)
+        where
+            T: Value
+        {
+            ref {
+                slot
+            }
+            mut {
+                slot
+            }
+        }
+
+        let mut number = 5;
+        let mut text = "old";
+        let before = number->[cell];
+        text->[cell] = "new";
+        (before, text)
+    "# });
+
+    assert_val_eq!(value, expected_tuple([int(5), string("new")]));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn omitted_generic_subscript_return_is_independent_of_first_type_param() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        subscript wrap<T>(slot: T)
+        where
+            T: Value
+        {
+            ref {
+                let local = [slot];
+                yield local
+            }
+        }
+
+        5->[wrap]
+    "# });
+
+    assert_val_eq!(value, expected_array_infer([int(5)]));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn placeholder_generic_subscript_return_is_independent_of_first_type_param() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        subscript wrap<T>(slot: T) -> _
+        where
+            T: Value
+        {
+            ref {
+                let local = [slot];
+                yield local
+            }
+        }
+
+        5->[wrap]
+    "# });
+
+    assert_val_eq!(value, expected_array_infer([int(5)]));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn explicit_generic_subscript_return_annotation_is_enforced() {
+    // `-> T` names the first generic parameter and must be enforced, not mistaken
+    // for an inferred placeholder: the body yields `[T]`, which conflicts with the
+    // annotated element return type `T`.
+    assert_experimental_compile_error(indoc! { r#"
+        subscript wrap<T>(slot: T) -> T
+        where
+            T: Value
+        {
+            ref {
+                let local = [slot];
+                yield local
+            }
+        }
+
+        5->[wrap]
+    "# });
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn ref_and_mut_subscript_members_must_infer_same_return_type() {
+    assert_experimental_compile_error(indoc! { r#"
+        subscript bad(int_slot, bool_slot) {
+            ref {
+                int_slot
+            }
+            mut {
+                bool_slot
+            }
+        }
+
+        let mut int_slot = 1;
+        let mut bool_slot = true;
+        int_slot->[bad](bool_slot)
+    "# });
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn module_function_can_use_later_named_subscript() {
     let value = run_experimental_subscript_source(indoc! { r#"
         fn read(slot: &mut int) -> int {
@@ -2584,6 +2817,37 @@ fn module_function_and_subscript_member_can_be_mutually_recursive() {
     "# });
 
     assert_val_eq!(value, int(13));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn module_function_and_projection_subscript_member_can_be_mutually_recursive() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        fn read(secret: Secret, depth: int) -> int {
+            if depth == 0 {
+                secret.raw
+            } else {
+                secret.value
+            }
+        }
+
+        #[private_repr]
+        struct Secret {
+            raw: int,
+        }
+
+        subscript Secret.value(self) -> int {
+            ref {
+                let local = read(self, 0);
+                yield local
+            }
+        }
+
+        let secret = Secret { raw: 21 };
+        read(secret, 1)
+    "# });
+
+    assert_val_eq!(value, int(21));
 }
 
 #[test]

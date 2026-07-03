@@ -2056,6 +2056,17 @@ impl TypeInference {
         }
     }
 
+    fn direct_local_place_return_root(arena: &NodeArena, node_id: NodeId) -> Option<LocalDeclId> {
+        match &arena[node_id].kind {
+            NodeKind::LoadLocal(load) => Some(load.id),
+            NodeKind::Block(block) => block
+                .body
+                .last()
+                .and_then(|tail| Self::direct_local_place_return_root(arena, *tail)),
+            _ => None,
+        }
+    }
+
     pub(crate) fn check_implicit_addressor_return_expr(
         &mut self,
         env: &mut TypingEnv,
@@ -2081,6 +2092,22 @@ impl TypeInference {
                 kind: InvalidSubscriptDefinitionKind::AddressorReturnMustBePlace,
                 span: expr_span,
             }));
+        }
+        // Implicit addressor members may infer the base receiver as `&mut` when
+        // returning it directly as a place. Roots in other parameters are still
+        // rejected by the addressor-root check instead of inferred here.
+        if let Some(local_id) = Self::direct_local_place_return_root(env.ir_arena, node_id)
+            && env.cur_locals.first().is_some_and(|base| *base == local_id)
+        {
+            let local = &env.all_locals[local_id.as_index()];
+            if local.mut_ty.is_variable() {
+                self.add_mut_be_at_least_constraint(
+                    local.mut_ty,
+                    env.ir_arena[node_id].span,
+                    MutType::mutable(),
+                    expr_span,
+                );
+            }
         }
         let effects = env.ir_arena[node_id].effects.clone();
         Ok(env.ir_arena.alloc(hir::Node::new(
