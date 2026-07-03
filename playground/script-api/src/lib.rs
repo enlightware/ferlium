@@ -60,6 +60,10 @@ impl PlaygroundCompiler {
     pub fn get_light_annotations(&mut self) -> Vec<AnnotationData> {
         self.inner.get_light_annotations()
     }
+
+    pub fn set_allow_experimental(&mut self, allow: bool) {
+        self.inner.set_allow_experimental(allow);
+    }
 }
 
 impl Default for PlaygroundCompiler {
