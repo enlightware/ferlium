@@ -2047,6 +2047,38 @@ fn first_class_addressor_subscript_parameter_assignment_is_inferred() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn first_class_subscript_parameters_can_be_chosen_before_mutation() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        subscript first(values: &mut [int]) -> int {
+            ref mut {
+                values[0]
+            }
+        }
+
+        subscript second(values: &mut [int]) -> int {
+            ref mut {
+                values[1]
+            }
+        }
+
+        fn bump_chosen(values: &mut [int], left, right, use_left) {
+            if use_left {
+                values->[left] += 1
+            } else {
+                values->[right] += 1
+            }
+        }
+
+        let mut values = [5, 12];
+        bump_chosen(values, first, second, false);
+        values
+    "# });
+
+    assert_val_eq!(value, expected_array_infer([int(5), int(13)]));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn first_class_yielded_subscript_parameter_assignment_is_inferred() {
     let value = run_experimental_subscript_source(indoc! { r#"
         subscript cell(slot: &mut int, log: &mut int) -> int {

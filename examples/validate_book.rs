@@ -282,6 +282,7 @@ fn process_ferlium_block(label: &str, attrs: &[String], code_body: &str) -> Bloc
         "should_panic",
         "compile_fail",
         "editable",
+        "experimental",
         "noplayground",
     ]
     .into_iter()
@@ -312,11 +313,12 @@ fn process_ferlium_block(label: &str, attrs: &[String], code_body: &str) -> Bloc
     let no_run = attrs.iter().any(|attr| attr == "no_run");
     let should_panic = attrs.iter().any(|attr| attr == "should_panic");
     let compile_fail = attrs.iter().any(|attr| attr == "compile_fail");
+    let experimental = attrs.iter().any(|attr| attr == "experimental");
 
     let code = strip_hidden_lines(code_body);
 
     if compile_fail {
-        match compile_only(label, &code) {
+        match compile_only(label, &code, experimental) {
             Ok(()) => {
                 print_failed_block(label, "expected compile failure but succeeded", &code);
                 BlockResult::Failed
@@ -327,7 +329,7 @@ fn process_ferlium_block(label: &str, attrs: &[String], code_body: &str) -> Bloc
             }
         }
     } else if no_run {
-        match compile_only(label, &code) {
+        match compile_only(label, &code, experimental) {
             Ok(()) => {
                 println!("[OK] {label}: compiled (no_run)");
                 BlockResult::Passed
@@ -338,7 +340,7 @@ fn process_ferlium_block(label: &str, attrs: &[String], code_body: &str) -> Bloc
             }
         }
     } else if should_panic {
-        match run_block(label, &code, true) {
+        match run_block(label, &code, true, experimental) {
             BlockResult::Passed => {
                 println!("[OK] {label}: panicked as expected");
                 BlockResult::Passed
@@ -350,7 +352,7 @@ fn process_ferlium_block(label: &str, attrs: &[String], code_body: &str) -> Bloc
             BlockResult::Ignored => BlockResult::Ignored,
         }
     } else {
-        match run_block(label, &code, false) {
+        match run_block(label, &code, false, experimental) {
             BlockResult::Passed => {
                 println!("[OK] {label}");
                 BlockResult::Passed
@@ -376,16 +378,18 @@ fn strip_hidden_lines(code: &str) -> String {
     output
 }
 
-fn compile_only(label: &str, code: &str) -> Result<(), RunError> {
+fn compile_only(label: &str, code: &str, experimental: bool) -> Result<(), RunError> {
     let mut session = CompilerSession::new();
+    session.set_allow_experimental(experimental);
     session
         .compile(code, label, ferlium::Path::single_str(label))
         .map(|_| ())
         .map_err(RunError::Compilation)
 }
 
-fn run_block(label: &str, code: &str, expect_panic: bool) -> BlockResult {
+fn run_block(label: &str, code: &str, expect_panic: bool, experimental: bool) -> BlockResult {
     let mut session = CompilerSession::new();
+    session.set_allow_experimental(experimental);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         try_compile_and_run(label, code, &mut session)
     }));
