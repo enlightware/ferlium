@@ -258,9 +258,9 @@ fn subscript_signature(
                 FnArgType::new(ty, mut_ty.unwrap_or_else(MutType::constant))
             } else {
                 // Source subscripts are predeclared before their SCC is emitted.
-                // Placeholder type vars start at 1 so var 0 remains available for a
-                // provisional omitted return; all placeholders are replaced by
-                // real fresh variables in emit_functions before real consumption.
+                // These placeholders only make the predeclared signature structurally
+                // valid; emit_functions replaces them with real inferred variables
+                // before any body inference or projection lookup can consume them.
                 FnArgType::new(
                     Type::variable_id((index + 1) as u32),
                     MutType::variable_id(index as u32),
@@ -289,8 +289,14 @@ pub(super) fn synthetic_subscript_member_function(
         let receiver_arg = args
             .first_mut()
             .expect("projection subscript receiver binding should be validated before emission");
-        let receiver_mut_ty = member.mode.mut_member.then_some(MutType::mutable());
-        receiver_arg.ty = Some((receiver_mut_ty, receiver_ty, receiver_span));
+        let receiver_kind = if member.mode.mut_member {
+            SubscriptMemberKind::Mut
+        } else {
+            SubscriptMemberKind::Ref
+        };
+        let receiver_mut_ty =
+            SubscriptSignature::projection_receiver_member_mutability(receiver_kind);
+        receiver_arg.ty = Some((Some(receiver_mut_ty), receiver_ty, receiver_span));
         args
     } else {
         subscript.args.clone()

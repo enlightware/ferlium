@@ -34,6 +34,7 @@ pub use path::*;
 pub use trait_impl::*;
 pub use uses::*;
 
+use crate::hir::function::CallableDefinition;
 use std::{fmt, hash::Hash, ops};
 
 use ustr::{Ustr, ustr};
@@ -50,6 +51,7 @@ use crate::{
     internal_compilation_error,
     module::id::{Id, NamedIndexed},
     types::{
+        mutability::MutType,
         r#trait::Trait,
         r#type::{
             CallResultConvention, FnArgType, LocalTypeAliasId, SubscriptMemberType,
@@ -167,6 +169,59 @@ pub struct SubscriptSignature {
     pub arg_names: Vec<Ustr>,
     pub constraints: Vec<PubTypeConstraint>,
     pub doc: Option<String>,
+}
+
+impl SubscriptSignature {
+    /// Build the shared subscript signature from a concrete member definition.
+    pub fn from_callable_definition(definition: &CallableDefinition) -> Self {
+        Self {
+            args: definition.ty_scheme.ty.args.clone(),
+            ret: definition.ty_scheme.ty.ret,
+            generic_params: definition.generic_params.clone(),
+            generic_effect_params: definition.generic_effect_params.clone(),
+            arg_names: definition.arg_names.clone(),
+            constraints: definition.ty_scheme.constraints.clone(),
+            doc: definition.doc.clone(),
+        }
+    }
+
+    /// Return member-call arguments, applying the projection receiver mutability rule.
+    pub fn member_args(
+        &self,
+        projection_receiver: bool,
+        member_kind: SubscriptMemberKind,
+    ) -> Vec<FnArgType> {
+        let mut args = self.args.clone();
+        if projection_receiver {
+            Self::set_projection_receiver_mutability(&mut args, member_kind);
+        }
+        args
+    }
+
+    /// Projection signatures are canonicalized with a const receiver.
+    pub fn normalize_projection_receiver(&mut self) {
+        if let Some(receiver) = self.args.first_mut() {
+            receiver.mut_ty = MutType::constant();
+        }
+    }
+
+    /// Mut projection members receive `&mut self`; ref members receive `self`.
+    pub fn projection_receiver_member_mutability(member_kind: SubscriptMemberKind) -> MutType {
+        match member_kind {
+            SubscriptMemberKind::Ref => MutType::constant(),
+            SubscriptMemberKind::Mut => MutType::mutable(),
+        }
+    }
+
+    /// Apply the projection receiver mutability rule to a member argument list.
+    pub fn set_projection_receiver_mutability(
+        args: &mut [FnArgType],
+        member_kind: SubscriptMemberKind,
+    ) {
+        if let Some(receiver) = args.first_mut() {
+            receiver.mut_ty = Self::projection_receiver_member_mutability(member_kind);
+        }
+    }
 }
 
 /// A named subscript bundle with optional read/write members.
@@ -533,15 +588,7 @@ impl Module {
             function.definition.result_convention,
             CallResultConvention::ADDRESSOR_PLACE
         );
-        let signature = SubscriptSignature {
-            args: function.definition.ty_scheme.ty.args.clone(),
-            ret: function.definition.ty_scheme.ty.ret,
-            generic_params: function.definition.generic_params.clone(),
-            generic_effect_params: function.definition.generic_effect_params.clone(),
-            arg_names: function.definition.arg_names.clone(),
-            constraints: function.definition.ty_scheme.constraints.clone(),
-            doc: function.definition.doc.clone(),
-        };
+        let signature = SubscriptSignature::from_callable_definition(&function.definition);
         let function = self.add_function_anonymous(function);
         let member = SubscriptMember {
             function,

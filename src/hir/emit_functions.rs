@@ -37,7 +37,7 @@ use crate::{
         FunctionId, GENERATED_LAMBDA_PREFIX, LocalDecl, LocalDeclId, LocalFunctionId,
         LocalSubscriptId, Module, ModuleEnv, ModuleFunction, ModuleFunctionSpans,
         PendingFunctionBody, PendingModuleFunction, ProjectionKey, QualifiedNameEnv,
-        SubscriptSignature, TraitId, Visibility, YieldProvenance, id::Id,
+        SubscriptMemberKind, SubscriptSignature, TraitId, Visibility, YieldProvenance, id::Id,
     },
     std::STD_MODULE_ID,
     types::{
@@ -408,43 +408,18 @@ fn subscript_signature_from_source(
     }
 }
 
-fn member_args_from_subscript_signature(
-    signature: &SubscriptSignature,
-    projection_receiver: bool,
-    mutable_member: bool,
-) -> Vec<FnArgType> {
-    let mut args = signature.args.clone();
-    if projection_receiver
-        && mutable_member
-        && let Some(receiver) = args.first_mut()
-    {
-        receiver.mut_ty = MutType::mutable();
-    }
-    args
-}
-
 fn update_subscript_signature_from_member_definition(
     output: &mut Module,
     subscript_id: LocalSubscriptId,
     projection_receiver: bool,
     member_definition: &CallableDefinition,
 ) {
-    let mut args = member_definition.ty_scheme.ty.args.clone();
+    let mut signature = SubscriptSignature::from_callable_definition(member_definition);
     if projection_receiver {
-        if let Some(receiver) = args.first_mut() {
-            receiver.mut_ty = MutType::constant();
-        }
+        signature.normalize_projection_receiver();
     }
     let subscript = &mut output.subscripts[subscript_id.as_index()];
-    subscript.signature = SubscriptSignature {
-        args,
-        ret: member_definition.ty_scheme.ty.ret,
-        generic_params: member_definition.generic_params.clone(),
-        generic_effect_params: member_definition.generic_effect_params.clone(),
-        arg_names: member_definition.arg_names.clone(),
-        constraints: member_definition.ty_scheme.constraints.clone(),
-        doc: member_definition.doc.clone(),
-    };
+    subscript.signature = signature;
 }
 
 struct SharedSubscriptSignature {
@@ -864,11 +839,12 @@ where
             explicit_root_tys = shared_signature.explicit_root_tys.clone();
             let signature = shared_signature.signature.clone();
             output.subscripts[subscript_id.as_index()].signature = signature.clone();
-            args_ty = member_args_from_subscript_signature(
-                &signature,
-                projection_key.is_some(),
-                requires_mutable_yield,
-            );
+            let member_kind = if requires_mutable_yield {
+                SubscriptMemberKind::Mut
+            } else {
+                SubscriptMemberKind::Ref
+            };
+            args_ty = signature.member_args(projection_key.is_some(), member_kind);
             ret_ty_ty = signature.ret;
         }
         let mut mapper = BitmapInstantiationMapper::new(&annotation_subst);

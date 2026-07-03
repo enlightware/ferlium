@@ -150,20 +150,22 @@ impl Module {
             return entry.subscript;
         }
 
+        let definition = CallableDefinition::new(
+            TypeScheme::new_just_type(FnType::new(
+                vec![FnArgType::new_by_val(receiver_ty)],
+                spec.field_ty,
+                no_effects(),
+            )),
+            vec![ustr("receiver")],
+            Some(format!(
+                "Compiler-generated projection subscript for field {}.",
+                key.field
+            )),
+        )
+        .with_result_convention(CallResultConvention::ADDRESSOR_PLACE);
+        let signature = SubscriptSignature::from_callable_definition(&definition);
         let function = self.add_function_anonymous(ModuleFunction::new(
-            CallableDefinition::new(
-                TypeScheme::new_just_type(FnType::new(
-                    vec![FnArgType::new_by_val(receiver_ty)],
-                    spec.field_ty,
-                    no_effects(),
-                )),
-                vec![ustr("receiver")],
-                Some(format!(
-                    "Compiler-generated projection addressor for field {}.",
-                    key.field
-                )),
-            )
-            .with_result_convention(CallResultConvention::ADDRESSOR_PLACE),
+            definition,
             Box::new(StructuralFieldAddressor::new(spec.index)),
             None,
             Vec::new(),
@@ -174,18 +176,7 @@ impl Module {
         };
         let id = LocalSubscriptId::from_index(self.subscripts.len());
         self.subscripts.push(SubscriptDefinition {
-            signature: SubscriptSignature {
-                args: vec![FnArgType::new_by_val(receiver_ty)],
-                ret: spec.field_ty,
-                generic_params: Vec::new(),
-                generic_effect_params: Vec::new(),
-                arg_names: vec![ustr("receiver")],
-                constraints: Vec::new(),
-                doc: Some(format!(
-                    "Compiler-generated projection subscript for field {}.",
-                    key.field
-                )),
-            },
+            signature,
             ref_member: Some(member.clone()),
             mut_member: Some(member),
         });
