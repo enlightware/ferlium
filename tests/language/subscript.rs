@@ -10,12 +10,13 @@
 use super::harness::{TestSession, expected_array_infer, expected_tuple, int, string};
 use ferlium::{
     SourceId,
-    ast::{PExprKind, SubscriptMemberMode},
+    ast::{ModuleDisplay, PExprKind, SubscriptMemberMode},
     compiler::error::{
         CompilationErrorImpl, InvalidRecordFieldContext, InvalidSubscriptDefinitionKind,
         InvalidYieldKind, MutabilityMustBeWhat, RuntimeErrorKind, SubscriptDefinitionSubject,
         UnsupportedSubscriptFeatureKind,
     },
+    format::FormatWith,
     hir::{ENodeArena, ENodeId, NodeKind},
     module::{YieldProvenance, id::Id},
     parse_module_and_expr,
@@ -100,6 +101,43 @@ fn parses_projection_subscript_definition() {
     let subscript = &module.subscripts[0];
     assert_eq!(subscript.name.0, ustr("x"));
     assert!(subscript.projection_receiver.is_some());
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn formats_subscript_member_body_with_nested_indentation() {
+    let (module, _, arena) = parse_module_and_expr(
+        indoc! { r#"
+            subscript Pixel.x(self) -> int {
+                ref mut {
+                    self.coords[0]
+                }
+            }
+        "# },
+        SourceId::from_index(1),
+        true,
+    )
+    .expect("projection subscript module should parse");
+    let session = TestSession::new();
+
+    let rendered = ModuleDisplay::new(&module, &arena)
+        .format_with(&session.std_module_env())
+        .to_string();
+
+    assert_eq!(
+        rendered,
+        indoc! { r#"
+            Subscripts:
+                subscript Pixel.x(self) -> int {
+                  ref mut
+                  self
+                    .coords
+                  [
+                    0
+                  ]
+                }
+        "# }
+    );
 }
 
 #[test]

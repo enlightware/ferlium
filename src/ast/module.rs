@@ -678,9 +678,9 @@ fn fmt_subscript_definition<P: Phase>(
             (false, false) => "<invalid>",
         };
         writeln!(f, "{doc_prefix}    {member_name}")?;
-        arena[member.body].format_ind(f, env, arena, body_indent)?;
+        arena[member.body].format_ind(f, env, arena, body_indent + 1)?;
     }
-    writeln!(f, "{doc_prefix}}}")
+    writeln!(f, "{doc_prefix}  }}")
 }
 
 impl<'a> FormatWith<ModuleEnv<'_>> for ModuleDisplay<'a, Parsed> {
