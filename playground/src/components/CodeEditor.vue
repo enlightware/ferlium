@@ -17,6 +17,7 @@ const view = ref<EditorView>();
 const diagnostics: Diagnostic[] = [];
 
 const compiler = new Compiler();
+compiler.set_allow_experimental(true);
 
 type AnnotationMode = "none" | "light" | "full";
 
