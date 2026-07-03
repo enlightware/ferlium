@@ -75,7 +75,7 @@ impl Default for PlaygroundCompiler {
 #[wasm_bindgen]
 pub fn init_rust_api() {
     set_panic_hook();
-    wasm_logger::init(wasm_logger::Config::new(log::Level::Debug));
+    wasm_logger::init(wasm_logger::Config::new(log::Level::Debug).module_prefix("ferlium"));
     log::info!("Rust API logging enabled.");
 }
 
