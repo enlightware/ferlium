@@ -207,7 +207,7 @@ fn light_annotations_hide_fallible_inside_returned_function_types() {
         "expected full annotations to show nested fallible effect, got: {full_annotations}"
     );
     assert!(
-        light_annotations.contains("() -> int ! e₀") && !light_annotations.contains("fallible"),
+        light_annotations.contains("() -> int") && !light_annotations.contains("fallible"),
         "expected light annotations to hide nested fallible effect, got: {light_annotations}"
     );
 }
@@ -224,14 +224,14 @@ fn light_annotations_keep_non_fallible_effects_inside_returned_function_types() 
     let light_annotations = light_annotation_hints(&mut compiler);
 
     assert!(
-        light_annotations.contains("() -> int ! (read, e₀)"),
-        "expected light annotations to keep nested read effect, got: {light_annotations}"
+        light_annotations.contains("() -> int ! read") && !light_annotations.contains("e₀"),
+        "expected light annotations to keep nested concrete read effect and hide generic effects, got: {light_annotations}"
     );
 }
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn light_annotations_keep_generic_effect_binders_used_by_callable_effects() {
+fn light_annotations_hide_generic_effect_binders_used_by_callable_effects() {
     let src = indoc! { r#"
         fn call(f) {
             f()
@@ -241,10 +241,12 @@ fn light_annotations_keep_generic_effect_binders_used_by_callable_effects() {
     let light = light_annotated_ide_source(&mut compiler, src);
 
     assert!(
-        light.contains("<A ! e₀>")
-            && light.contains("f: () -> A ! e₀")
-            && light.contains("-> A ! e₀"),
-        "expected light annotations to keep callable effect binder and uses, got:\n{light}"
+        light.contains("<A>") && light.contains("f: () -> A") && light.contains("-> A"),
+        "expected light annotations to keep callable type shape, got:\n{light}"
+    );
+    assert!(
+        !light.contains("e₀") && !light.contains("! e"),
+        "expected light annotations to hide callable generic effect binders and uses, got:\n{light}"
     );
 }
 
@@ -269,10 +271,11 @@ fn annotations_show_inferred_projection_subscript_evidence_effects() {
         "expected function effect to depend on projection evidence, got: {annotations}"
     );
     assert!(
-        light_annotations.contains("A: { value: B ! e₀, … }")
+        light_annotations.contains("A: { value: B, … }")
             && !light_annotations.contains("(ref")
+            && !light_annotations.contains("e₀")
             && !light_annotations.contains("projection value uses subscript"),
-        "expected light annotations to keep compact record-style projection evidence, got: {light_annotations}"
+        "expected light annotations to keep compact record-style projection evidence while hiding generic effects, got: {light_annotations}"
     );
 }
 

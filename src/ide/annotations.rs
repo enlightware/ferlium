@@ -18,13 +18,10 @@ use crate::{
     hir::{ENode, ENodeArena, ENodeId, NodeKind},
     module::{ELocalDecl as LocalDecl, ModuleEnv, id::Id},
     types::{
-        effects::{EffType, Effect, EffectVar},
-        r#type::{
-            FnType, Type, TypeDisplayEnv, TypeKind, TypeVar, display_effect_binding_value_with_env,
-        },
-        type_scheme::{PubTypeConstraint, TypeScheme},
+        effects::EffectVar,
+        r#type::{FnType, Type, TypeDisplayEnv, TypeVar, display_effect_binding_value_with_env},
+        type_scheme::TypeScheme,
         type_scheme_display::TypeSchemeConstraintRenderMode,
-        type_visitor::TypeInnerVisitor,
     },
 };
 use ustr::Ustr;
@@ -434,83 +431,7 @@ fn light_hidden_effect_vars(
         return FxHashSet::default();
     }
 
-    let mut callable_effect_vars = FxHashSet::default();
-    collect_callable_effect_vars_in_fn_type(&ty_scheme.ty, &mut callable_effect_vars);
-    for constraint in &ty_scheme.constraints {
-        collect_callable_effect_vars_in_constraint(constraint, &mut callable_effect_vars);
-    }
-
-    ty_scheme
-        .eff_quantifiers
-        .iter()
-        .copied()
-        .filter(|var| !callable_effect_vars.contains(var))
-        .collect()
-}
-
-fn collect_effect_vars(effects: &EffType, vars: &mut FxHashSet<EffectVar>) {
-    vars.extend(effects.iter().filter_map(|effect| match effect {
-        Effect::Variable(var) => Some(var),
-        Effect::Primitive(_) => None,
-    }));
-}
-
-fn collect_callable_effect_vars_in_fn_type(fn_ty: &FnType, vars: &mut FxHashSet<EffectVar>) {
-    collect_effect_vars(&fn_ty.effects, vars);
-    for arg in &fn_ty.args {
-        collect_callable_effect_vars_in_type(arg.ty, vars);
-    }
-    collect_callable_effect_vars_in_type(fn_ty.ret, vars);
-}
-
-fn collect_callable_effect_vars_in_type(ty: Type, vars: &mut FxHashSet<EffectVar>) {
-    struct CallableEffectVarsCollector<'a>(&'a mut FxHashSet<EffectVar>);
-
-    impl TypeInnerVisitor for CallableEffectVarsCollector<'_> {
-        fn visit_ty_kind_start(&mut self, ty: &TypeKind) {
-            if let TypeKind::Function(fn_ty) = ty {
-                collect_effect_vars(&fn_ty.effects, self.0);
-            }
-        }
-    }
-
-    ty.data().visit(&mut CallableEffectVarsCollector(vars));
-}
-
-fn collect_callable_effect_vars_in_constraint(
-    constraint: &PubTypeConstraint,
-    vars: &mut FxHashSet<EffectVar>,
-) {
-    match constraint {
-        PubTypeConstraint::TupleAtIndexIs {
-            tuple_ty,
-            element_ty,
-            ..
-        } => {
-            collect_callable_effect_vars_in_type(*tuple_ty, vars);
-            collect_callable_effect_vars_in_type(*element_ty, vars);
-        }
-        PubTypeConstraint::ProjectionSubscriptIs { subscript_ty, .. } => {
-            collect_callable_effect_vars_in_type(Type::subscript_type(subscript_ty.clone()), vars);
-        }
-        PubTypeConstraint::TypeHasVariant {
-            variant_ty,
-            payload_ty,
-            ..
-        } => {
-            collect_callable_effect_vars_in_type(*variant_ty, vars);
-            collect_callable_effect_vars_in_type(*payload_ty, vars);
-        }
-        PubTypeConstraint::HaveTrait {
-            input_tys,
-            output_tys,
-            ..
-        } => {
-            for ty in input_tys.iter().chain(output_tys) {
-                collect_callable_effect_vars_in_type(*ty, vars);
-            }
-        }
-    }
+    ty_scheme.eff_quantifiers.iter().copied().collect()
 }
 
 fn variable_type_annotations<Env>(
