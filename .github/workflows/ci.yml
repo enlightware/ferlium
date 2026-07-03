@@ -3,8 +3,8 @@ name: Cargo Build & Test
 on: [push, pull_request]
 
 jobs:
-  build_and_test:
-    name: Rust Formatting & Tests (${{ matrix.os }})
+  rust:
+    name: Rust Tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -14,11 +14,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Set up Rust
+      - name: Set up Rust with linting tools
+        if: runner.os != 'macOS'
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-          targets: wasm32-unknown-unknown
+
+      - name: Set up Rust
+        if: runner.os == 'macOS'
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Set up Rust cache
         uses: Swatinem/rust-cache@v2.9.1
@@ -45,16 +49,37 @@ jobs:
       - name: Run local tests
         run: cargo nextest run
 
+  wasm:
+    name: WASM tests (${{ matrix.browser }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - browser: Chrome and Firefox
+            os: ubuntu-latest
+            browser_flags: --chrome --firefox
+          - browser: Safari
+            os: macos-latest
+            browser_flags: --safari
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@v2.9.1
+        with:
+          key: ${{ runner.os }}-cargo
+
       - name: Install wasm-pack
         run: cargo install wasm-pack
 
-      - name: Run WASM tests (Chrome and Firefox)
-        if: runner.os != 'macOS'
-        run: WASM_BINDGEN_USE_BROWSER=1 WASM_BINDGEN_TEST_TIMEOUT=600 wasm-pack test --chrome --firefox --headless --test language --lib
-
-      - name: Run WASM tests (Safari)
-        if: runner.os == 'macOS'
-        run: WASM_BINDGEN_USE_BROWSER=1 WASM_BINDGEN_TEST_TIMEOUT=600 wasm-pack test --safari --headless --test language --lib
+      - name: Run WASM tests (${{ matrix.browser }})
+        run: WASM_BINDGEN_USE_BROWSER=1 WASM_BINDGEN_TEST_TIMEOUT=600 wasm-pack test ${{ matrix.browser_flags }} --headless --test language --lib
 
   build_site:
     name: Build and upload playground and book
@@ -137,7 +162,10 @@ jobs:
       id-token: write
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
-    needs: build_site
+    needs:
+      - wasm
+      - build_site
+      - validate_lezer_grammar
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
