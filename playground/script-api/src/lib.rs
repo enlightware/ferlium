@@ -75,7 +75,7 @@ impl Default for PlaygroundCompiler {
 #[wasm_bindgen]
 pub fn init_rust_api() {
     set_panic_hook();
-    wasm_logger::init(wasm_logger::Config::default());
+    wasm_logger::init(wasm_logger::Config::new(log::Level::Debug));
     log::info!("Rust API logging enabled.");
 }
 

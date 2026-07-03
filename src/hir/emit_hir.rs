@@ -821,12 +821,12 @@ pub(crate) fn emit_module_with_capabilities(
         } else {
             FxHashSet::default()
         };
-        if log_enabled!(log::Level::Debug) {
+        if log_enabled!(log::Level::Trace) {
             let names = emissions
                 .iter()
                 .map(|emission| emission.function().name.0)
                 .collect::<Vec<_>>();
-            log::debug!(
+            log::trace!(
                 "Processing circularly dependent implementations: {}",
                 iterable_to_string(names, ", ")
             );
@@ -1000,7 +1000,7 @@ pub(crate) fn emit_module_with_capabilities(
             .impl_header_to_string_by_id(local_impl_id, module_env);
         let header = header.strip_suffix("\n").unwrap_or_else(|| &header);
         let impl_type = if is_concrete { "Concrete" } else { "Blanket" };
-        log::debug!("Emitted {impl_type} {header}");
+        log::trace!("Emitted {impl_type} {header}");
     }
 
     Ok(output)
@@ -1038,6 +1038,9 @@ pub(super) fn log_dropped_constraints_expr(
     retained: &FxHashSet<PubTypeConstraintPtr>,
     module_env: ModuleEnv,
 ) {
+    if !log::log_enabled!(log::Level::Trace) {
+        return;
+    }
     if retained.len() == all.len() {
         return;
     }
@@ -1049,7 +1052,7 @@ pub(super) fn log_dropped_constraints_expr(
         })
         .map(|c| c.format_with(&module_env));
     let dropped = iterable_to_string(dropped, " ∧ ");
-    log::debug!("Dropped/resolved constraints in expr: {dropped}");
+    log::trace!("Dropped/resolved constraints in expr: {dropped}");
 }
 
 pub(super) fn log_dropped_constraints_module(
@@ -1059,6 +1062,9 @@ pub(super) fn log_dropped_constraints_module(
     retained: &FxHashSet<PubTypeConstraintPtr>,
     module_env: ModuleEnv,
 ) {
+    if !log::log_enabled!(log::Level::Trace) {
+        return;
+    }
     if retained.len() == related.len() {
         return;
     }
@@ -1070,5 +1076,5 @@ pub(super) fn log_dropped_constraints_module(
         })
         .map(|c| c.format_with(&module_env));
     let dropped = iterable_to_string(dropped, " ∧ ");
-    log::debug!("Dropped/resolved constraints in {ctx}: {dropped}");
+    log::trace!("Dropped/resolved constraints in {ctx}: {dropped}");
 }

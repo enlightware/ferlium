@@ -707,19 +707,22 @@ impl EffectSolver {
     }
 
     pub(super) fn log_debug_constraints(&mut self) {
-        log::debug!("Effect substitution table:");
+        if !log::log_enabled!(log::Level::Trace) {
+            return;
+        }
+        log::trace!("Effect substitution table:");
         for i in 0..self.table.len() {
             let var = EffectVar::new(i as u32);
             let value = self.table.probe_value(var);
             match value {
-                Some(value) => log::debug!("  {var} → {value}"),
-                None => log::debug!("  {var} → {} (unbound)", self.table.find(var)),
+                Some(value) => log::trace!("  {var} → {value}"),
+                None => log::trace!("  {var} → {} (unbound)", self.table.find(var)),
             }
         }
         if !self.pending_dependencies.is_empty() {
-            log::debug!("Inverted effect constraints:");
+            log::trace!("Inverted effect constraints:");
             for dep in &self.pending_dependencies {
-                log::debug!("  {} → {}", dep.source, dep.target);
+                log::trace!("  {} → {}", dep.source, dep.target);
             }
         }
     }

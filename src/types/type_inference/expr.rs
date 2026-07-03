@@ -5468,20 +5468,23 @@ impl TypeInference {
     }
 
     pub fn log_debug_constraints(&self, module_env: ModuleEnv) {
+        if !log::log_enabled!(log::Level::Trace) {
+            return;
+        }
         if self.ty_constraints.is_empty() {
-            log::debug!("No type constraints before unification.");
+            log::trace!("No type constraints before unification.");
         } else {
-            log::debug!("Type constraints before unification:");
+            log::trace!("Type constraints before unification:");
             for constraint in &self.ty_constraints {
-                log::debug!("  {}", constraint.format_with(&module_env));
+                log::trace!("  {}", constraint.format_with(&module_env));
             }
         }
         if self.mut_constraints.is_empty() {
-            log::debug!("No mutability constraints before unification.");
+            log::trace!("No mutability constraints before unification.");
         } else {
-            log::debug!("Mutability constraints before unification:");
+            log::trace!("Mutability constraints before unification:");
             for constraint in &self.mut_constraints {
-                log::debug!("  {constraint}");
+                log::trace!("  {constraint}");
             }
         }
     }

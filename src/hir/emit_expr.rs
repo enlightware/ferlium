@@ -348,7 +348,7 @@ fn emit_expr_unsafe_inner(
     elaborate_generated_functions(module, others, &mut pending_functions, generated)?;
 
     // Log dropped constraints.
-    if log_enabled!(log::Level::Debug) {
+    if log_enabled!(log::Level::Trace) {
         let module_env = ModuleEnv::new(module, others);
         let retained_ptrs: FxHashSet<PubTypeConstraintPtr> =
             constraints.iter().map(constraint_ptr).collect();

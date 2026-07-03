@@ -819,10 +819,11 @@ impl CompilerSession {
 
     /// Register a module without Ferlium source in this compilation session and return its id.
     pub fn register_module(&mut self, path: module::Path, module: Module) -> ModuleId {
+        log::trace!("Registering module {path}");
         let module_id = self
             .modules
             .insert(path, ModuleEntry::new_fresh_raw(module));
-        log::debug!("Registered module with id {module_id}");
+        log::trace!("Registered module received id {module_id}");
         module_id
     }
 
@@ -902,18 +903,20 @@ impl CompilerSession {
         source_name: &str,
         module_path: Path,
     ) -> Result<ModuleAndExpr, CompilationError> {
-        if log::log_enabled!(log::Level::Debug) {
-            log::debug!(
+        if log::log_enabled!(log::Level::Trace) {
+            log::trace!(
                 "Using other modules: {}",
                 self.modules.iter_names().join(", ")
             );
-            log::debug!("Input: {src_code}");
+        }
+        if log::log_enabled!(log::Level::Trace) {
+            log::trace!("Input: {src_code}");
         }
 
         // Compile the code.
-        // If debug logging is enabled, prepare an AST inspector that logs the ASTs.
+        // If trace logging is enabled, prepare an AST inspector that logs the ASTs.
         let uses = Uses::new_with_std();
-        let output = if log::log_enabled!(log::Level::Debug) {
+        let output = if log::log_enabled!(log::Level::Trace) {
             let dbg_module =
                 new_module_using_std(self.modules.next_id(), Path::single_str("$debug"));
             let ast_inspector = |module_ast: &ast::PModule,
@@ -922,10 +925,10 @@ impl CompilerSession {
                                  modules: &Modules| {
                 let env = ModuleEnv::new(&dbg_module, modules);
                 let ast = ast::ModuleDisplay::new(module_ast, arena);
-                log::debug!("Module AST\n{}", ast.format_with(&env));
+                log::trace!("Module AST\n{}", ast.format_with(&env));
                 if let Some(expr_ast) = expr_ast {
                     let ast = ast::ExprDisplay::new(expr_ast, arena);
-                    log::debug!("Expr AST\n{}", ast.format_with(&env));
+                    log::trace!("Expr AST\n{}", ast.format_with(&env));
                 }
             };
             self.compile_to_with_ast_inspector(
@@ -939,16 +942,16 @@ impl CompilerSession {
             self.compile_to_with_ast_inspector(src_code, source_name, module_path, uses, None)
         }?;
 
-        // If debug logging is enabled, display the final HIR, after linking and finalizing pending functions.
-        if log::log_enabled!(log::Level::Debug) {
+        // If trace logging is enabled, display the final HIR after linking and finalizing pending functions.
+        if log::log_enabled!(log::Level::Trace) {
             let entry = self.modules.get(output.module_id).unwrap();
             if let Some(module) = &entry.module {
                 if !module.is_empty() {
-                    log::debug!("Module HIR\n{}", module.format_with(&self.modules));
+                    log::trace!("Module HIR\n{}", module.format_with(&self.modules));
                 }
                 if let Some(expr) = output.expr.as_ref() {
                     let env = ModuleEnv::new(module, &self.modules);
-                    log::debug!(
+                    log::trace!(
                         "Expr HIR\n{}",
                         hir::ExprDisplay::new(expr.expr, &expr.locals).format_with(&env)
                     );

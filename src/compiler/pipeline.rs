@@ -446,7 +446,7 @@ pub(crate) fn add_code_to_module_with_capabilities(
     assert_eq!(module_ast.errors(&arena), &[]);
     {
         let env = ModuleEnv::new(&to, other_modules);
-        log::debug!(
+        log::trace!(
             "Added module AST\n{}",
             ast::ModuleDisplay::new(&module_ast, &arena).format_with(&env)
         );

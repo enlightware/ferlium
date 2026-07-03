@@ -1686,7 +1686,7 @@ where
             }
 
             // Log dropped constraints.
-            if log_enabled!(log::Level::Debug) {
+            if log_enabled!(log::Level::Trace) {
                 let module_env = ModuleEnv::new(output, others);
                 let retained_ptrs: FxHashSet<PubTypeConstraintPtr> =
                     constraints.iter().map(constraint_ptr).collect();

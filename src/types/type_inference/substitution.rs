@@ -339,37 +339,43 @@ impl UnifiedTypeInference {
     }
 
     pub fn log_debug_constraints(&self, module_env: ModuleEnv) {
+        if !log::log_enabled!(log::Level::Trace) {
+            return;
+        }
         if self.remaining_ty_constraints.is_empty() {
-            log::debug!("No type constraints after unification.");
+            log::trace!("No type constraints after unification.");
         } else {
-            log::debug!("Type constraints after unification:");
+            log::trace!("Type constraints after unification:");
             if !self.remaining_ty_constraints.is_empty() {
                 for constraint in &self.remaining_ty_constraints {
-                    log::debug!("  {}", constraint.format_with(&module_env));
+                    log::trace!("  {}", constraint.format_with(&module_env));
                 }
             }
         }
     }
 
     pub fn log_debug_substitution_tables(&mut self, module_env: ModuleEnv) {
-        log::debug!("Type substitution table:");
+        if !log::log_enabled!(log::Level::Trace) {
+            return;
+        }
+        log::trace!("Type substitution table:");
         for i in 0..self.ty_unification_table.len() {
             let var = TypeVar::new(i as u32);
             let value = self.ty_unification_table.probe_value(var);
             match value {
-                Some(value) => log::debug!("  {var} → {}", value.format_with(&module_env)),
-                None => log::debug!("  {var} → {} (unbound)", {
+                Some(value) => log::trace!("  {var} → {}", value.format_with(&module_env)),
+                None => log::trace!("  {var} → {} (unbound)", {
                     self.ty_unification_table.find(var)
                 }),
             }
         }
-        log::debug!("Mutability substitution table:");
+        log::trace!("Mutability substitution table:");
         for i in 0..self.mut_unification_table.len() {
             let var = MutVar::new(i as u32);
             let value = self.mut_unification_table.probe_value(var);
             match value {
-                Some(value) => log::debug!("  {var} → {value}"),
-                None => log::debug!("  {var} → {} (unbound)", {
+                Some(value) => log::trace!("  {var} → {value}"),
+                None => log::trace!("  {var} → {} (unbound)", {
                     self.mut_unification_table.find(var)
                 }),
             }

@@ -2349,7 +2349,10 @@ impl<'a> TraitSolver<'a> {
 
     /// Print all known implementations for the given trait id.
     fn log_debug_impls(&self, trait_id: TraitId) {
-        log::debug!("In current module:");
+        if !log::log_enabled!(log::Level::Trace) {
+            return;
+        }
+        log::trace!("In current module:");
         let mut fake_current = Module::new(
             self.current_type_items.module.id,
             self.current_type_items.module.path.clone(),
@@ -2362,7 +2365,7 @@ impl<'a> TraitSolver<'a> {
             if let Some(module) = &entry.module {
                 let impls = &module.impls;
                 if impls.blanket_key_to_id.contains_key(&trait_id) {
-                    log::debug!("In module {}:", module_path);
+                    log::trace!("In module {}:", module_path);
                     impls.log_debug_impls_headers(trait_id, env);
                 }
             }
@@ -2510,7 +2513,7 @@ impl<'a> TraitSolver<'a> {
             let dict_id = match self.solve_impl(*trait_id, input_tys, fn_span, arena) {
                 Ok(functions) => functions,
                 Err(err) => {
-                    log::debug!(
+                    log::trace!(
                         "Blanket impl constraint failed while solving {} for {:?}: {:?}",
                         self.trait_def(*trait_id).name,
                         input_tys,
@@ -2566,7 +2569,7 @@ impl<'a> TraitSolver<'a> {
             let dict_id = match self.solve_impl(*trait_id, input_tys, fn_span, arena) {
                 Ok(functions) => functions,
                 Err(err) => {
-                    log::debug!(
+                    log::trace!(
                         "Blanket impl constraint failed while solving {} for {:?}: {:?}",
                         self.trait_def(*trait_id).name,
                         input_tys,
@@ -3130,7 +3133,7 @@ impl<'a> TraitSolver<'a> {
             if let Some(impl_id) = derive.derive_impl(trait_id, input_tys, fn_span, arena, self)? {
                 return Ok(impl_id);
             } else {
-                log::debug!(
+                log::trace!(
                     "Tried derivation for trait {} with input types {:?}, but failed.",
                     trait_name,
                     input_tys
@@ -3139,7 +3142,7 @@ impl<'a> TraitSolver<'a> {
         }
 
         // No matching implementation found.
-        log::debug!(
+        log::trace!(
             "No matching impl for trait \"{}\" found. Existing impls:",
             trait_name
         );

@@ -853,7 +853,7 @@ impl TraitImpls {
                 DisplayFilter::Hide
             }
         };
-        log::debug!("{}", self.format_with(&(module_env, filter)));
+        log::trace!("{}", self.format_with(&(module_env, filter)));
     }
 
     pub fn impl_header_to_string_by_id(
