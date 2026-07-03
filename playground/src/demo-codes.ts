@@ -107,6 +107,36 @@ let e = energy_cost(Message::Write("hello"))
 
 (dist_eq, e)
 `],
+['Custom projections', `struct Point {
+	x: int,
+	y: int
+}
+
+struct Pixel {
+	coords: [int],
+}
+
+subscript Pixel.x(self) -> int {
+	ref mut {
+		self.coords[0]
+	}
+}
+
+subscript Pixel.y(self) -> int {
+	ref mut {
+		self.coords[1]
+	}
+}
+
+fn dist2(p) {
+	p.x * p.x + p.y * p.y
+}
+
+let mut pixel = Pixel { coords: [5, 12] };
+pixel.x += 1;
+
+(dist2(Point { x: 3, y: 4 }), dist2(pixel), pixel.x)
+`],
 ['Effects', `fn a(i, f, g) {
 	if i > 0 {
 	    b(i - 1, f, g); ()

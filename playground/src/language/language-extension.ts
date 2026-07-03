@@ -14,13 +14,15 @@ import { styleTags, tags as t } from "@lezer/highlight";
 
 // list if tags: https://lezer.codemirror.net/docs/ref/#highlight.tags
 const highlight = styleTags({
-	"pub fn let mut impl struct enum": t.definitionKeyword,
+	"pub fn let ref mut impl struct enum trait subscript const use": t.definitionKeyword,
 	"TypeAliasDef/type": t.definitionKeyword,
-	"if else match for return": t.controlKeyword,
-	"in as": t.operatorKeyword,
+	"if else match for return yield break continue loop": t.controlKeyword,
+	"in as and or not": t.operatorKeyword,
 	"Type/... TypeAllowRecordVariant/... TypeNoRecordVariant/...": t.typeName,
 	"CastTargetType/...": t.typeName,
 	MutTyOrInfer: t.typeName,
+	"Attribute/...": t.annotation,
+	"Attribute/Identifier": t.attributeName,
 	Identifier: t.name,
 	"TypeName/...": t.typeName,
 	"TagName/...": t.tagName,
