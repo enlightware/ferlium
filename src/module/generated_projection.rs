@@ -175,11 +175,10 @@ impl Module {
             provenance: YieldProvenance::AddressorPlace,
         };
         let id = LocalSubscriptId::from_index(self.subscripts.len());
-        self.subscripts.push(SubscriptDefinition {
-            signature,
-            ref_member: Some(member.clone()),
-            mut_member: Some(member),
-        });
+        let mut subscript = SubscriptDefinition::resolved(signature);
+        subscript.ref_member = Some(member.clone());
+        subscript.mut_member = Some(member);
+        self.subscripts.push(subscript);
         self.add_projection_subscript(
             key,
             id,

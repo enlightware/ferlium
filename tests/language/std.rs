@@ -543,20 +543,12 @@ fn array_index_is_registered_as_source_addressor_subscript() {
         module.get_function_name_by_id(array_index_id),
         Some(ustr("array_index"))
     );
+    let signature = subscript.expect_resolved_signature();
+    assert_eq!(signature.args, array_index.definition.ty_scheme.ty.args);
+    assert_eq!(signature.ret, array_index.definition.ty_scheme.ty.ret);
+    assert_eq!(signature.arg_names, array_index.definition.arg_names);
     assert_eq!(
-        subscript.signature.args,
-        array_index.definition.ty_scheme.ty.args
-    );
-    assert_eq!(
-        subscript.signature.ret,
-        array_index.definition.ty_scheme.ty.ret
-    );
-    assert_eq!(
-        subscript.signature.arg_names,
-        array_index.definition.arg_names
-    );
-    assert_eq!(
-        subscript.signature.generic_params,
+        signature.generic_params,
         array_index.definition.generic_params
     );
     assert_eq!(ref_member.function, array_index_id);
@@ -591,20 +583,12 @@ fn buffer_slot_is_registered_as_native_addressor_subscript() {
         module.get_function_name_by_id(ref_member.function),
         Some(ustr("buffer_slot"))
     );
+    let signature = subscript.expect_resolved_signature();
+    assert_eq!(signature.args, buffer_slot.definition.ty_scheme.ty.args);
+    assert_eq!(signature.ret, buffer_slot.definition.ty_scheme.ty.ret);
+    assert_eq!(signature.arg_names, buffer_slot.definition.arg_names);
     assert_eq!(
-        subscript.signature.args,
-        buffer_slot.definition.ty_scheme.ty.args
-    );
-    assert_eq!(
-        subscript.signature.ret,
-        buffer_slot.definition.ty_scheme.ty.ret
-    );
-    assert_eq!(
-        subscript.signature.arg_names,
-        buffer_slot.definition.arg_names
-    );
-    assert_eq!(
-        subscript.signature.generic_params,
+        signature.generic_params,
         buffer_slot.definition.generic_params
     );
 }

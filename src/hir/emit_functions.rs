@@ -419,7 +419,7 @@ fn update_subscript_signature_from_member_definition(
         signature.normalize_projection_receiver();
     }
     let subscript = &mut output.subscripts[subscript_id.as_index()];
-    subscript.signature = signature;
+    subscript.set_resolved_signature(signature);
 }
 
 struct SharedSubscriptSignature {
@@ -838,7 +838,7 @@ where
             annotation_subst = shared_signature.annotation_subst.clone();
             explicit_root_tys = shared_signature.explicit_root_tys.clone();
             let signature = shared_signature.signature.clone();
-            output.subscripts[subscript_id.as_index()].signature = signature.clone();
+            output.subscripts[subscript_id.as_index()].set_resolved_signature(signature.clone());
             let member_kind = if requires_mutable_yield {
                 SubscriptMemberKind::Mut
             } else {

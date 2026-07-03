@@ -296,10 +296,11 @@ fn compiled_module_exposes_subscript_by_name() {
     let subscript = module
         .get_subscript(ustr("cell"))
         .expect("subscript should be available by source name");
-    assert_eq!(subscript.signature.arg_names, vec![ustr("value")]);
-    assert_eq!(subscript.signature.args.len(), 1);
-    assert_eq!(subscript.signature.args[0].ty, int_type());
-    assert_eq!(subscript.signature.ret, int_type());
+    let signature = subscript.expect_resolved_signature();
+    assert_eq!(signature.arg_names, vec![ustr("value")]);
+    assert_eq!(signature.args.len(), 1);
+    assert_eq!(signature.args[0].ty, int_type());
+    assert_eq!(signature.ret, int_type());
     assert!(subscript.ref_member.is_some());
     assert!(subscript.mut_member.is_none());
 }

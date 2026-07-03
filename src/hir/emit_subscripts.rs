@@ -17,10 +17,7 @@ use crate::{
         SubscriptDefinition as ModuleSubscriptDefinition, SubscriptMember as ModuleSubscriptMember,
         SubscriptMemberKind, SubscriptSignature, Visibility, YieldProvenance, id::Id,
     },
-    types::{
-        mutability::MutType,
-        r#type::{FnArgType, Type, TypeKind},
-    },
+    types::r#type::{Type, TypeKind},
 };
 
 pub(super) fn predeclare_subscripts(
@@ -229,54 +226,11 @@ fn reject_accessible_structural_projection_conflict(
     Ok(())
 }
 
-fn subscript_signature(
+fn validate_pending_subscript_signature(
     subscript: &ast::DSubscriptDefinition,
-) -> Result<SubscriptSignature, InternalCompilationError> {
-    let provisional_ret = || {
-        subscript
-            .ret_ty
-            .map(|(ret_ty, _)| ret_ty)
-            .unwrap_or_else(|| Type::variable_id(0))
-    };
-    if let Some((receiver_ty, _)) = validate_projection_receiver_binding(subscript)? {
-        return Ok(SubscriptSignature {
-            args: vec![FnArgType::new_by_val(receiver_ty)],
-            ret: provisional_ret(),
-            generic_params: subscript.generic_params.type_params().to_vec(),
-            generic_effect_params: subscript.generic_params.effect_params().to_vec(),
-            arg_names: vec![subscript.args[0].name.0],
-            constraints: subscript.where_clause.clone(),
-            doc: subscript.doc.clone(),
-        });
-    }
-    let args = subscript
-        .args
-        .iter()
-        .enumerate()
-        .map(|(index, arg)| {
-            if let Some((mut_ty, ty, _span)) = arg.ty {
-                FnArgType::new(ty, mut_ty.unwrap_or_else(MutType::constant))
-            } else {
-                // Source subscripts are predeclared before their SCC is emitted.
-                // These placeholders only make the predeclared signature structurally
-                // valid; emit_functions replaces them with real inferred variables
-                // before any body inference or projection lookup can consume them.
-                FnArgType::new(
-                    Type::variable_id((index + 1) as u32),
-                    MutType::variable_id(index as u32),
-                )
-            }
-        })
-        .collect::<Vec<_>>();
-    Ok(SubscriptSignature {
-        args,
-        ret: provisional_ret(),
-        generic_params: subscript.generic_params.type_params().to_vec(),
-        generic_effect_params: subscript.generic_params.effect_params().to_vec(),
-        arg_names: subscript.args.iter().map(|arg| arg.name.0).collect(),
-        constraints: subscript.where_clause.clone(),
-        doc: subscript.doc.clone(),
-    })
+) -> Result<(), InternalCompilationError> {
+    validate_projection_receiver_binding(subscript)?;
+    Ok(())
 }
 
 pub(super) fn synthetic_subscript_member_function(
@@ -333,13 +287,10 @@ fn add_empty_subscript_bundle(
     output: &mut Module,
     subscript: &ast::DSubscriptDefinition,
 ) -> Result<LocalSubscriptId, InternalCompilationError> {
+    validate_pending_subscript_signature(subscript)?;
     Ok(output.add_subscript(
         subscript.name.0,
-        ModuleSubscriptDefinition {
-            signature: subscript_signature(subscript)?,
-            ref_member: None,
-            mut_member: None,
-        },
+        ModuleSubscriptDefinition::pending(),
         subscript.visibility,
     ))
 }
@@ -348,11 +299,8 @@ fn add_empty_projection_subscript_bundle(
     output: &mut Module,
     subscript: &ast::DSubscriptDefinition,
 ) -> Result<LocalSubscriptId, InternalCompilationError> {
-    Ok(output.add_subscript_anonymous(ModuleSubscriptDefinition {
-        signature: subscript_signature(subscript)?,
-        ref_member: None,
-        mut_member: None,
-    }))
+    validate_pending_subscript_signature(subscript)?;
+    Ok(output.add_subscript_anonymous(ModuleSubscriptDefinition::pending()))
 }
 
 pub(super) fn attach_subscript_member(

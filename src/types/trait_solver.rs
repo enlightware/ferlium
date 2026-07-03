@@ -335,7 +335,7 @@ pub(crate) fn current_projection_subscript_type_map(
         .iter()
         .filter_map(|(key, entry)| {
             let subscript = module.get_subscript_by_id(entry.subscript)?;
-            Some((*key, subscript.type_scheme(module).ty))
+            Some((*key, subscript.type_scheme(module)?.ty))
         })
         .collect()
 }
@@ -907,7 +907,7 @@ impl<'a> TraitSolver<'a> {
                 .and_then(|entry| entry.module())?;
             module
                 .get_subscript_by_id(subscript.subscript)?
-                .type_scheme(module)
+                .type_scheme(module)?
                 .ty
         };
         let subst = (

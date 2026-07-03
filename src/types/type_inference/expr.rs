@@ -805,6 +805,7 @@ impl TypeInference {
                     let owner = env.subscript_owner_module(subscript_id);
                     let (subscript_ty, inst_data, _subst) = subscript
                         .type_scheme(owner)
+                        .expect("named subscript signature should be resolved before use")
                         .instantiate_with_fresh_vars(self, expr_span, None, env.module_env);
                     let node = K::GetSubscript(b(hir::GetSubscript {
                         subscript: subscript_id,
@@ -2796,6 +2797,7 @@ impl TypeInference {
             .ok_or_else(|| Self::missing_subscript_member_error(field, mode))?;
             let (subscript_ty, inst_data, _subst) = subscript
                 .type_scheme(owner)
+                .expect("projection subscript signature should be resolved before use")
                 .instantiate_with_fresh_vars(self, field.1, None, env.module_env);
             (subscript_ty, inst_data, selected_member.provenance)
         };

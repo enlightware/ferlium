@@ -171,6 +171,15 @@ pub struct SubscriptSignature {
     pub doc: Option<String>,
 }
 
+/// Signature state for a subscript bundle during module emission.
+#[derive(Debug, Clone)]
+enum SubscriptSignatureState {
+    /// Source-predeclared bundle whose member SCC has not emitted its real signature yet.
+    Pending,
+    /// Fully inferred shared bundle signature.
+    Resolved(SubscriptSignature),
+}
+
 impl SubscriptSignature {
     /// Build the shared subscript signature from a concrete member definition.
     pub fn from_callable_definition(definition: &CallableDefinition) -> Self {
@@ -231,7 +240,7 @@ impl SubscriptSignature {
 /// capabilities are represented by the distinct `SubscriptType`.
 #[derive(Debug, Clone)]
 pub struct SubscriptDefinition {
-    pub signature: SubscriptSignature,
+    signature: SubscriptSignatureState,
     pub ref_member: Option<SubscriptMember>,
     pub mut_member: Option<SubscriptMember>,
 }
@@ -254,17 +263,55 @@ pub enum ProjectionOrigin {
 }
 
 impl SubscriptDefinition {
+    /// Create a source-predeclared bundle whose signature will be resolved during member emission.
+    pub fn pending() -> Self {
+        Self {
+            signature: SubscriptSignatureState::Pending,
+            ref_member: None,
+            mut_member: None,
+        }
+    }
+
+    /// Create a bundle with a fully known shared signature.
+    pub fn resolved(signature: SubscriptSignature) -> Self {
+        Self {
+            signature: SubscriptSignatureState::Resolved(signature),
+            ref_member: None,
+            mut_member: None,
+        }
+    }
+
+    /// Return the resolved shared signature, if this bundle has emitted its members.
+    pub fn resolved_signature(&self) -> Option<&SubscriptSignature> {
+        match &self.signature {
+            SubscriptSignatureState::Pending => None,
+            SubscriptSignatureState::Resolved(signature) => Some(signature),
+        }
+    }
+
+    /// Return the resolved shared signature, panicking on an internal emission-order violation.
+    pub fn expect_resolved_signature(&self) -> &SubscriptSignature {
+        self.resolved_signature()
+            .expect("subscript signature should be resolved before semantic consumption")
+    }
+
+    /// Replace the pending signature state with the inferred shared signature.
+    pub fn set_resolved_signature(&mut self, signature: SubscriptSignature) {
+        self.signature = SubscriptSignatureState::Resolved(signature);
+    }
+
     /// Derive the first-class capability type scheme for this subscript bundle.
-    pub fn type_scheme(&self, owner: &Module) -> TypeScheme<SubscriptType> {
-        TypeScheme::new_infer_quantifiers_with_constraints(
+    pub fn type_scheme(&self, owner: &Module) -> Option<TypeScheme<SubscriptType>> {
+        let signature = self.resolved_signature()?;
+        Some(TypeScheme::new_infer_quantifiers_with_constraints(
             SubscriptType::new(
-                self.signature.args.clone(),
-                self.signature.ret,
+                signature.args.clone(),
+                signature.ret,
                 subscript_member_type(owner, self.ref_member.as_ref()),
                 subscript_member_type(owner, self.mut_member.as_ref()),
             ),
-            self.signature.constraints.clone(),
-        )
+            signature.constraints.clone(),
+        ))
     }
 }
 
@@ -594,11 +641,9 @@ impl Module {
             function,
             provenance: YieldProvenance::AddressorPlace,
         };
-        let subscript = SubscriptDefinition {
-            signature,
-            ref_member: Some(member.clone()),
-            mut_member: Some(member),
-        };
+        let mut subscript = SubscriptDefinition::resolved(signature);
+        subscript.ref_member = Some(member.clone());
+        subscript.mut_member = Some(member);
         let id = self.add_subscript(name, subscript, Visibility::Module);
         self.unsafe_items.insert(name);
         id
