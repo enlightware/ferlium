@@ -14,16 +14,19 @@ use crate::{
     internal_compilation_error,
     module::{
         Module, ModuleFunction, ModuleId, Modules, ProjectionEntry, ProjectionKey,
-        ProjectionOrigin, SubscriptId, TraitId, TypeDefId,
+        ProjectionOrigin, ProjectionReceiverKey, SubscriptId, SubscriptMemberFunctionKind, TraitId,
+        TypeDefId, YieldProvenance, disambiguated_subscript_member_function_name,
         id::Id,
         path::Path,
+        stable_generated_name_hash,
         type_alias_name::{find_generic_alias_name, find_generic_alias_name_with},
     },
     std::STD_MODULE_ID,
     types::effects::EffType,
     types::r#trait::{Trait, TraitMethodIndex},
     types::r#type::{
-        BareNativeTypeB, NativeType, Type, TypeAliasEntry, TypeAliases, TypeDef, TypeDefSlot,
+        BareNativeTypeB, FnArgType, NativeType, Type, TypeAliasEntry, TypeAliases, TypeDef,
+        TypeDefSlot,
     },
     types::type_scheme::PubTypeConstraint,
     types::typing_env::TraitMethodDescription,
@@ -202,6 +205,27 @@ impl<'m> QualifiedNameEnv<'m> {
         format!("{}::{name}", self.format_module_prefix(id.module))
     }
 
+    fn format_item_name_readable(&self, module_id: ModuleId, name: &str) -> String {
+        if module_id == self.current.module.id {
+            name.to_owned()
+        } else {
+            format!("{}::{name}", self.format_module_prefix(module_id))
+        }
+    }
+
+    fn format_type_def_id_readable(&self, id: TypeDefId) -> String {
+        let name = self
+            .type_def_name(id)
+            .map(|name| name.to_string())
+            .unwrap_or_else(|| format!("#{}", id.index));
+        self.format_item_name_readable(id.module, &name)
+    }
+
+    fn format_trait_id_readable(&self, id: TraitId, fallback: Ustr) -> String {
+        let name = self.trait_name(id).unwrap_or(fallback);
+        self.format_item_name_readable(id.module, name.as_str())
+    }
+
     pub(crate) fn bare_native_name(&self, native: &BareNativeTypeB) -> Option<String> {
         if let Some(name) = self.current.type_aliases.get_bare_native_name(native) {
             return Some(format!(
@@ -309,6 +333,13 @@ impl<'m> QualifiedNameEnv<'m> {
             .join(", ")
     }
 
+    fn format_fn_arg_list(&self, args: &[FnArgType]) -> String {
+        args.iter()
+            .map(|arg| arg.format_with(self).to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
     fn format_effect_list(effs: &[EffType]) -> String {
         effs.iter()
             .map(Self::format_effect)
@@ -324,18 +355,6 @@ impl<'m> QualifiedNameEnv<'m> {
             .join("; ")
     }
 
-    fn stable_hash_64(input: &str) -> u64 {
-        const FNV_OFFSET: u64 = 0xcbf29ce484222325;
-        const FNV_PRIME: u64 = 0x100000001b3;
-
-        let mut hash = FNV_OFFSET;
-        for byte in input.as_bytes() {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(FNV_PRIME);
-        }
-        hash
-    }
-
     pub(crate) fn qualified_method_name(
         &self,
         trait_id: TraitId,
@@ -343,7 +362,10 @@ impl<'m> QualifiedNameEnv<'m> {
         index: TraitMethodIndex,
         input_tys: &[Type],
     ) -> String {
-        let mut s = format!("{}<", self.format_trait_id(trait_id, trait_def.name));
+        let mut s = format!(
+            "{}<",
+            self.format_trait_id_readable(trait_id, trait_def.name)
+        );
         for (i, ty) in input_tys.iter().enumerate() {
             if i > 0 {
                 s.push_str(", ");
@@ -352,6 +374,18 @@ impl<'m> QualifiedNameEnv<'m> {
         }
         s.push_str(&format!(">::{}", trait_def.method(index).0));
         s
+    }
+
+    pub(crate) fn qualified_named_subscript_name(&self, module_id: ModuleId, name: Ustr) -> String {
+        self.format_item_name_readable(module_id, name.as_str())
+    }
+
+    pub(crate) fn qualified_projection_subscript_name(&self, key: ProjectionKey) -> String {
+        let receiver = match key.receiver {
+            ProjectionReceiverKey::Structural(ty) => self.format_type(ty),
+            ProjectionReceiverKey::Nominal(type_def) => self.format_type_def_id_readable(type_def),
+        };
+        format!("{receiver}.{}", key.field)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -381,7 +415,36 @@ impl<'m> QualifiedNameEnv<'m> {
         );
         format!(
             "{readable_name}#impl:{:08x}",
-            Self::stable_hash_64(&canonical_identity) as u32
+            stable_generated_name_hash(&canonical_identity)
+        )
+    }
+
+    pub(crate) fn disambiguated_subscript_member_name(
+        &self,
+        readable_subscript_name: &str,
+        member_kind: SubscriptMemberFunctionKind,
+        definition: &crate::hir::function::CallableDefinition,
+        provenance: YieldProvenance,
+    ) -> String {
+        let ty_scheme = &definition.ty_scheme;
+        let fn_ty = &ty_scheme.ty;
+        let canonical_identity = format!(
+            "subscript={}; member={}; args=[{}]; return={}; effects=[{}]; result={:?}; provenance={:?}; ty_vars={}; eff_vars={}; constraints=[{}]",
+            readable_subscript_name,
+            member_kind.keyword(),
+            self.format_fn_arg_list(&fn_ty.args),
+            self.format_type(fn_ty.ret),
+            Self::format_effect(&fn_ty.effects),
+            definition.result_convention,
+            provenance,
+            ty_scheme.ty_quantifiers.len(),
+            ty_scheme.eff_quantifiers.len(),
+            self.format_constraint_list(&ty_scheme.constraints)
+        );
+        disambiguated_subscript_member_function_name(
+            readable_subscript_name,
+            member_kind,
+            &canonical_identity,
         )
     }
 }

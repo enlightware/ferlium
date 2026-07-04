@@ -369,7 +369,7 @@ pub fn elaborate_generated_functions(
             pending_functions,
         );
         if let Some(generated_projection_subscripts) = generated_projection_subscripts {
-            generated_projection_subscripts.commit(module);
+            generated_projection_subscripts.commit(module, others);
         }
         pending.extend(generated);
     }

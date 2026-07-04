@@ -18,7 +18,7 @@ use ferlium::{
     },
     format::FormatWith,
     hir::{ENodeArena, ENodeId, NodeKind},
-    module::{YieldProvenance, id::Id},
+    module::{ShowModuleWithOptions, YieldProvenance, id::Id},
     parse_module_and_expr,
     std::math::int_type,
     types::effects::{PrimitiveEffect, effect},
@@ -1209,6 +1209,105 @@ fn resolved_projection_subscripts_lower_to_static_apply() {
         count_static_projection_member_calls(&module.hir_arena, read_secret_entry),
         2,
         "each yielded secret.value projection should statically call the selected subscript member"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn subscript_member_function_names_are_generated() {
+    let mut session = experimental_session();
+    let module_id = session
+        .compile(indoc! { r#"
+            struct Pixel {
+                coords: [int],
+            }
+
+            subscript Pixel.x(self) -> int {
+                ref mut {
+                    self.coords[0]
+                }
+            }
+
+            #[private_repr]
+            struct Secret {
+                raw: int,
+            }
+
+            subscript Secret.value(self) -> int {
+                ref {
+                    let local = self.raw;
+                    yield local
+                }
+            }
+
+            subscript cell(slot: &mut int) -> int {
+                ref mut {
+                    slot
+                }
+            }
+
+            pub fn use_all(pixel: Pixel, secret: Secret, slot: &mut int) -> int {
+                pixel.x + secret.value + slot->[cell]
+            }
+        "# })
+        .module_id;
+    let compiler_session = session.session();
+    let module = compiler_session.expect_fresh_module(module_id);
+    let rendered = module
+        .format_with(&ShowModuleWithOptions::new(
+            compiler_session.modules(),
+            true,
+            true,
+        ))
+        .to_string();
+    let module_name = module.path().to_string();
+
+    assert!(
+        rendered.contains("Pixel.x::ref_mut#subscript:"),
+        "expected generated addressor projection subscript member name:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Secret.value::ref#subscript:"),
+        "expected generated yielded projection subscript member name:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("cell::ref_mut#subscript:"),
+        "expected generated named subscript member name:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains(&format!("{module_name}::{module_name}::")),
+        "generated subscript member names should not duplicate module qualification:\n{rendered}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generated_structural_projection_subscript_member_functions_are_named() {
+    let mut session = experimental_session();
+    let module_id = session
+        .compile(indoc! { r#"
+            fn read_value(container) -> int {
+                container.value
+            }
+
+            pub fn run() -> int {
+                read_value({ value: 41 }) + 1
+            }
+        "# })
+        .module_id;
+    let compiler_session = session.session();
+    let module = compiler_session.expect_fresh_module(module_id);
+    let rendered = module
+        .format_with(&ShowModuleWithOptions::new(
+            compiler_session.modules(),
+            true,
+            true,
+        ))
+        .to_string();
+
+    assert!(
+        rendered.contains(".value::ref_mut#subscript:"),
+        "expected generated structural projection subscript member name:\n{rendered}"
     );
 }
 

@@ -1682,6 +1682,10 @@ fn hir_prints_operator_static_apply_argument_names() {
         rendered.contains("right (by "),
         "expected operator callee argument name in HIR:\n{rendered}"
     );
+    assert!(
+        !rendered.contains("function std::std::"),
+        "generated std function names should not duplicate module qualification:\n{rendered}"
+    );
 }
 
 #[test]

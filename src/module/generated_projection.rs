@@ -10,12 +10,12 @@
 use ustr::{Ustr, ustr};
 
 use crate::{
-    FxHashMap,
+    FxHashMap, Modules,
     hir::function::{CallableDefinition, StructuralFieldAddressor},
     module::{
-        LocalSubscriptId, Module, ModuleFunction, ProjectionOrigin, SubscriptDefinition,
-        SubscriptId, SubscriptMember, SubscriptSignature, TypeDefId, Visibility, YieldProvenance,
-        id::Id,
+        LocalSubscriptId, Module, ModuleFunction, ProjectionOrigin, QualifiedNameEnv,
+        SubscriptDefinition, SubscriptId, SubscriptMember, SubscriptMemberFunctionKind,
+        SubscriptSignature, TypeDefId, Visibility, YieldProvenance, id::Id,
     },
     types::{
         effects::no_effects,
@@ -122,14 +122,14 @@ impl PendingGeneratedStructuralProjectionSubscripts {
             .map(|id| SubscriptId::new(self.module_id, id))
     }
 
-    pub(crate) fn commit(self, module: &mut Module) {
+    pub(crate) fn commit(self, module: &mut Module, modules: &Modules) {
         assert_eq!(
             module.subscripts.len(),
             self.base_subscript,
             "generated structural projection subscript ids were reserved before another subscript was added"
         );
         for spec in self.pending {
-            let id = module.get_or_add_generated_structural_projection_subscript(spec);
+            let id = module.get_or_add_generated_structural_projection_subscript(spec, modules);
             debug_assert_eq!(self.known[&spec.key], id);
         }
     }
@@ -139,10 +139,11 @@ impl Module {
     /// Return a compiler-generated structural projection subscript for `spec`.
     ///
     /// The generated subscript is stored in this module artifact but is not
-    /// entered in `def_table`, so it is not source-visible.
+    /// source-visible. Its backing function is named separately for debugging.
     pub(crate) fn get_or_add_generated_structural_projection_subscript(
         &mut self,
         spec: GeneratedStructuralProjectionSpec,
+        modules: &Modules,
     ) -> LocalSubscriptId {
         let key = spec.key;
         let receiver_ty = key.structural_receiver_ty();
@@ -164,12 +165,24 @@ impl Module {
         )
         .with_result_convention(CallResultConvention::ADDRESSOR_PLACE);
         let signature = SubscriptSignature::from_callable_definition(&definition);
+        let function_name = {
+            let qualified_name_env = QualifiedNameEnv::new_from_module(self, modules);
+            let readable_subscript_name =
+                qualified_name_env.qualified_projection_subscript_name(key);
+            qualified_name_env.disambiguated_subscript_member_name(
+                &readable_subscript_name,
+                SubscriptMemberFunctionKind::RefMut,
+                &definition,
+                YieldProvenance::AddressorPlace,
+            )
+        };
         let function = self.add_function_anonymous(ModuleFunction::new(
             definition,
             Box::new(StructuralFieldAddressor::new(spec.index)),
             None,
             Vec::new(),
         ));
+        self.name_function_with_visibility(function, function_name.into(), Visibility::Module);
         let member = SubscriptMember {
             function,
             provenance: YieldProvenance::AddressorPlace,

@@ -39,7 +39,8 @@ use crate::{
         ConcreteTraitImplKey, LocalFunctionId, LocalImplId, LocalSubscriptId, Module, ModuleEnv,
         ModuleFunction, ModuleId, Path as ModulePath,
         PendingGeneratedStructuralProjectionSubscripts, PendingModuleFunction, ProjectionKey,
-        TraitImpl, UModuleFunction, YieldProvenance, build_dictionary_value, id::Id,
+        SubscriptMemberFunctionKind, TraitImpl, UModuleFunction, YieldProvenance,
+        build_dictionary_value, id::Id,
     },
     std::value::{
         is_function_surface_only_value_trait_application, is_value_trait_for_function_type,
@@ -427,7 +428,7 @@ pub(super) fn borrow_check_and_elaborate_dict(
         pending_functions,
     );
     if let Some(generated_projection_subscripts) = generated_projection_subscripts {
-        generated_projection_subscripts.commit(output);
+        generated_projection_subscripts.commit(output, others);
     }
     elaborate_generated_functions(output, others, pending_functions, generated)?;
     Ok(())
@@ -621,6 +622,10 @@ fn module_implementation_emissions<'a>(
                                 )
                                 .expect("projection subscript receiver should be a named type")
                             },
+                        ),
+                        member_function_kind: SubscriptMemberFunctionKind::from_mode(
+                            member_def.mode.ref_member,
+                            member_def.mode.mut_member,
                         ),
                         provenance,
                         requires_mutable_yield: member_def.mode.mut_member,

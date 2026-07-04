@@ -499,19 +499,19 @@ fn generated_trait_method_names_use_qualified_type_names() {
         .collect::<Vec<_>>();
     let to_int_names = names
         .iter()
-        .filter(|name| name.starts_with("base::ToInt<"))
+        .filter(|name| name.starts_with("ToInt<"))
         .collect::<Vec<_>>();
 
     assert!(
         names
             .iter()
-            .any(|name| name.starts_with("base::ToInt<std::int>::to_int#impl:")),
+            .any(|name| name.starts_with("ToInt<std::int>::to_int#impl:")),
         "expected native impl name in {names:?}"
     );
     assert!(
         names
             .iter()
-            .any(|name| name.starts_with("base::ToInt<base::Wrapped>::to_int#impl:"))
+            .any(|name| name.starts_with("ToInt<base::Wrapped>::to_int#impl:"))
     );
     assert!(
         to_int_names
@@ -567,7 +567,7 @@ fn generated_trait_method_names_disambiguate_impl_outputs() {
     let adapter_names = module
         .iter_named_functions()
         .map(|(name, _)| name.to_string())
-        .filter(|name| name.starts_with("base::Adapter<[A]>::adapt"))
+        .filter(|name| name.starts_with("Adapter<[A]>::adapt"))
         .collect::<Vec<_>>();
 
     assert_eq!(

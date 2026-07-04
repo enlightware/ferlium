@@ -440,7 +440,7 @@ fn emit_expr_unsafe_inner(
         &mut pending_functions,
     );
     if let Some(generated_projection_subscripts) = generated_projection_subscripts {
-        generated_projection_subscripts.commit(module);
+        generated_projection_subscripts.commit(module, others);
     }
     elaborate_generated_functions(module, others, &mut pending_functions, generated)?;
     assert_eq!(locals.len(), local_count);

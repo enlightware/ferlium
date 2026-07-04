@@ -388,7 +388,7 @@ pub(super) fn emit_auto_value_impls(
                     &mut pending_functions,
                 );
                 if let Some(generated_projection_subscripts) = generated_projection_subscripts {
-                    generated_projection_subscripts.commit(output);
+                    generated_projection_subscripts.commit(output, others);
                 }
                 elaborate_generated_functions(output, others, &mut pending_functions, generated)?;
                 let id = output.add_function_anonymous(function);

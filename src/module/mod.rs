@@ -99,6 +99,30 @@ pub(crate) fn unique_generated_name(base_name: Ustr, mut exists: impl FnMut(Ustr
     }
 }
 
+pub(crate) fn stable_generated_name_hash(input: &str) -> u32 {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+
+    let mut hash = FNV_OFFSET;
+    for byte in input.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash as u32
+}
+
+pub(crate) fn disambiguated_subscript_member_function_name(
+    readable_subscript_name: &str,
+    member_kind: SubscriptMemberFunctionKind,
+    canonical_identity: &str,
+) -> String {
+    format!(
+        "{readable_subscript_name}::{}#subscript:{:08x}",
+        member_kind.keyword(),
+        stable_generated_name_hash(canonical_identity)
+    )
+}
+
 define_id_type!(
     /// ID of a module within a CompilerSession
     ModuleId
@@ -155,6 +179,33 @@ impl SubscriptMemberKind {
         match self {
             Self::Ref => "ref",
             Self::Mut => "mut",
+        }
+    }
+}
+
+/// Function implementation kind backing one source subscript member body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SubscriptMemberFunctionKind {
+    Ref,
+    Mut,
+    RefMut,
+}
+
+impl SubscriptMemberFunctionKind {
+    pub fn from_mode(ref_member: bool, mut_member: bool) -> Self {
+        match (ref_member, mut_member) {
+            (true, true) => Self::RefMut,
+            (true, false) => Self::Ref,
+            (false, true) => Self::Mut,
+            (false, false) => panic!("subscript member function must implement ref or mut"),
+        }
+    }
+
+    pub fn keyword(self) -> &'static str {
+        match self {
+            Self::Ref => "ref",
+            Self::Mut => "mut",
+            Self::RefMut => "ref_mut",
         }
     }
 }
@@ -636,7 +687,23 @@ impl Module {
             CallResultConvention::ADDRESSOR_PLACE
         );
         let signature = SubscriptSignature::from_callable_definition(&function.definition);
+        let canonical_identity = format!(
+            "subscript={}; member={}; args={:?}; return={:?}; effects={:?}; result={:?}; provenance={:?}",
+            name,
+            SubscriptMemberFunctionKind::RefMut.keyword(),
+            function.definition.ty_scheme.ty.args,
+            function.definition.ty_scheme.ty.ret,
+            function.definition.ty_scheme.ty.effects,
+            function.definition.result_convention,
+            YieldProvenance::AddressorPlace,
+        );
+        let function_name = disambiguated_subscript_member_function_name(
+            name.as_str(),
+            SubscriptMemberFunctionKind::RefMut,
+            &canonical_identity,
+        );
         let function = self.add_function_anonymous(function);
+        self.name_function_with_visibility(function, function_name.into(), Visibility::Module);
         let member = SubscriptMember {
             function,
             provenance: YieldProvenance::AddressorPlace,

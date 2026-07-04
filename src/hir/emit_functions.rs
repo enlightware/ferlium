@@ -37,7 +37,8 @@ use crate::{
         FunctionId, GENERATED_LAMBDA_PREFIX, LocalDecl, LocalDeclId, LocalFunctionId,
         LocalSubscriptId, Module, ModuleEnv, ModuleFunction, ModuleFunctionSpans,
         PendingFunctionBody, PendingModuleFunction, ProjectionKey, QualifiedNameEnv,
-        SubscriptMemberKind, SubscriptSignature, TraitId, Visibility, YieldProvenance, id::Id,
+        SubscriptMemberFunctionKind, SubscriptMemberKind, SubscriptSignature, TraitId, Visibility,
+        YieldProvenance, id::Id,
     },
     std::STD_MODULE_ID,
     types::{
@@ -107,6 +108,7 @@ pub(super) enum EmitFunctionKind {
         subscript_id: LocalSubscriptId,
         subscript_name: Ustr,
         projection_key: Option<ProjectionKey>,
+        member_function_kind: SubscriptMemberFunctionKind,
         provenance: YieldProvenance,
         requires_mutable_yield: bool,
     },
@@ -1754,11 +1756,35 @@ where
             }
             if let EmitFunctionKind::SubscriptMember {
                 subscript_id,
+                subscript_name,
                 projection_key,
+                member_function_kind,
+                provenance,
                 ..
             } = input.kind
             {
                 let definition = output.functions[id.as_index()].definition.clone();
+                let generated_name = {
+                    let qualified_name_env = QualifiedNameEnv::new_from_module(output, others);
+                    let readable_subscript_name = projection_key.map_or_else(
+                        || {
+                            qualified_name_env
+                                .qualified_named_subscript_name(output.module_id(), subscript_name)
+                        },
+                        |key| qualified_name_env.qualified_projection_subscript_name(key),
+                    );
+                    qualified_name_env.disambiguated_subscript_member_name(
+                        &readable_subscript_name,
+                        member_function_kind,
+                        &definition,
+                        provenance,
+                    )
+                };
+                output.name_function_with_visibility(
+                    *id,
+                    generated_name.into(),
+                    Visibility::Module,
+                );
                 update_subscript_signature_from_member_definition(
                     output,
                     subscript_id,

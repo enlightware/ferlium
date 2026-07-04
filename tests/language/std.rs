@@ -70,19 +70,19 @@ fn print_std_formats_empty_associated_effect_bindings() {
         ))
         .to_string();
     assert!(
-        rendered_all.contains("fn std::Value<std::string_iterator>::eq#impl:"),
+        rendered_all.contains("fn Value<std::string_iterator>::eq#impl:"),
         "expected generated string iterator impl function name to use the public alias, got:\n{rendered_all}"
     );
     assert!(
-        rendered_all.contains("fn std::Value<std::string_split_iterator>::eq#impl:"),
+        rendered_all.contains("fn Value<std::string_split_iterator>::eq#impl:"),
         "expected generated string split iterator impl function name to use the public alias, got:\n{rendered_all}"
     );
     assert!(
-        !rendered_all.contains("fn std::Value<ferlium::types::type::BareNativeTypeImpl<ferlium::std::string::StringIterator>>::"),
+        !rendered_all.contains("fn Value<ferlium::types::type::BareNativeTypeImpl<ferlium::std::string::StringIterator>>::"),
         "generated string iterator impl function names should not leak Rust native type names:\n{rendered_all}"
     );
     assert!(
-        !rendered_all.contains("fn std::Value<ferlium::types::type::BareNativeTypeImpl<ferlium::std::string::StringSplitIterator>>::"),
+        !rendered_all.contains("fn Value<ferlium::types::type::BareNativeTypeImpl<ferlium::std::string::StringSplitIterator>>::"),
         "generated string split iterator impl function names should not leak Rust native type names:\n{rendered_all}"
     );
 }
@@ -539,9 +539,14 @@ fn array_index_is_registered_as_source_addressor_subscript() {
     let array_index = module
         .get_function_by_id(array_index_id)
         .expect("std array_index subscript member function id should be valid");
-    assert_eq!(
-        module.get_function_name_by_id(array_index_id),
-        Some(ustr("array_index"))
+    let function_name = module
+        .get_function_name_by_id(array_index_id)
+        .expect("array_index subscript member function should be named");
+    assert!(
+        function_name
+            .as_str()
+            .starts_with("array_index::ref_mut#subscript:"),
+        "expected generated array_index subscript member name, got {function_name}"
     );
     let signature = subscript.expect_resolved_signature();
     assert_eq!(signature.args, array_index.definition.ty_scheme.ty.args);
@@ -579,9 +584,14 @@ fn buffer_slot_is_registered_as_native_addressor_subscript() {
     let buffer_slot = module
         .get_function_by_id(ref_member.function)
         .expect("buffer_slot subscript member function id should be valid");
-    assert_eq!(
-        module.get_function_name_by_id(ref_member.function),
-        Some(ustr("buffer_slot"))
+    let function_name = module
+        .get_function_name_by_id(ref_member.function)
+        .expect("buffer_slot subscript member function should be named");
+    assert!(
+        function_name
+            .as_str()
+            .starts_with("buffer_slot::ref_mut#subscript:"),
+        "expected generated buffer_slot subscript member name, got {function_name}"
     );
     let signature = subscript.expect_resolved_signature();
     assert_eq!(signature.args, buffer_slot.definition.ty_scheme.ty.args);
