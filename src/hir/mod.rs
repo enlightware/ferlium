@@ -163,7 +163,7 @@ pub(crate) fn node_is_place_reference(arena: &NodeArena, node_id: NodeId) -> boo
         // freshly produced static function value, which is not a place.
         GetTraitMethod(method) => !method.input_tys.iter().all(Type::is_constant),
         Project(_) | FieldAccess(_) => true,
-        Apply(app) => app.ty.returns_place(),
+        FunctionApply(app) => app.ty.returns_place(),
         SubscriptApply(app) => app.ty.returns_place(),
         StaticApply(app) => app.ty.returns_place(),
         TraitMethodApply(app) => app.ty.returns_place(),
@@ -190,7 +190,7 @@ pub(crate) fn place_resolution_may_create_temp(arena: &NodeArena, node_id: NodeI
             !node_is_place_reference(arena, field_access.value)
                 || place_resolution_may_create_temp(arena, field_access.value)
         }
-        Apply(app) if app.ty.returns_place() => {
+        FunctionApply(app) if app.ty.returns_place() => {
             !node_is_place_reference(arena, app.function)
                 || place_resolution_may_create_temp(arena, app.function)
                 || addressor_place_base_argument_index(arena, &app.arguments).is_some_and(
@@ -562,13 +562,13 @@ pub struct GetSubscript {
 
 /// Call a first-class function value.
 #[derive(Debug, Clone)]
-pub struct Application<P: HirPhase = Unelaborated> {
+pub struct FunctionApplication<P: HirPhase = Unelaborated> {
     pub function: NodeId<P>,
     pub arguments: Vec<CallArgument<P>>,
     pub ty: CallImplType,
 }
 
-/// Apply a first-class subscript capability.
+/// Apply a first-class subscript bundle.
 #[derive(Debug, Clone)]
 pub struct SubscriptApplication<P: HirPhase = Unelaborated> {
     pub subscript: NodeId<P>,
@@ -578,6 +578,9 @@ pub struct SubscriptApplication<P: HirPhase = Unelaborated> {
 }
 
 /// Call a statically known function.
+///
+/// The function may be a source-level function, a resolved trait method
+/// implementation, or a selected subscript member implementation.
 #[derive(Debug, Clone)]
 pub struct StaticApplication<P: HirPhase = Unelaborated> {
     pub function: FunctionId,
@@ -773,8 +776,8 @@ pub enum NodeKind<P: HirPhase = Unelaborated> {
     /// Load a statically known subscript as a first-class value.
     GetSubscript(B<GetSubscript>),
     /// Call a first-class function value.
-    Apply(B<Application<P>>),
-    /// Apply a first-class subscript capability.
+    FunctionApply(B<FunctionApplication<P>>),
+    /// Apply a first-class subscript bundle.
     SubscriptApply(B<SubscriptApplication<P>>),
     /// Call a statically known function.
     StaticApply(B<StaticApplication<P>>),
@@ -862,7 +865,7 @@ impl NodeKind {
                 v.extend_from_slice(&build.evidence_captures);
                 v
             }
-            Apply(app) => {
+            FunctionApply(app) => {
                 let mut v: SVec4<NodeId> = smallvec![app.function];
                 v.extend(app.arguments.iter().map(|arg| arg.value));
                 v
@@ -1180,7 +1183,7 @@ impl<P: HirPhase> Node<P> {
                     writeln!(f, "{indent_str}]")?;
                 }
             }
-            Apply(app) => {
+            FunctionApply(app) => {
                 writeln!(f, "{indent_str}eval")?;
                 format_ind(arena, app.function, f, locals, env, spacing, indent + 1)?;
                 if app.arguments.is_empty() {
@@ -1545,7 +1548,7 @@ impl<P: HirPhase> Node<P> {
                 }
                 // We do not look into evidence captures as they are generated code.
             }
-            Apply(app) => {
+            FunctionApply(app) => {
                 if let Some(ty) = type_at(arena, app.function, pos) {
                     return Some(ty);
                 }
@@ -1777,7 +1780,7 @@ impl Node {
             BuildSubscriptValue(_) => {
                 // no need to look into the value's type as it is already in this node's type
             }
-            Apply(app) => {
+            FunctionApply(app) => {
                 for arg in &app.arguments {
                     unbound_ty_vars(arena, arg.value, result, ignore);
                 }
@@ -1923,7 +1926,7 @@ pub(crate) fn instantiate_node_in_place<M: TypeMapper>(
     }
     // Then modify this node's kind-specific data
     match &mut arena[node_id].kind {
-        Apply(app) => {
+        FunctionApply(app) => {
             app.ty = app.ty.map(mapper);
         }
         StaticApply(app) => {

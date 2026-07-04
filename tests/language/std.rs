@@ -488,7 +488,7 @@ fn array_index_return_preserves_place_tail() {
     fn is_place_reference(arena: &ENodeArena, node: ENodeId) -> bool {
         match &arena[node].kind {
             NodeKind::LoadLocal(_) | NodeKind::Project(_) => true,
-            NodeKind::Apply(app) => app.ty.returns_place(),
+            NodeKind::FunctionApply(app) => app.ty.returns_place(),
             NodeKind::StaticApply(app) => app.ty.returns_place(),
             NodeKind::WithPlace(node) => is_place_reference(arena, node.body),
             NodeKind::Block(block) => block

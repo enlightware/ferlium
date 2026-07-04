@@ -53,7 +53,7 @@ impl Path {
             StaticApply(app) if app.ty.returns_place() => {
                 Self::from_addressor_place_arguments(arena, &app.arguments)
             }
-            Apply(app) if app.ty.returns_place() => {
+            FunctionApply(app) if app.ty.returns_place() => {
                 Self::from_addressor_place_arguments(arena, &app.arguments)
             }
             TraitMethodApply(app) if app.ty.returns_place() => {
@@ -356,7 +356,7 @@ fn returned_place_origin(arena: &NodeArena, node_id: NodeId) -> Option<PlaceOrig
             })
         }
         StaticApply(app) if app.ty.returns_place() => addressor_base_origin(arena, &app.arguments),
-        Apply(app) if app.ty.returns_place() => addressor_base_origin(arena, &app.arguments),
+        FunctionApply(app) if app.ty.returns_place() => addressor_base_origin(arena, &app.arguments),
         TraitMethodApply(app) if app.ty.returns_place() => {
             addressor_base_origin(arena, &app.arguments)
         }
@@ -406,7 +406,7 @@ impl Node {
                     check_borrows(arena, capture)?;
                 }
             }
-            Apply(app) => {
+            FunctionApply(app) => {
                 check_borrows(arena, app.function)?;
                 for arg in &app.arguments {
                     check_borrows(arena, arg.value)?;

@@ -534,7 +534,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
         // teaching the unelaborated place helper about elaboration payloads.
         match &self.dst[node_id].kind {
             NodeKind::LoadLocal(_) | NodeKind::Project(_) => true,
-            NodeKind::Apply(app) => app.ty.returns_place(),
+            NodeKind::FunctionApply(app) => app.ty.returns_place(),
             NodeKind::SubscriptApply(app) => app.ty.returns_place(),
             NodeKind::StaticApply(app) => app.ty.returns_place(),
             NodeKind::CallDictionaryMethod(call) => call.ty.returns_place(),
@@ -714,7 +714,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                     evidence_captures,
                 }))
             }
-            Apply(app) => {
+            FunctionApply(app) => {
                 let function = app.function;
                 let ty = app.ty.clone();
                 let source_arguments = app
@@ -722,7 +722,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                     .iter()
                     .zip(&app.ty.fn_ty.args)
                     .map(|(arg, arg_ty)| (arg.value, arg.passing, arg_ty.ty));
-                Apply(b(hir::Application {
+                FunctionApply(b(hir::FunctionApplication {
                     function: self.elaborate_node(src, function)?,
                     arguments: self.elaborate_call_arguments(src, source_arguments, node_span)?,
                     ty,

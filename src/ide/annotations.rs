@@ -466,7 +466,7 @@ fn node_variable_type_annotations<Env>(
             variable_type_annotations(arena, build.subscript, result, locals, env);
             // We do not look into evidence captures as they are generated code.
         }
-        Apply(app) => {
+        FunctionApply(app) => {
             variable_type_annotations(arena, app.function, result, locals, env);
             for arg in &app.arguments {
                 variable_type_annotations(arena, arg.value, result, locals, env);

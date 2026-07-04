@@ -218,7 +218,7 @@ impl UnifiedTypeInference {
         node.effects = SubstituteTypes::new(self).substitute_effect_type(&node.effects);
         use hir::NodeKind::*;
         match &mut arena[node_id].kind {
-            Apply(app) => {
+            FunctionApply(app) => {
                 self.substitute_in_call_impl_type_in_place(&mut app.ty);
             }
             StaticApply(app) => {

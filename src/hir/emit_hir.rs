@@ -173,7 +173,7 @@ fn fill_node_effect_vars(
     node.ty.fill_with_inner_effect_vars(vars);
     node.effects.fill_with_inner_effect_vars(vars);
     match &node.kind {
-        Apply(app) => app.ty.fill_with_inner_effect_vars(vars),
+        FunctionApply(app) => app.ty.fill_with_inner_effect_vars(vars),
         StaticApply(app) => {
             app.ty.fill_with_inner_effect_vars(vars);
             fill_fn_inst_data_effect_vars(&app.inst_data, vars);

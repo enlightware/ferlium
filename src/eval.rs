@@ -1246,7 +1246,7 @@ pub fn eval_node_with_ctx(
         BuildSubscriptValue(build_subscript) => {
             eval_build_subscript_value(arena, build_subscript, ctx, locals)
         }
-        Apply(app) => eval_apply(arena, app, node.span, ctx, locals),
+        FunctionApply(app) => eval_apply(arena, app, node.span, ctx, locals),
         CloneClosureEnv(node) => {
             eval_clone_closure_env(arena, node, arena[node_id].span, ctx, locals)
         }
@@ -2006,7 +2006,7 @@ fn eval_clone_value(
 #[inline(never)]
 fn eval_apply(
     arena: &ENodeArena,
-    app: &hir::Application<Elaborated>,
+    app: &hir::FunctionApplication<Elaborated>,
     span: Location,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
@@ -3210,7 +3210,7 @@ fn eval_project(
 
 fn place_resolution_depends_on_addressor_place(arena: &ENodeArena, node_id: ENodeId) -> bool {
     match &arena[node_id].kind {
-        NodeKind::Apply(app) => app.ty.returns_place(),
+        NodeKind::FunctionApply(app) => app.ty.returns_place(),
         NodeKind::StaticApply(app) => app.ty.returns_place(),
         NodeKind::SubscriptApply(app) => app.ty.returns_place(),
         NodeKind::CallDictionaryMethod(call) => call.ty.returns_place(),
@@ -3542,7 +3542,7 @@ fn try_eval_node_as_place(
             place.path.push(node.index.as_index() as isize);
             place
         }
-        Apply(app) if app.ty.returns_place() => {
+        FunctionApply(app) if app.ty.returns_place() => {
             let result = eval_apply(arena, app, node.span, ctx, locals)?;
             return Ok(control_flow_into_addressor_place(result).map_continue(Some));
         }
@@ -3613,7 +3613,7 @@ fn node_may_resolve_to_place(arena: &ENodeArena, node_id: ENodeId) -> bool {
     match &arena[node_id].kind {
         NodeKind::LoadLocal(_) => true,
         NodeKind::Project(node) => node_may_resolve_to_place(arena, node.value),
-        NodeKind::Apply(app) => app.ty.returns_place(),
+        NodeKind::FunctionApply(app) => app.ty.returns_place(),
         NodeKind::StaticApply(app) => app.ty.returns_place(),
         NodeKind::SubscriptApply(app) => app.ty.returns_place(),
         NodeKind::CallDictionaryMethod(call) => call.ty.returns_place(),

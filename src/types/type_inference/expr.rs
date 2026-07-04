@@ -1298,7 +1298,7 @@ impl TypeInference {
                         );
                         temp_stores.extend(prepared_arguments.temp_stores);
                         // Store and return the result
-                        let call = K::Apply(b(hir::Application {
+                        let call = K::FunctionApply(b(hir::FunctionApplication {
                             function,
                             arguments: prepared_arguments.arguments,
                             ty: CallImplType::value(app_ty),
@@ -2785,7 +2785,7 @@ impl TypeInference {
         expr_span: Location,
         receiver: NamedSubscriptReceiverOverride,
     ) -> Result<PreparedNamedSubscriptAccessor, InternalCompilationError> {
-        let (subscript_ty, inst_data, provenance) = {
+        let (subscript_ty, inst_data, argument_names, function, provenance) = {
             let owner = env.subscript_owner_module(subscript_id);
             let subscript = owner
                 .get_subscript_by_id(subscript_id.subscript)
@@ -2795,11 +2795,20 @@ impl TypeInference {
                 SubscriptMemberKind::Mut => subscript.mut_member.as_ref(),
             }
             .ok_or_else(|| Self::missing_subscript_member_error(field, mode))?;
+            let function_data = owner
+                .get_function_by_id(selected_member.function)
+                .expect("subscript member function should exist");
             let (subscript_ty, inst_data, _subst) = subscript
                 .type_scheme(owner)
                 .expect("projection subscript signature should be resolved before use")
                 .instantiate_with_fresh_vars(self, field.1, None, env.module_env);
-            (subscript_ty, inst_data, selected_member.provenance)
+            (
+                subscript_ty,
+                inst_data,
+                function_data.definition.arg_names.clone(),
+                FunctionId::new(subscript_id.module, selected_member.function),
+                selected_member.provenance,
+            )
         };
         if subscript_ty.args.len() != 1 {
             return Err(internal_compilation_error!(WrongNumberOfArguments {
@@ -2833,39 +2842,56 @@ impl TypeInference {
             );
         }
 
-        let subscript_node = env.ir_arena.alloc(hir::Node::new(
-            NodeKind::GetSubscript(b(hir::GetSubscript {
-                subscript: subscript_id,
-                subscript_path: ast::Path::new(vec![field]),
-                inst_data,
-            })),
-            Type::subscript_type(subscript_ty.clone()),
-            no_effects(),
-            field.1,
-        ));
-        let args_node_ids = vec![receiver.node];
+        let mut args_node_ids = vec![receiver.node];
         let mut inst_fn_args = subscript_ty.args.clone();
         if matches!(mode, SubscriptMemberKind::Mut) {
             inst_fn_args[0].mut_ty = MutType::mutable();
         }
         let inst_fn_ty = FnType::new(inst_fn_args, subscript_ty.ret, member_ty.effects.clone());
-        let subscript_effects = env.ir_arena[subscript_node].effects.clone();
         let receiver_effects = env.ir_arena[receiver.node].effects.clone();
-        let combined_effects =
-            self.make_dependent_effect([&subscript_effects, &receiver_effects, &member_ty.effects]);
-        let result_convention = CallResultConvention::Subscript(member_ty.result_convention);
-        let call = self.build_subscript_apply_call(
+        let combined_effects = self.make_dependent_effect([&receiver_effects, &inst_fn_ty.effects]);
+        let ret_ty = inst_fn_ty.ret;
+        let temp_start_index = env.cur_locals.len();
+        let prepared_arguments = self.prepare_call_arguments(
             env,
-            subscript_node,
-            ustr("$projection_subscript"),
-            args_node_ids,
-            inst_fn_ty,
-            result_convention,
-            mode,
-            combined_effects,
+            &mut args_node_ids,
+            &inst_fn_ty.args,
+            &inst_fn_ty.args,
             expr_span,
-            provenance,
+            None,
         );
+        let call = NodeKind::StaticApply(b(hir::StaticApplication {
+            function,
+            function_path: None,
+            function_span: field.1,
+            extra_arguments: Vec::new(),
+            arguments: prepared_arguments.arguments,
+            argument_names,
+            ty: CallImplType::new(
+                inst_fn_ty,
+                CallResultConvention::Subscript(member_ty.result_convention),
+            ),
+            inst_data,
+        }));
+        let call = hir::Node::new(call, ret_ty, combined_effects.clone(), expr_span);
+        let node = self.wrap_call_with_temp_drops(
+            env,
+            temp_start_index,
+            prepared_arguments.temp_stores,
+            call,
+        );
+        let node = env.ir_arena.alloc(hir::Node::new(
+            node,
+            ret_ty,
+            combined_effects.clone(),
+            expr_span,
+        ));
+        let call = NamedSubscriptCall {
+            node,
+            ty: ret_ty,
+            effects: combined_effects,
+            provenance,
+        };
         Ok(PreparedNamedSubscriptAccessor::Ready(call))
     }
 
@@ -4750,7 +4776,7 @@ impl TypeInference {
                     }
                 }
             }
-            NodeKind::Apply(mut app) if app.ty.returns_place() => {
+            NodeKind::FunctionApply(mut app) if app.ty.returns_place() => {
                 if let Some(base_index) =
                     addressor_place_base_argument_index(env.ir_arena, &app.arguments)
                 {
@@ -4760,7 +4786,7 @@ impl TypeInference {
                         span,
                     );
                     app.arguments[base_index].value = prepared.place;
-                    prepared.place = self.rebuild_place_node(env, place, NodeKind::Apply(app));
+                    prepared.place = self.rebuild_place_node(env, place, NodeKind::FunctionApply(app));
                     prepared
                 } else {
                     PreparedPlace {
@@ -5904,7 +5930,7 @@ fn place_evaluation_depends_on_addressor_place(arena: &NodeArena, node_id: NodeI
     use NodeKind::*;
 
     match &arena[node_id].kind {
-        Apply(app) => app.ty.returns_place(),
+        FunctionApply(app) => app.ty.returns_place(),
         StaticApply(app) => app.ty.returns_place(),
         TraitMethodApply(app) => app.ty.returns_place(),
         CallDictionaryMethod(call) => call.ty.returns_place(),

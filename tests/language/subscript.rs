@@ -1124,6 +1124,96 @@ fn module_function_can_use_later_projection_subscript() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn resolved_projection_subscripts_lower_to_static_apply() {
+    fn contains_subscript_apply(arena: &ENodeArena, node: ENodeId) -> bool {
+        match &arena[node].kind {
+            NodeKind::SubscriptApply(_) => true,
+            _ => crate::harness::hir_child_nodes(arena, node)
+                .into_iter()
+                .any(|child| contains_subscript_apply(arena, child)),
+        }
+    }
+
+    fn count_static_projection_member_calls(arena: &ENodeArena, node: ENodeId) -> usize {
+        let here = match &arena[node].kind {
+            NodeKind::StaticApply(app) => app.ty.result_convention.returns_borrow() as usize,
+            _ => 0,
+        };
+        here + crate::harness::hir_child_nodes(arena, node)
+            .into_iter()
+            .map(|child| count_static_projection_member_calls(arena, child))
+            .sum::<usize>()
+    }
+
+    let mut session = experimental_session();
+    let module = session.compile_and_get_module(indoc! { r#"
+        struct Pixel {
+            coords: [int],
+        }
+
+        subscript Pixel.x(self) -> int {
+            ref mut {
+                self.coords[0]
+            }
+        }
+
+        subscript Pixel.y(self) -> int {
+            ref mut {
+                self.coords[1]
+            }
+        }
+
+        pub fn dist2(p: Pixel) {
+            p.x * p.x + p.y * p.y
+        }
+
+        #[private_repr]
+        struct Secret {
+            raw: int,
+        }
+
+        subscript Secret.value(self) -> int {
+            ref {
+                let local = self.raw;
+                yield local
+            }
+        }
+
+        pub fn read_secret(secret: Secret) {
+            secret.value + secret.value
+        }
+    "# });
+    let dist2 = module
+        .get_function(ustr("dist2"))
+        .expect("dist2 should be compiled");
+    let dist2_entry = dist2.get_code_entry().unwrap();
+    let read_secret = module
+        .get_function(ustr("read_secret"))
+        .expect("read_secret should be compiled");
+    let read_secret_entry = read_secret.get_code_entry().unwrap();
+
+    assert!(
+        !contains_subscript_apply(&module.hir_arena, dist2_entry),
+        "resolved projection subscripts should not materialize first-class subscript applications"
+    );
+    assert_eq!(
+        count_static_projection_member_calls(&module.hir_arena, dist2_entry),
+        4,
+        "each addressor p.x/p.y projection should statically call the selected subscript member"
+    );
+    assert!(
+        !contains_subscript_apply(&module.hir_arena, read_secret_entry),
+        "resolved yielded projection subscripts should not materialize first-class subscript applications"
+    );
+    assert_eq!(
+        count_static_projection_member_calls(&module.hir_arena, read_secret_entry),
+        2,
+        "each yielded secret.value projection should statically call the selected subscript member"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn projection_subscript_self_access_inside_lambda_is_rejected() {
     assert_invalid_subscript_definition(
         indoc! { r#"
