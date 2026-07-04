@@ -440,6 +440,36 @@ impl PendingValueArgPassing {
     }
 }
 
+/// Formatting behavior shared by pending and elaborated call-argument metadata.
+pub trait CallArgPassingMetadata: Copy {
+    fn format_label(self) -> &'static str;
+}
+
+impl CallArgPassingMetadata for PendingArgPassing {
+    fn format_label(self) -> &'static str {
+        match self {
+            Self::MutableRef => "by mut",
+            Self::Value(PendingValueArgPassing::Unknown) => "by unresolved passing",
+            Self::Value(PendingValueArgPassing::Resolved(ResolvedValueArgPassing::TrivialCopy)) => {
+                "by trivial copy"
+            }
+            Self::Value(PendingValueArgPassing::Resolved(ResolvedValueArgPassing::SharedRef)) => {
+                "by ref"
+            }
+        }
+    }
+}
+
+impl CallArgPassingMetadata for ResolvedArgPassing {
+    fn format_label(self) -> &'static str {
+        match self {
+            Self::MutableRef => "by mut",
+            Self::Value(ResolvedValueArgPassing::TrivialCopy) => "by trivial copy",
+            Self::Value(ResolvedValueArgPassing::SharedRef) => "by ref",
+        }
+    }
+}
+
 /// How a call argument should be prepared, once resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolvedArgPassing {

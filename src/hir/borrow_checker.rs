@@ -356,7 +356,9 @@ fn returned_place_origin(arena: &NodeArena, node_id: NodeId) -> Option<PlaceOrig
             })
         }
         StaticApply(app) if app.ty.returns_place() => addressor_base_origin(arena, &app.arguments),
-        FunctionApply(app) if app.ty.returns_place() => addressor_base_origin(arena, &app.arguments),
+        FunctionApply(app) if app.ty.returns_place() => {
+            addressor_base_origin(arena, &app.arguments)
+        }
         TraitMethodApply(app) if app.ty.returns_place() => {
             addressor_base_origin(arena, &app.arguments)
         }

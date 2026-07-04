@@ -33,7 +33,7 @@ use crate::{
     Location,
     ast::{self, UnnamedArg},
     format::FormatWith,
-    hir::function::{PendingArgPassing, ResolvedArgPassing},
+    hir::function::{CallArgPassingMetadata, PendingArgPassing, ResolvedArgPassing},
     module::{
         ExtraParameterId, FunctionId, LocalCloneMetadata, LocalDecl, LocalDeclId,
         PendingLocalClone, PendingLocalDrop, PendingTakeLocalValueMode, ProjectionIndex,
@@ -76,7 +76,7 @@ pub trait HirPhase: Sized + std::fmt::Debug + Clone {
     /// Take-local mode carried by `TakeLocalValue` nodes in this phase.
     type TakeLocalValueMode: std::fmt::Debug + Clone + Copy + TakeLocalValueModeMetadata;
     /// Argument-passing metadata carried by call arguments in this phase.
-    type CallArgPassing: std::fmt::Debug + Clone + Copy;
+    type CallArgPassing: std::fmt::Debug + Clone + Copy + CallArgPassingMetadata;
     /// Deferred local-storage payload carried by local declarations in this phase.
     type DeferredLocalStorage: std::fmt::Debug + Clone + Copy;
 }
@@ -968,6 +968,27 @@ impl<P: HirPhase> HirPayload<P> for Never {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn format_call_argument<P: HirPhase>(
+    arena: &NodeArena<P>,
+    f: &mut std::fmt::Formatter,
+    locals: &[LocalDecl<P>],
+    env: &ModuleEnv<'_>,
+    spacing: usize,
+    indent: usize,
+    indent_str: &str,
+    name: Option<Ustr>,
+    arg: &CallArgument<P>,
+) -> std::fmt::Result {
+    let label = arg.passing.format_label();
+    if let Some(name) = name.filter(|name| !name.is_empty()) {
+        writeln!(f, "{indent_str}  {name} ({label}):")?;
+    } else {
+        writeln!(f, "{indent_str}  ({label}):")?;
+    }
+    format_ind(arena, arg.value, f, locals, env, spacing, indent + 2)
+}
+
 impl<P: HirPhase> HirPayload<P> for FieldAccess<P> {
     fn format_ind(
         &self,
@@ -1014,8 +1035,17 @@ impl<P: HirPhase> HirPayload<P> for B<TraitMethodApplication<P>> {
         } else {
             writeln!(f, "{indent_str}to (")?;
             for (name, arg) in method_def.arg_names.iter().zip(self.arguments.iter()) {
-                writeln!(f, "{indent_str}  {name}:")?;
-                format_ind(arena, arg.value, f, locals, env, spacing, indent + 1)?;
+                format_call_argument(
+                    arena,
+                    f,
+                    locals,
+                    env,
+                    spacing,
+                    indent,
+                    indent_str,
+                    Some(*name),
+                    arg,
+                )?;
             }
             writeln!(f, "{indent_str})")?;
         }
@@ -1191,7 +1221,17 @@ impl<P: HirPhase> Node<P> {
                 } else {
                     writeln!(f, "{indent_str}and apply to (")?;
                     for arg in &app.arguments {
-                        format_ind(arena, arg.value, f, locals, env, spacing, indent + 1)?;
+                        format_call_argument(
+                            arena,
+                            f,
+                            locals,
+                            env,
+                            spacing,
+                            indent,
+                            &indent_str,
+                            None,
+                            arg,
+                        )?;
                     }
                     writeln!(f, "{indent_str})")?;
                 }
@@ -1204,7 +1244,17 @@ impl<P: HirPhase> Node<P> {
                 } else {
                     writeln!(f, "{indent_str}and apply to (")?;
                     for arg in &app.arguments {
-                        format_ind(arena, arg.value, f, locals, env, spacing, indent + 1)?;
+                        format_call_argument(
+                            arena,
+                            f,
+                            locals,
+                            env,
+                            spacing,
+                            indent,
+                            &indent_str,
+                            None,
+                            arg,
+                        )?;
                     }
                     writeln!(f, "{indent_str})")?;
                 }
@@ -1248,11 +1298,18 @@ impl<P: HirPhase> Node<P> {
                     writeln!(f, "{indent_str}to ()")?;
                 } else {
                     writeln!(f, "{indent_str}to (")?;
-                    for (name, arg) in app.argument_names.iter().zip(app.arguments.iter()) {
-                        if !name.is_empty() {
-                            writeln!(f, "{indent_str}  {name}:")?;
-                        }
-                        format_ind(arena, arg.value, f, locals, env, spacing, indent + 1)?;
+                    for (index, arg) in app.arguments.iter().enumerate() {
+                        format_call_argument(
+                            arena,
+                            f,
+                            locals,
+                            env,
+                            spacing,
+                            indent,
+                            &indent_str,
+                            app.argument_names.get(index).copied(),
+                            arg,
+                        )?;
                     }
                     writeln!(f, "{indent_str})")?;
                 }
@@ -1345,7 +1402,17 @@ impl<P: HirPhase> Node<P> {
                 } else {
                     writeln!(f, "{indent_str}to (")?;
                     for arg in &call.arguments {
-                        format_ind(arena, arg.value, f, locals, env, spacing, indent + 1)?;
+                        format_call_argument(
+                            arena,
+                            f,
+                            locals,
+                            env,
+                            spacing,
+                            indent,
+                            &indent_str,
+                            None,
+                            arg,
+                        )?;
                     }
                     writeln!(f, "{indent_str})")?;
                 }

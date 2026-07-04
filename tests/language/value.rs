@@ -11,13 +11,14 @@ use test_log::test;
 use crate::harness::{TestSession, int, string};
 use ferlium::{
     compiler::error::{CompilationErrorImpl, RuntimeErrorKind},
+    format::FormatWith,
     hir::{
         self, ENodeArena, ENodeId, NodeKind,
         function::{ResolvedArgPassing, ResolvedValueArgPassing},
     },
     module::{
         LocalDeclId, LocalStorage, ResolvedLocalClone, ResolvedLocalDrop,
-        ResolvedTakeLocalValueMode, id::Id,
+        ResolvedTakeLocalValueMode, ShowModuleWithOptions, id::Id,
     },
 };
 use ustr::ustr;
@@ -1608,6 +1609,45 @@ fn multiple_parameters_preserve_declaration_order() {
             ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef),
             ResolvedArgPassing::MutableRef,
         ][..],
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn hir_prints_call_argument_passing_markers() {
+    let mut session = TestSession::new();
+    let module_id = session
+        .compile(
+            r#"
+            fn mix(a: int, b: string, c: &mut int) -> int { c = a; a }
+            pub fn demo() -> int {
+                let mut value = 0;
+                mix(1, "hello", value)
+            }
+            "#,
+        )
+        .module_id;
+    let compiler_session = session.session();
+    let module = compiler_session.expect_fresh_module(module_id);
+    let rendered = module
+        .format_with(&ShowModuleWithOptions::new(
+            compiler_session.modules(),
+            true,
+            true,
+        ))
+        .to_string();
+
+    assert!(
+        rendered.contains("a (by trivial copy):"),
+        "expected trivial-copy marker in HIR:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("b (by ref):"),
+        "expected shared-reference marker in HIR:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("c (by mut):"),
+        "expected mutable-reference marker in HIR:\n{rendered}"
     );
 }
 

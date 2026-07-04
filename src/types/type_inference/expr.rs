@@ -4786,7 +4786,8 @@ impl TypeInference {
                         span,
                     );
                     app.arguments[base_index].value = prepared.place;
-                    prepared.place = self.rebuild_place_node(env, place, NodeKind::FunctionApply(app));
+                    prepared.place =
+                        self.rebuild_place_node(env, place, NodeKind::FunctionApply(app));
                     prepared
                 } else {
                     PreparedPlace {
