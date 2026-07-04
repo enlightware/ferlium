@@ -1653,6 +1653,39 @@ fn hir_prints_call_argument_passing_markers() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn hir_prints_operator_static_apply_argument_names() {
+    let mut session = TestSession::new();
+    let module_id = session
+        .compile(
+            r#"
+            pub fn product(left_input: int, right_input: int) -> int {
+                left_input * right_input
+            }
+            "#,
+        )
+        .module_id;
+    let compiler_session = session.session();
+    let module = compiler_session.expect_fresh_module(module_id);
+    let rendered = module
+        .format_with(&ShowModuleWithOptions::new(
+            compiler_session.modules(),
+            true,
+            true,
+        ))
+        .to_string();
+
+    assert!(
+        rendered.contains("left (by "),
+        "expected operator callee argument name in HIR:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("right (by "),
+        "expected operator callee argument name in HIR:\n{rendered}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn context_native_parameter_passing_excludes_hidden_dictionary_args() {
     let session = TestSession::new();
     let function = session

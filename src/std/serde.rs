@@ -10,7 +10,9 @@
 use ustr::ustr;
 
 use crate::{
-    Location, cached_ty,
+    Location,
+    ast::UnnamedArg,
+    cached_ty,
     compiler::error::InternalCompilationError,
     containers::{SVec2, b},
     hir::hir_syn::native_str,
@@ -502,6 +504,7 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                             extra_arguments: vec![],
                             arguments,
                             argument_names: vec![ustr("array"), ustr("index")],
+                            argument_name_hint_policy: UnnamedArg::All,
                             ty: CallImplType::new(ty, CallResultConvention::ADDRESSOR_PLACE),
                             inst_data: hir::FnInstData::none(),
                         })),

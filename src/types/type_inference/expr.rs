@@ -182,6 +182,7 @@ enum CheckedStaticCallee {
         function_path: Option<ast::Path>,
         function_span: Location,
         argument_names: Vec<Ustr>,
+        argument_name_hint_policy: UnnamedArg,
     },
     TraitMethod {
         trait_id: TraitId,
@@ -2259,6 +2260,7 @@ impl TypeInference {
             extra_arguments: Vec::new(),
             arguments: prepared_arguments.arguments,
             argument_names: vec![ustr("array"), ustr("index")],
+            argument_name_hint_policy: UnnamedArg::All,
             ty: CallImplType::new(inst_fn_ty, definition.result_convention),
             inst_data,
         }));
@@ -2554,6 +2556,7 @@ impl TypeInference {
             extra_arguments: Vec::new(),
             arguments: prepared_arguments.arguments,
             argument_names: definition.arg_names.clone(),
+            argument_name_hint_policy: UnnamedArg::None,
             ty: CallImplType::new(inst_fn_ty, definition.result_convention),
             inst_data,
         }));
@@ -2867,6 +2870,7 @@ impl TypeInference {
             extra_arguments: Vec::new(),
             arguments: prepared_arguments.arguments,
             argument_names,
+            argument_name_hint_policy: UnnamedArg::None,
             ty: CallImplType::new(
                 inst_fn_ty,
                 CallResultConvention::Subscript(member_ty.result_convention),
@@ -3694,7 +3698,8 @@ impl TypeInference {
                     function,
                     function_path: Some(path.clone()),
                     function_span: path_span,
-                    argument_names: arguments_unnamed.filter_args(&definition.arg_names),
+                    argument_names: definition.arg_names.clone(),
+                    argument_name_hint_policy: arguments_unnamed,
                 },
                 abi_arg_tys: definition.ty_scheme.ty.args.clone(),
                 inst_fn_ty,
@@ -3833,6 +3838,7 @@ impl TypeInference {
                 function_path,
                 function_span,
                 argument_names,
+                argument_name_hint_policy,
             } => NodeKind::StaticApply(b(hir::StaticApplication {
                 function,
                 function_path,
@@ -3840,6 +3846,7 @@ impl TypeInference {
                 extra_arguments: Vec::new(),
                 arguments: prepared_arguments.arguments,
                 argument_names,
+                argument_name_hint_policy,
                 ty: CallImplType::new(call.inst_fn_ty, call.result_convention),
                 inst_data: call.inst_data,
             })),

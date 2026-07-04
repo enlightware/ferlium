@@ -588,8 +588,10 @@ pub struct StaticApplication<P: HirPhase = Unelaborated> {
     pub function_span: Location,
     pub extra_arguments: Vec<NodeId<P>>,
     pub arguments: Vec<CallArgument<P>>,
-    /// Optional source/debug names for visible arguments; same length as `arguments`.
+    /// Callee parameter names for visible arguments; same length as `arguments`.
     pub argument_names: Vec<Ustr>,
+    /// Call-site policy for whether IDE argument-name hints should be shown.
+    pub argument_name_hint_policy: UnnamedArg,
     pub ty: CallImplType,
     pub inst_data: FnInstData,
 }

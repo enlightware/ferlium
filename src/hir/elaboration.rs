@@ -773,6 +773,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                 let function_path = app.function_path.clone();
                 let function_span = app.function_span;
                 let argument_names = app.argument_names.clone();
+                let argument_name_hint_policy = app.argument_name_hint_policy;
                 let ty = app.ty.clone();
                 let inst_data = app.inst_data.clone();
                 let source_arguments = app
@@ -812,6 +813,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                     extra_arguments,
                     arguments: self.elaborate_call_arguments(src, source_arguments, node_span)?,
                     argument_names,
+                    argument_name_hint_policy,
                     ty,
                     inst_data,
                 }))
@@ -863,7 +865,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                             &input_tys,
                             &[],
                         ),
-                        arguments_unnamed.filter_args(&definition.arg_names),
+                        definition.arg_names.clone(),
                     )
                 };
                 if is_value_function || resolved {
@@ -896,6 +898,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                             node_span,
                         )?,
                         argument_names,
+                        argument_name_hint_policy: arguments_unnamed,
                         ty,
                         inst_data: hir::FnInstData::none(),
                     }))

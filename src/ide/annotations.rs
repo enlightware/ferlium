@@ -495,11 +495,14 @@ fn node_variable_type_annotations<Env>(
         }
         StaticApply(app) => {
             let arity = app.argument_names.len();
+            let argument_name_hints = app
+                .argument_name_hint_policy
+                .filter_args(&app.argument_names);
             let show_arg_name_hints = !app.function_span.is_empty();
             for (index, arg) in app.arguments.iter().enumerate() {
                 if show_arg_name_hints
                     && let (Some(path), Some(arg_name)) =
-                        (&app.function_path, app.argument_names.get(index))
+                        (&app.function_path, argument_name_hints.get(index))
                     && !should_hide_arg_name_hint(arena, path, arity, arg_name, arg.value, locals)
                 {
                     result.push((arena[arg.value].span.start_usize(), format!("{arg_name}: ")));

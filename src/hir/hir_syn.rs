@@ -8,6 +8,7 @@
 //
 use crate::{
     Location,
+    ast::UnnamedArg,
     containers::{IntoSVec2, b},
     hir::function::PendingArgPassing,
     hir::value::{LiteralNativeValue, LiteralValue},
@@ -57,6 +58,7 @@ pub fn static_apply_with_argument_passing(
         argument_names: (0..arguments.len())
             .map(|i| ustr(&format!("arg{i}")))
             .collect(),
+        argument_name_hint_policy: UnnamedArg::None,
         arguments,
         ty: CallImplType::value(ty),
         inst_data: hir::FnInstData::none(),
@@ -185,6 +187,7 @@ pub fn static_apply_with_result_convention<P: HirPhase>(
         argument_names: (0..arguments.len())
             .map(|i| ustr(&format!("arg{i}")))
             .collect(),
+        argument_name_hint_policy: UnnamedArg::None,
         arguments,
         ty: CallImplType::new(ty, result_convention),
         inst_data: hir::FnInstData::none(),

@@ -15,6 +15,7 @@ use ustr::Ustr;
 
 use crate::{
     Location,
+    ast::UnnamedArg,
     compiler::error::InternalCompilationError,
     containers::b,
     hir::dictionary::DictionaryReq,
@@ -2260,6 +2261,7 @@ impl<'a> TraitSolver<'a> {
             function_span: fn_span,
             extra_arguments: explicit_runtime_args,
             argument_names: definition.arg_names.clone(),
+            argument_name_hint_policy: UnnamedArg::None,
             arguments,
             ty: CallImplType::new(
                 definition.ty_scheme.ty.clone(),

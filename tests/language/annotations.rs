@@ -587,6 +587,29 @@ fn ide_annotations_hide_generated_operator_argument_names() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn ide_annotations_hide_pipe_subject_argument_name_only() {
+    let src = indoc! { r#"
+        fn choose(source: int, chosen: int) -> int { chosen }
+
+        fn run() -> int {
+            1 |> choose(2)
+        }
+    "# };
+    let mut compiler = compile_source(src);
+    let hints = annotation_hints(&mut compiler);
+
+    assert!(
+        !hints.contains("source:"),
+        "pipe annotations should hide the implicit first argument name:\n{hints}"
+    );
+    assert!(
+        hints.contains("chosen:"),
+        "pipe annotations should keep explicit later argument names:\n{hints}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_index_ide_annotations_do_not_expose_generated_place_call() {
     let src = indoc! { r#"
         fn first() {
