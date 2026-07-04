@@ -461,6 +461,7 @@ fn print_help() {
     println!(
         "\\function FN_NAME_OR_INDEX MOD_NAME?: Shows the code of a function given by its name or index, in a given module."
     );
+    println!("\\function MOD_NAME::FN_NAME: Shows the code of a function using a qualified name.");
     println!("\\history: Shows the modules in this session's history.");
     println!("CTRL-D: Exits the REPL.");
     println!("\nNote: expression locals do not persist across REPL inputs.");
@@ -482,6 +483,24 @@ fn console_module(module_id: ModuleId) -> Module {
         ),
     );
     module
+}
+
+fn repl_show_module_options(session: &CompilerSession) -> ShowModuleWithOptions<'_> {
+    ShowModuleWithOptions {
+        modules: session.modules(),
+        show_details: false,
+        show_all_functions: true,
+        show_private_items: true,
+    }
+}
+
+fn parse_repl_module_path(name: &str) -> Path {
+    Path::new(name.split("::").map(ustr).collect())
+}
+
+fn split_qualified_function_name(name: &str) -> Option<(Path, &str)> {
+    let (module, function) = name.rsplit_once("::")?;
+    (!module.is_empty() && !function.is_empty()).then(|| (parse_repl_module_path(module), function))
 }
 
 /// Process a single input: parse, compile module, and evaluate expression if present.
@@ -570,7 +589,7 @@ fn process_input(
         let module = session.expect_fresh_module(module_id);
         println!(
             "Module HIR:\n{}",
-            module.format_with(&ShowModuleWithOptions::new(session.modules(), false, false))
+            module.format_with(&repl_show_module_options(session))
         );
         if let Some(expr) = expr.as_ref() {
             let module_env = session.modules().env_for(module);
@@ -889,7 +908,10 @@ fn run_interactive_repl(allow_experimental: bool) {
                             };
                             let module = session.modules().get(module_id);
                             if let Some(module) = module {
-                                println!("\n{}", module.format_with(&session.modules()));
+                                println!(
+                                    "\n{}",
+                                    module.format_with(&repl_show_module_options(&session))
+                                );
                             } else {
                                 println!(
                                     "Module never compiled succesfully and is thus not available for inspection."
@@ -898,19 +920,34 @@ fn run_interactive_repl(allow_experimental: bool) {
                             true
                         }
                         "function" => {
-                            let (module_id, module_name): (ModuleId, &str) =
-                                if let Some(arg) = args.get(2) {
-                                    let name = *arg;
+                            let Some(function_arg) = args.get(1).copied() else {
+                                println!("Function id or name is required.");
+                                continue;
+                            };
+                            let qualified = split_qualified_function_name(function_arg);
+                            let (module_id, module_name, function_name): (ModuleId, String, &str) =
+                                if let Some(module_arg) = args.get(2) {
+                                    let module_path = parse_repl_module_path(module_arg);
                                     if let Some(module_id) =
-                                        session.modules().id_by_path(&Path::single_str(arg))
+                                        session.modules().id_by_path(&module_path)
                                     {
-                                        (module_id, name)
+                                        (module_id, module_arg.to_string(), function_arg)
                                     } else {
-                                        println!("Module {arg} not found.");
+                                        println!("Module {module_arg} not found.");
+                                        continue;
+                                    }
+                                } else if let Some((module_path, function_name)) = qualified {
+                                    let module_name = module_path.to_string();
+                                    if let Some(module_id) =
+                                        session.modules().id_by_path(&module_path)
+                                    {
+                                        (module_id, module_name, function_name)
+                                    } else {
+                                        println!("Module {module_name} not found.");
                                         continue;
                                     }
                                 } else {
-                                    (last_module, "current")
+                                    (last_module, String::from("current"), function_arg)
                                 };
                             let module = session.modules().get(module_id);
                             let module = match module {
@@ -922,25 +959,20 @@ fn run_interactive_repl(allow_experimental: bool) {
                                 }
                                 Some(module) => module,
                             };
-                            let fn_id = if let Some(arg) = args.get(1) {
-                                match arg.parse::<usize>() {
-                                    Ok(index) => LocalFunctionId::from_index(index),
-                                    Err(_) => {
-                                        // not a number, attempt to find by name
-                                        match module.get_local_function_id(ustr(arg)) {
-                                            Some(id) => id,
-                                            None => {
-                                                println!(
-                                                    "Function name {arg} not found in module {module_name}."
-                                                );
-                                                continue;
-                                            }
+                            let fn_id = match function_name.parse::<usize>() {
+                                Ok(index) => LocalFunctionId::from_index(index),
+                                Err(_) => {
+                                    // not a number, attempt to find by name
+                                    match module.get_local_function_id(ustr(function_name)) {
+                                        Some(id) => id,
+                                        None => {
+                                            println!(
+                                                "Function name {function_name} not found in module {module_name}."
+                                            );
+                                            continue;
                                         }
                                     }
                                 }
-                            } else {
-                                println!("Function id is required.");
-                                continue;
                             };
                             let function = if let Some(function) = module.get_function_by_id(fn_id)
                             {
