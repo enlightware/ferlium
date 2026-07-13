@@ -53,6 +53,26 @@ Same rules as ABI‑32 except:
 
 Scalars follow the same C/Rust alignment rules across mainstream platforms.
 
+## Scalar slots
+
+Besides pointer size, a backend profile defines its *ABI scalar slots*: the set of value shapes that the backend can pass and return directly, without going through memory.
+A scalar slot is independent of the pointer size; in particular, 32-bit profiles still have 64-bit scalar slots.
+
+| Profile | Scalar slots |
+|---------|--------------|
+| ABI-32 (wasm32, native-32) | `i32`, `i64`, `f32`, `f64` |
+| ABI-64 (wasm64, native-64) | `i32`, `i64`, `f32`, `f64` |
+
+These correspond to the Wasm value types on Wasm targets, and to register-passable scalars on native targets (where C ABIs pass 64-bit integers and doubles by value even on 32-bit platforms).
+
+A concrete value *fits in one ABI scalar slot* when its size is at most 8 bytes.
+The slot type is chosen as follows:
+
+- A value whose representation is exactly `f32` or `f64` uses the corresponding float slot.
+- Any other value uses the smallest integer slot that holds its size (`i32` if size ≤ 4, `i64` otherwise), with the value's bytes packed in little-endian order starting at the least significant byte.
+
+The closure-as-`i64` representation described in the Closures section is an instance of this rule: the wasm32 closure record has `code_index` at offset 0 and `env_ptr` at offset 4, and little-endian packing of those 8 bytes into an `i64` yields `code_index` in the low 32 bits and `env_ptr` in the high 32 bits.
+
 # Calling conventions
 
 Ferlium source has mutable value semantics: a parameter written as `T` is conceptually passed by value, while a parameter written as `&mut T` is conceptually passed by mutable reference.
@@ -66,15 +86,16 @@ Physical argument passing is derived from the lowered parameter type:
 | `&mut T` | Mutable reference/pointer to caller storage |
 | Generic `T` | Shared reference/pointer to caller storage |
 | Concrete non-`TrivialCopy` `T` | Shared reference/pointer to caller storage |
-| Concrete `TrivialCopy` `T` whose size is at most the backend pointer size | Direct value, copied by the ABI |
-| Concrete `TrivialCopy` `T` larger than the backend pointer size | Shared reference/pointer to caller storage |
+| Concrete `TrivialCopy` `T` that fits in one ABI scalar slot | Direct value, copied by the ABI |
+| Concrete `TrivialCopy` `T` larger than one ABI scalar slot | Shared reference/pointer to caller storage |
 
 Generic parameters are always passed by shared reference, even if they have a `T: TrivialCopy` constraint.
 This gives every generic function one stable ABI independent of later concrete instantiations.
 
-The phrase "direct value" above means a concrete `TrivialCopy` value that fits in one pointer-sized ABI slot for the target profile.
-For example, `int` is direct on ABI-32 and ABI-64. `float` has the representation of `f64`, so it is not a direct ABI-32 value; on ABI-32 it is passed by reference and returned through an out-pointer.
-On ABI-64 it may be direct if it is classified as `TrivialCopy`.
+The phrase "direct value" above means a concrete `TrivialCopy` value that fits in one ABI scalar slot for the target profile (see the Scalar slots section).
+For example, `int` is direct on ABI-32 and ABI-64.
+`float` has the representation of `f64`, which is a scalar slot on both profiles, so `float` is direct on ABI-32 and ABI-64 alike.
+Note that `TrivialCopy` classifies whether a *copy* of the representation is semantically valid, independently of size; the scalar-slot criterion is a separate, purely ABI-level decision about *how* such a value is passed.
 
 Implementation note: native callables already expose per-argument physical passing requests.
 Ferlium script functions should follow the rule above as part of lowering.
@@ -91,7 +112,7 @@ There are two effect cases:
 There are three return value classes:
 
 - **No value**: `()`
-- **Direct value**: concrete pointer-sized `TrivialCopy` values
+- **Direct value**: concrete `TrivialCopy` values that fit in one ABI scalar slot
 - **Caller-allocated value**: bigger types, polymorphic results
 
 The calling convention for return values is:
@@ -109,7 +130,7 @@ When a function may panic, status is 0 on success and non-zero on panic.
 
 ## Wasm
 
-The Wasm backend maps direct values and status values to Wasm value results.
+The Wasm backend maps direct values and status values to Wasm value types (`i32`, `i64`, `f32`, `f64`) following the scalar-slot rules.
 Shared references, mutable references, and caller-allocated result pointers are represented as pointers in linear memory using the selected backend profile.
 
 Parameters are passed to Wasm functions in the order of their definitions.
