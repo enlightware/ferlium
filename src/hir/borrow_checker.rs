@@ -14,7 +14,10 @@ use crate::{
         InternalCompilationError, InvalidSubscriptDefinitionKind, InvalidYieldKind,
         SubscriptDefinitionSubject,
     },
-    hir::{CallArgument, Node, NodeArena, NodeId, NodeKind, function::ArgConvention},
+    hir::{
+        CallArgument, Node, NodeArena, NodeId, NodeKind, function::ArgConvention,
+        node_is_place_reference,
+    },
     internal_compilation_error,
     module::{LocalDeclId, ULocalDecl, id::Id},
     types::r#type::Type,
@@ -34,21 +37,38 @@ struct Path {
 }
 
 impl Path {
+    fn from_local(id: LocalDeclId) -> Self {
+        Self {
+            variable: id.as_index(),
+            parts: Vec::new(),
+        }
+    }
+
     /// Builds a path for this node, assuming it is a place node, panicking otherwise.
     fn from_node(arena: &NodeArena, node_id: NodeId) -> Self {
+        Self::try_from_node(arena, node_id).expect("Cannot resolve a non-place node")
+    }
+
+    /// Builds a caller-storage path when `node_id` is rooted in an existing local.
+    ///
+    /// Some projection nodes are place-shaped but rooted in a temporary value. They cannot alias
+    /// an earlier caller place and are deliberately rejected by this fallible form. The ordered
+    /// argument analysis runs before temporary-place normalization, unlike the established borrow
+    /// checks that use [`Self::from_node`].
+    fn try_from_node(arena: &NodeArena, node_id: NodeId) -> Option<Self> {
         let node = &arena[node_id];
         use NodeKind::*;
         match &node.kind {
             Project(project) => {
-                let mut path = Self::from_node(arena, project.value);
+                let mut path = Self::try_from_node(arena, project.value)?;
                 path.parts
                     .push(PathPart::Projection(project.index.as_index()));
-                path
+                Some(path)
             }
             FieldAccess(field_access) => {
-                let mut path = Self::from_node(arena, field_access.value);
+                let mut path = Self::try_from_node(arena, field_access.value)?;
                 path.parts.push(PathPart::FieldAccess(field_access.field));
-                path
+                Some(path)
             }
             StaticApply(app) if app.ty.returns_place() => {
                 Self::from_addressor_place_arguments(arena, &app.arguments)
@@ -69,29 +89,29 @@ impl Path {
                 let tail = block
                     .tail_node()
                     .expect("place block should have a tail expression");
-                Self::from_node(arena, tail)
+                Self::try_from_node(arena, tail)
             }
-            WithPlace(node) => Self::from_node(arena, node.place),
-            LoadLocal(node) => Path {
-                variable: node.id.as_index(),
-                parts: Vec::new(),
-            },
-            _ => panic!("Cannot resolve a non-place node"),
+            WithPlace(node) => Self::try_from_node(arena, node.place),
+            LoadLocal(node) => Some(Self::from_local(node.id)),
+            _ => None,
         }
     }
 
-    fn from_addressor_place_arguments(arena: &NodeArena, arguments: &[CallArgument]) -> Self {
+    fn from_addressor_place_arguments(
+        arena: &NodeArena,
+        arguments: &[CallArgument],
+    ) -> Option<Self> {
         let base_index = arguments
             .iter()
             .position(|argument| !is_evidence_node(&arena[argument.value].kind))
             .expect("addressor-place application should have a base argument");
-        let mut path = Self::from_node(arena, arguments[base_index].value);
+        let mut path = Self::try_from_node(arena, arguments[base_index].value)?;
         if let Some(index) = arguments.get(base_index + 1) {
             path.parts.push(Self::index_part(arena, index.value));
         } else {
             path.parts.push(PathPart::IndexDynamic);
         }
-        path
+        Some(path)
     }
 
     fn index_part(arena: &NodeArena, node_id: NodeId) -> PathPart {
@@ -103,6 +123,112 @@ impl Path {
         }
         PathPart::IndexDynamic
     }
+}
+
+fn call_arguments(kind: &NodeKind) -> Option<&[CallArgument]> {
+    match kind {
+        NodeKind::FunctionApply(app) => Some(&app.arguments),
+        NodeKind::SubscriptApply(app) => Some(&app.arguments),
+        NodeKind::StaticApply(app) => Some(&app.arguments),
+        NodeKind::TraitMethodApply(app) => Some(&app.arguments),
+        NodeKind::CallDictionaryMethod(call) => Some(&call.arguments),
+        _ => None,
+    }
+}
+
+/// Whether evaluating `node_id` may write a place overlapping `observed`.
+///
+/// Calls can only mutate caller storage through `MutableRef` arguments. Direct assignments and
+/// ownership operations name their destination storage in HIR. Walking those operations gives
+/// call-lifetime planning the local write footprint that ordinary effect types intentionally do
+/// not carry. Keep this query on unelaborated HIR: both type inference and final HIR elaboration
+/// need to make the same semantic snapshot decision from the original argument expressions.
+fn evaluation_may_write_path(arena: &NodeArena, node_id: NodeId, observed: &Path) -> bool {
+    let node = &arena[node_id];
+
+    match &node.kind {
+        NodeKind::Assign(assign) => {
+            if node_is_place_reference(arena, assign.place) {
+                match Path::try_from_node(arena, assign.place) {
+                    Some(written) if do_paths_overlap(&written, observed) => return true,
+                    // A place-shaped destination without a caller-storage path is rooted in a
+                    // temporary and cannot alias `observed`.
+                    Some(_) | None => {}
+                }
+            }
+        }
+        NodeKind::StoreLocal(store) => {
+            if do_paths_overlap(&Path::from_local(store.id), observed) {
+                return true;
+            }
+        }
+        NodeKind::TakeLocalValue(take) => {
+            if do_paths_overlap(&Path::from_local(take.id), observed) {
+                return true;
+            }
+        }
+        NodeKind::DropClosureEnv(drop) if node_is_place_reference(arena, drop.target) => {
+            match Path::try_from_node(arena, drop.target) {
+                Some(written) if do_paths_overlap(&written, observed) => return true,
+                Some(_) | None => {}
+            }
+        }
+        NodeKind::DropSubscriptValue(drop) if node_is_place_reference(arena, drop.target) => {
+            match Path::try_from_node(arena, drop.target) {
+                Some(written) if do_paths_overlap(&written, observed) => return true,
+                Some(_) | None => {}
+            }
+        }
+        _ => {}
+    }
+
+    if call_arguments(&node.kind).is_some_and(|arguments| {
+        arguments.iter().any(|argument| {
+            argument.passing == ArgConvention::MutableRef
+                && Path::try_from_node(arena, argument.value)
+                    .is_some_and(|written| do_paths_overlap(&written, observed))
+        })
+    }) {
+        return true;
+    }
+
+    node.kind
+        .child_node_ids()
+        .into_iter()
+        .any(|child| evaluation_may_write_path(arena, child, observed))
+}
+
+/// Return each `Let` place whose observed value may be changed while a later argument is
+/// evaluated.
+///
+/// The pair contains `(let_argument_index, writing_argument_index)`. This is distinct from the
+/// simultaneous `Let`/`MutableRef` conflict checked below: the write happens before the outer call,
+/// but after the earlier argument's source-level evaluation point. The earlier value therefore
+/// needs a snapshot at that point.
+pub(crate) fn let_arguments_overlapping_later_argument_writes(
+    arena: &NodeArena,
+    arguments: &[CallArgument],
+) -> Vec<(usize, usize)> {
+    arguments
+        .iter()
+        .enumerate()
+        .filter(|(_, argument)| {
+            argument.passing == ArgConvention::Let
+                && crate::hir::node_is_place_reference(arena, argument.value)
+                && !matches!(arena[argument.value].kind, NodeKind::GetTraitMethod(_))
+        })
+        .filter_map(|(let_index, argument)| {
+            Path::try_from_node(arena, argument.value).map(|observed| (let_index, observed))
+        })
+        .flat_map(|(let_index, observed)| {
+            arguments
+                .iter()
+                .enumerate()
+                .skip(let_index + 1)
+                .filter(move |(_, later)| evaluation_may_write_path(arena, later.value, &observed))
+                .map(move |(writing_index, _)| (let_index, writing_index))
+        })
+        .collect()
 }
 
 fn is_evidence_node(kind: &NodeKind) -> bool {

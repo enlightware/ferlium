@@ -4232,15 +4232,40 @@ impl TypeInference {
     ) -> PreparedCallArguments {
         let arg_passing =
             self.argument_passing_for_args(arg_tys, abi_arg_tys, visible_arg_passing_override);
+        let source_arguments =
+            CallArgument::from_value_slice_and_passing(args, arg_passing.clone());
+        let caller_rooted_base = returns_caller_rooted_place.then(|| {
+            addressor_place_base_argument_index(env.ir_arena, &source_arguments)
+                .expect("addressor-place application should have a base argument")
+        });
+        let mut snapshot_for_later_argument_write = vec![false; args.len()];
+        for (let_index, _) in
+            crate::hir::borrow_checker::let_arguments_overlapping_later_argument_writes(
+                env.ir_arena,
+                &source_arguments,
+            )
+        {
+            // A place-returning addressor's base identifies caller storage rather than observing
+            // its current value. A later argument may finish mutating that storage before the
+            // addressor accesses it, but the returned place must remain rooted in the caller.
+            if caller_rooted_base != Some(let_index) {
+                snapshot_for_later_argument_write[let_index] = true;
+            }
+        }
         let mut stores = Vec::new();
-        let materialize_value_arguments_in_order =
-            args.iter()
+        let materialize_value_arguments_in_order = snapshot_for_later_argument_write
+            .iter()
+            .any(|snapshot| *snapshot)
+            || args
+                .iter()
                 .zip(arg_tys)
                 .zip(&arg_passing)
                 .any(|((&arg, arg_ty), &passing)| {
                     self.call_value_argument_needs_shared_ref_temp(env, arg, arg_ty.ty, passing)
                 });
-        for ((arg, arg_ty), passing) in args.iter_mut().zip(arg_tys).zip(&arg_passing) {
+        for (index, ((arg, arg_ty), passing)) in
+            args.iter_mut().zip(arg_tys).zip(&arg_passing).enumerate()
+        {
             match passing {
                 ArgConvention::MutableRef => {
                     if node_is_place_reference(env.ir_arena, *arg) {
@@ -4250,6 +4275,40 @@ impl TypeInference {
                     }
                 }
                 ArgConvention::Let => {
+                    if snapshot_for_later_argument_write[index] {
+                        let source = *arg;
+                        let ty = arg_ty.ty;
+                        if !self.type_has_concrete_trivial_copy_impl(env, ty) && !ty.is_function() {
+                            self.add_pub_constraint(PubTypeConstraint::new_have_trait(
+                                value_trait_id(env),
+                                vec![ty],
+                                vec![],
+                                vec![],
+                                span,
+                            ));
+                        }
+                        let source_span = env.ir_arena[source].span;
+                        let effects = env.ir_arena[source].effects.clone();
+                        let snapshot = env.ir_arena.alloc(hir::Node::new(
+                            NodeKind::CloneValue(hir::CloneValue {
+                                source,
+                                clone: PendingLocalClone::Unknown,
+                            }),
+                            ty,
+                            effects,
+                            source_span,
+                        ));
+                        let (store, load) =
+                            self.store_owned_temp(env, snapshot, ty, span, ustr("$snapshot"));
+
+                        // Transitional eager-pipeline adapter: later argument preparation may
+                        // hoist its evaluation prefix before the call, so put this snapshot in
+                        // the common prefix now, at its source argument's position. Final HIR
+                        // call-lifetime elaboration should instead emit the store inside this
+                        // argument and retain only the cleanup around the call.
+                        stores.push(store);
+                        *arg = load;
+                    }
                     if Self::node_is_scoped_place_value(env.ir_arena, *arg) {
                         let prepared = self.prepare_scoped_place_value_for_consumer(env, *arg);
                         stores.extend(prepared.prefix);
@@ -4288,10 +4347,6 @@ impl TypeInference {
         let mut arguments = CallArgument::from_value_slice_and_passing(args, arg_passing);
         let overlaps =
             crate::hir::borrow_checker::let_arguments_overlapping_mutable(env.ir_arena, &arguments);
-        let caller_rooted_base = returns_caller_rooted_place.then(|| {
-            addressor_place_base_argument_index(env.ir_arena, &arguments)
-                .expect("addressor-place application should have a base argument")
-        });
         let mut snapshotted = vec![false; arguments.len()];
         for (let_index, _) in overlaps {
             // A returned place must stay rooted in caller storage. Elaboration reports

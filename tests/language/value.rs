@@ -1754,6 +1754,83 @@ fn overlap_snapshot_preserves_left_to_right_argument_evaluation() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn let_argument_snapshots_before_later_argument_assignment() {
+    let source = r#"
+        fn combine(a, b, c) {
+            a * 2 + b * 3 + c * 5
+        }
+
+        let mut a = 0;
+        combine(a, { a += 1; 1 }, a) + a
+    "#;
+
+    let mut session = TestSession::new();
+    // The first argument observes 0, while the third argument and the expression after the call
+    // observe the incremented value 1: 0 * 2 + 1 * 3 + 1 * 5 + 1.
+    assert_val_eq!(session.run(source), int(9));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn let_argument_snapshots_before_later_nested_mutable_call() {
+    let source = r#"
+        fn combine(first: int, second: int) -> int {
+            first * 10 + second
+        }
+
+        fn increment(value: &mut int) -> int {
+            value += 1;
+            value
+        }
+
+        let mut value = 0;
+        combine(value, increment(value))
+    "#;
+
+    let mut session = TestSession::new();
+    assert_val_eq!(session.run(source), int(1));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn managed_let_argument_snapshots_before_later_argument_assignment() {
+    let source = r#"
+        fn keep(first: string, marker: int) -> string {
+            first
+        }
+
+        let mut value = "before";
+        keep(value, { value = "after"; 0 })
+    "#;
+
+    let mut session = TestSession::new();
+    assert_val_eq!(session.run(source), string("before"));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn disjoint_later_argument_write_does_not_snapshot_let_argument() {
+    let source = format!(
+        r#"
+        {}
+
+        fn observe(value: Probe, marker: int) -> int {{
+            value.0
+        }}
+
+        let mut pair = (Probe(2), 0);
+        observe(pair.0, {{ pair.1 = 1; 0 }})
+        "#,
+        incrementing_clone_probe_value_impl()
+    );
+
+    let mut session = TestSession::new();
+    // The custom clone increments Probe's payload. A spurious snapshot would therefore return 3.
+    assert_val_eq!(session.run(&source), int(2));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn managed_argument_materialization_preserves_left_to_right_evaluation() {
     let source = format!(
         r#"

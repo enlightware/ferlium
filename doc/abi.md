@@ -80,8 +80,8 @@ A parameter written as `&mut T` is a `MutableRef` access: the callee receives ex
 
 `Let` is a semantic convention, not a physical transport choice.
 It permits the caller to share existing storage when that is safe.
-When a `Let` argument aliases a mutable argument of the same call, HIR stores an explicit `CloneValue` snapshot in an owned temporary at the `Let` argument's evaluation point and cleans that temporary after the call.
-Thus a later argument mutation cannot change the value observed through the earlier argument.
+When a `Let` argument aliases a mutable argument of the same call, or when evaluation of a later argument writes the same place, HIR stores an explicit `CloneValue` snapshot in an owned temporary at the `Let` argument's evaluation point and cleans that temporary after the call.
+Thus neither later argument evaluation nor mutation inside the callee can change the value observed through the earlier argument.
 Two `Let` arguments may share storage; overlapping mutable arguments remain a borrow-checking error.
 
 Physical argument passing is derived from the lowered parameter type:
