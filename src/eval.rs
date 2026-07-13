@@ -20,7 +20,7 @@ use crate::{
     compiler::error::RuntimeErrorKind,
     containers::b,
     format::{FormatWith, write_with_separator},
-    hir::function::{ResolvedArgPassing, ResolvedValueArgPassing, TrivialCopy},
+    hir::function::{ArgConvention, copy_boxed_trivial_copy_native},
     hir::value::{
         FunctionValue, HiddenEvidenceArgValue, NativeValue, NativeValueType, SubscriptValue, Value,
     },
@@ -33,7 +33,7 @@ use crate::{
     std::buffer,
     types::{
         r#trait::{TraitDictionaryEntryIndex, TraitMethodIndex},
-        r#type::{CallResultConvention, FnArgType, Type, TypeKind, bare_native_type},
+        r#type::{CallResultConvention, FnArgType, Type},
     },
 };
 use crate::{
@@ -1972,7 +1972,13 @@ fn eval_clone_value(
             let layout = trivial_copy_layout(ctx, arena[node.source].ty, span);
             let temp_start = ctx.environment.len();
             let place = eval_or_return!(eval_node_as_place(arena, node.source, ctx, locals));
-            let result = copy_trivial_copy_value_from_place_layout(&place, layout, ctx, span);
+            let result = copy_trivial_copy_value_from_place_layout(
+                &place,
+                arena[node.source].ty,
+                layout,
+                ctx,
+                span,
+            );
             ctx.truncate_environment_storage(temp_start);
             return cont(result?);
         }
@@ -2247,6 +2253,10 @@ fn eval_resolved_runtime_call_with_args(
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
+    // Argument evaluation may initialize explicit caller-frame temporaries. Reserve the
+    // whole frame before recording the interpreter-only scratch boundary so post-call
+    // truncation cannot discard a HIR-owned local before its block cleanup runs.
+    ctx.reserve_current_frame_slots(locals);
     let temp_start = ctx.environment.len();
     let mut arguments = eval_or_return!((arguments.eval_args)(
         arena,
@@ -2292,10 +2302,10 @@ fn eval_addressor_place_args(
 ) -> Result<ControlFlow<PreparedCallArgs>, RuntimeError> {
     assert_eq!(args.len(), args_ty.len());
     let results = eval_or_return!(eval_sequence(
-        args.iter().zip(args_ty),
+        args.iter(),
         args.len(),
         ValOrMut::discard_storage,
-        |(arg, ty)| eval_call_arg(arena, arg.value, ty, arg.passing, ctx, locals),
+        |arg| eval_call_arg(arena, arg.value, arg.passing, ctx, locals),
     ));
     Ok(ControlFlow::Continue(PreparedCallArgs::new(results)))
 }
@@ -2334,7 +2344,9 @@ fn eval_store_local(
                 match eval_or_return!(try_eval_node_as_place(arena, node.value, ctx, locals)) {
                     Some(place) => {
                         let layout = trivial_copy_layout(ctx, local.ty, span);
-                        copy_trivial_copy_value_from_place_layout(&place, layout, ctx, span)?
+                        copy_trivial_copy_value_from_place_layout(
+                            &place, local.ty, layout, ctx, span,
+                        )?
                     }
                     None => eval_or_return!(eval_node_with_ctx(arena, node.value, ctx, locals)),
                 };
@@ -2364,7 +2376,7 @@ fn eval_store_local(
                 if let Some(dictionary) = try_dictionary_from_place(&place, ctx) {
                     ValOrMut::Dictionary(dictionary)
                 } else if let Some(value) =
-                    try_copy_trivial_copy_value_from_place(&place, local.ty, ctx, span)?
+                    try_copy_trivial_copy_value_from_place(&place, ctx, span)?
                 {
                     ValOrMut::Val(value)
                 } else {
@@ -2434,7 +2446,7 @@ fn eval_take_local_value(
             let layout = trivial_copy_layout(ctx, local.ty, span);
             let place = local_place(ctx, locals, node.id);
             cont(copy_trivial_copy_value_from_place_layout(
-                &place, layout, ctx, span,
+                &place, local.ty, layout, ctx, span,
             )?)
         }
         ResolvedTakeLocalValueMode::CloneBorrowed(clone) => {
@@ -2449,50 +2461,24 @@ fn eval_take_local_value(
     }
 }
 
-fn copy_trivial_copy_native_value_typed<T: TrivialCopy + NativeValue>(
-    value: &Value,
-) -> Option<Value> {
-    value
-        .as_primitive_ty::<T>()
-        .map(|value| Value::native(*value))
-}
-
-/// Temporary boxed-interpreter copy for native values known to implement `TrivialCopy`.
+/// Simulate a representation copy in the boxed interpreter.
 ///
-/// This is not the language contract for `TrivialCopy`: future typed/linear
-/// storage should lower `ResolvedLocalClone::TrivialCopy` to a layout-driven memcpy instead.
-fn copy_trivial_copy_native_value(value: &Value, ty: Type) -> Option<Value> {
-    let ty_data = ty.data();
-    if let TypeKind::Native(native) = &*ty_data
-        && native.arguments.is_empty()
-    {
-        if native.bare_ty == bare_native_type::<()>() {
-            return copy_trivial_copy_native_value_typed::<()>(value);
-        }
-        if native.bare_ty == bare_native_type::<bool>() {
-            return copy_trivial_copy_native_value_typed::<bool>(value);
-        }
-        if native.bare_ty == bare_native_type::<isize>() {
-            return copy_trivial_copy_native_value_typed::<isize>(value);
-        }
+/// Tuple boxes are rebuilt recursively, while native leaves are copied only
+/// through the sealed Rust `TrivialCopy` opt-ins above. Named records and tuples
+/// use the same boxed tuple representation. This deliberately does not call
+/// `Value::clone`; an unsupported value indicates that HIR or the structural
+/// classifier incorrectly selected `ResolvedLocalClone::TrivialCopy`.
+fn copy_boxed_trivial_copy_representation(value: &Value) -> Option<Value> {
+    if let Some(value) = copy_boxed_trivial_copy_native(value) {
+        return Some(value);
     }
-    None
-}
-
-fn copy_trivial_copy_native_value_with_layout(
-    value: &Value,
-    layout: ResolvedValueLayout,
-) -> Option<Value> {
-    if layout == ResolvedValueLayout::native::<()>() {
-        return copy_trivial_copy_native_value_typed::<()>(value);
-    }
-    if layout == ResolvedValueLayout::native::<bool>() {
-        return copy_trivial_copy_native_value_typed::<bool>(value);
-    }
-    if layout == ResolvedValueLayout::native::<isize>() {
-        return copy_trivial_copy_native_value_typed::<isize>(value);
-    }
-    None
+    let values = value.as_tuple()?;
+    Some(Value::tuple(
+        values
+            .iter()
+            .map(copy_boxed_trivial_copy_representation)
+            .collect::<Option<Vec<_>>>()?,
+    ))
 }
 
 fn copy_trivial_copy_value_from_place(
@@ -2501,10 +2487,10 @@ fn copy_trivial_copy_value_from_place(
     ctx: &EvalCtx,
     span: Location,
 ) -> Result<Value, RuntimeError> {
-    // Temporary companion to `copy_trivial_copy_native_value` for the boxed-value
-    // interpreter. This should collapse into the backend implementation of HIR
-    // `ResolvedLocalClone::TrivialCopy` once values are stored in copyable slots.
-    try_copy_trivial_copy_value_from_place(place, ty, ctx, span)?.ok_or_else(|| {
+    let value = place
+        .target_ref(ctx)
+        .map_err(|err| RuntimeError::new(err, Some(span)))?;
+    copy_boxed_trivial_copy_representation(value).ok_or_else(|| {
         panic!(
             "attempted to materialize non-TrivialCopy local value without Value::clone: type {:?}, place {:?}, span {:?}",
             ty, place, span
@@ -2514,6 +2500,7 @@ fn copy_trivial_copy_value_from_place(
 
 fn copy_trivial_copy_value_from_place_layout(
     place: &Place,
+    ty: Type,
     layout: ResolvedValueLayout,
     ctx: &EvalCtx,
     span: Location,
@@ -2521,25 +2508,25 @@ fn copy_trivial_copy_value_from_place_layout(
     let value = place
         .target_ref(ctx)
         .map_err(|err| RuntimeError::new(err, Some(span)))?;
-    copy_trivial_copy_native_value_with_layout(value, layout).ok_or_else(|| {
+    copy_boxed_trivial_copy_representation(value).ok_or_else(|| {
         panic!(
-            "attempted to materialize non-native TrivialCopy local value with layout {:?}, place {:?}",
-            layout, place
+            "attempted to materialize TrivialCopy local value of type {:?} with layout {:?}, place {:?}",
+            ty, layout, place
         );
     })
 }
 
 fn try_copy_trivial_copy_value_from_place(
     place: &Place,
-    ty: Type,
     ctx: &EvalCtx,
     span: Location,
 ) -> Result<Option<Value>, RuntimeError> {
-    // Temporary boxed-value interpreter bridge; see `copy_trivial_copy_native_value`.
+    // Opportunistic native-leaf bridge for place evaluation. Structural copies
+    // are represented explicitly by `CloneValue` and use the recursive helper.
     let value = place
         .target_ref(ctx)
         .map_err(|err| RuntimeError::new(err, Some(span)))?;
-    Ok(copy_trivial_copy_native_value(value, ty))
+    Ok(copy_boxed_trivial_copy_native(value))
 }
 
 #[inline(never)]
@@ -3183,12 +3170,9 @@ fn eval_project(
     if let Some(mut place) = eval_or_return!(try_eval_node_as_place(arena, data, ctx, locals)) {
         place.path.push(index as isize);
         if place_resolution_depends_on_addressor_place(arena, data) {
-            if let Some(value) = try_copy_trivial_copy_value_from_place(
-                &place,
-                arena[node_id].ty,
-                ctx,
-                arena[node_id].span,
-            )? {
+            if let Some(value) =
+                try_copy_trivial_copy_value_from_place(&place, ctx, arena[node_id].span)?
+            {
                 return cont(value);
             }
         } else {
@@ -3395,43 +3379,26 @@ fn eval_nodes(
 fn eval_call_arg(
     arena: &ENodeArena,
     arg: ENodeId,
-    arg_ty: &FnArgType,
-    passing: ResolvedArgPassing,
+    passing: ArgConvention,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> Result<ControlFlow<ValOrMut>, RuntimeError> {
     match passing {
-        ResolvedArgPassing::MutableRef => eval_node_as_place(arena, arg, ctx, locals)
+        ArgConvention::MutableRef => eval_node_as_place(arena, arg, ctx, locals)
             .map(|result| result.map_continue(ValOrMut::Mut)),
-        ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef) => {
-            match try_eval_node_as_place(arena, arg, ctx, locals) {
-                Ok(ControlFlow::Continue(Some(place))) => {
-                    Ok(ControlFlow::Continue(ValOrMut::Mut(place)))
-                }
-                Ok(ControlFlow::Continue(None)) if is_dictionary_metadata_node(arena, arg) => {
-                    eval_dictionary_metadata_node(arena, arg, ctx)
-                        .map(|result| result.map_continue(ValOrMut::Dictionary))
-                }
-                Ok(ControlFlow::Continue(None)) => {
-                    panic!(
-                        "shared-reference call argument should have been materialized as a local: kind {:?}, ty {:?}, span {:?}",
-                        arena[arg].kind, arena[arg].ty, arena[arg].span
-                    )
-                }
-                Ok(transfer) => Ok(transfer.map_continue(unreachable_continue)),
-                Err(err) => Err(err),
+        ArgConvention::Let => match try_eval_node_as_place(arena, arg, ctx, locals) {
+            Ok(ControlFlow::Continue(Some(place))) => {
+                Ok(ControlFlow::Continue(ValOrMut::Mut(place)))
             }
-        }
-        ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy)
-            if is_dictionary_metadata_node(arena, arg) =>
-        {
-            eval_dictionary_metadata_node(arena, arg, ctx)
-                .map(|result| result.map_continue(ValOrMut::Dictionary))
-        }
-        ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy) => {
-            let layout = trivial_copy_layout(ctx, arg_ty.ty, arena[arg].span);
-            eval_trivial_copy_arg(arena, arg, layout, ctx, locals)
-        }
+            Ok(ControlFlow::Continue(None)) if is_dictionary_metadata_node(arena, arg) => {
+                eval_dictionary_metadata_node(arena, arg, ctx)
+                    .map(|result| result.map_continue(ValOrMut::Dictionary))
+            }
+            Ok(ControlFlow::Continue(None)) => eval_node_with_ctx(arena, arg, ctx, locals)
+                .map(|result| result.map_continue(ValOrMut::Val)),
+            Ok(transfer) => Ok(transfer.map_continue(unreachable_continue)),
+            Err(err) => Err(err),
+        },
     }
 }
 
@@ -3464,8 +3431,8 @@ fn eval_args(
     let temp_start = ctx.environment.len();
     let mut results = Vec::with_capacity(args.len());
     assert_eq!(args.len(), args_ty.len());
-    for (arg, ty) in args.iter().zip(args_ty) {
-        let result = eval_call_arg(arena, arg.value, ty, arg.passing, ctx, locals);
+    for arg in args {
+        let result = eval_call_arg(arena, arg.value, arg.passing, ctx, locals);
         match result {
             Ok(ControlFlow::Continue(arg)) => results.push(arg),
             Ok(transfer) => {
@@ -3485,28 +3452,6 @@ fn eval_args(
         }
     }
     Ok(ControlFlow::Continue(PreparedCallArgs::new(results)))
-}
-
-fn eval_trivial_copy_arg(
-    arena: &ENodeArena,
-    arg: ENodeId,
-    layout: ResolvedValueLayout,
-    ctx: &mut EvalCtx,
-    locals: &[LocalDecl],
-) -> Result<ControlFlow<ValOrMut>, RuntimeError> {
-    let temp_start = ctx.environment.len();
-    match try_eval_node_as_place(arena, arg, ctx, locals) {
-        Ok(ControlFlow::Continue(Some(place))) => {
-            let value =
-                copy_trivial_copy_value_from_place_layout(&place, layout, ctx, arena[arg].span);
-            ctx.truncate_environment_storage(temp_start);
-            Ok(ControlFlow::Continue(ValOrMut::Val(value?)))
-        }
-        Ok(ControlFlow::Continue(None)) => eval_node_with_ctx(arena, arg, ctx, locals)
-            .map(|result| result.map_continue(ValOrMut::Val)),
-        Ok(transfer) => Ok(transfer.map_continue(unreachable_continue)),
-        Err(err) => Err(err),
-    }
 }
 
 fn is_dictionary_metadata_node(arena: &ENodeArena, node: ENodeId) -> bool {
@@ -3559,14 +3504,6 @@ fn try_eval_node_as_place(
                 eval_addressor_place_call_dictionary_method(arena, call, node.span, ctx, locals)?;
             return Ok(control_flow_into_addressor_place(result).map_continue(Some));
         }
-        CloneValue(node)
-            if matches!(
-                node.clone,
-                ResolvedLocalClone::Static(_) | ResolvedLocalClone::Dictionary(_)
-            ) && node_may_resolve_to_place(arena, node.source) =>
-        {
-            return try_eval_node_as_place(arena, node.source, ctx, locals);
-        }
         Block(block) => {
             let place = eval_or_return!(try_eval_nodes_as_place(arena, &block.body, ctx, locals));
             if !block.cleanup.is_empty() {
@@ -3617,14 +3554,6 @@ fn node_may_resolve_to_place(arena: &ENodeArena, node_id: ENodeId) -> bool {
         NodeKind::StaticApply(app) => app.ty.returns_place(),
         NodeKind::SubscriptApply(app) => app.ty.returns_place(),
         NodeKind::CallDictionaryMethod(call) => call.ty.returns_place(),
-        NodeKind::CloneValue(node)
-            if matches!(
-                node.clone,
-                ResolvedLocalClone::Static(_) | ResolvedLocalClone::Dictionary(_)
-            ) =>
-        {
-            node_may_resolve_to_place(arena, node.source)
-        }
         NodeKind::WithPlace(node) => node_may_resolve_to_place(arena, node.body),
         NodeKind::Block(block) => nodes_may_resolve_to_place(arena, &block.body),
         _ => false,
@@ -3655,9 +3584,7 @@ mod tests {
         },
         hir::{
             self, CallArgument, ENode, ENodeArena, Elaborated, LoopId, NodeKind,
-            function::{
-                CallableDefinition, ResolvedArgPassing, ResolvedValueArgPassing, ScriptFunction,
-            },
+            function::{ArgConvention, CallableDefinition, ScriptFunction},
             hir_syn,
             value::{LiteralValue, NativeDisplay, Value},
         },
@@ -3827,7 +3754,7 @@ mod tests {
                 yield_node_id: Some(yield_scratch),
                 runtime_arg_count: 1,
             }),
-            vec![ResolvedArgPassing::MutableRef],
+            vec![ArgConvention::MutableRef],
             None,
             accessor_locals,
         );
@@ -3920,7 +3847,7 @@ mod tests {
                 CallResultConvention::YIELDED_ONCE,
                 vec![CallArgument {
                     value: load_caller_log_for_arg,
-                    passing: ResolvedArgPassing::MutableRef,
+                    passing: ArgConvention::MutableRef,
                 }],
                 span,
             ),
@@ -3981,7 +3908,7 @@ mod tests {
                 yield_node_id: Some(yield_scratch),
                 runtime_arg_count: 1,
             }),
-            vec![ResolvedArgPassing::MutableRef],
+            vec![ArgConvention::MutableRef],
             None,
             accessor_locals,
         );
@@ -4179,7 +4106,7 @@ mod tests {
                 outer_fn_ty,
                 vec![CallArgument {
                     value: outer_log_arg,
-                    passing: ResolvedArgPassing::MutableRef,
+                    passing: ArgConvention::MutableRef,
                 }],
                 span,
             ),
@@ -4194,7 +4121,7 @@ mod tests {
                 inner_fn_ty,
                 vec![CallArgument {
                     value: inner_log_arg,
-                    passing: ResolvedArgPassing::MutableRef,
+                    passing: ArgConvention::MutableRef,
                 }],
                 span,
             ),
@@ -4453,11 +4380,11 @@ mod tests {
         let arguments = [
             CallArgument {
                 value: tracked,
-                passing: ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy),
+                passing: ArgConvention::Let,
             },
             CallArgument {
                 value: return_unit,
-                passing: ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy),
+                passing: ArgConvention::Let,
             },
         ];
 
@@ -4503,11 +4430,11 @@ mod tests {
         let arguments = [
             CallArgument {
                 value: tracked,
-                passing: ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy),
+                passing: ArgConvention::Let,
             },
             CallArgument {
                 value: break_node,
-                passing: ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy),
+                passing: ArgConvention::Let,
             },
         ];
 

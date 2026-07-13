@@ -45,16 +45,37 @@ use crate::{
     std::value::{
         is_function_surface_only_value_trait_application, is_value_trait_for_function_type,
     },
+    std::{STD_MODULE_ID, core_traits_names::VALUE_TRAIT_NAME},
     types::coherence::check_trait_impl,
     types::effects::{EffType, EffectVar},
     types::trait_solver::{TraitSolver, trait_solver_from_module},
-    types::r#type::Type,
+    types::r#type::{Type, TypeKind},
     types::type_inference::unify::UnifiedTypeInference,
     types::type_like::TypeLike,
     types::type_mapper::{BitmapInstantiationMapper, TypeMapper},
     types::type_scheme::PubTypeConstraint,
     types::type_visitor::{collect_effect_vars, collect_ty_vars},
 };
+
+/// Record explicit ownership behavior on the named type constructor before any
+/// function body or trait impl is elaborated. This makes structural properties
+/// independent of impl materialization and source order.
+fn mark_type_defs_with_custom_value_impls(module: &mut Module, input_tys: &[Type]) {
+    let local_module = module.module_id();
+    let defs = input_tys
+        .iter()
+        .filter_map(|ty| {
+            let data = ty.data();
+            let TypeKind::Named(named) = &*data else {
+                return None;
+            };
+            (named.def.module == local_module).then_some(named.def)
+        })
+        .collect::<FxHashSet<_>>();
+    for def in defs {
+        module.type_def_mut(def).has_custom_value_impl = true;
+    }
+}
 
 fn validate_name_uniqueness(source: &ast::PModule) -> Result<(), InternalCompilationError> {
     let mut names = FxHashMap::default();
@@ -706,6 +727,9 @@ pub(crate) fn emit_module_with_capabilities(
                 continue; // Trait not found; the error will be reported in the main impl loop
             };
             let trait_def = &trait_def;
+            if trait_id.module == STD_MODULE_ID && trait_def.name == VALUE_TRAIT_NAME {
+                mark_type_defs_with_custom_value_impls(&mut output, &input_tys);
+            }
             if input_tys.len() != trait_def.input_type_count() as usize {
                 return Err(internal_compilation_error!(WrongNumberOfArguments {
                     expected: trait_def.input_type_count() as usize,

@@ -24,10 +24,7 @@ use crate::{
         self, CallArgument, FieldAccess as HirFieldAccess, LoopId, NodeArena, NodeId, NodeKind,
         Project as HirProject, StoreLocal, Variant as HirVariant,
         addressor_place_base_argument_index,
-        function::{
-            CallableDefinition, PendingArgPassing, PendingValueArgPassing, ResolvedArgPassing,
-            ResolvedValueArgPassing, unresolved_arg_passing_for_args,
-        },
+        function::{ArgConvention, CallableDefinition, arg_conventions_for_args},
         node_is_place_reference, node_is_stable_place_reference,
         node_is_stable_storage_place_reference, place_resolution_may_create_temp,
         value::LiteralValue,
@@ -43,7 +40,7 @@ use crate::{
     parser::location::Location,
     std::{
         STD_MODULE_ID,
-        core_traits_names::{REPR_TRAIT_NAME, TRIVIAL_COPY_TRAIT_NAME, VALUE_TRAIT_NAME},
+        core_traits_names::{REPR_TRAIT_NAME, VALUE_TRAIT_NAME},
         math::int_type,
         value::{VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX, is_value_trait},
     },
@@ -171,7 +168,7 @@ struct StaticCallFromCheckedArgs {
     inst_data: hir::FnInstData,
     args_node_ids: Vec<NodeId>,
     abi_arg_tys: Vec<FnArgType>,
-    visible_arg_passing: Option<Vec<ResolvedArgPassing>>,
+    visible_arg_passing: Option<Vec<ArgConvention>>,
     result_mut_ty: MutType,
 }
 
@@ -208,7 +205,7 @@ struct PreparedStaticCallTarget {
     result_convention: CallResultConvention,
     inst_data: hir::FnInstData,
     abi_arg_tys: Vec<FnArgType>,
-    visible_arg_passing: Option<Vec<ResolvedArgPassing>>,
+    visible_arg_passing: Option<Vec<ArgConvention>>,
     result_mut_ty: MutType,
     have_trait_constraint: Option<PubTypeConstraint>,
 }
@@ -991,7 +988,7 @@ impl TypeInference {
                     MutType::Resolved(mut_ty) if mut_ty.is_mutable()
                 );
                 let initializer_is_known_trivial_copy =
-                    self.type_has_concrete_trivial_copy_impl(env, node_ty, expr_span);
+                    self.type_has_concrete_trivial_copy_impl(env, node_ty);
                 let defer_storage = node_ty != Type::never()
                     && initializer_is_borrow
                     && !initializer_place_needs_temp
@@ -1048,12 +1045,16 @@ impl TypeInference {
                 if needs_clone && !initializer_place_needs_temp {
                     local.clone = Some(PendingLocalClone::Unknown);
                 }
-                let value_id =
-                    if node_ty != Type::never() && initializer_is_borrow && needs_owned_snapshot {
-                        self.materialize_owned_value(env, node_id, expr_span)
-                    } else {
-                        node_id
-                    };
+                let store_clones_stable_place = needs_clone && !initializer_place_needs_temp;
+                let value_id = if node_ty != Type::never()
+                    && initializer_is_borrow
+                    && needs_owned_snapshot
+                    && !store_clones_stable_place
+                {
+                    self.materialize_owned_value(env, node_id, expr_span)
+                } else {
+                    node_id
+                };
                 let node_effects = env.ir_arena[value_id].effects.clone();
                 let id = env.push_local(local);
                 let node = K::StoreLocal(StoreLocal {
@@ -1134,9 +1135,8 @@ impl TypeInference {
                     node_id
                 } else {
                     // Return cleanup is represented by the lexical `Block.cleanup` scopes that the
-                    // transfer exits. Function-entry locals are not wrapped in an extra cleanup
-                    // scope here; the current calling convention passes non-trivial owned inputs by
-                    // reference and only owns trivial-copy inputs at the function boundary.
+                    // transfer exits. Function-entry locals are non-owning views governed by their
+                    // `ArgConvention`, so they are not wrapped in an extra cleanup scope here.
                     self.prepare_value_for_exit(env, node_id, 0, expr_span)
                 };
                 let node = K::Return(return_value);
@@ -1294,6 +1294,7 @@ impl TypeInference {
                             &mut args_nodes,
                             &args_tys,
                             abi_arg_tys,
+                            false,
                             expr_span,
                             None,
                         );
@@ -1423,7 +1424,7 @@ impl TypeInference {
                         let drop = if initializes_storage {
                             None
                         } else {
-                            if self.type_needs_semantic_drop(env, place_ty, expr_span)
+                            if self.type_needs_semantic_drop(env, place_ty)
                                 && !place_ty.is_function()
                             {
                                 self.add_pub_constraint(PubTypeConstraint::new_have_trait(
@@ -1511,7 +1512,7 @@ impl TypeInference {
                         let drop = if initializes_storage {
                             None
                         } else {
-                            if self.type_needs_semantic_drop(env, place_ty, expr_span)
+                            if self.type_needs_semantic_drop(env, place_ty)
                                 && !place_ty.is_function()
                             {
                                 self.add_pub_constraint(PubTypeConstraint::new_have_trait(
@@ -2250,6 +2251,7 @@ impl TypeInference {
             &mut argument_values,
             &inst_fn_ty.args,
             &definition.ty_scheme.ty.args,
+            definition.result_convention.returns_place(),
             expr_span,
             visible_arg_passing,
         );
@@ -2546,6 +2548,7 @@ impl TypeInference {
             &mut args_node_ids,
             &inst_fn_ty.args,
             &definition.ty_scheme.ty.args,
+            definition.result_convention.returns_place(),
             expr_span,
             visible_arg_passing,
         );
@@ -2753,6 +2756,7 @@ impl TypeInference {
             &mut args_node_ids,
             &inst_fn_ty.args,
             &inst_fn_ty.args,
+            result_convention.returns_place(),
             expr_span,
             None,
         );
@@ -2860,6 +2864,7 @@ impl TypeInference {
             &mut args_node_ids,
             &inst_fn_ty.args,
             &inst_fn_ty.args,
+            member_ty.result_convention.returns_caller_rooted_place(),
             expr_span,
             None,
         );
@@ -3408,12 +3413,30 @@ impl TypeInference {
                         }),
                     );
                 }
+                // Projection evidence is lowered to an accessor. Its receiver
+                // must therefore be a place even when an earlier access-chain
+                // step produced an owned value (for example `array[i].field`).
+                // Keep that value in an explicit owned temporary for the
+                // dynamic extent of the remaining chain.
+                let projection_receiver_needs_temp =
+                    matches!(&*place_ty.data(), TypeKind::Variable(_))
+                        && !node_is_place_reference(env.ir_arena, place_node);
+                let temp_start_index = env.cur_locals.len();
+                let mut temp_stores = Vec::new();
+                let place_node = if projection_receiver_needs_temp {
+                    let (store, load) =
+                        self.store_owned_temp(env, place_node, place_ty, expr_span, ustr("$place"));
+                    temp_stores.push(store);
+                    load
+                } else {
+                    place_node
+                };
                 let (next_node, next_ty, next_mut, uses_projection_evidence) = self
                     .infer_field_from_record_node(
                         env, place_node, place_ty, place_mut, mode, *base_span, *name, *step_span,
                     )?;
-                if uses_projection_evidence {
-                    return self.infer_prepared_accessor_with_body(
+                let result = if uses_projection_evidence {
+                    self.infer_prepared_accessor_with_body(
                         env,
                         NamedSubscriptCall {
                             node: next_node,
@@ -3437,19 +3460,36 @@ impl TypeInference {
                             )?;
                             Ok((node, env.ir_arena[node].ty))
                         }),
-                    );
+                    )
+                } else {
+                    self.infer_access_chain_steps_with_body(
+                        env,
+                        steps,
+                        step_index + 1,
+                        next_node,
+                        next_ty,
+                        next_mut,
+                        mode,
+                        expr_span,
+                        build_body,
+                    )
+                }?;
+                if temp_stores.is_empty() {
+                    return Ok(result);
                 }
-                self.infer_access_chain_steps_with_body(
+                let (node, _) = result;
+                let ty = env.ir_arena[node].ty;
+                let effects = env.ir_arena[node].effects.clone();
+                let node = self.wrap_owned_value_with_temp_drops(
                     env,
-                    steps,
-                    step_index + 1,
-                    next_node,
-                    next_ty,
-                    next_mut,
-                    mode,
+                    temp_start_index,
+                    temp_stores,
+                    node,
+                    ty,
+                    effects,
                     expr_span,
-                    build_body,
-                )
+                );
+                Ok((node, MutType::constant()))
             }
             AccessChainStep::Index {
                 index,
@@ -3631,7 +3671,7 @@ impl TypeInference {
         let value_effects = env.ir_arena[value].effects.clone();
         let place_effects = env.ir_arena[place].effects.clone();
         let effects = self.make_dependent_effect([&value_effects, &place_effects]);
-        if self.type_needs_semantic_drop(env, place_ty, expr_span) && !place_ty.is_function() {
+        if self.type_needs_semantic_drop(env, place_ty) && !place_ty.is_function() {
             self.add_pub_constraint(PubTypeConstraint::new_have_trait(
                 value_trait_id(env),
                 vec![place_ty],
@@ -3829,6 +3869,7 @@ impl TypeInference {
             &mut call.args_node_ids,
             &call.inst_fn_ty.args,
             &call.abi_arg_tys,
+            call.result_convention.returns_place(),
             expr_span,
             call.visible_arg_passing.as_deref(),
         );
@@ -3903,40 +3944,9 @@ impl TypeInference {
             let plan = self.access_chain_plan_for_expr(env, *arg);
             let needs_scoped_projection_driver =
                 Self::access_chain_plan_may_need_projection_driver(&plan);
-            let visible_runtime_shared_ref = target
-                .visible_arg_passing
-                .as_ref()
-                .and_then(|passing| passing.get(index))
-                .is_some_and(|passing| {
-                    matches!(
-                        passing,
-                        ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef)
-                    )
-                });
             let mode = match passing {
-                PendingArgPassing::MutableRef => SubscriptMemberKind::Mut,
-                PendingArgPassing::Value(PendingValueArgPassing::Resolved(
-                    ResolvedValueArgPassing::SharedRef,
-                )) => SubscriptMemberKind::Ref,
-                PendingArgPassing::Value(PendingValueArgPassing::Unknown)
-                    if needs_scoped_projection_driver =>
-                {
-                    if matches!(target.inst_fn_ty.args[index].mut_ty, MutType::Resolved(mut_val) if !mut_val.is_mutable())
-                    {
-                        SubscriptMemberKind::Ref
-                    } else {
-                        SubscriptMemberKind::Mut
-                    }
-                }
-                PendingArgPassing::Value(PendingValueArgPassing::Unknown)
-                    if visible_runtime_shared_ref =>
-                {
-                    SubscriptMemberKind::Ref
-                }
-                PendingArgPassing::Value(PendingValueArgPassing::Unknown)
-                | PendingArgPassing::Value(PendingValueArgPassing::Resolved(
-                    ResolvedValueArgPassing::TrivialCopy,
-                )) => continue,
+                ArgConvention::MutableRef => SubscriptMemberKind::Mut,
+                ArgConvention::Let => SubscriptMemberKind::Ref,
             };
             let place = plan.chain;
             if !needs_scoped_projection_driver
@@ -4209,28 +4219,30 @@ impl TypeInference {
         (store, load)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn prepare_call_arguments(
         &mut self,
         env: &mut TypingEnv,
         args: &mut [NodeId],
         arg_tys: &[FnArgType],
         abi_arg_tys: &[FnArgType],
+        returns_caller_rooted_place: bool,
         span: Location,
-        visible_arg_passing_override: Option<&[ResolvedArgPassing]>,
+        visible_arg_passing_override: Option<&[ArgConvention]>,
     ) -> PreparedCallArguments {
         let arg_passing =
             self.argument_passing_for_args(arg_tys, abi_arg_tys, visible_arg_passing_override);
         let mut stores = Vec::new();
         for ((arg, arg_ty), passing) in args.iter_mut().zip(arg_tys).zip(&arg_passing) {
             match passing {
-                PendingArgPassing::MutableRef => {
+                ArgConvention::MutableRef => {
                     if node_is_place_reference(env.ir_arena, *arg) {
                         let prepared = self.prepare_place_for_consumer(env, *arg, span);
                         stores.extend(prepared.prefix);
                         *arg = prepared.place;
                     }
                 }
-                PendingArgPassing::Value(_) => {
+                ArgConvention::Let => {
                     if Self::node_is_scoped_place_value(env.ir_arena, *arg) {
                         let prepared = self.prepare_scoped_place_value_for_consumer(env, *arg);
                         stores.extend(prepared.prefix);
@@ -4243,9 +4255,9 @@ impl TypeInference {
                         stores.extend(prepared.prefix);
                         *arg = prepared.place;
                     }
-                    if self.call_value_argument_needs_shared_ref_temp(
-                        env, *arg, arg_ty.ty, *passing, span,
-                    ) {
+                    if self
+                        .call_value_argument_needs_shared_ref_temp(env, *arg, arg_ty.ty, *passing)
+                    {
                         let value = self.materialize_owned_value(env, *arg, span);
                         let value_ty = env.ir_arena[value].ty;
                         let (store, load) =
@@ -4260,7 +4272,56 @@ impl TypeInference {
                 }
             }
         }
-        let arguments = CallArgument::from_value_slice_and_passing(args, arg_passing);
+        let mut arguments = CallArgument::from_value_slice_and_passing(args, arg_passing);
+        let overlaps =
+            crate::hir::borrow_checker::let_arguments_overlapping_mutable(env.ir_arena, &arguments);
+        let caller_rooted_base = returns_caller_rooted_place.then(|| {
+            addressor_place_base_argument_index(env.ir_arena, &arguments)
+                .expect("addressor-place application should have a base argument")
+        });
+        let mut snapshotted = vec![false; arguments.len()];
+        for (let_index, _) in overlaps {
+            // A returned place must stay rooted in caller storage. Elaboration reports
+            // the overlap instead of snapshotting its base into short-lived storage.
+            if caller_rooted_base == Some(let_index) || snapshotted[let_index] {
+                continue;
+            }
+            snapshotted[let_index] = true;
+            let ty = arg_tys[let_index].ty;
+            if !self.type_has_concrete_trivial_copy_impl(env, ty) && !ty.is_function() {
+                self.add_pub_constraint(PubTypeConstraint::new_have_trait(
+                    value_trait_id(env),
+                    vec![ty],
+                    vec![],
+                    vec![],
+                    span,
+                ));
+            }
+
+            let source = arguments[let_index].value;
+            let source_span = env.ir_arena[source].span;
+            let effects = env.ir_arena[source].effects.clone();
+            let snapshot = env.ir_arena.alloc(hir::Node::new(
+                NodeKind::CloneValue(hir::CloneValue {
+                    source,
+                    clone: PendingLocalClone::Unknown,
+                }),
+                ty,
+                effects.clone(),
+                source_span,
+            ));
+            let (store, load) = self.store_owned_temp(env, snapshot, ty, span, ustr("$snapshot"));
+
+            // Keep the store at this argument's evaluation position. The enclosing
+            // call block owns and cleans the local after the callee returns.
+            let snapshot_place = env.ir_arena.alloc(hir::Node::new(
+                Self::block(vec![store, load], Vec::new()),
+                ty,
+                effects,
+                source_span,
+            ));
+            arguments[let_index].value = snapshot_place;
+        }
         PreparedCallArguments {
             arguments,
             temp_stores: stores,
@@ -4271,16 +4332,12 @@ impl TypeInference {
         &self,
         arg_tys: &[FnArgType],
         abi_arg_tys: &[FnArgType],
-        visible_arg_passing_override: Option<&[ResolvedArgPassing]>,
-    ) -> Vec<PendingArgPassing> {
+        visible_arg_passing_override: Option<&[ArgConvention]>,
+    ) -> Vec<ArgConvention> {
         assert_eq!(arg_tys.len(), abi_arg_tys.len());
         if let Some(visible_arg_passing_override) = visible_arg_passing_override {
             assert_eq!(arg_tys.len(), visible_arg_passing_override.len());
-            return visible_arg_passing_override
-                .iter()
-                .copied()
-                .map(PendingArgPassing::from_resolved)
-                .collect();
+            return visible_arg_passing_override.to_vec();
         }
 
         arg_tys
@@ -4292,13 +4349,9 @@ impl TypeInference {
                     .as_resolved()
                     .is_some_and(|mut_ty| mut_ty.is_mutable())
                 {
-                    PendingArgPassing::MutableRef
-                } else if !abi_arg_ty.ty.is_constant() {
-                    PendingArgPassing::Value(PendingValueArgPassing::Resolved(
-                        ResolvedValueArgPassing::SharedRef,
-                    ))
+                    ArgConvention::MutableRef
                 } else {
-                    unresolved_arg_passing_for_args(std::slice::from_ref(arg_ty))
+                    arg_conventions_for_args(std::slice::from_ref(arg_ty))
                         .into_iter()
                         .next()
                         .unwrap()
@@ -4312,24 +4365,15 @@ impl TypeInference {
         env: &mut TypingEnv,
         arg: NodeId,
         ty: Type,
-        passing: PendingArgPassing,
-        span: Location,
+        passing: ArgConvention,
     ) -> bool {
         let is_stable_place = node_is_stable_storage_place_reference(env.ir_arena, arg);
         if ty == Type::never() || is_stable_place {
             return false;
         }
         match passing {
-            PendingArgPassing::MutableRef => false,
-            PendingArgPassing::Value(PendingValueArgPassing::Resolved(
-                ResolvedValueArgPassing::SharedRef,
-            )) => true,
-            PendingArgPassing::Value(PendingValueArgPassing::Resolved(
-                ResolvedValueArgPassing::TrivialCopy,
-            )) => false,
-            PendingArgPassing::Value(PendingValueArgPassing::Unknown) => {
-                !self.type_has_concrete_trivial_copy_impl(env, ty, span)
-            }
+            ArgConvention::MutableRef => false,
+            ArgConvention::Let => !self.type_has_concrete_trivial_copy_impl(env, ty),
         }
     }
 
@@ -4338,15 +4382,14 @@ impl TypeInference {
         env: &mut TypingEnv,
         arg: NodeId,
         ty: Type,
-        passing: PendingArgPassing,
+        passing: ArgConvention,
         span: Location,
     ) {
-        // A non-place shared-ref argument may need owned temporary storage whose cleanup uses Value::drop.
-        if matches!(passing, PendingArgPassing::Value(_))
-            && !node_is_stable_place_reference(env.ir_arena, arg)
-            && !self.type_has_concrete_trivial_copy_impl(env, ty, span)
-            && !ty.is_function()
-        {
+        let needs_value = match passing {
+            ArgConvention::MutableRef => false,
+            ArgConvention::Let => !node_is_stable_place_reference(env.ir_arena, arg),
+        };
+        if needs_value && !self.type_has_concrete_trivial_copy_impl(env, ty) && !ty.is_function() {
             self.add_pub_constraint(PubTypeConstraint::new_have_trait(
                 value_trait_id(env),
                 vec![ty],
@@ -4364,13 +4407,13 @@ impl TypeInference {
         mut prefix: Vec<NodeId>,
         call: hir::Node,
     ) -> NodeKind {
-        if prefix.is_empty() {
+        let drops = self.cleanup_locals_for_locals(env, temp_start_index);
+        if prefix.is_empty() && drops.is_empty() {
             return call.kind;
         }
 
         let call = env.ir_arena.alloc(call);
         prefix.push(call);
-        let drops = self.cleanup_locals_for_locals(env, temp_start_index);
         env.cur_locals.truncate(temp_start_index);
         self.block_or_cleanup_scope(prefix, drops)
     }
@@ -4393,11 +4436,12 @@ impl TypeInference {
         self.block_or_cleanup_scope(prefix, drops)
     }
 
-    /// Builds a consumer that reads `value` by shared reference. A non-place `value` needing a
+    /// Builds a consumer that reads `value` through shared storage. A non-place `value` needing a
     /// semantic drop is first bound to an owned `name` temporary dropped after the consumer (so it
-    /// acquires a `Value` obligation, like a shared-ref call argument); a place or trivially-copyable
-    /// `value` is consumed in place. `build_consumer` receives the node to consume — `value` or the
-    /// `LoadLocal` of its temporary — and returns its `(kind, type, effects)`.
+    /// acquires a `Value` obligation, like an indirect `Let` argument); a place or
+    /// trivially-copyable `value` is consumed in place. `build_consumer` receives the node to
+    /// consume — `value` or the `LoadLocal` of its temporary — and returns its `(kind, type,
+    /// effects)`.
     pub(crate) fn consume_value_by_shared_ref(
         &mut self,
         env: &mut TypingEnv,
@@ -4408,7 +4452,7 @@ impl TypeInference {
         build_consumer: impl FnOnce(&mut Self, &mut TypingEnv, NodeId) -> (NodeKind, Type, EffType),
     ) -> (NodeKind, Type, EffType) {
         let is_stable_place = node_is_stable_storage_place_reference(env.ir_arena, value);
-        if is_stable_place || !self.node_value_needs_semantic_drop(env, value, ty, span) {
+        if is_stable_place || !self.node_value_needs_semantic_drop(env, value, ty) {
             return build_consumer(self, env, value);
         }
         let temp_start = env.cur_locals.len();
@@ -4872,8 +4916,8 @@ impl TypeInference {
         ))
     }
 
-    fn type_needs_semantic_drop(&mut self, env: &mut TypingEnv, ty: Type, span: Location) -> bool {
-        !self.type_has_concrete_trivial_copy_impl(env, ty, span)
+    fn type_needs_semantic_drop(&mut self, env: &mut TypingEnv, ty: Type) -> bool {
+        !self.type_has_concrete_trivial_copy_impl(env, ty)
     }
 
     /// Resolves the scope-exit drop of an owned binding initialized with `value`.
@@ -4891,9 +4935,9 @@ impl TypeInference {
         span: Location,
     ) -> PendingLocalDrop {
         let needs_drop = if binding_mutable {
-            self.type_needs_semantic_drop(env, ty, span)
+            self.type_needs_semantic_drop(env, ty)
         } else {
-            self.node_value_needs_semantic_drop(env, value, ty, span)
+            self.node_value_needs_semantic_drop(env, value, ty)
         };
         if needs_drop {
             self.add_value_constraint_for_unknown_drop(value_trait_id(env), ty, span);
@@ -4947,14 +4991,13 @@ impl TypeInference {
         env: &mut TypingEnv,
         value: NodeId,
         ty: Type,
-        span: Location,
     ) -> bool {
         use NodeKind::*;
 
         // A named type may have an explicit `Value` impl whose `drop` is not memberwise,
         // so the structural shortcut below does not apply to it.
         if ty.data().is_named() {
-            return self.type_needs_semantic_drop(env, ty, span);
+            return self.type_needs_semantic_drop(env, ty);
         }
 
         // Pre-extract the children we need to recurse into so we can drop the borrow on the arena before the recursive call.
@@ -4966,11 +5009,11 @@ impl TypeInference {
             Tuple(nodes) | Record(nodes) => nodes.iter().copied().collect(),
             BuildClosure(closure) => closure.captures.iter().copied().collect(),
             BuildSubscriptValue(_) => return false,
-            _ => return self.type_needs_semantic_drop(env, ty, span),
+            _ => return self.type_needs_semantic_drop(env, ty),
         };
-        children.iter().any(|node| {
-            self.node_value_needs_semantic_drop(env, *node, env.ir_arena[*node].ty, span)
-        })
+        children
+            .iter()
+            .any(|node| self.node_value_needs_semantic_drop(env, *node, env.ir_arena[*node].ty))
     }
 
     fn materialize_owned_values(
@@ -5023,7 +5066,7 @@ impl TypeInference {
     ) -> NodeId {
         if !node_is_place_reference(env.ir_arena, value) {
             let ty = env.ir_arena[value].ty;
-            if self.node_value_needs_semantic_drop(env, value, ty, span) {
+            if self.node_value_needs_semantic_drop(env, value, ty) {
                 let temp_start_index = env.cur_locals.len();
                 let (store, _) = self.store_owned_temp(env, value, ty, span, ustr("$discard"));
                 let nodes = vec![store];
@@ -5987,14 +6030,12 @@ fn assignment_initializes_storage(
 }
 
 impl TypeInference {
-    /// Whether `ty` has a concrete `TrivialCopy` impl in scope. Cached per
-    /// inference pass to avoid recloning the module's impl table on every
-    /// probe.
+    /// Whether the concrete `ty` is structurally `TrivialCopy`. Cached per
+    /// inference pass to avoid recloning module metadata on every probe.
     pub(super) fn type_has_concrete_trivial_copy_impl(
         &mut self,
         env: &mut TypingEnv<'_>,
         ty: Type,
-        span: Location,
     ) -> bool {
         if !ty.is_constant() {
             return false;
@@ -6004,24 +6045,17 @@ impl TypeInference {
         }
         let mut trait_solver =
             TraitSolverProbe::from_module(env.module_env.current, env.module_env.modules);
-        let result = trait_solver
-            .solve_outputs(
-                env.module_env.expect_std_trait_id(TRIVIAL_COPY_TRAIT_NAME),
-                &[ty],
-                span,
-                env.ir_arena,
-            )
-            .is_ok();
+        let result = trait_solver.concrete_type_is_trivial_copy(ty);
         self.trivial_copy_cache.insert(ty, result);
         result
     }
 }
 
 fn visible_arg_passing_from_runtime<'a>(
-    runtime_arg_passing: Option<&'a [ResolvedArgPassing]>,
+    runtime_arg_passing: Option<&'a [ArgConvention]>,
     inst_data: &hir::FnInstData,
     visible_arg_count: usize,
-) -> Option<&'a [ResolvedArgPassing]> {
+) -> Option<&'a [ArgConvention]> {
     let runtime_arg_passing = runtime_arg_passing?;
     let hidden_dict_arg_count = inst_data.dicts_req.len();
     if hidden_dict_arg_count == 0 {

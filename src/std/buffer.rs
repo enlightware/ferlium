@@ -19,9 +19,9 @@ use crate::{
     },
     hir::{
         function::{
-            BinaryNativeFnRMN, BinaryNativeFnRRN, Callable, CallableDefinition, ContextNativeFn,
-            Function, ResolvedArgPassing, ResolvedValueArgPassing, UnaryNativeFnMN,
-            UnaryNativeFnRN,
+            ArgConvention, BinaryNativeFnRMN, BinaryNativeFnRRN, Callable, CallableDefinition,
+            ContextNativeFn, Function, UnaryNativeFnMN, UnaryNativeFnRN,
+            extract_trivial_native_input,
         },
         value::{NativeValueType, Value},
     },
@@ -34,11 +34,8 @@ use crate::{
     },
 };
 
-const TRIVIAL_COPY_INT: ResolvedArgPassing =
-    ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy);
-const SHARED_REF: ResolvedArgPassing =
-    ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef);
-const MUTABLE_REF: ResolvedArgPassing = ResolvedArgPassing::MutableRef;
+const LET: ArgConvention = ArgConvention::Let;
+const MUTABLE_REF: ArgConvention = ArgConvention::MutableRef;
 
 use super::value::native_layout_associated_consts;
 
@@ -182,13 +179,19 @@ fn buffer_slot_place(buffer: ValOrMut, index: isize) -> Result<Place, RuntimeErr
     Ok(place)
 }
 
-fn buffer_slot(mut args: ValOrMutArgs, _ctx: &mut EvalCtx) -> EvalControlFlowResult {
+fn int_from_arg(arg: ValOrMut, ctx: &mut EvalCtx<'_>, expected: &'static str) -> isize {
+    let result = extract_trivial_native_input::<isize>(&arg, ctx).expect(expected);
+    arg.discard_storage();
+    result
+}
+
+fn buffer_slot(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalControlFlowResult {
     let buffer = args.next().unwrap();
-    let index = args
-        .next()
-        .unwrap()
-        .into_primitive::<isize>()
-        .expect("buffer slot index should be an int");
+    let index = int_from_arg(
+        args.next().unwrap(),
+        ctx,
+        "buffer slot index should be an int",
+    );
     cont(Value::native(PlaceResult::new(buffer_slot_place(
         buffer, index,
     )?)))
@@ -217,7 +220,7 @@ fn buffer_slot_descr() -> ModuleFunction {
         Box::new(ContextNativeFn::new(
             "buffer_slot",
             &[],
-            &[MUTABLE_REF, TRIVIAL_COPY_INT],
+            &[MUTABLE_REF, LET],
             buffer_slot,
         )),
         None,
@@ -239,13 +242,13 @@ fn buffer_with_capacity_descr() -> ModuleFunction {
         ContextNativeFn::new(
             "buffer_with_capacity",
             &[],
-            &[TRIVIAL_COPY_INT],
-            |mut args: ValOrMutArgs, _ctx: &mut EvalCtx| {
-                let capacity = args
-                    .next()
-                    .unwrap()
-                    .into_primitive::<isize>()
-                    .expect("buffer capacity should be an int");
+            &[LET],
+            |mut args: ValOrMutArgs, ctx: &mut EvalCtx| {
+                let capacity = int_from_arg(
+                    args.next().unwrap(),
+                    ctx,
+                    "buffer capacity should be an int",
+                );
                 cont(Value::native(buffer_with_capacity(capacity)))
             },
         ),
@@ -256,11 +259,11 @@ fn buffer_clone_value_into(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalCon
     let dictionary = dictionary_from_arg(args.next().unwrap(), ctx)?;
     let source = args.next().unwrap();
     let target = args.next().unwrap();
-    let index = args
-        .next()
-        .unwrap()
-        .into_primitive::<isize>()
-        .expect("buffer target index should be an int");
+    let index = int_from_arg(
+        args.next().unwrap(),
+        ctx,
+        "buffer target index should be an int",
+    );
     let target = buffer_slot_place(target, index)?;
     call_value_clone_to_target(ctx, dictionary, source, target, Location::new_synthesized())
 }
@@ -282,8 +285,8 @@ fn buffer_clone_value_into_descr(value_trait_id: TraitId) -> ModuleFunction {
         "Clones a value into a buffer slot.",
         ContextNativeFn::new(
             "buffer_clone_value_into",
-            &[SHARED_REF],
-            &[SHARED_REF, MUTABLE_REF, TRIVIAL_COPY_INT],
+            &[LET],
+            &[LET, MUTABLE_REF, LET],
             buffer_clone_value_into,
         ),
     )
@@ -292,17 +295,17 @@ fn buffer_clone_value_into_descr(value_trait_id: TraitId) -> ModuleFunction {
 fn buffer_clone_into(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalControlFlowResult {
     let dictionary = dictionary_from_arg(args.next().unwrap(), ctx)?;
     let source = args.next().unwrap();
-    let source_index = args
-        .next()
-        .unwrap()
-        .into_primitive::<isize>()
-        .expect("buffer source index should be an int");
+    let source_index = int_from_arg(
+        args.next().unwrap(),
+        ctx,
+        "buffer source index should be an int",
+    );
     let target = args.next().unwrap();
-    let target_index = args
-        .next()
-        .unwrap()
-        .into_primitive::<isize>()
-        .expect("buffer target index should be an int");
+    let target_index = int_from_arg(
+        args.next().unwrap(),
+        ctx,
+        "buffer target index should be an int",
+    );
     let source = buffer_slot_place(source, source_index)?;
     let target = buffer_slot_place(target, target_index)?;
     call_value_clone_to_target(
@@ -332,8 +335,8 @@ fn buffer_clone_into_descr(value_trait_id: TraitId) -> ModuleFunction {
         "Clones a buffer slot into another buffer slot.",
         ContextNativeFn::new(
             "buffer_clone_into",
-            &[SHARED_REF],
-            &[SHARED_REF, TRIVIAL_COPY_INT, MUTABLE_REF, TRIVIAL_COPY_INT],
+            &[LET],
+            &[LET, LET, MUTABLE_REF, LET],
             buffer_clone_into,
         ),
     )
@@ -341,17 +344,17 @@ fn buffer_clone_into_descr(value_trait_id: TraitId) -> ModuleFunction {
 
 fn buffer_move_into(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalControlFlowResult {
     let mut source = place_from_arg(args.next().unwrap())?;
-    let source_index = args
-        .next()
-        .unwrap()
-        .into_primitive::<isize>()
-        .expect("buffer source index should be an int");
+    let source_index = int_from_arg(
+        args.next().unwrap(),
+        ctx,
+        "buffer source index should be an int",
+    );
     let mut target = place_from_arg(args.next().unwrap())?;
-    let target_index = args
-        .next()
-        .unwrap()
-        .into_primitive::<isize>()
-        .expect("buffer target index should be an int");
+    let target_index = int_from_arg(
+        args.next().unwrap(),
+        ctx,
+        "buffer target index should be an int",
+    );
     source.path.push(source_index);
     target.path.push(target_index);
     let value = {
@@ -383,7 +386,7 @@ fn buffer_move_into_descr() -> ModuleFunction {
         ContextNativeFn::new(
             "buffer_move_into",
             &[],
-            &[MUTABLE_REF, TRIVIAL_COPY_INT, MUTABLE_REF, TRIVIAL_COPY_INT],
+            &[MUTABLE_REF, LET, MUTABLE_REF, LET],
             buffer_move_into,
         ),
     )
@@ -419,11 +422,7 @@ fn buffer_move_descr() -> ModuleFunction {
 
 fn buffer_take(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalControlFlowResult {
     let mut source = place_from_arg(args.next().unwrap())?;
-    let index = args
-        .next()
-        .unwrap()
-        .into_primitive::<isize>()
-        .expect("buffer index should be an int");
+    let index = int_from_arg(args.next().unwrap(), ctx, "buffer index should be an int");
     source.path.push(index);
     let value = {
         let source = source.target_mut(ctx).map_err(RuntimeError::new_native)?;
@@ -443,23 +442,18 @@ fn buffer_take_descr() -> ModuleFunction {
         [],
         ["source", "index"],
         "Moves a value out of a buffer slot.",
-        ContextNativeFn::new(
-            "buffer_take",
-            &[],
-            &[MUTABLE_REF, TRIVIAL_COPY_INT],
-            buffer_take,
-        ),
+        ContextNativeFn::new("buffer_take", &[], &[MUTABLE_REF, LET], buffer_take),
     )
 }
 
 fn buffer_drop_at(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalControlFlowResult {
     let dictionary = dictionary_from_arg(args.next().unwrap(), ctx)?;
     let target = args.next().unwrap();
-    let index = args
-        .next()
-        .unwrap()
-        .into_primitive::<isize>()
-        .expect("buffer drop index should be an int");
+    let index = int_from_arg(
+        args.next().unwrap(),
+        ctx,
+        "buffer drop index should be an int",
+    );
     let target = buffer_slot_place(target, index)?;
     call_value_drop_for_temp(
         ctx,
@@ -482,8 +476,8 @@ fn buffer_drop_at_descr(value_trait_id: TraitId) -> ModuleFunction {
         "Drops a value stored in a buffer slot.",
         ContextNativeFn::new(
             "buffer_drop_at",
-            &[SHARED_REF],
-            &[MUTABLE_REF, TRIVIAL_COPY_INT],
+            &[LET],
+            &[MUTABLE_REF, LET],
             buffer_drop_at,
         ),
     )

@@ -14,10 +14,10 @@ use crate::{
         InternalCompilationError, InvalidSubscriptDefinitionKind, InvalidYieldKind,
         SubscriptDefinitionSubject,
     },
-    hir::{CallArgument, Node, NodeArena, NodeId, NodeKind},
+    hir::{CallArgument, Node, NodeArena, NodeId, NodeKind, function::ArgConvention},
     internal_compilation_error,
     module::{LocalDeclId, ULocalDecl, id::Id},
-    types::r#type::{FnArgType, Type},
+    types::r#type::Type,
 };
 
 enum PathPart {
@@ -144,19 +144,53 @@ fn do_paths_overlap(a: &Path, b: &Path) -> bool {
     true
 }
 
+/// Return each immutable argument whose place overlaps an exclusive mutable argument.
+///
+/// The pair contains `(let_argument_index, mutable_argument_index)`. Multiple immutable
+/// accesses may share a place; only immutable/mutable conflicts require a snapshot.
+pub(crate) fn let_arguments_overlapping_mutable(
+    arena: &NodeArena,
+    arguments: &[CallArgument],
+) -> Vec<(usize, usize)> {
+    let mutable_paths = arguments
+        .iter()
+        .enumerate()
+        .filter(|(_, argument)| argument.passing == ArgConvention::MutableRef)
+        .map(|(index, argument)| (index, Path::from_node(arena, argument.value)))
+        .collect::<Vec<_>>();
+
+    arguments
+        .iter()
+        .enumerate()
+        .filter(|(_, argument)| {
+            argument.passing == ArgConvention::Let
+                && crate::hir::node_is_place_reference(arena, argument.value)
+                // A generic trait method is place-like for dictionary dispatch, but the
+                // method value is metadata rather than aliasable source storage.
+                && !matches!(arena[argument.value].kind, NodeKind::GetTraitMethod(_))
+        })
+        .flat_map(|(let_index, argument)| {
+            let let_path = Path::from_node(arena, argument.value);
+            mutable_paths
+                .iter()
+                .filter(move |(_, mutable_path)| do_paths_overlap(&let_path, mutable_path))
+                .map(move |(mutable_index, _)| (let_index, *mutable_index))
+        })
+        .collect()
+}
+
 /// Implements borrow checking logic by comparing the paths of mutable arguments.
 fn check_arguments(
-    arg_types: &[FnArgType],
     arguments: &[CallArgument],
     arena: &NodeArena,
     fn_span: Location,
 ) -> Result<(), InternalCompilationError> {
     // Collect all mutable arguments indices and their paths.
-    let in_out_args: Vec<_> = arg_types
+    let in_out_args: Vec<_> = arguments
         .iter()
         .enumerate()
-        .filter_map(|(i, ty)| {
-            if ty.mut_ty.is_mutable() {
+        .filter_map(|(i, argument)| {
+            if argument.passing == ArgConvention::MutableRef {
                 Some((i, Path::from_node(arena, arguments[i].value)))
             } else {
                 None
@@ -413,21 +447,14 @@ impl Node {
                 for arg in &app.arguments {
                     check_borrows(arena, arg.value)?;
                 }
-                let fn_type = arena[app.function].ty.data();
-                let fn_type = fn_type.as_function().unwrap();
-                check_arguments(
-                    &fn_type.args,
-                    &app.arguments,
-                    arena,
-                    arena[app.function].span,
-                )?;
+                check_arguments(&app.arguments, arena, arena[app.function].span)?;
             }
             SubscriptApply(app) => {
                 check_borrows(arena, app.subscript)?;
                 for arg in &app.arguments {
                     check_borrows(arena, arg.value)?;
                 }
-                check_arguments(&app.ty.fn_ty.args, &app.arguments, arena, self.span)?;
+                check_arguments(&app.arguments, arena, self.span)?;
             }
             CloneClosureEnv(node) => {
                 check_borrows(arena, node.source)?;
@@ -448,13 +475,13 @@ impl Node {
                 for arg in &app.arguments {
                     check_borrows(arena, arg.value)?;
                 }
-                check_arguments(&app.ty.fn_ty.args, &app.arguments, arena, app.function_span)?;
+                check_arguments(&app.arguments, arena, app.function_span)?;
             }
             TraitMethodApply(app) => {
                 for arg in &app.arguments {
                     check_borrows(arena, arg.value)?;
                 }
-                check_arguments(&app.ty.fn_ty.args, &app.arguments, arena, app.method_span)?;
+                check_arguments(&app.arguments, arena, app.method_span)?;
             }
             GetFunction(_) | GetSubscript(_) => {}
             GetTraitMethod(_) | GetTraitAssociatedConst(_) | GetTraitDictionary(_) => {}
@@ -467,12 +494,7 @@ impl Node {
                 for arg in &node.arguments {
                     check_borrows(arena, arg.value)?;
                 }
-                check_arguments(
-                    &node.ty.fn_ty.args,
-                    &node.arguments,
-                    arena,
-                    arena[node.dictionary].span,
-                )?;
+                check_arguments(&node.arguments, arena, arena[node.dictionary].span)?;
             }
             StoreLocal(node) => {
                 check_borrows(arena, node.value)?;

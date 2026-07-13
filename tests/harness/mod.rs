@@ -507,6 +507,7 @@ fn option_type_def() -> TypeDef {
         span: Location::new_synthesized(),
         attributes: vec![],
         default_variant: None,
+        has_custom_value_impl: false,
     }
 }
 
@@ -542,6 +543,7 @@ fn map_iterator_type_def(iterator_trait: TraitId) -> TypeDef {
         span: Location::new_synthesized(),
         attributes: vec![],
         default_variant: None,
+        has_custom_value_impl: false,
     }
 }
 
@@ -570,6 +572,7 @@ fn witnessed_type_def(test_assoc_trait: TraitId) -> TypeDef {
         span: Location::new_synthesized(),
         attributes: vec![],
         default_variant: None,
+        has_custom_value_impl: false,
     }
 }
 

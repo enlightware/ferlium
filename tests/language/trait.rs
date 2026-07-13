@@ -16,10 +16,7 @@ use ferlium::{
     format::FormatWith,
     hir::{
         ENodeArena, ENodeId, NodeKind,
-        function::{
-            CallableDefinition, Function, ResolvedArgPassing, ResolvedValueArgPassing,
-            UnaryNativeFnNN,
-        },
+        function::{ArgConvention, CallableDefinition, Function, UnaryNativeFnNN},
         value::LiteralValue,
     },
     module::{Module, ModuleId, Path, TraitDictionaryEntry, TraitId},
@@ -224,7 +221,7 @@ fn generic_trait_method_function_argument_keeps_source_place_passing() {
     "#});
 
     let mut saw_method_store = false;
-    let mut saw_shared_ref_local_arg = false;
+    let mut saw_let_local_arg = false;
     for (_, node) in module.hir_arena.iter() {
         if let NodeKind::StoreLocal(store) = &node.kind
             && store_value_materializes_dictionary_method(&module.hir_arena, store.value)
@@ -239,10 +236,10 @@ fn generic_trait_method_function_argument_keeps_source_place_passing() {
             Some(argument)
                 if matches!(
                     argument.passing,
-                    ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef)
+                    ArgConvention::Let
                 ) && matches!(module.hir_arena[argument.value].kind, NodeKind::LoadLocal(_))
         ) {
-            saw_shared_ref_local_arg = true;
+            saw_let_local_arg = true;
         }
     }
 
@@ -251,8 +248,8 @@ fn generic_trait_method_function_argument_keeps_source_place_passing() {
         "generic trait method values passed as arguments should be materialized explicitly",
     );
     assert!(
-        saw_shared_ref_local_arg,
-        "materialized generic trait method values should be passed by shared reference from a local",
+        saw_let_local_arg,
+        "materialized generic trait method values should use Let access from a local",
     );
 }
 

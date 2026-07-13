@@ -10,7 +10,7 @@ use crate::{
     Location,
     ast::UnnamedArg,
     containers::{IntoSVec2, b},
-    hir::function::PendingArgPassing,
+    hir::function::ArgConvention,
     hir::value::{LiteralNativeValue, LiteralValue},
     hir::{self, CallArgument, HirPhase, NodeId, NodeKind, Project, Variant},
     module::{
@@ -45,7 +45,7 @@ pub fn static_apply_with_argument_passing(
     function: FunctionId,
     ty: FnType,
     arguments: impl Into<Vec<NodeId>>,
-    argument_passing: Vec<PendingArgPassing>,
+    argument_passing: Vec<ArgConvention>,
     span: Location,
 ) -> NodeKind {
     let arguments = arguments.into();

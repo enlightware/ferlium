@@ -10,7 +10,6 @@ use std::{
     fmt::{self, Debug},
     hash::DefaultHasher,
     marker::PhantomData,
-    mem::size_of,
 };
 
 use dyn_clone::DynClone;
@@ -30,7 +29,7 @@ use crate::{
     },
     format::{FormatWith, escape_identifier, format_generic_param_list, write_identifier},
     hir::value::{NativeValue, Value},
-    hir::{self, ENodeId, NodeArena, NodeId, UNodeArena, UNodeId},
+    hir::{self, ENodeId, UNodeArena, UNodeId},
     module::{ELocalDecl, ModuleEnv, ModuleFunction, ULocalDecl},
     types::effects::EffType,
     types::r#type::{
@@ -313,18 +312,18 @@ pub trait Callable: DynClone {
     fn call(
         &self,
         args: Vec<ValOrMut>,
-        ctx: &mut CallCtx,
+        _ctx: &mut CallCtx,
         locals: &[ELocalDecl],
     ) -> EvalControlFlowResult;
     fn as_script(&self) -> Option<&ScriptFunction> {
         None
     }
     /// Passing convention for the runtime adapter argument vector, including hidden evidence.
-    fn runtime_argument_passing(&self) -> Option<&[ResolvedArgPassing]> {
+    fn runtime_argument_passing(&self) -> Option<&[ArgConvention]> {
         None
     }
     /// Passing convention for source-visible callee parameters only.
-    fn visible_parameter_passing(&self) -> Option<&[ResolvedArgPassing]> {
+    fn visible_parameter_passing(&self) -> Option<&[ArgConvention]> {
         self.runtime_argument_passing()
     }
     fn as_script_mut(&mut self) -> Option<&mut ScriptFunction> {
@@ -382,159 +381,43 @@ impl Drop for CallArgsStorageGuard {
 
 pub type Function = Box<dyn Callable>;
 
-/// Call-argument passing before local ownership/value elaboration.
+/// The semantic access convention of a call argument.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PendingArgPassing {
-    /// Resolve the source expression as a mutable place.
+pub enum ArgConvention {
+    /// Give the callee exclusive mutable access to the argument place.
     MutableRef,
-    /// Pass a non-mutable value argument.
-    Value(PendingValueArgPassing),
+    /// Give the callee immutable, non-escaping access for the duration of the call.
+    Let,
 }
 
-impl PendingArgPassing {
-    pub fn resolved(self) -> Option<ResolvedArgPassing> {
-        match self {
-            Self::MutableRef => Some(ResolvedArgPassing::MutableRef),
-            Self::Value(PendingValueArgPassing::Unknown) => None,
-            Self::Value(PendingValueArgPassing::Resolved(passing)) => {
-                Some(ResolvedArgPassing::Value(passing))
-            }
-        }
-    }
-
-    pub fn into_elaborated(self) -> ResolvedArgPassing {
-        self.resolved()
-            .expect("argument passing should have been resolved before elaboration")
-    }
-
-    pub fn from_resolved(passing: ResolvedArgPassing) -> Self {
-        match passing {
-            ResolvedArgPassing::MutableRef => Self::MutableRef,
-            ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy) => Self::Value(
-                PendingValueArgPassing::Resolved(ResolvedValueArgPassing::TrivialCopy),
-            ),
-            ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef) => {
-                Self::Value(PendingValueArgPassing::Unknown)
-            }
-        }
-    }
-}
-
-/// Value-argument passing before local ownership/value elaboration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PendingValueArgPassing {
-    /// Decide between owned value and shared reference after type inference.
-    Unknown,
-    /// We know how to pass the argument.
-    Resolved(ResolvedValueArgPassing),
-}
-
-impl PendingValueArgPassing {
-    pub fn into_elaborated(self) -> ResolvedValueArgPassing {
-        match self {
-            Self::Unknown => {
-                panic!("argument passing should have been resolved before elaboration")
-            }
-            Self::Resolved(passing) => passing,
-        }
-    }
-}
-
-/// Formatting behavior shared by pending and elaborated call-argument metadata.
-pub trait CallArgPassingMetadata: Copy {
+/// Formatting behavior for call-argument metadata.
+pub trait CallArgConventionMetadata: Copy {
     fn format_label(self) -> &'static str;
 }
 
-impl CallArgPassingMetadata for PendingArgPassing {
+impl CallArgConventionMetadata for ArgConvention {
     fn format_label(self) -> &'static str {
         match self {
             Self::MutableRef => "by mut",
-            Self::Value(PendingValueArgPassing::Unknown) => "by unresolved passing",
-            Self::Value(PendingValueArgPassing::Resolved(ResolvedValueArgPassing::TrivialCopy)) => {
-                "by trivial copy"
-            }
-            Self::Value(PendingValueArgPassing::Resolved(ResolvedValueArgPassing::SharedRef)) => {
-                "by ref"
-            }
+            Self::Let => "by let",
         }
     }
 }
 
-impl CallArgPassingMetadata for ResolvedArgPassing {
-    fn format_label(self) -> &'static str {
-        match self {
-            Self::MutableRef => "by mut",
-            Self::Value(ResolvedValueArgPassing::TrivialCopy) => "by trivial copy",
-            Self::Value(ResolvedValueArgPassing::SharedRef) => "by ref",
-        }
-    }
-}
-
-/// How a call argument should be prepared, once resolved.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResolvedArgPassing {
-    /// Resolve the source expression as a mutable place.
-    MutableRef,
-    /// Pass a non-mutable value argument.
-    Value(ResolvedValueArgPassing),
-}
-
-/// How a call argument by value should be prepared, once resolved.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResolvedValueArgPassing {
-    /// Copy a concrete `TrivialCopy` argument by representation.
-    TrivialCopy,
-    /// Keep a place as a shared borrow.
-    SharedRef,
-}
-
-fn unresolved_arg_passing_for_arg(arg: &FnArgType) -> PendingArgPassing {
+fn arg_convention_for_arg(arg: &FnArgType) -> ArgConvention {
     if arg
         .mut_ty
         .as_resolved()
         .is_some_and(|mut_ty| mut_ty.is_mutable())
     {
-        PendingArgPassing::MutableRef
+        ArgConvention::MutableRef
     } else {
-        PendingArgPassing::Value(PendingValueArgPassing::Unknown)
+        ArgConvention::Let
     }
 }
 
-pub fn unresolved_arg_passing_for_args(args: &[FnArgType]) -> Vec<PendingArgPassing> {
-    args.iter().map(unresolved_arg_passing_for_arg).collect()
-}
-
-pub(crate) type ValueArgPassingResolver<C, E> =
-    fn(&mut NodeArena, &mut C, Type, bool, Location) -> Result<ResolvedValueArgPassing, E>;
-
-pub(crate) fn resolve_arg_passing_for_call<E, C>(
-    arena: &mut NodeArena,
-    ctx: &mut C,
-    args: &[NodeId],
-    arg_tys: &[FnArgType],
-    span: Location,
-    resolve_value_arg_passing: ValueArgPassingResolver<C, E>,
-) -> Result<Vec<PendingArgPassing>, E> {
-    assert_eq!(args.len(), arg_tys.len());
-    args.iter()
-        .zip(arg_tys)
-        .map(|(&arg, arg_ty)| {
-            if arg_ty
-                .mut_ty
-                .as_resolved()
-                .is_some_and(|mut_ty| mut_ty.is_mutable())
-            {
-                return Ok(PendingArgPassing::MutableRef);
-            }
-            let needs_temp = call_argument_may_need_temp(arena, arg);
-            resolve_value_arg_passing(arena, ctx, arg_ty.ty, needs_temp, span)
-                .map(|passing| PendingArgPassing::Value(PendingValueArgPassing::Resolved(passing)))
-        })
-        .collect()
-}
-
-pub(crate) fn call_argument_may_need_temp(arena: &NodeArena, node_id: NodeId) -> bool {
-    !hir::node_is_stable_place_reference(arena, node_id)
+pub fn arg_conventions_for_args(args: &[FnArgType]) -> Vec<ArgConvention> {
+    args.iter().map(arg_convention_for_arg).collect()
 }
 
 /// An empty dummy function returning (), used as placeholder
@@ -726,9 +609,9 @@ pub struct ContextNativeFn {
     /// Debug name used when formatting the native callable.
     name: &'static str,
     /// Runtime adapter passing, including hidden evidence followed by visible parameters.
-    runtime_argument_passing: Vec<ResolvedArgPassing>,
+    runtime_argument_passing: Vec<ArgConvention>,
     /// Visible Ferlium parameter passing, excluding hidden runtime evidence.
-    visible_parameter_passing: &'static [ResolvedArgPassing],
+    visible_parameter_passing: &'static [ArgConvention],
     /// Rust callback implementing the context-native operation.
     function: for<'a> fn(ValOrMutArgs, &mut CallCtx<'a>) -> EvalControlFlowResult,
 }
@@ -736,8 +619,8 @@ pub struct ContextNativeFn {
 impl ContextNativeFn {
     pub(crate) fn new(
         name: &'static str,
-        hidden_argument_passing: &'static [ResolvedArgPassing],
-        visible_parameter_passing: &'static [ResolvedArgPassing],
+        hidden_argument_passing: &'static [ArgConvention],
+        visible_parameter_passing: &'static [ArgConvention],
         function: for<'a> fn(ValOrMutArgs, &mut CallCtx<'a>) -> EvalControlFlowResult,
     ) -> Self {
         let runtime_argument_passing = hidden_argument_passing
@@ -764,11 +647,11 @@ impl Callable for ContextNativeFn {
         (self.function)(ValOrMutArgs::new(args), ctx)
     }
 
-    fn runtime_argument_passing(&self) -> Option<&[ResolvedArgPassing]> {
+    fn runtime_argument_passing(&self) -> Option<&[ArgConvention]> {
         Some(&self.runtime_argument_passing)
     }
 
-    fn visible_parameter_passing(&self) -> Option<&[ResolvedArgPassing]> {
+    fn visible_parameter_passing(&self) -> Option<&[ArgConvention]> {
         Some(self.visible_parameter_passing)
     }
 
@@ -789,14 +672,14 @@ impl Callable for ContextNativeFn {
 #[derive(Debug, Clone)]
 pub struct StructuralFieldAddressor {
     index: isize,
-    runtime_argument_passing: Vec<ResolvedArgPassing>,
+    runtime_argument_passing: Vec<ArgConvention>,
 }
 
 impl StructuralFieldAddressor {
     pub fn new(index: usize) -> Self {
         Self {
             index: index as isize,
-            runtime_argument_passing: vec![ResolvedArgPassing::MutableRef],
+            runtime_argument_passing: vec![ArgConvention::MutableRef],
         }
     }
 }
@@ -828,11 +711,11 @@ impl Callable for StructuralFieldAddressor {
         cont(Value::native(PlaceResult::new(place)))
     }
 
-    fn runtime_argument_passing(&self) -> Option<&[ResolvedArgPassing]> {
+    fn runtime_argument_passing(&self) -> Option<&[ArgConvention]> {
         Some(&self.runtime_argument_passing)
     }
 
-    fn visible_parameter_passing(&self) -> Option<&[ResolvedArgPassing]> {
+    fn visible_parameter_passing(&self) -> Option<&[ArgConvention]> {
         Some(&self.runtime_argument_passing)
     }
 
@@ -856,17 +739,17 @@ impl Callable for StructuralFieldAddressor {
 pub trait NativeOutput: NativeValue {}
 impl<T: NativeValue> NativeOutput for T {}
 
-/// Marker struct to declare argument by value to native functions.
+/// Marker selecting owned Rust-value extraction for a native `Let` argument.
 pub struct NatVal<T> {
     _marker: PhantomData<T>,
 }
 
-/// Marker struct to declare argument by shared reference to native functions.
+/// Marker selecting shared Rust-reference extraction for a native `Let` argument.
 pub struct NatRef<T> {
     _marker: PhantomData<T>,
 }
 
-/// Marker struct to declare argument by mutable reference to native functions.
+/// Marker selecting mutable Rust-reference extraction for a native `MutableRef` argument.
 pub struct NatMut<T> {
     _marker: PhantomData<T>,
 }
@@ -875,7 +758,9 @@ pub(crate) mod trivial_copy_private {
     pub trait Sealed {}
 }
 
-/// Marker for native Rust values that are safe and cheap to pass by value.
+/// Marker for native Rust values whose representation can be copied to produce
+/// a semantically independent Ferlium value. Physical argument passing is a
+/// separate target-ABI decision.
 ///
 /// # Safety
 ///
@@ -889,6 +774,28 @@ impl trivial_copy_private::Sealed for bool {}
 unsafe impl TrivialCopy for bool {}
 impl trivial_copy_private::Sealed for isize {}
 unsafe impl TrivialCopy for isize {}
+impl trivial_copy_private::Sealed for crate::std::math::Float {}
+unsafe impl TrivialCopy for crate::std::math::Float {}
+
+fn copy_boxed_trivial_copy_native_typed<T: TrivialCopy + NativeValue>(
+    value: &Value,
+) -> Option<Value> {
+    value
+        .as_primitive_ty::<T>()
+        .map(|value| Value::native(*value))
+}
+
+/// Copy one of the boxed interpreter's native `TrivialCopy` representations.
+///
+/// Keeping this dispatch beside the sealed Rust opt-ins makes adding a native
+/// leaf a single Rust-side change. Language-level trait registration remains
+/// explicit in the standard module.
+pub(crate) fn copy_boxed_trivial_copy_native(value: &Value) -> Option<Value> {
+    copy_boxed_trivial_copy_native_typed::<()>(value)
+        .or_else(|| copy_boxed_trivial_copy_native_typed::<bool>(value))
+        .or_else(|| copy_boxed_trivial_copy_native_typed::<isize>(value))
+        .or_else(|| copy_boxed_trivial_copy_native_typed::<crate::std::math::Float>(value))
+}
 
 pub fn extract_trivial_native_input<T: TrivialCopy>(
     arg: &ValOrMut,
@@ -922,7 +829,7 @@ pub fn extract_native_ref<'m, T: 'static>(
 /// This is necessary due to the lack of specialization in stable Rust.
 pub trait ArgExtractor {
     type Output<'a>;
-    const PASSING: ResolvedArgPassing;
+    const PASSING: ArgConvention;
     fn extract<'m>(
         arg: &'m ValOrMut,
         ctx: &'m mut CallCtx,
@@ -932,8 +839,7 @@ pub trait ArgExtractor {
 
 impl ArgExtractor for Value {
     type Output<'a> = &'a Value;
-    const PASSING: ResolvedArgPassing =
-        ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef);
+    const PASSING: ArgConvention = ArgConvention::Let;
     fn extract<'m>(
         arg: &'m ValOrMut,
         ctx: &'m mut CallCtx,
@@ -947,7 +853,7 @@ impl ArgExtractor for Value {
 
 impl ArgExtractor for &'_ mut Value {
     type Output<'a> = &'a mut Value;
-    const PASSING: ResolvedArgPassing = ResolvedArgPassing::MutableRef;
+    const PASSING: ArgConvention = ArgConvention::MutableRef;
     fn extract<'m>(
         arg: &'m ValOrMut,
         ctx: &'m mut CallCtx,
@@ -961,8 +867,7 @@ impl ArgExtractor for &'_ mut Value {
 
 impl<T: TrivialCopy> ArgExtractor for NatVal<T> {
     type Output<'a> = T;
-    const PASSING: ResolvedArgPassing =
-        ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy);
+    const PASSING: ArgConvention = ArgConvention::Let;
     fn extract<'m>(
         arg: &'m ValOrMut,
         ctx: &'m mut CallCtx,
@@ -976,8 +881,7 @@ impl<T: TrivialCopy> ArgExtractor for NatVal<T> {
 
 impl<T: 'static> ArgExtractor for NatRef<T> {
     type Output<'a> = &'a T;
-    const PASSING: ResolvedArgPassing =
-        ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef);
+    const PASSING: ArgConvention = ArgConvention::Let;
     fn extract<'m>(
         arg: &'m ValOrMut,
         ctx: &'m mut CallCtx,
@@ -991,7 +895,7 @@ impl<T: 'static> ArgExtractor for NatRef<T> {
 
 impl<T: 'static> ArgExtractor for NatMut<T> {
     type Output<'a> = &'a mut T;
-    const PASSING: ResolvedArgPassing = ResolvedArgPassing::MutableRef;
+    const PASSING: ArgConvention = ArgConvention::MutableRef;
     fn extract<'m>(
         arg: &'m ValOrMut,
         ctx: &'m mut CallCtx,
@@ -1001,10 +905,6 @@ impl<T: 'static> ArgExtractor for NatMut<T> {
     fn default_ty() -> Type {
         Type::primitive::<T>()
     }
-}
-
-pub fn assert_trivial_copy_input<T: TrivialCopy>() {
-    assert!(size_of::<T>() <= size_of::<isize>());
 }
 
 /// Marker struct to declare the output of a native function as a fallible value.
@@ -1073,7 +973,10 @@ macro_rules! n_ary_native_fn {
         pub struct $struct_name<
             $($arg: ArgExtractor + 'static,)*
             O: OutputBuilder + 'static,
-        >(for<'a> fn($($arg::Output<'a>),*) -> O::Input, PhantomData<($($arg,)* O)>);
+        >(
+            for<'a> fn($($arg::Output<'a>),*) -> O::Input,
+            PhantomData<($($arg,)* O)>,
+        );
 
         impl<
             $($arg: ArgExtractor + 'static,)*
@@ -1126,7 +1029,7 @@ macro_rules! n_ary_native_fn {
             #[allow(clippy::too_many_arguments)]
             pub fn description_with_ty(f: for<'a> fn($($arg::Output<'a>),*) -> O::Input, arg_names: [&'static str; count!($($arg)*)], doc: &'static str, $([<$arg:lower _ty>]: Type,)* o_ty: Type, effects: EffType) -> ModuleFunction {
                 let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
-                    [$(([<$arg:lower _ty>], $arg::PASSING == ResolvedArgPassing::MutableRef)), *],
+                    [$(([<$arg:lower _ty>], $arg::PASSING == ArgConvention::MutableRef)), *],
                     o_ty,
                     effects,
                 ));
@@ -1171,7 +1074,7 @@ macro_rules! n_ary_native_fn {
             }
             }
 
-            fn runtime_argument_passing(&self) -> Option<&[ResolvedArgPassing]> {
+            fn runtime_argument_passing(&self) -> Option<&[ArgConvention]> {
                 Some(&[$($arg::PASSING),*])
             }
 
@@ -1235,6 +1138,7 @@ n_ary_native_fn!(OctonaryNativeFn, A0, A1, A2, A3, A4, A5, A6, A7);
 
 #[cfg(test)]
 mod tests {
+    use std::mem::size_of;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::{
@@ -1262,15 +1166,11 @@ mod tests {
     fn observe_value(_: &Value) {}
 
     #[test]
-    fn resolved_argument_passing_stays_compact() {
-        assert!(
-            size_of::<ResolvedValueArgPassing>() <= size_of::<u32>(),
-            "ResolvedValueArgPassing should remain a compact ABI classification"
-        );
+    fn argument_convention_stays_compact() {
         assert_eq!(
-            size_of::<ResolvedArgPassing>(),
-            size_of::<ResolvedValueArgPassing>(),
-            "ResolvedArgPassing should stay within the resolved value-passing size"
+            size_of::<ArgConvention>(),
+            1,
+            "ArgConvention should remain a compact semantic classification"
         );
         assert!(
             size_of::<CallArgument<Elaborated>>() <= size_of::<usize>(),

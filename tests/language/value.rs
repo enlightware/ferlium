@@ -12,10 +12,7 @@ use crate::harness::{TestSession, int, string};
 use ferlium::{
     compiler::error::{CompilationErrorImpl, RuntimeErrorKind},
     format::FormatWith,
-    hir::{
-        self, ENodeArena, ENodeId, NodeKind,
-        function::{ResolvedArgPassing, ResolvedValueArgPassing},
-    },
+    hir::{self, ENodeArena, ENodeId, NodeKind, function::ArgConvention},
     module::{
         LocalDeclId, LocalStorage, ResolvedLocalClone, ResolvedLocalDrop,
         ResolvedTakeLocalValueMode, ShowModuleWithOptions, id::Id,
@@ -370,8 +367,8 @@ fn generated_value_to_string_materializes_string_pieces_as_cleanup_locals() {
         "#,
     );
 
-    let mut saw_shared_ref_piece_local = false;
-    let mut saw_shared_ref_piece_immediate = false;
+    let mut saw_indirect_let_piece_local = false;
+    let mut saw_indirect_let_piece_immediate = false;
     let mut saw_cleanup_block = false;
     for (_, node) in module.hir_arena.iter() {
         if let NodeKind::Block(block) = &node.kind
@@ -385,36 +382,33 @@ fn generated_value_to_string_materializes_string_pieces_as_cleanup_locals() {
         let Some(argument) = app.arguments.get(1) else {
             continue;
         };
-        if !matches!(
-            argument.passing,
-            ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef)
-        ) {
+        if !matches!(argument.passing, ArgConvention::Let) {
             continue;
         }
         match module.hir_arena[argument.value].kind {
-            NodeKind::LoadLocal(_) => saw_shared_ref_piece_local = true,
-            NodeKind::Immediate(_) => saw_shared_ref_piece_immediate = true,
+            NodeKind::LoadLocal(_) => saw_indirect_let_piece_local = true,
+            NodeKind::Immediate(_) => saw_indirect_let_piece_immediate = true,
             _ => {}
         }
     }
 
     assert!(
-        saw_shared_ref_piece_local,
-        "generated shared-ref string pieces should be loaded from explicit temporaries"
+        saw_indirect_let_piece_local,
+        "generated indirect Let string pieces should be loaded from explicit temporaries"
     );
     assert!(
         saw_cleanup_block,
-        "generated shared-ref string piece temporaries should use ordinary block cleanup"
+        "generated indirect Let string piece temporaries should use ordinary block cleanup"
     );
     assert!(
-        !saw_shared_ref_piece_immediate,
-        "generated shared-ref string pieces should not remain immediate call arguments"
+        !saw_indirect_let_piece_immediate,
+        "generated indirect Let string pieces should not remain immediate call arguments"
     );
 }
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn non_place_shared_ref_call_argument_uses_explicit_temp_cleanup() {
+fn non_place_indirect_let_argument_uses_explicit_temp_cleanup() {
     let mut session = TestSession::new();
     let compiled = session.compile(
         r#"
@@ -888,7 +882,7 @@ fn generic_owned_argument_from_mutable_place_uses_value_clone_and_owns_snapshot(
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn concrete_trivial_copy_call_argument_uses_trivial_copy_passing() {
+fn concrete_trivial_copy_call_argument_uses_let_convention() {
     let mut session = TestSession::new();
     let module = session.compile_and_get_module(
         r#"
@@ -905,14 +899,11 @@ fn concrete_trivial_copy_call_argument_uses_trivial_copy_passing() {
             let NodeKind::StaticApply(app) = &node.kind else {
                 return false;
             };
-            app.arguments.iter().any(|argument| {
-                matches!(
-                    argument.passing,
-                    ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy)
-                )
-            })
+            app.arguments
+                .iter()
+                .any(|argument| matches!(argument.passing, ArgConvention::Let))
         }),
-        "expected concrete int call argument to use trivial-copy passing"
+        "expected concrete int call argument to use the Let convention"
     );
 }
 
@@ -932,7 +923,9 @@ fn mutable_concrete_trivial_copy_place_lowers_to_snapshot_copy() {
     "#;
 
     let mut compile_session = TestSession::new();
-    let module = compile_session.compile_and_get_module(source);
+    let module_id = compile_session.compile(source).module_id;
+    let compiler_session = compile_session.session();
+    let module = compiler_session.expect_fresh_module(module_id);
     assert!(
         module.hir_arena.iter().any(|(_, node)| matches!(
             node.kind,
@@ -1050,7 +1043,7 @@ fn unused_owned_temporary_is_dropped() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn temporary_array_index_shared_ref_base_is_dropped() {
+fn temporary_array_index_let_base_is_dropped() {
     let mut session = TestSession::new();
     let source = format!(
         r#"
@@ -1070,7 +1063,7 @@ fn temporary_array_index_shared_ref_base_is_dropped() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn temporary_tuple_projection_shared_ref_base_is_dropped() {
+fn temporary_tuple_projection_let_base_is_dropped() {
     let mut session = TestSession::new();
     let source = format!(
         r#"
@@ -1090,7 +1083,7 @@ fn temporary_tuple_projection_shared_ref_base_is_dropped() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn temporary_record_projection_shared_ref_base_is_dropped() {
+fn temporary_record_projection_let_base_is_dropped() {
     let mut session = TestSession::new();
     let source = format!(
         r#"
@@ -1504,9 +1497,18 @@ fn value_impl_for_foreign_named_adt_is_rejected() {
 // Testing the callee-side parameter passing metadata used by SSA lowering,
 // as described in `doc/hir-ownership.md` ("Call Argument Passing").
 
+fn hir_has_cleanup(arena: &ENodeArena, expected_local: LocalDeclId) -> bool {
+    arena.iter().any(|(_, node)| {
+        matches!(
+            &node.kind,
+            NodeKind::Block(block) if block.cleanup.contains(&expected_local)
+        )
+    })
+}
+
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn concrete_trivial_copy_parameter_resolves_to_trivial_copy() {
+fn ordinary_parameter_uses_let_convention() {
     let mut session = TestSession::new();
     let module = session.compile_and_get_module("fn id(value: int) -> int { value } id(1)");
     assert_eq!(
@@ -1515,15 +1517,639 @@ fn concrete_trivial_copy_parameter_resolves_to_trivial_copy() {
             .unwrap()
             .parameter_passing
             .as_slice(),
-        &[ResolvedArgPassing::Value(
-            ResolvedValueArgPassing::TrivialCopy,
-        )][..],
+        &[ArgConvention::Let][..],
     );
 }
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn non_trivial_copy_value_parameter_resolves_to_shared_ref() {
+fn trivial_copy_call_argument_snapshots_before_later_mutable_argument() {
+    let source = r#"
+        fn observe(a: int, p: &mut int) -> int {
+            p = 2;
+            a
+        }
+
+        let mut x = 1;
+        observe(x, x)
+    "#;
+
+    let mut compile_session = TestSession::new();
+    let module = compile_session.compile_and_get_module(source);
+    assert!(module.hir_arena.iter().any(|(_, node)| matches!(
+        node.kind,
+        NodeKind::CloneValue(hir::CloneValue {
+            clone: ResolvedLocalClone::TrivialCopy,
+            ..
+        })
+    )));
+
+    let mut run_session = TestSession::new();
+    assert_val_eq!(run_session.run(source), int(1));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn large_trivial_copy_call_argument_snapshots_before_later_mutable_argument() {
+    let source = r#"
+        struct Pair(int, int)
+
+        fn observe(a: Pair, p: &mut Pair) -> int {
+            p.0 = 2;
+            a.0
+        }
+
+        let mut x = Pair(1, 0);
+        observe(x, x)
+    "#;
+
+    let mut compile_session = TestSession::new();
+    let module = compile_session.compile_and_get_module(source);
+    assert!(module.hir_arena.iter().any(|(_, node)| matches!(
+        node.kind,
+        NodeKind::CloneValue(hir::CloneValue {
+            clone: ResolvedLocalClone::TrivialCopy,
+            ..
+        })
+    )));
+    assert_eq!(
+        module
+            .get_function(ustr("observe"))
+            .unwrap()
+            .parameter_passing
+            .as_slice(),
+        &[ArgConvention::Let, ArgConvention::MutableRef]
+    );
+
+    let mut run_session = TestSession::new();
+    assert_val_eq!(run_session.run(source), int(1));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn managed_overlap_snapshot_is_owned_and_semantically_dropped() {
+    let source = format!(
+        r#"
+        {}
+
+        fn observe(value: Probe, target: &mut Probe) -> int {{
+            target.0 = 9;
+            value.0
+        }}
+
+        testing::reset_tracked_drops();
+        let observed = {{
+            let mut source = Probe(2);
+            let seen = observe(source, source);
+            seen * 10 + source.0
+        }};
+        observed * 1000 + testing::tracked_drop_log()
+        "#,
+        incrementing_clone_probe_value_impl()
+    );
+
+    let mut compile_session = TestSession::new();
+    let compiled = compile_session.compile(&source);
+    let expr = compiled.expr.expect("expected root expression");
+    let module = compile_session
+        .session()
+        .expect_fresh_module(compiled.module_id);
+    let snapshot_index = expr
+        .locals
+        .iter()
+        .position(|local| local.name.0 == ustr("$snapshot"))
+        .expect("expected an explicit overlap snapshot local");
+    let snapshot = &expr.locals[snapshot_index];
+    assert!(matches!(snapshot.storage, LocalStorage::Owned { .. }));
+    assert!(matches!(
+        snapshot.local_drop(),
+        Some(ResolvedLocalDrop::Static(_))
+    ));
+    assert!(hir_has_cleanup(
+        &module.hir_arena,
+        LocalDeclId::from_index(snapshot_index),
+    ));
+    assert!(module.hir_arena.iter().any(|(_, node)| matches!(
+        node.kind,
+        NodeKind::CloneValue(hir::CloneValue {
+            clone: ResolvedLocalClone::Static(_),
+            ..
+        })
+    )));
+
+    let mut run_session = TestSession::new();
+    // The snapshot clones 2 to 3 and is dropped immediately after the call;
+    // the original is then dropped as 9 at the end of its block.
+    assert_val_eq!(run_session.run(&source), int(39039));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_managed_overlap_uses_dictionary_snapshot() {
+    let source = r#"
+        fn observe<T>(a: T, p: &mut T, replacement: T) -> T where T: Value {
+            p = replacement;
+            a
+        }
+
+        fn through<T>(slot: &mut T, replacement: T) -> T where T: Value {
+            observe(slot, slot, replacement)
+        }
+
+        let mut value = "before";
+        let old = through(value, "after");
+        (old, value)
+    "#;
+
+    let mut compile_session = TestSession::new();
+    let module_id = compile_session.compile(source).module_id;
+    let compiler_session = compile_session.session();
+    let module = compiler_session.expect_fresh_module(module_id);
+    assert!(module.hir_arena.iter().any(|(_, node)| matches!(
+        node.kind,
+        NodeKind::CloneValue(hir::CloneValue {
+            clone: ResolvedLocalClone::Dictionary(_),
+            ..
+        })
+    )));
+    let through = module
+        .get_function(ustr("through"))
+        .expect("expected generic forwarding function");
+    let snapshot_index = through
+        .locals
+        .iter()
+        .position(|local| local.name.0 == ustr("$snapshot"))
+        .expect("expected an explicit overlap snapshot local");
+    assert!(matches!(
+        through.locals[snapshot_index].local_drop(),
+        Some(ResolvedLocalDrop::Dictionary(_))
+    ));
+    assert!(hir_has_cleanup(
+        &module.hir_arena,
+        LocalDeclId::from_index(snapshot_index),
+    ));
+
+    let mut run_session = TestSession::new();
+    assert_val_eq!(
+        run_session.run(source),
+        tuple!(string("before"), string("after"))
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn function_overlap_uses_an_owned_snapshot() {
+    let source = r#"
+        fn observe(value: (int) -> int, target: &mut (int) -> int) -> int {
+            target = |x| x + 10;
+            value(1)
+        }
+
+        let offset = 1;
+        let mut function: (int) -> int = |x| x + offset;
+        let observed = observe(function, function);
+        (observed, function(1))
+    "#;
+
+    let mut compile_session = TestSession::new();
+    let compiled = compile_session.compile(source);
+    let expr = compiled.expr.expect("expected root expression");
+    let module = compile_session
+        .session()
+        .expect_fresh_module(compiled.module_id);
+    let snapshot_index = expr
+        .locals
+        .iter()
+        .position(|local| local.name.0 == ustr("$snapshot"))
+        .expect("expected an explicit function snapshot local");
+    assert!(matches!(
+        expr.locals[snapshot_index].storage,
+        LocalStorage::Owned { .. }
+    ));
+    assert!(hir_has_cleanup(
+        &module.hir_arena,
+        LocalDeclId::from_index(snapshot_index),
+    ));
+
+    let mut run_session = TestSession::new();
+    assert_val_eq!(run_session.run(source), tuple!(int(2), int(11)));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn overlap_snapshot_preserves_left_to_right_argument_evaluation() {
+    let source = r#"
+        fn observe(prefix: int, value: int, target: &mut int) -> int {
+            target = 9;
+            value
+        }
+
+        let mut value = 1;
+        observe({ value = 5; 0 }, value, value)
+    "#;
+
+    let mut session = TestSession::new();
+    assert_val_eq!(session.run(source), int(5));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn disjoint_paths_do_not_snapshot_let_argument() {
+    let source = r#"
+        fn update(observed: int, target: &mut int) {
+            target = 2;
+        }
+
+        let mut value = (1, 0);
+        update(value.0, value.1);
+        value
+    "#;
+
+    let mut compile_session = TestSession::new();
+    let module = compile_session.compile_and_get_module(source);
+    assert!(!module.hir_arena.iter().any(|(_, node)| matches!(
+        node.kind,
+        NodeKind::CloneValue(hir::CloneValue {
+            clone: ResolvedLocalClone::TrivialCopy,
+            ..
+        })
+    )));
+
+    let mut run_session = TestSession::new();
+    assert_val_eq!(run_session.run(source), tuple!(int(1), int(2)));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn structural_tuple_trivial_copy_uses_representation_clone_and_skips_drop() {
+    let source = r#"
+        fn snapshot(value: &mut (int, int)) -> (int, int) {
+            let copy = value;
+            copy
+        }
+
+        let mut value = (1, 2);
+        let copy = snapshot(value);
+        value.0 = 3;
+        (copy.0, value.0)
+    "#;
+    let mut compile_session = TestSession::new();
+    let module = compile_session.compile_and_get_module(source);
+    assert!(module.hir_arena.iter().any(|(_, node)| matches!(
+        node.kind,
+        NodeKind::CloneValue(hir::CloneValue {
+            clone: ResolvedLocalClone::TrivialCopy,
+            ..
+        })
+    )));
+    let snapshot = module.get_function(ustr("snapshot")).unwrap();
+    let copy = snapshot
+        .locals
+        .iter()
+        .find(|local| local.name.0 == ustr("copy"))
+        .unwrap();
+    assert!(
+        copy.local_drop()
+            .is_none_or(|drop| matches!(drop, ResolvedLocalDrop::Skip))
+    );
+
+    let mut run_session = TestSession::new();
+    assert_val_eq!(run_session.run(source), tuple!(int(1), int(3)));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn structural_record_trivial_copy_uses_representation_clone_and_skips_drop() {
+    let source = r#"
+        fn snapshot(value: &mut { x: int, y: bool }) -> { x: int, y: bool } {
+            let copy = value;
+            copy
+        }
+
+        let mut value = { x: 1, y: true };
+        let copy = snapshot(value);
+        value.x = 3;
+        (copy.x, value.x)
+    "#;
+    let mut compile_session = TestSession::new();
+    let module = compile_session.compile_and_get_module(source);
+    assert!(module.hir_arena.iter().any(|(_, node)| matches!(
+        node.kind,
+        NodeKind::CloneValue(hir::CloneValue {
+            clone: ResolvedLocalClone::TrivialCopy,
+            ..
+        })
+    )));
+    let snapshot = module.get_function(ustr("snapshot")).unwrap();
+    let copy = snapshot
+        .locals
+        .iter()
+        .find(|local| local.name.0 == ustr("copy"))
+        .unwrap();
+    assert!(
+        copy.local_drop()
+            .is_none_or(|drop| matches!(drop, ResolvedLocalDrop::Skip))
+    );
+
+    let mut run_session = TestSession::new();
+    assert_val_eq!(run_session.run(source), tuple!(int(1), int(3)));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn tuple_with_string_is_not_trivial_copy() {
+    let mut session = TestSession::new();
+    let module = session.compile_and_get_module(
+        r#"
+        fn snapshot(value: &mut (int, string)) -> (int, string) {
+            let copy = value;
+            copy
+        }
+        let mut value = (1, "one");
+        snapshot(value)
+        "#,
+    );
+    let snapshot = module.get_function(ustr("snapshot")).unwrap();
+    let copy = snapshot
+        .locals
+        .iter()
+        .find(|local| local.name.0 == ustr("copy"))
+        .unwrap();
+    assert!(matches!(
+        copy.clone,
+        Some(ResolvedLocalClone::Static(_) | ResolvedLocalClone::Dictionary(_))
+    ));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn array_is_not_trivial_copy_even_when_its_elements_are() {
+    let mut session = TestSession::new();
+    let module = session.compile_and_get_module(
+        r#"
+        fn snapshot(value: &mut [int]) -> [int] {
+            let copy = value;
+            copy
+        }
+        let mut value = [1, 2];
+        snapshot(value)
+        "#,
+    );
+    let snapshot = module.get_function(ustr("snapshot")).unwrap();
+    let copy = snapshot
+        .locals
+        .iter()
+        .find(|local| local.name.0 == ustr("copy"))
+        .unwrap();
+    assert!(matches!(
+        copy.clone,
+        Some(ResolvedLocalClone::Static(_) | ResolvedLocalClone::Dictionary(_))
+    ));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn float_is_trivial_copy() {
+    let source = r#"
+        fn identity(value: float) -> float { value }
+        fn snapshot(value: &mut float) -> float {
+            let copy = value;
+            copy
+        }
+        let mut value = 1.5;
+        let copy = snapshot(value);
+        value = 2.5;
+        (identity(copy), value)
+    "#;
+    let mut compile_session = TestSession::new();
+    let module = compile_session.compile_and_get_module(source);
+    assert_eq!(
+        module
+            .get_function(ustr("identity"))
+            .unwrap()
+            .parameter_passing
+            .as_slice(),
+        &[ArgConvention::Let]
+    );
+    assert!(module.hir_arena.iter().any(|(_, node)| matches!(
+        node.kind,
+        NodeKind::CloneValue(hir::CloneValue {
+            clone: ResolvedLocalClone::TrivialCopy,
+            ..
+        })
+    )));
+
+    let mut run_session = TestSession::new();
+    assert_val_eq!(
+        run_session.run(source),
+        tuple!(
+            ferlium::std::math::float_value(1.5),
+            ferlium::std::math::float_value(2.5)
+        )
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn variants_and_recursive_named_types_are_not_trivial_copy() {
+    let mut session = TestSession::new();
+    let module = session.compile_and_get_module(
+        r#"
+        enum Maybe { None, Some(int) }
+        enum List { Nil, Cons(int, List) }
+
+        fn identity_maybe(value: Maybe) -> Maybe { value }
+        fn identity_list(value: List) -> List { value }
+        fn snapshot_maybe(value: &mut Maybe) -> Maybe {
+            let copy = value;
+            copy
+        }
+        fn snapshot_list(value: &mut List) -> List {
+            let copy = value;
+            copy
+        }
+
+        let mut maybe = Maybe::Some(1);
+        let mut list = List::Nil;
+        (snapshot_maybe(maybe), snapshot_list(list))
+        "#,
+    );
+    for function_name in [ustr("snapshot_maybe"), ustr("snapshot_list")] {
+        let function = module.get_function(function_name).unwrap();
+        let copy = function
+            .locals
+            .iter()
+            .find(|local| local.name.0 == ustr("copy"))
+            .unwrap();
+        assert!(matches!(copy.clone, Some(ResolvedLocalClone::Static(_))));
+    }
+    assert_eq!(
+        module
+            .get_function(ustr("identity_maybe"))
+            .unwrap()
+            .parameter_passing
+            .as_slice(),
+        &[ArgConvention::Let]
+    );
+    assert_eq!(
+        module
+            .get_function(ustr("identity_list"))
+            .unwrap()
+            .parameter_passing
+            .as_slice(),
+        &[ArgConvention::Let]
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn large_named_trivial_copy_type_is_cloned_by_representation() {
+    let source = r#"
+        struct Pair(int, int)
+
+        fn identity(value: Pair) -> Pair { value }
+        fn snapshot(value: &mut Pair) -> Pair {
+            let copy = value;
+            copy
+        }
+
+        let mut value = Pair(1, 2);
+        let copy = snapshot(value);
+        value.0 = 3;
+        (identity(copy).0, value.0)
+    "#;
+    let mut compile_session = TestSession::new();
+    let module = compile_session.compile_and_get_module(source);
+    assert_eq!(
+        module
+            .get_function(ustr("identity"))
+            .unwrap()
+            .parameter_passing
+            .as_slice(),
+        &[ArgConvention::Let]
+    );
+    assert!(module.hir_arena.iter().any(|(_, node)| matches!(
+        node.kind,
+        NodeKind::CloneValue(hir::CloneValue {
+            clone: ResolvedLocalClone::TrivialCopy,
+            ..
+        })
+    )));
+    let snapshot = module.get_function(ustr("snapshot")).unwrap();
+    let copy = snapshot
+        .locals
+        .iter()
+        .find(|local| local.name.0 == ustr("copy"))
+        .unwrap();
+    assert!(
+        copy.local_drop()
+            .is_none_or(|drop| matches!(drop, ResolvedLocalDrop::Skip))
+    );
+
+    let mut run_session = TestSession::new();
+    assert_val_eq!(run_session.run(source), tuple!(int(1), int(3)));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn named_type_with_custom_value_impl_is_not_trivial_copy() {
+    let source = r#"
+        struct Pair(int, int)
+
+        impl Value for Pair {
+            fn eq(left: Pair, right: Pair) -> bool {
+                left.0 == right.0 and left.1 == right.1
+            }
+            fn to_string(value: Pair) -> string { to_string(value.0) }
+            fn hash(value: Pair, state: &mut hasher) { hash(value.0, state) }
+            fn clone(source: Pair) -> Pair { Pair(source.0 + 10, source.1) }
+            fn drop(target: &mut Pair) {}
+        }
+
+        fn observe(value: Pair, target: &mut Pair) -> int {
+            target.0 = 2;
+            value.0
+        }
+
+        let mut value = Pair(1, 2);
+        observe(value, value)
+    "#;
+
+    let mut compile_session = TestSession::new();
+    let module = compile_session.compile_and_get_module(source);
+    assert_eq!(
+        module
+            .get_function(ustr("observe"))
+            .unwrap()
+            .parameter_passing
+            .as_slice(),
+        &[ArgConvention::Let, ArgConvention::MutableRef]
+    );
+    assert!(module.hir_arena.iter().any(|(_, node)| matches!(
+        node.kind,
+        NodeKind::CloneValue(hir::CloneValue {
+            clone: ResolvedLocalClone::Static(_),
+            ..
+        })
+    )));
+
+    let mut run_session = TestSession::new();
+    assert_val_eq!(run_session.run(source), int(11));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn custom_value_impl_remains_non_trivial_copy_across_modules() {
+    let mut session = TestSession::new();
+    session
+        .try_compile_module(
+            "base",
+            r#"
+            pub struct Pair(int, int)
+
+            impl Value for Pair {
+                fn eq(left: Pair, right: Pair) -> bool {
+                    left.0 == right.0 and left.1 == right.1
+                }
+                fn to_string(value: Pair) -> string { to_string(value.0) }
+                fn hash(value: Pair, state: &mut hasher) { hash(value.0, state) }
+                fn clone(source: Pair) -> Pair { Pair(source.0, source.1) }
+                fn drop(target: &mut Pair) {}
+            }
+            "#,
+        )
+        .unwrap();
+    let user = session
+        .try_compile_module(
+            "user",
+            r#"
+            fn snapshot(value: &mut base::Pair) -> base::Pair {
+                let copy = value;
+                copy
+            }
+            "#,
+        )
+        .unwrap();
+    let module = session.session().expect_fresh_module(user.module_id);
+    let snapshot = module.get_function(ustr("snapshot")).unwrap();
+    let copy = snapshot
+        .locals
+        .iter()
+        .find(|local| local.name.0 == ustr("copy"))
+        .unwrap();
+    assert!(matches!(copy.clone, Some(ResolvedLocalClone::Static(_))));
+    assert!(!module.hir_arena.iter().any(|(_, node)| matches!(
+        node.kind,
+        NodeKind::CloneValue(hir::CloneValue {
+            clone: ResolvedLocalClone::TrivialCopy,
+            ..
+        })
+    )));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn non_trivial_copy_parameter_uses_let_convention() {
     let mut session = TestSession::new();
     let module = session.compile_and_get_module(
         r#"
@@ -1537,9 +2163,7 @@ fn non_trivial_copy_value_parameter_resolves_to_shared_ref() {
             .unwrap()
             .parameter_passing
             .as_slice(),
-        &[ResolvedArgPassing::Value(
-            ResolvedValueArgPassing::SharedRef
-        )][..]
+        &[ArgConvention::Let][..]
     );
 }
 
@@ -1560,14 +2184,13 @@ fn mutable_parameter_resolves_to_mutable_ref() {
             .unwrap()
             .parameter_passing
             .as_slice(),
-        &[ResolvedArgPassing::MutableRef][..]
+        &[ArgConvention::MutableRef][..]
     );
 }
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn generic_value_parameter_resolves_to_shared_ref() {
-    // A generic parameter is not treated as `TrivialCopy` even under a `Value` constraint.
+fn generic_value_parameter_uses_let_convention() {
     let mut session = TestSession::new();
     let module = session.compile_and_get_module(
         r#"
@@ -1581,9 +2204,7 @@ fn generic_value_parameter_resolves_to_shared_ref() {
             .unwrap()
             .parameter_passing
             .as_slice(),
-        &[ResolvedArgPassing::Value(
-            ResolvedValueArgPassing::SharedRef
-        )][..]
+        &[ArgConvention::Let][..]
     );
 }
 
@@ -1605,9 +2226,9 @@ fn multiple_parameters_preserve_declaration_order() {
             .parameter_passing
             .as_slice(),
         &[
-            ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy),
-            ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef),
-            ResolvedArgPassing::MutableRef,
+            ArgConvention::Let,
+            ArgConvention::Let,
+            ArgConvention::MutableRef,
         ][..],
     );
 }
@@ -1638,12 +2259,12 @@ fn hir_prints_call_argument_passing_markers() {
         .to_string();
 
     assert!(
-        rendered.contains("a (by trivial copy):"),
-        "expected trivial-copy marker in HIR:\n{rendered}"
+        rendered.contains("a (by let):"),
+        "expected let marker in HIR:\n{rendered}"
     );
     assert!(
-        rendered.contains("b (by ref):"),
-        "expected shared-reference marker in HIR:\n{rendered}"
+        rendered.contains("b (by let):"),
+        "expected let marker in HIR:\n{rendered}"
     );
     assert!(
         rendered.contains("c (by mut):"),
@@ -1699,17 +2320,14 @@ fn context_native_parameter_passing_excludes_hidden_dictionary_args() {
         .unwrap();
     assert_eq!(
         function.parameter_passing.as_slice(),
-        &[
-            ResolvedArgPassing::MutableRef,
-            ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy),
-        ][..],
+        &[ArgConvention::MutableRef, ArgConvention::Let,][..],
     );
     assert_eq!(
         function.code.runtime_argument_passing().unwrap(),
         &[
-            ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef),
-            ResolvedArgPassing::MutableRef,
-            ResolvedArgPassing::Value(ResolvedValueArgPassing::TrivialCopy),
+            ArgConvention::Let,
+            ArgConvention::MutableRef,
+            ArgConvention::Let,
         ][..],
     );
 }

@@ -15,10 +15,7 @@ use crate::{
         self, NodeArena, NodeId, NodeKind,
         dictionary::{DictElaborationCtx, find_trait_impl_dict_index},
         emit_value_impl::{function_value_method, generic_value_methods_for_type},
-        function::{
-            PendingArgPassing, PendingValueArgPassing, ResolvedValueArgPassing,
-            resolve_arg_passing_for_call,
-        },
+        function::{ArgConvention, arg_conventions_for_args},
     },
     internal_compilation_error,
     module::{
@@ -129,7 +126,7 @@ pub(crate) fn resolve_local_clone(
 ) -> Result<ResolvedLocalClone, InternalCompilationError> {
     if ctx
         .trait_solver
-        .solve_concrete_trivial_copy_layout(arena, ty, span)?
+        .solve_concrete_trivial_copy_layout(ty, span)?
         .is_some()
     {
         return Ok(ResolvedLocalClone::TrivialCopy);
@@ -158,7 +155,7 @@ pub(crate) fn resolve_local_drop(
 ) -> Result<PendingLocalDrop, InternalCompilationError> {
     if ctx
         .trait_solver
-        .solve_concrete_trivial_copy_layout(arena, ty, span)?
+        .solve_concrete_trivial_copy_layout(ty, span)?
         .is_some()
     {
         return Ok(PendingLocalDrop::Resolved(ResolvedLocalDrop::Skip));
@@ -179,85 +176,7 @@ pub(crate) fn resolve_local_drop(
     }))
 }
 
-pub(crate) fn resolve_arg_passing(
-    source_arena: &NodeArena,
-    generated_arena: &mut NodeArena,
-    ctx: &mut DictElaborationCtx<'_, '_, '_>,
-    passing: &mut PendingArgPassing,
-    arg: NodeId,
-    ty: Type,
-    span: Location,
-) -> Result<(), InternalCompilationError> {
-    match passing {
-        PendingArgPassing::MutableRef
-        | PendingArgPassing::Value(PendingValueArgPassing::Resolved(
-            ResolvedValueArgPassing::SharedRef,
-        )) => {}
-        PendingArgPassing::Value(PendingValueArgPassing::Resolved(
-            ResolvedValueArgPassing::TrivialCopy,
-        )) => {
-            if ctx
-                .trait_solver
-                .solve_concrete_trivial_copy_layout(generated_arena, ty, span)?
-                .is_none()
-            {
-                return Err(internal_compilation_error!(Internal {
-                    error: "trivial-copy call argument has no resolved layout".to_string(),
-                    span,
-                }));
-            }
-        }
-        PendingArgPassing::Value(PendingValueArgPassing::Unknown) => {
-            let needs_temp = crate::hir::function::call_argument_may_need_temp(source_arena, arg);
-            *passing = PendingArgPassing::Value(PendingValueArgPassing::Resolved(
-                resolve_value_arg_passing(generated_arena, ctx, ty, needs_temp, span)?,
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn resolve_value_arg_passing(
-    arena: &mut NodeArena,
-    ctx: &mut DictElaborationCtx<'_, '_, '_>,
-    ty: Type,
-    needs_temp: bool,
-    span: Location,
-) -> Result<ResolvedValueArgPassing, InternalCompilationError> {
-    if ctx
-        .trait_solver
-        .solve_concrete_trivial_copy_layout(arena, ty, span)?
-        .is_some()
-    {
-        Ok(ResolvedValueArgPassing::TrivialCopy)
-    } else if needs_temp {
-        Err(internal_compilation_error!(Internal {
-            error: "shared-reference call argument still needs an explicit temporary".to_string(),
-            span,
-        }))
-    } else {
-        Ok(ResolvedValueArgPassing::SharedRef)
-    }
-}
-
-pub(crate) fn resolved_arg_passing_for_generated_call(
-    arena: &mut NodeArena,
-    trait_solver: &mut TraitSolver<'_>,
-    args: &[NodeId],
-    arg_tys: &[FnArgType],
-    span: Location,
-) -> Result<Vec<PendingArgPassing>, InternalCompilationError> {
-    resolve_arg_passing_for_call(
-        arena,
-        trait_solver,
-        args,
-        arg_tys,
-        span,
-        resolve_generated_trivial_copy_or_shared_ref_arg_passing,
-    )
-}
-
-/// Build a generated static call, materializing non-place shared-reference
+/// Build a generated static call, materializing non-place indirect `Let`
 /// arguments as explicit owned locals scoped to a cleanup block.
 pub(crate) fn static_apply_generated_with_locals(
     arena: &mut NodeArena,
@@ -303,12 +222,12 @@ pub(crate) fn static_apply_generated_with_locals(
 
 /// Prepared visible arguments plus explicit temporary stores/cleanup needed by a generated call.
 pub(crate) struct GeneratedCallArgumentPreparation {
-    pub argument_passing: Vec<PendingArgPassing>,
+    pub argument_passing: Vec<ArgConvention>,
     pub temp_stores: Vec<NodeId>,
     pub cleanup: Vec<LocalDeclId>,
 }
 
-/// Materialize generated non-place shared-reference arguments as locals before resolving passing.
+/// Materialize generated non-place indirect `Let` arguments as locals.
 pub(crate) fn prepare_generated_call_arguments_with_locals(
     arena: &mut NodeArena,
     locals: &mut Vec<LocalDecl>,
@@ -317,6 +236,7 @@ pub(crate) fn prepare_generated_call_arguments_with_locals(
     arg_tys: &[FnArgType],
     span: Location,
 ) -> Result<GeneratedCallArgumentPreparation, InternalCompilationError> {
+    assert_eq!(arguments.len(), arg_tys.len());
     let mut temp_stores = Vec::new();
     let mut cleanup = Vec::new();
 
@@ -325,13 +245,7 @@ pub(crate) fn prepare_generated_call_arguments_with_locals(
             .mut_ty
             .as_resolved()
             .is_some_and(|mut_ty| mut_ty.is_mutable())
-            || !generated_value_argument_needs_shared_ref_temp(
-                arena,
-                trait_solver,
-                *arg,
-                arg_ty.ty,
-                span,
-            )?
+            || !generated_let_argument_needs_temp(arena, trait_solver, *arg, arg_ty.ty, span)?
         {
             continue;
         }
@@ -375,8 +289,7 @@ pub(crate) fn prepare_generated_call_arguments_with_locals(
         *arg = load;
     }
 
-    let argument_passing =
-        resolved_arg_passing_for_generated_call(arena, trait_solver, arguments, arg_tys, span)?;
+    let argument_passing = arg_conventions_for_args(arg_tys);
     Ok(GeneratedCallArgumentPreparation {
         argument_passing,
         temp_stores,
@@ -408,7 +321,7 @@ pub(crate) fn wrap_generated_call_with_temp_cleanup(
     ))
 }
 
-fn generated_value_argument_needs_shared_ref_temp(
+fn generated_let_argument_needs_temp(
     arena: &mut NodeArena,
     trait_solver: &mut TraitSolver<'_>,
     arg: NodeId,
@@ -420,31 +333,8 @@ fn generated_value_argument_needs_shared_ref_temp(
         && !ty.is_function()
         && !hir::node_is_place_reference(arena, arg)
         && trait_solver
-            .solve_concrete_trivial_copy_layout(arena, ty, span)?
+            .solve_concrete_trivial_copy_layout(ty, span)?
             .is_none())
-}
-
-fn resolve_generated_trivial_copy_or_shared_ref_arg_passing(
-    arena: &mut NodeArena,
-    trait_solver: &mut TraitSolver<'_>,
-    ty: Type,
-    needs_temp: bool,
-    span: Location,
-) -> Result<ResolvedValueArgPassing, InternalCompilationError> {
-    if trait_solver
-        .solve_concrete_trivial_copy_layout(arena, ty, span)?
-        .is_some()
-    {
-        Ok(ResolvedValueArgPassing::TrivialCopy)
-    } else if needs_temp {
-        Err(internal_compilation_error!(Internal {
-            error: "generated shared-reference call argument still needs an explicit temporary"
-                .to_string(),
-            span,
-        }))
-    } else {
-        Ok(ResolvedValueArgPassing::SharedRef)
-    }
 }
 
 fn resolve_generated_temp_drop(
@@ -454,7 +344,7 @@ fn resolve_generated_temp_drop(
     span: Location,
 ) -> Result<ResolvedLocalDrop, InternalCompilationError> {
     if trait_solver
-        .solve_concrete_trivial_copy_layout(arena, ty, span)?
+        .solve_concrete_trivial_copy_layout(ty, span)?
         .is_some()
     {
         return Ok(ResolvedLocalDrop::Skip);

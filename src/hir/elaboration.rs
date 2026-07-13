@@ -20,7 +20,7 @@ use crate::{
             find_projection_subscript_dict_index,
             find_projection_subscript_dict_index_for_receiver_ty, find_trait_impl_dict_index,
         },
-        value_dispatch::{resolve_arg_passing, resolve_local_clone, resolve_local_drop},
+        value_dispatch::{resolve_local_clone, resolve_local_drop},
     },
     internal_compilation_error,
     module::{
@@ -39,10 +39,8 @@ use crate::{
     hir::emit_value_impl::{function_value_method, generic_value_methods_for_type},
     hir::value::LiteralValue,
     hir::{
-        self, CallArgument, ENodeArena, ENodeId, Elaborated, Node, NodeArena, NodeKind,
-        Project as HirProject, ResolvedArgPassing, StaticApplication, UNodeArena, UNodeId,
-        Unelaborated,
-        function::{PendingArgPassing, ResolvedValueArgPassing},
+        self, ArgConvention, CallArgument, ENodeArena, ENodeId, Elaborated, Node, NodeArena,
+        NodeKind, Project as HirProject, StaticApplication, UNodeArena, UNodeId, Unelaborated,
     },
     std::value::{
         is_function_surface_only_value_trait_application, is_value_trait_for_function_type,
@@ -510,9 +508,9 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
             node_span,
         );
         let passing = if access_mode.mut_member() {
-            ResolvedArgPassing::MutableRef
+            ArgConvention::MutableRef
         } else {
-            ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef)
+            ArgConvention::Let
         };
         SubscriptApply(b(hir::SubscriptApplication {
             subscript,
@@ -627,26 +625,44 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
     fn elaborate_call_arguments(
         &mut self,
         src: &UNodeArena,
-        arguments: impl IntoIterator<Item = (UNodeId, PendingArgPassing, Type)>,
+        arguments: impl IntoIterator<Item = (UNodeId, ArgConvention)>,
+        returns_caller_rooted_place: bool,
         node_span: Location,
     ) -> Result<Vec<CallArgument<Elaborated>>, InternalCompilationError> {
-        let arguments = arguments.into_iter();
-        let (lower, _) = arguments.size_hint();
-        let mut result = Vec::with_capacity(lower);
-        for (value, mut passing, arg_ty) in arguments {
-            resolve_arg_passing(
-                src,
-                &mut self.generated,
-                self.ctx,
-                &mut passing,
-                value,
-                arg_ty,
-                node_span,
-            )?;
-            result.push(CallArgument {
-                value: self.elaborate_node(src, value)?,
-                passing: passing.into_elaborated(),
-            });
+        let arguments = arguments.into_iter().collect::<Vec<_>>();
+        let source_arguments = arguments
+            .iter()
+            .map(|(value, passing)| CallArgument {
+                value: *value,
+                passing: *passing,
+            })
+            .collect::<Vec<_>>();
+        let overlaps =
+            hir::borrow_checker::let_arguments_overlapping_mutable(src, &source_arguments);
+        let caller_rooted_base = returns_caller_rooted_place.then(|| {
+            hir::addressor_place_base_argument_index(src, &source_arguments)
+                .expect("addressor-place application should have a base argument")
+        });
+        if let Some((let_index, mutable_index)) = overlaps.into_iter().next() {
+            if caller_rooted_base == Some(let_index) {
+                return Err(internal_compilation_error!(MutablePathsOverlap {
+                    a_span: src[source_arguments[let_index].value].span,
+                    b_span: src[source_arguments[mutable_index].value].span,
+                    fn_span: node_span,
+                }));
+            }
+            return Err(internal_compilation_error!(Internal {
+                error:
+                    "overlapping Let argument should have been materialized during type inference"
+                        .to_string(),
+                span: src[source_arguments[let_index].value].span,
+            }));
+        }
+
+        let mut result = Vec::with_capacity(arguments.len());
+        for (source, passing) in arguments {
+            let value = self.elaborate_node(src, source)?;
+            result.push(CallArgument { value, passing });
         }
         Ok(result)
     }
@@ -717,14 +733,15 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
             FunctionApply(app) => {
                 let function = app.function;
                 let ty = app.ty.clone();
-                let source_arguments = app
-                    .arguments
-                    .iter()
-                    .zip(&app.ty.fn_ty.args)
-                    .map(|(arg, arg_ty)| (arg.value, arg.passing, arg_ty.ty));
+                let source_arguments = app.arguments.iter().map(|arg| (arg.value, arg.passing));
                 FunctionApply(b(hir::FunctionApplication {
                     function: self.elaborate_node(src, function)?,
-                    arguments: self.elaborate_call_arguments(src, source_arguments, node_span)?,
+                    arguments: self.elaborate_call_arguments(
+                        src,
+                        source_arguments,
+                        ty.returns_place(),
+                        node_span,
+                    )?,
                     ty,
                 }))
             }
@@ -776,11 +793,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                 let argument_name_hint_policy = app.argument_name_hint_policy;
                 let ty = app.ty.clone();
                 let inst_data = app.inst_data.clone();
-                let source_arguments = app
-                    .arguments
-                    .iter()
-                    .zip(&app.ty.fn_ty.args)
-                    .map(|(arg, arg_ty)| (arg.value, arg.passing, arg_ty.ty));
+                let source_arguments = app.arguments.iter().map(|arg| (arg.value, arg.passing));
                 let source_extra_arguments = app.extra_arguments.iter().copied();
                 let mut extra_arguments = if !inst_data.dicts_req.is_empty() {
                     self.elaborate_extra_args_from_inst_data(&inst_data, function_span)?
@@ -811,7 +824,12 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                     function_path,
                     function_span,
                     extra_arguments,
-                    arguments: self.elaborate_call_arguments(src, source_arguments, node_span)?,
+                    arguments: self.elaborate_call_arguments(
+                        src,
+                        source_arguments,
+                        ty.returns_place(),
+                        node_span,
+                    )?,
                     argument_names,
                     argument_name_hint_policy,
                     ty,
@@ -822,15 +840,16 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                 let subscript = app.subscript;
                 let mut_member = app.mut_member;
                 let ty = app.ty.clone();
-                let source_arguments = app
-                    .arguments
-                    .iter()
-                    .zip(&app.ty.fn_ty.args)
-                    .map(|(arg, arg_ty)| (arg.value, arg.passing, arg_ty.ty));
+                let source_arguments = app.arguments.iter().map(|arg| (arg.value, arg.passing));
                 SubscriptApply(b(hir::SubscriptApplication {
                     subscript: self.elaborate_node(src, subscript)?,
                     mut_member,
-                    arguments: self.elaborate_call_arguments(src, source_arguments, node_span)?,
+                    arguments: self.elaborate_call_arguments(
+                        src,
+                        source_arguments,
+                        ty.returns_place(),
+                        node_span,
+                    )?,
                     ty,
                 }))
             }
@@ -843,12 +862,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                 let ty = app.ty.clone();
                 let input_tys = app.input_tys.clone();
                 let inst_data = app.inst_data.clone();
-                let source_arguments = || {
-                    app.arguments
-                        .iter()
-                        .zip(&app.ty.fn_ty.args)
-                        .map(|(arg, arg_ty)| (arg.value, arg.passing, arg_ty.ty))
-                };
+                let source_arguments = || app.arguments.iter().map(|arg| (arg.value, arg.passing));
                 assert!(
                     inst_data.dicts_req.is_empty(),
                     "Instantiation data for trait method is not supported yet."
@@ -895,6 +909,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                         arguments: self.elaborate_call_arguments(
                             src,
                             source_arguments(),
+                            ty.returns_place(),
                             node_span,
                         )?,
                         argument_names,
@@ -931,6 +946,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                         arguments: self.elaborate_call_arguments(
                             src,
                             source_arguments(),
+                            ty.returns_place(),
                             node_span,
                         )?,
                         ty,
@@ -965,6 +981,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                         arguments: self.elaborate_call_arguments(
                             src,
                             source_arguments(),
+                            ty.returns_place(),
                             node_span,
                         )?,
                         ty,
@@ -1249,15 +1266,16 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                 let dictionary = call.dictionary;
                 let entry_index = call.entry_index;
                 let ty = call.ty.clone();
-                let source_arguments = call
-                    .arguments
-                    .iter()
-                    .zip(&call.ty.fn_ty.args)
-                    .map(|(arg, arg_ty)| (arg.value, arg.passing, arg_ty.ty));
+                let source_arguments = call.arguments.iter().map(|arg| (arg.value, arg.passing));
                 CallDictionaryMethod(b(hir::CallDictionaryMethod {
                     dictionary: self.elaborate_node(src, dictionary)?,
                     entry_index,
-                    arguments: self.elaborate_call_arguments(src, source_arguments, node_span)?,
+                    arguments: self.elaborate_call_arguments(
+                        src,
+                        source_arguments,
+                        ty.returns_place(),
+                        node_span,
+                    )?,
                     ty,
                 }))
             }
@@ -1402,7 +1420,11 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
             WithYielded(node) => {
                 let accessor = self.elaborate_node(src, node.accessor)?;
                 let body = self.elaborate_node(src, node.body)?;
-                if matches!(&self.dst[accessor].kind, Project(_)) {
+                // A generic yielded projection may resolve to a concrete direct
+                // projection or addressor-place call. In either case the
+                // elaborated accessor already produces a place and needs no
+                // suspended yielded-accessor protocol.
+                if self.elaborated_node_is_place_reference(accessor) {
                     if let Some(inlined) =
                         self.inline_yielded_binding_body(node.binding, accessor, body)?
                     {

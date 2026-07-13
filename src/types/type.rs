@@ -1653,6 +1653,8 @@ pub struct TypeDef {
     pub attributes: Vec<Attribute>,
     /// The default enum variant for `Default`, if any.
     pub default_variant: Option<Ustr>,
+    /// Whether this type constructor has an explicit, non-derived `Value` impl.
+    pub has_custom_value_impl: bool,
 }
 
 /// Documentation attached to the declared product shape of a struct or enum variant.

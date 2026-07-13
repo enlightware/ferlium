@@ -30,7 +30,7 @@ use crate::{
     types::r#trait::{
         Trait, TraitAssociatedConstIndex, TraitDictionaryEntryIndex, TraitMethodIndex,
     },
-    types::r#type::{Type, TypeVar, fmt_fn_type_with_arg_names},
+    types::r#type::{Type, TypeKind, TypeVar, fmt_fn_type_with_arg_names},
     types::type_inference::substitution::InstSubst,
     types::type_like::TypeLike,
     types::type_scheme::PubTypeConstraint,
@@ -376,6 +376,17 @@ impl TraitImpls {
         let output_tys = output_tys.into();
         let output_effs = trait_def.impl_output_effs_or_pure_defaults(output_effs.into());
         let associated_const_values = associated_const_values.into();
+        debug_assert!(
+            !crate::std::value::is_value_trait(trait_id, trait_def)
+                || input_tys.iter().all(|ty| !matches!(
+                    &*ty.data(),
+                    TypeKind::Tuple(_)
+                        | TypeKind::Record(_)
+                        | TypeKind::Variant(_)
+                        | TypeKind::Function(_)
+                )),
+            "native code must not register Value impls for anonymous structural types"
+        );
 
         // Recover the definitions from the trait by instantiating the trait method definitions with the given types.
         let definitions = trait_def.instantiate_for_tys(&input_tys, &output_tys, &output_effs);

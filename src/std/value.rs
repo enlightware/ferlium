@@ -16,13 +16,13 @@ use crate::{
     ast::{Path, UnnamedArg},
     compiler::error::InternalCompilationError,
     containers::b,
-    hir::function::{
-        CallableDefinition, Function, PendingScriptFunction, UnaryNativeFnMN, UnaryNativeFnRN,
-    },
-    hir::value::{FunctionValue, LiteralValue, NativeValue, SubscriptValue, ustr_to_isize},
-    hir::{self, CallArgument, NodeArena, NodeId},
     hir::{
+        self, CallArgument, NodeArena, NodeId,
         emit_value_impl::function_value_method,
+        function::{
+            CallableDefinition, Function, PendingScriptFunction, UnaryNativeFnMN, UnaryNativeFnRN,
+        },
+        value::{FunctionValue, LiteralValue, NativeValue, SubscriptValue, ustr_to_isize},
         value_dispatch::{
             prepare_generated_call_arguments_with_locals, static_apply_generated_with_locals,
             wrap_generated_call_with_temp_cleanup,
@@ -42,14 +42,16 @@ use crate::{
         math::int_type,
         string::string_type,
     },
-    types::effects::{EffType, PrimitiveEffect},
-    types::mutability::{MutType, MutVal},
-    types::r#trait::{
-        Deriver, Trait, TraitAssociatedConst, TraitAssociatedConstIndex, TraitMethodIndex,
+    types::{
+        effects::{EffType, PrimitiveEffect},
+        mutability::{MutType, MutVal},
+        r#trait::{
+            Deriver, Trait, TraitAssociatedConst, TraitAssociatedConstIndex, TraitMethodIndex,
+        },
+        trait_solver::TraitSolver,
+        r#type::{CallImplType, FnArgType, FnType, Type, TypeDef, TypeKind, tuple_type},
+        type_like::TypeLike,
     },
-    types::trait_solver::TraitSolver,
-    types::r#type::{CallImplType, FnArgType, FnType, Type, TypeDef, TypeKind, tuple_type},
-    types::type_like::TypeLike,
 };
 
 pub(crate) fn equal<T>(lhs: T, rhs: T) -> bool

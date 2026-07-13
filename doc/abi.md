@@ -65,40 +65,49 @@ A scalar slot is independent of the pointer size; in particular, 32-bit profiles
 
 These correspond to the Wasm value types on Wasm targets, and to register-passable scalars on native targets (where C ABIs pass 64-bit integers and doubles by value even on 32-bit platforms).
 
-A concrete value *fits in one ABI scalar slot* when its size is at most 8 bytes.
-The slot type is chosen as follows:
+A value uses a scalar slot only when target ABI lowering assigns it a scalar representation.
+Primitive integers, floats, booleans, and pointers have such representations.
+An aggregate does not acquire a scalar representation merely because its byte size is at most 8; tuples, records, and named product types are initially passed indirectly.
 
-- A value whose representation is exactly `f32` or `f64` uses the corresponding float slot.
-- Any other value uses the smallest integer slot that holds its size (`i32` if size ≤ 4, `i64` otherwise), with the value's bytes packed in little-endian order starting at the least significant byte.
-
-The closure-as-`i64` representation described in the Closures section is an instance of this rule: the wasm32 closure record has `code_index` at offset 0 and `env_ptr` at offset 4, and little-endian packing of those 8 bytes into an `i64` yields `code_index` in the low 32 bits and `env_ptr` in the high 32 bits.
+A later backend may introduce an explicit aggregate coercion or flattening plan.
+Such a plan must define padding, packing, and callee reconstruction and is an ABI optimization, not a consequence of `TrivialCopy` or size alone.
 
 # Calling conventions
 
-Ferlium source has mutable value semantics: a parameter written as `T` is conceptually passed by value, while a parameter written as `&mut T` is conceptually passed by mutable reference.
-The ABI is allowed to implement a conceptual by-value parameter as a shared reference to caller-owned storage when that avoids an implicit copy.
-The callee must treat such storage as read-only; if it needs an owned mutable local, it must explicitly clone through `Value::clone`.
+Ferlium source has mutable value semantics.
+A parameter written as `T` is a `Let` access: the callee may observe it immutably for the duration of the call, but may neither mutate it nor retain access after returning.
+A parameter written as `&mut T` is a `MutableRef` access: the callee receives exclusive mutable access to the caller's place for the duration of the call.
+
+`Let` is a semantic convention, not a physical transport choice.
+It permits the caller to share existing storage when that is safe.
+When a `Let` argument aliases a mutable argument of the same call, HIR stores an explicit `CloneValue` snapshot in an owned temporary at the `Let` argument's evaluation point and cleans that temporary after the call.
+Thus a later argument mutation cannot change the value observed through the earlier argument.
+Two `Let` arguments may share storage; overlapping mutable arguments remain a borrow-checking error.
 
 Physical argument passing is derived from the lowered parameter type:
 
-| Source parameter | Physical ABI form |
-|------------------|-------------------|
-| `&mut T` | Mutable reference/pointer to caller storage |
-| Generic `T` | Shared reference/pointer to caller storage |
-| Concrete non-`TrivialCopy` `T` | Shared reference/pointer to caller storage |
-| Concrete `TrivialCopy` `T` that fits in one ABI scalar slot | Direct value, copied by the ABI |
-| Concrete `TrivialCopy` `T` larger than one ABI scalar slot | Shared reference/pointer to caller storage |
+| HIR convention and representation | Physical ABI form |
+|-----------------------------------|-------------------|
+| `MutableRef` | Mutable reference/pointer to caller storage |
+| `Let` with a scalar ABI representation | Direct scalar value |
+| Other concrete `Let` | Shared reference/pointer to storage containing the observed value |
+| Generic `Let` | Shared reference/pointer to storage containing the observed value |
 
-Generic parameters are always passed by shared reference, even if they have a `T: TrivialCopy` constraint.
+Generic `Let` parameters are physically indirect, even if they have a `T: TrivialCopy` constraint.
 This gives every generic function one stable ABI independent of later concrete instantiations.
 
-The phrase "direct value" above means a concrete `TrivialCopy` value that fits in one ABI scalar slot for the target profile (see the Scalar slots section).
-For example, `int` is direct on ABI-32 and ABI-64.
-`float` has the representation of `f64`, which is a scalar slot on both profiles, so `float` is direct on ABI-32 and ABI-64 alike.
-Note that `TrivialCopy` classifies whether a *copy* of the representation is semantically valid, independently of size; the scalar-slot criterion is a separate, purely ABI-level decision about *how* such a value is passed.
+An indirect `Let` normally points to the original shared place.
+If overlap analysis required a snapshot, it instead points to the explicit snapshot's storage.
+The convention remains `Let` in both cases: the snapshot and its cleanup are represented by HIR ownership operations, not hidden in call metadata.
 
-Implementation note: native callables already expose per-argument physical passing requests.
-Ferlium script functions should follow the rule above as part of lowering.
+For example, `int` and `float` have scalar ABI representations on ABI-32 and ABI-64.
+A tuple or record initially uses indirect transport even when it is small.
+If a snapshot of a structurally `TrivialCopy` aggregate is needed, `CloneValue::TrivialCopy` copies its representation regardless of size.
+`TrivialCopy` classifies whether a representation copy is semantically valid independently of physical passing.
+
+Implementation note: HIR and native callables expose semantic argument conventions.
+Target-specific ABI lowering will derive scalar or indirect physical transport later.
+The interpreter's native-Rust bridge makes the analogous `T` versus `&T` extraction decision separately from `ArgConvention`; both Rust adapter forms can implement a Ferlium `Let` parameter.
 
 ## Return value
 
@@ -112,8 +121,8 @@ There are two effect cases:
 There are three return value classes:
 
 - **No value**: `()`
-- **Direct value**: concrete `TrivialCopy` values that fit in one ABI scalar slot
-- **Caller-allocated value**: bigger types, polymorphic results
+- **Direct value**: concrete values with a direct scalar ABI representation
+- **Caller-allocated value**: aggregates, address-only values, and polymorphic results
 
 The calling convention for return values is:
 

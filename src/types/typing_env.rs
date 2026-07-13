@@ -15,7 +15,7 @@ use crate::{
         CompilationCapabilities,
         error::{InternalCompilationError, UnsafeFeature},
     },
-    hir::function::{CallableDefinition, ResolvedArgPassing},
+    hir::function::{ArgConvention, CallableDefinition},
     hir::{LoopId, NodeArena, NodeId},
     module::{
         FunctionId, LocalDecl, LocalDeclId, LocalFunctionId, Module, ModuleEnv, ModuleId,
@@ -40,7 +40,7 @@ pub type GetFunctionData<'a> = (
     &'a CallableDefinition,
     FunctionId,
     Option<ModuleId>,
-    Option<Vec<ResolvedArgPassing>>,
+    Option<Vec<ArgConvention>>,
 );
 pub type GetFunctionWithPathData<'a> = (ast::Path, GetFunctionData<'a>);
 pub type GetSubscriptData<'a> = (&'a SubscriptDefinition, SubscriptId, Option<ModuleId>);

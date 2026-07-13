@@ -43,7 +43,7 @@ fn repr_trait() -> Trait {
 fn trivial_copy_trait() -> Trait {
     Trait::new_with_self_input_type(
         "TrivialCopy",
-        "Marker trait for trusted native types that native adapters may pass by value.",
+        "Marker trait for types whose representation can be copied to produce a semantically independent value, without custom clone or drop behavior.",
         [],
         [],
     )

@@ -3,7 +3,7 @@
 This document records the ownership invariants that SSA lowering should rely on.
 It describes HIR after type inference, borrow checking, and dictionary elaboration.
 At that point all `LocalStorage::Deferred`, `LocalClone::Unknown`, `LocalDrop::Unknown`, and `TakeLocalValueMode::Unknown` placeholders must have been resolved.
-All call-site `ArgPassing` metadata must also have been resolved.
+All call-site `ArgConvention` metadata must also have been resolved.
 
 See `doc/abi.md` for the physical calling convention.
 This document is about source-level ownership semantics and the HIR operations that preserve them.
@@ -47,6 +47,7 @@ If `body` exits by return, break, continue, or runtime error, the accessor epilo
 If the accessor fails before yielding, no yielded binding exists and no post-yield epilogue runs.
 
 A member without `yield` uses `SubscriptResultConvention::AddressorPlace`, exposed on selected HIR calls as `CallResultConvention::ADDRESSOR_PLACE`, and keeps caller-rooted projection behavior.
+Its place-producing base argument uses `Let` (or `MutableRef`) access, so the returned place remains rooted in caller storage rather than a short-lived copied argument.
 When a subscript use must evaluate an addressor projection exactly once, HIR uses `WithPlace { place, binding, body }`.
 `WithPlace` evaluates `place` as a caller-rooted place, binds it to an internal non-owning `binding`, and evaluates `body`.
 It does not suspend an accessor and has no epilogue.
@@ -111,7 +112,8 @@ SSA must preserve the same cleanup behavior on all exits:
   `WithPlace` has no epilogue; ordinary enclosing `Block.cleanup` still applies.
 
 Function-entry locals are not represented by an extra cleanup block today.
-This is compatible with the current calling convention: non-trivial source-level value inputs are passed by reference, and owned function-boundary inputs are trivial-copy values whose cleanup is `Skip`.
+They are non-owning views governed by the parameter's `ArgConvention`; the caller remains responsible for the argument's ownership and cleanup.
+Direct scalar transport does not give the callee a semantic cleanup obligation.
 
 # Block Sequencing
 
@@ -167,31 +169,41 @@ Dispatch sites are:
 
 # Call Argument Passing
 
-HIR derives source-level argument passing from the callee ABI type:
+HIR derives one of two source-level argument conventions from the callee type:
 
-- mutable parameters resolve the argument as a mutable place;
-- generic by-value parameters are passed by shared reference, even when a concrete call site later solves them to a `TrivialCopy` type;
-- by-value parameters that are concrete types that solve as `TrivialCopy` are copied by representation;
-- other by-value parameters are passed by shared reference.
+- `T` parameters use `Let`, giving immutable, non-escaping access for the duration of the call;
+- `&mut T` parameters use `MutableRef`, giving exclusive mutable access to a place for the duration of the call.
 
-Call nodes store the resolved passing class (`MutableRef`, `SharedRef`, or `TrivialCopy`) so eval and SSA lowering do not have to rediscover callee ABI decisions after type inference has solved call-site types.
-For HIR bodies, the same high-level passing class is stored on `ModuleFunction.parameter_passing` for visible callee parameters, in declaration order.
+Call nodes store this `ArgConvention` so eval and SSA lowering preserve the same access semantics without rediscovering them from incidental representation details.
+For HIR bodies, the same convention is stored on `ModuleFunction.parameter_passing` for visible callee parameters, in declaration order.
 Native/interpreter-only bodies provide the same visible metadata explicitly; context-native helpers that also receive hidden runtime arguments keep those separate from visible parameter passing.
 That metadata intentionally stores no cleanup and no layout payload.
 
-The legality of `TrivialCopy` remains a trait-solver decision during HIR elaboration.
-Concrete value layout is not persisted in HIR or `Module`; eval and SSA lowering compute it structurally from `Type` plus the owning module environment when a resolved `TrivialCopy` edge needs size/alignment.
+`Let` does not by itself require a clone.
+The callee cannot mutate or retain the argument, and elaboration already inserts the normal ownership operations if the body later needs an owned value.
+However, if a `Let` argument path overlaps a `MutableRef` argument path in the same call, HIR generation stores a `CloneValue` snapshot in an explicit owned local at the `Let` argument's evaluation point.
+The clone dispatch records representation copy, static semantic clone, or dictionary clone, and the enclosing call block cleans the snapshot local after the call.
+The argument-position store preserves left-to-right evaluation: a later mutable argument cannot change the earlier observed value before the callee reads it, while managed snapshot cleanup stays visible to every backend.
+Two overlapping `Let` arguments may share; overlapping mutable arguments are rejected by the borrow checker.
+
+The legality of `ResolvedLocalClone::TrivialCopy` remains a trait-solver decision during HIR elaboration and is independent of size.
+Concrete value layout is not persisted in call metadata or `Module`; eval and later lowering compute it structurally from `Type` plus the owning module environment when implementing a representation copy.
 `Value` associated consts remain the dictionary carrier for generic layout metadata, not the source of truth for concrete layouts.
 
-Shared-reference calls should not hide temporary lifetimes in call metadata.
-If a non-`TrivialCopy` by-value argument is not already a place, HIR generation materializes it into an owned `$arg` local and wraps the call in normal `Block.cleanup`.
+`Let` calls should not hide temporary lifetimes in call metadata.
+If a non-`TrivialCopy` `Let` argument is not already a place, HIR generation materializes it into an owned `$arg` local and wraps the call in normal `Block.cleanup`.
 This keeps the cleanup visible to eval and SSA lowering as ordinary HIR.
+
+Addressor-place calls use `Let` or `MutableRef` for their caller-rooted base.
+The returned place therefore cannot accidentally point into a consumed argument value whose lifetime ends with the call.
 
 ## High-level passing convention requirements vs. physical ABI
 
-The high-level passing convention is derived at call construction/elaboration time and stored on call edges.
-Native (a.k.a. physical) calling conventions must agree with the derived convention: mutable/shared-reference arguments are passed by pointer, while concrete `TrivialCopy` arguments may still need target-specific ABI lowering as specified by `doc/abi.md`.
-For example, a `TrivialCopy` value larger than the native immediate argument size should be passed indirectly even though its language-level representation can be copied.
+The semantic convention is derived at call construction/elaboration time and stored on call edges.
+Target-specific ABI lowering later chooses physical transport.
+`MutableRef` lowers to exclusive mutable access to caller storage.
+`Let` may lower to a direct scalar or shared indirect access.
+When overlap analysis inserted a snapshot, an indirect `Let` must point to that snapshot rather than the original mutable place.
 
 # Function Values
 

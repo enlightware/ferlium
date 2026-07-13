@@ -20,8 +20,7 @@ use crate::{
     containers::b,
     hir::dictionary::DictionaryReq,
     hir::emit_value_impl::{function_value_method, generic_value_methods_for_type},
-    hir::function::CallableDefinition,
-    hir::function::{PendingArgPassing, PendingValueArgPassing, ResolvedValueArgPassing},
+    hir::function::{CallableDefinition, arg_conventions_for_args},
     hir::hir_syn::{get_dictionary, load_local},
     hir::{
         CallArgument, FnInstData, Node, NodeArena, NodeKind, StaticApplication, value::LiteralValue,
@@ -47,7 +46,7 @@ use crate::{
     types::effects::{EffType, Effect, EffectVar},
     types::mutability::{MutType, MutVar},
     types::r#trait::{Trait, TraitAssociatedConstIndex, TraitMethodIndex},
-    types::r#type::{CallImplType, FnArgType, SubscriptType, Type, TypeDef, TypeKind, TypeVar},
+    types::r#type::{CallImplType, SubscriptType, Type, TypeDef, TypeKind, TypeVar},
     types::type_inference::unify::UnifiedTypeInference,
     types::type_like::{TypeLike, instantiate_types},
     types::type_mapper::{BitmapInstantiationMapper, TypeMapper},
@@ -638,6 +637,10 @@ impl<'a> TraitSolverProbe<'a> {
     ) -> Result<(Vec<Type>, Vec<EffType>), InternalCompilationError> {
         self.with_solver(|solver| solver.solve_outputs(trait_id, input_tys, fn_span, arena))
     }
+
+    pub(crate) fn concrete_type_is_trivial_copy(&mut self, ty: Type) -> bool {
+        self.with_solver(|solver| solver.concrete_type_is_trivial_copy(ty))
+    }
 }
 
 impl TraitOutputQuery for TraitSolverProbe<'_> {
@@ -951,65 +954,75 @@ impl<'a> TraitSolver<'a> {
 
     pub(crate) fn solve_concrete_trivial_copy_layout(
         &mut self,
-        arena: &mut NodeArena,
         ty: Type,
         span: Location,
     ) -> Result<Option<ResolvedValueLayout>, InternalCompilationError> {
-        if !ty.is_constant() {
+        if !self.concrete_type_is_trivial_copy(ty) {
             return Ok(None);
         }
-        if self
-            .solve_impl(
-                self.std_trait_id(TRIVIAL_COPY_TRAIT_NAME),
-                &[ty],
-                span,
-                arena,
-            )
-            .is_err()
-        {
-            return Ok(None);
-        }
-        // `TrivialCopy` is marker-only, so selecting its impl proves that a
-        // representation copy is valid but does not itself carry layout data.
-        // The layout is synthesized structurally from the same concrete type.
         Ok(Some(value_layout_for_type(ty, span, self)?))
     }
 
-    pub(crate) fn resolved_arg_passing_for_no_temp_arg(
-        &mut self,
-        arena: &mut NodeArena,
-        arg: &FnArgType,
-        span: Location,
-    ) -> Result<PendingArgPassing, InternalCompilationError> {
-        if arg
-            .mut_ty
-            .as_resolved()
-            .is_some_and(|mut_ty| mut_ty.is_mutable())
-        {
-            Ok(PendingArgPassing::MutableRef)
-        } else if self
-            .solve_concrete_trivial_copy_layout(arena, arg.ty, span)?
-            .is_some()
-        {
-            Ok(PendingArgPassing::Value(PendingValueArgPassing::Resolved(
-                ResolvedValueArgPassing::TrivialCopy,
-            )))
-        } else {
-            Ok(PendingArgPassing::Value(PendingValueArgPassing::Resolved(
-                ResolvedValueArgPassing::SharedRef,
-            )))
+    /// Return whether representation-copying this concrete type is semantically valid.
+    ///
+    /// Native types opt in through concrete `TrivialCopy` impls. Inline product
+    /// types derive the property structurally, while named types do so only when
+    /// they have no explicit custom `Value` impl overriding ownership behavior.
+    pub(crate) fn concrete_type_is_trivial_copy(&self, ty: Type) -> bool {
+        if !ty.is_constant() {
+            return false;
         }
+        self.concrete_type_is_trivial_copy_inner(ty, &mut FxHashSet::default())
     }
 
-    fn resolved_arg_passing_for_no_temp_args(
-        &mut self,
-        arena: &mut NodeArena,
-        args: &[FnArgType],
-        span: Location,
-    ) -> Result<Vec<PendingArgPassing>, InternalCompilationError> {
-        args.iter()
-            .map(|arg| self.resolved_arg_passing_for_no_temp_arg(arena, arg, span))
-            .collect()
+    fn concrete_type_is_trivial_copy_inner(&self, ty: Type, active: &mut FxHashSet<Type>) -> bool {
+        let trivial_copy_key =
+            ConcreteTraitImplKey::new(self.std_trait_id(TRIVIAL_COPY_TRAIT_NAME), vec![ty]);
+        if self.has_canonical_trait_impl(&trivial_copy_key) {
+            return true;
+        }
+        if !active.insert(ty) {
+            return false;
+        }
+
+        let kind = ty.data().clone();
+        let result = match kind {
+            TypeKind::Tuple(member_tys) => member_tys
+                .into_iter()
+                .all(|member_ty| self.concrete_type_is_trivial_copy_inner(member_ty, active)),
+            TypeKind::Record(fields) => fields
+                .into_iter()
+                .all(|(_, field_ty)| self.concrete_type_is_trivial_copy_inner(field_ty, active)),
+            TypeKind::Named(named) => {
+                let type_def = self.type_def(named.def);
+                !type_def.has_custom_value_impl && {
+                    let shape_ty = type_def
+                        .instantiated_shape_with_effects(&named.params, &named.effect_params);
+                    self.concrete_type_is_trivial_copy_inner(shape_ty, active)
+                }
+            }
+            TypeKind::Native(_)
+            | TypeKind::Variant(_)
+            | TypeKind::Function(_)
+            | TypeKind::Subscript(_)
+            | TypeKind::Never
+            | TypeKind::Variable(_) => false,
+        };
+        active.remove(&ty);
+        result
+    }
+
+    /// Probe the canonical module that owns the trait rather than the current
+    /// visibility scope. Native-only marker properties must not change when an
+    /// unrelated module is added to or removed from the solver environment.
+    fn has_canonical_trait_impl(&self, key: &ConcreteTraitImplKey) -> bool {
+        if key.trait_id.module == self.current_type_items.module.id {
+            return self.impls.concrete_key_to_id.contains_key(key);
+        }
+        self.others
+            .get(key.trait_id.module)
+            .and_then(|entry| entry.module())
+            .is_some_and(|module| module.impls.concrete_key_to_id.contains_key(key))
     }
 
     /// Collect all visible concrete and blanket impl heads for a trait.
@@ -2248,11 +2261,7 @@ impl<'a> TraitSolver<'a> {
                 ))
             })
             .collect();
-        let argument_passing = self.resolved_arg_passing_for_no_temp_args(
-            &mut body_arena,
-            &definition.ty_scheme.ty.args,
-            fn_span,
-        )?;
+        let argument_passing = arg_conventions_for_args(&definition.ty_scheme.ty.args);
         let arguments = CallArgument::from_values_and_passing(argument_values, argument_passing);
 
         let apply = NodeKind::StaticApply(b(StaticApplication {

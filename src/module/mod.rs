@@ -50,6 +50,7 @@ use crate::{
     },
     internal_compilation_error,
     module::id::{Id, NamedIndexed},
+    std::core_traits_names::{TRIVIAL_COPY_TRAIT_NAME, VALUE_TRAIT_NAME},
     types::{
         mutability::MutType,
         r#trait::Trait,
@@ -569,6 +570,40 @@ pub struct Module {
 }
 
 impl Module {
+    fn mark_custom_value_impl_for_inputs(&mut self, is_value: bool, input_tys: &[Type]) {
+        if !is_value {
+            return;
+        }
+        debug_assert!(
+            input_tys.iter().all(|ty| {
+                !matches!(
+                    &*ty.data(),
+                    TypeKind::Tuple(_)
+                        | TypeKind::Record(_)
+                        | TypeKind::Variant(_)
+                        | TypeKind::Function(_)
+                )
+            }),
+            "native code must not register Value impls for anonymous structural types"
+        );
+        let module_id = self.module_id();
+        let defs = input_tys
+            .iter()
+            .filter_map(|ty| {
+                let data = ty.data();
+                let named = data.as_named()?;
+                debug_assert_eq!(
+                    named.def.module, module_id,
+                    "native Value impls for named types must be registered by the type's owning module"
+                );
+                (named.def.module == module_id).then_some(named.def)
+            })
+            .collect::<FxHashSet<_>>();
+        for def in defs {
+            self.type_def_mut(def).has_custom_value_impl = true;
+        }
+    }
+
     /// Create a new empty module with the given ID, store the id in impls for later use.
     pub fn new(module_id: ModuleId, path: Path) -> Self {
         Self {
@@ -1085,6 +1120,17 @@ impl Module {
         self.type_defs[id.index.as_index()].fill(type_def);
     }
 
+    /// Return a mutable resolved type definition owned by this module.
+    pub(crate) fn type_def_mut(&mut self, id: TypeDefId) -> &mut TypeDef {
+        assert_eq!(id.module, self.module_id());
+        match &mut self.type_defs[id.index.as_index()] {
+            TypeDefSlot::Resolved(def) => def,
+            TypeDefSlot::Reserved(_) => {
+                panic!("type definition should be resolved before mutation")
+            }
+        }
+    }
+
     pub fn type_def_name(&self, id: TypeDefId) -> Ustr {
         assert_eq!(id.module, self.module_id());
         self.type_defs[id.index.as_index()].name()
@@ -1354,6 +1400,9 @@ impl Module {
         functions: impl Into<Vec<Function>>,
     ) {
         assert_eq!(trait_id.module, self.module_id());
+        let input_tys = input_tys.into();
+        let is_value = self.traits[trait_id.index.as_index()].name == VALUE_TRAIT_NAME;
+        self.mark_custom_value_impl_for_inputs(is_value, &input_tys);
         let trait_def = &self.traits[trait_id.index.as_index()];
         let functions: Vec<_> = functions
             .into()
@@ -1391,6 +1440,8 @@ impl Module {
         functions: impl Into<Vec<Function>>,
     ) {
         assert_eq!(trait_id.module, self.module_id());
+        let is_value = self.traits[trait_id.index.as_index()].name == VALUE_TRAIT_NAME;
+        self.mark_custom_value_impl_for_inputs(is_value, &sub_key.input_tys);
         let trait_def = &self.traits[trait_id.index.as_index()];
         let functions: Vec<_> = functions
             .into()
@@ -1478,6 +1529,13 @@ impl Module {
         functions: impl Into<Vec<(Function, Vec<LocalDecl>)>>,
     ) {
         assert_eq!(trait_id.module, self.module_id());
+        let input_tys = input_tys.into();
+        let trait_name = self.traits[trait_id.index.as_index()].name;
+        debug_assert!(
+            trait_name != TRIVIAL_COPY_TRAIT_NAME || trait_id.module == self.module_id(),
+            "native TrivialCopy opt-ins must be registered in the trait's canonical module"
+        );
+        self.mark_custom_value_impl_for_inputs(trait_name == VALUE_TRAIT_NAME, &input_tys);
         let trait_def = &self.traits[trait_id.index.as_index()];
         // Add the impl, collecting new functions
         let mut fn_collector = FunctionCollector::new(self.functions.len());
@@ -1510,6 +1568,12 @@ impl Module {
         associated_const_values: impl Into<Vec<LiteralValue>>,
         functions: impl Into<Vec<(Function, Vec<LocalDecl>)>>,
     ) -> LocalImplId {
+        let input_tys = input_tys.into();
+        debug_assert!(
+            trait_def.name != TRIVIAL_COPY_TRAIT_NAME || trait_id.module == self.module_id(),
+            "native TrivialCopy opt-ins must be registered in the trait's canonical module"
+        );
+        self.mark_custom_value_impl_for_inputs(trait_def.name == VALUE_TRAIT_NAME, &input_tys);
         // Add the impl, collecting new functions
         let mut fn_collector = FunctionCollector::new(self.functions.len());
         let modules = Modules::new();
@@ -1568,6 +1632,8 @@ impl Module {
         functions: impl Into<Vec<(Function, Vec<LocalDecl>)>>,
     ) {
         assert_eq!(trait_id.module, self.module_id());
+        let is_value = self.traits[trait_id.index.as_index()].name == VALUE_TRAIT_NAME;
+        self.mark_custom_value_impl_for_inputs(is_value, &sub_key.input_tys);
         let trait_def = &self.traits[trait_id.index.as_index()];
         // Add the impl, collecting new functions
         let mut fn_collector = FunctionCollector::new(self.functions.len());

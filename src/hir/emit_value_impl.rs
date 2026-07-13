@@ -262,6 +262,9 @@ pub(super) fn emit_auto_value_impls(
         }
 
         let type_def = output.type_def(type_def_id);
+        if type_def.has_custom_value_impl {
+            continue;
+        }
         if type_def
             .attributes
             .iter()

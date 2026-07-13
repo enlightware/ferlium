@@ -23,9 +23,8 @@ use crate::{
     compiler::error::RuntimeErrorKind,
     containers::b,
     hir::function::{
-        BinaryNativeFnNMN, BinaryNativeFnNNFN, BinaryNativeFnNNN, BinaryNativeFnNNV,
-        BinaryNativeFnRMN, BinaryNativeFnRRFN, BinaryNativeFnRRN, BinaryNativeFnRRV, Function,
-        NullaryNativeFnN, UnaryNativeFnNN, UnaryNativeFnRFN, UnaryNativeFnRN,
+        BinaryNativeFnNMN, BinaryNativeFnNNFN, BinaryNativeFnNNN, BinaryNativeFnNNV, Function,
+        NullaryNativeFnN, UnaryNativeFnNFN, UnaryNativeFnNN,
     },
     hir::value::{LiteralValue, NativeDisplay, Value},
     module::Module,
@@ -208,10 +207,6 @@ where
     }
 }
 
-fn saturating_trunc_ref(value: &Float) -> Int {
-    saturating_trunc::<Int>(*value)
-}
-
 fn clamp_to_u32(value: Int) -> u32 {
     if value <= 0 {
         return 0;
@@ -303,31 +298,31 @@ fn hash_int(value: Int, state: &mut Hasher) {
     state.write_isize(value);
 }
 
-fn hash_float(value: &Float, state: &mut Hasher) {
+fn hash_float(value: Float, state: &mut Hasher) {
     state.write_u64(value.into_inner().to_bits());
 }
 
-fn equal_float(lhs: &Float, rhs: &Float) -> bool {
+fn equal_float(lhs: Float, rhs: Float) -> bool {
     lhs == rhs
 }
 
-fn compare_float(lhs: &Float, rhs: &Float) -> Value {
-    compare(*lhs, *rhs)
+fn compare_float(lhs: Float, rhs: Float) -> Value {
+    compare(lhs, rhs)
 }
 
-fn add_float(lhs: &Float, rhs: &Float) -> Float {
+fn add_float(lhs: Float, rhs: Float) -> Float {
     Float::new_saturating(lhs.into_inner() + rhs.into_inner())
 }
 
-fn sub_float(lhs: &Float, rhs: &Float) -> Float {
+fn sub_float(lhs: Float, rhs: Float) -> Float {
     Float::new_saturating(lhs.into_inner() - rhs.into_inner())
 }
 
-fn mul_float(lhs: &Float, rhs: &Float) -> Float {
+fn mul_float(lhs: Float, rhs: Float) -> Float {
     Float::new_saturating(lhs.into_inner() * rhs.into_inner())
 }
 
-fn div_float(lhs: &Float, rhs: &Float) -> Result<Float, RuntimeErrorKind> {
+fn div_float(lhs: Float, rhs: Float) -> Result<Float, RuntimeErrorKind> {
     if rhs.into_inner() == 0.0 {
         Err(RuntimeErrorKind::DivisionByZero)
     } else {
@@ -335,19 +330,19 @@ fn div_float(lhs: &Float, rhs: &Float) -> Result<Float, RuntimeErrorKind> {
     }
 }
 
-fn sin_float(value: &Float) -> Float {
+fn sin_float(value: Float) -> Float {
     saturated_real_result(value.into_inner().sin())
 }
 
-fn cos_float(value: &Float) -> Float {
+fn cos_float(value: Float) -> Float {
     saturated_real_result(value.into_inner().cos())
 }
 
-fn tan_float(value: &Float) -> Float {
+fn tan_float(value: Float) -> Float {
     saturated_real_result(value.into_inner().tan())
 }
 
-fn asin_float(value: &Float) -> Result<Float, RuntimeErrorKind> {
+fn asin_float(value: Float) -> Result<Float, RuntimeErrorKind> {
     let value = value.into_inner();
     Float::new(value.asin()).map_err(|_| {
         invalid_real_argument(format!(
@@ -356,7 +351,7 @@ fn asin_float(value: &Float) -> Result<Float, RuntimeErrorKind> {
     })
 }
 
-fn acos_float(value: &Float) -> Result<Float, RuntimeErrorKind> {
+fn acos_float(value: Float) -> Result<Float, RuntimeErrorKind> {
     let value = value.into_inner();
     Float::new(value.acos()).map_err(|_| {
         invalid_real_argument(format!(
@@ -365,31 +360,31 @@ fn acos_float(value: &Float) -> Result<Float, RuntimeErrorKind> {
     })
 }
 
-fn atan_float(value: &Float) -> Float {
+fn atan_float(value: Float) -> Float {
     saturated_real_result(value.into_inner().atan())
 }
 
-fn atan2_float(y: &Float, x: &Float) -> Float {
+fn atan2_float(y: Float, x: Float) -> Float {
     saturated_real_result(y.into_inner().atan2(x.into_inner()))
 }
 
-fn sinh_float(value: &Float) -> Float {
+fn sinh_float(value: Float) -> Float {
     saturated_real_result(value.into_inner().sinh())
 }
 
-fn cosh_float(value: &Float) -> Float {
+fn cosh_float(value: Float) -> Float {
     saturated_real_result(value.into_inner().cosh())
 }
 
-fn tanh_float(value: &Float) -> Float {
+fn tanh_float(value: Float) -> Float {
     saturated_real_result(value.into_inner().tanh())
 }
 
-fn asinh_float(value: &Float) -> Float {
+fn asinh_float(value: Float) -> Float {
     saturated_real_result(value.into_inner().asinh())
 }
 
-fn acosh_float(value: &Float) -> Result<Float, RuntimeErrorKind> {
+fn acosh_float(value: Float) -> Result<Float, RuntimeErrorKind> {
     let value = value.into_inner();
     Float::new(value.acosh()).map_err(|_| {
         invalid_real_argument(format!(
@@ -398,7 +393,7 @@ fn acosh_float(value: &Float) -> Result<Float, RuntimeErrorKind> {
     })
 }
 
-fn atanh_float(value: &Float) -> Result<Float, RuntimeErrorKind> {
+fn atanh_float(value: Float) -> Result<Float, RuntimeErrorKind> {
     let value = value.into_inner();
     Float::new(value.atanh()).map_err(|_| {
         invalid_real_argument(format!(
@@ -407,11 +402,11 @@ fn atanh_float(value: &Float) -> Result<Float, RuntimeErrorKind> {
     })
 }
 
-fn exp_float(value: &Float) -> Float {
+fn exp_float(value: Float) -> Float {
     saturated_real_result(value.into_inner().exp())
 }
 
-fn log_float(value: &Float) -> Result<Float, RuntimeErrorKind> {
+fn log_float(value: Float) -> Result<Float, RuntimeErrorKind> {
     let value = value.into_inner();
     Float::new(value.ln()).map_err(|_| {
         invalid_real_argument(format!(
@@ -420,7 +415,7 @@ fn log_float(value: &Float) -> Result<Float, RuntimeErrorKind> {
     })
 }
 
-fn pow_float(base: &Float, exponent: &Float) -> Result<Float, RuntimeErrorKind> {
+fn pow_float(base: Float, exponent: Float) -> Result<Float, RuntimeErrorKind> {
     let base = base.into_inner();
     let exponent = exponent.into_inner();
     let result = base.powf(exponent);
@@ -433,7 +428,7 @@ fn pow_float(base: &Float, exponent: &Float) -> Result<Float, RuntimeErrorKind> 
     }
 }
 
-fn sqrt_float(value: &Float) -> Result<Float, RuntimeErrorKind> {
+fn sqrt_float(value: Float) -> Result<Float, RuntimeErrorKind> {
     let value = value.into_inner();
     Float::new(value.sqrt()).map_err(|_| {
         invalid_real_argument(format!(
@@ -442,31 +437,31 @@ fn sqrt_float(value: &Float) -> Result<Float, RuntimeErrorKind> {
     })
 }
 
-fn neg_float(value: &Float) -> Float {
+fn neg_float(value: Float) -> Float {
     Float::new(-value.into_inner()).expect("negating a finite float should stay finite")
 }
 
-fn abs_float(value: &Float) -> Float {
+fn abs_float(value: Float) -> Float {
     value.abs()
 }
 
-fn signum_float(value: &Float) -> Float {
+fn signum_float(value: Float) -> Float {
     value.signum()
 }
 
-fn round_float(value: &Float) -> Int {
+fn round_float(value: Float) -> Int {
     value.round() as Int
 }
 
-fn floor_float(value: &Float) -> Int {
+fn floor_float(value: Float) -> Int {
     value.floor() as Int
 }
 
-fn ceil_float(value: &Float) -> Int {
+fn ceil_float(value: Float) -> Int {
     value.ceil() as Int
 }
 
-fn float_to_string(value: &Float) -> String {
+fn float_to_string(value: Float) -> String {
     String::new(&value.to_string())
 }
 
@@ -633,9 +628,9 @@ pub fn add_to_module(to: &mut Module) {
         [],
         native_layout_associated_consts::<Float>(),
         [
-            b(BinaryNativeFnRRN::new(equal_float)) as Function,
-            b(UnaryNativeFnRN::new(float_to_string)) as Function,
-            b(BinaryNativeFnRMN::new(hash_float)) as Function,
+            b(BinaryNativeFnNNN::new(equal_float)) as Function,
+            b(UnaryNativeFnNN::new(float_to_string)) as Function,
+            b(BinaryNativeFnNMN::new(hash_float)) as Function,
             native_value_clone_function::<Float>(),
             native_value_drop_function::<Float>(),
         ],
@@ -645,19 +640,19 @@ pub fn add_to_module(to: &mut Module) {
         [float_type()],
         [],
         [],
-        [b(UnaryNativeFnRN::new(float_to_string)) as Function],
+        [b(UnaryNativeFnNN::new(float_to_string)) as Function],
     );
     to.add_native_concrete_impl(
         num_trait_id,
         [float_type()],
         [],
         [
-            b(BinaryNativeFnRRN::new(add_float)) as Function,
-            b(BinaryNativeFnRRN::new(sub_float)) as Function,
-            b(BinaryNativeFnRRN::new(mul_float)) as Function,
-            b(UnaryNativeFnRN::new(neg_float)) as Function,
-            b(UnaryNativeFnRN::new(abs_float)) as Function,
-            b(UnaryNativeFnRN::new(signum_float)) as Function,
+            b(BinaryNativeFnNNN::new(add_float)) as Function,
+            b(BinaryNativeFnNNN::new(sub_float)) as Function,
+            b(BinaryNativeFnNNN::new(mul_float)) as Function,
+            b(UnaryNativeFnNN::new(neg_float)) as Function,
+            b(UnaryNativeFnNN::new(abs_float)) as Function,
+            b(UnaryNativeFnNN::new(signum_float)) as Function,
             b(UnaryFn::new(isize_to_float)) as Function,
         ],
     );
@@ -665,13 +660,19 @@ pub fn add_to_module(to: &mut Module) {
         ord_trait_id,
         [float_type()],
         [],
-        [b(BinaryNativeFnRRV::new(compare_float)) as Function],
+        [b(BinaryNativeFnNNV::new(compare_float)) as Function],
     );
     to.add_native_concrete_impl(
         div_trait_id,
         [float_type()],
         [],
-        [b(BinaryNativeFnRRFN::new(div_float)) as Function],
+        [b(BinaryNativeFnNNFN::new(div_float)) as Function],
+    );
+    to.add_native_concrete_impl(
+        trivial_copy_trait_id,
+        [float_type()],
+        [],
+        Vec::<Function>::new(),
     );
     to.add_concrete_impl_no_locals(
         real_trait_id,
@@ -683,23 +684,23 @@ pub fn add_to_module(to: &mut Module) {
             LiteralValue::new_native(Float::new(std::f64::consts::E).unwrap()),
         ],
         [
-            b(UnaryNativeFnRN::new(sin_float)) as Function,
-            b(UnaryNativeFnRN::new(cos_float)) as Function,
-            b(UnaryNativeFnRN::new(tan_float)) as Function,
-            b(UnaryNativeFnRFN::new(asin_float)) as Function,
-            b(UnaryNativeFnRFN::new(acos_float)) as Function,
-            b(UnaryNativeFnRN::new(atan_float)) as Function,
-            b(BinaryNativeFnRRN::new(atan2_float)) as Function,
-            b(UnaryNativeFnRN::new(sinh_float)) as Function,
-            b(UnaryNativeFnRN::new(cosh_float)) as Function,
-            b(UnaryNativeFnRN::new(tanh_float)) as Function,
-            b(UnaryNativeFnRN::new(asinh_float)) as Function,
-            b(UnaryNativeFnRFN::new(acosh_float)) as Function,
-            b(UnaryNativeFnRFN::new(atanh_float)) as Function,
-            b(UnaryNativeFnRN::new(exp_float)) as Function,
-            b(UnaryNativeFnRFN::new(log_float)) as Function,
-            b(BinaryNativeFnRRFN::new(pow_float)) as Function,
-            b(UnaryNativeFnRFN::new(sqrt_float)) as Function,
+            b(UnaryNativeFnNN::new(sin_float)) as Function,
+            b(UnaryNativeFnNN::new(cos_float)) as Function,
+            b(UnaryNativeFnNN::new(tan_float)) as Function,
+            b(UnaryNativeFnNFN::new(asin_float)) as Function,
+            b(UnaryNativeFnNFN::new(acos_float)) as Function,
+            b(UnaryNativeFnNN::new(atan_float)) as Function,
+            b(BinaryNativeFnNNN::new(atan2_float)) as Function,
+            b(UnaryNativeFnNN::new(sinh_float)) as Function,
+            b(UnaryNativeFnNN::new(cosh_float)) as Function,
+            b(UnaryNativeFnNN::new(tanh_float)) as Function,
+            b(UnaryNativeFnNN::new(asinh_float)) as Function,
+            b(UnaryNativeFnNFN::new(acosh_float)) as Function,
+            b(UnaryNativeFnNFN::new(atanh_float)) as Function,
+            b(UnaryNativeFnNN::new(exp_float)) as Function,
+            b(UnaryNativeFnNFN::new(log_float)) as Function,
+            b(BinaryNativeFnNNFN::new(pow_float)) as Function,
+            b(UnaryNativeFnNFN::new(sqrt_float)) as Function,
         ],
     );
     to.add_native_concrete_impl(
@@ -710,7 +711,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function(
         ustr("round"),
-        UnaryNativeFnRN::description_with_default_ty(
+        UnaryNativeFnNN::description_with_default_ty(
             round_float,
             ["value"],
             "Rounds a number to the nearest integer, saturating if necessary.",
@@ -719,7 +720,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function(
         ustr("floor"),
-        UnaryNativeFnRN::description_with_default_ty(
+        UnaryNativeFnNN::description_with_default_ty(
             floor_float,
             ["value"],
             "Rounds a number down to the nearest integer, saturating if necessary.",
@@ -728,7 +729,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function(
         ustr("ceil"),
-        UnaryNativeFnRN::description_with_default_ty(
+        UnaryNativeFnNN::description_with_default_ty(
             ceil_float,
             ["value"],
             "Rounds a number up to the nearest integer, saturating if necessary.",
@@ -747,6 +748,6 @@ pub fn add_to_module(to: &mut Module) {
         cast_trait_id,
         [float_type(), int_type()],
         [],
-        [b(UnaryNativeFnRN::new(saturating_trunc_ref)) as Function],
+        [b(UnaryNativeFnNN::new(saturating_trunc::<Int>)) as Function],
     );
 }

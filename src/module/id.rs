@@ -138,10 +138,7 @@ impl<N: Clone + Eq + Hash, I: Id, T> NamedIndexed<N, I, T> {
     }
 
     pub fn get_mut_by_name(&mut self, name: &N) -> Option<(I, &mut T)> {
-        let id = match self.name_to_id.get(name) {
-            Some(id) => *id,
-            None => return None,
-        };
+        let id = *self.name_to_id.get(name)?;
         self.get_mut(id).map(|data| (id, data))
     }
 

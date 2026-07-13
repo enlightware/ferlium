@@ -19,7 +19,10 @@ use crate::{
     define_id_type,
     format::FormatWith,
     hir::borrow_checker::{check_borrows, check_place_return_roots, check_yield_roots},
-    hir::function::{CallableDefinition, Function, PendingScriptFunction, ResolvedArgPassing},
+    hir::function::{
+        ArgConvention, CallableDefinition, Function, PendingScriptFunction,
+        arg_conventions_for_args,
+    },
     hir::{
         ENodeArena, ENodeId, Elaborated, HirPhase, NodeId, UNodeArena, UNodeId, Unelaborated,
         function::ScriptFunction,
@@ -471,7 +474,7 @@ pub struct ModuleFunction {
     ///
     /// HIR bodies set this during elaboration with the trait solver. Native/interpreter-only
     /// bodies provide it through `Callable::visible_parameter_passing`.
-    pub parameter_passing: Vec<ResolvedArgPassing>,
+    pub parameter_passing: Vec<ArgConvention>,
     pub spans: Option<ModuleFunctionSpans>,
     /// Local variable declarations for the function body, including arguments and any variables declared within the function.
     pub locals: Vec<ELocalDecl>,
@@ -484,7 +487,7 @@ pub type EModuleFunction = ModuleFunction;
 fn parameter_passing_from_code(
     definition: &CallableDefinition,
     code: &Function,
-) -> Vec<ResolvedArgPassing> {
+) -> Vec<ArgConvention> {
     let parameter_passing = code
         .visible_parameter_passing()
         .expect("module function code should expose visible parameter passing")
@@ -495,7 +498,7 @@ fn parameter_passing_from_code(
 
 fn check_parameter_passing_len(
     definition: &CallableDefinition,
-    parameter_passing: &[ResolvedArgPassing],
+    parameter_passing: &[ArgConvention],
 ) {
     let expected = definition.arg_names.len();
     assert_eq!(
@@ -589,18 +592,11 @@ impl PendingModuleFunction {
         if self.code.yield_node_id.is_some() {
             check_yield_roots(&self.code.arena, root, &self.locals)?;
         }
-        // Classify visible parameters while the trait solver is available, so
-        // later lowering passes can read the callee ABI without solving traits.
+        // Record the source-level conventions of visible parameters for later
+        // elaboration and lowering.
         let arg_count = self.definition.arg_names.len();
-        let parameter_passing = (0..arg_count)
-            .map(|i| {
-                let arg_ty = self.definition.ty_scheme.ty.args[i];
-                let span = self.locals[i].name.1;
-                ctx.trait_solver
-                    .resolved_arg_passing_for_no_temp_arg(&mut self.code.arena, &arg_ty, span)
-                    .map(|passing| passing.into_elaborated())
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let parameter_passing =
+            arg_conventions_for_args(&self.definition.ty_scheme.ty.args[..arg_count]);
         if self.definition.returns_place() {
             if self.code.arena[root].ty != Type::never() {
                 return Err(internal_compilation_error!(InvalidSubscriptDefinition {
@@ -664,7 +660,7 @@ impl ModuleFunction {
     pub fn new_elaborated(
         definition: CallableDefinition,
         code: Function,
-        parameter_passing: Vec<ResolvedArgPassing>,
+        parameter_passing: Vec<ArgConvention>,
         spans: Option<ModuleFunctionSpans>,
         locals: Vec<ELocalDecl>,
     ) -> Self {

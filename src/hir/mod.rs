@@ -33,7 +33,7 @@ use crate::{
     Location,
     ast::{self, UnnamedArg},
     format::FormatWith,
-    hir::function::{CallArgPassingMetadata, PendingArgPassing, ResolvedArgPassing},
+    hir::function::{ArgConvention, CallArgConventionMetadata},
     module::{
         ExtraParameterId, FunctionId, LocalCloneMetadata, LocalDecl, LocalDeclId,
         PendingLocalClone, PendingLocalDrop, PendingTakeLocalValueMode, ProjectionIndex,
@@ -76,7 +76,7 @@ pub trait HirPhase: Sized + std::fmt::Debug + Clone {
     /// Take-local mode carried by `TakeLocalValue` nodes in this phase.
     type TakeLocalValueMode: std::fmt::Debug + Clone + Copy + TakeLocalValueModeMetadata;
     /// Argument-passing metadata carried by call arguments in this phase.
-    type CallArgPassing: std::fmt::Debug + Clone + Copy + CallArgPassingMetadata;
+    type CallArgConvention: std::fmt::Debug + Clone + Copy + CallArgConventionMetadata;
     /// Deferred local-storage payload carried by local declarations in this phase.
     type DeferredLocalStorage: std::fmt::Debug + Clone + Copy;
 }
@@ -98,7 +98,7 @@ impl HirPhase for Unelaborated {
     type LocalClone = PendingLocalClone;
     type LocalDrop = PendingLocalDrop;
     type TakeLocalValueMode = PendingTakeLocalValueMode;
-    type CallArgPassing = PendingArgPassing;
+    type CallArgConvention = ArgConvention;
     type DeferredLocalStorage = crate::module::DeferredLocalStorage;
 }
 
@@ -111,7 +111,7 @@ impl HirPhase for Elaborated {
     type LocalClone = ResolvedLocalClone;
     type LocalDrop = ResolvedLocalDrop;
     type TakeLocalValueMode = ResolvedTakeLocalValueMode;
-    type CallArgPassing = ResolvedArgPassing;
+    type CallArgConvention = ArgConvention;
     type DeferredLocalStorage = Never;
 }
 
@@ -285,9 +285,9 @@ pub(crate) fn resolve_deferred_local_storage_shape(
     }
 }
 
-pub(crate) fn addressor_place_base_argument_index(
-    arena: &NodeArena,
-    arguments: &[CallArgument],
+pub(crate) fn addressor_place_base_argument_index<P: HirPhase>(
+    arena: &NodeArena<P>,
+    arguments: &[CallArgument<P>],
 ) -> Option<usize> {
     let base = arguments
         .iter()
@@ -306,7 +306,7 @@ pub(crate) fn addressor_place_base_argument_index(
 
 /// Whether `kind` is a hidden evidence argument rather than a value argument.
 /// Evidence arguments are expected to form a contiguous prefix of a call's argument list; see [`addressor_place_base_argument_index`].
-fn is_evidence_node(kind: &NodeKind) -> bool {
+fn is_evidence_node<P: HirPhase>(kind: &NodeKind<P>) -> bool {
     matches!(
         kind,
         NodeKind::GetDictionary(_)
@@ -513,13 +513,13 @@ pub struct DropSubscriptValue<P: HirPhase = Unelaborated> {
 #[derive(Debug, Clone, Copy)]
 pub struct CallArgument<P: HirPhase = Unelaborated> {
     pub value: NodeId<P>,
-    pub passing: P::CallArgPassing,
+    pub passing: P::CallArgConvention,
 }
 
 impl<P: HirPhase> CallArgument<P> {
     pub(crate) fn from_values_and_passing(
         values: Vec<NodeId<P>>,
-        passing: Vec<P::CallArgPassing>,
+        passing: Vec<P::CallArgConvention>,
     ) -> Vec<Self> {
         assert_eq!(values.len(), passing.len());
         values
@@ -531,7 +531,7 @@ impl<P: HirPhase> CallArgument<P> {
 
     pub(crate) fn from_value_slice_and_passing(
         values: &[NodeId<P>],
-        passing: Vec<P::CallArgPassing>,
+        passing: Vec<P::CallArgConvention>,
     ) -> Vec<Self> {
         assert_eq!(values.len(), passing.len());
         values

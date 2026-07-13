@@ -1024,6 +1024,7 @@ impl PTypeDef {
             span: self.span,
             attributes: self.attributes.clone(),
             default_variant,
+            has_custom_value_impl: false,
         })
     }
 
