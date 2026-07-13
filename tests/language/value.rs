@@ -1754,6 +1754,65 @@ fn overlap_snapshot_preserves_left_to_right_argument_evaluation() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn managed_argument_materialization_preserves_left_to_right_evaluation() {
+    let source = format!(
+        r#"
+        {}
+
+        fn record_int(log: &mut int, digit: int) -> int {{
+            log = log * 10 + digit;
+            digit
+        }}
+
+        fn record_probe(log: &mut int, digit: int) -> Probe {{
+            log = log * 10 + digit;
+            Probe(digit)
+        }}
+
+        fn combine(first: int, middle: Probe, last: int) -> int {{
+            first * 100 + middle.0 * 10 + last
+        }}
+
+        let mut log = 0;
+        let result = combine(
+            record_int(log, 1),
+            record_probe(log, 2),
+            record_int(log, 3),
+        );
+        result * 1000 + log
+        "#,
+        tracked_probe_value_impl()
+    );
+
+    let mut session = TestSession::new();
+    // Both the result and the side-effect log encode 1, 2, 3. In particular, materializing the
+    // managed middle argument must not move its evaluation ahead of the first direct argument.
+    assert_val_eq!(session.run(&source), int(123123));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn dynamic_call_rejects_overlapping_mutable_arguments() {
+    let mut session = TestSession::new();
+    session
+        .fail_compilation(
+            r#"
+            fn overwrite(left: &mut int, right: &mut int) {
+                left = 1;
+                right = 2;
+            }
+
+            let function = overwrite;
+            let mut value = 0;
+            function(value, value)
+            "#,
+        )
+        .as_mutable_paths_overlap()
+        .expect("dynamic calls must receive the same overlap checking as static calls");
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn disjoint_paths_do_not_snapshot_let_argument() {
     let source = r#"
         fn update(observed: int, target: &mut int) {

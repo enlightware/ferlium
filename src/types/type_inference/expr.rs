@@ -4233,6 +4233,13 @@ impl TypeInference {
         let arg_passing =
             self.argument_passing_for_args(arg_tys, abi_arg_tys, visible_arg_passing_override);
         let mut stores = Vec::new();
+        let materialize_value_arguments_in_order =
+            args.iter()
+                .zip(arg_tys)
+                .zip(&arg_passing)
+                .any(|((&arg, arg_ty), &passing)| {
+                    self.call_value_argument_needs_shared_ref_temp(env, arg, arg_ty.ty, passing)
+                });
         for ((arg, arg_ty), passing) in args.iter_mut().zip(arg_tys).zip(&arg_passing) {
             match passing {
                 ArgConvention::MutableRef => {
@@ -4255,13 +4262,19 @@ impl TypeInference {
                         stores.extend(prepared.prefix);
                         *arg = prepared.place;
                     }
-                    if self
-                        .call_value_argument_needs_shared_ref_temp(env, *arg, arg_ty.ty, *passing)
-                    {
+                    let needs_shared_ref_temp = self
+                        .call_value_argument_needs_shared_ref_temp(env, *arg, arg_ty.ty, *passing);
+                    let needs_ordering_temp = materialize_value_arguments_in_order
+                        && arg_ty.ty != Type::never()
+                        && !node_is_place_reference(env.ir_arena, *arg);
+                    if needs_shared_ref_temp || needs_ordering_temp {
                         let value = self.materialize_owned_value(env, *arg, span);
                         let value_ty = env.ir_arena[value].ty;
                         let (store, load) =
                             self.store_owned_temp(env, value, value_ty, span, ustr("$arg"));
+                        // Once any managed argument requires prefix storage, materialize every
+                        // non-place value argument there in source order. Otherwise a later
+                        // managed store could run before an earlier direct, effectful argument.
                         stores.push(store);
                         *arg = load;
                     } else {
