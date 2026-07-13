@@ -7,7 +7,9 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use gungraun::{library_benchmark, library_benchmark_group, main};
+use gungraun::{
+    Callgrind, EntryPoint, LibraryBenchmarkConfig, library_benchmark, library_benchmark_group, main,
+};
 use std::hint::black_box;
 
 use ferlium::{
@@ -54,17 +56,55 @@ fn compile_user_code_corpus(session: &mut CompilerSession) {
     }
 }
 
-// --- Compilation benchmarks ---
-
-#[library_benchmark]
-fn bench_std_load() {
-    CompilerSession::new();
+struct BenchOutput<T> {
+    session: CompilerSession,
+    result: T,
 }
 
-#[library_benchmark(setup = CompilerSession::new)]
-fn bench_user_code_compile_without_std_startup(mut session: CompilerSession) {
-    compile_user_code_corpus(&mut session);
-    black_box(session);
+fn bench_session() -> CompilerSession {
+    CompilerSession::new()
+}
+
+/// Drop benchmark-owned values after Gungraun has left the measured function.
+fn teardown_benchmark<T>(output: BenchOutput<T>) {
+    let BenchOutput {
+        session: _session,
+        result: _result,
+    } = output;
+}
+
+// This function's symbol is the custom Callgrind entry point. Keeping it out of line gives every
+// benchmark the same precise boundary without matching nested Rust closure/monomorph symbols.
+#[inline(never)]
+fn measure<T>(run: impl FnOnce() -> T) -> T {
+    let result = run();
+    black_box(&result);
+    result
+}
+
+fn benchmark_config() -> LibraryBenchmarkConfig {
+    let mut config = LibraryBenchmarkConfig::default();
+    config.tool(Callgrind::default().entry_point(EntryPoint::Custom("*::measure::<*>".to_owned())));
+    config
+}
+
+// --- Compilation benchmarks ---
+
+#[library_benchmark(teardown = teardown_benchmark)]
+fn bench_std_load() -> BenchOutput<()> {
+    BenchOutput {
+        session: measure(bench_session),
+        result: (),
+    }
+}
+
+#[library_benchmark(setup = bench_session, teardown = teardown_benchmark)]
+fn bench_user_code_compile_without_std_startup(mut session: CompilerSession) -> BenchOutput<()> {
+    measure(|| compile_user_code_corpus(&mut session));
+    BenchOutput {
+        session,
+        result: (),
+    }
 }
 
 // --- Runtime benchmarks ---
@@ -83,12 +123,16 @@ fn setup_quicksort() -> (CompilerSession, ModuleId, Vec<isize>) {
     (session, module_id, random_data)
 }
 
-#[library_benchmark(setup = setup_quicksort)]
-fn bench_quicksort_run((session, module_id, random_data): (CompilerSession, ModuleId, Vec<isize>)) {
-    let array_ty = array_type(int_type());
-    let input = int_a(random_data);
-
-    call_fn!(&session, module_id, "quicksort_int_a", [input => array_ty] -> array_ty).unwrap();
+#[library_benchmark(setup = setup_quicksort, teardown = teardown_benchmark)]
+fn bench_quicksort_run(
+    (session, module_id, random_data): (CompilerSession, ModuleId, Vec<isize>),
+) -> BenchOutput<Value> {
+    let result = measure(|| {
+        let array_ty = array_type(int_type());
+        let input = int_a(random_data);
+        call_fn!(&session, module_id, "quicksort_int_a", [input => array_ty] -> array_ty).unwrap()
+    });
+    BenchOutput { session, result }
 }
 
 fn setup_fibonacci() -> (CompilerSession, ModuleId) {
@@ -104,10 +148,13 @@ fn setup_fibonacci() -> (CompilerSession, ModuleId) {
     (session, module_id)
 }
 
-#[library_benchmark(setup = setup_fibonacci)]
-fn bench_fibonacci((session, module_id): (CompilerSession, ModuleId)) {
-    run_fn_native!(&session, module_id, "fibonacci_rec", [black_box(20) => isize] -> isize)
-        .unwrap();
+#[library_benchmark(setup = setup_fibonacci, teardown = teardown_benchmark)]
+fn bench_fibonacci((session, module_id): (CompilerSession, ModuleId)) -> BenchOutput<isize> {
+    let result = measure(|| {
+        run_fn_native!(&session, module_id, "fibonacci_rec", [black_box(20) => isize] -> isize)
+            .unwrap()
+    });
+    BenchOutput { session, result }
 }
 
 fn setup_sieve() -> (CompilerSession, ModuleId) {
@@ -123,9 +170,13 @@ fn setup_sieve() -> (CompilerSession, ModuleId) {
     (session, module_id)
 }
 
-#[library_benchmark(setup = setup_sieve)]
-fn bench_sieve((session, module_id): (CompilerSession, ModuleId)) {
-    run_fn_native!(&session, module_id, "prime_count", [black_box(500) => isize] -> isize).unwrap();
+#[library_benchmark(setup = setup_sieve, teardown = teardown_benchmark)]
+fn bench_sieve((session, module_id): (CompilerSession, ModuleId)) -> BenchOutput<isize> {
+    let result = measure(|| {
+        run_fn_native!(&session, module_id, "prime_count", [black_box(500) => isize] -> isize)
+            .unwrap()
+    });
+    BenchOutput { session, result }
 }
 
 fn setup_rle_encode() -> (CompilerSession, ModuleId, Str) {
@@ -142,9 +193,14 @@ fn setup_rle_encode() -> (CompilerSession, ModuleId, Str) {
     (session, module_id, input)
 }
 
-#[library_benchmark(setup = setup_rle_encode)]
-fn bench_rle_encode((session, module_id, input): (CompilerSession, ModuleId, Str)) {
-    run_fn_native!(&session, module_id, "rle_encode_string", [input => Str] -> Str).unwrap();
+#[library_benchmark(setup = setup_rle_encode, teardown = teardown_benchmark)]
+fn bench_rle_encode(
+    (session, module_id, input): (CompilerSession, ModuleId, Str),
+) -> BenchOutput<Str> {
+    let result = measure(|| {
+        run_fn_native!(&session, module_id, "rle_encode_string", [input => Str] -> Str).unwrap()
+    });
+    BenchOutput { session, result }
 }
 
 fn setup_csv() -> (CompilerSession, ModuleId) {
@@ -160,9 +216,12 @@ fn setup_csv() -> (CompilerSession, ModuleId) {
     (session, module_id)
 }
 
-#[library_benchmark(setup = setup_csv)]
-fn bench_csv((session, module_id): (CompilerSession, ModuleId)) {
-    run_fn_native!(&session, module_id, "csv_table", [black_box(500) => isize] -> Str).unwrap();
+#[library_benchmark(setup = setup_csv, teardown = teardown_benchmark)]
+fn bench_csv((session, module_id): (CompilerSession, ModuleId)) -> BenchOutput<Str> {
+    let result = measure(|| {
+        run_fn_native!(&session, module_id, "csv_table", [black_box(500) => isize] -> Str).unwrap()
+    });
+    BenchOutput { session, result }
 }
 
 fn setup_bank_account() -> (CompilerSession, ModuleId) {
@@ -197,9 +256,10 @@ fn setup_bank_account() -> (CompilerSession, ModuleId) {
     (session, module_id)
 }
 
-#[library_benchmark(setup = setup_bank_account)]
-fn bench_bank_account_run((session, module_id): (CompilerSession, ModuleId)) {
-    run_fn_native!(&session, module_id, "test", [] -> Str).unwrap();
+#[library_benchmark(setup = setup_bank_account, teardown = teardown_benchmark)]
+fn bench_bank_account_run((session, module_id): (CompilerSession, ModuleId)) -> BenchOutput<Str> {
+    let result = measure(|| run_fn_native!(&session, module_id, "test", [] -> Str).unwrap());
+    BenchOutput { session, result }
 }
 
 fn setup_sudoku() -> (CompilerSession, ModuleId) {
@@ -215,15 +275,18 @@ fn setup_sudoku() -> (CompilerSession, ModuleId) {
     (session, module_id)
 }
 
-#[library_benchmark(setup = setup_sudoku)]
-fn bench_sudoku_run((session, module_id): (CompilerSession, ModuleId)) {
-    run_fn_native!(
-        &session,
-        module_id,
-        "solved_cell",
-        [black_box(0) => isize, black_box(2) => isize] -> isize
-    )
-    .unwrap();
+#[library_benchmark(setup = setup_sudoku, teardown = teardown_benchmark)]
+fn bench_sudoku_run((session, module_id): (CompilerSession, ModuleId)) -> BenchOutput<isize> {
+    let result = measure(|| {
+        run_fn_native!(
+            &session,
+            module_id,
+            "solved_cell",
+            [black_box(0) => isize, black_box(2) => isize] -> isize
+        )
+        .unwrap()
+    });
+    BenchOutput { session, result }
 }
 
 fn setup_calculator() -> (CompilerSession, ModuleId, Str) {
@@ -240,9 +303,14 @@ fn setup_calculator() -> (CompilerSession, ModuleId, Str) {
     (session, module_id, expr)
 }
 
-#[library_benchmark(setup = setup_calculator)]
-fn bench_calculator_run((session, module_id, expr): (CompilerSession, ModuleId, Str)) {
-    run_fn_native!(&session, module_id, "calculate", [expr => Str] -> isize).unwrap();
+#[library_benchmark(setup = setup_calculator, teardown = teardown_benchmark)]
+fn bench_calculator_run(
+    (session, module_id, expr): (CompilerSession, ModuleId, Str),
+) -> BenchOutput<isize> {
+    let result = measure(|| {
+        run_fn_native!(&session, module_id, "calculate", [expr => Str] -> isize).unwrap()
+    });
+    BenchOutput { session, result }
 }
 
 // --- Support functions ---
@@ -282,4 +350,7 @@ library_benchmark_group!(
     ]
 );
 
-main!(library_benchmark_groups = [compilation, runtime]);
+main!(
+    config = benchmark_config(),
+    library_benchmark_groups = [compilation, runtime]
+);
