@@ -36,6 +36,7 @@ fn assert_variant_name_conflicts_with_type(src: &str, expected_name: &str) {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[allow(clippy::approx_constant)]
 fn type_aliases() {
     let mut session = TestSession::new();
 

@@ -439,6 +439,19 @@ fn non_place_indirect_let_argument_uses_explicit_temp_cleanup() {
     );
 }
 
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trivial_copy_rvalues_stay_direct_in_final_hir() {
+    let mut session = TestSession::new();
+    let compiled = session.compile("1 + 1");
+    let expr = compiled.expr.expect("expected expression");
+
+    assert!(
+        expr.locals.iter().all(|local| local.name.0 != ustr("$arg")),
+        "TrivialCopy rvalues should not acquire call-only owned temporaries"
+    );
+}
+
 fn expression_cleanup_drop_modes(
     session: &mut TestSession,
     source: &str,
@@ -1886,6 +1899,67 @@ fn dynamic_call_rejects_overlapping_mutable_arguments() {
         )
         .as_mutable_paths_overlap()
         .expect("dynamic calls must receive the same overlap checking as static calls");
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn static_call_rejects_overlapping_mutable_arguments_after_elaboration() {
+    let mut session = TestSession::new();
+    session
+        .fail_compilation(
+            r#"
+            fn overwrite(left: &mut int, right: &mut int) {
+                left = 1;
+                right = 2;
+            }
+
+            let mut value = 0;
+            overwrite(value, value)
+            "#,
+        )
+        .as_mutable_paths_overlap()
+        .expect("static calls must be checked in final HIR");
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn dictionary_call_rejects_overlapping_mutable_arguments_after_elaboration() {
+    let mut session = TestSession::new();
+    session
+        .fail_compilation(
+            r#"
+            trait Overwrite<Self> {
+                fn overwrite(left: &mut Self, right: &mut Self);
+            }
+
+            fn apply<T>(value: &mut T)
+            where
+                T: Overwrite
+            {
+                overwrite(value, value)
+            }
+            "#,
+        )
+        .as_mutable_paths_overlap()
+        .expect("dictionary calls must be checked after trait-call elaboration");
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn let_argument_snapshots_before_write_in_later_place_preparation() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(
+            r#"
+            fn first(left: int, right: int) -> int { left }
+
+            let mut observed = 1;
+            let fallback = 0;
+            first(observed, { observed = 2; fallback })
+            "#,
+        ),
+        int(1)
+    );
 }
 
 #[test]

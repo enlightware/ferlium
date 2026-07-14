@@ -270,7 +270,7 @@ fn explicit_generic_module_functions() {
                     ..
                 } =>
                     *trait_id == value_trait
-                        && input_tys.as_slice() == &[keep_ret_ty]
+                        && input_tys.as_slice() == [keep_ret_ty]
                         && output_tys.is_empty(),
                 _ => false,
             })
@@ -324,7 +324,7 @@ fn function_where_clauses_are_enforced() {
                     ..
                 } => {
                     trait_id == expected_trait
-                        && input_tys.as_slice() == &[keep_ord_ret_ty]
+                        && input_tys.as_slice() == [keep_ord_ret_ty]
                         && output_tys.is_empty()
                 }
                 _ => false,

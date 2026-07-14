@@ -93,11 +93,11 @@ fn sieve() {
     );
 
     let is_prime = |n| run_native_int_bool(&session, module_id, "is_prime", n);
-    assert_eq!(is_prime(1), false);
-    assert_eq!(is_prime(4), false);
-    assert_eq!(is_prime(100), false);
-    assert_eq!(is_prime(2), true);
-    assert_eq!(is_prime(97), true);
+    assert!(!is_prime(1));
+    assert!(!is_prime(4));
+    assert!(!is_prime(100));
+    assert!(is_prime(2));
+    assert!(is_prime(97));
 
     let prime_count = |n| run_native_int_int(&session, module_id, "prime_count", n);
     assert_eq!(prime_count(10), 4);

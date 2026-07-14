@@ -1184,7 +1184,7 @@ impl TestSession {
                 value,
                 ty,
             } = actual;
-            let expected_ty = expected.ty.unwrap_or_else(|| ty.clone());
+            let expected_ty = expected.ty.unwrap_or(ty);
             let actual = self.value_to_assertion_text(module_id, value, ty);
             let expected = self.value_to_assertion_text(module_id, expected.value, expected_ty);
             if let Some(extra_message) = extra_message {
@@ -1222,7 +1222,7 @@ impl TestSession {
 
     /// Get the source table for this compilation session.
     pub fn source_table(&self) -> &SourceTable {
-        &self.session.source_table()
+        self.session.source_table()
     }
 
     /// Parse a type from a source code and return the corresponding fully-defined Type.
@@ -1517,7 +1517,7 @@ pub fn none() -> ExpectedValue {
 
 pub fn some(value: impl Into<ExpectedValue>) -> ExpectedValue {
     let value = value.into();
-    let ty = value.ty.clone().map(ferlium::std::option::option_type);
+    let ty = value.ty.map(ferlium::std::option::option_type);
     ExpectedValue {
         value: ferlium::std::option::some(value.value),
         ty,

@@ -290,7 +290,7 @@ pub(super) fn borrow_check_and_elaborate_pending_function(
         .expect("expected pending function body");
     function.definition = function_slot.definition.clone();
     function.spans = function_slot.spans.clone();
-    let (elaborated, _) = function.check_borrows_and_elaborate_hir(dst_arena, ctx)?;
+    let elaborated = function.check_borrows_and_elaborate_hir(dst_arena, ctx)?;
     *function_slot = elaborated;
     Ok(())
 }

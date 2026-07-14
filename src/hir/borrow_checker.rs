@@ -6,6 +6,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
+use smallvec::smallvec;
 use ustr::Ustr;
 
 use crate::{
@@ -14,12 +15,13 @@ use crate::{
         InternalCompilationError, InvalidSubscriptDefinitionKind, InvalidYieldKind,
         SubscriptDefinitionSubject,
     },
+    containers::SVec4,
     hir::{
-        CallArgument, Node, NodeArena, NodeId, NodeKind, function::ArgConvention,
-        node_is_place_reference,
+        CallArgument, ENodeArena, ENodeId, Elaborated, NodeArena, NodeId, NodeKind,
+        function::ArgConvention, node_is_place_reference,
     },
     internal_compilation_error,
-    module::{LocalDeclId, ULocalDecl, id::Id},
+    module::{ELocalDecl, LocalDeclId, id::Id},
     types::r#type::Type,
 };
 
@@ -305,177 +307,15 @@ pub(crate) fn let_arguments_overlapping_mutable(
         .collect()
 }
 
-/// Implements borrow checking logic by comparing the paths of mutable arguments.
-fn check_arguments(
-    arguments: &[CallArgument],
-    arena: &NodeArena,
-    fn_span: Location,
-) -> Result<(), InternalCompilationError> {
-    // Collect all mutable arguments indices and their paths.
-    let in_out_args: Vec<_> = arguments
-        .iter()
-        .enumerate()
-        .filter_map(|(i, argument)| {
-            if argument.passing == ArgConvention::MutableRef {
-                Some((i, Path::from_node(arena, arguments[i].value)))
-            } else {
-                None
-            }
-        })
-        .collect();
-    // Compare all mutable arguments' paths pairwise.
-    for (i, arg_i) in in_out_args.iter().enumerate() {
-        for arg_j in in_out_args.iter().skip(i + 1) {
-            if do_paths_overlap(&arg_i.1, &arg_j.1) {
-                return Err(internal_compilation_error!(MutablePathsOverlap {
-                    a_span: arena[arguments[arg_i.0].value].span,
-                    b_span: arena[arguments[arg_j.0].value].span,
-                    fn_span,
-                }));
-            }
-        }
-    }
-    Ok(())
-}
-
-pub fn check_borrows(arena: &NodeArena, node_id: NodeId) -> Result<(), InternalCompilationError> {
-    arena[node_id].check_borrows(arena)
-}
-
-pub fn check_place_return_roots(
-    arena: &NodeArena,
-    node_id: NodeId,
-    locals: &[ULocalDecl],
-    base_parameter_index: Option<usize>,
-    subject: SubscriptDefinitionSubject,
-) -> Result<(), InternalCompilationError> {
-    check_place_return_roots_in_node(arena, node_id, locals, base_parameter_index, subject)
-}
-
-pub fn check_yield_roots(
-    arena: &NodeArena,
-    node_id: NodeId,
-    locals: &[ULocalDecl],
-) -> Result<(), InternalCompilationError> {
-    check_yield_roots_in_node(arena, node_id, locals)
-}
-
-fn check_yield_roots_in_node(
-    arena: &NodeArena,
-    node_id: NodeId,
-    locals: &[ULocalDecl],
-) -> Result<(), InternalCompilationError> {
-    let node = &arena[node_id];
-    if let NodeKind::Yield(value) = &node.kind {
-        check_yield_root(arena, *value, locals)?;
-    }
-    for child in node.kind.child_node_ids() {
-        check_yield_roots_in_node(arena, child, locals)?;
-    }
-    Ok(())
-}
-
-fn check_yield_root(
-    arena: &NodeArena,
-    node_id: NodeId,
-    locals: &[ULocalDecl],
-) -> Result<(), InternalCompilationError> {
-    if arena[node_id].ty == Type::never() {
-        return Ok(());
-    }
-
-    let Some(origin) = returned_place_origin(arena, node_id) else {
-        return Err(internal_compilation_error!(InvalidYield {
-            kind: InvalidYieldKind::NotAccessorOwned,
-            span: arena[node_id].span,
-        }));
-    };
-
-    match origin {
-        PlaceOrigin::Direct {
-            local: local_id, ..
-        } if locals
-            .get(local_id.as_index())
-            .is_some_and(|local| local.may_own_storage()) =>
-        {
-            Ok(())
-        }
-        PlaceOrigin::Direct { .. } | PlaceOrigin::Addressor(_) => {
-            Err(internal_compilation_error!(InvalidYield {
-                kind: InvalidYieldKind::NotAccessorOwned,
-                span: arena[node_id].span,
-            }))
-        }
-    }
-}
-
-fn check_place_return_roots_in_node(
-    arena: &NodeArena,
-    node_id: NodeId,
-    locals: &[ULocalDecl],
-    base_parameter_index: Option<usize>,
-    subject: SubscriptDefinitionSubject,
-) -> Result<(), InternalCompilationError> {
-    let node = &arena[node_id];
-    if let NodeKind::Return(value) = &node.kind {
-        check_place_return_root(arena, *value, locals, base_parameter_index, subject)?;
-    }
-    for child in node.kind.child_node_ids() {
-        check_place_return_roots_in_node(arena, child, locals, base_parameter_index, subject)?;
-    }
-    Ok(())
-}
-
-fn check_place_return_root(
-    arena: &NodeArena,
-    node_id: NodeId,
-    locals: &[ULocalDecl],
-    base_parameter_index: Option<usize>,
-    subject: SubscriptDefinitionSubject,
-) -> Result<(), InternalCompilationError> {
-    if arena[node_id].ty == Type::never() {
-        return Ok(());
-    }
-
-    let Some(origin) = returned_place_origin(arena, node_id) else {
-        return Err(internal_compilation_error!(InvalidSubscriptDefinition {
-            subject,
-            kind: InvalidSubscriptDefinitionKind::AddressorReturnMustBeCallerRooted,
-            span: arena[node_id].span,
-        }));
-    };
-
-    match origin {
-        PlaceOrigin::Direct {
-            local,
-            through_projection,
-        } if Some(local.as_index()) == base_parameter_index
-            && (through_projection
-                || locals
-                    .get(local.as_index())
-                    .is_some_and(|local| local.mut_ty.is_mutable())) =>
-        {
-            Ok(())
-        }
-        PlaceOrigin::Addressor(local_id) if Some(local_id.as_index()) == base_parameter_index => {
-            Ok(())
-        }
-        PlaceOrigin::Direct { .. } | PlaceOrigin::Addressor(_) => {
-            Err(internal_compilation_error!(InvalidSubscriptDefinition {
-                subject,
-                kind: InvalidSubscriptDefinitionKind::AddressorReturnMustBeRootedInBaseParameter,
-                span: arena[node_id].span,
-            }))
-        }
-    }
-}
-
-// Very conservative first addressor rule: a Ferlium addressor-place function can
-// only return a place produced by another addressor call, and that call must be
-// rooted in this function's base/receiver parameter: the first visible
-// source-level parameter, after hidden closure captures if any. This is
-// intentionally sound but limiting; later addressor forms should extend this
-// provenance model rather than weaken the escape check.
+/// A compact provenance summary used to ensure that a returned or yielded place cannot outlive
+/// its storage.
+///
+/// It records the local at the root of the place and whether the place is produced directly or by
+/// an addressor call. Addressor-place returns must remain rooted in the function's base/receiver
+/// parameter (the first visible source parameter after hidden captures), while yielded places must
+/// refer directly to storage owned by the suspended accessor. The summary is intentionally
+/// conservative; supporting additional place-producing forms should extend the provenance it
+/// records without weakening these escape checks.
 #[derive(Clone, Copy)]
 enum PlaceOrigin {
     /// A direct local place or projection rooted in a local.
@@ -495,203 +335,354 @@ impl PlaceOrigin {
     }
 }
 
-fn returned_place_origin(arena: &NodeArena, node_id: NodeId) -> Option<PlaceOrigin> {
+impl Path {
+    fn from_enode(arena: &ENodeArena, node_id: ENodeId) -> Self {
+        Self::try_from_enode(arena, node_id).expect("Cannot resolve a non-place node")
+    }
+
+    fn try_from_enode(arena: &ENodeArena, node_id: ENodeId) -> Option<Self> {
+        let node = &arena[node_id];
+        use NodeKind::*;
+        match &node.kind {
+            Project(project) => {
+                let mut path = Self::try_from_enode(arena, project.value)?;
+                path.parts
+                    .push(PathPart::Projection(project.index.as_index()));
+                Some(path)
+            }
+            StaticApply(app) if app.ty.returns_place() => {
+                Self::from_enode_addressor_arguments(arena, &app.arguments)
+            }
+            FunctionApply(app) if app.ty.returns_place() => {
+                Self::from_enode_addressor_arguments(arena, &app.arguments)
+            }
+            CallDictionaryMethod(call) if call.ty.returns_place() => {
+                Self::from_enode_addressor_arguments(arena, &call.arguments)
+            }
+            SubscriptApply(app) if app.ty.returns_place() => {
+                Self::from_enode_addressor_arguments(arena, &app.arguments)
+            }
+            Block(block) => block
+                .tail_node()
+                .and_then(|tail| Self::try_from_enode(arena, tail)),
+            WithPlace(node) => Self::try_from_enode(arena, node.place),
+            LoadLocal(node) => Some(Self::from_local(node.id)),
+            FieldAccess(never)
+            | TraitMethodApply(never)
+            | GetTraitMethod(never)
+            | GetTraitAssociatedConst(never)
+            | GetTraitDictionary(never) => match *never {},
+            _ => None,
+        }
+    }
+
+    fn from_enode_addressor_arguments(
+        arena: &ENodeArena,
+        arguments: &[CallArgument<Elaborated>],
+    ) -> Option<Self> {
+        let base_index = arguments
+            .iter()
+            .position(|argument| !is_enode_evidence(&arena[argument.value].kind))
+            .expect("addressor-place application should have a base argument");
+        let mut path = Self::try_from_enode(arena, arguments[base_index].value)?;
+        if let Some(index) = arguments.get(base_index + 1) {
+            path.parts.push(Self::enode_index_part(arena, index.value));
+        } else {
+            path.parts.push(PathPart::IndexDynamic);
+        }
+        Some(path)
+    }
+
+    fn enode_index_part(arena: &ENodeArena, node_id: ENodeId) -> PathPart {
+        if let NodeKind::Immediate(immediate) = &arena[node_id].kind {
+            let index = *immediate.as_primitive_ty::<isize>().unwrap();
+            if index >= 0 {
+                return PathPart::IndexStatic(index as usize);
+            }
+        }
+        PathPart::IndexDynamic
+    }
+}
+
+fn is_enode_evidence(kind: &NodeKind<Elaborated>) -> bool {
+    matches!(
+        kind,
+        NodeKind::GetDictionary(_)
+            | NodeKind::LoadDictionary(_)
+            | NodeKind::LoadSubscriptEvidence(_)
+    )
+}
+
+fn check_elaborated_arguments(
+    arguments: &[CallArgument<Elaborated>],
+    arena: &ENodeArena,
+    fn_span: Location,
+) -> Result<(), InternalCompilationError> {
+    let mutable_paths = arguments
+        .iter()
+        .enumerate()
+        .filter(|(_, argument)| argument.passing == ArgConvention::MutableRef)
+        .map(|(index, argument)| (index, Path::from_enode(arena, argument.value)))
+        .collect::<Vec<_>>();
+    for (index, left) in mutable_paths.iter().enumerate() {
+        for right in mutable_paths.iter().skip(index + 1) {
+            if do_paths_overlap(&left.1, &right.1) {
+                return Err(internal_compilation_error!(MutablePathsOverlap {
+                    a_span: arena[arguments[left.0].value].span,
+                    b_span: arena[arguments[right.0].value].span,
+                    fn_span,
+                }));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn check_elaborated_borrows(
+    arena: &ENodeArena,
+    node_id: ENodeId,
+) -> Result<(), InternalCompilationError> {
     let node = &arena[node_id];
-    use NodeKind::*;
     match &node.kind {
+        NodeKind::FunctionApply(app) => {
+            check_elaborated_arguments(&app.arguments, arena, arena[app.function].span)?;
+        }
+        NodeKind::SubscriptApply(app) => {
+            check_elaborated_arguments(&app.arguments, arena, node.span)?;
+        }
+        NodeKind::StaticApply(app) => {
+            check_elaborated_arguments(&app.arguments, arena, app.function_span)?;
+        }
+        NodeKind::CallDictionaryMethod(call) => {
+            check_elaborated_arguments(&call.arguments, arena, arena[call.dictionary].span)?;
+        }
+        _ => {}
+    }
+    for child in elaborated_child_node_ids(&node.kind) {
+        check_elaborated_borrows(arena, child)?;
+    }
+    Ok(())
+}
+
+pub fn check_elaborated_yield_roots(
+    arena: &ENodeArena,
+    node_id: ENodeId,
+    locals: &[ELocalDecl],
+) -> Result<(), InternalCompilationError> {
+    check_elaborated_yield_roots_in_node(arena, node_id, locals)
+}
+
+fn check_elaborated_yield_roots_in_node(
+    arena: &ENodeArena,
+    node_id: ENodeId,
+    locals: &[ELocalDecl],
+) -> Result<(), InternalCompilationError> {
+    let node = &arena[node_id];
+    if let NodeKind::Yield(value) = &node.kind {
+        check_elaborated_yield_root(arena, *value, locals)?;
+    }
+    for child in elaborated_child_node_ids(&node.kind) {
+        check_elaborated_yield_roots_in_node(arena, child, locals)?;
+    }
+    Ok(())
+}
+
+fn check_elaborated_yield_root(
+    arena: &ENodeArena,
+    node_id: ENodeId,
+    locals: &[ELocalDecl],
+) -> Result<(), InternalCompilationError> {
+    if arena[node_id].ty == Type::never() {
+        return Ok(());
+    }
+    let valid =
+        elaborated_returned_place_origin(arena, node_id).is_some_and(|origin| match origin {
+            PlaceOrigin::Direct { local, .. } => locals
+                .get(local.as_index())
+                .is_some_and(|local| local.owns_storage()),
+            PlaceOrigin::Addressor(_) => false,
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(internal_compilation_error!(InvalidYield {
+            kind: InvalidYieldKind::NotAccessorOwned,
+            span: arena[node_id].span,
+        }))
+    }
+}
+
+pub fn check_elaborated_place_return_roots(
+    arena: &ENodeArena,
+    node_id: ENodeId,
+    locals: &[ELocalDecl],
+    base_parameter_index: Option<usize>,
+    subject: SubscriptDefinitionSubject,
+) -> Result<(), InternalCompilationError> {
+    let node = &arena[node_id];
+    if let NodeKind::Return(value) = &node.kind {
+        check_elaborated_place_return_root(arena, *value, locals, base_parameter_index, subject)?;
+    }
+    for child in elaborated_child_node_ids(&node.kind) {
+        check_elaborated_place_return_roots(arena, child, locals, base_parameter_index, subject)?;
+    }
+    Ok(())
+}
+
+fn check_elaborated_place_return_root(
+    arena: &ENodeArena,
+    node_id: ENodeId,
+    locals: &[ELocalDecl],
+    base_parameter_index: Option<usize>,
+    subject: SubscriptDefinitionSubject,
+) -> Result<(), InternalCompilationError> {
+    if arena[node_id].ty == Type::never() {
+        return Ok(());
+    }
+    let Some(origin) = elaborated_returned_place_origin(arena, node_id) else {
+        return Err(internal_compilation_error!(InvalidSubscriptDefinition {
+            subject,
+            kind: InvalidSubscriptDefinitionKind::AddressorReturnMustBeCallerRooted,
+            span: arena[node_id].span,
+        }));
+    };
+    let valid = match origin {
+        PlaceOrigin::Direct {
+            local,
+            through_projection,
+        } => {
+            Some(local.as_index()) == base_parameter_index
+                && (through_projection
+                    || locals
+                        .get(local.as_index())
+                        .is_some_and(|local| local.mut_ty.is_mutable()))
+        }
+        PlaceOrigin::Addressor(local) => Some(local.as_index()) == base_parameter_index,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(internal_compilation_error!(InvalidSubscriptDefinition {
+            subject,
+            kind: InvalidSubscriptDefinitionKind::AddressorReturnMustBeRootedInBaseParameter,
+            span: arena[node_id].span,
+        }))
+    }
+}
+
+fn elaborated_returned_place_origin(arena: &ENodeArena, node_id: ENodeId) -> Option<PlaceOrigin> {
+    use NodeKind::*;
+    match &arena[node_id].kind {
         LoadLocal(load) => Some(PlaceOrigin::Direct {
             local: load.id,
             through_projection: false,
         }),
-        Project(project) => {
-            returned_place_origin(arena, project.value).map(|origin| PlaceOrigin::Direct {
+        Project(project) => elaborated_returned_place_origin(arena, project.value).map(|origin| {
+            PlaceOrigin::Direct {
                 local: origin.local(),
                 through_projection: true,
-            })
+            }
+        }),
+        StaticApply(app) if app.ty.returns_place() => {
+            elaborated_addressor_base_origin(arena, &app.arguments)
         }
-        FieldAccess(field_access) => {
-            returned_place_origin(arena, field_access.value).map(|origin| PlaceOrigin::Direct {
-                local: origin.local(),
-                through_projection: true,
-            })
-        }
-        StaticApply(app) if app.ty.returns_place() => addressor_base_origin(arena, &app.arguments),
         FunctionApply(app) if app.ty.returns_place() => {
-            addressor_base_origin(arena, &app.arguments)
-        }
-        TraitMethodApply(app) if app.ty.returns_place() => {
-            addressor_base_origin(arena, &app.arguments)
+            elaborated_addressor_base_origin(arena, &app.arguments)
         }
         CallDictionaryMethod(call) if call.ty.returns_place() => {
-            addressor_base_origin(arena, &call.arguments)
+            elaborated_addressor_base_origin(arena, &call.arguments)
         }
         SubscriptApply(app) if app.ty.returns_place() => {
-            addressor_base_origin(arena, &app.arguments)
+            elaborated_addressor_base_origin(arena, &app.arguments)
         }
-        WithPlace(node) => returned_place_origin(arena, node.place),
+        WithPlace(with) => elaborated_returned_place_origin(arena, with.place),
         Block(block) => block
-            .body
-            .last()
-            .and_then(|tail| returned_place_origin(arena, *tail)),
+            .tail_node()
+            .and_then(|tail| elaborated_returned_place_origin(arena, tail)),
+        FieldAccess(never)
+        | TraitMethodApply(never)
+        | GetTraitMethod(never)
+        | GetTraitAssociatedConst(never)
+        | GetTraitDictionary(never) => match *never {},
         _ => None,
     }
 }
 
-fn addressor_base_origin(arena: &NodeArena, arguments: &[CallArgument]) -> Option<PlaceOrigin> {
+fn elaborated_addressor_base_origin(
+    arena: &ENodeArena,
+    arguments: &[CallArgument<Elaborated>],
+) -> Option<PlaceOrigin> {
     let base_index = arguments
         .iter()
-        .position(|argument| !is_evidence_node(&arena[argument.value].kind))?;
-    returned_place_origin(arena, arguments[base_index].value)
+        .position(|argument| !is_enode_evidence(&arena[argument.value].kind))?;
+    elaborated_returned_place_origin(arena, arguments[base_index].value)
         .map(|origin| PlaceOrigin::Addressor(origin.local()))
 }
 
-impl Node {
-    pub fn check_borrows(&self, arena: &NodeArena) -> Result<(), InternalCompilationError> {
-        use NodeKind::*;
-        match &self.kind {
-            Immediate(_) | Uninit => {}
-            BuildClosure(build_closure) => {
-                check_borrows(arena, build_closure.function)?;
-                for &capture in &build_closure.dictionary_captures {
-                    check_borrows(arena, capture)?;
-                }
-                for &capture in &build_closure.captures {
-                    check_borrows(arena, capture)?;
-                }
-                if let Some(dict) = build_closure.captures_value_dictionary {
-                    check_borrows(arena, dict)?;
-                }
-            }
-            BuildSubscriptValue(build) => {
-                check_borrows(arena, build.subscript)?;
-                for &capture in &build.evidence_captures {
-                    check_borrows(arena, capture)?;
-                }
-            }
-            FunctionApply(app) => {
-                check_borrows(arena, app.function)?;
-                for arg in &app.arguments {
-                    check_borrows(arena, arg.value)?;
-                }
-                check_arguments(&app.arguments, arena, arena[app.function].span)?;
-            }
-            SubscriptApply(app) => {
-                check_borrows(arena, app.subscript)?;
-                for arg in &app.arguments {
-                    check_borrows(arena, arg.value)?;
-                }
-                check_arguments(&app.arguments, arena, self.span)?;
-            }
-            CloneClosureEnv(node) => {
-                check_borrows(arena, node.source)?;
-            }
-            DropClosureEnv(node) => {
-                check_borrows(arena, node.target)?;
-            }
-            CloneSubscriptValue(node) => {
-                check_borrows(arena, node.source)?;
-            }
-            DropSubscriptValue(node) => {
-                check_borrows(arena, node.target)?;
-            }
-            CloneValue(node) => {
-                check_borrows(arena, node.source)?;
-            }
-            StaticApply(app) => {
-                for arg in &app.arguments {
-                    check_borrows(arena, arg.value)?;
-                }
-                check_arguments(&app.arguments, arena, app.function_span)?;
-            }
-            TraitMethodApply(app) => {
-                for arg in &app.arguments {
-                    check_borrows(arena, arg.value)?;
-                }
-                check_arguments(&app.arguments, arena, app.method_span)?;
-            }
-            GetFunction(_) | GetSubscript(_) => {}
-            GetTraitMethod(_) | GetTraitAssociatedConst(_) | GetTraitDictionary(_) => {}
-            GetDictionary(_) => {}
-            LoadDictionary(_) | LoadSubscriptEvidence(_) => {}
-            GetDictionaryMethod(node) => check_borrows(arena, node.dictionary)?,
-            GetDictionaryAssociatedConst(node) => check_borrows(arena, node.dictionary)?,
-            CallDictionaryMethod(node) => {
-                check_borrows(arena, node.dictionary)?;
-                for arg in &node.arguments {
-                    check_borrows(arena, arg.value)?;
-                }
-                check_arguments(&node.arguments, arena, arena[node.dictionary].span)?;
-            }
-            StoreLocal(node) => {
-                check_borrows(arena, node.value)?;
-            }
-            TakeLocalValue(_) => {}
-            LoadLocal(_) => {}
-            Return(node_id) => {
-                check_borrows(arena, *node_id)?;
-            }
-            Yield(node_id) => {
-                check_borrows(arena, *node_id)?;
-            }
-            WithYielded(node) => {
-                check_borrows(arena, node.accessor)?;
-                check_borrows(arena, node.body)?;
-            }
-            WithPlace(node) => {
-                check_borrows(arena, node.place)?;
-                check_borrows(arena, node.body)?;
-            }
-            Block(block) => {
-                for &node_id in block.body.iter() {
-                    check_borrows(arena, node_id)?;
-                }
-            }
-            Assign(assignment) => {
-                check_borrows(arena, assignment.place)?;
-                check_borrows(arena, assignment.value)?;
-            }
-            Tuple(nodes) => {
-                for &node_id in nodes.iter() {
-                    check_borrows(arena, node_id)?;
-                }
-            }
-            Project(project) => {
-                check_borrows(arena, project.value)?;
-            }
-            Variant(variant) => {
-                check_borrows(arena, variant.payload)?;
-            }
-            ExtractTag(node_id) => {
-                check_borrows(arena, *node_id)?;
-            }
-            Record(nodes) => {
-                for &node_id in nodes.iter() {
-                    check_borrows(arena, node_id)?;
-                }
-            }
-            FieldAccess(field_access) => {
-                check_borrows(arena, field_access.value)?;
-            }
-            Array(nodes) => {
-                for &node_id in nodes.iter() {
-                    check_borrows(arena, node_id)?;
-                }
-            }
-            Case(case) => {
-                check_borrows(arena, case.value)?;
-                for &(_, node_id) in case.alternatives.iter() {
-                    check_borrows(arena, node_id)?;
-                }
-                check_borrows(arena, case.default)?;
-            }
-            Loop(node) => {
-                check_borrows(arena, node.body)?;
-            }
-            Break(node) => {
-                check_borrows(arena, node.value)?;
-            }
-            CheckCallDepth | CheckFuel | Continue(_) => {}
-        }
-        Ok(())
+fn elaborated_child_node_ids(kind: &NodeKind<Elaborated>) -> SVec4<ENodeId> {
+    use NodeKind::*;
+    match kind {
+        Immediate(_)
+        | Uninit
+        | GetFunction(_)
+        | GetSubscript(_)
+        | GetDictionary(_)
+        | LoadDictionary(_)
+        | LoadSubscriptEvidence(_)
+        | TakeLocalValue(_)
+        | LoadLocal(_)
+        | CheckCallDepth
+        | CheckFuel
+        | Continue(_) => smallvec![],
+        BuildClosure(build) => std::iter::once(build.function)
+            .chain(build.dictionary_captures.iter().copied())
+            .chain(build.captures.iter().copied())
+            .chain(build.captures_value_dictionary)
+            .collect(),
+        BuildSubscriptValue(build) => std::iter::once(build.subscript)
+            .chain(build.evidence_captures.iter().copied())
+            .collect(),
+        FunctionApply(app) => std::iter::once(app.function)
+            .chain(app.arguments.iter().map(|argument| argument.value))
+            .collect(),
+        SubscriptApply(app) => std::iter::once(app.subscript)
+            .chain(app.arguments.iter().map(|argument| argument.value))
+            .collect(),
+        StaticApply(app) => app
+            .extra_arguments
+            .iter()
+            .copied()
+            .chain(app.arguments.iter().map(|argument| argument.value))
+            .collect(),
+        CallDictionaryMethod(call) => std::iter::once(call.dictionary)
+            .chain(call.arguments.iter().map(|argument| argument.value))
+            .collect(),
+        CloneClosureEnv(operation) => smallvec![operation.source],
+        DropClosureEnv(operation) => smallvec![operation.target],
+        CloneSubscriptValue(operation) => smallvec![operation.source],
+        DropSubscriptValue(operation) => smallvec![operation.target],
+        CloneValue(operation) => smallvec![operation.source],
+        GetDictionaryMethod(operation) => smallvec![operation.dictionary],
+        GetDictionaryAssociatedConst(operation) => smallvec![operation.dictionary],
+        StoreLocal(store) => smallvec![store.value],
+        Return(value) | Yield(value) | ExtractTag(value) => smallvec![*value],
+        WithYielded(with) => smallvec![with.accessor, with.body],
+        WithPlace(with) => smallvec![with.place, with.body],
+        Block(block) => block.body.iter().copied().collect(),
+        Assign(assign) => smallvec![assign.place, assign.value],
+        Tuple(values) | Record(values) | Array(values) => values.iter().copied().collect(),
+        Project(project) => smallvec![project.value],
+        Variant(variant) => smallvec![variant.payload],
+        Case(case) => std::iter::once(case.value)
+            .chain(case.alternatives.iter().map(|(_, value)| *value))
+            .chain(std::iter::once(case.default))
+            .collect(),
+        Loop(r#loop) => smallvec![r#loop.body],
+        Break(r#break) => smallvec![r#break.value],
+        FieldAccess(never)
+        | TraitMethodApply(never)
+        | GetTraitMethod(never)
+        | GetTraitAssociatedConst(never)
+        | GetTraitDictionary(never) => match *never {},
     }
 }

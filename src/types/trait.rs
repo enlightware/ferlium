@@ -742,6 +742,59 @@ impl FormatWith<ModuleEnv<'_>> for Trait {
     }
 }
 
+impl Trait {
+    pub fn validate_impl_size(&self, input_tys: &[Type], output_tys: &[Type], method_count: usize) {
+        self.validate_impl_shape(input_tys, output_tys, &[], 0, method_count)
+    }
+
+    pub fn validate_impl_shape(
+        &self,
+        input_tys: &[Type],
+        output_tys: &[Type],
+        output_effs: &[EffType],
+        associated_const_count: usize,
+        method_count: usize,
+    ) {
+        assert_eq!(
+            self.input_type_count(),
+            input_tys.len() as u32,
+            "Mismatched input type count when implementing trait {}.",
+            self.name,
+        );
+        assert_eq!(
+            self.output_type_count(),
+            output_tys.len() as u32,
+            "Mismatched output type count when implementing trait {}.",
+            self.name,
+        );
+        assert_eq!(
+            self.output_effect_count(),
+            output_effs.len() as u32,
+            "Mismatched output effect count when implementing trait {}.",
+            self.name,
+        );
+        assert_eq!(
+            self.associated_consts.len(),
+            associated_const_count,
+            "Mismatched associated const count when implementing trait {}.",
+            self.name,
+        );
+        assert_eq!(
+            self.methods.len(),
+            method_count,
+            "Mismatched method count when implementing trait {}.",
+            self.name,
+        );
+    }
+
+    /// Span of the trait definition, or synthesized if not available.
+    pub fn trait_span(&self) -> Location {
+        self.spans
+            .as_ref()
+            .map_or_else(Location::new_synthesized, |spans| spans.span)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{
@@ -825,58 +878,5 @@ mod tests {
             trait_def.impl_output_effs_or_pure_defaults(vec![]),
             vec![EffType::empty()]
         );
-    }
-}
-
-impl Trait {
-    pub fn validate_impl_size(&self, input_tys: &[Type], output_tys: &[Type], method_count: usize) {
-        self.validate_impl_shape(input_tys, output_tys, &[], 0, method_count)
-    }
-
-    pub fn validate_impl_shape(
-        &self,
-        input_tys: &[Type],
-        output_tys: &[Type],
-        output_effs: &[EffType],
-        associated_const_count: usize,
-        method_count: usize,
-    ) {
-        assert_eq!(
-            self.input_type_count(),
-            input_tys.len() as u32,
-            "Mismatched input type count when implementing trait {}.",
-            self.name,
-        );
-        assert_eq!(
-            self.output_type_count(),
-            output_tys.len() as u32,
-            "Mismatched output type count when implementing trait {}.",
-            self.name,
-        );
-        assert_eq!(
-            self.output_effect_count(),
-            output_effs.len() as u32,
-            "Mismatched output effect count when implementing trait {}.",
-            self.name,
-        );
-        assert_eq!(
-            self.associated_consts.len(),
-            associated_const_count,
-            "Mismatched associated const count when implementing trait {}.",
-            self.name,
-        );
-        assert_eq!(
-            self.methods.len(),
-            method_count,
-            "Mismatched method count when implementing trait {}.",
-            self.name,
-        );
-    }
-
-    /// Span of the trait definition, or synthesized if not available.
-    pub fn trait_span(&self) -> Location {
-        self.spans
-            .as_ref()
-            .map_or_else(Location::new_synthesized, |spans| spans.span)
     }
 }

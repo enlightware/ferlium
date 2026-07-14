@@ -181,8 +181,8 @@ That metadata intentionally stores no cleanup and no layout payload.
 
 `Let` does not by itself require a clone.
 The callee cannot mutate or retain the argument, and elaboration already inserts the normal ownership operations if the body later needs an owned value.
-However, if a `Let` argument path overlaps a `MutableRef` argument path in the same call, or evaluation of a later argument writes an overlapping path, HIR generation stores a `CloneValue` snapshot in an explicit owned local at the `Let` argument's evaluation point.
-The clone dispatch records representation copy, static semantic clone, or dictionary clone, and the enclosing call block cleans the snapshot local after the call.
+However, if a `Let` argument path overlaps a `MutableRef` argument path in the same call, or evaluation of a later argument writes an overlapping path, elaboration inserts a `CloneValue` snapshot at the `Let` argument's evaluation point.
+The clone dispatch records representation copy, static semantic clone, or dictionary clone. A managed snapshot is stored in an explicit owned local that the enclosing call block cleans after the call; a `TrivialCopy` snapshot remains a direct HIR value and needs no cleanup.
 The argument-position store preserves left-to-right evaluation: a later mutable argument cannot change the earlier observed value before the callee reads it, while managed snapshot cleanup stays visible to every backend.
 Two overlapping `Let` arguments may share; overlapping mutable arguments are rejected by the borrow checker.
 

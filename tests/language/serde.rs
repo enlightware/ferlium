@@ -266,6 +266,7 @@ fn json_roundtrip_variant_record_array_with_strings() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[allow(clippy::approx_constant)]
 fn json_serialization_roundtrip() {
     let mut session = TestSession::new();
     // bool, low-level JSON functions

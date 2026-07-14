@@ -18,7 +18,9 @@ use crate::{
     containers::b,
     define_id_type,
     format::FormatWith,
-    hir::borrow_checker::{check_borrows, check_place_return_roots, check_yield_roots},
+    hir::borrow_checker::{
+        check_elaborated_borrows, check_elaborated_place_return_roots, check_elaborated_yield_roots,
+    },
     hir::function::{
         ArgConvention, CallableDefinition, Function, PendingScriptFunction,
         arg_conventions_for_args,
@@ -28,8 +30,7 @@ use crate::{
         function::ScriptFunction,
     },
     hir::{
-        dictionary::DictElaborationCtx,
-        elaboration::{ElaboratedHir, elaborate_hir},
+        dictionary::DictElaborationCtx, elaboration::elaborate_hir,
         value_dispatch::elaborate_local_ownership_and_value_dispatches,
     },
     internal_compilation_error,
@@ -581,7 +582,7 @@ impl PendingModuleFunction {
         mut self,
         dst_arena: &mut ENodeArena,
         ctx: &mut DictElaborationCtx<'_, '_, '_>,
-    ) -> Result<(EModuleFunction, ElaboratedHir), InternalCompilationError> {
+    ) -> Result<EModuleFunction, InternalCompilationError> {
         let root = self.code.entry_node_id;
         LocalDecl::assign_sequential_slots(&mut self.locals);
         elaborate_local_ownership_and_value_dispatches(
@@ -589,15 +590,12 @@ impl PendingModuleFunction {
             &mut self.locals,
             ctx,
         )?;
-        if self.code.yield_node_id.is_some() {
-            check_yield_roots(&self.code.arena, root, &self.locals)?;
-        }
         // Record the source-level conventions of visible parameters for later
         // elaboration and lowering.
         let arg_count = self.definition.arg_names.len();
         let parameter_passing =
             arg_conventions_for_args(&self.definition.ty_scheme.ty.args[..arg_count]);
-        if self.definition.returns_place() {
+        let place_return_check = if self.definition.returns_place() {
             if self.code.arena[root].ty != Type::never() {
                 return Err(internal_compilation_error!(InvalidSubscriptDefinition {
                     subject: self.subscript_definition_subject(),
@@ -619,21 +617,24 @@ impl PendingModuleFunction {
                         .expect("runtime argument count should include visible arguments"),
                 )
             };
-            check_place_return_roots(
-                &self.code.arena,
-                root,
-                &self.locals,
+            Some((base_parameter_index, self.subscript_definition_subject()))
+        } else {
+            None
+        };
+        let elaborated = elaborate_hir(&self.code.arena, root, dst_arena, ctx, self.locals)?;
+        if self.code.yield_node_id.is_some() {
+            check_elaborated_yield_roots(dst_arena, elaborated.root, &elaborated.locals)?;
+        }
+        if let Some((base_parameter_index, subject)) = place_return_check {
+            check_elaborated_place_return_roots(
+                dst_arena,
+                elaborated.root,
+                &elaborated.locals,
                 base_parameter_index,
-                self.subscript_definition_subject(),
+                subject,
             )?;
         }
-        check_borrows(&self.code.arena, root)?;
-        let elaborated = elaborate_hir(&self.code.arena, root, dst_arena, ctx, &self.locals)?;
-        let locals = self
-            .locals
-            .into_iter()
-            .map(ULocalDecl::into_elaborated)
-            .collect();
+        check_elaborated_borrows(dst_arena, elaborated.root)?;
         let function = ModuleFunction::new_elaborated(
             self.definition,
             b(ScriptFunction {
@@ -643,9 +644,9 @@ impl PendingModuleFunction {
             }),
             parameter_passing,
             self.spans,
-            locals,
+            elaborated.locals,
         );
-        Ok((function, elaborated))
+        Ok(function)
     }
 
     fn subscript_definition_subject(&self) -> SubscriptDefinitionSubject {

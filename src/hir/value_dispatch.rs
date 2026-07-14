@@ -111,8 +111,13 @@ fn resolve_value_method_dispatch(
         ));
     }
     let value_trait_id = ctx.trait_solver.std_trait_id(VALUE_TRAIT_NAME);
-    let dict_index = find_trait_impl_dict_index(ctx.dicts, value_trait_id, &[ty])
-        .unwrap_or_else(|| panic!("{missing_dictionary_msg}: {ty:?}"));
+    let dict_index =
+        find_trait_impl_dict_index(ctx.dicts, value_trait_id, &[ty]).ok_or_else(|| {
+            internal_compilation_error!(Internal {
+                error: format!("{missing_dictionary_msg}: {ty:?}"),
+                span,
+            })
+        })?;
     Ok(ResolvedValueMethodDispatch::Dictionary(
         ExtraParameterId::from_index(dict_index),
     ))

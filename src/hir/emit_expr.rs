@@ -15,7 +15,7 @@ use crate::{
     desugar::desugar_expr_with_empty_ctx,
     hir::{self, UNodeArena},
     hir::{
-        borrow_checker::check_borrows,
+        borrow_checker::check_elaborated_borrows,
         dictionary::DictElaborationCtx,
         elaboration::{elaborate_generated_functions, elaborate_hir},
         emit_functions::check_unbounds,
@@ -412,17 +412,10 @@ fn emit_expr_unsafe_inner(
         &mut solver,
         generated_projection_subscripts,
     );
-    let local_count = locals.len();
     elaborate_local_ownership_and_value_dispatches(expr_arena, &mut locals, &mut ctx)?;
-    check_borrows(expr_arena, node_id)?;
-    let expr = elaborate_hir(
-        expr_arena,
-        node_id,
-        &mut module.hir_arena,
-        &mut ctx,
-        &locals,
-    )?
-    .root;
+    let elaborated = elaborate_hir(expr_arena, node_id, &mut module.hir_arena, &mut ctx, locals)?;
+    let expr = elaborated.root;
+    check_elaborated_borrows(&module.hir_arena, expr)?;
     for lambda_id in lambda_functions.iter() {
         let function_slot = &mut module.functions[lambda_id.as_index()];
         borrow_check_and_elaborate_pending_function(
@@ -443,7 +436,6 @@ fn emit_expr_unsafe_inner(
         generated_projection_subscripts.commit(module, others);
     }
     elaborate_generated_functions(module, others, &mut pending_functions, generated)?;
-    assert_eq!(locals.len(), local_count);
     for lambda_id in lambda_functions {
         module.functions[lambda_id.as_index()].refresh_debug_info();
     }
@@ -451,7 +443,7 @@ fn emit_expr_unsafe_inner(
     Ok(CompiledExpr {
         expr,
         ty: ty_scheme,
-        locals: locals.into_iter().map(LocalDecl::into_elaborated).collect(),
+        locals: elaborated.locals,
     })
 }
 

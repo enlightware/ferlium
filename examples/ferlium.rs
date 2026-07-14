@@ -44,7 +44,7 @@ impl ariadne::Span for Span {
     type SourceId = SourceId;
 
     fn source(&self) -> &Self::SourceId {
-        &self.0.source_id_ref()
+        self.0.source_id_ref()
     }
 
     fn start(&self) -> usize {
@@ -1028,7 +1028,7 @@ fn run_interactive_repl(allow_experimental: bool) {
 
         // Process the input using the shared function
         let name = &format!("repl{counter}");
-        let result = process_input(&name, &src, counter, &mut session, true, fuel_limit);
+        let result = process_input(name, &src, counter, &mut session, true, fuel_limit);
         if let Ok(module) = result {
             last_module = module;
         }

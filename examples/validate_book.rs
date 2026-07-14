@@ -124,14 +124,14 @@ fn process_markdown_file(path: &Path, stats: &mut Stats) -> Result<(), String> {
         return Ok(());
     }
 
-    let mut parser = Parser::new_ext(&content, Options::all());
+    let parser = Parser::new_ext(&content, Options::all());
     let mut in_code_block = false;
     let mut code_info = String::new();
     let mut code_body = String::new();
     let mut block_index = 0usize;
     let mut file_stats = Stats::default();
 
-    while let Some(event) = parser.next() {
+    for event in parser {
         match event {
             Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(info))) => {
                 in_code_block = true;

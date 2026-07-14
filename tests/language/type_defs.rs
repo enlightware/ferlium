@@ -287,7 +287,7 @@ macro_rules! assert_path_is {
     }};
 }
 
-fn expect_applied_path<'a, S, I>(ty: &'a ast::PType, expected: I) -> &'a [ast::PTypeSpan]
+fn expect_applied_path<S, I>(ty: &ast::PType, expected: I) -> &[ast::PTypeSpan]
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,

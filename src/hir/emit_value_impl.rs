@@ -382,7 +382,7 @@ pub(super) fn emit_auto_value_impls(
                     &mut solver,
                     generated_projection_subscripts,
                 );
-                let (function, _) =
+                let function =
                     function.check_borrows_and_elaborate_hir(&mut output.hir_arena, &mut ctx)?;
                 let generated_projection_subscripts = ctx.take_generated_projection_subscripts();
                 let generated = solver.commit(

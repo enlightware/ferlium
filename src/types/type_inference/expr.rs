@@ -156,11 +156,6 @@ struct PreparedPlace {
     place: NodeId,
 }
 
-struct PreparedCallArguments {
-    arguments: Vec<CallArgument>,
-    temp_stores: Vec<NodeId>,
-}
-
 struct StaticCallFromCheckedArgs {
     callee: CheckedStaticCallee,
     inst_fn_ty: FnType,
@@ -1265,8 +1260,6 @@ impl TypeInference {
                             &args_effects,
                             &call_effects,
                         ]);
-                        // Non-place function values and borrowed arguments are stored in
-                        // explicit temps so the call ABI can pass stable places.
                         let temp_start_index = env.cur_locals.len();
                         let mut temp_stores = Vec::new();
                         let function = if node_is_place_reference(env.ir_arena, func_node_id) {
@@ -1298,16 +1291,15 @@ impl TypeInference {
                             expr_span,
                             None,
                         );
-                        temp_stores.extend(prepared_arguments.temp_stores);
                         // Store and return the result
                         let call = K::FunctionApply(b(hir::FunctionApplication {
                             function,
-                            arguments: prepared_arguments.arguments,
+                            arguments: prepared_arguments,
                             ty: CallImplType::value(app_ty),
                         }));
                         let call =
                             hir::Node::new(call, ret_ty, combined_effects.clone(), expr_span);
-                        let node = self.wrap_call_with_temp_drops(
+                        let node = self.wrap_call_with_prefix_and_temp_drops(
                             env,
                             temp_start_index,
                             temp_stores,
@@ -2260,19 +2252,14 @@ impl TypeInference {
             function_path: Some(path),
             function_span: expr_span,
             extra_arguments: Vec::new(),
-            arguments: prepared_arguments.arguments,
+            arguments: prepared_arguments,
             argument_names: vec![ustr("array"), ustr("index")],
             argument_name_hint_policy: UnnamedArg::All,
             ty: CallImplType::new(inst_fn_ty, definition.result_convention),
             inst_data,
         }));
         let call = hir::Node::new(call, element_ty, combined_effects.clone(), expr_span);
-        let node = self.wrap_call_with_temp_drops(
-            env,
-            temp_start_index,
-            prepared_arguments.temp_stores,
-            call,
-        );
+        let node = self.wrap_call_with_temp_drops(env, temp_start_index, call);
         Ok((
             hir::Node::new(node, element_ty, combined_effects, expr_span),
             array_expr_mut,
@@ -2557,19 +2544,14 @@ impl TypeInference {
             function_path: None,
             function_span: data.name.1,
             extra_arguments: Vec::new(),
-            arguments: prepared_arguments.arguments,
+            arguments: prepared_arguments,
             argument_names: definition.arg_names.clone(),
             argument_name_hint_policy: UnnamedArg::None,
             ty: CallImplType::new(inst_fn_ty, definition.result_convention),
             inst_data,
         }));
         let call = hir::Node::new(call, ret_ty, combined_effects.clone(), expr_span);
-        let node = self.wrap_call_with_temp_drops(
-            env,
-            temp_start_index,
-            prepared_arguments.temp_stores,
-            call,
-        );
+        let node = self.wrap_call_with_temp_drops(env, temp_start_index, call);
         let node = env.ir_arena.alloc(hir::Node::new(
             node,
             ret_ty,
@@ -2760,15 +2742,15 @@ impl TypeInference {
             expr_span,
             None,
         );
-        temp_stores.extend(prepared_arguments.temp_stores);
         let call = NodeKind::SubscriptApply(b(hir::SubscriptApplication {
             subscript,
             mut_member: matches!(mode, SubscriptMemberKind::Mut),
-            arguments: prepared_arguments.arguments,
+            arguments: prepared_arguments,
             ty: CallImplType::new(inst_fn_ty, result_convention),
         }));
         let call = hir::Node::new(call, ret_ty, combined_effects.clone(), expr_span);
-        let node = self.wrap_call_with_temp_drops(env, temp_start_index, temp_stores, call);
+        let node =
+            self.wrap_call_with_prefix_and_temp_drops(env, temp_start_index, temp_stores, call);
         let node = env.ir_arena.alloc(hir::Node::new(
             node,
             ret_ty,
@@ -2873,7 +2855,7 @@ impl TypeInference {
             function_path: None,
             function_span: field.1,
             extra_arguments: Vec::new(),
-            arguments: prepared_arguments.arguments,
+            arguments: prepared_arguments,
             argument_names,
             argument_name_hint_policy: UnnamedArg::None,
             ty: CallImplType::new(
@@ -2883,12 +2865,7 @@ impl TypeInference {
             inst_data,
         }));
         let call = hir::Node::new(call, ret_ty, combined_effects.clone(), expr_span);
-        let node = self.wrap_call_with_temp_drops(
-            env,
-            temp_start_index,
-            prepared_arguments.temp_stores,
-            call,
-        );
+        let node = self.wrap_call_with_temp_drops(env, temp_start_index, call);
         let node = env.ir_arena.alloc(hir::Node::new(
             node,
             ret_ty,
@@ -3885,7 +3862,7 @@ impl TypeInference {
                 function_path,
                 function_span,
                 extra_arguments: Vec::new(),
-                arguments: prepared_arguments.arguments,
+                arguments: prepared_arguments,
                 argument_names,
                 argument_name_hint_policy,
                 ty: CallImplType::new(call.inst_fn_ty, call.result_convention),
@@ -3903,7 +3880,7 @@ impl TypeInference {
                 method_index,
                 method_path,
                 method_span,
-                arguments: prepared_arguments.arguments,
+                arguments: prepared_arguments,
                 arguments_unnamed,
                 ty: CallImplType::new(call.inst_fn_ty, call.result_convention),
                 input_tys,
@@ -3911,12 +3888,7 @@ impl TypeInference {
             })),
         };
         let call_node = hir::Node::new(node, ret_ty, effects.clone(), expr_span);
-        let node = self.wrap_call_with_temp_drops(
-            env,
-            temp_start_index,
-            prepared_arguments.temp_stores,
-            call_node,
-        );
+        let node = self.wrap_call_with_temp_drops(env, temp_start_index, call_node);
         BuiltStaticCall {
             node,
             ty: ret_ty,
@@ -4229,7 +4201,7 @@ impl TypeInference {
         returns_caller_rooted_place: bool,
         span: Location,
         visible_arg_passing_override: Option<&[ArgConvention]>,
-    ) -> PreparedCallArguments {
+    ) -> Vec<CallArgument> {
         let arg_passing =
             self.argument_passing_for_args(arg_tys, abi_arg_tys, visible_arg_passing_override);
         let source_arguments =
@@ -4238,7 +4210,7 @@ impl TypeInference {
             addressor_place_base_argument_index(env.ir_arena, &source_arguments)
                 .expect("addressor-place application should have a base argument")
         });
-        let mut snapshot_for_later_argument_write = vec![false; args.len()];
+        let mut needs_snapshot_constraint = vec![false; args.len()];
         for (let_index, _) in
             crate::hir::borrow_checker::let_arguments_overlapping_later_argument_writes(
                 env.ir_arena,
@@ -4249,102 +4221,41 @@ impl TypeInference {
             // its current value. A later argument may finish mutating that storage before the
             // addressor accesses it, but the returned place must remain rooted in the caller.
             if caller_rooted_base != Some(let_index) {
-                snapshot_for_later_argument_write[let_index] = true;
+                needs_snapshot_constraint[let_index] = true;
             }
         }
-        let mut stores = Vec::new();
-        let materialize_value_arguments_in_order = snapshot_for_later_argument_write
-            .iter()
-            .any(|snapshot| *snapshot)
-            || args
-                .iter()
-                .zip(arg_tys)
-                .zip(&arg_passing)
-                .any(|((&arg, arg_ty), &passing)| {
-                    self.call_value_argument_needs_shared_ref_temp(env, arg, arg_ty.ty, passing)
-                });
-        for (index, ((arg, arg_ty), passing)) in
-            args.iter_mut().zip(arg_tys).zip(&arg_passing).enumerate()
-        {
+        for (index, needs_constraint) in needs_snapshot_constraint.iter().copied().enumerate() {
+            if needs_constraint {
+                self.add_call_argument_value_constraint(env, arg_tys[index].ty, span);
+            }
+        }
+
+        for ((arg, arg_ty), passing) in args.iter_mut().zip(arg_tys).zip(&arg_passing) {
             match passing {
                 ArgConvention::MutableRef => {
                     if node_is_place_reference(env.ir_arena, *arg) {
                         let prepared = self.prepare_place_for_consumer(env, *arg, span);
-                        stores.extend(prepared.prefix);
-                        *arg = prepared.place;
+                        *arg = self.wrap_prepared_call_place(env, prepared, *arg);
                     }
                 }
                 ArgConvention::Let => {
-                    if snapshot_for_later_argument_write[index] {
-                        let source = *arg;
-                        let ty = arg_ty.ty;
-                        if !self.type_has_concrete_trivial_copy_impl(env, ty) && !ty.is_function() {
-                            self.add_pub_constraint(PubTypeConstraint::new_have_trait(
-                                value_trait_id(env),
-                                vec![ty],
-                                vec![],
-                                vec![],
-                                span,
-                            ));
-                        }
-                        let source_span = env.ir_arena[source].span;
-                        let effects = env.ir_arena[source].effects.clone();
-                        let snapshot = env.ir_arena.alloc(hir::Node::new(
-                            NodeKind::CloneValue(hir::CloneValue {
-                                source,
-                                clone: PendingLocalClone::Unknown,
-                            }),
-                            ty,
-                            effects,
-                            source_span,
-                        ));
-                        let (store, load) =
-                            self.store_owned_temp(env, snapshot, ty, span, ustr("$snapshot"));
-
-                        // Transitional eager-pipeline adapter: later argument preparation may
-                        // hoist its evaluation prefix before the call, so put this snapshot in
-                        // the common prefix now, at its source argument's position. Final HIR
-                        // call-lifetime elaboration should instead emit the store inside this
-                        // argument and retain only the cleanup around the call.
-                        stores.push(store);
-                        *arg = load;
-                    }
                     if Self::node_is_scoped_place_value(env.ir_arena, *arg) {
                         let prepared = self.prepare_scoped_place_value_for_consumer(env, *arg);
-                        stores.extend(prepared.prefix);
-                        *arg = prepared.place;
+                        *arg = self.wrap_prepared_call_place(env, prepared, *arg);
                     }
                     if node_is_place_reference(env.ir_arena, *arg)
                         && !node_is_stable_place_reference(env.ir_arena, *arg)
                     {
                         let prepared = self.prepare_place_for_consumer(env, *arg, span);
-                        stores.extend(prepared.prefix);
-                        *arg = prepared.place;
+                        *arg = self.wrap_prepared_call_place(env, prepared, *arg);
                     }
-                    let needs_shared_ref_temp = self
-                        .call_value_argument_needs_shared_ref_temp(env, *arg, arg_ty.ty, *passing);
-                    let needs_ordering_temp = materialize_value_arguments_in_order
-                        && arg_ty.ty != Type::never()
-                        && !node_is_place_reference(env.ir_arena, *arg);
-                    if needs_shared_ref_temp || needs_ordering_temp {
-                        let value = self.materialize_owned_value(env, *arg, span);
-                        let value_ty = env.ir_arena[value].ty;
-                        let (store, load) =
-                            self.store_owned_temp(env, value, value_ty, span, ustr("$arg"));
-                        // Once any managed argument requires prefix storage, materialize every
-                        // non-place value argument there in source order. Otherwise a later
-                        // managed store could run before an earlier direct, effectful argument.
-                        stores.push(store);
-                        *arg = load;
-                    } else {
-                        self.add_call_argument_temp_value_constraint(
-                            env, *arg, arg_ty.ty, *passing, span,
-                        );
-                    }
+                    self.add_call_argument_temp_value_constraint(
+                        env, *arg, arg_ty.ty, *passing, span,
+                    );
                 }
             }
         }
-        let mut arguments = CallArgument::from_value_slice_and_passing(args, arg_passing);
+        let arguments = CallArgument::from_value_slice_and_passing(args, arg_passing);
         let overlaps =
             crate::hir::borrow_checker::let_arguments_overlapping_mutable(env.ir_arena, &arguments);
         let mut snapshotted = vec![false; arguments.len()];
@@ -4355,44 +4266,47 @@ impl TypeInference {
                 continue;
             }
             snapshotted[let_index] = true;
-            let ty = arg_tys[let_index].ty;
-            if !self.type_has_concrete_trivial_copy_impl(env, ty) && !ty.is_function() {
-                self.add_pub_constraint(PubTypeConstraint::new_have_trait(
-                    value_trait_id(env),
-                    vec![ty],
-                    vec![],
-                    vec![],
-                    span,
-                ));
-            }
-
-            let source = arguments[let_index].value;
-            let source_span = env.ir_arena[source].span;
-            let effects = env.ir_arena[source].effects.clone();
-            let snapshot = env.ir_arena.alloc(hir::Node::new(
-                NodeKind::CloneValue(hir::CloneValue {
-                    source,
-                    clone: PendingLocalClone::Unknown,
-                }),
-                ty,
-                effects.clone(),
-                source_span,
-            ));
-            let (store, load) = self.store_owned_temp(env, snapshot, ty, span, ustr("$snapshot"));
-
-            // Keep the store at this argument's evaluation position. The enclosing
-            // call block owns and cleans the local after the callee returns.
-            let snapshot_place = env.ir_arena.alloc(hir::Node::new(
-                Self::block(vec![store, load], Vec::new()),
-                ty,
-                effects,
-                source_span,
-            ));
-            arguments[let_index].value = snapshot_place;
+            self.add_call_argument_value_constraint(env, arg_tys[let_index].ty, span);
         }
-        PreparedCallArguments {
-            arguments,
-            temp_stores: stores,
+        arguments
+    }
+
+    /// Keep place-normalization work at the argument's source evaluation position.
+    /// Generated locals are cleaned by the call's enclosing scope, so this inner block owns no
+    /// cleanup itself. In particular, writes in the prefix remain visible to final call-lifetime
+    /// planning instead of being hoisted ahead of earlier arguments.
+    fn wrap_prepared_call_place(
+        &mut self,
+        env: &mut TypingEnv,
+        mut prepared: PreparedPlace,
+        original: NodeId,
+    ) -> NodeId {
+        if prepared.prefix.is_empty() {
+            return prepared.place;
+        }
+        prepared.prefix.push(prepared.place);
+        env.ir_arena.alloc(hir::Node::new(
+            Self::block(prepared.prefix, Vec::new()),
+            env.ir_arena[original].ty,
+            env.ir_arena[original].effects.clone(),
+            env.ir_arena[original].span,
+        ))
+    }
+
+    fn add_call_argument_value_constraint(
+        &mut self,
+        env: &mut TypingEnv,
+        ty: Type,
+        span: Location,
+    ) {
+        if !self.type_has_concrete_trivial_copy_impl(env, ty) && !ty.is_function() {
+            self.add_pub_constraint(PubTypeConstraint::new_have_trait(
+                value_trait_id(env),
+                vec![ty],
+                vec![],
+                vec![],
+                span,
+            ));
         }
     }
 
@@ -4428,23 +4342,6 @@ impl TypeInference {
             .collect()
     }
 
-    fn call_value_argument_needs_shared_ref_temp(
-        &mut self,
-        env: &mut TypingEnv,
-        arg: NodeId,
-        ty: Type,
-        passing: ArgConvention,
-    ) -> bool {
-        let is_stable_place = node_is_stable_storage_place_reference(env.ir_arena, arg);
-        if ty == Type::never() || is_stable_place {
-            return false;
-        }
-        match passing {
-            ArgConvention::MutableRef => false,
-            ArgConvention::Let => !self.type_has_concrete_trivial_copy_impl(env, ty),
-        }
-    }
-
     fn add_call_argument_temp_value_constraint(
         &mut self,
         env: &mut TypingEnv,
@@ -4469,6 +4366,26 @@ impl TypeInference {
     }
 
     fn wrap_call_with_temp_drops(
+        &mut self,
+        env: &mut TypingEnv,
+        temp_start_index: usize,
+        call: hir::Node,
+    ) -> NodeKind {
+        self.wrap_call_with_prefix_and_temp_drops(env, temp_start_index, Vec::new(), call)
+    }
+
+    /// Evaluate target-setup operations before a call and keep their temporaries alive through it.
+    ///
+    /// Use this when the callable target must be stabilized before argument evaluation, such as
+    /// storing a dynamic function or first-class subscript value in a temporary. Compiler-generated
+    /// consumers may also use it when they explicitly materialize their input before the consumer.
+    ///
+    /// `prefix` runs before the entire call, including its arguments. Locals created since
+    /// `temp_start_index` remain alive through the call and are cleaned on every exit afterward.
+    ///
+    /// Do not use this for source-argument preparation: argument-local work must remain at the
+    /// argument's position to preserve left-to-right evaluation.
+    fn wrap_call_with_prefix_and_temp_drops(
         &mut self,
         env: &mut TypingEnv,
         temp_start_index: usize,
@@ -4527,7 +4444,8 @@ impl TypeInference {
         let (store, load) = self.store_owned_temp(env, value, ty, span, name);
         let (kind, consumer_ty, consumer_effects) = build_consumer(self, env, load);
         let consumer = hir::Node::new(kind, consumer_ty, consumer_effects.clone(), span);
-        let block = self.wrap_call_with_temp_drops(env, temp_start, vec![store], consumer);
+        let block =
+            self.wrap_call_with_prefix_and_temp_drops(env, temp_start, vec![store], consumer);
         (block, consumer_ty, consumer_effects)
     }
 

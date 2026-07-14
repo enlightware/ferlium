@@ -80,7 +80,8 @@ A parameter written as `&mut T` is a `MutableRef` access: the callee receives ex
 
 `Let` is a semantic convention, not a physical transport choice.
 It permits the caller to share existing storage when that is safe.
-When a `Let` argument aliases a mutable argument of the same call, or when evaluation of a later argument writes the same place, HIR stores an explicit `CloneValue` snapshot in an owned temporary at the `Let` argument's evaluation point and cleans that temporary after the call.
+When a `Let` argument aliases a mutable argument of the same call, or when evaluation of a later argument writes the same place, HIR stores an explicit `CloneValue` snapshot at the `Let` argument's evaluation point.
+Managed snapshots use an owned temporary cleaned after the call; `TrivialCopy` snapshots remain direct values.
 Thus neither later argument evaluation nor mutation inside the callee can change the value observed through the earlier argument.
 Two `Let` arguments may share storage; overlapping mutable arguments remain a borrow-checking error.
 
@@ -182,7 +183,7 @@ Fields are canonicalised to produce a stable layout:
 
 1. Compute each field’s alignment (per backend profile).
 2. Sort fields by:
-   - **Primary:** decreasing alignment  
+   - **Primary:** decreasing alignment
    - **Secondary:** lexicographic field name
 
 ```
@@ -242,7 +243,7 @@ This does not affect their layout.
 ## Tag representation
 
 Tags are stored as `u32` referring to interned strings within one compilation session.
-Binary modules are not compatible across compilation sessions. 
+Binary modules are not compatible across compilation sessions.
 
 ## Payload layout
 

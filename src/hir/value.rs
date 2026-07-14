@@ -608,7 +608,9 @@ mod tests {
     #[cfg(not(miri))]
     fn rust_drop_does_not_own_value_payload_lifetime() {
         reset_rust_drop_count();
-        drop(Value::native(RustDropTracked));
+        {
+            let _value = Value::native(RustDropTracked);
+        }
         assert_eq!(rust_drop_count(), 0);
     }
 

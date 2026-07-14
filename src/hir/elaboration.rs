@@ -8,7 +8,7 @@
 //
 
 use crate::{FxHashMap, FxHashSet, Modules};
-use ustr::Ustr;
+use ustr::{Ustr, ustr};
 
 use crate::{
     Location,
@@ -24,10 +24,10 @@ use crate::{
     },
     internal_compilation_error,
     module::{
-        ExtraParameterId, FunctionId, GeneratedStructuralProjectionSpec, LocalDecl,
-        LocalFunctionId, Module, ModuleEnv, PendingLocalClone, PendingLocalDrop,
+        ELocalDecl, ExtraParameterId, FunctionId, GeneratedStructuralProjectionSpec, LocalDecl,
+        LocalDeclId, LocalFunctionId, Module, ModuleEnv, PendingLocalClone, PendingLocalDrop,
         PendingModuleFunction, PendingTakeLocalValueMode, ProjectionIndex, ProjectionKey,
-        SubscriptId, SubscriptMemberKind, TraitId, id::Id,
+        ResolvedLocalClone, ResolvedLocalDrop, SubscriptId, SubscriptMemberKind, TraitId, id::Id,
     },
     types::r#trait::{TraitDictionaryEntryIndex, TraitMethodIndex},
     types::trait_solver::{TraitSolver, trait_solver_from_module},
@@ -308,6 +308,7 @@ fn extra_arg_kind_for_module_function(
 pub struct ElaboratedHir {
     pub root: ENodeId,
     pub remap: FxHashMap<UNodeId, ENodeId>,
+    pub locals: Vec<ELocalDecl>,
 }
 
 /// Elaborate a pre-dictionary-passing HIR tree into the final HIR arena.
@@ -316,13 +317,19 @@ pub fn elaborate_hir<'d, 'sr, 'sm>(
     root: UNodeId,
     dst: &mut ENodeArena,
     ctx: &mut DictElaborationCtx<'d, 'sr, 'sm>,
-    locals: &[LocalDecl],
+    locals: Vec<LocalDecl>,
 ) -> Result<ElaboratedHir, InternalCompilationError> {
     let mut elaboration = HirElaboration::new(dst, ctx, locals);
     let root = elaboration.elaborate_node(src, root)?;
+    LocalDecl::assign_sequential_slots(&mut elaboration.locals);
     Ok(ElaboratedHir {
         root,
         remap: elaboration.remap,
+        locals: elaboration
+            .locals
+            .into_iter()
+            .map(LocalDecl::into_elaborated)
+            .collect(),
     })
 }
 
@@ -357,7 +364,7 @@ pub fn elaborate_generated_functions(
             &mut solver,
             generated_projection_subscripts,
         );
-        let (elaborated, _) =
+        let elaborated =
             function.check_borrows_and_elaborate_hir(&mut module.hir_arena, &mut ctx)?;
         module.functions[id.as_index()] = elaborated;
         let generated_projection_subscripts = ctx.take_generated_projection_subscripts();
@@ -379,16 +386,33 @@ struct HirElaboration<'a, 'd, 'sr, 'sm> {
     generated: UNodeArena,
     dst: &'a mut ENodeArena,
     ctx: &'a mut DictElaborationCtx<'d, 'sr, 'sm>,
-    locals: &'a [LocalDecl],
+    locals: Vec<LocalDecl>,
     remap: FxHashMap<UNodeId, ENodeId>,
     in_progress: FxHashSet<UNodeId>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ArgumentLifetimePlan {
+    Direct,
+    Snapshot {
+        clone: ResolvedLocalClone,
+        drop: Option<ResolvedLocalDrop>,
+    },
+    MaterializeOwned {
+        drop: ResolvedLocalDrop,
+    },
+}
+
+struct ElaboratedCallArguments {
+    arguments: Vec<CallArgument<Elaborated>>,
+    cleanup: Vec<LocalDeclId>,
 }
 
 impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
     fn new(
         dst: &'a mut ENodeArena,
         ctx: &'a mut DictElaborationCtx<'d, 'sr, 'sm>,
-        locals: &'a [LocalDecl],
+        locals: Vec<LocalDecl>,
     ) -> Self {
         Self {
             generated: UNodeArena::default(),
@@ -398,6 +422,60 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
             remap: FxHashMap::default(),
             in_progress: FxHashSet::default(),
         }
+    }
+
+    fn push_owned_call_temp(
+        &mut self,
+        ty: Type,
+        drop: ResolvedLocalDrop,
+        span: Location,
+        name: Ustr,
+    ) -> LocalDeclId {
+        let mut local = LocalDecl::new(
+            (name, Location::new_synthesized()),
+            MutType::constant(),
+            ty,
+            None,
+            span,
+        );
+        local.set_owned_storage(PendingLocalDrop::Resolved(drop));
+        LocalDecl::push_with_next_slot(&mut self.locals, local)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn materialize_call_value(
+        &mut self,
+        value: ENodeId,
+        ty: Type,
+        effects: &EffType,
+        value_span: Location,
+        scope_span: Location,
+        name: Ustr,
+        drop: ResolvedLocalDrop,
+    ) -> (ENodeId, LocalDeclId) {
+        let local = self.push_owned_call_temp(ty, drop, scope_span, name);
+        let store = self.alloc_elaborated_node(
+            NodeKind::StoreLocal(hir::StoreLocal { value, id: local }),
+            Type::unit(),
+            effects.clone(),
+            value_span,
+        );
+        let load = self.alloc_elaborated_node(
+            NodeKind::LoadLocal(hir::LoadLocal { id: local }),
+            ty,
+            no_effects(),
+            value_span,
+        );
+        let value = self.alloc_elaborated_node(
+            NodeKind::Block(b(hir::Block {
+                body: b(SVec2::from_vec(vec![store, load])),
+                cleanup: Vec::new(),
+            })),
+            ty,
+            effects.clone(),
+            value_span,
+        );
+        (value, local)
     }
 
     fn elaborate_node(
@@ -562,7 +640,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
 
     fn inline_yielded_binding_body(
         &mut self,
-        binding: crate::module::LocalDeclId,
+        binding: LocalDeclId,
         place: ENodeId,
         body: ENodeId,
     ) -> Result<Option<NodeKind<Elaborated>>, InternalCompilationError> {
@@ -625,46 +703,147 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
     fn elaborate_call_arguments(
         &mut self,
         src: &UNodeArena,
-        arguments: impl IntoIterator<Item = (UNodeId, ArgConvention)>,
+        arguments: &[CallArgument],
         returns_caller_rooted_place: bool,
         node_span: Location,
-    ) -> Result<Vec<CallArgument<Elaborated>>, InternalCompilationError> {
-        let arguments = arguments.into_iter().collect::<Vec<_>>();
-        let source_arguments = arguments
-            .iter()
-            .map(|(value, passing)| CallArgument {
-                value: *value,
-                passing: *passing,
-            })
-            .collect::<Vec<_>>();
-        let overlaps =
-            hir::borrow_checker::let_arguments_overlapping_mutable(src, &source_arguments);
+    ) -> Result<ElaboratedCallArguments, InternalCompilationError> {
+        let mut snapshot = vec![false; arguments.len()];
         let caller_rooted_base = returns_caller_rooted_place.then(|| {
-            hir::addressor_place_base_argument_index(src, &source_arguments)
+            hir::addressor_place_base_argument_index(src, arguments)
                 .expect("addressor-place application should have a base argument")
         });
-        if let Some((let_index, mutable_index)) = overlaps.into_iter().next() {
+
+        for (let_index, mutable_index) in
+            hir::borrow_checker::let_arguments_overlapping_mutable(src, arguments)
+        {
             if caller_rooted_base == Some(let_index) {
                 return Err(internal_compilation_error!(MutablePathsOverlap {
-                    a_span: src[source_arguments[let_index].value].span,
-                    b_span: src[source_arguments[mutable_index].value].span,
+                    a_span: src[arguments[let_index].value].span,
+                    b_span: src[arguments[mutable_index].value].span,
                     fn_span: node_span,
                 }));
             }
-            return Err(internal_compilation_error!(Internal {
-                error:
-                    "overlapping Let argument should have been materialized during type inference"
-                        .to_string(),
-                span: src[source_arguments[let_index].value].span,
-            }));
+            snapshot[let_index] = true;
+        }
+
+        for (let_index, _) in
+            hir::borrow_checker::let_arguments_overlapping_later_argument_writes(src, arguments)
+        {
+            if caller_rooted_base != Some(let_index) {
+                snapshot[let_index] = true;
+            }
+        }
+
+        // Resolve the complete plan before rewriting an argument. This keeps conflict
+        // classification independent of elaboration traversal and allocation order.
+        let mut plans = Vec::with_capacity(arguments.len());
+        for (index, argument) in arguments.iter().enumerate() {
+            let source = argument.value;
+            let ty = src[source].ty;
+            let plan = if ty == Type::never() {
+                // Evaluating a `never` argument transfers control before the call. It therefore
+                // needs neither a snapshot nor an owned call lifetime, even if conservative path
+                // analysis happened to classify its place as overlapping.
+                ArgumentLifetimePlan::Direct
+            } else if snapshot[index] {
+                let clone = resolve_local_clone(&mut self.generated, self.ctx, ty, node_span)?;
+                let drop = if matches!(clone, ResolvedLocalClone::TrivialCopy) {
+                    None
+                } else {
+                    Some(
+                        resolve_local_drop(&mut self.generated, self.ctx, ty, node_span)?
+                            .into_elaborated(),
+                    )
+                };
+                ArgumentLifetimePlan::Snapshot { clone, drop }
+            } else if argument.passing == ArgConvention::Let
+                && (!hir::node_is_place_reference(src, source)
+                    // A generic trait method is place-like only while type inference represents
+                    // dictionary dispatch. Elaboration produces a fresh function value, so its
+                    // owned environment needs the same explicit call lifetime as any rvalue.
+                    || matches!(src[source].kind, NodeKind::GetTraitMethod(_)))
+            {
+                let drop = resolve_local_drop(&mut self.generated, self.ctx, ty, node_span)?
+                    .into_elaborated();
+                if drop == ResolvedLocalDrop::Skip {
+                    ArgumentLifetimePlan::Direct
+                } else {
+                    ArgumentLifetimePlan::MaterializeOwned { drop }
+                }
+            } else {
+                ArgumentLifetimePlan::Direct
+            };
+            plans.push(plan);
         }
 
         let mut result = Vec::with_capacity(arguments.len());
-        for (source, passing) in arguments {
-            let value = self.elaborate_node(src, source)?;
-            result.push(CallArgument { value, passing });
+        let mut cleanup = Vec::new();
+        for (argument, plan) in arguments.iter().zip(plans) {
+            let source = argument.value;
+            let source_node = &src[source];
+            let mut value = self.elaborate_node(src, source)?;
+            let drop = match plan {
+                ArgumentLifetimePlan::Direct => None,
+                ArgumentLifetimePlan::Snapshot { clone, drop } => {
+                    value = self.alloc_elaborated_node(
+                        NodeKind::CloneValue(hir::CloneValue {
+                            source: value,
+                            clone,
+                        }),
+                        source_node.ty,
+                        source_node.effects.clone(),
+                        source_node.span,
+                    );
+                    drop
+                }
+                ArgumentLifetimePlan::MaterializeOwned { drop } => Some(drop),
+            };
+
+            if let Some(drop) = drop {
+                let (materialized, local) = self.materialize_call_value(
+                    value,
+                    source_node.ty,
+                    &source_node.effects,
+                    source_node.span,
+                    node_span,
+                    if matches!(plan, ArgumentLifetimePlan::Snapshot { .. }) {
+                        ustr("$snapshot")
+                    } else {
+                        ustr("$arg")
+                    },
+                    drop,
+                );
+                value = materialized;
+                cleanup.push(local);
+            }
+
+            result.push(CallArgument {
+                value,
+                passing: argument.passing,
+            });
         }
-        Ok(result)
+        Ok(ElaboratedCallArguments {
+            arguments: result,
+            cleanup,
+        })
+    }
+
+    fn wrap_call_cleanup(
+        &mut self,
+        call: NodeKind<Elaborated>,
+        cleanup: Vec<LocalDeclId>,
+        ty: Type,
+        effects: &EffType,
+        span: Location,
+    ) -> NodeKind<Elaborated> {
+        if cleanup.is_empty() {
+            return call;
+        }
+        let call = self.alloc_elaborated_node(call, ty, effects.clone(), span);
+        NodeKind::Block(b(hir::Block {
+            body: b(SVec2::from_vec(vec![call])),
+            cleanup,
+        }))
     }
 
     fn elaborate_source_kind(
@@ -733,17 +912,18 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
             FunctionApply(app) => {
                 let function = app.function;
                 let ty = app.ty.clone();
-                let source_arguments = app.arguments.iter().map(|arg| (arg.value, arg.passing));
-                FunctionApply(b(hir::FunctionApplication {
+                let arguments = self.elaborate_call_arguments(
+                    src,
+                    &app.arguments,
+                    ty.returns_place(),
+                    node_span,
+                )?;
+                let call = FunctionApply(b(hir::FunctionApplication {
                     function: self.elaborate_node(src, function)?,
-                    arguments: self.elaborate_call_arguments(
-                        src,
-                        source_arguments,
-                        ty.returns_place(),
-                        node_span,
-                    )?,
+                    arguments: arguments.arguments,
                     ty,
-                }))
+                }));
+                self.wrap_call_cleanup(call, arguments.cleanup, node_ty, node_effects, node_span)
             }
             CloneClosureEnv(node) => {
                 let source = node.source;
@@ -793,7 +973,6 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                 let argument_name_hint_policy = app.argument_name_hint_policy;
                 let ty = app.ty.clone();
                 let inst_data = app.inst_data.clone();
-                let source_arguments = app.arguments.iter().map(|arg| (arg.value, arg.passing));
                 let source_extra_arguments = app.extra_arguments.iter().copied();
                 let mut extra_arguments = if !inst_data.dicts_req.is_empty() {
                     self.elaborate_extra_args_from_inst_data(&inst_data, function_span)?
@@ -819,39 +998,42 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                 let source_extra_arguments =
                     self.elaborate_node_iter(src, source_extra_arguments)?;
                 extra_arguments.extend(source_extra_arguments);
-                StaticApply(b(StaticApplication {
+                let arguments = self.elaborate_call_arguments(
+                    src,
+                    &app.arguments,
+                    ty.returns_place(),
+                    node_span,
+                )?;
+                let call = StaticApply(b(StaticApplication {
                     function,
                     function_path,
                     function_span,
                     extra_arguments,
-                    arguments: self.elaborate_call_arguments(
-                        src,
-                        source_arguments,
-                        ty.returns_place(),
-                        node_span,
-                    )?,
+                    arguments: arguments.arguments,
                     argument_names,
                     argument_name_hint_policy,
                     ty,
                     inst_data,
-                }))
+                }));
+                self.wrap_call_cleanup(call, arguments.cleanup, node_ty, node_effects, node_span)
             }
             SubscriptApply(app) => {
                 let subscript = app.subscript;
                 let mut_member = app.mut_member;
                 let ty = app.ty.clone();
-                let source_arguments = app.arguments.iter().map(|arg| (arg.value, arg.passing));
-                SubscriptApply(b(hir::SubscriptApplication {
+                let arguments = self.elaborate_call_arguments(
+                    src,
+                    &app.arguments,
+                    ty.returns_place(),
+                    node_span,
+                )?;
+                let call = SubscriptApply(b(hir::SubscriptApplication {
                     subscript: self.elaborate_node(src, subscript)?,
                     mut_member,
-                    arguments: self.elaborate_call_arguments(
-                        src,
-                        source_arguments,
-                        ty.returns_place(),
-                        node_span,
-                    )?,
+                    arguments: arguments.arguments,
                     ty,
-                }))
+                }));
+                self.wrap_call_cleanup(call, arguments.cleanup, node_ty, node_effects, node_span)
             }
             TraitMethodApply(app) => {
                 let trait_id = app.trait_id;
@@ -862,7 +1044,6 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                 let ty = app.ty.clone();
                 let input_tys = app.input_tys.clone();
                 let inst_data = app.inst_data.clone();
-                let source_arguments = || app.arguments.iter().map(|arg| (arg.value, arg.passing));
                 assert!(
                     inst_data.dicts_req.is_empty(),
                     "Instantiation data for trait method is not supported yet."
@@ -882,7 +1063,13 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                         definition.arg_names.clone(),
                     )
                 };
-                if is_value_function || resolved {
+                let arguments = self.elaborate_call_arguments(
+                    src,
+                    &app.arguments,
+                    ty.returns_place(),
+                    node_span,
+                )?;
+                let call = if is_value_function || resolved {
                     let function = if is_value_function {
                         FunctionId::new(
                             self.ctx.trait_solver.current_type_items.module.id,
@@ -906,12 +1093,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                         function_path: Some(method_path),
                         function_span: method_span,
                         extra_arguments: Vec::new(),
-                        arguments: self.elaborate_call_arguments(
-                            src,
-                            source_arguments(),
-                            ty.returns_place(),
-                            node_span,
-                        )?,
+                        arguments: arguments.arguments,
                         argument_names,
                         argument_name_hint_policy: arguments_unnamed,
                         ty,
@@ -943,12 +1125,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                     CallDictionaryMethod(b(hir::CallDictionaryMethod {
                         dictionary,
                         entry_index,
-                        arguments: self.elaborate_call_arguments(
-                            src,
-                            source_arguments(),
-                            ty.returns_place(),
-                            node_span,
-                        )?,
+                        arguments: arguments.arguments,
                         ty,
                     }))
                 } else {
@@ -978,15 +1155,11 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                     CallDictionaryMethod(b(hir::CallDictionaryMethod {
                         dictionary,
                         entry_index,
-                        arguments: self.elaborate_call_arguments(
-                            src,
-                            source_arguments(),
-                            ty.returns_place(),
-                            node_span,
-                        )?,
+                        arguments: arguments.arguments,
                         ty,
                     }))
-                }
+                };
+                self.wrap_call_cleanup(call, arguments.cleanup, node_ty, node_effects, node_span)
             }
             GetFunction(get_fn) => {
                 let mut get_fn = (**get_fn).clone();
@@ -1266,18 +1439,19 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                 let dictionary = call.dictionary;
                 let entry_index = call.entry_index;
                 let ty = call.ty.clone();
-                let source_arguments = call.arguments.iter().map(|arg| (arg.value, arg.passing));
-                CallDictionaryMethod(b(hir::CallDictionaryMethod {
+                let arguments = self.elaborate_call_arguments(
+                    src,
+                    &call.arguments,
+                    ty.returns_place(),
+                    node_span,
+                )?;
+                let call = CallDictionaryMethod(b(hir::CallDictionaryMethod {
                     dictionary: self.elaborate_node(src, dictionary)?,
                     entry_index,
-                    arguments: self.elaborate_call_arguments(
-                        src,
-                        source_arguments,
-                        ty.returns_place(),
-                        node_span,
-                    )?,
+                    arguments: arguments.arguments,
                     ty,
-                }))
+                }));
+                self.wrap_call_cleanup(call, arguments.cleanup, node_ty, node_effects, node_span)
             }
             Return(node) => Return(self.elaborate_node(src, *node)?),
             Block(block) => {
@@ -1574,7 +1748,8 @@ mod tests {
         );
 
         let mut elaborated_arena = ENodeArena::default();
-        let elaborated = elaborate_hir(&arena, node, &mut elaborated_arena, &mut ctx, &[]).unwrap();
+        let elaborated =
+            elaborate_hir(&arena, node, &mut elaborated_arena, &mut ctx, Vec::new()).unwrap();
 
         let NodeKind::Immediate(immediate) = &elaborated_arena[elaborated.root].kind else {
             panic!("expected associated const to elaborate to an immediate");
@@ -1635,7 +1810,8 @@ mod tests {
         );
 
         let mut elaborated_arena = ENodeArena::default();
-        let elaborated = elaborate_hir(&arena, node, &mut elaborated_arena, &mut ctx, &[]).unwrap();
+        let elaborated =
+            elaborate_hir(&arena, node, &mut elaborated_arena, &mut ctx, Vec::new()).unwrap();
 
         let NodeKind::GetDictionaryAssociatedConst(get_const) =
             &elaborated_arena[elaborated.root].kind
