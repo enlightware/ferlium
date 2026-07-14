@@ -2642,6 +2642,59 @@ fn string_literals() {
         session.run(r#""hello \"world\"""#),
         string(r#"hello "world""#)
     );
+    assert_val_eq!(session.run(r#"(3, "hi").1"#), string("hi"));
+    assert_val_eq!(session.run(r#"{ n: 3, text: "hi" }.text"#), string("hi"));
+    assert_val_eq!(session.run(r#"["hi"][0]"#), string("hi"));
+    assert_val_eq!(
+        session.run(r#"match Some("hi") { Some(text) => text, None => "" }"#),
+        string("hi")
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn string_literal_hir_materializes_owned_values_from_trivial_immediates() {
+    let mut session = TestSession::new();
+    let compiled = session.compile(r#""hello""#);
+    let module = session.session().expect_fresh_module(compiled.module_id);
+
+    assert!(
+        module
+            .hir_arena
+            .iter()
+            .all(|(_, node)| !matches!(node.kind, NodeKind::Immediate(_))
+                || node.ty != ferlium::std::string::string_type()),
+        "owned strings must never appear directly in HIR immediates"
+    );
+    assert!(module.hir_arena.iter().any(|(_, node)| {
+        matches!(
+            &node.kind,
+            NodeKind::StaticApply(call)
+                if call.ty.fn_ty.ret == ferlium::std::string::string_type()
+                    && call.arguments.len() == 1
+                    && matches!(module.hir_arena[call.arguments[0].value].kind, NodeKind::Immediate(_))
+        )
+    }));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn string_literal_patterns_match_runtime_owned_strings() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(r#"match string_concat("hel", "lo") { "hello" => 1, _ => 0 }"#),
+        int(1)
+    );
+    assert_val_eq!(
+        session.run(r#"match (3, string_concat("h", "i")) { (3, "hi") => 1, _ => 0 }"#),
+        int(1)
+    );
+    assert_val_eq!(
+        session.run(
+            r#"match { n: 3, text: string_concat("h", "i") } { { n: 3, text: "hi" } => 1, _ => 0 }"#
+        ),
+        int(1)
+    );
 }
 
 #[test]

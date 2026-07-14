@@ -10,19 +10,24 @@ use smallvec::smallvec;
 use ustr::Ustr;
 
 use crate::{
-    Location,
+    FxHashSet, Location,
     compiler::error::{
         InternalCompilationError, InvalidSubscriptDefinitionKind, InvalidYieldKind,
         SubscriptDefinitionSubject,
     },
     containers::SVec4,
+    format::FormatWith,
     hir::{
         CallArgument, ENodeArena, ENodeId, Elaborated, NodeArena, NodeId, NodeKind,
-        function::ArgConvention, node_is_place_reference,
+        function::ArgConvention, node_is_place_reference, value::LiteralValue,
     },
     internal_compilation_error,
     module::{ELocalDecl, LocalDeclId, id::Id},
-    types::r#type::Type,
+    types::{
+        trait_solver::TraitSolver,
+        r#type::{Type, TypeKind},
+        type_like::TypeLike,
+    },
 };
 
 enum PathPart {
@@ -81,7 +86,7 @@ impl Path {
             TraitMethodApply(app) if app.ty.returns_place() => {
                 Self::from_addressor_place_arguments(arena, &app.arguments)
             }
-            CallDictionaryMethod(call) if call.ty.returns_place() => {
+            CallDictionaryFunction(call) if call.ty.returns_place() => {
                 Self::from_addressor_place_arguments(arena, &call.arguments)
             }
             SubscriptApply(app) if app.ty.returns_place() => {
@@ -133,7 +138,7 @@ fn call_arguments(kind: &NodeKind) -> Option<&[CallArgument]> {
         NodeKind::SubscriptApply(app) => Some(&app.arguments),
         NodeKind::StaticApply(app) => Some(&app.arguments),
         NodeKind::TraitMethodApply(app) => Some(&app.arguments),
-        NodeKind::CallDictionaryMethod(call) => Some(&call.arguments),
+        NodeKind::CallDictionaryFunction(call) => Some(&call.arguments),
         _ => None,
     }
 }
@@ -356,7 +361,7 @@ impl Path {
             FunctionApply(app) if app.ty.returns_place() => {
                 Self::from_enode_addressor_arguments(arena, &app.arguments)
             }
-            CallDictionaryMethod(call) if call.ty.returns_place() => {
+            CallDictionaryFunction(call) if call.ty.returns_place() => {
                 Self::from_enode_addressor_arguments(arena, &call.arguments)
             }
             SubscriptApply(app) if app.ty.returns_place() => {
@@ -453,7 +458,7 @@ pub fn check_elaborated_borrows(
         NodeKind::StaticApply(app) => {
             check_elaborated_arguments(&app.arguments, arena, app.function_span)?;
         }
-        NodeKind::CallDictionaryMethod(call) => {
+        NodeKind::CallDictionaryFunction(call) => {
             check_elaborated_arguments(&call.arguments, arena, arena[call.dictionary].span)?;
         }
         _ => {}
@@ -462,6 +467,152 @@ pub fn check_elaborated_borrows(
         check_elaborated_borrows(arena, child)?;
     }
     Ok(())
+}
+
+/// Validate the representation boundary shared by immediates and literal
+/// patterns after all types and dictionaries have been elaborated.
+pub fn check_elaborated_literal_invariants(
+    arena: &ENodeArena,
+    node_id: ENodeId,
+    solver: &TraitSolver<'_>,
+) -> Result<(), InternalCompilationError> {
+    fn visit(
+        arena: &ENodeArena,
+        node_id: ENodeId,
+        solver: &TraitSolver<'_>,
+        visited: &mut FxHashSet<ENodeId>,
+    ) -> Result<(), InternalCompilationError> {
+        if !visited.insert(node_id) {
+            return Ok(());
+        }
+        let node = &arena[node_id];
+        if let NodeKind::Immediate(value) = &node.kind {
+            // `LiteralNativeValue` is sealed behind the Rust-side `TrivialCopy`
+            // bound, which is sufficient for a same-type native immediate even
+            // in compiler-internal contexts that deliberately build a partial
+            // std module without its normal language impl table.
+            let inherently_trivial_native = value.native_type() == Some(node.ty);
+            if !node.ty.is_constant()
+                || !(inherently_trivial_native || solver.concrete_type_is_trivial_copy(node.ty))
+            {
+                let env = solver.qualified_name_env();
+                return Err(internal_compilation_error!(Internal {
+                    error: format!(
+                        "HIR immediate has non-TrivialCopy type `{}`",
+                        node.ty.format_with(&env)
+                    ),
+                    span: node.span,
+                }));
+            }
+            if !literal_value_compatible_with_type(value, node.ty, solver, false) {
+                let env = solver.qualified_name_env();
+                return Err(internal_compilation_error!(Internal {
+                    error: format!(
+                        "HIR immediate payload `{value}` is incompatible with type `{}`",
+                        node.ty.format_with(&env)
+                    ),
+                    span: node.span,
+                }));
+            }
+        }
+        if let NodeKind::Case(case) = &node.kind {
+            let scrutinee_ty = arena[case.value].ty;
+            for (value, _) in &case.alternatives {
+                if !literal_value_compatible_with_type(value, scrutinee_ty, solver, true) {
+                    let env = solver.qualified_name_env();
+                    return Err(internal_compilation_error!(Internal {
+                        error: format!(
+                            "case literal payload `{value}` is incompatible with scrutinee type `{}`",
+                            scrutinee_ty.format_with(&env),
+                        ),
+                        span: node.span,
+                    }));
+                }
+            }
+        }
+        for child in elaborated_child_node_ids(&node.kind) {
+            visit(arena, child, solver, visited)?;
+        }
+        Ok(())
+    }
+
+    visit(arena, node_id, solver, &mut FxHashSet::default())
+}
+
+fn literal_value_compatible_with_type(
+    value: &LiteralValue,
+    ty: Type,
+    solver: &TraitSolver<'_>,
+    pattern: bool,
+) -> bool {
+    fn inner(
+        value: &LiteralValue,
+        ty: Type,
+        solver: &TraitSolver<'_>,
+        pattern: bool,
+        active: &mut FxHashSet<Type>,
+    ) -> bool {
+        // Generic source HIR can retain the scrutinee type variable even when
+        // constraints guarantee the concrete literal domain at instantiation.
+        // The interpreter's fallible shape comparison remains the runtime
+        // tripwire for an inconsistent instantiation.
+        let kind = ty.data().clone();
+        if pattern && matches!(&kind, TypeKind::Variable(_)) {
+            return true;
+        }
+        if let TypeKind::Named(named) = &kind {
+            if !active.insert(ty) {
+                return false;
+            }
+            let shape = solver
+                .type_def(named.def)
+                .instantiated_shape_with_effects(&named.params, &named.effect_params);
+            let result = inner(value, shape, solver, pattern, active);
+            active.remove(&ty);
+            return result;
+        }
+        match value {
+            LiteralValue::Native(_) => {
+                if pattern
+                    && value
+                        .as_primitive_ty::<crate::std::string::StaticStr>()
+                        .is_some()
+                {
+                    ty == crate::std::string::string_type()
+                } else if value.as_primitive_ty::<()>().is_some() {
+                    matches!(&kind, TypeKind::Tuple(fields) if fields.is_empty())
+                        || matches!(&kind, TypeKind::Record(fields) if fields.is_empty())
+                        || value.native_type() == Some(ty)
+                } else {
+                    value.native_type() == Some(ty)
+                }
+            }
+            LiteralValue::Tuple(values) => {
+                if !active.insert(ty) {
+                    return false;
+                }
+                let result = match kind {
+                    TypeKind::Tuple(member_tys) => {
+                        values.len() == member_tys.len()
+                            && values.iter().zip(member_tys).all(|(value, member_ty)| {
+                                inner(value, member_ty, solver, pattern, active)
+                            })
+                    }
+                    TypeKind::Record(fields) => {
+                        values.len() == fields.len()
+                            && values.iter().zip(fields).all(|(value, (_, field_ty))| {
+                                inner(value, field_ty, solver, pattern, active)
+                            })
+                    }
+                    _ => false,
+                };
+                active.remove(&ty);
+                result
+            }
+        }
+    }
+
+    inner(value, ty, solver, pattern, &mut FxHashSet::default())
 }
 
 pub fn check_elaborated_yield_roots(
@@ -589,7 +740,7 @@ fn elaborated_returned_place_origin(arena: &ENodeArena, node_id: ENodeId) -> Opt
         FunctionApply(app) if app.ty.returns_place() => {
             elaborated_addressor_base_origin(arena, &app.arguments)
         }
-        CallDictionaryMethod(call) if call.ty.returns_place() => {
+        CallDictionaryFunction(call) if call.ty.returns_place() => {
             elaborated_addressor_base_origin(arena, &call.arguments)
         }
         SubscriptApply(app) if app.ty.returns_place() => {
@@ -654,7 +805,7 @@ fn elaborated_child_node_ids(kind: &NodeKind<Elaborated>) -> SVec4<ENodeId> {
             .copied()
             .chain(app.arguments.iter().map(|argument| argument.value))
             .collect(),
-        CallDictionaryMethod(call) => std::iter::once(call.dictionary)
+        CallDictionaryFunction(call) => std::iter::once(call.dictionary)
             .chain(call.arguments.iter().map(|argument| argument.value))
             .collect(),
         CloneClosureEnv(operation) => smallvec![operation.source],
@@ -662,8 +813,7 @@ fn elaborated_child_node_ids(kind: &NodeKind<Elaborated>) -> SVec4<ENodeId> {
         CloneSubscriptValue(operation) => smallvec![operation.source],
         DropSubscriptValue(operation) => smallvec![operation.target],
         CloneValue(operation) => smallvec![operation.source],
-        GetDictionaryMethod(operation) => smallvec![operation.dictionary],
-        GetDictionaryAssociatedConst(operation) => smallvec![operation.dictionary],
+        GetDictionaryFunction(operation) => smallvec![operation.dictionary],
         StoreLocal(store) => smallvec![store.value],
         Return(value) | Yield(value) | ExtractTag(value) => smallvec![*value],
         WithYielded(with) => smallvec![with.accessor, with.body],
@@ -684,5 +834,93 @@ fn elaborated_child_node_ids(kind: &NodeKind<Elaborated>) -> SVec4<ENodeId> {
         | GetTraitMethod(never)
         | GetTraitAssociatedConst(never)
         | GetTraitDictionary(never) => match *never {},
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::{
+        FxHashMap,
+        compiler::CompilerSession,
+        containers::b,
+        hir::{Case, ENode, value::LiteralValue},
+        module::{CurrentTypeItems, PendingFunctionCollector},
+        std::string::{StaticStr, string_type},
+        types::{
+            effects::EffType,
+            trait_solver::{CurrentProjectionSubscriptTypes, TraitSolver},
+            r#type::Type,
+        },
+    };
+
+    fn with_std_solver(result: impl FnOnce(&TraitSolver<'_>)) {
+        let session = CompilerSession::new();
+        let module = session.std_module();
+        let module_env = session.module_env();
+        let mut impls = module.impls.clone();
+        let mut deps = FxHashSet::default();
+        let solver = TraitSolver::new(
+            CurrentTypeItems::new_from_module(module),
+            &mut impls,
+            FxHashMap::default(),
+            &mut deps,
+            CurrentProjectionSubscriptTypes::empty(),
+            PendingFunctionCollector::new(0),
+            module_env.modules,
+        );
+        result(&solver);
+    }
+
+    #[test]
+    fn final_hir_rejects_owned_string_immediate() {
+        let span = Location::new_synthesized();
+        let mut arena = ENodeArena::default();
+        let root = arena.alloc(ENode::new(
+            NodeKind::Immediate(LiteralValue::new_native(StaticStr::new("hello"))),
+            string_type(),
+            EffType::empty(),
+            span,
+        ));
+
+        with_std_solver(|solver| {
+            assert!(check_elaborated_literal_invariants(&arena, root, solver).is_err());
+        });
+    }
+
+    #[test]
+    fn final_hir_rejects_pattern_with_incompatible_representation() {
+        let span = Location::new_synthesized();
+        let mut arena = ENodeArena::default();
+        let scrutinee = arena.alloc(ENode::new(
+            NodeKind::Immediate(LiteralValue::new_native(1isize)),
+            Type::primitive::<isize>(),
+            EffType::empty(),
+            span,
+        ));
+        let branch = arena.alloc(ENode::new(
+            NodeKind::Immediate(LiteralValue::new_native(())),
+            Type::unit(),
+            EffType::empty(),
+            span,
+        ));
+        let root = arena.alloc(ENode::new(
+            NodeKind::Case(b(Case {
+                value: scrutinee,
+                alternatives: vec![(
+                    LiteralValue::new_native(StaticStr::new("not an int")),
+                    branch,
+                )],
+                default: branch,
+            })),
+            Type::unit(),
+            EffType::empty(),
+            span,
+        ));
+
+        with_std_solver(|solver| {
+            assert!(check_elaborated_literal_invariants(&arena, root, solver).is_err());
+        });
     }
 }

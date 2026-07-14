@@ -15,13 +15,13 @@ use crate::{
     cached_ty,
     compiler::error::InternalCompilationError,
     containers::{SVec2, b},
-    hir::hir_syn::native_str,
     hir::value::{LiteralValue, ustr_to_isize},
     hir::{self, CallArgument, NodeArena, NodeId},
     hir::{
         function::CallableDefinition,
         value_dispatch::{
-            prepare_generated_call_arguments_with_locals, static_apply_generated_with_locals,
+            materialize_static_string, prepare_generated_call_arguments_with_locals,
+            static_apply_generated_with_locals,
         },
     },
     module::{
@@ -33,7 +33,7 @@ use crate::{
         core_traits_names::{DESERIALIZE_TRAIT_NAME, SERIALIZE_TRAIT_NAME, VALUE_TRAIT_NAME},
         data_value::data_value_record_entry_type,
         math::int_type,
-        string::{string_type, string_value},
+        string::string_type,
         value::VALUE_CLONE_METHOD_INDEX,
     },
     types::effects::{EffType, PrimitiveEffect},
@@ -73,7 +73,6 @@ fn build_serialize_projection(
     member_ty: Type,
 ) -> Result<NodeId, InternalCompilationError> {
     use hir::hir_syn::*;
-
     let load_node = alloc_synth_node(arena, load_local(self_id), self_ty);
     let project_node = alloc_synth_node(
         arena,
@@ -244,7 +243,8 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
                 .into_iter()
                 .enumerate()
                 .map(|(index, (name, ty_i))| {
-                    let tag = n(arena, native_str(&name), string_type());
+                    let tag =
+                        materialize_static_string(arena, &mut locals, solver, name.as_str(), span)?;
                     let payload = build_serialize_projection(
                         arena,
                         solver,
@@ -277,7 +277,8 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
             let alternatives = variants
                 .into_iter()
                 .map(|(tag, payload_ty)| {
-                    let name_node = n(arena, native_str(&tag), string_type());
+                    let name_node =
+                        materialize_static_string(arena, &mut locals, solver, tag.as_str(), span)?;
                     let payload_node = if payload_ty != Type::unit() {
                         build_serialize_projection(
                             arena,
@@ -640,9 +641,8 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
             let variant_cases = variants
                 .into_iter()
                 .map(|(tag, payload_ty)| {
-                    let tag_value = string_value(&tag)
-                        .to_literal_value()
-                        .expect("enum variant tag strings should always lower to literal values");
+                    let tag_value =
+                        LiteralValue::new_native(crate::std::string::StaticStr::new(&tag));
                     let build_variant = if payload_ty != Type::unit() {
                         // variant with payload
                         let load_variant_for_payload =
@@ -753,12 +753,7 @@ fn build_panic(
 ) -> Result<NodeId, InternalCompilationError> {
     let span = Location::new_synthesized();
 
-    // helpers to synthesize HIR
-    let n = |arena: &mut NodeArena, kind, ty| {
-        arena.alloc(hir::Node::new(kind, ty, EffType::empty(), span))
-    };
-
-    let build_string = n(arena, native_str(message), string_type());
+    let build_string = materialize_static_string(arena, locals, solver, message, span)?;
     let function = solver.get_function(span, &module::Path::single_str("std"), ustr("panic"))?;
     static_apply_generated_with_locals(
         arena,
@@ -860,14 +855,13 @@ fn build_expect_data_value_record_entry(
     fields: NodeId,
     name: &str,
 ) -> Result<NodeId, InternalCompilationError> {
-    use hir::hir_syn::*;
     let span = Location::new_synthesized();
 
     // types
     let element_ty = tuple_type([string_type(), data_value_type()]);
     let payload_ty = array_type(element_ty);
 
-    let name_node = alloc_synth_node(arena, native_str(name), string_type());
+    let name_node = materialize_static_string(arena, locals, solver, name, span)?;
     let function = solver.get_function(
         span,
         &module::Path::single_str("std"),

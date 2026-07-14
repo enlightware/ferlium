@@ -167,7 +167,7 @@ pub(crate) fn node_is_place_reference(arena: &NodeArena, node_id: NodeId) -> boo
         SubscriptApply(app) => app.ty.returns_place(),
         StaticApply(app) => app.ty.returns_place(),
         TraitMethodApply(app) => app.ty.returns_place(),
-        CallDictionaryMethod(call) => call.ty.returns_place(),
+        CallDictionaryFunction(call) => call.ty.returns_place(),
         WithPlace(node) => node_is_place_reference(arena, node.body),
         Block(block) => block
             .tail_node()
@@ -217,7 +217,7 @@ pub(crate) fn place_resolution_may_create_temp(arena: &NodeArena, node_id: NodeI
                 .iter()
                 .any(|arg| place_resolution_may_create_temp(arena, arg.value))
         }
-        CallDictionaryMethod(call) if call.ty.returns_place() => {
+        CallDictionaryFunction(call) if call.ty.returns_place() => {
             addressor_place_base_argument_index(arena, &call.arguments).is_some_and(|base_index| {
                 !node_is_place_reference(arena, call.arguments[base_index].value)
             }) || call
@@ -674,21 +674,14 @@ pub struct LoadSubscriptEvidence {
 
 /// Look up a method function value from a trait dictionary.
 #[derive(Debug, Clone, Copy)]
-pub struct GetDictionaryMethod<P: HirPhase = Unelaborated> {
+pub struct GetDictionaryFunction<P: HirPhase = Unelaborated> {
     pub dictionary: NodeId<P>,
     pub entry_index: TraitDictionaryEntryIndex,
 }
 
-/// Look up an associated const value from a trait dictionary.
-#[derive(Debug, Clone, Copy)]
-pub struct GetDictionaryAssociatedConst<P: HirPhase = Unelaborated> {
-    pub dictionary: NodeId<P>,
-    pub entry_index: TraitDictionaryEntryIndex,
-}
-
-/// Call a method entry through a trait dictionary.
+/// Call a function entry through a trait dictionary.
 #[derive(Debug, Clone)]
-pub struct CallDictionaryMethod<P: HirPhase = Unelaborated> {
+pub struct CallDictionaryFunction<P: HirPhase = Unelaborated> {
     pub dictionary: NodeId<P>,
     pub entry_index: TraitDictionaryEntryIndex,
     pub arguments: Vec<CallArgument<P>>,
@@ -800,11 +793,9 @@ pub enum NodeKind<P: HirPhase = Unelaborated> {
     /// Load a first-class subscript capability from a function hidden argument.
     LoadSubscriptEvidence(LoadSubscriptEvidence),
     /// Look up a method function value from a trait dictionary.
-    GetDictionaryMethod(GetDictionaryMethod<P>),
-    /// Look up an associated const value from a trait dictionary.
-    GetDictionaryAssociatedConst(GetDictionaryAssociatedConst<P>),
-    /// Call a method entry through a trait dictionary.
-    CallDictionaryMethod(B<CallDictionaryMethod<P>>),
+    GetDictionaryFunction(GetDictionaryFunction<P>),
+    /// Call a function entry through a trait dictionary.
+    CallDictionaryFunction(B<CallDictionaryFunction<P>>),
 
     // Runtime checks.
     /// Check the current function call depth against the runtime limit.
@@ -888,9 +879,8 @@ impl NodeKind {
                 .copied()
                 .chain(app.arguments.iter().map(|arg| arg.value))
                 .collect(),
-            GetDictionaryMethod(node) => smallvec![node.dictionary],
-            GetDictionaryAssociatedConst(node) => smallvec![node.dictionary],
-            CallDictionaryMethod(node) => {
+            GetDictionaryFunction(node) => smallvec![node.dictionary],
+            CallDictionaryFunction(node) => {
                 let mut v: SVec4<NodeId> = smallvec![node.dictionary];
                 v.extend(node.arguments.iter().map(|arg| arg.value));
                 v
@@ -1359,10 +1349,10 @@ impl<P: HirPhase> Node<P> {
                     load.extra_parameter.as_index()
                 )?;
             }
-            GetDictionaryMethod(get_method) => {
+            GetDictionaryFunction(get_method) => {
                 writeln!(
                     f,
-                    "{indent_str}get dictionary method entry {}",
+                    "{indent_str}get dictionary function entry {}",
                     usize::from(get_method.entry_index)
                 )?;
                 format_ind(
@@ -1375,26 +1365,10 @@ impl<P: HirPhase> Node<P> {
                     indent + 1,
                 )?;
             }
-            GetDictionaryAssociatedConst(get_const) => {
+            CallDictionaryFunction(call) => {
                 writeln!(
                     f,
-                    "{indent_str}get dictionary associated const entry {}",
-                    usize::from(get_const.entry_index)
-                )?;
-                format_ind(
-                    arena,
-                    get_const.dictionary,
-                    f,
-                    locals,
-                    env,
-                    spacing,
-                    indent + 1,
-                )?;
-            }
-            CallDictionaryMethod(call) => {
-                writeln!(
-                    f,
-                    "{indent_str}call dictionary method entry {}",
+                    "{indent_str}call dictionary function entry {}",
                     usize::from(call.entry_index)
                 )?;
                 writeln!(f, "{indent_str}with dictionary")?;
@@ -1690,17 +1664,12 @@ impl<P: HirPhase> Node<P> {
                 // GetDictionary nodes don't contain child expressions with types
             }
             LoadDictionary(_) | LoadSubscriptEvidence(_) => {}
-            GetDictionaryMethod(node) => {
+            GetDictionaryFunction(node) => {
                 if let Some(ty) = type_at(arena, node.dictionary, pos) {
                     return Some(ty);
                 }
             }
-            GetDictionaryAssociatedConst(node) => {
-                if let Some(ty) = type_at(arena, node.dictionary, pos) {
-                    return Some(ty);
-                }
-            }
-            CallDictionaryMethod(node) => {
+            CallDictionaryFunction(node) => {
                 if let Some(ty) = type_at(arena, node.dictionary, pos) {
                     return Some(ty);
                 }
@@ -1901,13 +1870,10 @@ impl Node {
                 // no need to look into the dictionary's type as it is already in this node's type
             }
             LoadDictionary(_) | LoadSubscriptEvidence(_) => {}
-            GetDictionaryMethod(node) => {
+            GetDictionaryFunction(node) => {
                 unbound_ty_vars(arena, node.dictionary, result, ignore);
             }
-            GetDictionaryAssociatedConst(node) => {
-                unbound_ty_vars(arena, node.dictionary, result, ignore);
-            }
-            CallDictionaryMethod(node) => {
+            CallDictionaryFunction(node) => {
                 unbound_ty_vars(arena, node.dictionary, result, ignore);
                 for arg in &node.arguments {
                     unbound_ty_vars(arena, arg.value, result, ignore);
@@ -2029,7 +1995,7 @@ pub(crate) fn instantiate_node_in_place<M: TypeMapper>(
             instantiate_types_in_place(&mut get_dict.output_tys, mapper);
             instantiate_effect_types_in_place(&mut get_dict.output_effs, mapper);
         }
-        CallDictionaryMethod(call) => {
+        CallDictionaryFunction(call) => {
             call.ty = call.ty.map(mapper);
         }
         _ => {}

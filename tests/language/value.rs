@@ -517,17 +517,16 @@ fn discarded_array_literal_with_immediate_elements_uses_semantic_drop() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn discarded_tuple_literal_with_immediate_elements_still_skips_semantic_drop() {
+fn discarded_tuple_literal_with_owned_string_elements_uses_semantic_drop() {
     let mut session = TestSession::new();
 
     let drops = expression_cleanup_drop_modes(&mut session, r#"{ ("hello", "world"); () }"#);
 
     assert!(
-        drops.is_empty()
-            || drops
-                .iter()
-                .all(|drop| matches!(drop, ResolvedLocalDrop::Skip)),
-        "tuple storage release recursively reclaims inline elements, so immediate-only tuples do not need semantic drop"
+        drops
+            .iter()
+            .any(|drop| !matches!(drop, ResolvedLocalDrop::Skip)),
+        "a tuple containing owned strings must run semantic drop"
     );
 }
 
@@ -2623,9 +2622,8 @@ fn discarded_bool_struct_temporary_runs_semantic_drop() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn mutable_literal_initialized_local_drop_is_resolved_from_its_type() {
-    // A mutable binding can be reassigned an owned value, so its scope-exit drop must be
-    // resolved from its type; only an immutable binding may skip the drop based on its
-    // literal initializer.
+    // String literals explicitly materialize owned strings. Both the immutable
+    // binding and the reassignable binding therefore need ordinary semantic cleanup.
     let mut session = TestSession::new();
     let module = session.compile_and_get_module(
         r#"
@@ -2648,7 +2646,7 @@ fn mutable_literal_initialized_local_drop_is_resolved_from_its_type() {
             .local_drop()
             .copied()
     };
-    assert_eq!(drop_of("ok"), Some(ResolvedLocalDrop::Skip));
+    assert!(matches!(drop_of("ok"), Some(ResolvedLocalDrop::Static(_))));
     assert!(matches!(drop_of("s"), Some(ResolvedLocalDrop::Static(_))));
 }
 

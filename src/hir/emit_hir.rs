@@ -7,13 +7,43 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 use crate::{
-    FxHashMap, FxHashSet, Modules,
+    FxHashMap, FxHashSet, Location, Modules,
     containers::B,
     hir::emit_associated_consts::{
-        SourceAssociatedConstImpl, associated_const_values_for_source_impl,
+        SourceAssociatedConstImpl, associated_const_getter, associated_const_values_for_source_impl,
     },
     module::Uses,
 };
+
+pub(super) fn add_source_associated_const_getters(
+    output: &mut Module,
+    others: &Modules,
+    values: &[hir::value::LiteralValue],
+    tys: &[Type],
+    names: &[Ustr],
+    span: Location,
+) -> Result<Vec<LocalFunctionId>, InternalCompilationError> {
+    assert_eq!(values.len(), names.len());
+    assert!(values.len() <= tys.len());
+    let getters = {
+        let mut solver = trait_solver_from_module!(output, others);
+        values
+            .iter()
+            .zip(tys.iter().copied())
+            .map(|(value, ty)| associated_const_getter(value, ty, span, &mut solver))
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let mut pending = PendingModuleFunctions::default();
+    let ids = getters
+        .into_iter()
+        .map(|getter| add_pending_function_anonymous(output, &mut pending, getter))
+        .collect::<Vec<_>>();
+    elaborate_generated_functions(output, others, &mut pending, ids.iter().copied())?;
+    for (name, id) in names.iter().copied().zip(ids.iter().copied()) {
+        output.name_function_with_visibility(id, name, Visibility::Module);
+    }
+    Ok(ids)
+}
 
 use log::log_enabled;
 use ustr::Ustr;
@@ -39,7 +69,7 @@ use crate::{
         ConcreteTraitImplKey, LocalFunctionId, LocalImplId, LocalSubscriptId, Module, ModuleEnv,
         ModuleFunction, ModuleId, Path as ModulePath,
         PendingGeneratedStructuralProjectionSubscripts, PendingModuleFunction, ProjectionKey,
-        SubscriptMemberFunctionKind, TraitImpl, UModuleFunction, YieldProvenance,
+        SubscriptMemberFunctionKind, TraitImpl, UModuleFunction, Visibility, YieldProvenance,
         build_dictionary_value, id::Id,
     },
     std::value::{
@@ -245,7 +275,7 @@ fn fill_node_effect_vars(
                 .iter()
                 .for_each(|eff| eff.fill_with_inner_effect_vars(vars));
         }
-        CallDictionaryMethod(call) => call.ty.fill_with_inner_effect_vars(vars),
+        CallDictionaryFunction(call) => call.ty.fill_with_inner_effect_vars(vars),
         _ => {}
     }
 
@@ -798,13 +828,33 @@ pub(crate) fn emit_module_with_capabilities(
                     &solver,
                 )?
             };
-            let dictionary_value = build_dictionary_value(&method_ids, &associated_const_values);
             let associated_const_tys = trait_def.instantiate_associated_const_tys_for_tys(
                 &input_tys,
                 &output_tys,
                 &output_effs,
             );
-            let dictionary_ty = output.computer_dictionary_ty(&method_ids, associated_const_tys);
+            let mut associated_const_names = trait_solver_from_module!(output, others)
+                .impl_associated_const_names(
+                    trait_id,
+                    &input_tys,
+                    &output_tys,
+                    &output_effs,
+                    0,
+                    0,
+                    &[],
+                );
+            associated_const_names.truncate(associated_const_values.len());
+            let associated_const_getters = add_source_associated_const_getters(
+                &mut output,
+                others,
+                &associated_const_values,
+                &associated_const_tys,
+                &associated_const_names,
+                imp.span,
+            )?;
+            let dictionary_value = build_dictionary_value(&method_ids, &associated_const_getters);
+            let dictionary_ty =
+                output.computer_dictionary_ty(&method_ids, associated_const_tys.iter().copied());
             let stub = TraitImpl::new(
                 output_tys,
                 output_effs,
@@ -814,7 +864,8 @@ pub(crate) fn emit_module_with_capabilities(
                 public,
                 Some(imp.span),
             )
-            .with_associated_const_values(associated_const_values);
+            .with_associated_const_values(associated_const_values)
+            .with_associated_const_getters(associated_const_getters);
             let key = ConcreteTraitImplKey::new(trait_id, input_tys.clone());
             let id = output.impls.add_concrete_struct(key, stub);
             concrete_impl_stubs.insert(
@@ -1014,10 +1065,30 @@ pub(crate) fn emit_module_with_capabilities(
                     &emit_output.output_tys,
                     &emit_output.output_effs,
                 );
+            let mut associated_const_names = trait_solver_from_module!(output, others)
+                .impl_associated_const_names(
+                    trait_id,
+                    &emit_output.input_tys,
+                    &emit_output.output_tys,
+                    &emit_output.output_effs,
+                    emit_output.ty_var_count,
+                    emit_output.eff_var_count,
+                    &emit_output.constraints,
+                );
+            associated_const_names.truncate(associated_const_values.len());
+            let associated_const_getters = add_source_associated_const_getters(
+                &mut output,
+                others,
+                &associated_const_values,
+                &associated_const_tys,
+                &associated_const_names,
+                imp.span,
+            )?;
             output.add_emitted_impl(
                 trait_id,
                 emit_output,
                 associated_const_values,
+                associated_const_getters,
                 associated_const_tys,
                 public,
                 Some(imp.span),

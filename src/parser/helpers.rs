@@ -39,7 +39,7 @@ use crate::containers::b;
 use crate::hir::value::{LiteralNativeValue, LiteralValue};
 use crate::parser::escapes::apply_string_escapes;
 use crate::std::math::{Float, int_type};
-use crate::std::string::String as MyString;
+use crate::std::string::StaticStr;
 use crate::types::r#type::{Type, TypeDefProductDocs, TypeDefShapeDocs, TypeDefVariantDocs};
 use core::str::FromStr;
 use lalrpop_util::ParseError;
@@ -267,7 +267,7 @@ pub(crate) fn parse_string(s: &str) -> String {
 /// Make a string literal
 pub(crate) fn string_literal(s: &str) -> LiteralValue {
     let s = apply_string_escapes(&s[1..s.len() - 1]);
-    LiteralValue::new_native(MyString::from_str(&s).unwrap())
+    LiteralValue::new_native(StaticStr::new(&s))
 }
 
 /// Make formatted string

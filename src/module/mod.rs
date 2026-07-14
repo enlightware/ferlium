@@ -1420,6 +1420,7 @@ impl Module {
             output_effs,
             associated_const_values,
             functions,
+            &mut self.hir_arena,
             &mut fn_collector,
             &qualified_name_env,
         );
@@ -1459,6 +1460,7 @@ impl Module {
             output_effs,
             associated_const_values,
             functions,
+            &mut self.hir_arena,
             &mut fn_collector,
             &qualified_name_env,
         );
@@ -1549,6 +1551,7 @@ impl Module {
             [],
             associated_const_values,
             functions,
+            &mut self.hir_arena,
             &mut fn_collector,
             &qualified_name_env,
         );
@@ -1586,6 +1589,7 @@ impl Module {
             [],
             associated_const_values,
             functions,
+            &mut self.hir_arena,
             &mut fn_collector,
             &qualified_name_env,
         );
@@ -1647,6 +1651,7 @@ impl Module {
             [],
             associated_const_values,
             functions,
+            &mut self.hir_arena,
             &mut fn_collector,
             &qualified_name_env,
         );
@@ -1654,20 +1659,23 @@ impl Module {
     }
 
     /// Add a concrete or blanket trait implementation to this module, using already-added local functions.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn add_emitted_impl(
         &mut self,
         trait_id: TraitId,
         emit_output: EmitTraitOutput,
         associated_const_values: impl Into<Vec<LiteralValue>>,
+        associated_const_getters: impl Into<Vec<LocalFunctionId>>,
         associated_const_tys: impl IntoIterator<Item = Type>,
         public: bool,
         source_span: Option<Location>,
     ) -> LocalImplId {
         let associated_const_values = associated_const_values.into();
+        let associated_const_getters = associated_const_getters.into();
         let dictionary_ty =
             self.computer_dictionary_ty(&emit_output.functions, associated_const_tys);
         let dictionary_value =
-            build_dictionary_value(&emit_output.functions, &associated_const_values);
+            build_dictionary_value(&emit_output.functions, &associated_const_getters);
         let imp = TraitImpl::new(
             emit_output.output_tys,
             emit_output.output_effs,
@@ -1677,7 +1685,8 @@ impl Module {
             public,
             source_span,
         )
-        .with_associated_const_values(associated_const_values);
+        .with_associated_const_values(associated_const_values)
+        .with_associated_const_getters(associated_const_getters);
         if emit_output.ty_var_count == 0 && emit_output.eff_var_count == 0 {
             let key = ConcreteTraitImplKey::new(trait_id, emit_output.input_tys);
             self.impls.add_concrete_struct(key, imp)

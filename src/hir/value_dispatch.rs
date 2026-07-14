@@ -19,11 +19,12 @@ use crate::{
     },
     internal_compilation_error,
     module::{
-        ExtraParameterId, FunctionId, LocalDecl, LocalDeclId, LocalStorage, PendingLocalClone,
-        PendingLocalDrop, ResolvedLocalClone, ResolvedLocalDrop, id::Id,
+        self, ExtraParameterId, FunctionId, LocalDecl, LocalDeclId, LocalStorage,
+        PendingLocalClone, PendingLocalDrop, ResolvedLocalClone, ResolvedLocalDrop, id::Id,
     },
     std::{
         core_traits_names::VALUE_TRAIT_NAME,
+        string::{STRING_FROM_STATIC_FUNCTION_NAME, static_str_type, string_type},
         value::{
             VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX, is_function_surface_only_value_type,
         },
@@ -37,6 +38,36 @@ use crate::{
         type_like::TypeLike,
     },
 };
+
+/// Build the ordinary owned-value materialization for compiler string data.
+pub(crate) fn materialize_static_string(
+    arena: &mut NodeArena,
+    locals: &mut Vec<LocalDecl>,
+    trait_solver: &mut TraitSolver<'_>,
+    value: &str,
+    span: Location,
+) -> Result<NodeId, InternalCompilationError> {
+    let representation = arena.alloc(hir::Node::new(
+        hir::hir_syn::static_str(value),
+        static_str_type(),
+        EffType::empty(),
+        span,
+    ));
+    let function = trait_solver.get_local_or_import_function(
+        span,
+        &module::Path::single_str("std"),
+        crate::ustr(STRING_FROM_STATIC_FUNCTION_NAME),
+    )?;
+    static_apply_generated_with_locals(
+        arena,
+        locals,
+        trait_solver,
+        function,
+        [(representation, static_str_type())],
+        string_type(),
+        span,
+    )
+}
 
 /// Resolve any remaining local ownership placeholders and local clone/drop value dispatches.
 pub fn elaborate_local_ownership_and_value_dispatches<'d, 'sr, 'sm>(

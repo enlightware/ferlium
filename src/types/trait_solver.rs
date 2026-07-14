@@ -952,6 +952,38 @@ impl<'a> TraitSolver<'a> {
         QualifiedNameEnv::new(self.current_type_items, self.others)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn impl_associated_const_names(
+        &self,
+        trait_id: TraitId,
+        input_tys: &[Type],
+        output_tys: &[Type],
+        output_effs: &[EffType],
+        ty_var_count: u32,
+        eff_var_count: u32,
+        constraints: &[PubTypeConstraint],
+    ) -> Vec<Ustr> {
+        let trait_def = self.trait_def(trait_id);
+        let env = self.qualified_name_env();
+        (0..trait_def.associated_const_count())
+            .map(TraitAssociatedConstIndex::from_index)
+            .map(|index| {
+                env.disambiguated_impl_associated_const_name(
+                    trait_id,
+                    trait_def,
+                    index,
+                    input_tys,
+                    output_tys,
+                    output_effs,
+                    ty_var_count,
+                    eff_var_count,
+                    constraints,
+                )
+                .into()
+            })
+            .collect()
+    }
+
     pub(crate) fn solve_concrete_trivial_copy_layout(
         &mut self,
         ty: Type,
@@ -2176,8 +2208,23 @@ impl<'a> TraitSolver<'a> {
             output_types,
             output_effs,
         );
+        let associated_const_names = self.impl_associated_const_names(
+            trait_id,
+            input_types,
+            output_types,
+            output_effs,
+            0,
+            0,
+            &[],
+        );
+        let associated_const_getters = TraitImpls::bundle_pending_trivial_associated_const_getters(
+            &associated_const_values,
+            &associated_const_tys,
+            &mut self.fn_collector,
+            |index| associated_const_names[index],
+        );
         let dictionary_ty = TraitImpls::dictionary_ty(tys, associated_const_tys);
-        let dictionary_value = build_dictionary_value(&methods, &associated_const_values);
+        let dictionary_value = build_dictionary_value(&methods, &associated_const_getters);
         let imp = TraitImpl::new(
             output_types.to_vec(),
             output_effs.to_vec(),
@@ -2187,7 +2234,8 @@ impl<'a> TraitSolver<'a> {
             false,
             None,
         )
-        .with_associated_const_values(associated_const_values);
+        .with_associated_const_values(associated_const_values)
+        .with_associated_const_getters(associated_const_getters);
         let key = ConcreteTraitImplKey::new(trait_id, input_types.to_vec());
         self.impls.add_concrete_struct(key, imp)
     }
@@ -2403,14 +2451,31 @@ impl<'a> TraitSolver<'a> {
             let dictionary_ty_for_use = trait_def.get_dictionary_type_for_tys(input_tys, &[], &[]);
             (method_tys, associated_const_tys, dictionary_ty_for_use)
         };
+        if input_tys.iter().all(Type::is_constant) {
+            let key = ConcreteTraitImplKey::new(trait_id, input_tys.to_vec());
+            if let Some(local_impl_id) = self.impls.concrete().get(&key).copied() {
+                return Ok((
+                    TraitImplId::new(self.current_type_items.module.id, local_impl_id),
+                    dictionary_ty_for_use,
+                ));
+            }
+        }
         let associated_const_values =
             value_layout_associated_const_values(input_tys[0], span, self)?;
         let associated_const_values = associated_const_values
             .into_iter()
             .map(LiteralValue::new_native)
             .collect::<Vec<_>>();
+        let associated_const_names =
+            self.impl_associated_const_names(trait_id, input_tys, &[], &[], 0, 0, &[]);
+        let associated_const_getters = TraitImpls::bundle_pending_trivial_associated_const_getters(
+            &associated_const_values,
+            &associated_const_tys,
+            &mut self.fn_collector,
+            |index| associated_const_names[index],
+        );
         let dictionary_ty = TraitImpls::dictionary_ty(method_tys, associated_const_tys);
-        let dictionary_value = build_dictionary_value(&methods, &associated_const_values);
+        let dictionary_value = build_dictionary_value(&methods, &associated_const_getters);
         let imp = TraitImpl::new(
             Vec::new(),
             Vec::new(),
@@ -2420,14 +2485,11 @@ impl<'a> TraitSolver<'a> {
             false,
             None,
         )
-        .with_associated_const_values(associated_const_values);
+        .with_associated_const_values(associated_const_values)
+        .with_associated_const_getters(associated_const_getters);
         let impl_id = if input_tys.iter().all(Type::is_constant) {
             let key = ConcreteTraitImplKey::new(trait_id, input_tys.to_vec());
-            if let Some(impl_id) = self.impls.concrete().get(&key).copied() {
-                impl_id
-            } else {
-                self.impls.add_concrete_struct(key, imp)
-            }
+            self.impls.add_concrete_struct(key, imp)
         } else {
             self.impls.add_anonymous_dictionary_struct(imp)
         };
@@ -2718,6 +2780,7 @@ impl<'a> TraitSolver<'a> {
                     output_effs: vec![],
                     methods: vec![],
                     associated_const_values: vec![],
+                    associated_const_getters: vec![],
                     dictionary_value: TraitDictionary::new(&[], &[]),
                     dictionary_ty: Type::tuple([]),
                     public: false,
@@ -2987,9 +3050,25 @@ impl<'a> TraitSolver<'a> {
                         &output_tys,
                         &output_effs,
                     );
+                    let associated_const_names = self.impl_associated_const_names(
+                        trait_id,
+                        input_tys,
+                        &output_tys,
+                        &output_effs,
+                        sub_key.ty_var_count,
+                        sub_key.eff_var_count,
+                        &sub_key.constraints,
+                    );
+                    let associated_const_getters =
+                        TraitImpls::bundle_pending_trivial_associated_const_getters(
+                            &associated_const_values,
+                            &associated_const_tys,
+                            &mut self.fn_collector,
+                            |index| associated_const_names[index],
+                        );
                     let dictionary_ty = TraitImpls::dictionary_ty(tys, associated_const_tys);
                     let dictionary_value =
-                        build_dictionary_value(&methods, &associated_const_values);
+                        build_dictionary_value(&methods, &associated_const_getters);
                     let imp = TraitImpl::new(
                         output_tys,
                         output_effs,
@@ -2999,7 +3078,8 @@ impl<'a> TraitSolver<'a> {
                         false,
                         None,
                     )
-                    .with_associated_const_values(associated_const_values);
+                    .with_associated_const_values(associated_const_values)
+                    .with_associated_const_getters(associated_const_getters);
                     let local_impl_id = if output_effs_depend_on_application {
                         // Concrete impl lookup is keyed only by input types. If
                         // output effects still had variables before the
@@ -3265,6 +3345,35 @@ impl<'a> TraitSolver<'a> {
                     associated_const_index
                 )
             }))
+    }
+
+    /// Resolve the zero-argument runtime getter for an associated constant.
+    pub fn solve_associated_const_getter(
+        &mut self,
+        trait_id: TraitId,
+        input_tys: &[Type],
+        associated_const_index: TraitAssociatedConstIndex,
+        fn_span: Location,
+        arena: &mut NodeArena,
+    ) -> Result<FunctionId, InternalCompilationError> {
+        assert!(
+            associated_const_index.as_index() < self.trait_def(trait_id).associated_const_count(),
+            "associated const index {} out of bounds for trait {}",
+            associated_const_index,
+            self.trait_def(trait_id).name
+        );
+        let impl_id = self.solve_impl(trait_id, input_tys, fn_span, arena)?;
+        let getter = self
+            .get_impl_data_by_id(impl_id)
+            .associated_const_getter(associated_const_index)
+            .unwrap_or_else(|| {
+                panic!(
+                    "implementation of trait {} is missing associated const getter #{}",
+                    self.trait_def(trait_id).name,
+                    associated_const_index
+                )
+            });
+        Ok(FunctionId::new(impl_id.module, getter))
     }
 
     /// Get a specific trait implementation data by its id.

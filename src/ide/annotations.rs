@@ -525,13 +525,10 @@ fn node_variable_type_annotations<Env>(
         }
         GetDictionary(_) => {}
         LoadDictionary(_) | LoadSubscriptEvidence(_) => {}
-        GetDictionaryMethod(node) => {
+        GetDictionaryFunction(node) => {
             variable_type_annotations(arena, node.dictionary, result, locals, env);
         }
-        GetDictionaryAssociatedConst(node) => {
-            variable_type_annotations(arena, node.dictionary, result, locals, env);
-        }
-        CallDictionaryMethod(node) => {
+        CallDictionaryFunction(node) => {
             variable_type_annotations(arena, node.dictionary, result, locals, env);
             for arg in &node.arguments {
                 variable_type_annotations(arena, arg.value, result, locals, env);

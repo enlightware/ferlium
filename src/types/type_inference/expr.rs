@@ -42,6 +42,7 @@ use crate::{
         STD_MODULE_ID,
         core_traits_names::{REPR_TRAIT_NAME, VALUE_TRAIT_NAME},
         math::int_type,
+        string::{STRING_FROM_STATIC_FUNCTION_NAME, StaticStr, static_str_type, string_type},
         value::{VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX, is_value_trait},
     },
     types::{
@@ -724,6 +725,77 @@ impl TypeInference {
         Ok((node_id, fn_ty_wrapper, MutType::constant(), no_effects()))
     }
 
+    /// Lower one source literal to HIR. Most literal representations already
+    /// have their source type and become immediates directly. A string literal
+    /// instead materializes an owned `string` from a `StaticStr` immediate.
+    fn infer_literal_expr(
+        &mut self,
+        env: &mut TypingEnv,
+        value: LiteralValue,
+        source_ty: Type,
+        span: Location,
+    ) -> Result<(NodeId, MutType), InternalCompilationError> {
+        use hir::Node as N;
+
+        if value.as_primitive_ty::<StaticStr>().is_none() {
+            let node = env.ir_arena.alloc(N::new(
+                hir::hir_syn::immediate(value),
+                source_ty,
+                no_effects(),
+                span,
+            ));
+            return Ok((node, MutType::constant()));
+        }
+
+        debug_assert_eq!(source_ty, string_type());
+        let representation = env.ir_arena.alloc(N::new(
+            hir::hir_syn::immediate(value),
+            static_str_type(),
+            no_effects(),
+            span,
+        ));
+        let (function_path, definition, function, runtime_arg_passing) = {
+            let (path, (definition, function, _module, runtime_arg_passing)) =
+                env.get_std_function(ustr(STRING_FROM_STATIC_FUNCTION_NAME), span)?;
+            (path, definition.clone(), function, runtime_arg_passing)
+        };
+        let (inst_fn_ty, inst_data, _subst) =
+            definition
+                .ty_scheme
+                .instantiate_with_fresh_vars(self, span, None, env.module_env);
+        debug_assert_eq!(inst_fn_ty.args.len(), 1);
+        debug_assert_eq!(inst_fn_ty.args[0].ty, static_str_type());
+        debug_assert_eq!(inst_fn_ty.ret, string_type());
+        let visible_arg_passing =
+            visible_arg_passing_from_runtime(runtime_arg_passing.as_deref(), &inst_data, 1)
+                .map(<[_]>::to_vec);
+        let call = self.build_static_call_from_checked_args(
+            env,
+            StaticCallFromCheckedArgs {
+                callee: CheckedStaticCallee::Function {
+                    function,
+                    function_path: Some(function_path),
+                    function_span: span,
+                    argument_names: definition.arg_names.clone(),
+                    argument_name_hint_policy: UnnamedArg::All,
+                },
+                abi_arg_tys: definition.ty_scheme.ty.args.clone(),
+                inst_fn_ty,
+                result_convention: definition.result_convention,
+                inst_data,
+                args_node_ids: vec![representation],
+                visible_arg_passing,
+                result_mut_ty: MutType::constant(),
+            },
+            span,
+        );
+        debug_assert_eq!(call.ty, source_ty);
+        let node = env
+            .ir_arena
+            .alloc(N::new(call.node, call.ty, call.effects, span));
+        Ok((node, call.mut_ty))
+    }
+
     pub fn infer_expr(
         &mut self,
         env: &mut TypingEnv,
@@ -734,6 +806,9 @@ impl TypeInference {
         use hir::NodeKind as K;
         let expr = &env.ast_arena[expr_id];
         let expr_span = expr.span;
+        if let ExprKind::Literal(value, ty) = &expr.kind {
+            return self.infer_literal_expr(env, value.clone(), *ty, expr_span);
+        }
         let sp = |id: DExprId| env.ast_arena[id].span;
         if Self::is_access_chain_expr(&expr.kind) {
             let plan = self.access_chain_plan_for_expr(env, expr_id);
@@ -742,12 +817,7 @@ impl TypeInference {
             }
         }
         let (node, ty, mut_ty, effects) = match &expr.kind {
-            Literal(value, ty) => (
-                K::Immediate(value.clone()),
-                *ty,
-                MutType::constant(),
-                no_effects(),
-            ),
+            Literal(_, _) => unreachable!("literal expressions return before general inference"),
             FormattedString(_s) => {
                 unreachable!("this cannot happen as payload is never")
             }
@@ -4793,7 +4863,7 @@ impl TypeInference {
                     }
                 }
             }
-            NodeKind::CallDictionaryMethod(mut call) if call.ty.returns_place() => {
+            NodeKind::CallDictionaryFunction(mut call) if call.ty.returns_place() => {
                 if let Some(base_index) =
                     addressor_place_base_argument_index(env.ir_arena, &call.arguments)
                 {
@@ -4804,7 +4874,7 @@ impl TypeInference {
                     );
                     call.arguments[base_index].value = prepared.place;
                     prepared.place =
-                        self.rebuild_place_node(env, place, NodeKind::CallDictionaryMethod(call));
+                        self.rebuild_place_node(env, place, NodeKind::CallDictionaryFunction(call));
                     prepared
                 } else {
                     PreparedPlace {
@@ -5470,17 +5540,13 @@ impl TypeInference {
         let expr = &env.ast_arena[expr_id];
         let expr_span = expr.span;
         use ExprKind::*;
-        use hir::Node as N;
-        use hir::NodeKind as K;
 
         // Literal of correct type, we are good
-        if let Literal(value, ty) = &expr.kind {
-            if *ty == expected_ty {
-                let node = K::Immediate(value.clone());
-                return Ok(env
-                    .ir_arena
-                    .alloc(N::new(node, expected_ty, no_effects(), expr_span)));
-            }
+        if let Literal(value, ty) = &expr.kind
+            && *ty == expected_ty
+        {
+            let (node, _mut_ty) = self.infer_literal_expr(env, value.clone(), *ty, expr_span)?;
+            return Ok(node);
         }
 
         // Functions abstraction
@@ -5970,7 +6036,7 @@ fn place_evaluation_depends_on_addressor_place(arena: &NodeArena, node_id: NodeI
         FunctionApply(app) => app.ty.returns_place(),
         StaticApply(app) => app.ty.returns_place(),
         TraitMethodApply(app) => app.ty.returns_place(),
-        CallDictionaryMethod(call) => call.ty.returns_place(),
+        CallDictionaryFunction(call) => call.ty.returns_place(),
         Project(project) => place_evaluation_depends_on_addressor_place(arena, project.value),
         FieldAccess(field_access) => {
             place_evaluation_depends_on_addressor_place(arena, field_access.value)

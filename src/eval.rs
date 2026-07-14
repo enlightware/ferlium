@@ -1276,12 +1276,9 @@ pub fn eval_node_with_ctx(
         LoadSubscriptEvidence(node) => cont(Value::subscript_value(
             subscript_from_extra_parameter(ctx, node.extra_parameter),
         )),
-        GetDictionaryMethod(node) => eval_get_dictionary_method(arena, node, ctx),
-        GetDictionaryAssociatedConst(node) => {
-            eval_get_dictionary_associated_const(arena, node, ctx)
-        }
-        CallDictionaryMethod(node) => {
-            eval_call_dictionary_method(arena, node, arena[node_id].span, ctx, locals)
+        GetDictionaryFunction(node) => eval_get_dictionary_function(arena, node, ctx),
+        CallDictionaryFunction(node) => {
+            eval_call_dictionary_function(arena, node, arena[node_id].span, ctx, locals)
         }
         StoreLocal(node) => eval_store_local(arena, node, arena[node_id].span, ctx, locals),
         TakeLocalValue(node) => eval_take_local_value(node, arena[node_id].span, ctx, locals),
@@ -1490,76 +1487,56 @@ fn extra_parameter_value(
     ctx.extra_parameters[ctx.extra_frame_base + extra_parameter.as_index()].clone()
 }
 
-fn call_dictionary_method(
+fn call_dictionary_function(
     ctx: &mut EvalCtx,
     dictionary: TraitDictionaryId,
     entry_index: TraitDictionaryEntryIndex,
     arguments: Vec<ValOrMut>,
     span: Location,
 ) -> EvalControlFlowResult {
-    let TraitDictionaryEntry::Method(function) =
-        ctx.dictionary_value(dictionary).entry(entry_index)
-    else {
-        panic!("attempted to call a non-method dictionary entry");
-    };
+    let TraitDictionaryEntry::Function(function) =
+        ctx.dictionary_value(dictionary).entry(entry_index);
     let function_value = FunctionValue::bare(FunctionId::new(dictionary.module_id, function));
     ctx.call_function_value(&function_value, arguments, span)
 }
 
-fn eval_get_dictionary_method(
+fn eval_get_dictionary_function(
     arena: &ENodeArena,
-    node: &hir::GetDictionaryMethod<Elaborated>,
+    node: &hir::GetDictionaryFunction<Elaborated>,
     ctx: &mut EvalCtx,
 ) -> EvalControlFlowResult {
     let dictionary = eval_or_return!(eval_dictionary_metadata_node(arena, node.dictionary, ctx));
-    let TraitDictionaryEntry::Method(function) =
-        ctx.dictionary_value(dictionary).entry(node.entry_index)
-    else {
-        panic!("attempted to get a non-method dictionary entry as a function");
-    };
+    let TraitDictionaryEntry::Function(function) =
+        ctx.dictionary_value(dictionary).entry(node.entry_index);
     cont(Value::function(FunctionId::new(
         dictionary.module_id,
         function,
     )))
 }
 
-fn eval_get_dictionary_associated_const(
+fn eval_call_dictionary_function(
     arena: &ENodeArena,
-    node: &hir::GetDictionaryAssociatedConst<Elaborated>,
-    ctx: &mut EvalCtx,
-) -> EvalControlFlowResult {
-    let dictionary = eval_or_return!(eval_dictionary_metadata_node(arena, node.dictionary, ctx));
-    let TraitDictionaryEntry::AssociatedConst(value) =
-        ctx.dictionary_value(dictionary).entry(node.entry_index)
-    else {
-        panic!("attempted to get a non-associated-const dictionary entry as a value");
-    };
-    cont(value.into_value())
-}
-
-fn eval_call_dictionary_method(
-    arena: &ENodeArena,
-    node: &hir::CallDictionaryMethod<Elaborated>,
+    node: &hir::CallDictionaryFunction<Elaborated>,
     span: Location,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
-    eval_call_dictionary_method_with(arena, node, span, ctx, locals, eval_args)
+    eval_call_dictionary_function_with(arena, node, span, ctx, locals, eval_args)
 }
 
-fn eval_addressor_place_call_dictionary_method(
+fn eval_addressor_place_call_dictionary_function(
     arena: &ENodeArena,
-    node: &hir::CallDictionaryMethod<Elaborated>,
+    node: &hir::CallDictionaryFunction<Elaborated>,
     span: Location,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
-    eval_call_dictionary_method_with(arena, node, span, ctx, locals, eval_addressor_place_args)
+    eval_call_dictionary_function_with(arena, node, span, ctx, locals, eval_addressor_place_args)
 }
 
-fn eval_call_dictionary_method_with(
+fn eval_call_dictionary_function_with(
     arena: &ENodeArena,
-    node: &hir::CallDictionaryMethod<Elaborated>,
+    node: &hir::CallDictionaryFunction<Elaborated>,
     span: Location,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
@@ -1574,7 +1551,7 @@ fn eval_call_dictionary_method_with(
         ctx,
         locals,
     ));
-    let result = call_dictionary_method(
+    let result = call_dictionary_function(
         ctx,
         dictionary,
         node.entry_index,
@@ -1601,7 +1578,7 @@ fn call_resolved_value_method(
         ResolvedValueMethod::Static(function) => ctx.call_function_id(function, arguments, span),
         ResolvedValueMethod::Dictionary(dict_index) => {
             let dictionary = dictionary_from_extra_parameter(ctx, dict_index);
-            call_dictionary_method(
+            call_dictionary_function(
                 ctx,
                 dictionary,
                 TraitDictionaryEntryIndex::from_index(method_index.as_index()),
@@ -1711,7 +1688,7 @@ pub(crate) fn call_value_clone_for_temp(
     span: Location,
 ) -> Result<Value, RuntimeError> {
     call_value_clone_with(ctx, source, span, |ctx, arguments| {
-        call_dictionary_method(
+        call_dictionary_function(
             ctx,
             dictionary,
             TraitDictionaryEntryIndex::from_index(VALUE_CLONE_METHOD_INDEX.as_index()),
@@ -1776,7 +1753,7 @@ pub(crate) fn call_value_drop_for_temp(
             (place, Some(target_index))
         }
     };
-    let result = discard_call_result(call_dictionary_method(
+    let result = discard_call_result(call_dictionary_function(
         ctx,
         dictionary,
         TraitDictionaryEntryIndex::from_index(VALUE_DROP_METHOD_INDEX.as_index()),
@@ -3197,7 +3174,7 @@ fn place_resolution_depends_on_addressor_place(arena: &ENodeArena, node_id: ENod
         NodeKind::FunctionApply(app) => app.ty.returns_place(),
         NodeKind::StaticApply(app) => app.ty.returns_place(),
         NodeKind::SubscriptApply(app) => app.ty.returns_place(),
-        NodeKind::CallDictionaryMethod(call) => call.ty.returns_place(),
+        NodeKind::CallDictionaryFunction(call) => call.ty.returns_place(),
         NodeKind::Project(node) => place_resolution_depends_on_addressor_place(arena, node.value),
         NodeKind::WithPlace(node) => place_resolution_depends_on_addressor_place(arena, node.place),
         NodeKind::Block(block) => block
@@ -3257,27 +3234,33 @@ fn eval_case(
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
-    let value = if let Some(place) =
+    let selected = if let Some(place) =
         eval_or_return!(try_eval_node_as_place(arena, case.value, ctx, locals))
     {
-        place
+        let value = place
             .target_ref(ctx)
-            .map_err(|err| RuntimeError::new(err, Some(arena[case.value].span)))?
-            .to_literal_value()
+            .map_err(|err| RuntimeError::new(err, Some(arena[case.value].span)))?;
+        select_case_alternative(case, value)
     } else {
-        eval_or_return!(eval_node_with_ctx(arena, case.value, ctx, locals)).to_literal_value()
+        let value = eval_or_return!(eval_node_with_ctx(arena, case.value, ctx, locals));
+        let selected = select_case_alternative(case, &value);
+        value.discard_storage();
+        selected
     };
-    let value = value.unwrap_or_else(|| {
-        panic!(
-            "Case evaluated a non-literal scrutinee. This HIR should have been rejected before evaluation."
-        )
-    });
+    eval_node_with_ctx(arena, selected, ctx, locals)
+}
+
+fn select_case_alternative(case: &hir::Case<Elaborated>, value: &Value) -> ENodeId {
     for (alternative, node) in &case.alternatives {
-        if value == *alternative {
-            return eval_node_with_ctx(arena, *node, ctx, locals);
+        match alternative.try_matches_runtime_value(value) {
+            Ok(true) => return *node,
+            Ok(false) => {}
+            Err(_) => panic!(
+                "Case evaluated a scrutinee incompatible with its literal alternatives. This HIR should have been rejected before evaluation."
+            ),
         }
     }
-    eval_node_with_ctx(arena, case.default, ctx, locals)
+    case.default
 }
 
 #[inline(never)]
@@ -3464,7 +3447,7 @@ fn is_dictionary_metadata_node(arena: &ENodeArena, node: ENodeId) -> bool {
 fn is_function_metadata_node(arena: &ENodeArena, node: ENodeId) -> bool {
     matches!(
         arena[node].kind,
-        NodeKind::GetFunction(_) | NodeKind::GetDictionaryMethod(_)
+        NodeKind::GetFunction(_) | NodeKind::GetDictionaryFunction(_)
     )
 }
 
@@ -3499,9 +3482,9 @@ fn try_eval_node_as_place(
             let result = eval_addressor_place_subscript_apply(arena, app, node.span, ctx, locals)?;
             return Ok(control_flow_into_addressor_place(result).map_continue(Some));
         }
-        CallDictionaryMethod(call) if call.ty.returns_place() => {
+        CallDictionaryFunction(call) if call.ty.returns_place() => {
             let result =
-                eval_addressor_place_call_dictionary_method(arena, call, node.span, ctx, locals)?;
+                eval_addressor_place_call_dictionary_function(arena, call, node.span, ctx, locals)?;
             return Ok(control_flow_into_addressor_place(result).map_continue(Some));
         }
         Block(block) => {
@@ -3553,7 +3536,7 @@ fn node_may_resolve_to_place(arena: &ENodeArena, node_id: ENodeId) -> bool {
         NodeKind::FunctionApply(app) => app.ty.returns_place(),
         NodeKind::StaticApply(app) => app.ty.returns_place(),
         NodeKind::SubscriptApply(app) => app.ty.returns_place(),
-        NodeKind::CallDictionaryMethod(call) => call.ty.returns_place(),
+        NodeKind::CallDictionaryFunction(call) => call.ty.returns_place(),
         NodeKind::WithPlace(node) => node_may_resolve_to_place(arena, node.body),
         NodeKind::Block(block) => nodes_may_resolve_to_place(arena, &block.body),
         _ => false,
@@ -3584,7 +3567,7 @@ mod tests {
         },
         hir::{
             self, CallArgument, ENode, ENodeArena, Elaborated, LoopId, NodeKind,
-            function::{ArgConvention, CallableDefinition, ScriptFunction},
+            function::{ArgConvention, CallableDefinition, NullaryNativeFnN, ScriptFunction},
             hir_syn,
             value::{LiteralValue, NativeDisplay, Value},
         },
@@ -3627,11 +3610,47 @@ mod tests {
         crate::cached_primitive_ty!(EvalDropTracked)
     }
 
+    fn make_eval_drop_tracked() -> EvalDropTracked {
+        EvalDropTracked
+    }
+
+    fn eval_drop_tracked_function() -> ModuleFunction {
+        NullaryNativeFnN::description_with_default_ty(
+            make_eval_drop_tracked,
+            [],
+            "Creates a drop-tracked interpreter test value.",
+            EffType::empty(),
+        )
+    }
+
+    fn eval_drop_tracked_node(
+        arena: &mut ENodeArena,
+        module_id: ModuleId,
+        function_id: LocalFunctionId,
+        span: Location,
+    ) -> crate::hir::ENodeId {
+        let ty = eval_drop_tracked_type();
+        node(
+            arena,
+            hir_syn::static_apply(
+                crate::module::FunctionId::new(module_id, function_id),
+                FnType::new(vec![], ty, EffType::empty()),
+                Vec::new(),
+                span,
+            ),
+            ty,
+            span,
+        )
+    }
+
     fn eval_args_test_session() -> (CompilerSession, ModuleId) {
         let mut session = CompilerSession::new();
         let module_id = ModuleId::from_index(2);
         let path = Path::single_str("$eval_args_test");
-        let module = Module::new(module_id, path.clone());
+        let mut module = Module::new(module_id, path.clone());
+        let function =
+            module.add_function(ustr("make_eval_drop_tracked"), eval_drop_tracked_function());
+        assert_eq!(function, LocalFunctionId::from_index(0));
         let registered = session.register_module(path, module);
         assert_eq!(registered, module_id);
         (session, module_id)
@@ -3981,12 +4000,9 @@ mod tests {
             Type::never(),
             span,
         );
-        let epilogue_tracked = node(
-            &mut arena,
-            hir_syn::native(EvalDropTracked),
-            eval_drop_tracked_type(),
-            span,
-        );
+        let tracked_function_id = LocalFunctionId::from_index(1);
+        let epilogue_tracked =
+            eval_drop_tracked_node(&mut arena, test_module_id, tracked_function_id, span);
         let accessor_entry = node(
             &mut arena,
             NodeKind::Block(b(hir::Block {
@@ -4054,6 +4070,10 @@ mod tests {
         module.hir_arena = arena;
         let registered_accessor = module.add_function(ustr("accessor"), accessor_function);
         assert_eq!(registered_accessor, accessor_id);
+        assert_eq!(
+            module.add_function(ustr("make_eval_drop_tracked"), eval_drop_tracked_function()),
+            tracked_function_id
+        );
 
         let mut session = CompilerSession::new();
         let module_id = session.register_module(path, module);
@@ -4194,12 +4214,12 @@ mod tests {
         reset_eval_drop_tracked_count();
         let span = Location::new_synthesized();
         let mut arena = ENodeArena::default();
-        let tracked = arena.alloc(ENode::new(
-            NodeKind::Immediate(LiteralValue::new_native(EvalDropTracked)),
-            eval_drop_tracked_type(),
-            EffType::empty(),
+        let tracked = eval_drop_tracked_node(
+            &mut arena,
+            ModuleId::from_index(2),
+            LocalFunctionId::from_index(0),
             span,
-        ));
+        );
         let unit = arena.alloc(ENode::new(
             NodeKind::Immediate(LiteralValue::new_native(())),
             Type::unit(),
@@ -4230,12 +4250,12 @@ mod tests {
         let span = Location::new_synthesized();
         let label = LoopId::from_index(0);
         let mut arena = ENodeArena::default();
-        let tracked = arena.alloc(ENode::new(
-            NodeKind::Immediate(LiteralValue::new_native(EvalDropTracked)),
-            Type::primitive::<EvalDropTracked>(),
-            EffType::empty(),
+        let tracked = eval_drop_tracked_node(
+            &mut arena,
+            ModuleId::from_index(2),
+            LocalFunctionId::from_index(0),
             span,
-        ));
+        );
         let unit = arena.alloc(ENode::new(
             NodeKind::Immediate(LiteralValue::new_native(())),
             Type::unit(),
@@ -4257,8 +4277,8 @@ mod tests {
             EffType::empty(),
             span,
         ));
-        let session = CompilerSession::new();
-        let result = eval_node(&arena, block, ModuleId::from_index(0), &[], &session).unwrap();
+        let (session, module_id) = eval_args_test_session();
+        let result = eval_node(&arena, block, module_id, &[], &session).unwrap();
         let ControlFlow::Transfer(ControlTransfer::Break { value, .. }) = result else {
             panic!("expected block to propagate break");
         };
@@ -4353,12 +4373,12 @@ mod tests {
         reset_eval_drop_tracked_count();
         let span = Location::new_synthesized();
         let mut arena = ENodeArena::default();
-        let tracked = arena.alloc(ENode::new(
-            NodeKind::Immediate(LiteralValue::new_native(EvalDropTracked)),
-            Type::primitive::<EvalDropTracked>(),
-            EffType::empty(),
+        let tracked = eval_drop_tracked_node(
+            &mut arena,
+            ModuleId::from_index(2),
+            LocalFunctionId::from_index(0),
             span,
-        ));
+        );
         let unit = arena.alloc(ENode::new(
             NodeKind::Immediate(LiteralValue::new_native(())),
             Type::unit(),
@@ -4403,12 +4423,12 @@ mod tests {
         let span = Location::new_synthesized();
         let label = LoopId::from_index(0);
         let mut arena = ENodeArena::default();
-        let tracked = arena.alloc(ENode::new(
-            NodeKind::Immediate(LiteralValue::new_native(EvalDropTracked)),
-            eval_drop_tracked_type(),
-            EffType::empty(),
+        let tracked = eval_drop_tracked_node(
+            &mut arena,
+            ModuleId::from_index(2),
+            LocalFunctionId::from_index(0),
             span,
-        ));
+        );
         let unit = arena.alloc(ENode::new(
             NodeKind::Immediate(LiteralValue::new_native(())),
             Type::unit(),

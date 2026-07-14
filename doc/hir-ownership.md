@@ -1,14 +1,13 @@
 # HIR Ownership and Value Dispatch
 
 This document records the ownership invariants that SSA lowering should rely on.
-It describes HIR after type inference, borrow checking, and dictionary elaboration.
-At that point all `LocalStorage::Deferred`, `LocalClone::Unknown`, `LocalDrop::Unknown`, and `TakeLocalValueMode::Unknown` placeholders must have been resolved.
-All call-site `ArgConvention` metadata must also have been resolved.
+It describes final HIR after type inference, dictionary and ownership elaboration, and final borrow and lifetime validation.
+At that point all `LocalStorage::Deferred`, `LocalClone::Unknown`, `LocalDrop::Unknown`, and `TakeLocalValueMode::Unknown` placeholders have been resolved, and every call site and function parameter has a concrete `ArgConvention`.
 
 See `doc/abi.md` for the physical calling convention.
 This document is about source-level ownership semantics and the HIR operations that preserve them.
 
-# Values, Places, and Locals
+## Values, Places, and Locals
 
 A HIR expression either produces an owned value, denotes a caller-rooted place in existing storage, or drives a scoped yielded place.
 Caller-rooted place-like nodes include `LoadLocal`, direct projections (`Project`), and call nodes whose selected implementation has `CallResultConvention::ADDRESSOR_PLACE`.
@@ -23,7 +22,7 @@ After HIR construction the selected call metadata is the source of truth: consum
 The returned place is an expression-local capability, not a storable reference value.
 HIR must not store a raw place in a local, aggregate, closure capture, or normal value return.
 
-## Subscripts and Projection Evidence
+### Subscripts and Projection Evidence
 
 A subscript bundle is a `SubscriptType`, not a `FnType`.
 Each selected `ref` or `mut` member is emitted as a member function, and the member definition plus selected HIR call metadata carry the wrapper call result convention.
@@ -62,7 +61,15 @@ Std `array_index` is a source subscript with `AddressorPlace` provenance, backed
 | `clone` | If present, `StoreLocal` initializes the local by either a trivial copy or the returned result of `Value::clone(source)`. |
 | `assignment_mode` | `InitializeStorage` means assignment writes uninitialized storage and must not drop the previous destination. |
 
-# Owned Materialization
+## Owned Materialization
+
+Every final-HIR `Immediate` contains immutable constant data with a concrete `TrivialCopy` representation, so it never owns a resource requiring semantic clone or drop.
+A managed source literal is materialized explicitly: for example, a string literal is a `StaticStr` immediate passed to the private `string_from_static` constructor, which produces an owned `string`.
+Aggregate construction materializes managed literal leaves before assembling the runtime tuple, record, variant, or array.
+
+Literal patterns use the same immutable representation data but compare it asymmetrically with runtime values.
+In particular, `StaticStr` pattern data is compared directly with an owned runtime string; runtime text is never interned to perform a match.
+Final-HIR validation checks immediate representation types and statically known pattern shapes.
 
 When a context needs an owned value and the source is already an owned value, HIR can use that value directly.
 When the source is a place, HIR must materialize ownership explicitly:
@@ -90,7 +97,7 @@ Current lowering applies these rules in the main ownership-sensitive contexts:
 - Subscript reads, assignments, and compound assignments use one projection driver: `WithYielded` for scoped members and `WithPlace` for addressor members.
   Compound assignment reads and writes the internal binding inside that single projection instead of duplicating the accessor.
 
-# Drops and Cleanup
+## Drops and Cleanup
 
 Lexical cleanup is represented by `Block.cleanup`, a list of locals in declaration order.
 When a block is exited, cleanup runs in reverse order.
@@ -115,7 +122,7 @@ Function-entry locals are not represented by an extra cleanup block today.
 They are non-owning views governed by the parameter's `ArgConvention`; the caller remains responsible for the argument's ownership and cleanup.
 Direct scalar transport does not give the callee a semantic cleanup obligation.
 
-# Block Sequencing
+## Block Sequencing
 
 Blocks evaluate every node in `Block.body` in order.
 Only the tail node is the block's value, but non-tail nodes are still semantic evaluation steps and must not be skipped by HIR consumers.
@@ -127,7 +134,7 @@ In that case, the generation stores the discarded value in a generated owned loc
 SSA lowering should treat these wrappers like ordinary blocks: lower their body, run their cleanup on every exit, and ignore their unit result as the enclosing block's non-tail value.
 For any non-tail node, SSA lowering should preserve evaluation order and effects, ignore the produced value as the enclosing block value, and preserve any nested or enclosing `Block.cleanup` obligations.
 
-# Clone and Drop Dispatch
+## Clone and Drop Dispatch
 
 Clone and drop dispatch are specialized by site.
 Before dictionary elaboration, `Unknown` means the final type is needed to choose the implementation.
@@ -167,7 +174,7 @@ Dispatch sites are:
 - `Block.cleanup` with `LocalDecl::drop`: drop an owned local at scope exit.
 - `Assignment::drop`: drop the overwritten destination value.
 
-# Call Argument Passing
+## Call Argument Passing
 
 HIR derives one of two source-level argument conventions from the callee type:
 
@@ -188,7 +195,6 @@ Two overlapping `Let` arguments may share; overlapping mutable arguments are rej
 
 The legality of `ResolvedLocalClone::TrivialCopy` remains a trait-solver decision during HIR elaboration and is independent of size.
 Concrete value layout is not persisted in call metadata or `Module`; eval and later lowering compute it structurally from `Type` plus the owning module environment when implementing a representation copy.
-`Value` associated consts remain the dictionary carrier for generic layout metadata, not the source of truth for concrete layouts.
 
 `Let` calls should not hide temporary lifetimes in call metadata.
 If a non-`TrivialCopy` `Let` argument is not already a place, HIR generation materializes it into an owned `$arg` local and wraps the call in normal `Block.cleanup`.
@@ -197,7 +203,7 @@ This keeps the cleanup visible to eval and SSA lowering as ordinary HIR.
 Addressor-place calls use `Let` or `MutableRef` for their caller-rooted base.
 The returned place therefore cannot accidentally point into a consumed argument value whose lifetime ends with the call.
 
-## High-level passing convention requirements vs. physical ABI
+### Semantic and Physical Argument Passing
 
 The semantic convention is derived at call construction/elaboration time and stored on call edges.
 Target-specific ABI lowering later chooses physical transport.
@@ -205,7 +211,7 @@ Target-specific ABI lowering later chooses physical transport.
 `Let` may lower to a direct scalar or shared indirect access.
 When overlap analysis inserted a snapshot, an indirect `Let` must point to that snapshot rather than the original mutable place.
 
-# Function Values
+## Function Values
 
 Function surface types do not create user-visible `Value` dictionary requirements.
 Their `Value` implementation is compiler-provided and uses the closure payload metadata stored in the function value.
@@ -223,16 +229,19 @@ For closures with captures, `BuildClosure` stores:
 SSA must make this closure environment visible as data.
 Clone/drop for a function value must call the captured-environment dictionary, not host-language clone/drop.
 
-# Trait Dictionaries and Layout Constants
+## Trait Dictionaries and Associated Constants
 
 Dictionary elaboration rewrites transient `GetTraitMethod`, `GetTraitAssociatedConst`, and `GetTraitDictionary` nodes into explicit dictionary/evidence nodes.
 SSA should lower the elaborated form.
 
-For concrete associated constants, elaboration emits an immediate.
-For generic associated constants, elaboration emits `GetDictionaryAssociatedConst` from the hidden dictionary parameter.
-`Value::SIZE` and `Value::ALIGN` are therefore available either as constants or as dictionary associated constants and are the source of typed storage sizes.
+Every runtime dictionary entry is a function: trait methods occupy the first entries, followed by associated constants as zero-argument getter functions.
+The getter owns literal materialization, so each access to a managed associated constant produces a fresh owned value.
 
-# Non-Contracts of the Boxed Interpreter
+For a concrete associated constant, elaboration emits a static zero-argument call to the selected getter; for a generic associated constant, it emits a zero-argument `CallDictionaryFunction` through the hidden dictionary parameter.
+Compiler-owned `Value::SIZE` and `Value::ALIGN` metadata may still be inspected directly while computing concrete layouts.
+At runtime their getters carry generic layout metadata like any other associated constant, but they are not the source of truth for concrete layouts.
+
+## Non-Contracts of the Boxed Interpreter
 
 The current boxed interpreter still has helper paths such as boxed native `TrivialCopy` copying and interpreter-only `ValOrMut::Ref` call arguments for borrowing existing boxed storage.
 These are interpreter implementation details, not language or SSA contracts.

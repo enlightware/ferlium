@@ -6,7 +6,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use std::{str::FromStr, sync::LazyLock};
+use std::sync::LazyLock;
 
 use crate::ast::{DExprArena, DExprId, DLetPattern as LetPattern};
 use crate::parser::helpers::syn_static_apply_path;
@@ -14,7 +14,7 @@ use crate::{Location, internal_compilation_error};
 use regex::Regex;
 use ustr::{Ustr, ustr};
 
-use crate::std::string::String;
+use crate::std::string::StaticStr;
 use crate::types::mutability::MutVal;
 use crate::{
     ast::{DExpr as Expr, DExprKind as ExprKind},
@@ -24,9 +24,11 @@ use crate::{
 };
 
 fn string_literal(string: &str, span: Location, arena: &mut DExprArena) -> DExprId {
-    let string = String::from_str(string).unwrap();
     arena.alloc(Expr::new(
-        ExprKind::literal(LiteralValue::new_native(string), string_type()),
+        ExprKind::literal(
+            LiteralValue::new_native(StaticStr::new(string)),
+            string_type(),
+        ),
         span,
     ))
 }
@@ -70,7 +72,7 @@ pub fn emit_format_string_ast(
 
     // Start with an empty mutable string.
     let empty_string = arena.alloc(Expr::new(
-        ExprKind::literal(LiteralValue::new_native(String::default()), string_type()),
+        ExprKind::literal(LiteralValue::new_native(StaticStr::new("")), string_type()),
         span,
     ));
     let let_stmt = arena.alloc(Expr::new(

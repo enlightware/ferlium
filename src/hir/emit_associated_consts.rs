@@ -14,15 +14,92 @@ use crate::{
         InternalCompilationError, InvalidTraitAssociatedConstImplKind,
         InvalidTraitAssociatedConstImplKind::{Duplicate, Missing, Unknown},
     },
-    hir::value::LiteralValue,
+    hir::{Node, NodeArena, NodeId, hir_syn},
+    hir::{
+        function::{CallableDefinition, PendingScriptFunction},
+        value::LiteralValue,
+        value_dispatch::materialize_static_string,
+    },
     internal_compilation_error,
-    module::TraitId,
+    module::{LocalDecl, PendingModuleFunction, TraitId},
     std::value::{is_value_trait, value_layout_associated_const_values},
     types::{
-        r#trait::Trait, trait_solver::TraitSolver, r#type::Type,
+        r#trait::Trait,
+        trait_solver::TraitSolver,
+        r#type::{FnType, Type, TypeKind},
         type_inference::unify::SubOrSameType,
     },
 };
+
+fn materialize_associated_const_literal(
+    arena: &mut NodeArena,
+    locals: &mut Vec<LocalDecl>,
+    solver: &mut TraitSolver<'_>,
+    value: &LiteralValue,
+    ty: Type,
+    span: Location,
+) -> Result<NodeId, InternalCompilationError> {
+    if let Some(value) = value.as_primitive_ty::<crate::std::string::StaticStr>() {
+        debug_assert_eq!(ty, crate::std::string::string_type());
+        return materialize_static_string(arena, locals, solver, value.as_str(), span);
+    }
+
+    match value {
+        LiteralValue::Native(_) => Ok(arena.alloc(Node::new(
+            hir_syn::immediate(value.clone()),
+            ty,
+            EffType::empty(),
+            span,
+        ))),
+        LiteralValue::Tuple(values) => {
+            let kind = ty.data().clone();
+            let (member_tys, record) = match kind {
+                TypeKind::Tuple(member_tys) => (member_tys, false),
+                TypeKind::Record(fields) => (fields.into_iter().map(|(_, ty)| ty).collect(), true),
+                _ => panic!("tuple literal metadata should have a tuple or record result type"),
+            };
+            assert_eq!(values.len(), member_tys.len());
+            let nodes = values
+                .iter()
+                .zip(member_tys)
+                .map(|(value, ty)| {
+                    materialize_associated_const_literal(arena, locals, solver, value, ty, span)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let kind = if record {
+                hir_syn::record(nodes)
+            } else {
+                hir_syn::tuple(nodes)
+            };
+            Ok(arena.alloc(Node::new(kind, ty, EffType::empty(), span)))
+        }
+    }
+}
+
+/// Build the authoritative runtime getter from canonical literal metadata and
+/// the associated constant's declared result type.
+pub(super) fn associated_const_getter(
+    value: &LiteralValue,
+    ty: Type,
+    span: Location,
+    solver: &mut TraitSolver<'_>,
+) -> Result<PendingModuleFunction, InternalCompilationError> {
+    let mut arena = NodeArena::default();
+    let mut locals = Vec::new();
+    let root =
+        materialize_associated_const_literal(&mut arena, &mut locals, solver, value, ty, span)?;
+    let definition = CallableDefinition::new_infer_quantifiers(
+        FnType::new_by_val([], ty, EffType::empty()),
+        [],
+        "Compiler-generated associated constant getter.",
+    );
+    Ok(PendingModuleFunction::new(
+        definition,
+        PendingScriptFunction::new(arena, root, 0),
+        None,
+        locals,
+    ))
+}
 
 /// Synthesize compiler-provided associated const values for source-emitted impls.
 pub(super) fn emitted_associated_const_values(

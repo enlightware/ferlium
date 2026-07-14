@@ -17,10 +17,13 @@ use itertools::Itertools;
 use ustr::Ustr;
 
 use crate::{
+    containers::b,
     define_id_type,
     format::{FormatWith, write_with_separator_and_format_fn},
-    hir::function::Function,
+    hir::function::{CallableDefinition, Function, PendingScriptFunction, ScriptFunction},
+    hir::hir_syn,
     hir::value::LiteralValue,
+    hir::{ENodeArena, NodeArena},
     module::{
         LocalDecl, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleId, PendingModuleFunction,
         QualifiedNameEnv, TraitId, Visibility, id::Id, unique_generated_name,
@@ -30,12 +33,54 @@ use crate::{
     types::r#trait::{
         Trait, TraitAssociatedConstIndex, TraitDictionaryEntryIndex, TraitMethodIndex,
     },
-    types::r#type::{Type, TypeKind, TypeVar, fmt_fn_type_with_arg_names},
+    types::r#type::{FnType, Type, TypeKind, TypeVar, fmt_fn_type_with_arg_names},
     types::type_inference::substitution::InstSubst,
     types::type_like::TypeLike,
     types::type_scheme::PubTypeConstraint,
     types::type_scheme_display::format_constraints_consolidated,
 };
+
+fn associated_const_getter_definition(ty: Type) -> CallableDefinition {
+    CallableDefinition::new_infer_quantifiers(
+        FnType::new_by_val([], ty, EffType::empty()),
+        [],
+        "Compiler-generated associated constant getter.",
+    )
+}
+
+fn trivial_associated_const_getter(
+    value: LiteralValue,
+    ty: Type,
+    arena: &mut ENodeArena,
+) -> ModuleFunction {
+    debug_assert!(
+        value.has_representation_type(ty),
+        "managed associated constants require an explicit HIR materializer getter"
+    );
+    let root = hir_syn::alloc_synth(arena, hir_syn::immediate(value), ty);
+    ModuleFunction::new_elaborated(
+        associated_const_getter_definition(ty),
+        b(ScriptFunction::new(root, 0)) as Function,
+        Vec::new(),
+        None,
+        Vec::new(),
+    )
+}
+
+fn pending_trivial_associated_const_getter(value: LiteralValue, ty: Type) -> PendingModuleFunction {
+    debug_assert!(
+        value.has_representation_type(ty),
+        "managed associated constants require an explicit HIR materializer getter"
+    );
+    let mut arena = NodeArena::default();
+    let root = hir_syn::alloc_synth(&mut arena, hir_syn::immediate(value), ty);
+    PendingModuleFunction::new(
+        associated_const_getter_definition(ty),
+        PendingScriptFunction::new(arena, root, 0),
+        None,
+        Vec::new(),
+    )
+}
 
 define_id_type!(
     /// Local trait implementation ID within a module
@@ -145,46 +190,40 @@ impl TraitKey {
 /// Runtime metadata for a trait dictionary.
 ///
 /// Dictionary bodies are module-owned metadata, not Ferlium values. Runtime
-/// code passes `TraitDictionaryId` handles around; projecting one entry
-/// materializes a normal function value or associated const value.
+/// code passes `TraitDictionaryId` handles around; every projected entry is a
+/// callable function. Associated constants use zero-argument getter functions.
 #[derive(Debug, Clone)]
 pub struct TraitDictionary {
-    methods: Vec<LocalFunctionId>,
-    associated_const_values: Vec<LiteralValue>,
+    functions: Vec<LocalFunctionId>,
 }
 
 /// A projected entry from a runtime trait dictionary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TraitDictionaryEntry {
-    Method(LocalFunctionId),
-    AssociatedConst(LiteralValue),
+    Function(LocalFunctionId),
 }
 
 impl TraitDictionary {
-    pub fn new(methods: &[LocalFunctionId], associated_const_values: &[LiteralValue]) -> Self {
+    pub fn new(methods: &[LocalFunctionId], associated_const_getters: &[LocalFunctionId]) -> Self {
         Self {
-            methods: methods.to_vec(),
-            associated_const_values: associated_const_values.to_vec(),
+            functions: methods
+                .iter()
+                .chain(associated_const_getters)
+                .copied()
+                .collect(),
         }
     }
 
     pub fn entry(&self, index: TraitDictionaryEntryIndex) -> TraitDictionaryEntry {
-        let index = index.as_index();
-        if index < self.methods.len() {
-            TraitDictionaryEntry::Method(self.methods[index])
-        } else {
-            TraitDictionaryEntry::AssociatedConst(
-                self.associated_const_values[index - self.methods.len()].clone(),
-            )
-        }
+        TraitDictionaryEntry::Function(self.functions[index.as_index()])
     }
 }
 
 pub fn build_dictionary_value(
     methods: &[LocalFunctionId],
-    associated_const_values: &[LiteralValue],
+    associated_const_getters: &[LocalFunctionId],
 ) -> TraitDictionary {
-    TraitDictionary::new(methods, associated_const_values)
+    TraitDictionary::new(methods, associated_const_getters)
 }
 
 /// An implementation of a trait.
@@ -199,7 +238,10 @@ pub struct TraitImpl {
     /// Values for associated consts, in trait declaration order.
     #[new(default)]
     pub associated_const_values: Vec<LiteralValue>,
-    /// The runtime dictionary, with methods first and associated const values after them.
+    /// Runtime getter functions for associated consts, in declaration order.
+    #[new(default)]
+    pub associated_const_getters: Vec<LocalFunctionId>,
+    /// The runtime dictionary, with methods first and associated const getters after them.
     pub dictionary_value: TraitDictionary,
     /// The type of the runtime dictionary.
     /// If the implementation is a blanket one, the key contains the rest of the type scheme.
@@ -223,6 +265,23 @@ impl TraitImpl {
         self.associated_const_values
             .get(usize::from(index))
             .cloned()
+    }
+
+    pub fn with_associated_const_getters(
+        mut self,
+        associated_const_getters: impl Into<Vec<LocalFunctionId>>,
+    ) -> Self {
+        self.associated_const_getters = associated_const_getters.into();
+        self
+    }
+
+    pub fn associated_const_getter(
+        &self,
+        index: TraitAssociatedConstIndex,
+    ) -> Option<LocalFunctionId> {
+        self.associated_const_getters
+            .get(usize::from(index))
+            .copied()
     }
 }
 
@@ -369,6 +428,7 @@ impl TraitImpls {
         output_effs: impl Into<Vec<EffType>>,
         associated_const_values: impl Into<Vec<LiteralValue>>,
         functions: impl Into<Vec<(Function, Vec<LocalDecl>)>>,
+        hir_arena: &mut ENodeArena,
         fn_collector: &mut FunctionCollector,
         qualified_name_env: &QualifiedNameEnv<'_>,
     ) -> LocalImplId {
@@ -409,6 +469,7 @@ impl TraitImpls {
             output_effs,
             associated_const_values,
             functions,
+            hir_arena,
             fn_collector,
             qualified_name_env,
         )
@@ -427,6 +488,7 @@ impl TraitImpls {
         output_effs: Vec<EffType>,
         associated_const_values: impl Into<Vec<LiteralValue>>,
         functions: Vec<ModuleFunction>,
+        hir_arena: &mut ENodeArena,
         fn_collector: &mut FunctionCollector,
         qualified_name_env: &QualifiedNameEnv<'_>,
     ) -> LocalImplId {
@@ -465,8 +527,29 @@ impl TraitImpls {
             &output_tys,
             &output_effs,
         );
+        let associated_const_getters = Self::bundle_trivial_associated_const_getters(
+            &associated_const_values,
+            &associated_const_tys,
+            hir_arena,
+            fn_collector,
+            |index| {
+                qualified_name_env
+                    .disambiguated_impl_associated_const_name(
+                        trait_id,
+                        trait_def,
+                        TraitAssociatedConstIndex::from_index(index),
+                        &input_tys,
+                        &output_tys,
+                        &output_effs,
+                        0,
+                        0,
+                        &[],
+                    )
+                    .into()
+            },
+        );
         let dictionary_type = Self::dictionary_ty(method_tys, associated_const_tys);
-        let dictionary_value = build_dictionary_value(&methods, &associated_const_values);
+        let dictionary_value = build_dictionary_value(&methods, &associated_const_getters);
         let imp = TraitImpl::new(
             output_tys,
             output_effs,
@@ -476,7 +559,8 @@ impl TraitImpls {
             true,
             None,
         )
-        .with_associated_const_values(associated_const_values);
+        .with_associated_const_values(associated_const_values)
+        .with_associated_const_getters(associated_const_getters);
         let key = ConcreteTraitImplKey::new(trait_id, input_tys);
         self.add_concrete_struct(key, imp)
     }
@@ -529,8 +613,28 @@ impl TraitImpls {
             &output_tys,
             &output_effs,
         );
+        let associated_const_getters = Self::bundle_pending_trivial_associated_const_getters(
+            &associated_const_values,
+            &associated_const_tys,
+            fn_collector,
+            |index| {
+                qualified_name_env
+                    .disambiguated_impl_associated_const_name(
+                        trait_id,
+                        trait_def,
+                        TraitAssociatedConstIndex::from_index(index),
+                        &input_tys,
+                        &output_tys,
+                        &output_effs,
+                        0,
+                        0,
+                        &[],
+                    )
+                    .into()
+            },
+        );
         let dictionary_type = Self::dictionary_ty(method_tys, associated_const_tys);
-        let dictionary_value = build_dictionary_value(&methods, &associated_const_values);
+        let dictionary_value = build_dictionary_value(&methods, &associated_const_getters);
         let imp = TraitImpl::new(
             output_tys,
             output_effs,
@@ -540,7 +644,8 @@ impl TraitImpls {
             true,
             None,
         )
-        .with_associated_const_values(associated_const_values);
+        .with_associated_const_values(associated_const_values)
+        .with_associated_const_getters(associated_const_getters);
         let key = ConcreteTraitImplKey::new(trait_id, input_tys);
         self.add_concrete_struct(key, imp)
     }
@@ -574,6 +679,7 @@ impl TraitImpls {
         output_effs: impl Into<Vec<EffType>>,
         associated_const_values: impl Into<Vec<LiteralValue>>,
         functions: impl Into<Vec<(Function, Vec<LocalDecl>)>>,
+        hir_arena: &mut ENodeArena,
         fn_collector: &mut FunctionCollector,
         qualified_name_env: &QualifiedNameEnv<'_>,
     ) -> LocalImplId {
@@ -603,6 +709,7 @@ impl TraitImpls {
             output_effs,
             associated_const_values,
             functions,
+            hir_arena,
             fn_collector,
             qualified_name_env,
         )
@@ -618,6 +725,7 @@ impl TraitImpls {
         output_effs: Vec<EffType>,
         associated_const_values: impl Into<Vec<LiteralValue>>,
         functions: Vec<ModuleFunction>,
+        hir_arena: &mut ENodeArena,
         fn_collector: &mut FunctionCollector,
         qualified_name_env: &QualifiedNameEnv<'_>,
     ) -> LocalImplId {
@@ -656,8 +764,29 @@ impl TraitImpls {
             &output_tys,
             &output_effs,
         );
+        let associated_const_getters = Self::bundle_trivial_associated_const_getters(
+            &associated_const_values,
+            &associated_const_tys,
+            hir_arena,
+            fn_collector,
+            |index| {
+                qualified_name_env
+                    .disambiguated_impl_associated_const_name(
+                        trait_id,
+                        trait_def,
+                        TraitAssociatedConstIndex::from_index(index),
+                        &sub_key.input_tys,
+                        &output_tys,
+                        &output_effs,
+                        sub_key.ty_var_count,
+                        sub_key.eff_var_count,
+                        &sub_key.constraints,
+                    )
+                    .into()
+            },
+        );
         let dictionary_type = Self::dictionary_ty(method_tys, associated_const_tys);
-        let dictionary_value = build_dictionary_value(&methods, &associated_const_values);
+        let dictionary_value = build_dictionary_value(&methods, &associated_const_getters);
         let imp = TraitImpl::new(
             output_tys,
             output_effs,
@@ -667,7 +796,8 @@ impl TraitImpls {
             true,
             None,
         )
-        .with_associated_const_values(associated_const_values);
+        .with_associated_const_values(associated_const_values)
+        .with_associated_const_getters(associated_const_getters);
         let key = BlanketTraitImplKey::new(trait_id, sub_key);
         self.add_blanket_struct(key, imp)
     }
@@ -722,6 +852,51 @@ impl TraitImpls {
         (methods, tys)
     }
 
+    pub(crate) fn bundle_trivial_associated_const_getters(
+        values: &[LiteralValue],
+        tys: &[Type],
+        hir_arena: &mut ENodeArena,
+        fn_collector: &mut FunctionCollector,
+        namer: impl Fn(usize) -> Ustr,
+    ) -> Vec<LocalFunctionId> {
+        values
+            .iter()
+            .cloned()
+            .zip(tys.iter().copied())
+            .enumerate()
+            .map(|(index, (value, ty))| {
+                let id = fn_collector.next_id();
+                fn_collector.push(
+                    namer(index),
+                    trivial_associated_const_getter(value, ty, hir_arena),
+                );
+                id
+            })
+            .collect()
+    }
+
+    pub(crate) fn bundle_pending_trivial_associated_const_getters(
+        values: &[LiteralValue],
+        tys: &[Type],
+        fn_collector: &mut PendingFunctionCollector,
+        namer: impl Fn(usize) -> Ustr,
+    ) -> Vec<LocalFunctionId> {
+        values
+            .iter()
+            .cloned()
+            .zip(tys.iter().copied())
+            .enumerate()
+            .map(|(index, (value, ty))| {
+                let id = fn_collector.next_id();
+                fn_collector.push(
+                    namer(index),
+                    pending_trivial_associated_const_getter(value, ty),
+                );
+                id
+            })
+            .collect()
+    }
+
     pub fn dictionary_ty(
         method_tys: Vec<Type>,
         associated_const_tys: impl IntoIterator<Item = Type>,
@@ -729,7 +904,11 @@ impl TraitImpls {
         Type::tuple(
             method_tys
                 .into_iter()
-                .chain(associated_const_tys)
+                .chain(
+                    associated_const_tys.into_iter().map(|ty| {
+                        Type::function_type(FnType::new_by_val([], ty, EffType::empty()))
+                    }),
+                )
                 .collect::<Vec<_>>(),
         )
     }

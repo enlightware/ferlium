@@ -12,29 +12,42 @@ use crate::{
     containers::{IntoSVec2, b},
     hir::function::ArgConvention,
     hir::value::{LiteralNativeValue, LiteralValue},
-    hir::{self, CallArgument, HirPhase, NodeId, NodeKind, Project, Variant},
+    hir::{self, CallArgument, HirPhase, Node, NodeArena, NodeId, NodeKind, Project, Variant},
     module::{
         FunctionId, LocalDecl, LocalDeclId, LocalFrameSlot, PendingLocalDrop,
         PendingTakeLocalValueMode, ProjectionIndex, TraitImplId, id::Id,
     },
-    std::string::String as FerliumString,
+    std::string::StaticStr,
+    types::effects::EffType,
     types::mutability::{MutType, MutVal},
+    types::r#trait::TraitDictionaryEntryIndex,
     types::r#type::{CallImplType, CallResultConvention, FnType, Type},
 };
-use std::str::FromStr;
 use ustr::{Ustr, ustr};
 
 use NodeKind as K;
+
+/// Allocate a synthesized HIR node with no effects.
+pub fn alloc_synth<P: HirPhase>(
+    arena: &mut NodeArena<P>,
+    kind: NodeKind<P>,
+    ty: Type,
+) -> NodeId<P> {
+    arena.alloc(Node::new(
+        kind,
+        ty,
+        EffType::empty(),
+        Location::new_synthesized(),
+    ))
+}
 
 #[allow(dead_code)]
 pub fn native<P: HirPhase, T: LiteralNativeValue + 'static>(value: T) -> NodeKind<P> {
     immediate(LiteralValue::new_native(value))
 }
 
-pub fn native_str<P: HirPhase>(value: &str) -> NodeKind<P> {
-    immediate(LiteralValue::new_native(
-        FerliumString::from_str(value).unwrap(),
-    ))
+pub fn static_str<P: HirPhase>(value: &str) -> NodeKind<P> {
+    immediate(LiteralValue::new_native(StaticStr::new(value)))
 }
 
 pub fn immediate<P: HirPhase>(value: LiteralValue) -> NodeKind<P> {
@@ -191,6 +204,20 @@ pub fn static_apply_with_result_convention<P: HirPhase>(
         arguments,
         ty: CallImplType::new(ty, result_convention),
         inst_data: hir::FnInstData::none(),
+    }))
+}
+
+pub fn call_dictionary_function<P: HirPhase>(
+    dictionary: NodeId<P>,
+    entry_index: TraitDictionaryEntryIndex,
+    arguments: Vec<CallArgument<P>>,
+    ty: CallImplType,
+) -> NodeKind<P> {
+    K::CallDictionaryFunction(b(hir::CallDictionaryFunction {
+        dictionary,
+        entry_index,
+        arguments,
+        ty,
     }))
 }
 

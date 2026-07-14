@@ -23,7 +23,7 @@ use crate::{
     },
     std::STD_MODULE_ID,
     types::effects::EffType,
-    types::r#trait::{Trait, TraitMethodIndex},
+    types::r#trait::{Trait, TraitAssociatedConstIndex, TraitMethodIndex},
     types::r#type::{
         BareNativeTypeB, FnArgType, NativeType, Type, TypeAliasEntry, TypeAliases, TypeDef,
         TypeDefSlot,
@@ -355,11 +355,11 @@ impl<'m> QualifiedNameEnv<'m> {
             .join("; ")
     }
 
-    pub(crate) fn qualified_method_name(
+    fn qualified_trait_item_name(
         &self,
         trait_id: TraitId,
         trait_def: &Trait,
-        index: TraitMethodIndex,
+        item_name: Ustr,
         input_tys: &[Type],
     ) -> String {
         let mut s = format!(
@@ -372,8 +372,33 @@ impl<'m> QualifiedNameEnv<'m> {
             }
             s.push_str(&self.format_type(*ty));
         }
-        s.push_str(&format!(">::{}", trait_def.method(index).0));
+        s.push_str(&format!(">::{item_name}"));
         s
+    }
+
+    pub(crate) fn qualified_method_name(
+        &self,
+        trait_id: TraitId,
+        trait_def: &Trait,
+        index: TraitMethodIndex,
+        input_tys: &[Type],
+    ) -> String {
+        self.qualified_trait_item_name(trait_id, trait_def, trait_def.method(index).0, input_tys)
+    }
+
+    pub(crate) fn qualified_associated_const_name(
+        &self,
+        trait_id: TraitId,
+        trait_def: &Trait,
+        index: TraitAssociatedConstIndex,
+        input_tys: &[Type],
+    ) -> String {
+        self.qualified_trait_item_name(
+            trait_id,
+            trait_def,
+            trait_def.associated_const(index).name,
+            input_tys,
+        )
     }
 
     pub(crate) fn qualified_named_subscript_name(&self, module_id: ModuleId, name: Ustr) -> String {
@@ -406,6 +431,39 @@ impl<'m> QualifiedNameEnv<'m> {
             "trait={}; method={}; inputs=[{}]; outputs=[{}]; effects=[{}]; ty_vars={}; eff_vars={}; constraints=[{}]",
             self.format_trait_id(trait_id, trait_def.name),
             trait_def.method(index).0,
+            self.format_type_list(input_tys),
+            self.format_type_list(output_tys),
+            Self::format_effect_list(output_effs),
+            ty_var_count,
+            eff_var_count,
+            self.format_constraint_list(constraints)
+        );
+        format!(
+            "{readable_name}#impl:{:08x}",
+            stable_generated_name_hash(&canonical_identity)
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn disambiguated_impl_associated_const_name(
+        &self,
+        trait_id: TraitId,
+        trait_def: &Trait,
+        index: TraitAssociatedConstIndex,
+        input_tys: &[Type],
+        output_tys: &[Type],
+        output_effs: &[EffType],
+        ty_var_count: u32,
+        eff_var_count: u32,
+        constraints: &[PubTypeConstraint],
+    ) -> String {
+        let associated_const = trait_def.associated_const(index);
+        let readable_name =
+            self.qualified_associated_const_name(trait_id, trait_def, index, input_tys);
+        let canonical_identity = format!(
+            "trait={}; associated_const={}; inputs=[{}]; outputs=[{}]; effects=[{}]; ty_vars={}; eff_vars={}; constraints=[{}]",
+            self.format_trait_id(trait_id, trait_def.name),
+            associated_const.name,
             self.format_type_list(input_tys),
             self.format_type_list(output_tys),
             Self::format_effect_list(output_effs),

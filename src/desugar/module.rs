@@ -1068,6 +1068,26 @@ impl ast::TraitDefinition {
         env: &ModuleEnv<'_>,
         modules_used: &mut FxHashSet<ModuleId>,
     ) -> Result<Trait, InternalCompilationError> {
+        let mut items = self
+            .methods
+            .iter()
+            .map(|item| item.name)
+            .chain(self.associated_consts.iter().map(|item| item.name))
+            .collect::<Vec<_>>();
+        items.sort_by_key(|(_, span)| span.start());
+        let mut item_names = FxHashSet::default();
+        for (name, span) in items {
+            if !item_names.insert(name) {
+                return Err(internal_compilation_error!(InvalidTraitDefinition {
+                    trait_name: self.name.0,
+                    kind: crate::compiler::error::InvalidTraitDefinitionKind::DuplicateItem {
+                        name,
+                    },
+                    span,
+                }));
+            }
+        }
+
         let generic_params = self
             .input_type_names
             .iter()

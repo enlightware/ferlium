@@ -21,7 +21,10 @@ use ustr::Ustr;
 use crate::{
     containers::{B, IntoSVec2, SVec2, b},
     format::write_with_separator,
+    hir::function::NativeTrivialCopy,
     module::{FunctionId, SubscriptId, TraitDictionaryId},
+    std::string::StaticStr,
+    types::r#type::{Type, TypeKind},
 };
 
 // Support for primitive values
@@ -73,12 +76,25 @@ pub trait LiteralNativeValue:
     Any + fmt::Debug + DynClone + DynEq + DynHash + NativeDisplay + 'static
 {
     fn as_any(&self) -> &dyn Any;
+    fn native_type(&self) -> Type;
+    fn matches_native_value(&self, value: &dyn NativeValue) -> Option<bool>;
     fn into_native_value(self: B<Self>) -> B<dyn NativeValue>;
 }
 
-impl<T: NativeValue + Clone + Hash + Eq + NativeDisplay> LiteralNativeValue for T {
+impl<T: NativeValue + NativeTrivialCopy + Hash + Eq + NativeDisplay> LiteralNativeValue for T {
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn native_type(&self) -> Type {
+        Type::primitive::<T>()
+    }
+
+    fn matches_native_value(&self, value: &dyn NativeValue) -> Option<bool> {
+        value
+            .as_any()
+            .downcast_ref::<T>()
+            .map(|value| self == value)
     }
 
     fn into_native_value(self: B<Self>) -> B<dyn NativeValue> {
@@ -236,33 +252,6 @@ impl Value {
 
     pub fn is_unit(&self) -> bool {
         self.as_primitive_ty::<()>().is_some()
-    }
-
-    pub fn to_literal_value(&self) -> Option<LiteralValue> {
-        match self {
-            Self::Native(_) =>
-            {
-                #[allow(clippy::manual_map)]
-                if self.as_primitive_ty::<()>().is_some() {
-                    Some(LiteralValue::new_native(()))
-                } else if let Some(value) = self.as_primitive_ty::<bool>() {
-                    Some(LiteralValue::new_native(*value))
-                } else if let Some(value) = self.as_primitive_ty::<isize>() {
-                    Some(LiteralValue::new_native(*value))
-                } else if let Some(value) = self.as_primitive_ty::<crate::std::string::String>() {
-                    Some(LiteralValue::new_native(value.clone()))
-                } else {
-                    None
-                }
-            }
-            Self::Tuple(values) => Some(LiteralValue::new_tuple(
-                values
-                    .iter()
-                    .map(Value::to_literal_value)
-                    .collect::<Option<Vec<_>>>()?,
-            )),
-            Self::Uninit | Self::Variant(_) | Self::Function(_) | Self::Subscript(_) => None,
-        }
     }
 
     pub fn native<T: NativeValue + 'static>(value: T) -> Self {
@@ -524,6 +513,11 @@ pub enum LiteralValue {
     Tuple(B<SVec2<LiteralValue>>),
 }
 
+/// A pattern literal and runtime value do not have compatible representations.
+/// This indicates invalid typed HIR rather than an ordinary pattern mismatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IncompatibleLiteralShape;
+
 impl LiteralValue {
     pub fn new_native<T: LiteralNativeValue + 'static>(value: T) -> Self {
         Self::Native(b(value))
@@ -538,6 +532,69 @@ impl LiteralValue {
         match self {
             Native(value) => Value::native_box(value.into_native_value()),
             Tuple(args) => Value::tuple(args.into_iter().map(Self::into_value).collect::<Vec<_>>()),
+        }
+    }
+
+    /// Compare immutable pattern data with a runtime value without converting
+    /// owned runtime data into a literal representation.
+    pub fn try_matches_runtime_value(
+        &self,
+        value: &Value,
+    ) -> Result<bool, IncompatibleLiteralShape> {
+        match (self, value) {
+            (Self::Native(expected), Value::Native(actual)) => {
+                if let Some(expected) =
+                    LiteralNativeValue::as_any(expected.as_ref()).downcast_ref::<StaticStr>()
+                {
+                    return actual
+                        .as_any()
+                        .downcast_ref::<crate::std::string::String>()
+                        .map(|actual| expected.as_str() == actual.as_ref())
+                        .ok_or(IncompatibleLiteralShape);
+                }
+                expected
+                    .matches_native_value(actual.as_ref())
+                    .ok_or(IncompatibleLiteralShape)
+            }
+            (Self::Tuple(expected), Value::Tuple(actual)) if expected.len() == actual.len() => {
+                expected.iter().zip(actual.iter()).try_fold(
+                    true,
+                    |all_equal, (expected, actual)| {
+                        let equal = expected.try_matches_runtime_value(actual)?;
+                        Ok(all_equal && equal)
+                    },
+                )
+            }
+            (Self::Tuple(_), Value::Tuple(_)) | (Self::Native(_), _) | (Self::Tuple(_), _) => {
+                Err(IncompatibleLiteralShape)
+            }
+        }
+    }
+
+    pub(crate) fn native_type(&self) -> Option<Type> {
+        match self {
+            Self::Native(value) => Some(value.native_type()),
+            Self::Tuple(_) => None,
+        }
+    }
+
+    /// Whether copying this literal tree directly produces the declared runtime
+    /// representation, without any materializer calls.
+    pub(crate) fn has_representation_type(&self, ty: Type) -> bool {
+        match self {
+            Self::Native(value) => value.native_type() == ty,
+            Self::Tuple(values) => {
+                let member_tys = match ty.data().clone() {
+                    TypeKind::Tuple(member_tys) => member_tys,
+                    TypeKind::Record(fields) => fields.into_iter().map(|(_, ty)| ty).collect(),
+                    _ => return false,
+                };
+                values.len() == member_tys.len()
+                    && values
+                        .iter()
+                        .zip(member_tys)
+                        .all(|(value, ty)| value.has_representation_type(ty))
+            }
         }
     }
 

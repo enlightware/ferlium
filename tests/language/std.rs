@@ -174,12 +174,12 @@ fn assert_value_layout(
     assert_eq!(
         imp.dictionary_value
             .entry(value_trait_def.dictionary_associated_const_index(size_index)),
-        TraitDictionaryEntry::AssociatedConst(LiteralValue::new_native(size))
+        TraitDictionaryEntry::Function(imp.associated_const_getter(size_index).unwrap())
     );
     assert_eq!(
         imp.dictionary_value
             .entry(value_trait_def.dictionary_associated_const_index(align_index)),
-        TraitDictionaryEntry::AssociatedConst(LiteralValue::new_native(align))
+        TraitDictionaryEntry::Function(imp.associated_const_getter(align_index).unwrap())
     );
 }
 

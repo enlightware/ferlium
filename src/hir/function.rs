@@ -766,18 +766,18 @@ pub(crate) mod trivial_copy_private {
 ///
 /// Implementors must be concrete, non-generic native types whose copied
 /// representation is a valid independent value in Ferlium native adapters.
-pub unsafe trait TrivialCopy: Copy + 'static + trivial_copy_private::Sealed {}
+pub unsafe trait NativeTrivialCopy: Copy + 'static + trivial_copy_private::Sealed {}
 
 impl trivial_copy_private::Sealed for () {}
-unsafe impl TrivialCopy for () {}
+unsafe impl NativeTrivialCopy for () {}
 impl trivial_copy_private::Sealed for bool {}
-unsafe impl TrivialCopy for bool {}
+unsafe impl NativeTrivialCopy for bool {}
 impl trivial_copy_private::Sealed for isize {}
-unsafe impl TrivialCopy for isize {}
+unsafe impl NativeTrivialCopy for isize {}
 impl trivial_copy_private::Sealed for crate::std::math::Float {}
-unsafe impl TrivialCopy for crate::std::math::Float {}
+unsafe impl NativeTrivialCopy for crate::std::math::Float {}
 
-fn copy_boxed_trivial_copy_native_typed<T: TrivialCopy + NativeValue>(
+fn copy_boxed_trivial_copy_native_typed<T: NativeTrivialCopy + NativeValue>(
     value: &Value,
 ) -> Option<Value> {
     value
@@ -795,9 +795,10 @@ pub(crate) fn copy_boxed_trivial_copy_native(value: &Value) -> Option<Value> {
         .or_else(|| copy_boxed_trivial_copy_native_typed::<bool>(value))
         .or_else(|| copy_boxed_trivial_copy_native_typed::<isize>(value))
         .or_else(|| copy_boxed_trivial_copy_native_typed::<crate::std::math::Float>(value))
+        .or_else(|| copy_boxed_trivial_copy_native_typed::<crate::std::string::StaticStr>(value))
 }
 
-pub fn extract_trivial_native_input<T: TrivialCopy>(
+pub fn extract_trivial_native_input<T: NativeTrivialCopy>(
     arg: &ValOrMut,
     ctx: &mut CallCtx,
 ) -> Result<T, RuntimeErrorKind> {
@@ -865,7 +866,7 @@ impl ArgExtractor for &'_ mut Value {
     }
 }
 
-impl<T: TrivialCopy> ArgExtractor for NatVal<T> {
+impl<T: NativeTrivialCopy> ArgExtractor for NatVal<T> {
     type Output<'a> = T;
     const PASSING: ArgConvention = ArgConvention::Let;
     fn extract<'m>(

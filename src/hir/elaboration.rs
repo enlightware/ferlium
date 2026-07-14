@@ -13,7 +13,7 @@ use ustr::{Ustr, ustr};
 use crate::{
     Location,
     compiler::error::InternalCompilationError,
-    hir::hir_syn::get_dictionary,
+    hir::hir_syn::{call_dictionary_function, get_dictionary, static_apply},
     hir::{
         dictionary::{
             DictElaborationCtx, DictionariesReq, DictionaryReq, ExtraParameters,
@@ -613,7 +613,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
             NodeKind::FunctionApply(app) => app.ty.returns_place(),
             NodeKind::SubscriptApply(app) => app.ty.returns_place(),
             NodeKind::StaticApply(app) => app.ty.returns_place(),
-            NodeKind::CallDictionaryMethod(call) => call.ty.returns_place(),
+            NodeKind::CallDictionaryFunction(call) => call.ty.returns_place(),
             NodeKind::WithPlace(node) => self.elaborated_node_is_place_reference(node.body),
             NodeKind::Block(block) => block
                 .tail_node()
@@ -1122,12 +1122,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                         no_effects(),
                         method_span,
                     )?;
-                    CallDictionaryMethod(b(hir::CallDictionaryMethod {
-                        dictionary,
-                        entry_index,
-                        arguments: arguments.arguments,
-                        ty,
-                    }))
+                    call_dictionary_function(dictionary, entry_index, arguments.arguments, ty)
                 } else {
                     let dict_index = find_trait_impl_dict_index(
                         self.ctx.dicts,
@@ -1152,12 +1147,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                         dict_ty,
                         method_index,
                     );
-                    CallDictionaryMethod(b(hir::CallDictionaryMethod {
-                        dictionary,
-                        entry_index,
-                        arguments: arguments.arguments,
-                        ty,
-                    }))
+                    call_dictionary_function(dictionary, entry_index, arguments.arguments, ty)
                 };
                 self.wrap_call_cleanup(call, arguments.cleanup, node_ty, node_effects, node_span)
             }
@@ -1303,7 +1293,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                         no_effects(),
                         method_span,
                     )?;
-                    GetDictionaryMethod(hir::GetDictionaryMethod {
+                    GetDictionaryFunction(hir::GetDictionaryFunction {
                         dictionary,
                         entry_index,
                     })
@@ -1336,13 +1326,19 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                         values[usize::from(associated_const_index)],
                     ))
                 } else if resolved {
-                    Immediate(self.ctx.trait_solver.solve_associated_const(
+                    let function = self.ctx.trait_solver.solve_associated_const_getter(
                         trait_id,
                         &input_tys,
                         associated_const_index,
                         associated_const_span,
                         &mut self.generated,
-                    )?)
+                    )?;
+                    static_apply(
+                        function,
+                        FnType::new_by_val([], node_ty, no_effects()),
+                        Vec::new(),
+                        associated_const_span,
+                    )
                 } else {
                     let dict_index = find_trait_impl_dict_index(
                         self.ctx.dicts,
@@ -1362,14 +1358,15 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                         no_effects(),
                         associated_const_span,
                     )?;
-                    GetDictionaryAssociatedConst(hir::GetDictionaryAssociatedConst {
+                    call_dictionary_function(
                         dictionary,
-                        entry_index: self
-                            .ctx
+                        self.ctx
                             .trait_solver
                             .trait_def(trait_id)
                             .dictionary_associated_const_index(associated_const_index),
-                    })
+                        Vec::new(),
+                        CallImplType::value(FnType::new_by_val([], node_ty, no_effects())),
+                    )
                 }
             }
             GetTraitDictionary(get_dict) => {
@@ -1419,23 +1416,15 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                 })
             }
             LoadLocal(load) => LoadLocal(*load),
-            GetDictionaryMethod(node) => {
+            GetDictionaryFunction(node) => {
                 let dictionary = node.dictionary;
                 let entry_index = node.entry_index;
-                GetDictionaryMethod(hir::GetDictionaryMethod {
+                GetDictionaryFunction(hir::GetDictionaryFunction {
                     dictionary: self.elaborate_node(src, dictionary)?,
                     entry_index,
                 })
             }
-            GetDictionaryAssociatedConst(node) => {
-                let dictionary = node.dictionary;
-                let entry_index = node.entry_index;
-                GetDictionaryAssociatedConst(hir::GetDictionaryAssociatedConst {
-                    dictionary: self.elaborate_node(src, dictionary)?,
-                    entry_index,
-                })
-            }
-            CallDictionaryMethod(call) => {
+            CallDictionaryFunction(call) => {
                 let dictionary = call.dictionary;
                 let entry_index = call.entry_index;
                 let ty = call.ty.clone();
@@ -1445,7 +1434,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
                     ty.returns_place(),
                     node_span,
                 )?;
-                let call = CallDictionaryMethod(b(hir::CallDictionaryMethod {
+                let call = CallDictionaryFunction(b(hir::CallDictionaryFunction {
                     dictionary: self.elaborate_node(src, dictionary)?,
                     entry_index,
                     arguments: arguments.arguments,
@@ -1686,7 +1675,7 @@ mod tests {
     }
 
     #[test]
-    fn concrete_associated_const_elaborates_to_immediate() {
+    fn concrete_associated_const_elaborates_to_static_getter_call() {
         let traits = vec![layout_trait()];
         let trait_def = &traits[0];
         let trait_id = TraitId::new(ModuleId(0), LocalTraitId(0));
@@ -1710,6 +1699,7 @@ mod tests {
         let qualified_name_env = QualifiedNameEnv::new_from_module(&current_module, &modules);
         let mut impls = TraitImpls::new(ModuleId(0));
         let mut fn_collector = FunctionCollector::new(0);
+        let mut getter_arena = ENodeArena::default();
         impls.add_concrete_raw(
             trait_id,
             trait_def,
@@ -1721,6 +1711,7 @@ mod tests {
                 LiteralValue::new_native(4isize),
             ],
             Vec::<(Function, Vec<LocalDecl>)>::new(),
+            &mut getter_arena,
             &mut fn_collector,
             &qualified_name_env,
         );
@@ -1751,14 +1742,15 @@ mod tests {
         let elaborated =
             elaborate_hir(&arena, node, &mut elaborated_arena, &mut ctx, Vec::new()).unwrap();
 
-        let NodeKind::Immediate(immediate) = &elaborated_arena[elaborated.root].kind else {
-            panic!("expected associated const to elaborate to an immediate");
+        let NodeKind::StaticApply(call) = &elaborated_arena[elaborated.root].kind else {
+            panic!("expected associated const to elaborate to a static getter call");
         };
-        assert_eq!(immediate.as_primitive_ty::<isize>(), Some(&8));
+        assert!(call.arguments.is_empty());
+        assert_eq!(call.function.function.as_index(), 0);
     }
 
     #[test]
-    fn generic_associated_const_elaborates_to_dictionary_associated_const() {
+    fn generic_associated_const_elaborates_to_dictionary_getter_call() {
         let traits = vec![layout_trait()];
         let trait_def = &traits[0];
         let trait_id = TraitId::new(ModuleId(0), LocalTraitId(0));
@@ -1813,14 +1805,13 @@ mod tests {
         let elaborated =
             elaborate_hir(&arena, node, &mut elaborated_arena, &mut ctx, Vec::new()).unwrap();
 
-        let NodeKind::GetDictionaryAssociatedConst(get_const) =
-            &elaborated_arena[elaborated.root].kind
-        else {
-            panic!("expected associated const to elaborate to a dictionary associated const");
+        let NodeKind::CallDictionaryFunction(call) = &elaborated_arena[elaborated.root].kind else {
+            panic!("expected associated const to elaborate to a dictionary getter call");
         };
-        assert_eq!(usize::from(get_const.entry_index), 1);
-        let NodeKind::LoadDictionary(load) = &elaborated_arena[get_const.dictionary].kind else {
-            panic!("expected dictionary associated const source to load a dictionary");
+        assert!(call.arguments.is_empty());
+        assert_eq!(usize::from(call.entry_index), 1);
+        let NodeKind::LoadDictionary(load) = &elaborated_arena[call.dictionary].kind else {
+            panic!("expected dictionary getter source to load a dictionary");
         };
         assert_eq!(load.extra_parameter.as_index(), 0);
     }

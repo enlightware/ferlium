@@ -25,7 +25,7 @@ use crate::{
     module::{ModuleEnv, TraitId, TraitImplId, id::Id},
     types::effects::{EffType, EffectVar, EffectsInstSubst},
     types::trait_solver::TraitSolver,
-    types::r#type::{Type, TypeInstSubst, TypeVar},
+    types::r#type::{FnType, Type, TypeInstSubst, TypeVar},
     types::type_inference::substitution::InstSubst,
     types::type_like::TypeLike,
     types::type_mapper::BitmapInstantiationMapper,
@@ -397,6 +397,21 @@ impl Trait {
 
     /// Validate the trait and return a descriptive error instead of panicking.
     pub fn try_validate(&self) -> Result<(), TraitValidationError> {
+        let mut item_names = FxHashSet::default();
+        for name in self
+            .methods
+            .iter()
+            .map(|(name, _)| *name)
+            .chain(self.associated_consts.iter().map(|item| item.name))
+        {
+            if !item_names.insert(name) {
+                return Err(TraitValidationError::Invalid {
+                    trait_name: self.name,
+                    kind: InvalidTraitDefinitionKind::DuplicateItem { name },
+                });
+            }
+        }
+
         // Make sure that parent constraints only refer to the input or the output type variables.
         let trait_type_count = self.type_var_count();
         for constraint in &self.parent_constraints {
@@ -587,7 +602,13 @@ impl Trait {
         let associated_const_tys = self
             .associated_consts
             .iter()
-            .map(|associated_const| associated_const.ty.map(&mut mapper))
+            .map(|associated_const| {
+                Type::function_type(FnType::new_by_val(
+                    [],
+                    associated_const.ty.map(&mut mapper),
+                    EffType::empty(),
+                ))
+            })
             .collect::<Vec<_>>();
         Type::tuple(
             method_tys

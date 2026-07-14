@@ -32,7 +32,7 @@ use ferlium::{
 use indoc::indoc;
 use ustr::ustr;
 
-use crate::harness::{TestSession, int};
+use crate::harness::{TestSession, int, string};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
@@ -255,9 +255,9 @@ fn generic_trait_method_function_argument_keeps_source_place_passing() {
 
 fn store_value_materializes_dictionary_method(arena: &ENodeArena, value: ENodeId) -> bool {
     match &arena[value].kind {
-        NodeKind::GetDictionaryMethod(_) => true,
+        NodeKind::GetDictionaryFunction(_) => true,
         NodeKind::CloneValue(clone) => {
-            matches!(arena[clone.source].kind, NodeKind::GetDictionaryMethod(_))
+            matches!(arena[clone.source].kind, NodeKind::GetDictionaryFunction(_))
         }
         _ => false,
     }
@@ -700,27 +700,102 @@ fn concrete_impl_stores_associated_const_values() {
         imp.associated_const_value(TraitAssociatedConstIndex(1)),
         Some(LiteralValue::new_native(1isize))
     );
-    assert_eq!(module.function_count(), 1);
+    assert_eq!(module.function_count(), 3);
+
+    for (index, expected_name) in [
+        (TraitAssociatedConstIndex(0), ">::SIZE#impl:"),
+        (TraitAssociatedConstIndex(1), ">::ALIGN#impl:"),
+    ] {
+        let getter = imp.associated_const_getter(index).unwrap();
+        let actual_name = module.get_function_name_by_id(getter).unwrap();
+        assert!(
+            actual_name.starts_with("Layout<") && actual_name.contains(expected_name),
+            "expected `{actual_name}` to identify `Layout{expected_name}`"
+        );
+        let function = module.get_function_by_id(getter).unwrap();
+        let entry = function
+            .get_code_entry()
+            .expect("associated constant getter should be an ordinary HIR function");
+        assert!(matches!(
+            module.hir_arena[entry].kind,
+            NodeKind::Immediate(_)
+        ));
+    }
 
     assert!(matches!(
         imp.dictionary_value.entry(TraitDictionaryEntryIndex(0)),
-        TraitDictionaryEntry::Method(_)
+        TraitDictionaryEntry::Function(_)
     ));
     assert_eq!(
         imp.dictionary_value.entry(TraitDictionaryEntryIndex(1)),
-        TraitDictionaryEntry::AssociatedConst(LiteralValue::new_native(0isize))
+        TraitDictionaryEntry::Function(
+            imp.associated_const_getter(TraitAssociatedConstIndex(0))
+                .unwrap()
+        )
     );
     assert_eq!(
         imp.dictionary_value.entry(TraitDictionaryEntryIndex(2)),
-        TraitDictionaryEntry::AssociatedConst(LiteralValue::new_native(1isize))
+        TraitDictionaryEntry::Function(
+            imp.associated_const_getter(TraitAssociatedConstIndex(1))
+                .unwrap()
+        )
     );
 
     let int_ty = Type::primitive::<isize>();
+    assert_eq!(
+        trait_def.get_dictionary_type_for_tys(&[Type::unit()], &[], &[]),
+        imp.dictionary_ty,
+        "trait-side and implementation-side dictionary types must agree"
+    );
     let dictionary_ty_data = imp.dictionary_ty.data();
     let dictionary_tys = dictionary_ty_data.as_tuple().unwrap();
     assert!(dictionary_tys[0].data().as_function().is_some());
-    assert_eq!(dictionary_tys[1], int_ty);
-    assert_eq!(dictionary_tys[2], int_ty);
+    assert_eq!(dictionary_tys[1].data().as_function().unwrap().ret, int_ty);
+    assert_eq!(dictionary_tys[2].data().as_function().unwrap().ret, int_ty);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_items_share_one_namespace() {
+    let sources = [
+        indoc! {r#"
+            trait Duplicate<Self> {
+                fn item(value: Self) -> int;
+                fn item(value: Self) -> int;
+            }
+        "#},
+        indoc! {r#"
+            trait Duplicate<Self> {
+                const item: int;
+                const item: int;
+            }
+        "#},
+        indoc! {r#"
+            trait Duplicate<Self> {
+                fn item(value: Self) -> int;
+                const item: int;
+            }
+        "#},
+    ];
+
+    for source in sources {
+        let mut session = TestSession::new();
+        match session.fail_compilation(source).into_inner() {
+            CompilationErrorImpl::InvalidTraitDefinition {
+                trait_name,
+                kind,
+                span,
+            } => {
+                assert_eq!(trait_name, ustr("Duplicate"));
+                assert_eq!(
+                    kind,
+                    InvalidTraitDefinitionKind::DuplicateItem { name: ustr("item") }
+                );
+                assert_eq!(span.start_usize(), source.rfind("item").unwrap());
+            }
+            other => panic!("expected InvalidTraitDefinition, got {other:?}"),
+        }
+    }
 }
 
 #[test]
@@ -747,6 +822,39 @@ fn source_traits_can_define_literal_associated_consts() {
         "#}),
         int(7)
     );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn managed_associated_consts_are_materialized_by_concrete_and_dictionary_getters() {
+    let mut session = TestSession::new();
+    let source = indoc! {r#"
+        trait Greeting<Self> {
+            const TEXT: string;
+        }
+
+        impl Greeting for int {
+            const TEXT = "hello";
+        }
+
+        fn generic<T>(value: T) -> string
+        where
+            T: Greeting
+        {
+            Greeting::<T>::TEXT
+        }
+
+        let concrete = Greeting::<int>::TEXT;
+        let through_dictionary = generic(0);
+        string_concat(concrete, through_dictionary)
+    "#};
+
+    assert_val_eq!(session.run(source), string("hellohello"));
+
+    let module = session.compile_and_get_module(source);
+    assert!(module.iter_named_functions().any(|(name, _)| {
+        name.starts_with("Greeting<std::int>::TEXT#impl:") && !name.contains("getter")
+    }));
 }
 
 #[test]

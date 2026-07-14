@@ -15,7 +15,7 @@ use std::{
 
 use unicode_normalization::UnicodeNormalization;
 use unicode_segmentation::UnicodeSegmentation;
-use ustr::ustr;
+use ustr::{Ustr, ustr};
 
 use crate::{
     cached_primitive_ty, cached_ty,
@@ -23,15 +23,16 @@ use crate::{
     containers::b,
     hir::function::{
         BinaryNativeFnMRN, BinaryNativeFnRMN, BinaryNativeFnRRFN, BinaryNativeFnRRN,
-        BinaryNativeFnRRV, Function, NullaryNativeFnN, TernaryNativeFnRNNN, TernaryNativeFnRRRN,
-        UnaryNativeFnMV, UnaryNativeFnRN, UnaryNativeFnRV,
+        BinaryNativeFnRRV, Function, NativeTrivialCopy, NullaryNativeFnN, TernaryNativeFnRNNN,
+        TernaryNativeFnRRRN, UnaryNativeFnMV, UnaryNativeFnNN, UnaryNativeFnRN, UnaryNativeFnRV,
+        trivial_copy_private,
     },
     hir::value::{NativeDisplay, NativeValueType, Value},
-    module::{Module, ModuleFunction},
+    module::{Module, ModuleFunction, Visibility},
     std::{
         core_traits_names::{
             DEFAULT_TRAIT_NAME, EMPTY_TRAIT_NAME, INSPECT_TRAIT_NAME, ORD_TRAIT_NAME,
-            VALUE_TRAIT_NAME,
+            TRIVIAL_COPY_TRAIT_NAME, VALUE_TRAIT_NAME,
         },
         hash::Hasher,
         logic::bool_type,
@@ -49,6 +50,38 @@ use crate::{
 
 use super::option::{none, option_type, some};
 
+pub(crate) const STRING_FROM_STATIC_FUNCTION_NAME: &str = "string_from_static";
+
+/// Immutable compiler representation of a source string literal.
+///
+/// The text is escape-decoded by the parser and normalized to NFC here, matching
+/// the source-level [`String`] constructor. `Ustr` makes this representation
+/// copyable; unlike an owned `String`, it has no semantic clone or drop behavior.
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct StaticStr(Ustr);
+
+impl StaticStr {
+    pub(crate) fn new(s: &str) -> Self {
+        let normalized = s.nfc().collect::<std::string::String>();
+        Self(ustr(&normalized))
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        self.0.as_str()
+    }
+}
+
+impl NativeDisplay for StaticStr {
+    fn fmt_repr(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "\"{}\"", self.0)
+    }
+}
+
+impl trivial_copy_private::Sealed for StaticStr {}
+// SAFETY: `StaticStr` is a copyable handle to immutable, process-lifetime text.
+unsafe impl NativeTrivialCopy for StaticStr {}
+
 /// A UTF-8 encoded string type that supports Unicode grapheme clusters and normalization.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct String(
@@ -59,6 +92,10 @@ pub struct String(
 impl String {
     pub fn new(s: &str) -> Self {
         Self(Rc::new(s.nfc().collect()))
+    }
+
+    fn from_static(value: StaticStr) -> Self {
+        Self::new(value.as_str())
     }
 
     pub fn push_str(&mut self, value: &Self) {
@@ -472,6 +509,10 @@ pub fn string_type() -> Type {
     cached_primitive_ty!(String)
 }
 
+pub(crate) fn static_str_type() -> Type {
+    cached_primitive_ty!(StaticStr)
+}
+
 pub fn string_iter_type() -> Type {
     cached_ty!(|| Type::native::<StringIterator>([]))
 }
@@ -555,6 +596,7 @@ pub fn add_to_module(to: &mut Module) {
     let ord_trait_id = to.expect_std_trait_id_in_current_module(ORD_TRAIT_NAME);
     let default_trait_id = to.expect_std_trait_id_in_current_module(DEFAULT_TRAIT_NAME);
     let empty_trait_id = to.expect_std_trait_id_in_current_module(EMPTY_TRAIT_NAME);
+    let trivial_copy_trait_id = to.expect_std_trait_id_in_current_module(TRIVIAL_COPY_TRAIT_NAME);
     // Note: string alias is added in core.rs
     to.add_type_alias_str_with_doc(
         "string_iterator",
@@ -565,6 +607,20 @@ pub fn add_to_module(to: &mut Module) {
         "string_split_iterator",
         string_split_iter_type(),
         "An iterator over substrings produced by splitting a string.",
+    );
+
+    to.add_native_concrete_impl(trivial_copy_trait_id, [static_str_type()], [], []);
+    to.add_function_with_visibility(
+        ustr(STRING_FROM_STATIC_FUNCTION_NAME),
+        UnaryNativeFnNN::description_with_ty(
+            String::from_static,
+            ["literal"],
+            "Materializes an owned string from compiler constant data.",
+            static_str_type(),
+            string_type(),
+            no_effects(),
+        ),
+        Visibility::Module,
     );
 
     to.add_concrete_impl_no_locals(

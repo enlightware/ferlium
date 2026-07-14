@@ -19,7 +19,8 @@ use crate::{
     define_id_type,
     format::FormatWith,
     hir::borrow_checker::{
-        check_elaborated_borrows, check_elaborated_place_return_roots, check_elaborated_yield_roots,
+        check_elaborated_borrows, check_elaborated_literal_invariants,
+        check_elaborated_place_return_roots, check_elaborated_yield_roots,
     },
     hir::function::{
         ArgConvention, CallableDefinition, Function, PendingScriptFunction,
@@ -634,6 +635,7 @@ impl PendingModuleFunction {
                 subject,
             )?;
         }
+        check_elaborated_literal_invariants(dst_arena, elaborated.root, ctx.trait_solver)?;
         check_elaborated_borrows(dst_arena, elaborated.root)?;
         let function = ModuleFunction::new_elaborated(
             self.definition,

@@ -13,6 +13,7 @@ use crate::{
     hir::{
         NodeArena, dictionary::DictElaborationCtx, elaboration::elaborate_generated_functions,
         emit_associated_consts::emitted_associated_const_values, emit_functions::EmitTraitOutput,
+        emit_hir::add_source_associated_const_getters,
     },
     internal_compilation_error,
     module::{
@@ -405,6 +406,25 @@ pub(super) fn emit_auto_value_impls(
             env.trait_def(value_trait_id)
                 .instantiate_associated_const_tys_for_tys(&[input_ty], &[], &[])
         };
+        let mut associated_const_names = trait_solver_from_module!(output, others)
+            .impl_associated_const_names(
+                value_trait_id,
+                &[input_ty],
+                &[],
+                &[],
+                ty_var_count,
+                eff_var_count,
+                &constraints,
+            );
+        associated_const_names.truncate(associated_const_values.len());
+        let associated_const_getters = add_source_associated_const_getters(
+            output,
+            others,
+            &associated_const_values,
+            &associated_const_tys,
+            &associated_const_names,
+            type_def_span,
+        )?;
         output.add_emitted_impl(
             value_trait_id,
             EmitTraitOutput {
@@ -417,6 +437,7 @@ pub(super) fn emit_auto_value_impls(
                 functions: function_ids,
             },
             associated_const_values,
+            associated_const_getters,
             associated_const_tys,
             false,
             Some(type_def_span),

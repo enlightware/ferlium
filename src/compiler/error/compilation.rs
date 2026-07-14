@@ -249,6 +249,9 @@ impl InvalidTraitConstraintKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InvalidTraitDefinitionKind {
     MissingInputTypes,
+    DuplicateItem {
+        name: Ustr,
+    },
     InvalidConstraintTypeVar {
         ty_var: TypeVar,
     },
@@ -268,6 +271,9 @@ impl InvalidTraitDefinitionKind {
         match self {
             MissingInputTypes => {
                 format!("Trait `{trait_name}` must have at least one input type parameter")
+            }
+            DuplicateItem { name } => {
+                format!("Trait item `{trait_name}::{name}` is defined more than once")
             }
             InvalidConstraintTypeVar { ty_var } => format!(
                 "Trait `{trait_name}` refers to invalid type variable `{ty_var}` in its where clause"
