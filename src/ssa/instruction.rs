@@ -37,7 +37,7 @@ use crate::{
     list,
     module::{FunctionId, ModuleEnv},
     ssa,
-    types::r#type::Type,
+    types::{r#trait::TraitDictionaryEntryIndex, r#type::Type},
 };
 
 /// The identity of an instruction in the context of its containing funtion.
@@ -332,7 +332,12 @@ impl Instruction {
     /// and `memcpy` consume that place exactly as they consume a `subfield` result, so a later
     /// tuple-lowering pass rewrites `dict_entry N from <symbolic dict>` to
     /// `subfield N from <materialized witness-table tuple>` one-for-one.
-    pub fn dict_entry(span: Location, dict: ssa::Value, entry_index: usize, ty: Type) -> Self {
+    pub fn dict_entry(
+        span: Location,
+        dict: ssa::Value,
+        entry_index: TraitDictionaryEntryIndex,
+        ty: Type,
+    ) -> Self {
         Instruction {
             span,
             operands: Box::new([dict]),
@@ -602,7 +607,8 @@ impl Instruction {
         ty: Type,
         captures: Vec<ssa::Value>,
     ) -> Self {
-        let num_hidden_dicts = hidden_dicts.len();
+        let num_hidden_dicts = u32::try_from(hidden_dicts.len())
+            .expect("a closure cannot capture more than u32::MAX hidden dictionaries");
         let has_env_dict = env_dict.is_some();
         let mut operands = hidden_dicts;
         operands.extend(captures);
@@ -678,7 +684,10 @@ pub enum InstructionKind {
     /// Project a field place from an aggregate place.
     Subfield { ty: Type },
     /// Project a function entry place from a symbolic dictionary.
-    DictEntry { entry_index: usize, ty: Type },
+    DictEntry {
+        entry_index: TraitDictionaryEntryIndex,
+        ty: Type,
+    },
     /// Resolve a member function place from a symbolic subscript.
     SubscriptMember { mut_member: bool, ty: Type },
     /// Bundle a symbolic subscript with its captured evidence.
@@ -714,7 +723,7 @@ pub enum InstructionKind {
     /// Construct a closure from a function and its captured environment.
     BuildClosure {
         function: FunctionId,
-        num_hidden_dicts: usize,
+        num_hidden_dicts: u32,
         has_env_dict: bool,
         ty: Type,
     },
@@ -951,7 +960,7 @@ impl InstructionKind {
                 has_env_dict,
                 ..
             } => assert!(
-                whole.operands.len() >= *num_hidden_dicts + *has_env_dict as usize,
+                whole.operands.len() >= *num_hidden_dicts as usize + *has_env_dict as usize,
                 "build_closure needs at least its hidden dictionaries and the optional env dictionary"
             ),
             CloneClosureEnv { .. } => assert_eq!(
@@ -1139,4 +1148,17 @@ fn fmt_runtime_check(
         write!(f, " -> b{} unwind b{}", normal.raw(), unwind.raw())?;
     }
     Ok(())
+}
+
+#[cfg(all(test, target_pointer_width = "64"))]
+mod tests {
+    use std::mem::size_of;
+
+    use super::{Instruction, InstructionKind};
+
+    #[test]
+    fn instruction_representation_stays_compact() {
+        assert_eq!(size_of::<InstructionKind>(), 24);
+        assert_eq!(size_of::<Instruction>(), 56);
+    }
 }

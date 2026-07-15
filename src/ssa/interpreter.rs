@@ -23,7 +23,7 @@ use crate::{
         value::{FunctionValue, HiddenEvidenceArgValue, LiteralValue, SubscriptValue, Value},
     },
     module::{
-        FunctionId, LocalFunctionId, ModuleEnv, ModuleId, TraitDictionaryId, id::Id,
+        FunctionId, LocalFunctionId, ModuleEnv, ModuleId, TraitDictionaryId,
         trait_impl::TraitDictionaryEntry,
     },
     ssa::{self, BlockIdentity, InstructionIdentity, InstructionKind},
@@ -460,7 +460,7 @@ impl<'a> Interpreter<'a> {
                     slots,
                     &instr.operands,
                     function,
-                    *num_hidden_dicts,
+                    *num_hidden_dicts as usize,
                     *has_env_dict,
                 )?;
                 slots.insert(def.unwrap(), Binding::Value(closure));
@@ -530,13 +530,10 @@ impl<'a> Interpreter<'a> {
         slots: &mut FxHashMap<ssa::Value, Binding>,
         operands: &[ssa::Value],
         def: ssa::Value,
-        entry_index: usize,
+        entry_index: TraitDictionaryEntryIndex,
     ) {
         let id = self.dict_operand(slots, &operands[0]);
-        let entry = self
-            .ctx
-            .dictionary_value(id)
-            .entry(TraitDictionaryEntryIndex::from_index(entry_index));
+        let entry = self.ctx.dictionary_value(id).entry(entry_index);
         let value = match entry {
             TraitDictionaryEntry::Function(function) => Value::function(FunctionId {
                 module: id.module_id,

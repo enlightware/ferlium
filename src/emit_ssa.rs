@@ -6,7 +6,7 @@ use crate::module::{
     ExtraParameterId, ResolvedLocalClone, ResolvedLocalDrop, ResolvedTakeLocalValueMode,
 };
 use crate::ssa::Instruction;
-use crate::types::r#trait::TraitMethodIndex;
+use crate::types::r#trait::{TraitDictionaryEntryIndex, TraitMethodIndex};
 use crate::types::r#type::{CallImplType, CallResultConvention, SubscriptResultConvention};
 use crate::{
     CompilerSession, Location, Modules, containers,
@@ -332,16 +332,20 @@ impl<'a> Emitter<'a> {
     /// Returns the runtime dictionary entry index and function type of the `Value` trait method
     /// `method_index` (e.g. [`VALUE_DROP_METHOD_INDEX`] or [`VALUE_CLONE_METHOD_INDEX`]) for the
     /// type `ty`.
-    fn value_method(&self, method_index: TraitMethodIndex, ty: Type) -> (usize, Type) {
+    fn value_method(
+        &self,
+        method_index: TraitMethodIndex,
+        ty: Type,
+    ) -> (TraitDictionaryEntryIndex, Type) {
         let env = ModuleEnv::new(self.module, self.others);
         let value_trait_id = env.expect_std_trait_id(VALUE_TRAIT_NAME);
         let trait_def = env.trait_def(value_trait_id);
         let dict_ty = trait_def.get_dictionary_type_for_tys(&[ty], &[], &[]);
-        let entry_index = trait_def.dictionary_method_index(method_index).as_index();
+        let entry_index = trait_def.dictionary_method_index(method_index);
         let dict_ty_data = dict_ty.data();
         let method_ty = dict_ty_data
             .as_tuple()
-            .expect("Value dictionary should be a tuple type")[entry_index];
+            .expect("Value dictionary should be a tuple type")[entry_index.as_index()];
         (entry_index, method_ty)
     }
 
@@ -1112,7 +1116,7 @@ impl<'a> Emitter<'a> {
                     self.insert(Instruction::dict_entry(
                         node.span,
                         dict,
-                        n.index.as_index(),
+                        TraitDictionaryEntryIndex::from_index(n.index.as_index()),
                         node.ty,
                     ))
                     .unwrap()
@@ -1180,7 +1184,7 @@ impl<'a> Emitter<'a> {
                 self.insert(Instruction::dict_entry(
                     node.span,
                     dictionary,
-                    n.entry_index.as_index(),
+                    n.entry_index,
                     node.ty,
                 ))
                 .unwrap()
@@ -1541,7 +1545,7 @@ impl<'a> Emitter<'a> {
             .insert(Instruction::dict_entry(
                 node.span,
                 dictionary,
-                n.entry_index.as_index(),
+                n.entry_index,
                 function_ty,
             ))
             .unwrap();
