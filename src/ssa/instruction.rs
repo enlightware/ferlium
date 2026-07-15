@@ -21,12 +21,12 @@
 //!
 //! An instruction either defines a single result register (`InstructionResult` other than `Nothing`)
 //! or defines nothing; a result-less instruction's slot must never be read. Some kinds are
-//! *terminators* (`ret`, `br`, `condbr`, `invoke`, `resume` — each reports this via its own
-//! `is_terminator`): a terminator appears exactly once, as the last instruction of its block, and
+//! *terminators* (`ret`, `br`, `condbr`, `invoke`, `resume`, and fallible runtime checks, as
+//! classified by [`InstructionKind::is_terminator`]): a terminator appears exactly once, as the
+//! last instruction of its block, and
 //! every other instruction is a non-terminator. These structural invariants are verified per function
 //! by the interpreter (see `Interpreter::verify_function`).
 
-use std::any::Any;
 use std::fmt;
 
 use ustr::Ustr;
@@ -52,7 +52,7 @@ pub struct Instruction {
     pub operands: Vec<ssa::Value>,
 
     /// The kind-specific part of `self`.
-    pub kind: Box<dyn InstructionKind>,
+    pub kind: InstructionKind,
 }
 
 impl Instruction {
@@ -66,14 +66,8 @@ impl Instruction {
         self.kind.is_terminator()
     }
 
-    /// Returns a kind-discriminated view of `self`.
-    pub fn view(&self) -> InstructionView<'_> {
-        self.kind.view(self)
-    }
-
-    /// Verifies the structural contract of this instruction in isolation by delegating to its kind's
-    /// own [`InstructionKind::verify`] (the operand **arity**, and the data-dependent operand count
-    /// for `alloca`/`move`/`build_closure`).
+    /// Verifies the structural contract of this instruction in isolation (the operand **arity**, and
+    /// the data-dependent operand count for `alloca`/`move`/`build_closure`).
     pub fn verify(&self) {
         self.kind.verify(self);
     }
@@ -83,7 +77,7 @@ impl Instruction {
         Instruction {
             span,
             operands: vec![],
-            kind: Box::new(Alloca { ty }),
+            kind: InstructionKind::Alloca { ty },
         }
     }
 
@@ -96,7 +90,7 @@ impl Instruction {
         Instruction {
             span,
             operands: vec![witness],
-            kind: Box::new(Alloca { ty }),
+            kind: InstructionKind::Alloca { ty },
         }
     }
 
@@ -106,7 +100,7 @@ impl Instruction {
         Instruction {
             span,
             operands: vec![],
-            kind: Box::new(AllocaPlace { pointing_to }),
+            kind: InstructionKind::AllocaPlace { pointing_to },
         }
     }
 
@@ -117,7 +111,7 @@ impl Instruction {
         Instruction {
             span,
             operands: vec![],
-            kind: Box::new(UnconditionalBranch { target }),
+            kind: InstructionKind::UnconditionalBranch { target },
         }
     }
 
@@ -156,7 +150,7 @@ impl Instruction {
         Instruction {
             span,
             operands,
-            kind: Box::new(Call {}),
+            kind: InstructionKind::Call,
         }
     }
 
@@ -184,7 +178,7 @@ impl Instruction {
         Instruction {
             span,
             operands,
-            kind: Box::new(Invoke { normal, unwind }),
+            kind: InstructionKind::Invoke { normal, unwind },
         }
     }
 
@@ -205,7 +199,7 @@ impl Instruction {
         Instruction {
             span,
             operands: vec![],
-            kind: Box::new(Resume {}),
+            kind: InstructionKind::Resume,
         }
     }
 
@@ -232,7 +226,7 @@ impl Instruction {
         Instruction {
             span,
             operands,
-            kind: Box::new(Project { ty }),
+            kind: InstructionKind::Project { ty },
         }
     }
 
@@ -244,7 +238,7 @@ impl Instruction {
         Instruction {
             span,
             operands: vec![place],
-            kind: Box::new(Yield {}),
+            kind: InstructionKind::Yield,
         }
     }
 
@@ -257,7 +251,7 @@ impl Instruction {
         Instruction {
             span,
             operands: vec![place],
-            kind: Box::new(EndProject {}),
+            kind: InstructionKind::EndProject,
         }
     }
 
@@ -272,7 +266,7 @@ impl Instruction {
         Instruction {
             span,
             operands: vec![v1, v2],
-            kind: Box::new(CompareEqual {}),
+            kind: InstructionKind::CompareEqual,
         }
     }
 
@@ -290,10 +284,10 @@ impl Instruction {
         Instruction {
             span,
             operands: vec![condition],
-            kind: Box::new(ConditionalBranch {
+            kind: InstructionKind::ConditionalBranch {
                 on_success,
                 on_failure,
-            }),
+            },
         }
     }
 
@@ -307,7 +301,7 @@ impl Instruction {
         Instruction {
             span,
             operands: vec![source],
-            kind: Box::new(Load {}),
+            kind: InstructionKind::Load,
         }
     }
 
@@ -326,7 +320,7 @@ impl Instruction {
         Instruction {
             span,
             operands: vec![source, index],
-            kind: Box::new(Subfield { ty }),
+            kind: InstructionKind::Subfield { ty },
         }
     }
 
@@ -342,7 +336,7 @@ impl Instruction {
         Instruction {
             span,
             operands: vec![dict],
-            kind: Box::new(DictEntry { entry_index, ty }),
+            kind: InstructionKind::DictEntry { entry_index, ty },
         }
     }
 
@@ -362,7 +356,7 @@ impl Instruction {
         Instruction {
             span,
             operands: vec![subscript],
-            kind: Box::new(SubscriptMember { mut_member, ty }),
+            kind: InstructionKind::SubscriptMember { mut_member, ty },
         }
     }
 
@@ -382,7 +376,7 @@ impl Instruction {
         Instruction {
             span,
             operands,
-            kind: Box::new(BuildSubscript { ty }),
+            kind: InstructionKind::BuildSubscript { ty },
         }
     }
 
@@ -396,7 +390,7 @@ impl Instruction {
         Instruction {
             span,
             operands: vec![],
-            kind: Box::new(Variant { tag, type_: t }),
+            kind: InstructionKind::Variant { tag, ty: t },
         }
     }
 
@@ -406,7 +400,7 @@ impl Instruction {
         Instruction {
             span,
             operands: vec![variant],
-            kind: Box::new(ExtractTag {}),
+            kind: InstructionKind::ExtractTag,
         }
     }
 
@@ -418,7 +412,7 @@ impl Instruction {
         Instruction {
             span,
             operands: vec![],
-            kind: Box::new(Ret {}),
+            kind: InstructionKind::Ret,
         }
     }
 
@@ -431,7 +425,7 @@ impl Instruction {
         Instruction {
             span,
             operands: vec![],
-            kind: Box::new(StackSave {}),
+            kind: InstructionKind::StackSave,
         }
     }
 
@@ -441,7 +435,7 @@ impl Instruction {
         Instruction {
             span,
             operands: vec![marker],
-            kind: Box::new(StackRestore {}),
+            kind: InstructionKind::StackRestore,
         }
     }
 
@@ -450,10 +444,7 @@ impl Instruction {
         Instruction {
             span,
             operands: vec![],
-            kind: Box::new(RuntimeCheck {
-                kind: RuntimeCheckKind::CallDepth,
-                successors: None,
-            }),
+            kind: InstructionKind::CheckCallDepth { successors: None },
         }
     }
 
@@ -462,10 +453,7 @@ impl Instruction {
         Instruction {
             span,
             operands: vec![],
-            kind: Box::new(RuntimeCheck {
-                kind: RuntimeCheckKind::Fuel,
-                successors: None,
-            }),
+            kind: InstructionKind::CheckFuel { successors: None },
         }
     }
 
@@ -475,7 +463,13 @@ impl Instruction {
         normal: ssa::BlockIdentity,
         unwind: ssa::BlockIdentity,
     ) -> Self {
-        Self::invoke_runtime_check(span, RuntimeCheckKind::CallDepth, normal, unwind)
+        Instruction {
+            span,
+            operands: vec![],
+            kind: InstructionKind::CheckCallDepth {
+                successors: Some((normal, unwind)),
+            },
+        }
     }
 
     /// Creates a fuel guard with explicit normal and unwind successors.
@@ -484,22 +478,12 @@ impl Instruction {
         normal: ssa::BlockIdentity,
         unwind: ssa::BlockIdentity,
     ) -> Self {
-        Self::invoke_runtime_check(span, RuntimeCheckKind::Fuel, normal, unwind)
-    }
-
-    fn invoke_runtime_check(
-        span: Location,
-        kind: RuntimeCheckKind,
-        normal: ssa::BlockIdentity,
-        unwind: ssa::BlockIdentity,
-    ) -> Self {
         Instruction {
             span,
             operands: vec![],
-            kind: Box::new(RuntimeCheck {
-                kind,
+            kind: InstructionKind::CheckFuel {
                 successors: Some((normal, unwind)),
-            }),
+            },
         }
     }
 
@@ -514,7 +498,7 @@ impl Instruction {
         Instruction {
             span,
             operands: vec![value, destination],
-            kind: Box::new(Store {}),
+            kind: InstructionKind::Store,
         }
     }
 
@@ -525,7 +509,7 @@ impl Instruction {
         Instruction {
             span,
             operands: vec![destination],
-            kind: Box::new(Clear {}),
+            kind: InstructionKind::Clear,
         }
     }
 
@@ -544,7 +528,7 @@ impl Instruction {
         Instruction {
             span,
             operands: vec![source, destination],
-            kind: Box::new(Memcpy {}),
+            kind: InstructionKind::Memcpy,
         }
     }
 
@@ -557,7 +541,7 @@ impl Instruction {
         Instruction {
             span,
             operands: vec![source, destination],
-            kind: Box::new(Move {}),
+            kind: InstructionKind::Move,
         }
     }
 
@@ -575,7 +559,7 @@ impl Instruction {
         Instruction {
             span,
             operands: vec![source, destination, witness],
-            kind: Box::new(Move {}),
+            kind: InstructionKind::Move,
         }
     }
 
@@ -593,7 +577,7 @@ impl Instruction {
         Instruction {
             span,
             operands: vec![target, callee],
-            kind: Box::new(Drop {}),
+            kind: InstructionKind::Drop,
         }
     }
 
@@ -626,12 +610,12 @@ impl Instruction {
         Instruction {
             span,
             operands,
-            kind: Box::new(BuildClosure {
+            kind: InstructionKind::BuildClosure {
                 function,
                 num_hidden_dicts,
                 has_env_dict,
                 ty,
-            }),
+            },
         }
     }
 
@@ -641,7 +625,7 @@ impl Instruction {
         Instruction {
             span,
             operands: vec![source],
-            kind: Box::new(CloneClosureEnv { ty }),
+            kind: InstructionKind::CloneClosureEnv { ty },
         }
     }
 
@@ -651,205 +635,99 @@ impl Instruction {
         Instruction {
             span,
             operands: vec![target],
-            kind: Box::new(DropClosureEnv {}),
+            kind: InstructionKind::DropClosureEnv,
         }
     }
+}
+
+/// The kind-specific metadata of an SSA instruction.
+///
+/// Operands stay in [`Instruction::operands`] so generic SSA traversals can inspect and rewrite
+/// them uniformly. This enum contains only metadata whose shape is specific to an instruction.
+pub enum InstructionKind {
+    /// Stack storage for a value of `ty`, optionally using a run-time layout witness.
+    Alloca { ty: Type },
+    /// Stack storage for a pointer to a value of `pointing_to`.
+    AllocaPlace { pointing_to: Type },
+    /// A statically or dynamically resolved function call.
+    Call,
+    /// A fallible call with normal and unwind successors.
+    Invoke {
+        normal: ssa::BlockIdentity,
+        unwind: ssa::BlockIdentity,
+    },
+    /// Continue propagating an error after running a cleanup pad.
+    Resume,
+    /// Enter a scoped subscript accessor and expose its yielded place.
+    Project { ty: Type },
+    /// Yield a place from a scoped subscript accessor.
+    Yield,
+    /// Resume and finish a scoped subscript accessor.
+    EndProject,
+    /// Compare a runtime value with compile-time literal-pattern metadata.
+    CompareEqual,
+    /// Branch according to a boolean operand.
+    ConditionalBranch {
+        on_success: ssa::BlockIdentity,
+        on_failure: ssa::BlockIdentity,
+    },
+    /// Unconditionally branch to `target`.
+    UnconditionalBranch { target: ssa::BlockIdentity },
+    /// Read a representation-copyable value from a place without consuming it.
+    Load,
+    /// Project a field place from an aggregate place.
+    Subfield { ty: Type },
+    /// Project a function entry place from a symbolic dictionary.
+    DictEntry { entry_index: usize, ty: Type },
+    /// Resolve a member function place from a symbolic subscript.
+    SubscriptMember { mut_member: bool, ty: Type },
+    /// Bundle a symbolic subscript with its captured evidence.
+    BuildSubscript { ty: Type },
+    /// Return after the result has been written through the return place.
+    Ret,
+    /// Construct a tagged variant shell whose payload is initialized separately.
+    Variant { tag: Ustr, ty: Type },
+    /// Read a variant tag as an integer.
+    ExtractTag,
+    /// Store a value into unoccupied place storage.
+    Store,
+    /// Mark place storage absent without semantic drop.
+    Clear,
+    /// Copy a statically sized, resource-free representation between places.
+    Memcpy,
+    /// Transfer ownership between places, optionally using a run-time layout witness.
+    Move,
+    /// Save the current stack top.
+    StackSave,
+    /// Restore a previously saved stack top.
+    StackRestore,
+    /// Enforce the configured script call-depth limit.
+    CheckCallDepth {
+        successors: Option<(ssa::BlockIdentity, ssa::BlockIdentity)>,
+    },
+    /// Consume one unit of optional execution fuel.
+    CheckFuel {
+        successors: Option<(ssa::BlockIdentity, ssa::BlockIdentity)>,
+    },
+    /// Semantically drop an initialized value through its `Value::drop` function.
+    Drop,
+    /// Construct a closure from a function and its captured environment.
+    BuildClosure {
+        function: FunctionId,
+        num_hidden_dicts: usize,
+        has_env_dict: bool,
+        ty: Type,
+    },
+    /// Deep-clone a closure's captured environment.
+    CloneClosureEnv { ty: Type },
+    /// Drop a closure's captured environment.
+    DropClosureEnv,
 }
 
 impl FormatWith<ModuleEnv<'_>> for Instruction {
     fn fmt_with(&self, f: &mut fmt::Formatter<'_>, env: &ModuleEnv<'_>) -> fmt::Result {
         self.kind.fmt_within(f, self, env)
     }
-}
-
-/// A type encoding the kind-specific contents of an instruction.
-pub trait InstructionKind: Any {
-    /// The type of the result of `self`, which is the kind-specific part of `whole`.
-    fn result(&self, _whole: &Instruction) -> InstructionResult {
-        InstructionResult::Nothing
-    }
-
-    /// Returns `true` iff `self` is a terminator.
-    fn is_terminator(&self) -> bool {
-        false
-    }
-
-    /// Asserts the structural well-formedness of `whole` (whose kind-specific part is `self`): its
-    /// operand **arity** and, where the layout is data-dependent (`alloca`/`move`/`build_closure`),
-    /// the operand count that the kind's own metadata implies.
-    ///
-    /// Each concrete instruction owns its own contract here rather than in a central registry, so a
-    /// new instruction cannot be added without stating how many operands it takes, and the check sits
-    /// next to the constructor that establishes it. Operand *role* (place vs value vs dictionary vs
-    /// marker) is intentionally not checked — it is not recoverable from the `ssa::Value` variant, so
-    /// it is enforced at point of use by the interpreter's operand resolvers.
-    fn verify(&self, whole: &Instruction);
-
-    /// Returns a borrowed, kind-discriminated view of `self`, which is the kind-specific part of
-    /// `whole`. Backends match on this view to lower the instruction.
-    fn view<'a>(&'a self, whole: &'a Instruction) -> InstructionView<'a>;
-
-    /// Computes a textual representation of `self`, which is the kind-specific part of `whole`.
-    fn fmt_within(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        whole: &Instruction,
-        env: &ModuleEnv<'_>,
-    ) -> fmt::Result;
-}
-
-/// A borrowed, kind-discriminated view of an [`Instruction`].
-///
-/// This is the backend-facing projection of the private instruction-kind structs: it exposes the
-/// data each backend needs to lower an instruction without leaking backend types into this module
-/// or making the kind structs public. Operands (such as a `load` source or a `store`
-/// value/destination) remain available through `Instruction::operands`.
-pub enum InstructionView<'a> {
-    /// A stack allocation of an instance of `ty`. For a non-statically-sized `ty`, `witness` is
-    /// the `Value` dictionary place witnessing its run-time layout (the instruction's sole operand).
-    Alloca {
-        ty: Type,
-        witness: Option<&'a ssa::Value>,
-    },
-
-    /// A stack allocation of a pointer to an instance of `pointing_to`.
-    AllocaPlace { pointing_to: Type },
-
-    /// A function call. Operand `0` is the callee — a constant [`ssa::Value::Function`] or the place
-    /// of a function value, read by reference (see [`Instruction::call`] for the full callee
-    /// contract). The remaining operands are the arguments, the last of which is the return
-    /// out-pointer for a non-`()` result.
-    Call,
-
-    /// A *fallible* function call (operands as for [`Call`](InstructionView::Call)) that terminates
-    /// its block with two successors: `normal` on completion, `unwind` on a raised error. The
-    /// `unwind` target is a cleanup landing pad. See [`Instruction::invoke`].
-    Invoke {
-        normal: ssa::BlockIdentity,
-        unwind: ssa::BlockIdentity,
-    },
-
-    /// Continues the unwind a cleanup pad interrupted, handing the in-flight error back to the caller
-    /// (not a fresh throw — see [`Instruction::resume`]). Terminates an outermost cleanup pad; no
-    /// successors.
-    Resume,
-
-    /// The *enter* half of a scoped (`YieldedOnce`) subscript access: runs the accessor (operands as
-    /// for [`Call`](InstructionView::Call)) to its `yield` and exposes the yielded place (of pointee
-    /// type `ty`) as this instruction's result register. See [`Instruction::project`].
-    Project { ty: Type },
-
-    /// Inside a `YieldedOnce` accessor body: exposes the place at operand `0` to the driving
-    /// `project` and suspends the accessor frame. See [`Instruction::r#yield`].
-    Yield,
-
-    /// The *leave* half of a scoped subscript access: resumes the accessor a `project` (the place at
-    /// operand `0`) suspended, running its slide and reclaiming its frame. See
-    /// [`Instruction::end_project`].
-    EndProject,
-
-    /// An equality comparison of operands `0` and `1`.
-    CompareEqual,
-
-    /// A conditional branch on operand `0`.
-    ConditionalBranch {
-        on_success: ssa::BlockIdentity,
-        on_failure: ssa::BlockIdentity,
-    },
-
-    /// An unconditional branch to `target`.
-    UnconditionalBranch { target: ssa::BlockIdentity },
-
-    /// A load of the value at the place given by operand `0`.
-    Load,
-
-    /// A projection (of type `ty`) out of the aggregate place at operand `0`, at the field index
-    /// given by the `int` value at operand `1` (a constant for a static field, or a register for a
-    /// run-time offset).
-    Subfield { ty: Type },
-
-    /// The place of entry `entry_index` (of type `ty`) of the symbolic dictionary at operand `0`.
-    /// The symbolic analog of `Subfield`: a method function value or an associated const, kept
-    /// dictionary-symbolic until a later tuple-lowering pass rewrites it to `Subfield`.
-    DictEntry { entry_index: usize, ty: Type },
-
-    /// The member-resolving analog of [`DictEntry`](InstructionView::DictEntry) for a first-class
-    /// subscript: yields the place of the `ref` (`mut_member == false`) or `mut` member of the
-    /// symbolic subscript at operand `0`, as a function value (of type `ty`) bundling the
-    /// subscript's captured hidden evidence. See [`Instruction::subscript_member`].
-    SubscriptMember { mut_member: bool, ty: Type },
-
-    /// Bundles the symbolic subscript at operand `0` with captured hidden evidence (the remaining
-    /// operands) into a first-class subscript value of type `ty`. See
-    /// [`Instruction::build_subscript`].
-    BuildSubscript { ty: Type },
-
-    /// A return. The result, if any, has already been written through the return out-pointer.
-    Ret,
-
-    /// A construction of a tagged variant *shell* (`tag` with an uninitialized payload), yielded as a
-    /// register. Takes **no operands**: the payload is filled in place through a projection of the
-    /// shell's destination, so a generic payload is never materialized in a temporary (see
-    /// [`Instruction::variant`]).
-    Variant { tag: Ustr },
-
-    /// An extraction of the tag of the variant at the place given by operand `0`, yielded as an
-    /// `int` register.
-    ExtractTag,
-
-    /// A store of operand `0` (a value) into operand `1` (a place).
-    Store,
-
-    /// Marks the storage at operand `0` absent without running semantic drop.
-    Clear,
-
-    /// A place-to-place copy of the pointee of operand `0` (a place) into operand `1` (a place),
-    /// without materializing it in a register.
-    Memcpy,
-
-    /// A source-consuming place-to-place move of the pointee of operand `0` into operand `1`.
-    /// `witness` is the run-time-layout `Value` dictionary place iff the pointee is not statically
-    /// sized (absent for a statically-sized move).
-    Move { witness: Option<&'a ssa::Value> },
-
-    /// A capture of the current top of the stack, yielded as a marker register.
-    StackSave,
-
-    /// A reset of the top of the stack to the marker at operand `0`.
-    StackRestore,
-
-    /// Checks the current function-call depth against the runtime limit.
-    CheckCallDepth {
-        successors: Option<(ssa::BlockIdentity, ssa::BlockIdentity)>,
-    },
-
-    /// Consumes one unit of execution fuel when fuel accounting is enabled.
-    CheckFuel {
-        successors: Option<(ssa::BlockIdentity, ssa::BlockIdentity)>,
-    },
-
-    /// An init-guarded drop of the pointee at operand `0` (a place), invoking operand `1` (a
-    /// `Value::drop` callee — a constant function or a function-value place, per the
-    /// [`Instruction::call`] callee contract) only if that pointee is currently initialized.
-    Drop,
-
-    /// A construction of a closure value bundling the target `function` with its captured
-    /// environment. Operand layout is `[hidden_dicts…, captures…, env_dict?]`: `num_hidden_dicts`
-    /// leading symbolic dictionary operands feed the lambda body's hidden `@extra` parameters, the
-    /// value-capture places follow, and a trailing symbolic `Value`-dictionary operand (present iff
-    /// `has_env_dict`) clones/drops the captured value environment.
-    BuildClosure {
-        function: &'a FunctionId,
-        num_hidden_dicts: usize,
-        has_env_dict: bool,
-    },
-
-    /// A deep clone of the captured environment of the closure at the place given by operand `0`,
-    /// yielding a fresh closure value.
-    CloneClosureEnv,
-
-    /// A drop of the owned captured environment of the closure at the place given by operand `0`.
-    DropClosureEnv,
 }
 
 /// The type of an instruction's result.
@@ -887,34 +765,205 @@ impl InstructionResult {
     }
 }
 
-/// A stack allocation.
-///
-/// The instruction defines a place capable of storing an instance of `ty`, allocated on the
-/// stack.
-///
-/// If `ty` is not statically sized, the instruction carries a single operand: the `Value`
-/// dictionary witnessing the run-time layout of `ty` (see `Instruction::alloca_dynamic`).
-struct Alloca {
-    /// The type of the allocation.
-    pub ty: Type,
-}
+impl InstructionKind {
+    fn result(&self, whole: &Instruction) -> InstructionResult {
+        use InstructionKind::*;
 
-impl InstructionKind for Alloca {
-    fn result(&self, _whole: &Instruction) -> InstructionResult {
-        InstructionResult::pointer_to(InstructionResult::Lowered(self.ty))
+        match self {
+            Alloca { ty } => InstructionResult::pointer_to(InstructionResult::Lowered(*ty)),
+            AllocaPlace { pointing_to } => InstructionResult::pointer_to(
+                InstructionResult::pointer_to(InstructionResult::Lowered(*pointing_to)),
+            ),
+            Project { ty }
+            | Subfield { ty }
+            | DictEntry { ty, .. }
+            | SubscriptMember { ty, .. } => {
+                InstructionResult::pointer_to(InstructionResult::Lowered(*ty))
+            }
+            CompareEqual => InstructionResult::Lowered(cached_primitive_ty!(bool)),
+            Load => {
+                InstructionResult::pointee_of(InstructionResult::Same(whole.operands[0].clone()))
+            }
+            BuildSubscript { ty }
+            | Variant { ty, .. }
+            | BuildClosure { ty, .. }
+            | CloneClosureEnv { ty } => InstructionResult::Lowered(*ty),
+            ExtractTag => InstructionResult::Lowered(cached_primitive_ty!(isize)),
+            StackSave => InstructionResult::StackMarker,
+            Call
+            | Invoke { .. }
+            | Resume
+            | Yield
+            | EndProject
+            | ConditionalBranch { .. }
+            | UnconditionalBranch { .. }
+            | Ret
+            | Store
+            | Clear
+            | Memcpy
+            | Move
+            | StackRestore
+            | CheckCallDepth { .. }
+            | CheckFuel { .. }
+            | Drop
+            | DropClosureEnv => InstructionResult::Nothing,
+        }
+    }
+
+    fn is_terminator(&self) -> bool {
+        matches!(
+            self,
+            Self::Invoke { .. }
+                | Self::Resume
+                | Self::ConditionalBranch { .. }
+                | Self::UnconditionalBranch { .. }
+                | Self::Ret
+                | Self::CheckCallDepth {
+                    successors: Some(_)
+                }
+                | Self::CheckFuel {
+                    successors: Some(_)
+                }
+        )
     }
 
     fn verify(&self, whole: &Instruction) {
-        assert!(
-            whole.operands.len() <= 1,
-            "alloca takes the run-time-layout witness iff its type is not statically sized (0 or 1 operand)"
-        );
-    }
+        use InstructionKind::*;
 
-    fn view<'a>(&'a self, whole: &'a Instruction) -> InstructionView<'a> {
-        InstructionView::Alloca {
-            ty: self.ty,
-            witness: whole.operands.first(),
+        match self {
+            Alloca { .. } => assert!(
+                whole.operands.len() <= 1,
+                "alloca takes the run-time-layout witness iff its type is not statically sized (0 or 1 operand)"
+            ),
+            AllocaPlace { .. } => {
+                assert!(whole.operands.is_empty(), "alloca_place takes no operands")
+            }
+            Call => assert!(
+                !whole.operands.is_empty(),
+                "call needs at least the callee operand"
+            ),
+            Invoke { .. } => assert!(
+                !whole.operands.is_empty(),
+                "invoke needs at least the callee operand"
+            ),
+            Resume => assert!(whole.operands.is_empty(), "resume takes no operands"),
+            Project { .. } => assert!(
+                !whole.operands.is_empty(),
+                "project needs at least the callee operand"
+            ),
+            Yield => assert_eq!(
+                whole.operands.len(),
+                1,
+                "yield takes exactly the place to expose"
+            ),
+            EndProject => assert_eq!(
+                whole.operands.len(),
+                1,
+                "end_project takes exactly the projected place"
+            ),
+            CompareEqual => assert_eq!(
+                whole.operands.len(),
+                2,
+                "compare_eq compares exactly two operands"
+            ),
+            ConditionalBranch { .. } => assert_eq!(
+                whole.operands.len(),
+                1,
+                "condbr takes exactly the condition operand"
+            ),
+            UnconditionalBranch { .. } => {
+                assert!(whole.operands.is_empty(), "br takes no operands")
+            }
+            Load => assert_eq!(
+                whole.operands.len(),
+                1,
+                "load takes exactly the source place"
+            ),
+            Subfield { .. } => assert_eq!(
+                whole.operands.len(),
+                2,
+                "subfield takes the aggregate place and the int field-index value"
+            ),
+            DictEntry { .. } => assert_eq!(
+                whole.operands.len(),
+                1,
+                "dict_entry takes exactly the symbolic dictionary operand"
+            ),
+            SubscriptMember { .. } => assert_eq!(
+                whole.operands.len(),
+                1,
+                "subscript_member takes exactly the symbolic subscript operand"
+            ),
+            BuildSubscript { .. } => assert!(
+                !whole.operands.is_empty(),
+                "build_subscript takes the symbolic subscript operand plus its evidence captures"
+            ),
+            Ret => assert!(
+                whole.operands.is_empty(),
+                "ret takes no operands (the result is written through the return out-pointer)"
+            ),
+            Variant { .. } => assert!(
+                whole.operands.is_empty(),
+                "variant builds an uninitialized shell and takes no operands"
+            ),
+            ExtractTag => assert_eq!(
+                whole.operands.len(),
+                1,
+                "extract_tag takes exactly the variant place"
+            ),
+            Store => assert_eq!(
+                whole.operands.len(),
+                2,
+                "store takes the value and the destination place"
+            ),
+            Clear => assert_eq!(
+                whole.operands.len(),
+                1,
+                "clear takes exactly the destination place"
+            ),
+            Memcpy => assert_eq!(
+                whole.operands.len(),
+                2,
+                "memcpy is a pure copy of a statically-sized, owns-nothing pointee: source and destination only"
+            ),
+            Move => assert!(
+                matches!(whole.operands.len(), 2 | 3),
+                "move takes source and destination places, plus the layout witness iff dynamic"
+            ),
+            StackSave => {
+                assert!(whole.operands.is_empty(), "stack_save takes no operands")
+            }
+            StackRestore => assert_eq!(
+                whole.operands.len(),
+                1,
+                "stack_restore takes exactly the saved marker"
+            ),
+            CheckCallDepth { .. } | CheckFuel { .. } => {
+                assert!(whole.operands.is_empty(), "runtime checks take no operands")
+            }
+            Drop => assert_eq!(
+                whole.operands.len(),
+                2,
+                "drop takes the target place and the Value::drop callee"
+            ),
+            BuildClosure {
+                num_hidden_dicts,
+                has_env_dict,
+                ..
+            } => assert!(
+                whole.operands.len() >= *num_hidden_dicts + *has_env_dict as usize,
+                "build_closure needs at least its hidden dictionaries and the optional env dictionary"
+            ),
+            CloneClosureEnv { .. } => assert_eq!(
+                whole.operands.len(),
+                1,
+                "clone_closure_env takes exactly the closure place"
+            ),
+            DropClosureEnv => assert_eq!(
+                whole.operands.len(),
+                1,
+                "drop_closure_env takes exactly the closure place"
+            ),
         }
     }
 
@@ -924,1067 +973,170 @@ impl InstructionKind for Alloca {
         whole: &Instruction,
         env: &ModuleEnv<'_>,
     ) -> fmt::Result {
-        if let Some(witness) = whole.operands.first() {
-            write!(
+        use InstructionKind::*;
+
+        match self {
+            Alloca { ty } => {
+                write!(f, "alloca {}", ty.format_with(env))?;
+                if let Some(witness) = whole.operands.first() {
+                    write!(f, " using {}", witness.format_with(env))?;
+                }
+                Ok(())
+            }
+            AllocaPlace { pointing_to } => {
+                write!(f, "alloca_place {}", pointing_to.format_with(env))
+            }
+            Call => {
+                write!(f, "call ")?;
+                fmt_callee_and_args(f, whole, env)
+            }
+            Invoke { normal, unwind } => {
+                write!(f, "invoke ")?;
+                fmt_callee_and_args(f, whole, env)?;
+                write!(f, " -> b{} unwind b{}", normal.raw(), unwind.raw())
+            }
+            Resume => write!(f, "resume"),
+            Project { .. } => {
+                write!(f, "project ")?;
+                fmt_callee_and_args(f, whole, env)
+            }
+            Yield => write!(f, "yield {}", whole.operands[0].format_with(env)),
+            EndProject => write!(f, "end_project {}", whole.operands[0].format_with(env)),
+            CompareEqual => write!(
                 f,
-                "alloca {} using {}",
-                self.ty.format_with(env),
-                witness.format_with(env)
-            )
-        } else {
-            write!(f, "alloca {}", self.ty.format_with(env))
+                "comp_eq {} {}",
+                whole.operands[0].format_with(env),
+                whole.operands[1].format_with(env)
+            ),
+            ConditionalBranch {
+                on_success,
+                on_failure,
+            } => write!(
+                f,
+                "condbr {}, b{}, b{}",
+                whole.operands[0].format_with(env),
+                on_success.raw(),
+                on_failure.raw()
+            ),
+            UnconditionalBranch { target } => write!(f, "br b{}", target.raw()),
+            Load => write!(f, "load {}", whole.operands[0].format_with(env)),
+            Subfield { .. } => write!(
+                f,
+                "subfield {} from {}",
+                whole.operands[1].format_with(env),
+                whole.operands[0].format_with(env)
+            ),
+            DictEntry { entry_index, .. } => write!(
+                f,
+                "dict_entry {} from {}",
+                entry_index,
+                whole.operands[0].format_with(env)
+            ),
+            SubscriptMember { mut_member, .. } => write!(
+                f,
+                "subscript_member {} from {}",
+                if *mut_member { "mut" } else { "ref" },
+                whole.operands[0].format_with(env)
+            ),
+            BuildSubscript { .. } => {
+                write!(f, "build_subscript {}", whole.operands[0].format_with(env))?;
+                if whole.operands.len() > 1 {
+                    write!(f, " capturing (")?;
+                    for (i, operand) in whole.operands[1..].iter().enumerate() {
+                        if i != 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{}", operand.format_with(env))?;
+                    }
+                    write!(f, ")")?;
+                }
+                Ok(())
+            }
+            Ret => write!(f, "ret"),
+            Variant { tag, .. } => write!(f, "variant .{tag}"),
+            ExtractTag => write!(f, "extract_tag {}", whole.operands[0].format_with(env)),
+            Store => write!(
+                f,
+                "store {} to {}",
+                whole.operands[0].format_with(env),
+                whole.operands[1].format_with(env)
+            ),
+            Clear => write!(f, "clear {}", whole.operands[0].format_with(env)),
+            Memcpy => write!(
+                f,
+                "memcpy {} to {}",
+                whole.operands[0].format_with(env),
+                whole.operands[1].format_with(env)
+            ),
+            Move => {
+                write!(
+                    f,
+                    "move {} to {}",
+                    whole.operands[0].format_with(env),
+                    whole.operands[1].format_with(env)
+                )?;
+                if let Some(witness) = whole.operands.get(2) {
+                    write!(f, " using {}", witness.format_with(env))?;
+                }
+                Ok(())
+            }
+            StackSave => write!(f, "stack_save"),
+            StackRestore => write!(f, "stack_restore {}", whole.operands[0].format_with(env)),
+            CheckCallDepth { successors } => fmt_runtime_check(f, "check_call_depth", *successors),
+            CheckFuel { successors } => fmt_runtime_check(f, "check_fuel", *successors),
+            Drop => write!(
+                f,
+                "drop {} via {}",
+                whole.operands[0].format_with(env),
+                whole.operands[1].format_with(env)
+            ),
+            BuildClosure { function, .. } => {
+                write!(
+                    f,
+                    "build_closure {}(",
+                    ssa::Value::Function(*function).format_with(env)
+                )?;
+                for (i, operand) in whole.operands.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", operand.format_with(env))?;
+                }
+                write!(f, ")")
+            }
+            CloneClosureEnv { .. } => write!(
+                f,
+                "clone_closure_env {}",
+                whole.operands[0].format_with(env)
+            ),
+            DropClosureEnv => write!(f, "drop_closure_env {}", whole.operands[0].format_with(env)),
         }
     }
 }
 
-/// A stack allocation of a pointer to a value.
-pub struct AllocaPlace {
-    /// The type of object the allocated pointer points to.
-    pub pointing_to: Type,
-}
-
-impl InstructionKind for AllocaPlace {
-    fn result(&self, _whole: &Instruction) -> InstructionResult {
-        InstructionResult::pointer_to(InstructionResult::pointer_to(InstructionResult::Lowered(
-            self.pointing_to,
-        )))
-    }
-
-    fn verify(&self, whole: &Instruction) {
-        assert!(whole.operands.is_empty(), "alloca_place takes no operands");
-    }
-
-    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
-        InstructionView::AllocaPlace {
-            pointing_to: self.pointing_to,
-        }
-    }
-
-    fn fmt_within(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        _whole: &Instruction,
-        env: &ModuleEnv<'_>,
-    ) -> fmt::Result {
-        write!(f, "alloca_place {}", self.pointing_to.format_with(env))
-    }
-}
-
-/// A function call in SSA.
-struct Call {}
-
-impl InstructionKind for Call {
-    fn result(&self, _whole: &Instruction) -> InstructionResult {
-        // Calls do not yield a register: a callee with a non-`()` result writes it through the
-        // return out-pointer passed as the call's last operand.
-        InstructionResult::Nothing
-    }
-
-    fn verify(&self, whole: &Instruction) {
-        assert!(
-            !whole.operands.is_empty(),
-            "call needs at least the callee operand"
-        );
-    }
-
-    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
-        InstructionView::Call
-    }
-
-    fn fmt_within(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        whole: &Instruction,
-        env: &ModuleEnv<'_>,
-    ) -> fmt::Result {
-        write!(f, "call ")?;
-        fmt_callee_and_args(f, whole, env)
-    }
-}
-
-/// Writes a call's `callee(arg, arg, …)` operand list — the part shared by `call` and `invoke`
-/// formatting (operand `0` is the callee; the rest are the arguments).
 fn fmt_callee_and_args(
     f: &mut fmt::Formatter<'_>,
     whole: &Instruction,
     env: &ModuleEnv<'_>,
 ) -> fmt::Result {
     write!(f, "{}(", whole.operands[0].format_with(env))?;
-    for i in 1..whole.operands.len() {
-        if i > 1 {
+    for (i, operand) in whole.operands[1..].iter().enumerate() {
+        if i != 0 {
             write!(f, ", ")?;
         }
-        write!(f, "{}", whole.operands[i].format_with(env))?;
+        write!(f, "{}", operand.format_with(env))?;
     }
     write!(f, ")")
 }
 
-/// A fallible function call in SSA that diverts to a cleanup pad on a raised error (see
-/// [`Instruction::invoke`]).
-struct Invoke {
-    /// The continuation block, branched to on normal completion of the call.
-    normal: ssa::BlockIdentity,
-
-    /// The cleanup landing pad, branched to when the call raises a `RuntimeError`.
-    unwind: ssa::BlockIdentity,
-}
-
-impl InstructionKind for Invoke {
-    fn result(&self, _whole: &Instruction) -> InstructionResult {
-        // Like `Call`: no register; a non-`()` result is written through the return out-pointer.
-        InstructionResult::Nothing
-    }
-
-    fn is_terminator(&self) -> bool {
-        true
-    }
-
-    fn verify(&self, whole: &Instruction) {
-        assert!(
-            !whole.operands.is_empty(),
-            "invoke needs at least the callee operand"
-        );
-    }
-
-    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
-        InstructionView::Invoke {
-            normal: self.normal,
-            unwind: self.unwind,
-        }
-    }
-
-    fn fmt_within(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        whole: &Instruction,
-        env: &ModuleEnv<'_>,
-    ) -> fmt::Result {
-        write!(f, "invoke ")?;
-        fmt_callee_and_args(f, whole, env)?;
-        write!(
-            f,
-            " -> b{} unwind b{}",
-            self.normal.raw(),
-            self.unwind.raw()
-        )
-    }
-}
-
-/// Continues the unwind a cleanup pad interrupted, handing the in-flight error back to the caller and
-/// terminating an outermost cleanup pad in SSA (see [`Instruction::resume`]).
-struct Resume {}
-
-impl InstructionKind for Resume {
-    fn is_terminator(&self) -> bool {
-        true
-    }
-
-    fn verify(&self, whole: &Instruction) {
-        assert!(whole.operands.is_empty());
-    }
-
-    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
-        InstructionView::Resume
-    }
-
-    fn fmt_within(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        _whole: &Instruction,
-        _env: &ModuleEnv<'_>,
-    ) -> fmt::Result {
-        write!(f, "resume")
-    }
-}
-
-/// The *enter* half of a scoped (`YieldedOnce`) subscript access (see [`Instruction::project`]).
-struct Project {
-    /// The pointee type of the exposed yielded place.
-    ty: Type,
-}
-
-impl InstructionKind for Project {
-    fn result(&self, _whole: &Instruction) -> InstructionResult {
-        // The result is the yielded place: a pointer to the projected element. A register value is
-        // obtained by loading it.
-        InstructionResult::pointer_to(InstructionResult::Lowered(self.ty))
-    }
-
-    fn verify(&self, whole: &Instruction) {
-        assert!(!whole.operands.is_empty());
-    }
-
-    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
-        InstructionView::Project { ty: self.ty }
-    }
-
-    fn fmt_within(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        whole: &Instruction,
-        env: &ModuleEnv<'_>,
-    ) -> fmt::Result {
-        write!(f, "project ")?;
-        fmt_callee_and_args(f, whole, env)
-    }
-}
-
-/// Exposes a yielded place and suspends a `YieldedOnce` accessor (see [`Instruction::r#yield`]).
-struct Yield {}
-
-impl InstructionKind for Yield {
-    fn verify(&self, whole: &Instruction) {
-        assert_eq!(
-            whole.operands.len(),
-            1,
-            "yield takes exactly the place to expose"
-        );
-    }
-
-    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
-        InstructionView::Yield
-    }
-
-    fn fmt_within(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        whole: &Instruction,
-        env: &ModuleEnv<'_>,
-    ) -> fmt::Result {
-        write!(f, "yield {}", whole.operands[0].format_with(env))
-    }
-}
-
-/// The *leave* half of a scoped subscript access: resumes the accessor slide (see
-/// [`Instruction::end_project`]).
-struct EndProject {}
-
-impl InstructionKind for EndProject {
-    fn verify(&self, whole: &Instruction) {
-        assert_eq!(
-            whole.operands.len(),
-            1,
-            "end_project takes exactly the projected place"
-        );
-    }
-
-    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
-        InstructionView::EndProject
-    }
-
-    fn fmt_within(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        whole: &Instruction,
-        env: &ModuleEnv<'_>,
-    ) -> fmt::Result {
-        write!(f, "end_project {}", whole.operands[0].format_with(env))
-    }
-}
-
-/// A comparison for equality in SSA.
-struct CompareEqual {}
-
-impl InstructionKind for CompareEqual {
-    fn result(&self, _whole: &Instruction) -> InstructionResult {
-        InstructionResult::Lowered(cached_primitive_ty!(bool))
-    }
-
-    fn verify(&self, whole: &Instruction) {
-        assert_eq!(
-            whole.operands.len(),
-            2,
-            "compare_eq compares exactly two operands"
-        );
-    }
-
-    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
-        InstructionView::CompareEqual
-    }
-
-    fn fmt_within(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        whole: &Instruction,
-        env: &ModuleEnv<'_>,
-    ) -> fmt::Result {
-        write!(
-            f,
-            "comp_eq {} {}",
-            whole.operands[0].format_with(env),
-            whole.operands[1].format_with(env)
-        )
-    }
-}
-
-/// A conditional jump in SSA.
-struct ConditionalBranch {
-    /// The target of the branch if the condition holds.
-    on_success: ssa::BlockIdentity,
-
-    /// The target of the branch if the condition does not hold.
-    on_failure: ssa::BlockIdentity,
-}
-
-impl InstructionKind for ConditionalBranch {
-    fn is_terminator(&self) -> bool {
-        true
-    }
-
-    fn verify(&self, whole: &Instruction) {
-        assert_eq!(
-            whole.operands.len(),
-            1,
-            "condbr takes exactly the condition operand"
-        );
-    }
-
-    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
-        InstructionView::ConditionalBranch {
-            on_success: self.on_success,
-            on_failure: self.on_failure,
-        }
-    }
-
-    fn fmt_within(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        whole: &Instruction,
-        env: &ModuleEnv<'_>,
-    ) -> fmt::Result {
-        write!(
-            f,
-            "condbr {}, b{}, b{}",
-            whole.operands[0].format_with(env),
-            self.on_success.raw(),
-            self.on_failure.raw()
-        )
-    }
-}
-
-/// A source-preserving load of a representation-copyable value into a register.
-struct Load {}
-
-impl InstructionKind for Load {
-    fn result(&self, whole: &Instruction) -> InstructionResult {
-        InstructionResult::pointee_of(InstructionResult::Same(whole.operands[0].clone()))
-    }
-
-    fn verify(&self, whole: &Instruction) {
-        assert_eq!(
-            whole.operands.len(),
-            1,
-            "load takes exactly the source place"
-        );
-    }
-
-    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
-        InstructionView::Load
-    }
-
-    fn fmt_within(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        whole: &Instruction,
-        env: &ModuleEnv<'_>,
-    ) -> fmt::Result {
-        write!(f, "load {}", whole.operands[0].format_with(env))
-    }
-}
-
-/// A subfield instruction in SSA: the **place** of a field of an aggregate, at the `int` index value
-/// (operand `1`) — a constant for a static field or a register for a run-time offset.
-struct Subfield {
-    /// The type of the projected value
-    ty: Type,
-}
-
-impl InstructionKind for Subfield {
-    fn result(&self, _whole: &Instruction) -> InstructionResult {
-        // The operand is a place (pointer to the aggregate) and the result is a place: a pointer to
-        // the projected element. A register value is obtained by `load`ing the result.
-        InstructionResult::pointer_to(InstructionResult::Lowered(self.ty))
-    }
-
-    fn verify(&self, whole: &Instruction) {
-        assert_eq!(
-            whole.operands.len(),
-            2,
-            "subfield takes the aggregate place and the int field-index value"
-        );
-    }
-
-    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
-        InstructionView::Subfield { ty: self.ty }
-    }
-
-    fn fmt_within(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        whole: &Instruction,
-        env: &ModuleEnv<'_>,
-    ) -> fmt::Result {
-        write!(
-            f,
-            "subfield {} from {}",
-            whole.operands[1].format_with(env),
-            whole.operands[0].format_with(env)
-        )
-    }
-}
-
-/// A dictionary-entry instruction in SSA: the symbolic analog of [`Subfield`] for a trait
-/// dictionary (see [`Instruction::dict_entry`]).
-struct DictEntry {
-    /// The index of the function entry within the dictionary (methods first, then
-    /// associated-constant getters).
-    entry_index: usize,
-
-    /// The type of the function entry (a method or associated-constant getter).
-    ty: Type,
-}
-
-impl InstructionKind for DictEntry {
-    fn result(&self, _whole: &Instruction) -> InstructionResult {
-        // Like `Subfield`: the result is the place of the entry; a register value is obtained by
-        // `load`ing it, and a method callee is read by reference at the `call`/`drop`.
-        InstructionResult::pointer_to(InstructionResult::Lowered(self.ty))
-    }
-
-    fn verify(&self, whole: &Instruction) {
-        assert_eq!(
-            whole.operands.len(),
-            1,
-            "dict_entry takes exactly the symbolic dictionary operand"
-        );
-    }
-
-    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
-        InstructionView::DictEntry {
-            entry_index: self.entry_index,
-            ty: self.ty,
-        }
-    }
-
-    fn fmt_within(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        whole: &Instruction,
-        env: &ModuleEnv<'_>,
-    ) -> fmt::Result {
-        write!(
-            f,
-            "dict_entry {} from {}",
-            self.entry_index,
-            whole.operands[0].format_with(env)
-        )
-    }
-}
-
-/// A subscript-member instruction in SSA: the member-resolving analog of [`DictEntry`] for a
-/// first-class subscript (see [`Instruction::subscript_member`]).
-struct SubscriptMember {
-    /// Whether the `mut` member is selected (`false` selects the `ref` member).
-    mut_member: bool,
-
-    /// The type of the member (its function type).
-    ty: Type,
-}
-
-impl InstructionKind for SubscriptMember {
-    fn result(&self, _whole: &Instruction) -> InstructionResult {
-        // Like `DictEntry`: the result is the place of the member function value, read by
-        // reference at the `call`/`project` that consumes it.
-        InstructionResult::pointer_to(InstructionResult::Lowered(self.ty))
-    }
-
-    fn verify(&self, whole: &Instruction) {
-        assert_eq!(
-            whole.operands.len(),
-            1,
-            "subscript_member takes exactly the symbolic subscript operand"
-        );
-    }
-
-    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
-        InstructionView::SubscriptMember {
-            mut_member: self.mut_member,
-            ty: self.ty,
-        }
-    }
-
-    fn fmt_within(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        whole: &Instruction,
-        env: &ModuleEnv<'_>,
-    ) -> fmt::Result {
-        write!(
-            f,
-            "subscript_member {} from {}",
-            if self.mut_member { "mut" } else { "ref" },
-            whole.operands[0].format_with(env)
-        )
-    }
-}
-
-/// A subscript-value construction instruction in SSA (see [`Instruction::build_subscript`]).
-struct BuildSubscript {
-    /// The type of the constructed subscript value.
-    ty: Type,
-}
-
-impl InstructionKind for BuildSubscript {
-    fn result(&self, _whole: &Instruction) -> InstructionResult {
-        InstructionResult::Lowered(self.ty)
-    }
-
-    fn verify(&self, whole: &Instruction) {
-        assert!(
-            !whole.operands.is_empty(),
-            "build_subscript takes the symbolic subscript operand plus its evidence captures"
-        );
-    }
-
-    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
-        InstructionView::BuildSubscript { ty: self.ty }
-    }
-
-    fn fmt_within(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        whole: &Instruction,
-        env: &ModuleEnv<'_>,
-    ) -> fmt::Result {
-        write!(f, "build_subscript {}", whole.operands[0].format_with(env))?;
-        if whole.operands.len() > 1 {
-            write!(f, " capturing (")?;
-            for (i, op) in whole.operands[1..].iter().enumerate() {
-                if i != 0 {
-                    write!(f, ", ")?;
-                }
-                write!(f, "{}", op.format_with(env))?;
-            }
-            write!(f, ")")?;
-        }
-        Ok(())
-    }
-}
-
-/// A return instruction in SSA.
-struct Ret {}
-
-impl InstructionKind for Ret {
-    fn is_terminator(&self) -> bool {
-        true
-    }
-
-    fn verify(&self, whole: &Instruction) {
-        assert!(
-            whole.operands.is_empty(),
-            "ret takes no operands (the result is written through the return out-pointer)"
-        );
-    }
-
-    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
-        InstructionView::Ret
-    }
-
-    fn fmt_within(
-        &self,
-        _f: &mut fmt::Formatter<'_>,
-        _whole: &Instruction,
-        _env: &ModuleEnv<'_>,
-    ) -> fmt::Result {
-        write!(_f, "ret")
-    }
-}
-
-/// A variant shell construction in SSA.
-///
-/// Yields a `Value::Variant { tag, payload }` whose payload is left uninitialized; the constructing
-/// site fills the payload in place after storing the shell into the variant's destination. The
-/// memory model is the HIR interpreter's `Value::Variant`.
-struct Variant {
-    /// The tag of the constructed variant.
-    tag: Ustr,
-
-    /// The type of the constructed variant.
-    type_: Type,
-}
-
-impl InstructionKind for Variant {
-    fn result(&self, _whole: &Instruction) -> InstructionResult {
-        InstructionResult::Lowered(self.type_)
-    }
-
-    fn verify(&self, whole: &Instruction) {
-        assert!(
-            whole.operands.is_empty(),
-            "variant builds an uninitialized shell and takes no operands"
-        );
-    }
-
-    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
-        InstructionView::Variant { tag: self.tag }
-    }
-
-    fn fmt_within(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        whole: &Instruction,
-        _env: &ModuleEnv<'_>,
-    ) -> fmt::Result {
-        let _ = whole;
-        write!(f, "variant .{}", self.tag)
-    }
-}
-
-/// A variant tag extraction in SSA, reading the tag of the variant at the operand place as an `int`.
-struct ExtractTag {}
-
-impl InstructionKind for ExtractTag {
-    fn result(&self, _whole: &Instruction) -> InstructionResult {
-        InstructionResult::Lowered(cached_primitive_ty!(isize))
-    }
-
-    fn verify(&self, whole: &Instruction) {
-        assert_eq!(
-            whole.operands.len(),
-            1,
-            "extract_tag takes exactly the variant place"
-        );
-    }
-
-    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
-        InstructionView::ExtractTag
-    }
-
-    fn fmt_within(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        whole: &Instruction,
-        env: &ModuleEnv<'_>,
-    ) -> fmt::Result {
-        write!(f, "extract_tag {}", whole.operands[0].format_with(env))
-    }
-}
-
-/// A store of a register value into a place, which drops nothing (see [`Instruction::store`]).
-struct Store {}
-
-impl InstructionKind for Store {
-    fn verify(&self, whole: &Instruction) {
-        assert_eq!(
-            whole.operands.len(),
-            2,
-            "store takes the value and the destination place"
-        );
-    }
-
-    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
-        InstructionView::Store
-    }
-
-    fn fmt_within(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        whole: &Instruction,
-        env: &ModuleEnv<'_>,
-    ) -> fmt::Result {
-        write!(
-            f,
-            "store {} to {}",
-            whole.operands[0].format_with(env),
-            whole.operands[1].format_with(env)
-        )
-    }
-}
-
-/// Marks place storage absent without running semantic drop.
-struct Clear {}
-
-impl InstructionKind for Clear {
-    fn verify(&self, whole: &Instruction) {
-        assert_eq!(
-            whole.operands.len(),
-            1,
-            "clear takes exactly the destination place"
-        );
-    }
-
-    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
-        InstructionView::Clear
-    }
-
-    fn fmt_within(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        whole: &Instruction,
-        env: &ModuleEnv<'_>,
-    ) -> fmt::Result {
-        write!(f, "clear {}", whole.operands[0].format_with(env))
-    }
-}
-
-/// A place-to-place copy in SSA, which copies the pointee of the source place (operand `0`)
-/// into the destination place (operand `1`) without materializing it in a register.
-struct Memcpy {}
-
-impl InstructionKind for Memcpy {
-    fn verify(&self, whole: &Instruction) {
-        assert_eq!(
-            whole.operands.len(),
-            2,
-            "memcpy is a pure copy of a statically-sized, owns-nothing pointee: source and destination only"
-        );
-    }
-
-    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
-        InstructionView::Memcpy
-    }
-
-    fn fmt_within(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        whole: &Instruction,
-        env: &ModuleEnv<'_>,
-    ) -> fmt::Result {
-        write!(
-            f,
-            "memcpy {} to {}",
-            whole.operands[0].format_with(env),
-            whole.operands[1].format_with(env)
-        )
-    }
-}
-
-/// A source-consuming move (ownership transfer) of the pointee of operand `0` into operand `1`. The
-/// layout witness (operand `2`) is present iff the pointee is not statically sized — mirrors `Alloca`.
-struct Move {}
-
-impl InstructionKind for Move {
-    fn verify(&self, whole: &Instruction) {
-        assert!(
-            matches!(whole.operands.len(), 2 | 3),
-            "move takes source and destination places, plus the layout witness iff dynamic"
-        );
-    }
-
-    fn view<'a>(&'a self, whole: &'a Instruction) -> InstructionView<'a> {
-        InstructionView::Move {
-            witness: whole.operands.get(2),
-        }
-    }
-
-    fn fmt_within(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        whole: &Instruction,
-        env: &ModuleEnv<'_>,
-    ) -> fmt::Result {
-        write!(
-            f,
-            "move {} to {}",
-            whole.operands[0].format_with(env),
-            whole.operands[1].format_with(env)
-        )?;
-        if let Some(witness) = whole.operands.get(2) {
-            write!(f, " using {}", witness.format_with(env))?;
-        }
-        Ok(())
-    }
-}
-
-/// A capture of the current top of the stack in SSA.
-struct StackSave {}
-
-impl InstructionKind for StackSave {
-    fn result(&self, _whole: &Instruction) -> InstructionResult {
-        InstructionResult::StackMarker
-    }
-
-    fn verify(&self, whole: &Instruction) {
-        assert!(whole.operands.is_empty(), "stack_save takes no operands");
-    }
-
-    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
-        InstructionView::StackSave
-    }
-
-    fn fmt_within(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        _whole: &Instruction,
-        _env: &ModuleEnv<'_>,
-    ) -> fmt::Result {
-        write!(f, "stack_save")
-    }
-}
-
-/// A reset of the top of the stack to a previously saved marker in SSA.
-struct StackRestore {}
-
-impl InstructionKind for StackRestore {
-    fn verify(&self, whole: &Instruction) {
-        assert_eq!(
-            whole.operands.len(),
-            1,
-            "stack_restore takes exactly the saved marker"
-        );
-    }
-
-    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
-        InstructionView::StackRestore
-    }
-
-    fn fmt_within(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        whole: &Instruction,
-        env: &ModuleEnv<'_>,
-    ) -> fmt::Result {
-        write!(f, "stack_restore {}", whole.operands[0].format_with(env))
-    }
-}
-
-#[derive(Clone, Copy)]
-enum RuntimeCheckKind {
-    CallDepth,
-    Fuel,
-}
-
-/// A fallible runtime resource guard copied from final HIR.
-struct RuntimeCheck {
-    kind: RuntimeCheckKind,
+fn fmt_runtime_check(
+    f: &mut fmt::Formatter<'_>,
+    name: &str,
     successors: Option<(ssa::BlockIdentity, ssa::BlockIdentity)>,
-}
-
-impl InstructionKind for RuntimeCheck {
-    fn is_terminator(&self) -> bool {
-        self.successors.is_some()
+) -> fmt::Result {
+    write!(f, "{name}")?;
+    if let Some((normal, unwind)) = successors {
+        write!(f, " -> b{} unwind b{}", normal.raw(), unwind.raw())?;
     }
-
-    fn verify(&self, whole: &Instruction) {
-        assert!(whole.operands.is_empty(), "runtime checks take no operands");
-    }
-
-    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
-        match self.kind {
-            RuntimeCheckKind::CallDepth => InstructionView::CheckCallDepth {
-                successors: self.successors,
-            },
-            RuntimeCheckKind::Fuel => InstructionView::CheckFuel {
-                successors: self.successors,
-            },
-        }
-    }
-
-    fn fmt_within(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        _whole: &Instruction,
-        _env: &ModuleEnv<'_>,
-    ) -> fmt::Result {
-        let name = match self.kind {
-            RuntimeCheckKind::CallDepth => "check_call_depth",
-            RuntimeCheckKind::Fuel => "check_fuel",
-        };
-        write!(f, "{name}")?;
-        if let Some((normal, unwind)) = self.successors {
-            write!(f, " -> b{} unwind b{}", normal.raw(), unwind.raw())?;
-        }
-        Ok(())
-    }
-}
-
-/// An init-guarded drop in SSA.
-///
-/// Operand `0` is the place whose pointee is dropped; operand `1` is the `Value::drop` callee. The
-/// drop runs only if the pointee is initialized, so a value already moved out (left uninitialized)
-/// is skipped.
-struct Drop {}
-
-impl InstructionKind for Drop {
-    fn verify(&self, whole: &Instruction) {
-        assert_eq!(
-            whole.operands.len(),
-            2,
-            "drop takes the target place and the Value::drop callee"
-        );
-    }
-
-    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
-        InstructionView::Drop
-    }
-
-    fn fmt_within(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        whole: &Instruction,
-        env: &ModuleEnv<'_>,
-    ) -> fmt::Result {
-        write!(
-            f,
-            "drop {} via {}",
-            whole.operands[0].format_with(env),
-            whole.operands[1].format_with(env)
-        )
-    }
-}
-
-/// A closure construction in SSA.
-///
-/// Bundles a function reference with its captured environment into a runtime `FunctionValue`.
-/// Operand layout is `[hidden_dicts…, captures…, env_dict?]`: `num_hidden_dicts` leading symbolic
-/// dictionary operands feed the lambda body's hidden `@extra` parameters, the value-capture places
-/// follow, and a trailing symbolic `Value`-dictionary operand (present iff `has_env_dict`) clones/
-/// drops the captured value environment.
-struct BuildClosure {
-    /// The closure's target (lambda) function.
-    function: FunctionId,
-
-    /// Number of leading symbolic dictionary operands feeding the lambda body's `@extra` params.
-    num_hidden_dicts: usize,
-
-    /// Whether the final operand is the symbolic `Value` dictionary for the captured environment
-    /// (`true` iff there are value captures).
-    has_env_dict: bool,
-
-    /// The type of the constructed closure value.
-    ty: Type,
-}
-
-impl InstructionKind for BuildClosure {
-    fn result(&self, _whole: &Instruction) -> InstructionResult {
-        InstructionResult::Lowered(self.ty)
-    }
-
-    fn verify(&self, whole: &Instruction) {
-        assert!(
-            whole.operands.len() >= self.num_hidden_dicts + self.has_env_dict as usize,
-            "build_closure needs at least its hidden dictionaries and the optional env dictionary"
-        );
-    }
-
-    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
-        InstructionView::BuildClosure {
-            function: &self.function,
-            num_hidden_dicts: self.num_hidden_dicts,
-            has_env_dict: self.has_env_dict,
-        }
-    }
-
-    fn fmt_within(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        whole: &Instruction,
-        env: &ModuleEnv<'_>,
-    ) -> fmt::Result {
-        write!(
-            f,
-            "build_closure {}(",
-            ssa::Value::Function(self.function).format_with(env)
-        )?;
-        for (i, op) in whole.operands.iter().enumerate() {
-            if i > 0 {
-                write!(f, ", ")?;
-            }
-            write!(f, "{}", op.format_with(env))?;
-        }
-        write!(f, ")")
-    }
-}
-
-/// A deep clone of a closure's captured environment in SSA, yielding a fresh closure value.
-struct CloneClosureEnv {
-    /// The type of the cloned closure value.
-    ty: Type,
-}
-
-impl InstructionKind for CloneClosureEnv {
-    fn result(&self, _whole: &Instruction) -> InstructionResult {
-        InstructionResult::Lowered(self.ty)
-    }
-
-    fn verify(&self, whole: &Instruction) {
-        assert_eq!(
-            whole.operands.len(),
-            1,
-            "clone_closure_env takes exactly the closure place"
-        );
-    }
-
-    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
-        InstructionView::CloneClosureEnv
-    }
-
-    fn fmt_within(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        whole: &Instruction,
-        env: &ModuleEnv<'_>,
-    ) -> fmt::Result {
-        write!(
-            f,
-            "clone_closure_env {}",
-            whole.operands[0].format_with(env)
-        )
-    }
-}
-
-/// A drop of a closure's owned captured environment in SSA.
-struct DropClosureEnv {}
-
-impl InstructionKind for DropClosureEnv {
-    fn verify(&self, whole: &Instruction) {
-        assert_eq!(
-            whole.operands.len(),
-            1,
-            "drop_closure_env takes exactly the closure place"
-        );
-    }
-
-    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
-        InstructionView::DropClosureEnv
-    }
-
-    fn fmt_within(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        whole: &Instruction,
-        env: &ModuleEnv<'_>,
-    ) -> fmt::Result {
-        write!(f, "drop_closure_env {}", whole.operands[0].format_with(env))
-    }
-}
-
-/// A SSA terminator that unconditionally transfers control flow to the start of another block.
-struct UnconditionalBranch {
-    target: ssa::BlockIdentity,
-}
-
-impl InstructionKind for UnconditionalBranch {
-    fn is_terminator(&self) -> bool {
-        true
-    }
-
-    fn verify(&self, whole: &Instruction) {
-        assert!(whole.operands.is_empty(), "br takes no operands");
-    }
-
-    fn view<'a>(&'a self, _whole: &'a Instruction) -> InstructionView<'a> {
-        InstructionView::UnconditionalBranch {
-            target: self.target,
-        }
-    }
-
-    fn fmt_within(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        _whole: &Instruction,
-        _env: &ModuleEnv<'_>,
-    ) -> fmt::Result {
-        write!(f, "br b{}", self.target.raw())
-    }
+    Ok(())
 }

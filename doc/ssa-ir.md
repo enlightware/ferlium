@@ -65,7 +65,7 @@ read. Values live in registers or in storage reached through a *place*.
   may still be *unreachable* — e.g. the join after a match whose every arm diverges — but it is
   non-empty and terminated; reachability is a separate, unchecked property.)
 - The terminators are `ret`, `br`, `condbr`, `invoke`, `resume`, and the unwind-capable forms of the
-  runtime checks (each kind reports this via its own `is_terminator`).
+  runtime checks (classified exhaustively by `InstructionKind::is_terminator`).
 - Every branch target (`br`/`condbr`/`invoke` successor) names an existing block of the same function.
 
 These are exactly what `verify_function` asserts (every block non-empty; terminator-iff-last; targets
@@ -230,11 +230,11 @@ count. Roles: **p** = place, **v** = value, **d** = dictionary, **m** = stack ma
 
 Two layers, both run in debug builds before a function executes:
 
-- **`InstructionKind::verify(&self, whole)`** — each concrete instruction implements its own operand
-  **arity** check locally (the "Invariant" column above for arity), so a new instruction cannot be
-  added without stating how many operands it takes, and the check sits next to its constructor.
-  `Instruction::verify` just delegates to the kind. Operand *role* is intentionally not checked here
-  (§3) — it is enforced at point of use.
+- **`InstructionKind::verify(&self, whole)`** — the exhaustive instruction-kind match checks each
+  instruction's operand **arity** (the "Invariant" column above for arity). Adding an instruction
+  requires defining its contract alongside those of every other kind. `Instruction::verify`
+  delegates to this check. Operand *role* is intentionally not checked here (§3) — it is enforced at
+  point of use.
 - **`Interpreter::verify_function(func)`** — the per-function structural invariants of §2 (every block
   non-empty; terminator-iff-last-instruction; branch targets exist and are non-empty), and it runs
   each instruction's `verify`.

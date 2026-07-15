@@ -26,7 +26,7 @@ use crate::{
         FunctionId, LocalFunctionId, ModuleEnv, ModuleId, TraitDictionaryId, id::Id,
         trait_impl::TraitDictionaryEntry,
     },
-    ssa::{self, BlockIdentity, InstructionIdentity, InstructionView},
+    ssa::{self, BlockIdentity, InstructionIdentity, InstructionKind},
     std::buffer,
     types::{
         r#trait::TraitDictionaryEntryIndex,
@@ -317,59 +317,59 @@ impl<'a> Interpreter<'a> {
         let instr = func.at(i);
         let def = func.definition(i);
         let span = instr.span;
-        Ok(match instr.view() {
-            InstructionView::Alloca { ty, .. } => {
-                let init = self.shaped_uninitialized_value(ty);
+        Ok(match &instr.kind {
+            InstructionKind::Alloca { ty } => {
+                let init = self.shaped_uninitialized_value(*ty);
                 let place = self.alloc_cell(init);
                 slots.insert(def.unwrap(), Binding::Place(place));
                 Step::Advance
             }
-            InstructionView::AllocaPlace { .. } => {
+            InstructionKind::AllocaPlace { .. } => {
                 let place = self.alloc_cell(Value::uninit());
                 slots.insert(def.unwrap(), Binding::Place(place));
                 Step::Advance
             }
-            InstructionView::Subfield { .. } => {
+            InstructionKind::Subfield { .. } => {
                 self.exec_subfield(func, slots, &instr.operands, def.unwrap());
                 Step::Advance
             }
-            InstructionView::DictEntry { entry_index, .. } => {
-                self.exec_dict_entry(slots, &instr.operands, def.unwrap(), entry_index);
+            InstructionKind::DictEntry { entry_index, .. } => {
+                self.exec_dict_entry(slots, &instr.operands, def.unwrap(), *entry_index);
                 Step::Advance
             }
-            InstructionView::SubscriptMember { mut_member, .. } => {
-                self.exec_subscript_member(slots, &instr.operands, def.unwrap(), mut_member);
+            InstructionKind::SubscriptMember { mut_member, .. } => {
+                self.exec_subscript_member(slots, &instr.operands, def.unwrap(), *mut_member);
                 Step::Advance
             }
-            InstructionView::BuildSubscript { .. } => {
+            InstructionKind::BuildSubscript { .. } => {
                 self.exec_build_subscript(slots, &instr.operands, def.unwrap());
                 Step::Advance
             }
-            InstructionView::Load => {
+            InstructionKind::Load => {
                 self.exec_load(slots, &instr.operands, def.unwrap())?;
                 Step::Advance
             }
-            InstructionView::Store => {
+            InstructionKind::Store => {
                 self.exec_store(func, slots, &instr.operands)?;
                 Step::Advance
             }
-            InstructionView::Clear => {
+            InstructionKind::Clear => {
                 self.exec_clear(slots, &instr.operands[0]);
                 Step::Advance
             }
-            InstructionView::Memcpy => {
+            InstructionKind::Memcpy => {
                 self.exec_memcpy(slots, &instr.operands)?;
                 Step::Advance
             }
-            InstructionView::Move { .. } => {
+            InstructionKind::Move => {
                 self.exec_move(slots, &instr.operands)?;
                 Step::Advance
             }
-            InstructionView::CompareEqual => {
+            InstructionKind::CompareEqual => {
                 self.exec_compare_equal(func, slots, &instr.operands, def.unwrap());
                 Step::Advance
             }
-            InstructionView::ConditionalBranch {
+            InstructionKind::ConditionalBranch {
                 on_success,
                 on_failure,
             } => {
@@ -377,11 +377,11 @@ impl<'a> Interpreter<'a> {
                 let taken = *c
                     .as_primitive_ty::<bool>()
                     .expect("condbr condition must be a bool");
-                Step::Goto(if taken { on_success } else { on_failure })
+                Step::Goto(if taken { *on_success } else { *on_failure })
             }
-            InstructionView::UnconditionalBranch { target } => Step::Goto(target),
-            InstructionView::Ret => Step::Return,
-            InstructionView::Variant { tag } => {
+            InstructionKind::UnconditionalBranch { target } => Step::Goto(*target),
+            InstructionKind::Ret => Step::Return,
+            InstructionKind::Variant { tag, .. } => {
                 // Build a tagged variant shell with an uninitialized payload. The constructing site
                 // stores it into the variant's destination and then fills the payload in place
                 // through a projection of that destination, so the payload aggregate is never
@@ -390,87 +390,88 @@ impl<'a> Interpreter<'a> {
                 // payload is written explicitly by the emitter.
                 slots.insert(
                     def.unwrap(),
-                    Binding::Value(Value::raw_variant(tag, Value::uninit())),
+                    Binding::Value(Value::raw_variant(*tag, Value::uninit())),
                 );
                 Step::Advance
             }
-            InstructionView::ExtractTag => {
+            InstructionKind::ExtractTag => {
                 self.exec_extract_tag(slots, &instr.operands, def.unwrap());
                 Step::Advance
             }
-            InstructionView::Call => {
+            InstructionKind::Call => {
                 self.exec_call(slots, &instr.operands, span)?;
                 Step::Advance
             }
-            InstructionView::Invoke { normal, unwind } => {
+            InstructionKind::Invoke { normal, unwind } => {
                 // A fallible call: on a raised error, stash it and divert to the cleanup pad rather
                 // than propagating straight out of the frame. The pad drops this frame's live locals
                 // (husk-skipping anything already dropped/moved) and ends in `br <outer pad>` or
                 // `resume`, the latter re-raising `pending` to the caller (see the loop in
                 // `run_function`). On normal completion control falls through to the continuation.
                 match self.exec_call(slots, &instr.operands, span) {
-                    Ok(()) => Step::Goto(normal),
+                    Ok(()) => Step::Goto(*normal),
                     Err(err) => {
                         *pending = Some(err);
-                        Step::Goto(unwind)
+                        Step::Goto(*unwind)
                     }
                 }
             }
-            InstructionView::Resume => Step::Resume,
-            InstructionView::Project { ty } => {
+            InstructionKind::Resume => Step::Resume,
+            InstructionKind::Project { ty } => {
                 // Enter a scoped subscript: run the accessor to its `yield`, bind the exposed place
                 // (and the suspended frame) to this register, and continue with the body.
-                self.exec_project(slots, &instr.operands, def.unwrap(), ty, span)?;
+                self.exec_project(slots, &instr.operands, def.unwrap(), *ty, span)?;
                 Step::Advance
             }
-            InstructionView::Yield => {
+            InstructionKind::Yield => {
                 // Suspend the accessor, exposing the place at operand `0` to the driving `project`.
                 let place = self.place_operand(slots, &instr.operands[0]);
                 Step::Suspend(place)
             }
-            InstructionView::EndProject => self.exec_end_project(slots, &instr.operands)?,
-            InstructionView::Drop => {
+            InstructionKind::EndProject => self.exec_end_project(slots, &instr.operands)?,
+            InstructionKind::Drop => {
                 self.exec_drop(slots, &instr.operands, span)?;
                 Step::Advance
             }
-            InstructionView::StackSave => {
+            InstructionKind::StackSave => {
                 let marker = self.ctx.environment.len();
                 slots.insert(def.unwrap(), Binding::StackMarker(marker));
                 Step::Advance
             }
-            InstructionView::StackRestore => {
+            InstructionKind::StackRestore => {
                 let marker = self.stack_marker_operand(slots, &instr.operands[0]);
                 self.restore_stack(marker);
                 Step::Advance
             }
-            InstructionView::CheckCallDepth { successors } => {
+            InstructionKind::CheckCallDepth { successors } => {
                 return self
-                    .exec_runtime_check(pending, successors, |ctx| ctx.check_call_depth(span));
+                    .exec_runtime_check(pending, *successors, |ctx| ctx.check_call_depth(span));
             }
-            InstructionView::CheckFuel { successors } => {
-                return self.exec_runtime_check(pending, successors, |ctx| ctx.check_fuel(span));
+            InstructionKind::CheckFuel { successors } => {
+                return self.exec_runtime_check(pending, *successors, |ctx| ctx.check_fuel(span));
             }
-            InstructionView::BuildClosure {
+            InstructionKind::BuildClosure {
                 function,
                 num_hidden_dicts,
                 has_env_dict,
+                ..
             } => {
                 let closure = self.exec_build_closure(
                     slots,
                     &instr.operands,
                     function,
-                    num_hidden_dicts,
-                    has_env_dict,
+                    *num_hidden_dicts,
+                    *has_env_dict,
                 )?;
                 slots.insert(def.unwrap(), Binding::Value(closure));
                 Step::Advance
             }
-            InstructionView::CloneClosureEnv => {
+            InstructionKind::CloneClosureEnv { .. } => {
                 let cloned = self.exec_clone_closure_env(slots, &instr.operands[0], span)?;
                 slots.insert(def.unwrap(), Binding::Value(cloned));
                 Step::Advance
             }
-            InstructionView::DropClosureEnv => {
+            InstructionKind::DropClosureEnv => {
                 self.exec_drop_closure_env(slots, &instr.operands[0], span)?;
                 Step::Advance
             }
@@ -2193,35 +2194,35 @@ fn verify_function(func: &ssa::Function) {
             );
         }
         // The last instruction terminates (checked above); validate its branch targets.
-        match func.at(instructions[last]).view() {
-            InstructionView::ConditionalBranch {
+        match &func.at(instructions[last]).kind {
+            InstructionKind::ConditionalBranch {
                 on_success,
                 on_failure,
             } => assert!(
-                target_ok(on_success) && target_ok(on_failure),
+                target_ok(*on_success) && target_ok(*on_failure),
                 "SSA function `{}` block {}: condbr targets a missing or empty block",
                 func.name,
                 b.raw()
             ),
-            InstructionView::UnconditionalBranch { target } => assert!(
-                target_ok(target),
+            InstructionKind::UnconditionalBranch { target } => assert!(
+                target_ok(*target),
                 "SSA function `{}` block {}: br targets a missing or empty block",
                 func.name,
                 b.raw()
             ),
-            InstructionView::Invoke { normal, unwind } => assert!(
-                target_ok(normal) && target_ok(unwind),
+            InstructionKind::Invoke { normal, unwind } => assert!(
+                target_ok(*normal) && target_ok(*unwind),
                 "SSA function `{}` block {}: invoke targets a missing or empty block",
                 func.name,
                 b.raw()
             ),
-            InstructionView::CheckCallDepth {
+            InstructionKind::CheckCallDepth {
                 successors: Some((normal, unwind)),
             }
-            | InstructionView::CheckFuel {
+            | InstructionKind::CheckFuel {
                 successors: Some((normal, unwind)),
             } => assert!(
-                target_ok(normal) && target_ok(unwind),
+                target_ok(*normal) && target_ok(*unwind),
                 "SSA function `{}` block {}: runtime check targets a missing or empty block",
                 func.name,
                 b.raw()
