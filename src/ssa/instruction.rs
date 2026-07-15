@@ -2,7 +2,7 @@
 //!
 //! # Operand and result contract
 //!
-//! Each instruction carries a flat `operands: Vec<ssa::Value>` whose length and per-position meaning
+//! Each instruction carries a flat `operands: Box<[ssa::Value]>` whose length and per-position meaning
 //! are fixed by the instruction kind (documented on each `Instruction::*` constructor below and
 //! checked by [`Instruction::verify`]). An operand falls into one of four runtime *roles*; which role
 //! a given position expects is part of the contract, but it is **not** recoverable from the
@@ -49,7 +49,7 @@ pub struct Instruction {
     pub span: Location,
 
     /// The operands of the instruction.
-    pub operands: Vec<ssa::Value>,
+    pub operands: Box<[ssa::Value]>,
 
     /// The kind-specific part of `self`.
     pub kind: InstructionKind,
@@ -76,7 +76,7 @@ impl Instruction {
     pub fn alloca(span: Location, ty: Type) -> Self {
         Instruction {
             span,
-            operands: vec![],
+            operands: Box::new([]),
             kind: InstructionKind::Alloca { ty },
         }
     }
@@ -89,7 +89,7 @@ impl Instruction {
     pub fn alloca_dynamic(span: Location, ty: Type, witness: ssa::Value) -> Self {
         Instruction {
             span,
-            operands: vec![witness],
+            operands: Box::new([witness]),
             kind: InstructionKind::Alloca { ty },
         }
     }
@@ -99,7 +99,7 @@ impl Instruction {
     pub fn alloca_place(span: Location, pointing_to: Type) -> Self {
         Instruction {
             span,
-            operands: vec![],
+            operands: Box::new([]),
             kind: InstructionKind::AllocaPlace { pointing_to },
         }
     }
@@ -110,7 +110,7 @@ impl Instruction {
     pub fn br(span: Location, target: ssa::BlockIdentity) -> Self {
         Instruction {
             span,
-            operands: vec![],
+            operands: Box::new([]),
             kind: InstructionKind::UnconditionalBranch { target },
         }
     }
@@ -149,7 +149,7 @@ impl Instruction {
         operands.extend(arguments);
         Instruction {
             span,
-            operands,
+            operands: operands.into_boxed_slice(),
             kind: InstructionKind::Call,
         }
     }
@@ -177,7 +177,7 @@ impl Instruction {
         operands.extend(arguments);
         Instruction {
             span,
-            operands,
+            operands: operands.into_boxed_slice(),
             kind: InstructionKind::Invoke { normal, unwind },
         }
     }
@@ -198,7 +198,7 @@ impl Instruction {
     pub fn resume(span: Location) -> Self {
         Instruction {
             span,
-            operands: vec![],
+            operands: Box::new([]),
             kind: InstructionKind::Resume,
         }
     }
@@ -225,7 +225,7 @@ impl Instruction {
         operands.extend(arguments);
         Instruction {
             span,
-            operands,
+            operands: operands.into_boxed_slice(),
             kind: InstructionKind::Project { ty },
         }
     }
@@ -237,7 +237,7 @@ impl Instruction {
     pub fn r#yield(span: Location, place: ssa::Value) -> Self {
         Instruction {
             span,
-            operands: vec![place],
+            operands: Box::new([place]),
             kind: InstructionKind::Yield,
         }
     }
@@ -250,7 +250,7 @@ impl Instruction {
     pub fn end_project(span: Location, place: ssa::Value) -> Self {
         Instruction {
             span,
-            operands: vec![place],
+            operands: Box::new([place]),
             kind: InstructionKind::EndProject,
         }
     }
@@ -265,7 +265,7 @@ impl Instruction {
     pub fn compare_eq(span: Location, v1: ssa::Value, v2: ssa::Value) -> Self {
         Instruction {
             span,
-            operands: vec![v1, v2],
+            operands: Box::new([v1, v2]),
             kind: InstructionKind::CompareEqual,
         }
     }
@@ -283,7 +283,7 @@ impl Instruction {
     ) -> Self {
         Instruction {
             span,
-            operands: vec![condition],
+            operands: Box::new([condition]),
             kind: InstructionKind::ConditionalBranch {
                 on_success,
                 on_failure,
@@ -300,7 +300,7 @@ impl Instruction {
     pub fn load(span: Location, source: ssa::Value) -> Self {
         Instruction {
             span,
-            operands: vec![source],
+            operands: Box::new([source]),
             kind: InstructionKind::Load,
         }
     }
@@ -319,7 +319,7 @@ impl Instruction {
     pub fn subfield(span: Location, source: ssa::Value, index: ssa::Value, ty: Type) -> Self {
         Instruction {
             span,
-            operands: vec![source, index],
+            operands: Box::new([source, index]),
             kind: InstructionKind::Subfield { ty },
         }
     }
@@ -335,7 +335,7 @@ impl Instruction {
     pub fn dict_entry(span: Location, dict: ssa::Value, entry_index: usize, ty: Type) -> Self {
         Instruction {
             span,
-            operands: vec![dict],
+            operands: Box::new([dict]),
             kind: InstructionKind::DictEntry { entry_index, ty },
         }
     }
@@ -355,7 +355,7 @@ impl Instruction {
     ) -> Self {
         Instruction {
             span,
-            operands: vec![subscript],
+            operands: Box::new([subscript]),
             kind: InstructionKind::SubscriptMember { mut_member, ty },
         }
     }
@@ -375,7 +375,7 @@ impl Instruction {
         operands.extend(evidence);
         Instruction {
             span,
-            operands,
+            operands: operands.into_boxed_slice(),
             kind: InstructionKind::BuildSubscript { ty },
         }
     }
@@ -389,7 +389,7 @@ impl Instruction {
     pub fn variant(span: Location, tag: Ustr, t: Type) -> Self {
         Instruction {
             span,
-            operands: vec![],
+            operands: Box::new([]),
             kind: InstructionKind::Variant { tag, ty: t },
         }
     }
@@ -399,7 +399,7 @@ impl Instruction {
     pub fn extract_tag(span: Location, variant: ssa::Value) -> Self {
         Instruction {
             span,
-            operands: vec![variant],
+            operands: Box::new([variant]),
             kind: InstructionKind::ExtractTag,
         }
     }
@@ -411,7 +411,7 @@ impl Instruction {
     pub fn ret(span: Location) -> Self {
         Instruction {
             span,
-            operands: vec![],
+            operands: Box::new([]),
             kind: InstructionKind::Ret,
         }
     }
@@ -424,7 +424,7 @@ impl Instruction {
     pub fn stack_save(span: Location) -> Self {
         Instruction {
             span,
-            operands: vec![],
+            operands: Box::new([]),
             kind: InstructionKind::StackSave,
         }
     }
@@ -434,7 +434,7 @@ impl Instruction {
     pub fn stack_restore(span: Location, marker: ssa::Value) -> Self {
         Instruction {
             span,
-            operands: vec![marker],
+            operands: Box::new([marker]),
             kind: InstructionKind::StackRestore,
         }
     }
@@ -443,7 +443,7 @@ impl Instruction {
     pub fn check_call_depth(span: Location) -> Self {
         Instruction {
             span,
-            operands: vec![],
+            operands: Box::new([]),
             kind: InstructionKind::CheckCallDepth { successors: None },
         }
     }
@@ -452,7 +452,7 @@ impl Instruction {
     pub fn check_fuel(span: Location) -> Self {
         Instruction {
             span,
-            operands: vec![],
+            operands: Box::new([]),
             kind: InstructionKind::CheckFuel { successors: None },
         }
     }
@@ -465,7 +465,7 @@ impl Instruction {
     ) -> Self {
         Instruction {
             span,
-            operands: vec![],
+            operands: Box::new([]),
             kind: InstructionKind::CheckCallDepth {
                 successors: Some((normal, unwind)),
             },
@@ -480,7 +480,7 @@ impl Instruction {
     ) -> Self {
         Instruction {
             span,
-            operands: vec![],
+            operands: Box::new([]),
             kind: InstructionKind::CheckFuel {
                 successors: Some((normal, unwind)),
             },
@@ -497,7 +497,7 @@ impl Instruction {
     pub fn store(span: Location, value: ssa::Value, destination: ssa::Value) -> Self {
         Instruction {
             span,
-            operands: vec![value, destination],
+            operands: Box::new([value, destination]),
             kind: InstructionKind::Store,
         }
     }
@@ -508,7 +508,7 @@ impl Instruction {
     pub fn clear(span: Location, destination: ssa::Value) -> Self {
         Instruction {
             span,
-            operands: vec![destination],
+            operands: Box::new([destination]),
             kind: InstructionKind::Clear,
         }
     }
@@ -527,7 +527,7 @@ impl Instruction {
     pub fn memcpy(span: Location, source: ssa::Value, destination: ssa::Value) -> Self {
         Instruction {
             span,
-            operands: vec![source, destination],
+            operands: Box::new([source, destination]),
             kind: InstructionKind::Memcpy,
         }
     }
@@ -540,7 +540,7 @@ impl Instruction {
     pub fn move_value(span: Location, source: ssa::Value, destination: ssa::Value) -> Self {
         Instruction {
             span,
-            operands: vec![source, destination],
+            operands: Box::new([source, destination]),
             kind: InstructionKind::Move,
         }
     }
@@ -558,7 +558,7 @@ impl Instruction {
     ) -> Self {
         Instruction {
             span,
-            operands: vec![source, destination, witness],
+            operands: Box::new([source, destination, witness]),
             kind: InstructionKind::Move,
         }
     }
@@ -576,7 +576,7 @@ impl Instruction {
     pub fn drop(span: Location, target: ssa::Value, callee: ssa::Value) -> Self {
         Instruction {
             span,
-            operands: vec![target, callee],
+            operands: Box::new([target, callee]),
             kind: InstructionKind::Drop,
         }
     }
@@ -609,7 +609,7 @@ impl Instruction {
         operands.extend(env_dict);
         Instruction {
             span,
-            operands,
+            operands: operands.into_boxed_slice(),
             kind: InstructionKind::BuildClosure {
                 function,
                 num_hidden_dicts,
@@ -624,7 +624,7 @@ impl Instruction {
     pub fn clone_closure_env(span: Location, source: ssa::Value, ty: Type) -> Self {
         Instruction {
             span,
-            operands: vec![source],
+            operands: Box::new([source]),
             kind: InstructionKind::CloneClosureEnv { ty },
         }
     }
@@ -634,7 +634,7 @@ impl Instruction {
     pub fn drop_closure_env(span: Location, target: ssa::Value) -> Self {
         Instruction {
             span,
-            operands: vec![target],
+            operands: Box::new([target]),
             kind: InstructionKind::DropClosureEnv,
         }
     }
