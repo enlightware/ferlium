@@ -3629,6 +3629,99 @@ fn named_subscript_body_error_runs_epilogue_before_propagating() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn named_subscript_slide_error_unwinds_caller_owned_locals() {
+    let mut session = experimental_session();
+    let source = indoc! { r#"
+        struct Probe(int)
+
+        impl Value for Probe {
+            fn eq(left: Probe, right: Probe) -> bool { left.0 == right.0 }
+            fn to_string(value: Probe) -> string { to_string(value.0) }
+            fn hash(value: Probe, state: &mut hasher) { hash(value.0, state) }
+            fn clone(source: Probe) -> Probe { Probe(source.0) }
+            fn drop(target: &mut Probe) { testing::record_tracked_drop(target.0) }
+        }
+
+        subscript cell(slot: &mut int) -> int {
+            mut {
+                let mut local = slot;
+                yield local;
+                slot = local;
+                let ignored = [0][1];
+            }
+        }
+
+        testing::reset_tracked_drops();
+        let owned = Probe(7);
+        let mut slot = 5;
+        slot->[cell] = 9
+    "# };
+
+    assert_eq!(
+        session.fail_run(source),
+        RuntimeErrorKind::Aborted(Some(
+            "Array access out of bounds: index 1 for length 1".to_string()
+        ))
+    );
+    assert_val_eq!(session.run("testing::tracked_drop_log()"), int(7));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn named_subscript_slide_error_during_unwind_hard_aborts_without_outer_semantic_cleanup() {
+    let mut session = experimental_session();
+    let source = indoc! { r#"
+        struct Probe(int)
+
+        impl Value for Probe {
+            fn eq(left: Probe, right: Probe) -> bool { left.0 == right.0 }
+            fn to_string(value: Probe) -> string { to_string(value.0) }
+            fn hash(value: Probe, state: &mut hasher) { hash(value.0, state) }
+            fn clone(source: Probe) -> Probe { Probe(source.0) }
+            fn drop(target: &mut Probe) { testing::record_tracked_drop(target.0) }
+        }
+
+        subscript cell(slot: &mut int) -> int {
+            mut {
+                let mut local = slot;
+                yield local;
+                slot = local;
+                let slide_error = [0][1];
+            }
+        }
+
+        testing::reset_tracked_drops();
+        let owned = Probe(7);
+        let mut slot = 5;
+        slot->[cell] = [0][2]
+    "# };
+
+    // The body starts unwinding with index 2, then the accessor slide raises index 1. A second
+    // failure during semantic unwind hard-aborts the executor, retaining both causes and skipping
+    // all remaining Ferlium cleanup.
+    let error = session
+        .try_run(source)
+        .expect_err("the accessor body and slide must both fail");
+    let abort = error
+        .hard_abort()
+        .expect("a failure during unwind must produce a structured hard abort");
+    assert_eq!(
+        abort.initial().kind(),
+        RuntimeErrorKind::Aborted(Some(
+            "Array access out of bounds: index 2 for length 1".to_string()
+        ))
+    );
+    assert_eq!(
+        abort.during_cleanup().kind(),
+        RuntimeErrorKind::Aborted(Some(
+            "Array access out of bounds: index 1 for length 1".to_string()
+        ))
+    );
+    assert_val_eq!(session.run("testing::tracked_drop_log()"), int(0));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn named_subscript_prologue_error_skips_epilogue() {
     let mut session = experimental_session();
     let source = indoc! { r#"
@@ -3655,6 +3748,45 @@ fn named_subscript_prologue_error_skips_epilogue() {
         ))
     );
     assert_val_eq!(session.run("testing::tracked_drop_log()"), int(1));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn named_subscript_prologue_error_unwinds_caller_owned_locals() {
+    let mut session = experimental_session();
+    let source = indoc! { r#"
+        struct Probe(int)
+
+        impl Value for Probe {
+            fn eq(left: Probe, right: Probe) -> bool { left.0 == right.0 }
+            fn to_string(value: Probe) -> string { to_string(value.0) }
+            fn hash(value: Probe, state: &mut hasher) { hash(value.0, state) }
+            fn clone(source: Probe) -> Probe { Probe(source.0) }
+            fn drop(target: &mut Probe) { testing::record_tracked_drop(target.0) }
+        }
+
+        subscript cell(slot: &mut int) -> int {
+            mut {
+                let ignored = [0][1];
+                let mut local = slot;
+                yield local;
+                slot = local
+            }
+        }
+
+        testing::reset_tracked_drops();
+        let owned = Probe(7);
+        let mut slot = 5;
+        slot->[cell] = 9
+    "# };
+
+    assert_eq!(
+        session.fail_run(source),
+        RuntimeErrorKind::Aborted(Some(
+            "Array access out of bounds: index 1 for length 1".to_string()
+        ))
+    );
+    assert_val_eq!(session.run("testing::tracked_drop_log()"), int(7));
 }
 
 #[test]

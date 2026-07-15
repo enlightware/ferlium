@@ -42,7 +42,8 @@ A member that contains `yield` uses `SubscriptResultConvention::YieldedOnce`, ex
 The yielded place is valid only while the accessor frame is suspended, so HIR must consume the call through `WithYielded { accessor, binding, body }`.
 `WithYielded` runs the accessor to its single `Yield(place)`, binds that place to an internal non-owning `binding`, evaluates `body`, then resumes the accessor epilogue.
 The binding is not source-visible storage and must not be captured, returned, or stored as a value.
-If `body` exits by return, break, continue, or runtime error, the accessor epilogue and normal frame cleanup still run before the transfer continues.
+If `body` exits by return, break, continue, or runtime error, the accessor epilogue and normal frame cleanup are attempted before the transfer continues.
+If an epilogue or cleanup action raises while a runtime error is already unwinding, execution instead escalates to hard abort and no further Ferlium cleanup runs.
 If the accessor fails before yielding, no yielded binding exists and no post-yield epilogue runs.
 
 A member without `yield` uses `SubscriptResultConvention::AddressorPlace`, exposed on selected HIR calls as `CallResultConvention::ADDRESSOR_PLACE`, and keeps caller-rooted projection behavior.
@@ -103,6 +104,7 @@ Lexical cleanup is represented by `Block.cleanup`, a list of locals in declarati
 When a block is exited, cleanup runs in reverse order.
 After local storage resolution, cleanup is a no-op for non-owning locals.
 For owned locals it applies the resolved `LocalDrop`: `Skip` reclaims only storage, while static and dictionary modes call `Value::drop` before discarding storage.
+Once a semantic-drop action starts, the target lifetime has ended even if the call raises before entering the drop body; the target is invalidated and must not be observed or retried.
 
 Assignments to initialized storage carry an optional `Assignment::drop`.
 If present, the old destination lifetime ends before the new value replaces it; the resolved mode may be `Skip`.
@@ -112,7 +114,9 @@ SSA must preserve the same cleanup behavior on all exits:
 
 - Normal scope exit runs the block's cleanup.
 - A moved local is not dropped again.
-- Runtime-error edges must run semantic drops for initialized owned locals created in the exited scope, in reverse order, before storage is reclaimed.
+- Runtime-error edges attempt semantic drops for initialized owned locals created in the exited scope, in reverse order, before storage is reclaimed.
+  If one of those drops raises during the unwind, execution hard-aborts and remaining storage is reclaimed without further semantic drops.
+- If a drop raises as the primary error during normal inline cleanup, remaining siblings in that same cleanup sequence are currently skipped, while enclosing scopes continue unwinding.
 - `return`, `break`, and `continue` edges run the cleanup for each lexical block they exit.
 - A value carried by `return` or `break` is prepared before cleanup runs: a local owned by the exited scope is moved with `TakeLocalValue`, while a still-live place is materialized with `CloneValue` or a trivial copy.
 - If a transfer exits a `WithYielded` body, the suspended accessor epilogue runs before the transfer continues past the `WithYielded`.

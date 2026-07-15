@@ -20,6 +20,7 @@ use ferlium::{
         MutabilityMustBeWhat, RuntimeErrorKind,
     },
     eval::{EvalCtx, eval_node_with_ctx},
+    execution::ReferenceInterpreterLimits,
     format::FormatWith,
     hir::value::Value,
     hir::{ENodeArena, ENodeId, NodeKind},
@@ -2349,6 +2350,35 @@ fn recursive_execution_succeeds_below_limit() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn hir_execution_uses_configured_limits() {
+    let mut session = TestSession::new();
+
+    let recursive = session.compile("fn recurse() { recurse() } recurse()");
+    let expr = recursive
+        .expr
+        .expect("test source should have an expression");
+    let module = session.session().expect_fresh_module(recursive.module_id);
+    let limits = ReferenceInterpreterLimits::default().with_call_depth_limit(4);
+    let mut ctx = EvalCtx::with_limits(recursive.module_id, session.session(), limits);
+    let error = eval_node_with_ctx(&module.hir_arena, expr.expr, &mut ctx, &expr.locals)
+        .expect_err("recursive HIR execution must reach the configured call-depth limit");
+    assert_eq!(
+        error.kind(),
+        RuntimeErrorKind::CallDepthLimitExceeded { limit: 4 }
+    );
+
+    let looping = session.compile("loop {}");
+    let expr = looping.expr.expect("test source should have an expression");
+    let module = session.session().expect_fresh_module(looping.module_id);
+    let limits = ReferenceInterpreterLimits::default().with_fuel_limit(Some(0));
+    let mut ctx = EvalCtx::with_limits(looping.module_id, session.session(), limits);
+    let error = eval_node_with_ctx(&module.hir_arena, expr.expr, &mut ctx, &expr.locals)
+        .expect_err("looping HIR execution must consume the configured fuel");
+    assert_eq!(error.kind(), RuntimeErrorKind::FuelExhausted);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn recursive_execution_errors() {
     let mut session = TestSession::new();
     use RuntimeErrorKind::*;
@@ -2406,7 +2436,7 @@ fn productive_recursive_returns_are_not_defaulted_to_never() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn stack_limit_exceeded() {
+fn environment_cell_limit_exceeded() {
     let mut session = TestSession::new();
     let module_and_expr = session.compile("fn f() { let a = 1; let b = 2; b } f()");
     let expr = module_and_expr
@@ -2415,16 +2445,17 @@ fn stack_limit_exceeded() {
     let module = session
         .session()
         .expect_fresh_module(module_and_expr.module_id);
-    let mut ctx = EvalCtx::new(module_and_expr.module_id, session.session());
-    ctx.stack_limit = 1;
+    let limits = ReferenceInterpreterLimits::default().with_environment_cell_limit(1);
+    let mut ctx = EvalCtx::with_limits(module_and_expr.module_id, session.session(), limits);
 
     let error = eval_node_with_ctx(&module.hir_arena, expr.expr, &mut ctx, &expr.locals)
-        .expect_err("evaluation should exceed the stack limit");
+        .expect_err("evaluation should exceed the environment-cell limit");
 
     assert_eq!(
         error.kind(),
-        RuntimeErrorKind::StackLimitExceeded { limit: 1 }
+        RuntimeErrorKind::EnvironmentCellLimitExceeded { limit: 1 }
     );
+    assert!(!ctx.is_poisoned());
     assert_eq!(ctx.environment.len(), 0);
     assert_eq!(ctx.call_depth, 0);
 }

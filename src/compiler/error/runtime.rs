@@ -15,16 +15,27 @@ use crate::parser::location::{Location, SourceTable};
 
 use super::MutabilityMustBeContext;
 
-/// Runtime error
+/// The summary kind of a runtime failure, cancellation, or hard abort.
+///
+/// `Fallible` language operations participate in the function ABI, while call-depth, environment,
+/// and fuel exhaustion cancel execution out of band and are not source effects. The full
+/// [`crate::eval::RuntimeError::HardAbort`] retains both the initial and cleanup failures; this enum
+/// exposes `HardAbort` as its stable summary kind.
 
 #[derive(Debug, Clone, PartialEq, Eq, EnumAsInner)]
 pub enum RuntimeErrorKind {
+    /// Recovery from an earlier failure itself failed, poisoning this executor.
+    HardAbort,
     Aborted(Option<String>),
     DivisionByZero,
     RemainderByZero,
     InvalidArgument(String),
-    CallDepthLimitExceeded { limit: usize },
-    StackLimitExceeded { limit: usize },
+    CallDepthLimitExceeded {
+        limit: usize,
+    },
+    EnvironmentCellLimitExceeded {
+        limit: usize,
+    },
     FuelExhausted,
 }
 
@@ -32,6 +43,7 @@ impl Display for RuntimeErrorKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use RuntimeErrorKind::*;
         match self {
+            HardAbort => write!(f, "Hard abort while unwinding an earlier failure"),
             Aborted(msg) => match msg {
                 Some(msg) => write!(f, "Aborted: {msg}"),
                 None => write!(f, "Aborted"),
@@ -42,11 +54,26 @@ impl Display for RuntimeErrorKind {
             CallDepthLimitExceeded { limit } => {
                 write!(f, "Call depth limit exceeded: limit is {limit}")
             }
-            StackLimitExceeded { limit } => {
-                write!(f, "Stack limit exceeded: limit is {limit}")
+            EnvironmentCellLimitExceeded { limit } => {
+                write!(
+                    f,
+                    "Interpreter environment cell limit exceeded: limit is {limit}"
+                )
             }
             FuelExhausted => write!(f, "Execution fuel exhausted"),
         }
+    }
+}
+
+impl RuntimeErrorKind {
+    /// Whether this failure was imposed by the executor rather than declared by Ferlium code.
+    pub fn is_execution_cancellation(&self) -> bool {
+        matches!(
+            self,
+            Self::CallDepthLimitExceeded { .. }
+                | Self::EnvironmentCellLimitExceeded { .. }
+                | Self::FuelExhausted
+        )
     }
 }
 

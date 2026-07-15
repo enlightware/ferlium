@@ -630,7 +630,7 @@ impl<'m> ModuleEnv<'m> {
             .and_then(|(_, entry)| entry.generic_params.is_empty().then_some(entry.ty)))
     }
 
-    /// Like [`type_alias_type`], but also returns the source [`ModuleId`] when the alias
+    /// Like [`Self::type_alias_type`], but also returns the source [`ModuleId`] when the alias
     /// is defined in another module (`None` means it belongs to the current module).
     /// Returns the full [`TypeAliasEntry`] to support generic aliases.
     pub fn type_alias_with_module<'a>(
@@ -855,7 +855,7 @@ impl<'m> ModuleEnv<'m> {
         }))
     }
 
-    /// Like [`type_def_type`], but also returns the source [`ModuleId`] when the type
+    /// Like [`Self::type_def_type`], but also returns the source [`ModuleId`] when the type
     /// is defined in another module (`None` means it belongs to the current module).
     pub fn type_def_type_with_module(
         &self,

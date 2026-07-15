@@ -12,7 +12,8 @@ use std::sync::LazyLock;
 use crate::{
     CompilationError, CompilerSession, FxHashMap, FxHashSet, ModuleAndExpr, ModuleEnv, Path,
     SourceId, call_fn,
-    eval::{DEFAULT_INTERACTIVE_FUEL_LIMIT, EvalCtx, eval_node_with_ctx},
+    eval::{EvalCtx, eval_node_with_ctx},
+    execution::{DEFAULT_INTERACTIVE_FUEL_LIMIT, ReferenceInterpreterLimits},
     format::FormatWith,
     hir::value::{NativeValue, Value},
     module::Uses,
@@ -150,8 +151,9 @@ impl Compiler {
             }
             let value = {
                 let module = self.session.expect_fresh_module(module_id);
-                let mut ctx = EvalCtx::new(module_id, &self.session);
-                ctx.set_fuel_limit(self.execution_fuel_limit);
+                let limits = ReferenceInterpreterLimits::default()
+                    .with_fuel_limit(self.execution_fuel_limit);
+                let mut ctx = EvalCtx::with_limits(module_id, &self.session, limits);
                 eval_node_with_ctx(&module.hir_arena, expr.expr, &mut ctx, &expr.locals)
             };
             match value {
@@ -177,7 +179,7 @@ impl Compiler {
                     ExecutionResult::success(output)
                 }
                 Err(error) => {
-                    let summary = error.kind.to_string();
+                    let summary = error.kind().to_string();
                     let complete = format!(
                         "{}",
                         error.format_with(&(

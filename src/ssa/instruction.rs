@@ -22,7 +22,7 @@
 //! An instruction either defines a single result register (`InstructionResult` other than `Nothing`)
 //! or defines nothing; a result-less instruction's slot must never be read. Some kinds are
 //! *terminators* (`ret`, `br`, `condbr`, `invoke`, `resume`, and fallible runtime checks, as
-//! classified by [`InstructionKind::is_terminator`]): a terminator appears exactly once, as the
+//! classified by `InstructionKind::is_terminator`): a terminator appears exactly once, as the
 //! last instruction of its block, and
 //! every other instruction is a non-terminator. These structural invariants are verified per function
 //! by the interpreter (see `Interpreter::verify_function`).
@@ -64,6 +64,52 @@ impl Instruction {
     /// Returns `true` iff `self` is a terminator.
     pub fn is_terminator(&self) -> bool {
         self.kind.is_terminator()
+    }
+
+    /// Returns whether executing this instruction can leave normally sequenced control without
+    /// carrying an explicit unwind successor of its own.
+    ///
+    /// This includes both language failure from non-call-shaped operations and out-of-band execution
+    /// cancellation such as reference-interpreter storage exhaustion. Keeping the classification
+    /// here makes adding an instruction an exhaustive decision: SSA lowering can attach the current
+    /// cleanup landing pad wherever one is required without changing the instruction's normal ABI.
+    pub fn may_raise_implicitly(&self) -> bool {
+        use InstructionKind::*;
+
+        match self.kind {
+            Alloca { .. }
+            | AllocaPlace { .. }
+            | Call
+            | Project { .. }
+            | EndProject
+            | Load
+            | DictEntry { .. }
+            | SubscriptMember { .. }
+            | Store
+            | Memcpy
+            | Move
+            | Drop
+            | BuildClosure { .. }
+            | CloneClosureEnv { .. }
+            | DropClosureEnv => true,
+
+            Invoke { .. }
+            | Resume
+            | Yield
+            | CompareEqual
+            | ConditionalBranch { .. }
+            | UnconditionalBranch { .. }
+            | Subfield { .. }
+            | BuildSubscript { .. }
+            | Ret
+            | Variant { .. }
+            | ExtractTag
+            | Clear
+            | StackSave
+            | StackRestore
+            | CheckCallDepth { .. }
+            | CheckFuel { .. } => false,
+        }
     }
 
     /// Verifies the structural contract of this instruction in isolation (the operand **arity**, and
@@ -154,7 +200,7 @@ impl Instruction {
         }
     }
 
-    /// Creates an `invoke` instruction: a *fallible* call that, on a raised [`RuntimeError`], diverts
+    /// Creates an `invoke` instruction: a source-level *fallible* call that, on failure, diverts
     /// control to the `unwind` cleanup landing pad instead of propagating straight out of the frame.
     ///
     /// A terminator with two successors (the SSA analog of LLVM `invoke`): on normal completion
@@ -162,10 +208,10 @@ impl Instruction {
     /// call); on a raised error it transfers to `unwind` (a pad block that drops the frame's still-live
     /// locals and then `br`s to an enclosing pad or `resume`s). The operand layout is identical to
     /// [`call`](Self::call) (`[callee, args.., ret-out]`) and the callee contract is the same; only
-    /// *fallible* calls that have cleanup to run on the error path are lowered as `invoke` — an
-    /// infallible call, or one with nothing to clean up in its frame, stays a plain [`call`](Self::call).
-    ///
-    /// [`RuntimeError`]: crate::eval::RuntimeError
+    /// *fallible* calls that have cleanup to run on the error path are lowered as `invoke` — a
+    /// source-level infallible call, or one with nothing to clean up in its frame, stays a plain
+    /// [`call`](Self::call). A plain call can separately carry a function-level implicit unwind edge
+    /// for out-of-band execution cancellation.
     pub fn invoke<T: IntoIterator<Item = ssa::Value>>(
         span: Location,
         callee: ssa::Value,
@@ -187,11 +233,13 @@ impl Instruction {
     /// up the stack.
     ///
     /// Named after LLVM's `resume` (the third of `invoke`/`landingpad`/`resume`). It is not a *throw*:
-    /// the error was already raised — by the original fallible call — and is merely *paused* while the
-    /// pad runs the frame's drops. `resume` lifts that pause. A terminator with no successors (like
-    /// [`ret`](Self::ret)): it is the last instruction of an outermost cleanup pad, reached after that
-    /// pad and the pads it chains from have dropped the frame's live locals. The caller's
-    /// [`invoke`](Self::invoke) at the originating call site catches the resumed error and routes it
+    /// the error was already raised — by a language failure or execution cancellation — and is
+    /// merely *paused* while the pad runs the frame's drops. `resume` lifts that pause. A terminator
+    /// with no successors (like [`ret`](Self::ret)): it is the last instruction of an outermost
+    /// cleanup pad, reached after that pad and the pads it chains from have successfully dropped the
+    /// frame's live locals. If a drop raises, hard abort occurs instead and `resume` is not reached.
+    /// The caller's
+    /// explicit or implicit exceptional edge at the originating call site routes the resumed error
     /// into the caller's own pad — giving the cross-frame unwind.
     ///
     /// [`RuntimeError`]: crate::eval::RuntimeError
@@ -345,8 +393,8 @@ impl Instruction {
         }
     }
 
-    /// Creates a `subscript_member` instruction: the member-resolving analog of [`dict_entry`]
-    /// (Instruction::dict_entry) for a first-class subscript.
+    /// Creates a `subscript_member` instruction: the member-resolving analog of
+    /// [`Instruction::dict_entry`] for a first-class subscript.
     ///
     /// `subscript` is a symbolic subscript operand (a constant [`ssa::Value::Subscript`] or a
     /// forwarded evidence `Parameter`). The instruction yields the **place** of the subscript's
@@ -478,11 +526,7 @@ impl Instruction {
     }
 
     /// Creates a fuel guard with explicit normal and unwind successors.
-    pub fn invoke_check_fuel(
-        span: Location,
-        normal: ssa::BlockId,
-        unwind: ssa::BlockId,
-    ) -> Self {
+    pub fn invoke_check_fuel(span: Location, normal: ssa::BlockId, unwind: ssa::BlockId) -> Self {
         Instruction {
             span,
             operands: Box::new([]),
@@ -657,7 +701,7 @@ pub enum InstructionKind {
     AllocaPlace { pointing_to: Type },
     /// A statically or dynamically resolved function call.
     Call,
-    /// A fallible call with normal and unwind successors.
+    /// A source-level fallible call with normal and unwind successors.
     Invoke {
         normal: ssa::BlockId,
         unwind: ssa::BlockId,

@@ -35,3 +35,14 @@ The main phases are:
 10. Execute final HIR through the tree-walking interpreter, or lower it to SSA and execute it through the SSA reference interpreter.
 
 Future backend work may lower SSA to WebAssembly, bytecode, JIT, or native code.
+
+HIR and SSA interpretation use the same `ExecutionLimits` configuration for call depth and fuel.
+Their `ReferenceInterpreterLimits` additionally cap entries in the boxed interpreters' shared
+evaluation environment. This bounds interpreter storage roots rather than their indirectly-owned
+heap allocation and is therefore not presented as a backend-neutral or byte-accurate memory budget.
+A limit violation is host-enforced execution cancellation, not a source `Fallible` effect; normal
+function ABI and cancellation propagation are separate concerns. If semantic cleanup itself raises
+while a failure or cancellation is already unwinding, both reference interpreters hard-abort and
+poison the executor as specified in [runtime-sandboxing.md](runtime-sandboxing.md).
+A future common memory policy should account for actual runtime allocation independently of backend
+representation.

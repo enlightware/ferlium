@@ -35,7 +35,10 @@ use rustyline::DefaultEditor;
 use rustyline::{config::Configurer, error::ReadlineError};
 use ustr::ustr;
 
-use ferlium::eval::{DEFAULT_INTERACTIVE_FUEL_LIMIT, EvalCtx, eval_node_with_ctx};
+use ferlium::{
+    eval::{EvalCtx, eval_node_with_ctx},
+    execution::{DEFAULT_INTERACTIVE_FUEL_LIMIT, ReferenceInterpreterLimits},
+};
 
 /// A wrapper around location to implement ariadne::Span
 #[derive(Debug, Clone, Copy)]
@@ -604,8 +607,8 @@ fn process_input(
     if let Some(expr) = expr {
         // Evaluate expression
         let result = {
-            let mut eval_ctx = EvalCtx::new(module_id, session);
-            eval_ctx.set_fuel_limit(fuel_limit);
+            let limits = ReferenceInterpreterLimits::default().with_fuel_limit(fuel_limit);
+            let mut eval_ctx = EvalCtx::with_limits(module_id, session, limits);
             let arena = &eval_ctx
                 .compiler_session()
                 .expect_fresh_module(module_id)

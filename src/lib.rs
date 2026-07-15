@@ -17,6 +17,7 @@ pub mod containers;
 mod desugar;
 pub mod emit_ssa;
 pub mod eval;
+pub mod execution;
 pub mod format;
 mod graph;
 pub mod hir;

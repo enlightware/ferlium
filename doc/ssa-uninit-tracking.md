@@ -2,7 +2,8 @@
 
 SSA registers always contain values. Addressable storage is different: a local, temporary, return
 slot, or aggregate field may be absent because it has not been initialized yet, has been moved, or
-has already been dropped. Cleanup must test that state so every live value is dropped exactly once.
+has already been dropped. Cleanup must test that state so every live value is dropped at most once
+and, when semantic unwind completes, every still-live value is dropped.
 
 This is an ownership property of storage, not a source-language `Option<T>`, and absence is not an
 `ssa::Value` operand. The SSA instructions make the relevant transitions explicit:
@@ -59,16 +60,20 @@ The same storage state is part of the SSA call contract:
 - a return out-pointer is absent on entry and present after a normal value return;
 - a `let` argument is a present snapshot/borrow that the callee does not consume;
 - a mutable-reference argument is present before and after the call;
-- an unwind path leaves an unproduced return slot absent and runs guarded cleanup for every live
-  local and temporary.
+- an unwind path leaves an unproduced return slot absent and attempts guarded cleanup for every live
+  local and temporary; if cleanup itself raises, hard abort stops semantic cleanup and raw
+  reclamation consumes the remaining initialized storage.
 
-Fallible calls and runtime fuel/call-depth checks use explicit unwind edges when cleanup is pending.
+Fallible calls and runtime fuel/call-depth checks use explicit successor edges when cleanup is
+pending. Other potentially raising instructions use the function's sparse implicit unwind
+table, including resource-limited allocation and scoped-accessor ramp/slide execution.
 See `doc/ssa-ir.md` for the instruction and boundary contracts.
 
 ## Validation
 
 The interpreter asserts that storage-only operations do not hide ownership mistakes: overwriting,
 clearing, or reclaiming a cell that still owns resources is a lowering bug. Language tests then run
-each compiled expression through both the HIR and SSA interpreters and compare successful values or
-runtime-error kinds. Dedicated SSA tests additionally cover partial initialization, empty aggregates,
-and cleanup on runtime-resource exhaustion.
+each compiled expression through both the HIR and SSA interpreters and compare successful values,
+ordinary runtime-error kinds, and the two retained cause kinds of hard aborts. Dedicated SSA tests
+additionally cover partial initialization, empty aggregates, recoverable cleanup on runtime-resource
+exhaustion, and hard-abort reclamation when that cleanup also fails.

@@ -66,7 +66,8 @@ read. Values live in registers or in storage reached through a *place*.
   non-empty and terminated; reachability is a separate, unchecked property.)
 - The terminators are `ret`, `br`, `condbr`, `invoke`, `resume`, and the unwind-capable forms of the
   runtime checks (classified exhaustively by `InstructionKind::is_terminator`).
-- Every branch target (`br`/`condbr`/`invoke` successor) names an existing block of the same function.
+- Every branch target (`br`/`condbr`/`invoke` successor, runtime-check successor, and sparse
+  implicit-unwind-table target) names an existing block of the same function.
 
 These are exactly what `verify_function` asserts (every block non-empty; terminator-iff-last; targets
 valid), in addition to running each instruction's own `verify`.
@@ -196,13 +197,20 @@ count. Roles: **p** = place, **v** = value, **d** = dictionary, **m** = stack ma
 | `condbr cond, bN, bM` ★ | `[cond:v(bool)]` | — | `n == 1`. |
 | `resume` ★ | — | — | `n == 0`; continues the unwind a cleanup pad interrupted, handing the in-flight error to the caller (not a fresh throw). Terminates an outermost pad. |
 
+Instructions without explicit unwind successors may have an entry in the function's sparse
+implicit unwind table. The entry is an exceptional CFG edge to a cleanup pad; it covers
+resource failures and fallible scoped-accessor ramps/slides without adding fields to every
+instruction. Cleanup instructions inside a landing pad have no further unwind entry: if one raises
+while the original error is pending, execution hard-aborts. See
+[ssa-error-propagation.md](ssa-error-propagation.md).
+
 ### Scoped (`YieldedOnce`) subscripts
 
 | Instr | Operands | Result | Invariant |
 |-------|----------|--------|-----------|
-| `project` | `[callee, args..]` (as `call`, **no** ret-out) | place `*ty` (the yielded place) | `n ≥ 1`; runs the accessor to its `yield`, keeping the frame suspended, and exposes the yielded place as its result register. |
+| `project` | `[callee, args..]` (as `call`, **no** ret-out) | place `*ty` (the yielded place) | `n ≥ 1`; runs the accessor ramp to its `yield`, keeping the frame suspended, and exposes the yielded place as its result register. A ramp error follows the instruction's sparse unwind edge when caller cleanup is live. |
 | `yield` | `[place:p]` | — | `n == 1`; inside the accessor body — exposes the place to the driving `project` and suspends the frame. The instructions after it are the *slide* (epilogue), reached only on resume. |
-| `end_project` | `[place:p]` (the `project` result) | — | `n == 1`; resumes the suspended accessor's slide and reclaims its frame. Distinct from the unwind `resume`. Runs on the normal exit **and** in the cleanup pad (slide-on-error). |
+| `end_project` | `[place:p]` (the `project` result) | — | `n == 1`; resumes the suspended accessor's slide and reclaims its frame. Distinct from the unwind `resume`. Runs on the normal exit **and** in the cleanup pad (slide-on-error). A primary slide error follows its sparse unwind edge; a slide error during an active unwind hard-aborts. |
 
 ### Cleanup
 
@@ -245,5 +253,6 @@ the undefined behavior such IR would cause in a real backend.
 
 In addition, the language-test harness executes each compiled expression with both the HIR tree
 interpreter and the SSA interpreter. It compares typed results on success and runtime-error kinds on
-failure. SSA-only tests pin textual IR shape, configurable resource limits, and storage invariants
-that are not directly observable in a source result.
+ordinary failure; for hard abort it additionally compares both retained cause kinds. SSA-only tests
+pin textual IR shape, configurable resource limits, and storage invariants that are not directly
+observable in a source result.

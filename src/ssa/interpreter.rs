@@ -2,7 +2,7 @@
 //!
 //! The interpreter exists to check that `emit_ssa` lowers HIR to *semantically correct* SSA: it
 //! runs a lowered [`ssa::Function`] and produces the value the function computes. It reuses the HIR
-//! interpreter's memory substrate — an SSA *place* (pointer) is an [`eval::Place`] and the heap is
+//! interpreter's memory substrate — an SSA *place* (pointer) is a [`Place`] and the heap is
 //! the [`EvalCtx`]'s `environment`. Native (std) callees are delegated to the HIR interpreter; SSA
 //! (script) callees are interpreted recursively so their own lowering is exercised too.
 
@@ -18,6 +18,7 @@ use crate::{
         ControlFlow, EvalCtx, Place, PlaceResult, RuntimeError, ValOrMut,
         call_value_clone_for_temp, call_value_drop_for_temp,
     },
+    execution::ReferenceInterpreterLimits,
     hir::{
         function::{ArgConvention, copy_boxed_trivial_copy_native},
         value::{FunctionValue, HiddenEvidenceArgValue, LiteralValue, SubscriptValue, Value},
@@ -78,17 +79,26 @@ enum Step {
     /// Resume the unwind that this frame's cleanup pad interrupted: hand the in-flight error back to
     /// the caller so propagation continues up the stack.
     ///
-    /// When a fallible call raises, the error does not leave the frame immediately — control is first
-    /// diverted to a cleanup pad (the `invoke`'s unwind edge) which runs the frame's drops. That pad
+    /// When a language failure or execution cancellation reaches a cleanup edge, the error does not
+    /// leave the frame immediately: control first enters a pad that runs the frame's drops. That pad
     /// has *paused* the unwind. After the drops, this step (the pad's `resume` terminator) lets it
     /// continue: the same error — stashed when control entered the pad — is returned to the caller,
-    /// which catches it at the originating call site and runs its own pad. The error is *continued*,
-    /// not newly raised, which is why it is `resume` and not a throw.
+    /// whose explicit or implicit call-site edge can run its own pad. The error is *continued*, not
+    /// newly raised, which is why it is `resume` and not a throw.
     Resume,
     /// Suspend the current frame at a `yield`, exposing the carried place to the driving `project`.
     /// The frame's registers and stack cells stay live; `end_project` later resumes it (mirrors the
     /// HIR interpreter's `ControlTransfer::Yield`).
     Suspend(Place),
+}
+
+/// Why a frame's register map is being reclaimed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FrameBindingExit {
+    /// Normal `ret`: any resource-owning register would be a lowering bug.
+    Completed,
+    /// Ordinary error propagation: partially constructed register values may be abandoned.
+    OrdinaryError,
 }
 
 /// The outcome of running a frame's instruction loop ([`Interpreter::run_loop`]): it either ran to a
@@ -155,33 +165,37 @@ pub struct Interpreter<'a> {
 impl<'a> Interpreter<'a> {
     /// Creates an interpreter whose initial module context is `module_id`.
     pub fn new(module_id: ModuleId, session: &'a CompilerSession) -> Self {
+        Self::with_limits(module_id, session, ReferenceInterpreterLimits::default())
+    }
+
+    /// Creates an interpreter with backend-independent execution limits.
+    pub fn with_limits(
+        module_id: ModuleId,
+        session: &'a CompilerSession,
+        limits: ReferenceInterpreterLimits,
+    ) -> Self {
         Self {
-            ctx: EvalCtx::new(module_id, session),
+            ctx: EvalCtx::with_limits(module_id, session, limits),
             session,
             cache: FxHashMap::default(),
         }
     }
 
-    /// Sets the maximum number of simultaneously active script frames.
-    pub fn set_call_depth_limit(&mut self, limit: usize) {
-        assert!(limit > 0, "call-depth limit must be positive");
-        self.ctx.call_depth_limit = limit;
-    }
-
-    /// Enables fuel accounting with `limit` remaining loop/back-edge checks, or disables it with
-    /// `None`.
-    pub fn set_fuel_limit(&mut self, limit: Option<usize>) {
-        self.ctx.set_fuel_limit(limit);
+    /// Whether a failure during semantic unwind made this interpreter unsafe to re-enter.
+    pub fn is_poisoned(&self) -> bool {
+        self.ctx.is_poisoned()
     }
 
     /// Runs the no-argument entry function `main_id` of `module_id` and returns its result value, or
-    /// the [`RuntimeError`] it raised. A raised error has already unwound the callee's frames through
-    /// their cleanup pads (dropping live locals), so propagating it here leaks nothing live.
+    /// the [`RuntimeError`] it raised. An ordinary error has already unwound the callee's frames
+    /// through their cleanup pads; a hard abort has instead reclaimed all known interpreter-owned
+    /// roots without running further Ferlium cleanup.
     pub fn run_main(
         &mut self,
         module_id: ModuleId,
         main_id: LocalFunctionId,
     ) -> Result<Value, RuntimeError> {
+        self.ctx.ensure_runnable()?;
         let key = FunctionKey {
             module: module_id,
             identity: main_id,
@@ -205,7 +219,7 @@ impl<'a> Interpreter<'a> {
             .ret;
         let entry_top = self.ctx.environment.len();
         let init = self.shaped_uninitialized_value(ret_ty);
-        let ret = self.alloc_cell(init);
+        let ret = self.alloc_cell(init, Location::new_synthesized())?;
         if let Err(error) = self.run_function(key, vec![Binding::Place(ret.clone())]) {
             self.reclaim_frame_storage(entry_top);
             return Err(error);
@@ -291,18 +305,43 @@ impl<'a> Interpreter<'a> {
         let mut pending: Option<RuntimeError> = None;
         loop {
             let i = instructions[idx];
-            match self.exec(func, &mut slots, &mut pending, i)? {
+            let step = match self.exec(func, &mut slots, &mut pending, i) {
+                Ok(step) => step,
+                Err(error) => {
+                    if error.is_hard_abort() {
+                        self.discard_bindings_after_hard_abort(slots);
+                        return Err(error);
+                    }
+                    if let Some(initial) = pending.take() {
+                        let error = self.ctx.poison(initial, error);
+                        self.discard_bindings_after_hard_abort(slots);
+                        return Err(error);
+                    }
+                    let Some(unwind) = func.implicit_unwind_target(i) else {
+                        self.discard_inactive_bindings(slots, FrameBindingExit::OrdinaryError);
+                        return Err(error);
+                    };
+                    pending = Some(error);
+                    Step::Goto(unwind)
+                }
+            };
+            match step {
                 Step::Advance => idx += 1,
                 Step::Goto(b) => {
                     block = b;
                     instructions = func.block(block).instructions().collect();
                     idx = 0;
                 }
-                Step::Return => return Ok(FrameOutcome::Completed),
+                Step::Return => {
+                    self.discard_inactive_bindings(slots, FrameBindingExit::Completed);
+                    return Ok(FrameOutcome::Completed);
+                }
                 Step::Resume => {
-                    return Err(pending
+                    let error = pending
                         .take()
-                        .expect("resume reached without an in-flight error"));
+                        .expect("resume reached without an in-flight error");
+                    self.discard_inactive_bindings(slots, FrameBindingExit::OrdinaryError);
+                    return Err(error);
                 }
                 // Suspend at the `yield`: hand back the live frame and the resume point (the
                 // instruction right after the `yield`) for a later `end_project`.
@@ -332,12 +371,12 @@ impl<'a> Interpreter<'a> {
         Ok(match &instr.kind {
             InstructionKind::Alloca { ty } => {
                 let init = self.shaped_uninitialized_value(*ty);
-                let place = self.alloc_cell(init);
+                let place = self.alloc_cell(init, span)?;
                 slots.insert(def.unwrap(), Binding::Place(place));
                 Step::Advance
             }
             InstructionKind::AllocaPlace { .. } => {
-                let place = self.alloc_cell(Value::uninit());
+                let place = self.alloc_cell(Value::uninit(), span)?;
                 slots.insert(def.unwrap(), Binding::Place(place));
                 Step::Advance
             }
@@ -346,11 +385,17 @@ impl<'a> Interpreter<'a> {
                 Step::Advance
             }
             InstructionKind::DictEntry { entry_index, .. } => {
-                self.exec_dict_entry(slots, &instr.operands, def.unwrap(), *entry_index);
+                self.exec_dict_entry(slots, &instr.operands, def.unwrap(), *entry_index, span)?;
                 Step::Advance
             }
             InstructionKind::SubscriptMember { mut_member, .. } => {
-                self.exec_subscript_member(slots, &instr.operands, def.unwrap(), *mut_member);
+                self.exec_subscript_member(
+                    slots,
+                    &instr.operands,
+                    def.unwrap(),
+                    *mut_member,
+                    span,
+                )?;
                 Step::Advance
             }
             InstructionKind::BuildSubscript { .. } => {
@@ -423,6 +468,12 @@ impl<'a> Interpreter<'a> {
                 match self.exec_call(slots, &instr.operands, span) {
                     Ok(()) => Step::Goto(*normal),
                     Err(err) => {
+                        if err.is_hard_abort() {
+                            return Err(err);
+                        }
+                        if let Some(initial) = pending.take() {
+                            return Err(self.ctx.poison(initial, err));
+                        }
                         *pending = Some(err);
                         Step::Goto(*unwind)
                     }
@@ -502,6 +553,12 @@ impl<'a> Interpreter<'a> {
                 Ok(successors.map_or(Step::Advance, |(normal, _)| Step::Goto(normal)))
             }
             Err(error) => {
+                if error.is_hard_abort() {
+                    return Err(error);
+                }
+                if let Some(initial) = pending.take() {
+                    return Err(self.ctx.poison(initial, error));
+                }
                 if let Some((_, unwind)) = successors {
                     *pending = Some(error);
                     Ok(Step::Goto(unwind))
@@ -543,7 +600,8 @@ impl<'a> Interpreter<'a> {
         operands: &[ssa::Value],
         def: ssa::Value,
         entry_index: TraitDictionaryEntryIndex,
-    ) {
+        span: Location,
+    ) -> Result<(), RuntimeError> {
         let id = self.dict_operand(slots, &operands[0]);
         let entry = self.ctx.dictionary_value(id).entry(entry_index);
         let value = match entry {
@@ -552,8 +610,9 @@ impl<'a> Interpreter<'a> {
                 function,
             }),
         };
-        let place = self.alloc_cell(value);
+        let place = self.alloc_cell(value, span)?;
         slots.insert(def, Binding::Place(place));
+        Ok(())
     }
 
     /// Executes a `subscript_member` instruction: the member-resolving analog of `dict_entry` for
@@ -568,7 +627,8 @@ impl<'a> Interpreter<'a> {
         operands: &[ssa::Value],
         def: ssa::Value,
         mut_member: bool,
-    ) {
+        span: Location,
+    ) -> Result<(), RuntimeError> {
         let subscript = self.subscript_operand(slots, &operands[0]);
         let function = self
             .ctx
@@ -583,8 +643,9 @@ impl<'a> Interpreter<'a> {
                 None,
             ))
         };
-        let place = self.alloc_cell(value);
+        let place = self.alloc_cell(value, span)?;
         slots.insert(def, Binding::Place(place));
+        Ok(())
     }
 
     /// Executes a `build_subscript` instruction: bundles the base subscript with captured hidden
@@ -812,35 +873,42 @@ impl<'a> Interpreter<'a> {
             .expect_fresh_module(module)
             .get_function_by_id(identity)
             .expect("drop callee not found");
-        if f.code.as_script().is_some() {
+        let drop_result = if f.code.as_script().is_some() {
             // A script `Value::drop(&mut self)` in the uniform by-pointer ABI: `drop(self, ())`. Its
             // `()` out-pointer starts a husk like any `@ret`; the drop body writes it (discarded after).
-            let unit_ret = self.alloc_cell(Value::uninit());
-            self.run_function(
-                FunctionKey { module, identity },
-                vec![Binding::Place(target.clone()), Binding::Place(unit_ret)],
-            )?;
+            match self.alloc_cell(Value::uninit(), span) {
+                Ok(unit_ret) => self.run_function(
+                    FunctionKey { module, identity },
+                    vec![Binding::Place(target.clone()), Binding::Place(unit_ret)],
+                ),
+                Err(error) => Err(error),
+            }
         } else {
             // Delegate to the HIR interpreter with the callee's module given explicitly; the
             // delegate rotates its own ambient module internally, so the SSA interpreter never
             // touches `ctx.module_id` (its IR is fully module-resolved).
-            let result = self.ctx.call_resolved_function_with_extra(
-                FunctionId {
-                    module,
-                    function: identity,
-                },
-                vec![],
-                vec![ValOrMut::Mut(target.clone())],
-                span,
-            );
-            match result? {
-                ControlFlow::Continue(v) => v.discard_storage(),
-                ControlFlow::Transfer(_) => panic!("unexpected control transfer from a drop"),
-            }
-        }
-        // Mark the storage uninitialized so it is never dropped or read again, but preserve the
-        // aggregate *skeleton* (a `Tuple` of `Uninit` leaves) so the storage can be reinitialized
-        // field-by-field via `project`/`store` (as in `p = ...` reassignment).
+            self.ctx
+                .call_resolved_function_with_extra(
+                    FunctionId {
+                        module,
+                        function: identity,
+                    },
+                    vec![],
+                    vec![ValOrMut::Mut(target.clone())],
+                    span,
+                )
+                .map(|result| match result {
+                    ControlFlow::Continue(v) => v.discard_storage(),
+                    ControlFlow::Transfer(_) => {
+                        panic!("unexpected control transfer from a drop")
+                    }
+                })
+        };
+
+        // Once a semantic-drop action starts, its target lifetime has ended even if the call
+        // raises before entering the body: the value may already be partially destroyed and must
+        // never be observed or retried. Preserve only the aggregate skeleton so assignment can
+        // reinitialize it field by field.
         let slot = target
             .target_mut(&mut self.ctx)
             .expect("drop target must be addressable");
@@ -850,7 +918,7 @@ impl<'a> Interpreter<'a> {
             .target_mut(&mut self.ctx)
             .expect("drop target must be addressable") = skeleton;
         husk.discard_storage();
-        Ok(())
+        drop_result
     }
 
     /// Executes a `call` instruction whose operands are `[callee, args.., return-out-pointer]`.
@@ -943,9 +1011,12 @@ impl<'a> Interpreter<'a> {
                 for arg in &hidden_args {
                     leading.push(match arg {
                         HiddenEvidenceArgValue::TraitDictionary(id) => Binding::Dictionary(*id),
-                        HiddenEvidenceArgValue::Subscript(subscript) => Binding::Place(
-                            self.alloc_cell(Value::subscript_value(subscript.as_ref().clone())),
-                        ),
+                        HiddenEvidenceArgValue::Subscript(subscript) => {
+                            Binding::Place(self.alloc_cell(
+                                Value::subscript_value(subscript.as_ref().clone()),
+                                span,
+                            )?)
+                        }
                     });
                 }
                 (
@@ -1048,7 +1119,7 @@ impl<'a> Interpreter<'a> {
         args.extend(leading);
         for (k, op) in arg_ops.iter().enumerate() {
             let binding = match param_tags.get(offset + k) {
-                Some(ssa::ParameterTag::Dictionary) => self.evidence_binding(slots, op),
+                Some(ssa::ParameterTag::Dictionary) => self.evidence_binding(slots, op, span)?,
                 _ => Binding::Place(self.place_operand(slots, op)),
             };
             args.push(binding);
@@ -1058,7 +1129,7 @@ impl<'a> Interpreter<'a> {
         // place out-slot and bind the returned place directly; its `end_project` is then a no-op
         // (an addressor has no slide). A `YieldedOnce` member runs to its `yield` below.
         if convention.returns_place() {
-            let out = self.alloc_cell(Value::uninit());
+            let out = self.alloc_cell(Value::uninit(), span)?;
             args.push(Binding::Place(out.clone()));
             self.run_function(key, args)?;
             let place = self
@@ -1111,6 +1182,7 @@ impl<'a> Interpreter<'a> {
             }
             Err(err) => {
                 self.ctx.call_depth -= 1;
+                self.reclaim_frame_storage(frame_top);
                 Err(err)
             }
         }
@@ -1256,7 +1328,9 @@ impl<'a> Interpreter<'a> {
                     // `Dictionary` tag, so the operand disambiguates them. A non-extra
                     // (visible/return) parameter is always a by-pointer place, never reinterpreted
                     // as a dictionary.
-                    Some(ssa::ParameterTag::Dictionary) => self.evidence_binding(slots, op),
+                    Some(ssa::ParameterTag::Dictionary) => {
+                        self.evidence_binding(slots, op, span)?
+                    }
                     _ => Binding::Place(self.place_operand(slots, op)),
                 };
                 args.push(binding);
@@ -1420,7 +1494,8 @@ impl<'a> Interpreter<'a> {
                     leading.push(Binding::Dictionary(*id));
                 }
                 HiddenEvidenceArgValue::Subscript(subscript) => {
-                    let place = self.alloc_cell(Value::subscript_value(subscript.as_ref().clone()));
+                    let place =
+                        self.alloc_cell(Value::subscript_value(subscript.as_ref().clone()), span)?;
                     leading.push(Binding::Place(place));
                 }
             }
@@ -1428,6 +1503,9 @@ impl<'a> Interpreter<'a> {
 
         // Clone the captured environment into a fresh environment temporary. `env_ptr` points into
         // the closure's heap box (stable across `environment` growth).
+        // Check before cloning so a limit failure cannot leave a freshly cloned managed
+        // environment requiring semantic cleanup outside SSA's explicit drop path.
+        self.check_environment_cell_capacity(span)?;
         let cloned_env = match env_dict {
             // SAFETY: `env_ptr` targets the closure's environment, which lives in its heap box (stable
             // across `environment` growth) at `place`; `call_value_clone_for_temp` borrows `ctx`, and
@@ -1437,7 +1515,7 @@ impl<'a> Interpreter<'a> {
             }
             None => Value::uninit(),
         };
-        let env_idx = self.alloc_cell(cloned_env).target;
+        let env_idx = self.alloc_cell(cloned_env, span)?.target;
         for i in 0..env_len {
             leading.push(Binding::Place(Place {
                 target: env_idx,
@@ -1451,28 +1529,52 @@ impl<'a> Interpreter<'a> {
         // Drop the cloned environment temporary (running the captures' `Value::drop`), then reclaim
         // every cell allocated since the marker (the temporary's husk and the callee's frame). The
         // closure itself is left untouched in `place`.
-        let drop_result = match env_dict {
-            Some(dict) => {
-                let target = Place {
-                    target: env_idx,
-                    path: vec![],
-                };
-                match call_value_drop_for_temp(&mut self.ctx, dict, ValOrMut::Mut(target), span) {
-                    Ok(ControlFlow::Continue(v)) => {
-                        v.discard_storage();
-                        Ok(())
+        let drop_result = if call_result.as_ref().is_err_and(RuntimeError::is_hard_abort) {
+            self.discard_place_storage(&Place {
+                target: env_idx,
+                path: vec![],
+            });
+            Ok(())
+        } else {
+            match env_dict {
+                Some(dict) => {
+                    let target = Place {
+                        target: env_idx,
+                        path: vec![],
+                    };
+                    match call_value_drop_for_temp(
+                        &mut self.ctx,
+                        dict,
+                        ValOrMut::Mut(target.clone()),
+                        span,
+                    ) {
+                        Ok(ControlFlow::Continue(v)) => {
+                            v.discard_storage();
+                            Ok(())
+                        }
+                        Ok(ControlFlow::Transfer(_)) => {
+                            panic!("unexpected control transfer from a closure environment drop")
+                        }
+                        Err(err) => {
+                            // A failed semantic drop leaves its target live or partially dropped.
+                            // Reclaim the temporary's Rust backing storage explicitly before
+                            // `restore_stack`: the stack-restore assertion is reserved for genuine SSA
+                            // lowering leaks, not an already-observed cleanup failure.
+                            self.discard_place_storage(&target);
+                            Err(err)
+                        }
                     }
-                    Ok(ControlFlow::Transfer(_)) => {
-                        panic!("unexpected control transfer from a closure environment drop")
-                    }
-                    Err(err) => Err(err),
                 }
+                None => Ok(()),
             }
-            None => Ok(()),
         };
         self.restore_stack(marker);
 
-        call_result.and(drop_result)
+        match (call_result, drop_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Ok(()), Err(error)) | (Err(error), Ok(())) => Err(error),
+            (Err(initial), Err(during_cleanup)) => Err(self.ctx.poison(initial, during_cleanup)),
+        }
     }
 
     /// Builds a closure value from the target `function` and its `[hidden_dicts…, captures…,
@@ -1527,7 +1629,7 @@ impl<'a> Interpreter<'a> {
     }
 
     /// Deep-clones the captured environment of the closure at `operand`'s place, mirroring
-    /// [`eval::eval_clone_closure_env`], and returns the fresh closure value.
+    /// `eval::eval_clone_closure_env`, and returns the fresh closure value.
     fn exec_clone_closure_env(
         &mut self,
         slots: &FxHashMap<ssa::Value, Binding>,
@@ -1569,7 +1671,7 @@ impl<'a> Interpreter<'a> {
     }
 
     /// Drops the owned captured environment of the closure at `operand`'s place, mirroring
-    /// [`eval::eval_drop_closure_env`].
+    /// `eval::eval_drop_closure_env`.
     fn exec_drop_closure_env(
         &mut self,
         slots: &FxHashMap<ssa::Value, Binding>,
@@ -1703,14 +1805,27 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    /// Allocates a fresh heap cell initialized to `init` and returns the place denoting it.
-    fn alloc_cell(&mut self, init: Value) -> Place {
+    /// Allocates a fresh environment cell initialized to `init` and returns its place.
+    ///
+    /// On exhaustion, the current instruction's implicit unwind target runs the ordinary SSA
+    /// cleanup pads. Cleanup remains subject to the same quota; a secondary failure while dropping
+    /// hard-aborts the unwind, poisons the executor, and bypasses all remaining semantic cleanup.
+    fn alloc_cell(&mut self, init: Value, span: Location) -> Result<Place, RuntimeError> {
+        if let Err(error) = self.check_environment_cell_capacity(span) {
+            init.discard_storage();
+            return Err(error);
+        }
         let target = self.ctx.environment.len();
         self.ctx.environment.push(ValOrMut::Val(init));
-        Place {
+        Ok(Place {
             target,
             path: vec![],
-        }
+        })
+    }
+
+    fn check_environment_cell_capacity(&mut self, span: Location) -> Result<(), RuntimeError> {
+        self.ctx
+            .check_environment_cell_limit(self.ctx.environment.len(), Some(span))
     }
 
     /// Reclaims the interpreter backing storage of a completed or unwound script frame.
@@ -1722,6 +1837,81 @@ impl<'a> Interpreter<'a> {
     /// an explicit lowering contract.
     fn reclaim_frame_storage(&mut self, frame_top: usize) {
         self.ctx.truncate_environment_storage(frame_top);
+    }
+
+    /// Reclaims one place's boxed interpreter storage without running semantic `Value::drop`.
+    ///
+    /// This is the reference-interpreter form of abort reclamation: it is only used after semantic
+    /// cleanup has already failed, when retrying guest cleanup would be incorrect.
+    fn discard_place_storage(&mut self, place: &Place) {
+        let target = place
+            .target_mut(&mut self.ctx)
+            .expect("storage-reclamation target must be addressable");
+        let value = std::mem::replace(target, Value::uninit());
+        value.discard_storage();
+    }
+
+    /// Reclaims register-owned interpreter storage after a frame has become inactive.
+    ///
+    /// A completed frame may retain only resource-free SSA values; an owning value there means the
+    /// lowering omitted a semantic move or drop. An ordinary error may abandon a partially
+    /// constructed register value, so raw reclamation is allowed. Neither path may retain an open
+    /// projection: its accessor epilogue is semantic cleanup and must have run through an unwind
+    /// edge before the frame exits.
+    fn discard_inactive_bindings(
+        &mut self,
+        slots: FxHashMap<ssa::Value, Binding>,
+        exit: FrameBindingExit,
+    ) {
+        for binding in slots.into_values() {
+            match binding {
+                Binding::Value(value) => {
+                    debug_assert!(
+                        exit == FrameBindingExit::OrdinaryError || is_reclaimable(&value),
+                        "SSA completed a frame with a resource-owning register value; the lowering \
+                         owed an explicit move or drop: {value:?}",
+                    );
+                    value.discard_storage();
+                }
+                Binding::Projected { .. } => {
+                    panic!(
+                        "SSA frame exited with an open projection; its `end_project` cleanup edge \
+                         was not executed"
+                    )
+                }
+                Binding::Place(_) | Binding::Dictionary(_) | Binding::StackMarker(_) => {}
+            }
+        }
+    }
+
+    /// Reclaims SSA-register-owned storage after hard abort without running Ferlium code.
+    ///
+    /// Ordinary values live in the shared environment, but closure construction and a few
+    /// instruction results can temporarily own boxed values in the register map. Open projections
+    /// additionally own suspended accessor frames. Pads normally consume both; hard abort bypasses
+    /// pads, so host-controlled reclamation must visit these roots explicitly.
+    fn discard_bindings_after_hard_abort(&mut self, slots: FxHashMap<ssa::Value, Binding>) {
+        let mut suspended = Vec::new();
+        for binding in slots.into_values() {
+            match binding {
+                Binding::Value(value) => value.discard_storage(),
+                Binding::Projected { frame, .. } => suspended.push(*frame),
+                Binding::Place(_) | Binding::Dictionary(_) | Binding::StackMarker(_) => {}
+            }
+        }
+
+        // Nested projections occupy successively higher environment ranges. Reclaim the innermost
+        // frames first so truncating an outer frame cannot invalidate a still-to-be-visited root.
+        suspended.sort_unstable_by_key(|frame| std::cmp::Reverse(frame.frame_top));
+        for frame in suspended {
+            self.discard_bindings_after_hard_abort(frame.slots);
+            self.ctx.call_depth = self
+                .ctx
+                .call_depth
+                .checked_sub(1)
+                .expect("a suspended accessor must contribute one live call frame");
+            self.reclaim_frame_storage(frame.frame_top);
+        }
     }
 
     /// Resets the top of the stack to `marker`, discarding the storage of every cell allocated
@@ -1801,13 +1991,16 @@ impl<'a> Interpreter<'a> {
         &mut self,
         slots: &FxHashMap<ssa::Value, Binding>,
         op: &ssa::Value,
-    ) -> Binding {
+        span: Location,
+    ) -> Result<Binding, RuntimeError> {
         if let Some(id) = self.try_dict_operand(slots, op) {
-            Binding::Dictionary(id)
+            Ok(Binding::Dictionary(id))
         } else if let ssa::Value::Subscript(id) = op {
-            Binding::Place(self.alloc_cell(Value::subscript(*id)))
+            Ok(Binding::Place(
+                self.alloc_cell(Value::subscript(*id), span)?,
+            ))
         } else {
-            Binding::Place(self.place_operand(slots, op))
+            Ok(Binding::Place(self.place_operand(slots, op)))
         }
     }
 
@@ -2171,7 +2364,8 @@ fn husk_like(v: &Value) -> Value {
 /// - a *terminator* appears exactly once per non-empty block, as its last instruction, and no other
 ///   instruction terminates (so control neither falls off the end nor stops mid-block);
 /// - every branch target is an existing, non-empty block (so execution always lands on a real
-///   instruction), and the entry block is non-empty.
+///   instruction), including sparse implicit-unwind-table targets, and the entry block is
+///   non-empty.
 #[cfg(debug_assertions)]
 fn verify_function(func: &ssa::Function) {
     let block_ids: Vec<BlockId> = func.blocks().collect();
@@ -2184,6 +2378,22 @@ fn verify_function(func: &ssa::Function) {
         "SSA function `{}`: the entry block is empty",
         func.name
     );
+
+    for (instruction, target) in func.implicit_unwind_targets() {
+        assert!(
+            func.at(instruction).may_raise_implicitly(),
+            "SSA function `{}`: instruction {} has an implicit unwind target but cannot raise \
+             implicitly",
+            func.name,
+            instruction.raw()
+        );
+        assert!(
+            target_ok(target),
+            "SSA function `{}`: instruction {} has a missing or empty implicit unwind target",
+            func.name,
+            instruction.raw()
+        );
+    }
 
     for b in &block_ids {
         let b = *b;

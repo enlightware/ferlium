@@ -114,10 +114,10 @@ The interpreter's native-Rust bridge makes the analogous `T` versus `&T` extract
 
 Return passing is derived from the lowered return type and the function effects.
 Each function can have effects, which might be polymorphic and represented by effect variables.
-There are two effect cases:
+There are two language-effect cases:
 
-- **No panic**: the function's effects contain no `Fallible` and no effect variables
-- **May panic**: the function's effects contain `Fallible` or effect variables
+- **No language failure**: the function's effects contain no `Fallible` and no effect variables
+- **May return a language failure**: the function's effects contain `Fallible` or effect variables
 
 There are three return value classes:
 
@@ -127,16 +127,37 @@ There are three return value classes:
 
 The calling convention for return values is:
 
-| May panic? | Return value kind          | ABI return form                                                | Out-pointer needed? |
-|------------|----------------------------|----------------------------------------------------------------|---------------------|
-| No         | No value                   | Returns `()`                                                   | No                  |
-| No         | Direct value               | Returns the value directly                                     | No                  |
-| No         | Caller-allocated value     | Returns `()`; callee writes result to out-pointer              | Yes                 |
-| Yes        | No value                   | Returns status                                                 | No                  |
-| Yes        | Direct value               | Returns status plus the direct value                           | No                  |
-| Yes        | Caller-allocated value     | Returns status; callee writes result to out-pointer on success | Yes                 |
+| May return language failure? | Return value kind      | ABI return form                                                | Out-pointer needed? |
+|------------------------------|------------------------|----------------------------------------------------------------|---------------------|
+| No                           | No value               | Returns `()`                                                   | No                  |
+| No                           | Direct value           | Returns the value directly                                     | No                  |
+| No                           | Caller-allocated value | Returns `()`; callee writes result to out-pointer              | Yes                 |
+| Yes                          | No value               | Returns status                                                 | No                  |
+| Yes                          | Direct value           | Returns status plus the direct value                           | No                  |
+| Yes                          | Caller-allocated value | Returns status; callee writes result to out-pointer on success | Yes                 |
 
-When a function may panic, status is 0 on success and non-zero on panic.
+For a `Fallible` function, status is 0 on success and non-zero on language failure.
+
+### Execution cancellation
+
+Host-enforced execution cancellation is separate from the source-language `Fallible` effect. Fuel,
+call-depth, interpreter-environment, and future accounted-memory limits do not make every function
+that can allocate or execute a loop source-level `Fallible`; Ferlium code cannot catch these
+cancellations.
+
+Cancellation therefore does not change the normal return forms above. A backend that promises
+recoverable cancellation and semantic unwinding must provide an out-of-band propagation mechanism,
+such as target exception handling or an equivalent hidden internal channel. Cleanup edges may run
+while cancellation propagates through functions whose ordinary ABI has no status result. If a
+cleanup action raises while an error or cancellation is already unwinding, the runtime hard-aborts
+instead of starting a replacement unwind; see [runtime-sandboxing.md](runtime-sandboxing.md). If a
+backend cannot provide the out-of-band channel, its alternatives are a universal hidden status
+convention or abort/trap semantics without guaranteed cleanup; this specification does not silently
+reinterpret a normal direct return as a fallible status return.
+
+Only failures reported by Ferlium's accounted runtime participate in recoverable cancellation.
+Unrecoverable exhaustion in the host allocator or target runtime may still abort or trap at a lower
+level.
 
 ## Wasm
 

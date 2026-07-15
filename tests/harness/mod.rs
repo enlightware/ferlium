@@ -1378,10 +1378,11 @@ impl TestSession {
         let ModuleAndExpr { module_id, expr } =
             self.try_compile(src).map_err(Error::Compilation)?;
 
-        // Run the expression if any, through *both* interpreters, asserting their *outcomes* agree —
-        // equal values, or equal runtime-error kinds — and returning the HIR result. Running both on
-        // every snippet gives the SSA backend full coverage, including the error path: a failing
-        // snippet exercises both backends rather than short-circuiting on the HIR error.
+        // Run the expression if any through *both* interpreters, asserting their outcomes agree:
+        // equal values, matching ordinary runtime-error kinds, or matching hard-abort summaries and
+        // retained cause kinds. Return the HIR result. Running both on every snippet gives the SSA
+        // backend full coverage, including the error path: a failing snippet exercises both
+        // backends rather than short-circuiting on the HIR error.
         if let Some(expr) = expr {
             let ty = expr.ty.ty;
             let value = {
@@ -1409,6 +1410,25 @@ impl TestSession {
                             "SSA backend raised a different runtime error than the HIR \
                              interpreter"
                         );
+                        match (hir_err.hard_abort(), ssa_err.hard_abort()) {
+                            (Some(hir_abort), Some(ssa_abort)) => {
+                                assert_eq!(
+                                    ssa_abort.initial().kind(),
+                                    hir_abort.initial().kind(),
+                                    "SSA hard abort retained a different initial failure than HIR"
+                                );
+                                assert_eq!(
+                                    ssa_abort.during_cleanup().kind(),
+                                    hir_abort.during_cleanup().kind(),
+                                    "SSA hard abort retained a different cleanup failure than HIR"
+                                );
+                            }
+                            (None, None) => {}
+                            _ => panic!(
+                                "SSA backend disagreed with HIR about whether the runtime error \
+                                 was a structured hard abort"
+                            ),
+                        }
                     }
                     (hir, ssa) => panic!(
                         "SSA backend diverged from the HIR interpreter: one produced a value \

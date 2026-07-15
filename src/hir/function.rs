@@ -491,13 +491,8 @@ impl Callable for ScriptFunction {
             .compiler_session()
             .expect_fresh_module(ctx.module_id)
             .hir_arena;
-        if ctx.environment.len().saturating_add(arg_count) > ctx.stack_limit {
-            return Err(RuntimeError::new(
-                RuntimeErrorKind::StackLimitExceeded {
-                    limit: ctx.stack_limit,
-                },
-                Some(arena[self.entry_node_id].span),
-            ));
+        if ctx.environment.len().saturating_add(arg_count) > ctx.environment_cell_limit {
+            return Err(ctx.environment_cell_limit_error(Some(arena[self.entry_node_id].span)));
         }
 
         let old_frame_base = ctx.frame_base;
@@ -505,11 +500,11 @@ impl Callable for ScriptFunction {
         ctx.environment.extend(args.into_vec());
         ctx.call_depth += 1;
 
-        let ret = eval_node_with_ctx(arena, self.entry_node_id, ctx, locals_arg);
-        let cleanup = if ret.is_err() {
-            drop_frame_owned_locals_on_error(ctx, locals_arg, arena[self.entry_node_id].span)
-        } else {
-            Ok(())
+        let ret = match eval_node_with_ctx(arena, self.entry_node_id, ctx, locals_arg) {
+            Ok(ret) => Ok(ret),
+            Err(error) => Err(ctx.cleanup_after_error(error, |ctx| {
+                drop_frame_owned_locals_on_error(ctx, locals_arg, arena[self.entry_node_id].span)
+            })),
         };
 
         ctx.call_depth -= 1;
@@ -527,7 +522,6 @@ impl Callable for ScriptFunction {
         ctx.truncate_environment_storage(ctx.frame_base);
         ctx.frame_base = old_frame_base;
 
-        cleanup?;
         let ret = ret?;
         // Convert Return to Continue at function boundary
         // (return statements should only escape the current function, not propagate to callers)

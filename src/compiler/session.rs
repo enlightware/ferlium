@@ -20,7 +20,8 @@ use crate::{
     },
     containers::b,
     define_id_type, emit_ssa,
-    eval::{DEFAULT_INTERACTIVE_FUEL_LIMIT, EvalCtx, ValOrMut, eval_node_with_ctx},
+    eval::{EvalCtx, ValOrMut, eval_node_with_ctx},
+    execution::{DEFAULT_INTERACTIVE_FUEL_LIMIT, ReferenceInterpreterLimits},
     format::FormatWith,
     hir::CompiledExpr,
     hir::value::Value,
@@ -103,7 +104,7 @@ pub struct ModuleEntry {
     /// Informations needed to rebuild the module, if it supports rebuilding (std doesn't).
     pub(crate) src_info: Option<ModuleSrcInfo>,
     /// Last good compiled module (without stale deps at that time).
-    /// Must be not-None if [`stale`] is false.
+    /// Must be non-`None` if `stale` is false.
     pub(crate) module: Option<Module>,
     /// Compilation error, if last compilation failed.
     pub(crate) last_error: Option<CompilationError>,
@@ -601,8 +602,9 @@ impl CompilerSession {
 
         let result = {
             let temp_module = self.expect_fresh_module(module.module_id());
-            let mut ctx = EvalCtx::with_environment(module.module_id(), environment, self);
-            ctx.set_fuel_limit(fuel_limit);
+            let limits = ReferenceInterpreterLimits::default().with_fuel_limit(fuel_limit);
+            let mut ctx =
+                EvalCtx::with_environment_and_limits(module.module_id(), environment, self, limits);
             match eval_node_with_ctx(
                 &temp_module.hir_arena,
                 compiled.expr,
@@ -1063,8 +1065,10 @@ impl CompilerSession {
     ///
     /// The top-level expression is wrapped as a synthetic no-argument `fn main` (its HIR node is
     /// already elaborated into the module's arena) so the function-oriented SSA lowering and
-    /// interpreter run it unchanged. Used by the test harness to exercise every snippet through the
-    /// SSA backend in addition to the HIR interpreter.
+    /// interpreter run it unchanged. This is a temporary adapter: registering a synthetic function
+    /// in the module is not intended to be part of the eventual backend-neutral execution model.
+    /// Used by the test harness to exercise every snippet through the SSA backend in addition to the
+    /// HIR interpreter.
     ///
     /// Returns the resulting value, or the [`RuntimeError`](crate::eval::RuntimeError) the snippet
     /// raised — so the harness can assert error parity with the HIR interpreter on failing snippets.

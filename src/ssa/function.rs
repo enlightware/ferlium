@@ -58,6 +58,12 @@ pub struct Function {
 
     /// The basic blocks in the function, the first of which being the function's entry.
     blocks: list::List<Option<BlockBounds>>,
+
+    /// Cleanup landing pads for instructions whose implicit exceptional exit must unwind live
+    /// locals. Kept sparse because only instructions emitted inside a scope with ownership
+    /// obligations need an entry, and consulted only on the exceptional path. The exit may carry a
+    /// language failure or out-of-band execution cancellation; neither changes the normal result.
+    implicit_unwind_targets: Vec<(InstructionId, BlockId)>,
 }
 
 impl Function {
@@ -69,6 +75,7 @@ impl Function {
             constants: Vec::new(),
             slots: list::List::new(),
             blocks: list::List::new(),
+            implicit_unwind_targets: Vec::new(),
         }
     }
 
@@ -170,6 +177,28 @@ impl Function {
             Some(ssa::Value::Register(i))
         }
     }
+
+    /// Records the cleanup landing pad to enter if `instruction` exits exceptionally without an
+    /// explicit unwind successor of its own.
+    pub fn set_implicit_unwind_target(&mut self, instruction: InstructionId, target: BlockId) {
+        debug_assert!(
+            self.implicit_unwind_target(instruction).is_none(),
+            "an instruction has at most one implicit unwind target"
+        );
+        self.implicit_unwind_targets.push((instruction, target));
+    }
+
+    /// Returns the cleanup landing pad for an implicit exceptional exit at `instruction`.
+    pub fn implicit_unwind_target(&self, instruction: InstructionId) -> Option<BlockId> {
+        self.implicit_unwind_targets
+            .iter()
+            .find_map(|&(candidate, target)| (candidate == instruction).then_some(target))
+    }
+
+    /// Iterates over the exceptional cleanup edges carried in the function's sparse unwind table.
+    pub fn implicit_unwind_targets(&self) -> impl Iterator<Item = (InstructionId, BlockId)> + '_ {
+        self.implicit_unwind_targets.iter().copied()
+    }
 }
 
 impl FormatWith<ModuleEnv<'_>> for Function {
@@ -210,12 +239,16 @@ impl FormatWith<ModuleEnv<'_>> for Function {
             for b in self.blocks.addresses() {
                 writeln!(f, "  b{}:", b.raw())?;
                 for i in self.block(b).instructions() {
-                    writeln!(
+                    write!(
                         f,
                         "    {} = {}",
                         ssa::Value::Register(i),
                         self.at(i).format_with(env)
                     )?;
+                    if let Some(unwind) = self.implicit_unwind_target(i) {
+                        write!(f, " [unwind b{}]", unwind.raw())?;
+                    }
+                    writeln!(f)?;
                 }
             }
         }

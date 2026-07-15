@@ -1,8 +1,14 @@
 use test_log::test;
 
 use ferlium::{
-    compiler::error::RuntimeErrorKind, eval::RuntimeError, format::FormatWith, hir::value::Value,
-    module::ShowModuleWithOptions, ssa::interpreter::Interpreter,
+    Location,
+    compiler::error::RuntimeErrorKind,
+    eval::{EvalCtx, RuntimeError},
+    execution::ReferenceInterpreterLimits,
+    format::FormatWith,
+    hir::value::Value,
+    module::{FunctionId, ShowModuleWithOptions},
+    ssa::interpreter::Interpreter,
 };
 
 use crate::harness::{TestSession, bool, expected_tuple, int};
@@ -22,10 +28,48 @@ fn run_ssa_with_limits(
         .expect_fresh_module(module_id)
         .get_local_function_id(ustr::ustr("main"))
         .expect("test source must define `fn main`");
-    let mut interpreter = Interpreter::new(module_id, session.session());
-    interpreter.set_call_depth_limit(call_depth_limit);
-    interpreter.set_fuel_limit(fuel_limit);
+    let limits = ReferenceInterpreterLimits::default()
+        .with_call_depth_limit(call_depth_limit)
+        .with_fuel_limit(fuel_limit);
+    let mut interpreter = Interpreter::with_limits(module_id, session.session(), limits);
     interpreter.run_main(module_id, main_id)
+}
+
+fn run_main_with_environment_cell_limit(
+    session: &mut TestSession,
+    source: &str,
+    limit: usize,
+    via_ssa: bool,
+) -> Result<Value, RuntimeError> {
+    let module_id = session.compile(source).module_id;
+    let main_id = session
+        .session()
+        .expect_fresh_module(module_id)
+        .get_local_function_id(ustr::ustr("main"))
+        .expect("test source must define `fn main`");
+    let limits = ReferenceInterpreterLimits::default().with_environment_cell_limit(limit);
+    if via_ssa {
+        let mut interpreter = Interpreter::with_limits(module_id, session.session(), limits);
+        interpreter.run_main(module_id, main_id)
+    } else {
+        let mut interpreter = EvalCtx::with_limits(module_id, session.session(), limits);
+        interpreter
+            .call_function_id(
+                FunctionId::new(module_id, main_id),
+                vec![],
+                Location::new_synthesized(),
+            )
+            .map(|control| control.into_value())
+    }
+}
+
+fn tracked_drop_log(session: &mut TestSession) -> isize {
+    let value = session.run("testing::tracked_drop_log()");
+    let log = *value
+        .as_primitive_ty::<isize>()
+        .expect("tracked drop log must be an int");
+    value.discard_storage();
+    log
 }
 
 /// Print the elaborated HIR of `src` for parameter-passing experiments.
@@ -199,6 +243,104 @@ fn ssa_call_depth_limit_stops_recursive_execution() {
 }
 
 #[test]
+fn ssa_environment_cell_limit_stops_allocation_and_leaves_session_usable() {
+    let mut session = TestSession::new();
+    let module_id = session
+        .compile("fn main() -> int { let x: int = 1; x }")
+        .module_id;
+    let main_id = session
+        .session()
+        .expect_fresh_module(module_id)
+        .get_local_function_id(ustr::ustr("main"))
+        .expect("test source must define `fn main`");
+    let limits = ReferenceInterpreterLimits::default().with_environment_cell_limit(1);
+    let mut interpreter = Interpreter::with_limits(module_id, session.session(), limits);
+    let error = interpreter
+        .run_main(module_id, main_id)
+        .expect_err("SSA allocation must respect the configured environment cell limit");
+    assert_eq!(
+        error.kind(),
+        RuntimeErrorKind::EnvironmentCellLimitExceeded { limit: 1 }
+    );
+    assert!(!interpreter.is_poisoned());
+
+    let mut interpreter = Interpreter::new(module_id, session.session());
+    assert_val_eq!(interpreter.run_main(module_id, main_id).unwrap(), int(1));
+}
+
+#[test]
+fn environment_cell_exhaustion_unwinds_owned_locals_in_both_interpreters() {
+    let mut session = TestSession::new();
+    let source = r#"
+        struct Probe(int)
+
+        impl Value for Probe {
+            fn eq(left: Probe, right: Probe) -> bool { left.0 == right.0 }
+            fn to_string(value: Probe) -> string { to_string(value.0) }
+            fn hash(value: Probe, state: &mut hasher) { hash(value.0, state) }
+            fn clone(source: Probe) -> Probe { Probe(source.0) }
+            fn drop(target: &mut Probe) { testing::record_tracked_drop(target.0) }
+        }
+
+        fn exhaust_environment() {
+            let cell = 1;
+            exhaust_environment()
+        }
+
+        fn main() {
+            let owned = Probe(7);
+            exhaust_environment()
+        }
+    "#;
+    session
+        .run("testing::reset_tracked_drops()")
+        .discard_storage();
+    let module_id = session.compile(source).module_id;
+    let main_id = session
+        .session()
+        .expect_fresh_module(module_id)
+        .get_local_function_id(ustr::ustr("main"))
+        .expect("test source must define `fn main`");
+    let limits = ReferenceInterpreterLimits::default()
+        .with_call_depth_limit(1_024)
+        .with_environment_cell_limit(32);
+
+    let mut interpreter = Interpreter::with_limits(module_id, session.session(), limits);
+    let error = interpreter
+        .run_main(module_id, main_id)
+        .expect_err("SSA recursion must exhaust the environment-cell quota");
+    assert_eq!(
+        error.kind(),
+        RuntimeErrorKind::EnvironmentCellLimitExceeded { limit: 32 }
+    );
+    drop(interpreter);
+    assert_val_eq!(session.run("testing::tracked_drop_log()"), int(7));
+
+    session
+        .run("testing::reset_tracked_drops()")
+        .discard_storage();
+    let module_id = session.compile(source).module_id;
+    let main_id = session
+        .session()
+        .expect_fresh_module(module_id)
+        .get_local_function_id(ustr::ustr("main"))
+        .expect("test source must define `fn main`");
+    let mut ctx = EvalCtx::with_limits(module_id, session.session(), limits);
+    let error = ctx
+        .call_function_id(
+            FunctionId::new(module_id, main_id),
+            vec![],
+            Location::new_synthesized(),
+        )
+        .expect_err("HIR recursion must exhaust the environment-cell quota");
+    assert_eq!(
+        error.kind(),
+        RuntimeErrorKind::EnvironmentCellLimitExceeded { limit: 32 }
+    );
+    assert_val_eq!(session.run("testing::tracked_drop_log()"), int(7));
+}
+
+#[test]
 fn ssa_completed_recursive_frames_reclaim_storage() {
     let mut session = TestSession::new();
     let source = r#"
@@ -279,6 +421,306 @@ fn ssa_fuel_exhaustion_unwinds_owned_locals() {
         .expect_err("an SSA loop must consume execution fuel");
     assert_eq!(error.kind(), RuntimeErrorKind::FuelExhausted);
     assert_val_eq!(session.run("testing::tracked_drop_log()"), int(7));
+}
+
+#[test]
+fn failure_during_cancellation_unwind_hard_aborts_and_poisons_both_interpreters() {
+    let mut session = TestSession::new();
+    let source = r#"
+        struct Probe(string)
+        struct Bomb(string)
+
+        impl Value for Probe {
+            fn eq(left: Probe, right: Probe) -> bool { left.0 == right.0 }
+            fn to_string(value: Probe) -> string { to_string(value.0) }
+            fn hash(value: Probe, state: &mut hasher) { hash(value.0, state) }
+            fn clone(source: Probe) -> Probe { Probe(source.0) }
+            fn drop(target: &mut Probe) { testing::record_tracked_drop(7) }
+        }
+
+        impl Value for Bomb {
+            fn eq(left: Bomb, right: Bomb) -> bool { left.0 == right.0 }
+            fn to_string(value: Bomb) -> string { to_string(value.0) }
+            fn hash(value: Bomb, state: &mut hasher) { hash(value.0, state) }
+            fn clone(source: Bomb) -> Bomb { Bomb(source.0) }
+            fn drop(target: &mut Bomb) {
+                let a00 = 0; let a01 = 0; let a02 = 0; let a03 = 0;
+                let a04 = 0; let a05 = 0; let a06 = 0; let a07 = 0;
+                let a08 = 0; let a09 = 0; let a10 = 0; let a11 = 0;
+            }
+        }
+
+        fn main() {
+            testing::reset_tracked_drops();
+            let outer = Probe("outer");
+            let bomb = Bomb("bomb");
+            loop {}
+        }
+    "#;
+    let module_id = session.compile(source).module_id;
+    let main_id = session
+        .session()
+        .expect_fresh_module(module_id)
+        .get_local_function_id(ustr::ustr("main"))
+        .expect("test source must define `fn main`");
+    let mut observed_ssa_hard_abort = false;
+    for limit in 4..64 {
+        let limits = ReferenceInterpreterLimits::default()
+            .with_fuel_limit(Some(0))
+            .with_environment_cell_limit(limit);
+        let mut ssa = Interpreter::with_limits(module_id, session.session(), limits);
+        let error = ssa
+            .run_main(module_id, main_id)
+            .expect_err("the loop must be cancelled");
+        let Some(abort) = error.hard_abort() else {
+            continue;
+        };
+        if abort.initial().kind() != RuntimeErrorKind::FuelExhausted {
+            continue;
+        }
+        assert_eq!(
+            abort.during_cleanup().kind(),
+            RuntimeErrorKind::EnvironmentCellLimitExceeded { limit }
+        );
+        assert!(ssa.is_poisoned());
+        assert_eq!(
+            ssa.run_main(module_id, main_id)
+                .expect_err("a poisoned SSA interpreter must reject re-entry")
+                .kind(),
+            RuntimeErrorKind::HardAbort
+        );
+        observed_ssa_hard_abort = true;
+        break;
+    }
+    assert!(
+        observed_ssa_hard_abort,
+        "a swept SSA environment limit should cancel the failure unwind"
+    );
+
+    let mut observed_hir_hard_abort = false;
+    for limit in 4..64 {
+        let limits = ReferenceInterpreterLimits::default()
+            .with_fuel_limit(Some(0))
+            .with_environment_cell_limit(limit);
+        let mut hir = EvalCtx::with_limits(module_id, session.session(), limits);
+        let error = hir
+            .call_function_id(
+                FunctionId::new(module_id, main_id),
+                vec![],
+                Location::new_synthesized(),
+            )
+            .expect_err("the loop must be cancelled");
+        let Some(abort) = error.hard_abort() else {
+            continue;
+        };
+        if abort.initial().kind() != RuntimeErrorKind::FuelExhausted {
+            continue;
+        }
+        assert_eq!(
+            abort.during_cleanup().kind(),
+            RuntimeErrorKind::EnvironmentCellLimitExceeded { limit }
+        );
+        assert!(hir.is_poisoned());
+        assert_eq!(
+            hir.call_function_id(
+                FunctionId::new(module_id, main_id),
+                vec![],
+                Location::new_synthesized(),
+            )
+            .expect_err("a poisoned HIR executor must reject re-entry")
+            .kind(),
+            RuntimeErrorKind::HardAbort
+        );
+        observed_hir_hard_abort = true;
+        break;
+    }
+    assert!(
+        observed_hir_hard_abort,
+        "a swept HIR environment limit should cancel the failure unwind"
+    );
+
+    assert_val_eq!(session.run("testing::tracked_drop_log()"), int(0));
+}
+
+#[test]
+fn cancellation_during_inline_return_cleanup_continues_with_outer_scope() {
+    let mut session = TestSession::new();
+    let source = r#"
+        struct Probe(int)
+        struct Bomb(int)
+
+        impl Value for Probe {
+            fn eq(left: Probe, right: Probe) -> bool { left.0 == right.0 }
+            fn to_string(value: Probe) -> string { to_string(value.0) }
+            fn hash(value: Probe, state: &mut hasher) { hash(value.0, state) }
+            fn clone(source: Probe) -> Probe { Probe(source.0) }
+            fn drop(target: &mut Probe) { testing::record_tracked_drop(target.0) }
+        }
+
+        impl Value for Bomb {
+            fn eq(left: Bomb, right: Bomb) -> bool { left.0 == right.0 }
+            fn to_string(value: Bomb) -> string { to_string(value.0) }
+            fn hash(value: Bomb, state: &mut hasher) { hash(value.0, state) }
+            fn clone(source: Bomb) -> Bomb { Bomb(source.0) }
+            fn drop(target: &mut Bomb) {
+                let a00 = 0; let a01 = 0; let a02 = 0; let a03 = 0;
+                let a04 = 0; let a05 = 0; let a06 = 0; let a07 = 0;
+                let a08 = 0; let a09 = 0; let a10 = 0; let a11 = 0;
+            }
+        }
+
+        fn main() {
+            let outer = Probe(7);
+            {
+                let bomb = Bomb(0);
+                return ();
+            }
+        }
+    "#;
+
+    for (backend, via_ssa) in [("SSA", true), ("HIR", false)] {
+        let mut observed_cancellation = false;
+        for limit in 8..40 {
+            session
+                .run("testing::reset_tracked_drops()")
+                .discard_storage();
+            let result = run_main_with_environment_cell_limit(&mut session, source, limit, via_ssa);
+            let is_expected_cancellation = result.as_ref().is_err_and(|error| {
+                error.kind() == RuntimeErrorKind::EnvironmentCellLimitExceeded { limit }
+                    && !error.is_hard_abort()
+            });
+            if let Ok(value) = result {
+                value.discard_storage();
+            }
+            if is_expected_cancellation && tracked_drop_log(&mut session) == 7 {
+                observed_cancellation = true;
+                break;
+            }
+        }
+        assert!(
+            observed_cancellation,
+            "a swept {backend} limit should make the inner drop fail as a primary cancellation \
+             while the outer scope still unwinds"
+        );
+    }
+}
+
+#[test]
+fn failed_assignment_drop_consumes_the_old_value_in_both_interpreters() {
+    let mut session = TestSession::new();
+    let source = r#"
+        struct Probe(int)
+        struct Bomb(int)
+
+        impl Value for Probe {
+            fn eq(left: Probe, right: Probe) -> bool { left.0 == right.0 }
+            fn to_string(value: Probe) -> string { to_string(value.0) }
+            fn hash(value: Probe, state: &mut hasher) { hash(value.0, state) }
+            fn clone(source: Probe) -> Probe { Probe(source.0) }
+            fn drop(target: &mut Probe) { testing::record_tracked_drop(target.0) }
+        }
+
+        impl Value for Bomb {
+            fn eq(left: Bomb, right: Bomb) -> bool { left.0 == right.0 }
+            fn to_string(value: Bomb) -> string { to_string(value.0) }
+            fn hash(value: Bomb, state: &mut hasher) { hash(value.0, state) }
+            fn clone(source: Bomb) -> Bomb { Bomb(source.0) }
+            fn drop(target: &mut Bomb) {
+                let a00 = 0; let a01 = 0; let a02 = 0; let a03 = 0;
+                let a04 = 0; let a05 = 0; let a06 = 0; let a07 = 0;
+                let a08 = 0; let a09 = 0; let a10 = 0; let a11 = 0;
+            }
+        }
+
+        fn main() {
+            let outer = Probe(7);
+            let mut value = Bomb(0);
+            value = Bomb(1);
+        }
+    "#;
+
+    for (backend, via_ssa) in [("SSA", true), ("HIR", false)] {
+        let mut observed_cancellation = false;
+        for limit in 8..48 {
+            session
+                .run("testing::reset_tracked_drops()")
+                .discard_storage();
+            let result = run_main_with_environment_cell_limit(&mut session, source, limit, via_ssa);
+            let is_expected_cancellation = result.as_ref().is_err_and(|error| {
+                error.kind() == RuntimeErrorKind::EnvironmentCellLimitExceeded { limit }
+                    && !error.is_hard_abort()
+            });
+            if let Ok(value) = result {
+                value.discard_storage();
+            }
+
+            if is_expected_cancellation && tracked_drop_log(&mut session) == 7 {
+                observed_cancellation = true;
+                break;
+            }
+        }
+        assert!(
+            observed_cancellation,
+            "a swept {backend} limit should make assignment's old-value drop fail once, consume \
+             that target, and continue unwinding the outer scope"
+        );
+    }
+}
+
+#[test]
+fn cancellation_during_closure_environment_drop_reclaims_the_temporary() {
+    let mut session = TestSession::new();
+    let source = r#"
+        struct Bomb(string)
+
+        impl Value for Bomb {
+            fn eq(left: Bomb, right: Bomb) -> bool { left.0 == right.0 }
+            fn to_string(value: Bomb) -> string { to_string(value.0) }
+            fn hash(value: Bomb, state: &mut hasher) { hash(value.0, state) }
+            fn clone(source: Bomb) -> Bomb { Bomb(source.0) }
+            fn drop(target: &mut Bomb) {
+                let a00 = 0; let a01 = 0; let a02 = 0; let a03 = 0;
+                let a04 = 0; let a05 = 0; let a06 = 0; let a07 = 0;
+                let a08 = 0; let a09 = 0; let a10 = 0; let a11 = 0;
+                let a12 = 0; let a13 = 0; let a14 = 0; let a15 = 0;
+            }
+        }
+
+        fn main() {
+            let bomb = Bomb("owns a heap string");
+            let f = || bomb.0;
+            f()
+        }
+    "#;
+    let module_id = session.compile(source).module_id;
+    let main_id = session
+        .session()
+        .expect_fresh_module(module_id)
+        .get_local_function_id(ustr::ustr("main"))
+        .expect("test source must define `fn main`");
+
+    // The exact number of reference-interpreter cells used is an implementation detail. Sweep a
+    // small range to exercise cancellation specifically while the cloned closure environment is
+    // being dropped. Before the regression fix this reached `restore_stack` with a live
+    // resource-owning temporary and tripped its SSA-leak assertion.
+    let mut observed_cancellation = false;
+    for limit in 8..64 {
+        let limits = ReferenceInterpreterLimits::default().with_environment_cell_limit(limit);
+        let mut interpreter = Interpreter::with_limits(module_id, session.session(), limits);
+        match interpreter.run_main(module_id, main_id) {
+            Ok(value) => value.discard_storage(),
+            Err(error) => {
+                observed_cancellation |= matches!(
+                    error.kind(),
+                    RuntimeErrorKind::EnvironmentCellLimitExceeded { .. }
+                );
+            }
+        }
+    }
+    assert!(
+        observed_cancellation,
+        "the swept limits should exercise environment-cell cancellation"
+    );
 }
 
 #[test]
@@ -636,24 +1078,24 @@ fn nested_place_call() {
   b0:
     %r0 = alloca [int]
     %r1 = alloca int
-    %r2 = alloca int
-    %r3 = store @c0 to %r2
-    %r4 = alloca_place [int]
+    %r2 = alloca int [unwind b1]
+    %r3 = store @c0 to %r2 [unwind b1]
+    %r4 = alloca_place [int] [unwind b1]
     %r5 = invoke std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r2, %r4) -> b2 unwind b1
   b1:
     %r17 = drop %r0 via <test>::std::Value<[std::int]>::drop#impl:a4f41aeb
     %r18 = resume
   b2:
-    %r6 = load %r4
-    %r7 = call <test>::std::Value<[std::int]>::clone#impl:94a041f9(%r6, %r0)
-    %r8 = alloca int
-    %r9 = store @c2 to %r8
-    %r10 = alloca_place int
+    %r6 = load %r4 [unwind b1]
+    %r7 = call <test>::std::Value<[std::int]>::clone#impl:94a041f9(%r6, %r0) [unwind b1]
+    %r8 = alloca int [unwind b1]
+    %r9 = store @c2 to %r8 [unwind b1]
+    %r10 = alloca_place int [unwind b1]
     %r11 = invoke std::array_index::ref_mut#subscript:cb69b6f4(%r0, %r8, %r10) -> b3 unwind b1
   b3:
-    %r12 = load %r10
-    %r13 = memcpy %r12 to %r1
-    %r14 = move %r1 to %p1
+    %r12 = load %r10 [unwind b1]
+    %r13 = memcpy %r12 to %r1 [unwind b1]
+    %r14 = move %r1 to %p1 [unwind b1]
     %r15 = drop %r0 via <test>::std::Value<[std::int]>::drop#impl:a4f41aeb
     %r16 = ret
 
@@ -881,29 +1323,41 @@ fn std::Value<(std::int, std::bool)>::to_string#impl:8f2e215f(%p0: @arg let (int
     %r6 = store @c0 to %r5
     %r7 = call std::string_from_static(%r5, %r0)
     %r8 = subfield @c2 from %p0
-    %r9 = call std::Value<std::int>::to_string#impl:a5db1d9f(%r8, %r1)
-    %r10 = alloca ()
-    %r11 = call std::string_push_str(%r0, %r1, %r10)
+    %r9 = call std::Value<std::int>::to_string#impl:a5db1d9f(%r8, %r1) [unwind b1]
+    %r10 = alloca () [unwind b1]
+    %r11 = call std::string_push_str(%r0, %r1, %r10) [unwind b1]
     %r12 = drop %r1 via std::Value<std::string>::drop#impl:1d429675
-    %r13 = alloca StaticStr
-    %r14 = store @c3 to %r13
-    %r15 = call std::string_from_static(%r13, %r2)
-    %r16 = alloca ()
-    %r17 = call std::string_push_str(%r0, %r2, %r16)
+    %r13 = alloca StaticStr [unwind b2]
+    %r14 = store @c3 to %r13 [unwind b2]
+    %r15 = call std::string_from_static(%r13, %r2) [unwind b2]
+    %r16 = alloca () [unwind b2]
+    %r17 = call std::string_push_str(%r0, %r2, %r16) [unwind b2]
     %r18 = drop %r2 via std::Value<std::string>::drop#impl:1d429675
     %r19 = subfield @c4 from %p0
-    %r20 = call std::Value<std::bool>::to_string#impl:044f2674(%r19, %r3)
-    %r21 = alloca ()
-    %r22 = call std::string_push_str(%r0, %r3, %r21)
+    %r20 = call std::Value<std::bool>::to_string#impl:044f2674(%r19, %r3) [unwind b3]
+    %r21 = alloca () [unwind b3]
+    %r22 = call std::string_push_str(%r0, %r3, %r21) [unwind b3]
     %r23 = drop %r3 via std::Value<std::string>::drop#impl:1d429675
-    %r24 = alloca StaticStr
-    %r25 = store @c5 to %r24
-    %r26 = call std::string_from_static(%r24, %r4)
-    %r27 = alloca ()
-    %r28 = call std::string_push_str(%r0, %r4, %r27)
+    %r24 = alloca StaticStr [unwind b4]
+    %r25 = store @c5 to %r24 [unwind b4]
+    %r26 = call std::string_from_static(%r24, %r4) [unwind b4]
+    %r27 = alloca () [unwind b4]
+    %r28 = call std::string_push_str(%r0, %r4, %r27) [unwind b4]
     %r29 = drop %r4 via std::Value<std::string>::drop#impl:1d429675
     %r30 = move %r0 to %p1
     %r31 = ret
+  b1:
+    %r32 = drop %r1 via std::Value<std::string>::drop#impl:1d429675
+    %r33 = resume
+  b2:
+    %r34 = drop %r2 via std::Value<std::string>::drop#impl:1d429675
+    %r35 = resume
+  b3:
+    %r36 = drop %r3 via std::Value<std::string>::drop#impl:1d429675
+    %r37 = resume
+  b4:
+    %r38 = drop %r4 via std::Value<std::string>::drop#impl:1d429675
+    %r39 = resume
 "#,
     );
 }
@@ -1187,15 +1641,19 @@ fn generic_apply() {
   @c1: () = ()
   b0:
     %r0 = alloca A using %p1
-    %r1 = dict_entry 2 from %p0
-    %r2 = dict_entry 6 from %p0
-    %r3 = alloca int
-    %r4 = store @c0 to %r3
-    %r5 = call %r2(%r3, %r0)
-    %r6 = call %r1(%p2, %r0, %p3)
+    %r1 = dict_entry 2 from %p0 [unwind b1]
+    %r2 = dict_entry 6 from %p0 [unwind b1]
+    %r3 = alloca int [unwind b1]
+    %r4 = store @c0 to %r3 [unwind b1]
+    %r5 = call %r2(%r3, %r0) [unwind b1]
+    %r6 = call %r1(%p2, %r0, %p3) [unwind b1]
     %r7 = dict_entry 4 from %p1
     %r8 = drop %r0 via %r7
     %r9 = ret
+  b1:
+    %r10 = dict_entry 4 from %p1
+    %r11 = drop %r0 via %r10
+    %r12 = resume
 "#,
     );
 }
@@ -1242,16 +1700,19 @@ fn capture(%p0: @ret int):
   b0:
     %r0 = alloca int
     %r1 = alloca () -> int
-    %r2 = alloca int
-    %r3 = store @c0 to %r2
-    %r4 = call std::Num<std::int>::from_int#impl:25eabc6b(%r2, %r0)
-    %r5 = alloca int
-    %r6 = memcpy %r0 to %r5
-    %r7 = build_closure <test>::$lambda$1(%r5, dict(m<...>:i0))
-    %r8 = store %r7 to %r1
-    %r9 = call %r1(%p0)
+    %r2 = alloca int [unwind b1]
+    %r3 = store @c0 to %r2 [unwind b1]
+    %r4 = call std::Num<std::int>::from_int#impl:25eabc6b(%r2, %r0) [unwind b1]
+    %r5 = alloca int [unwind b1]
+    %r6 = memcpy %r0 to %r5 [unwind b1]
+    %r7 = build_closure <test>::$lambda$1(%r5, dict(m<...>:i0)) [unwind b1]
+    %r8 = store %r7 to %r1 [unwind b1]
+    %r9 = call %r1(%p0) [unwind b1]
     %r10 = drop %r1 via <test>::$_ferlium_function_value_drop
     %r11 = ret
+  b1:
+    %r12 = drop %r1 via <test>::$_ferlium_function_value_drop
+    %r13 = resume
 
 fn std::Value<(std::int,)>::ALIGN#impl:2b73eccb(%p0: @ret int):
   @c0: int = 8
@@ -1328,18 +1789,24 @@ fn std::Value<(std::int,)>::to_string#impl:30b07f9c(%p0: @arg let (int,), %p1: @
     %r4 = store @c0 to %r3
     %r5 = call std::string_from_static(%r3, %r0)
     %r6 = subfield @c2 from %p0
-    %r7 = call std::Value<std::int>::to_string#impl:a5db1d9f(%r6, %r1)
-    %r8 = alloca ()
-    %r9 = call std::string_push_str(%r0, %r1, %r8)
+    %r7 = call std::Value<std::int>::to_string#impl:a5db1d9f(%r6, %r1) [unwind b1]
+    %r8 = alloca () [unwind b1]
+    %r9 = call std::string_push_str(%r0, %r1, %r8) [unwind b1]
     %r10 = drop %r1 via std::Value<std::string>::drop#impl:1d429675
-    %r11 = alloca StaticStr
-    %r12 = store @c3 to %r11
-    %r13 = call std::string_from_static(%r11, %r2)
-    %r14 = alloca ()
-    %r15 = call std::string_push_str(%r0, %r2, %r14)
+    %r11 = alloca StaticStr [unwind b2]
+    %r12 = store @c3 to %r11 [unwind b2]
+    %r13 = call std::string_from_static(%r11, %r2) [unwind b2]
+    %r14 = alloca () [unwind b2]
+    %r15 = call std::string_push_str(%r0, %r2, %r14) [unwind b2]
     %r16 = drop %r2 via std::Value<std::string>::drop#impl:1d429675
     %r17 = move %r0 to %p1
     %r18 = ret
+  b1:
+    %r19 = drop %r1 via std::Value<std::string>::drop#impl:1d429675
+    %r20 = resume
+  b2:
+    %r21 = drop %r2 via std::Value<std::string>::drop#impl:1d429675
+    %r22 = resume
 "#,
     );
 }
@@ -1392,13 +1859,17 @@ fn generic_multiple_ops_reuse_witness() {
   @c0: () = ()
   b0:
     %r0 = alloca A using %p1
-    %r1 = dict_entry 0 from %p0
-    %r2 = dict_entry 2 from %p0
-    %r3 = call %r2(%p2, %p2, %r0)
-    %r4 = call %r1(%r0, %p2, %p3)
+    %r1 = dict_entry 0 from %p0 [unwind b1]
+    %r2 = dict_entry 2 from %p0 [unwind b1]
+    %r3 = call %r2(%p2, %p2, %r0) [unwind b1]
+    %r4 = call %r1(%r0, %p2, %p3) [unwind b1]
     %r5 = dict_entry 4 from %p1
     %r6 = drop %r0 via %r5
     %r7 = ret
+  b1:
+    %r8 = dict_entry 4 from %p1
+    %r9 = drop %r0 via %r8
+    %r10 = resume
 "#,
     );
 }
@@ -1602,54 +2073,78 @@ fn std::Value<<test>::A>::to_string#impl:78412598(%p0: @arg let A, %p1: @ret str
     %r9 = alloca StaticStr
     %r10 = store @c0 to %r9
     %r11 = call std::string_from_static(%r9, %r0)
-    %r12 = alloca StaticStr
-    %r13 = store @c2 to %r12
-    %r14 = call std::string_from_static(%r12, %r1)
-    %r15 = alloca ()
-    %r16 = call std::string_push_str(%r0, %r1, %r15)
+    %r12 = alloca StaticStr [unwind b1]
+    %r13 = store @c2 to %r12 [unwind b1]
+    %r14 = call std::string_from_static(%r12, %r1) [unwind b1]
+    %r15 = alloca () [unwind b1]
+    %r16 = call std::string_push_str(%r0, %r1, %r15) [unwind b1]
     %r17 = drop %r1 via std::Value<std::string>::drop#impl:1d429675
-    %r18 = alloca StaticStr
-    %r19 = store @c3 to %r18
-    %r20 = call std::string_from_static(%r18, %r2)
-    %r21 = alloca ()
-    %r22 = call std::string_push_str(%r0, %r2, %r21)
+    %r18 = alloca StaticStr [unwind b2]
+    %r19 = store @c3 to %r18 [unwind b2]
+    %r20 = call std::string_from_static(%r18, %r2) [unwind b2]
+    %r21 = alloca () [unwind b2]
+    %r22 = call std::string_push_str(%r0, %r2, %r21) [unwind b2]
     %r23 = drop %r2 via std::Value<std::string>::drop#impl:1d429675
     %r24 = subfield @c4 from %p0
-    %r25 = call std::Value<std::int>::to_string#impl:a5db1d9f(%r24, %r3)
-    %r26 = alloca ()
-    %r27 = call std::string_push_str(%r0, %r3, %r26)
+    %r25 = call std::Value<std::int>::to_string#impl:a5db1d9f(%r24, %r3) [unwind b3]
+    %r26 = alloca () [unwind b3]
+    %r27 = call std::string_push_str(%r0, %r3, %r26) [unwind b3]
     %r28 = drop %r3 via std::Value<std::string>::drop#impl:1d429675
-    %r29 = alloca StaticStr
-    %r30 = store @c5 to %r29
-    %r31 = call std::string_from_static(%r29, %r4)
-    %r32 = alloca ()
-    %r33 = call std::string_push_str(%r0, %r4, %r32)
+    %r29 = alloca StaticStr [unwind b4]
+    %r30 = store @c5 to %r29 [unwind b4]
+    %r31 = call std::string_from_static(%r29, %r4) [unwind b4]
+    %r32 = alloca () [unwind b4]
+    %r33 = call std::string_push_str(%r0, %r4, %r32) [unwind b4]
     %r34 = drop %r4 via std::Value<std::string>::drop#impl:1d429675
-    %r35 = alloca StaticStr
-    %r36 = store @c6 to %r35
-    %r37 = call std::string_from_static(%r35, %r5)
-    %r38 = alloca ()
-    %r39 = call std::string_push_str(%r0, %r5, %r38)
+    %r35 = alloca StaticStr [unwind b5]
+    %r36 = store @c6 to %r35 [unwind b5]
+    %r37 = call std::string_from_static(%r35, %r5) [unwind b5]
+    %r38 = alloca () [unwind b5]
+    %r39 = call std::string_push_str(%r0, %r5, %r38) [unwind b5]
     %r40 = drop %r5 via std::Value<std::string>::drop#impl:1d429675
-    %r41 = alloca StaticStr
-    %r42 = store @c3 to %r41
-    %r43 = call std::string_from_static(%r41, %r6)
-    %r44 = alloca ()
-    %r45 = call std::string_push_str(%r0, %r6, %r44)
+    %r41 = alloca StaticStr [unwind b6]
+    %r42 = store @c3 to %r41 [unwind b6]
+    %r43 = call std::string_from_static(%r41, %r6) [unwind b6]
+    %r44 = alloca () [unwind b6]
+    %r45 = call std::string_push_str(%r0, %r6, %r44) [unwind b6]
     %r46 = drop %r6 via std::Value<std::string>::drop#impl:1d429675
     %r47 = subfield @c7 from %p0
-    %r48 = call std::Value<std::int>::to_string#impl:a5db1d9f(%r47, %r7)
-    %r49 = alloca ()
-    %r50 = call std::string_push_str(%r0, %r7, %r49)
+    %r48 = call std::Value<std::int>::to_string#impl:a5db1d9f(%r47, %r7) [unwind b7]
+    %r49 = alloca () [unwind b7]
+    %r50 = call std::string_push_str(%r0, %r7, %r49) [unwind b7]
     %r51 = drop %r7 via std::Value<std::string>::drop#impl:1d429675
-    %r52 = alloca StaticStr
-    %r53 = store @c8 to %r52
-    %r54 = call std::string_from_static(%r52, %r8)
-    %r55 = alloca ()
-    %r56 = call std::string_push_str(%r0, %r8, %r55)
+    %r52 = alloca StaticStr [unwind b8]
+    %r53 = store @c8 to %r52 [unwind b8]
+    %r54 = call std::string_from_static(%r52, %r8) [unwind b8]
+    %r55 = alloca () [unwind b8]
+    %r56 = call std::string_push_str(%r0, %r8, %r55) [unwind b8]
     %r57 = drop %r8 via std::Value<std::string>::drop#impl:1d429675
     %r58 = move %r0 to %p1
     %r59 = ret
+  b1:
+    %r60 = drop %r1 via std::Value<std::string>::drop#impl:1d429675
+    %r61 = resume
+  b2:
+    %r62 = drop %r2 via std::Value<std::string>::drop#impl:1d429675
+    %r63 = resume
+  b3:
+    %r64 = drop %r3 via std::Value<std::string>::drop#impl:1d429675
+    %r65 = resume
+  b4:
+    %r66 = drop %r4 via std::Value<std::string>::drop#impl:1d429675
+    %r67 = resume
+  b5:
+    %r68 = drop %r5 via std::Value<std::string>::drop#impl:1d429675
+    %r69 = resume
+  b6:
+    %r70 = drop %r6 via std::Value<std::string>::drop#impl:1d429675
+    %r71 = resume
+  b7:
+    %r72 = drop %r7 via std::Value<std::string>::drop#impl:1d429675
+    %r73 = resume
+  b8:
+    %r74 = drop %r8 via std::Value<std::string>::drop#impl:1d429675
+    %r75 = resume
 
 fn std::Value<<test>::Wrapper>::ALIGN#impl:a9f8abbf(%p0: @ret int):
   @c0: int = 8
@@ -1763,54 +2258,78 @@ fn std::Value<<test>::Wrapper>::to_string#impl:7f6f6750(%p0: @arg let Wrapper, %
     %r9 = alloca StaticStr
     %r10 = store @c0 to %r9
     %r11 = call std::string_from_static(%r9, %r0)
-    %r12 = alloca StaticStr
-    %r13 = store @c2 to %r12
-    %r14 = call std::string_from_static(%r12, %r1)
-    %r15 = alloca ()
-    %r16 = call std::string_push_str(%r0, %r1, %r15)
+    %r12 = alloca StaticStr [unwind b1]
+    %r13 = store @c2 to %r12 [unwind b1]
+    %r14 = call std::string_from_static(%r12, %r1) [unwind b1]
+    %r15 = alloca () [unwind b1]
+    %r16 = call std::string_push_str(%r0, %r1, %r15) [unwind b1]
     %r17 = drop %r1 via std::Value<std::string>::drop#impl:1d429675
-    %r18 = alloca StaticStr
-    %r19 = store @c3 to %r18
-    %r20 = call std::string_from_static(%r18, %r2)
-    %r21 = alloca ()
-    %r22 = call std::string_push_str(%r0, %r2, %r21)
+    %r18 = alloca StaticStr [unwind b2]
+    %r19 = store @c3 to %r18 [unwind b2]
+    %r20 = call std::string_from_static(%r18, %r2) [unwind b2]
+    %r21 = alloca () [unwind b2]
+    %r22 = call std::string_push_str(%r0, %r2, %r21) [unwind b2]
     %r23 = drop %r2 via std::Value<std::string>::drop#impl:1d429675
     %r24 = subfield @c4 from %p0
-    %r25 = call <test>::std::Value<<test>::A>::to_string#impl:78412598(%r24, %r3)
-    %r26 = alloca ()
-    %r27 = call std::string_push_str(%r0, %r3, %r26)
+    %r25 = call <test>::std::Value<<test>::A>::to_string#impl:78412598(%r24, %r3) [unwind b3]
+    %r26 = alloca () [unwind b3]
+    %r27 = call std::string_push_str(%r0, %r3, %r26) [unwind b3]
     %r28 = drop %r3 via std::Value<std::string>::drop#impl:1d429675
-    %r29 = alloca StaticStr
-    %r30 = store @c5 to %r29
-    %r31 = call std::string_from_static(%r29, %r4)
-    %r32 = alloca ()
-    %r33 = call std::string_push_str(%r0, %r4, %r32)
+    %r29 = alloca StaticStr [unwind b4]
+    %r30 = store @c5 to %r29 [unwind b4]
+    %r31 = call std::string_from_static(%r29, %r4) [unwind b4]
+    %r32 = alloca () [unwind b4]
+    %r33 = call std::string_push_str(%r0, %r4, %r32) [unwind b4]
     %r34 = drop %r4 via std::Value<std::string>::drop#impl:1d429675
-    %r35 = alloca StaticStr
-    %r36 = store @c6 to %r35
-    %r37 = call std::string_from_static(%r35, %r5)
-    %r38 = alloca ()
-    %r39 = call std::string_push_str(%r0, %r5, %r38)
+    %r35 = alloca StaticStr [unwind b5]
+    %r36 = store @c6 to %r35 [unwind b5]
+    %r37 = call std::string_from_static(%r35, %r5) [unwind b5]
+    %r38 = alloca () [unwind b5]
+    %r39 = call std::string_push_str(%r0, %r5, %r38) [unwind b5]
     %r40 = drop %r5 via std::Value<std::string>::drop#impl:1d429675
-    %r41 = alloca StaticStr
-    %r42 = store @c3 to %r41
-    %r43 = call std::string_from_static(%r41, %r6)
-    %r44 = alloca ()
-    %r45 = call std::string_push_str(%r0, %r6, %r44)
+    %r41 = alloca StaticStr [unwind b6]
+    %r42 = store @c3 to %r41 [unwind b6]
+    %r43 = call std::string_from_static(%r41, %r6) [unwind b6]
+    %r44 = alloca () [unwind b6]
+    %r45 = call std::string_push_str(%r0, %r6, %r44) [unwind b6]
     %r46 = drop %r6 via std::Value<std::string>::drop#impl:1d429675
     %r47 = subfield @c7 from %p0
-    %r48 = call <test>::std::Value<<test>::A>::to_string#impl:78412598(%r47, %r7)
-    %r49 = alloca ()
-    %r50 = call std::string_push_str(%r0, %r7, %r49)
+    %r48 = call <test>::std::Value<<test>::A>::to_string#impl:78412598(%r47, %r7) [unwind b7]
+    %r49 = alloca () [unwind b7]
+    %r50 = call std::string_push_str(%r0, %r7, %r49) [unwind b7]
     %r51 = drop %r7 via std::Value<std::string>::drop#impl:1d429675
-    %r52 = alloca StaticStr
-    %r53 = store @c8 to %r52
-    %r54 = call std::string_from_static(%r52, %r8)
-    %r55 = alloca ()
-    %r56 = call std::string_push_str(%r0, %r8, %r55)
+    %r52 = alloca StaticStr [unwind b8]
+    %r53 = store @c8 to %r52 [unwind b8]
+    %r54 = call std::string_from_static(%r52, %r8) [unwind b8]
+    %r55 = alloca () [unwind b8]
+    %r56 = call std::string_push_str(%r0, %r8, %r55) [unwind b8]
     %r57 = drop %r8 via std::Value<std::string>::drop#impl:1d429675
     %r58 = move %r0 to %p1
     %r59 = ret
+  b1:
+    %r60 = drop %r1 via std::Value<std::string>::drop#impl:1d429675
+    %r61 = resume
+  b2:
+    %r62 = drop %r2 via std::Value<std::string>::drop#impl:1d429675
+    %r63 = resume
+  b3:
+    %r64 = drop %r3 via std::Value<std::string>::drop#impl:1d429675
+    %r65 = resume
+  b4:
+    %r66 = drop %r4 via std::Value<std::string>::drop#impl:1d429675
+    %r67 = resume
+  b5:
+    %r68 = drop %r5 via std::Value<std::string>::drop#impl:1d429675
+    %r69 = resume
+  b6:
+    %r70 = drop %r6 via std::Value<std::string>::drop#impl:1d429675
+    %r71 = resume
+  b7:
+    %r72 = drop %r7 via std::Value<std::string>::drop#impl:1d429675
+    %r73 = resume
+  b8:
+    %r74 = drop %r8 via std::Value<std::string>::drop#impl:1d429675
+    %r75 = resume
 "#
     );
 }
@@ -1956,14 +2475,18 @@ fn store_local_generic_clone_dictionary() {
   @c0: () = ()
   b0:
     %r0 = alloca A using %p0
-    %r1 = dict_entry 3 from %p0
-    %r2 = call %r1(%p1, %r0)
-    %r3 = alloca ()
-    %r4 = call <test>::g(%r0, %r3)
-    %r5 = store @c0 to %p2
+    %r1 = dict_entry 3 from %p0 [unwind b1]
+    %r2 = call %r1(%p1, %r0) [unwind b1]
+    %r3 = alloca () [unwind b1]
+    %r4 = call <test>::g(%r0, %r3) [unwind b1]
+    %r5 = store @c0 to %p2 [unwind b1]
     %r6 = dict_entry 4 from %p0
     %r7 = drop %r0 via %r6
     %r8 = ret
+  b1:
+    %r9 = dict_entry 4 from %p0
+    %r10 = drop %r0 via %r9
+    %r11 = resume
 
 fn g(%p0: @arg &mut A, %p1: @ret ()):
   @c0: () = ()
@@ -2559,9 +3082,12 @@ fn yielded_subscript_read() {
 fn f(%p0: @arg &mut int, %p1: @ret int):
   b0:
     %r0 = project <test>::cell::ref_mut#subscript:f3d0ec43(%p0)
-    %r1 = memcpy %r0 to %p1
+    %r1 = memcpy %r0 to %p1 [unwind b1]
     %r2 = end_project %r0
     %r3 = ret
+  b1:
+    %r4 = end_project %r0
+    %r5 = resume
 "#,
     );
 }
@@ -2591,12 +3117,15 @@ fn f(%p0: @arg &mut int, %p1: @arg let int, %p2: @ret ()):
   @c0: () = ()
   b0:
     %r0 = project <test>::cell::ref_mut#subscript:f3d0ec43(%p0)
-    %r1 = alloca int
-    %r2 = memcpy %p1 to %r1
-    %r3 = move %r1 to %r0
-    %r4 = store @c0 to %p2
+    %r1 = alloca int [unwind b1]
+    %r2 = memcpy %p1 to %r1 [unwind b1]
+    %r3 = move %r1 to %r0 [unwind b1]
+    %r4 = store @c0 to %p2 [unwind b1]
     %r5 = end_project %r0
     %r6 = ret
+  b1:
+    %r7 = end_project %r0
+    %r8 = resume
 "#,
     );
 }
@@ -2637,12 +3166,15 @@ fn f(%p0: @arg &mut int, %p1: @arg let int, %p2: @ret ()):
   @c0: () = ()
   b0:
     %r0 = project <test>::cell::ref_mut#subscript:f3d0ec43(%p0)
-    %r1 = alloca int
-    %r2 = call std::Num<std::int>::add#impl:7665d3ee(%r0, %p1, %r1)
-    %r3 = move %r1 to %r0
-    %r4 = store @c0 to %p2
+    %r1 = alloca int [unwind b1]
+    %r2 = call std::Num<std::int>::add#impl:7665d3ee(%r0, %p1, %r1) [unwind b1]
+    %r3 = move %r1 to %r0 [unwind b1]
+    %r4 = store @c0 to %p2 [unwind b1]
     %r5 = end_project %r0
     %r6 = ret
+  b1:
+    %r7 = end_project %r0
+    %r8 = resume
 "#,
     );
 }
@@ -2674,14 +3206,14 @@ fn f(%p0: @arg &mut int, %p1: @arg let int, %p2: @arg let int, %p3: @ret ()):
   @c0: () = ()
   b0:
     %r0 = project <test>::cell::ref_mut#subscript:f3d0ec43(%p0)
-    %r1 = alloca int
+    %r1 = alloca int [unwind b1]
     %r2 = invoke std::idiv(%p1, %p2, %r1) -> b2 unwind b1
   b1:
     %r7 = end_project %r0
     %r8 = resume
   b2:
-    %r3 = move %r1 to %r0
-    %r4 = store @c0 to %p3
+    %r3 = move %r1 to %r0 [unwind b1]
+    %r4 = store @c0 to %p3 [unwind b1]
     %r5 = end_project %r0
     %r6 = ret
 "#,

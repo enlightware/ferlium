@@ -2925,10 +2925,12 @@ impl std::borrow::Borrow<TypeKind> for InternedType {
 }
 
 /// Attempts to find an isomorphism (bijection) between local_world and existing_world.
-/// Returns a Vec where result[local_idx] = global_idx in existing_world, if an isomorphism exists.
+/// Returns a vector where `result[local_idx] = global_idx` in `existing_world`, if an isomorphism
+/// exists.
 ///
 /// Two worlds are isomorphic if there exists a bijection f: local → existing such that
-/// when we remap all local type references in local_world[i] using f, we get existing_world[f(i)].
+/// when we remap all local type references in `local_world[i]` using `f`, we get
+/// `existing_world[f(i)]`.
 fn find_world_isomorphism(
     local_world: &[TypeKind],
     existing_world: &TypeWorld,

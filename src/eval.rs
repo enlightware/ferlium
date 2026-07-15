@@ -8,7 +8,6 @@
 //
 use std::{collections::VecDeque, mem};
 
-use derive_new::new;
 use enum_as_inner::EnumAsInner;
 use ustr::Ustr;
 
@@ -19,6 +18,7 @@ use crate::{
     CompilerSession, FxHashMap, Location, ModuleRegistry, SourceId, SourceTable,
     compiler::error::RuntimeErrorKind,
     containers::b,
+    execution::ReferenceInterpreterLimits,
     format::{FormatWith, write_with_separator},
     hir::function::{ArgConvention, copy_boxed_trivial_copy_native},
     hir::value::{
@@ -40,8 +40,6 @@ use crate::{
     Modules,
     hir::{self, CallArgument, ENodeArena, ENodeId, Elaborated, LoopId, NodeKind},
 };
-
-pub const DEFAULT_INTERACTIVE_FUEL_LIMIT: usize = 100_000;
 
 /// Either a value or a unique mutable reference to a value.
 /// This allows to implement the mutable value semantics.
@@ -195,11 +193,13 @@ pub struct EvalCtx<'a> {
     /// current function call depth
     pub call_depth: usize,
     /// maximum function call depth
-    pub call_depth_limit: usize,
-    /// maximum number of values in the evaluation environment
-    pub stack_limit: usize,
+    call_depth_limit: usize,
+    /// maximum number of entries in the reference interpreters' shared environment
+    pub environment_cell_limit: usize,
     /// remaining execution fuel; `None` means fuel checks are disabled
-    pub fuel_remaining: Option<usize>,
+    fuel_remaining: Option<usize>,
+    /// Whether this executor can still safely run Ferlium code.
+    execution_state: ExecutionState,
     /// id of the current module for import slot resolution
     pub module_id: ModuleId,
     /// whether the current function returns a place result
@@ -211,11 +211,20 @@ pub struct EvalCtx<'a> {
 }
 
 impl<'a> EvalCtx<'a> {
-    const DEFAULT_CALL_DEPTH_LIMIT: usize = 128;
-    const DEFAULT_STACK_LIMIT: usize = 65_536;
-
     pub fn new(module_id: ModuleId, compiler_session: &'a CompilerSession) -> EvalCtx<'a> {
-        Self::with_environment(module_id, Vec::new(), compiler_session)
+        Self::with_limits(
+            module_id,
+            compiler_session,
+            ReferenceInterpreterLimits::default(),
+        )
+    }
+
+    pub fn with_limits(
+        module_id: ModuleId,
+        compiler_session: &'a CompilerSession,
+        limits: ReferenceInterpreterLimits,
+    ) -> EvalCtx<'a> {
+        Self::with_environment_and_limits(module_id, Vec::new(), compiler_session, limits)
     }
 
     fn reserve_current_frame_slots(&mut self, locals: &[LocalDecl]) {
@@ -227,18 +236,6 @@ impl<'a> EvalCtx<'a> {
     /// Get the compiler session.
     pub fn compiler_session(&self) -> &'a CompilerSession {
         self.compiler_session
-    }
-
-    pub fn set_fuel(&mut self, fuel: usize) {
-        self.fuel_remaining = Some(fuel);
-    }
-
-    pub fn set_fuel_limit(&mut self, fuel_limit: Option<usize>) {
-        self.fuel_remaining = fuel_limit;
-    }
-
-    pub fn disable_fuel(&mut self) {
-        self.fuel_remaining = None;
     }
 
     pub fn check_fuel(&mut self, span: Location) -> EvalControlFlowResult {
@@ -269,22 +266,29 @@ impl<'a> EvalCtx<'a> {
         }
     }
 
-    /// Error out if growing the evaluation environment to `prospective_len` would reach the stack limit.
-    /// `span` is `None` at call-frame entry, where the call site is attached as a backtrace frame by the caller instead.
-    fn check_stack_limit(
+    /// Errors if `next_index` is outside the configured environment-cell range.
+    ///
+    /// Callers pass either `environment.len()` before appending one cell or the concrete local-slot
+    /// index they are about to materialize. `span` is `None` at call-frame entry, where the caller
+    /// attaches the call site as a backtrace frame.
+    pub(crate) fn check_environment_cell_limit(
         &self,
-        prospective_len: usize,
+        next_index: usize,
         span: Option<Location>,
     ) -> Result<(), RuntimeError> {
-        if prospective_len >= self.stack_limit {
-            return Err(RuntimeError::new(
-                RuntimeErrorKind::StackLimitExceeded {
-                    limit: self.stack_limit,
-                },
-                span,
-            ));
+        if next_index >= self.environment_cell_limit {
+            return Err(self.environment_cell_limit_error(span));
         }
         Ok(())
+    }
+
+    pub(crate) fn environment_cell_limit_error(&self, span: Option<Location>) -> RuntimeError {
+        RuntimeError::new(
+            RuntimeErrorKind::EnvironmentCellLimitExceeded {
+                limit: self.environment_cell_limit,
+            },
+            span,
+        )
     }
 
     pub fn pop_environment_entry(&mut self) -> Option<ValOrMut> {
@@ -350,15 +354,30 @@ impl<'a> EvalCtx<'a> {
         environment: Vec<ValOrMut>,
         compiler_session: &'a CompilerSession,
     ) -> EvalCtx<'a> {
+        Self::with_environment_and_limits(
+            module,
+            environment,
+            compiler_session,
+            ReferenceInterpreterLimits::default(),
+        )
+    }
+
+    pub fn with_environment_and_limits(
+        module: ModuleId,
+        environment: Vec<ValOrMut>,
+        compiler_session: &'a CompilerSession,
+        limits: ReferenceInterpreterLimits,
+    ) -> EvalCtx<'a> {
         EvalCtx {
             environment,
             frame_base: 0,
             extra_parameters: Vec::new(),
             extra_frame_base: 0,
             call_depth: 0,
-            call_depth_limit: Self::DEFAULT_CALL_DEPTH_LIMIT,
-            stack_limit: Self::DEFAULT_STACK_LIMIT,
-            fuel_remaining: None,
+            call_depth_limit: limits.execution.call_depth_limit,
+            environment_cell_limit: limits.environment_cell_limit,
+            fuel_remaining: limits.execution.fuel_limit,
+            execution_state: ExecutionState::Running,
             module_id: module,
             returns_place: false,
             trivial_copy_layout_cache: FxHashMap::default(),
@@ -370,6 +389,70 @@ impl<'a> EvalCtx<'a> {
     pub fn get_module_function(&self, function: FunctionId) -> &ModuleFunction {
         let module = self.compiler_session.expect_fresh_module(function.module);
         module.get_function_by_id(function.function).unwrap()
+    }
+
+    /// Rejects entry into an executor whose semantic unwind has already failed.
+    pub(crate) fn ensure_runnable(&self) -> Result<(), RuntimeError> {
+        match &self.execution_state {
+            ExecutionState::Running => Ok(()),
+            ExecutionState::Poisoned(abort) => {
+                Err(RuntimeError::HardAbort(Box::new(abort.clone())))
+            }
+        }
+    }
+
+    /// Runs semantic cleanup for an error already in flight.
+    ///
+    /// A second failure means Ferlium cleanup semantics can no longer be completed. The executor is
+    /// poisoned immediately and callers must only reclaim backing storage, never run more guest
+    /// cleanup.
+    pub(crate) fn cleanup_after_error(
+        &mut self,
+        initial: RuntimeError,
+        cleanup: impl FnOnce(&mut Self) -> Result<(), RuntimeError>,
+    ) -> RuntimeError {
+        let initial = match initial {
+            RuntimeError::Failure(_) => initial,
+            RuntimeError::HardAbort(abort) => {
+                self.execution_state = ExecutionState::Poisoned((*abort).clone());
+                return RuntimeError::HardAbort(abort);
+            }
+        };
+        match cleanup(self) {
+            Ok(()) => initial,
+            Err(during_cleanup) => self.poison(initial, during_cleanup),
+        }
+    }
+
+    pub(crate) fn poison(
+        &mut self,
+        initial: RuntimeError,
+        during_cleanup: RuntimeError,
+    ) -> RuntimeError {
+        let initial = match initial {
+            RuntimeError::Failure(failure) => failure,
+            RuntimeError::HardAbort(abort) => {
+                self.execution_state = ExecutionState::Poisoned((*abort).clone());
+                return RuntimeError::HardAbort(abort);
+            }
+        };
+        let during_cleanup = match during_cleanup {
+            RuntimeError::Failure(failure) => failure,
+            RuntimeError::HardAbort(abort) => {
+                self.execution_state = ExecutionState::Poisoned((*abort).clone());
+                return RuntimeError::HardAbort(abort);
+            }
+        };
+        let abort = HardAbort {
+            initial,
+            during_cleanup,
+        };
+        self.execution_state = ExecutionState::Poisoned(abort.clone());
+        RuntimeError::HardAbort(Box::new(abort))
+    }
+
+    pub fn is_poisoned(&self) -> bool {
+        matches!(self.execution_state, ExecutionState::Poisoned(_))
     }
 
     fn function_value_visible_argument_types(
@@ -447,6 +530,7 @@ impl<'a> EvalCtx<'a> {
         } else {
             let dictionary = closure_env_dictionary
                 .expect("closures with captured values must carry a Value dictionary");
+            self.check_environment_cell_limit(self.environment.len(), Some(location))?;
             let closure_env = call_value_clone_for_temp(
                 self,
                 dictionary,
@@ -479,26 +563,37 @@ impl<'a> EvalCtx<'a> {
             .map_err(|err| err.with_frame(function_id, location));
 
         if let Some(target) = closure_env_temp {
-            let drop_result = call_value_drop_for_temp(
-                self,
-                closure_env_dictionary.expect("closure environment dictionary disappeared"),
-                ValOrMut::Mut(Place {
-                    target,
-                    path: Vec::new(),
-                }),
-                location,
-            );
-            self.pop_environment_entry_discard();
-            let result = match (result, drop_result) {
-                (Ok(result), Ok(_)) => Ok(result),
-                (Ok(result), Err(err)) => {
-                    if let Some(value) = result.into_transfer_value() {
-                        value.discard_storage();
-                    }
-                    Err(err)
-                }
-                (Err(err), _) => Err(err),
+            let dictionary =
+                closure_env_dictionary.expect("closure environment dictionary disappeared");
+            let place = Place {
+                target,
+                path: Vec::new(),
             };
+            let result = match result {
+                Ok(result) => match discard_call_result(call_value_drop_for_temp(
+                    self,
+                    dictionary,
+                    ValOrMut::Mut(place),
+                    location,
+                )) {
+                    Ok(()) => Ok(result),
+                    Err(error) => {
+                        if let Some(value) = result.into_transfer_value() {
+                            value.discard_storage();
+                        }
+                        Err(error)
+                    }
+                },
+                Err(error) => Err(self.cleanup_after_error(error, |ctx| {
+                    discard_call_result(call_value_drop_for_temp(
+                        ctx,
+                        dictionary,
+                        ValOrMut::Mut(place),
+                        location,
+                    ))
+                })),
+            };
+            self.pop_environment_entry_discard();
             return result;
         }
 
@@ -561,7 +656,13 @@ impl<'a> EvalCtx<'a> {
         extra_arguments: Vec<HiddenEvidenceArgValue>,
         arguments: Vec<ValOrMut>,
     ) -> Result<(SuspendedAccessor, Place), RuntimeError> {
-        self.check_stack_limit(self.environment.len(), None)?;
+        self.ensure_runnable()?;
+        if self.environment.len().saturating_add(arguments.len()) > self.environment_cell_limit {
+            for argument in arguments {
+                argument.discard_storage();
+            }
+            return Err(self.environment_cell_limit_error(None));
+        }
         let local_id = function_id.function;
         let mut module_id = function_id.module;
         mem::swap(&mut self.module_id, &mut module_id);
@@ -631,11 +732,9 @@ impl<'a> EvalCtx<'a> {
                 }
             }
             Err(err) => {
-                let cleanup = drop_frame_owned_locals_on_error(
-                    self,
-                    locals,
-                    arena[script.entry_node_id].span,
-                );
+                let err = self.cleanup_after_error(err, |ctx| {
+                    drop_frame_owned_locals_on_error(ctx, locals, arena[script.entry_node_id].span)
+                });
                 self.call_depth -= 1;
                 self.truncate_environment_storage(frame_base);
                 self.extra_parameters.truncate(extra_start);
@@ -643,7 +742,6 @@ impl<'a> EvalCtx<'a> {
                 self.extra_frame_base = old_extra_frame_base;
                 self.returns_place = previous_returns_place;
                 mem::swap(&mut self.module_id, &mut module_id);
-                cleanup?;
                 Err(err)
             }
         }
@@ -656,6 +754,16 @@ impl<'a> EvalCtx<'a> {
     ) -> EvalControlFlowResult {
         self.resume_suspended_accessor_epilogue_inner(suspension)
             .map_err(|err| err.with_frame(suspension.function, location))
+    }
+
+    /// Tears down a suspended accessor without running its Ferlium epilogue.
+    ///
+    /// Used only after hard abort, when semantic cleanup must stop but trusted interpreter storage
+    /// still has to be reclaimed.
+    fn abandon_suspended_accessor(&mut self, suspension: SuspendedAccessor) {
+        self.call_depth -= 1;
+        self.truncate_environment_storage(suspension.frame_base);
+        self.extra_parameters.truncate(suspension.extra_start);
     }
 
     fn resume_suspended_accessor_epilogue_inner(
@@ -688,12 +796,17 @@ impl<'a> EvalCtx<'a> {
         let locals = &function_data.locals;
         let arena = &module.hir_arena;
 
-        let result =
-            eval_epilogue_after_yield(arena, script.entry_node_id, yield_node_id, self, locals);
-        let cleanup = if result.is_err() {
-            drop_frame_owned_locals_on_error(self, locals, arena[yield_node_id].span)
-        } else {
-            Ok(())
+        let result = match eval_epilogue_after_yield(
+            arena,
+            script.entry_node_id,
+            yield_node_id,
+            self,
+            locals,
+        ) {
+            Ok(result) => Ok(result),
+            Err(error) => Err(self.cleanup_after_error(error, |ctx| {
+                drop_frame_owned_locals_on_error(ctx, locals, arena[yield_node_id].span)
+            })),
         };
 
         self.call_depth -= 1;
@@ -708,7 +821,6 @@ impl<'a> EvalCtx<'a> {
         self.returns_place = caller_returns_place;
         self.extra_frame_base = caller_extra_frame_base;
 
-        cleanup?;
         result
     }
 
@@ -719,7 +831,7 @@ impl<'a> EvalCtx<'a> {
         extra_arguments: Vec<HiddenEvidenceArgValue>,
         arguments: Vec<ValOrMut>,
     ) -> EvalControlFlowResult {
-        self.check_stack_limit(self.environment.len(), None)?;
+        self.ensure_runnable()?;
         let local_id = function_id.function;
         let mut module_id = function_id.module;
         // Use the new module for the duration of the function call.
@@ -1117,38 +1229,40 @@ impl FormatWith<(&SourceTable, ModuleRegistry<'_>)> for BacktraceFrame {
 }
 
 /// A runtime error that occurred during evaluation and is propagated upwards.
-#[derive(Debug, Clone, new)]
-pub struct RuntimeError {
-    /// The kind of the error.
-    pub(crate) kind: RuntimeErrorKind,
-    /// The location where the error occurred, None if in native code.
-    pub(crate) location: Option<Location>,
-    /// The call stack at the time of the error.
-    #[new(default)]
-    pub(crate) backtrace: Vec<BacktraceFrame>,
+#[derive(Debug, Clone)]
+pub enum RuntimeError {
+    /// A primary language failure or host-enforced execution cancellation.
+    Failure(RuntimeFailure),
+    /// Recovery from `initial` raised `during_cleanup`; no further Ferlium cleanup may run.
+    HardAbort(Box<HardAbort>),
 }
-impl RuntimeError {
-    pub fn new_native(kind: RuntimeErrorKind) -> Self {
-        Self {
-            kind,
-            location: None,
-            backtrace: Vec::new(),
-        }
+
+/// One non-recursive runtime failure with its source location and accumulated call stack.
+#[derive(Debug, Clone)]
+pub struct RuntimeFailure {
+    kind: RuntimeErrorKind,
+    location: Option<Location>,
+    backtrace: Vec<BacktraceFrame>,
+}
+
+/// The two failures that forced an executor to abandon semantic cleanup and become poisoned.
+#[derive(Debug, Clone)]
+pub struct HardAbort {
+    initial: RuntimeFailure,
+    during_cleanup: RuntimeFailure,
+}
+
+impl HardAbort {
+    pub fn initial(&self) -> &RuntimeFailure {
+        &self.initial
     }
 
-    pub fn with_frame(self, function_id: FunctionId, location: Location) -> Self {
-        let mut backtrace = self.backtrace;
-        backtrace.push(BacktraceFrame {
-            function_id,
-            call_site: location,
-        });
-        Self {
-            kind: self.kind,
-            location: self.location,
-            backtrace,
-        }
+    pub fn during_cleanup(&self) -> &RuntimeFailure {
+        &self.during_cleanup
     }
+}
 
+impl RuntimeFailure {
     pub fn kind(&self) -> RuntimeErrorKind {
         self.kind.clone()
     }
@@ -1157,17 +1271,87 @@ impl RuntimeError {
         self.location
     }
 
-    pub fn backtrace(&self) -> &Vec<BacktraceFrame> {
+    pub fn backtrace(&self) -> &[BacktraceFrame] {
         &self.backtrace
     }
 
+    fn with_frame(mut self, function_id: FunctionId, location: Location) -> Self {
+        self.backtrace.push(BacktraceFrame {
+            function_id,
+            call_site: location,
+        });
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
+enum ExecutionState {
+    Running,
+    Poisoned(HardAbort),
+}
+
+impl RuntimeError {
+    pub fn new(kind: RuntimeErrorKind, location: Option<Location>) -> Self {
+        Self::Failure(RuntimeFailure {
+            kind,
+            location,
+            backtrace: Vec::new(),
+        })
+    }
+
+    pub fn new_native(kind: RuntimeErrorKind) -> Self {
+        Self::new(kind, None)
+    }
+
+    pub fn with_frame(self, function_id: FunctionId, location: Location) -> Self {
+        match self {
+            Self::Failure(failure) => Self::Failure(failure.with_frame(function_id, location)),
+            Self::HardAbort(abort) => Self::HardAbort(Box::new(HardAbort {
+                initial: abort.initial.with_frame(function_id, location),
+                during_cleanup: abort.during_cleanup.with_frame(function_id, location),
+            })),
+        }
+    }
+
+    pub fn kind(&self) -> RuntimeErrorKind {
+        match self {
+            Self::Failure(failure) => failure.kind(),
+            Self::HardAbort(_) => RuntimeErrorKind::HardAbort,
+        }
+    }
+
+    pub fn location(&self) -> Option<Location> {
+        match self {
+            Self::Failure(failure) => failure.location(),
+            Self::HardAbort(abort) => abort.initial.location(),
+        }
+    }
+
+    pub fn backtrace(&self) -> &[BacktraceFrame] {
+        match self {
+            Self::Failure(failure) => failure.backtrace(),
+            Self::HardAbort(abort) => abort.initial.backtrace(),
+        }
+    }
+
+    pub fn hard_abort(&self) -> Option<&HardAbort> {
+        match self {
+            Self::Failure(_) => None,
+            Self::HardAbort(abort) => Some(abort),
+        }
+    }
+
+    pub fn is_hard_abort(&self) -> bool {
+        matches!(self, Self::HardAbort(_))
+    }
+
     pub fn top_most_location_in(&self, source_id: SourceId) -> Option<Location> {
-        if let Some(location) = self.location
+        if let Some(location) = self.location()
             && location.source_id == source_id
         {
             return Some(location);
         }
-        for frame in &self.backtrace {
+        for frame in self.backtrace() {
             if frame.call_site.source_id == source_id {
                 return Some(frame.call_site);
             }
@@ -1182,8 +1366,28 @@ impl FormatWith<(&SourceTable, &Modules)> for RuntimeError {
         f: &mut std::fmt::Formatter<'_>,
         data: &(&SourceTable, &Modules),
     ) -> std::fmt::Result {
+        match self {
+            Self::Failure(failure) => failure.fmt_with(f, data)?,
+            Self::HardAbort(abort) => {
+                writeln!(f, "Execution hard-aborted while unwinding:")?;
+                writeln!(f, "initial failure:")?;
+                abort.initial.fmt_with(f, data)?;
+                writeln!(f, "failure during cleanup:")?;
+                abort.during_cleanup.fmt_with(f, data)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl FormatWith<(&SourceTable, &Modules)> for RuntimeFailure {
+    fn fmt_with(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+        data: &(&SourceTable, &Modules),
+    ) -> std::fmt::Result {
         write!(f, "Execution error: {}", self.kind)?;
-        if let Some(location) = &self.location {
+        if let Some(location) = self.location {
             write!(f, " at {}", location.format_with(data.0))?;
         }
         writeln!(f)?;
@@ -1644,6 +1848,32 @@ fn call_local_drop_dispatch(
     ))
 }
 
+/// Attempts a local's semantic drop and ends the target lifetime even if that attempt raises.
+///
+/// Once a drop action starts, the value may be partially destroyed—or cancellation may prevent
+/// entry into its drop body—and must never be observed or retried. Reclaiming and invalidating its
+/// boxed storage is therefore unconditional; the original drop result is then propagated.
+fn drop_local_value_at_place(
+    ctx: &mut EvalCtx,
+    drop: ResolvedLocalDrop,
+    target: Place,
+    span: Location,
+) -> Result<(), RuntimeError> {
+    let drop_result = call_local_drop_dispatch(ctx, drop, target.clone(), span);
+    let discard_result = discard_value_storage_at_place(ctx, &target, span);
+    if drop_result.is_err() {
+        debug_assert!(
+            discard_result.is_ok(),
+            "failed to invalidate a drop target after its semantic drop also failed"
+        );
+        // The semantic-drop failure is the primary error. In release builds, retain it even if the
+        // interpreter also failed to address the target for invalidation.
+        drop_result
+    } else {
+        discard_result
+    }
+}
+
 fn resolved_local_drop(drop: &ResolvedLocalDrop) -> ResolvedLocalDrop {
     *drop
 }
@@ -1685,8 +1915,7 @@ fn drop_owned_locals_on_error_from(
         if place_contains_uninit(ctx, &target, span)? {
             continue;
         }
-        call_local_drop_dispatch(ctx, resolved_local_drop(drop), target.clone(), span)?;
-        discard_value_storage_at_place(ctx, &target, span)?;
+        drop_local_value_at_place(ctx, resolved_local_drop(drop), target, span)?;
     }
     Ok(())
 }
@@ -1828,6 +2057,10 @@ pub(crate) fn call_value_drop_for_temp(
         ValOrMut::Dictionary(_) => panic!("cannot drop trait dictionary metadata as a Value"),
         ValOrMut::Val(value) => {
             let target_index = ctx.environment.len();
+            if let Err(error) = ctx.check_environment_cell_limit(target_index, Some(span)) {
+                value.discard_storage();
+                return Err(error);
+            }
             ctx.environment.push(ValOrMut::Val(value));
             let place = Place {
                 target: target_index,
@@ -2392,9 +2625,9 @@ fn eval_store_local(
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
     let local = &locals[node.id.as_index()];
-    ctx.check_stack_limit(ctx.environment.len(), Some(span))?;
+    ctx.check_environment_cell_limit(ctx.environment.len(), Some(span))?;
     let target_index = local_environment_index(ctx, locals, node.id);
-    ctx.check_stack_limit(target_index, Some(span))?;
+    ctx.check_environment_cell_limit(target_index, Some(span))?;
     if let Some(clone) = &local.clone {
         ctx.ensure_environment_slot(target_index);
         let clone = resolved_local_clone(clone);
@@ -2662,20 +2895,30 @@ fn eval_with_yielded(
     let body_result = eval_node_with_ctx(arena, node.body, ctx, locals);
     ctx.set_environment_entry(binding_index, ValOrMut::Val(Value::uninit()));
 
-    let mut epilogue_result = match epilogue.member {
-        AccessorMemberEpilogue::Suspended(suspension) => {
-            ctx.resume_suspended_accessor_epilogue(suspension, span)
+    let body_hard_aborted = body_result.as_ref().is_err_and(RuntimeError::is_hard_abort);
+    let mut epilogue_result = if body_hard_aborted {
+        if let AccessorMemberEpilogue::Suspended(suspension) = epilogue.member {
+            ctx.abandon_suspended_accessor(suspension);
         }
-        AccessorMemberEpilogue::None => cont(Value::unit()),
+        cont(Value::unit())
+    } else {
+        match epilogue.member {
+            AccessorMemberEpilogue::Suspended(suspension) => {
+                ctx.resume_suspended_accessor_epilogue(suspension, span)
+            }
+            AccessorMemberEpilogue::None => cont(Value::unit()),
+        }
     };
-    for cleanup in epilogue.cleanup_scopes {
-        if let Err(err) = drop_cleanup_locals(ctx, locals, &cleanup, span) {
-            epilogue_result = Err(err);
-            break;
+    if epilogue_result.is_ok() {
+        for cleanup in epilogue.cleanup_scopes {
+            if let Err(err) = drop_cleanup_locals(ctx, locals, &cleanup, span) {
+                epilogue_result = Err(err);
+                break;
+            }
         }
     }
     ctx.truncate_environment_storage(temp_start);
-    combine_with_yielded_body_and_epilogue(body_result, epilogue_result)
+    combine_with_yielded_body_and_epilogue(ctx, body_result, epilogue_result)
 }
 
 fn eval_accessor_until_yield(
@@ -2796,12 +3039,9 @@ fn eval_block_accessor_until_yield(
                 return Ok(transfer.map_continue(unreachable_continue));
             }
             Err(err) => {
-                if let Err(cleanup_err) =
+                let err = ctx.cleanup_after_error(err, |ctx| {
                     drop_cleanup_locals(ctx, locals, &block.cleanup, arena[*node].span)
-                {
-                    ctx.truncate_environment_storage(env_size);
-                    return Err(cleanup_err);
-                }
+                });
                 ctx.truncate_environment_storage(env_size);
                 return Err(err);
             }
@@ -2825,6 +3065,7 @@ fn eval_block_accessor_until_yield(
 }
 
 fn combine_with_yielded_body_and_epilogue(
+    ctx: &mut EvalCtx,
     body_result: EvalControlFlowResult,
     epilogue_result: EvalControlFlowResult,
 ) -> EvalControlFlowResult {
@@ -2849,7 +3090,7 @@ fn combine_with_yielded_body_and_epilogue(
             discard_control_flow_value(epilogue);
             Err(err)
         }
-        (Err(_), Err(epilogue_err)) => Err(epilogue_err),
+        (Err(body_err), Err(epilogue_err)) => Err(ctx.poison(body_err, epilogue_err)),
     }
 }
 
@@ -2975,7 +3216,9 @@ fn eval_block_epilogue_after_yield(
                 return Ok(transfer);
             }
             Err(err) => {
-                drop_cleanup_locals(ctx, locals, &block.cleanup, arena[yield_container].span)?;
+                let err = ctx.cleanup_after_error(err, |ctx| {
+                    drop_cleanup_locals(ctx, locals, &block.cleanup, arena[yield_container].span)
+                });
                 return Err(err);
             }
         }
@@ -2988,7 +3231,9 @@ fn eval_block_epilogue_after_yield(
                 if let Some(value) = last_value.take() {
                     value.discard_storage();
                 }
-                drop_cleanup_locals(ctx, locals, &block.cleanup, arena[*node].span)?;
+                let err = ctx.cleanup_after_error(err, |ctx| {
+                    drop_cleanup_locals(ctx, locals, &block.cleanup, arena[*node].span)
+                });
                 return Err(err);
             }
             Ok(ControlFlow::Continue(value)) => {
@@ -3105,8 +3350,7 @@ fn drop_cleanup_locals(
         if place_contains_uninit(ctx, &target, span)? {
             continue;
         }
-        call_local_drop_dispatch(ctx, resolved_local_drop(drop), target.clone(), span)?;
-        discard_value_storage_at_place(ctx, &target, span)?;
+        drop_local_value_at_place(ctx, resolved_local_drop(drop), target, span)?;
     }
     Ok(())
 }
@@ -3126,16 +3370,16 @@ fn eval_block_with_cleanup(
                 if let Some(value) = last_value.take() {
                     value.discard_storage();
                 }
-                let cleanup = drop_cleanup_locals(ctx, locals, cleanup_drops, arena[*node].span);
-                if let Err(err) = cleanup {
-                    ctx.truncate_environment_storage(env_size);
-                    return Err(err);
+                let err = ctx.cleanup_after_error(err, |ctx| {
+                    drop_cleanup_locals(ctx, locals, cleanup_drops, arena[*node].span)
+                });
+                if !err.is_hard_abort() {
+                    ctx.assert_no_owned_local_leaks_before_truncate(
+                        locals,
+                        env_size,
+                        arena[*node].span,
+                    );
                 }
-                ctx.assert_no_owned_local_leaks_before_truncate(
-                    locals,
-                    env_size,
-                    arena[*node].span,
-                );
                 ctx.truncate_environment_storage(env_size);
                 return Err(err);
             }
@@ -3195,7 +3439,7 @@ fn eval_assign(
     if let Some(drop) = &assignment.drop
         && !place_contains_uninit(ctx, &place, span)?
         && let Err(err) =
-            call_local_drop_dispatch(ctx, resolved_local_drop(drop), place.clone(), span)
+            drop_local_value_at_place(ctx, resolved_local_drop(drop), place.clone(), span)
     {
         value.discard_storage();
         return Err(err);
@@ -3744,7 +3988,10 @@ mod tests {
 
     #[test]
     fn with_yielded_body_value_wins_over_epilogue_transfer() {
+        let session = CompilerSession::new();
+        let mut ctx = EvalCtx::new(ModuleId::from_index(0), &session);
         let result = combine_with_yielded_body_and_epilogue(
+            &mut ctx,
             cont(Value::native(1 as Int)),
             ret(Value::native(2 as Int)),
         )
@@ -3758,7 +4005,10 @@ mod tests {
 
     #[test]
     fn with_yielded_body_error_wins_over_epilogue_transfer() {
+        let session = CompilerSession::new();
+        let mut ctx = EvalCtx::new(ModuleId::from_index(0), &session);
         let result = combine_with_yielded_body_and_epilogue(
+            &mut ctx,
             Err(RuntimeError::new_native(RuntimeErrorKind::Aborted(Some(
                 "body".into(),
             )))),
@@ -3767,7 +4017,7 @@ mod tests {
 
         let err = result.expect_err("expected body error to win over epilogue transfer");
         assert_eq!(
-            err.kind,
+            err.kind(),
             RuntimeErrorKind::Aborted(Some("body".to_string()))
         );
     }

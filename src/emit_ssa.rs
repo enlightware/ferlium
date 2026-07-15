@@ -220,6 +220,7 @@ impl<'a> Emitter<'a> {
                 returns_place: f.definition.returns_place(),
                 scopes: Vec::new(),
                 pending_pads: Vec::new(),
+                cleanup_unwind_target: CleanupUnwindTarget::CurrentScope,
             },
             hir_arena: &module.hir_arena,
             session,
@@ -320,7 +321,8 @@ impl<'a> Emitter<'a> {
         // The callee is the place of the `Value::clone` method entry; the call reads the function
         // value by reference (never loaded into a register — see the `call` contract). A plain
         // `call`, not an `invoke`: `Value::clone` is infallible by its trait contract (a fallible
-        // clone impl is a compile error), so the clone can never raise and needs no cleanup pad.
+        // clone impl is a compile error). `insert` may still attach an implicit unwind edge for
+        // out-of-band execution cancellation.
         self.insert(Instruction::call(span, method_place, [source, target]));
     }
 
@@ -523,7 +525,12 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// Pops the innermost scope, emitting its cleanup in reverse declaration order (normal scope exit).
+    /// Pops the innermost scope, then emits its cleanup in reverse declaration order (normal scope
+    /// exit).
+    ///
+    /// Popping first is semantically significant: if one of these cleanup actions raises as the
+    /// primary error, its implicit unwind edge must target an enclosing scope's pad, never the scope
+    /// currently being cleaned (which would retry already-started drops).
     fn exit_scope(&mut self, span: Location) {
         let scope = self
             .context
@@ -550,14 +557,30 @@ impl<'a> Emitter<'a> {
     /// The scopes are left on the stack: the block becomes terminated by the transfer's following
     /// terminator, so the skipped `exit_scope` calls become no-ops on the dead edge.
     fn emit_unwind_drops(&mut self, span: Location, to_depth: usize) {
-        let actions: Vec<CleanupAction> = self.context.scopes[to_depth..]
-            .iter()
-            .rev()
-            .flat_map(|scope| scope.actions.iter().rev().cloned())
-            .collect();
-        for action in actions {
-            self.emit_cleanup(span, action);
+        debug_assert!(matches!(
+            self.context.cleanup_unwind_target,
+            CleanupUnwindTarget::CurrentScope
+        ));
+        for depth in (to_depth..self.context.scopes.len()).rev() {
+            let actions: Vec<CleanupAction> = self.context.scopes[depth]
+                .actions
+                .iter()
+                .rev()
+                .cloned()
+                .collect();
+            let outer = self.context.scopes[..depth]
+                .iter()
+                .rposition(|scope| !scope.actions.is_empty())
+                .map(|outer_depth| self.allocate_pad(outer_depth, span));
+            self.context.cleanup_unwind_target = match outer {
+                Some(outer) => CleanupUnwindTarget::OuterPad(outer),
+                None => CleanupUnwindTarget::PropagateWithoutPad,
+            };
+            for action in actions {
+                self.emit_cleanup(span, action);
+            }
         }
+        self.context.cleanup_unwind_target = CleanupUnwindTarget::CurrentScope;
     }
 
     /// Emits the drops of *all* enclosing scopes, innermost first (the unwinding performed by a
@@ -566,13 +589,13 @@ impl<'a> Emitter<'a> {
         self.emit_unwind_drops(span, 0);
     }
 
-    /// Allocates (or returns the cached) cleanup pad the current scope's fallible calls should unwind
-    /// to, plus the outer pads it chains to. The pad blocks are created empty here and recorded in
+    /// Allocates (or returns the cached) cleanup pad the current exceptional edge should unwind to,
+    /// plus the outer pads it chains to. The pad blocks are created empty here and recorded in
     /// `pending_pads`; their bodies are emitted at function finalization (see `fill_pending_pads`),
     /// because a block is a contiguous range in the shared instruction arena and so cannot be filled
     /// in the middle of lowering another block. Returns `None` when no enclosing scope has drop
-    /// obligations — the frame has nothing to clean up, so a raised error propagates straight to the
-    /// caller and the call stays a plain `call`.
+    /// obligations — the frame has nothing to clean up, so the failure or cancellation propagates
+    /// straight to the caller.
     fn innermost_pad(&mut self, span: Location) -> Option<BlockId> {
         let depth = self
             .context
@@ -584,9 +607,10 @@ impl<'a> Emitter<'a> {
 
     /// Allocates the cleanup pad block for the scope at `depth` (memoized on the scope), recursively
     /// allocating the chain of enclosing pads, and records each in `pending_pads` for later filling.
-    /// The chained pads, innermost first, drop every live frame local exactly once on the error path
-    /// — mirroring the inline unwinding `emit_unwind_drops`/`emit_return_drops` perform for
-    /// `break`/`return`, but reached via an `invoke`'s unwind edge.
+    /// If cleanup completes, the chained pads, innermost first, drop every live frame local exactly
+    /// once on the error path — mirroring the inline unwinding
+    /// `emit_unwind_drops`/`emit_return_drops` perform for `break`/`return`, but reached via an
+    /// explicit or implicit exceptional edge.
     fn allocate_pad(&mut self, depth: usize, span: Location) -> BlockId {
         if let Some(pad) = self.context.scopes[depth].pad {
             return pad;
@@ -621,15 +645,23 @@ impl<'a> Emitter<'a> {
 
     /// Emits the bodies of all deferred cleanup pads, at function finalization. Each pad block is
     /// empty until now, so filling them here — after the body's last block is terminated — keeps every
-    /// block a contiguous instruction range. A pad runs its (init-guarded) drops, then `br`s to its
-    /// outer pad or `resume`s.
+    /// block a contiguous instruction range. A pad runs its (init-guarded) cleanup, then `br`s to its
+    /// outer pad or `resume`s. Cleanup instructions emitted inside a pad receive no further cleanup
+    /// edge: if one raises while the original error is in flight, the executor hard-aborts instead of
+    /// starting a replacement unwind.
     fn fill_pending_pads(&mut self) {
         let pads = std::mem::take(&mut self.context.pending_pads);
         for pad in pads {
             self.context.point = InsertionPoint::End(pad.block);
+            debug_assert!(matches!(
+                self.context.cleanup_unwind_target,
+                CleanupUnwindTarget::CurrentScope
+            ));
+            self.context.cleanup_unwind_target = CleanupUnwindTarget::PropagateWithoutPad;
             for action in pad.actions {
                 self.emit_cleanup(pad.span, action);
             }
+            self.context.cleanup_unwind_target = CleanupUnwindTarget::CurrentScope;
             match pad.outer {
                 Some(outer_pad) => self.insert(Instruction::br(pad.span, outer_pad)),
                 None => self.insert(Instruction::resume(pad.span)),
@@ -642,7 +674,8 @@ impl<'a> Emitter<'a> {
     /// `invoke` whose unwind edge runs that pad (dropping the frame's live locals before the error
     /// propagates), with lowering continuing in a fresh continuation block; any other call is a plain
     /// `call`. This is the only place `invoke` is introduced, and the single point at which a call's
-    /// fallibility is decided — so no call site can forget to request an unwind edge.
+    /// source-level fallibility is decided. A plain call may separately receive an implicit unwind
+    /// edge for out-of-band execution cancellation in [`insert`](Self::insert).
     fn emit_call(
         &mut self,
         span: Location,
@@ -721,7 +754,8 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// Allocates frame storage for every [`LocalStorage::Owned`] local of the lowered function and
+    /// Allocates frame storage for every
+    /// [`LocalStorage::Owned`](crate::module::function::LocalStorage::Owned) local of the lowered function and
     /// binds it to its `alloca` place.
     ///
     /// Arguments are `NonOwning` and keep their by-value parameter binding. A lowered closure's
@@ -1298,13 +1332,16 @@ impl<'a> Emitter<'a> {
         for arg in visible_arguments {
             arguments.push(self.lower_as_place(&self.hir_arena[arg.value]));
         }
+        // Accessor-expression temporaries are already live while the ramp runs. Give `project` an
+        // error pad that drops them if the ramp fails. On success this scope is promoted below to
+        // the projection scope, where the same temporaries remain live until after the slide.
+        self.enter_scope(&deferred_cleanup);
         // The exposed place's pointee type is the binding's (element) type. `project` runs the ramp
         // to the yield and binds the yielded place to its result register.
         //
-        // NOTE: the ramp is lowered as a plain `project` even when fallible; a ramp raise propagates
-        // straight out without running the caller's cleanup pad. The current `let`/`inout` accessors
-        // have infallible ramps, so this is not yet exercised; a fallible-ramp accessor would need an
-        // `invoke`-style `project` (a follow-up), the same way `emit_call` chooses `invoke`.
+        // `project` has no explicit normal/unwind successors, but `insert` records the current
+        // cleanup pad as its implicit run-time-error target. A fallible accessor ramp therefore
+        // unwinds the caller's live locals before its error propagates.
         let element_ty = self.local_declaration(n.binding).ty;
         let place = self
             .insert(Instruction::project(
@@ -1315,7 +1352,12 @@ impl<'a> Emitter<'a> {
             ))
             .unwrap();
         self.context.locals.insert(n.binding, place.clone());
-        self.enter_projection_scope(place, &deferred_cleanup);
+        let scope = self
+            .context
+            .scopes
+            .last_mut()
+            .expect("the accessor-ramp temporary scope must be active");
+        scope.push_action(CleanupAction::EndProject { place });
     }
 
     /// Lowers the addressor `place` of a [`hir::WithPlace`] and binds its non-owning `binding`
@@ -1750,8 +1792,8 @@ impl<'a> Emitter<'a> {
 
                         // A plain `call`, not an `invoke`: `Value::clone` is declared with an empty
                         // effect row (a fallible clone impl is a compile error —
-                        // `TraitMethodEffectMismatch`), so the clone can never raise and needs no
-                        // cleanup-pad unwind edge.
+                        // `TraitMethodEffectMismatch`). `insert` still records any implicit
+                        // execution-cancellation edge.
                         self.insert(Instruction::call(node.span, f, [source.clone(), target]));
                         if let Some(spec) = temp_drop {
                             self.emit_drop(node.span, source, source_node.ty, spec);
@@ -1802,8 +1844,9 @@ impl<'a> Emitter<'a> {
                         let source_node = &self.hir_arena[n.source];
                         let (source, temp_drop) = self.lower_clone_source(&clone, source_node);
 
-                        // A plain `call`: `Value::clone` is infallible by its trait contract (see the
-                        // `StoreLocal` clone above), so no unwind edge is needed.
+                        // A plain `call`: `Value::clone` has no language-failure edge by its trait
+                        // contract (see the `StoreLocal` clone above). Execution cancellation remains
+                        // an implicit edge.
                         self.insert(Instruction::call(node.span, f, [source.clone(), target]));
                         if let Some(spec) = temp_drop {
                             self.emit_drop(node.span, source, source_node.ty, spec);
@@ -1860,7 +1903,8 @@ impl<'a> Emitter<'a> {
                             ResolvedLocalClone::Static(f) => {
                                 let f = self.function_value(f);
                                 let source = self.place_of_local(n.id);
-                                // Plain `call`: `Value::clone` is infallible by its trait contract.
+                                // Plain `call`: `Value::clone` is source-level infallible; execution
+                                // cancellation remains an implicit edge.
                                 self.insert(Instruction::call(node.span, f, [source, destination]));
                             }
                             ResolvedLocalClone::Dictionary(dictionary) => {
@@ -2321,9 +2365,21 @@ impl<'a> Emitter<'a> {
 
     /// Inserts `s` at the current insertion point, and returns its result register, if any.
     fn insert(&mut self, s: Instruction) -> Option<ssa::Value> {
+        let unwind = if s.may_raise_implicitly() {
+            match self.context.cleanup_unwind_target {
+                CleanupUnwindTarget::CurrentScope => self.innermost_pad(s.span),
+                CleanupUnwindTarget::OuterPad(target) => Some(target),
+                CleanupUnwindTarget::PropagateWithoutPad => None,
+            }
+        } else {
+            None
+        };
         let i = match &self.context.point {
             InsertionPoint::End(b) => self.context.function.block_mut(*b).append(s),
         };
+        if let Some(target) = unwind {
+            self.context.function.set_implicit_unwind_target(i, target);
+        }
         self.context.function.definition(i)
     }
 
@@ -2385,12 +2441,30 @@ struct InsertionContext {
     scopes: Vec<Scope>,
 
     /// Cleanup landing pads whose bodies are emitted at function finalization rather than where they
-    /// are referenced. A pad block is *allocated* (empty) the moment a fallible `invoke` needs to
-    /// name it, but cannot be *filled* there: a block is a contiguous range in the shared instruction
-    /// arena, so emitting the pad's drops mid-body would splice them into the block being lowered.
+    /// are referenced. A pad block is *allocated* (empty) the moment an explicit or implicit
+    /// exceptional edge needs to name it, but cannot be *filled* there: a block is a contiguous range
+    /// in the shared instruction arena, so emitting the pad's drops mid-body would splice them into
+    /// the block being lowered.
     /// Each pad therefore captures its drop obligations (and the outer pad it chains to) up front and
     /// is filled, contiguously, after the body is fully lowered (see `fill_pending_pads`).
     pending_pads: Vec<PendingPad>,
+
+    /// Where an implicitly raising instruction emitted in the current context must unwind.
+    cleanup_unwind_target: CleanupUnwindTarget,
+}
+
+/// Exceptional destination for instructions that do not carry explicit unwind successors.
+#[derive(Clone, Copy)]
+enum CleanupUnwindTarget {
+    /// Normal function-body emission: derive a pad from the active lexical scopes.
+    CurrentScope,
+    /// Inline normal-exit cleanup: if this action raises as the primary error, enter the enclosing
+    /// scope's pad.
+    OuterPad(BlockId),
+    /// Do not attach another cleanup edge. This is used for outermost inline cleanup, whose primary
+    /// error propagates to the caller, and inside landing pads, where a secondary error causes hard
+    /// abort instead of a replacement unwind.
+    PropagateWithoutPad,
 }
 
 /// A cleanup landing pad awaiting its body (see `InsertionContext::pending_pads`).
@@ -2406,7 +2480,7 @@ struct PendingPad {
     /// `None` for the outermost pad, which `resume`s instead (re-raising to the caller).
     outer: Option<BlockId>,
 
-    /// The span the pad's actions are attributed to (the first fallible call that needed the pad).
+    /// The span the pad's actions are attributed to (the first exceptional edge that needed it).
     span: Location,
 }
 
@@ -2418,12 +2492,22 @@ struct Scope {
     /// drops, on every path — matching the HIR interpreter's epilogue-on-exit.
     actions: Vec<CleanupAction>,
 
-    /// The cleanup landing pad for this scope, built lazily the first time a fallible call nested in
-    /// it needs an unwind edge (see `allocate_pad`). The pad runs this scope's actions (reverse
+    /// The cleanup landing pad for this scope, built lazily the first time an exceptional edge nested
+    /// in it needs an unwind target (see `allocate_pad`). The pad runs this scope's actions (reverse
     /// declaration order, init-guarded) and then chains to the nearest enclosing scope's pad or, if
-    /// none, `resume`s — re-raising the in-flight error to the caller. `None` until built (a scope
-    /// with no obligations, or one no fallible call unwinds through, never gets one).
+    /// none, `resume`s — propagating the in-flight error to the caller. `None` until built (a scope
+    /// with no obligations, or one no exceptional edge unwinds through, never gets one).
     pad: Option<BlockId>,
+}
+
+impl Scope {
+    /// Adds an obligation and invalidates any pad that captured the previous action set.
+    fn push_action(&mut self, action: CleanupAction) {
+        self.actions.push(action);
+        // `allocate_pad` snapshots the current actions. A later exceptional edge must allocate a
+        // fresh pad containing this new obligation rather than reuse that stale snapshot.
+        self.pad = None;
+    }
 }
 
 /// A single deferred cleanup action run on scope exit, transfer, and the error pad.
@@ -2468,10 +2552,11 @@ struct DropObligation {
     spec: DropSpec,
 }
 
-/// Whether a call whose evaluation carries `effects` may raise a runtime error, and so needs an
-/// unwind edge to a cleanup pad. A concrete `Fallible` primitive effect is exact; an unresolved
-/// effect variable is treated conservatively as potentially fallible, so a generic callee that
-/// instantiates fallibly still runs its caller's cleanup on the error path.
+/// Whether a call's source effect row can return a language failure, and so needs an explicit unwind
+/// edge to a cleanup pad. A concrete `Fallible` primitive effect is exact; an unresolved effect
+/// variable is treated conservatively as potentially fallible, so a generic callee that instantiates
+/// fallibly still runs its caller's cleanup on the error path. Out-of-band cancellation is classified
+/// independently by [`Instruction::may_raise_implicitly`].
 fn effects_are_fallible(effects: &EffType) -> bool {
     effects.contains(Effect::Primitive(PrimitiveEffect::Fallible)) || effects.has_variables()
 }

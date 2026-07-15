@@ -10,7 +10,7 @@
 //! Module bundle system for incremental rebuilds and leak-free hot reloads
 //!
 //! This module implements the following architecture where:
-//! - Each compiled module version is an Rc<Module>
+//! - Each compiled module version is an `Rc<Module>`.
 //! - Cross-module references carry the owning module ID with the local item ID.
 
 pub mod debug_info;
