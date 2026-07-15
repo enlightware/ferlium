@@ -57,7 +57,7 @@ impl ModuleAndExpr {
 pub(crate) type AstInspectorCb<'a> =
     &'a dyn Fn(&ast::PModule, Option<ast::PExprId>, &ast::PExprArena, &Modules);
 
-static FIRST_USER_MODULE_ID: ModuleId = ModuleId(2);
+static FIRST_USER_MODULE_ID: ModuleId = ModuleId::new(2);
 
 thread_local! {
     static EMPTY_COMPILER_SESSION_CACHE: RefCell<Option<CompilerSession>> = const { RefCell::new(None) };

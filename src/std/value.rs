@@ -61,16 +61,16 @@ where
     lhs == rhs
 }
 
-pub(crate) const VALUE_EQ_METHOD_INDEX: TraitMethodIndex = TraitMethodIndex(0);
-pub(crate) const VALUE_TO_STRING_METHOD_INDEX: TraitMethodIndex = TraitMethodIndex(1);
-pub(crate) const VALUE_HASH_METHOD_INDEX: TraitMethodIndex = TraitMethodIndex(2);
-pub(crate) const VALUE_CLONE_METHOD_INDEX: TraitMethodIndex = TraitMethodIndex(3);
-pub(crate) const VALUE_DROP_METHOD_INDEX: TraitMethodIndex = TraitMethodIndex(4);
+pub(crate) const VALUE_EQ_METHOD_INDEX: TraitMethodIndex = TraitMethodIndex::new(0);
+pub(crate) const VALUE_TO_STRING_METHOD_INDEX: TraitMethodIndex = TraitMethodIndex::new(1);
+pub(crate) const VALUE_HASH_METHOD_INDEX: TraitMethodIndex = TraitMethodIndex::new(2);
+pub(crate) const VALUE_CLONE_METHOD_INDEX: TraitMethodIndex = TraitMethodIndex::new(3);
+pub(crate) const VALUE_DROP_METHOD_INDEX: TraitMethodIndex = TraitMethodIndex::new(4);
 pub(crate) const VALUE_SIZE_ASSOC_CONST_INDEX: TraitAssociatedConstIndex =
-    TraitAssociatedConstIndex(0);
+    TraitAssociatedConstIndex::new(0);
 pub(crate) const VALUE_ALIGN_ASSOC_CONST_INDEX: TraitAssociatedConstIndex =
-    TraitAssociatedConstIndex(1);
-pub(crate) const INSPECT_METHOD_INDEX: TraitMethodIndex = TraitMethodIndex(0);
+    TraitAssociatedConstIndex::new(1);
+pub(crate) const INSPECT_METHOD_INDEX: TraitMethodIndex = TraitMethodIndex::new(0);
 pub(crate) const NO_DERIVE_VALUE_ATTRIBUTE: &str = "no_derive_value";
 
 pub(crate) fn native_layout_associated_consts<T>() -> Vec<LiteralValue> {

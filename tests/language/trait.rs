@@ -652,8 +652,8 @@ fn concrete_impl_stores_associated_const_values() {
         TraitAssociatedConst::new("SIZE", Type::primitive::<isize>(), "Size in bytes."),
         TraitAssociatedConst::new("ALIGN", Type::primitive::<isize>(), "Alignment in bytes."),
     ]);
-    let mut module = Module::new(ModuleId(0), Path::single_str("$trait_impl_test"));
-    let trait_id = TraitId::new(ModuleId(0), module.add_trait(trait_def.clone()));
+    let mut module = Module::new(ModuleId::new(0), Path::single_str("$trait_impl_test"));
+    let trait_id = TraitId::new(ModuleId::new(0), module.add_trait(trait_def.clone()));
     let impl_id = module.add_concrete_impl_for_trait_def(
         trait_id,
         &trait_def,
@@ -673,38 +673,38 @@ fn concrete_impl_stores_associated_const_values() {
         .expect("concrete impl should be registered");
 
     assert_eq!(
-        trait_def.dictionary_method_index(TraitMethodIndex(0)),
-        TraitDictionaryEntryIndex(0)
+        trait_def.dictionary_method_index(TraitMethodIndex::new(0)),
+        TraitDictionaryEntryIndex::new(0)
     );
     assert_eq!(
         trait_def.associated_const_index(ustr("SIZE")),
-        Some(TraitAssociatedConstIndex(0))
+        Some(TraitAssociatedConstIndex::new(0))
     );
     assert_eq!(
         trait_def.associated_const_index(ustr("ALIGN")),
-        Some(TraitAssociatedConstIndex(1))
+        Some(TraitAssociatedConstIndex::new(1))
     );
     assert_eq!(
-        trait_def.dictionary_associated_const_index(TraitAssociatedConstIndex(0)),
-        TraitDictionaryEntryIndex(1)
+        trait_def.dictionary_associated_const_index(TraitAssociatedConstIndex::new(0)),
+        TraitDictionaryEntryIndex::new(1)
     );
     assert_eq!(
-        trait_def.dictionary_associated_const_index(TraitAssociatedConstIndex(1)),
-        TraitDictionaryEntryIndex(2)
+        trait_def.dictionary_associated_const_index(TraitAssociatedConstIndex::new(1)),
+        TraitDictionaryEntryIndex::new(2)
     );
     assert_eq!(
-        imp.associated_const_value(TraitAssociatedConstIndex(0)),
+        imp.associated_const_value(TraitAssociatedConstIndex::new(0)),
         Some(LiteralValue::new_native(0isize))
     );
     assert_eq!(
-        imp.associated_const_value(TraitAssociatedConstIndex(1)),
+        imp.associated_const_value(TraitAssociatedConstIndex::new(1)),
         Some(LiteralValue::new_native(1isize))
     );
     assert_eq!(module.function_count(), 3);
 
     for (index, expected_name) in [
-        (TraitAssociatedConstIndex(0), ">::SIZE#impl:"),
-        (TraitAssociatedConstIndex(1), ">::ALIGN#impl:"),
+        (TraitAssociatedConstIndex::new(0), ">::SIZE#impl:"),
+        (TraitAssociatedConstIndex::new(1), ">::ALIGN#impl:"),
     ] {
         let getter = imp.associated_const_getter(index).unwrap();
         let actual_name = module.get_function_name_by_id(getter).unwrap();
@@ -723,20 +723,23 @@ fn concrete_impl_stores_associated_const_values() {
     }
 
     assert!(matches!(
-        imp.dictionary_value.entry(TraitDictionaryEntryIndex(0)),
+        imp.dictionary_value
+            .entry(TraitDictionaryEntryIndex::new(0)),
         TraitDictionaryEntry::Function(_)
     ));
     assert_eq!(
-        imp.dictionary_value.entry(TraitDictionaryEntryIndex(1)),
+        imp.dictionary_value
+            .entry(TraitDictionaryEntryIndex::new(1)),
         TraitDictionaryEntry::Function(
-            imp.associated_const_getter(TraitAssociatedConstIndex(0))
+            imp.associated_const_getter(TraitAssociatedConstIndex::new(0))
                 .unwrap()
         )
     );
     assert_eq!(
-        imp.dictionary_value.entry(TraitDictionaryEntryIndex(2)),
+        imp.dictionary_value
+            .entry(TraitDictionaryEntryIndex::new(2)),
         TraitDictionaryEntry::Function(
-            imp.associated_const_getter(TraitAssociatedConstIndex(1))
+            imp.associated_const_getter(TraitAssociatedConstIndex::new(1))
                 .unwrap()
         )
     );

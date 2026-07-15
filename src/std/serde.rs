@@ -79,8 +79,13 @@ fn build_serialize_projection(
         project(load_node, ProjectionIndex::from_index(index)),
         member_ty,
     );
-    let function =
-        solver.solve_impl_method(trait_id, &[member_ty], TraitMethodIndex(0), span, arena)?;
+    let function = solver.solve_impl_method(
+        trait_id,
+        &[member_ty],
+        TraitMethodIndex::new(0),
+        span,
+        arena,
+    )?;
     static_apply_generated_with_locals(
         arena,
         locals,
@@ -379,7 +384,7 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                                  data: NodeId,
                                  ty: Type| {
             let function =
-                solver.solve_impl_method(trait_id, &[ty], TraitMethodIndex(0), span, arena)?;
+                solver.solve_impl_method(trait_id, &[ty], TraitMethodIndex::new(0), span, arena)?;
             static_apply_generated_with_locals(
                 arena,
                 locals,
@@ -576,7 +581,7 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                     let function = solver.solve_impl_method(
                         trait_id,
                         &[ty],
-                        TraitMethodIndex(0),
+                        TraitMethodIndex::new(0),
                         span,
                         arena,
                     )?;

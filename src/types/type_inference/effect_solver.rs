@@ -820,7 +820,7 @@ mod tests {
         let mut solver = EffectSolver::default();
         let target = solver.table.new_key(None);
         let span = Location::new_synthesized();
-        let trait_id = TraitId::new(ModuleId(0), LocalTraitId(0));
+        let trait_id = TraitId::new(ModuleId::new(0), LocalTraitId::new(0));
         let method_name = ustr("pure");
 
         solver

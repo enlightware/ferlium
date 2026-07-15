@@ -859,7 +859,7 @@ mod tests {
         assert_eq!(trait_def.output_type_count(), 1);
         assert_eq!(
             trait_def.method_index(ustr("add")),
-            Some(TraitMethodIndex(0))
+            Some(TraitMethodIndex::new(0))
         );
     }
 

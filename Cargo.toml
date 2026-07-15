@@ -15,12 +15,13 @@ rust-version = "1.92"
 
 [features]
 default = []
-serde = ["dep:serde"]
+serde = ["dep:serde", "nonmax/serde"]
 
 [build-dependencies]
 lalrpop = "0.23.1"
 
 [dev-dependencies]
+serde_test = "1.0.177"
 test-log = "0.2.16"
 pulldown-cmark = "0.13"
 directories = "6"

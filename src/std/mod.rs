@@ -36,7 +36,7 @@ pub mod serde;
 pub mod string;
 pub mod value;
 
-pub(crate) static STD_MODULE_ID: ModuleId = ModuleId(0);
+pub(crate) static STD_MODULE_ID: ModuleId = ModuleId::new(0);
 
 pub fn std_module(source_table: &mut SourceTable) -> Module {
     let mut module = Module::new(STD_MODULE_ID, module::Path::single_str("std"));

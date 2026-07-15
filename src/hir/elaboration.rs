@@ -1678,7 +1678,7 @@ mod tests {
     fn concrete_associated_const_elaborates_to_static_getter_call() {
         let traits = vec![layout_trait()];
         let trait_def = &traits[0];
-        let trait_id = TraitId::new(ModuleId(0), LocalTraitId(0));
+        let trait_id = TraitId::new(ModuleId::new(0), LocalTraitId::new(0));
         let mut arena = NodeArena::default();
         let span = Location::new_synthesized();
         let node = arena.alloc(Node::new(
@@ -1694,10 +1694,11 @@ mod tests {
         ));
 
         let modules = Modules::new();
-        let mut current_module = Module::new(ModuleId(0), Path::single_str("$elaboration_test"));
+        let mut current_module =
+            Module::new(ModuleId::new(0), Path::single_str("$elaboration_test"));
         current_module.traits = traits.clone();
         let qualified_name_env = QualifiedNameEnv::new_from_module(&current_module, &modules);
-        let mut impls = TraitImpls::new(ModuleId(0));
+        let mut impls = TraitImpls::new(ModuleId::new(0));
         let mut fn_collector = FunctionCollector::new(0);
         let mut getter_arena = ENodeArena::default();
         impls.add_concrete_raw(
@@ -1753,7 +1754,7 @@ mod tests {
     fn generic_associated_const_elaborates_to_dictionary_getter_call() {
         let traits = vec![layout_trait()];
         let trait_def = &traits[0];
-        let trait_id = TraitId::new(ModuleId(0), LocalTraitId(0));
+        let trait_id = TraitId::new(ModuleId::new(0), LocalTraitId::new(0));
         let input_ty = Type::variable_id(0);
         let mut arena = NodeArena::default();
         let span = Location::new_synthesized();
@@ -1769,9 +1770,10 @@ mod tests {
             span,
         ));
 
-        let mut impls = TraitImpls::new(ModuleId(0));
+        let mut impls = TraitImpls::new(ModuleId::new(0));
         let modules = Modules::new();
-        let mut current_module = Module::new(ModuleId(0), Path::single_str("$elaboration_test"));
+        let mut current_module =
+            Module::new(ModuleId::new(0), Path::single_str("$elaboration_test"));
         current_module.traits = traits.clone();
         let mut deps = FxHashSet::default();
         let mut solver = TraitSolver::new(

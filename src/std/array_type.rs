@@ -17,7 +17,7 @@ use crate::{
 // `std_module` declares `array_type.fer` before any other std type definition.
 const ARRAY_TYPE_DEF: TypeDefId = TypeDefId {
     module: STD_MODULE_ID,
-    index: LocalTypeDefId(0),
+    index: LocalTypeDefId::new(0),
 };
 
 pub fn array_type(element_ty: Type) -> Type {

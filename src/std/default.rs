@@ -85,7 +85,7 @@ impl Deriver for EnumDefaultDeriver {
             let function = solver.solve_impl_method(
                 trait_id,
                 &[payload_ty],
-                TraitMethodIndex(0),
+                TraitMethodIndex::new(0),
                 span,
                 &mut body_arena,
             )?;

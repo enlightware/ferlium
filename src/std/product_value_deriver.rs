@@ -70,7 +70,7 @@ impl Deriver for ProductValueDeriver {
                 let function = solver.solve_impl_method(
                     trait_id,
                     &[member_ty],
-                    TraitMethodIndex(0),
+                    TraitMethodIndex::new(0),
                     span,
                     arena,
                 )?;

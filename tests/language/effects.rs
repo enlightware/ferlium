@@ -294,7 +294,7 @@ fn effects_unsafe_erases_effects_in_std_context() {
     let (_module, expr, arena) = parse_module_and_expr(mod_src, source_id, true)
         .expect("std-context expression should parse");
     let mut module = new_module_using_std(
-        ferlium::module::ModuleId(0),
+        ferlium::module::ModuleId::new(0),
         ferlium::module::Path::single_str("$effects_unsafe_test"),
     );
     let compiled = emit_expr_unsafe(

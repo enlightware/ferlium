@@ -172,7 +172,7 @@ impl<'m> TypingEnv<'m> {
         let base_index = self.base_local_function_index;
         let index = base_index + self.lambda_functions.len() as u32;
         self.lambda_functions.push(function);
-        LocalFunctionId(index)
+        LocalFunctionId::new(index)
     }
 
     pub fn has_variable_name(&self, name: Ustr) -> bool {

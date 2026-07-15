@@ -11,60 +11,165 @@ use crate::FxHashMap;
 use std::hash::Hash;
 use std::mem::swap;
 
+#[doc(hidden)]
+pub use nonmax::NonMaxU32 as IdRepr;
+
 /// An ID that can be used as an index into a collection
 pub trait Id: Copy {
     fn from_index(index: usize) -> Self;
     fn as_index(self) -> usize;
 }
 
-// Small helper macro to declare newtype ID wrappers over u32 with common derives and helpers
+// Small helper macro to declare compact newtype ID wrappers with common derives and helpers.
 #[macro_export]
 macro_rules! define_id_type {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
         #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-        pub struct $name(pub u32);
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        #[repr(transparent)]
+        pub struct $name($crate::module::id::IdRepr);
+
+        impl $name {
+            /// Creates an ID from its compact integer representation.
+            ///
+            /// Panics if `index` is `u32::MAX`, which is reserved as the niche for `Option<Self>`.
+            #[inline]
+            pub const fn new(index: u32) -> Self {
+                match $crate::module::id::IdRepr::new(index) {
+                    Some(index) => Self(index),
+                    None => panic!(concat!(
+                        stringify!($name),
+                        " cannot represent u32::MAX"
+                    )),
+                }
+            }
+
+            /// Returns the compact integer representation of this ID.
+            #[inline]
+            pub const fn as_u32(self) -> u32 {
+                self.0.get()
+            }
+        }
+
         impl $crate::module::id::Id for $name {
             #[inline]
             fn from_index(index: usize) -> Self {
-                Self(index as u32)
+                let index = match <u32 as std::convert::TryFrom<usize>>::try_from(index) {
+                    Ok(index) => index,
+                    Err(_) => panic!(concat!(
+                        stringify!($name),
+                        " index does not fit in u32"
+                    )),
+                };
+                Self::new(index)
             }
+
             #[inline]
             fn as_index(self) -> usize {
-                self.0 as usize
+                self.as_u32() as usize
             }
         }
+
         impl Default for $name {
             #[inline]
             fn default() -> Self {
-                Self::from_index(0)
+                Self::new(0)
             }
         }
+
         impl std::fmt::Display for $name {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, "{}", self.0)
+                std::fmt::Display::fmt(&self.as_u32(), f)
             }
         }
+
+        impl std::hash::Hash for $name {
+            fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+                std::hash::Hash::hash(&self.as_u32(), state);
+            }
+        }
+
         impl From<$name> for usize {
             fn from(id: $name) -> Self {
-                id.0 as usize
+                id.as_u32() as usize
             }
         }
     };
 }
 
-#[cfg(all(test, feature = "serde"))]
+#[cfg(test)]
 mod tests {
     use super::*;
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    use std::mem::size_of;
 
-    define_id_type!(SerdeTestId);
+    define_id_type!(TestId);
 
+    #[cfg(feature = "serde")]
     fn assert_serde<T: serde::Serialize + for<'de> serde::Deserialize<'de>>() {}
 
     #[test]
+    #[cfg(feature = "serde")]
     fn defined_id_types_derive_serde_when_feature_is_enabled() {
-        assert_serde::<SerdeTestId>();
+        assert_serde::<TestId>();
+    }
+
+    #[test]
+    #[cfg(feature = "serde")]
+    fn defined_id_types_preserve_the_u32_wire_representation() {
+        use serde_test::{Token, assert_de_tokens_error, assert_tokens};
+
+        let id = TestId::new(42);
+        assert_tokens(
+            &id,
+            &[Token::NewtypeStruct { name: "TestId" }, Token::U32(42)],
+        );
+        assert_de_tokens_error::<TestId>(
+            &[
+                Token::NewtypeStruct { name: "TestId" },
+                Token::U32(u32::MAX),
+            ],
+            "out of range integral type conversion attempted",
+        );
+    }
+
+    #[test]
+    fn defined_id_types_round_trip_indices() {
+        let id = TestId::from_index((u32::MAX - 1) as usize);
+        assert_eq!(id.as_u32(), u32::MAX - 1);
+        assert_eq!(id.as_index(), (u32::MAX - 1) as usize);
+        assert_eq!(TestId::default(), TestId::new(0));
+    }
+
+    #[test]
+    fn defined_id_types_have_a_compact_optional_representation() {
+        assert_eq!(size_of::<TestId>(), size_of::<u32>());
+        assert_eq!(size_of::<Option<TestId>>(), size_of::<u32>());
+    }
+
+    #[test]
+    fn defined_id_types_preserve_u32_hashing() {
+        fn hash(value: impl Hash) -> u64 {
+            let mut hasher = DefaultHasher::new();
+            value.hash(&mut hasher);
+            hasher.finish()
+        }
+
+        assert_eq!(hash(TestId::new(42)), hash(42_u32));
+    }
+
+    #[test]
+    #[should_panic(expected = "TestId cannot represent u32::MAX")]
+    fn defined_id_types_reject_the_reserved_value() {
+        TestId::new(u32::MAX);
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    #[should_panic(expected = "TestId index does not fit in u32")]
+    fn defined_id_types_reject_indices_larger_than_u32() {
+        TestId::from_index(u32::MAX as usize + 1);
     }
 }
 
