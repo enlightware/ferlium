@@ -1314,6 +1314,83 @@ fn generic_value_drop_runs_on_runtime_error() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn fallible_value_clone_impl_is_rejected() {
+    // The SSA emitter lowers synthesized `Value::clone`/`Value::drop` calls as plain `call`s with no
+    // cleanup-pad unwind edge. That is sound only because these methods cannot raise: a `Value` impl
+    // whose `clone`/`drop` body is fallible is a compile error (the trait declares an empty effect
+    // row). This pins the invariant the SSA lowering relies on.
+    let mut session = TestSession::new();
+    session.fail_compilation(
+        r#"
+        struct Probe(int)
+        impl Value for Probe {
+            fn eq(left: Probe, right: Probe) -> bool { left.0 == right.0 }
+            fn to_string(value: Probe) -> string { to_string(value.0) }
+            fn hash(value: Probe, state: &mut hasher) { hash(value.0, state) }
+            fn clone(source: Probe) -> Probe { Probe(idiv(1, 0)) }
+            fn drop(target: &mut Probe) {}
+        }
+        Probe(1).0
+        "#,
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn nested_scope_drops_run_innermost_first_on_runtime_error() {
+    // An abort in an inner block unwinds through both scopes' cleanup pads: the inner local is
+    // dropped first, then the outer one. Runs under both backends, so the SSA landing-pad chain is
+    // checked against the HIR interpreter's frame unwind.
+    let mut session = TestSession::new();
+    let source = format!(
+        r#"
+        {}
+        fn run() -> int {{
+            let outer = Probe(1);
+            {{
+                let inner = Probe(2);
+                idiv(1, 0)
+            }}
+        }}
+        testing::reset_tracked_drops();
+        run()
+        "#,
+        tracked_probe_value_impl()
+    );
+    assert_eq!(session.fail_run(&source), RuntimeErrorKind::DivisionByZero);
+    // Drops, in order: inner Probe(2), then outer Probe(1) → the digit sequence 21.
+    assert_val_eq!(session.run("testing::tracked_drop_log()"), int(21));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn cross_frame_drops_run_callee_first_on_runtime_error() {
+    // An abort deep in a callee unwinds the callee's frame (running its pad) before re-raising into
+    // the caller's frame (running its pad): the callee local is dropped first, then the caller's.
+    let mut session = TestSession::new();
+    let source = format!(
+        r#"
+        {}
+        fn g() -> int {{
+            let c = Probe(3);
+            idiv(1, 0)
+        }}
+        fn run() -> int {{
+            let a = Probe(1);
+            g()
+        }}
+        testing::reset_tracked_drops();
+        run()
+        "#,
+        tracked_probe_value_impl()
+    );
+    assert_eq!(session.fail_run(&source), RuntimeErrorKind::DivisionByZero);
+    // Drops, in order: callee Probe(3), then caller Probe(1) → the digit sequence 31.
+    assert_val_eq!(session.run("testing::tracked_drop_log()"), int(31));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn auto_derived_struct_value_clone_uses_field_clone() {
     let mut session = TestSession::new();
     assert_val_eq!(
@@ -2650,6 +2727,36 @@ fn mutable_literal_initialized_local_drop_is_resolved_from_its_type() {
     assert!(matches!(drop_of("s"), Some(ResolvedLocalDrop::Static(_))));
 }
 
+/// An empty `struct` whose `Value::drop` records a side effect. A zero-field aggregate has no
+/// run-time leaf in which to record liveness, so the SSA interpreter must distinguish a constructed
+/// value (represented as `Tuple([])`) from uninitialized/dropped storage (a flat `Uninit`) the same
+/// way the HIR interpreter does — these tests pin that down on both backends.
+const EMPTY_VALUE_STRUCT: &str = r#"
+    struct E {}
+    impl Value for E {
+        fn eq(left: E, right: E) -> bool { true }
+        fn to_string(value: E) -> string { "" }
+        fn hash(value: E, state: &mut hasher) { }
+        fn clone(source: E) -> E { E{} }
+        fn drop(target: &mut E) { testing::record_tracked_drop(1); }
+    }
+"#;
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn owned_empty_struct_is_dropped_once_at_scope_exit() {
+    let mut session = TestSession::new();
+    let source = format!(
+        "{EMPTY_VALUE_STRUCT}
+        fn g() {{ let x = E{{}}; }}
+        testing::reset_tracked_drops();
+        g();
+        testing::tracked_drop_log()"
+    );
+    // Exactly one drop: the owned `x` is dropped when its scope exits.
+    assert_val_eq!(session.run(&source), int(1));
+}
+
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn reassigned_mutable_literal_initialized_local_is_dropped_at_scope_exit() {
@@ -2671,4 +2778,123 @@ fn reassigned_mutable_literal_initialized_local_is_dropped_at_scope_exit() {
         f()
     "#;
     assert_val_eq!(session.run(source), int(3));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn reassigned_empty_struct_drops_old_and_final_value() {
+    let mut session = TestSession::new();
+    let source = format!(
+        "{EMPTY_VALUE_STRUCT}
+        fn g() {{ let mut x = E{{}}; x = E{{}}; }}
+        testing::reset_tracked_drops();
+        g();
+        testing::tracked_drop_log()"
+    );
+    // The log appends a digit per drop (`old * 10 + 1`): the overwritten value, then the final one.
+    // Two drops, neither double-counted — confirms drop-at-most-once survives the empty-aggregate
+    // skeleton/`Uninit` round-trip.
+    assert_val_eq!(session.run(&source), int(11));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn moved_empty_struct_is_dropped_once_by_the_new_owner() {
+    let mut session = TestSession::new();
+    let source = format!(
+        "{EMPTY_VALUE_STRUCT}
+        fn mk() -> E {{ E{{}} }}
+        fn g() {{ let y = mk(); }}
+        testing::reset_tracked_drops();
+        g();
+        testing::tracked_drop_log()"
+    );
+    // Constructed in `mk`, moved out to `y`: the moved-from source is left uninitialized and not
+    // re-dropped, so exactly one drop runs (at `y`'s scope exit).
+    assert_val_eq!(session.run(&source), int(1));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn empty_struct_field_is_dropped_with_its_record() {
+    let mut session = TestSession::new();
+    let source = format!(
+        "{EMPTY_VALUE_STRUCT}
+        struct W {{ e: E, n: int }}
+        fn g() {{ let w = W{{ e: E{{}}, n: 3 }}; }}
+        testing::reset_tracked_drops();
+        g();
+        testing::tracked_drop_log()"
+    );
+    // The empty-struct field is constructed in place and dropped exactly once with its owner.
+    assert_val_eq!(session.run(&source), int(1));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn unconstructed_empty_struct_is_not_dropped() {
+    let mut session = TestSession::new();
+    let source = format!(
+        "{EMPTY_VALUE_STRUCT}
+        fn f(c: bool) -> int {{ if c {{ let x = E{{}}; 1 }} else {{ 2 }} }}
+        testing::reset_tracked_drops();
+        f(false);
+        testing::tracked_drop_log()"
+    );
+    // The `else` branch never constructs `x`. Its storage stays uninitialized (a flat `Uninit`,
+    // never the live `Tuple([])` marker), so no drop runs — matching the HIR interpreter. This is
+    // the case the SSA storage seeding must get right: an empty aggregate is *not* seeded `Tuple([])`.
+    assert_val_eq!(session.run(&source), int(0));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn all_unit_aggregate_with_custom_drop_is_dropped() {
+    // A struct whose only field is `()` is the case that makes the SSA husk rule treat a unit leaf
+    // as *live*: its run-time storage is `Tuple([Native(())])`, and if `is_drop_husk` classified a
+    // unit leaf as a husk, this aggregate would look dead and its `Value::drop` would be skipped —
+    // diverging from the HIR interpreter. This pins that the custom drop runs exactly once.
+    let mut session = TestSession::new();
+    let source = r#"
+        struct Marker(())
+        impl Value for Marker {
+            fn eq(l: Marker, r: Marker) -> bool { true }
+            fn to_string(v: Marker) -> string { "m" }
+            fn hash(v: Marker, s: &mut hasher) { () }
+            fn clone(s: Marker) -> Marker { Marker(()) }
+            fn drop(t: &mut Marker) { testing::record_tracked_drop(9) }
+        }
+        testing::reset_tracked_drops();
+        { let m = Marker(()); (); };
+        testing::tracked_drop_log()
+    "#;
+    assert_val_eq!(session.run(source), int(9));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn aggregate_with_unit_field_dropped_once_on_error_after_field_borrow() {
+    // Reading a field of an owned aggregate that also has a `()` field borrows the field (it is not
+    // moved out), so the aggregate stays fully live and its unwind-pad drop runs exactly once. This
+    // guards against an over-drop of `Tuple([.., unit])` storage on the error path: the unit leaf
+    // keeps `is_drop_husk` from treating the live aggregate as a husk, while the (never-produced)
+    // partially-moved state would be the only way it could go wrong. Runs under both backends.
+    let mut session = TestSession::new();
+    let source = format!(
+        r#"
+        {}
+        struct Pair(Probe, ())
+        fn read(p: Pair) -> int {{ p.0.0 }}
+        fn run() -> int {{
+            let pair = Pair(Probe(7), ());
+            read(pair);
+            idiv(1, 0)
+        }}
+        testing::reset_tracked_drops();
+        run()
+        "#,
+        tracked_probe_value_impl()
+    );
+    assert_eq!(session.fail_run(&source), RuntimeErrorKind::DivisionByZero);
+    assert_val_eq!(session.run("testing::tracked_drop_log()"), int(7));
 }

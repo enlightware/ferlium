@@ -19,10 +19,11 @@ use std::{
 use ustr::Ustr;
 
 use crate::{
+    FxHashSet,
     containers::{B, IntoSVec2, SVec2, b},
     format::write_with_separator,
     hir::function::NativeTrivialCopy,
-    module::{FunctionId, SubscriptId, TraitDictionaryId},
+    module::{FunctionId, ModuleEnv, SubscriptId, TraitDictionaryId},
     std::string::StaticStr,
     types::r#type::{Type, TypeKind},
 };
@@ -581,19 +582,63 @@ impl LiteralValue {
     /// Whether copying this literal tree directly produces the declared runtime
     /// representation, without any materializer calls.
     pub(crate) fn has_representation_type(&self, ty: Type) -> bool {
+        self.has_representation_type_with(ty, &mut |_| None, &mut FxHashSet::default())
+    }
+
+    /// Whether this literal tree is the run-time representation of `ty`, after
+    /// unfolding named types through `env`.
+    pub(crate) fn has_representation_type_in(&self, ty: Type, env: &ModuleEnv<'_>) -> bool {
+        self.has_representation_type_with(
+            ty,
+            &mut |ty| match &*ty.data() {
+                TypeKind::Named(named) => Some(named.instantiated_shape(env)),
+                _ => None,
+            },
+            &mut FxHashSet::default(),
+        )
+    }
+
+    fn has_representation_type_with(
+        &self,
+        ty: Type,
+        named_shape: &mut impl FnMut(Type) -> Option<Type>,
+        active: &mut FxHashSet<Type>,
+    ) -> bool {
+        if let Some(shape) = named_shape(ty) {
+            if !active.insert(ty) {
+                return false;
+            }
+            let result = self.has_representation_type_with(shape, named_shape, active);
+            active.remove(&ty);
+            return result;
+        }
+
+        let kind = ty.data().clone();
         match self {
-            Self::Native(value) => value.native_type() == ty,
+            Self::Native(_) if self.as_primitive_ty::<()>().is_some() => {
+                self.native_type() == Some(ty)
+                    || matches!(&kind, TypeKind::Tuple(fields) if fields.is_empty())
+                    || matches!(&kind, TypeKind::Record(fields) if fields.is_empty())
+            }
+            Self::Native(_) => self.native_type() == Some(ty),
             Self::Tuple(values) => {
-                let member_tys = match ty.data().clone() {
+                if !active.insert(ty) {
+                    return false;
+                }
+                let member_tys = match kind {
                     TypeKind::Tuple(member_tys) => member_tys,
                     TypeKind::Record(fields) => fields.into_iter().map(|(_, ty)| ty).collect(),
-                    _ => return false,
+                    _ => {
+                        active.remove(&ty);
+                        return false;
+                    }
                 };
-                values.len() == member_tys.len()
-                    && values
-                        .iter()
-                        .zip(member_tys)
-                        .all(|(value, ty)| value.has_representation_type(ty))
+                let result = values.len() == member_tys.len()
+                    && values.iter().zip(member_tys).all(|(value, ty)| {
+                        value.has_representation_type_with(ty, named_shape, active)
+                    });
+                active.remove(&ty);
+                result
             }
         }
     }

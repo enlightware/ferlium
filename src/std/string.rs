@@ -44,7 +44,7 @@ use crate::{
         },
     },
     types::effects::{PrimitiveEffect, effect, no_effects},
-    types::r#type::{FnType, Type},
+    types::r#type::{FnType, Type, bare_native_type},
     types::type_scheme::TypeScheme,
 };
 
@@ -598,6 +598,7 @@ pub fn add_to_module(to: &mut Module) {
     let empty_trait_id = to.expect_std_trait_id_in_current_module(EMPTY_TRAIT_NAME);
     let trivial_copy_trait_id = to.expect_std_trait_id_in_current_module(TRIVIAL_COPY_TRAIT_NAME);
     // Note: string alias is added in core.rs
+    to.add_private_bare_native_type_alias_str("StaticStr", bare_native_type::<StaticStr>());
     to.add_type_alias_str_with_doc(
         "string_iterator",
         string_iter_type(),

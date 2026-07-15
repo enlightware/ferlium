@@ -22,6 +22,7 @@ mod recursive_types;
 mod regression;
 mod serde;
 mod simple;
+mod ssa;
 mod std;
 mod subscript;
 mod r#trait;
