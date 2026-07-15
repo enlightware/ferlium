@@ -23,7 +23,7 @@ use crate::{
         value::{FunctionValue, HiddenEvidenceArgValue, LiteralValue, SubscriptValue, Value},
     },
     module::{
-        FunctionId, LocalFunctionId, ModuleEnv, ModuleId, TraitDictionaryId,
+        FunctionId, LocalFunctionId, ModuleEnv, ModuleId, TraitDictionaryId, id::Id,
         trait_impl::TraitDictionaryEntry,
     },
     ssa::{self, BlockIdentity, InstructionIdentity, InstructionKind},
@@ -261,7 +261,7 @@ impl<'a> Interpreter<'a> {
         let func = self.function(key);
         let mut slots: FxHashMap<ssa::Value, Binding> = FxHashMap::default();
         for (i, b) in args.into_iter().enumerate() {
-            slots.insert(ssa::Value::Parameter(i), b);
+            slots.insert(ssa::Value::Parameter(ssa::ParameterId::from_index(i)), b);
         }
         match self.run_loop(&func, slots, func.entry(), 0)? {
             FrameOutcome::Completed => Ok(()),
@@ -1079,7 +1079,7 @@ impl<'a> Interpreter<'a> {
         let func = self.function(key);
         let mut acc_slots: FxHashMap<ssa::Value, Binding> = FxHashMap::default();
         for (i, b) in args.into_iter().enumerate() {
-            acc_slots.insert(ssa::Value::Parameter(i), b);
+            acc_slots.insert(ssa::Value::Parameter(ssa::ParameterId::from_index(i)), b);
         }
         match self.run_loop(&func, acc_slots, func.entry(), 0) {
             Ok(FrameOutcome::Suspended {

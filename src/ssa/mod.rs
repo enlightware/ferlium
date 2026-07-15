@@ -5,4 +5,4 @@ pub mod value;
 
 pub use function::{BlockIdentity, Function, Parameter, ParameterTag};
 pub use instruction::{Instruction, InstructionIdentity, InstructionKind, InstructionResult};
-pub use value::Value;
+pub use value::{ParameterId, Value};

@@ -5,7 +5,7 @@ use crate::{
     format::FormatWith,
     hir::function::ArgConvention,
     list,
-    module::ModuleEnv,
+    module::{ModuleEnv, id::Id},
     ssa::value::{Constant, ConstantId},
     ssa::{self, Instruction, InstructionIdentity, InstructionResult},
     types::r#type::Type,
@@ -72,9 +72,9 @@ impl Function {
         }
     }
 
-    /// Appends a parameter to this function's signature and returns its slot.
-    pub fn add_parameter(&mut self, t: Type, tag: ParameterTag) -> usize {
-        let slot = self.parameters.len();
+    /// Appends a parameter to this function's signature and returns its identity.
+    pub fn add_parameter(&mut self, t: Type, tag: ParameterTag) -> ssa::ParameterId {
+        let slot = ssa::ParameterId::from_index(self.parameters.len());
         self.parameters.push(Parameter { type_: t, tag });
         slot
     }
@@ -188,7 +188,7 @@ impl FormatWith<ModuleEnv<'_>> for Function {
             write!(
                 f,
                 "{}: @{} {}",
-                ssa::Value::Parameter(i),
+                ssa::Value::Parameter(ssa::ParameterId::from_index(i)),
                 kind,
                 p.type_.format_with(env)
             )?;

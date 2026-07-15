@@ -136,22 +136,22 @@ impl<'a> Emitter<'a> {
         let mut lowered = ssa::Function::new(name);
 
         // The function signature is laid out as `[extra dictionary/evidence params..., runtime
-        // args...]`. Extra parameters occupy the leading slots `[0, extra_count)` and the visible
-        // runtime arguments, which are the leading `LocalDecl`s, occupy `[extra_count, ..)`.
+        // args...]`. Extra parameters occupy the leading slots and the visible runtime arguments,
+        // which are the leading `LocalDecl`s, follow them.
         let env = ModuleEnv::new(module, others);
         let extra = f.definition.ty_scheme.extra_parameters(env);
-        let extra_count = extra.requirements.len();
 
+        // Record the extra parameters in signature order and which incoming dictionary parameter
+        // witnesses the `Value` layout of each generic type, so allocations of generic storage can
+        // carry their run-time layout witness.
         let mut extra_parameters: FxHashMap<ExtraParameterId, ssa::Value> = FxHashMap::default();
-        for j in 0..extra_count {
-            extra_parameters.insert(ExtraParameterId::from_index(j), ssa::Value::Parameter(j));
-        }
-
-        // Record which incoming dictionary parameter witnesses the `Value` layout of each generic
-        // type, so that allocations of generic storage can carry their run-time layout witness.
         let value_trait_id = env.expect_std_trait_id(VALUE_TRAIT_NAME);
         let mut value_witnesses: Vec<(Type, ssa::Value)> = vec![];
         for (j, req) in extra.requirements.iter().enumerate() {
+            let parameter = ssa::Value::Parameter(
+                lowered.add_parameter(req.to_dict_type_in_env(&env), ssa::ParameterTag::Dictionary),
+            );
+            extra_parameters.insert(ExtraParameterId::from_index(j), parameter.clone());
             if let DictionaryReq::TraitImpl {
                 trait_id,
                 input_tys,
@@ -160,14 +160,8 @@ impl<'a> Emitter<'a> {
                 && *trait_id == value_trait_id
                 && let [ty] = input_tys[..]
             {
-                value_witnesses.push((ty, ssa::Value::Parameter(j)));
+                value_witnesses.push((ty, parameter));
             }
-        }
-
-        // Record the function signature in slot order: the extra (dictionary/evidence)
-        // parameters first, then the visible runtime arguments (the leading `LocalDecl`s).
-        for req in &extra.requirements {
-            lowered.add_parameter(req.to_dict_type_in_env(&env), ssa::ParameterTag::Dictionary);
         }
 
         // Bind the runtime argument locals. For a plain function these are exactly the visible
@@ -191,8 +185,9 @@ impl<'a> Emitter<'a> {
             } else {
                 f.parameter_passing[i - capture_count]
             };
-            lowered.add_parameter(f.locals[i].ty, ssa::ParameterTag::Parameter(passing));
-            let param = ssa::Value::Parameter(extra_count + i);
+            let param = ssa::Value::Parameter(
+                lowered.add_parameter(f.locals[i].ty, ssa::ParameterTag::Parameter(passing)),
+            );
             locals.insert(LocalDeclId::from_index(i), param);
         }
 

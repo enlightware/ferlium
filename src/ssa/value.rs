@@ -4,7 +4,7 @@ use crate::{
     containers::B,
     format::FormatWith,
     hir::value::LiteralValue,
-    module::{FunctionId, ModuleEnv, SubscriptId, TraitDictionaryId},
+    module::{FunctionId, ModuleEnv, SubscriptId, TraitDictionaryId, id::Id},
     ssa,
     types::r#type::Type,
 };
@@ -34,8 +34,8 @@ pub enum Value {
     /// A reference to a lowered function.
     Function(FunctionId),
 
-    /// The `i`-th parameter of a function.
-    Parameter(usize),
+    /// A parameter in the containing function's signature.
+    Parameter(ParameterId),
 
     /// The register assigned by an instruction.
     Register(ssa::InstructionIdentity),
@@ -62,19 +62,15 @@ impl fmt::Display for Value {
     }
 }
 
-/// The stable identity of a typed immediate in an SSA function's constant pool.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct ConstantId(usize);
+crate::define_id_type!(
+    /// The stable identity of a typed immediate in an SSA function's constant pool.
+    ConstantId
+);
 
-impl ConstantId {
-    pub(crate) fn from_index(index: usize) -> Self {
-        Self(index)
-    }
-
-    pub fn as_index(self) -> usize {
-        self.0
-    }
-}
+crate::define_id_type!(
+    /// The stable identity of a parameter in an SSA function's signature.
+    ParameterId
+);
 
 /// A typed, trivially-copyable HIR immediate representation.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
