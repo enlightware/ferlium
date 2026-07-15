@@ -86,14 +86,18 @@ The integration story also differs from other Rust-embedded scripting engines:
 
 ### Performance roadmap
 
-Today Ferlium is a tree-walking interpreter. A [Gungraun](https://gungraun.github.io/gungraun/latest/html/index.html)-based benchmark suite tracks instruction counts to catch regressions reliably.
-SSA lowering is currently in progress; a WebAssembly backend is planned on top of it, with the goal of calling Rust-compiled-to-WebAssembly hosts with no FFI overhead.
+Ferlium executes through its HIR tree-walking interpreter by default. It also has an SSA lowering and
+reference interpreter, exercised alongside the HIR interpreter by the language test suite. A
+[Gungraun](https://gungraun.github.io/gungraun/latest/html/index.html)-based benchmark suite tracks
+instruction counts to catch regressions reliably. A WebAssembly backend is planned on top of SSA,
+with the goal of calling Rust-compiled-to-WebAssembly hosts with no FFI overhead.
 
 ### Current limitations
 
 Ferlium is pre-1.0; expect breaking changes in syntax, APIs, and standard library.
 
-* The interpreter is tree-walking; SSA lowering and a WebAssembly backend are planned but not implemented.
+* The SSA reference interpreter is not yet selectable through the normal embedding and REPL APIs,
+  and the WebAssembly backend is not implemented yet.
 * The compiler is single-threaded — it currently panics if its interned type-universe lock is contended.
 * Dynamic dispatch is out of scope.
 * No file-based module discovery from script source: module organisation is the host's responsibility (see the [Modules chapter](https://enlightware.github.io/ferlium/book/modules.html) of the book).

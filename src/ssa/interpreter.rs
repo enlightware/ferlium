@@ -203,13 +203,19 @@ impl<'a> Interpreter<'a> {
             .ty_scheme
             .ty
             .ret;
+        let entry_top = self.ctx.environment.len();
         let init = self.shaped_uninitialized_value(ret_ty);
         let ret = self.alloc_cell(init);
-        self.run_function(key, vec![Binding::Place(ret.clone())])?;
+        if let Err(error) = self.run_function(key, vec![Binding::Place(ret.clone())]) {
+            self.reclaim_frame_storage(entry_top);
+            return Err(error);
+        }
         let slot = ret
             .target_mut(&mut self.ctx)
             .expect("return cell must be addressable");
-        Ok(std::mem::replace(slot, Value::uninit()))
+        let value = std::mem::replace(slot, Value::uninit());
+        self.reclaim_frame_storage(entry_top);
+        Ok(value)
     }
 
     /// Returns the lowered SSA body of `key`, building and caching it on first use.
@@ -236,9 +242,15 @@ impl<'a> Interpreter<'a> {
     /// `CheckCallDepth` in recursive functions; lowering preserves that check explicitly, so frame
     /// entry only maintains the counter and does not impose an additional backend-specific limit.
     fn run_function(&mut self, key: FunctionKey, args: Vec<Binding>) -> Result<(), RuntimeError> {
+        // Parameters point into caller-owned storage. Everything allocated above this marker belongs
+        // to the callee and must be reclaimed when its frame completes or unwinds. Addressor-place
+        // results are statically required to remain caller-rooted, while yielded accessors use the
+        // separate suspended-frame path and restore their saved marker in `exec_end_project`.
+        let frame_top = self.ctx.environment.len();
         self.ctx.call_depth += 1;
         let result = self.run_frame(key, args);
         self.ctx.call_depth -= 1;
+        self.reclaim_frame_storage(frame_top);
         result
     }
 
@@ -763,7 +775,7 @@ impl<'a> Interpreter<'a> {
         // The accessor frame is torn down whichever way its slide ends: drop the depth it
         // held since the `project` and reclaim its stack cells, then surface any slide error.
         self.ctx.call_depth -= 1;
-        self.restore_stack(frame_top);
+        self.reclaim_frame_storage(frame_top);
         match result? {
             FrameOutcome::Completed => Ok(Step::Advance),
             FrameOutcome::Suspended { .. } => {
@@ -1699,6 +1711,17 @@ impl<'a> Interpreter<'a> {
             target,
             path: vec![],
         }
+    }
+
+    /// Reclaims the interpreter backing storage of a completed or unwound script frame.
+    ///
+    /// SSA cleanup has already performed the frame's semantic drops. Scratch cells may nevertheless
+    /// contain abandoned partial constructions when evaluation transferred before producing a value;
+    /// reclaiming their Rust storage mirrors `EvalCtx::truncate_environment_storage` in the HIR
+    /// interpreter and is distinct from an SSA `stack_restore`, whose live-resource assertion checks
+    /// an explicit lowering contract.
+    fn reclaim_frame_storage(&mut self, frame_top: usize) {
+        self.ctx.truncate_environment_storage(frame_top);
     }
 
     /// Resets the top of the stack to `marker`, discarding the storage of every cell allocated

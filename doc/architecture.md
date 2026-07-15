@@ -2,7 +2,7 @@
 
 Ferlium is designed to be integrated into existing Rust codebases, web apps through WebAssembly, and in the future target static compilation. Therefore, it is designed with minimal runtime requirements. Essentially, the runtime consists of a small standard library. In particular, type information should not be necessary for running code.
 
-The compiler transforms source code into a parsed abstract syntax tree (AST), desugars it into a source-level AST suitable for type inference, resolves symbols, infers and checks types while emitting typed high-level IR (HIR), performs HIR validation and elaboration, then executes the HIR. A bytecode VM, JIT, or native backend could later replace the current tree interpreter.
+The compiler transforms source code into a parsed abstract syntax tree (AST), desugars it into a source-level AST suitable for type inference, resolves symbols, infers and checks types while emitting typed high-level IR (HIR), then elaborates and validates final HIR. Ferlium can execute final HIR directly with its tree-walking interpreter or lower it to SSA and run the SSA reference interpreter. Future machine backends can consume the same SSA form.
 
 ## Source Layout
 
@@ -12,6 +12,8 @@ The compiler transforms source code into a parsed abstract syntax tree (AST), de
 - `desugar/`: parsed-AST-to-desugared-AST lowering for syntax conveniences and module-level definitions.
 - `types/`: type representation, effects, mutability, type inference, trait solving, coherence, substitutions, visitors, and schemes.
 - `hir/`: the typed high-level IR, HIR synthesis helpers, AST-to-HIR emission, borrow checking, dictionary passing, function representation, pattern-match lowering helpers, and runtime values.
+- `ssa/`: SSA functions, instructions, values, validation, and the SSA reference interpreter.
+- `emit_ssa.rs`: final-HIR-to-SSA lowering.
 - `module/`: module identity, paths, imports, module environments, function metadata, trait impl metadata, and symbol lookup.
 - `std/`: Rust-backed standard library modules and bundled Ferlium prelude source.
 - `ide/`: IDE-facing compiler wrapper, annotations, diagnostics, execution result shaping, signatures, and source index helpers.
@@ -28,8 +30,8 @@ The main phases are:
 5. Unify type, effect, and mutability constraints.
 6. Resolve deferred local storage decisions from the unified mutability facts, then activate the `Value` constraints required by finalized ownership and take-local semantics.
 7. Simplify and default remaining trait constraints, then build final type schemes and hidden dictionary/evidence parameter lists.
-8. Run borrow checking over HIR.
-9. Elaborate dictionaries for trait resolution, record field access, value dispatch, and unresolved argument passing.
-10. Execute HIR through the current interpreter.
+8. Elaborate dictionaries, ownership and value dispatch, record field access, and call lifetime plans into final HIR.
+9. Validate final-HIR ownership, literal, borrow, place-lifetime, and yield invariants.
+10. Execute final HIR through the tree-walking interpreter, or lower it to SSA and execute it through the SSA reference interpreter.
 
-Future backend work may add bytecode generation and VM execution, or JIT/native code generation.
+Future backend work may lower SSA to WebAssembly, bytecode, JIT, or native code.

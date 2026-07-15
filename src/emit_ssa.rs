@@ -2212,6 +2212,16 @@ impl<'a> Emitter<'a> {
                 }
             }
 
+            K::LoadSubscriptEvidence(n) => {
+                // Forwarded subscript evidence is likewise an incoming by-pointer extra parameter.
+                // When it is used as a first-class value rather than only as call metadata, copy
+                // that value into the requested destination.
+                if destination.is_some() {
+                    let p = self.context.extra_parameters[&n.extra_parameter].clone();
+                    self.memcpy_into_if_needed(node.span, p, destination);
+                }
+            }
+
             K::CallDictionaryFunction(n) => {
                 // A place-returning dictionary function is resolved as a place and copied into the destination,
                 // like any other place-returning call.
@@ -2297,12 +2307,14 @@ impl<'a> Emitter<'a> {
 
             K::Array(ids) => self.lower_array_into(node, ids, destination),
 
-            _ => {
-                todo!(
-                    "lowering is unimplemented for node of kind '{:?}'",
-                    node.kind
-                );
-            }
+            // These operations exist only before final HIR elaboration. Their `Never` payloads make
+            // that invariant part of the phase type while keeping this match exhaustive, so adding
+            // a future HIR node forces SSA lowering to handle it at compile time.
+            K::FieldAccess(never)
+            | K::TraitMethodApply(never)
+            | K::GetTraitMethod(never)
+            | K::GetTraitAssociatedConst(never)
+            | K::GetTraitDictionary(never) => match *never {},
         }
     }
 

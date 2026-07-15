@@ -199,6 +199,63 @@ fn ssa_call_depth_limit_stops_recursive_execution() {
 }
 
 #[test]
+fn ssa_completed_recursive_frames_reclaim_storage() {
+    let mut session = TestSession::new();
+    let source = r#"
+        fn fibonacci(n: int) -> int {
+            if n <= 1 { n } else { fibonacci(n - 1) + fibonacci(n - 2) }
+        }
+
+        fn main() -> int { fibonacci(20) }
+    "#;
+
+    assert_val_eq!(
+        run_ssa_with_limits(&mut session, source, 128, None).unwrap(),
+        int(6765),
+    );
+}
+
+#[test]
+fn reused_ssa_interpreter_reclaims_dropped_frames() {
+    let mut session = TestSession::new();
+    let source = r#"
+        struct Probe(int)
+
+        impl Value for Probe {
+            fn eq(left: Probe, right: Probe) -> bool { left.0 == right.0 }
+            fn to_string(value: Probe) -> string { to_string(value.0) }
+            fn hash(value: Probe, state: &mut hasher) { hash(value.0, state) }
+            fn clone(source: Probe) -> Probe { Probe(source.0) }
+            fn drop(target: &mut Probe) { testing::record_tracked_drop(target.0) }
+        }
+
+        fn fibonacci(n: int) -> int {
+            if n <= 1 { n } else { fibonacci(n - 1) + fibonacci(n - 2) }
+        }
+
+        fn main() -> int {
+            testing::reset_tracked_drops();
+            let owned = Probe(7);
+            fibonacci(16)
+        }
+    "#;
+    let module_id = session.compile(source).module_id;
+    let main_id = session
+        .session()
+        .expect_fresh_module(module_id)
+        .get_local_function_id(ustr::ustr("main"))
+        .expect("test source must define `fn main`");
+    let mut interpreter = Interpreter::new(module_id, session.session());
+
+    for _ in 0..3 {
+        let value = interpreter.run_main(module_id, main_id).unwrap();
+        assert_val_eq!(value, int(987));
+    }
+    drop(interpreter);
+    assert_val_eq!(session.run("testing::tracked_drop_log()"), int(7));
+}
+
+#[test]
 fn ssa_fuel_exhaustion_unwinds_owned_locals() {
     let mut session = TestSession::new();
     let source = r#"
