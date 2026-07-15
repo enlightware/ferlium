@@ -26,7 +26,7 @@ use crate::{
         FunctionId, LocalFunctionId, ModuleEnv, ModuleId, TraitDictionaryId, id::Id,
         trait_impl::TraitDictionaryEntry,
     },
-    ssa::{self, BlockIdentity, InstructionIdentity, InstructionKind},
+    ssa::{self, BlockId, InstructionId, InstructionKind},
     std::buffer,
     types::{
         r#trait::TraitDictionaryEntryIndex,
@@ -72,7 +72,7 @@ enum Step {
     /// Continue with the next instruction in the block.
     Advance,
     /// Transfer control to the start of the given block.
-    Goto(BlockIdentity),
+    Goto(BlockId),
     /// Return from the current function (the result is already in the return out-pointer).
     Return,
     /// Resume the unwind that this frame's cleanup pad interrupted: hand the in-flight error back to
@@ -100,7 +100,7 @@ enum FrameOutcome {
         /// The yielded place (`yield`'s operand), exposed as the `project`'s result.
         place: Place,
         /// The block holding the instructions after the `yield`.
-        block: BlockIdentity,
+        block: BlockId,
         /// The index of the first post-`yield` instruction within `block`.
         idx: usize,
         /// The accessor frame's live register/parameter bindings.
@@ -132,7 +132,7 @@ struct SuspendedFrame {
     /// The accessor function.
     key: FunctionKey,
     /// The block to resume into (the one containing the `yield`).
-    block: BlockIdentity,
+    block: BlockId,
     /// The index of the first post-`yield` instruction within `block`.
     idx: usize,
     /// The accessor frame's live register/parameter bindings.
@@ -280,10 +280,10 @@ impl<'a> Interpreter<'a> {
         &mut self,
         func: &ssa::Function,
         mut slots: FxHashMap<ssa::Value, Binding>,
-        mut block: BlockIdentity,
+        mut block: BlockId,
         mut idx: usize,
     ) -> Result<FrameOutcome, RuntimeError> {
-        let mut instructions: Vec<InstructionIdentity> = func.block(block).instructions().collect();
+        let mut instructions: Vec<InstructionId> = func.block(block).instructions().collect();
         // The error in flight through this frame's cleanup pads: set when an `invoke` diverts control
         // to its unwind pad, taken when the chain of pads ends in a `resume` that re-raises it. It is
         // always consumed (at `resume`) before the `Err` leaves this frame, so a nested call's own
@@ -324,7 +324,7 @@ impl<'a> Interpreter<'a> {
         func: &ssa::Function,
         slots: &mut FxHashMap<ssa::Value, Binding>,
         pending: &mut Option<RuntimeError>,
-        i: InstructionIdentity,
+        i: InstructionId,
     ) -> Result<Step, RuntimeError> {
         let instr = func.at(i);
         let def = func.definition(i);
@@ -493,7 +493,7 @@ impl<'a> Interpreter<'a> {
     fn exec_runtime_check(
         &mut self,
         pending: &mut Option<RuntimeError>,
-        successors: Option<(BlockIdentity, BlockIdentity)>,
+        successors: Option<(BlockId, BlockId)>,
         check: impl FnOnce(&mut EvalCtx<'a>) -> crate::eval::EvalControlFlowResult,
     ) -> Result<Step, RuntimeError> {
         match check(&mut self.ctx) {
@@ -2174,10 +2174,10 @@ fn husk_like(v: &Value) -> Value {
 ///   instruction), and the entry block is non-empty.
 #[cfg(debug_assertions)]
 fn verify_function(func: &ssa::Function) {
-    let block_ids: Vec<BlockIdentity> = func.blocks().collect();
+    let block_ids: Vec<BlockId> = func.blocks().collect();
 
-    let non_empty = |b: BlockIdentity| !func.block(b).is_empty();
-    let target_ok = |b: BlockIdentity| block_ids.contains(&b) && non_empty(b);
+    let non_empty = |b: BlockId| !func.block(b).is_empty();
+    let target_ok = |b: BlockId| block_ids.contains(&b) && non_empty(b);
 
     assert!(
         non_empty(func.entry()),
@@ -2187,7 +2187,7 @@ fn verify_function(func: &ssa::Function) {
 
     for b in &block_ids {
         let b = *b;
-        let instructions: Vec<InstructionIdentity> = func.block(b).instructions().collect();
+        let instructions: Vec<InstructionId> = func.block(b).instructions().collect();
         // Every block must be non-empty and therefore (with the terminator-iff-last check below) end
         // in a terminator: an empty block is a malformed CFG. The emitter allocates blocks before
         // filling them, but always fills them (with code, a fall-through `br`, or the trailing `ret`

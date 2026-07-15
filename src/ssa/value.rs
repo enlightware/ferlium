@@ -38,7 +38,7 @@ pub enum Value {
     Parameter(ParameterId),
 
     /// The register assigned by an instruction.
-    Register(ssa::InstructionIdentity),
+    Register(ssa::InstructionId),
 
     /// Compile-time pattern data used only by a `comp_eq` instruction.
     Pattern(B<LiteralValue>),

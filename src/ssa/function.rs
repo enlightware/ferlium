@@ -7,7 +7,7 @@ use crate::{
     list,
     module::{ModuleEnv, id::Id},
     ssa::value::{Constant, ConstantId},
-    ssa::{self, Instruction, InstructionIdentity, InstructionResult},
+    ssa::{self, Instruction, InstructionId, InstructionResult},
     types::r#type::Type,
 };
 
@@ -120,12 +120,12 @@ impl Function {
 
     /// Returns an iterator over the identities of this function's basic blocks, the first of which
     /// is the entry block.
-    pub fn blocks(&self) -> impl Iterator<Item = BlockIdentity> + '_ {
+    pub fn blocks(&self) -> impl Iterator<Item = BlockId> + '_ {
         self.blocks.addresses()
     }
 
     /// Returns the identity of this function's entry block.
-    pub fn entry(&self) -> BlockIdentity {
+    pub fn entry(&self) -> BlockId {
         self.blocks
             .addresses()
             .next()
@@ -133,12 +133,12 @@ impl Function {
     }
 
     /// Returns the value of `i`.
-    pub fn at(&self, i: InstructionIdentity) -> &Instruction {
+    pub fn at(&self, i: InstructionId) -> &Instruction {
         &self.slots[i]
     }
 
     /// Returns the basic block identified by `b`.
-    pub fn block(&self, b: BlockIdentity) -> Block<'_> {
+    pub fn block(&self, b: BlockId) -> Block<'_> {
         Block {
             identity: b,
             holder: self,
@@ -146,7 +146,7 @@ impl Function {
     }
 
     /// Returns the basic block identified by `b`.
-    pub fn block_mut(&mut self, b: BlockIdentity) -> BlockMut<'_> {
+    pub fn block_mut(&mut self, b: BlockId) -> BlockMut<'_> {
         BlockMut {
             identity: b,
             holder: self,
@@ -163,7 +163,7 @@ impl Function {
     }
 
     /// Returns the register assigned by `i`, if any.
-    pub fn definition(&self, i: InstructionIdentity) -> Option<ssa::Value> {
+    pub fn definition(&self, i: InstructionId) -> Option<ssa::Value> {
         if self.slots[i].result() == InstructionResult::Nothing {
             None
         } else {
@@ -225,19 +225,19 @@ impl FormatWith<ModuleEnv<'_>> for Function {
 }
 
 /// The identity of a basic block in the context of its containing function.
-pub type BlockIdentity = list::Address;
+pub type BlockId = list::Address;
 
 /// The first and last instructions of a basic block.
 #[derive(PartialEq, Eq, Debug)]
 struct BlockBounds {
-    first: InstructionIdentity,
-    last: InstructionIdentity,
+    first: InstructionId,
+    last: InstructionId,
 }
 
 /// A basic block within `holder`.
 pub struct Block<'a> {
     /// The identity of this block.
-    identity: BlockIdentity,
+    identity: BlockId,
 
     /// A reference to the function containing this block.
     holder: &'a Function,
@@ -245,7 +245,7 @@ pub struct Block<'a> {
 
 impl<'a> Block<'a> {
     /// Returns the identity of `self`.
-    pub fn id(&self) -> BlockIdentity {
+    pub fn id(&self) -> BlockId {
         self.identity
     }
 
@@ -283,7 +283,7 @@ impl<'a> Block<'a> {
 
 pub struct BlockMut<'a> {
     /// The identity of this block.
-    identity: BlockIdentity,
+    identity: BlockId,
 
     /// A reference to the function containing this block.
     holder: &'a mut Function,
@@ -292,7 +292,7 @@ pub struct BlockMut<'a> {
 /// A basic block in a SSA IR function.
 impl BlockMut<'_> {
     /// Returns the identity of `self`.
-    pub fn id(&self) -> BlockIdentity {
+    pub fn id(&self) -> BlockId {
         self.identity
     }
 
@@ -312,7 +312,7 @@ impl BlockMut<'_> {
     }
 
     /// Adds `s` at the end of `self` and returns its identity.
-    pub fn append(&mut self, s: Instruction) -> InstructionIdentity {
+    pub fn append(&mut self, s: Instruction) -> InstructionId {
         assert!(!self.is_terminated(), "insertion after terminator");
         let i = self.holder.slots.append(s);
         self.set_last(i);
@@ -320,7 +320,7 @@ impl BlockMut<'_> {
     }
 
     /// Assigns the last instruction of `self`.
-    fn set_last(&mut self, i: InstructionIdentity) {
+    fn set_last(&mut self, i: InstructionId) {
         let j = self.holder.blocks[self.identity]
             .as_ref()
             .map_or(i, |bs| bs.first);
@@ -334,16 +334,16 @@ pub struct BlockIterator<'a> {
     slots: &'a list::List<Instruction>,
 
     /// The identity of the next element in `self`, if any.
-    current: Option<InstructionIdentity>,
+    current: Option<InstructionId>,
 
     /// The identity of the last element in `self`.
-    last: Option<InstructionIdentity>,
+    last: Option<InstructionId>,
 }
 
 impl Iterator for BlockIterator<'_> {
-    type Item = InstructionIdentity;
+    type Item = InstructionId;
 
-    fn next(&mut self) -> Option<InstructionIdentity> {
+    fn next(&mut self) -> Option<InstructionId> {
         if let Some(n) = self.current {
             self.current = if Some(n) != self.last {
                 self.slots.address_after(n)

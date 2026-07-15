@@ -19,7 +19,7 @@ use crate::{
         self, FunctionId, LocalDeclId, LocalFunctionId, Module, ModuleEnv, ModuleId,
         TraitDictionaryId, TraitImplId, id::Id,
     },
-    ssa::{self, BlockIdentity},
+    ssa::{self, BlockId},
     std::{
         STD_MODULE_ID,
         core_traits_names::VALUE_TRAIT_NAME,
@@ -62,16 +62,16 @@ pub fn emit_ssa(module: &Module, others: &Modules, session: &CompilerSession) ->
 /// The SSA blocks involved in the lowering of a case in a match expression.
 struct CaseBlocks {
     /// The head blocks for the conditions.
-    heads: Vec<BlockIdentity>,
+    heads: Vec<BlockId>,
 
     /// The body blocks for the conditions.
-    bodies: Vec<BlockIdentity>,
+    bodies: Vec<BlockId>,
 
     /// The default case block.
-    default: BlockIdentity,
+    default: BlockId,
 
     /// The tail block of the case.
-    tail: BlockIdentity,
+    tail: BlockId,
 }
 
 /// A constructor of SSA IR.
@@ -573,7 +573,7 @@ impl<'a> Emitter<'a> {
     /// in the middle of lowering another block. Returns `None` when no enclosing scope has drop
     /// obligations — the frame has nothing to clean up, so a raised error propagates straight to the
     /// caller and the call stays a plain `call`.
-    fn innermost_pad(&mut self, span: Location) -> Option<BlockIdentity> {
+    fn innermost_pad(&mut self, span: Location) -> Option<BlockId> {
         let depth = self
             .context
             .scopes
@@ -587,7 +587,7 @@ impl<'a> Emitter<'a> {
     /// The chained pads, innermost first, drop every live frame local exactly once on the error path
     /// — mirroring the inline unwinding `emit_unwind_drops`/`emit_return_drops` perform for
     /// `break`/`return`, but reached via an `invoke`'s unwind edge.
-    fn allocate_pad(&mut self, depth: usize, span: Location) -> BlockIdentity {
+    fn allocate_pad(&mut self, depth: usize, span: Location) -> BlockId {
         if let Some(pad) = self.context.scopes[depth].pad {
             return pad;
         }
@@ -1360,14 +1360,14 @@ impl<'a> Emitter<'a> {
 
     /// Returns the blocks created for `n`.
     fn create_case_blocks(&mut self, n: &Case<Elaborated>) -> CaseBlocks {
-        let mut heads: Vec<BlockIdentity> = vec![];
-        let mut bodies: Vec<BlockIdentity> = vec![];
+        let mut heads: Vec<BlockId> = vec![];
+        let mut bodies: Vec<BlockId> = vec![];
         for _ in n.alternatives.iter() {
             heads.push(self.context.function.add_block().id());
             bodies.push(self.context.function.add_block().id());
         }
-        let default: BlockIdentity = self.context.function.add_block().id();
-        let tail: BlockIdentity = self.context.function.add_block().id();
+        let default: BlockId = self.context.function.add_block().id();
+        let tail: BlockId = self.context.function.add_block().id();
         CaseBlocks {
             heads,
             bodies,
@@ -2396,7 +2396,7 @@ struct InsertionContext {
 /// A cleanup landing pad awaiting its body (see `InsertionContext::pending_pads`).
 struct PendingPad {
     /// The (allocated, initially empty) pad block.
-    block: BlockIdentity,
+    block: BlockId,
 
     /// This scope's cleanup actions to run in the pad, already reversed (innermost-declared last runs
     /// first), captured when the pad was allocated and the scope was still live.
@@ -2404,7 +2404,7 @@ struct PendingPad {
 
     /// The pad of the nearest enclosing scope with obligations, branched to after this pad's actions;
     /// `None` for the outermost pad, which `resume`s instead (re-raising to the caller).
-    outer: Option<BlockIdentity>,
+    outer: Option<BlockId>,
 
     /// The span the pad's actions are attributed to (the first fallible call that needed the pad).
     span: Location,
@@ -2423,7 +2423,7 @@ struct Scope {
     /// declaration order, init-guarded) and then chains to the nearest enclosing scope's pad or, if
     /// none, `resume`s — re-raising the in-flight error to the caller. `None` until built (a scope
     /// with no obligations, or one no fallible call unwinds through, never gets one).
-    pad: Option<BlockIdentity>,
+    pad: Option<BlockId>,
 }
 
 /// A single deferred cleanup action run on scope exit, transfer, and the error pad.
@@ -2441,10 +2441,10 @@ enum CleanupAction {
 #[derive(Clone)]
 struct LoopFrame {
     /// The loop's head block, branched to by `continue` and by the body's back-edge.
-    head: BlockIdentity,
+    head: BlockId,
 
     /// The loop's exit block, branched to by `break`; lowering continues here after the loop.
-    exit: BlockIdentity,
+    exit: BlockId,
 
     /// The place into which `break` writes the loop's result (the loop's destination, or a
     /// throwaway temporary when the result is discarded).
@@ -2489,5 +2489,5 @@ enum DropSpec {
 #[derive(Clone, Copy)]
 enum InsertionPoint {
     /// The end of a basic block.
-    End(BlockIdentity),
+    End(BlockId),
 }

@@ -40,8 +40,8 @@ use crate::{
     types::{r#trait::TraitDictionaryEntryIndex, r#type::Type},
 };
 
-/// The identity of an instruction in the context of its containing funtion.
-pub type InstructionIdentity = list::Address;
+/// The identity of an instruction in the context of its containing function.
+pub type InstructionId = list::Address;
 
 /// An instruction in the SSA form of Ferlium.
 pub struct Instruction {
@@ -107,7 +107,7 @@ impl Instruction {
     /// Creates a `br` (unconditional branch) instruction transferring control to `target`.
     ///
     /// A terminator; takes no operands. `target` must be an existing block of the same function.
-    pub fn br(span: Location, target: ssa::BlockIdentity) -> Self {
+    pub fn br(span: Location, target: ssa::BlockId) -> Self {
         Instruction {
             span,
             operands: Box::new([]),
@@ -170,8 +170,8 @@ impl Instruction {
         span: Location,
         callee: ssa::Value,
         arguments: T,
-        normal: ssa::BlockIdentity,
-        unwind: ssa::BlockIdentity,
+        normal: ssa::BlockId,
+        unwind: ssa::BlockId,
     ) -> Self {
         let mut operands = vec![callee];
         operands.extend(arguments);
@@ -278,8 +278,8 @@ impl Instruction {
     pub fn condbr(
         span: Location,
         condition: ssa::Value,
-        on_success: ssa::BlockIdentity,
-        on_failure: ssa::BlockIdentity,
+        on_success: ssa::BlockId,
+        on_failure: ssa::BlockId,
     ) -> Self {
         Instruction {
             span,
@@ -465,8 +465,8 @@ impl Instruction {
     /// Creates a call-depth guard with explicit normal and unwind successors.
     pub fn invoke_check_call_depth(
         span: Location,
-        normal: ssa::BlockIdentity,
-        unwind: ssa::BlockIdentity,
+        normal: ssa::BlockId,
+        unwind: ssa::BlockId,
     ) -> Self {
         Instruction {
             span,
@@ -480,8 +480,8 @@ impl Instruction {
     /// Creates a fuel guard with explicit normal and unwind successors.
     pub fn invoke_check_fuel(
         span: Location,
-        normal: ssa::BlockIdentity,
-        unwind: ssa::BlockIdentity,
+        normal: ssa::BlockId,
+        unwind: ssa::BlockId,
     ) -> Self {
         Instruction {
             span,
@@ -659,8 +659,8 @@ pub enum InstructionKind {
     Call,
     /// A fallible call with normal and unwind successors.
     Invoke {
-        normal: ssa::BlockIdentity,
-        unwind: ssa::BlockIdentity,
+        normal: ssa::BlockId,
+        unwind: ssa::BlockId,
     },
     /// Continue propagating an error after running a cleanup pad.
     Resume,
@@ -674,11 +674,11 @@ pub enum InstructionKind {
     CompareEqual,
     /// Branch according to a boolean operand.
     ConditionalBranch {
-        on_success: ssa::BlockIdentity,
-        on_failure: ssa::BlockIdentity,
+        on_success: ssa::BlockId,
+        on_failure: ssa::BlockId,
     },
     /// Unconditionally branch to `target`.
-    UnconditionalBranch { target: ssa::BlockIdentity },
+    UnconditionalBranch { target: ssa::BlockId },
     /// Read a representation-copyable value from a place without consuming it.
     Load,
     /// Project a field place from an aggregate place.
@@ -712,11 +712,11 @@ pub enum InstructionKind {
     StackRestore,
     /// Enforce the configured script call-depth limit.
     CheckCallDepth {
-        successors: Option<(ssa::BlockIdentity, ssa::BlockIdentity)>,
+        successors: Option<(ssa::BlockId, ssa::BlockId)>,
     },
     /// Consume one unit of optional execution fuel.
     CheckFuel {
-        successors: Option<(ssa::BlockIdentity, ssa::BlockIdentity)>,
+        successors: Option<(ssa::BlockId, ssa::BlockId)>,
     },
     /// Semantically drop an initialized value through its `Value::drop` function.
     Drop,
@@ -1141,7 +1141,7 @@ fn fmt_callee_and_args(
 fn fmt_runtime_check(
     f: &mut fmt::Formatter<'_>,
     name: &str,
-    successors: Option<(ssa::BlockIdentity, ssa::BlockIdentity)>,
+    successors: Option<(ssa::BlockId, ssa::BlockId)>,
 ) -> fmt::Result {
     write!(f, "{name}")?;
     if let Some((normal, unwind)) = successors {
