@@ -1,3 +1,4 @@
+use nonmax::NonMaxU32;
 use std::fmt;
 use std::ops::{Index, IndexMut};
 
@@ -6,14 +7,14 @@ pub struct List<T> {
     /// The number of elements in the list.
     size: usize,
 
-    /// The offset of the list head.
-    head_offset: usize,
+    /// The address of the list head.
+    head: Option<Address>,
 
-    /// The offset of the list tail.
-    tail_offset: usize,
+    /// The address of the list tail.
+    tail: Option<Address>,
 
-    /// The position of the next free bucket in the list buffer.
-    free_offset: usize,
+    /// The head of the free-bucket list.
+    free: Option<Address>,
 
     /// The elements in list.
     storage: Vec<Bucket<T>>,
@@ -24,9 +25,9 @@ impl<T> List<T> {
     pub fn new() -> Self {
         Self {
             size: 0,
-            head_offset: !0,
-            tail_offset: !0,
-            free_offset: 0,
+            head: None,
+            tail: None,
+            free: None,
             storage: vec![],
         }
     }
@@ -48,40 +49,24 @@ impl<T> List<T> {
 
     /// Returns the position of the first element, if any.
     pub fn first_address(&self) -> Option<Address> {
-        if self.is_empty() {
-            None
-        } else {
-            Some(Address::new(self.head_offset))
-        }
+        self.head
     }
 
     /// Returns position of the last element, if any.
     pub fn last_address(&self) -> Option<Address> {
-        if self.is_empty() {
-            None
-        } else {
-            Some(Address::new(self.tail_offset))
-        }
+        self.tail
     }
 
     /// Returns the position that immediately follows `a`, if any.
     pub fn address_after(&self, a: Address) -> Option<Address> {
         assert!(self.in_bounds(a));
-        if a == self.last_address() {
-            None
-        } else {
-            Some(Address::new(self.storage[a.offset].next))
-        }
+        self.storage[a.as_index()].next
     }
 
     /// Returns the position that immediately precedes `a`, if any.
     pub fn address_before(&self, a: Address) -> Option<Address> {
         assert!(self.in_bounds(a));
-        if a == self.first_address() {
-            None
-        } else {
-            Some(Address::new(self.storage[a.offset].previous))
-        }
+        self.storage[a.as_index()].previous
     }
 
     /// Returns an iterator over the contents of `self`.
@@ -105,34 +90,25 @@ impl<T> List<T> {
         let n = self.storage.len();
         let r = n - self.size;
         if k > r {
-            self.storage.reserve(k - r);
+            let additional = k - r;
+            assert!(
+                additional <= Address::CAPACITY - n,
+                "list address space exhausted"
+            );
+            self.storage.reserve(additional);
         }
     }
 
     /// Inserts `x` at the end of `self` and returns its position.
     pub fn append(&mut self, x: T) -> Address {
-        // Is the underlying storage empty?
-        if self.storage.is_empty() {
+        if self.is_empty() {
+            let address = self.allocate_bucket(None, None, x);
             self.size = 1;
-            self.head_offset = 0;
-            self.tail_offset = 0;
-            self.free_offset = 1;
-            self.storage.push(Bucket::new(!0, !0, x));
-            Address::new(0)
-        }
-        // Has the list been emptied?
-        else if self.size == 0 {
-            let new_offset = self.free_offset;
-            self.size = 1;
-            self.head_offset = self.free_offset;
-            self.tail_offset = self.free_offset;
-            self.free_offset = self.storage[new_offset].next;
-            self.storage[new_offset].assign(!0, !0, x);
-            Address::new(new_offset)
-        }
-        // Regular insertion.
-        else {
-            self.insert_after(Address::new(self.tail_offset), x)
+            self.head = Some(address);
+            self.tail = Some(address);
+            address
+        } else {
+            self.insert_after(self.tail.expect("a non-empty list has a tail"), x)
         }
     }
 
@@ -141,7 +117,7 @@ impl<T> List<T> {
         if self.is_empty() {
             self.append(x)
         } else {
-            self.insert_before(Address::new(self.head_offset), x)
+            self.insert_before(self.head.expect("a non-empty list has a head"), x)
         }
     }
 
@@ -149,97 +125,93 @@ impl<T> List<T> {
     pub fn insert_before(&mut self, a: Address, x: T) -> Address {
         assert!(self.in_bounds(a));
 
-        // The offset of the previous bucket, if any.
-        let p = self.storage[a.offset].previous;
-
-        // Is the storage full or can we re-use a bucket that was emptied?
-        let new_offset = if self.free_offset == self.storage.len() {
-            self.storage.push(Bucket::new(p, a.offset, x));
-            self.free_offset = self.storage.len();
-            self.free_offset - 1
-        } else {
-            let new_offset = self.free_offset;
-            self.free_offset = self.storage[self.free_offset].next;
-            self.storage[new_offset].assign(p, a.offset, x);
-            new_offset
-        };
+        let previous = self.storage[a.as_index()].previous;
+        let new_address = self.allocate_bucket(previous, Some(a), x);
 
         // Update links.
-        if a.offset == self.head_offset {
-            self.head_offset = new_offset;
+        if let Some(previous) = previous {
+            self.storage[previous.as_index()].next = Some(new_address);
         } else {
-            self.storage[p].next = new_offset;
+            self.head = Some(new_address);
         }
-        self.storage[a.offset].previous = new_offset;
+        self.storage[a.as_index()].previous = Some(new_address);
 
         // Update size.
         self.size += 1;
-        Address::new(new_offset)
+        new_address
     }
 
     /// Inserts `x` after the element at `a` and returns its position.
     pub fn insert_after(&mut self, a: Address, x: T) -> Address {
         assert!(self.in_bounds(a));
 
-        // The offset of the next bucket, if any.
-        let n = self.storage[a.offset].next;
-
-        // Is the storage full or can we re-use a bucket that was emptied?
-        let new_offset = if self.free_offset == self.storage.len() {
-            self.storage.push(Bucket::new(a.offset, n, x));
-            self.free_offset = self.storage.len();
-            self.free_offset - 1
-        } else {
-            let new_offset = self.free_offset;
-            self.free_offset = self.storage[self.free_offset].next;
-            self.storage[new_offset].assign(a.offset, n, x);
-            new_offset
-        };
+        let next = self.storage[a.as_index()].next;
+        let new_address = self.allocate_bucket(Some(a), next, x);
 
         // Update links.
-        if a.offset == self.tail_offset {
-            self.tail_offset = new_offset;
+        if let Some(next) = next {
+            self.storage[next.as_index()].previous = Some(new_address);
         } else {
-            self.storage[n].previous = new_offset;
+            self.tail = Some(new_address);
         }
-        self.storage[a.offset].next = new_offset;
+        self.storage[a.as_index()].next = Some(new_address);
 
         // Update size.
         self.size += 1;
-        Address::new(new_offset)
+        new_address
     }
 
     /// Removes and returns the element at `a`.
     pub fn remove(&mut self, a: Address) -> T {
         assert!(self.in_bounds(a));
 
-        let p = self.storage[a.offset].previous;
-        if p != !0 {
-            self.storage[p].next = self.storage[a.offset].next;
-        }
+        let index = a.as_index();
+        let previous = self.storage[index].previous;
+        let next = self.storage[index].next;
 
-        let n = self.storage[a.offset].next;
-        if n != !0 {
-            self.storage[n].previous = self.storage[a.offset].previous;
+        if let Some(previous) = previous {
+            self.storage[previous.as_index()].next = next;
+        } else {
+            self.head = next;
         }
-
-        self.storage[a.offset].next = self.free_offset;
+        if let Some(next) = next {
+            self.storage[next.as_index()].previous = previous;
+        } else {
+            self.tail = previous;
+        }
 
         self.size -= 1;
-        self.free_offset = a.offset;
-        if a.offset == self.head_offset {
-            self.head_offset = n;
-        }
-        if a.offset == self.tail_offset {
-            self.tail_offset = p;
-        }
+        self.storage[index].previous = None;
+        self.storage[index].next = self.free;
+        self.free = Some(a);
 
-        self.storage[a.offset].element.take().unwrap()
+        self.storage[index].element.take().unwrap()
     }
 
     /// Returns `true` iff `a` is a valid position in `self`.
     fn in_bounds(&self, a: Address) -> bool {
-        a.offset < self.storage.len()
+        self.storage
+            .get(a.as_index())
+            .is_some_and(|bucket| bucket.element.is_some())
+    }
+
+    /// Allocates a bucket, reusing a removed bucket when possible.
+    fn allocate_bucket(
+        &mut self,
+        previous: Option<Address>,
+        next: Option<Address>,
+        element: T,
+    ) -> Address {
+        if let Some(address) = self.free {
+            let bucket = &mut self.storage[address.as_index()];
+            self.free = bucket.next;
+            bucket.assign(previous, next, element);
+            address
+        } else {
+            let address = Address::new(self.storage.len());
+            self.storage.push(Bucket::new(previous, next, element));
+            address
+        }
     }
 }
 
@@ -248,14 +220,14 @@ impl<T> Index<Address> for List<T> {
 
     fn index(&self, a: Address) -> &T {
         assert!(self.in_bounds(a));
-        self.storage[a.offset].element.as_ref().unwrap()
+        self.storage[a.as_index()].element.as_ref().unwrap()
     }
 }
 
 impl<T> IndexMut<Address> for List<T> {
     fn index_mut(&mut self, a: Address) -> &mut T {
         assert!(self.in_bounds(a));
-        self.storage[a.offset].element.as_mut().unwrap()
+        self.storage[a.as_index()].element.as_mut().unwrap()
     }
 }
 
@@ -291,32 +263,34 @@ impl<T: std::fmt::Debug> fmt::Debug for List<T> {
 }
 
 /// The address of an element in a doubly linked list.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct Address {
-    /// The raw representation of this address.
-    offset: usize,
-}
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(transparent)]
+pub struct Address(NonMaxU32);
 
 impl Address {
-    /// Creates a new instance with the given offset.
+    /// The maximum number of buckets addressable by a list.
+    const CAPACITY: usize = u32::MAX as usize;
+
+    /// Creates a new instance with the given storage index.
     fn new(offset: usize) -> Self {
-        Address { offset }
+        let offset = u32::try_from(offset).expect("list address space exhausted");
+        Self(NonMaxU32::new(offset).expect("list address space exhausted"))
+    }
+
+    /// Returns this address as an index into a list's backing storage.
+    fn as_index(self) -> usize {
+        self.0.get() as usize
     }
 
     /// Returns the raw value of this address.
-    pub fn raw(&self) -> usize {
-        self.offset
+    pub fn raw(self) -> u32 {
+        self.0.get()
     }
 }
 
-impl PartialEq<Option<Address>> for Address {
-    /// Returns `true` iff `self` is equal to the value wrapped in `other`.
-    fn eq(&self, other: &Option<Address>) -> bool {
-        if let Some(rhs) = other {
-            self == rhs
-        } else {
-            false
-        }
+impl std::hash::Hash for Address {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&self.raw(), state);
     }
 }
 
@@ -358,13 +332,11 @@ impl<'a, T> Iterator for AddressIterator<'a, T> {
 
 /// A bucket in the internal storage of a doubly linked list.
 struct Bucket<T> {
-    /// If the bucket is busy, this property is either the offset of the preceding bucket or `!0` if
-    /// there isn't any. If the bucket is free, this property is unspecified.
-    previous: usize,
+    /// The preceding bucket when this bucket is occupied.
+    previous: Option<Address>,
 
-    /// If the bucket is busy, this property is either the offset of the succeeding bucket or `!0` if
-    /// there isn't any. If the bucket is free, this property is the offset of the next free bucket.
-    next: usize,
+    /// The succeeding bucket when occupied, or the next free bucket when unoccupied.
+    next: Option<Address>,
 
     /// The stored element iff the bucket is busy.
     element: Option<T>,
@@ -372,7 +344,7 @@ struct Bucket<T> {
 
 impl<T> Bucket<T> {
     /// Creates a new instance with the given properties.
-    fn new(previous: usize, next: usize, element: T) -> Self {
+    fn new(previous: Option<Address>, next: Option<Address>, element: T) -> Self {
         Self {
             previous,
             next,
@@ -381,7 +353,8 @@ impl<T> Bucket<T> {
     }
 
     /// Assigns the value of `self`, assuming it is free.
-    fn assign(&mut self, previous: usize, next: usize, element: T) {
+    fn assign(&mut self, previous: Option<Address>, next: Option<Address>, element: T) {
+        debug_assert!(self.element.is_none());
         self.previous = previous;
         self.next = next;
         self.element = Some(element);
@@ -398,6 +371,34 @@ impl<T> Default for List<T> {
 mod tests {
 
     use super::*;
+    use std::hash::{DefaultHasher, Hash, Hasher};
+
+    #[test]
+    fn address_has_a_compact_optional_representation() {
+        assert_eq!(std::mem::size_of::<Address>(), 4);
+        assert_eq!(std::mem::size_of::<Option<Address>>(), 4);
+    }
+
+    #[test]
+    fn address_supports_the_largest_valid_offset() {
+        let address = Address::new((u32::MAX - 1) as usize);
+        assert_eq!(address.raw(), u32::MAX - 1);
+    }
+
+    #[test]
+    fn address_hashes_its_logical_offset() {
+        let mut address_hasher = DefaultHasher::new();
+        Address::new(42).hash(&mut address_hasher);
+        let mut integer_hasher = DefaultHasher::new();
+        42_u32.hash(&mut integer_hasher);
+        assert_eq!(address_hasher.finish(), integer_hasher.finish());
+    }
+
+    #[test]
+    #[should_panic(expected = "list address space exhausted")]
+    fn address_rejects_the_reserved_offset() {
+        Address::new(u32::MAX as usize);
+    }
 
     #[test]
     fn test_is_empty() {
@@ -521,6 +522,24 @@ mod tests {
         xs.remove(b);
         xs.append("d");
         assert!(xs.iter().eq(["a", "c", "d"].iter()));
+    }
+
+    #[test]
+    fn test_reuse_multiple_removed_buckets() {
+        let mut xs = List::<&str>::new();
+        let a = xs.append("a");
+        let b = xs.append("b");
+        xs.append("c");
+        let d = xs.append("d");
+
+        xs.remove(b);
+        xs.remove(d);
+
+        let e = xs.append("e");
+        let f = xs.insert_after(a, "f");
+        assert_eq!(e, d);
+        assert_eq!(f, b);
+        assert!(xs.iter().eq(["a", "f", "c", "e"].iter()));
     }
 
     #[test]

@@ -345,7 +345,7 @@ impl Iterator for BlockIterator<'_> {
 
     fn next(&mut self) -> Option<InstructionIdentity> {
         if let Some(n) = self.current {
-            self.current = if n != self.last {
+            self.current = if Some(n) != self.last {
                 self.slots.address_after(n)
             } else {
                 None
