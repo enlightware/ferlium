@@ -20,6 +20,7 @@ pub mod format;
 mod graph;
 pub mod hir;
 pub mod ide;
+pub mod list;
 pub mod module;
 pub mod parser;
 pub mod std;
