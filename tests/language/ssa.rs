@@ -3321,6 +3321,19 @@ fn closure_over_generic_in_concrete_caller_runs() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn closure_over_constrained_native_runs() {
+    let mut session = TestSession::new();
+    let source = "fn use_probe() { let f = testing::constrained_native_probe; f(0) } use_probe()";
+    let out = session.emit_ssa(source);
+    assert!(
+        out.contains("build_closure testing::constrained_native_probe(dict("),
+        "expected the constrained native's dictionary to be captured, got:\n{out}"
+    );
+    assert_val_eq!(session.run(source), int(42));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn closure_forwarding_enclosing_generic_dict_runs() {
     let mut session = TestSession::new();
     assert_val_eq!(

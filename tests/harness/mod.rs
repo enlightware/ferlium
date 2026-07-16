@@ -9,16 +9,22 @@
 use ferlium::{
     CompilerSession, FxHashSet, Location, ModuleAndExpr, SourceTable,
     compiler::error::{CompilationError, RuntimeErrorKind},
-    eval::{ControlFlow, EvalResult, RuntimeError, eval_node},
+    eval::{
+        ControlFlow, EvalControlFlowResult, EvalCtx, EvalResult, RuntimeError, ValOrMut, cont,
+        eval_node,
+    },
     hir::CompiledExpr,
     hir::function::{
-        BinaryNativeFnNNV, BinaryNativeFnRMN, BinaryNativeFnRRN, CallableDefinition, Function,
-        NullaryNativeFnN, NullaryNativeFnV, UnaryNativeFnMN, UnaryNativeFnNN, UnaryNativeFnNV,
-        UnaryNativeFnRN, UnaryNativeFnVN, UnaryNativeFnVV,
+        ArgConvention, BinaryNativeFnNNV, BinaryNativeFnRMN, BinaryNativeFnRRN, Callable,
+        CallableDefinition, Function, NullaryNativeFnN, NullaryNativeFnV, UnaryNativeFnMN,
+        UnaryNativeFnNN, UnaryNativeFnNV, UnaryNativeFnRN, UnaryNativeFnVN, UnaryNativeFnVV,
     },
     hir::value::{LiteralValue, NativeValueType, Value},
     hir::{ENodeArena, ENodeId, NodeKind},
-    module::{BlanketTraitImplSubKey, Module, ModuleEnv, ModuleId, Path, TraitId},
+    module::{
+        BlanketTraitImplSubKey, ELocalDecl, Module, ModuleEnv, ModuleFunction, ModuleId, Path,
+        TraitId,
+    },
     std::core_traits_names::{ITERATOR_TRAIT_NAME, VALUE_TRAIT_NAME},
     std::{
         array::{array_type, array_value_from_vec},
@@ -698,6 +704,44 @@ fn tracked_drop_log() -> isize {
     TRACKED_DROPS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+#[derive(Clone)]
+struct ConstrainedNativeProbe;
+
+impl Callable for ConstrainedNativeProbe {
+    fn call(
+        &self,
+        args: Vec<ValOrMut>,
+        _ctx: &mut EvalCtx,
+        _locals: &[ELocalDecl],
+    ) -> EvalControlFlowResult {
+        let mut args = args.into_iter();
+        assert!(matches!(args.next(), Some(ValOrMut::Dictionary(_))));
+        match args.next() {
+            Some(ValOrMut::Val(value)) => value.discard_storage(),
+            Some(ValOrMut::Mut(_) | ValOrMut::Ref(_)) => {}
+            Some(ValOrMut::Dictionary(_)) | None => panic!("expected one visible value argument"),
+        }
+        assert!(args.next().is_none());
+        cont(Value::native(42isize))
+    }
+
+    fn visible_parameter_passing(&self) -> Option<&[ArgConvention]> {
+        Some(&[ArgConvention::Let])
+    }
+
+    fn format_ind(
+        &self,
+        f: &mut std::fmt::Formatter,
+        _locals: &[ELocalDecl],
+        _env: &ModuleEnv<'_>,
+        spacing: usize,
+        indent: usize,
+    ) -> std::fmt::Result {
+        let indent_str = format!("{}{}", "  ".repeat(spacing), "⎸ ".repeat(indent));
+        write!(f, "{indent_str}ConstrainedNativeProbe")
+    }
+}
+
 fn testing_module(
     module_id: ModuleId,
     iterator_trait: TraitId,
@@ -883,6 +927,29 @@ fn testing_module(
             clone_tracked_value_clone_function(),
             clone_tracked_value_drop_function(),
         ],
+    );
+    let generic_ty = Type::variable_id(0);
+    module.add_function(
+        "constrained_native_probe".into(),
+        ModuleFunction::new_without_spans_nor_locals(
+            CallableDefinition::new(
+                TypeScheme::new_infer_quantifiers_with_constraints(
+                    FnType::new_by_val([generic_ty], int_type(), no_effects()),
+                    vec![PubTypeConstraint::new_have_trait(
+                        value_trait_id,
+                        vec![generic_ty],
+                        vec![],
+                        vec![],
+                        Location::new_synthesized(),
+                    )],
+                ),
+                vec![ustr("value")],
+                Some(String::from(
+                    "Test-only constrained native used to exercise first-class evidence capture.",
+                )),
+            ),
+            Box::new(ConstrainedNativeProbe),
+        ),
     );
     module.add_function(
         "some_int".into(),

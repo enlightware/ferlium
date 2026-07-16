@@ -927,7 +927,15 @@ impl<'a> Interpreter<'a> {
 
         // A constant function reference is a direct (bare) call.
         if let ssa::Value::Function(r) = callee_op {
-            return self.exec_resolved_call(slots, r.module, r.function, Vec::new(), arg_ops, span);
+            return self.exec_resolved_call(
+                slots,
+                r.module,
+                r.function,
+                Vec::new(),
+                0,
+                arg_ops,
+                span,
+            );
         }
 
         // Otherwise the callee operand is the place of a first-class function value, read by
@@ -948,7 +956,7 @@ impl<'a> Interpreter<'a> {
         if is_closure {
             self.exec_closure_call(slots, &place, arg_ops, span)
         } else {
-            self.exec_resolved_call(slots, module_id, function_id, Vec::new(), arg_ops, span)
+            self.exec_resolved_call(slots, module_id, function_id, Vec::new(), 0, arg_ops, span)
         }
     }
 
@@ -1269,13 +1277,16 @@ impl<'a> Interpreter<'a> {
     /// Calls the resolved function `(callee_module, callee_identity)` with `leading` (a closure's
     /// prepended `@extra` dictionary evidence and captured-environment slots, in signature order;
     /// empty for a non-closure call) ahead of the visible arguments `arg_ops` (the last of which is
-    /// the return out-pointer).
+    /// the return out-pointer). `closure_env_len` identifies the trailing value-capture bindings in
+    /// `leading`, keeping them distinct from evidence bindings even though both may be places.
+    #[allow(clippy::too_many_arguments)]
     fn exec_resolved_call(
         &mut self,
         slots: &mut FxHashMap<ssa::Value, Binding>,
         callee_module: ModuleId,
         callee_identity: LocalFunctionId,
         leading: Vec<Binding>,
+        closure_env_len: usize,
         arg_ops: &[ssa::Value],
         span: Location,
     ) -> Result<(), RuntimeError> {
@@ -1341,6 +1352,7 @@ impl<'a> Interpreter<'a> {
             callee_module,
             callee_identity,
             leading,
+            closure_env_len,
             arg_ops,
             span,
         )
@@ -1351,12 +1363,14 @@ impl<'a> Interpreter<'a> {
     /// writes the returned value through the return out-pointer. Kept out of the script call path
     /// so the recursion's per-frame stack stays small.
     #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
     fn exec_resolved_native_call(
         &mut self,
         slots: &mut FxHashMap<ssa::Value, Binding>,
         callee_module: ModuleId,
         callee_identity: LocalFunctionId,
         leading: Vec<Binding>,
+        closure_env_len: usize,
         arg_ops: &[ssa::Value],
         span: Location,
     ) -> Result<(), RuntimeError> {
@@ -1365,31 +1379,51 @@ impl<'a> Interpreter<'a> {
             .get_function_by_id(callee_identity)
             .expect("callee function not found");
 
-        // A closure over a *native* function would have to prepend its environment ahead of the
-        // native's visible arguments; this is not needed yet (lambda bodies are always scripts).
-        assert!(
-            leading.is_empty(),
-            "a closure over a native function is not lowered to SSA yet"
-        );
-
         // Native callee: marshal the extra (dictionary) arguments and the visible arguments,
         // delegate to the HIR interpreter, then write the returned value through the return
         // out-pointer.
         //
         // A call's operands are laid out as `[extra dictionaries…, visible args…, return
-        // out-pointer]`. `parameter_passing` describes only the visible arguments, so the leading
-        // `extra_count` operands are the extra (dictionary) parameters the native expects ahead of
-        // its visible arguments.
+        // out-pointer]`. A first-class constrained native instead carries some or all of those
+        // extras in `leading`. `parameter_passing` describes only the visible arguments, while the
+        // native callable's runtime passing includes hidden evidence followed by visible arguments.
+        assert_eq!(
+            closure_env_len, 0,
+            "a native function closure contains unexpected value captures"
+        );
         let passing = f.parameter_passing.clone();
         let n_vis = passing.len();
-        let extra_count = arg_ops.len().checked_sub(n_vis + 1).expect(
+        let operand_extra_count = arg_ops.len().checked_sub(n_vis + 1).expect(
             "a native call must pass the visible arguments and a return out-pointer at minimum",
         );
-        let (extra_ops, rest) = arg_ops.split_at(extra_count);
+        let extra_count = leading.len() + operand_extra_count;
+        if let Some(runtime_passing) = f.code.runtime_argument_passing() {
+            let expected_extra_count = runtime_passing
+                .len()
+                .checked_sub(n_vis)
+                .expect("native runtime argument passing must include all visible arguments");
+            assert_eq!(
+                extra_count, expected_extra_count,
+                "native call hidden arguments do not match its runtime argument passing"
+            );
+        }
+        let (extra_ops, rest) = arg_ops.split_at(operand_extra_count);
         let (visible_ops, ret_op) = rest.split_at(n_vis);
         let ret_place = self.place_operand(slots, &ret_op[0]);
 
         let mut args: Vec<ValOrMut> = Vec::with_capacity(extra_count + n_vis);
+        // Captured hidden evidence from a first-class constrained native. Trait dictionaries remain
+        // interned metadata; subscript evidence is represented by the materialized place allocated
+        // by `exec_closure_call`.
+        for binding in leading {
+            args.push(match binding {
+                Binding::Dictionary(id) => ValOrMut::Dictionary(id),
+                Binding::Place(place) => ValOrMut::Mut(place),
+                Binding::Value(_) | Binding::StackMarker(_) | Binding::Projected { .. } => {
+                    panic!("a native function closure contains invalid hidden evidence")
+                }
+            });
+        }
         // Extra arguments: a symbolic trait dictionary is passed as interned evidence
         // (`ValOrMut::Dictionary`), exactly as the HIR interpreter passes a dictionary; subscript
         // evidence is passed as an owned subscript value (mirroring
@@ -1508,8 +1542,15 @@ impl<'a> Interpreter<'a> {
             }));
         }
 
-        let call_result =
-            self.exec_resolved_call(slots, module_id, function_id, leading, arg_ops, span);
+        let call_result = self.exec_resolved_call(
+            slots,
+            module_id,
+            function_id,
+            leading,
+            env_len,
+            arg_ops,
+            span,
+        );
 
         // Drop the cloned environment temporary (running the captures' `Value::drop`), then reclaim
         // every cell allocated since the marker (the temporary's husk and the callee's frame). The
