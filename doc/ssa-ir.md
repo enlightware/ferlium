@@ -1,26 +1,17 @@
 # SSA IR: Structure, Calling Conventions, and Per-Instruction Invariants
 
-This is the reference for the **invariants** a well-formed Ferlium SSA function must satisfy: the
-shape of a function, the calling conventions on its boundary, and the contract of each instruction.
-It is the specification the interpreter's verifier checks and that a backend may rely on.
+This is the contract of a well-formed Ferlium SSA function: its structure, calling conventions, and
+instruction invariants. The verifier checks this contract and backends may rely on it.
 
-Related documents — this one is the structural/contract reference; those are the deep dives:
+Related documents:
 
-- `doc/abi.md` — the *physical* ABI (sizes, alignment, register/stack lowering). SSA records the
-  high-level convention; the backend realizes it per `abi.md`.
-- `doc/hir-ownership.md` — the HIR ownership model (clone / copy / move / drop) that these
-  instructions realize.
-- `doc/ssa-uninit-tracking.md` — the liveness / husk model that defines what "initialized" means
-  (referenced throughout §4.3).
-- `doc/ssa-error-propagation.md` — `invoke` / landing pad / `resume` unwinding (referenced in §5).
+- `doc/abi.md` — physical representation and ABI lowering;
+- `doc/hir-ownership.md` — source-level clone, copy, move, and drop semantics;
+- `doc/ssa-uninit-tracking.md` — storage initialization and drop state;
+- `doc/ssa-error-propagation.md` — unwind edges and cleanup pads.
 
-Two classes of invariant appear below:
-
-- **Structural** invariants are machine-checked: `Instruction::verify` (per-instruction, §6) and
-  `Interpreter::verify_function` (per-function, §6) assert them in debug builds before execution.
-- **Semantic** invariants (operand *roles* in §3, the storage-state contracts in §4.3) are not
-  recoverable from the IR alone; they are upheld by lowering and checked at the point of use by the
-  interpreter's operand resolvers, or relied upon as a contract.
+`Instruction::verify` checks instruction-local structure. `ssa::verify::verify_function` derives and
+checks per-function roles, dominance, value consumption, and storage ownership (§6).
 
 ## 1. Model
 
@@ -53,60 +44,51 @@ read. Values live in registers or in storage reached through a *place*.
    the captured-environment slots come first (they are leading `@arg`s, not part of the surface
    argument list), then the visible source arguments.
 3. `@ret` — `Return`: the caller-allocated return out-pointer (see §4.2). Always last when present.
+   The function's result convention disambiguates the physical pointee: `Value` stores `T` through
+   `*T`, while `AddressorPlace` stores a returned place pointer through `**T`.
 
 **Blocks.**
 
 - The first block is the **entry**.
 - **Every block is non-empty and ends in exactly one terminator**, which appears *only* as the
-  block's last instruction. The emitter allocates a block before filling it — to get an identity to
-  branch to ahead of emitting its body, for the forward references a `condbr`/`br`/`invoke` or a
-  match/loop join needs — but it always fills it (with code, a fall-through `br`, or the trailing
-  `ret` at finalization). An empty block is therefore a malformed CFG, not a tolerated state. (A block
-  may still be *unreachable* — e.g. the join after a match whose every arm diverges — but it is
-  non-empty and terminated; reachability is a separate, unchecked property.)
+  block's last instruction. Unreachable blocks are permitted but must still be complete.
 - The terminators are `ret`, `br`, `condbr`, `invoke`, `resume`, and the unwind-capable forms of the
   runtime checks (classified exhaustively by `InstructionKind::is_terminator`).
 - Every branch target (`br`/`condbr`/`invoke` successor, runtime-check successor, and sparse
   implicit-unwind-table target) names an existing block of the same function.
 
-These are exactly what `verify_function` asserts (every block non-empty; terminator-iff-last; targets
-valid), in addition to running each instruction's own `verify`.
+These are part of what `ssa::verify::verify_function` asserts, in addition to the derived semantic
+checks described in §6.
 
 ## 3. Operand roles (semantic invariant)
 
-Each instruction carries a flat `operands: Vec<ssa::Value>` whose length and per-position meaning are
-fixed by its kind (§5). Each position expects one of four **roles**, which is part of the contract but
-is **not** recoverable from the `ssa::Value` variant (a `Register`/`Parameter` can bind any role).
-The role is therefore enforced where the operand is *consumed*, by the interpreter's resolvers:
+Each instruction carries `operands: Box<[ssa::Value]>`; its kind fixes their count and roles (§5).
+Registers and parameters do not encode their roles, but the verifier derives them from parameter tags
+and defining instructions:
 
-| Role | Produced by | Consumed by | Resolver |
-|------|-------------|-------------|----------|
-| **place** | `alloca*`, `subfield`, `dict_entry`, `project`, by-pointer parameter | `load`, `store`, `memcpy`, `move`, `subfield`, `drop`, `call` callee, … | `place_operand` |
-| **value** | `load`, `compare_eq`, `variant`, `extract_tag`, `build_closure`, `clone_closure_env`, a constant | `store` value, `compare_eq`, `condbr` cond, … | `value_operand` |
-| **dictionary** | `Dictionary`/`Subscript` constant, forwarded `@extra` | `dict_entry`, `subscript_member`, `call`/`project` evidence args | `dict_operand` / `subscript_operand` |
-| **stack marker** | `stack_save` | `stack_restore` | `stack_marker_operand` |
+| Role | Produced by | Consumed by |
+|------|-------------|-------------|
+| **place** | `alloca*`, `subfield`, `dict_entry`, `project`, by-pointer parameter | `load`, `store`, `memcpy`, `move`, `subfield`, `drop`, calls, … |
+| **value** | `load`, `compare_eq`, `variant`, `extract_tag`, closures, constants | `store`, `compare_eq`, `condbr`, … |
+| **dictionary** | dictionary/subscript constants and `@extra` | evidence projections and calls |
+| **stack marker** | `stack_save` | `stack_restore` |
 
-A non-trivially-copyable **value** has *exactly one* consuming use (reading it again after it is moved
-out is a mis-lowering the interpreter catches). A **place** may be read any number of times.
+An owned materialized value has exactly one consuming use. A place may be read multiple times.
 
 ## 4. Calling conventions
 
 ### 4.1 Inputs — argument convention (`ParameterTag::Parameter(ArgConvention)`)
 
-Final HIR has two semantic argument conventions. SSA records the same convention on the parameter;
-its current storage-explicit form passes both as places. A physical ABI may later materialize an
-already-fresh `Let` value directly when its representation permits that, without changing the
-source semantics:
+SSA records final HIR's two semantic argument conventions. Its current storage-explicit form passes
+both as places; a physical ABI may later pass an already-fresh `Let` value directly:
 
 - `MutableRef` — exclusive mutable access to the caller's place for the duration of the call.
 - `Let` — immutable, non-escaping access to the argument value for the duration of the call.
 
-Any snapshot required by evaluation order or aliasing is explicit in final HIR before SSA lowering.
-`Let` therefore never means “re-read whatever the caller's mutable storage contains”; it observes the
-already selected argument value. Whether producing that value uses a representation copy, a semantic
-clone, or an ownership transfer is likewise explicit before the call.
+Snapshots, clones, copies, and ownership transfers are explicit before SSA lowering. `Let` observes
+the selected argument value rather than later mutations of its original storage.
 
-### 4.2 Outputs — return conventions (`FnReturnConvention`)
+### 4.2 Outputs — return conventions (`CallResultConvention`)
 
 The result type is always `ret`; the convention controls *how* the immediate result is produced and
 may be consumed as a place.
@@ -145,12 +127,10 @@ flat `Uninit`, while non-empty aggregates retain a recursive husk skeleton).
   husk.
 - **`Let` argument:** the pointee is **live before** and is not mutated or consumed by the callee.
 
-Units flow through real cells (there is no unit-place sentinel), so a unit `@ret`/value is an ordinary
-cell obeying the invariants above with no special case. The recursive husk/liveness check
-(`is_drop_husk`) is what makes "fully initialized on exit" well-defined for aggregates.
+Units flow through real cells (there is no unit-place sentinel).
 
-> These boundary storage-state contracts are *semantic* (not yet machine-checked by `verify`). The
-> structural arity/terminator invariants in §2 and §6 are.
+The verifier checks identifiable local result storage. Borrowed and opaque external storage remains a
+calling-convention contract.
 
 ## 5. Per-instruction reference
 
@@ -164,10 +144,10 @@ count. Roles: **p** = place, **v** = value, **d** = dictionary, **m** = stack ma
 | `alloca ty` | — (or `[witness:d-like place]` if `ty` is not statically sized) | place `*ty` | `n ≤ 1`; the witness is present iff `ty`'s layout is run-time (a generic `Value` dictionary place). |
 | `alloca_place ty` | — | place `**ty` | `n == 0`; a slot holding a *pointer* to a `ty` (used for `AddressorPlace`/`project` out-slots). |
 | `load` | `[src:p]` | value | `n == 1`; source-preserving load of a representation-copyable pointee into a register (currently used for internal place pointers). Ownership transfer is always an explicit `move`, never a run-time decision made by `load`. |
-| `store` | `[v, dst:p]` | — | `n == 2`; writes `v` into `dst`. **Drops nothing:** `dst` must own no live resource (a husk, or a resource-free in-place overwrite) — a resource-owning pointee needs an explicit `drop` first. |
-| `clear` | `[dst:p]` | — | `n == 1`; marks already-resource-free storage absent. It is initialization bookkeeping, never a substitute for semantic `drop`. |
-| `memcpy` | `[src:p, dst:p]` | — | `n == 2`; a **source-preserving** place-to-place copy of an **owns-nothing**, statically-sized pointee (a scalar, a bare function, or an aggregate of such). A resource-owning value is never `memcpy`d — copying one is a `Value::clone` (a `call`), transferring one is a `move`. |
-| `move` | `[src:p, dst:p]` (or `+[witness:p]` if `src`'s layout is run-time) | — | `n ∈ {2,3}`; a **source-consuming** place-to-place ownership transfer of the pointee, leaving the source moved-out. Unlike `memcpy` it consumes the source; unlike a copy it needs no `Value::clone`. The witness (a generic `Value` dictionary place carrying `SIZE`/`ALIGN`) is present iff the pointee's layout is run-time, exactly as for `alloca` — the interpreter moves shape-agnostically and ignores it, a backend sizes the copy from it. The dynamic form prints `move … using {witness}`. |
+| `store` | `[v, dst:p]` | — | `n == 2`; writes `v` into `dst`. **Drops nothing:** `dst` must have no live semantic drop obligation — an absent destination or a live `TrivialCopy` representation may be overwritten, while any custom/managed value needs an explicit `drop` first. |
+| `clear` | `[dst:p]` | — | `n == 1`; marks storage with no live semantic drop obligation absent. It is initialization bookkeeping, never a substitute for semantic `drop`. |
+| `memcpy` | `[src:p, dst:p]` | — | `n == 2`; a **source-preserving** place-to-place copy of a concrete, statically-sized `TrivialCopy` pointee. A non-`TrivialCopy` copy is a `Value::clone` (a `call`); transferring ownership is a `move`. |
+| `move` | `[src:p, dst:p]` (or `+[witness:p]`) | — | `n ∈ {2,3}`; transfers ownership and leaves `src` absent. The witness supplies a generic value's run-time layout. |
 
 ### Aggregates & variants
 
@@ -188,8 +168,8 @@ count. Roles: **p** = place, **v** = value, **d** = dictionary, **m** = stack ma
 
 | Instr | Operands | Result | Invariant |
 |-------|----------|--------|-----------|
-| `call` | `[callee, args.., ret-out?]` | — | `n ≥ 1`. Callee is a constant `Function` or the **place** of a function value, always read *by reference* (never loaded — so a closure environment is never copied). Result goes through the `ret-out` pointer. |
-| `invoke … -> bN unwind bM` ★ | as `call` | — | `n ≥ 1`. A *fallible* call: normal completion falls to `bN`, a raised error to the cleanup pad `bM`. Only fallible calls with cleanup to run become `invoke` (see `ssa-error-propagation.md`). |
+| `call` | `[callee, args.., ret-out:p]` | — | `n ≥ 2`. Callee is a constant `Function` or the **place** of a function value, always read *by reference* (never loaded — so a closure environment is never copied). Every call, including a unit-returning call, has a trailing result place. |
+| `invoke … -> bN unwind bM` ★ | as `call` | — | `n ≥ 2`. A *fallible* call: normal completion falls to `bN`, a raised error to the cleanup pad `bM`. Only fallible calls with cleanup to run become `invoke` (see `ssa-error-propagation.md`). |
 | `check_call_depth` | — | — | `n == 0`; enforces the runtime's maximum active script-frame depth. With pending cleanup it is a terminator written `check_call_depth -> bN unwind bM`. |
 | `check_fuel` | — | — | `n == 0`; consumes one unit of optional execution fuel at a loop/back-edge guard. With pending cleanup it is a terminator written `check_fuel -> bN unwind bM`. |
 | `ret` ★ | — | — | `n == 0`; the result is already in `@ret`. |
@@ -217,8 +197,8 @@ while the original error is pending, execution hard-aborts. See
 | Instr | Operands | Result | Invariant |
 |-------|----------|--------|-----------|
 | `drop` | `[target:p, callee]` | — | `n == 2`; init-guarded — runs the `Value::drop` callee (same callee contract as `call`) only if `target`'s pointee is live, then leaves a husk skeleton. Runs each `Value::drop` at most once. |
-| `stack_save` | — | marker | `n == 0`; captures the current stack top. |
-| `stack_restore` | `[marker:m]` | — | `n == 1`; reclaims every cell allocated since `marker`. Stack discipline: no live place points above `marker`. |
+| `stack_save` | — | marker | `n == 0`; captures the current stack top as an immutable, reusable marker. When control reaches a save through different allocation frontiers, the verifier keeps those paths as separate analysis alternatives. |
+| `stack_restore` | `[marker:m]` | — | `n == 1`; reclaims every cell allocated since `marker`. The same marker may be restored repeatedly. Stack discipline: no live place points above `marker`. |
 
 ### Closures
 
@@ -236,23 +216,27 @@ while the original error is pending, execution hard-aborts. See
 
 ## 6. Verification
 
-Two layers, both run in debug builds before a function executes:
+Two layers run in debug builds immediately after lowering:
 
 - **`InstructionKind::verify(&self, whole)`** — the exhaustive instruction-kind match checks each
   instruction's operand **arity** (the "Invariant" column above for arity). Adding an instruction
   requires defining its contract alongside those of every other kind. `Instruction::verify`
   delegates to this check. Operand *role* is intentionally not checked here (§3) — it is enforced at
   point of use.
-- **`Interpreter::verify_function(func)`** — the per-function structural invariants of §2 (every block
-  non-empty; terminator-iff-last-instruction; branch targets exist and are non-empty), and it runs
-  each instruction's `verify`.
+- **`ssa::verify::verify_function`** checks CFG structure, operand roles, instruction-level
+  dominance, owned-register consumption, and control-flow-sensitive storage ownership. Dominance
+  includes exceptional edges that leave in the middle of a block, so a definition after a raising
+  instruction cannot be used by its landing pad. The verifier recursively tracks product fields and
+  conservatively updates the nearest known ancestor of opaque projections. Named representations are
+  unfolded for transfer compatibility; function and subscript values use handle representations.
 
-The point of fast structural verification is to make malformed IR fail with a precise message instead
-of an out-of-bounds operand access or silently corrupted interpreter state — the moral equivalent of
-the undefined behavior such IR would cause in a real backend.
+The derived state is not stored in `ssa::Function` and does not inspect runtime `hir::Value`s.
+Different allocation frontiers and path-dependent `stack_save` snapshots remain separate alternatives
+for as long as that correlation may affect a later restore.
 
-In addition, the language-test harness executes each compiled expression with both the HIR tree
-interpreter and the SSA interpreter. It compares typed results on success and runtime-error kinds on
-ordinary failure; for hard abort it additionally compares both retained cause kinds. SSA-only tests
-pin textual IR shape, configurable resource limits, and storage invariants that are not directly
-observable in a source result.
+One current boundary remains: a witnessed generic `move` may connect type descriptors whose equality
+was proved by HIR inference but is not retained in SSA. Standalone serialized-SSA verification will
+need normalized layout/equality metadata.
+
+Language tests execute compiled expressions through both interpreters and compare their results or
+runtime-error kinds. Malformed-SSA tests pin verifier failures directly.

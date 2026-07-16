@@ -13,13 +13,20 @@ This is an ownership property of storage, not a source-language `Option<T>`, and
 - `memcpy` preserves its source and initializes its destination;
 - `move` initializes its destination and makes its source absent;
 - `drop` acts only on present storage and then makes it absent;
-- `clear` makes already-resource-free storage absent without running semantic drop.
+- `clear` makes storage with no live semantic drop obligation absent without running semantic drop.
 
-A machine backend may realize this model with drop flags and eliminate flags proved constant by
-data-flow analysis. The SSA interpreter uses `hir::Value::Uninit` inside its boxed memory model as
-the concrete representation of an absent leaf. That interpreter detail is not an SSA value kind.
+The verifier derives this state for identifiable local places and product fields across normal and
+unwind edges. It joins ordinary ownership facts, while keeping different allocation frontiers and
+path-dependent stack-marker snapshots as separate alternatives. The state is analysis data, not part
+of `ssa::Function`.
 
-## Aggregate storage is recursive
+A machine backend may use that analysis to realize genuinely dynamic states with drop flags or
+bitsets, while eliminating flags proved constant. The SSA interpreter instead uses
+`hir::Value::Uninit` inside its temporary boxed memory model as the concrete representation of an
+absent leaf. That interpreter detail is neither an SSA value kind nor part of the future dense-memory
+representation.
+
+## Aggregate and empty storage
 
 The SSA lowering constructs, moves, and drops aggregates field by field. Consequently an aggregate
 slot can be partially initialized: some fields are present while others are absent. Initialization
@@ -35,11 +42,8 @@ Tuple-backed storage covers tuples, records, and named product types. A guarded 
 after dropping a live aggregate it leaves a husk skeleton of the same non-empty shape so its fields
 remain addressable for later reinitialization.
 
-Variants and arrays also contain recursively initialized storage, but retain their runtime shell:
-variant payloads and array elements may be absent independently. They are not `TrivialCopy`, and
-their ownership operations remain explicit.
-
-## Empty aggregates
+Variants and arrays retain opaque runtime shells, so the verifier tracks their nearest known
+enclosing storage rather than inspecting interpreter values.
 
 A zero-field aggregate has no leaf from which to infer presence. The interpreter therefore uses a
 single representation convention:
@@ -53,27 +57,13 @@ aggregate from being dropped while ensuring a constructed one receives its seman
 Unit `()` is not an empty aggregate. It is the native scalar `Native(())`, stored in an ordinary
 cell like `bool` or `int`; lowering an immediate `()` initializes that cell normally.
 
-## Call boundaries and unwinding
-
-The same storage state is part of the SSA call contract:
-
-- a return out-pointer is absent on entry and present after a normal value return;
-- a `let` argument is a present snapshot/borrow that the callee does not consume;
-- a mutable-reference argument is present before and after the call;
-- an unwind path leaves an unproduced return slot absent and attempts guarded cleanup for every live
-  local and temporary; if cleanup itself raises, hard abort stops semantic cleanup and raw
-  reclamation consumes the remaining initialized storage.
-
-Fallible calls and runtime fuel/call-depth checks use explicit successor edges when cleanup is
-pending. Other potentially raising instructions use the function's sparse implicit unwind
-table, including resource-limited allocation and scoped-accessor ramp/slide execution.
-See `doc/ssa-ir.md` for the instruction and boundary contracts.
-
 ## Validation
 
-The interpreter asserts that storage-only operations do not hide ownership mistakes: overwriting,
-clearing, or reclaiming a cell that still owns resources is a lowering bug. Language tests then run
-each compiled expression through both the HIR and SSA interpreters and compare successful values,
-ordinary runtime-error kinds, and the two retained cause kinds of hard aborts. Dedicated SSA tests
-additionally cover partial initialization, empty aggregates, recoverable cleanup on runtime-resource
-exhaustion, and hard-abort reclamation when that cleanup also fails.
+`ssa::verify` rejects identifiable overwrites, clears, moves, and stack restoration inconsistent
+with the derived state. See `doc/ssa-ir.md` for the complete verifier and call-boundary contracts.
+
+Physical allocation leak detection is a separate runtime concern. A future dense-memory
+implementation should account allocations in its runtime arena/allocator so instance teardown can
+prove that bytes and host resources were reclaimed. That complements this verifier: allocator
+accounting cannot prove that a required user-defined semantic drop ran, while SSA ownership analysis
+cannot see arbitrary nested allocations made by a native runtime value.

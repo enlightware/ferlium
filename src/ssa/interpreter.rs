@@ -92,15 +92,6 @@ enum Step {
     Suspend(Place),
 }
 
-/// Why a frame's register map is being reclaimed.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum FrameBindingExit {
-    /// Normal `ret`: any resource-owning register would be a lowering bug.
-    Completed,
-    /// Ordinary error propagation: partially constructed register values may be abandoned.
-    OrdinaryError,
-}
-
 /// The outcome of running a frame's instruction loop ([`Interpreter::run_loop`]): it either ran to a
 /// `ret`/`resume` (`Completed`) or hit a `yield` (`Suspended`), in which case the live register map
 /// and the resume point are handed back so a later `end_project` can continue the accessor's slide.
@@ -245,8 +236,6 @@ impl<'a> Interpreter<'a> {
             others,
             self.session,
         ));
-        #[cfg(debug_assertions)]
-        verify_function(&f);
         self.cache.insert(key, f.clone());
         f
     }
@@ -318,7 +307,7 @@ impl<'a> Interpreter<'a> {
                         return Err(error);
                     }
                     let Some(unwind) = func.implicit_unwind_target(i) else {
-                        self.discard_inactive_bindings(slots, FrameBindingExit::OrdinaryError);
+                        self.discard_inactive_bindings(slots);
                         return Err(error);
                     };
                     pending = Some(error);
@@ -333,14 +322,14 @@ impl<'a> Interpreter<'a> {
                     idx = 0;
                 }
                 Step::Return => {
-                    self.discard_inactive_bindings(slots, FrameBindingExit::Completed);
+                    self.discard_inactive_bindings(slots);
                     return Ok(FrameOutcome::Completed);
                 }
                 Step::Resume => {
                     let error = pending
                         .take()
                         .expect("resume reached without an in-flight error");
-                    self.discard_inactive_bindings(slots, FrameBindingExit::OrdinaryError);
+                    self.discard_inactive_bindings(slots);
                     return Err(error);
                 }
                 // Suspend at the `yield`: hand back the live frame and the resume point (the
@@ -721,10 +710,6 @@ impl<'a> Interpreter<'a> {
             .expect("clear of an invalid place");
         let husk = husk_like(slot);
         let old = std::mem::replace(slot, husk);
-        debug_assert!(
-            is_reclaimable(&old),
-            "clear would leak a live resource; semantic drop must run first"
-        );
         old.discard_storage();
     }
 
@@ -1226,9 +1211,9 @@ impl<'a> Interpreter<'a> {
                      call; a `&mut`/`&`/trivial-copy argument must point at a live value",
                 ),
                 // The return out-pointer must be fully initialized when the callee returns normally.
-                // (There is no *precondition* on `@ret` here: a resource-owning `@ret` being
-                // overwritten is caught precisely by the `store` discard invariant, and overwriting a
-                // resource-free slot — e.g. the in-place `a = a + b` — is sound.)
+                // There is no dynamic precondition on `@ret` here: the caller-side SSA ownership
+                // analysis checks identifiable result storage, and opaque caller-owned storage is a
+                // calling-convention contract.
                 ssa::ParameterTag::Return => {
                     if matches!(phase, CallPhase::After) {
                         assert!(
@@ -1853,26 +1838,14 @@ impl<'a> Interpreter<'a> {
 
     /// Reclaims register-owned interpreter storage after a frame has become inactive.
     ///
-    /// A completed frame may retain only resource-free SSA values; an owning value there means the
-    /// lowering omitted a semantic move or drop. An ordinary error may abandon a partially
-    /// constructed register value, so raw reclamation is allowed. Neither path may retain an open
-    /// projection: its accessor epilogue is semantic cleanup and must have run through an unwind
-    /// edge before the frame exits.
-    fn discard_inactive_bindings(
-        &mut self,
-        slots: FxHashMap<ssa::Value, Binding>,
-        exit: FrameBindingExit,
-    ) {
+    /// Register ownership and consumption are verified from SSA before execution. Raw reclamation
+    /// here only frees the boxed reference-interpreter representation; it makes no semantic
+    /// ownership decision. An open projection remains invalid because its accessor epilogue is
+    /// semantic cleanup and must have run through an unwind edge before the frame exits.
+    fn discard_inactive_bindings(&mut self, slots: FxHashMap<ssa::Value, Binding>) {
         for binding in slots.into_values() {
             match binding {
-                Binding::Value(value) => {
-                    debug_assert!(
-                        exit == FrameBindingExit::OrdinaryError || is_reclaimable(&value),
-                        "SSA completed a frame with a resource-owning register value; the lowering \
-                         owed an explicit move or drop: {value:?}",
-                    );
-                    value.discard_storage();
-                }
+                Binding::Value(value) => value.discard_storage(),
                 Binding::Projected { .. } => {
                     panic!(
                         "SSA frame exited with an open projection; its `end_project` cleanup edge \
@@ -1919,15 +1892,8 @@ impl<'a> Interpreter<'a> {
     fn restore_stack(&mut self, marker: usize) {
         while self.ctx.environment.len() > marker {
             if let Some(ValOrMut::Val(v)) = self.ctx.environment.pop() {
-                // Reclaiming storage by popping the stack is the interpreter freeing the Rust value;
-                // a real backend only moves the stack pointer and frees nothing. So a cell reclaimed
-                // this way must already carry nothing that owns resources — a husk or a
-                // `TrivialCopy` value — otherwise the emitter leaked it (it owed an explicit `drop`).
-                debug_assert!(
-                    is_reclaimable(&v),
-                    "SSA leak: stack_restore reclaims a live resource-owning value (a missing \
-                     explicit drop): {v:?}",
-                );
+                // SSA ownership verification proves that stack restoration crosses no live
+                // semantic drop obligation. This only frees the boxed interpreter representation.
                 v.discard_storage();
             }
         }
@@ -2168,9 +2134,8 @@ impl<'a> Interpreter<'a> {
         std::mem::replace(slot, husk)
     }
 
-    /// Writes `v` into the cell denoted by `place`. A `store` **drops nothing**: the overwritten
-    /// value must own no resource (a husk or a resource-free in-place reassignment); a resource-owner
-    /// here is a leak the emitter owed a `drop` for.
+    /// Writes `v` into the cell denoted by `place`. A `store` **drops nothing**; SSA verification
+    /// establishes that identifiable local storage carries no live semantic drop obligation.
     fn store(&mut self, v: Value, place: &Place) -> Result<(), RuntimeError> {
         // Generic (`alloca A`) storage starts flat-`Uninit`; a field store grows the enclosing
         // `Tuple` skeleton on demand so the leaf is addressable.
@@ -2179,11 +2144,6 @@ impl<'a> Interpreter<'a> {
             .target_mut(&mut self.ctx)
             .expect("store to an invalid place");
         let old = std::mem::replace(slot, v);
-        debug_assert!(
-            is_reclaimable(&old),
-            "SSA leak: store overwrites a live resource-owning value (a missing explicit drop): \
-             {old:?}",
-        );
         // Reclaims interpreter-only storage (like a stack-pop); runs no `Value::drop`.
         old.discard_storage();
         Ok(())
@@ -2308,39 +2268,6 @@ fn is_drop_husk(v: &Value) -> bool {
     }
 }
 
-/// Whether `v` owns any resource that an explicit semantic `drop` must release — heap storage (a
-/// `string`, an array's `Buffer`, …) or a closure's captured environment — anywhere inside it.
-///
-/// This is the property the interpreter's `discard_storage` papers over: it frees these Rust values,
-/// but a real backend frees nothing on a stack-pop or a slot overwrite. A value that owns *no*
-/// resource (a husk; a scalar `int`/`bool`/`float`/`()`; an aggregate or variant built only from
-/// such; a bare function) is genuinely free to discard — `read_copy` recognises the trivially-copyable
-/// leaves, and the recursion covers aggregates, variants, and closure environments.
-fn owns_resources(v: &Value) -> bool {
-    match v {
-        Value::Uninit => false,
-        Value::Tuple(fields) => fields.iter().any(owns_resources),
-        Value::Variant(variant) => owns_resources(&variant.value),
-        // A closure with a captured environment owns it (released by `drop_closure_env`); a bare
-        // function (no environment) owns nothing.
-        Value::Function(f) => f.closure_env_len != 0,
-        // A subscript value carries interned implementation identity plus evidence ids — like a
-        // bare function it owns no user resource (the HIR interpreter's `DropSubscriptValue`
-        // merely discards its storage, running no semantic `Value::drop`).
-        Value::Subscript(_) => false,
-        // A scalar native (`read_copy` is `Some`) owns nothing; any other native — an array `Buffer`,
-        // … — owns heap storage.
-        Value::Native(_) => read_copy(v).is_none(),
-    }
-}
-
-/// Whether `v` can be reclaimed by simply discarding its storage (a stack-pop or a slot overwrite)
-/// without leaking — i.e. it [owns no resource](owns_resources). Anything that owns a resource must
-/// be released by an explicit semantic `drop`, never silently discarded.
-fn is_reclaimable(v: &Value) -> bool {
-    !owns_resources(v)
-}
-
 /// Returns a husk mirroring the aggregate *skeleton* of `v`: a `Tuple` becomes a `Tuple` of
 /// (recursively) husked leaves — collapsing to flat `Uninit` when empty, via `aggregate_husk` —
 /// and anything else becomes a flat `Uninit`. Used to leave drained storage reinitializable
@@ -2350,115 +2277,6 @@ fn husk_like(v: &Value) -> Value {
     match v {
         Value::Tuple(fields) => aggregate_husk(fields.iter().map(husk_like).collect::<Vec<_>>()),
         _ => Value::uninit(),
-    }
-}
-
-/// Verifies the structural well-formedness of a freshly built SSA function (debug builds only),
-/// before it is executed or cached.
-///
-/// A real backend (or this interpreter) would exhibit undefined behavior on malformed IR — falling
-/// off the end of a block, jumping into an empty block, or indexing a missing operand. This pass
-/// turns each such case into an immediate, precisely-located panic at build time:
-///
-/// - every instruction satisfies its operand contract ([`ssa::Instruction::verify`]);
-/// - a *terminator* appears exactly once per non-empty block, as its last instruction, and no other
-///   instruction terminates (so control neither falls off the end nor stops mid-block);
-/// - every branch target is an existing, non-empty block (so execution always lands on a real
-///   instruction), including sparse implicit-unwind-table targets, and the entry block is
-///   non-empty.
-#[cfg(debug_assertions)]
-fn verify_function(func: &ssa::Function) {
-    let block_ids: Vec<BlockId> = func.blocks().collect();
-
-    let non_empty = |b: BlockId| !func.block(b).is_empty();
-    let target_ok = |b: BlockId| block_ids.contains(&b) && non_empty(b);
-
-    assert!(
-        non_empty(func.entry()),
-        "SSA function `{}`: the entry block is empty",
-        func.name
-    );
-
-    for (instruction, target) in func.implicit_unwind_targets() {
-        assert!(
-            func.at(instruction).may_raise_implicitly(),
-            "SSA function `{}`: instruction {} has an implicit unwind target but cannot raise \
-             implicitly",
-            func.name,
-            instruction.raw()
-        );
-        assert!(
-            target_ok(target),
-            "SSA function `{}`: instruction {} has a missing or empty implicit unwind target",
-            func.name,
-            instruction.raw()
-        );
-    }
-
-    for b in &block_ids {
-        let b = *b;
-        let instructions: Vec<InstructionId> = func.block(b).instructions().collect();
-        // Every block must be non-empty and therefore (with the terminator-iff-last check below) end
-        // in a terminator: an empty block is a malformed CFG. The emitter allocates blocks before
-        // filling them, but always fills them (with code, a fall-through `br`, or the trailing `ret`
-        // at finalization), so a leftover empty block is a lowering bug, not a tolerated state.
-        assert!(
-            !instructions.is_empty(),
-            "SSA function `{}` block {}: a block must not be empty (it must end in a terminator)",
-            func.name,
-            b.raw()
-        );
-        let last = instructions.len() - 1;
-        for (k, &i) in instructions.iter().enumerate() {
-            let instr = func.at(i);
-            instr.verify();
-            assert_eq!(
-                instr.is_terminator(),
-                k == last,
-                "SSA function `{}` block {}: a terminator must be the block's last instruction and \
-                 appear exactly once (instruction {} of {})",
-                func.name,
-                b.raw(),
-                k,
-                instructions.len()
-            );
-        }
-        // The last instruction terminates (checked above); validate its branch targets.
-        match &func.at(instructions[last]).kind {
-            InstructionKind::ConditionalBranch {
-                on_success,
-                on_failure,
-            } => assert!(
-                target_ok(*on_success) && target_ok(*on_failure),
-                "SSA function `{}` block {}: condbr targets a missing or empty block",
-                func.name,
-                b.raw()
-            ),
-            InstructionKind::UnconditionalBranch { target } => assert!(
-                target_ok(*target),
-                "SSA function `{}` block {}: br targets a missing or empty block",
-                func.name,
-                b.raw()
-            ),
-            InstructionKind::Invoke { normal, unwind } => assert!(
-                target_ok(*normal) && target_ok(*unwind),
-                "SSA function `{}` block {}: invoke targets a missing or empty block",
-                func.name,
-                b.raw()
-            ),
-            InstructionKind::CheckCallDepth {
-                successors: Some((normal, unwind)),
-            }
-            | InstructionKind::CheckFuel {
-                successors: Some((normal, unwind)),
-            } => assert!(
-                target_ok(*normal) && target_ok(*unwind),
-                "SSA function `{}` block {}: runtime check targets a missing or empty block",
-                func.name,
-                b.raw()
-            ),
-            _ => {}
-        }
     }
 }
 

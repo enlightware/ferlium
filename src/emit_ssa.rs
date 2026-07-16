@@ -133,7 +133,7 @@ impl<'a> Emitter<'a> {
             .expect("function should be a script");
 
         let name = module.get_function_name_by_id(source).unwrap();
-        let mut lowered = ssa::Function::new(name);
+        let mut lowered = ssa::Function::new(name, f.definition.return_convention());
 
         // The function signature is laid out as `[extra dictionary/evidence params..., runtime
         // args...]`. Extra parameters occupy the leading slots and the visible runtime arguments,
@@ -264,7 +264,10 @@ impl<'a> Emitter<'a> {
         // `fill_pending_pads`).
         emitter.fill_pending_pads();
 
-        emitter.context.function
+        let function = emitter.context.function;
+        #[cfg(debug_assertions)]
+        ssa::verify::verify_function(&function, module, others);
+        function
     }
 
     /// Returns the module-qualified identity of `f`.
@@ -1986,9 +1989,8 @@ impl<'a> Emitter<'a> {
 
             K::DropSubscriptValue(n) => {
                 // Drop a first-class subscript value: it carries only interned evidence (no user
-                // resource — see `owns_resources`), so its storage is simply reclaimable and no
-                // instruction is emitted (mirroring `eval_drop_subscript_value`, which discards the
-                // storage without a semantic drop). The target place is still lowered for effects.
+                // resource), so no semantic instruction is emitted (mirroring
+                // `eval_drop_subscript_value`). The target place is still lowered for effects.
                 let _ = self.lower_as_place(&self.hir_arena[n.target]);
                 self.store_unit_result(node.span, destination);
             }

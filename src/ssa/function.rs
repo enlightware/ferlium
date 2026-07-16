@@ -8,7 +8,7 @@ use crate::{
     module::{ModuleEnv, id::Id},
     ssa::value::{Constant, ConstantId},
     ssa::{self, Instruction, InstructionId, InstructionResult},
-    types::r#type::Type,
+    types::r#type::{CallResultConvention, Type},
 };
 
 /// The origin of an SSA function parameter.
@@ -47,6 +47,10 @@ pub struct Function {
     /// The name of the function.
     pub name: Ustr,
 
+    /// The logical result convention, needed to distinguish a value out-pointer (`*T`) from an
+    /// addressor result slot containing a place pointer (`**T`).
+    result_convention: CallResultConvention,
+
     /// The parameters of the function, in slot order (extra parameters first, then arguments).
     parameters: Vec<Parameter>,
 
@@ -67,16 +71,22 @@ pub struct Function {
 }
 
 impl Function {
-    /// Creates an instance with the given properties.
-    pub fn new(name: Ustr) -> Self {
+    /// Creates an empty function with the given name and logical result convention.
+    pub fn new(name: Ustr, result_convention: CallResultConvention) -> Self {
         Self {
             name,
+            result_convention,
             parameters: Vec::new(),
             constants: Vec::new(),
             slots: list::List::new(),
             blocks: list::List::new(),
             implicit_unwind_targets: Vec::new(),
         }
+    }
+
+    /// Returns how this function exposes its logical result.
+    pub fn result_convention(&self) -> CallResultConvention {
+        self.result_convention
     }
 
     /// Appends a parameter to this function's signature and returns its identity.

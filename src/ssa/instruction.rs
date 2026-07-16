@@ -4,28 +4,26 @@
 //!
 //! Each instruction carries a flat `operands: Box<[ssa::Value]>` whose length and per-position meaning
 //! are fixed by the instruction kind (documented on each `Instruction::*` constructor below and
-//! checked by [`Instruction::verify`]). An operand falls into one of four runtime *roles*; which role
-//! a given position expects is part of the contract, but it is **not** recoverable from the
-//! `ssa::Value` variant alone (a `Register`/`Parameter` can bind any of them), so the role is
-//! enforced where the operand is consumed — by the interpreter's `place_operand` / `value_operand` /
-//! `dict_operand` / `stack_marker_operand` resolvers:
+//! checked by [`Instruction::verify`]). An operand falls into one of four *roles*. A
+//! `Register`/`Parameter` does not encode its role, so the per-function SSA verifier derives it from
+//! signatures and defining instructions before execution:
 //!
 //! - **place** — a pointer into storage (the result of an `alloca`/`subfield`/`dict_entry`, or an
 //!   incoming by-pointer parameter). Consumed by `load`, `store`, `subfield`, `drop`, etc.
 //! - **value** — a materialized register or constant (the result of a `load`/`comp_eq`, or a literal
-//!   constant). A non-trivially-copyable value has *exactly one* consuming use; reading it again is a
-//!   mis-lowering the interpreter catches.
+//!   constant). An owned materialized value has *exactly one* consuming use.
 //! - **dictionary** — a symbolic trait dictionary (evidence), consumed by `dict_entry`/`call` and
 //!   never materialized as a value.
-//! - **stack marker** — a saved stack top produced by `stack_save`, consumed only by `stack_restore`.
+//! - **stack marker** — an immutable saved stack top produced by `stack_save`, used only by
+//!   `stack_restore`. A marker may be restored more than once.
 //!
 //! An instruction either defines a single result register (`InstructionResult` other than `Nothing`)
 //! or defines nothing; a result-less instruction's slot must never be read. Some kinds are
 //! *terminators* (`ret`, `br`, `condbr`, `invoke`, `resume`, and fallible runtime checks, as
 //! classified by `InstructionKind::is_terminator`): a terminator appears exactly once, as the
 //! last instruction of its block, and
-//! every other instruction is a non-terminator. These structural invariants are verified per function
-//! by the interpreter (see `Interpreter::verify_function`).
+//! every other instruction is a non-terminator. These structural invariants are verified immediately
+//! after SSA lowering.
 
 use std::fmt;
 
@@ -163,9 +161,8 @@ impl Instruction {
 
     /// Creates a `call` instruction with the given properties.
     ///
-    /// A call yields no register: a callee with a non-`()` result writes it through the return
-    /// out-pointer passed as the call's last operand. `result` records the callee's logical return
-    /// type as IR metadata.
+    /// A call yields no register: every callee, including one returning `()`, writes its result
+    /// through the return out-pointer passed as the call's last operand.
     ///
     /// ## Callee contract
     ///
@@ -473,7 +470,8 @@ impl Instruction {
     /// stack.
     ///
     /// Paired with `stack_restore`, this brackets a region (such as a loop body) so that the
-    /// temporaries it allocates are reclaimed on every back-edge and exit, bounding stack use.
+    /// temporaries it allocates are reclaimed on every back-edge and exit, bounding stack use. The
+    /// marker is an immutable frontier and may be restored repeatedly.
     pub fn stack_save(span: Location) -> Self {
         Instruction {
             span,
@@ -539,10 +537,10 @@ impl Instruction {
     /// Creates a `store` instruction writing the **value** operand `0` (`value`) into the **place**
     /// operand `1` (`destination`).
     ///
-    /// A `store` **drops nothing**: `destination` must hold no live resource — a husk, or a
-    /// resource-free value overwritten in place — so the emitter owes an explicit `drop` before
-    /// overwriting a resource-owning pointee. Yields no register; `value` is consumed (moved, for a
-    /// non-trivial value).
+    /// A `store` **drops nothing**: `destination` must carry no live semantic drop obligation — it
+    /// is absent or contains a `TrivialCopy` representation — so the emitter owes an explicit
+    /// `drop` before overwriting a managed/custom-drop pointee. Yields no register; `value` is
+    /// consumed (moved, for a non-trivial value).
     pub fn store(span: Location, value: ssa::Value, destination: ssa::Value) -> Self {
         Instruction {
             span,
@@ -552,8 +550,8 @@ impl Instruction {
     }
 
     /// Creates a `clear` instruction that marks the storage at `destination` absent. The previous
-    /// state must already own no resource; clearing is initialization bookkeeping, not a semantic
-    /// drop.
+    /// state must carry no live semantic drop obligation; clearing is initialization bookkeeping,
+    /// not a semantic drop.
     pub fn clear(span: Location, destination: ssa::Value) -> Self {
         Instruction {
             span,
@@ -565,10 +563,9 @@ impl Instruction {
     /// Creates a `memcpy` instruction: a pure, **source-preserving** copy of the pointee of `source`
     /// (a place) into `destination` (a place), without first materializing it in a register.
     ///
-    /// The pointee must **own no resource** — a scalar, a bare function, or an aggregate built only
-    /// from such. Any resource-owning copy is lowered through `Value::clone` (a `call`) by HIR before
-    /// reaching the emitter, and an ownership transfer uses [`move_value`](Self::move_value); a bare
-    /// `memcpy` never moves its source out.
+    /// The pointee must be concrete `TrivialCopy`. Any other copy is lowered through `Value::clone`
+    /// (a `call`) by HIR before reaching the emitter, and an ownership transfer uses
+    /// [`move_value`](Self::move_value); a bare `memcpy` never moves its source out.
     ///
     /// **Requirement:** the pointee must have a **statically known layout** — a real backend sizes the
     /// copy from the type alone. Copies are always statically sized; a generic transfer is a
@@ -746,7 +743,7 @@ pub enum InstructionKind {
     Store,
     /// Mark place storage absent without semantic drop.
     Clear,
-    /// Copy a statically sized, resource-free representation between places.
+    /// Copy a statically sized `TrivialCopy` representation between places.
     Memcpy,
     /// Transfer ownership between places, optionally using a run-time layout witness.
     Move,
@@ -892,12 +889,12 @@ impl InstructionKind {
                 assert!(whole.operands.is_empty(), "alloca_place takes no operands")
             }
             Call => assert!(
-                !whole.operands.is_empty(),
-                "call needs at least the callee operand"
+                whole.operands.len() >= 2,
+                "call needs the callee and a trailing result place"
             ),
             Invoke { .. } => assert!(
-                !whole.operands.is_empty(),
-                "invoke needs at least the callee operand"
+                whole.operands.len() >= 2,
+                "invoke needs the callee and a trailing result place"
             ),
             Resume => assert!(whole.operands.is_empty(), "resume takes no operands"),
             Project { .. } => assert!(
@@ -977,7 +974,7 @@ impl InstructionKind {
             Memcpy => assert_eq!(
                 whole.operands.len(),
                 2,
-                "memcpy is a pure copy of a statically-sized, owns-nothing pointee: source and destination only"
+                "memcpy is a pure copy of a statically-sized TrivialCopy pointee: source and destination only"
             ),
             Move => assert!(
                 matches!(whole.operands.len(), 2 | 3),
