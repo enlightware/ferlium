@@ -404,6 +404,50 @@ enum EdgeKind {
     Unwind,
 }
 
+/// Constant-time dominance queries over the reachable instruction CFG.
+///
+/// Immediate dominators are computed with the Cooper-Harvey-Kennedy algorithm, then the resulting
+/// dominator tree is numbered in depth-first order. A node dominates another exactly when its tree
+/// interval contains the other's interval.
+struct InstructionDominance {
+    preorder: Vec<usize>,
+    postorder: Vec<usize>,
+}
+
+impl InstructionDominance {
+    const UNREACHABLE: usize = usize::MAX;
+
+    fn is_reachable(&self, instruction: usize) -> bool {
+        self.preorder[instruction] != Self::UNREACHABLE
+    }
+
+    fn dominates(&self, definition: usize, usage: usize) -> bool {
+        self.is_reachable(definition)
+            && self.is_reachable(usage)
+            && self.preorder[definition] <= self.preorder[usage]
+            && self.postorder[usage] <= self.postorder[definition]
+    }
+}
+
+fn intersect_dominator_paths(
+    mut left: usize,
+    mut right: usize,
+    immediate_dominator: &[Option<usize>],
+    reverse_postorder_index: &[usize],
+) -> usize {
+    while left != right {
+        while reverse_postorder_index[left] > reverse_postorder_index[right] {
+            left = immediate_dominator[left]
+                .expect("dominance intersection must stay on the known dominator tree");
+        }
+        while reverse_postorder_index[right] > reverse_postorder_index[left] {
+            right = immediate_dominator[right]
+                .expect("dominance intersection must stay on the known dominator tree");
+        }
+    }
+    left
+}
+
 struct RootInfo {
     value: ssa::Value,
     ty: Type,
@@ -665,24 +709,27 @@ impl<'a> Verifier<'a> {
     }
 
     fn verify_operand_roles_and_dominance(&self) {
-        let dominators = self.compute_instruction_dominators();
+        let dominance = self.compute_instruction_dominance();
         for &instruction in &self.instructions {
             let whole = self.func.at(instruction);
             for operand in whole.operands.iter() {
                 if let ssa::Value::Register(definition) = operand {
                     let def_block = self.instruction_block[definition];
                     let use_block = self.instruction_block[&instruction];
-                    let dominates = match dominators.get(&instruction) {
-                        Some(dominators) => dominators.contains(definition),
+                    let definition_index = self.instruction_index[definition];
+                    let usage_index = self.instruction_index[&instruction];
+                    let dominates = if dominance.is_reachable(usage_index) {
+                        dominance.dominates(definition_index, usage_index)
+                    } else {
                         // Unreachable instructions are not part of the dominance fixed point. Still
                         // reject a use preceding its definition within one unreachable block; no
                         // meaningful cross-block dominance relation exists without a path from the
                         // entry.
-                        None if def_block == use_block => {
-                            self.instruction_index[definition]
-                                < self.instruction_index[&instruction]
+                        if def_block == use_block {
+                            definition_index < usage_index
+                        } else {
+                            true
                         }
-                        None => true,
                     };
                     assert!(
                         dominates,
@@ -923,57 +970,72 @@ impl<'a> Verifier<'a> {
         }
     }
 
-    fn compute_instruction_dominators(&self) -> FxHashMap<InstructionId, FxHashSet<InstructionId>> {
-        let entry = self.block_first[&self.func.entry()];
-        let mut reachable = FxHashSet::default();
-        let mut predecessors: FxHashMap<InstructionId, Vec<InstructionId>> = FxHashMap::default();
-        let mut worklist = VecDeque::from([entry]);
-        reachable.insert(entry);
-        while let Some(instruction) = worklist.pop_front() {
+    fn compute_instruction_dominance(&self) -> InstructionDominance {
+        let instruction_count = self.instructions.len();
+        let entry = self.instruction_index[&self.block_first[&self.func.entry()]];
+        let mut successors = vec![Vec::new(); instruction_count];
+        let mut predecessors = vec![Vec::new(); instruction_count];
+        for (instruction_index, &instruction) in self.instructions.iter().enumerate() {
             for (successor, _) in self.successors(instruction) {
-                let incoming = predecessors.entry(successor).or_default();
-                if !incoming.contains(&instruction) {
-                    incoming.push(instruction);
-                }
-                if reachable.insert(successor) {
-                    worklist.push_back(successor);
+                let successor = self.instruction_index[&successor];
+                if !successors[instruction_index].contains(&successor) {
+                    successors[instruction_index].push(successor);
+                    predecessors[successor].push(instruction_index);
                 }
             }
+        }
+
+        // Compute reverse postorder without recursion so verifier capacity is independent of the
+        // host thread's call-stack size.
+        let mut visited = vec![false; instruction_count];
+        let mut postorder = Vec::new();
+        let mut stack = vec![(entry, 0)];
+        visited[entry] = true;
+        while let Some((instruction, next_successor)) = stack.last_mut() {
+            if let Some(&successor) = successors[*instruction].get(*next_successor) {
+                *next_successor += 1;
+                if !visited[successor] {
+                    visited[successor] = true;
+                    stack.push((successor, 0));
+                }
+            } else {
+                postorder.push(*instruction);
+                stack.pop();
+            }
+        }
+        postorder.reverse();
+        let reverse_postorder = postorder;
+        let mut reverse_postorder_index =
+            vec![InstructionDominance::UNREACHABLE; instruction_count];
+        for (index, &instruction) in reverse_postorder.iter().enumerate() {
+            reverse_postorder_index[instruction] = index;
         }
 
         // Dominance is defined over the instruction CFG, not merely blocks: an implicit unwind edge
         // can leave in the middle of a block, so definitions later in that block do not dominate the
         // landing pad.
-        let all_reachable = reachable.clone();
-        let mut result: FxHashMap<InstructionId, FxHashSet<InstructionId>> = FxHashMap::default();
-        for &instruction in &reachable {
-            result.insert(
-                instruction,
-                if instruction == entry {
-                    FxHashSet::from_iter([entry])
-                } else {
-                    all_reachable.clone()
-                },
-            );
-        }
+        let mut immediate_dominator = vec![None; instruction_count];
+        immediate_dominator[entry] = Some(entry);
         loop {
             let mut changed = false;
-            for &instruction in &reachable {
-                if instruction == entry {
-                    continue;
+            for &instruction in reverse_postorder.iter().skip(1) {
+                let mut known_predecessors = predecessors[instruction]
+                    .iter()
+                    .copied()
+                    .filter(|&predecessor| immediate_dominator[predecessor].is_some());
+                let mut new_dominator = known_predecessors
+                    .next()
+                    .expect("a reachable non-entry instruction must have a known predecessor");
+                for predecessor in known_predecessors {
+                    new_dominator = intersect_dominator_paths(
+                        predecessor,
+                        new_dominator,
+                        &immediate_dominator,
+                        &reverse_postorder_index,
+                    );
                 }
-                let incoming = &predecessors[&instruction];
-                let (first, rest) = incoming
-                    .split_first()
-                    .expect("a reachable non-entry instruction must have a predecessor");
-                let mut new = result[first].clone();
-                new.retain(|candidate| {
-                    rest.iter()
-                        .all(|predecessor| result[predecessor].contains(candidate))
-                });
-                new.insert(instruction);
-                if new != result[&instruction] {
-                    result.insert(instruction, new);
+                if immediate_dominator[instruction] != Some(new_dominator) {
+                    immediate_dominator[instruction] = Some(new_dominator);
                     changed = true;
                 }
             }
@@ -981,7 +1043,36 @@ impl<'a> Verifier<'a> {
                 break;
             }
         }
-        result
+
+        let mut dominator_tree = vec![Vec::new(); instruction_count];
+        for &instruction in reverse_postorder.iter().skip(1) {
+            let dominator = immediate_dominator[instruction]
+                .expect("every reachable instruction must have an immediate dominator");
+            dominator_tree[dominator].push(instruction);
+        }
+
+        let mut preorder = vec![InstructionDominance::UNREACHABLE; instruction_count];
+        let mut postorder = vec![InstructionDominance::UNREACHABLE; instruction_count];
+        let mut timestamp = 0;
+        let mut stack = vec![(entry, false)];
+        while let Some((instruction, exiting)) = stack.pop() {
+            if exiting {
+                postorder[instruction] = timestamp;
+                timestamp += 1;
+                continue;
+            }
+            preorder[instruction] = timestamp;
+            timestamp += 1;
+            stack.push((instruction, true));
+            for &child in dominator_tree[instruction].iter().rev() {
+                stack.push((child, false));
+            }
+        }
+
+        InstructionDominance {
+            preorder,
+            postorder,
+        }
     }
 
     fn place_pointee_type(&self, value: &ssa::Value) -> Option<SsaType> {
@@ -1726,6 +1817,104 @@ mod tests {
             crate::ssa::Value::Register(local),
         ));
         f.block_mut(using).append(Instruction::ret(span));
+        verify(&f);
+    }
+
+    #[test]
+    fn accepts_entry_definition_used_after_a_diamond() {
+        let span = Location::new_synthesized();
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let mut f = Function::new("diamond_dominance".into(), Default::default());
+        let condition = f.add_constant(
+            crate::std::logic::bool_type(),
+            LiteralValue::new_native(true),
+            &env,
+        );
+        let value = f.add_constant(int_type(), LiteralValue::new_native(42isize), &env);
+        let ret = f.add_parameter(int_type(), ParameterTag::Return);
+        let entry = f.add_block().id();
+        let left = f.add_block().id();
+        let right = f.add_block().id();
+        let join = f.add_block().id();
+
+        let local = f
+            .block_mut(entry)
+            .append(Instruction::alloca(span, int_type()));
+        f.block_mut(entry).append(Instruction::store(
+            span,
+            crate::ssa::Value::Constant(value),
+            crate::ssa::Value::Register(local),
+        ));
+        f.block_mut(entry).append(Instruction::condbr(
+            span,
+            crate::ssa::Value::Constant(condition),
+            left,
+            right,
+        ));
+        f.block_mut(left).append(Instruction::br(span, join));
+        f.block_mut(right).append(Instruction::br(span, join));
+        let loaded = f
+            .block_mut(join)
+            .append(Instruction::load(span, crate::ssa::Value::Register(local)));
+        f.block_mut(join).append(Instruction::store(
+            span,
+            crate::ssa::Value::Register(loaded),
+            crate::ssa::Value::Parameter(ret),
+        ));
+        f.block_mut(join).append(Instruction::ret(span));
+
+        verify(&f);
+    }
+
+    #[test]
+    fn accepts_entry_definition_used_inside_and_after_a_loop() {
+        let span = Location::new_synthesized();
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let mut f = Function::new("loop_dominance".into(), Default::default());
+        let condition = f.add_constant(
+            crate::std::logic::bool_type(),
+            LiteralValue::new_native(true),
+            &env,
+        );
+        let value = f.add_constant(int_type(), LiteralValue::new_native(42isize), &env);
+        let ret = f.add_parameter(int_type(), ParameterTag::Return);
+        let entry = f.add_block().id();
+        let header = f.add_block().id();
+        let body = f.add_block().id();
+        let exit = f.add_block().id();
+
+        let local = f
+            .block_mut(entry)
+            .append(Instruction::alloca(span, int_type()));
+        f.block_mut(entry).append(Instruction::store(
+            span,
+            crate::ssa::Value::Constant(value),
+            crate::ssa::Value::Register(local),
+        ));
+        f.block_mut(entry).append(Instruction::br(span, header));
+        f.block_mut(header)
+            .append(Instruction::load(span, crate::ssa::Value::Register(local)));
+        f.block_mut(header).append(Instruction::condbr(
+            span,
+            crate::ssa::Value::Constant(condition),
+            body,
+            exit,
+        ));
+        f.block_mut(body)
+            .append(Instruction::load(span, crate::ssa::Value::Register(local)));
+        f.block_mut(body).append(Instruction::br(span, header));
+        let loaded = f
+            .block_mut(exit)
+            .append(Instruction::load(span, crate::ssa::Value::Register(local)));
+        f.block_mut(exit).append(Instruction::store(
+            span,
+            crate::ssa::Value::Register(loaded),
+            crate::ssa::Value::Parameter(ret),
+        ));
+        f.block_mut(exit).append(Instruction::ret(span));
+
         verify(&f);
     }
 
