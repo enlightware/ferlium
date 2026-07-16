@@ -84,7 +84,9 @@ jobs:
         run: cargo install wasm-pack
 
       - name: Run WASM tests (${{ matrix.browser }})
-        run: WASM_BINDGEN_USE_BROWSER=1 WASM_BINDGEN_TEST_TIMEOUT=600 wasm-pack test ${{ matrix.browser_flags }} --headless --test language --lib
+        # The language test binary is large enough that loading its full DWARF data can leave Chrome's renderer unresponsive to WebDriver.
+        # Keep debug assertions, but omit debuginfo from the Wasm test artifact.
+        run: CARGO_PROFILE_TEST_DEBUG=0 WASM_BINDGEN_USE_BROWSER=1 WASM_BINDGEN_TEST_TIMEOUT=600 wasm-pack test ${{ matrix.browser_flags }} --headless --test language --lib
 
   build_site:
     name: Build and upload playground and book
