@@ -48,7 +48,7 @@ pub(crate) type AstInspectorCb<'a> =
 static FIRST_USER_MODULE_ID: ModuleId = ModuleId::new(3);
 
 thread_local! {
-    static EMPTY_COMPILER_SESSION_CACHE: RefCell<Option<CompilerSession>> = const { RefCell::new(None) };
+    static INITIAL_SESSION_STATE_CACHE: RefCell<Option<InitialSessionState>> = const { RefCell::new(None) };
 }
 
 static DEFINED_TYPE_PARSER: LazyLock<parser::DefinedTypeParser> =
@@ -86,7 +86,7 @@ pub struct ModuleSrcInfo {
 }
 
 /// A module that has been attempted to be compiled at least once.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ModuleEntry {
     /// Informations needed to rebuild the module, if it supports rebuilding (std doesn't).
     pub(crate) src_info: Option<ModuleSrcInfo>,
@@ -355,7 +355,7 @@ impl<'a> ModuleRegistry<'a> {
 }
 
 /// A compilation session, that contains a source table and the standard library.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct CompilerSession {
     /// Source table for this compilation session.
     pub(crate) source_table: SourceTable,
@@ -376,47 +376,65 @@ pub struct CompilationCapabilities {
     pub allow_experimental: bool,
 }
 
-impl CompilerSession {
-    /// Create a new compilation session with an empty source table and the standard library loaded.
-    pub fn new() -> Self {
-        if let Some(session) = EMPTY_COMPILER_SESSION_CACHE.with(|cache| cache.borrow().clone()) {
-            return session;
-        }
+/// Cached expensive portion of a pristine compiler session.
+struct InitialSessionState {
+    source_table: SourceTable,
+    std_module: Module,
+}
 
+impl InitialSessionState {
+    fn build() -> Self {
         let mut source_table = SourceTable::default();
+        let std_module = ferlium_std::std_module(&mut source_table);
+        Self {
+            source_table,
+            std_module,
+        }
+    }
+
+    fn new_session(&self) -> CompilerSession {
+        let source_table = self.source_table.clone();
+        let initial_source_table_size = source_table.len();
         let mut modules = Modules::default();
         assert_eq!(modules.next_id(), STD_MODULE_ID);
-        let std_module = ferlium_std::std_module(&mut source_table);
-        let std_name = module::Path::single_str("std");
-        modules.insert(std_name, ModuleEntry::new_fresh_raw(std_module));
-        let empty_std_user = new_module_using_std(
-            modules.next_id(),
-            module::Path::single_str("$empty_std_user"),
+        modules.insert(
+            module::Path::single_str("std"),
+            ModuleEntry::new_fresh_raw(self.std_module.clone_std_for_new_session()),
         );
+
+        let empty_std_user_path = module::Path::single_str("$empty_std_user");
+        let empty_std_user = new_module_using_std(modules.next_id(), empty_std_user_path.clone());
         let empty_std_user = modules.insert(
-            module::Path::single_str("$empty_std_user"),
+            empty_std_user_path,
             ModuleEntry::new_fresh_raw(empty_std_user),
         );
+
         let scratch_path = module::Path::single_str("$scratch");
         let scratch_module = new_module_using_std(modules.next_id(), scratch_path.clone());
         let scratch_module =
             modules.insert(scratch_path, ModuleEntry::new_fresh_raw(scratch_module));
         assert_eq!(modules.next_id(), FIRST_USER_MODULE_ID);
-        let initial_source_table_size = source_table.len();
-        let session = Self {
+
+        CompilerSession {
             source_table,
             modules,
             empty_std_user,
             scratch_module,
             initial_source_table_size,
             capabilities: CompilationCapabilities::default(),
-        };
+        }
+    }
+}
 
-        EMPTY_COMPILER_SESSION_CACHE.with(|cache| {
-            *cache.borrow_mut() = Some(session.clone());
-        });
-
-        session
+impl CompilerSession {
+    /// Create a new compilation session with an empty source table and the standard library loaded.
+    pub fn new() -> Self {
+        INITIAL_SESSION_STATE_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            cache
+                .get_or_insert_with(InitialSessionState::build)
+                .new_session()
+        })
     }
 
     /// Get the source table for this compilation session.
@@ -1081,6 +1099,35 @@ impl Default for CompilerSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_initial_state_creates_independent_sessions() {
+        let mut first = CompilerSession::new();
+        let second = CompilerSession::new();
+
+        assert!(!std::ptr::eq(first.std_module(), second.std_module()));
+        assert_eq!(first.empty_std_user, ModuleId::new(1));
+        assert_eq!(first.scratch_module, ModuleId::new(2));
+        assert_eq!(first.modules.next_id(), FIRST_USER_MODULE_ID);
+        assert_eq!(second.modules.next_id(), FIRST_USER_MODULE_ID);
+
+        let path = Path::single_str("first_session_only");
+        first
+            .compile(
+                "fn marker() -> int { 1 }",
+                "<first_session_only>",
+                path.clone(),
+            )
+            .unwrap();
+
+        assert!(first.modules.get_id_by_name(&path).is_some());
+        assert!(second.modules.get_id_by_name(&path).is_none());
+        assert!(first.source_table.len() > second.source_table.len());
+
+        first.reset();
+        assert_eq!(first.modules.next_id(), FIRST_USER_MODULE_ID);
+        assert_eq!(first.source_table.len(), first.initial_source_table_size);
+    }
 
     fn module_snapshot(
         session: &CompilerSession,

@@ -10,7 +10,8 @@
 //! Module bundle system for incremental rebuilds and leak-free hot reloads
 //!
 //! This module implements the following architecture where:
-//! - Each compiled module version is an `Rc<Module>`.
+//! - Each compiler-session entry directly owns its compiled `Module`.
+//! - Published modules are immutable semantic snapshots.
 //! - Cross-module references carry the owning module ID with the local item ID.
 
 pub mod debug_info;
@@ -50,7 +51,10 @@ use crate::{
     },
     internal_compilation_error,
     module::id::{Id, NamedIndexed},
-    std::core_traits_names::{TRIVIAL_COPY_TRAIT_NAME, VALUE_TRAIT_NAME},
+    std::{
+        STD_MODULE_ID,
+        core_traits_names::{TRIVIAL_COPY_TRAIT_NAME, VALUE_TRAIT_NAME},
+    },
     types::{
         mutability::MutType,
         r#trait::Trait,
@@ -540,7 +544,7 @@ impl ops::IndexMut<usize> for TypeDefSlots {
 /// Items are conceptually private, but some are pub(crate) for lifetime constraints.
 /// These are only accessed directly by emit_hir and trait_solver, other users should go through accessors,
 /// with the exception of uses which is also accessed directly by desugar.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Module {
     pub(crate) path: Path,
     /// Modules referenced by IDs in compiled module data.
@@ -570,6 +574,33 @@ pub struct Module {
 }
 
 impl Module {
+    /// Deliberately deep-copy the cached standard library for a new compiler session.
+    ///
+    /// General modules are not cloneable: this single initialization path exists only so
+    /// sessions do not have to rebuild std from source.
+    pub(crate) fn clone_std_for_new_session(&self) -> Self {
+        assert_eq!(
+            self.module_id(),
+            STD_MODULE_ID,
+            "only the cached std module may be copied between compiler sessions"
+        );
+        Self {
+            path: self.path.clone(),
+            deps: self.deps.clone(),
+            uses: self.uses.clone(),
+            def_table: self.def_table.clone(),
+            unsafe_items: self.unsafe_items.clone(),
+            functions: self.functions.clone(),
+            subscripts: self.subscripts.clone(),
+            projection_subscripts: self.projection_subscripts.clone(),
+            type_aliases: self.type_aliases.clone(),
+            type_defs: self.type_defs.clone(),
+            traits: self.traits.clone(),
+            impls: self.impls.clone(),
+            hir_arena: self.hir_arena.clone(),
+        }
+    }
+
     fn mark_custom_value_impl_for_inputs(&mut self, is_value: bool, input_tys: &[Type]) {
         if !is_value {
             return;

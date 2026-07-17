@@ -493,6 +493,12 @@ pub enum EmitModuleFrom {
     Existing(B<Module>),
 }
 
+/// A failed module emission together with the module state available for diagnostics.
+pub(crate) struct ModuleEmissionError {
+    pub(crate) error: InternalCompilationError,
+    pub(crate) module: Module,
+}
+
 enum ModuleImplementationEmission<'a> {
     Function(&'a ast::DModuleFunction),
     SubscriptMember {
@@ -711,6 +717,7 @@ pub fn emit_module(
         emit_from,
         CompilationCapabilities::default(),
     )
+    .map_err(|failure| failure.error)
 }
 
 pub(crate) fn emit_module_with_capabilities(
@@ -721,17 +728,33 @@ pub(crate) fn emit_module_with_capabilities(
     others: &Modules,
     emit_from: EmitModuleFrom,
     capabilities: CompilationCapabilities,
-) -> Result<Module, InternalCompilationError> {
-    // Preliminary: Make sure no name is defined multiple times.
-    validate_name_uniqueness(&source)?;
-
-    // First desugar the module.
+) -> Result<Module, Box<ModuleEmissionError>> {
     let mut output = match emit_from {
         EmitModuleFrom::Uses(uses) => Module::from_uses(module_id, module_path, uses),
         EmitModuleFrom::Existing(module) => *module,
     };
-    let (source, desugared_arena, sorted_sccs) =
-        source.desugar(&mut output, others, parsed_arena)?;
+
+    match emit_module_contents(source, parsed_arena, others, &mut output, capabilities) {
+        Ok(()) => Ok(output),
+        Err(error) => Err(Box::new(ModuleEmissionError {
+            error,
+            module: output,
+        })),
+    }
+}
+
+fn emit_module_contents(
+    source: ast::PModule,
+    parsed_arena: &PExprArena,
+    others: &Modules,
+    output: &mut Module,
+    capabilities: CompilationCapabilities,
+) -> Result<(), InternalCompilationError> {
+    // Preliminary: Make sure no name is defined multiple times.
+    validate_name_uniqueness(&source)?;
+
+    // First desugar the module.
+    let (source, desugared_arena, sorted_sccs) = source.desugar(output, others, parsed_arena)?;
 
     // Pre-registration pass: for trait impls with an explicit `for ConcreteType` annotation,
     // register a stub implementation before processing any function SCCs. This allows module
@@ -743,7 +766,7 @@ pub(crate) fn emit_module_with_capabilities(
             let output_tys = for_trait.output_tys();
             let output_effs = for_trait.output_effs();
             let Some((trait_module_id, trait_id, trait_def)) = ({
-                let module_env = ModuleEnv::new(&output, others);
+                let module_env = ModuleEnv::new(output, others);
                 module_env
                     .trait_id_with_module(&Path::single_tuple(imp.trait_name))?
                     .map(|(trait_module_id, trait_id)| {
@@ -758,7 +781,7 @@ pub(crate) fn emit_module_with_capabilities(
             };
             let trait_def = &trait_def;
             if trait_id.module == STD_MODULE_ID && trait_def.name == VALUE_TRAIT_NAME {
-                mark_type_defs_with_custom_value_impls(&mut output, &input_tys);
+                mark_type_defs_with_custom_value_impls(output, &input_tys);
             }
             if input_tys.len() != trait_def.input_type_count() as usize {
                 return Err(internal_compilation_error!(WrongNumberOfArguments {
@@ -790,7 +813,7 @@ pub(crate) fn emit_module_with_capabilities(
             }
             let output_effs = trait_def.impl_output_effs_or_pure_defaults(output_effs);
             check_trait_impl(
-                &output,
+                output,
                 others,
                 trait_id,
                 trait_module_id.is_none(),
@@ -845,7 +868,7 @@ pub(crate) fn emit_module_with_capabilities(
                 );
             associated_const_names.truncate(associated_const_values.len());
             let associated_const_getters = add_source_associated_const_getters(
-                &mut output,
+                output,
                 others,
                 &associated_const_values,
                 &associated_const_tys,
@@ -882,9 +905,9 @@ pub(crate) fn emit_module_with_capabilities(
     // Temporary unelaborated HIR arena used by trait solving/defaulting paths.
     let mut solver_arena = UNodeArena::default();
 
-    emit_auto_value_impls(&mut output, &mut solver_arena, others, &source.impls)?;
+    emit_auto_value_impls(output, &mut solver_arena, others, &source.impls)?;
 
-    let subscript_ids = predeclare_subscripts(&mut output, &source, others)?;
+    let subscript_ids = predeclare_subscripts(output, &source, others)?;
 
     // Process each implementation SCC one by one.
     for mut scc in sorted_sccs.into_iter().rev() {
@@ -914,7 +937,7 @@ pub(crate) fn emit_module_with_capabilities(
 
         // Emit the corresponding implementation bodies.
         emit_functions(
-            &mut output,
+            output,
             &mut solver_arena,
             || emissions.iter().map(ModuleImplementationEmission::input),
             &desugared_arena,
@@ -928,7 +951,7 @@ pub(crate) fn emit_module_with_capabilities(
     // Process trait implementations
     for (imp_idx, imp) in source.impls.iter().enumerate() {
         // Validate the function mapping.
-        let module_env = ModuleEnv::new(&output, others);
+        let module_env = ModuleEnv::new(output, others);
         let (trait_module_id, trait_id) = module_env
             .trait_id_with_module(&Path::single_tuple(imp.trait_name))?
             .ok_or_else(|| internal_compilation_error!(TraitNotFound(imp.trait_name.1)))?;
@@ -997,7 +1020,7 @@ pub(crate) fn emit_module_with_capabilities(
             })
             .collect::<FxHashSet<_>>();
         let emit_output = emit_functions(
-            &mut output,
+            output,
             &mut solver_arena,
             functions,
             &desugared_arena,
@@ -1028,7 +1051,7 @@ pub(crate) fn emit_module_with_capabilities(
             stub_data.id
         } else {
             check_trait_impl(
-                &output,
+                output,
                 others,
                 trait_id,
                 trait_module_id.is_none(),
@@ -1077,7 +1100,7 @@ pub(crate) fn emit_module_with_capabilities(
                 );
             associated_const_names.truncate(associated_const_values.len());
             let associated_const_getters = add_source_associated_const_getters(
-                &mut output,
+                output,
                 others,
                 &associated_const_values,
                 &associated_const_tys,
@@ -1094,7 +1117,7 @@ pub(crate) fn emit_module_with_capabilities(
                 Some(imp.span),
             )
         };
-        let module_env = ModuleEnv::new(&output, others);
+        let module_env = ModuleEnv::new(output, others);
         let header = output
             .impls
             .impl_header_to_string_by_id(local_impl_id, module_env);
@@ -1103,7 +1126,7 @@ pub(crate) fn emit_module_with_capabilities(
         log::trace!("Emitted {impl_type} {header}");
     }
 
-    Ok(output)
+    Ok(())
 }
 
 pub(super) type PubTypeConstraintPtr = *const PubTypeConstraint;

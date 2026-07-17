@@ -31,7 +31,6 @@ use crate::{
     },
     module::{Module, ModuleEnv, ModuleId, Path, Uses, id::Id},
     parser::{self, describe_parse_error},
-    std::new_module_using_std,
 };
 
 pub(crate) enum ModuleRef {
@@ -184,14 +183,11 @@ pub(crate) fn compile_with_source_id(
         capabilities,
     ) {
         Ok(result) => result,
-        Err(error) => {
-            // Resolve types in the error, to provide better error messages.
-            let mut module = new_module_using_std(module_id, module_path.clone());
-            if let Ok((module_ast, _, arena)) = parse_module_and_expr(src_code, source_id, false) {
-                let _ = module_ast.desugar(&mut module, modules, &arena);
-            }
-            let env = ModuleEnv::new(&module, modules);
-            let error = CompilationError::resolve_types(error, &env, source_table);
+        Err(failure) => {
+            // Resolve types against the partially emitted module, which contains every name
+            // registered before the failure.
+            let env = ModuleEnv::new(&failure.module, modules);
+            let error = CompilationError::resolve_types(failure.error, &env, source_table);
             let path_for_new = module_ref.into_path();
             process_compilation_failed(modules, path_for_new, src_info, old_module, &error);
             return Err(error);
@@ -453,8 +449,7 @@ pub(crate) fn add_code_to_module_with_capabilities(
     }
 
     // Emit HIR for the module.
-    let prev_to = to.clone();
-    let module_path = prev_to.path().clone();
+    let module_path = to.path().clone();
     let emit_from = EmitModuleFrom::Existing(b(to));
     let module = emit_module_with_capabilities(
         module_ast,
@@ -465,9 +460,9 @@ pub(crate) fn add_code_to_module_with_capabilities(
         emit_from,
         capabilities,
     )
-    .map_err(|error| {
-        let env = ModuleEnv::new(&prev_to, other_modules);
-        CompilationError::resolve_types(error, &env, source_table)
+    .map_err(|failure| {
+        let env = ModuleEnv::new(&failure.module, other_modules);
+        CompilationError::resolve_types(failure.error, &env, source_table)
     })?;
 
     Ok(module)
