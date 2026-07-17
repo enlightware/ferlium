@@ -838,7 +838,7 @@ fn factorial() {
     %r3 = alloca int
     %r4 = call std::Num<std::int>::from_int#impl:25eabc6b(%r1, %r3)
     %r5 = alloca bool
-    %r6 = call std::gt(dict(m<...>:i20), %p0, %r3, %r5)
+    %r6 = call std::gt(dict(std::Ord<std::int>), %p0, %r3, %r5)
     %r7 = br b1
   b1:
     %r8 = comp_eq %r5 true
@@ -1164,27 +1164,27 @@ fn std::Value<[std::int]>::SIZE#impl:9ddb92fe(%p0: @ret int):
 
 fn std::Value<[std::int]>::clone#impl:94a041f9(%p0: @arg let [int], %p1: @ret [int]):
   b0:
-    %r0 = call std::Value<[A]>::clone#impl:5d7e5692(dict(m<...>:i0), dict(m<...>:i16), %p0, %p1)
+    %r0 = call std::Value<[A]>::clone#impl:5d7e5692(dict(<test>::std::Value<[std::int]>), dict(std::Value<std::int>), %p0, %p1)
     %r1 = ret
 
 fn std::Value<[std::int]>::drop#impl:a4f41aeb(%p0: @arg &mut [int], %p1: @ret ()):
   b0:
-    %r0 = call std::Value<[A]>::drop#impl:4499dda8(dict(m<...>:i0), dict(m<...>:i16), %p0, %p1)
+    %r0 = call std::Value<[A]>::drop#impl:4499dda8(dict(<test>::std::Value<[std::int]>), dict(std::Value<std::int>), %p0, %p1)
     %r1 = ret
 
 fn std::Value<[std::int]>::eq#impl:7e1688d4(%p0: @arg let [int], %p1: @arg let [int], %p2: @ret bool):
   b0:
-    %r0 = call std::Value<[A]>::eq#impl:82e999e1(dict(m<...>:i0), dict(m<...>:i16), %p0, %p1, %p2)
+    %r0 = call std::Value<[A]>::eq#impl:82e999e1(dict(<test>::std::Value<[std::int]>), dict(std::Value<std::int>), %p0, %p1, %p2)
     %r1 = ret
 
 fn std::Value<[std::int]>::hash#impl:0aca59c2(%p0: @arg let [int], %p1: @arg &mut hasher, %p2: @ret ()):
   b0:
-    %r0 = call std::Value<[A]>::hash#impl:2f76a94b(dict(m<...>:i0), dict(m<...>:i16), %p0, %p1, %p2)
+    %r0 = call std::Value<[A]>::hash#impl:2f76a94b(dict(<test>::std::Value<[std::int]>), dict(std::Value<std::int>), %p0, %p1, %p2)
     %r1 = ret
 
 fn std::Value<[std::int]>::to_string#impl:892a091b(%p0: @arg let [int], %p1: @ret string):
   b0:
-    %r0 = call std::Value<[A]>::to_string#impl:c74a3a78(dict(m<...>:i0), dict(m<...>:i16), %p0, %p1)
+    %r0 = call std::Value<[A]>::to_string#impl:c74a3a78(dict(<test>::std::Value<[std::int]>), dict(std::Value<std::int>), %p0, %p1)
     %r1 = ret
 "#,
     );
@@ -1756,7 +1756,7 @@ fn capture(%p0: @ret int):
     %r4 = call std::Num<std::int>::from_int#impl:25eabc6b(%r2, %r0) [unwind b1]
     %r5 = alloca int [unwind b1]
     %r6 = memcpy %r0 to %r5 [unwind b1]
-    %r7 = build_closure <test>::$lambda$1(%r5, dict(m<...>:i0)) [unwind b1]
+    %r7 = build_closure <test>::$lambda$1(%r5, dict(<test>::std::Value<(std::int,)>)) [unwind b1]
     %r8 = store %r7 to %r1 [unwind b1]
     %r9 = call %r1(%p0) [unwind b1]
     %r10 = drop %r1 via <test>::$_ferlium_function_value_drop

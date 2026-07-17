@@ -4,7 +4,7 @@ use crate::{
     containers::B,
     format::FormatWith,
     hir::value::LiteralValue,
-    module::{FunctionId, ModuleEnv, SubscriptId, TraitDictionaryId, id::Id},
+    module::{FunctionId, ModuleEnv, QualifiedNameEnv, SubscriptId, TraitDictionaryId, id::Id},
     ssa,
     types::r#type::Type,
 };
@@ -81,25 +81,37 @@ pub struct Constant {
 
 impl FormatWith<ModuleEnv<'_>> for Value {
     fn fmt_with(&self, f: &mut fmt::Formatter<'_>, env: &ModuleEnv<'_>) -> fmt::Result {
-        let Value::Function(id) = self else {
-            return fmt::Display::fmt(self, f);
-        };
-        let module = if id.module == env.current.module_id() {
-            env.current
-        } else {
-            env.modules
-                .get(id.module)
-                .and_then(|entry| entry.module())
-                .expect("SSA function operand refers to an unavailable module")
-        };
-        let function = module
-            .get_function_name_by_id(id.function)
-            .unwrap_or_else(|| "<anonymous>".into());
-        let module_name = env
-            .modules
-            .get_name(id.module)
-            .map(ToString::to_string)
-            .unwrap_or_else(|| format!("#{}", id.module));
-        write!(f, "{module_name}::{function}")
+        match self {
+            Value::Dictionary(id) => {
+                let Some(module) = env.module_by_id(id.module_id) else {
+                    return fmt::Display::fmt(self, f);
+                };
+                let Some(key) = module.get_impl_trait_key_by_id(id.impl_id) else {
+                    return fmt::Display::fmt(self, f);
+                };
+                let trait_def = env.trait_def(key.trait_id());
+                let qualified_names = QualifiedNameEnv::new_from_module(module, env.modules);
+                write!(
+                    f,
+                    "dict({})",
+                    qualified_names.qualified_impl_name(key.trait_id(), trait_def, key.input_tys())
+                )
+            }
+            Value::Function(id) => {
+                let module = env
+                    .module_by_id(id.module)
+                    .expect("SSA function operand refers to an unavailable module");
+                let function = module
+                    .get_function_name_by_id(id.function)
+                    .unwrap_or_else(|| "<anonymous>".into());
+                let module_name = env
+                    .modules
+                    .get_name(id.module)
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| format!("#{}", id.module));
+                write!(f, "{module_name}::{function}")
+            }
+            _ => fmt::Display::fmt(self, f),
+        }
     }
 }

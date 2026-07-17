@@ -355,13 +355,7 @@ impl<'m> QualifiedNameEnv<'m> {
             .join("; ")
     }
 
-    fn qualified_trait_item_name(
-        &self,
-        trait_id: TraitId,
-        trait_def: &Trait,
-        item_name: Ustr,
-        input_tys: &[Type],
-    ) -> String {
+    fn impl_name(&self, trait_id: TraitId, trait_def: &Trait, input_tys: &[Type]) -> String {
         let mut s = format!(
             "{}<",
             self.format_trait_id_readable(trait_id, trait_def.name)
@@ -372,8 +366,34 @@ impl<'m> QualifiedNameEnv<'m> {
             }
             s.push_str(&self.format_type(*ty));
         }
-        s.push_str(&format!(">::{item_name}"));
+        s.push('>');
         s
+    }
+
+    pub(crate) fn qualified_impl_name(
+        &self,
+        trait_id: TraitId,
+        trait_def: &Trait,
+        input_tys: &[Type],
+    ) -> String {
+        format!(
+            "{}::{}",
+            self.format_module_prefix(self.current.module.id),
+            self.impl_name(trait_id, trait_def, input_tys)
+        )
+    }
+
+    fn qualified_trait_item_name(
+        &self,
+        trait_id: TraitId,
+        trait_def: &Trait,
+        item_name: Ustr,
+        input_tys: &[Type],
+    ) -> String {
+        format!(
+            "{}::{item_name}",
+            self.impl_name(trait_id, trait_def, input_tys)
+        )
     }
 
     pub(crate) fn qualified_method_name(
