@@ -89,7 +89,7 @@ impl FormatWith<ModuleEnv<'_>> for Value {
         } else {
             env.modules
                 .get(id.module)
-                .and_then(|entry| entry.module.as_ref())
+                .and_then(|entry| entry.module())
                 .expect("SSA function operand refers to an unavailable module")
         };
         let function = module

@@ -90,7 +90,27 @@ fn bench_session() -> CompilerSession {
 }
 
 fn bench_session_for_target(target: ExecutionTarget) -> (CompilerSession, ExecutionTarget) {
-    (CompilerSession::new(), target)
+    let mut session = CompilerSession::new();
+    if target == ExecutionTarget::Ssa {
+        let std_id = session.std_module().module_id();
+        session.prepare_execution_target(target, std_id);
+    }
+    (session, target)
+}
+
+fn warm_initial_session_state() {
+    drop(CompilerSession::new());
+}
+
+fn prepared_std_ssa_session() -> CompilerSession {
+    let mut session = CompilerSession::new();
+    let std_id = session.std_module().module_id();
+    session.prepare_execution_target(ExecutionTarget::Ssa, std_id);
+    session
+}
+
+fn warm_std_ssa_state() {
+    drop(prepared_std_ssa_session());
 }
 
 /// Drop benchmark-owned values after Gungraun has left the measured function.
@@ -122,6 +142,32 @@ fn benchmark_config() -> LibraryBenchmarkConfig {
 fn bench_std_load() -> BenchOutput<()> {
     BenchOutput {
         session: measure(bench_session),
+        result: (),
+    }
+}
+
+#[library_benchmark(setup = warm_initial_session_state, teardown = teardown_benchmark)]
+fn bench_warm_session_load(_: ()) -> BenchOutput<()> {
+    BenchOutput {
+        session: measure(CompilerSession::new),
+        result: (),
+    }
+}
+
+#[library_benchmark(setup = bench_session, teardown = teardown_benchmark)]
+fn bench_std_ssa_build(mut session: CompilerSession) -> BenchOutput<()> {
+    let std_id = session.std_module().module_id();
+    measure(|| session.prepare_execution_target(ExecutionTarget::Ssa, std_id));
+    BenchOutput {
+        session,
+        result: (),
+    }
+}
+
+#[library_benchmark(setup = warm_std_ssa_state, teardown = teardown_benchmark)]
+fn bench_cached_std_ssa_session_load(_: ()) -> BenchOutput<()> {
+    BenchOutput {
+        session: measure(CompilerSession::new),
         result: (),
     }
 }
@@ -477,7 +523,13 @@ fn lcg_seq(n: usize, seed: usize) -> Vec<isize> {
 
 library_benchmark_group!(
     name = compilation,
-    benchmarks = [bench_std_load, bench_user_code_compile_without_std_startup]
+    benchmarks = [
+        bench_std_load,
+        bench_warm_session_load,
+        bench_std_ssa_build,
+        bench_cached_std_ssa_session_load,
+        bench_user_code_compile_without_std_startup
+    ]
 );
 
 library_benchmark_group!(

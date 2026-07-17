@@ -7,6 +7,8 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
+use std::cell::OnceCell;
+
 use crate::{
     compiler::Modules,
     emit_ssa::build_ssa_function,
@@ -17,37 +19,39 @@ use crate::{
 /// Backend output derived from one completed semantic module revision.
 #[derive(Default)]
 pub(crate) struct ModuleArtifacts {
-    ssa: Option<SsaArtifacts>,
+    ssa: OnceCell<SsaArtifacts>,
 }
 
 impl std::fmt::Debug for ModuleArtifacts {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ModuleArtifacts")
-            .field(
-                "ssa_function_slots",
-                &self.ssa.as_ref().map(SsaArtifacts::len),
-            )
+            .field("ssa_function_slots", &self.ssa.get().map(SsaArtifacts::len))
             .finish()
     }
 }
 
 impl ModuleArtifacts {
     pub(crate) fn with_ssa(module: &Module, modules: &Modules) -> Self {
-        Self {
-            ssa: Some(SsaArtifacts::build(module, modules)),
-        }
+        let artifacts = Self::default();
+        artifacts
+            .ssa
+            .set(SsaArtifacts::build(module, modules))
+            .unwrap_or_else(|_| unreachable!("a new artifact set cannot already contain SSA"));
+        artifacts
     }
 
     pub(crate) fn has_ssa(&self) -> bool {
-        self.ssa.is_some()
+        self.ssa.get().is_some()
     }
 
     pub(crate) fn ssa(&self) -> Option<&SsaArtifacts> {
-        self.ssa.as_ref()
+        self.ssa.get()
     }
 
-    pub(crate) fn set_ssa(&mut self, ssa: SsaArtifacts) {
-        self.ssa = Some(ssa);
+    pub(crate) fn set_ssa(&self, ssa: SsaArtifacts) {
+        self.ssa
+            .set(ssa)
+            .unwrap_or_else(|_| panic!("SSA artifacts may only be installed once per revision"));
     }
 }
 
@@ -87,7 +91,7 @@ impl SsaArtifacts {
 }
 
 /// Install complete SSA artifacts for a fresh module and all of its dependencies.
-pub(crate) fn ensure_ssa_artifacts(modules: &mut Modules, module_id: ModuleId) {
+pub(crate) fn ensure_ssa_artifacts(modules: &Modules, module_id: ModuleId) {
     let entry = modules
         .get(module_id)
         .unwrap_or_else(|| panic!("module {module_id} is not registered"));
@@ -116,5 +120,5 @@ pub(crate) fn ensure_ssa_artifacts(modules: &mut Modules, module_id: ModuleId) {
             .expect("a fresh module entry must contain its module");
         SsaArtifacts::build(module, modules)
     };
-    modules.get_mut(module_id).unwrap().artifacts.set_ssa(ssa);
+    modules.get(module_id).unwrap().artifacts().set_ssa(ssa);
 }

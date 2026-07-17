@@ -2441,7 +2441,7 @@ impl<'a> TraitSolver<'a> {
         let env = ModuleEnv::new(&fake_current, self.others);
         self.impls.log_debug_impls_headers(trait_id, env);
         for (module_path, entry) in self.others.iter_named() {
-            if let Some(module) = &entry.module {
+            if let Some(module) = entry.module() {
                 let impls = &module.impls;
                 if impls.blanket_key_to_id.contains_key(&trait_id) {
                     log::trace!("In module {}:", module_path);
@@ -2846,8 +2846,7 @@ impl<'a> TraitSolver<'a> {
                             .others
                             .get(module_id)
                             .unwrap()
-                            .module
-                            .as_ref()
+                            .module()
                             .unwrap()
                             .impls
                             .data[impl_id.as_index()];
@@ -2969,14 +2968,7 @@ impl<'a> TraitSolver<'a> {
 
                     // Succeeded? First get the blanket implementation data and compute the output types.
                     let impls = if let Some(module_id) = imp_module_id {
-                        &self
-                            .others
-                            .get(module_id)
-                            .unwrap()
-                            .module
-                            .as_ref()
-                            .unwrap()
-                            .impls
+                        &self.others.get(module_id).unwrap().module().unwrap().impls
                     } else {
                         #[allow(clippy::needless_borrow)] // clippy has a bug here as of Rust 1.90
                         &self.impls
@@ -3126,8 +3118,7 @@ impl<'a> TraitSolver<'a> {
                             .others
                             .get(module_id)
                             .unwrap()
-                            .module
-                            .as_ref()
+                            .module()
                             .unwrap()
                             .impls
                             .data[impl_id.as_index()];
@@ -3407,8 +3398,7 @@ impl<'a> TraitSolver<'a> {
             .others
             .get(impl_id.module)
             .unwrap_or_else(|| panic!("module #{} not found", impl_id.module))
-            .module
-            .as_ref()
+            .module()
             .unwrap()
             .impls
             .data[impl_id.impl_id.as_index()]

@@ -69,7 +69,7 @@ impl FormatWith<ModuleEnv<'_>> for FunctionId {
         } else {
             env.modules
                 .get(self.module)
-                .and_then(|entry| entry.module.as_ref())
+                .and_then(|entry| entry.module())
                 .expect("function module not found")
         };
         let name = module

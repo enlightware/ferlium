@@ -7,7 +7,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use std::{mem, sync::LazyLock};
+use std::{mem, rc::Rc, sync::LazyLock};
 
 use lalrpop_util::ErrorRecovery;
 
@@ -19,8 +19,8 @@ use crate::{
     compiler::diagnostics::diagnostics_from_error,
     compiler::error::{CompilationError, LocatedError},
     compiler::session::{
-        AstInspectorCb, CompilationOutput, CompilationRevision, ModuleEntry, ModuleSrcInfo,
-        Modules, SourceVersion,
+        AstInspectorCb, CompilationOutput, CompilationRevision, ModuleEntry, ModuleRevision,
+        ModuleSrcInfo, Modules, SourceVersion,
     },
     compiler::{CompilationCapabilities, ModuleArtifacts},
     containers::b,
@@ -87,17 +87,15 @@ pub(crate) fn compile_with_source_id(
             .unwrap_or_else(|| panic!("module {id} has no registered path"))
             .clone(),
     };
-    let (module_id, old_module, had_ssa, compilation_revision) = match &module_ref {
+    let (module_id, old_revision, had_ssa, compilation_revision) = match &module_ref {
         ModuleRef::ByPath(path) => {
             if let Some((id, entry)) = modules.get_mut_by_name(path) {
                 let compilation_revision = entry.next_compilation_revision();
-                let had_ssa = entry.artifacts.has_ssa();
-                let old = entry.module.as_mut().map(|m| {
-                    mem::replace(
-                        m,
-                        Module::new(next_module_id, Path::single_str("$recompile_placeholder")),
-                    )
-                });
+                let had_ssa = entry.has_ssa_artifacts_for_any_state();
+                let old = entry.replace_revision_with_placeholder(Module::new(
+                    next_module_id,
+                    Path::single_str("$recompile_placeholder"),
+                ));
                 (id, old, had_ssa, compilation_revision)
             } else {
                 (
@@ -114,13 +112,11 @@ pub(crate) fn compile_with_source_id(
                 (None, false, CompilationRevision::from_index(0)),
                 |e| {
                     let compilation_revision = e.next_compilation_revision();
-                    let had_ssa = e.artifacts.has_ssa();
-                    let old = e.module.as_mut().map(|m| {
-                        mem::replace(
-                            m,
-                            Module::new(next_module_id, Path::single_str("$recompile_placeholder")),
-                        )
-                    });
+                    let had_ssa = e.has_ssa_artifacts_for_any_state();
+                    let old = e.replace_revision_with_placeholder(Module::new(
+                        next_module_id,
+                        Path::single_str("$recompile_placeholder"),
+                    ));
                     (old, had_ssa, compilation_revision)
                 },
             );
@@ -135,7 +131,7 @@ pub(crate) fn compile_with_source_id(
         |modules: &mut Modules,
          path_for_new: Option<Path>,
          src_info: ModuleSrcInfo,
-         old_module: Option<Module>,
+         old_revision: Option<Rc<ModuleRevision>>,
          error: &CompilationError| {
             let error = error.clone();
             let diagnostics = diagnostics_from_error(
@@ -149,7 +145,7 @@ pub(crate) fn compile_with_source_id(
             if let Some(entry) = modules.get_mut(module_id) {
                 entry.update_with_compilation_error(
                     src_info,
-                    old_module,
+                    old_revision,
                     error,
                     compilation_revision,
                     diagnostics,
@@ -171,7 +167,7 @@ pub(crate) fn compile_with_source_id(
         Err(error) => {
             let error = compilation_error!(ParsingFailed(error));
             let path_for_new = module_ref.into_path();
-            process_compilation_failed(modules, path_for_new, src_info, old_module, &error);
+            process_compilation_failed(modules, path_for_new, src_info, old_revision, &error);
             return Err(error);
         }
     };
@@ -197,7 +193,7 @@ pub(crate) fn compile_with_source_id(
             let env = ModuleEnv::new(&failure.module, modules);
             let error = CompilationError::resolve_types(failure.error, &env, source_table);
             let path_for_new = module_ref.into_path();
-            process_compilation_failed(modules, path_for_new, src_info, old_module, &error);
+            process_compilation_failed(modules, path_for_new, src_info, old_revision, &error);
             return Err(error);
         }
     };
@@ -218,7 +214,7 @@ pub(crate) fn compile_with_source_id(
                 let env = ModuleEnv::new(&module, modules);
                 let error = CompilationError::resolve_types(error, &env, source_table);
                 let path_for_new = module_ref.into_path();
-                process_compilation_failed(modules, path_for_new, src_info, old_module, &error);
+                process_compilation_failed(modules, path_for_new, src_info, old_revision, &error);
                 return Err(error);
             }
         };
@@ -228,7 +224,8 @@ pub(crate) fn compile_with_source_id(
     };
 
     // Detect cycles in the module dependency graph.
-    if let Some(cycle) = find_module_deps_cycle(modules, module_id, &module, old_module.is_some()) {
+    if let Some(cycle) = find_module_deps_cycle(modules, module_id, &module, old_revision.is_some())
+    {
         let error = compilation_error!(CircularImportDependency {
             origin: modules.get_name(module_id).unwrap().to_string(),
             import_chain: cycle
@@ -241,7 +238,7 @@ pub(crate) fn compile_with_source_id(
             span: Location::new_synthesized(),
         });
         let path_for_new = module_ref.into_path();
-        process_compilation_failed(modules, path_for_new, src_info, old_module, &error);
+        process_compilation_failed(modules, path_for_new, src_info, old_revision, &error);
         return Err(error);
     }
 
@@ -250,7 +247,7 @@ pub(crate) fn compile_with_source_id(
     let deps_stale = deps.iter().any(|&dep| modules.get(dep).unwrap().stale);
     if deps_stale {
         if let Some(entry) = modules.get_mut(module_id) {
-            entry.update_with_stale(src_info, old_module, deps, compilation_revision);
+            entry.update_with_stale(src_info, old_revision, deps, compilation_revision);
             mark_stale_transitively(modules, module_id);
         } else {
             // Only reachable for ByPath when the module does not yet exist.

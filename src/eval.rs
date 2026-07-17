@@ -1181,8 +1181,7 @@ impl BacktraceFrame {
         let module = modules
             .get(self.function_id.module)
             .unwrap()
-            .module
-            .as_ref()
+            .module()
             .unwrap();
         let function_module_path = modules
             .get_name(self.function_id.module)

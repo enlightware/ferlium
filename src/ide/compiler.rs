@@ -260,10 +260,10 @@ impl Compiler {
 
     pub fn list_module_fns(&self) -> Vec<FunctionSignature> {
         let mut sigs = Vec::new();
-        let user_module = &self
+        let user_module = self
             .session
             .expect_module_entry(self.user_module.module_id)
-            .module;
+            .module();
         for (mod_name, module) in self.session.modules().iter_named_modules() {
             for (sym_name, func) in module.iter_named_functions() {
                 // skip trait methods
@@ -299,10 +299,10 @@ impl Compiler {
         static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^@(get|set) (.*)$").unwrap());
         let mut getters = FxHashSet::default();
         let mut setters = FxHashSet::default();
-        let user_module = &self
+        let user_module = self
             .session
             .expect_module_entry(self.user_module.module_id)
-            .module;
+            .module();
         for (mod_name, module) in self.session.modules().iter_named_modules() {
             for (sym_name, _) in module.iter_named_functions() {
                 // skip trait methods

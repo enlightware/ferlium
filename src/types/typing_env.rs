@@ -228,8 +228,7 @@ impl<'m> TypingEnv<'m> {
                 .modules
                 .get(module_id)
                 .unwrap()
-                .module
-                .as_ref()
+                .module()
                 .unwrap();
             let id = source_module.get_local_function_id(function_name).unwrap();
             let function = source_module.get_function_by_id(id).unwrap();
@@ -286,8 +285,7 @@ impl<'m> TypingEnv<'m> {
                 .modules
                 .get(module_id)
                 .unwrap()
-                .module
-                .as_ref()
+                .module()
                 .unwrap();
             let id = source_module
                 .get_local_subscript_id(subscript_name)
@@ -317,7 +315,7 @@ impl<'m> TypingEnv<'m> {
             self.module_env
                 .modules
                 .get(subscript_id.module)
-                .and_then(|entry| entry.module.as_ref())
+                .and_then(|entry| entry.module())
                 .expect("subscript module should be loaded")
         }
     }
@@ -347,8 +345,7 @@ impl<'m> TypingEnv<'m> {
                 .modules
                 .get(STD_MODULE_ID)
                 .unwrap()
-                .module
-                .as_ref()
+                .module()
                 .unwrap();
             let id = source_module
                 .get_local_function_id(function_name)
@@ -398,8 +395,7 @@ impl<'m> TypingEnv<'m> {
                 .modules
                 .get(STD_MODULE_ID)
                 .unwrap()
-                .module
-                .as_ref()
+                .module()
                 .unwrap();
             let subscript = source_module
                 .get_subscript(subscript_name)

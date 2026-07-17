@@ -7,7 +7,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use ::std::{cell::RefCell, fmt, sync::LazyLock};
+use ::std::{cell::RefCell, fmt, rc::Rc, sync::LazyLock};
 use derive_new::new;
 use itertools::Itertools;
 
@@ -87,16 +87,34 @@ pub struct ModuleSrcInfo {
     pub(crate) uses: Uses,
 }
 
+/// Immutable semantic and backend output for one successful module compilation.
+#[derive(Debug)]
+pub(crate) struct ModuleRevision {
+    module: Module,
+    artifacts: ModuleArtifacts,
+}
+
+impl ModuleRevision {
+    fn new(module: Module) -> Self {
+        Self {
+            module,
+            artifacts: ModuleArtifacts::default(),
+        }
+    }
+
+    fn with_artifacts(module: Module, artifacts: ModuleArtifacts) -> Self {
+        Self { module, artifacts }
+    }
+}
+
 /// A module that has been attempted to be compiled at least once.
 #[derive(Debug)]
 pub struct ModuleEntry {
     /// Informations needed to rebuild the module, if it supports rebuilding (std doesn't).
     pub(crate) src_info: Option<ModuleSrcInfo>,
-    /// Last good compiled module (without stale deps at that time).
+    /// Last good compiled module revision (without stale deps at that time).
     /// Must be non-`None` if `stale` is false.
-    pub(crate) module: Option<Module>,
-    /// Backend output derived from the current compiled module revision.
-    pub(crate) artifacts: ModuleArtifacts,
+    pub(crate) revision: Option<Rc<ModuleRevision>>,
     /// Compilation error, if last compilation failed.
     pub(crate) last_error: Option<CompilationError>,
     /// Deps from latest successful self build, stale or not.
@@ -112,11 +130,14 @@ pub struct ModuleEntry {
 impl ModuleEntry {
     /// New fresh module that cannot be rebuilt (e.g. std).
     pub fn new_fresh_raw(module: Module) -> Self {
-        let deps = module.deps().collect();
+        Self::new_fresh_raw_revision(Rc::new(ModuleRevision::new(module)))
+    }
+
+    fn new_fresh_raw_revision(revision: Rc<ModuleRevision>) -> Self {
+        let deps = revision.module.deps().collect();
         ModuleEntry {
             src_info: None,
-            module: Some(module),
-            artifacts: ModuleArtifacts::default(),
+            revision: Some(revision),
             last_error: None,
             latest_deps: deps,
             compilation_revision: CompilationRevision::from_index(0),
@@ -134,8 +155,7 @@ impl ModuleEntry {
         let deps = module.deps().collect();
         ModuleEntry {
             src_info: Some(src_info),
-            module: Some(module),
-            artifacts: ModuleArtifacts::default(),
+            revision: Some(Rc::new(ModuleRevision::new(module))),
             last_error: None,
             latest_deps: deps,
             compilation_revision,
@@ -152,8 +172,7 @@ impl ModuleEntry {
     ) -> Self {
         ModuleEntry {
             src_info: Some(src_info),
-            module: None,
-            artifacts: ModuleArtifacts::default(),
+            revision: None,
             last_error: None,
             latest_deps: deps,
             compilation_revision,
@@ -171,8 +190,7 @@ impl ModuleEntry {
     ) -> Self {
         ModuleEntry {
             src_info: Some(src_info),
-            module: None,
-            artifacts: ModuleArtifacts::default(),
+            revision: None,
             last_error: Some(error),
             latest_deps: vec![],
             compilation_revision,
@@ -182,18 +200,15 @@ impl ModuleEntry {
     }
 
     /// Our module compiled successfully, but some of its dependencies are stale.
-    pub fn update_with_stale(
+    pub(crate) fn update_with_stale(
         &mut self,
         src_info: ModuleSrcInfo,
-        old_module: Option<Module>,
+        old_revision: Option<Rc<ModuleRevision>>,
         latest_deps: Vec<ModuleId>,
         compilation_revision: CompilationRevision,
     ) {
         self.src_info = Some(src_info);
-        self.module = old_module;
-        if self.module.is_none() {
-            self.artifacts = ModuleArtifacts::default();
-        }
+        self.revision = old_revision;
         self.last_error = None;
         self.latest_deps = latest_deps;
         self.compilation_revision = compilation_revision;
@@ -202,19 +217,16 @@ impl ModuleEntry {
     }
 
     /// Our module failed to compile, but can be rebuilt later.
-    pub fn update_with_compilation_error(
+    pub(crate) fn update_with_compilation_error(
         &mut self,
         src_info: ModuleSrcInfo,
-        old_module: Option<Module>,
+        old_revision: Option<Rc<ModuleRevision>>,
         error: CompilationError,
         compilation_revision: CompilationRevision,
         diagnostics: Vec<ModuleDiagnostic>,
     ) {
         self.src_info = Some(src_info);
-        self.module = old_module;
-        if self.module.is_none() {
-            self.artifacts = ModuleArtifacts::default();
-        }
+        self.revision = old_revision;
         self.last_error = Some(error);
         self.compilation_revision = compilation_revision;
         self.diagnostics = diagnostics;
@@ -222,11 +234,36 @@ impl ModuleEntry {
     }
 
     pub fn module(&self) -> Option<&Module> {
-        self.module.as_ref()
+        self.revision.as_deref().map(|revision| &revision.module)
+    }
+
+    pub(crate) fn artifacts(&self) -> &ModuleArtifacts {
+        &self
+            .revision
+            .as_ref()
+            .expect("module artifacts require a compiled revision")
+            .artifacts
+    }
+
+    pub(crate) fn has_ssa_artifacts_for_any_state(&self) -> bool {
+        self.revision
+            .as_ref()
+            .is_some_and(|revision| revision.artifacts.has_ssa())
+    }
+
+    pub(crate) fn replace_revision_with_placeholder(
+        &mut self,
+        placeholder: Module,
+    ) -> Option<Rc<ModuleRevision>> {
+        self.revision
+            .replace(Rc::new(ModuleRevision::new(placeholder)))
     }
 
     pub(crate) fn current_ssa(&self) -> Option<&SsaArtifacts> {
-        (!self.stale).then(|| self.artifacts.ssa()).flatten()
+        if self.stale {
+            return None;
+        }
+        self.revision.as_ref()?.artifacts.ssa()
     }
 
     pub(crate) fn new_fresh_with_artifacts(
@@ -235,9 +272,16 @@ impl ModuleEntry {
         artifacts: ModuleArtifacts,
         compilation_revision: CompilationRevision,
     ) -> Self {
-        let mut entry = Self::new_fresh(src_info, module, compilation_revision);
-        entry.artifacts = artifacts;
-        entry
+        let deps = module.deps().collect();
+        Self {
+            src_info: Some(src_info),
+            revision: Some(Rc::new(ModuleRevision::with_artifacts(module, artifacts))),
+            last_error: None,
+            latest_deps: deps,
+            compilation_revision,
+            diagnostics: Vec::new(),
+            stale: false,
+        }
     }
 
     pub(crate) fn next_compilation_revision(&self) -> CompilationRevision {
@@ -297,7 +341,7 @@ impl<'a> ModuleInfo<'a> {
 
     /// Return whether a compiled module is available for semantic fallback.
     pub fn has_compiled_module(&self) -> bool {
-        self.entry.module.is_some()
+        self.entry.revision.is_some()
     }
 
     /// Return whether the current fresh module revision has complete SSA artifacts.
@@ -414,7 +458,7 @@ pub struct CompilationCapabilities {
 /// Cached expensive portion of a pristine compiler session.
 struct InitialSessionState {
     source_table: SourceTable,
-    std_module: Module,
+    std_revision: Rc<ModuleRevision>,
 }
 
 impl InitialSessionState {
@@ -423,7 +467,7 @@ impl InitialSessionState {
         let std_module = ferlium_std::std_module(&mut source_table);
         Self {
             source_table,
-            std_module,
+            std_revision: Rc::new(ModuleRevision::new(std_module)),
         }
     }
 
@@ -434,7 +478,7 @@ impl InitialSessionState {
         assert_eq!(modules.next_id(), STD_MODULE_ID);
         modules.insert(
             module::Path::single_str("std"),
-            ModuleEntry::new_fresh_raw(self.std_module.clone_std_for_new_session()),
+            ModuleEntry::new_fresh_raw_revision(Rc::clone(&self.std_revision)),
         );
 
         let empty_std_user_path = module::Path::single_str("$empty_std_user");
@@ -926,7 +970,7 @@ impl CompilerSession {
         // If trace logging is enabled, display the final HIR after linking and finalizing pending functions.
         if log::log_enabled!(log::Level::Trace) {
             let entry = self.modules.get(output.module_id).unwrap();
-            if let Some(module) = &entry.module {
+            if let Some(module) = entry.module() {
                 if !module.is_empty() {
                     log::trace!("Module HIR\n{}", module.format_with(&self.modules));
                 }
@@ -1105,7 +1149,7 @@ impl CompilerSession {
     /// Existing artifacts for the same module revision are reused.
     pub fn prepare_execution_target(&mut self, target: ExecutionTarget, module_id: ModuleId) {
         if target == ExecutionTarget::Ssa {
-            ensure_ssa_artifacts(&mut self.modules, module_id);
+            ensure_ssa_artifacts(&self.modules, module_id);
         }
     }
 
@@ -1141,8 +1185,7 @@ impl CompilerSession {
     pub fn expect_compiled_module(&self, module_id: ModuleId) -> &Module {
         let entry = self.expect_module_entry(module_id);
         entry
-            .module
-            .as_ref()
+            .module()
             .unwrap_or_else(|| panic!("Module {module_id} does not have a compiled version"))
     }
 
@@ -1212,11 +1255,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cached_initial_state_creates_independent_sessions() {
+    fn cached_initial_state_shares_std_and_isolates_session_state() {
         let mut first = CompilerSession::new();
         let second = CompilerSession::new();
 
-        assert!(!std::ptr::eq(first.std_module(), second.std_module()));
+        assert!(std::ptr::eq(first.std_module(), second.std_module()));
+        assert!(Rc::ptr_eq(
+            first
+                .modules
+                .get(STD_MODULE_ID)
+                .unwrap()
+                .revision
+                .as_ref()
+                .unwrap(),
+            second
+                .modules
+                .get(STD_MODULE_ID)
+                .unwrap()
+                .revision
+                .as_ref()
+                .unwrap()
+        ));
         assert_eq!(first.empty_std_user, ModuleId::new(1));
         assert_eq!(first.scratch_module, ModuleId::new(2));
         assert_eq!(first.modules.next_id(), FIRST_USER_MODULE_ID);
@@ -1238,6 +1297,36 @@ mod tests {
         first.reset();
         assert_eq!(first.modules.next_id(), FIRST_USER_MODULE_ID);
         assert_eq!(first.source_table.len(), first.initial_source_table_size);
+    }
+
+    #[test]
+    fn std_ssa_artifacts_are_shared_between_existing_and_future_sessions() {
+        let mut first = CompilerSession::new();
+        let second = CompilerSession::new();
+
+        first.prepare_execution_target(ExecutionTarget::Ssa, STD_MODULE_ID);
+        let third = CompilerSession::new();
+
+        let first_ssa = first
+            .modules
+            .get(STD_MODULE_ID)
+            .unwrap()
+            .current_ssa()
+            .unwrap();
+        let second_ssa = second
+            .modules
+            .get(STD_MODULE_ID)
+            .unwrap()
+            .current_ssa()
+            .unwrap();
+        let third_ssa = third
+            .modules
+            .get(STD_MODULE_ID)
+            .unwrap()
+            .current_ssa()
+            .unwrap();
+        assert!(std::ptr::eq(first_ssa, second_ssa));
+        assert!(std::ptr::eq(first_ssa, third_ssa));
     }
 
     fn module_snapshot(

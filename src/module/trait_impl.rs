@@ -110,7 +110,7 @@ impl FormatWith<ModuleEnv<'_>> for TraitImplId {
         } else {
             env.modules
                 .get(self.module)
-                .and_then(|entry| entry.module.as_ref())
+                .and_then(|entry| entry.module())
                 .unwrap_or_else(|| panic!("dictionary module {} not found", self.module))
         };
         let imp = module.get_impl_data(self.impl_id).unwrap();

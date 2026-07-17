@@ -28,7 +28,7 @@ pub struct ModulesResolver<'a> {
 impl ModulesResolver<'_> {
     fn import_exists(&self, module: &ModPath, symbol: Ustr) -> bool {
         if let Some(entry) = self.modules.get_value_by_name(module)
-            && let Some(module) = &entry.module
+            && let Some(module) = entry.module()
         {
             module.public_symbols().any(|n| n == symbol)
         } else {
