@@ -96,8 +96,8 @@ with the goal of calling Rust-compiled-to-WebAssembly hosts with no FFI overhead
 
 Ferlium is pre-1.0; expect breaking changes in syntax, APIs, and standard library.
 
-* The SSA reference interpreter is not yet selectable through the normal embedding and REPL APIs,
-  and the WebAssembly backend is not implemented yet.
+* The SSA reference interpreter can be selected through the embedding API or the REPL's `--ssa`
+  mode. The WebAssembly backend is not implemented yet.
 * The compiler is single-threaded — it currently panics if its interned type-universe lock is contended.
 * Dynamic dispatch is out of scope.
 * No file-based module discovery from script source: module organisation is the host's responsibility (see the [Modules chapter](https://enlightware.github.io/ferlium/book/modules.html) of the book).

@@ -21,7 +21,7 @@ use crate::{
         ModuleRef, compile_with_source_id, new_ast_arena_sized_from_source, parse_module_and_expr,
     },
     define_id_type, emit_ssa,
-    eval::{ControlFlow, EvalCtx, RuntimeError, ValOrMut, eval_function, eval_function_with_ctx},
+    eval::{ControlFlow, EvalCtx, RuntimeError, ValOrMut, eval_function_with_ctx},
     execution::{DEFAULT_INTERACTIVE_FUEL_LIMIT, ExecutionTarget, ReferenceInterpreterLimits},
     format::FormatWith,
     hir::emit_expr::emit_expr_entry_with_private_impls,
@@ -1128,18 +1128,40 @@ impl CompilerSession {
         entry: LocalFunctionId,
         arguments: Vec<Value>,
     ) -> Result<Value, RuntimeError> {
+        self.run_entry_with_limits(
+            target,
+            module_id,
+            entry,
+            arguments,
+            ReferenceInterpreterLimits::default(),
+        )
+    }
+
+    /// Interpret an already-compiled entry through the selected reference backend with explicit
+    /// backend-independent execution limits.
+    pub fn run_entry_with_limits(
+        &mut self,
+        target: ExecutionTarget,
+        module_id: ModuleId,
+        entry: LocalFunctionId,
+        arguments: Vec<Value>,
+        limits: ReferenceInterpreterLimits,
+    ) -> Result<Value, RuntimeError> {
         self.prepare_execution_target(target, module_id);
         match target {
-            ExecutionTarget::Hir => eval_function(
-                module_id,
-                entry,
-                arguments.into_iter().map(ValOrMut::Val).collect(),
-                self,
-            )
-            .map(ControlFlow::into_value),
+            ExecutionTarget::Hir => {
+                let mut ctx = EvalCtx::with_limits(module_id, self, limits);
+                eval_function_with_ctx(
+                    module_id,
+                    entry,
+                    arguments.into_iter().map(ValOrMut::Val).collect(),
+                    &mut ctx,
+                )
+                .map(ControlFlow::into_value)
+            }
             ExecutionTarget::Ssa => {
                 use crate::ssa::interpreter::Interpreter;
-                let mut interp = Interpreter::new(module_id, self);
+                let mut interp = Interpreter::with_limits(module_id, self, limits);
                 interp.run_entry(module_id, entry, arguments)
             }
         }

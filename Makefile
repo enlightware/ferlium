@@ -64,6 +64,9 @@ fuzz-cmin: fuzz-cmin-parse fuzz-cmin-ide fuzz-cmin-grammar
 repl:
 	RUST_BACKTRACE=1 RUST_LOG=ferlium=debug cargo run --example ferlium
 
+repl-ssa:
+	RUST_BACKTRACE=1 RUST_LOG=ferlium=debug cargo run --example ferlium -- --ssa
+
 print-std:
 	cargo run --example ferlium -- --print-std
 

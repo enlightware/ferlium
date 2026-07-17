@@ -93,6 +93,22 @@ fn execution_targets_accept_by_value_arguments() {
     }
 }
 
+#[test]
+fn execution_targets_use_configured_limits() {
+    let mut session = TestSession::new();
+    let output = session.compile("loop {}");
+    let entry = output.expr.expect("test source should have an expression");
+    let limits = ReferenceInterpreterLimits::default().with_fuel_limit(Some(0));
+
+    for target in ExecutionTarget::ALL {
+        let error = session
+            .session_mut()
+            .run_entry_with_limits(target, output.module_id, entry, vec![], limits)
+            .expect_err("execution must consume the configured fuel");
+        assert_eq!(error.kind(), RuntimeErrorKind::FuelExhausted);
+    }
+}
+
 fn tracked_drop_log(session: &mut TestSession) -> isize {
     let value = session.run("testing::tracked_drop_log()");
     let log = *value

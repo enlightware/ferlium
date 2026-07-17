@@ -28,17 +28,14 @@ use ferlium::std::new_module_using_std;
 use ferlium::std::string::String as FerliumString;
 use ferlium::types::effects::{PrimitiveEffect, effect};
 use ferlium::{
-    CompilationOutput, CompilerSession, Location, SourceId, SourceTable, SubOrSameType,
-    parse_module_and_expr,
+    CompilationOutput, CompilerSession, ExecutionTarget, Location, SourceId, SourceTable,
+    SubOrSameType, parse_module_and_expr,
 };
 use rustyline::DefaultEditor;
 use rustyline::{config::Configurer, error::ReadlineError};
 use ustr::ustr;
 
-use ferlium::{
-    eval::{EvalCtx, eval_function_with_ctx},
-    execution::{DEFAULT_INTERACTIVE_FUEL_LIMIT, ReferenceInterpreterLimits},
-};
+use ferlium::execution::{DEFAULT_INTERACTIVE_FUEL_LIMIT, ReferenceInterpreterLimits};
 
 /// A wrapper around location to implement ariadne::Span
 #[derive(Debug, Clone, Copy)]
@@ -514,6 +511,7 @@ fn process_input(
     fill_use_until: usize,
     session: &mut CompilerSession,
     is_repl: bool,
+    target: ExecutionTarget,
     fuel_limit: Option<usize>,
 ) -> Result<ModuleId, i32> {
     // Parse the input once to get the list of symbols this module defines.
@@ -580,7 +578,7 @@ fn process_input(
 
     // Compile the input to a module and an expression (if any)
     let CompilationOutput { module_id, expr } = session
-        .compile_to(input, name, Path::single_str(name), uses)
+        .compile_to_for(target, input, name, Path::single_str(name), uses)
         .map_err(|e| {
             eprintln!("Compilation error:");
             pretty_print_checking_error(&e, input, session.source_table());
@@ -606,6 +604,10 @@ fn process_input(
         }
     }
 
+    if target == ExecutionTarget::Ssa {
+        println!("Module SSA:\n{}", session.emit_ssa_module(module_id));
+    }
+
     // If there's an expression, evaluate it
     if let Some(expr) = expr {
         let ty = session
@@ -619,12 +621,10 @@ fn process_input(
         // Evaluate expression
         let result = {
             let limits = ReferenceInterpreterLimits::default().with_fuel_limit(fuel_limit);
-            let mut eval_ctx = EvalCtx::with_limits(module_id, session, limits);
-            eval_function_with_ctx(module_id, expr, vec![], &mut eval_ctx)
+            session.run_entry_with_limits(target, module_id, expr, vec![], limits)
         };
         match result {
             Ok(value) => {
-                let value = value.into_value();
                 let rendered = match session
                     .value_to_inspect_text_with_fuel(module_id, value, ty, fuel_limit)
                 {
@@ -651,13 +651,6 @@ fn process_input(
         if !is_repl {
             println!("No expression to evaluate.");
         }
-    }
-
-    let print_ssa: bool = env::args().any(|arg| arg == "--print-ssa");
-
-    if print_ssa {
-        let ssa = session.emit_ssa_module(module_id);
-        println!("{}", ssa);
     }
 
     Ok(module_id)
@@ -704,6 +697,7 @@ fn process_pipe_input(
     print_module: bool,
     print_annotations: bool,
     allow_experimental: bool,
+    target: ExecutionTarget,
 ) -> i32 {
     // Read all input from stdin
     let mut input = String::new();
@@ -726,7 +720,7 @@ fn process_pipe_input(
     session.set_allow_experimental(allow_experimental);
 
     // Process the input
-    process_input("<stdin>", &input, 0, &mut session, false, None).map_or_else(
+    process_input("<stdin>", &input, 0, &mut session, false, target, None).map_or_else(
         |code| code,
         |module_id| {
             if print_module {
@@ -739,28 +733,38 @@ fn process_pipe_input(
 }
 
 fn main() {
+    let args: Vec<String> = env::args().collect();
+    let target = if args.iter().any(|arg| arg == "--ssa") {
+        ExecutionTarget::Ssa
+    } else {
+        ExecutionTarget::Hir
+    };
+
     // Check if we're being used in pipe mode (stdin is not a terminal)
     if !io::stdin().is_terminal() {
         // Pipe mode: read from stdin, process, and exit
-        let print_module = env::args().any(|arg| arg == "--print-module");
-        let print_annotations = env::args().any(|arg| arg == "--print-annotations");
-        let allow_experimental = env::args().any(|arg| arg == "--allow-experimental");
+        let print_module = args.iter().any(|arg| arg == "--print-module");
+        let print_annotations = args.iter().any(|arg| arg == "--print-annotations");
+        let allow_experimental = args.iter().any(|arg| arg == "--allow-experimental");
         std::process::exit(process_pipe_input(
             print_module,
             print_annotations,
             allow_experimental,
+            target,
         ));
     }
 
     // Check for help flag
-    let args: Vec<String> = env::args().collect();
     let allow_experimental = args.iter().any(|arg| arg == "--allow-experimental");
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         println!("Ferlium REPL - A functional programming language interpreter");
         println!();
         println!("Usage:");
         println!("  {} [--help|-h]        Show the help.", args[0]);
-        println!("  {} [--print-ssa]      Print the ssa output", args[0]);
+        println!(
+            "  {} [--ssa]            Compile to SSA, print it, and execute it with the SSA interpreter.",
+            args[0]
+        );
         println!(
             "  {} [--print-std]      Print the standard library module (interactive mode only).",
             args[0]
@@ -835,10 +839,10 @@ fn main() {
     }
 
     // Interactive REPL mode
-    run_interactive_repl(allow_experimental);
+    run_interactive_repl(allow_experimental, target);
 }
 
-fn run_interactive_repl(allow_experimental: bool) {
+fn run_interactive_repl(allow_experimental: bool, target: ExecutionTarget) {
     // Logging
     env_logger::init();
 
@@ -1046,7 +1050,7 @@ fn run_interactive_repl(allow_experimental: bool) {
 
         // Process the input using the shared function
         let name = &format!("repl{counter}");
-        let result = process_input(name, &src, counter, &mut session, true, fuel_limit);
+        let result = process_input(name, &src, counter, &mut session, true, target, fuel_limit);
         if let Ok(module) = result {
             last_module = module;
         }
