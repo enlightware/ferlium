@@ -8,6 +8,18 @@
 
 use derive_new::new;
 
+/// Reference-interpreter backend used to execute compiled Ferlium code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ExecutionTarget {
+    Hir,
+    Ssa,
+}
+
+impl ExecutionTarget {
+    /// All execution targets, in canonical comparison order.
+    pub const ALL: [Self; 2] = [Self::Hir, Self::Ssa];
+}
+
 /// Default fuel budget for interactive execution.
 pub const DEFAULT_INTERACTIVE_FUEL_LIMIT: usize = 100_000;
 

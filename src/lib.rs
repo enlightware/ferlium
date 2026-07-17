@@ -38,6 +38,7 @@ pub use compiler::{
     ModuleDiagnostic, ModuleInfo, ModuleRegistry, ModuleSource, SourceVersion,
     parse_module_and_expr,
 };
+pub use execution::ExecutionTarget;
 pub use ide::Compiler;
 pub use module::{ModuleEnv, Path};
 pub use parser::location::{Location, SourceId, SourceTable};

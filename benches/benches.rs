@@ -13,15 +13,10 @@ use gungraun::{
 use std::hint::black_box;
 
 use ferlium::{
-    CompilerSession, Path, call_fn,
+    CompilerSession, ExecutionTarget, Path,
     hir::value::Value,
-    module::ModuleId,
-    run_fn_native,
-    std::{
-        array::{array_type, array_value_from_vec},
-        math::int_type,
-        string::String as Str,
-    },
+    module::{LocalFunctionId, ModuleId},
+    std::{array::array_value_from_vec, string::String as Str},
 };
 
 // --- User-code corpus ---
@@ -59,6 +54,34 @@ fn compile_user_code_corpus(session: &mut CompilerSession) {
 struct BenchOutput<T> {
     session: CompilerSession,
     result: T,
+}
+
+struct RuntimeBench<I> {
+    target: ExecutionTarget,
+    session: CompilerSession,
+    module_id: ModuleId,
+    entry: LocalFunctionId,
+    input: I,
+}
+
+fn runtime_bench<I>(
+    target: ExecutionTarget,
+    session: CompilerSession,
+    module_id: ModuleId,
+    function_name: &str,
+    input: I,
+) -> RuntimeBench<I> {
+    let entry = session
+        .expect_fresh_module(module_id)
+        .get_local_function_id(ferlium::ustr(function_name))
+        .unwrap_or_else(|| panic!("function {function_name} not found"));
+    RuntimeBench {
+        target,
+        session,
+        module_id,
+        entry,
+        input,
+    }
 }
 
 fn bench_session() -> CompilerSession {
@@ -109,7 +132,7 @@ fn bench_user_code_compile_without_std_startup(mut session: CompilerSession) -> 
 
 // --- Runtime benchmarks ---
 
-fn setup_quicksort() -> (CompilerSession, ModuleId, Vec<isize>) {
+fn setup_quicksort(target: ExecutionTarget) -> RuntimeBench<Vec<isize>> {
     let mut session = CompilerSession::new();
     let module_id = session
         .compile(
@@ -120,22 +143,28 @@ fn setup_quicksort() -> (CompilerSession, ModuleId, Vec<isize>) {
         .unwrap()
         .module_id;
     let random_data = lcg_seq(300, 42);
-    (session, module_id, random_data)
+    runtime_bench(target, session, module_id, "quicksort_int_a", random_data)
 }
 
-#[library_benchmark(setup = setup_quicksort, teardown = teardown_benchmark)]
-fn bench_quicksort_run(
-    (session, module_id, random_data): (CompilerSession, ModuleId, Vec<isize>),
-) -> BenchOutput<Value> {
+#[library_benchmark(teardown = teardown_benchmark)]
+#[benches::target(iter = ExecutionTarget::ALL, setup = setup_quicksort)]
+fn bench_quicksort_run(bench: RuntimeBench<Vec<isize>>) -> BenchOutput<Value> {
+    let RuntimeBench {
+        target,
+        session,
+        module_id,
+        entry,
+        input,
+    } = bench;
     let result = measure(|| {
-        let array_ty = array_type(int_type());
-        let input = int_a(random_data);
-        call_fn!(&session, module_id, "quicksort_int_a", [input => array_ty] -> array_ty).unwrap()
+        session
+            .run_entry(target, module_id, entry, vec![int_a(input)])
+            .unwrap()
     });
     BenchOutput { session, result }
 }
 
-fn setup_fibonacci() -> (CompilerSession, ModuleId) {
+fn setup_fibonacci(target: ExecutionTarget) -> RuntimeBench<()> {
     let mut session = CompilerSession::new();
     let module_id = session
         .compile(
@@ -145,19 +174,35 @@ fn setup_fibonacci() -> (CompilerSession, ModuleId) {
         )
         .unwrap()
         .module_id;
-    (session, module_id)
+    runtime_bench(target, session, module_id, "fibonacci_rec", ())
 }
 
-#[library_benchmark(setup = setup_fibonacci, teardown = teardown_benchmark)]
-fn bench_fibonacci((session, module_id): (CompilerSession, ModuleId)) -> BenchOutput<isize> {
+#[library_benchmark(teardown = teardown_benchmark)]
+#[benches::target(iter = ExecutionTarget::ALL, setup = setup_fibonacci)]
+fn bench_fibonacci(bench: RuntimeBench<()>) -> BenchOutput<isize> {
+    let RuntimeBench {
+        target,
+        session,
+        module_id,
+        entry,
+        input: (),
+    } = bench;
     let result = measure(|| {
-        run_fn_native!(&session, module_id, "fibonacci_rec", [black_box(20) => isize] -> isize)
+        session
+            .run_entry(
+                target,
+                module_id,
+                entry,
+                vec![Value::native(black_box(20isize))],
+            )
+            .unwrap()
+            .into_primitive_ty::<isize>()
             .unwrap()
     });
     BenchOutput { session, result }
 }
 
-fn setup_sieve() -> (CompilerSession, ModuleId) {
+fn setup_sieve(target: ExecutionTarget) -> RuntimeBench<()> {
     let mut session = CompilerSession::new();
     let module_id = session
         .compile(
@@ -167,19 +212,35 @@ fn setup_sieve() -> (CompilerSession, ModuleId) {
         )
         .unwrap()
         .module_id;
-    (session, module_id)
+    runtime_bench(target, session, module_id, "prime_count", ())
 }
 
-#[library_benchmark(setup = setup_sieve, teardown = teardown_benchmark)]
-fn bench_sieve((session, module_id): (CompilerSession, ModuleId)) -> BenchOutput<isize> {
+#[library_benchmark(teardown = teardown_benchmark)]
+#[benches::target(iter = ExecutionTarget::ALL, setup = setup_sieve)]
+fn bench_sieve(bench: RuntimeBench<()>) -> BenchOutput<isize> {
+    let RuntimeBench {
+        target,
+        session,
+        module_id,
+        entry,
+        input: (),
+    } = bench;
     let result = measure(|| {
-        run_fn_native!(&session, module_id, "prime_count", [black_box(500) => isize] -> isize)
+        session
+            .run_entry(
+                target,
+                module_id,
+                entry,
+                vec![Value::native(black_box(500isize))],
+            )
+            .unwrap()
+            .into_primitive_ty::<isize>()
             .unwrap()
     });
     BenchOutput { session, result }
 }
 
-fn setup_rle_encode() -> (CompilerSession, ModuleId, Str) {
+fn setup_rle_encode(target: ExecutionTarget) -> RuntimeBench<Str> {
     let mut session = CompilerSession::new();
     let module_id = session
         .compile(
@@ -190,20 +251,30 @@ fn setup_rle_encode() -> (CompilerSession, ModuleId, Str) {
         .unwrap()
         .module_id;
     let input = Str::new(&"aabccccccc".repeat(50));
-    (session, module_id, input)
+    runtime_bench(target, session, module_id, "rle_encode_string", input)
 }
 
-#[library_benchmark(setup = setup_rle_encode, teardown = teardown_benchmark)]
-fn bench_rle_encode(
-    (session, module_id, input): (CompilerSession, ModuleId, Str),
-) -> BenchOutput<Str> {
+#[library_benchmark(teardown = teardown_benchmark)]
+#[benches::target(iter = ExecutionTarget::ALL, setup = setup_rle_encode)]
+fn bench_rle_encode(bench: RuntimeBench<Str>) -> BenchOutput<Str> {
+    let RuntimeBench {
+        target,
+        session,
+        module_id,
+        entry,
+        input,
+    } = bench;
     let result = measure(|| {
-        run_fn_native!(&session, module_id, "rle_encode_string", [input => Str] -> Str).unwrap()
+        session
+            .run_entry(target, module_id, entry, vec![Value::native(input)])
+            .unwrap()
+            .into_primitive_ty::<Str>()
+            .unwrap()
     });
     BenchOutput { session, result }
 }
 
-fn setup_csv() -> (CompilerSession, ModuleId) {
+fn setup_csv(target: ExecutionTarget) -> RuntimeBench<()> {
     let mut session = CompilerSession::new();
     let module_id = session
         .compile(
@@ -213,18 +284,35 @@ fn setup_csv() -> (CompilerSession, ModuleId) {
         )
         .unwrap()
         .module_id;
-    (session, module_id)
+    runtime_bench(target, session, module_id, "csv_table", ())
 }
 
-#[library_benchmark(setup = setup_csv, teardown = teardown_benchmark)]
-fn bench_csv((session, module_id): (CompilerSession, ModuleId)) -> BenchOutput<Str> {
+#[library_benchmark(teardown = teardown_benchmark)]
+#[benches::target(iter = ExecutionTarget::ALL, setup = setup_csv)]
+fn bench_csv(bench: RuntimeBench<()>) -> BenchOutput<Str> {
+    let RuntimeBench {
+        target,
+        session,
+        module_id,
+        entry,
+        input: (),
+    } = bench;
     let result = measure(|| {
-        run_fn_native!(&session, module_id, "csv_table", [black_box(500) => isize] -> Str).unwrap()
+        session
+            .run_entry(
+                target,
+                module_id,
+                entry,
+                vec![Value::native(black_box(500isize))],
+            )
+            .unwrap()
+            .into_primitive_ty::<Str>()
+            .unwrap()
     });
     BenchOutput { session, result }
 }
 
-fn setup_bank_account() -> (CompilerSession, ModuleId) {
+fn setup_bank_account(target: ExecutionTarget) -> RuntimeBench<()> {
     use indoc::indoc;
     let mut session = CompilerSession::new();
     let _ = session.compile(
@@ -253,16 +341,30 @@ fn setup_bank_account() -> (CompilerSession, ModuleId) {
         )
         .unwrap()
         .module_id;
-    (session, module_id)
+    runtime_bench(target, session, module_id, "test", ())
 }
 
-#[library_benchmark(setup = setup_bank_account, teardown = teardown_benchmark)]
-fn bench_bank_account_run((session, module_id): (CompilerSession, ModuleId)) -> BenchOutput<Str> {
-    let result = measure(|| run_fn_native!(&session, module_id, "test", [] -> Str).unwrap());
+#[library_benchmark(teardown = teardown_benchmark)]
+#[benches::target(iter = ExecutionTarget::ALL, setup = setup_bank_account)]
+fn bench_bank_account_run(bench: RuntimeBench<()>) -> BenchOutput<Str> {
+    let RuntimeBench {
+        target,
+        session,
+        module_id,
+        entry,
+        input: (),
+    } = bench;
+    let result = measure(|| {
+        session
+            .run_entry(target, module_id, entry, vec![])
+            .unwrap()
+            .into_primitive_ty::<Str>()
+            .unwrap()
+    });
     BenchOutput { session, result }
 }
 
-fn setup_sudoku() -> (CompilerSession, ModuleId) {
+fn setup_sudoku(target: ExecutionTarget) -> RuntimeBench<()> {
     let mut session = CompilerSession::new();
     let module_id = session
         .compile(
@@ -272,24 +374,38 @@ fn setup_sudoku() -> (CompilerSession, ModuleId) {
         )
         .unwrap()
         .module_id;
-    (session, module_id)
+    runtime_bench(target, session, module_id, "solved_cell", ())
 }
 
-#[library_benchmark(setup = setup_sudoku, teardown = teardown_benchmark)]
-fn bench_sudoku_run((session, module_id): (CompilerSession, ModuleId)) -> BenchOutput<isize> {
+#[library_benchmark(teardown = teardown_benchmark)]
+#[benches::target(iter = ExecutionTarget::ALL, setup = setup_sudoku)]
+fn bench_sudoku_run(bench: RuntimeBench<()>) -> BenchOutput<isize> {
+    let RuntimeBench {
+        target,
+        session,
+        module_id,
+        entry,
+        input: (),
+    } = bench;
     let result = measure(|| {
-        run_fn_native!(
-            &session,
-            module_id,
-            "solved_cell",
-            [black_box(0) => isize, black_box(2) => isize] -> isize
-        )
-        .unwrap()
+        session
+            .run_entry(
+                target,
+                module_id,
+                entry,
+                vec![
+                    Value::native(black_box(0isize)),
+                    Value::native(black_box(2isize)),
+                ],
+            )
+            .unwrap()
+            .into_primitive_ty::<isize>()
+            .unwrap()
     });
     BenchOutput { session, result }
 }
 
-fn setup_calculator() -> (CompilerSession, ModuleId, Str) {
+fn setup_calculator(target: ExecutionTarget) -> RuntimeBench<Str> {
     let mut session = CompilerSession::new();
     let module_id = session
         .compile(
@@ -300,15 +416,25 @@ fn setup_calculator() -> (CompilerSession, ModuleId, Str) {
         .unwrap()
         .module_id;
     let expr = Str::new("((1 + 2) * (3 + 4) - 5) * 6 / 2 + 100");
-    (session, module_id, expr)
+    runtime_bench(target, session, module_id, "calculate", expr)
 }
 
-#[library_benchmark(setup = setup_calculator, teardown = teardown_benchmark)]
-fn bench_calculator_run(
-    (session, module_id, expr): (CompilerSession, ModuleId, Str),
-) -> BenchOutput<isize> {
+#[library_benchmark(teardown = teardown_benchmark)]
+#[benches::target(iter = ExecutionTarget::ALL, setup = setup_calculator)]
+fn bench_calculator_run(bench: RuntimeBench<Str>) -> BenchOutput<isize> {
+    let RuntimeBench {
+        target,
+        session,
+        module_id,
+        entry,
+        input,
+    } = bench;
     let result = measure(|| {
-        run_fn_native!(&session, module_id, "calculate", [expr => Str] -> isize).unwrap()
+        session
+            .run_entry(target, module_id, entry, vec![Value::native(input)])
+            .unwrap()
+            .into_primitive_ty::<isize>()
+            .unwrap()
     });
     BenchOutput { session, result }
 }

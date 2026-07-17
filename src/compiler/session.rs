@@ -19,8 +19,8 @@ use crate::{
         ModuleRef, compile_with_source_id, new_ast_arena_sized_from_source, parse_module_and_expr,
     },
     define_id_type, emit_ssa,
-    eval::{EvalCtx, ValOrMut, eval_function_with_ctx},
-    execution::{DEFAULT_INTERACTIVE_FUEL_LIMIT, ReferenceInterpreterLimits},
+    eval::{ControlFlow, EvalCtx, RuntimeError, ValOrMut, eval_function, eval_function_with_ctx},
+    execution::{DEFAULT_INTERACTIVE_FUEL_LIMIT, ExecutionTarget, ReferenceInterpreterLimits},
     format::FormatWith,
     hir::emit_expr::emit_expr_entry_with_private_impls,
     hir::value::Value,
@@ -987,15 +987,31 @@ impl CompilerSession {
             .unwrap_or_else(|error| panic!("rendering SSA result failed: {error}"))
     }
 
-    /// Interpret an already-compiled expression entry through the SSA backend.
-    pub fn run_entry_via_ssa(
+    /// Interpret an already-compiled entry through the selected reference backend.
+    ///
+    /// The entry must accept only caller-owned by-value arguments and cannot require hidden
+    /// dictionary parameters.
+    pub fn run_entry(
         &self,
+        target: ExecutionTarget,
         module_id: ModuleId,
         entry: LocalFunctionId,
-    ) -> Result<Value, crate::eval::RuntimeError> {
-        use crate::ssa::interpreter::Interpreter;
-        let mut interp = Interpreter::new(module_id, self);
-        interp.run_entry(module_id, entry, vec![])
+        arguments: Vec<Value>,
+    ) -> Result<Value, RuntimeError> {
+        match target {
+            ExecutionTarget::Hir => eval_function(
+                module_id,
+                entry,
+                arguments.into_iter().map(ValOrMut::Val).collect(),
+                self,
+            )
+            .map(ControlFlow::into_value),
+            ExecutionTarget::Ssa => {
+                use crate::ssa::interpreter::Interpreter;
+                let mut interp = Interpreter::new(module_id, self);
+                interp.run_entry(module_id, entry, arguments)
+            }
+        }
     }
 
     /// Returns the entry for module_id, or panic if not found.

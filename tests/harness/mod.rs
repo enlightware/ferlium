@@ -7,12 +7,9 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 use ferlium::{
-    CompilationOutput, CompilerSession, FxHashSet, Location, SourceTable,
+    CompilationOutput, CompilerSession, ExecutionTarget, FxHashSet, Location, SourceTable,
     compiler::error::{CompilationError, RuntimeErrorKind},
-    eval::{
-        ControlFlow, EvalControlFlowResult, EvalCtx, EvalResult, RuntimeError, ValOrMut, cont,
-        eval_function,
-    },
+    eval::{EvalControlFlowResult, EvalCtx, EvalResult, RuntimeError, ValOrMut, cont},
     hir::function::{
         ArgConvention, BinaryNativeFnNNV, BinaryNativeFnRMN, BinaryNativeFnRRN, Callable,
         CallableDefinition, Function, NullaryNativeFnN, NullaryNativeFnV, UnaryNativeFnMN,
@@ -21,8 +18,8 @@ use ferlium::{
     hir::value::{LiteralValue, NativeValueType, Value},
     hir::{ENodeArena, ENodeId, NodeKind},
     module::{
-        BlanketTraitImplSubKey, ELocalDecl, LocalFunctionId, Module, ModuleEnv, ModuleFunction,
-        ModuleId, Path, TraitId,
+        BlanketTraitImplSubKey, ELocalDecl, Module, ModuleEnv, ModuleFunction, ModuleId, Path,
+        TraitId,
     },
     std::core_traits_names::{ITERATOR_TRAIT_NAME, VALUE_TRAIT_NAME},
     std::{
@@ -1429,14 +1426,6 @@ impl TestSession {
             .clone()
     }
 
-    /// Interpret the already-compiled top-level expression `expr` of `module_id` with the HIR
-    /// interpreter, returning its value.
-    fn eval_hir(&self, module_id: ModuleId, expr: LocalFunctionId) -> Result<Value, Error> {
-        eval_function(module_id, expr, vec![], &self.session)
-            .map(ControlFlow::into_value)
-            .map_err(Error::Runtime)
-    }
-
     /// Compile and run the src and return its typed execution result (either a value or an error)
     pub fn try_compile_and_run_value(&mut self, src: &str) -> CompileRunValueResult {
         // Compile the source.
@@ -1464,12 +1453,12 @@ impl TestSession {
                 // fixture would apply its effect twice (once per backend) and the two backends
                 // would diverge spuriously. See `PropertyFixtures`.
                 let fixtures = PropertyFixtures::capture();
-                let hir_result = self.eval_hir(module_id, expr);
-                fixtures.restore();
-                let ssa_result = self
-                    .session
-                    .run_entry_via_ssa(module_id, expr)
-                    .map_err(Error::Runtime);
+                let [hir_result, ssa_result] = ExecutionTarget::ALL.map(|target| {
+                    fixtures.restore();
+                    self.session
+                        .run_entry(target, module_id, expr, vec![])
+                        .map_err(Error::Runtime)
+                });
                 match (&hir_result, &ssa_result) {
                     (Ok(hir_value), Ok(ssa_value)) => {
                         if let Err(message) = compare_values(ssa_value, hir_value, "value") {

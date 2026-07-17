@@ -124,10 +124,11 @@ and remains future work.
 ## Surfacing and testing
 
 `Interpreter::run_entry`, its no-argument `run_main` convenience wrapper, and
-`CompilerSession::run_entry_via_ssa` return `Result<Value, RuntimeError>`, so the SSA backend reports
-errors instead of panicking. The test harness runs failing snippets through *both* backends under
-`Backend::Both` and asserts outcome parity: equal values, matching ordinary error kinds, or matching
-hard-abort summaries and both retained cause kinds. The drop-count tests in `tests/language/value.rs`
+`CompilerSession::run_entry` return `Result<Value, RuntimeError>`, so both reference backends report
+errors instead of panicking. The test harness runs failing snippets through
+`ExecutionTarget::ALL` and asserts outcome parity: equal values, matching ordinary error kinds, or
+matching hard-abort summaries and both retained cause kinds. The drop-count tests in
+`tests/language/value.rs`
 (e.g.
 `lexical_drop_runs_on_runtime_error`, `nested_scope_drops_run_innermost_first_on_runtime_error`,
 `cross_frame_drops_run_callee_first_on_runtime_error`) pin that the SSA landing-pad chain drops the

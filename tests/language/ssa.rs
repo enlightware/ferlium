@@ -1,7 +1,7 @@
 use test_log::test;
 
 use ferlium::{
-    Location,
+    ExecutionTarget, Location,
     compiler::error::RuntimeErrorKind,
     eval::{EvalCtx, RuntimeError},
     execution::ReferenceInterpreterLimits,
@@ -64,7 +64,7 @@ fn run_main_with_environment_cell_limit(
 }
 
 #[test]
-fn entry_invocation_accepts_by_value_arguments() {
+fn execution_targets_accept_by_value_arguments() {
     let mut session = TestSession::new();
     let module_id = session
         .compile("fn add_one(value: int) -> int { value + 1 }")
@@ -74,14 +74,15 @@ fn entry_invocation_accepts_by_value_arguments() {
         .expect_fresh_module(module_id)
         .get_local_function_id(ustr::ustr("add_one"))
         .unwrap();
-    let mut interpreter = Interpreter::new(module_id, session.session());
-
-    assert_val_eq!(
-        interpreter
-            .run_entry(module_id, add_one_id, vec![int_value(41)])
-            .unwrap(),
-        int(42)
-    );
+    for target in ExecutionTarget::ALL {
+        assert_val_eq!(
+            session
+                .session()
+                .run_entry(target, module_id, add_one_id, vec![int_value(41)])
+                .unwrap(),
+            int(42)
+        );
+    }
 }
 
 fn tracked_drop_log(session: &mut TestSession) -> isize {
