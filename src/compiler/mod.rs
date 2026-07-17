@@ -7,11 +7,13 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
+mod artifacts;
 pub mod diagnostics;
 pub mod error;
 mod pipeline;
 mod session;
 
+pub(crate) use artifacts::{ModuleArtifacts, SsaArtifacts};
 pub use diagnostics::ModuleDiagnostic;
 pub use error::*;
 pub(crate) use pipeline::add_code_to_module_with_capabilities;
@@ -71,5 +73,23 @@ pub mod test_support {
         module_id: ModuleId,
     ) -> Option<Vec<ModuleId>> {
         Some(session.modules().info(module_id)?.latest_deps().to_vec())
+    }
+
+    pub fn module_has_ssa_artifacts(
+        session: &CompilerSession,
+        module_id: ModuleId,
+    ) -> Option<bool> {
+        Some(session.modules().info(module_id)?.has_ssa_artifacts())
+    }
+
+    pub fn module_ssa_function_slots(
+        session: &CompilerSession,
+        module_id: ModuleId,
+    ) -> Option<usize> {
+        session
+            .modules
+            .get(module_id)?
+            .current_ssa()
+            .map(|ssa| ssa.len())
     }
 }

@@ -9,7 +9,7 @@ use crate::ssa::Instruction;
 use crate::types::r#trait::{TraitDictionaryEntryIndex, TraitMethodIndex};
 use crate::types::r#type::{CallImplType, CallResultConvention, SubscriptResultConvention};
 use crate::{
-    CompilerSession, Location, Modules, containers,
+    Location, Modules, containers,
     format::FormatWith,
     hir::{
         self, CallArgument, Case, ENode, ENodeArena, Elaborated, GetDictionary, LoopId,
@@ -39,7 +39,11 @@ use crate::{
 /// bodiless (native) functions are skipped.
 ///
 /// Intended for testing and debugging.
-pub fn emit_ssa(module: &Module, others: &Modules, session: &CompilerSession) -> String {
+pub(crate) fn emit_ssa(
+    module: &Module,
+    others: &Modules,
+    artifacts: &crate::compiler::SsaArtifacts,
+) -> String {
     let mut functions: Vec<(Ustr, LocalFunctionId)> = (0..module.function_count())
         .map(LocalFunctionId::from_index)
         .filter_map(|id| {
@@ -54,7 +58,13 @@ pub fn emit_ssa(module: &Module, others: &Modules, session: &CompilerSession) ->
     functions.sort_by_key(|(name, id)| (*name, id.as_index()));
     functions
         .into_iter()
-        .map(|(_, f)| Emitter::emit_ssa_fn(f, module, others, session))
+        .map(|(_, f)| {
+            let lowered = artifacts
+                .get(f)
+                .expect("every script function must have an SSA artifact");
+            let env = ModuleEnv::new(module, others);
+            format!("{}", lowered.format_with(&env))
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -76,55 +86,29 @@ struct CaseBlocks {
 
 /// A constructor of SSA IR.
 struct Emitter<'a> {
-    /// The module being lowered.
-    module: &'a Module,
-
-    /// The other modules.
-    others: &'a Modules,
+    /// Read-only access to the completed module and its dependencies.
+    env: ModuleEnv<'a>,
 
     /// The context in which the emitter inserts new IR.
     context: InsertionContext,
 
     /// The HIR node arena.
     hir_arena: &'a ENodeArena,
-
-    /// The current compiler session.
-    session: &'a CompilerSession,
 }
 
 /// Builds the SSA IR of the function `source` of `module` and returns the lowered function.
 ///
 /// This is the shared entry point used both by the textual SSA dump (`emit_ssa`) and by backends
 /// (such as the WASM emitter) that consume the lowered `ssa::Function` directly.
-pub fn build_ssa_function(
-    source: LocalFunctionId,
-    module: &Module,
-    others: &Modules,
-    session: &CompilerSession,
-) -> ssa::Function {
-    Emitter::build_ssa_fn(source, module, others, session)
+pub fn build_ssa_function(source: LocalFunctionId, env: ModuleEnv<'_>) -> ssa::Function {
+    Emitter::build_ssa_fn(source, env)
 }
 
 impl<'a> Emitter<'a> {
-    /// Generates the textual IR of `source`.
-    fn emit_ssa_fn(
-        source: LocalFunctionId,
-        module: &'a Module,
-        others: &'a Modules,
-        session: &'a CompilerSession,
-    ) -> String {
-        let lowered = Self::build_ssa_fn(source, module, others, session);
-        let env = ModuleEnv::new(module, others);
-        format!("{}", lowered.format_with(&env))
-    }
-
     /// Builds and returns the lowered SSA representation of `source`.
-    fn build_ssa_fn(
-        source: LocalFunctionId,
-        module: &'a Module,
-        others: &'a Modules,
-        session: &'a CompilerSession,
-    ) -> ssa::Function {
+    fn build_ssa_fn(source: LocalFunctionId, env: ModuleEnv<'a>) -> ssa::Function {
+        let module = env.current;
+        let others = env.modules;
         let f = module.get_function_by_id(source).unwrap();
         let syntax = f
             .code
@@ -205,8 +189,7 @@ impl<'a> Emitter<'a> {
 
         // Instantiate an emitter to generate the function's contents.
         let mut emitter = Emitter {
-            module,
-            others,
+            env,
             context: InsertionContext {
                 function: lowered,
                 source,
@@ -223,7 +206,6 @@ impl<'a> Emitter<'a> {
                 cleanup_unwind_target: CleanupUnwindTarget::CurrentScope,
             },
             hir_arena: &module.hir_arena,
-            session,
         };
 
         // Allocate frame storage for every `Owned` local and bind it to its `alloca` place.
@@ -337,9 +319,8 @@ impl<'a> Emitter<'a> {
         method_index: TraitMethodIndex,
         ty: Type,
     ) -> (TraitDictionaryEntryIndex, Type) {
-        let env = ModuleEnv::new(self.module, self.others);
-        let value_trait_id = env.expect_std_trait_id(VALUE_TRAIT_NAME);
-        let trait_def = env.trait_def(value_trait_id);
+        let value_trait_id = self.env.expect_std_trait_id(VALUE_TRAIT_NAME);
+        let trait_def = self.env.trait_def(value_trait_id);
         let dict_ty = trait_def.get_dictionary_type_for_tys(&[ty], &[], &[]);
         let entry_index = trait_def.dictionary_method_index(method_index);
         let dict_ty_data = dict_ty.data();
@@ -354,16 +335,17 @@ impl<'a> Emitter<'a> {
     /// per *local*; an emitter-synthesized clone-source temporary has no local to carry a drop
     /// resolution, so its drop is recovered from the impl the clone came from.
     fn value_drop_sibling_of_clone(&self, clone: FunctionId) -> FunctionId {
-        let env = ModuleEnv::new(self.module, self.others);
-        let value_trait_id = env.expect_std_trait_id(VALUE_TRAIT_NAME);
-        let trait_def = env.trait_def(value_trait_id);
+        let value_trait_id = self.env.expect_std_trait_id(VALUE_TRAIT_NAME);
+        let trait_def = self.env.trait_def(value_trait_id);
         let clone_index = trait_def
             .dictionary_method_index(VALUE_CLONE_METHOD_INDEX)
             .as_index();
         let drop_index = trait_def
             .dictionary_method_index(VALUE_DROP_METHOD_INDEX)
             .as_index();
-        let module = self.session.expect_fresh_module(clone.module);
+        let module = self.env.module_by_id(clone.module).unwrap_or_else(|| {
+            panic!("module {} is unavailable during SSA lowering", clone.module)
+        });
         // The compiler-provided `Value` methods of function types are module-wide named
         // functions, not impl members; resolve the drop sibling by its well-known name.
         if module.get_function_name_by_id(clone.function)
@@ -768,7 +750,11 @@ impl<'a> Emitter<'a> {
     /// skipped here. Non-owning, non-argument locals (aliases) are bound to their initializer's place
     /// when their `StoreLocal` is lowered.
     fn allocate_owned_locals(&mut self) {
-        let f = self.module.get_function_by_id(self.context.source).unwrap();
+        let f = self
+            .env
+            .current
+            .get_function_by_id(self.context.source)
+            .unwrap();
         let owned: Vec<(LocalDeclId, Type)> = f
             .locals
             .iter()
@@ -805,8 +791,7 @@ impl<'a> Emitter<'a> {
     /// a value *of* a bare type variable — or an aggregate embedding one directly — has a layout that
     /// depends on a run-time witness (see [`type_has_static_layout`]).
     fn is_statically_sized(&self, ty: Type) -> bool {
-        let env = ModuleEnv::new(self.module, self.others);
-        type_has_static_layout(ty, self.context.span, &env)
+        type_has_static_layout(ty, self.context.span, &self.env)
     }
 
     /// Inserts an allocation of storage for an instance of `ty` and returns its address.
@@ -845,7 +830,8 @@ impl<'a> Emitter<'a> {
     /// Returns the declaration for `l` within the currently-lowered function.
     fn local_declaration(&self, l: LocalDeclId) -> &module::ELocalDecl {
         &self
-            .module
+            .env
+            .current
             .get_function_by_id(self.context.source)
             .unwrap()
             .locals[l.as_index()]
@@ -936,7 +922,7 @@ impl<'a> Emitter<'a> {
             .cloned()
             .expect("an array literal must have a named array type");
         let element_ty = named.params[0];
-        let shape = named.instantiated_shape(&ModuleEnv::new(self.module, self.others));
+        let shape = named.instantiated_shape(&self.env);
         let fields = shape
             .data()
             .as_record()
@@ -1010,7 +996,10 @@ impl<'a> Emitter<'a> {
     /// calls to std primitives (e.g. the `buffer_*` intrinsics) that the lowered source need not
     /// itself import.
     fn demand_std_function(&self, name: &str) -> FunctionId {
-        let std_module = self.session.expect_fresh_module(STD_MODULE_ID);
+        let std_module = self
+            .env
+            .module_by_id(STD_MODULE_ID)
+            .expect("std module is unavailable during SSA lowering");
         let id = std_module
             .get_local_function_id(Ustr::from(name))
             .unwrap_or_else(|| panic!("std function `{name}` not found"));
@@ -1021,7 +1010,10 @@ impl<'a> Emitter<'a> {
     /// subscript named `name`. Used to synthesize slot-place calls (e.g. `buffer_slot`), which are
     /// registered as subscripts rather than plain functions.
     fn demand_std_subscript_mut_member(&self, name: &str) -> FunctionId {
-        let std_module = self.session.expect_fresh_module(STD_MODULE_ID);
+        let std_module = self
+            .env
+            .module_by_id(STD_MODULE_ID)
+            .expect("std module is unavailable during SSA lowering");
         let subscript = std_module
             .get_subscript(Ustr::from(name))
             .unwrap_or_else(|| panic!("std subscript `{name}` not found"));
@@ -2361,8 +2353,11 @@ impl<'a> Emitter<'a> {
 
     /// Interns a typed HIR immediate representation in the current function's constant pool.
     fn immediate_constant(&mut self, ty: Type, representation: LiteralValue) -> ssa::Value {
-        let env = ModuleEnv::new(self.module, self.others);
-        ssa::Value::Constant(self.context.function.add_constant(ty, representation, &env))
+        ssa::Value::Constant(
+            self.context
+                .function
+                .add_constant(ty, representation, &self.env),
+        )
     }
 
     /// Inserts `s` at the current insertion point, and returns its result register, if any.
@@ -2395,8 +2390,7 @@ impl<'a> Emitter<'a> {
 
     /// Returns a textual representation of `x`.
     fn show<T: FormatWith<ModuleEnv<'a>>>(&self, x: T) -> String {
-        let e = ModuleEnv::new(self.module, self.others);
-        format!("{}", x.format_with(&e))
+        format!("{}", x.format_with(&self.env))
     }
 }
 

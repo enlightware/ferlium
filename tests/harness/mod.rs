@@ -1288,6 +1288,11 @@ impl TestSession {
         &self.session
     }
 
+    /// Get mutable access to the compiler session for artifact preparation and compiler tests.
+    pub fn session_mut(&mut self) -> &mut CompilerSession {
+        &mut self.session
+    }
+
     pub fn allow_experimental(&mut self) {
         self.session.set_allow_experimental(true);
     }

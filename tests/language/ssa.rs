@@ -16,6 +16,12 @@ use crate::harness::{TestSession, bool, expected_tuple, int, int_value};
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
 
+fn prepare_ssa(session: &mut TestSession, module_id: ferlium::module::ModuleId) {
+    session
+        .session_mut()
+        .prepare_execution_target(ExecutionTarget::Ssa, module_id);
+}
+
 fn run_ssa_with_limits(
     session: &mut TestSession,
     source: &str,
@@ -31,6 +37,7 @@ fn run_ssa_with_limits(
     let limits = ReferenceInterpreterLimits::default()
         .with_call_depth_limit(call_depth_limit)
         .with_fuel_limit(fuel_limit);
+    prepare_ssa(session, module_id);
     let mut interpreter = Interpreter::with_limits(module_id, session.session(), limits);
     interpreter.run_main(module_id, main_id)
 }
@@ -49,6 +56,7 @@ fn run_main_with_environment_cell_limit(
         .expect("test source must define `fn main`");
     let limits = ReferenceInterpreterLimits::default().with_environment_cell_limit(limit);
     if via_ssa {
+        prepare_ssa(session, module_id);
         let mut interpreter = Interpreter::with_limits(module_id, session.session(), limits);
         interpreter.run_main(module_id, main_id)
     } else {
@@ -77,7 +85,7 @@ fn execution_targets_accept_by_value_arguments() {
     for target in ExecutionTarget::ALL {
         assert_val_eq!(
             session
-                .session()
+                .session_mut()
                 .run_entry(target, module_id, add_one_id, vec![int_value(41)])
                 .unwrap(),
             int(42)
@@ -276,6 +284,7 @@ fn ssa_environment_cell_limit_stops_allocation_and_leaves_session_usable() {
         .get_local_function_id(ustr::ustr("main"))
         .expect("test source must define `fn main`");
     let limits = ReferenceInterpreterLimits::default().with_environment_cell_limit(1);
+    prepare_ssa(&mut session, module_id);
     let mut interpreter = Interpreter::with_limits(module_id, session.session(), limits);
     let error = interpreter
         .run_main(module_id, main_id)
@@ -327,6 +336,7 @@ fn environment_cell_exhaustion_unwinds_owned_locals_in_both_interpreters() {
         .with_call_depth_limit(1_024)
         .with_environment_cell_limit(32);
 
+    prepare_ssa(&mut session, module_id);
     let mut interpreter = Interpreter::with_limits(module_id, session.session(), limits);
     let error = interpreter
         .run_main(module_id, main_id)
@@ -409,6 +419,7 @@ fn reused_ssa_interpreter_reclaims_dropped_frames() {
         .expect_fresh_module(module_id)
         .get_local_function_id(ustr::ustr("main"))
         .expect("test source must define `fn main`");
+    prepare_ssa(&mut session, module_id);
     let mut interpreter = Interpreter::new(module_id, session.session());
 
     for _ in 0..3 {
@@ -485,6 +496,7 @@ fn failure_during_cancellation_unwind_hard_aborts_and_poisons_both_interpreters(
         .expect_fresh_module(module_id)
         .get_local_function_id(ustr::ustr("main"))
         .expect("test source must define `fn main`");
+    prepare_ssa(&mut session, module_id);
     let mut observed_ssa_hard_abort = false;
     for limit in 4..64 {
         let limits = ReferenceInterpreterLimits::default()
@@ -720,6 +732,7 @@ fn cancellation_during_closure_environment_drop_reclaims_the_temporary() {
         .expect_fresh_module(module_id)
         .get_local_function_id(ustr::ustr("main"))
         .expect("test source must define `fn main`");
+    prepare_ssa(&mut session, module_id);
 
     // The exact number of reference-interpreter cells used is an implementation detail. Sweep a
     // small range to exercise cancellation specifically while the cloned closure environment is

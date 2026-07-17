@@ -40,11 +40,11 @@ const USER_CODE_CORPUS: &[(&str, &str)] = &[
     ),
 ];
 
-fn compile_user_code_corpus(session: &mut CompilerSession) {
+fn compile_user_code_corpus(session: &mut CompilerSession, target: ExecutionTarget) {
     for (name, src) in USER_CODE_CORPUS {
         let file = format!("{name}.fer");
         let module_id = session
-            .compile(src, &file, Path::single_str(name))
+            .compile_for(target, src, &file, Path::single_str(name))
             .unwrap()
             .module_id;
         black_box(module_id);
@@ -66,7 +66,7 @@ struct RuntimeBench<I> {
 
 fn runtime_bench<I>(
     target: ExecutionTarget,
-    session: CompilerSession,
+    mut session: CompilerSession,
     module_id: ModuleId,
     function_name: &str,
     input: I,
@@ -75,6 +75,7 @@ fn runtime_bench<I>(
         .expect_fresh_module(module_id)
         .get_local_function_id(ferlium::ustr(function_name))
         .unwrap_or_else(|| panic!("function {function_name} not found"));
+    session.prepare_execution_target(target, module_id);
     RuntimeBench {
         target,
         session,
@@ -86,6 +87,10 @@ fn runtime_bench<I>(
 
 fn bench_session() -> CompilerSession {
     CompilerSession::new()
+}
+
+fn bench_session_for_target(target: ExecutionTarget) -> (CompilerSession, ExecutionTarget) {
+    (CompilerSession::new(), target)
 }
 
 /// Drop benchmark-owned values after Gungraun has left the measured function.
@@ -121,9 +126,12 @@ fn bench_std_load() -> BenchOutput<()> {
     }
 }
 
-#[library_benchmark(setup = bench_session, teardown = teardown_benchmark)]
-fn bench_user_code_compile_without_std_startup(mut session: CompilerSession) -> BenchOutput<()> {
-    measure(|| compile_user_code_corpus(&mut session));
+#[library_benchmark(teardown = teardown_benchmark)]
+#[benches::target(iter = ExecutionTarget::ALL, setup = bench_session_for_target)]
+fn bench_user_code_compile_without_std_startup(
+    (mut session, target): (CompilerSession, ExecutionTarget),
+) -> BenchOutput<()> {
+    measure(|| compile_user_code_corpus(&mut session, target));
     BenchOutput {
         session,
         result: (),
@@ -135,7 +143,8 @@ fn bench_user_code_compile_without_std_startup(mut session: CompilerSession) -> 
 fn setup_quicksort(target: ExecutionTarget) -> RuntimeBench<Vec<isize>> {
     let mut session = CompilerSession::new();
     let module_id = session
-        .compile(
+        .compile_for(
+            target,
             include_str!("../tests/modules/quicksort.fer"),
             "quicksort.fer",
             Path::single_str("quicksort"),
@@ -151,7 +160,7 @@ fn setup_quicksort(target: ExecutionTarget) -> RuntimeBench<Vec<isize>> {
 fn bench_quicksort_run(bench: RuntimeBench<Vec<isize>>) -> BenchOutput<Value> {
     let RuntimeBench {
         target,
-        session,
+        mut session,
         module_id,
         entry,
         input,
@@ -167,7 +176,8 @@ fn bench_quicksort_run(bench: RuntimeBench<Vec<isize>>) -> BenchOutput<Value> {
 fn setup_fibonacci(target: ExecutionTarget) -> RuntimeBench<()> {
     let mut session = CompilerSession::new();
     let module_id = session
-        .compile(
+        .compile_for(
+            target,
             include_str!("../tests/modules/fibonacci.fer"),
             "fibonacci.fer",
             Path::single_str("fibonacci"),
@@ -182,7 +192,7 @@ fn setup_fibonacci(target: ExecutionTarget) -> RuntimeBench<()> {
 fn bench_fibonacci(bench: RuntimeBench<()>) -> BenchOutput<isize> {
     let RuntimeBench {
         target,
-        session,
+        mut session,
         module_id,
         entry,
         input: (),
@@ -205,7 +215,8 @@ fn bench_fibonacci(bench: RuntimeBench<()>) -> BenchOutput<isize> {
 fn setup_sieve(target: ExecutionTarget) -> RuntimeBench<()> {
     let mut session = CompilerSession::new();
     let module_id = session
-        .compile(
+        .compile_for(
+            target,
             include_str!("../tests/modules/sieve.fer"),
             "sieve.fer",
             Path::single_str("sieve"),
@@ -220,7 +231,7 @@ fn setup_sieve(target: ExecutionTarget) -> RuntimeBench<()> {
 fn bench_sieve(bench: RuntimeBench<()>) -> BenchOutput<isize> {
     let RuntimeBench {
         target,
-        session,
+        mut session,
         module_id,
         entry,
         input: (),
@@ -243,7 +254,8 @@ fn bench_sieve(bench: RuntimeBench<()>) -> BenchOutput<isize> {
 fn setup_rle_encode(target: ExecutionTarget) -> RuntimeBench<Str> {
     let mut session = CompilerSession::new();
     let module_id = session
-        .compile(
+        .compile_for(
+            target,
             include_str!("../tests/modules/rle_encode.fer"),
             "rle_encode.fer",
             Path::single_str("rle_encode"),
@@ -259,7 +271,7 @@ fn setup_rle_encode(target: ExecutionTarget) -> RuntimeBench<Str> {
 fn bench_rle_encode(bench: RuntimeBench<Str>) -> BenchOutput<Str> {
     let RuntimeBench {
         target,
-        session,
+        mut session,
         module_id,
         entry,
         input,
@@ -277,7 +289,8 @@ fn bench_rle_encode(bench: RuntimeBench<Str>) -> BenchOutput<Str> {
 fn setup_csv(target: ExecutionTarget) -> RuntimeBench<()> {
     let mut session = CompilerSession::new();
     let module_id = session
-        .compile(
+        .compile_for(
+            target,
             include_str!("../tests/modules/csv.fer"),
             "csv.fer",
             Path::single_str("csv"),
@@ -292,7 +305,7 @@ fn setup_csv(target: ExecutionTarget) -> RuntimeBench<()> {
 fn bench_csv(bench: RuntimeBench<()>) -> BenchOutput<Str> {
     let RuntimeBench {
         target,
-        session,
+        mut session,
         module_id,
         entry,
         input: (),
@@ -315,18 +328,21 @@ fn bench_csv(bench: RuntimeBench<()>) -> BenchOutput<Str> {
 fn setup_bank_account(target: ExecutionTarget) -> RuntimeBench<()> {
     use indoc::indoc;
     let mut session = CompilerSession::new();
-    let _ = session.compile(
+    let _ = session.compile_for(
+        target,
         include_str!("../tests/modules/quicksort.fer"),
         "quicksort.fer",
         Path::single_str("quicksort"),
     );
-    let _ = session.compile(
+    let _ = session.compile_for(
+        target,
         include_str!("../tests/modules/bank_account.fer"),
         "bank_account.fer",
         Path::single_str("account"),
     );
     let module_id = session
-        .compile(
+        .compile_for(
+            target,
             indoc! { r#"
             fn test() {
                 let data = account::test_data();
@@ -349,7 +365,7 @@ fn setup_bank_account(target: ExecutionTarget) -> RuntimeBench<()> {
 fn bench_bank_account_run(bench: RuntimeBench<()>) -> BenchOutput<Str> {
     let RuntimeBench {
         target,
-        session,
+        mut session,
         module_id,
         entry,
         input: (),
@@ -367,7 +383,8 @@ fn bench_bank_account_run(bench: RuntimeBench<()>) -> BenchOutput<Str> {
 fn setup_sudoku(target: ExecutionTarget) -> RuntimeBench<()> {
     let mut session = CompilerSession::new();
     let module_id = session
-        .compile(
+        .compile_for(
+            target,
             include_str!("../tests/modules/sudoku.fer"),
             "sudoku.fer",
             Path::single_str("sudoku"),
@@ -382,7 +399,7 @@ fn setup_sudoku(target: ExecutionTarget) -> RuntimeBench<()> {
 fn bench_sudoku_run(bench: RuntimeBench<()>) -> BenchOutput<isize> {
     let RuntimeBench {
         target,
-        session,
+        mut session,
         module_id,
         entry,
         input: (),
@@ -408,7 +425,8 @@ fn bench_sudoku_run(bench: RuntimeBench<()>) -> BenchOutput<isize> {
 fn setup_calculator(target: ExecutionTarget) -> RuntimeBench<Str> {
     let mut session = CompilerSession::new();
     let module_id = session
-        .compile(
+        .compile_for(
+            target,
             include_str!("../tests/modules/calculator.fer"),
             "calculator.fer",
             Path::single_str("calculator"),
@@ -424,7 +442,7 @@ fn setup_calculator(target: ExecutionTarget) -> RuntimeBench<Str> {
 fn bench_calculator_run(bench: RuntimeBench<Str>) -> BenchOutput<isize> {
     let RuntimeBench {
         target,
-        session,
+        mut session,
         module_id,
         entry,
         input,

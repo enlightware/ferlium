@@ -512,6 +512,17 @@ impl<'m> ModuleEnv<'m> {
         Self { current, modules }
     }
 
+    /// Resolve a module identity while treating the completed candidate module as current.
+    ///
+    /// Backend lowering uses this before the candidate replaces the registry placeholder.
+    pub(crate) fn module_by_id(&self, module_id: ModuleId) -> Option<&'m Module> {
+        if module_id == self.current.module_id() {
+            Some(self.current)
+        } else {
+            self.modules.get(module_id).and_then(|entry| entry.module())
+        }
+    }
+
     pub fn type_alias_name(&self, ty: Type) -> Option<String> {
         if let Some(name) = self.current.type_aliases.get_name(ty) {
             return Some(name.to_string());

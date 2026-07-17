@@ -11,6 +11,8 @@ use ::std::{cell::RefCell, fmt, sync::LazyLock};
 use derive_new::new;
 use itertools::Itertools;
 
+use super::artifacts::{ModuleArtifacts, SsaArtifacts, ensure_ssa_artifacts};
+
 use crate::{
     FxHashSet, Location, SourceId, SourceTable, ast, compilation_error,
     compiler::diagnostics::ModuleDiagnostic,
@@ -93,6 +95,8 @@ pub struct ModuleEntry {
     /// Last good compiled module (without stale deps at that time).
     /// Must be non-`None` if `stale` is false.
     pub(crate) module: Option<Module>,
+    /// Backend output derived from the current compiled module revision.
+    pub(crate) artifacts: ModuleArtifacts,
     /// Compilation error, if last compilation failed.
     pub(crate) last_error: Option<CompilationError>,
     /// Deps from latest successful self build, stale or not.
@@ -112,6 +116,7 @@ impl ModuleEntry {
         ModuleEntry {
             src_info: None,
             module: Some(module),
+            artifacts: ModuleArtifacts::default(),
             last_error: None,
             latest_deps: deps,
             compilation_revision: CompilationRevision::from_index(0),
@@ -130,6 +135,7 @@ impl ModuleEntry {
         ModuleEntry {
             src_info: Some(src_info),
             module: Some(module),
+            artifacts: ModuleArtifacts::default(),
             last_error: None,
             latest_deps: deps,
             compilation_revision,
@@ -147,6 +153,7 @@ impl ModuleEntry {
         ModuleEntry {
             src_info: Some(src_info),
             module: None,
+            artifacts: ModuleArtifacts::default(),
             last_error: None,
             latest_deps: deps,
             compilation_revision,
@@ -165,6 +172,7 @@ impl ModuleEntry {
         ModuleEntry {
             src_info: Some(src_info),
             module: None,
+            artifacts: ModuleArtifacts::default(),
             last_error: Some(error),
             latest_deps: vec![],
             compilation_revision,
@@ -183,6 +191,9 @@ impl ModuleEntry {
     ) {
         self.src_info = Some(src_info);
         self.module = old_module;
+        if self.module.is_none() {
+            self.artifacts = ModuleArtifacts::default();
+        }
         self.last_error = None;
         self.latest_deps = latest_deps;
         self.compilation_revision = compilation_revision;
@@ -201,6 +212,9 @@ impl ModuleEntry {
     ) {
         self.src_info = Some(src_info);
         self.module = old_module;
+        if self.module.is_none() {
+            self.artifacts = ModuleArtifacts::default();
+        }
         self.last_error = Some(error);
         self.compilation_revision = compilation_revision;
         self.diagnostics = diagnostics;
@@ -209,6 +223,21 @@ impl ModuleEntry {
 
     pub fn module(&self) -> Option<&Module> {
         self.module.as_ref()
+    }
+
+    pub(crate) fn current_ssa(&self) -> Option<&SsaArtifacts> {
+        (!self.stale).then(|| self.artifacts.ssa()).flatten()
+    }
+
+    pub(crate) fn new_fresh_with_artifacts(
+        src_info: ModuleSrcInfo,
+        module: Module,
+        artifacts: ModuleArtifacts,
+        compilation_revision: CompilationRevision,
+    ) -> Self {
+        let mut entry = Self::new_fresh(src_info, module, compilation_revision);
+        entry.artifacts = artifacts;
+        entry
     }
 
     pub(crate) fn next_compilation_revision(&self) -> CompilationRevision {
@@ -231,6 +260,7 @@ impl fmt::Debug for ModuleInfo<'_> {
             .field("latest_deps", &self.latest_deps())
             .field("stale", &self.is_stale())
             .field("has_compiled_module", &self.has_compiled_module())
+            .field("has_ssa_artifacts", &self.has_ssa_artifacts())
             .finish()
     }
 }
@@ -268,6 +298,11 @@ impl<'a> ModuleInfo<'a> {
     /// Return whether a compiled module is available for semantic fallback.
     pub fn has_compiled_module(&self) -> bool {
         self.entry.module.is_some()
+    }
+
+    /// Return whether the current fresh module revision has complete SSA artifacts.
+    pub fn has_ssa_artifacts(&self) -> bool {
+        self.entry.current_ssa().is_some()
     }
 }
 
@@ -523,6 +558,7 @@ impl CompilerSession {
             ModuleRef::Existing(module_id),
             uses,
             self.capabilities,
+            ExecutionTarget::Hir,
             None,
         );
         Ok(())
@@ -829,6 +865,17 @@ impl CompilerSession {
         source_name: &str,
         module_path: Path,
     ) -> Result<CompilationOutput, CompilationError> {
+        self.compile_for(ExecutionTarget::Hir, src_code, source_name, module_path)
+    }
+
+    /// Compile source code with the backend artifacts required by `target`.
+    pub fn compile_for(
+        &mut self,
+        target: ExecutionTarget,
+        src_code: &str,
+        source_name: &str,
+        module_path: Path,
+    ) -> Result<CompilationOutput, CompilationError> {
         if log::log_enabled!(log::Level::Trace) {
             log::trace!(
                 "Using other modules: {}",
@@ -862,10 +909,18 @@ impl CompilerSession {
                 source_name,
                 module_path,
                 uses,
+                target,
                 Some(&ast_inspector),
             )
         } else {
-            self.compile_to_with_ast_inspector(src_code, source_name, module_path, uses, None)
+            self.compile_to_with_ast_inspector(
+                src_code,
+                source_name,
+                module_path,
+                uses,
+                target,
+                None,
+            )
         }?;
 
         // If trace logging is enabled, display the final HIR after linking and finalizing pending functions.
@@ -901,7 +956,25 @@ impl CompilerSession {
         module_path: Path,
         uses: Uses,
     ) -> Result<CompilationOutput, CompilationError> {
-        self.compile_to_with_ast_inspector(src_code, source_name, module_path, uses, None)
+        self.compile_to_for(
+            ExecutionTarget::Hir,
+            src_code,
+            source_name,
+            module_path,
+            uses,
+        )
+    }
+
+    /// Compile source code with custom imports and the artifacts required by `target`.
+    pub fn compile_to_for(
+        &mut self,
+        target: ExecutionTarget,
+        src_code: &str,
+        source_name: &str,
+        module_path: Path,
+        uses: Uses,
+    ) -> Result<CompilationOutput, CompilationError> {
+        self.compile_to_with_ast_inspector(src_code, source_name, module_path, uses, target, None)
     }
 
     pub(crate) fn compile_to_with_ast_inspector(
@@ -910,6 +983,7 @@ impl CompilerSession {
         source_name: &str,
         module_path: Path,
         uses: Uses,
+        target: ExecutionTarget,
         ast_inspector: Option<AstInspectorCb<'_>>,
     ) -> Result<CompilationOutput, CompilationError> {
         let src_info = self
@@ -927,6 +1001,7 @@ impl CompilerSession {
             ModuleRef::ByPath(module_path),
             uses,
             self.capabilities,
+            target,
             ast_inspector,
         )
     }
@@ -936,14 +1011,22 @@ impl CompilerSession {
     /// [`emit_ssa_module`](Self::emit_ssa_module) instead.
     pub fn emit_ssa(&mut self, source_name: &str, src: &str) -> String {
         let p = module::Path::single_str(source_name);
-        let i = self.compile(src, source_name, p).unwrap().module_id;
+        let i = self
+            .compile_for(ExecutionTarget::Ssa, src, source_name, p)
+            .unwrap()
+            .module_id;
         self.emit_ssa_module(i)
     }
 
     /// Emits the SSA form of the already-compiled module `module_id`.
     pub fn emit_ssa_module(&mut self, module_id: ModuleId) -> String {
-        let module = self.expect_fresh_module(module_id);
-        emit_ssa::emit_ssa(module, self.raw_modules(), self)
+        self.prepare_execution_target(ExecutionTarget::Ssa, module_id);
+        let entry = self.expect_module_entry(module_id);
+        let module = entry.module().unwrap();
+        let artifacts = entry
+            .current_ssa()
+            .expect("SSA preparation must install complete artifacts");
+        emit_ssa::emit_ssa(module, self.raw_modules(), artifacts)
     }
 
     /// Lowers `src` to SSA and interprets its `fn main` entry, returning a textual rendering of the
@@ -956,7 +1039,10 @@ impl CompilerSession {
         use crate::ssa::interpreter::Interpreter;
 
         let p = module::Path::single_str(source_name);
-        let module_id = self.compile(src, source_name, p).unwrap().module_id;
+        let module_id = self
+            .compile_for(ExecutionTarget::Ssa, src, source_name, p)
+            .unwrap()
+            .module_id;
         let (main_id, ret_ty) = {
             let module = self.expect_fresh_module(module_id);
             let main_id = module
@@ -992,12 +1078,13 @@ impl CompilerSession {
     /// The entry must accept only caller-owned by-value arguments and cannot require hidden
     /// dictionary parameters.
     pub fn run_entry(
-        &self,
+        &mut self,
         target: ExecutionTarget,
         module_id: ModuleId,
         entry: LocalFunctionId,
         arguments: Vec<Value>,
     ) -> Result<Value, RuntimeError> {
+        self.prepare_execution_target(target, module_id);
         match target {
             ExecutionTarget::Hir => eval_function(
                 module_id,
@@ -1011,6 +1098,14 @@ impl CompilerSession {
                 let mut interp = Interpreter::new(module_id, self);
                 interp.run_entry(module_id, entry, arguments)
             }
+        }
+    }
+
+    /// Ensure that `module_id` and its dependencies have the artifacts needed by `target`.
+    /// Existing artifacts for the same module revision are reused.
+    pub fn prepare_execution_target(&mut self, target: ExecutionTarget, module_id: ModuleId) {
+        if target == ExecutionTarget::Ssa {
+            ensure_ssa_artifacts(&mut self.modules, module_id);
         }
     }
 

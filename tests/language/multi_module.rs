@@ -9,10 +9,11 @@
 use test_log::test;
 
 use ferlium::{
-    CompilerSession, Path,
+    CompilerSession, ExecutionTarget, Path,
     compiler::test_support::{
         module_compilation_revision, module_diagnostics_len, module_entry_exists,
-        module_has_compiled_version, module_is_stale, module_latest_deps, module_source_version,
+        module_has_compiled_version, module_has_ssa_artifacts, module_is_stale, module_latest_deps,
+        module_source_version, module_ssa_function_slots,
     },
     hir::value::Value,
     module::{ModuleId, Visibility, id::Id},
@@ -1222,6 +1223,94 @@ fn module_source_versions_and_compilation_revisions_are_tracked() {
     assert_eq!(unchanged.source_version().unwrap().as_index(), 1);
     assert_eq!(unchanged.compilation_revision().as_index(), 2);
     assert!(unchanged.diagnostics().is_empty());
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn ssa_artifacts_follow_the_published_module_revision() {
+    let mut session = CompilerSession::new();
+    let module_id = session
+        .compile_for(
+            ExecutionTarget::Ssa,
+            "fn value() -> int { 1 }",
+            "artifacts",
+            Path::single_str("artifacts"),
+        )
+        .expect("initial SSA compile should succeed")
+        .module_id;
+
+    assert_eq!(module_has_ssa_artifacts(&session, module_id), Some(true));
+    assert_eq!(module_ssa_function_slots(&session, module_id), Some(1));
+    let initial_revision = module_compilation_revision(&session, module_id).unwrap();
+
+    session.prepare_execution_target(ExecutionTarget::Ssa, module_id);
+    assert_eq!(
+        module_compilation_revision(&session, module_id),
+        Some(initial_revision),
+        "reusing artifacts must not change the module revision"
+    );
+
+    session
+        .update_module_source(
+            module_id,
+            "fn value() -> int { 2 } fn other() -> int { value() }",
+        )
+        .expect("SSA-enabled recompilation should succeed");
+    assert_eq!(module_has_ssa_artifacts(&session, module_id), Some(true));
+    assert_eq!(module_ssa_function_slots(&session, module_id), Some(2));
+
+    session
+        .update_module_source(module_id, "this is not valid Ferlium")
+        .expect("failed source compilation is recorded in the module entry");
+    assert_eq!(
+        module_has_ssa_artifacts(&session, module_id),
+        Some(false),
+        "stale entries must not expose old artifacts as current"
+    );
+
+    session
+        .update_module_source(module_id, "fn value() -> int { 3 }")
+        .expect("a valid update should recover the module");
+    assert_eq!(module_has_ssa_artifacts(&session, module_id), Some(true));
+    assert_eq!(module_ssa_function_slots(&session, module_id), Some(1));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn ssa_compilation_prepares_script_dependencies() {
+    let mut session = CompilerSession::new();
+    let base_id = session
+        .compile(
+            "pub fn value() -> int { 41 }",
+            "base",
+            Path::single_str("base"),
+        )
+        .expect("base should compile as HIR")
+        .module_id;
+    assert_eq!(module_has_ssa_artifacts(&session, base_id), Some(false));
+
+    let user_id = session
+        .compile_for(
+            ExecutionTarget::Ssa,
+            "fn main() -> int { base::value() + 1 }",
+            "user",
+            Path::single_str("user"),
+        )
+        .expect("SSA user should compile")
+        .module_id;
+    assert_eq!(module_has_ssa_artifacts(&session, base_id), Some(true));
+    assert_eq!(module_has_ssa_artifacts(&session, user_id), Some(true));
+
+    let main = session
+        .expect_fresh_module(user_id)
+        .get_local_function_id(ustr("main"))
+        .expect("user should define main");
+    assert_val_eq!(
+        session
+            .run_entry(ExecutionTarget::Ssa, user_id, main, vec![])
+            .unwrap(),
+        int(42)
+    );
 }
 
 #[test]

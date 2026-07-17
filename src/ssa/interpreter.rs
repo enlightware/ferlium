@@ -7,13 +7,11 @@
 //! (script) callees are interpreted recursively so their own lowering is exercised too.
 
 use std::collections::VecDeque;
-use std::rc::Rc;
 
 use rustc_hash::FxHashMap;
 
 use crate::{
     CompilerSession, Location,
-    emit_ssa::build_ssa_function,
     eval::{
         ControlFlow, EvalCtx, Place, PlaceResult, RuntimeError, ValOrMut,
         call_value_clone_for_temp, call_value_drop_for_temp,
@@ -147,19 +145,24 @@ struct SuspendedFrame {
 pub struct Interpreter<'a> {
     /// The HIR evaluation context; its `environment` doubles as the SSA heap.
     ctx: EvalCtx<'a>,
-    /// The compiler session, used to resolve and lazily lower callees.
+    /// The compiler session, used to resolve immutable module artifacts and native callees.
     session: &'a CompilerSession,
-    /// Lazily built and cached SSA bodies of called functions.
-    cache: FxHashMap<FunctionKey, Rc<ssa::Function>>,
 }
 
 impl<'a> Interpreter<'a> {
     /// Creates an interpreter whose initial module context is `module_id`.
+    ///
+    /// The session must already contain SSA artifacts for every script module that can be reached;
+    /// [`CompilerSession::prepare_execution_target`](crate::CompilerSession::prepare_execution_target)
+    /// or [`CompilerSession::run_entry`](crate::CompilerSession::run_entry) establishes that
+    /// invariant.
     pub fn new(module_id: ModuleId, session: &'a CompilerSession) -> Self {
         Self::with_limits(module_id, session, ReferenceInterpreterLimits::default())
     }
 
     /// Creates an interpreter with backend-independent execution limits.
+    ///
+    /// As with [`Self::new`], SSA artifacts must have been prepared before construction.
     pub fn with_limits(
         module_id: ModuleId,
         session: &'a CompilerSession,
@@ -168,7 +171,6 @@ impl<'a> Interpreter<'a> {
         Self {
             ctx: EvalCtx::with_limits(module_id, session, limits),
             session,
-            cache: FxHashMap::default(),
         }
     }
 
@@ -280,21 +282,19 @@ impl<'a> Interpreter<'a> {
         Ok(value)
     }
 
-    /// Returns the lowered SSA body of `key`, building and caching it on first use.
-    fn function(&mut self, key: FunctionKey) -> Rc<ssa::Function> {
-        if let Some(f) = self.cache.get(&key) {
-            return f.clone();
-        }
-        let module = self.session.expect_fresh_module(key.module);
-        let others = self.session.raw_modules();
-        let f = Rc::new(build_ssa_function(
-            key.identity,
-            module,
-            others,
-            self.session,
-        ));
-        self.cache.insert(key, f.clone());
-        f
+    /// Returns the immutable SSA body stored beside the function's semantic module revision.
+    fn function(&self, key: FunctionKey) -> &'a ssa::Function {
+        self.session
+            .expect_module_entry(key.module)
+            .current_ssa()
+            .unwrap_or_else(|| panic!("module {} has no current SSA artifacts", key.module))
+            .get(key.identity)
+            .unwrap_or_else(|| {
+                panic!(
+                    "script function {}:{} has no SSA body",
+                    key.module, key.identity
+                )
+            })
     }
 
     /// Runs `key`'s body with the given parameter bindings (in slot order). The function writes its
@@ -323,7 +323,7 @@ impl<'a> Interpreter<'a> {
         for (i, b) in args.into_iter().enumerate() {
             slots.insert(ssa::Value::Parameter(ssa::ParameterId::from_index(i)), b);
         }
-        match self.run_loop(&func, slots, func.entry(), 0)? {
+        match self.run_loop(func, slots, func.entry(), 0)? {
             FrameOutcome::Completed => Ok(()),
             FrameOutcome::Suspended { .. } => {
                 panic!(
@@ -874,7 +874,7 @@ impl<'a> Interpreter<'a> {
             _ => panic!("end_project operand is not an open projection"),
         };
         let func = self.function(key);
-        let result = self.run_loop(&func, acc_slots, block, idx);
+        let result = self.run_loop(func, acc_slots, block, idx);
         // The accessor frame is torn down whichever way its slide ends: drop the depth it
         // held since the `project` and reclaim its stack cells, then surface any slide error.
         self.ctx.call_depth -= 1;
@@ -1202,7 +1202,7 @@ impl<'a> Interpreter<'a> {
         for (i, b) in args.into_iter().enumerate() {
             acc_slots.insert(ssa::Value::Parameter(ssa::ParameterId::from_index(i)), b);
         }
-        match self.run_loop(&func, acc_slots, func.entry(), 0) {
+        match self.run_loop(func, acc_slots, func.entry(), 0) {
             Ok(FrameOutcome::Suspended {
                 place,
                 block,
