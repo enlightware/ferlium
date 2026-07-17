@@ -14,7 +14,6 @@ use ferlium::{
         module_compilation_revision, module_diagnostics_len, module_entry_exists,
         module_has_compiled_version, module_is_stale, module_latest_deps, module_source_version,
     },
-    eval::ValOrMut,
     hir::value::Value,
     module::{ModuleId, Visibility, id::Id},
     types::r#type::Type,
@@ -783,36 +782,6 @@ fn private_trait_method_is_hidden_across_modules() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn eval_expression_in_module_can_use_private_members() {
-    let mut session = CompilerSession::new();
-    let module_id = session
-        .compile(
-            "fn add_one(x) { x + 1 }",
-            "<test>",
-            Path::single_str("test"),
-        )
-        .unwrap()
-        .module_id;
-
-    let (value, ty) = session
-        .eval_expression_in_module(
-            module_id,
-            "<test_expr>",
-            "test::add_one((arg0: int))",
-            vec![(
-                "arg0",
-                Type::primitive::<isize>(),
-                ValOrMut::Val(Value::native(5isize)),
-            )],
-        )
-        .unwrap();
-
-    assert_eq!(value.as_primitive_ty::<isize>().copied(), Some(6));
-    assert_eq!(ty, Type::primitive::<isize>());
-}
-
-#[test]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn impl_for_private_type_is_not_visible_across_modules() {
     let mut session = TestSession::new();
 
@@ -1394,101 +1363,4 @@ fn value_to_string_renders_int_correctly() {
         .unwrap();
 
     assert_eq!(rendered, "42");
-}
-
-#[test]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn eval_expression_in_module_executes_inferred_single_arg_function() {
-    let mut session = CompilerSession::new();
-    let module_id = session
-        .compile(
-            "fn add_one(x) { x + 1 }",
-            "<test>",
-            Path::single_str("test"),
-        )
-        .unwrap()
-        .module_id;
-
-    let (value, ty) = session
-        .eval_expression_in_module(
-            module_id,
-            "<test_expr>",
-            "add_one((arg0: int))",
-            vec![(
-                "arg0",
-                Type::primitive::<isize>(),
-                ValOrMut::Val(Value::native(5isize)),
-            )],
-        )
-        .unwrap();
-
-    assert_eq!(value.as_primitive_ty::<isize>().copied(), Some(6));
-    assert_eq!(ty, Type::primitive::<isize>());
-}
-
-#[test]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn eval_expression_in_module_executes_inferred_multi_arg_function() {
-    let mut session = CompilerSession::new();
-    let module_id = session
-        .compile(
-            "fn mix(a, b) { a * 2 + b }",
-            "<test>",
-            Path::single_str("test"),
-        )
-        .unwrap()
-        .module_id;
-
-    let (value, ty) = session
-        .eval_expression_in_module(
-            module_id,
-            "<test_expr>",
-            "mix((arg0: int), (arg1: int))",
-            vec![
-                (
-                    "arg0",
-                    Type::primitive::<isize>(),
-                    ValOrMut::Val(Value::native(20isize)),
-                ),
-                (
-                    "arg1",
-                    Type::primitive::<isize>(),
-                    ValOrMut::Val(Value::native(2isize)),
-                ),
-            ],
-        )
-        .unwrap();
-
-    assert_eq!(value.as_primitive_ty::<isize>().copied(), Some(42));
-    assert_eq!(ty, Type::primitive::<isize>());
-}
-
-#[test]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn eval_expression_in_module_does_not_change_module_source_version() {
-    let mut session = CompilerSession::new();
-    let module_id = session
-        .compile(
-            "fn add_one(x) { x + 1 }",
-            "<test>",
-            Path::single_str("test"),
-        )
-        .unwrap()
-        .module_id;
-    let source_version = module_source_version(&session, module_id);
-
-    session
-        .eval_expression_in_module(
-            module_id,
-            "<test_expr>",
-            "add_one((arg0: int))",
-            vec![(
-                "arg0",
-                Type::primitive::<isize>(),
-                ValOrMut::Val(Value::native(5isize)),
-            )],
-        )
-        .unwrap();
-
-    assert_eq!(module_source_version(&session, module_id), source_version);
 }

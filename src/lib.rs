@@ -34,8 +34,9 @@ pub(crate) use compiler::Modules;
 pub(crate) use compiler::add_code_to_module_with_capabilities;
 pub use compiler::error::{CompilationError, LocatedError};
 pub use compiler::{
-    CompilationCapabilities, CompilationRevision, CompilerSession, ModuleAndExpr, ModuleDiagnostic,
-    ModuleInfo, ModuleRegistry, ModuleSource, SourceVersion, parse_module_and_expr,
+    CompilationCapabilities, CompilationOutput, CompilationRevision, CompilerSession,
+    ModuleDiagnostic, ModuleInfo, ModuleRegistry, ModuleSource, SourceVersion,
+    parse_module_and_expr,
 };
 pub use ide::Compiler;
 pub use module::{ModuleEnv, Path};

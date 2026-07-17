@@ -12,7 +12,7 @@ use ferlium::compiler::error::{
     GenericParamsOwner, InvalidAttributeKind, InvalidEnumDefaultAttributeKind,
     InvalidGenericParamsKind, InvalidTraitConstraintKind,
 };
-use ferlium::eval::eval_node;
+use ferlium::eval::eval_function;
 use ferlium::format::FormatWith;
 use ferlium::hir::value::Value;
 use ferlium::module::id::Id;
@@ -49,20 +49,22 @@ fn run_and_format(session: &mut TestSession, src: &str) -> String {
     let expr = module_and_expr
         .expr
         .expect("expected an expression to evaluate in formatting regression");
-    let value = {
+    let (value, ty) = {
         let compiler_session = session.session();
         let module = compiler_session.expect_fresh_module(module_and_expr.module_id);
-        eval_node(
-            &module.hir_arena,
-            expr.expr,
-            module_and_expr.module_id,
-            &expr.locals,
-            compiler_session,
-        )
-        .unwrap()
-        .into_value()
+        let ty = module
+            .get_function_by_id(expr)
+            .unwrap()
+            .definition
+            .ty_scheme
+            .ty
+            .ret;
+        let value = eval_function(module_and_expr.module_id, expr, vec![], compiler_session)
+            .unwrap()
+            .into_value();
+        (value, ty)
     };
-    session.value_to_string(module_and_expr.module_id, value, expr.ty.ty)
+    session.value_to_string(module_and_expr.module_id, value, ty)
 }
 
 fn format_compiled_module(session: &mut TestSession, src: &str) -> String {

@@ -19,14 +19,14 @@ use crate::{
     compiler::diagnostics::diagnostics_from_error,
     compiler::error::{CompilationError, LocatedError},
     compiler::session::{
-        AstInspectorCb, CompilationRevision, ModuleAndExpr, ModuleEntry, ModuleSrcInfo, Modules,
-        SourceVersion,
+        AstInspectorCb, CompilationOutput, CompilationRevision, ModuleEntry, ModuleSrcInfo,
+        Modules, SourceVersion,
     },
     containers::b,
     format::FormatWith,
     graph,
     hir::{
-        emit_expr::emit_expr_with_capabilities,
+        emit_expr::emit_expr_entry_with_capabilities,
         emit_hir::{EmitModuleFrom, emit_module_with_capabilities},
     },
     module::{Module, ModuleEnv, ModuleId, Path, Uses, id::Id},
@@ -68,7 +68,7 @@ pub(crate) fn compile_with_source_id(
     uses: Uses,
     capabilities: CompilationCapabilities,
     ast_inspector: Option<AstInspectorCb<'_>>,
-) -> Result<ModuleAndExpr, CompilationError> {
+) -> Result<CompilationOutput, CompilationError> {
     // Retrieve the source text registered under this id.
     let src_code = source_table
         .get_source_text(source_id)
@@ -200,7 +200,7 @@ pub(crate) fn compile_with_source_id(
 
     // Emit HIR for the expression, if any.
     let expr = if let Some(expr_ast) = expr_ast {
-        let compiled_expr = match emit_expr_with_capabilities(
+        let entry = match emit_expr_entry_with_capabilities(
             expr_ast,
             &arena,
             &mut module,
@@ -218,7 +218,7 @@ pub(crate) fn compile_with_source_id(
                 return Err(error);
             }
         };
-        Some(compiled_expr)
+        Some(entry)
     } else {
         None
     };
@@ -291,7 +291,7 @@ pub(crate) fn compile_with_source_id(
         }
     }
 
-    Ok(ModuleAndExpr { module_id, expr })
+    Ok(CompilationOutput { module_id, expr })
 }
 
 fn direct_deps(modules: &Modules, target: ModuleId) -> Vec<ModuleId> {

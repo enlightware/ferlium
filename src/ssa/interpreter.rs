@@ -177,44 +177,101 @@ impl<'a> Interpreter<'a> {
         self.ctx.is_poisoned()
     }
 
-    /// Runs the no-argument entry function `main_id` of `module_id` and returns its result value, or
-    /// the [`RuntimeError`] it raised. An ordinary error has already unwound the callee's frames
-    /// through their cleanup pads; a hard abort has instead reclaimed all known interpreter-owned
-    /// roots without running further Ferlium cleanup.
+    /// Runs the no-argument entry function `main_id` of `module_id`.
     pub fn run_main(
         &mut self,
         module_id: ModuleId,
         main_id: LocalFunctionId,
     ) -> Result<Value, RuntimeError> {
-        self.ctx.ensure_runnable()?;
+        self.run_entry(module_id, main_id, vec![])
+    }
+
+    /// Runs an entry function with caller-owned by-value arguments and returns its result value, or
+    /// the [`RuntimeError`] it raised.
+    ///
+    /// Entry functions cannot require hidden dictionary parameters. An ordinary error has already
+    /// unwound the callee's frames through their cleanup pads; a hard abort has instead reclaimed
+    /// all known interpreter-owned roots without running further Ferlium cleanup.
+    pub fn run_entry(
+        &mut self,
+        module_id: ModuleId,
+        entry_id: LocalFunctionId,
+        arguments: Vec<Value>,
+    ) -> Result<Value, RuntimeError> {
+        if let Err(error) = self.ctx.ensure_runnable() {
+            for argument in arguments {
+                argument.discard_storage();
+            }
+            return Err(error);
+        }
         let key = FunctionKey {
             module: module_id,
-            identity: main_id,
+            identity: entry_id,
         };
         let func = self.function(key);
+        let parameter_tags = func
+            .parameters()
+            .iter()
+            .map(|parameter| parameter.tag)
+            .collect::<Vec<_>>();
         assert_eq!(
-            func.parameters().len(),
-            1,
-            "eval_ssa entry function must take no arguments (only the return out-pointer)"
+            parameter_tags.len(),
+            arguments.len() + 1,
+            "SSA entry arguments must match its visible parameters"
         );
-        // The sole parameter is the caller-allocated return out-pointer; shape it from the return
+        assert!(
+            parameter_tags[..arguments.len()]
+                .iter()
+                .all(|tag| matches!(tag, ssa::ParameterTag::Parameter(_))),
+            "SSA entry functions cannot require hidden dictionary parameters"
+        );
+        assert_eq!(parameter_tags.last(), Some(&ssa::ParameterTag::Return));
+
+        let entry_top = self.ctx.environment.len();
+        let required_cells = arguments.len() + 1;
+        if entry_top.saturating_add(required_cells) > self.ctx.environment_cell_limit {
+            for argument in arguments {
+                argument.discard_storage();
+            }
+            return Err(self.ctx.environment_cell_limit_error(None));
+        }
+
+        let span = Location::new_synthesized();
+        let mut bindings = Vec::with_capacity(required_cells);
+        for argument in arguments {
+            let place = self
+                .alloc_cell(argument, span)
+                .expect("entry argument capacity was checked above");
+            bindings.push(Binding::Place(place));
+        }
+
+        // The final parameter is the caller-allocated return out-pointer; shape it from the return
         // type so the callee can `project`/`store` its result fields into it.
         let ret_ty = self
             .session
             .expect_fresh_module(module_id)
-            .get_function_by_id(main_id)
+            .get_function_by_id(entry_id)
             .unwrap()
             .definition
             .ty_scheme
             .ty
             .ret;
-        let entry_top = self.ctx.environment.len();
         let init = self.shaped_uninitialized_value(ret_ty);
-        let ret = self.alloc_cell(init, Location::new_synthesized())?;
-        if let Err(error) = self.run_function(key, vec![Binding::Place(ret.clone())]) {
+        let ret = self
+            .alloc_cell(init, span)
+            .expect("entry return capacity was checked above");
+        bindings.push(Binding::Place(ret.clone()));
+
+        #[cfg(debug_assertions)]
+        let boundary = Self::call_boundary(&parameter_tags, &bindings);
+        #[cfg(debug_assertions)]
+        self.check_call_boundary(&boundary, CallPhase::Before);
+        if let Err(error) = self.run_function(key, bindings) {
             self.reclaim_frame_storage(entry_top);
             return Err(error);
         }
+        #[cfg(debug_assertions)]
+        self.check_call_boundary(&boundary, CallPhase::After);
         let slot = ret
             .target_mut(&mut self.ctx)
             .expect("return cell must be addressable");

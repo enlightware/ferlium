@@ -19,7 +19,7 @@ use ferlium::{
         CompilationErrorImpl, DuplicatedVariantContext, InvalidLoopControlKind, LoopControlKind,
         MutabilityMustBeWhat, RuntimeErrorKind,
     },
-    eval::{EvalCtx, eval_node_with_ctx},
+    eval::{EvalCtx, eval_function_with_ctx},
     execution::ReferenceInterpreterLimits,
     format::FormatWith,
     hir::value::Value,
@@ -2357,10 +2357,9 @@ fn hir_execution_uses_configured_limits() {
     let expr = recursive
         .expr
         .expect("test source should have an expression");
-    let module = session.session().expect_fresh_module(recursive.module_id);
     let limits = ReferenceInterpreterLimits::default().with_call_depth_limit(4);
     let mut ctx = EvalCtx::with_limits(recursive.module_id, session.session(), limits);
-    let error = eval_node_with_ctx(&module.hir_arena, expr.expr, &mut ctx, &expr.locals)
+    let error = eval_function_with_ctx(recursive.module_id, expr, vec![], &mut ctx)
         .expect_err("recursive HIR execution must reach the configured call-depth limit");
     assert_eq!(
         error.kind(),
@@ -2369,10 +2368,9 @@ fn hir_execution_uses_configured_limits() {
 
     let looping = session.compile("loop {}");
     let expr = looping.expr.expect("test source should have an expression");
-    let module = session.session().expect_fresh_module(looping.module_id);
     let limits = ReferenceInterpreterLimits::default().with_fuel_limit(Some(0));
     let mut ctx = EvalCtx::with_limits(looping.module_id, session.session(), limits);
-    let error = eval_node_with_ctx(&module.hir_arena, expr.expr, &mut ctx, &expr.locals)
+    let error = eval_function_with_ctx(looping.module_id, expr, vec![], &mut ctx)
         .expect_err("looping HIR execution must consume the configured fuel");
     assert_eq!(error.kind(), RuntimeErrorKind::FuelExhausted);
 }
@@ -2442,13 +2440,10 @@ fn environment_cell_limit_exceeded() {
     let expr = module_and_expr
         .expr
         .expect("test source should have an expr");
-    let module = session
-        .session()
-        .expect_fresh_module(module_and_expr.module_id);
     let limits = ReferenceInterpreterLimits::default().with_environment_cell_limit(1);
     let mut ctx = EvalCtx::with_limits(module_and_expr.module_id, session.session(), limits);
 
-    let error = eval_node_with_ctx(&module.hir_arena, expr.expr, &mut ctx, &expr.locals)
+    let error = eval_function_with_ctx(module_and_expr.module_id, expr, vec![], &mut ctx)
         .expect_err("evaluation should exceed the environment-cell limit");
 
     assert_eq!(
@@ -2558,17 +2553,30 @@ fn never_type() {
 fn loop_types() {
     let mut session = TestSession::new();
 
-    let expr = session.compile("loop {}").expr.unwrap();
-    assert_eq!(expr.ty.ty, Type::never());
+    fn compile_type(session: &mut TestSession, source: &str) -> Type {
+        let compiled = session.compile(source);
+        let expr = compiled.expr.unwrap();
+        session
+            .session()
+            .expect_fresh_module(compiled.module_id)
+            .get_function_by_id(expr)
+            .unwrap()
+            .definition
+            .ty_scheme
+            .ty
+            .ret
+    }
 
-    let expr = session.compile("loop { break }").expr.unwrap();
-    assert_eq!(expr.ty.ty, Type::unit());
-
-    let expr = session.compile("loop { break 42 }").expr.unwrap();
-    assert_eq!(expr.ty.ty, Type::primitive::<isize>());
-
-    let expr = session.compile("loop { continue }").expr.unwrap();
-    assert_eq!(expr.ty.ty, Type::never());
+    assert_eq!(compile_type(&mut session, "loop {}"), Type::never());
+    assert_eq!(compile_type(&mut session, "loop { break }"), Type::unit());
+    assert_eq!(
+        compile_type(&mut session, "loop { break 42 }"),
+        Type::primitive::<isize>()
+    );
+    assert_eq!(
+        compile_type(&mut session, "loop { continue }"),
+        Type::never()
+    );
 }
 
 #[test]
@@ -3107,11 +3115,17 @@ fn type_ascription() {
 
     // Optimisation
     let module_and_expr = session.compile("1");
-    let body = module_and_expr.expr.unwrap().expr;
-    let arena = &session
+    let module = session
         .session()
-        .expect_fresh_module(module_and_expr.module_id)
-        .hir_arena;
+        .expect_fresh_module(module_and_expr.module_id);
+    let body = module
+        .get_function_by_id(module_and_expr.expr.unwrap())
+        .unwrap()
+        .code
+        .as_script()
+        .unwrap()
+        .entry_node_id;
+    let arena = &module.hir_arena;
     let root = &arena[body];
     assert!(
         arena[root.kind.as_block().unwrap().body[0]]
@@ -3119,11 +3133,17 @@ fn type_ascription() {
             .is_static_apply()
     );
     let module_and_expr = session.compile("(1: int)");
-    let body = module_and_expr.expr.unwrap().expr;
-    let arena = &session
+    let module = session
         .session()
-        .expect_fresh_module(module_and_expr.module_id)
-        .hir_arena;
+        .expect_fresh_module(module_and_expr.module_id);
+    let body = module
+        .get_function_by_id(module_and_expr.expr.unwrap())
+        .unwrap()
+        .code
+        .as_script()
+        .unwrap()
+        .entry_node_id;
+    let arena = &module.hir_arena;
     let root = &arena[body];
     assert!(
         arena[root.kind.as_block().unwrap().body[0]]

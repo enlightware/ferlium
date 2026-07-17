@@ -26,9 +26,9 @@ use crate::{
     },
     module::{
         ELocalDecl as LocalDecl, ExtraParameterId, FunctionId, LocalDebugVisibility, LocalDeclId,
-        ModuleFunction, ModuleId, ProjectionIndex, ResolvedLocalClone, ResolvedLocalDrop,
-        ResolvedTakeLocalValueMode, ResolvedValueLayout, SubscriptId, TraitDictionary,
-        TraitDictionaryEntry, TraitDictionaryId, TraitImplId,
+        LocalFunctionId, ModuleFunction, ModuleId, ProjectionIndex, ResolvedLocalClone,
+        ResolvedLocalDrop, ResolvedTakeLocalValueMode, ResolvedValueLayout, SubscriptId,
+        TraitDictionary, TraitDictionaryEntry, TraitDictionaryId, TraitImplId,
     },
     std::buffer,
     types::{
@@ -1442,7 +1442,8 @@ macro_rules! eval_or_return {
 }
 
 /// Evaluate this node and return the result.
-pub fn eval_node(
+#[cfg(test)]
+fn eval_node(
     arena: &ENodeArena,
     node_id: ENodeId,
     module_id: ModuleId,
@@ -1453,8 +1454,33 @@ pub fn eval_node(
     eval_node_with_ctx(arena, node_id, &mut ctx, locals)
 }
 
+/// Evaluate an already-compiled module function with ordinary runtime arguments.
+pub fn eval_function(
+    module_id: ModuleId,
+    function_id: LocalFunctionId,
+    arguments: Vec<ValOrMut>,
+    compiler_session: &CompilerSession,
+) -> EvalControlFlowResult {
+    let mut ctx = EvalCtx::new(module_id, compiler_session);
+    eval_function_with_ctx(module_id, function_id, arguments, &mut ctx)
+}
+
+/// Evaluate an already-compiled module function using an existing evaluation context.
+pub fn eval_function_with_ctx(
+    module_id: ModuleId,
+    function_id: LocalFunctionId,
+    arguments: Vec<ValOrMut>,
+    ctx: &mut EvalCtx,
+) -> EvalControlFlowResult {
+    ctx.call_function_id(
+        FunctionId::new(module_id, function_id),
+        arguments,
+        Location::new_synthesized(),
+    )
+}
+
 /// Evaluate this node given the environment and return the result.
-pub fn eval_node_with_ctx(
+pub(crate) fn eval_node_with_ctx(
     arena: &ENodeArena,
     node_id: ENodeId,
     ctx: &mut EvalCtx,
@@ -3971,7 +3997,7 @@ mod tests {
 
     fn eval_args_test_session() -> (CompilerSession, ModuleId) {
         let mut session = CompilerSession::new();
-        let module_id = ModuleId::from_index(2);
+        let module_id = session.raw_modules().next_id();
         let path = Path::single_str("$eval_args_test");
         let mut module = Module::new(module_id, path.clone());
         let function =
@@ -3980,6 +4006,10 @@ mod tests {
         let registered = session.register_module(path, module);
         assert_eq!(registered, module_id);
         (session, module_id)
+    }
+
+    fn test_module_id() -> ModuleId {
+        CompilerSession::new().raw_modules().next_id()
     }
 
     fn eval_drop_tracked_count() -> usize {
@@ -4126,7 +4156,7 @@ mod tests {
         let span = Location::new_synthesized();
         let int_ty = int_type();
         let mut arena = ENodeArena::default();
-        let test_module_id = ModuleId::from_index(2);
+        let test_module_id = test_module_id();
 
         let accessor_log = LocalDeclId::from_index(0);
         let accessor_scratch = LocalDeclId::from_index(1);
@@ -4308,7 +4338,7 @@ mod tests {
         let span = Location::new_synthesized();
         let int_ty = int_type();
         let mut arena = ENodeArena::default();
-        let test_module_id = ModuleId::from_index(2);
+        let test_module_id = test_module_id();
 
         let accessor_scratch = LocalDeclId::from_index(0);
         let caller_binding = LocalDeclId::from_index(0);
@@ -4432,7 +4462,7 @@ mod tests {
         let span = Location::new_synthesized();
         let int_ty = int_type();
         let mut arena = ENodeArena::default();
-        let test_module_id = ModuleId::from_index(2);
+        let test_module_id = test_module_id();
 
         let caller_log = LocalDeclId::from_index(0);
         let outer_binding = LocalDeclId::from_index(1);
@@ -4548,7 +4578,7 @@ mod tests {
         let mut arena = ENodeArena::default();
         let tracked = eval_drop_tracked_node(
             &mut arena,
-            ModuleId::from_index(2),
+            test_module_id(),
             LocalFunctionId::from_index(0),
             span,
         );
@@ -4584,7 +4614,7 @@ mod tests {
         let mut arena = ENodeArena::default();
         let tracked = eval_drop_tracked_node(
             &mut arena,
-            ModuleId::from_index(2),
+            test_module_id(),
             LocalFunctionId::from_index(0),
             span,
         );
@@ -4707,7 +4737,7 @@ mod tests {
         let mut arena = ENodeArena::default();
         let tracked = eval_drop_tracked_node(
             &mut arena,
-            ModuleId::from_index(2),
+            test_module_id(),
             LocalFunctionId::from_index(0),
             span,
         );
@@ -4757,7 +4787,7 @@ mod tests {
         let mut arena = ENodeArena::default();
         let tracked = eval_drop_tracked_node(
             &mut arena,
-            ModuleId::from_index(2),
+            test_module_id(),
             LocalFunctionId::from_index(0),
             span,
         );

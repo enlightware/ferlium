@@ -418,13 +418,14 @@ fn non_place_indirect_let_argument_uses_explicit_temp_cleanup() {
     );
     let expr = compiled.expr.expect("expected expression");
     let module = session.session().expect_fresh_module(compiled.module_id);
-    let arg_local_index = expr
+    let function = module.get_function_by_id(expr).unwrap();
+    let arg_local_index = function
         .locals
         .iter()
         .position(|local| local.name.0 == ustr("$arg"))
         .expect("expected an explicit argument temporary local");
     assert!(matches!(
-        expr.locals[arg_local_index].storage,
+        function.locals[arg_local_index].storage,
         LocalStorage::Owned { .. }
     ));
     let arg_local = LocalDeclId::from_index(arg_local_index);
@@ -445,9 +446,17 @@ fn trivial_copy_rvalues_stay_direct_in_final_hir() {
     let mut session = TestSession::new();
     let compiled = session.compile("1 + 1");
     let expr = compiled.expr.expect("expected expression");
+    let function = session
+        .session()
+        .expect_fresh_module(compiled.module_id)
+        .get_function_by_id(expr)
+        .unwrap();
 
     assert!(
-        expr.locals.iter().all(|local| local.name.0 != ustr("$arg")),
+        function
+            .locals
+            .iter()
+            .all(|local| local.name.0 != ustr("$arg")),
         "TrivialCopy rvalues should not acquire call-only owned temporaries"
     );
 }
@@ -463,6 +472,7 @@ fn expression_cleanup_drop_modes(
     let module = session
         .session()
         .expect_fresh_module(module_and_expr.module_id);
+    let function = module.get_function_by_id(compiled_expr).unwrap();
 
     module
         .hir_arena
@@ -473,7 +483,7 @@ fn expression_cleanup_drop_modes(
         })
         .flat_map(|block| &block.cleanup)
         .filter_map(|local_id| {
-            compiled_expr
+            function
                 .locals
                 .get(local_id.as_index())?
                 .local_drop()
@@ -1703,12 +1713,13 @@ fn managed_overlap_snapshot_is_owned_and_semantically_dropped() {
     let module = compile_session
         .session()
         .expect_fresh_module(compiled.module_id);
-    let snapshot_index = expr
+    let function = module.get_function_by_id(expr).unwrap();
+    let snapshot_index = function
         .locals
         .iter()
         .position(|local| local.name.0 == ustr("$snapshot"))
         .expect("expected an explicit overlap snapshot local");
-    let snapshot = &expr.locals[snapshot_index];
+    let snapshot = &function.locals[snapshot_index];
     assert!(matches!(snapshot.storage, LocalStorage::Owned { .. }));
     assert!(matches!(
         snapshot.local_drop(),
@@ -1806,13 +1817,14 @@ fn function_overlap_uses_an_owned_snapshot() {
     let module = compile_session
         .session()
         .expect_fresh_module(compiled.module_id);
-    let snapshot_index = expr
+    let function = module.get_function_by_id(expr).unwrap();
+    let snapshot_index = function
         .locals
         .iter()
         .position(|local| local.name.0 == ustr("$snapshot"))
         .expect("expected an explicit function snapshot local");
     assert!(matches!(
-        expr.locals[snapshot_index].storage,
+        function.locals[snapshot_index].storage,
         LocalStorage::Owned { .. }
     ));
     assert!(hir_has_cleanup(

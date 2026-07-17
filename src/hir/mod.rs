@@ -21,8 +21,6 @@ pub(crate) mod r#match;
 pub mod value;
 pub(crate) mod value_dispatch;
 
-pub use emit_expr::CompiledExpr;
-
 #[doc(hidden)]
 pub mod test_support {
     pub use crate::hir::emit_expr::emit_expr_unsafe;

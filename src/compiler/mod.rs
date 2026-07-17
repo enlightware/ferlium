@@ -18,7 +18,7 @@ pub(crate) use pipeline::add_code_to_module_with_capabilities;
 pub use pipeline::parse_module_and_expr;
 pub(crate) use session::Modules;
 pub use session::{
-    CompilationCapabilities, CompilationRevision, CompilerSession, ModuleAndExpr, ModuleInfo,
+    CompilationCapabilities, CompilationOutput, CompilationRevision, CompilerSession, ModuleInfo,
     ModuleRegistry, ModuleSource, SourceVersion,
 };
 

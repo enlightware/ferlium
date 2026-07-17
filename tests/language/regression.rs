@@ -11,7 +11,7 @@ use ustr::ustr;
 
 use ferlium::compiler::error::CompilationErrorImpl;
 use ferlium::hir::value::Value;
-use ferlium::{Compiler, Path, eval::eval_node};
+use ferlium::{Compiler, Path, eval::eval_function};
 use test_log::test;
 
 use indoc::indoc;
@@ -342,21 +342,23 @@ fn value_to_string_arrays_by_logical_contents() {
     let expr = module_and_expr
         .expr
         .expect("expected an expression for the formatting regression");
-    let value = {
+    let (value, ty) = {
         let compiler_session = session.session();
         let module = compiler_session.expect_fresh_module(module_and_expr.module_id);
-        eval_node(
-            &module.hir_arena,
-            expr.expr,
-            module_and_expr.module_id,
-            &expr.locals,
-            compiler_session,
-        )
-        .unwrap()
-        .into_value()
+        let ty = module
+            .get_function_by_id(expr)
+            .unwrap()
+            .definition
+            .ty_scheme
+            .ty
+            .ret;
+        let value = eval_function(module_and_expr.module_id, expr, vec![], compiler_session)
+            .unwrap()
+            .into_value();
+        (value, ty)
     };
     assert_eq!(
-        session.value_to_string(module_and_expr.module_id, value, expr.ty.ty),
+        session.value_to_string(module_and_expr.module_id, value, ty),
         "[{ a: 1 }, { a: 2 }]"
     );
 
@@ -364,21 +366,23 @@ fn value_to_string_arrays_by_logical_contents() {
     let expr = module_and_expr
         .expr
         .expect("expected an expression for the formatting regression");
-    let value = {
+    let (value, ty) = {
         let compiler_session = session.session();
         let module = compiler_session.expect_fresh_module(module_and_expr.module_id);
-        eval_node(
-            &module.hir_arena,
-            expr.expr,
-            module_and_expr.module_id,
-            &expr.locals,
-            compiler_session,
-        )
-        .unwrap()
-        .into_value()
+        let ty = module
+            .get_function_by_id(expr)
+            .unwrap()
+            .definition
+            .ty_scheme
+            .ty
+            .ret;
+        let value = eval_function(module_and_expr.module_id, expr, vec![], compiler_session)
+            .unwrap()
+            .into_value();
+        (value, ty)
     };
     assert_eq!(
-        session.value_to_string(module_and_expr.module_id, value, expr.ty.ty),
+        session.value_to_string(module_and_expr.module_id, value, ty),
         "[[1, 2], [3, 4]]"
     );
 }

@@ -10,9 +10,9 @@
 use std::sync::LazyLock;
 
 use crate::{
-    CompilationError, CompilerSession, FxHashMap, FxHashSet, ModuleAndExpr, ModuleEnv, Path,
+    CompilationError, CompilationOutput, CompilerSession, FxHashMap, FxHashSet, ModuleEnv, Path,
     SourceId, call_fn,
-    eval::{EvalCtx, eval_node_with_ctx},
+    eval::EvalCtx,
     execution::{DEFAULT_INTERACTIVE_FUEL_LIMIT, ReferenceInterpreterLimits},
     format::FormatWith,
     hir::value::{NativeValue, Value},
@@ -39,7 +39,7 @@ use super::{
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 pub struct Compiler {
     session: CompilerSession,
-    user_module: ModuleAndExpr,
+    user_module: CompilationOutput,
     uses: Uses,
     char_index_lookup: FxHashMap<SourceId, CharIndexLookup>,
     execution_fuel_limit: Option<usize>,
@@ -149,12 +149,17 @@ impl Compiler {
                     None,
                 ));
             }
-            let value = {
+            let (value, ty) = {
                 let module = self.session.expect_fresh_module(module_id);
+                let function = module.get_function_by_id(*expr).unwrap();
+                let ty = function.definition.ty_scheme.ty.ret;
                 let limits = ReferenceInterpreterLimits::default()
                     .with_fuel_limit(self.execution_fuel_limit);
                 let mut ctx = EvalCtx::with_limits(module_id, &self.session, limits);
-                eval_node_with_ctx(&module.hir_arena, expr.expr, &mut ctx, &expr.locals)
+                (
+                    crate::eval::eval_function_with_ctx(module_id, *expr, vec![], &mut ctx),
+                    ty,
+                )
             };
             match value {
                 Ok(value) => {
@@ -162,7 +167,7 @@ impl Compiler {
                     let rendered = match self.session.value_to_inspect_text_with_fuel(
                         module_id,
                         value,
-                        expr.ty.ty,
+                        ty,
                         self.execution_fuel_limit,
                     ) {
                         Ok(rendered) => rendered,
@@ -175,7 +180,7 @@ impl Compiler {
                     };
                     let module = self.session.expect_fresh_module(module_id);
                     let module_env = ModuleEnv::new(module, self.session.raw_modules());
-                    let output = format!("{}: {}", rendered, expr.ty.display(&module_env));
+                    let output = format!("{}: {}", rendered, ty.format_with(&module_env));
                     ExecutionResult::success(output)
                 }
                 Err(error) => {

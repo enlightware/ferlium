@@ -83,6 +83,8 @@ pub struct TraitSolver<'a> {
     /// Stack of defining modules for imported blanket impls currently being materialized.
     /// Only the top module's private impls are visible.
     private_impl_scope: Vec<ModuleId>,
+    /// Additional module whose private impls are visible to a privileged scratch expression.
+    privileged_impl_module: Option<ModuleId>,
 }
 
 impl<'a> TraitSolver<'a> {
@@ -109,7 +111,18 @@ impl<'a> TraitSolver<'a> {
             solving_stack: FxHashSet::default(),
             active_improvements: FxHashSet::default(),
             private_impl_scope: Vec::new(),
+            privileged_impl_module: None,
         }
+    }
+
+    /// Allow this solver to use private trait implementations from `module_id`.
+    ///
+    /// This is used by the private scratch-expression machinery when dispatching on a value whose
+    /// type originates in another module. It does not grant access to private names or type
+    /// representations.
+    pub(crate) fn allow_private_impls_from(&mut self, module_id: ModuleId) {
+        debug_assert!(self.privileged_impl_module.is_none());
+        self.privileged_impl_module = Some(module_id);
     }
 }
 
@@ -192,6 +205,7 @@ pub(crate) struct TraitSolverProbe<'a> {
     fn_collector: PendingFunctionCollector,
     active_improvements: FxHashSet<TraitImprovementKey>,
     private_impl_scope: Vec<ModuleId>,
+    privileged_impl_module: Option<ModuleId>,
     others: &'a Modules,
 }
 
@@ -576,6 +590,7 @@ impl<'a> TraitSolverProbe<'a> {
             fn_collector: PendingFunctionCollector::new(module.functions.len()),
             active_improvements: FxHashSet::default(),
             private_impl_scope: Vec::new(),
+            privileged_impl_module: None,
             others,
         }
     }
@@ -594,6 +609,7 @@ impl<'a> TraitSolverProbe<'a> {
             fn_collector: solver.fn_collector.clone(),
             active_improvements: solver.active_improvements.clone(),
             private_impl_scope: solver.private_impl_scope.clone(),
+            privileged_impl_module: solver.privileged_impl_module,
             others: solver.others,
         }
     }
@@ -615,9 +631,11 @@ impl<'a> TraitSolverProbe<'a> {
         );
         solver.active_improvements = mem::take(&mut self.active_improvements);
         solver.private_impl_scope = self.private_impl_scope.clone();
+        solver.privileged_impl_module = self.privileged_impl_module;
         let result = f(&mut solver);
         self.active_improvements = mem::take(&mut solver.active_improvements);
         self.private_impl_scope = mem::take(&mut solver.private_impl_scope);
+        self.privileged_impl_module = solver.privileged_impl_module;
         self.current_functions = mem::take(&mut solver.current_functions);
         self.current_projection_subscript_types
             .cache_materialized_types_from(&solver.current_projection_subscript_types);
@@ -838,7 +856,9 @@ impl<'a> TraitSolver<'a> {
     }
 
     fn can_use_other_impl(&self, module_id: ModuleId, imp: &TraitImpl) -> bool {
-        imp.public || self.private_impl_scope.last().copied() == Some(module_id)
+        imp.public
+            || self.private_impl_scope.last().copied() == Some(module_id)
+            || self.privileged_impl_module == Some(module_id)
     }
 
     pub(crate) fn reject_inaccessible_private_repr(

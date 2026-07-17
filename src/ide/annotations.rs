@@ -13,7 +13,7 @@ use crate::{FxHashMap, FxHashSet, Location};
 use heck::ToSnakeCase;
 
 use crate::{
-    CompilerSession, ModuleAndExpr, SourceId, ast,
+    CompilationOutput, CompilerSession, SourceId, ast,
     format::{FormatWith, format_generic_param_list},
     hir::{ENode, ENodeArena, ENodeId, NodeKind},
     module::{ELocalDecl as LocalDecl, ModuleEnv, id::Id},
@@ -46,7 +46,7 @@ impl AnnotationData {
 /// Type and other annotations for display in a IDE, for a given source file.
 /// Returns a vector of positions in byte offsets and annotations.
 pub(super) fn display_annotations(
-    module_and_expr: &ModuleAndExpr,
+    module_and_expr: &CompilationOutput,
     source_id: SourceId,
     src: &str,
     session: &CompilerSession,
@@ -100,13 +100,15 @@ pub(super) fn display_annotations(
         }
     }
     if let Some(expr) = &module_and_expr.expr {
-        let root_span = module.hir_arena[expr.expr].span;
+        let function = module.get_function_by_id(*expr).unwrap();
+        let script = function.code.as_script().unwrap();
+        let root_span = module.hir_arena[script.entry_node_id].span;
         if root_span.source_id == source_id {
             variable_type_annotations(
                 &module.hir_arena,
-                expr.expr,
+                script.entry_node_id,
                 &mut annotations,
-                &expr.locals,
+                &function.locals,
                 &env,
             );
         }
@@ -272,10 +274,15 @@ pub(super) fn display_annotations(
 
     // Return type of the expression, if any.
     if let Some(expr) = &module_and_expr.expr {
-        let root_span = module.hir_arena[expr.expr].span;
+        let function = module.get_function_by_id(*expr).unwrap();
+        let script = function.code.as_script().unwrap();
+        let root_span = module.hir_arena[script.entry_node_id].span;
         annotations.push((
             root_span.end_usize(),
-            format!(": {}", expr.ty.display(&env)),
+            format!(
+                ": {}",
+                function.definition.ty_scheme.ty.ret.format_with(&env)
+            ),
         ));
     }
     // FIXME: this need better behaviour to be useful.

@@ -7,13 +7,12 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 use ferlium::{
-    CompilerSession, FxHashSet, Location, ModuleAndExpr, SourceTable,
+    CompilationOutput, CompilerSession, FxHashSet, Location, SourceTable,
     compiler::error::{CompilationError, RuntimeErrorKind},
     eval::{
         ControlFlow, EvalControlFlowResult, EvalCtx, EvalResult, RuntimeError, ValOrMut, cont,
-        eval_node,
+        eval_function,
     },
-    hir::CompiledExpr,
     hir::function::{
         ArgConvention, BinaryNativeFnNNV, BinaryNativeFnRMN, BinaryNativeFnRRN, Callable,
         CallableDefinition, Function, NullaryNativeFnN, NullaryNativeFnV, UnaryNativeFnMN,
@@ -22,8 +21,8 @@ use ferlium::{
     hir::value::{LiteralValue, NativeValueType, Value},
     hir::{ENodeArena, ENodeId, NodeKind},
     module::{
-        BlanketTraitImplSubKey, ELocalDecl, Module, ModuleEnv, ModuleFunction, ModuleId, Path,
-        TraitId,
+        BlanketTraitImplSubKey, ELocalDecl, LocalFunctionId, Module, ModuleEnv, ModuleFunction,
+        ModuleId, Path, TraitId,
     },
     std::core_traits_names::{ITERATOR_TRAIT_NAME, VALUE_TRAIT_NAME},
     std::{
@@ -1385,7 +1384,7 @@ impl TestSession {
     }
 
     /// Compile and run the src and return its module and expression
-    pub fn try_compile(&mut self, src: &str) -> Result<ModuleAndExpr, CompilationError> {
+    pub fn try_compile(&mut self, src: &str) -> Result<CompilationOutput, CompilationError> {
         self.session
             .compile(src, "<test>", Path::single_str("test"))
     }
@@ -1395,7 +1394,7 @@ impl TestSession {
         &mut self,
         name: &str,
         src: &str,
-    ) -> Result<ModuleAndExpr, CompilationError> {
+    ) -> Result<CompilationOutput, CompilationError> {
         self.session.compile(src, name, Path::single_str(name))
     }
 
@@ -1409,7 +1408,7 @@ impl TestSession {
     }
 
     /// Compile the src and return its module and expression
-    pub fn compile(&mut self, src: &str) -> ModuleAndExpr {
+    pub fn compile(&mut self, src: &str) -> CompilationOutput {
         self.try_compile(src)
             .unwrap_or_else(|error| panic!("Compilation error: {error:?}"))
     }
@@ -1432,9 +1431,8 @@ impl TestSession {
 
     /// Interpret the already-compiled top-level expression `expr` of `module_id` with the HIR
     /// interpreter, returning its value.
-    fn eval_hir(&self, module_id: ModuleId, expr: &CompiledExpr) -> Result<Value, Error> {
-        let arena = &self.session.expect_fresh_module(module_id).hir_arena;
-        eval_node(arena, expr.expr, module_id, &expr.locals, &self.session)
+    fn eval_hir(&self, module_id: ModuleId, expr: LocalFunctionId) -> Result<Value, Error> {
+        eval_function(module_id, expr, vec![], &self.session)
             .map(ControlFlow::into_value)
             .map_err(Error::Runtime)
     }
@@ -1442,7 +1440,7 @@ impl TestSession {
     /// Compile and run the src and return its typed execution result (either a value or an error)
     pub fn try_compile_and_run_value(&mut self, src: &str) -> CompileRunValueResult {
         // Compile the source.
-        let ModuleAndExpr { module_id, expr } =
+        let CompilationOutput { module_id, expr } =
             self.try_compile(src).map_err(Error::Compilation)?;
 
         // Run the expression if any through *both* interpreters, asserting their outcomes agree:
@@ -1451,18 +1449,26 @@ impl TestSession {
         // backend full coverage, including the error path: a failing snippet exercises both
         // backends rather than short-circuiting on the HIR error.
         if let Some(expr) = expr {
-            let ty = expr.ty.ty;
+            let ty = self
+                .session
+                .expect_fresh_module(module_id)
+                .get_function_by_id(expr)
+                .unwrap()
+                .definition
+                .ty_scheme
+                .ty
+                .ret;
             let value = {
                 // Snapshot the externally-mutable `@props` fixtures so the SSA run observes the
                 // same preconditions as the HIR run. Without this, a snippet that mutates a
                 // fixture would apply its effect twice (once per backend) and the two backends
                 // would diverge spuriously. See `PropertyFixtures`.
                 let fixtures = PropertyFixtures::capture();
-                let hir_result = self.eval_hir(module_id, &expr);
+                let hir_result = self.eval_hir(module_id, expr);
                 fixtures.restore();
                 let ssa_result = self
                     .session
-                    .run_expr_via_ssa(module_id, &expr)
+                    .run_entry_via_ssa(module_id, expr)
                     .map_err(Error::Runtime);
                 match (&hir_result, &ssa_result) {
                     (Ok(hir_value), Ok(ssa_value)) => {

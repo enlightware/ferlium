@@ -3422,7 +3422,14 @@ fn named_subscript_instantiates_member_effect_variables_at_use_site() {
     let expr = compiled
         .expr
         .expect("compiled source should have an expression");
-    let effects = module.hir_arena[expr.expr].effects.clone();
+    let effects = module
+        .get_function_by_id(expr)
+        .unwrap()
+        .definition
+        .ty_scheme
+        .ty
+        .effects
+        .clone();
     assert_eq!(effects, effect(PrimitiveEffect::Read));
 }
 

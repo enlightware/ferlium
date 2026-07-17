@@ -28,7 +28,7 @@ use ferlium::std::new_module_using_std;
 use ferlium::std::string::String as FerliumString;
 use ferlium::types::effects::{PrimitiveEffect, effect};
 use ferlium::{
-    CompilerSession, Location, ModuleAndExpr, SourceId, SourceTable, SubOrSameType,
+    CompilationOutput, CompilerSession, Location, SourceId, SourceTable, SubOrSameType,
     parse_module_and_expr,
 };
 use rustyline::DefaultEditor;
@@ -36,7 +36,7 @@ use rustyline::{config::Configurer, error::ReadlineError};
 use ustr::ustr;
 
 use ferlium::{
-    eval::{EvalCtx, eval_node_with_ctx},
+    eval::{EvalCtx, eval_function_with_ctx},
     execution::{DEFAULT_INTERACTIVE_FUEL_LIMIT, ReferenceInterpreterLimits},
 };
 
@@ -579,7 +579,7 @@ fn process_input(
     }
 
     // Compile the input to a module and an expression (if any)
-    let ModuleAndExpr { module_id, expr } = session
+    let CompilationOutput { module_id, expr } = session
         .compile_to(input, name, Path::single_str(name), uses)
         .map_err(|e| {
             eprintln!("Compilation error:");
@@ -596,30 +596,37 @@ fn process_input(
         );
         if let Some(expr) = expr.as_ref() {
             let module_env = session.modules().env_for(module);
+            let function = module.get_function_by_id(*expr).unwrap();
+            let script = function.code.as_script().unwrap();
             println!(
                 "Expr HIR:\n{}",
-                hir::ExprDisplay::new(expr.expr, &expr.locals).format_with(&module_env)
+                hir::ExprDisplay::new(script.entry_node_id, &function.locals)
+                    .format_with(&module_env)
             );
         }
     }
 
     // If there's an expression, evaluate it
     if let Some(expr) = expr {
+        let ty = session
+            .expect_fresh_module(module_id)
+            .get_function_by_id(expr)
+            .unwrap()
+            .definition
+            .ty_scheme
+            .ty
+            .ret;
         // Evaluate expression
         let result = {
             let limits = ReferenceInterpreterLimits::default().with_fuel_limit(fuel_limit);
             let mut eval_ctx = EvalCtx::with_limits(module_id, session, limits);
-            let arena = &eval_ctx
-                .compiler_session()
-                .expect_fresh_module(module_id)
-                .hir_arena;
-            eval_node_with_ctx(arena, expr.expr, &mut eval_ctx, &expr.locals)
+            eval_function_with_ctx(module_id, expr, vec![], &mut eval_ctx)
         };
         match result {
             Ok(value) => {
                 let value = value.into_value();
                 let rendered = match session
-                    .value_to_inspect_text_with_fuel(module_id, value, expr.ty.ty, fuel_limit)
+                    .value_to_inspect_text_with_fuel(module_id, value, ty, fuel_limit)
                 {
                     Ok(rendered) => rendered,
                     Err(error) => {
@@ -629,7 +636,7 @@ fn process_input(
                 };
                 let module = session.expect_fresh_module(module_id);
                 let module_env = session.modules().env_for(module);
-                println!("{}: {}", rendered, expr.ty.display(&module_env));
+                println!("{}: {}", rendered, ty.format_with(&module_env));
             }
             Err(error) => {
                 eprintln!(

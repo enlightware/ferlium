@@ -44,8 +44,15 @@ fn test_expr(session: &mut TestSession, src: &str, exp_eff: EffType) {
     let module_and_expr = session.compile(src);
     let module_id = module_and_expr.module_id;
     let expr = module_and_expr.expr.unwrap();
-    let arena = &session.session().expect_fresh_module(module_id).hir_arena;
-    let effects = arena[expr.expr].effects.clone();
+    let module = session.session().expect_fresh_module(module_id);
+    let effects = module
+        .get_function_by_id(expr)
+        .unwrap()
+        .definition
+        .ty_scheme
+        .ty
+        .effects
+        .clone();
     assert_eq!(effects, exp_eff);
 }
 
@@ -297,7 +304,7 @@ fn effects_unsafe_erases_effects_in_std_context() {
         ferlium::module::ModuleId::new(0),
         ferlium::module::Path::single_str("$effects_unsafe_test"),
     );
-    let compiled = emit_expr_unsafe(
+    let root = emit_expr_unsafe(
         expr.expect("expected expression"),
         &arena,
         &mut module,
@@ -306,7 +313,7 @@ fn effects_unsafe_erases_effects_in_std_context() {
     )
     .expect("std-context expression should compile");
 
-    assert_eq!(module.hir_arena[compiled.expr].effects, EffType::empty());
+    assert_eq!(module.hir_arena[root].effects, EffType::empty());
 }
 
 #[test]

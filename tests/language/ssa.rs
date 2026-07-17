@@ -11,7 +11,7 @@ use ferlium::{
     ssa::interpreter::Interpreter,
 };
 
-use crate::harness::{TestSession, bool, expected_tuple, int};
+use crate::harness::{TestSession, bool, expected_tuple, int, int_value};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
@@ -61,6 +61,27 @@ fn run_main_with_environment_cell_limit(
             )
             .map(|control| control.into_value())
     }
+}
+
+#[test]
+fn entry_invocation_accepts_by_value_arguments() {
+    let mut session = TestSession::new();
+    let module_id = session
+        .compile("fn add_one(value: int) -> int { value + 1 }")
+        .module_id;
+    let add_one_id = session
+        .session()
+        .expect_fresh_module(module_id)
+        .get_local_function_id(ustr::ustr("add_one"))
+        .unwrap();
+    let mut interpreter = Interpreter::new(module_id, session.session());
+
+    assert_val_eq!(
+        interpreter
+            .run_entry(module_id, add_one_id, vec![int_value(41)])
+            .unwrap(),
+        int(42)
+    );
 }
 
 fn tracked_drop_log(session: &mut TestSession) -> isize {

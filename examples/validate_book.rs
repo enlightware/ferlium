@@ -17,9 +17,9 @@ use std::process;
 
 use directories::ProjectDirs;
 use ferlium::CompilationError;
-use ferlium::eval::eval_node;
+use ferlium::eval::eval_function;
 use ferlium::eval::{ControlFlow, RuntimeError};
-use ferlium::{CompilerSession, ModuleAndExpr};
+use ferlium::{CompilationOutput, CompilerSession};
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use sha2::{Digest, Sha256};
 
@@ -430,7 +430,7 @@ fn try_compile_and_run(
     code: &str,
     session: &mut CompilerSession,
 ) -> Result<(), RunError> {
-    let ModuleAndExpr {
+    let CompilationOutput {
         module_id: module,
         expr,
     } = session
@@ -438,8 +438,7 @@ fn try_compile_and_run(
         .map_err(RunError::Compilation)?;
 
     if let Some(expr) = expr {
-        let arena = &session.expect_fresh_module(module).hir_arena;
-        eval_node(arena, expr.expr, module, &expr.locals, session)
+        eval_function(module, expr, vec![], session)
             .map(ControlFlow::into_value)
             .map_err(RunError::Runtime)?;
     }

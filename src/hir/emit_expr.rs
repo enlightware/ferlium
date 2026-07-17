@@ -28,13 +28,14 @@ use crate::{
     },
     internal_compilation_error,
     module::{
-        ELocalDecl, GENERATED_LAMBDA_PREFIX, LocalDecl, LocalDeclId, Module, ModuleEnv,
-        PendingGeneratedStructuralProjectionSubscripts, Visibility, id::Id,
+        ELocalDecl, GENERATED_LAMBDA_PREFIX, LocalDecl, LocalDeclId, LocalFunctionId, Module,
+        ModuleEnv, ModuleFunction, ModuleId, PendingGeneratedStructuralProjectionSubscripts,
+        Visibility, id::Id,
     },
     types::{
         effects::EffType,
         trait_solver::{TraitSolver, trait_solver_from_module},
-        r#type::{CallResultConvention, Type, TypeInstSubst, TypeVar},
+        r#type::{CallResultConvention, FnType, Type, TypeInstSubst, TypeVar},
         type_inference::{
             defaulting::DefaultingScope, expr::TypeInference, unify::UnifiedTypeInference,
         },
@@ -47,17 +48,66 @@ use crate::{
 
 use log::log_enabled;
 
-/// A compiled expression
+/// Expression HIR awaiting registration as a module function.
 #[derive(Debug)]
-pub struct CompiledExpr {
-    pub expr: hir::ENodeId,
-    pub ty: TypeScheme<Type>,
-    pub locals: Vec<ELocalDecl>,
+struct PendingExprEntry {
+    expr: hir::ENodeId,
+    ty: TypeScheme<Type>,
+    locals: Vec<ELocalDecl>,
 }
 
-/// Emit HIR for an expression.
-/// Return the compiled expression and any remaining external constraints
-/// referring to lower-generation type variables.
+#[derive(Debug, Clone, Copy)]
+struct ExprEmissionOptions {
+    capabilities: CompilationCapabilities,
+    private_impl_module: Option<ModuleId>,
+}
+
+impl PendingExprEntry {
+    /// Register this expression as a private function whose leading locals are runtime arguments.
+    ///
+    /// Expression emission still uses a small temporary result while inference and elaboration are
+    /// in progress. Published compilation results expose only the returned function identity.
+    fn into_entry_with_runtime_args(
+        self,
+        module: &mut Module,
+        runtime_arg_count: usize,
+    ) -> LocalFunctionId {
+        use crate::{
+            containers::b,
+            hir::function::{ScriptFunction, arg_conventions_for_args},
+        };
+
+        let effects = module.hir_arena[self.expr].effects.clone();
+        let argument_locals = &self.locals[..runtime_arg_count];
+        let arguments = argument_locals
+            .iter()
+            .map(ELocalDecl::as_fn_arg_type)
+            .collect::<Vec<_>>();
+        let argument_names = argument_locals
+            .iter()
+            .map(|local| local.name.0)
+            .collect::<Vec<_>>();
+        let parameter_passing = arg_conventions_for_args(&arguments);
+        let definition = hir::function::CallableDefinition::new(
+            TypeScheme::new_infer_quantifiers_with_constraints(
+                FnType::new(arguments, self.ty.ty, effects),
+                self.ty.constraints,
+            ),
+            argument_names,
+            None,
+        );
+        let function = ModuleFunction::new_elaborated(
+            definition,
+            b(ScriptFunction::new(self.expr, runtime_arg_count)),
+            parameter_passing,
+            None,
+            self.locals,
+        );
+        module.add_function_with_visibility(ustr::ustr("<expr>"), function, Visibility::Module)
+    }
+}
+
+/// Emit HIR for an expression and return its root node.
 /// Note: the expression might not be safe to use if it has unbound constraints or type variables.
 pub fn emit_expr_unsafe(
     source: PExprId,
@@ -65,25 +115,29 @@ pub fn emit_expr_unsafe(
     module: &mut Module,
     others: &Modules,
     locals: Vec<LocalDecl>,
-) -> Result<CompiledExpr, InternalCompilationError> {
-    emit_expr_unsafe_with_capabilities(
+) -> Result<hir::ENodeId, InternalCompilationError> {
+    emit_expr_unsafe_with_options(
         source,
         parsed_arena,
         module,
         others,
         locals,
-        CompilationCapabilities::default(),
+        ExprEmissionOptions {
+            capabilities: CompilationCapabilities::default(),
+            private_impl_module: None,
+        },
     )
+    .map(|pending| pending.expr)
 }
 
-pub(crate) fn emit_expr_unsafe_with_capabilities(
+fn emit_expr_unsafe_with_options(
     source: PExprId,
     parsed_arena: &PExprArena,
     module: &mut Module,
     others: &Modules,
     locals: Vec<LocalDecl>,
-    capabilities: CompilationCapabilities,
-) -> Result<CompiledExpr, InternalCompilationError> {
+    options: ExprEmissionOptions,
+) -> Result<PendingExprEntry, InternalCompilationError> {
     let mut expr_arena = UNodeArena::default();
     emit_expr_unsafe_inner(
         source,
@@ -92,7 +146,7 @@ pub(crate) fn emit_expr_unsafe_with_capabilities(
         others,
         locals,
         &mut expr_arena,
-        capabilities,
+        options,
     )
 }
 
@@ -103,8 +157,12 @@ fn emit_expr_unsafe_inner(
     others: &Modules,
     mut locals: Vec<LocalDecl>,
     expr_arena: &mut UNodeArena,
-    capabilities: CompilationCapabilities,
-) -> Result<CompiledExpr, InternalCompilationError> {
+    options: ExprEmissionOptions,
+) -> Result<PendingExprEntry, InternalCompilationError> {
+    let ExprEmissionOptions {
+        capabilities,
+        private_impl_module,
+    } = options;
     // Make sure that the locals' types have no type variables in them
     assert!(
         locals
@@ -166,6 +224,9 @@ fn emit_expr_unsafe_inner(
 
     // Perform the unification.
     let mut solver = trait_solver_from_module!(module, others);
+    if let Some(module_id) = private_impl_module {
+        solver.allow_private_impls_from(module_id);
+    }
     let mut ty_inf = ty_inf.unify(&mut solver, expr_arena)?;
     let generated = solver.commit(
         &mut module.functions,
@@ -203,6 +264,9 @@ fn emit_expr_unsafe_inner(
     {
         let node_ty = ty_inf.substitute_in_type(expr_arena[node_id].ty);
         let mut solver = trait_solver_from_module!(module, others);
+        if let Some(module_id) = private_impl_module {
+            solver.allow_private_impls_from(module_id);
+        }
         let orphan_constraints = ty_inf.remaining_constraints().to_vec();
         let unit_variant_seed_tys =
             UnifiedTypeInference::collect_unit_variant_seed_types(expr_arena, node_id);
@@ -278,6 +342,9 @@ fn emit_expr_unsafe_inner(
 
     // Filter solved constraints.
     let mut solver = trait_solver_from_module!(module, others);
+    if let Some(module_id) = private_impl_module {
+        solver.allow_private_impls_from(module_id);
+    }
     let mut drop_subst = fixup_subst;
     let mut constraints: Vec<_> = all_constraints
         .iter()
@@ -406,6 +473,9 @@ fn emit_expr_unsafe_inner(
     let generated_projection_subscripts =
         PendingGeneratedStructuralProjectionSubscripts::new(module);
     let mut solver = trait_solver_from_module!(module, &others);
+    if let Some(module_id) = private_impl_module {
+        solver.allow_private_impls_from(module_id);
+    }
     let mut ctx = DictElaborationCtx::new_with_generated_projection_subscripts(
         &dicts,
         None,
@@ -440,7 +510,7 @@ fn emit_expr_unsafe_inner(
         module.functions[lambda_id.as_index()].refresh_debug_info();
     }
 
-    Ok(CompiledExpr {
+    Ok(PendingExprEntry {
         expr,
         ty: ty_scheme,
         locals: elaborated.locals,
@@ -449,25 +519,66 @@ fn emit_expr_unsafe_inner(
 
 /// Emit HIR for an expression, failing if there are any unbound type variables or constraints.
 /// If the expression imports functions from the module graph, the module's imports are updated.
-pub(crate) fn emit_expr_with_capabilities(
+pub(crate) fn emit_expr_entry_with_capabilities(
     source: PExprId,
     parsed_arena: &PExprArena,
     module: &mut Module,
     others: &Modules,
     locals: Vec<LocalDecl>,
     capabilities: CompilationCapabilities,
-) -> Result<CompiledExpr, InternalCompilationError> {
-    let span = parsed_arena[source].span;
-    let CompiledExpr { ty, expr, locals } = emit_expr_unsafe_with_capabilities(
+) -> Result<LocalFunctionId, InternalCompilationError> {
+    let pending = emit_expr_with_options(
         source,
         parsed_arena,
         module,
         others,
         locals,
-        capabilities,
+        ExprEmissionOptions {
+            capabilities,
+            private_impl_module: None,
+        },
     )?;
+    Ok(pending.into_entry_with_runtime_args(module, 0))
+}
+
+/// Emit an expression with privileged access to one foreign module's private trait impls.
+pub(crate) fn emit_expr_entry_with_private_impls(
+    source: PExprId,
+    parsed_arena: &PExprArena,
+    module: &mut Module,
+    others: &Modules,
+    locals: Vec<LocalDecl>,
+    capabilities: CompilationCapabilities,
+    private_impl_module: ModuleId,
+) -> Result<LocalFunctionId, InternalCompilationError> {
+    let runtime_arg_count = locals.len();
+    let pending = emit_expr_with_options(
+        source,
+        parsed_arena,
+        module,
+        others,
+        locals,
+        ExprEmissionOptions {
+            capabilities,
+            private_impl_module: Some(private_impl_module),
+        },
+    )?;
+    Ok(pending.into_entry_with_runtime_args(module, runtime_arg_count))
+}
+
+fn emit_expr_with_options(
+    source: PExprId,
+    parsed_arena: &PExprArena,
+    module: &mut Module,
+    others: &Modules,
+    locals: Vec<LocalDecl>,
+    options: ExprEmissionOptions,
+) -> Result<PendingExprEntry, InternalCompilationError> {
+    let span = parsed_arena[source].span;
+    let PendingExprEntry { ty, expr, locals } =
+        emit_expr_unsafe_with_options(source, parsed_arena, module, others, locals, options)?;
     validate_safe_expr_type_scheme(&ty, span)?;
-    Ok(CompiledExpr { ty, expr, locals })
+    Ok(PendingExprEntry { ty, expr, locals })
 }
 
 fn validate_safe_expr_type_scheme(
