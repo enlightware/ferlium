@@ -17,8 +17,9 @@
 //! - **stack marker** — an immutable saved stack top produced by `stack_save`, used only by
 //!   `stack_restore`. A marker may be restored more than once.
 //!
-//! An instruction either defines a single result register (`InstructionResult` other than `Nothing`)
-//! or defines nothing; a result-less instruction's slot must never be read. Some kinds are
+//! An instruction either defines a single stable result value (`InstructionResult` other than
+//! `Nothing`) or defines nothing. Result identity is independent of the instruction's physical
+//! location in the containing function. Some kinds are
 //! *terminators* (`ret`, `br`, `condbr`, `invoke`, `resume`, and fallible runtime checks, as
 //! classified by `InstructionKind::is_terminator`): a terminator appears exactly once, as the
 //! last instruction of its block, and
@@ -43,6 +44,11 @@ pub type InstructionId = list::Address;
 
 /// An instruction in the SSA form of Ferlium.
 pub struct Instruction {
+    /// The function-local identity assigned to this instruction's result, if it has one.
+    ///
+    /// Constructors leave this unset; inserting the instruction into a function assigns it.
+    result_id: Option<ssa::ValueId>,
+
     /// The region of the code corresponding to this instruction.
     pub span: Location,
 
@@ -54,6 +60,25 @@ pub struct Instruction {
 }
 
 impl Instruction {
+    /// Returns the stable identity assigned to this instruction's result, if any.
+    pub fn result_id(&self) -> Option<ssa::ValueId> {
+        self.result_id
+    }
+
+    /// Assigns this instruction's result identity when it is inserted into a function.
+    pub(crate) fn assign_result_id(&mut self, result_id: Option<ssa::ValueId>) {
+        debug_assert!(
+            self.result_id.is_none(),
+            "an instruction is inserted only once"
+        );
+        debug_assert_eq!(
+            result_id.is_some(),
+            self.result() != InstructionResult::Nothing,
+            "exactly result-producing instructions receive a value identity"
+        );
+        self.result_id = result_id;
+    }
+
     /// The type of the instruction's result.
     pub fn result(&self) -> InstructionResult {
         self.kind.result(self)
@@ -112,12 +137,18 @@ impl Instruction {
     /// Verifies the structural contract of this instruction in isolation (the operand **arity**, and
     /// the data-dependent operand count for `alloca`/`move`/`build_closure`).
     pub fn verify(&self) {
+        assert_eq!(
+            self.result_id.is_some(),
+            self.result() != InstructionResult::Nothing,
+            "exactly result-producing instructions have a value identity"
+        );
         self.kind.verify(self);
     }
 
     /// Creates an `alloca` instruction for storage whose size is known at compile time.
     pub fn alloca(span: Location, ty: Type) -> Self {
         Instruction {
+            result_id: None,
             span,
             operands: Box::new([]),
             kind: InstructionKind::Alloca { ty },
@@ -131,6 +162,7 @@ impl Instruction {
     /// allocation.
     pub fn alloca_dynamic(span: Location, ty: Type, witness: ssa::Value) -> Self {
         Instruction {
+            result_id: None,
             span,
             operands: Box::new([witness]),
             kind: InstructionKind::Alloca { ty },
@@ -141,6 +173,7 @@ impl Instruction {
     /// `pointing_to`. No operands; the result is the place of that pointer slot.
     pub fn alloca_place(span: Location, pointing_to: Type) -> Self {
         Instruction {
+            result_id: None,
             span,
             operands: Box::new([]),
             kind: InstructionKind::AllocaPlace { pointing_to },
@@ -152,6 +185,7 @@ impl Instruction {
     /// A terminator; takes no operands. `target` must be an existing block of the same function.
     pub fn br(span: Location, target: ssa::BlockId) -> Self {
         Instruction {
+            result_id: None,
             span,
             operands: Box::new([]),
             kind: InstructionKind::UnconditionalBranch { target },
@@ -190,6 +224,7 @@ impl Instruction {
         let mut operands = vec![callee];
         operands.extend(arguments);
         Instruction {
+            result_id: None,
             span,
             operands: operands.into_boxed_slice(),
             kind: InstructionKind::Call,
@@ -217,6 +252,7 @@ impl Instruction {
         let mut operands = vec![callee];
         operands.extend(arguments);
         Instruction {
+            result_id: None,
             span,
             operands: operands.into_boxed_slice(),
             kind: InstructionKind::Invoke { normal, unwind },
@@ -241,6 +277,7 @@ impl Instruction {
     /// [`RuntimeError`]: crate::eval::RuntimeError
     pub fn resume(span: Location) -> Self {
         Instruction {
+            result_id: None,
             span,
             operands: Box::new([]),
             kind: InstructionKind::Resume,
@@ -268,6 +305,7 @@ impl Instruction {
         let mut operands = vec![callee];
         operands.extend(arguments);
         Instruction {
+            result_id: None,
             span,
             operands: operands.into_boxed_slice(),
             kind: InstructionKind::Project { ty },
@@ -280,6 +318,7 @@ impl Instruction {
     /// [`end_project`](Self::end_project) resumes the frame. Mirrors the HIR `Yield`.
     pub fn r#yield(span: Location, place: ssa::Value) -> Self {
         Instruction {
+            result_id: None,
             span,
             operands: Box::new([place]),
             kind: InstructionKind::Yield,
@@ -293,6 +332,7 @@ impl Instruction {
     /// [`resume`](Self::resume).
     pub fn end_project(span: Location, place: ssa::Value) -> Self {
         Instruction {
+            result_id: None,
             span,
             operands: Box::new([place]),
             kind: InstructionKind::EndProject,
@@ -308,6 +348,7 @@ impl Instruction {
     /// constant, or a place/register whose pointee is a scalar or composite literal).
     pub fn compare_eq(span: Location, v1: ssa::Value, v2: ssa::Value) -> Self {
         Instruction {
+            result_id: None,
             span,
             operands: Box::new([v1, v2]),
             kind: InstructionKind::CompareEqual,
@@ -326,6 +367,7 @@ impl Instruction {
         on_failure: ssa::BlockId,
     ) -> Self {
         Instruction {
+            result_id: None,
             span,
             operands: Box::new([condition]),
             kind: InstructionKind::ConditionalBranch {
@@ -343,6 +385,7 @@ impl Instruction {
     /// [`move_value`](Self::move_value) instructions rather than a run-time choice made by `load`.
     pub fn load(span: Location, source: ssa::Value) -> Self {
         Instruction {
+            result_id: None,
             span,
             operands: Box::new([source]),
             kind: InstructionKind::Load,
@@ -362,6 +405,7 @@ impl Instruction {
     /// how a backend (LLVM `getelementptr`) takes the index as an IR value regardless.
     pub fn subfield(span: Location, source: ssa::Value, index: ssa::Value, ty: Type) -> Self {
         Instruction {
+            result_id: None,
             span,
             operands: Box::new([source, index]),
             kind: InstructionKind::Subfield { ty },
@@ -383,6 +427,7 @@ impl Instruction {
         ty: Type,
     ) -> Self {
         Instruction {
+            result_id: None,
             span,
             operands: Box::new([dict]),
             kind: InstructionKind::DictEntry { entry_index, ty },
@@ -403,6 +448,7 @@ impl Instruction {
         ty: Type,
     ) -> Self {
         Instruction {
+            result_id: None,
             span,
             operands: Box::new([subscript]),
             kind: InstructionKind::SubscriptMember { mut_member, ty },
@@ -423,6 +469,7 @@ impl Instruction {
         let mut operands = vec![subscript];
         operands.extend(evidence);
         Instruction {
+            result_id: None,
             span,
             operands: operands.into_boxed_slice(),
             kind: InstructionKind::BuildSubscript { ty },
@@ -437,6 +484,7 @@ impl Instruction {
     /// materialized into a temporary.
     pub fn variant(span: Location, tag: Ustr, t: Type) -> Self {
         Instruction {
+            result_id: None,
             span,
             operands: Box::new([]),
             kind: InstructionKind::Variant { tag, ty: t },
@@ -447,6 +495,7 @@ impl Instruction {
     /// place and yields it as an `int` register (matching the HIR interpreter's tag encoding).
     pub fn extract_tag(span: Location, variant: ssa::Value) -> Self {
         Instruction {
+            result_id: None,
             span,
             operands: Box::new([variant]),
             kind: InstructionKind::ExtractTag,
@@ -459,6 +508,7 @@ impl Instruction {
     /// out-pointer (the last parameter) before returning.
     pub fn ret(span: Location) -> Self {
         Instruction {
+            result_id: None,
             span,
             operands: Box::new([]),
             kind: InstructionKind::Ret,
@@ -473,6 +523,7 @@ impl Instruction {
     /// marker is an immutable frontier and may be restored repeatedly.
     pub fn stack_save(span: Location) -> Self {
         Instruction {
+            result_id: None,
             span,
             operands: Box::new([]),
             kind: InstructionKind::StackSave,
@@ -483,6 +534,7 @@ impl Instruction {
     /// result of an earlier `stack_save`), reclaiming everything allocated since.
     pub fn stack_restore(span: Location, marker: ssa::Value) -> Self {
         Instruction {
+            result_id: None,
             span,
             operands: Box::new([marker]),
             kind: InstructionKind::StackRestore,
@@ -492,6 +544,7 @@ impl Instruction {
     /// Creates a runtime call-depth guard corresponding to HIR `CheckCallDepth`.
     pub fn check_call_depth(span: Location) -> Self {
         Instruction {
+            result_id: None,
             span,
             operands: Box::new([]),
             kind: InstructionKind::CheckCallDepth,
@@ -501,6 +554,7 @@ impl Instruction {
     /// Creates a runtime fuel guard corresponding to HIR `CheckFuel`.
     pub fn check_fuel(span: Location) -> Self {
         Instruction {
+            result_id: None,
             span,
             operands: Box::new([]),
             kind: InstructionKind::CheckFuel,
@@ -516,6 +570,7 @@ impl Instruction {
     /// consumed (moved, for a non-trivial value).
     pub fn store(span: Location, value: ssa::Value, destination: ssa::Value) -> Self {
         Instruction {
+            result_id: None,
             span,
             operands: Box::new([value, destination]),
             kind: InstructionKind::Store,
@@ -527,6 +582,7 @@ impl Instruction {
     /// not a semantic drop.
     pub fn clear(span: Location, destination: ssa::Value) -> Self {
         Instruction {
+            result_id: None,
             span,
             operands: Box::new([destination]),
             kind: InstructionKind::Clear,
@@ -545,6 +601,7 @@ impl Instruction {
     /// [`move_dynamic`](Self::move_dynamic), never a `memcpy`.
     pub fn memcpy(span: Location, source: ssa::Value, destination: ssa::Value) -> Self {
         Instruction {
+            result_id: None,
             span,
             operands: Box::new([source, destination]),
             kind: InstructionKind::Memcpy,
@@ -558,6 +615,7 @@ impl Instruction {
     /// `memcpy`, it consumes the source.
     pub fn move_value(span: Location, source: ssa::Value, destination: ssa::Value) -> Self {
         Instruction {
+            result_id: None,
             span,
             operands: Box::new([source, destination]),
             kind: InstructionKind::Move,
@@ -576,6 +634,7 @@ impl Instruction {
         witness: ssa::Value,
     ) -> Self {
         Instruction {
+            result_id: None,
             span,
             operands: Box::new([source, destination, witness]),
             kind: InstructionKind::Move,
@@ -594,6 +653,7 @@ impl Instruction {
     /// slot `project`ed out of a dictionary), read by reference and never loaded into a register.
     pub fn drop(span: Location, target: ssa::Value, callee: ssa::Value) -> Self {
         Instruction {
+            result_id: None,
             span,
             operands: Box::new([target, callee]),
             kind: InstructionKind::Drop,
@@ -628,6 +688,7 @@ impl Instruction {
         operands.extend(captures);
         operands.extend(env_dict);
         Instruction {
+            result_id: None,
             span,
             operands: operands.into_boxed_slice(),
             kind: InstructionKind::BuildClosure {
@@ -643,6 +704,7 @@ impl Instruction {
     /// closure at the place given by `source`, yielding a fresh closure value of type `ty`.
     pub fn clone_closure_env(span: Location, source: ssa::Value, ty: Type) -> Self {
         Instruction {
+            result_id: None,
             span,
             operands: Box::new([source]),
             kind: InstructionKind::CloneClosureEnv { ty },
@@ -653,6 +715,7 @@ impl Instruction {
     /// closure at the place given by `target`.
     pub fn drop_closure_env(span: Location, target: ssa::Value) -> Self {
         Instruction {
+            result_id: None,
             span,
             operands: Box::new([target]),
             kind: InstructionKind::DropClosureEnv,

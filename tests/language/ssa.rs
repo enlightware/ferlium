@@ -283,8 +283,8 @@ fn simple_functions() {
         session.emit_ssa("fn t(x: int) {x}"),
         r#"fn t(%p0: @arg let int, %p1: @ret int):
   b0:
-    %r0 = memcpy %p0 to %p1
-    %r1 = ret
+    memcpy %p0 to %p1
+    ret
 "#,
     );
 }
@@ -299,11 +299,11 @@ fn call_functions() {
   @c0: int = 1
   b0:
     %r0 = alloca int
-    %r1 = store @c0 to %r0
-    %r2 = alloca int
-    %r3 = call std::Num<std::int>::from_int#impl:25eabc6b(%r0, %r2)
-    %r4 = call std::Num<std::int>::add#impl:7665d3ee(%p0, %r2, %p1)
-    %r5 = ret
+    store @c0 to %r0
+    %r1 = alloca int
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r0, %r1)
+    call std::Num<std::int>::add#impl:7665d3ee(%p0, %r1, %p1)
+    ret
 "#
     );
 
@@ -315,12 +315,12 @@ fn call_functions() {
   b0:
     %r0 = alloca int
     %r1 = alloca int
-    %r2 = store @c0 to %r1
-    %r3 = alloca int
-    %r4 = call std::Num<std::int>::from_int#impl:25eabc6b(%r1, %r3)
-    %r5 = call std::Num<std::int>::mul#impl:a3604103(%r3, %p0, %r0)
-    %r6 = move %r0 to %p1
-    %r7 = ret
+    store @c0 to %r1
+    %r2 = alloca int
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r1, %r2)
+    call std::Num<std::int>::mul#impl:a3604103(%r2, %p0, %r0)
+    move %r0 to %p1
+    ret
 "#
     );
 }
@@ -335,20 +335,20 @@ fn match_case_functions() {
   @c0: bool = true
   @c1: int = 2
   b0:
-    %r0 = br b1
+    br b1
   b1:
-    %r1 = comp_eq @c0 true
-    %r2 = condbr %r1, b2, b3
+    %r0 = comp_eq @c0 true
+    condbr %r0, b2, b3
   b2:
-    %r3 = memcpy %p0 to %p1
-    %r4 = br b4
+    memcpy %p0 to %p1
+    br b4
   b3:
-    %r5 = alloca int
-    %r6 = store @c1 to %r5
-    %r7 = call std::Num<std::int>::from_int#impl:25eabc6b(%r5, %p1)
-    %r8 = br b4
+    %r1 = alloca int
+    store @c1 to %r1
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r1, %p1)
+    br b4
   b4:
-    %r9 = ret
+    ret
 "#
     );
 
@@ -357,32 +357,32 @@ fn match_case_functions() {
         r#"fn a0(%p0: @arg let int, %p1: @ret int):
   @c0: int = 1
   b0:
-    %r0 = br b1
+    br b1
   b1:
-    %r1 = comp_eq %p0 0
-    %r2 = condbr %r1, b2, b3
+    %r0 = comp_eq %p0 0
+    condbr %r0, b2, b3
   b2:
-    %r3 = memcpy %p0 to %p1
-    %r4 = br b6
+    memcpy %p0 to %p1
+    br b6
   b3:
-    %r5 = comp_eq %p0 1
-    %r6 = condbr %r5, b4, b5
+    %r1 = comp_eq %p0 1
+    condbr %r1, b4, b5
   b4:
-    %r7 = alloca int
-    %r8 = store @c0 to %r7
-    %r9 = alloca int
-    %r10 = call std::Num<std::int>::from_int#impl:25eabc6b(%r7, %r9)
-    %r11 = call std::Num<std::int>::sub#impl:6eee9827(%p0, %r9, %p1)
-    %r12 = br b6
+    %r2 = alloca int
+    store @c0 to %r2
+    %r3 = alloca int
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r2, %r3)
+    call std::Num<std::int>::sub#impl:6eee9827(%p0, %r3, %p1)
+    br b6
   b5:
-    %r13 = alloca int
-    %r14 = store @c0 to %r13
-    %r15 = alloca int
-    %r16 = call std::Num<std::int>::from_int#impl:25eabc6b(%r13, %r15)
-    %r17 = call std::Num<std::int>::neg#impl:6b873453(%r15, %p1)
-    %r18 = br b6
+    %r4 = alloca int
+    store @c0 to %r4
+    %r5 = alloca int
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r4, %r5)
+    call std::Num<std::int>::neg#impl:6b873453(%r5, %p1)
+    br b6
   b6:
-    %r19 = ret
+    ret
 "#
     );
 }
@@ -395,9 +395,9 @@ fn user_function_call() {
         sessions.emit_ssa("fn a0(x: int) { a0(x) }"),
         r#"fn a0(%p0: @arg let int, %p1: @ret never):
   b0:
-    %r0 = check_call_depth
-    %r1 = call <test>::a0(%p0, %p1)
-    %r2 = ret
+    check_call_depth
+    call <test>::a0(%p0, %p1)
+    ret
 "#
     )
 }
@@ -639,35 +639,35 @@ fn factorial() {
         r#"fn factorial(%p0: @arg let int, %p1: @ret int):
   @c0: int = 1
   b0:
-    %r0 = check_call_depth
+    check_call_depth
+    %r0 = alloca int
+    store @c0 to %r0
     %r1 = alloca int
-    %r2 = store @c0 to %r1
-    %r3 = alloca int
-    %r4 = call std::Num<std::int>::from_int#impl:25eabc6b(%r1, %r3)
-    %r5 = alloca bool
-    %r6 = call std::gt(dict(std::Ord<std::int>), %p0, %r3, %r5)
-    %r7 = br b1
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r0, %r1)
+    %r2 = alloca bool
+    call std::gt(dict(std::Ord<std::int>), %p0, %r1, %r2)
+    br b1
   b1:
-    %r8 = comp_eq %r5 true
-    %r9 = condbr %r8, b2, b3
+    %r3 = comp_eq %r2 true
+    condbr %r3, b2, b3
   b2:
-    %r10 = alloca int
-    %r11 = store @c0 to %r10
-    %r12 = alloca int
-    %r13 = call std::Num<std::int>::from_int#impl:25eabc6b(%r10, %r12)
-    %r14 = alloca int
-    %r15 = call std::Num<std::int>::sub#impl:6eee9827(%p0, %r12, %r14)
-    %r16 = alloca int
-    %r17 = call <test>::factorial(%r14, %r16)
-    %r18 = call std::Num<std::int>::mul#impl:a3604103(%p0, %r16, %p1)
-    %r19 = br b4
+    %r4 = alloca int
+    store @c0 to %r4
+    %r5 = alloca int
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r4, %r5)
+    %r6 = alloca int
+    call std::Num<std::int>::sub#impl:6eee9827(%p0, %r5, %r6)
+    %r7 = alloca int
+    call <test>::factorial(%r6, %r7)
+    call std::Num<std::int>::mul#impl:a3604103(%p0, %r7, %p1)
+    br b4
   b3:
-    %r20 = alloca int
-    %r21 = store @c0 to %r20
-    %r22 = call std::Num<std::int>::from_int#impl:25eabc6b(%r20, %p1)
-    %r23 = br b4
+    %r8 = alloca int
+    store @c0 to %r8
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r8, %p1)
+    br b4
   b4:
-    %r24 = ret
+    ret
 "#
     );
 }
@@ -687,29 +687,29 @@ fn place_call_into_alias_local_branch() {
   @c3: () = ()
   b0:
     %r0 = alloca int
-    %r1 = br b1
+    br b1
   b1:
-    %r2 = comp_eq @c0 true
-    %r3 = condbr %r2, b2, b3
+    %r1 = comp_eq @c0 true
+    condbr %r1, b2, b3
   b2:
-    %r4 = alloca int
-    %r5 = store @c1 to %r4
-    %r6 = alloca_place int
-    %r7 = call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r4, %r6)
-    %r8 = load %r6
-    %r9 = memcpy %r8 to %r0
-    %r10 = br b4
+    %r2 = alloca int
+    store @c1 to %r2
+    %r3 = alloca_place int
+    call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r2, %r3)
+    %r4 = load %r3
+    memcpy %r4 to %r0
+    br b4
   b3:
-    %r11 = alloca int
-    %r12 = store @c2 to %r11
-    %r13 = alloca_place int
-    %r14 = call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r11, %r13)
-    %r15 = load %r13
-    %r16 = memcpy %r15 to %r0
-    %r17 = br b4
+    %r5 = alloca int
+    store @c2 to %r5
+    %r6 = alloca_place int
+    call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r5, %r6)
+    %r7 = load %r6
+    memcpy %r7 to %r0
+    br b4
   b4:
-    %r18 = move %r0 to %p1
-    %r19 = ret
+    move %r0 to %p1
+    ret
 "#,
     );
 }
@@ -722,8 +722,8 @@ fn iter1_multi_param_value() {
         session.emit_ssa("fn f(x: int, y: int) { x + y }"),
         r#"fn f(%p0: @arg let int, %p1: @arg let int, %p2: @ret int):
   b0:
-    %r0 = call std::Num<std::int>::add#impl:7665d3ee(%p0, %p1, %p2)
-    %r1 = ret
+    call std::Num<std::int>::add#impl:7665d3ee(%p0, %p1, %p2)
+    ret
 "#,
     );
 }
@@ -741,16 +741,16 @@ fn iter1_mut_local_copy() {
   @c1: int = 1
   b0:
     %r0 = alloca int
-    %r1 = memcpy %p0 to %r0
+    memcpy %p0 to %r0
+    %r1 = alloca int
     %r2 = alloca int
+    store @c1 to %r2
     %r3 = alloca int
-    %r4 = store @c1 to %r3
-    %r5 = alloca int
-    %r6 = call std::Num<std::int>::from_int#impl:25eabc6b(%r3, %r5)
-    %r7 = call std::Num<std::int>::add#impl:7665d3ee(%r0, %r5, %r2)
-    %r8 = move %r2 to %r0
-    %r9 = memcpy %r0 to %p1
-    %r10 = ret
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r2, %r3)
+    call std::Num<std::int>::add#impl:7665d3ee(%r0, %r3, %r1)
+    move %r1 to %r0
+    memcpy %r0 to %p1
+    ret
 "#,
     );
 }
@@ -768,16 +768,16 @@ fn iter1_let_mut_move_return() {
   @c1: int = 1
   b0:
     %r0 = alloca int
-    %r1 = memcpy %p0 to %r0
+    memcpy %p0 to %r0
+    %r1 = alloca int
     %r2 = alloca int
+    store @c1 to %r2
     %r3 = alloca int
-    %r4 = store @c1 to %r3
-    %r5 = alloca int
-    %r6 = call std::Num<std::int>::from_int#impl:25eabc6b(%r3, %r5)
-    %r7 = call std::Num<std::int>::add#impl:7665d3ee(%r0, %r5, %r2)
-    %r8 = move %r2 to %r0
-    %r9 = move %r0 to %p1
-    %r10 = ret
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r2, %r3)
+    call std::Num<std::int>::add#impl:7665d3ee(%r0, %r3, %r1)
+    move %r1 to %r0
+    move %r0 to %p1
+    ret
 "#,
     );
 }
@@ -795,27 +795,27 @@ fn array_index_read() {
   b0:
     %r0 = alloca bool
     %r1 = alloca int
-    %r2 = store @c0 to %r1
-    %r3 = alloca_place bool
-    %r4 = call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r1, %r3)
-    %r5 = load %r3
-    %r6 = memcpy %r5 to %r0
-    %r7 = br b1
+    store @c0 to %r1
+    %r2 = alloca_place bool
+    call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r1, %r2)
+    %r3 = load %r2
+    memcpy %r3 to %r0
+    br b1
   b1:
-    %r8 = comp_eq %r0 true
-    %r9 = condbr %r8, b2, b3
+    %r4 = comp_eq %r0 true
+    condbr %r4, b2, b3
   b2:
-    %r10 = alloca int
-    %r11 = store @c2 to %r10
-    %r12 = call std::Num<std::int>::from_int#impl:25eabc6b(%r10, %p1)
-    %r13 = br b4
+    %r5 = alloca int
+    store @c2 to %r5
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r5, %p1)
+    br b4
   b3:
-    %r14 = alloca int
-    %r15 = store @c3 to %r14
-    %r16 = call std::Num<std::int>::from_int#impl:25eabc6b(%r14, %p1)
-    %r17 = br b4
+    %r6 = alloca int
+    store @c3 to %r6
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r6, %p1)
+    br b4
   b4:
-    %r18 = ret
+    ret
 "#,
     );
 }
@@ -831,15 +831,15 @@ fn array_index_assign() {
   @c2: () = ()
   b0:
     %r0 = alloca int
-    %r1 = store @c0 to %r0
-    %r2 = alloca_place bool
-    %r3 = call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r0, %r2)
-    %r4 = load %r2
-    %r5 = alloca bool
-    %r6 = store @c1 to %r5
-    %r7 = move %r5 to %r4
-    %r8 = store @c2 to %p1
-    %r9 = ret
+    store @c0 to %r0
+    %r1 = alloca_place bool
+    call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r0, %r1)
+    %r2 = load %r1
+    %r3 = alloca bool
+    store @c1 to %r3
+    move %r3 to %r2
+    store @c2 to %p1
+    ret
 "#,
     );
 }
@@ -856,12 +856,12 @@ fn place_call_returned_as_value() {
   @c0: int = 0
   b0:
     %r0 = alloca int
-    %r1 = store @c0 to %r0
-    %r2 = alloca_place int
-    %r3 = call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r0, %r2)
-    %r4 = load %r2
-    %r5 = memcpy %r4 to %p1
-    %r6 = ret
+    store @c0 to %r0
+    %r1 = alloca_place int
+    call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r0, %r1)
+    %r2 = load %r1
+    memcpy %r2 to %p1
+    ret
 "#,
     );
 }
@@ -880,20 +880,20 @@ fn place_call_into_owned_local() {
   b0:
     %r0 = alloca int
     %r1 = alloca int
-    %r2 = store @c0 to %r1
-    %r3 = alloca_place int
-    %r4 = call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r1, %r3)
-    %r5 = load %r3
-    %r6 = memcpy %r5 to %r0
-    %r7 = alloca int
-    %r8 = alloca int
-    %r9 = store @c2 to %r8
-    %r10 = alloca int
-    %r11 = call std::Num<std::int>::from_int#impl:25eabc6b(%r8, %r10)
-    %r12 = call std::Num<std::int>::add#impl:7665d3ee(%r0, %r10, %r7)
-    %r13 = move %r7 to %r0
-    %r14 = move %r0 to %p1
-    %r15 = ret
+    store @c0 to %r1
+    %r2 = alloca_place int
+    call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r1, %r2)
+    %r3 = load %r2
+    memcpy %r3 to %r0
+    %r4 = alloca int
+    %r5 = alloca int
+    store @c2 to %r5
+    %r6 = alloca int
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r5, %r6)
+    call std::Num<std::int>::add#impl:7665d3ee(%r0, %r6, %r4)
+    move %r4 to %r0
+    move %r0 to %p1
+    ret
 "#,
     );
 }
@@ -911,13 +911,13 @@ fn place_call_discarded() {
   b0:
     %r0 = alloca int
     %r1 = alloca int
-    %r2 = store @c0 to %r1
-    %r3 = alloca_place int
-    %r4 = call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r1, %r3)
-    %r5 = load %r3
-    %r6 = memcpy %r5 to %r0
-    %r7 = store @c1 to %p1
-    %r8 = ret
+    store @c0 to %r1
+    %r2 = alloca_place int
+    call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r1, %r2)
+    %r3 = load %r2
+    memcpy %r3 to %r0
+    store @c1 to %p1
+    ret
 "#,
     );
 }
@@ -937,62 +937,62 @@ fn nested_place_call() {
     %r0 = alloca [int]
     %r1 = alloca int
     %r2 = alloca int [unwind b1]
-    %r3 = store @c0 to %r2 [unwind b1]
-    %r4 = alloca_place [int] [unwind b1]
-    %r5 = invoke std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r2, %r4) -> b2 unwind b1
+    store @c0 to %r2 [unwind b1]
+    %r3 = alloca_place [int] [unwind b1]
+    invoke std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r2, %r3) -> b2 unwind b1
   b1:
-    %r17 = drop %r0 via <test>::std::Value<[std::int]>::drop#impl:a4f41aeb
-    %r18 = resume
+    drop %r0 via <test>::std::Value<[std::int]>::drop#impl:a4f41aeb
+    resume
   b2:
-    %r6 = load %r4 [unwind b1]
-    %r7 = call <test>::std::Value<[std::int]>::clone#impl:94a041f9(%r6, %r0) [unwind b1]
-    %r8 = alloca int [unwind b1]
-    %r9 = store @c2 to %r8 [unwind b1]
-    %r10 = alloca_place int [unwind b1]
-    %r11 = invoke std::array_index::ref_mut#subscript:cb69b6f4(%r0, %r8, %r10) -> b3 unwind b1
+    %r4 = load %r3 [unwind b1]
+    call <test>::std::Value<[std::int]>::clone#impl:94a041f9(%r4, %r0) [unwind b1]
+    %r5 = alloca int [unwind b1]
+    store @c2 to %r5 [unwind b1]
+    %r6 = alloca_place int [unwind b1]
+    invoke std::array_index::ref_mut#subscript:cb69b6f4(%r0, %r5, %r6) -> b3 unwind b1
   b3:
-    %r12 = load %r10 [unwind b1]
-    %r13 = memcpy %r12 to %r1 [unwind b1]
-    %r14 = move %r1 to %p1 [unwind b1]
-    %r15 = drop %r0 via <test>::std::Value<[std::int]>::drop#impl:a4f41aeb
-    %r16 = ret
+    %r7 = load %r6 [unwind b1]
+    memcpy %r7 to %r1 [unwind b1]
+    move %r1 to %p1 [unwind b1]
+    drop %r0 via <test>::std::Value<[std::int]>::drop#impl:a4f41aeb
+    ret
 
 fn std::Value<[std::int]>::ALIGN#impl:90f3bfea(%p0: @ret int):
   @c0: int = 8
   b0:
-    %r0 = store @c0 to %p0
-    %r1 = ret
+    store @c0 to %p0
+    ret
 
 fn std::Value<[std::int]>::SIZE#impl:9ddb92fe(%p0: @ret int):
   @c0: int = 48
   b0:
-    %r0 = store @c0 to %p0
-    %r1 = ret
+    store @c0 to %p0
+    ret
 
 fn std::Value<[std::int]>::clone#impl:94a041f9(%p0: @arg let [int], %p1: @ret [int]):
   b0:
-    %r0 = call std::Value<[A]>::clone#impl:d3305f1a(dict(std::Value<std::int>), dict(<test>::std::Value<[std::int]>), %p0, %p1)
-    %r1 = ret
+    call std::Value<[A]>::clone#impl:d3305f1a(dict(std::Value<std::int>), dict(<test>::std::Value<[std::int]>), %p0, %p1)
+    ret
 
 fn std::Value<[std::int]>::drop#impl:a4f41aeb(%p0: @arg &mut [int], %p1: @ret ()):
   b0:
-    %r0 = call std::Value<[A]>::drop#impl:6cacf658(dict(std::Value<std::int>), dict(<test>::std::Value<[std::int]>), %p0, %p1)
-    %r1 = ret
+    call std::Value<[A]>::drop#impl:6cacf658(dict(std::Value<std::int>), dict(<test>::std::Value<[std::int]>), %p0, %p1)
+    ret
 
 fn std::Value<[std::int]>::eq#impl:7e1688d4(%p0: @arg let [int], %p1: @arg let [int], %p2: @ret bool):
   b0:
-    %r0 = call std::Value<[A]>::eq#impl:0ac782c1(dict(std::Value<std::int>), dict(<test>::std::Value<[std::int]>), %p0, %p1, %p2)
-    %r1 = ret
+    call std::Value<[A]>::eq#impl:0ac782c1(dict(std::Value<std::int>), dict(<test>::std::Value<[std::int]>), %p0, %p1, %p2)
+    ret
 
 fn std::Value<[std::int]>::hash#impl:0aca59c2(%p0: @arg let [int], %p1: @arg &mut hasher, %p2: @ret ()):
   b0:
-    %r0 = call std::Value<[A]>::hash#impl:90d7c903(dict(std::Value<std::int>), dict(<test>::std::Value<[std::int]>), %p0, %p1, %p2)
-    %r1 = ret
+    call std::Value<[A]>::hash#impl:90d7c903(dict(std::Value<std::int>), dict(<test>::std::Value<[std::int]>), %p0, %p1, %p2)
+    ret
 
 fn std::Value<[std::int]>::to_string#impl:892a091b(%p0: @arg let [int], %p1: @ret string):
   b0:
-    %r0 = call std::Value<[A]>::to_string#impl:6a7dc628(dict(std::Value<std::int>), dict(<test>::std::Value<[std::int]>), %p0, %p1)
-    %r1 = ret
+    call std::Value<[A]>::to_string#impl:6a7dc628(dict(std::Value<std::int>), dict(<test>::std::Value<[std::int]>), %p0, %p1)
+    ret
 "#,
     );
 }
@@ -1008,18 +1008,18 @@ fn place_call_as_let_argument() {
   @c0: int = 0
   b0:
     %r0 = alloca int
-    %r1 = store @c0 to %r0
-    %r2 = alloca_place [int]
-    %r3 = call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r0, %r2)
-    %r4 = load %r2
-    %r5 = call <test>::g(%r4, %p1)
-    %r6 = ret
+    store @c0 to %r0
+    %r1 = alloca_place [int]
+    call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r0, %r1)
+    %r2 = load %r1
+    call <test>::g(%r2, %p1)
+    ret
 
 fn g(%p0: @arg let [int], %p1: @ret ()):
   @c0: () = ()
   b0:
-    %r0 = store @c0 to %p1
-    %r1 = ret
+    store @c0 to %p1
+    ret
 "#,
     );
 }
@@ -1035,18 +1035,18 @@ fn place_call_as_mutable_ref_argument() {
   @c0: int = 0
   b0:
     %r0 = alloca int
-    %r1 = store @c0 to %r0
-    %r2 = alloca_place [int]
-    %r3 = call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r0, %r2)
-    %r4 = load %r2
-    %r5 = call <test>::g(%r4, %p1)
-    %r6 = ret
+    store @c0 to %r0
+    %r1 = alloca_place [int]
+    call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r0, %r1)
+    %r2 = load %r1
+    call <test>::g(%r2, %p1)
+    ret
 
 fn g(%p0: @arg &mut [int], %p1: @ret ()):
   @c0: () = ()
   b0:
-    %r0 = store @c0 to %p1
-    %r1 = ret
+    store @c0 to %p1
+    ret
 "#,
     );
 }
@@ -1065,27 +1065,27 @@ fn projection_of_place_call() {
     %r0 = alloca (int, bool)
     %r1 = alloca bool
     %r2 = alloca int
-    %r3 = store @c0 to %r2
-    %r4 = alloca_place (int, bool)
-    %r5 = call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r2, %r4)
-    %r6 = load %r4
-    %r7 = memcpy %r6 to %r0
-    %r8 = subfield @c2 from %r0
-    %r9 = memcpy %r8 to %r1
-    %r10 = move %r1 to %p1
-    %r11 = ret
+    store @c0 to %r2
+    %r3 = alloca_place (int, bool)
+    call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r2, %r3)
+    %r4 = load %r3
+    memcpy %r4 to %r0
+    %r5 = subfield @c2 from %r0
+    memcpy %r5 to %r1
+    move %r1 to %p1
+    ret
 
 fn std::Value<(std::int, std::bool)>::ALIGN#impl:9cca4d8c(%p0: @ret int):
   @c0: int = 8
   b0:
-    %r0 = store @c0 to %p0
-    %r1 = ret
+    store @c0 to %p0
+    ret
 
 fn std::Value<(std::int, std::bool)>::SIZE#impl:1462ea00(%p0: @ret int):
   @c0: int = 16
   b0:
-    %r0 = store @c0 to %p0
-    %r1 = ret
+    store @c0 to %p0
+    ret
 
 fn std::Value<(std::int, std::bool)>::clone#impl:c6a2252d(%p0: @arg let (int, bool), %p1: @ret (int, bool)):
   @c0: int = 0
@@ -1093,11 +1093,11 @@ fn std::Value<(std::int, std::bool)>::clone#impl:c6a2252d(%p0: @arg let (int, bo
   b0:
     %r0 = subfield @c0 from %p1
     %r1 = subfield @c0 from %p0
-    %r2 = call std::Value<std::int>::clone#impl:2d38cab9(%r1, %r0)
-    %r3 = subfield @c1 from %p1
-    %r4 = subfield @c1 from %p0
-    %r5 = call std::Value<std::bool>::clone#impl:0e47e282(%r4, %r3)
-    %r6 = ret
+    call std::Value<std::int>::clone#impl:2d38cab9(%r1, %r0)
+    %r2 = subfield @c1 from %p1
+    %r3 = subfield @c1 from %p0
+    call std::Value<std::bool>::clone#impl:0e47e282(%r3, %r2)
+    ret
 
 fn std::Value<(std::int, std::bool)>::drop#impl:2f5156cf(%p0: @arg &mut (int, bool), %p1: @ret ()):
   @c0: int = 0
@@ -1106,12 +1106,12 @@ fn std::Value<(std::int, std::bool)>::drop#impl:2f5156cf(%p0: @arg &mut (int, bo
   b0:
     %r0 = subfield @c0 from %p0
     %r1 = alloca ()
-    %r2 = call std::Value<std::int>::drop#impl:76f3f2ef(%r0, %r1)
-    %r3 = subfield @c1 from %p0
-    %r4 = alloca ()
-    %r5 = call std::Value<std::bool>::drop#impl:17fb3d04(%r3, %r4)
-    %r6 = store @c2 to %p1
-    %r7 = ret
+    call std::Value<std::int>::drop#impl:76f3f2ef(%r0, %r1)
+    %r2 = subfield @c1 from %p0
+    %r3 = alloca ()
+    call std::Value<std::bool>::drop#impl:17fb3d04(%r2, %r3)
+    store @c2 to %p1
+    ret
 
 fn std::Value<(std::int, std::bool)>::eq#impl:8240623e(%p0: @arg let (int, bool), %p1: @arg let (int, bool), %p2: @ret bool):
   @c0: int = 0
@@ -1122,33 +1122,33 @@ fn std::Value<(std::int, std::bool)>::eq#impl:8240623e(%p0: @arg let (int, bool)
     %r0 = subfield @c0 from %p0
     %r1 = subfield @c0 from %p1
     %r2 = alloca bool
-    %r3 = call std::Value<std::int>::eq#impl:87044288(%r0, %r1, %r2)
-    %r4 = br b1
+    call std::Value<std::int>::eq#impl:87044288(%r0, %r1, %r2)
+    br b1
   b1:
-    %r5 = comp_eq %r2 true
-    %r6 = condbr %r5, b2, b3
+    %r3 = comp_eq %r2 true
+    condbr %r3, b2, b3
   b2:
-    %r7 = subfield @c1 from %p0
-    %r8 = subfield @c1 from %p1
-    %r9 = alloca bool
-    %r10 = call std::Value<std::bool>::eq#impl:fd9b066d(%r7, %r8, %r9)
-    %r11 = br b5
+    %r4 = subfield @c1 from %p0
+    %r5 = subfield @c1 from %p1
+    %r6 = alloca bool
+    call std::Value<std::bool>::eq#impl:fd9b066d(%r4, %r5, %r6)
+    br b5
   b3:
-    %r19 = store @c3 to %p2
-    %r20 = br b4
+    store @c3 to %p2
+    br b4
   b4:
-    %r21 = ret
+    ret
   b5:
-    %r12 = comp_eq %r9 true
-    %r13 = condbr %r12, b6, b7
+    %r7 = comp_eq %r6 true
+    condbr %r7, b6, b7
   b6:
-    %r14 = store @c2 to %p2
-    %r15 = br b8
+    store @c2 to %p2
+    br b8
   b7:
-    %r16 = store @c3 to %p2
-    %r17 = br b8
+    store @c3 to %p2
+    br b8
   b8:
-    %r18 = br b4
+    br b4
 
 fn std::Value<(std::int, std::bool)>::hash#impl:d83c2054(%p0: @arg let (int, bool), %p1: @arg &mut hasher, %p2: @ret ()):
   @c0: int = 0
@@ -1157,12 +1157,12 @@ fn std::Value<(std::int, std::bool)>::hash#impl:d83c2054(%p0: @arg let (int, boo
   b0:
     %r0 = subfield @c0 from %p0
     %r1 = alloca ()
-    %r2 = call std::Value<std::int>::hash#impl:bdc2934a(%r0, %p1, %r1)
-    %r3 = subfield @c1 from %p0
-    %r4 = alloca ()
-    %r5 = call std::Value<std::bool>::hash#impl:7e2c0813(%r3, %p1, %r4)
-    %r6 = store @c2 to %p2
-    %r7 = ret
+    call std::Value<std::int>::hash#impl:bdc2934a(%r0, %p1, %r1)
+    %r2 = subfield @c1 from %p0
+    %r3 = alloca ()
+    call std::Value<std::bool>::hash#impl:7e2c0813(%r2, %p1, %r3)
+    store @c2 to %p2
+    ret
 
 fn std::Value<(std::int, std::bool)>::to_string#impl:8f2e215f(%p0: @arg let (int, bool), %p1: @ret string):
   @c0: StaticStr = "("
@@ -1178,44 +1178,44 @@ fn std::Value<(std::int, std::bool)>::to_string#impl:8f2e215f(%p0: @arg let (int
     %r3 = alloca string
     %r4 = alloca string
     %r5 = alloca StaticStr
-    %r6 = store @c0 to %r5
-    %r7 = call std::string_from_static(%r5, %r0)
-    %r8 = subfield @c2 from %p0
-    %r9 = call std::Value<std::int>::to_string#impl:a5db1d9f(%r8, %r1) [unwind b1]
-    %r10 = alloca () [unwind b1]
-    %r11 = call std::string_push_str(%r0, %r1, %r10) [unwind b1]
-    %r12 = drop %r1 via std::Value<std::string>::drop#impl:1d429675
-    %r13 = alloca StaticStr [unwind b2]
-    %r14 = store @c3 to %r13 [unwind b2]
-    %r15 = call std::string_from_static(%r13, %r2) [unwind b2]
-    %r16 = alloca () [unwind b2]
-    %r17 = call std::string_push_str(%r0, %r2, %r16) [unwind b2]
-    %r18 = drop %r2 via std::Value<std::string>::drop#impl:1d429675
-    %r19 = subfield @c4 from %p0
-    %r20 = call std::Value<std::bool>::to_string#impl:044f2674(%r19, %r3) [unwind b3]
-    %r21 = alloca () [unwind b3]
-    %r22 = call std::string_push_str(%r0, %r3, %r21) [unwind b3]
-    %r23 = drop %r3 via std::Value<std::string>::drop#impl:1d429675
-    %r24 = alloca StaticStr [unwind b4]
-    %r25 = store @c5 to %r24 [unwind b4]
-    %r26 = call std::string_from_static(%r24, %r4) [unwind b4]
-    %r27 = alloca () [unwind b4]
-    %r28 = call std::string_push_str(%r0, %r4, %r27) [unwind b4]
-    %r29 = drop %r4 via std::Value<std::string>::drop#impl:1d429675
-    %r30 = move %r0 to %p1
-    %r31 = ret
+    store @c0 to %r5
+    call std::string_from_static(%r5, %r0)
+    %r6 = subfield @c2 from %p0
+    call std::Value<std::int>::to_string#impl:a5db1d9f(%r6, %r1) [unwind b1]
+    %r7 = alloca () [unwind b1]
+    call std::string_push_str(%r0, %r1, %r7) [unwind b1]
+    drop %r1 via std::Value<std::string>::drop#impl:1d429675
+    %r8 = alloca StaticStr [unwind b2]
+    store @c3 to %r8 [unwind b2]
+    call std::string_from_static(%r8, %r2) [unwind b2]
+    %r9 = alloca () [unwind b2]
+    call std::string_push_str(%r0, %r2, %r9) [unwind b2]
+    drop %r2 via std::Value<std::string>::drop#impl:1d429675
+    %r10 = subfield @c4 from %p0
+    call std::Value<std::bool>::to_string#impl:044f2674(%r10, %r3) [unwind b3]
+    %r11 = alloca () [unwind b3]
+    call std::string_push_str(%r0, %r3, %r11) [unwind b3]
+    drop %r3 via std::Value<std::string>::drop#impl:1d429675
+    %r12 = alloca StaticStr [unwind b4]
+    store @c5 to %r12 [unwind b4]
+    call std::string_from_static(%r12, %r4) [unwind b4]
+    %r13 = alloca () [unwind b4]
+    call std::string_push_str(%r0, %r4, %r13) [unwind b4]
+    drop %r4 via std::Value<std::string>::drop#impl:1d429675
+    move %r0 to %p1
+    ret
   b1:
-    %r32 = drop %r1 via std::Value<std::string>::drop#impl:1d429675
-    %r33 = resume
+    drop %r1 via std::Value<std::string>::drop#impl:1d429675
+    resume
   b2:
-    %r34 = drop %r2 via std::Value<std::string>::drop#impl:1d429675
-    %r35 = resume
+    drop %r2 via std::Value<std::string>::drop#impl:1d429675
+    resume
   b3:
-    %r36 = drop %r3 via std::Value<std::string>::drop#impl:1d429675
-    %r37 = resume
+    drop %r3 via std::Value<std::string>::drop#impl:1d429675
+    resume
   b4:
-    %r38 = drop %r4 via std::Value<std::string>::drop#impl:1d429675
-    %r39 = resume
+    drop %r4 via std::Value<std::string>::drop#impl:1d429675
+    resume
 "#,
     );
 }
@@ -1230,28 +1230,28 @@ fn place_call_value_in_branches() {
   @c0: int = 0
   @c1: int = 1
   b0:
-    %r0 = br b1
+    br b1
   b1:
-    %r1 = comp_eq %p1 true
-    %r2 = condbr %r1, b2, b3
+    %r0 = comp_eq %p1 true
+    condbr %r0, b2, b3
   b2:
-    %r3 = alloca int
-    %r4 = store @c0 to %r3
-    %r5 = alloca_place int
-    %r6 = call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r3, %r5)
-    %r7 = load %r5
-    %r8 = memcpy %r7 to %p2
-    %r9 = br b4
+    %r1 = alloca int
+    store @c0 to %r1
+    %r2 = alloca_place int
+    call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r1, %r2)
+    %r3 = load %r2
+    memcpy %r3 to %p2
+    br b4
   b3:
-    %r10 = alloca int
-    %r11 = store @c1 to %r10
-    %r12 = alloca_place int
-    %r13 = call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r10, %r12)
-    %r14 = load %r12
-    %r15 = memcpy %r14 to %p2
-    %r16 = br b4
+    %r4 = alloca int
+    store @c1 to %r4
+    %r5 = alloca_place int
+    call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r4, %r5)
+    %r6 = load %r5
+    memcpy %r6 to %p2
+    br b4
   b4:
-    %r17 = ret
+    ret
 "#,
     );
 }
@@ -1269,13 +1269,13 @@ fn place_call_into_alias_local() {
   b0:
     %r0 = alloca int
     %r1 = alloca int
-    %r2 = store @c0 to %r1
-    %r3 = alloca_place int
-    %r4 = call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r1, %r3)
-    %r5 = load %r3
-    %r6 = memcpy %r5 to %r0
-    %r7 = move %r0 to %p1
-    %r8 = ret
+    store @c0 to %r1
+    %r2 = alloca_place int
+    call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r1, %r2)
+    %r3 = load %r2
+    memcpy %r3 to %r0
+    move %r0 to %p1
+    ret
 "#,
     );
 }
@@ -1287,9 +1287,9 @@ fn iter1_apply() {
         session.emit_ssa("fn f(x: int) { f(x) }"),
         r#"fn f(%p0: @arg let int, %p1: @ret never):
   b0:
-    %r0 = check_call_depth
-    %r1 = call <test>::f(%p0, %p1)
-    %r2 = ret
+    check_call_depth
+    call <test>::f(%p0, %p1)
+    ret
 "#,
     );
 }
@@ -1303,8 +1303,8 @@ fn let_param_non_trivial() {
         r#"fn f(%p0: @arg let string, %p1: @ret ()):
   @c0: () = ()
   b0:
-    %r0 = store @c0 to %p1
-    %r1 = ret
+    store @c0 to %p1
+    ret
 "#,
     );
 }
@@ -1319,8 +1319,8 @@ fn let_param_generic() {
         r#"fn f(%p0: @arg let A, %p1: @ret ()):
   @c0: () = ()
   b0:
-    %r0 = store @c0 to %p1
-    %r1 = ret
+    store @c0 to %p1
+    ret
 "#,
     );
 }
@@ -1334,14 +1334,14 @@ fn let_argument_forwards_existing_place() {
         session.emit_ssa("fn u(s: string) { } fn caller(s: string) { u(s) }"),
         r#"fn caller(%p0: @arg let string, %p1: @ret ()):
   b0:
-    %r0 = call <test>::u(%p0, %p1)
-    %r1 = ret
+    call <test>::u(%p0, %p1)
+    ret
 
 fn u(%p0: @arg let string, %p1: @ret ()):
   @c0: () = ()
   b0:
-    %r0 = store @c0 to %p1
-    %r1 = ret
+    store @c0 to %p1
+    ret
 "#,
     );
 }
@@ -1365,12 +1365,12 @@ fn recursive_trivial_copy_call_uses_let_convention() {
   @c1: () = ()
   b0:
     %r0 = alloca int
-    %r1 = check_call_depth
-    %r2 = alloca int
-    %r3 = store @c0 to %r2
-    %r4 = call std::Num<std::int>::from_int#impl:25eabc6b(%r2, %r0)
-    %r5 = call <test>::f(%r0, %p1)
-    %r6 = ret
+    check_call_depth
+    %r1 = alloca int
+    store @c0 to %r1
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r1, %r0)
+    call <test>::f(%r0, %p1)
+    ret
 "#,
     );
 }
@@ -1384,9 +1384,9 @@ fn trivial_copy_call_uses_let_convention() {
         session.emit_ssa("fn f(a: int) { f(a) }"),
         r#"fn f(%p0: @arg let int, %p1: @ret never):
   b0:
-    %r0 = check_call_depth
-    %r1 = call <test>::f(%p0, %p1)
-    %r2 = ret
+    check_call_depth
+    call <test>::f(%p0, %p1)
+    ret
 "#,
     );
 }
@@ -1409,8 +1409,8 @@ fn call_mutable_reference_argument_passes_owned_local_place() {
         r#"fn callee(%p0: @arg &mut int, %p1: @ret ()):
   @c0: () = ()
   b0:
-    %r0 = store @c0 to %p1
-    %r1 = ret
+    store @c0 to %p1
+    ret
 
 fn caller(%p0: @ret ()):
   @c0: int = 0
@@ -1418,10 +1418,10 @@ fn caller(%p0: @ret ()):
   b0:
     %r0 = alloca int
     %r1 = alloca int
-    %r2 = store @c0 to %r1
-    %r3 = call std::Num<std::int>::from_int#impl:25eabc6b(%r1, %r0)
-    %r4 = call <test>::callee(%r0, %p0)
-    %r5 = ret
+    store @c0 to %r1
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r1, %r0)
+    call <test>::callee(%r0, %p0)
+    ret
 "#,
     );
 }
@@ -1446,8 +1446,8 @@ fn call_passes_all_argument_conventions() {
         r#"fn callee(%p0: @arg let int, %p1: @arg &mut int, %p2: @arg let string, %p3: @ret ()):
   @c0: () = ()
   b0:
-    %r0 = store @c0 to %p3
-    %r1 = ret
+    store @c0 to %p3
+    ret
 
 fn caller(%p0: @arg let string, %p1: @ret ()):
   @c0: int = 0
@@ -1456,14 +1456,14 @@ fn caller(%p0: @arg let string, %p1: @ret ()):
   b0:
     %r0 = alloca int
     %r1 = alloca int
-    %r2 = store @c0 to %r1
-    %r3 = call std::Num<std::int>::from_int#impl:25eabc6b(%r1, %r0)
-    %r4 = alloca int
-    %r5 = store @c2 to %r4
-    %r6 = alloca int
-    %r7 = call std::Num<std::int>::from_int#impl:25eabc6b(%r4, %r6)
-    %r8 = call <test>::callee(%r6, %r0, %p0, %p1)
-    %r9 = ret
+    store @c0 to %r1
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r1, %r0)
+    %r2 = alloca int
+    store @c2 to %r2
+    %r3 = alloca int
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r2, %r3)
+    call <test>::callee(%r3, %r0, %p0, %p1)
+    ret
 "#,
     );
 }
@@ -1479,11 +1479,11 @@ fn mutable_reference_parameter() {
   b0:
     %r0 = alloca int
     %r1 = alloca int
-    %r2 = store @c0 to %r1
-    %r3 = call std::Num<std::int>::from_int#impl:25eabc6b(%r1, %r0)
-    %r4 = move %r0 to %p0
-    %r5 = store @c1 to %p1
-    %r6 = ret
+    store @c0 to %r1
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r1, %r0)
+    move %r0 to %p0
+    store @c1 to %p1
+    ret
 "#,
     );
 }
@@ -1502,16 +1502,16 @@ fn generic_apply() {
     %r1 = dict_entry 2 from %p0 [unwind b1]
     %r2 = dict_entry 6 from %p0 [unwind b1]
     %r3 = alloca int [unwind b1]
-    %r4 = store @c0 to %r3 [unwind b1]
-    %r5 = call %r2(%r3, %r0) [unwind b1]
-    %r6 = call %r1(%p2, %r0, %p3) [unwind b1]
-    %r7 = dict_entry 4 from %p1
-    %r8 = drop %r0 via %r7
-    %r9 = ret
+    store @c0 to %r3 [unwind b1]
+    call %r2(%r3, %r0) [unwind b1]
+    call %r1(%p2, %r0, %p3) [unwind b1]
+    %r4 = dict_entry 4 from %p1
+    drop %r0 via %r4
+    ret
   b1:
-    %r10 = dict_entry 4 from %p1
-    %r11 = drop %r0 via %r10
-    %r12 = resume
+    %r5 = dict_entry 4 from %p1
+    drop %r0 via %r5
+    resume
 "#,
     );
 }
@@ -1523,8 +1523,8 @@ fn dynamic_apply() {
         session.emit_ssa("fn apply_fn(f, x: int) { f(x) }"),
         r#"fn apply_fn(%p0: @arg let (int) -> A ! e₀, %p1: @arg let int, %p2: @ret A):
   b0:
-    %r0 = call %p0(%p1, %p2)
-    %r1 = ret
+    call %p0(%p1, %p2)
+    ret
 "#,
     );
 }
@@ -1543,14 +1543,14 @@ fn value_capturing_closure() {
         r#"fn $_ferlium_function_value_drop(%p0: @arg &mut A, %p1: @ret ()):
   @c0: () = ()
   b0:
-    %r0 = drop_closure_env %p0
-    %r1 = store @c0 to %p1
-    %r2 = ret
+    drop_closure_env %p0
+    store @c0 to %p1
+    ret
 
 fn $lambda$1(%p0: @arg &mut int, %p1: @ret int):
   b0:
-    %r0 = memcpy %p0 to %p1
-    %r1 = ret
+    memcpy %p0 to %p1
+    ret
 
 fn capture(%p0: @ret int):
   @c0: int = 1
@@ -1559,38 +1559,38 @@ fn capture(%p0: @ret int):
     %r0 = alloca int
     %r1 = alloca () -> int
     %r2 = alloca int [unwind b1]
-    %r3 = store @c0 to %r2 [unwind b1]
-    %r4 = call std::Num<std::int>::from_int#impl:25eabc6b(%r2, %r0) [unwind b1]
-    %r5 = alloca int [unwind b1]
-    %r6 = memcpy %r0 to %r5 [unwind b1]
-    %r7 = build_closure <test>::$lambda$1(%r5, dict(<test>::std::Value<(std::int,)>)) [unwind b1]
-    %r8 = store %r7 to %r1 [unwind b1]
-    %r9 = call %r1(%p0) [unwind b1]
-    %r10 = drop %r1 via <test>::$_ferlium_function_value_drop
-    %r11 = ret
+    store @c0 to %r2 [unwind b1]
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r2, %r0) [unwind b1]
+    %r3 = alloca int [unwind b1]
+    memcpy %r0 to %r3 [unwind b1]
+    %r4 = build_closure <test>::$lambda$1(%r3, dict(<test>::std::Value<(std::int,)>)) [unwind b1]
+    store %r4 to %r1 [unwind b1]
+    call %r1(%p0) [unwind b1]
+    drop %r1 via <test>::$_ferlium_function_value_drop
+    ret
   b1:
-    %r12 = drop %r1 via <test>::$_ferlium_function_value_drop
-    %r13 = resume
+    drop %r1 via <test>::$_ferlium_function_value_drop
+    resume
 
 fn std::Value<(std::int,)>::ALIGN#impl:2b73eccb(%p0: @ret int):
   @c0: int = 8
   b0:
-    %r0 = store @c0 to %p0
-    %r1 = ret
+    store @c0 to %p0
+    ret
 
 fn std::Value<(std::int,)>::SIZE#impl:ad9d7fe7(%p0: @ret int):
   @c0: int = 8
   b0:
-    %r0 = store @c0 to %p0
-    %r1 = ret
+    store @c0 to %p0
+    ret
 
 fn std::Value<(std::int,)>::clone#impl:7414fc52(%p0: @arg let (int,), %p1: @ret (int,)):
   @c0: int = 0
   b0:
     %r0 = subfield @c0 from %p1
     %r1 = subfield @c0 from %p0
-    %r2 = call std::Value<std::int>::clone#impl:2d38cab9(%r1, %r0)
-    %r3 = ret
+    call std::Value<std::int>::clone#impl:2d38cab9(%r1, %r0)
+    ret
 
 fn std::Value<(std::int,)>::drop#impl:d5ec4f8c(%p0: @arg &mut (int,), %p1: @ret ()):
   @c0: int = 0
@@ -1598,9 +1598,9 @@ fn std::Value<(std::int,)>::drop#impl:d5ec4f8c(%p0: @arg &mut (int,), %p1: @ret 
   b0:
     %r0 = subfield @c0 from %p0
     %r1 = alloca ()
-    %r2 = call std::Value<std::int>::drop#impl:76f3f2ef(%r0, %r1)
-    %r3 = store @c1 to %p1
-    %r4 = ret
+    call std::Value<std::int>::drop#impl:76f3f2ef(%r0, %r1)
+    store @c1 to %p1
+    ret
 
 fn std::Value<(std::int,)>::eq#impl:b00d2abd(%p0: @arg let (int,), %p1: @arg let (int,), %p2: @ret bool):
   @c0: int = 0
@@ -1610,19 +1610,19 @@ fn std::Value<(std::int,)>::eq#impl:b00d2abd(%p0: @arg let (int,), %p1: @arg let
     %r0 = subfield @c0 from %p0
     %r1 = subfield @c0 from %p1
     %r2 = alloca bool
-    %r3 = call std::Value<std::int>::eq#impl:87044288(%r0, %r1, %r2)
-    %r4 = br b1
+    call std::Value<std::int>::eq#impl:87044288(%r0, %r1, %r2)
+    br b1
   b1:
-    %r5 = comp_eq %r2 true
-    %r6 = condbr %r5, b2, b3
+    %r3 = comp_eq %r2 true
+    condbr %r3, b2, b3
   b2:
-    %r7 = store @c1 to %p2
-    %r8 = br b4
+    store @c1 to %p2
+    br b4
   b3:
-    %r9 = store @c2 to %p2
-    %r10 = br b4
+    store @c2 to %p2
+    br b4
   b4:
-    %r11 = ret
+    ret
 
 fn std::Value<(std::int,)>::hash#impl:58218263(%p0: @arg let (int,), %p1: @arg &mut hasher, %p2: @ret ()):
   @c0: int = 0
@@ -1630,9 +1630,9 @@ fn std::Value<(std::int,)>::hash#impl:58218263(%p0: @arg let (int,), %p1: @arg &
   b0:
     %r0 = subfield @c0 from %p0
     %r1 = alloca ()
-    %r2 = call std::Value<std::int>::hash#impl:bdc2934a(%r0, %p1, %r1)
-    %r3 = store @c1 to %p2
-    %r4 = ret
+    call std::Value<std::int>::hash#impl:bdc2934a(%r0, %p1, %r1)
+    store @c1 to %p2
+    ret
 
 fn std::Value<(std::int,)>::to_string#impl:30b07f9c(%p0: @arg let (int,), %p1: @ret string):
   @c0: StaticStr = "("
@@ -1644,27 +1644,27 @@ fn std::Value<(std::int,)>::to_string#impl:30b07f9c(%p0: @arg let (int,), %p1: @
     %r1 = alloca string
     %r2 = alloca string
     %r3 = alloca StaticStr
-    %r4 = store @c0 to %r3
-    %r5 = call std::string_from_static(%r3, %r0)
-    %r6 = subfield @c2 from %p0
-    %r7 = call std::Value<std::int>::to_string#impl:a5db1d9f(%r6, %r1) [unwind b1]
-    %r8 = alloca () [unwind b1]
-    %r9 = call std::string_push_str(%r0, %r1, %r8) [unwind b1]
-    %r10 = drop %r1 via std::Value<std::string>::drop#impl:1d429675
-    %r11 = alloca StaticStr [unwind b2]
-    %r12 = store @c3 to %r11 [unwind b2]
-    %r13 = call std::string_from_static(%r11, %r2) [unwind b2]
-    %r14 = alloca () [unwind b2]
-    %r15 = call std::string_push_str(%r0, %r2, %r14) [unwind b2]
-    %r16 = drop %r2 via std::Value<std::string>::drop#impl:1d429675
-    %r17 = move %r0 to %p1
-    %r18 = ret
+    store @c0 to %r3
+    call std::string_from_static(%r3, %r0)
+    %r4 = subfield @c2 from %p0
+    call std::Value<std::int>::to_string#impl:a5db1d9f(%r4, %r1) [unwind b1]
+    %r5 = alloca () [unwind b1]
+    call std::string_push_str(%r0, %r1, %r5) [unwind b1]
+    drop %r1 via std::Value<std::string>::drop#impl:1d429675
+    %r6 = alloca StaticStr [unwind b2]
+    store @c3 to %r6 [unwind b2]
+    call std::string_from_static(%r6, %r2) [unwind b2]
+    %r7 = alloca () [unwind b2]
+    call std::string_push_str(%r0, %r2, %r7) [unwind b2]
+    drop %r2 via std::Value<std::string>::drop#impl:1d429675
+    move %r0 to %p1
+    ret
   b1:
-    %r19 = drop %r1 via std::Value<std::string>::drop#impl:1d429675
-    %r20 = resume
+    drop %r1 via std::Value<std::string>::drop#impl:1d429675
+    resume
   b2:
-    %r21 = drop %r2 via std::Value<std::string>::drop#impl:1d429675
-    %r22 = resume
+    drop %r2 via std::Value<std::string>::drop#impl:1d429675
+    resume
 "#,
     );
 }
@@ -1683,8 +1683,8 @@ fn generic_two_same_type_params() {
         r#"fn f(%p0: @extra ((A, A) -> A, (A, A) -> A, (A, A) -> A, (A) -> A, (A) -> A, (A) -> A, (int) -> A), %p1: @arg let A, %p2: @arg let A, %p3: @ret A):
   b0:
     %r0 = dict_entry 0 from %p0
-    %r1 = call %r0(%p1, %p2, %p3)
-    %r2 = ret
+    call %r0(%p1, %p2, %p3)
+    ret
 "#,
     );
 }
@@ -1699,8 +1699,8 @@ fn generic_higher_order_function_param() {
         session.emit_ssa("fn apply(f: (A) -> A, x) { f(x) }"),
         r#"fn apply(%p0: @arg let (A) -> A ! e₀, %p1: @arg let A, %p2: @ret A):
   b0:
-    %r0 = call %p0(%p1, %p2)
-    %r1 = ret
+    call %p0(%p1, %p2)
+    ret
 "#,
     );
 }
@@ -1719,15 +1719,15 @@ fn generic_multiple_ops_reuse_witness() {
     %r0 = alloca A using %p1
     %r1 = dict_entry 0 from %p0 [unwind b1]
     %r2 = dict_entry 2 from %p0 [unwind b1]
-    %r3 = call %r2(%p2, %p2, %r0) [unwind b1]
-    %r4 = call %r1(%r0, %p2, %p3) [unwind b1]
-    %r5 = dict_entry 4 from %p1
-    %r6 = drop %r0 via %r5
-    %r7 = ret
+    call %r2(%p2, %p2, %r0) [unwind b1]
+    call %r1(%r0, %p2, %p3) [unwind b1]
+    %r3 = dict_entry 4 from %p1
+    drop %r0 via %r3
+    ret
   b1:
-    %r8 = dict_entry 4 from %p1
-    %r9 = drop %r0 via %r8
-    %r10 = resume
+    %r4 = dict_entry 4 from %p1
+    drop %r0 via %r4
+    resume
 "#,
     );
 }
@@ -1742,8 +1742,8 @@ fn generic_comparison() {
         r#"fn f(%p0: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A) -> A, (&mut A) -> (), () -> int, () -> int), %p1: @arg let A, %p2: @arg let A, %p3: @ret bool):
   b0:
     %r0 = dict_entry 0 from %p0
-    %r1 = call %r0(%p1, %p2, %p3)
-    %r2 = ret
+    call %r0(%p1, %p2, %p3)
+    ret
 "#,
     );
 }
@@ -1763,13 +1763,13 @@ fn copy_int() {
   @c1: int = 1
   b0:
     %r0 = alloca int
-    %r1 = memcpy %p0 to %r0
+    memcpy %p0 to %r0
+    %r1 = alloca int
+    store @c1 to %r1
     %r2 = alloca int
-    %r3 = store @c1 to %r2
-    %r4 = alloca int
-    %r5 = call std::Num<std::int>::from_int#impl:25eabc6b(%r2, %r4)
-    %r6 = call std::Num<std::int>::add#impl:7665d3ee(%r0, %r4, %p1)
-    %r7 = ret
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r1, %r2)
+    call std::Num<std::int>::add#impl:7665d3ee(%r0, %r2, %p1)
+    ret
 "#,
     );
 }
@@ -1801,35 +1801,35 @@ fn construct_struct() {
   b0:
     %r0 = subfield @c0 from %p0
     %r1 = alloca int
-    %r2 = store @c1 to %r1
-    %r3 = call std::Num<std::int>::from_int#impl:25eabc6b(%r1, %r0)
-    %r4 = subfield @c1 from %p0
-    %r5 = alloca int
-    %r6 = store @c2 to %r5
-    %r7 = call std::Num<std::int>::from_int#impl:25eabc6b(%r5, %r4)
-    %r8 = ret
+    store @c1 to %r1
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r1, %r0)
+    %r2 = subfield @c1 from %p0
+    %r3 = alloca int
+    store @c2 to %r3
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r3, %r2)
+    ret
 
 fn make_wrapper(%p0: @ret Wrapper):
   @c0: int = 0
   @c1: int = 1
   b0:
     %r0 = subfield @c0 from %p0
-    %r1 = call <test>::make_a(%r0)
-    %r2 = subfield @c1 from %p0
-    %r3 = call <test>::make_a(%r2)
-    %r4 = ret
+    call <test>::make_a(%r0)
+    %r1 = subfield @c1 from %p0
+    call <test>::make_a(%r1)
+    ret
 
 fn std::Value<<test>::A>::ALIGN#impl:b9fa7ef7(%p0: @ret int):
   @c0: int = 8
   b0:
-    %r0 = store @c0 to %p0
-    %r1 = ret
+    store @c0 to %p0
+    ret
 
 fn std::Value<<test>::A>::SIZE#impl:b6651763(%p0: @ret int):
   @c0: int = 16
   b0:
-    %r0 = store @c0 to %p0
-    %r1 = ret
+    store @c0 to %p0
+    ret
 
 fn std::Value<<test>::A>::clone#impl:3b26fee6(%p0: @arg let A, %p1: @ret A):
   @c0: int = 0
@@ -1837,11 +1837,11 @@ fn std::Value<<test>::A>::clone#impl:3b26fee6(%p0: @arg let A, %p1: @ret A):
   b0:
     %r0 = subfield @c0 from %p1
     %r1 = subfield @c0 from %p0
-    %r2 = call std::Value<std::int>::clone#impl:2d38cab9(%r1, %r0)
-    %r3 = subfield @c1 from %p1
-    %r4 = subfield @c1 from %p0
-    %r5 = call std::Value<std::int>::clone#impl:2d38cab9(%r4, %r3)
-    %r6 = ret
+    call std::Value<std::int>::clone#impl:2d38cab9(%r1, %r0)
+    %r2 = subfield @c1 from %p1
+    %r3 = subfield @c1 from %p0
+    call std::Value<std::int>::clone#impl:2d38cab9(%r3, %r2)
+    ret
 
 fn std::Value<<test>::A>::drop#impl:e48f46c8(%p0: @arg &mut A, %p1: @ret ()):
   @c0: int = 0
@@ -1850,12 +1850,12 @@ fn std::Value<<test>::A>::drop#impl:e48f46c8(%p0: @arg &mut A, %p1: @ret ()):
   b0:
     %r0 = subfield @c0 from %p0
     %r1 = alloca ()
-    %r2 = call std::Value<std::int>::drop#impl:76f3f2ef(%r0, %r1)
-    %r3 = subfield @c1 from %p0
-    %r4 = alloca ()
-    %r5 = call std::Value<std::int>::drop#impl:76f3f2ef(%r3, %r4)
-    %r6 = store @c2 to %p1
-    %r7 = ret
+    call std::Value<std::int>::drop#impl:76f3f2ef(%r0, %r1)
+    %r2 = subfield @c1 from %p0
+    %r3 = alloca ()
+    call std::Value<std::int>::drop#impl:76f3f2ef(%r2, %r3)
+    store @c2 to %p1
+    ret
 
 fn std::Value<<test>::A>::eq#impl:601557a9(%p0: @arg let A, %p1: @arg let A, %p2: @ret bool):
   @c0: int = 0
@@ -1866,33 +1866,33 @@ fn std::Value<<test>::A>::eq#impl:601557a9(%p0: @arg let A, %p1: @arg let A, %p2
     %r0 = subfield @c0 from %p0
     %r1 = subfield @c0 from %p1
     %r2 = alloca bool
-    %r3 = call std::Value<std::int>::eq#impl:87044288(%r0, %r1, %r2)
-    %r4 = br b1
+    call std::Value<std::int>::eq#impl:87044288(%r0, %r1, %r2)
+    br b1
   b1:
-    %r5 = comp_eq %r2 true
-    %r6 = condbr %r5, b2, b3
+    %r3 = comp_eq %r2 true
+    condbr %r3, b2, b3
   b2:
-    %r7 = subfield @c1 from %p0
-    %r8 = subfield @c1 from %p1
-    %r9 = alloca bool
-    %r10 = call std::Value<std::int>::eq#impl:87044288(%r7, %r8, %r9)
-    %r11 = br b5
+    %r4 = subfield @c1 from %p0
+    %r5 = subfield @c1 from %p1
+    %r6 = alloca bool
+    call std::Value<std::int>::eq#impl:87044288(%r4, %r5, %r6)
+    br b5
   b3:
-    %r19 = store @c3 to %p2
-    %r20 = br b4
+    store @c3 to %p2
+    br b4
   b4:
-    %r21 = ret
+    ret
   b5:
-    %r12 = comp_eq %r9 true
-    %r13 = condbr %r12, b6, b7
+    %r7 = comp_eq %r6 true
+    condbr %r7, b6, b7
   b6:
-    %r14 = store @c2 to %p2
-    %r15 = br b8
+    store @c2 to %p2
+    br b8
   b7:
-    %r16 = store @c3 to %p2
-    %r17 = br b8
+    store @c3 to %p2
+    br b8
   b8:
-    %r18 = br b4
+    br b4
 
 fn std::Value<<test>::A>::hash#impl:2d1a24bf(%p0: @arg let A, %p1: @arg &mut hasher, %p2: @ret ()):
   @c0: int = 0
@@ -1901,12 +1901,12 @@ fn std::Value<<test>::A>::hash#impl:2d1a24bf(%p0: @arg let A, %p1: @arg &mut has
   b0:
     %r0 = subfield @c0 from %p0
     %r1 = alloca ()
-    %r2 = call std::Value<std::int>::hash#impl:bdc2934a(%r0, %p1, %r1)
-    %r3 = subfield @c1 from %p0
-    %r4 = alloca ()
-    %r5 = call std::Value<std::int>::hash#impl:bdc2934a(%r3, %p1, %r4)
-    %r6 = store @c2 to %p2
-    %r7 = ret
+    call std::Value<std::int>::hash#impl:bdc2934a(%r0, %p1, %r1)
+    %r2 = subfield @c1 from %p0
+    %r3 = alloca ()
+    call std::Value<std::int>::hash#impl:bdc2934a(%r2, %p1, %r3)
+    store @c2 to %p2
+    ret
 
 fn std::Value<<test>::A>::to_string#impl:78412598(%p0: @arg let A, %p1: @ret string):
   @c0: StaticStr = "A { "
@@ -1929,92 +1929,92 @@ fn std::Value<<test>::A>::to_string#impl:78412598(%p0: @arg let A, %p1: @ret str
     %r7 = alloca string
     %r8 = alloca string
     %r9 = alloca StaticStr
-    %r10 = store @c0 to %r9
-    %r11 = call std::string_from_static(%r9, %r0)
-    %r12 = alloca StaticStr [unwind b1]
-    %r13 = store @c2 to %r12 [unwind b1]
-    %r14 = call std::string_from_static(%r12, %r1) [unwind b1]
-    %r15 = alloca () [unwind b1]
-    %r16 = call std::string_push_str(%r0, %r1, %r15) [unwind b1]
-    %r17 = drop %r1 via std::Value<std::string>::drop#impl:1d429675
-    %r18 = alloca StaticStr [unwind b2]
-    %r19 = store @c3 to %r18 [unwind b2]
-    %r20 = call std::string_from_static(%r18, %r2) [unwind b2]
-    %r21 = alloca () [unwind b2]
-    %r22 = call std::string_push_str(%r0, %r2, %r21) [unwind b2]
-    %r23 = drop %r2 via std::Value<std::string>::drop#impl:1d429675
-    %r24 = subfield @c4 from %p0
-    %r25 = call std::Value<std::int>::to_string#impl:a5db1d9f(%r24, %r3) [unwind b3]
-    %r26 = alloca () [unwind b3]
-    %r27 = call std::string_push_str(%r0, %r3, %r26) [unwind b3]
-    %r28 = drop %r3 via std::Value<std::string>::drop#impl:1d429675
-    %r29 = alloca StaticStr [unwind b4]
-    %r30 = store @c5 to %r29 [unwind b4]
-    %r31 = call std::string_from_static(%r29, %r4) [unwind b4]
-    %r32 = alloca () [unwind b4]
-    %r33 = call std::string_push_str(%r0, %r4, %r32) [unwind b4]
-    %r34 = drop %r4 via std::Value<std::string>::drop#impl:1d429675
-    %r35 = alloca StaticStr [unwind b5]
-    %r36 = store @c6 to %r35 [unwind b5]
-    %r37 = call std::string_from_static(%r35, %r5) [unwind b5]
-    %r38 = alloca () [unwind b5]
-    %r39 = call std::string_push_str(%r0, %r5, %r38) [unwind b5]
-    %r40 = drop %r5 via std::Value<std::string>::drop#impl:1d429675
-    %r41 = alloca StaticStr [unwind b6]
-    %r42 = store @c3 to %r41 [unwind b6]
-    %r43 = call std::string_from_static(%r41, %r6) [unwind b6]
-    %r44 = alloca () [unwind b6]
-    %r45 = call std::string_push_str(%r0, %r6, %r44) [unwind b6]
-    %r46 = drop %r6 via std::Value<std::string>::drop#impl:1d429675
-    %r47 = subfield @c7 from %p0
-    %r48 = call std::Value<std::int>::to_string#impl:a5db1d9f(%r47, %r7) [unwind b7]
-    %r49 = alloca () [unwind b7]
-    %r50 = call std::string_push_str(%r0, %r7, %r49) [unwind b7]
-    %r51 = drop %r7 via std::Value<std::string>::drop#impl:1d429675
-    %r52 = alloca StaticStr [unwind b8]
-    %r53 = store @c8 to %r52 [unwind b8]
-    %r54 = call std::string_from_static(%r52, %r8) [unwind b8]
-    %r55 = alloca () [unwind b8]
-    %r56 = call std::string_push_str(%r0, %r8, %r55) [unwind b8]
-    %r57 = drop %r8 via std::Value<std::string>::drop#impl:1d429675
-    %r58 = move %r0 to %p1
-    %r59 = ret
+    store @c0 to %r9
+    call std::string_from_static(%r9, %r0)
+    %r10 = alloca StaticStr [unwind b1]
+    store @c2 to %r10 [unwind b1]
+    call std::string_from_static(%r10, %r1) [unwind b1]
+    %r11 = alloca () [unwind b1]
+    call std::string_push_str(%r0, %r1, %r11) [unwind b1]
+    drop %r1 via std::Value<std::string>::drop#impl:1d429675
+    %r12 = alloca StaticStr [unwind b2]
+    store @c3 to %r12 [unwind b2]
+    call std::string_from_static(%r12, %r2) [unwind b2]
+    %r13 = alloca () [unwind b2]
+    call std::string_push_str(%r0, %r2, %r13) [unwind b2]
+    drop %r2 via std::Value<std::string>::drop#impl:1d429675
+    %r14 = subfield @c4 from %p0
+    call std::Value<std::int>::to_string#impl:a5db1d9f(%r14, %r3) [unwind b3]
+    %r15 = alloca () [unwind b3]
+    call std::string_push_str(%r0, %r3, %r15) [unwind b3]
+    drop %r3 via std::Value<std::string>::drop#impl:1d429675
+    %r16 = alloca StaticStr [unwind b4]
+    store @c5 to %r16 [unwind b4]
+    call std::string_from_static(%r16, %r4) [unwind b4]
+    %r17 = alloca () [unwind b4]
+    call std::string_push_str(%r0, %r4, %r17) [unwind b4]
+    drop %r4 via std::Value<std::string>::drop#impl:1d429675
+    %r18 = alloca StaticStr [unwind b5]
+    store @c6 to %r18 [unwind b5]
+    call std::string_from_static(%r18, %r5) [unwind b5]
+    %r19 = alloca () [unwind b5]
+    call std::string_push_str(%r0, %r5, %r19) [unwind b5]
+    drop %r5 via std::Value<std::string>::drop#impl:1d429675
+    %r20 = alloca StaticStr [unwind b6]
+    store @c3 to %r20 [unwind b6]
+    call std::string_from_static(%r20, %r6) [unwind b6]
+    %r21 = alloca () [unwind b6]
+    call std::string_push_str(%r0, %r6, %r21) [unwind b6]
+    drop %r6 via std::Value<std::string>::drop#impl:1d429675
+    %r22 = subfield @c7 from %p0
+    call std::Value<std::int>::to_string#impl:a5db1d9f(%r22, %r7) [unwind b7]
+    %r23 = alloca () [unwind b7]
+    call std::string_push_str(%r0, %r7, %r23) [unwind b7]
+    drop %r7 via std::Value<std::string>::drop#impl:1d429675
+    %r24 = alloca StaticStr [unwind b8]
+    store @c8 to %r24 [unwind b8]
+    call std::string_from_static(%r24, %r8) [unwind b8]
+    %r25 = alloca () [unwind b8]
+    call std::string_push_str(%r0, %r8, %r25) [unwind b8]
+    drop %r8 via std::Value<std::string>::drop#impl:1d429675
+    move %r0 to %p1
+    ret
   b1:
-    %r60 = drop %r1 via std::Value<std::string>::drop#impl:1d429675
-    %r61 = resume
+    drop %r1 via std::Value<std::string>::drop#impl:1d429675
+    resume
   b2:
-    %r62 = drop %r2 via std::Value<std::string>::drop#impl:1d429675
-    %r63 = resume
+    drop %r2 via std::Value<std::string>::drop#impl:1d429675
+    resume
   b3:
-    %r64 = drop %r3 via std::Value<std::string>::drop#impl:1d429675
-    %r65 = resume
+    drop %r3 via std::Value<std::string>::drop#impl:1d429675
+    resume
   b4:
-    %r66 = drop %r4 via std::Value<std::string>::drop#impl:1d429675
-    %r67 = resume
+    drop %r4 via std::Value<std::string>::drop#impl:1d429675
+    resume
   b5:
-    %r68 = drop %r5 via std::Value<std::string>::drop#impl:1d429675
-    %r69 = resume
+    drop %r5 via std::Value<std::string>::drop#impl:1d429675
+    resume
   b6:
-    %r70 = drop %r6 via std::Value<std::string>::drop#impl:1d429675
-    %r71 = resume
+    drop %r6 via std::Value<std::string>::drop#impl:1d429675
+    resume
   b7:
-    %r72 = drop %r7 via std::Value<std::string>::drop#impl:1d429675
-    %r73 = resume
+    drop %r7 via std::Value<std::string>::drop#impl:1d429675
+    resume
   b8:
-    %r74 = drop %r8 via std::Value<std::string>::drop#impl:1d429675
-    %r75 = resume
+    drop %r8 via std::Value<std::string>::drop#impl:1d429675
+    resume
 
 fn std::Value<<test>::Wrapper>::ALIGN#impl:a9f8abbf(%p0: @ret int):
   @c0: int = 8
   b0:
-    %r0 = store @c0 to %p0
-    %r1 = ret
+    store @c0 to %p0
+    ret
 
 fn std::Value<<test>::Wrapper>::SIZE#impl:21b54a2b(%p0: @ret int):
   @c0: int = 32
   b0:
-    %r0 = store @c0 to %p0
-    %r1 = ret
+    store @c0 to %p0
+    ret
 
 fn std::Value<<test>::Wrapper>::clone#impl:e02c4c62(%p0: @arg let Wrapper, %p1: @ret Wrapper):
   @c0: int = 0
@@ -2022,11 +2022,11 @@ fn std::Value<<test>::Wrapper>::clone#impl:e02c4c62(%p0: @arg let Wrapper, %p1: 
   b0:
     %r0 = subfield @c0 from %p1
     %r1 = subfield @c0 from %p0
-    %r2 = call <test>::std::Value<<test>::A>::clone#impl:3b26fee6(%r1, %r0)
-    %r3 = subfield @c1 from %p1
-    %r4 = subfield @c1 from %p0
-    %r5 = call <test>::std::Value<<test>::A>::clone#impl:3b26fee6(%r4, %r3)
-    %r6 = ret
+    call <test>::std::Value<<test>::A>::clone#impl:3b26fee6(%r1, %r0)
+    %r2 = subfield @c1 from %p1
+    %r3 = subfield @c1 from %p0
+    call <test>::std::Value<<test>::A>::clone#impl:3b26fee6(%r3, %r2)
+    ret
 
 fn std::Value<<test>::Wrapper>::drop#impl:c2860560(%p0: @arg &mut Wrapper, %p1: @ret ()):
   @c0: int = 0
@@ -2035,12 +2035,12 @@ fn std::Value<<test>::Wrapper>::drop#impl:c2860560(%p0: @arg &mut Wrapper, %p1: 
   b0:
     %r0 = subfield @c0 from %p0
     %r1 = alloca ()
-    %r2 = call <test>::std::Value<<test>::A>::drop#impl:e48f46c8(%r0, %r1)
-    %r3 = subfield @c1 from %p0
-    %r4 = alloca ()
-    %r5 = call <test>::std::Value<<test>::A>::drop#impl:e48f46c8(%r3, %r4)
-    %r6 = store @c2 to %p1
-    %r7 = ret
+    call <test>::std::Value<<test>::A>::drop#impl:e48f46c8(%r0, %r1)
+    %r2 = subfield @c1 from %p0
+    %r3 = alloca ()
+    call <test>::std::Value<<test>::A>::drop#impl:e48f46c8(%r2, %r3)
+    store @c2 to %p1
+    ret
 
 fn std::Value<<test>::Wrapper>::eq#impl:d6883255(%p0: @arg let Wrapper, %p1: @arg let Wrapper, %p2: @ret bool):
   @c0: int = 0
@@ -2051,33 +2051,33 @@ fn std::Value<<test>::Wrapper>::eq#impl:d6883255(%p0: @arg let Wrapper, %p1: @ar
     %r0 = subfield @c0 from %p0
     %r1 = subfield @c0 from %p1
     %r2 = alloca bool
-    %r3 = call <test>::std::Value<<test>::A>::eq#impl:601557a9(%r0, %r1, %r2)
-    %r4 = br b1
+    call <test>::std::Value<<test>::A>::eq#impl:601557a9(%r0, %r1, %r2)
+    br b1
   b1:
-    %r5 = comp_eq %r2 true
-    %r6 = condbr %r5, b2, b3
+    %r3 = comp_eq %r2 true
+    condbr %r3, b2, b3
   b2:
-    %r7 = subfield @c1 from %p0
-    %r8 = subfield @c1 from %p1
-    %r9 = alloca bool
-    %r10 = call <test>::std::Value<<test>::A>::eq#impl:601557a9(%r7, %r8, %r9)
-    %r11 = br b5
+    %r4 = subfield @c1 from %p0
+    %r5 = subfield @c1 from %p1
+    %r6 = alloca bool
+    call <test>::std::Value<<test>::A>::eq#impl:601557a9(%r4, %r5, %r6)
+    br b5
   b3:
-    %r19 = store @c3 to %p2
-    %r20 = br b4
+    store @c3 to %p2
+    br b4
   b4:
-    %r21 = ret
+    ret
   b5:
-    %r12 = comp_eq %r9 true
-    %r13 = condbr %r12, b6, b7
+    %r7 = comp_eq %r6 true
+    condbr %r7, b6, b7
   b6:
-    %r14 = store @c2 to %p2
-    %r15 = br b8
+    store @c2 to %p2
+    br b8
   b7:
-    %r16 = store @c3 to %p2
-    %r17 = br b8
+    store @c3 to %p2
+    br b8
   b8:
-    %r18 = br b4
+    br b4
 
 fn std::Value<<test>::Wrapper>::hash#impl:65f26de7(%p0: @arg let Wrapper, %p1: @arg &mut hasher, %p2: @ret ()):
   @c0: int = 0
@@ -2086,12 +2086,12 @@ fn std::Value<<test>::Wrapper>::hash#impl:65f26de7(%p0: @arg let Wrapper, %p1: @
   b0:
     %r0 = subfield @c0 from %p0
     %r1 = alloca ()
-    %r2 = call <test>::std::Value<<test>::A>::hash#impl:2d1a24bf(%r0, %p1, %r1)
-    %r3 = subfield @c1 from %p0
-    %r4 = alloca ()
-    %r5 = call <test>::std::Value<<test>::A>::hash#impl:2d1a24bf(%r3, %p1, %r4)
-    %r6 = store @c2 to %p2
-    %r7 = ret
+    call <test>::std::Value<<test>::A>::hash#impl:2d1a24bf(%r0, %p1, %r1)
+    %r2 = subfield @c1 from %p0
+    %r3 = alloca ()
+    call <test>::std::Value<<test>::A>::hash#impl:2d1a24bf(%r2, %p1, %r3)
+    store @c2 to %p2
+    ret
 
 fn std::Value<<test>::Wrapper>::to_string#impl:7f6f6750(%p0: @arg let Wrapper, %p1: @ret string):
   @c0: StaticStr = "Wrapper { "
@@ -2114,80 +2114,80 @@ fn std::Value<<test>::Wrapper>::to_string#impl:7f6f6750(%p0: @arg let Wrapper, %
     %r7 = alloca string
     %r8 = alloca string
     %r9 = alloca StaticStr
-    %r10 = store @c0 to %r9
-    %r11 = call std::string_from_static(%r9, %r0)
-    %r12 = alloca StaticStr [unwind b1]
-    %r13 = store @c2 to %r12 [unwind b1]
-    %r14 = call std::string_from_static(%r12, %r1) [unwind b1]
-    %r15 = alloca () [unwind b1]
-    %r16 = call std::string_push_str(%r0, %r1, %r15) [unwind b1]
-    %r17 = drop %r1 via std::Value<std::string>::drop#impl:1d429675
-    %r18 = alloca StaticStr [unwind b2]
-    %r19 = store @c3 to %r18 [unwind b2]
-    %r20 = call std::string_from_static(%r18, %r2) [unwind b2]
-    %r21 = alloca () [unwind b2]
-    %r22 = call std::string_push_str(%r0, %r2, %r21) [unwind b2]
-    %r23 = drop %r2 via std::Value<std::string>::drop#impl:1d429675
-    %r24 = subfield @c4 from %p0
-    %r25 = call <test>::std::Value<<test>::A>::to_string#impl:78412598(%r24, %r3) [unwind b3]
-    %r26 = alloca () [unwind b3]
-    %r27 = call std::string_push_str(%r0, %r3, %r26) [unwind b3]
-    %r28 = drop %r3 via std::Value<std::string>::drop#impl:1d429675
-    %r29 = alloca StaticStr [unwind b4]
-    %r30 = store @c5 to %r29 [unwind b4]
-    %r31 = call std::string_from_static(%r29, %r4) [unwind b4]
-    %r32 = alloca () [unwind b4]
-    %r33 = call std::string_push_str(%r0, %r4, %r32) [unwind b4]
-    %r34 = drop %r4 via std::Value<std::string>::drop#impl:1d429675
-    %r35 = alloca StaticStr [unwind b5]
-    %r36 = store @c6 to %r35 [unwind b5]
-    %r37 = call std::string_from_static(%r35, %r5) [unwind b5]
-    %r38 = alloca () [unwind b5]
-    %r39 = call std::string_push_str(%r0, %r5, %r38) [unwind b5]
-    %r40 = drop %r5 via std::Value<std::string>::drop#impl:1d429675
-    %r41 = alloca StaticStr [unwind b6]
-    %r42 = store @c3 to %r41 [unwind b6]
-    %r43 = call std::string_from_static(%r41, %r6) [unwind b6]
-    %r44 = alloca () [unwind b6]
-    %r45 = call std::string_push_str(%r0, %r6, %r44) [unwind b6]
-    %r46 = drop %r6 via std::Value<std::string>::drop#impl:1d429675
-    %r47 = subfield @c7 from %p0
-    %r48 = call <test>::std::Value<<test>::A>::to_string#impl:78412598(%r47, %r7) [unwind b7]
-    %r49 = alloca () [unwind b7]
-    %r50 = call std::string_push_str(%r0, %r7, %r49) [unwind b7]
-    %r51 = drop %r7 via std::Value<std::string>::drop#impl:1d429675
-    %r52 = alloca StaticStr [unwind b8]
-    %r53 = store @c8 to %r52 [unwind b8]
-    %r54 = call std::string_from_static(%r52, %r8) [unwind b8]
-    %r55 = alloca () [unwind b8]
-    %r56 = call std::string_push_str(%r0, %r8, %r55) [unwind b8]
-    %r57 = drop %r8 via std::Value<std::string>::drop#impl:1d429675
-    %r58 = move %r0 to %p1
-    %r59 = ret
+    store @c0 to %r9
+    call std::string_from_static(%r9, %r0)
+    %r10 = alloca StaticStr [unwind b1]
+    store @c2 to %r10 [unwind b1]
+    call std::string_from_static(%r10, %r1) [unwind b1]
+    %r11 = alloca () [unwind b1]
+    call std::string_push_str(%r0, %r1, %r11) [unwind b1]
+    drop %r1 via std::Value<std::string>::drop#impl:1d429675
+    %r12 = alloca StaticStr [unwind b2]
+    store @c3 to %r12 [unwind b2]
+    call std::string_from_static(%r12, %r2) [unwind b2]
+    %r13 = alloca () [unwind b2]
+    call std::string_push_str(%r0, %r2, %r13) [unwind b2]
+    drop %r2 via std::Value<std::string>::drop#impl:1d429675
+    %r14 = subfield @c4 from %p0
+    call <test>::std::Value<<test>::A>::to_string#impl:78412598(%r14, %r3) [unwind b3]
+    %r15 = alloca () [unwind b3]
+    call std::string_push_str(%r0, %r3, %r15) [unwind b3]
+    drop %r3 via std::Value<std::string>::drop#impl:1d429675
+    %r16 = alloca StaticStr [unwind b4]
+    store @c5 to %r16 [unwind b4]
+    call std::string_from_static(%r16, %r4) [unwind b4]
+    %r17 = alloca () [unwind b4]
+    call std::string_push_str(%r0, %r4, %r17) [unwind b4]
+    drop %r4 via std::Value<std::string>::drop#impl:1d429675
+    %r18 = alloca StaticStr [unwind b5]
+    store @c6 to %r18 [unwind b5]
+    call std::string_from_static(%r18, %r5) [unwind b5]
+    %r19 = alloca () [unwind b5]
+    call std::string_push_str(%r0, %r5, %r19) [unwind b5]
+    drop %r5 via std::Value<std::string>::drop#impl:1d429675
+    %r20 = alloca StaticStr [unwind b6]
+    store @c3 to %r20 [unwind b6]
+    call std::string_from_static(%r20, %r6) [unwind b6]
+    %r21 = alloca () [unwind b6]
+    call std::string_push_str(%r0, %r6, %r21) [unwind b6]
+    drop %r6 via std::Value<std::string>::drop#impl:1d429675
+    %r22 = subfield @c7 from %p0
+    call <test>::std::Value<<test>::A>::to_string#impl:78412598(%r22, %r7) [unwind b7]
+    %r23 = alloca () [unwind b7]
+    call std::string_push_str(%r0, %r7, %r23) [unwind b7]
+    drop %r7 via std::Value<std::string>::drop#impl:1d429675
+    %r24 = alloca StaticStr [unwind b8]
+    store @c8 to %r24 [unwind b8]
+    call std::string_from_static(%r24, %r8) [unwind b8]
+    %r25 = alloca () [unwind b8]
+    call std::string_push_str(%r0, %r8, %r25) [unwind b8]
+    drop %r8 via std::Value<std::string>::drop#impl:1d429675
+    move %r0 to %p1
+    ret
   b1:
-    %r60 = drop %r1 via std::Value<std::string>::drop#impl:1d429675
-    %r61 = resume
+    drop %r1 via std::Value<std::string>::drop#impl:1d429675
+    resume
   b2:
-    %r62 = drop %r2 via std::Value<std::string>::drop#impl:1d429675
-    %r63 = resume
+    drop %r2 via std::Value<std::string>::drop#impl:1d429675
+    resume
   b3:
-    %r64 = drop %r3 via std::Value<std::string>::drop#impl:1d429675
-    %r65 = resume
+    drop %r3 via std::Value<std::string>::drop#impl:1d429675
+    resume
   b4:
-    %r66 = drop %r4 via std::Value<std::string>::drop#impl:1d429675
-    %r67 = resume
+    drop %r4 via std::Value<std::string>::drop#impl:1d429675
+    resume
   b5:
-    %r68 = drop %r5 via std::Value<std::string>::drop#impl:1d429675
-    %r69 = resume
+    drop %r5 via std::Value<std::string>::drop#impl:1d429675
+    resume
   b6:
-    %r70 = drop %r6 via std::Value<std::string>::drop#impl:1d429675
-    %r71 = resume
+    drop %r6 via std::Value<std::string>::drop#impl:1d429675
+    resume
   b7:
-    %r72 = drop %r7 via std::Value<std::string>::drop#impl:1d429675
-    %r73 = resume
+    drop %r7 via std::Value<std::string>::drop#impl:1d429675
+    resume
   b8:
-    %r74 = drop %r8 via std::Value<std::string>::drop#impl:1d429675
-    %r75 = resume
+    drop %r8 via std::Value<std::string>::drop#impl:1d429675
+    resume
 "#
     );
 }
@@ -2218,20 +2218,20 @@ fn copy_struct_with_explicit_clone() {
         ssa,
         r#"fn f(%p0: @arg let Probe, %p1: @ret Probe):
   b0:
-    %r0 = call <test>::std::Value<<test>::Probe>::clone#impl:a879cee3(%p0, %p1)
-    %r1 = ret
+    call <test>::std::Value<<test>::Probe>::clone#impl:a879cee3(%p0, %p1)
+    ret
 
 fn std::Value<<test>::Probe>::ALIGN#impl:79916c32(%p0: @ret int):
   @c0: int = 8
   b0:
-    %r0 = store @c0 to %p0
-    %r1 = ret
+    store @c0 to %p0
+    ret
 
 fn std::Value<<test>::Probe>::SIZE#impl:99ef601e(%p0: @ret int):
   @c0: int = 8
   b0:
-    %r0 = store @c0 to %p0
-    %r1 = ret
+    store @c0 to %p0
+    ret
 
 fn std::Value<<test>::Probe>::clone#impl:a879cee3(%p0: @arg let Probe, %p1: @ret Probe):
   @c0: int = 0
@@ -2240,39 +2240,39 @@ fn std::Value<<test>::Probe>::clone#impl:a879cee3(%p0: @arg let Probe, %p1: @ret
     %r0 = subfield @c0 from %p1
     %r1 = subfield @c0 from %p0
     %r2 = alloca int
-    %r3 = store @c1 to %r2
-    %r4 = alloca int
-    %r5 = call std::Num<std::int>::from_int#impl:25eabc6b(%r2, %r4)
-    %r6 = call std::Num<std::int>::add#impl:7665d3ee(%r1, %r4, %r0)
-    %r7 = ret
+    store @c1 to %r2
+    %r3 = alloca int
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r2, %r3)
+    call std::Num<std::int>::add#impl:7665d3ee(%r1, %r3, %r0)
+    ret
 
 fn std::Value<<test>::Probe>::drop#impl:c816a941(%p0: @arg &mut Probe, %p1: @ret ()):
   @c0: () = ()
   b0:
-    %r0 = store @c0 to %p1
-    %r1 = ret
+    store @c0 to %p1
+    ret
 
 fn std::Value<<test>::Probe>::eq#impl:938075a8(%p0: @arg let Probe, %p1: @arg let Probe, %p2: @ret bool):
   @c0: int = 0
   b0:
     %r0 = subfield @c0 from %p0
     %r1 = subfield @c0 from %p1
-    %r2 = call std::Value<std::int>::eq#impl:87044288(%r0, %r1, %p2)
-    %r3 = ret
+    call std::Value<std::int>::eq#impl:87044288(%r0, %r1, %p2)
+    ret
 
 fn std::Value<<test>::Probe>::hash#impl:d7e4d34a(%p0: @arg let Probe, %p1: @arg &mut hasher, %p2: @ret ()):
   @c0: int = 0
   b0:
     %r0 = subfield @c0 from %p0
-    %r1 = call std::Value<std::int>::hash#impl:bdc2934a(%r0, %p1, %p2)
-    %r2 = ret
+    call std::Value<std::int>::hash#impl:bdc2934a(%r0, %p1, %p2)
+    ret
 
 fn std::Value<<test>::Probe>::to_string#impl:367ced11(%p0: @arg let Probe, %p1: @ret string):
   @c0: int = 0
   b0:
     %r0 = subfield @c0 from %p0
-    %r1 = call std::Value<std::int>::to_string#impl:a5db1d9f(%r0, %p1)
-    %r2 = ret
+    call std::Value<std::int>::to_string#impl:a5db1d9f(%r0, %p1)
+    ret
 "#
     );
     // TODO pattern based matching
@@ -2287,8 +2287,8 @@ fn clone_value_generic_return() {
         r#"fn f(%p0: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A) -> A, (&mut A) -> (), () -> int, () -> int), %p1: @arg let A, %p2: @ret A):
   b0:
     %r0 = dict_entry 3 from %p0
-    %r1 = call %r0(%p1, %p2)
-    %r2 = ret
+    call %r0(%p1, %p2)
+    ret
 "#,
     );
 }
@@ -2303,20 +2303,20 @@ fn clone_value_generic_branch() {
         r#"fn f(%p0: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A) -> A, (&mut A) -> (), () -> int, () -> int), %p1: @arg let A, %p2: @ret A):
   @c0: bool = true
   b0:
-    %r0 = br b1
+    br b1
   b1:
-    %r1 = comp_eq @c0 true
-    %r2 = condbr %r1, b2, b3
+    %r0 = comp_eq @c0 true
+    condbr %r0, b2, b3
   b2:
-    %r3 = dict_entry 3 from %p0
-    %r4 = call %r3(%p1, %p2)
-    %r5 = br b4
+    %r1 = dict_entry 3 from %p0
+    call %r1(%p1, %p2)
+    br b4
   b3:
-    %r6 = dict_entry 3 from %p0
-    %r7 = call %r6(%p1, %p2)
-    %r8 = br b4
+    %r2 = dict_entry 3 from %p0
+    call %r2(%p1, %p2)
+    br b4
   b4:
-    %r9 = ret
+    ret
 "#,
     );
 }
@@ -2334,23 +2334,23 @@ fn store_local_generic_clone_dictionary() {
   b0:
     %r0 = alloca A using %p0
     %r1 = dict_entry 3 from %p0 [unwind b1]
-    %r2 = call %r1(%p1, %r0) [unwind b1]
-    %r3 = alloca () [unwind b1]
-    %r4 = call <test>::g(%r0, %r3) [unwind b1]
-    %r5 = store @c0 to %p2 [unwind b1]
-    %r6 = dict_entry 4 from %p0
-    %r7 = drop %r0 via %r6
-    %r8 = ret
+    call %r1(%p1, %r0) [unwind b1]
+    %r2 = alloca () [unwind b1]
+    call <test>::g(%r0, %r2) [unwind b1]
+    store @c0 to %p2 [unwind b1]
+    %r3 = dict_entry 4 from %p0
+    drop %r0 via %r3
+    ret
   b1:
-    %r9 = dict_entry 4 from %p0
-    %r10 = drop %r0 via %r9
-    %r11 = resume
+    %r4 = dict_entry 4 from %p0
+    drop %r0 via %r4
+    resume
 
 fn g(%p0: @arg &mut A, %p1: @ret ()):
   @c0: () = ()
   b0:
-    %r0 = store @c0 to %p1
-    %r1 = ret
+    store @c0 to %p1
+    ret
 "#,
     );
 }
@@ -2366,9 +2366,9 @@ fn return_local_int_move() {
   @c1: () = ()
   b0:
     %r0 = alloca int
-    %r1 = store @c0 to %r0
-    %r2 = move %r0 to %p0
-    %r3 = ret
+    store @c0 to %r0
+    move %r0 to %p0
+    ret
 "#,
     );
 }
@@ -2390,14 +2390,14 @@ fn reassign_local_literal() {
   @c2: int = 2
   b0:
     %r0 = alloca int
-    %r1 = store @c0 to %r0
+    store @c0 to %r0
+    %r1 = alloca int
     %r2 = alloca int
-    %r3 = alloca int
-    %r4 = store @c2 to %r3
-    %r5 = call std::Num<std::int>::from_int#impl:25eabc6b(%r3, %r2)
-    %r6 = move %r2 to %r0
-    %r7 = move %r0 to %p0
-    %r8 = ret
+    store @c2 to %r2
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r2, %r1)
+    move %r1 to %r0
+    move %r0 to %p0
+    ret
 "#,
     );
 }
@@ -2414,12 +2414,12 @@ fn reassign_local_from_param() {
   @c1: () = ()
   b0:
     %r0 = alloca int
-    %r1 = store @c0 to %r0
-    %r2 = alloca int
-    %r3 = memcpy %p0 to %r2
-    %r4 = move %r2 to %r0
-    %r5 = move %r0 to %p1
-    %r6 = ret
+    store @c0 to %r0
+    %r1 = alloca int
+    memcpy %p0 to %r1
+    move %r1 to %r0
+    move %r0 to %p1
+    ret
 "#,
     );
 }
@@ -2440,30 +2440,30 @@ fn reassign_in_branches() {
   b0:
     %r0 = alloca int
     %r1 = alloca ()
-    %r2 = store @c0 to %r0
-    %r3 = br b1
+    store @c0 to %r0
+    br b1
   b1:
-    %r4 = comp_eq %p0 true
-    %r5 = condbr %r4, b2, b3
+    %r2 = comp_eq %p0 true
+    condbr %r2, b2, b3
   b2:
-    %r6 = alloca int
-    %r7 = alloca int
-    %r8 = store @c2 to %r7
-    %r9 = call std::Num<std::int>::from_int#impl:25eabc6b(%r7, %r6)
-    %r10 = move %r6 to %r0
-    %r11 = store @c1 to %r1
-    %r12 = br b4
+    %r3 = alloca int
+    %r4 = alloca int
+    store @c2 to %r4
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r4, %r3)
+    move %r3 to %r0
+    store @c1 to %r1
+    br b4
   b3:
-    %r13 = alloca int
-    %r14 = alloca int
-    %r15 = store @c3 to %r14
-    %r16 = call std::Num<std::int>::from_int#impl:25eabc6b(%r14, %r13)
-    %r17 = move %r13 to %r0
-    %r18 = store @c1 to %r1
-    %r19 = br b4
+    %r5 = alloca int
+    %r6 = alloca int
+    store @c3 to %r6
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r6, %r5)
+    move %r5 to %r0
+    store @c1 to %r1
+    br b4
   b4:
-    %r20 = move %r0 to %p1
-    %r21 = ret
+    move %r0 to %p1
+    ret
 "#,
     );
 }
@@ -2480,12 +2480,12 @@ fn reassign_mutable_ref_param_from_local() {
   @c1: () = ()
   b0:
     %r0 = alloca int
-    %r1 = store @c0 to %r0
-    %r2 = alloca int
-    %r3 = memcpy %r0 to %r2
-    %r4 = move %r2 to %p0
-    %r5 = store @c1 to %p1
-    %r6 = ret
+    store @c0 to %r0
+    %r1 = alloca int
+    memcpy %r0 to %r1
+    move %r1 to %p0
+    store @c1 to %p1
+    ret
 "#,
     );
 }
@@ -2502,15 +2502,15 @@ fn reassign_array_element_from_param() {
   @c1: () = ()
   b0:
     %r0 = alloca int
-    %r1 = store @c0 to %r0
-    %r2 = alloca_place int
-    %r3 = call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r0, %r2)
-    %r4 = load %r2
-    %r5 = alloca int
-    %r6 = memcpy %p1 to %r5
-    %r7 = move %r5 to %r4
-    %r8 = store @c1 to %p2
-    %r9 = ret
+    store @c0 to %r0
+    %r1 = alloca_place int
+    call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r0, %r1)
+    %r2 = load %r1
+    %r3 = alloca int
+    memcpy %p1 to %r3
+    move %r3 to %r2
+    store @c1 to %p2
+    ret
 "#,
     );
 }
@@ -2530,12 +2530,12 @@ fn reassign_generic() {
   b0:
     %r0 = alloca A using %p0
     %r1 = dict_entry 3 from %p0
-    %r2 = call %r1(%p2, %r0)
-    %r3 = dict_entry 4 from %p0
-    %r4 = drop %p1 via %r3
-    %r5 = move %r0 to %p1 using %p0
-    %r6 = store @c0 to %p3
-    %r7 = ret
+    call %r1(%p2, %r0)
+    %r2 = dict_entry 4 from %p0
+    drop %p1 via %r2
+    move %r0 to %p1 using %p0
+    store @c0 to %p3
+    ret
 "#
     )
 }
@@ -2554,10 +2554,10 @@ fn void_body_tail_assignment_writes_ret() {
   @c0: () = ()
   b0:
     %r0 = alloca int
-    %r1 = memcpy %p1 to %r0
-    %r2 = move %r0 to %p0
-    %r3 = store @c0 to %p2
-    %r4 = ret
+    memcpy %p1 to %r0
+    move %r0 to %p0
+    store @c0 to %p2
+    ret
 "#,
     );
     // And it runs (the caller observes the write; the boundary check passes).
@@ -2592,22 +2592,22 @@ fn generic_match_composite_scrutinee_compares_whole_value() {
   @c0: int = 1
   @c1: int = 2
   b0:
-    %r0 = br b1
+    br b1
   b1:
-    %r1 = comp_eq %p0 (true, true)
-    %r2 = condbr %r1, b2, b3
+    %r0 = comp_eq %p0 (true, true)
+    condbr %r0, b2, b3
   b2:
-    %r3 = alloca int
-    %r4 = store @c0 to %r3
-    %r5 = call std::Num<std::int>::from_int#impl:25eabc6b(%r3, %p1)
-    %r6 = br b4
+    %r1 = alloca int
+    store @c0 to %r1
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r1, %p1)
+    br b4
   b3:
-    %r7 = alloca int
-    %r8 = store @c1 to %r7
-    %r9 = call std::Num<std::int>::from_int#impl:25eabc6b(%r7, %p1)
-    %r10 = br b4
+    %r2 = alloca int
+    store @c1 to %r2
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r2, %p1)
+    br b4
   b4:
-    %r11 = ret
+    ret
 "#,
     );
 }
@@ -2624,22 +2624,22 @@ fn generic_match_nested_composite_scrutinee_compares_whole_value() {
   @c0: int = 1
   @c1: int = 2
   b0:
-    %r0 = br b1
+    br b1
   b1:
-    %r1 = comp_eq %p0 (true, (false, true))
-    %r2 = condbr %r1, b2, b3
+    %r0 = comp_eq %p0 (true, (false, true))
+    condbr %r0, b2, b3
   b2:
-    %r3 = alloca int
-    %r4 = store @c0 to %r3
-    %r5 = call std::Num<std::int>::from_int#impl:25eabc6b(%r3, %p1)
-    %r6 = br b4
+    %r1 = alloca int
+    store @c0 to %r1
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r1, %p1)
+    br b4
   b3:
-    %r7 = alloca int
-    %r8 = store @c1 to %r7
-    %r9 = call std::Num<std::int>::from_int#impl:25eabc6b(%r7, %p1)
-    %r10 = br b4
+    %r2 = alloca int
+    store @c1 to %r2
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r2, %p1)
+    br b4
   b4:
-    %r11 = ret
+    ret
 "#,
     );
 }
@@ -2658,22 +2658,22 @@ fn generic_match_string_scrutinee_compares_borrowed_place() {
   @c0: int = 1
   @c1: int = 2
   b0:
-    %r0 = br b1
+    br b1
   b1:
-    %r1 = comp_eq %p0 "a"
-    %r2 = condbr %r1, b2, b3
+    %r0 = comp_eq %p0 "a"
+    condbr %r0, b2, b3
   b2:
-    %r3 = alloca int
-    %r4 = store @c0 to %r3
-    %r5 = call std::Num<std::int>::from_int#impl:25eabc6b(%r3, %p1)
-    %r6 = br b4
+    %r1 = alloca int
+    store @c0 to %r1
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r1, %p1)
+    br b4
   b3:
-    %r7 = alloca int
-    %r8 = store @c1 to %r7
-    %r9 = call std::Num<std::int>::from_int#impl:25eabc6b(%r7, %p1)
-    %r10 = br b4
+    %r2 = alloca int
+    store @c1 to %r2
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r2, %p1)
+    br b4
   b4:
-    %r11 = ret
+    ret
 "#,
     );
 }
@@ -2692,22 +2692,22 @@ fn generic_match_scrutinee_compares_borrowed_place() {
   @c0: int = 1
   @c1: int = 2
   b0:
-    %r0 = br b1
+    br b1
   b1:
-    %r1 = comp_eq %p0 0
-    %r2 = condbr %r1, b2, b3
+    %r0 = comp_eq %p0 0
+    condbr %r0, b2, b3
   b2:
-    %r3 = alloca int
-    %r4 = store @c0 to %r3
-    %r5 = call std::Num<std::int>::from_int#impl:25eabc6b(%r3, %p1)
-    %r6 = br b4
+    %r1 = alloca int
+    store @c0 to %r1
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r1, %p1)
+    br b4
   b3:
-    %r7 = alloca int
-    %r8 = store @c1 to %r7
-    %r9 = call std::Num<std::int>::from_int#impl:25eabc6b(%r7, %p1)
-    %r10 = br b4
+    %r2 = alloca int
+    store @c1 to %r2
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r2, %p1)
+    br b4
   b4:
-    %r11 = ret
+    ret
 "#,
     );
 }
@@ -2723,16 +2723,16 @@ fn copy_int_param_to_local() {
   @c1: int = 1
   b0:
     %r0 = alloca int
-    %r1 = memcpy %p0 to %r0
+    memcpy %p0 to %r0
+    %r1 = alloca int
     %r2 = alloca int
+    store @c1 to %r2
     %r3 = alloca int
-    %r4 = store @c1 to %r3
-    %r5 = alloca int
-    %r6 = call std::Num<std::int>::from_int#impl:25eabc6b(%r3, %r5)
-    %r7 = call std::Num<std::int>::add#impl:7665d3ee(%r0, %r5, %r2)
-    %r8 = move %r2 to %r0
-    %r9 = move %r0 to %p1
-    %r10 = ret
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r2, %r3)
+    call std::Num<std::int>::add#impl:7665d3ee(%r0, %r3, %r1)
+    move %r1 to %r0
+    move %r0 to %p1
+    ret
 "#,
     );
 }
@@ -2746,8 +2746,8 @@ fn variants() {
         r#"fn f(%p0: @arg let X (string) | Y, %p1: @ret ()):
   @c0: () = ()
   b0:
-    %r0 = store @c0 to %p1
-    %r1 = ret
+    store @c0 to %p1
+    ret
 "#
     );
 }
@@ -2763,21 +2763,21 @@ fn named_subscript_read() {
         r#"fn f(%p0: @arg &mut [int], %p1: @ret int):
   b0:
     %r0 = alloca_place int
-    %r1 = call <test>::first::ref_mut#subscript:19d196cf(%p0, %r0)
-    %r2 = load %r0
-    %r3 = memcpy %r2 to %p1
-    %r4 = ret
+    call <test>::first::ref_mut#subscript:19d196cf(%p0, %r0)
+    %r1 = load %r0
+    memcpy %r1 to %p1
+    ret
 
 fn first::ref_mut#subscript:19d196cf(%p0: @arg &mut [int], %p1: @ret int):
   @c0: int = 0
   b0:
     %r0 = alloca int
-    %r1 = store @c0 to %r0
-    %r2 = alloca_place int
-    %r3 = call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r0, %r2)
-    %r4 = load %r2
-    %r5 = store %r4 to %p1
-    %r6 = ret
+    store @c0 to %r0
+    %r1 = alloca_place int
+    call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r0, %r1)
+    %r2 = load %r1
+    store %r2 to %p1
+    ret
 "#,
     );
 }
@@ -2794,24 +2794,24 @@ fn named_subscript_assign() {
   @c0: () = ()
   b0:
     %r0 = alloca_place int
-    %r1 = call <test>::first::ref_mut#subscript:19d196cf(%p0, %r0)
-    %r2 = load %r0
-    %r3 = alloca int
-    %r4 = memcpy %p1 to %r3
-    %r5 = move %r3 to %r2
-    %r6 = store @c0 to %p2
-    %r7 = ret
+    call <test>::first::ref_mut#subscript:19d196cf(%p0, %r0)
+    %r1 = load %r0
+    %r2 = alloca int
+    memcpy %p1 to %r2
+    move %r2 to %r1
+    store @c0 to %p2
+    ret
 
 fn first::ref_mut#subscript:19d196cf(%p0: @arg &mut [int], %p1: @ret int):
   @c0: int = 0
   b0:
     %r0 = alloca int
-    %r1 = store @c0 to %r0
-    %r2 = alloca_place int
-    %r3 = call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r0, %r2)
-    %r4 = load %r2
-    %r5 = store %r4 to %p1
-    %r6 = ret
+    store @c0 to %r0
+    %r1 = alloca_place int
+    call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r0, %r1)
+    %r2 = load %r1
+    store %r2 to %p1
+    ret
 "#,
     );
 }
@@ -2828,24 +2828,24 @@ fn named_subscript_compound_assign() {
   @c0: () = ()
   b0:
     %r0 = alloca_place int
-    %r1 = call <test>::first::ref_mut#subscript:19d196cf(%p0, %r0)
-    %r2 = load %r0
-    %r3 = alloca int
-    %r4 = call std::Num<std::int>::add#impl:7665d3ee(%r2, %p1, %r3)
-    %r5 = move %r3 to %r2
-    %r6 = store @c0 to %p2
-    %r7 = ret
+    call <test>::first::ref_mut#subscript:19d196cf(%p0, %r0)
+    %r1 = load %r0
+    %r2 = alloca int
+    call std::Num<std::int>::add#impl:7665d3ee(%r1, %p1, %r2)
+    move %r2 to %r1
+    store @c0 to %p2
+    ret
 
 fn first::ref_mut#subscript:19d196cf(%p0: @arg &mut [int], %p1: @ret int):
   @c0: int = 0
   b0:
     %r0 = alloca int
-    %r1 = store @c0 to %r0
-    %r2 = alloca_place int
-    %r3 = call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r0, %r2)
-    %r4 = load %r2
-    %r5 = store %r4 to %p1
-    %r6 = ret
+    store @c0 to %r0
+    %r1 = alloca_place int
+    call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r0, %r1)
+    %r2 = load %r1
+    store %r2 to %p1
+    ret
 "#,
     );
 }
@@ -2857,8 +2857,8 @@ fn explicit_return_value() {
         session.emit_ssa("fn g(x: int) -> int { return x }"),
         r#"fn g(%p0: @arg let int, %p1: @ret int):
   b0:
-    %r0 = memcpy %p0 to %p1
-    %r1 = ret
+    memcpy %p0 to %p1
+    ret
 "#,
     );
 }
@@ -2878,12 +2878,12 @@ fn addressor_subscript_member_returns_place() {
   @c0: int = 0
   b0:
     %r0 = alloca int
-    %r1 = store @c0 to %r0
-    %r2 = alloca_place int
-    %r3 = call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r0, %r2)
-    %r4 = load %r2
-    %r5 = store %r4 to %p1
-    %r6 = ret
+    store @c0 to %r0
+    %r1 = alloca_place int
+    call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r0, %r1)
+    %r2 = load %r1
+    store %r2 to %p1
+    ret
 "#,
     );
 }
@@ -2903,12 +2903,12 @@ fn yielded_subscript_member_emitted_standalone() {
   @c0: () = ()
   b0:
     %r0 = alloca int
-    %r1 = memcpy %p0 to %r0
-    %r2 = yield %r0
-    %r3 = alloca int
-    %r4 = memcpy %r0 to %r3
-    %r5 = move %r3 to %p0
-    %r6 = ret
+    memcpy %p0 to %r0
+    yield %r0
+    %r1 = alloca int
+    memcpy %r0 to %r1
+    move %r1 to %p0
+    ret
 "#,
     );
 }
@@ -2930,22 +2930,22 @@ fn yielded_subscript_read() {
   @c0: () = ()
   b0:
     %r0 = alloca int
-    %r1 = memcpy %p0 to %r0
-    %r2 = yield %r0
-    %r3 = alloca int
-    %r4 = memcpy %r0 to %r3
-    %r5 = move %r3 to %p0
-    %r6 = ret
+    memcpy %p0 to %r0
+    yield %r0
+    %r1 = alloca int
+    memcpy %r0 to %r1
+    move %r1 to %p0
+    ret
 
 fn f(%p0: @arg &mut int, %p1: @ret int):
   b0:
     %r0 = project <test>::cell::ref_mut#subscript:f3d0ec43(%p0)
-    %r1 = memcpy %r0 to %p1 [unwind b1]
-    %r2 = end_project %r0
-    %r3 = ret
+    memcpy %r0 to %p1 [unwind b1]
+    end_project %r0
+    ret
   b1:
-    %r4 = end_project %r0
-    %r5 = resume
+    end_project %r0
+    resume
 "#,
     );
 }
@@ -2964,26 +2964,26 @@ fn yielded_subscript_assign() {
   @c0: () = ()
   b0:
     %r0 = alloca int
-    %r1 = memcpy %p0 to %r0
-    %r2 = yield %r0
-    %r3 = alloca int
-    %r4 = memcpy %r0 to %r3
-    %r5 = move %r3 to %p0
-    %r6 = ret
+    memcpy %p0 to %r0
+    yield %r0
+    %r1 = alloca int
+    memcpy %r0 to %r1
+    move %r1 to %p0
+    ret
 
 fn f(%p0: @arg &mut int, %p1: @arg let int, %p2: @ret ()):
   @c0: () = ()
   b0:
     %r0 = project <test>::cell::ref_mut#subscript:f3d0ec43(%p0)
     %r1 = alloca int [unwind b1]
-    %r2 = memcpy %p1 to %r1 [unwind b1]
-    %r3 = move %r1 to %r0 [unwind b1]
-    %r4 = store @c0 to %p2 [unwind b1]
-    %r5 = end_project %r0
-    %r6 = ret
+    memcpy %p1 to %r1 [unwind b1]
+    move %r1 to %r0 [unwind b1]
+    store @c0 to %p2 [unwind b1]
+    end_project %r0
+    ret
   b1:
-    %r7 = end_project %r0
-    %r8 = resume
+    end_project %r0
+    resume
 "#,
     );
 }
@@ -3013,26 +3013,26 @@ fn yielded_subscript_compound_assign() {
   @c0: () = ()
   b0:
     %r0 = alloca int
-    %r1 = memcpy %p0 to %r0
-    %r2 = yield %r0
-    %r3 = alloca int
-    %r4 = memcpy %r0 to %r3
-    %r5 = move %r3 to %p0
-    %r6 = ret
+    memcpy %p0 to %r0
+    yield %r0
+    %r1 = alloca int
+    memcpy %r0 to %r1
+    move %r1 to %p0
+    ret
 
 fn f(%p0: @arg &mut int, %p1: @arg let int, %p2: @ret ()):
   @c0: () = ()
   b0:
     %r0 = project <test>::cell::ref_mut#subscript:f3d0ec43(%p0)
     %r1 = alloca int [unwind b1]
-    %r2 = call std::Num<std::int>::add#impl:7665d3ee(%r0, %p1, %r1) [unwind b1]
-    %r3 = move %r1 to %r0 [unwind b1]
-    %r4 = store @c0 to %p2 [unwind b1]
-    %r5 = end_project %r0
-    %r6 = ret
+    call std::Num<std::int>::add#impl:7665d3ee(%r0, %p1, %r1) [unwind b1]
+    move %r1 to %r0 [unwind b1]
+    store @c0 to %p2 [unwind b1]
+    end_project %r0
+    ret
   b1:
-    %r7 = end_project %r0
-    %r8 = resume
+    end_project %r0
+    resume
 "#,
     );
 }
@@ -3053,27 +3053,27 @@ fn yielded_subscript_fallible_body_runs_slide_on_unwind() {
   @c0: () = ()
   b0:
     %r0 = alloca int
-    %r1 = memcpy %p0 to %r0
-    %r2 = yield %r0
-    %r3 = alloca int
-    %r4 = memcpy %r0 to %r3
-    %r5 = move %r3 to %p0
-    %r6 = ret
+    memcpy %p0 to %r0
+    yield %r0
+    %r1 = alloca int
+    memcpy %r0 to %r1
+    move %r1 to %p0
+    ret
 
 fn f(%p0: @arg &mut int, %p1: @arg let int, %p2: @arg let int, %p3: @ret ()):
   @c0: () = ()
   b0:
     %r0 = project <test>::cell::ref_mut#subscript:f3d0ec43(%p0)
     %r1 = alloca int [unwind b1]
-    %r2 = invoke std::idiv(%p1, %p2, %r1) -> b2 unwind b1
+    invoke std::idiv(%p1, %p2, %r1) -> b2 unwind b1
   b1:
-    %r7 = end_project %r0
-    %r8 = resume
+    end_project %r0
+    resume
   b2:
-    %r3 = move %r1 to %r0 [unwind b1]
-    %r4 = store @c0 to %p3 [unwind b1]
-    %r5 = end_project %r0
-    %r6 = ret
+    move %r1 to %r0 [unwind b1]
+    store @c0 to %p3 [unwind b1]
+    end_project %r0
+    ret
 "#,
     );
 }
@@ -3217,11 +3217,11 @@ fn discarded_tuple_construction_lowers_into_throwaway_temp() {
   b0:
     %r0 = alloca (int, int)
     %r1 = subfield @c0 from %r0
-    %r2 = memcpy %p0 to %r1
-    %r3 = subfield @c1 from %r0
-    %r4 = memcpy %p0 to %r3
-    %r5 = memcpy %p0 to %p1
-    %r6 = ret
+    memcpy %p0 to %r1
+    %r2 = subfield @c1 from %r0
+    memcpy %p0 to %r2
+    memcpy %p0 to %p1
+    ret
 "#,
     );
 }
@@ -3239,11 +3239,11 @@ fn discarded_record_construction_lowers_into_throwaway_temp() {
   b0:
     %r0 = alloca { a: int, b: int }
     %r1 = subfield @c0 from %r0
-    %r2 = memcpy %p0 to %r1
-    %r3 = subfield @c1 from %r0
-    %r4 = memcpy %p0 to %r3
-    %r5 = memcpy %p0 to %p1
-    %r6 = ret
+    memcpy %p0 to %r1
+    %r2 = subfield @c1 from %r0
+    memcpy %p0 to %r2
+    memcpy %p0 to %p1
+    ret
 "#,
     );
 }

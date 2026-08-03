@@ -465,6 +465,7 @@ struct Verifier<'a> {
     instruction_index: FxHashMap<InstructionId, usize>,
     instruction_block: FxHashMap<InstructionId, BlockId>,
     block_first: FxHashMap<BlockId, InstructionId>,
+    value_definition: FxHashMap<ssa::ValueId, InstructionId>,
     value_roles: FxHashMap<ssa::Value, ValueRole>,
     roots: Vec<RootInfo>,
     root_index: FxHashMap<ssa::Value, usize>,
@@ -481,6 +482,7 @@ impl<'a> Verifier<'a> {
             instruction_index: FxHashMap::default(),
             instruction_block: FxHashMap::default(),
             block_first: FxHashMap::default(),
+            value_definition: FxHashMap::default(),
             value_roles: FxHashMap::default(),
             roots: vec![],
             root_index: FxHashMap::default(),
@@ -598,6 +600,17 @@ impl<'a> Verifier<'a> {
             let Some(value) = self.func.definition(instruction) else {
                 continue;
             };
+            let ssa::Value::Register(value_id) = value else {
+                unreachable!("instruction definitions are registers")
+            };
+            assert!(
+                self.value_definition
+                    .insert(value_id, instruction)
+                    .is_none(),
+                "SSA function `{}`: value {value_id} has more than one definition",
+                self.func.name
+            );
+            let value = ssa::Value::Register(value_id);
             let role = self.resolve_result(self.func.at(instruction).result());
             if let InstructionKind::Alloca { ty } = self.func.at(instruction).kind {
                 let root = self.roots.len();
@@ -703,9 +716,10 @@ impl<'a> Verifier<'a> {
             let whole = self.func.at(instruction);
             for operand in whole.operands.iter() {
                 if let ssa::Value::Register(definition) = operand {
-                    let def_block = self.instruction_block[definition];
+                    let definition = self.value_definition[definition];
+                    let def_block = self.instruction_block[&definition];
                     let use_block = self.instruction_block[&instruction];
-                    let definition_index = self.instruction_index[definition];
+                    let definition_index = self.instruction_index[&definition];
                     let usage_index = self.instruction_index[&instruction];
                     let dominates = if dominance.is_reachable(usage_index) {
                         dominance.dominates(definition_index, usage_index)
@@ -1559,25 +1573,30 @@ impl<'a> Verifier<'a> {
             | ssa::Value::Dictionary(_)
             | ssa::Value::Pattern(_) => false,
             ssa::Value::Parameter(_) => false,
-            ssa::Value::Register(instruction) => match &self.func.at(*instruction).kind {
-                InstructionKind::Variant { .. } | InstructionKind::CloneClosureEnv { .. } => true,
-                InstructionKind::BuildClosure {
-                    num_hidden_dicts,
-                    has_env_dict,
-                    ..
-                } => {
-                    self.func.at(*instruction).operands.len()
-                        > *num_hidden_dicts as usize + usize::from(*has_env_dict)
+            ssa::Value::Register(value_id) => {
+                let instruction = self.value_definition[value_id];
+                match &self.func.at(instruction).kind {
+                    InstructionKind::Variant { .. } | InstructionKind::CloneClosureEnv { .. } => {
+                        true
+                    }
+                    InstructionKind::BuildClosure {
+                        num_hidden_dicts,
+                        has_env_dict,
+                        ..
+                    } => {
+                        self.func.at(instruction).operands.len()
+                            > *num_hidden_dicts as usize + usize::from(*has_env_dict)
+                    }
+                    InstructionKind::Load
+                    | InstructionKind::CompareEqual
+                    | InstructionKind::ExtractTag
+                    | InstructionKind::BuildSubscript { .. } => false,
+                    _ => match self.func.at(instruction).result() {
+                        InstructionResult::Lowered(ty) => !self.is_trivial_copy(ty),
+                        _ => false,
+                    },
                 }
-                InstructionKind::Load
-                | InstructionKind::CompareEqual
-                | InstructionKind::ExtractTag
-                | InstructionKind::BuildSubscript { .. } => false,
-                _ => match self.func.at(*instruction).result() {
-                    InstructionResult::Lowered(ty) => !self.is_trivial_copy(ty),
-                    _ => false,
-                },
-            },
+            }
         }
     }
 
@@ -1628,17 +1647,18 @@ impl<'a> Verifier<'a> {
     }
 
     fn local_place(&self, value: &ssa::Value) -> LocalPlace {
-        let ssa::Value::Register(instruction) = value else {
+        let ssa::Value::Register(value_id) = value else {
             return LocalPlace::External;
         };
-        match &self.func.at(*instruction).kind {
+        let instruction = self.value_definition[value_id];
+        match &self.func.at(instruction).kind {
             InstructionKind::Alloca { .. } => LocalPlace::Root {
                 root: self.root_index[value],
                 path: Some(vec![]),
             },
             InstructionKind::Subfield { .. } => {
-                let base = self.local_place(&self.func.at(*instruction).operands[0]);
-                let index = self.static_field_index(&self.func.at(*instruction).operands[1]);
+                let base = self.local_place(&self.func.at(instruction).operands[0]);
+                let index = self.static_field_index(&self.func.at(instruction).operands[1]);
                 match base {
                     LocalPlace::Root { root, path } => LocalPlace::Root {
                         root,
@@ -1708,7 +1728,7 @@ mod tests {
         CompilerSession, Location,
         hir::value::LiteralValue,
         module::{FunctionId, LocalFunctionId, ModuleId},
-        ssa::{Function, Instruction, ParameterTag, verify::verify_function},
+        ssa::{BlockId, Function, Instruction, ParameterTag, Value, verify::verify_function},
         std::math::int_type,
         types::r#type::Type,
     };
@@ -1717,6 +1737,12 @@ mod tests {
         let session = CompilerSession::new();
         let env = session.module_env();
         verify_function(f, env.current, env.modules);
+    }
+
+    fn append_result(f: &mut Function, block: BlockId, instruction: Instruction) -> Value {
+        let instruction = f.block_mut(block).append(instruction);
+        f.definition(instruction)
+            .expect("test instruction should define a value")
     }
 
     fn managed_variant_ty() -> Type {
@@ -1734,25 +1760,21 @@ mod tests {
         let constant = f.add_constant(int_type(), LiteralValue::new_native(0isize), &env);
         let variant_ty = managed_variant_ty();
         let block = f.add_block().id();
-        let local = f
-            .block_mut(block)
-            .append(Instruction::alloca(span, variant_ty));
-        let first =
-            f.block_mut(block)
-                .append(Instruction::variant(span, ustr::ustr("A"), variant_ty));
-        f.block_mut(block).append(Instruction::store(
-            span,
-            crate::ssa::Value::Register(first),
-            crate::ssa::Value::Register(local),
-        ));
-        let second =
-            f.block_mut(block)
-                .append(Instruction::variant(span, ustr::ustr("A"), variant_ty));
-        f.block_mut(block).append(Instruction::store(
-            span,
-            crate::ssa::Value::Register(second),
-            crate::ssa::Value::Register(local),
-        ));
+        let local = append_result(&mut f, block, Instruction::alloca(span, variant_ty));
+        let first = append_result(
+            &mut f,
+            block,
+            Instruction::variant(span, ustr::ustr("A"), variant_ty),
+        );
+        f.block_mut(block)
+            .append(Instruction::store(span, first, local.clone()));
+        let second = append_result(
+            &mut f,
+            block,
+            Instruction::variant(span, ustr::ustr("A"), variant_ty),
+        );
+        f.block_mut(block)
+            .append(Instruction::store(span, second, local));
         f.block_mut(block).append(Instruction::store(
             span,
             crate::ssa::Value::Constant(constant),
@@ -1778,24 +1800,21 @@ mod tests {
         let entry = f.add_block().id();
         let defining = f.add_block().id();
         let using = f.add_block().id();
-        let local = f
-            .block_mut(entry)
-            .append(Instruction::alloca(span, variant_ty));
+        let local = append_result(&mut f, entry, Instruction::alloca(span, variant_ty));
         f.block_mut(entry).append(Instruction::condbr(
             span,
             crate::ssa::Value::Constant(condition),
             defining,
             using,
         ));
-        let value =
-            f.block_mut(defining)
-                .append(Instruction::variant(span, ustr::ustr("A"), variant_ty));
+        let value = append_result(
+            &mut f,
+            defining,
+            Instruction::variant(span, ustr::ustr("A"), variant_ty),
+        );
         f.block_mut(defining).append(Instruction::br(span, using));
-        f.block_mut(using).append(Instruction::store(
-            span,
-            crate::ssa::Value::Register(value),
-            crate::ssa::Value::Register(local),
-        ));
+        f.block_mut(using)
+            .append(Instruction::store(span, value, local));
         f.block_mut(using).append(Instruction::ret(span));
         verify(&f);
     }
@@ -1818,13 +1837,11 @@ mod tests {
         let right = f.add_block().id();
         let join = f.add_block().id();
 
-        let local = f
-            .block_mut(entry)
-            .append(Instruction::alloca(span, int_type()));
+        let local = append_result(&mut f, entry, Instruction::alloca(span, int_type()));
         f.block_mut(entry).append(Instruction::store(
             span,
             crate::ssa::Value::Constant(value),
-            crate::ssa::Value::Register(local),
+            local.clone(),
         ));
         f.block_mut(entry).append(Instruction::condbr(
             span,
@@ -1834,12 +1851,10 @@ mod tests {
         ));
         f.block_mut(left).append(Instruction::br(span, join));
         f.block_mut(right).append(Instruction::br(span, join));
-        let loaded = f
-            .block_mut(join)
-            .append(Instruction::load(span, crate::ssa::Value::Register(local)));
+        let loaded = append_result(&mut f, join, Instruction::load(span, local));
         f.block_mut(join).append(Instruction::store(
             span,
-            crate::ssa::Value::Register(loaded),
+            loaded,
             crate::ssa::Value::Parameter(ret),
         ));
         f.block_mut(join).append(Instruction::ret(span));
@@ -1865,17 +1880,15 @@ mod tests {
         let body = f.add_block().id();
         let exit = f.add_block().id();
 
-        let local = f
-            .block_mut(entry)
-            .append(Instruction::alloca(span, int_type()));
+        let local = append_result(&mut f, entry, Instruction::alloca(span, int_type()));
         f.block_mut(entry).append(Instruction::store(
             span,
             crate::ssa::Value::Constant(value),
-            crate::ssa::Value::Register(local),
+            local.clone(),
         ));
         f.block_mut(entry).append(Instruction::br(span, header));
         f.block_mut(header)
-            .append(Instruction::load(span, crate::ssa::Value::Register(local)));
+            .append(Instruction::load(span, local.clone()));
         f.block_mut(header).append(Instruction::condbr(
             span,
             crate::ssa::Value::Constant(condition),
@@ -1883,14 +1896,12 @@ mod tests {
             exit,
         ));
         f.block_mut(body)
-            .append(Instruction::load(span, crate::ssa::Value::Register(local)));
+            .append(Instruction::load(span, local.clone()));
         f.block_mut(body).append(Instruction::br(span, header));
-        let loaded = f
-            .block_mut(exit)
-            .append(Instruction::load(span, crate::ssa::Value::Register(local)));
+        let loaded = append_result(&mut f, exit, Instruction::load(span, local));
         f.block_mut(exit).append(Instruction::store(
             span,
-            crate::ssa::Value::Register(loaded),
+            loaded,
             crate::ssa::Value::Parameter(ret),
         ));
         f.block_mut(exit).append(Instruction::ret(span));
@@ -1910,17 +1921,13 @@ mod tests {
         let raising = f
             .block_mut(entry)
             .append(Instruction::alloca(span, int_type()));
-        let late_definition = f
-            .block_mut(entry)
-            .append(Instruction::alloca(span, int_type()));
+        let late_definition = append_result(&mut f, entry, Instruction::alloca(span, int_type()));
         f.block_mut(entry).append(Instruction::br(span, normal));
         f.set_implicit_unwind_target(raising, unwind);
 
         f.block_mut(normal).append(Instruction::ret(span));
-        f.block_mut(unwind).append(Instruction::load(
-            span,
-            crate::ssa::Value::Register(late_definition),
-        ));
+        f.block_mut(unwind)
+            .append(Instruction::load(span, late_definition));
         f.block_mut(unwind).append(Instruction::resume(span));
         verify(&f);
     }
@@ -1969,22 +1976,17 @@ mod tests {
         let mut f = Function::new("bad_stack_restore".into(), Default::default());
         let variant_ty = managed_variant_ty();
         let block = f.add_block().id();
-        let marker = f.block_mut(block).append(Instruction::stack_save(span));
-        let local = f
-            .block_mut(block)
-            .append(Instruction::alloca(span, variant_ty));
-        let value =
-            f.block_mut(block)
-                .append(Instruction::variant(span, ustr::ustr("A"), variant_ty));
-        f.block_mut(block).append(Instruction::store(
-            span,
-            crate::ssa::Value::Register(value),
-            crate::ssa::Value::Register(local),
-        ));
-        f.block_mut(block).append(Instruction::stack_restore(
-            span,
-            crate::ssa::Value::Register(marker),
-        ));
+        let marker = append_result(&mut f, block, Instruction::stack_save(span));
+        let local = append_result(&mut f, block, Instruction::alloca(span, variant_ty));
+        let value = append_result(
+            &mut f,
+            block,
+            Instruction::variant(span, ustr::ustr("A"), variant_ty),
+        );
+        f.block_mut(block)
+            .append(Instruction::store(span, value, local));
+        f.block_mut(block)
+            .append(Instruction::stack_restore(span, marker));
         f.block_mut(block).append(Instruction::ret(span));
         verify(&f);
     }
@@ -1994,21 +1996,17 @@ mod tests {
         let span = Location::new_synthesized();
         let mut f = Function::new("reused_stack_marker".into(), Default::default());
         let block = f.add_block().id();
-        let marker = f.block_mut(block).append(Instruction::stack_save(span));
+        let marker = append_result(&mut f, block, Instruction::stack_save(span));
 
         f.block_mut(block)
             .append(Instruction::alloca(span, int_type()));
-        f.block_mut(block).append(Instruction::stack_restore(
-            span,
-            crate::ssa::Value::Register(marker),
-        ));
+        f.block_mut(block)
+            .append(Instruction::stack_restore(span, marker.clone()));
 
         f.block_mut(block)
             .append(Instruction::alloca(span, int_type()));
-        f.block_mut(block).append(Instruction::stack_restore(
-            span,
-            crate::ssa::Value::Register(marker),
-        ));
+        f.block_mut(block)
+            .append(Instruction::stack_restore(span, marker));
         f.block_mut(block).append(Instruction::ret(span));
         verify(&f);
     }
@@ -2051,19 +2049,15 @@ mod tests {
         let mut f = Function::new("bad_clear".into(), Default::default());
         let variant_ty = managed_variant_ty();
         let block = f.add_block().id();
-        let local = f
-            .block_mut(block)
-            .append(Instruction::alloca(span, variant_ty));
-        let value =
-            f.block_mut(block)
-                .append(Instruction::variant(span, ustr::ustr("A"), variant_ty));
-        f.block_mut(block).append(Instruction::store(
-            span,
-            crate::ssa::Value::Register(value),
-            crate::ssa::Value::Register(local),
-        ));
+        let local = append_result(&mut f, block, Instruction::alloca(span, variant_ty));
+        let value = append_result(
+            &mut f,
+            block,
+            Instruction::variant(span, ustr::ustr("A"), variant_ty),
+        );
         f.block_mut(block)
-            .append(Instruction::clear(span, crate::ssa::Value::Register(local)));
+            .append(Instruction::store(span, value, local.clone()));
+        f.block_mut(block).append(Instruction::clear(span, local));
         f.block_mut(block).append(Instruction::ret(span));
         verify(&f);
     }

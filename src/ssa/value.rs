@@ -5,7 +5,6 @@ use crate::{
     format::FormatWith,
     hir::value::LiteralValue,
     module::{FunctionId, ModuleEnv, QualifiedNameEnv, SubscriptId, TraitDictionaryId, id::Id},
-    ssa,
     types::r#type::Type,
 };
 
@@ -37,8 +36,8 @@ pub enum Value {
     /// A parameter in the containing function's signature.
     Parameter(ParameterId),
 
-    /// The register assigned by an instruction.
-    Register(ssa::InstructionId),
+    /// A function-local result value defined by an instruction.
+    Register(ValueId),
 
     /// Compile-time pattern data used only by a `comp_eq` instruction.
     Pattern(B<LiteralValue>),
@@ -56,7 +55,7 @@ impl fmt::Display for Value {
             }
             Value::Function(id) => write!(f, "fn(m{}:f{})", id.module, id.function),
             Value::Parameter(i) => write!(f, "%p{}", i),
-            Value::Register(i) => write!(f, "%r{}", i.raw()),
+            Value::Register(i) => write!(f, "%r{}", i.as_index()),
             Value::Pattern(lit) => write!(f, "{}", lit),
         }
     }
@@ -70,6 +69,11 @@ crate::define_id_type!(
 crate::define_id_type!(
     /// The stable identity of a parameter in an SSA function's signature.
     ParameterId
+);
+
+crate::define_id_type!(
+    /// The stable identity of an instruction result within an SSA function.
+    ValueId
 );
 
 /// A typed, trivially-copyable HIR immediate representation.

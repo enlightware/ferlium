@@ -7,4 +7,4 @@ pub(crate) mod verify;
 
 pub use function::{BlockId, Function, Parameter, ParameterTag};
 pub use instruction::{Instruction, InstructionId, InstructionKind, InstructionResult};
-pub use value::{ParameterId, Value};
+pub use value::{ParameterId, Value, ValueId};

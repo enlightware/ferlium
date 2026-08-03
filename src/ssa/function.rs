@@ -60,6 +60,9 @@ pub struct Function {
     /// The instructions in the function.
     slots: list::List<Instruction>,
 
+    /// The next function-local result identity allocated during construction.
+    next_value: usize,
+
     /// The basic blocks in the function, the first of which being the function's entry.
     blocks: list::List<Option<BlockBounds>>,
 
@@ -79,6 +82,7 @@ impl Function {
             parameters: Vec::new(),
             constants: Vec::new(),
             slots: list::List::new(),
+            next_value: 0,
             blocks: list::List::new(),
             implicit_unwind_targets: Vec::new(),
         }
@@ -181,11 +185,7 @@ impl Function {
 
     /// Returns the register assigned by `i`, if any.
     pub fn definition(&self, i: InstructionId) -> Option<ssa::Value> {
-        if self.slots[i].result() == InstructionResult::Nothing {
-            None
-        } else {
-            Some(ssa::Value::Register(i))
-        }
+        self.slots[i].result_id().map(ssa::Value::Register)
     }
 
     /// Records the cleanup landing pad to enter if `instruction` raises a source failure without
@@ -249,12 +249,11 @@ impl FormatWith<ModuleEnv<'_>> for Function {
             for b in self.blocks.addresses() {
                 writeln!(f, "  b{}:", b.raw())?;
                 for i in self.block(b).instructions() {
-                    write!(
-                        f,
-                        "    {} = {}",
-                        ssa::Value::Register(i),
-                        self.at(i).format_with(env)
-                    )?;
+                    write!(f, "    ")?;
+                    if let Some(result) = self.definition(i) {
+                        write!(f, "{result} = ")?;
+                    }
+                    write!(f, "{}", self.at(i).format_with(env))?;
                     if let Some(unwind) = self.implicit_unwind_target(i) {
                         write!(f, " [unwind b{}]", unwind.raw())?;
                     }
@@ -357,6 +356,13 @@ impl BlockMut<'_> {
     /// Adds `s` at the end of `self` and returns its identity.
     pub fn append(&mut self, s: Instruction) -> InstructionId {
         assert!(!self.is_terminated(), "insertion after terminator");
+        let mut s = s;
+        let result_id = (s.result() != InstructionResult::Nothing).then(|| {
+            let result = ssa::ValueId::from_index(self.holder.next_value);
+            self.holder.next_value += 1;
+            result
+        });
+        s.assign_result_id(result_id);
         let i = self.holder.slots.append(s);
         self.set_last(i);
         i
@@ -397,5 +403,45 @@ impl Iterator for BlockIterator<'_> {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        Location,
+        module::id::Id,
+        ssa::{Function, Instruction, Value},
+        std::math::int_type,
+    };
+
+    #[test]
+    fn result_value_ids_are_independent_of_instruction_locations() {
+        let span = Location::new_synthesized();
+        let mut function = Function::new("independent_value_ids".into(), Default::default());
+        let block = function.add_block().id();
+
+        let first = function
+            .block_mut(block)
+            .append(Instruction::alloca(span, int_type()));
+        let resultless = function
+            .block_mut(block)
+            .append(Instruction::check_fuel(span));
+        let second = function
+            .block_mut(block)
+            .append(Instruction::alloca(span, int_type()));
+
+        assert_eq!(first.raw(), 0);
+        assert_eq!(resultless.raw(), 1);
+        assert_eq!(second.raw(), 2);
+        assert_eq!(
+            function.definition(first),
+            Some(Value::Register(crate::ssa::ValueId::from_index(0)))
+        );
+        assert_eq!(function.definition(resultless), None);
+        assert_eq!(
+            function.definition(second),
+            Some(Value::Register(crate::ssa::ValueId::from_index(1)))
+        );
     }
 }

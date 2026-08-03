@@ -19,7 +19,7 @@ A function is an ordered list of **parameters** (its signature) plus a set of **
 a sequence of **instructions** drawn from a shared per-function arena. Values are referenced as:
 
 - `%pN` — parameter `N` (a `ssa::Value::Parameter`), in signature order;
-- `%rN` — the register defined by an instruction (a `ssa::Value::Register`);
+- `%rN` — an independent function-local instruction result (a `ssa::Value::Register`);
 - `bN` — a block (not a value: block ids appear only as branch targets);
 - `@cN` — a reference into the function-local typed constant pool. Each entry is a concrete,
   `TrivialCopy` HIR immediate representation; constants such as `StaticStr` remain opaque until a
@@ -30,9 +30,10 @@ Compile-time match patterns are separate operands, not runtime constants: they m
 source-language value such as `string` even though the corresponding HIR immediate representation is
 `StaticStr`.
 
-SSA is single-assignment: each instruction defines **at most one** result register (its
-`InstructionResult`; `Nothing` means it defines none). A result-less instruction's slot must never be
-read. Values live in registers or in storage reached through a *place*.
+SSA is single-assignment: each instruction defines **at most one** result register. A
+result-producing instruction has an explicit `ValueId`; `InstructionResult::Nothing` means it
+defines none and is printed without a `%rN =` prefix. `ValueId` is independent of the instruction's
+temporary arena location. Values live in registers or in storage reached through a *place*.
 
 ## 2. Function structure (structural invariants)
 
