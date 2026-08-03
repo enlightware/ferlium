@@ -553,6 +553,35 @@ mod tests {
     }
 
     #[test]
+    fn needless_return_diagnostic_does_not_cover_the_following_line() {
+        let mut compiler = Compiler::new();
+        let source = indoc::indoc! { r#"
+            fn factorial(n) {
+                if n <= 1 {
+                    return 1
+                } else {
+                    n * factorial(n - 1)
+                }
+            }
+
+            factorial(5)
+        "# };
+        let report = compiler.compile_report(source);
+
+        assert!(report.succeeded);
+        let warning = report
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.text == "needless return")
+            .expect("tail return should be reported as needless");
+        let warned_text = source.chars().collect::<Vec<_>>()
+            [warning.from as usize..warning.to as usize]
+            .iter()
+            .collect::<String>();
+        assert_eq!(warned_text, "return 1");
+    }
+
+    #[test]
     fn run_expr_array_inspect_respects_execution_fuel_limit() {
         let mut compiler = build(
             r#"

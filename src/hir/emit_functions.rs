@@ -17,6 +17,7 @@ use crate::{
             InvalidSubscriptDefinitionKind, SubscriptDefinitionSubject, UnsafeFeature,
             UnsupportedSubscriptFeatureKind,
         },
+        lints::report_needless_returns_in_tail,
     },
     containers::{SVec2, b},
     format::FormatWith,
@@ -978,6 +979,7 @@ where
         let mut fn_arena = NodeArena::default();
         LocalDecl::assign_sequential_slots(&mut locals);
         let cur_locals = (0..locals.len()).map(LocalDeclId::from_index).collect();
+        report_needless_returns_in_tail(desugared_arena, function.body, warnings);
         let mut ty_env = TypingEnv::new(
             &mut locals,
             cur_locals,

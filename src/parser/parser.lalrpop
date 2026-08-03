@@ -18,7 +18,7 @@ use lalrpop_util::ErrorRecovery;
 grammar<'err, 'arena>(
     source_id: SourceId,
     errors: &'err mut Vec<ErrorRecovery<usize, Token<'input>, LocatedError>>,
-    arena: &'arena mut PExprArena
+    arena: &'arena mut PExprArena,
 );
 
 extern {
@@ -1252,7 +1252,10 @@ BranchBlock: ExprKind = {
 Block: ExprKind = {
     "{" <e:Stmts> <r:Es<BreakNoValueExpr>> "}" => ExprKind::block(ext_b(e, r)),
     "{" <e:Stmts> <r:Expr> "}" => ExprKind::block(ext_b(e, r)),
-    "{" <e:Stmts> <r:Loc<"}">> => ExprKind::block(ext_b(e, unit_literal_expr(r, arena))),
+    "{" <e:Stmts> "}" => ExprKind::block(ext_b(
+        e,
+        unit_literal_expr(Location::new_synthesized(), arena),
+    )),
 }
 
 #[inline]
@@ -1534,7 +1537,7 @@ Lps<T>: LetPattern = {
 
 // Return T along with its location
 Sp<T>: (T, Location) = {
-    <l:@L> <t: T> <r:@R> => (t, span(l, r, source_id)),
+    <l:@L> <t: T> <r:@R> => (t, span_without_trailing_whitespace(l, r, source_id, input)),
 };
 
 // Return the location of T, ignoring its content

@@ -784,6 +784,8 @@ Block {
     "{" stmt* BreakNoValue "}"
     |
     "{" stmt* expr "}"
+    // The compiler represents this form with a synthesized unit tail; the closing brace is not
+    // itself an expression and must not become a diagnostic location.
     | "{" stmt* "}"
 }
 

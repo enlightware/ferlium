@@ -10,6 +10,7 @@
 mod artifacts;
 pub mod diagnostics;
 pub mod error;
+pub(crate) mod lints;
 mod pipeline;
 mod session;
 

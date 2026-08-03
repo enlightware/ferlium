@@ -20,6 +20,7 @@ use crate::{
             LoopControlKind, SubscriptDefinitionSubject, UnsafeFeature,
             UnsupportedSubscriptFeatureKind, WhatIsNotAProductType, WhichProductTypeIsNot,
         },
+        lints::report_needless_returns_in_tail,
     },
     containers::{SVec2, b, continuous_hashmap_to_vec},
     format::FormatWith,
@@ -544,6 +545,8 @@ impl TypeInference {
     ) -> Result<(NodeId, Type, MutType, EffType), InternalCompilationError> {
         use hir::Node as N;
         use hir::NodeKind as K;
+
+        report_needless_returns_in_tail(env.ast_arena, body, env.warnings);
 
         // 1. Collect free variables in the body.
         let mut free_vars = FxHashSet::default();

@@ -1264,15 +1264,41 @@ fn successful_compilation_records_and_clears_unreachable_code_warnings() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn tail_divergence_does_not_report_unreachable_code() {
+fn final_return_reports_needless_return_instead_of_the_closing_brace() {
+    let mut session = CompilerSession::new();
+    let source = indoc! { r#"
+        fn value() -> int {
+            return 1;
+        }
+    "# };
+    let module_id = session
+        .compile(
+            source,
+            "needless_return",
+            Path::single_str("needless_return"),
+        )
+        .expect("tail return should compile")
+        .module_id;
+
+    let diagnostics = session.modules().info(module_id).unwrap().diagnostics();
+    assert_eq!(diagnostics.len(), 1);
+    let warning = &diagnostics[0];
+    assert_eq!(warning.severity, DiagnosticSeverity::Warning);
+    assert_eq!(warning.message, "needless return");
+    assert_eq!(&source[warning.location.as_range()], "return 1");
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn early_return_is_not_reported_as_needless() {
     let mut session = CompilerSession::new();
     let module_id = session
         .compile(
-            "fn value() -> int { return 1 }",
-            "reachable",
-            Path::single_str("reachable"),
+            "fn value(flag: bool) -> int { if flag { return 1; }; 2 }",
+            "early_return",
+            Path::single_str("early_return"),
         )
-        .expect("tail return should compile")
+        .expect("early return should compile")
         .module_id;
 
     assert!(
@@ -1283,6 +1309,43 @@ fn tail_divergence_does_not_report_unreachable_code() {
             .diagnostics()
             .is_empty()
     );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn tail_returns_in_branches_and_lambdas_are_reported_as_needless() {
+    let mut session = CompilerSession::new();
+    let source = indoc! { r#"
+        fn choose(flag: bool) -> int {
+            if flag { return 1; } else { 2 }
+        }
+
+        fn callback() -> int {
+            let f = || { return 3; };
+            f()
+        }
+    "# };
+    let module_id = session
+        .compile(
+            source,
+            "nested_needless_returns",
+            Path::single_str("nested_needless_returns"),
+        )
+        .expect("tail returns in branches and lambdas should compile")
+        .module_id;
+
+    let diagnostics = session.modules().info(module_id).unwrap().diagnostics();
+    assert_eq!(diagnostics.len(), 2);
+    assert!(
+        diagnostics
+            .iter()
+            .all(|warning| warning.message == "needless return")
+    );
+    let warned = diagnostics
+        .iter()
+        .map(|warning| source[warning.location.as_range()].trim())
+        .collect::<Vec<_>>();
+    assert_eq!(warned, ["return 1", "return 3"]);
 }
 
 #[test]

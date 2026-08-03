@@ -208,6 +208,23 @@ pub(crate) fn span(l: usize, r: usize, source_id: SourceId) -> Location {
     Location::new_usize(l, r, source_id)
 }
 
+/// Build a token-tight span for a grammar value wrapped by `Sp<T>`.
+///
+/// When `T` is a reduced nonterminal, LALRPOP may resolve the trailing `@R` at the start of its
+/// lookahead token. The built-in lexer has already consumed ignored whitespace by then, but that
+/// trivia is not part of the syntax value and should not leak into source diagnostics.
+pub(crate) fn span_without_trailing_whitespace(
+    l: usize,
+    r: usize,
+    source_id: SourceId,
+    source: &str,
+) -> Location {
+    let text = source
+        .get(l..r)
+        .expect("parser locations should be valid source byte boundaries");
+    Location::new_usize(l, l + text.trim_end().len(), source_id)
+}
+
 /// Make a custom parse error
 pub(crate) fn parse_error<L, T>(msg: String, span: Location) -> ParseError<L, T, LocatedError> {
     ParseError::User { error: (msg, span) }

@@ -33,6 +33,7 @@ pub enum DiagnosticSeverity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum CompilationWarning {
     UnreachableCode { location: Location },
+    NeedlessReturn { location: Location },
 }
 
 impl CompilationWarning {
@@ -40,15 +41,20 @@ impl CompilationWarning {
         Self::UnreachableCode { location }
     }
 
+    pub(crate) fn needless_return(location: Location) -> Self {
+        Self::NeedlessReturn { location }
+    }
+
     fn location(self) -> Location {
         match self {
-            Self::UnreachableCode { location } => location,
+            Self::UnreachableCode { location } | Self::NeedlessReturn { location } => location,
         }
     }
 
     fn message(self) -> &'static str {
         match self {
             Self::UnreachableCode { .. } => "unreachable code",
+            Self::NeedlessReturn { .. } => "needless return",
         }
     }
 }
