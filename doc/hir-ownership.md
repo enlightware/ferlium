@@ -1,8 +1,10 @@
 # HIR Ownership and Value Dispatch
 
-This document records the ownership invariants that SSA lowering should rely on.
+This document records the ownership invariants that MIR lowering should rely on.
 It describes final HIR after type inference, dictionary and ownership elaboration, and final borrow and lifetime validation.
-At that point all `LocalStorage::Deferred`, `LocalClone::Unknown`, `LocalDrop::Unknown`, and `TakeLocalValueMode::Unknown` placeholders have been resolved, and every call site and function parameter has a concrete `ArgConvention`.
+At that point all `LocalStorage::Deferred`, `PendingLocalClone::Unknown`,
+`PendingLocalDrop::Unknown`, and `PendingTakeLocalValueMode::Unknown` placeholders have been
+resolved, and every call site and function parameter has a concrete `ArgConvention`.
 
 See `doc/abi.md` for the physical calling convention.
 This document is about source-level ownership semantics and the HIR operations that preserve them.
@@ -11,7 +13,7 @@ This document is about source-level ownership semantics and the HIR operations t
 
 A HIR expression either produces an owned value, denotes a caller-rooted place in existing storage, or drives a scoped yielded place.
 Caller-rooted place-like nodes include `LoadLocal`, direct projections (`Project`), and call nodes whose selected implementation has `CallResultConvention::ADDRESSOR_PLACE`.
-SSA must not treat every `LoadLocal` as an owned read: ownership transfer, clone, and copy are explicit HIR operations.
+MIR does not treat every `LoadLocal` as an owned read: ownership transfer, clone, and copy are explicit HIR operations.
 
 When a place-producing projection or call needs a non-place base, HIR generation stores that base in an explicit owned temporary local first.
 The consumer then uses a normal place rooted at that temporary, and the surrounding `Block.cleanup` releases the temporary after the consumer.
@@ -46,8 +48,8 @@ If `body` exits by return, break, continue, or source failure, the accessor epil
 If an epilogue or cleanup action raises a second source failure while another source failure is already propagating, execution is poisoned by `FailureDuringCleanup` and no further Ferlium cleanup runs.
 A sandbox violation always poisons immediately and bypasses cleanup.
 If the accessor fails before yielding, no yielded binding exists and no post-yield epilogue runs.
-See [ssa-error-propagation.md](ssa-error-propagation.md) for the current SSA cleanup CFG and its
-transitional limitations, and [runtime-sandboxing.md](runtime-sandboxing.md) for executor poisoning.
+See [mir-error-propagation.md](mir-error-propagation.md) for the MIR cleanup CFG and
+[runtime-sandboxing.md](runtime-sandboxing.md) for executor poisoning.
 
 A member without `yield` uses `SubscriptResultConvention::AddressorPlace`, exposed on selected HIR calls as `CallResultConvention::ADDRESSOR_PLACE`, and keeps caller-rooted projection behavior.
 Its place-producing base argument uses `Let` (or `MutableRef`) access, so the returned place remains rooted in caller storage rather than a short-lived copied argument.
@@ -58,7 +60,7 @@ Std `array_index` is a source subscript with `AddressorPlace` provenance, backed
 
 `LocalDecl` is the ownership metadata for a local:
 
-| Field | SSA-facing meaning |
+| Field | MIR-facing meaning |
 |-------|--------------------|
 | `slot` | Frame slot offset within the local value frame. Extra dictionary/evidence parameters use a separate index space. |
 | `storage` | Whether this local is a non-owning alias, owns storage with lexical cleanup, or is temporarily deferred until final mutability facts are known. |
@@ -78,8 +80,10 @@ Final-HIR validation checks immediate representation types and statically known 
 When a context needs an owned value and the source is already an owned value, HIR can use that value directly.
 When the source is a place, HIR must materialize ownership explicitly:
 
-- Type not yet resolved after HIR construction: emit `CloneValue { source, clone: LocalClone::Unknown }`.
-- Concrete `TrivialCopy` type after dictionary elaboration: resolve to `LocalClone::Resolved(TrivialCopy)`.
+- Type not yet resolved after HIR construction: emit
+  `CloneValue { source, clone: PendingLocalClone::Unknown }`.
+- Concrete `TrivialCopy` type after dictionary elaboration: resolve to
+  `ResolvedLocalClone::TrivialCopy`.
 - Non-`TrivialCopy` value type after dictionary elaboration: resolve to a static or dictionary `Value::clone` dispatch.
 - Local consumed as an owned result: emit `TakeLocalValue { id, mode }` and skip the matching lexical drop if it resolves to `MoveOwned`.
 - If local ownership is not known yet, emit `TakeLocalValue { id, mode: Unknown }`, then resolve it to either a move or clone/copy after local storage is known.
@@ -138,8 +142,8 @@ HIR construction enforces a single reachable, block-structured yield for such bo
 
 HIR generation makes discard cleanup explicit for non-tail values that need semantic `Value::drop`.
 In that case, the generation stores the discarded value in a generated owned local, wraps that store in a block, and records the local in that wrapper's `Block.cleanup`.
-SSA lowering should treat these wrappers like ordinary blocks: lower their body, run their cleanup on every exit, and ignore their unit result as the enclosing block's non-tail value.
-For any non-tail node, SSA lowering should preserve evaluation order and effects, ignore the produced value as the enclosing block value, and preserve any nested or enclosing `Block.cleanup` obligations.
+MIR lowering treats these wrappers like ordinary blocks: it lowers their body, runs their cleanup on every exit, and ignores their unit result as the enclosing block's non-tail value.
+For any non-tail node, MIR lowering preserves evaluation order and effects, ignores the produced value as the enclosing block value, and preserves any nested or enclosing `Block.cleanup` obligations.
 
 ## Clone and Drop Dispatch
 
@@ -165,14 +169,14 @@ The `Value` method signatures are:
 
 Both methods have an empty effect type.
 In particular, semantic drop cleanup does not add source-level fallibility.
-`clone` semantically produces a fresh owned value. SSA lowering may still use the
+`clone` semantically produces a fresh owned value. MIR lowering may still use the
 normal caller-allocated return convention to write that result directly into its
 final destination slot.
 
 For `Dictionary(id)`, `id` indexes the function's extra dictionary/evidence parameter list.
 The dictionary entry is selected with `VALUE_TRAIT.dictionary_method_index(...)`.
 Extra dictionary/evidence parameters do not have matching `LocalDecl`s and do not affect source-level local slots.
-SSA lowering may choose a physical ABI layout that packs evidence and values together, but that packing is not part of HIR ownership semantics.
+MIR lowering may choose a physical ABI layout that packs evidence and values together, but that packing is not part of HIR ownership semantics.
 
 Dispatch sites are:
 
@@ -188,7 +192,7 @@ HIR derives one of two source-level argument conventions from the callee type:
 - `T` parameters use `Let`, giving immutable, non-escaping access for the duration of the call;
 - `&mut T` parameters use `MutableRef`, giving exclusive mutable access to a place for the duration of the call.
 
-Call nodes store this `ArgConvention` so eval and SSA lowering preserve the same access semantics without rediscovering them from incidental representation details.
+Call nodes store this `ArgConvention` so eval and MIR lowering preserve the same access semantics without rediscovering them from incidental representation details.
 For HIR bodies, the same convention is stored on `ModuleFunction.parameter_passing` for visible callee parameters, in declaration order.
 Native/interpreter-only bodies provide the same visible metadata explicitly; context-native helpers that also receive hidden runtime arguments keep those separate from visible parameter passing.
 That metadata intentionally stores no cleanup and no layout payload.
@@ -205,7 +209,7 @@ Concrete value layout is not persisted in call metadata or `Module`; eval and la
 
 `Let` calls should not hide temporary lifetimes in call metadata.
 If a non-`TrivialCopy` `Let` argument is not already a place, HIR generation materializes it into an owned `$arg` local and wraps the call in normal `Block.cleanup`.
-This keeps the cleanup visible to eval and SSA lowering as ordinary HIR.
+This keeps the cleanup visible to eval and MIR lowering as ordinary HIR.
 
 Addressor-place calls use `Let` or `MutableRef` for their caller-rooted base.
 The returned place therefore cannot accidentally point into a consumed argument value whose lifetime ends with the call.
@@ -233,13 +237,13 @@ For closures with captures, `BuildClosure` stores:
 - owned value captures, already materialized by the rules above;
 - a `captures_value_dictionary`, the `Value` dictionary for the tuple of owned captures.
 
-SSA must make this closure environment visible as data.
+MIR makes this closure environment visible as data.
 Clone/drop for a function value must call the captured-environment dictionary, not host-language clone/drop.
 
 ## Trait Dictionaries and Associated Constants
 
 Dictionary elaboration rewrites transient `GetTraitMethod`, `GetTraitAssociatedConst`, and `GetTraitDictionary` nodes into explicit dictionary/evidence nodes.
-SSA should lower the elaborated form.
+MIR lowers the elaborated form.
 
 Every runtime dictionary entry is a function: trait methods occupy the first entries, followed by associated constants as zero-argument getter functions.
 The getter owns literal materialization, so each access to a managed associated constant produces a fresh owned value.
@@ -251,5 +255,5 @@ At runtime their getters carry generic layout metadata like any other associated
 ## Non-Contracts of the Boxed Interpreter
 
 The current boxed interpreter still has helper paths such as boxed native `TrivialCopy` copying and interpreter-only `ValOrMut::Ref` call arguments for borrowing existing boxed storage.
-These are interpreter implementation details, not language or SSA contracts.
-SSA should lower `CloneValue` with `TrivialCopy` mode as a storage copy and lower clone/drop through the explicit dispatch described above.
+These are interpreter implementation details, not language or MIR contracts.
+MIR lowers `CloneValue` with `TrivialCopy` mode as a storage copy and lowers clone/drop through the explicit dispatch described above.

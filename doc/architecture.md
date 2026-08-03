@@ -2,7 +2,7 @@
 
 Ferlium is designed to be integrated into existing Rust codebases, web apps through WebAssembly, and in the future target static compilation. Therefore, it is designed with minimal runtime requirements. Essentially, the runtime consists of a small standard library. In particular, type information should not be necessary for running code.
 
-The compiler transforms source code into a parsed abstract syntax tree (AST), desugars it into a source-level AST suitable for type inference, resolves symbols, infers and checks types while emitting typed high-level IR (HIR), then elaborates and validates final HIR. Ferlium can execute final HIR directly with its tree-walking interpreter or lower it to SSA and run the SSA reference interpreter. Future machine backends can consume the same SSA form.
+The compiler transforms source code into a parsed abstract syntax tree (AST), desugars it into a source-level AST suitable for type inference, resolves symbols, infers and checks types while emitting typed high-level IR (HIR), then elaborates and validates final HIR. Ferlium can execute final HIR directly with its tree-walking interpreter or lower it to MIR and run the MIR reference interpreter. Future machine backends can consume the same MIR form.
 
 ## Source Layout
 
@@ -12,8 +12,9 @@ The compiler transforms source code into a parsed abstract syntax tree (AST), de
 - `desugar/`: parsed-AST-to-desugared-AST lowering for syntax conveniences and module-level definitions.
 - `types/`: type representation, effects, mutability, type inference, trait solving, coherence, substitutions, visitors, and schemes.
 - `hir/`: the typed high-level IR, HIR synthesis helpers, AST-to-HIR emission, borrow checking, dictionary passing, function representation, pattern-match lowering helpers, and runtime values.
-- `ssa/`: SSA functions, instructions, values, validation, and the SSA reference interpreter.
-- `emit_ssa.rs`: final-HIR-to-SSA lowering.
+- `mir/`: the typed middle-level IR, including canonical functions, the construction-only builder,
+  operations, terminators, values, verification, and the MIR reference interpreter.
+- `emit_mir.rs`: final-HIR-to-MIR lowering.
 - `module/`: module identity, paths, imports, module environments, function metadata, trait impl metadata, and symbol lookup.
 - `std/`: Rust-backed standard library modules and bundled Ferlium prelude source.
 - `ide/`: IDE-facing compiler wrapper, annotations, diagnostics, execution result shaping, signatures, and source index helpers.
@@ -32,11 +33,11 @@ The main phases are:
 7. Simplify and default remaining trait constraints, then build final type schemes and hidden dictionary/evidence parameter lists.
 8. Elaborate dictionaries, ownership and value dispatch, record field access, and call lifetime plans into final HIR.
 9. Validate final-HIR ownership, literal, borrow, place-lifetime, and yield invariants.
-10. Execute final HIR through the tree-walking interpreter, or lower it to SSA and execute it through the SSA reference interpreter.
+10. Execute final HIR through the tree-walking interpreter, or lower it to MIR and execute it through the MIR reference interpreter.
 
-Future backend work may lower SSA to WebAssembly, bytecode, JIT, or native code.
+Future backend work may lower MIR to WebAssembly, bytecode, JIT, or native code.
 
-HIR and SSA interpretation share `ExecutionLimits`; their boxed reference implementations add an
+HIR and MIR interpretation share `ExecutionLimits`; their boxed reference implementations add an
 environment-cell guard. Runtime failure and poisoning semantics are specified in
 [runtime-sandboxing.md](runtime-sandboxing.md), while the distinction between that guard and a real
 memory quota is specified in [runtime-memory-limits.md](runtime-memory-limits.md).

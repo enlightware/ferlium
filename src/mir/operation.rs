@@ -1,12 +1,12 @@
-//! SSA instructions and their contracts.
+//! MIR operations, terminators, and their contracts.
 //!
 //! # Operand and result contract
 //!
-//! Each instruction carries a flat `operands: Box<[ssa::Value]>` whose length and per-position meaning
-//! are fixed by the instruction kind (documented on each `Instruction::*` constructor below and
-//! checked by [`Instruction::verify`]). An operand falls into one of four *roles*. A
-//! `Register`/`Parameter` does not encode its role, so the per-function SSA verifier derives it from
-//! signatures and defining instructions before execution:
+//! Each operation carries a flat `operands: Box<[mir::Value]>` whose length and per-position meaning
+//! are fixed by the operation kind (documented on each `Operation::*` constructor below and
+//! checked by [`Operation::verify`]). An operand falls into one of four *roles*. A
+//! `Register`/`Parameter` does not encode its role, so the per-function MIR verifier derives it from
+//! signatures and defining operations before execution:
 //!
 //! - **place** — a pointer into storage (the result of an `alloca`/`subfield`/`dict_entry`, or an
 //!   incoming by-pointer parameter). Consumed by `load`, `store`, `subfield`, `drop`, etc.
@@ -17,14 +17,10 @@
 //! - **stack marker** — an immutable saved stack top produced by `stack_save`, used only by
 //!   `stack_restore`. A marker may be restored more than once.
 //!
-//! An instruction either defines a single stable result value (`InstructionResult` other than
-//! `Nothing`) or defines nothing. Result identity is independent of the instruction's physical
-//! location in the containing function. Some kinds are
-//! *terminators* (`ret`, `br`, `condbr`, `invoke`, `resume`, and fallible runtime checks, as
-//! classified by `InstructionKind::is_terminator`): a terminator appears exactly once, as the
-//! last instruction of its block, and
-//! every other instruction is a non-terminator. These structural invariants are verified immediately
-//! after SSA lowering.
+//! An operation either defines a single stable result value (`OperationResult` other than
+//! `Nothing`) or defines nothing. Every block owns zero or more operations followed by exactly one
+//! [`Terminator`](crate::mir::terminator::Terminator). Operations never carry intra-function
+//! successors; all normal and source-failure control flow is explicit in the terminator.
 
 use std::fmt;
 
@@ -32,167 +28,128 @@ use ustr::Ustr;
 
 use crate::{
     Location, cached_primitive_ty,
+    containers::{B, b},
     format::FormatWith,
-    list,
+    mir,
     module::{FunctionId, ModuleEnv},
-    ssa,
-    types::{r#trait::TraitDictionaryEntryIndex, r#type::Type},
+    types::{
+        effects::{Effect, PrimitiveEffect},
+        r#trait::TraitDictionaryEntryIndex,
+        r#type::{CallImplType, Type},
+    },
 };
 
-/// The identity of an instruction in the context of its containing function.
-pub type InstructionId = list::Address;
-
-/// An instruction in the SSA form of Ferlium.
-pub struct Instruction {
-    /// The function-local identity assigned to this instruction's result, if it has one.
+/// A non-terminating operation in Ferlium MIR.
+pub struct Operation {
+    /// The function-local identity assigned to this operation's result, if it has one.
     ///
-    /// Constructors leave this unset; inserting the instruction into a function assigns it.
-    result_id: Option<ssa::ValueId>,
+    /// Constructors leave this unset; inserting the operation into a function assigns it.
+    result_id: Option<mir::ValueId>,
 
-    /// The region of the code corresponding to this instruction.
+    /// The region of the code corresponding to this operation.
     pub span: Location,
 
-    /// The operands of the instruction.
-    pub operands: Box<[ssa::Value]>,
+    /// The operands of the operation.
+    pub operands: Box<[mir::Value]>,
 
     /// The kind-specific part of `self`.
-    pub kind: InstructionKind,
+    pub kind: OperationKind,
 }
 
-impl Instruction {
-    /// Returns the stable identity assigned to this instruction's result, if any.
-    pub fn result_id(&self) -> Option<ssa::ValueId> {
+impl Operation {
+    /// Returns the stable identity assigned to this operation's result, if any.
+    pub fn result_id(&self) -> Option<mir::ValueId> {
         self.result_id
     }
 
-    /// Assigns this instruction's result identity when it is inserted into a function.
-    pub(crate) fn assign_result_id(&mut self, result_id: Option<ssa::ValueId>) {
+    /// Assigns this operation's result identity when it is inserted into a function.
+    pub(crate) fn assign_result_id(&mut self, result_id: Option<mir::ValueId>) {
         debug_assert!(
             self.result_id.is_none(),
-            "an instruction is inserted only once"
+            "an operation is inserted only once"
         );
         debug_assert_eq!(
             result_id.is_some(),
-            self.result() != InstructionResult::Nothing,
-            "exactly result-producing instructions receive a value identity"
+            self.result() != OperationResult::Nothing,
+            "exactly result-producing operations receive a value identity"
         );
         self.result_id = result_id;
     }
 
-    /// The type of the instruction's result.
-    pub fn result(&self) -> InstructionResult {
+    /// The type of the operation's result.
+    pub fn result(&self) -> OperationResult {
         self.kind.result(self)
     }
 
-    /// Returns `true` iff `self` is a terminator.
-    pub fn is_terminator(&self) -> bool {
-        self.kind.is_terminator()
-    }
-
-    /// Returns whether executing this instruction can leave normally sequenced control without
-    /// carrying an explicit unwind successor of its own.
+    /// Classifies whether this operation can raise a source-level failure.
     ///
-    /// This transitional classification over-approximates source failures from non-call-shaped
-    /// operations. Sandbox violations always bypass MIR cleanup even when an instruction has an
-    /// implicit edge; the canonical MIR refactor replaces this with retained call-site effects.
-    pub fn may_raise_implicitly(&self) -> bool {
-        use InstructionKind::*;
-
-        match self.kind {
-            Alloca { .. }
-            | AllocaPlace { .. }
-            | Call
-            | Project { .. }
-            | EndProject
-            | Load
-            | DictEntry { .. }
-            | SubscriptMember { .. }
-            | Store
-            | Memcpy
-            | Move
-            | Drop
-            | BuildClosure { .. }
-            | CloneClosureEnv { .. }
-            | DropClosureEnv => true,
-
-            Invoke { .. }
-            | Resume
-            | Yield
-            | CompareEqual
-            | ConditionalBranch { .. }
-            | UnconditionalBranch { .. }
-            | Subfield { .. }
-            | BuildSubscript { .. }
-            | Ret
-            | Variant { .. }
-            | ExtractTag
-            | Clear
-            | StackSave
-            | StackRestore
-            | CheckCallDepth
-            | CheckFuel => false,
+    /// Sandbox violations are deliberately not represented here: they leave the MIR CFG through
+    /// executor management. An operation classified as `Fallible` is valid only inside
+    /// [`TerminatorKind::Invoke`](crate::mir::terminator::TerminatorKind::Invoke); the verifier
+    /// resolves context-dependent operations before enforcing the same rule.
+    pub fn source_fallibility(&self) -> SourceFallibility {
+        let effects = match &self.kind {
+            OperationKind::Call { ty } | OperationKind::Project { ty, .. } => ty.effects(),
+            // The defining `Project` carries the accessor type. Resolving this case therefore
+            // requires the function-local role of the operand.
+            OperationKind::EndProject => return SourceFallibility::FromOpenProjection,
+            _ => return SourceFallibility::Infallible,
+        };
+        if effects.contains(Effect::Primitive(PrimitiveEffect::Fallible)) || effects.has_variables()
+        {
+            SourceFallibility::Fallible
+        } else {
+            SourceFallibility::Infallible
         }
     }
 
-    /// Verifies the structural contract of this instruction in isolation (the operand **arity**, and
+    /// Verifies the structural contract of this operation in isolation (the operand **arity**, and
     /// the data-dependent operand count for `alloca`/`move`/`build_closure`).
     pub fn verify(&self) {
         assert_eq!(
             self.result_id.is_some(),
-            self.result() != InstructionResult::Nothing,
-            "exactly result-producing instructions have a value identity"
+            self.result() != OperationResult::Nothing,
+            "exactly result-producing operations have a value identity"
         );
         self.kind.verify(self);
     }
 
-    /// Creates an `alloca` instruction for storage whose size is known at compile time.
+    /// Creates an `alloca` operation for storage whose size is known at compile time.
     pub fn alloca(span: Location, ty: Type) -> Self {
-        Instruction {
+        Operation {
             result_id: None,
             span,
             operands: Box::new([]),
-            kind: InstructionKind::Alloca { ty },
+            kind: OperationKind::Alloca { ty },
         }
     }
 
-    /// Creates an `alloca` instruction for storage whose size is known only at run time.
+    /// Creates an `alloca` operation for storage whose size is known only at run time.
     ///
     /// `witness` is the place of the `Value` dictionary witnessing the run-time layout of `ty`;
     /// its `SIZE` and `ALIGN` associated const entries determine the size and alignment of the
     /// allocation.
-    pub fn alloca_dynamic(span: Location, ty: Type, witness: ssa::Value) -> Self {
-        Instruction {
+    pub fn alloca_dynamic(span: Location, ty: Type, witness: mir::Value) -> Self {
+        Operation {
             result_id: None,
             span,
             operands: Box::new([witness]),
-            kind: InstructionKind::Alloca { ty },
+            kind: OperationKind::Alloca { ty },
         }
     }
 
-    /// Creates an `alloca_place` instruction: stack storage for a *pointer* to an instance of
+    /// Creates an `alloca_place` operation: stack storage for a *pointer* to an instance of
     /// `pointing_to`. No operands; the result is the place of that pointer slot.
     pub fn alloca_place(span: Location, pointing_to: Type) -> Self {
-        Instruction {
+        Operation {
             result_id: None,
             span,
             operands: Box::new([]),
-            kind: InstructionKind::AllocaPlace { pointing_to },
+            kind: OperationKind::AllocaPlace { pointing_to },
         }
     }
 
-    /// Creates a `br` (unconditional branch) instruction transferring control to `target`.
-    ///
-    /// A terminator; takes no operands. `target` must be an existing block of the same function.
-    pub fn br(span: Location, target: ssa::BlockId) -> Self {
-        Instruction {
-            result_id: None,
-            span,
-            operands: Box::new([]),
-            kind: InstructionKind::UnconditionalBranch { target },
-        }
-    }
-
-    /// Creates a `call` instruction with the given properties.
+    /// Creates a `call` operation with the given properties.
     ///
     /// A call yields no register: every callee, including one returning `()`, writes its result
     /// through the return out-pointer passed as the call's last operand.
@@ -205,7 +162,7 @@ impl Instruction {
     /// the same kind of value and are called the same way.
     ///
     /// The `callee` operand (operand `0`) is therefore **one of two forms**:
-    /// - a constant [`ssa::Value::Function`] — a direct call to a statically known function (no
+    /// - a constant [`mir::Value::Function`] — a direct call to a statically known function (no
     ///   hidden evidence, no environment); or
     /// - the **place** of a function value — a function-typed local or parameter, a closure, or a
     ///   method slot `project`ed out of a dictionary/witness-table tuple.
@@ -216,77 +173,25 @@ impl Instruction {
     /// uniformly: its hidden evidence and (per-call cloned) environment, if any, are prepended ahead
     /// of the visible arguments; a bare function value adds nothing. The same contract governs the
     /// [`drop`](Self::drop) callee.
-    pub fn call<T: IntoIterator<Item = ssa::Value>>(
+    pub fn call<T: IntoIterator<Item = mir::Value>>(
         span: Location,
-        callee: ssa::Value,
+        callee: mir::Value,
         arguments: T,
+        ty: CallImplType,
     ) -> Self {
         let mut operands = vec![callee];
         operands.extend(arguments);
-        Instruction {
+        Operation {
             result_id: None,
             span,
             operands: operands.into_boxed_slice(),
-            kind: InstructionKind::Call,
+            kind: OperationKind::Call { ty: b(ty) },
         }
     }
 
-    /// Creates an `invoke` instruction: a source-level *fallible* call that, on failure, diverts
-    /// control to the `unwind` cleanup landing pad instead of propagating straight out of the frame.
-    ///
-    /// A terminator with two successors (the SSA analog of LLVM `invoke`): on normal completion
-    /// control transfers to `normal` (the continuation block holding the instructions that follow the
-    /// call); on a raised error it transfers to `unwind` (a pad block that drops the frame's still-live
-    /// locals and then `br`s to an enclosing pad or `resume`s). The operand layout is identical to
-    /// [`call`](Self::call) (`[callee, args.., ret-out]`) and the callee contract is the same; only
-    /// *fallible* calls that have cleanup to run on the error path are lowered as `invoke` — a
-    /// source-level infallible call, or one with nothing to clean up in its frame, stays a plain
-    /// [`call`](Self::call).
-    pub fn invoke<T: IntoIterator<Item = ssa::Value>>(
-        span: Location,
-        callee: ssa::Value,
-        arguments: T,
-        normal: ssa::BlockId,
-        unwind: ssa::BlockId,
-    ) -> Self {
-        let mut operands = vec![callee];
-        operands.extend(arguments);
-        Instruction {
-            result_id: None,
-            span,
-            operands: operands.into_boxed_slice(),
-            kind: InstructionKind::Invoke { normal, unwind },
-        }
-    }
-
-    /// Creates a `resume` instruction, which *continues* the unwind a cleanup pad interrupted: it
-    /// hands the in-flight [`RuntimeError`] back to this function's caller so propagation carries on
-    /// up the stack.
-    ///
-    /// Named after LLVM's `resume` (the third of `invoke`/`landingpad`/`resume`). It is not a *throw*:
-    /// the source failure was already raised and is
-    /// merely *paused* while the pad runs the frame's drops. `resume` lifts that pause. A terminator
-    /// with no successors (like [`ret`](Self::ret)): it is the last instruction of an outermost
-    /// cleanup pad, reached after that pad and the pads it chains from have successfully dropped the
-    /// frame's live locals. If a source-fallible cleanup action raises,
-    /// failure-during-cleanup poisoning occurs instead and `resume` is not reached.
-    /// The caller's
-    /// explicit or implicit exceptional edge at the originating call site routes the resumed error
-    /// into the caller's own pad — giving the cross-frame unwind.
-    ///
-    /// [`RuntimeError`]: crate::eval::RuntimeError
-    pub fn resume(span: Location) -> Self {
-        Instruction {
-            result_id: None,
-            span,
-            operands: Box::new([]),
-            kind: InstructionKind::Resume,
-        }
-    }
-
-    /// Creates a `project` instruction: the *enter* half of a scoped (`YieldedOnce`) subscript
+    /// Creates a `project` operation: the *enter* half of a scoped (`YieldedOnce`) subscript
     /// access. It runs the subscript accessor `callee` (a `YieldedOnce` member) to its single
-    /// `yield`, suspending the accessor frame, and **exposes the yielded place as this instruction's
+    /// `yield`, suspending the accessor frame, and **exposes the yielded place as this operation's
     /// result register** (a place of pointee type `ty`). The body that uses the place runs next; the
     /// matching [`end_project`](Self::end_project), keyed by this result register, resumes the
     /// accessor's slide (epilogue).
@@ -294,302 +199,254 @@ impl Instruction {
     /// Operands are `[callee, args..]` with the same callee contract as [`call`](Self::call), where
     /// `args` are the accessor's extra (dictionary) and visible arguments. Unlike `call` there is no
     /// trailing return out-pointer: the accessor's nominal return is unused on the yielded path (the
-    /// place flows out as this instruction's result register). Mirrors the HIR interpreter's
+    /// place flows out as this operation's result register). Mirrors the HIR interpreter's
     /// `call_accessor_until_yield`.
-    pub fn project<T: IntoIterator<Item = ssa::Value>>(
+    pub fn project<T: IntoIterator<Item = mir::Value>>(
         span: Location,
-        callee: ssa::Value,
+        callee: mir::Value,
         arguments: T,
-        ty: Type,
+        yielded: Type,
+        ty: CallImplType,
     ) -> Self {
         let mut operands = vec![callee];
         operands.extend(arguments);
-        Instruction {
+        Operation {
             result_id: None,
             span,
             operands: operands.into_boxed_slice(),
-            kind: InstructionKind::Project { ty },
+            kind: OperationKind::Project { yielded, ty: b(ty) },
         }
     }
 
-    /// Creates a `yield` instruction: inside a `YieldedOnce` accessor body, it exposes the **place**
-    /// at operand `0` to the driving [`project`](Self::project) site and suspends the accessor frame.
-    /// The instructions after it form the accessor's slide (epilogue), reached only when the matching
-    /// [`end_project`](Self::end_project) resumes the frame. Mirrors the HIR `Yield`.
-    pub fn r#yield(span: Location, place: ssa::Value) -> Self {
-        Instruction {
-            result_id: None,
-            span,
-            operands: Box::new([place]),
-            kind: InstructionKind::Yield,
-        }
-    }
-
-    /// Creates an `end_project` instruction: the *leave* half of a scoped subscript access. Operand
+    /// Creates an `end_project` operation: the *leave* half of a scoped subscript access. Operand
     /// `0` is the place a [`project`](Self::project) exposed; this resumes that suspended accessor
     /// from after its `yield`, runs its slide to completion, and reclaims the accessor frame. Mirrors
-    /// the HIR interpreter's `resume_suspended_accessor_epilogue`. Distinct from the unwind
-    /// [`resume`](Self::resume).
-    pub fn end_project(span: Location, place: ssa::Value) -> Self {
-        Instruction {
+    /// the HIR interpreter's `resume_suspended_accessor_epilogue`.
+    pub fn end_project(span: Location, place: mir::Value) -> Self {
+        Operation {
             result_id: None,
             span,
             operands: Box::new([place]),
-            kind: InstructionKind::EndProject,
+            kind: OperationKind::EndProject,
         }
     }
 
-    /// Creates a `compare_eq` instruction comparing operands `0` (`v1`) and `1` (`v2`) for structural
+    /// Creates a `compare_eq` operation comparing operands `0` (`v1`) and `1` (`v2`) for structural
     /// equality, yielding a `bool` register.
     ///
     /// Both operands are read **non-consumingly** as literal snapshots (a place is borrowed, never
     /// moved), so this is the comparison of a lowered `match`: the scrutinee stays live for the
     /// remaining alternatives and the arm body. Each operand must have a literal form (a scalar
     /// constant, or a place/register whose pointee is a scalar or composite literal).
-    pub fn compare_eq(span: Location, v1: ssa::Value, v2: ssa::Value) -> Self {
-        Instruction {
+    pub fn compare_eq(span: Location, v1: mir::Value, v2: mir::Value) -> Self {
+        Operation {
             result_id: None,
             span,
             operands: Box::new([v1, v2]),
-            kind: InstructionKind::CompareEqual,
+            kind: OperationKind::CompareEqual,
         }
     }
 
-    /// Creates a `condbr` (conditional branch) instruction: branches to `on_success` if operand `0`
-    /// (`condition`) is `true`, otherwise to `on_failure`.
-    ///
-    /// A terminator. The single operand is a **value** that must resolve to a `bool`; both targets
-    /// must be existing blocks of the same function.
-    pub fn condbr(
-        span: Location,
-        condition: ssa::Value,
-        on_success: ssa::BlockId,
-        on_failure: ssa::BlockId,
-    ) -> Self {
-        Instruction {
-            result_id: None,
-            span,
-            operands: Box::new([condition]),
-            kind: InstructionKind::ConditionalBranch {
-                on_success,
-                on_failure,
-            },
-        }
-    }
-
-    /// Creates a `load` instruction reading the value at the place `source` (operand `0`) into a
+    /// Creates a `load` operation reading the value at the place `source` (operand `0`) into a
     /// register.
     ///
     /// `source` must be a **place** whose pointee has a representation-copyable value (currently an
     /// internal place pointer). The source stays initialized. Ownership transfers are explicit
-    /// [`move_value`](Self::move_value) instructions rather than a run-time choice made by `load`.
-    pub fn load(span: Location, source: ssa::Value) -> Self {
-        Instruction {
+    /// [`move_value`](Self::move_value) operations rather than a run-time choice made by `load`.
+    pub fn load(span: Location, source: mir::Value) -> Self {
+        Operation {
             result_id: None,
             span,
             operands: Box::new([source]),
-            kind: InstructionKind::Load,
+            kind: OperationKind::Load,
         }
     }
 
-    /// Creates a `subfield` instruction yielding the **place** of the field (of type `ty`) of the
+    /// Creates a `subfield` operation yielding the **place** of the field (of type `ty`) of the
     /// aggregate place `source` (operand `0`) at the field index given by the `int` value `index`
     /// (operand `1`).
     ///
     /// `source` must be a place whose pointee is an aggregate with more than `index` fields (or
     /// generic storage that grows to that shape on the first field store); the result is a place,
     /// computed without reading or moving the aggregate. `index` is an ordinary `int` value operand —
-    /// usually a typed [`ssa::Value::Constant`] from the containing function's pool (a tuple/record
+    /// usually a typed [`mir::Value::Constant`] from the containing function's pool (a tuple/record
     /// field at a known position), but a register when the offset is only known at run time.
     /// Keeping the index a value operand — rather than splitting static and dynamic forms — matches
     /// how a backend (LLVM `getelementptr`) takes the index as an IR value regardless.
-    pub fn subfield(span: Location, source: ssa::Value, index: ssa::Value, ty: Type) -> Self {
-        Instruction {
+    pub fn subfield(span: Location, source: mir::Value, index: mir::Value, ty: Type) -> Self {
+        Operation {
             result_id: None,
             span,
             operands: Box::new([source, index]),
-            kind: InstructionKind::Subfield { ty },
+            kind: OperationKind::Subfield { ty },
         }
     }
 
-    /// Creates a `dict_entry` instruction: the symbolic analog of `subfield` for a trait dictionary.
+    /// Creates a `dict_entry` operation: the symbolic analog of `subfield` for a trait dictionary.
     ///
-    /// `dict` is a symbolic dictionary operand (a constant [`ssa::Value::Dictionary`] or a forwarded
-    /// dictionary `Parameter`). The instruction yields the **place** of entry `entry_index` of that
+    /// `dict` is a symbolic dictionary operand (a constant [`mir::Value::Dictionary`] or a forwarded
+    /// dictionary `Parameter`). The operation yields the **place** of entry `entry_index` of that
     /// dictionary — a method function value, or an associated const — of type `ty`. `call`, `drop`,
     /// and `memcpy` consume that place exactly as they consume a `subfield` result, so a later
     /// tuple-lowering pass rewrites `dict_entry N from <symbolic dict>` to
     /// `subfield N from <materialized witness-table tuple>` one-for-one.
     pub fn dict_entry(
         span: Location,
-        dict: ssa::Value,
+        dict: mir::Value,
         entry_index: TraitDictionaryEntryIndex,
         ty: Type,
     ) -> Self {
-        Instruction {
+        Operation {
             result_id: None,
             span,
             operands: Box::new([dict]),
-            kind: InstructionKind::DictEntry { entry_index, ty },
+            kind: OperationKind::DictEntry { entry_index, ty },
         }
     }
 
-    /// Creates a `subscript_member` instruction: the member-resolving analog of
-    /// [`Instruction::dict_entry`] for a first-class subscript.
+    /// Creates a `subscript_member` operation: the member-resolving analog of
+    /// [`Operation::dict_entry`] for a first-class subscript.
     ///
-    /// `subscript` is a symbolic subscript operand (a constant [`ssa::Value::Subscript`] or a
-    /// forwarded evidence `Parameter`). The instruction yields the **place** of the subscript's
+    /// `subscript` is a symbolic subscript operand (a constant [`mir::Value::Subscript`] or a
+    /// forwarded evidence `Parameter`). The operation yields the **place** of the subscript's
     /// `ref`/`mut` member — a function value of type `ty` bundling the subscript's captured hidden
     /// evidence — which a `call`/`project` consumes by reference exactly like a closure callee.
     pub fn subscript_member(
         span: Location,
-        subscript: ssa::Value,
+        subscript: mir::Value,
         mut_member: bool,
         ty: Type,
     ) -> Self {
-        Instruction {
+        Operation {
             result_id: None,
             span,
             operands: Box::new([subscript]),
-            kind: InstructionKind::SubscriptMember { mut_member, ty },
+            kind: OperationKind::SubscriptMember { mut_member, ty },
         }
     }
 
-    /// Creates a `build_subscript` instruction, which bundles the symbolic subscript at operand `0`
+    /// Creates a `build_subscript` operation, which bundles the symbolic subscript at operand `0`
     /// with captured hidden evidence — the remaining operands, each a symbolic dictionary or
     /// subscript operand — yielding a first-class subscript value of type `ty`. With no captures it
     /// reads the subscript operand into a fresh first-class value (the lowering of a subscript
     /// clone).
     pub fn build_subscript(
         span: Location,
-        subscript: ssa::Value,
-        evidence: Vec<ssa::Value>,
+        subscript: mir::Value,
+        evidence: Vec<mir::Value>,
         ty: Type,
     ) -> Self {
         let mut operands = vec![subscript];
         operands.extend(evidence);
-        Instruction {
+        Operation {
             result_id: None,
             span,
             operands: operands.into_boxed_slice(),
-            kind: InstructionKind::BuildSubscript { ty },
+            kind: OperationKind::BuildSubscript { ty },
         }
     }
 
-    /// Creates a `variant` instruction, which builds a tagged variant *shell* of type `ty`: the
+    /// Creates a `variant` operation, which builds a tagged variant *shell* of type `ty`: the
     /// result is a register holding `Value::Variant { tag, <uninitialized payload> }`. The
     /// constructing site stores the shell into the variant's destination and then fills the payload
     /// in place through a projection of that destination (variant payload index `0`), so the
     /// payload aggregate — which may be generic and thus have no `Value` layout witness — is never
     /// materialized into a temporary.
     pub fn variant(span: Location, tag: Ustr, t: Type) -> Self {
-        Instruction {
+        Operation {
             result_id: None,
             span,
             operands: Box::new([]),
-            kind: InstructionKind::Variant { tag, ty: t },
+            kind: OperationKind::Variant { tag, ty: t },
         }
     }
 
-    /// Creates an `extract_tag` instruction, which reads the tag of the variant at the `variant`
+    /// Creates an `extract_tag` operation, which reads the tag of the variant at the `variant`
     /// place and yields it as an `int` register (matching the HIR interpreter's tag encoding).
-    pub fn extract_tag(span: Location, variant: ssa::Value) -> Self {
-        Instruction {
+    pub fn extract_tag(span: Location, variant: mir::Value) -> Self {
+        Operation {
             result_id: None,
             span,
             operands: Box::new([variant]),
-            kind: InstructionKind::ExtractTag,
+            kind: OperationKind::ExtractTag,
         }
     }
 
-    /// Creates a 'ret' instruction.
-    ///
-    /// The return value is not an operand: the function writes its result into the return
-    /// out-pointer (the last parameter) before returning.
-    pub fn ret(span: Location) -> Self {
-        Instruction {
-            result_id: None,
-            span,
-            operands: Box::new([]),
-            kind: InstructionKind::Ret,
-        }
-    }
-
-    /// Creates a `stack_save` instruction, whose result is a marker for the current top of the
+    /// Creates a `stack_save` operation, whose result is a marker for the current top of the
     /// stack.
     ///
     /// Paired with `stack_restore`, this brackets a region (such as a loop body) so that the
     /// temporaries it allocates are reclaimed on every back-edge and exit, bounding stack use. The
     /// marker is an immutable frontier and may be restored repeatedly.
     pub fn stack_save(span: Location) -> Self {
-        Instruction {
+        Operation {
             result_id: None,
             span,
             operands: Box::new([]),
-            kind: InstructionKind::StackSave,
+            kind: OperationKind::StackSave,
         }
     }
 
-    /// Creates a `stack_restore` instruction, which resets the top of the stack to `marker` (the
+    /// Creates a `stack_restore` operation, which resets the top of the stack to `marker` (the
     /// result of an earlier `stack_save`), reclaiming everything allocated since.
-    pub fn stack_restore(span: Location, marker: ssa::Value) -> Self {
-        Instruction {
+    pub fn stack_restore(span: Location, marker: mir::Value) -> Self {
+        Operation {
             result_id: None,
             span,
             operands: Box::new([marker]),
-            kind: InstructionKind::StackRestore,
+            kind: OperationKind::StackRestore,
         }
     }
 
     /// Creates a runtime call-depth guard corresponding to HIR `CheckCallDepth`.
     pub fn check_call_depth(span: Location) -> Self {
-        Instruction {
+        Operation {
             result_id: None,
             span,
             operands: Box::new([]),
-            kind: InstructionKind::CheckCallDepth,
+            kind: OperationKind::CheckCallDepth,
         }
     }
 
     /// Creates a runtime fuel guard corresponding to HIR `CheckFuel`.
     pub fn check_fuel(span: Location) -> Self {
-        Instruction {
+        Operation {
             result_id: None,
             span,
             operands: Box::new([]),
-            kind: InstructionKind::CheckFuel,
+            kind: OperationKind::CheckFuel,
         }
     }
 
-    /// Creates a `store` instruction writing the **value** operand `0` (`value`) into the **place**
+    /// Creates a `store` operation writing the **value** operand `0` (`value`) into the **place**
     /// operand `1` (`destination`).
     ///
     /// A `store` **drops nothing**: `destination` must carry no live semantic drop obligation — it
     /// is absent or contains a `TrivialCopy` representation — so the emitter owes an explicit
     /// `drop` before overwriting a managed/custom-drop pointee. Yields no register; `value` is
     /// consumed (moved, for a non-trivial value).
-    pub fn store(span: Location, value: ssa::Value, destination: ssa::Value) -> Self {
-        Instruction {
+    pub fn store(span: Location, value: mir::Value, destination: mir::Value) -> Self {
+        Operation {
             result_id: None,
             span,
             operands: Box::new([value, destination]),
-            kind: InstructionKind::Store,
+            kind: OperationKind::Store,
         }
     }
 
-    /// Creates a `clear` instruction that marks the storage at `destination` absent. The previous
+    /// Creates a `clear` operation that marks the storage at `destination` absent. The previous
     /// state must carry no live semantic drop obligation; clearing is initialization bookkeeping,
     /// not a semantic drop.
-    pub fn clear(span: Location, destination: ssa::Value) -> Self {
-        Instruction {
+    pub fn clear(span: Location, destination: mir::Value) -> Self {
+        Operation {
             result_id: None,
             span,
             operands: Box::new([destination]),
-            kind: InstructionKind::Clear,
+            kind: OperationKind::Clear,
         }
     }
 
-    /// Creates a `memcpy` instruction: a pure, **source-preserving** copy of the pointee of `source`
+    /// Creates a `memcpy` operation: a pure, **source-preserving** copy of the pointee of `source`
     /// (a place) into `destination` (a place), without first materializing it in a register.
     ///
     /// The pointee must be concrete `TrivialCopy`. Any other copy is lowered through `Value::clone`
@@ -599,49 +456,49 @@ impl Instruction {
     /// **Requirement:** the pointee must have a **statically known layout** — a real backend sizes the
     /// copy from the type alone. Copies are always statically sized; a generic transfer is a
     /// [`move_dynamic`](Self::move_dynamic), never a `memcpy`.
-    pub fn memcpy(span: Location, source: ssa::Value, destination: ssa::Value) -> Self {
-        Instruction {
+    pub fn memcpy(span: Location, source: mir::Value, destination: mir::Value) -> Self {
+        Operation {
             result_id: None,
             span,
             operands: Box::new([source, destination]),
-            kind: InstructionKind::Memcpy,
+            kind: OperationKind::Memcpy,
         }
     }
 
-    /// Creates a `move` instruction: a **source-consuming** ownership transfer of the whole pointee of
+    /// Creates a `move` operation: a **source-consuming** ownership transfer of the whole pointee of
     /// `source` (a place) into `destination` (a place). The source is left moved-out. For a
     /// statically-sized pointee; a generic (run-time-layout) transfer uses
     /// [`move_dynamic`](Self::move_dynamic). Unlike a copy, a move needs no `Value::clone`; unlike
     /// `memcpy`, it consumes the source.
-    pub fn move_value(span: Location, source: ssa::Value, destination: ssa::Value) -> Self {
-        Instruction {
+    pub fn move_value(span: Location, source: mir::Value, destination: mir::Value) -> Self {
+        Operation {
             result_id: None,
             span,
             operands: Box::new([source, destination]),
-            kind: InstructionKind::Move,
+            kind: OperationKind::Move,
         }
     }
 
-    /// Creates a `move` instruction for a value whose size is known only at run time: a move of a
+    /// Creates a `move` operation for a value whose size is known only at run time: a move of a
     /// generic (bare-type-variable-typed) pointee. `witness` is the place of the `Value` dictionary
     /// witnessing the run-time layout of the moved value (its `SIZE`/`ALIGN`), exactly as for
-    /// [`alloca_dynamic`](Self::alloca_dynamic). The SSA interpreter moves the value shape-agnostically
+    /// [`alloca_dynamic`](Self::alloca_dynamic). The MIR interpreter moves the value shape-agnostically
     /// (the witness is metadata it ignores); a real backend uses the witness to size the copy.
     pub fn move_dynamic(
         span: Location,
-        source: ssa::Value,
-        destination: ssa::Value,
-        witness: ssa::Value,
+        source: mir::Value,
+        destination: mir::Value,
+        witness: mir::Value,
     ) -> Self {
-        Instruction {
+        Operation {
             result_id: None,
             span,
             operands: Box::new([source, destination, witness]),
-            kind: InstructionKind::Move,
+            kind: OperationKind::Move,
         }
     }
 
-    /// Creates a 'drop' instruction.
+    /// Creates a 'drop' operation.
     ///
     /// Drops the pointee of `target` (a place) by invoking the `Value::drop` implementation named by
     /// `callee`, but **only if** the pointee is currently initialized. An already-uninitialized
@@ -649,23 +506,23 @@ impl Instruction {
     /// the inline drops the emitter places at scope-exit edges run exactly once.
     ///
     /// `callee` follows the same contract as the [`call`](Self::call) callee: it is either a constant
-    /// [`ssa::Value::Function`] or the **place** of a function value (e.g. the `Value::drop` method
+    /// [`mir::Value::Function`] or the **place** of a function value (e.g. the `Value::drop` method
     /// slot `project`ed out of a dictionary), read by reference and never loaded into a register.
-    pub fn drop(span: Location, target: ssa::Value, callee: ssa::Value) -> Self {
-        Instruction {
+    pub fn drop(span: Location, target: mir::Value, callee: mir::Value) -> Self {
+        Operation {
             result_id: None,
             span,
             operands: Box::new([target, callee]),
-            kind: InstructionKind::Drop,
+            kind: OperationKind::Drop,
         }
     }
 
-    /// Creates a `build_closure` instruction, which bundles a function with its captured environment
+    /// Creates a `build_closure` operation, which bundles a function with its captured environment
     /// into a first-class closure value.
     ///
     /// `function` identifies the closure's target (lambda) function. `hidden_dicts` are the symbolic
     /// dictionary operands for the lambda body's hidden `@extra` parameters (the dictionary captures,
-    /// in target-parameter order); each is a constant [`ssa::Value::Dictionary`] or a forwarded
+    /// in target-parameter order); each is a constant [`mir::Value::Dictionary`] or a forwarded
     /// dictionary `Parameter`. `env_dict` is the symbolic `Value` dictionary used to clone/drop the
     /// captured value environment (`None` iff there are no value captures). `captures` are the
     /// value-capture places, in target-parameter order; construction consumes their values into the
@@ -676,10 +533,10 @@ impl Instruction {
     pub fn build_closure(
         span: Location,
         function: FunctionId,
-        hidden_dicts: Vec<ssa::Value>,
-        env_dict: Option<ssa::Value>,
+        hidden_dicts: Vec<mir::Value>,
+        env_dict: Option<mir::Value>,
         ty: Type,
-        captures: Vec<ssa::Value>,
+        captures: Vec<mir::Value>,
     ) -> Self {
         let num_hidden_dicts = u32::try_from(hidden_dicts.len())
             .expect("a closure cannot capture more than u32::MAX hidden dictionaries");
@@ -687,11 +544,11 @@ impl Instruction {
         let mut operands = hidden_dicts;
         operands.extend(captures);
         operands.extend(env_dict);
-        Instruction {
+        Operation {
             result_id: None,
             span,
             operands: operands.into_boxed_slice(),
-            kind: InstructionKind::BuildClosure {
+            kind: OperationKind::BuildClosure {
                 function,
                 num_hidden_dicts,
                 has_env_dict,
@@ -700,62 +557,64 @@ impl Instruction {
         }
     }
 
-    /// Creates a `clone_closure_env` instruction, which deep-clones the captured environment of the
+    /// Creates a `clone_closure_env` operation, which deep-clones the captured environment of the
     /// closure at the place given by `source`, yielding a fresh closure value of type `ty`.
-    pub fn clone_closure_env(span: Location, source: ssa::Value, ty: Type) -> Self {
-        Instruction {
+    pub fn clone_closure_env(span: Location, source: mir::Value, ty: Type) -> Self {
+        Operation {
             result_id: None,
             span,
             operands: Box::new([source]),
-            kind: InstructionKind::CloneClosureEnv { ty },
+            kind: OperationKind::CloneClosureEnv { ty },
         }
     }
 
-    /// Creates a `drop_closure_env` instruction, which drops the owned captured environment of the
+    /// Creates a `drop_closure_env` operation, which drops the owned captured environment of the
     /// closure at the place given by `target`.
-    pub fn drop_closure_env(span: Location, target: ssa::Value) -> Self {
-        Instruction {
+    pub fn drop_closure_env(span: Location, target: mir::Value) -> Self {
+        Operation {
             result_id: None,
             span,
             operands: Box::new([target]),
-            kind: InstructionKind::DropClosureEnv,
+            kind: OperationKind::DropClosureEnv,
         }
     }
 }
 
-/// The kind-specific metadata of an SSA instruction.
+/// Whether an operation can raise a source-level failure.
 ///
-/// Operands stay in [`Instruction::operands`] so generic SSA traversals can inspect and rewrite
-/// them uniformly. This enum contains only metadata whose shape is specific to an instruction.
-pub enum InstructionKind {
+/// Sandbox violations are outside this classification. `EndProject` is context-dependent because
+/// its accessor type belongs to the open projection defined by its operand.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceFallibility {
+    /// The operation cannot raise a source failure.
+    Infallible,
+    /// The operation can raise and must be represented by `Invoke`.
+    Fallible,
+    /// Fallibility comes from the operation's defining open projection.
+    FromOpenProjection,
+}
+
+/// The kind-specific metadata of a MIR operation.
+///
+/// Operands stay in [`Operation::operands`] so generic MIR traversals can inspect and rewrite
+/// them uniformly. This enum contains only metadata whose shape is specific to an operation.
+#[derive(Clone)]
+pub enum OperationKind {
     /// Stack storage for a value of `ty`, optionally using a run-time layout witness.
     Alloca { ty: Type },
     /// Stack storage for a pointer to a value of `pointing_to`.
     AllocaPlace { pointing_to: Type },
-    /// A statically or dynamically resolved function call.
-    Call,
-    /// A source-level fallible call with normal and unwind successors.
-    Invoke {
-        normal: ssa::BlockId,
-        unwind: ssa::BlockId,
-    },
-    /// Continue propagating an error after running a cleanup pad.
-    Resume,
+    /// A statically or dynamically resolved function call with its instantiated call-site type.
+    /// The type is boxed to keep every operation compact despite the signature's variable-sized
+    /// metadata.
+    Call { ty: B<CallImplType> },
     /// Enter a scoped subscript accessor and expose its yielded place.
-    Project { ty: Type },
-    /// Yield a place from a scoped subscript accessor.
-    Yield,
+    /// The call-site type is boxed for the same compactness reason as [`Self::Call`].
+    Project { yielded: Type, ty: B<CallImplType> },
     /// Resume and finish a scoped subscript accessor.
     EndProject,
     /// Compare a runtime value with compile-time literal-pattern metadata.
     CompareEqual,
-    /// Branch according to a boolean operand.
-    ConditionalBranch {
-        on_success: ssa::BlockId,
-        on_failure: ssa::BlockId,
-    },
-    /// Unconditionally branch to `target`.
-    UnconditionalBranch { target: ssa::BlockId },
     /// Read a representation-copyable value from a place without consuming it.
     Load,
     /// Project a field place from an aggregate place.
@@ -769,8 +628,6 @@ pub enum InstructionKind {
     SubscriptMember { mut_member: bool, ty: Type },
     /// Bundle a symbolic subscript with its captured evidence.
     BuildSubscript { ty: Type },
-    /// Return after the result has been written through the return place.
-    Ret,
     /// Construct a tagged variant shell whose payload is initialized separately.
     Variant { tag: Ustr, ty: Type },
     /// Read a variant tag as an integer.
@@ -806,80 +663,72 @@ pub enum InstructionKind {
     DropClosureEnv,
 }
 
-impl FormatWith<ModuleEnv<'_>> for Instruction {
+impl FormatWith<ModuleEnv<'_>> for Operation {
     fn fmt_with(&self, f: &mut fmt::Formatter<'_>, env: &ModuleEnv<'_>) -> fmt::Result {
         self.kind.fmt_within(f, self, env)
     }
 }
 
-/// The type of an instruction's result.
+/// The type of an operation's result.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub enum InstructionResult {
+pub enum OperationResult {
     /// A type expressible in Ferlium.
     Lowered(Type),
 
-    /// The type of a SSA value.
-    Same(ssa::Value),
+    /// The type of a MIR value.
+    Same(mir::Value),
 
     /// The type of the value referred to by a pointer.
-    Pointee(Box<InstructionResult>),
+    Pointee(Box<OperationResult>),
 
     /// A pointer to a type.
-    Pointer(Box<InstructionResult>),
+    Pointer(Box<OperationResult>),
 
     /// A backend-internal marker for a saved top of the stack (the result of `stack_save`). It is
     /// not a Ferlium-expressible type; it is only consumed by a matching `stack_restore`.
     StackMarker,
 
-    /// The type of an isntruction that doesn't produce any value.
+    /// An operation that does not produce a value.
     Nothing,
 }
 
-impl InstructionResult {
+impl OperationResult {
     /// Returns the type of a pointee referred to by an instance of `pointer`.
-    fn pointee_of(pointer: InstructionResult) -> InstructionResult {
-        InstructionResult::Pointee(Box::new(pointer))
+    fn pointee_of(pointer: OperationResult) -> OperationResult {
+        OperationResult::Pointee(Box::new(pointer))
     }
 
     /// Returns the type of a pointer to an instance of `pointee`.
-    fn pointer_to(pointee: InstructionResult) -> InstructionResult {
-        InstructionResult::Pointer(Box::new(pointee))
+    fn pointer_to(pointee: OperationResult) -> OperationResult {
+        OperationResult::Pointer(Box::new(pointee))
     }
 }
 
-impl InstructionKind {
-    fn result(&self, whole: &Instruction) -> InstructionResult {
-        use InstructionKind::*;
+impl OperationKind {
+    fn result(&self, whole: &Operation) -> OperationResult {
+        use OperationKind::*;
 
         match self {
-            Alloca { ty } => InstructionResult::pointer_to(InstructionResult::Lowered(*ty)),
-            AllocaPlace { pointing_to } => InstructionResult::pointer_to(
-                InstructionResult::pointer_to(InstructionResult::Lowered(*pointing_to)),
+            Alloca { ty } => OperationResult::pointer_to(OperationResult::Lowered(*ty)),
+            AllocaPlace { pointing_to } => OperationResult::pointer_to(
+                OperationResult::pointer_to(OperationResult::Lowered(*pointing_to)),
             ),
-            Project { ty }
+            Project { yielded: ty, .. }
             | Subfield { ty }
             | DictEntry { ty, .. }
             | SubscriptMember { ty, .. } => {
-                InstructionResult::pointer_to(InstructionResult::Lowered(*ty))
+                OperationResult::pointer_to(OperationResult::Lowered(*ty))
             }
-            CompareEqual => InstructionResult::Lowered(cached_primitive_ty!(bool)),
-            Load => {
-                InstructionResult::pointee_of(InstructionResult::Same(whole.operands[0].clone()))
-            }
+            CompareEqual => OperationResult::Lowered(cached_primitive_ty!(bool)),
+            Load => OperationResult::pointee_of(OperationResult::Same(whole.operands[0].clone())),
             BuildSubscript { ty }
             | Variant { ty, .. }
             | BuildClosure { ty, .. }
-            | CloneClosureEnv { ty } => InstructionResult::Lowered(*ty),
-            ExtractTag => InstructionResult::Lowered(cached_primitive_ty!(isize)),
-            StackSave => InstructionResult::StackMarker,
-            Call
-            | Invoke { .. }
-            | Resume
-            | Yield
+            | CloneClosureEnv { ty } => OperationResult::Lowered(*ty),
+            ExtractTag => OperationResult::Lowered(cached_primitive_ty!(isize)),
+            StackSave => OperationResult::StackMarker,
+            Call { .. }
             | EndProject
-            | ConditionalBranch { .. }
-            | UnconditionalBranch { .. }
-            | Ret
             | Store
             | Clear
             | Memcpy
@@ -888,23 +737,12 @@ impl InstructionKind {
             | CheckCallDepth
             | CheckFuel
             | Drop
-            | DropClosureEnv => InstructionResult::Nothing,
+            | DropClosureEnv => OperationResult::Nothing,
         }
     }
 
-    fn is_terminator(&self) -> bool {
-        matches!(
-            self,
-            Self::Invoke { .. }
-                | Self::Resume
-                | Self::ConditionalBranch { .. }
-                | Self::UnconditionalBranch { .. }
-                | Self::Ret
-        )
-    }
-
-    fn verify(&self, whole: &Instruction) {
-        use InstructionKind::*;
+    fn verify(&self, whole: &Operation) {
+        use OperationKind::*;
 
         match self {
             Alloca { .. } => assert!(
@@ -914,23 +752,13 @@ impl InstructionKind {
             AllocaPlace { .. } => {
                 assert!(whole.operands.is_empty(), "alloca_place takes no operands")
             }
-            Call => assert!(
+            Call { .. } => assert!(
                 whole.operands.len() >= 2,
                 "call needs the callee and a trailing result place"
             ),
-            Invoke { .. } => assert!(
-                whole.operands.len() >= 2,
-                "invoke needs the callee and a trailing result place"
-            ),
-            Resume => assert!(whole.operands.is_empty(), "resume takes no operands"),
             Project { .. } => assert!(
                 !whole.operands.is_empty(),
                 "project needs at least the callee operand"
-            ),
-            Yield => assert_eq!(
-                whole.operands.len(),
-                1,
-                "yield takes exactly the place to expose"
             ),
             EndProject => assert_eq!(
                 whole.operands.len(),
@@ -942,14 +770,6 @@ impl InstructionKind {
                 2,
                 "compare_eq compares exactly two operands"
             ),
-            ConditionalBranch { .. } => assert_eq!(
-                whole.operands.len(),
-                1,
-                "condbr takes exactly the condition operand"
-            ),
-            UnconditionalBranch { .. } => {
-                assert!(whole.operands.is_empty(), "br takes no operands")
-            }
             Load => assert_eq!(
                 whole.operands.len(),
                 1,
@@ -973,10 +793,6 @@ impl InstructionKind {
             BuildSubscript { .. } => assert!(
                 !whole.operands.is_empty(),
                 "build_subscript takes the symbolic subscript operand plus its evidence captures"
-            ),
-            Ret => assert!(
-                whole.operands.is_empty(),
-                "ret takes no operands (the result is written through the return out-pointer)"
             ),
             Variant { .. } => assert!(
                 whole.operands.is_empty(),
@@ -1046,10 +862,10 @@ impl InstructionKind {
     fn fmt_within(
         &self,
         f: &mut fmt::Formatter<'_>,
-        whole: &Instruction,
+        whole: &Operation,
         env: &ModuleEnv<'_>,
     ) -> fmt::Result {
-        use InstructionKind::*;
+        use OperationKind::*;
 
         match self {
             Alloca { ty } => {
@@ -1062,21 +878,14 @@ impl InstructionKind {
             AllocaPlace { pointing_to } => {
                 write!(f, "alloca_place {}", pointing_to.format_with(env))
             }
-            Call => {
+            Call { .. } => {
                 write!(f, "call ")?;
                 fmt_callee_and_args(f, whole, env)
             }
-            Invoke { normal, unwind } => {
-                write!(f, "invoke ")?;
-                fmt_callee_and_args(f, whole, env)?;
-                write!(f, " -> b{} unwind b{}", normal.raw(), unwind.raw())
-            }
-            Resume => write!(f, "resume"),
             Project { .. } => {
                 write!(f, "project ")?;
                 fmt_callee_and_args(f, whole, env)
             }
-            Yield => write!(f, "yield {}", whole.operands[0].format_with(env)),
             EndProject => write!(f, "end_project {}", whole.operands[0].format_with(env)),
             CompareEqual => write!(
                 f,
@@ -1084,17 +893,6 @@ impl InstructionKind {
                 whole.operands[0].format_with(env),
                 whole.operands[1].format_with(env)
             ),
-            ConditionalBranch {
-                on_success,
-                on_failure,
-            } => write!(
-                f,
-                "condbr {}, b{}, b{}",
-                whole.operands[0].format_with(env),
-                on_success.raw(),
-                on_failure.raw()
-            ),
-            UnconditionalBranch { target } => write!(f, "br b{}", target.raw()),
             Load => write!(f, "load {}", whole.operands[0].format_with(env)),
             Subfield { .. } => write!(
                 f,
@@ -1128,7 +926,6 @@ impl InstructionKind {
                 }
                 Ok(())
             }
-            Ret => write!(f, "ret"),
             Variant { tag, .. } => write!(f, "variant .{tag}"),
             ExtractTag => write!(f, "extract_tag {}", whole.operands[0].format_with(env)),
             Store => write!(
@@ -1170,7 +967,7 @@ impl InstructionKind {
                 write!(
                     f,
                     "build_closure {}(",
-                    ssa::Value::Function(*function).format_with(env)
+                    mir::Value::Function(*function).format_with(env)
                 )?;
                 for (i, operand) in whole.operands.iter().enumerate() {
                     if i > 0 {
@@ -1192,7 +989,7 @@ impl InstructionKind {
 
 fn fmt_callee_and_args(
     f: &mut fmt::Formatter<'_>,
-    whole: &Instruction,
+    whole: &Operation,
     env: &ModuleEnv<'_>,
 ) -> fmt::Result {
     write!(f, "{}(", whole.operands[0].format_with(env))?;
@@ -1209,11 +1006,13 @@ fn fmt_callee_and_args(
 mod tests {
     use std::mem::size_of;
 
-    use super::{Instruction, InstructionKind};
+    use super::{Operation, OperationKind};
 
     #[test]
-    fn instruction_representation_stays_compact() {
-        assert_eq!(size_of::<InstructionKind>(), 24);
-        assert_eq!(size_of::<Instruction>(), 56);
+    fn operation_representation_stays_compact() {
+        // Boxing call-site signatures prevents the largest operation variant from inflating every
+        // operation in a basic block.
+        assert_eq!(size_of::<OperationKind>(), 24);
+        assert_eq!(size_of::<Operation>(), 56);
     }
 }

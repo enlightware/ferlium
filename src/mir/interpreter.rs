@@ -1,9 +1,9 @@
-//! A reference interpreter for the SSA form of Ferlium.
+//! A reference interpreter for the MIR form of Ferlium.
 //!
-//! The interpreter exists to check that `emit_ssa` lowers HIR to *semantically correct* SSA: it
-//! runs a lowered [`ssa::Function`] and produces the value the function computes. It reuses the HIR
-//! interpreter's memory substrate — an SSA *place* (pointer) is a [`Place`] and the heap is
-//! the [`EvalCtx`]'s `environment`. Native (std) callees are delegated to the HIR interpreter; SSA
+//! The interpreter exists to check that `emit_mir` lowers HIR to *semantically correct* MIR: it
+//! runs a lowered [`mir::Function`] and produces the value the function computes. It reuses the HIR
+//! interpreter's memory substrate — a MIR *place* (pointer) is a [`Place`] and the heap is
+//! the [`EvalCtx`]'s `environment`. Native (std) callees are delegated to the HIR interpreter; MIR
 //! (script) callees are interpreted recursively so their own lowering is exercised too.
 
 use std::collections::VecDeque;
@@ -21,11 +21,11 @@ use crate::{
         function::{ArgConvention, copy_boxed_trivial_copy_native},
         value::{FunctionValue, HiddenEvidenceArgValue, LiteralValue, SubscriptValue, Value},
     },
+    mir::{self, BlockId, Operation, OperationKind, terminator::TerminatorKind},
     module::{
         FunctionId, LocalFunctionId, ModuleEnv, ModuleId, TraitDictionaryId, id::Id,
         trait_impl::TraitDictionaryEntry,
     },
-    ssa::{self, BlockId, InstructionId, InstructionKind},
     std::buffer,
     types::{
         r#trait::TraitDictionaryEntryIndex,
@@ -40,14 +40,14 @@ pub struct FunctionKey {
     pub identity: LocalFunctionId,
 }
 
-/// The runtime binding of an SSA register or parameter: either a materialized value (the result of
+/// The runtime binding of a MIR register or parameter: either a materialized value (the result of
 /// a `load`/`comp_eq`) or a place (the result of an `alloca`/`project`, or an incoming by-pointer
 /// parameter).
 ///
 /// A non-trivially-copyable value is *moved* out of its binding by its single consuming use. The
 /// interpreter leaves a boxed-HIR `Value::Uninit` tombstone in this private binding map so a second
-/// read panics loudly (see `value_operand`). Absence is not representable as an `ssa::Value` operand;
-/// this is dynamic validation of SSA single-consumption, not part of the IR value model.
+/// read panics loudly (see `value_operand`). Absence is not representable as an `mir::Value` operand;
+/// this is dynamic validation of MIR single-consumption, not part of the IR value model.
 enum Binding {
     Value(Value),
     Place(Place),
@@ -66,48 +66,20 @@ enum Binding {
     },
 }
 
-/// The control-flow effect of executing a single instruction.
-enum Step {
-    /// Continue with the next instruction in the block.
-    Advance,
-    /// Transfer control to the start of the given block.
-    Goto(BlockId),
-    /// Return from the current function (the result is already in the return out-pointer).
-    Return,
-    /// Resume the unwind that this frame's cleanup pad interrupted: hand the in-flight error back to
-    /// the caller so propagation continues up the stack.
-    ///
-    /// When a source failure reaches a cleanup edge, the error does not
-    /// leave the frame immediately: control first enters a pad that runs the frame's drops. That pad
-    /// has *paused* the unwind. After the drops, this step (the pad's `resume` terminator) lets it
-    /// continue: the same error — stashed when control entered the pad — is returned to the caller,
-    /// whose explicit or implicit call-site edge can run its own pad. The error is *continued*, not
-    /// newly raised, which is why it is `resume` and not a throw.
-    Resume,
-    /// Suspend the current frame at a `yield`, exposing the carried place to the driving `project`.
-    /// The frame's registers and stack cells stay live; `end_project` later resumes it (mirrors the
-    /// HIR interpreter's `ControlTransfer::Yield`).
-    Suspend(Place),
-}
-
-/// The outcome of running a frame's instruction loop ([`Interpreter::run_loop`]): it either ran to a
-/// `ret`/`resume` (`Completed`) or hit a `yield` (`Suspended`), in which case the live register map
-/// and the resume point are handed back so a later `end_project` can continue the accessor's slide.
+/// The outcome of running a frame's MIR CFG.
 enum FrameOutcome {
     Completed,
     Suspended {
         /// The yielded place (`yield`'s operand), exposed as the `project`'s result.
         place: Place,
-        /// The block holding the instructions after the `yield`.
+        /// The explicit resume block selected by the `yield` terminator.
         block: BlockId,
-        /// The index of the first post-`yield` instruction within `block`.
-        idx: usize,
         /// The accessor frame's live register/parameter bindings.
-        slots: FxHashMap<ssa::Value, Binding>,
+        slots: FxHashMap<mir::Value, Binding>,
     },
 }
 
-/// Which side of a call the storage-state contract (`doc/ssa-ir.md` §4.3) is being checked on.
+/// Which side of a call the storage-state contract (`doc/mir-ir.md` §4.3) is being checked on.
 #[cfg(debug_assertions)]
 #[derive(Clone, Copy)]
 enum CallPhase {
@@ -126,24 +98,22 @@ impl std::fmt::Display for CallPhase {
 }
 
 /// A suspended `YieldedOnce` accessor frame, kept alive between a `project` and its `end_project`
-/// (the SSA analog of the HIR interpreter's `SuspendedAccessor`).
+/// (the MIR analog of the HIR interpreter's `SuspendedAccessor`).
 struct SuspendedFrame {
     /// The accessor function.
     key: FunctionKey,
-    /// The block to resume into (the one containing the `yield`).
+    /// The explicit block to resume into after the `yield`.
     block: BlockId,
-    /// The index of the first post-`yield` instruction within `block`.
-    idx: usize,
     /// The accessor frame's live register/parameter bindings.
-    slots: FxHashMap<ssa::Value, Binding>,
+    slots: FxHashMap<mir::Value, Binding>,
     /// The `environment` length captured at the `project`, so `end_project` reclaims the accessor's
     /// stack cells once its slide completes (mirrors `truncate_environment_storage`).
     frame_top: usize,
 }
 
-/// The state of an SSA interpreter.
+/// The state of a MIR interpreter.
 pub struct Interpreter<'a> {
-    /// The HIR evaluation context; its `environment` doubles as the SSA heap.
+    /// The HIR evaluation context; its `environment` doubles as the MIR heap.
     ctx: EvalCtx<'a>,
     /// The compiler session, used to resolve immutable module artifacts and native callees.
     session: &'a CompilerSession,
@@ -152,7 +122,7 @@ pub struct Interpreter<'a> {
 impl<'a> Interpreter<'a> {
     /// Creates an interpreter whose initial module context is `module_id`.
     ///
-    /// The session must already contain SSA artifacts for every script module that can be reached;
+    /// The session must already contain MIR artifacts for every script module that can be reached;
     /// [`CompilerSession::prepare_execution_target`](crate::CompilerSession::prepare_execution_target)
     /// or [`CompilerSession::run_entry`](crate::CompilerSession::run_entry) establishes that
     /// invariant.
@@ -162,7 +132,7 @@ impl<'a> Interpreter<'a> {
 
     /// Creates an interpreter with backend-independent execution limits.
     ///
-    /// As with [`Self::new`], SSA artifacts must have been prepared before construction.
+    /// As with [`Self::new`], MIR artifacts must have been prepared before construction.
     pub fn with_limits(
         module_id: ModuleId,
         session: &'a CompilerSession,
@@ -214,20 +184,20 @@ impl<'a> Interpreter<'a> {
         let parameter_tags = func
             .parameters()
             .iter()
-            .map(|parameter| parameter.tag)
+            .map(|parameter| parameter.kind)
             .collect::<Vec<_>>();
         assert_eq!(
             parameter_tags.len(),
             arguments.len() + 1,
-            "SSA entry arguments must match its visible parameters"
+            "MIR entry arguments must match its visible parameters"
         );
         assert!(
             parameter_tags[..arguments.len()]
                 .iter()
-                .all(|tag| matches!(tag, ssa::ParameterTag::Parameter(_))),
-            "SSA entry functions cannot require hidden dictionary parameters"
+                .all(|tag| matches!(tag, mir::ParameterKind::Parameter(_))),
+            "MIR entry functions cannot require hidden dictionary parameters"
         );
-        assert_eq!(parameter_tags.last(), Some(&ssa::ParameterTag::Return));
+        assert_eq!(parameter_tags.last(), Some(&mir::ParameterKind::Return));
 
         let entry_top = self.ctx.environment.len();
         let required_cells = arguments.len() + 1;
@@ -282,16 +252,16 @@ impl<'a> Interpreter<'a> {
         Ok(value)
     }
 
-    /// Returns the immutable SSA body stored beside the function's semantic module revision.
-    fn function(&self, key: FunctionKey) -> &'a ssa::Function {
+    /// Returns the immutable MIR body stored beside the function's semantic module revision.
+    fn function(&self, key: FunctionKey) -> &'a mir::Function {
         self.session
             .expect_module_entry(key.module)
-            .current_ssa()
-            .unwrap_or_else(|| panic!("module {} has no current SSA artifacts", key.module))
+            .current_mir()
+            .unwrap_or_else(|| panic!("module {} has no current MIR artifacts", key.module))
             .get(key.identity)
             .unwrap_or_else(|| {
                 panic!(
-                    "script function {}:{} has no SSA body",
+                    "script function {}:{} has no MIR body",
                     key.module, key.identity
                 )
             })
@@ -319,11 +289,11 @@ impl<'a> Interpreter<'a> {
     /// other than through a `project`) is a lowering bug.
     fn run_frame(&mut self, key: FunctionKey, args: Vec<Binding>) -> Result<(), RuntimeError> {
         let func = self.function(key);
-        let mut slots: FxHashMap<ssa::Value, Binding> = FxHashMap::default();
+        let mut slots: FxHashMap<mir::Value, Binding> = FxHashMap::default();
         for (i, b) in args.into_iter().enumerate() {
-            slots.insert(ssa::Value::Parameter(ssa::ParameterId::from_index(i)), b);
+            slots.insert(mir::Value::Parameter(mir::ParameterId::from_index(i)), b);
         }
-        match self.run_loop(func, slots, func.entry(), 0)? {
+        match self.run_loop(func, slots, func.entry())? {
             FrameOutcome::Completed => Ok(()),
             FrameOutcome::Suspended { .. } => {
                 panic!(
@@ -333,69 +303,107 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    /// Runs `func`'s instruction stream starting at `(block, idx)` with the given live `slots`, until
-    /// it either completes (`ret`/`resume`) or suspends at a `yield`. Used both for a fresh frame
-    /// (from its entry) and to resume a suspended accessor's slide (from after its `yield`).
+    /// Runs `func`'s explicit MIR CFG from `block` until it returns, propagates an error, or
+    /// suspends at a yielded projection.
     fn run_loop(
         &mut self,
-        func: &ssa::Function,
-        mut slots: FxHashMap<ssa::Value, Binding>,
+        func: &mir::Function,
+        mut slots: FxHashMap<mir::Value, Binding>,
         mut block: BlockId,
-        mut idx: usize,
     ) -> Result<FrameOutcome, RuntimeError> {
-        let mut instructions: Vec<InstructionId> = func.block(block).instructions().collect();
-        // The error in flight through this frame's cleanup pads: set when an `invoke` diverts control
-        // to its unwind pad, taken when the chain of pads ends in a `resume` that re-raises it. It is
-        // always consumed (at `resume`) before the `Err` leaves this frame, so a nested call's own
-        // in-flight error never overlaps with this one.
+        // Source errors are carried implicitly while explicit cleanup blocks run. A second source
+        // error is retained separately until `FailureDuringCleanup` performs the poisoning exit.
         let mut pending: Option<RuntimeError> = None;
+        let mut cleanup_failure: Option<RuntimeError> = None;
         loop {
-            let i = instructions[idx];
-            let step = match self.exec(func, &mut slots, &mut pending, i) {
-                Ok(step) => step,
-                Err(error) => {
-                    if let Some(initial) = pending.take() {
-                        let error = self.ctx.poison(initial, error);
-                        self.discard_bindings_after_poisoning(slots);
-                        return Err(error);
-                    }
+            let current = func.block(block);
+            for operation in current.operations() {
+                if let Err(error) = self.exec_operation(func, &mut slots, operation) {
                     if error.is_poisoning() {
+                        let error = match pending.take() {
+                            Some(initial) => self.ctx.poison(initial, error),
+                            None => error,
+                        };
                         self.discard_bindings_after_poisoning(slots);
                         return Err(error);
                     }
-                    let Some(unwind) = func.implicit_unwind_target(i) else {
-                        self.discard_inactive_bindings(slots);
-                        return Err(error);
-                    };
-                    pending = Some(error);
-                    Step::Goto(unwind)
+                    panic!("a plain MIR operation raised a source failure");
                 }
-            };
-            match step {
-                Step::Advance => idx += 1,
-                Step::Goto(b) => {
-                    block = b;
-                    instructions = func.block(block).instructions().collect();
-                    idx = 0;
+            }
+
+            match &current.terminator().kind {
+                TerminatorKind::Goto { target } => block = *target,
+                TerminatorKind::CondBr {
+                    condition,
+                    then_target,
+                    else_target,
+                } => {
+                    let value = self.value_operand(func, &mut slots, condition);
+                    let taken = *value
+                        .as_primitive_ty::<bool>()
+                        .expect("condbr condition must be a bool");
+                    block = if taken { *then_target } else { *else_target };
                 }
-                Step::Return => {
+                TerminatorKind::Invoke {
+                    operation,
+                    normal,
+                    error,
+                } => match self.exec_operation(func, &mut slots, operation) {
+                    Ok(()) => block = *normal,
+                    Err(failure) if failure.is_poisoning() => {
+                        let failure = match pending.take() {
+                            Some(initial) => self.ctx.poison(initial, failure),
+                            None => failure,
+                        };
+                        self.discard_bindings_after_poisoning(slots);
+                        return Err(failure);
+                    }
+                    Err(failure) => {
+                        if pending.is_some() {
+                            assert!(cleanup_failure.is_none());
+                            cleanup_failure = Some(failure);
+                        } else {
+                            pending = Some(failure);
+                        }
+                        block = *error;
+                    }
+                },
+                TerminatorKind::Return => {
+                    assert!(
+                        pending.is_none(),
+                        "return reached while a source failure was in flight"
+                    );
                     self.discard_inactive_bindings(slots);
                     return Ok(FrameOutcome::Completed);
                 }
-                Step::Resume => {
+                TerminatorKind::PropagateError => {
+                    assert!(cleanup_failure.is_none());
                     let error = pending
                         .take()
-                        .expect("resume reached without an in-flight error");
+                        .expect("propagate_error reached without an in-flight source failure");
                     self.discard_inactive_bindings(slots);
                     return Err(error);
                 }
-                // Suspend at the `yield`: hand back the live frame and the resume point (the
-                // instruction right after the `yield`) for a later `end_project`.
-                Step::Suspend(place) => {
+                TerminatorKind::FailureDuringCleanup => {
+                    let initial = pending
+                        .take()
+                        .expect("failure_during_cleanup reached without an initial failure");
+                    let secondary = cleanup_failure
+                        .take()
+                        .expect("failure_during_cleanup reached without a cleanup failure");
+                    let error = self.ctx.poison(initial, secondary);
+                    self.discard_bindings_after_poisoning(slots);
+                    return Err(error);
+                }
+                TerminatorKind::Yield { place, resume } => {
+                    assert!(
+                        pending.is_none(),
+                        "yield reached while a source failure was in flight"
+                    );
+                    let place = self.place_operand(&slots, place);
                     return Ok(FrameOutcome::Suspended {
                         place,
-                        block,
-                        idx: idx + 1,
+                        block: *resume,
                         slots,
                     });
                 }
@@ -403,88 +411,62 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    /// Executes the instruction `i` of `func` within the current frame `slots`.
-    fn exec(
+    /// Executes one MIR operation within the current frame.
+    fn exec_operation(
         &mut self,
-        func: &ssa::Function,
-        slots: &mut FxHashMap<ssa::Value, Binding>,
-        pending: &mut Option<RuntimeError>,
-        i: InstructionId,
-    ) -> Result<Step, RuntimeError> {
-        let instr = func.at(i);
-        let def = func.definition(i);
-        let span = instr.span;
-        Ok(match &instr.kind {
-            InstructionKind::Alloca { ty } => {
+        func: &mir::Function,
+        slots: &mut FxHashMap<mir::Value, Binding>,
+        operation: &Operation,
+    ) -> Result<(), RuntimeError> {
+        let def = operation.result_id().map(mir::Value::Register);
+        let span = operation.span;
+        match &operation.kind {
+            OperationKind::Alloca { ty } => {
                 let init = self.shaped_uninitialized_value(*ty);
                 let place = self.alloc_cell(init, span)?;
                 slots.insert(def.unwrap(), Binding::Place(place));
-                Step::Advance
             }
-            InstructionKind::AllocaPlace { .. } => {
+            OperationKind::AllocaPlace { .. } => {
                 let place = self.alloc_cell(Value::uninit(), span)?;
                 slots.insert(def.unwrap(), Binding::Place(place));
-                Step::Advance
             }
-            InstructionKind::Subfield { .. } => {
-                self.exec_subfield(func, slots, &instr.operands, def.unwrap());
-                Step::Advance
+            OperationKind::Subfield { .. } => {
+                self.exec_subfield(func, slots, &operation.operands, def.unwrap());
             }
-            InstructionKind::DictEntry { entry_index, .. } => {
-                self.exec_dict_entry(slots, &instr.operands, def.unwrap(), *entry_index, span)?;
-                Step::Advance
+            OperationKind::DictEntry { entry_index, .. } => {
+                self.exec_dict_entry(slots, &operation.operands, def.unwrap(), *entry_index, span)?;
             }
-            InstructionKind::SubscriptMember { mut_member, .. } => {
+            OperationKind::SubscriptMember { mut_member, .. } => {
                 self.exec_subscript_member(
                     slots,
-                    &instr.operands,
+                    &operation.operands,
                     def.unwrap(),
                     *mut_member,
                     span,
                 )?;
-                Step::Advance
             }
-            InstructionKind::BuildSubscript { .. } => {
-                self.exec_build_subscript(slots, &instr.operands, def.unwrap());
-                Step::Advance
+            OperationKind::BuildSubscript { .. } => {
+                self.exec_build_subscript(slots, &operation.operands, def.unwrap());
             }
-            InstructionKind::Load => {
-                self.exec_load(slots, &instr.operands, def.unwrap())?;
-                Step::Advance
+            OperationKind::Load => {
+                self.exec_load(slots, &operation.operands, def.unwrap())?;
             }
-            InstructionKind::Store => {
-                self.exec_store(func, slots, &instr.operands)?;
-                Step::Advance
+            OperationKind::Store => {
+                self.exec_store(func, slots, &operation.operands)?;
             }
-            InstructionKind::Clear => {
-                self.exec_clear(slots, &instr.operands[0]);
-                Step::Advance
+            OperationKind::Clear => {
+                self.exec_clear(slots, &operation.operands[0]);
             }
-            InstructionKind::Memcpy => {
-                self.exec_memcpy(slots, &instr.operands)?;
-                Step::Advance
+            OperationKind::Memcpy => {
+                self.exec_memcpy(slots, &operation.operands)?;
             }
-            InstructionKind::Move => {
-                self.exec_move(slots, &instr.operands)?;
-                Step::Advance
+            OperationKind::Move => {
+                self.exec_move(slots, &operation.operands)?;
             }
-            InstructionKind::CompareEqual => {
-                self.exec_compare_equal(func, slots, &instr.operands, def.unwrap());
-                Step::Advance
+            OperationKind::CompareEqual => {
+                self.exec_compare_equal(func, slots, &operation.operands, def.unwrap());
             }
-            InstructionKind::ConditionalBranch {
-                on_success,
-                on_failure,
-            } => {
-                let c = self.value_operand(func, slots, &instr.operands[0]);
-                let taken = *c
-                    .as_primitive_ty::<bool>()
-                    .expect("condbr condition must be a bool");
-                Step::Goto(if taken { *on_success } else { *on_failure })
-            }
-            InstructionKind::UnconditionalBranch { target } => Step::Goto(*target),
-            InstructionKind::Ret => Step::Return,
-            InstructionKind::Variant { tag, .. } => {
+            OperationKind::Variant { tag, .. } => {
                 // Build a tagged variant shell with an uninitialized payload. The constructing site
                 // stores it into the variant's destination and then fills the payload in place
                 // through a projection of that destination, so the payload aggregate is never
@@ -495,70 +477,37 @@ impl<'a> Interpreter<'a> {
                     def.unwrap(),
                     Binding::Value(Value::raw_variant(*tag, Value::uninit())),
                 );
-                Step::Advance
             }
-            InstructionKind::ExtractTag => {
-                self.exec_extract_tag(slots, &instr.operands, def.unwrap());
-                Step::Advance
+            OperationKind::ExtractTag => {
+                self.exec_extract_tag(slots, &operation.operands, def.unwrap());
             }
-            InstructionKind::Call => {
-                self.exec_call(slots, &instr.operands, span)?;
-                Step::Advance
+            OperationKind::Call { .. } => {
+                self.exec_call(slots, &operation.operands, span)?;
             }
-            InstructionKind::Invoke { normal, unwind } => {
-                // A fallible call: on a raised error, stash it and divert to the cleanup pad rather
-                // than propagating straight out of the frame. The pad drops this frame's live locals
-                // (husk-skipping anything already dropped/moved) and ends in `br <outer pad>` or
-                // `resume`, the latter re-raising `pending` to the caller (see the loop in
-                // `run_function`). On normal completion control falls through to the continuation.
-                match self.exec_call(slots, &instr.operands, span) {
-                    Ok(()) => Step::Goto(*normal),
-                    Err(err) => {
-                        if let Some(initial) = pending.take() {
-                            return Err(self.ctx.poison(initial, err));
-                        }
-                        if err.is_poisoning() {
-                            return Err(err);
-                        }
-                        *pending = Some(err);
-                        Step::Goto(*unwind)
-                    }
-                }
-            }
-            InstructionKind::Resume => Step::Resume,
-            InstructionKind::Project { ty } => {
+            OperationKind::Project { yielded, .. } => {
                 // Enter a scoped subscript: run the accessor to its `yield`, bind the exposed place
                 // (and the suspended frame) to this register, and continue with the body.
-                self.exec_project(slots, &instr.operands, def.unwrap(), *ty, span)?;
-                Step::Advance
+                self.exec_project(slots, &operation.operands, def.unwrap(), *yielded, span)?;
             }
-            InstructionKind::Yield => {
-                // Suspend the accessor, exposing the place at operand `0` to the driving `project`.
-                let place = self.place_operand(slots, &instr.operands[0]);
-                Step::Suspend(place)
+            OperationKind::EndProject => self.exec_end_project(slots, &operation.operands)?,
+            OperationKind::Drop => {
+                self.exec_drop(slots, &operation.operands, span)?;
             }
-            InstructionKind::EndProject => self.exec_end_project(slots, &instr.operands)?,
-            InstructionKind::Drop => {
-                self.exec_drop(slots, &instr.operands, span)?;
-                Step::Advance
-            }
-            InstructionKind::StackSave => {
+            OperationKind::StackSave => {
                 let marker = self.ctx.environment.len();
                 slots.insert(def.unwrap(), Binding::StackMarker(marker));
-                Step::Advance
             }
-            InstructionKind::StackRestore => {
-                let marker = self.stack_marker_operand(slots, &instr.operands[0]);
+            OperationKind::StackRestore => {
+                let marker = self.stack_marker_operand(slots, &operation.operands[0]);
                 self.restore_stack(marker);
-                Step::Advance
             }
-            InstructionKind::CheckCallDepth => {
-                return self.exec_runtime_check(|ctx| ctx.check_call_depth(span));
+            OperationKind::CheckCallDepth => {
+                self.exec_runtime_check(|ctx| ctx.check_call_depth(span))?;
             }
-            InstructionKind::CheckFuel => {
-                return self.exec_runtime_check(|ctx| ctx.check_fuel(span));
+            OperationKind::CheckFuel => {
+                self.exec_runtime_check(|ctx| ctx.check_fuel(span))?;
             }
-            InstructionKind::BuildClosure {
+            OperationKind::BuildClosure {
                 function,
                 num_hidden_dicts,
                 has_env_dict,
@@ -566,49 +515,47 @@ impl<'a> Interpreter<'a> {
             } => {
                 let closure = self.exec_build_closure(
                     slots,
-                    &instr.operands,
+                    &operation.operands,
                     function,
                     *num_hidden_dicts as usize,
                     *has_env_dict,
                 )?;
                 slots.insert(def.unwrap(), Binding::Value(closure));
-                Step::Advance
             }
-            InstructionKind::CloneClosureEnv { .. } => {
-                let cloned = self.exec_clone_closure_env(slots, &instr.operands[0], span)?;
+            OperationKind::CloneClosureEnv { .. } => {
+                let cloned = self.exec_clone_closure_env(slots, &operation.operands[0], span)?;
                 slots.insert(def.unwrap(), Binding::Value(cloned));
-                Step::Advance
             }
-            InstructionKind::DropClosureEnv => {
-                self.exec_drop_closure_env(slots, &instr.operands[0], span)?;
-                Step::Advance
+            OperationKind::DropClosureEnv => {
+                self.exec_drop_closure_env(slots, &operation.operands[0], span)?;
             }
-        })
+        }
+        Ok(())
     }
 
     fn exec_runtime_check(
         &mut self,
         check: impl FnOnce(&mut EvalCtx<'a>) -> crate::eval::EvalControlFlowResult,
-    ) -> Result<Step, RuntimeError> {
+    ) -> Result<(), RuntimeError> {
         match check(&mut self.ctx) {
             Ok(result) => {
                 result.into_value().discard_storage();
-                Ok(Step::Advance)
+                Ok(())
             }
             Err(error) => Err(error),
         }
     }
 
-    /// Executes a `subfield` instruction. The field index is the `int` value at operand `1` — a
+    /// Executes a `subfield` operation. The field index is the `int` value at operand `1` — a
     /// constant for a static field, or a register holding a run-time offset. Either way it
     /// resolves to an `isize`.
     #[inline(never)]
     fn exec_subfield(
         &mut self,
-        func: &ssa::Function,
-        slots: &mut FxHashMap<ssa::Value, Binding>,
-        operands: &[ssa::Value],
-        def: ssa::Value,
+        func: &mir::Function,
+        slots: &mut FxHashMap<mir::Value, Binding>,
+        operands: &[mir::Value],
+        def: mir::Value,
     ) {
         let mut place = self.place_operand(slots, &operands[0]);
         let index = self.value_operand(func, slots, &operands[1]);
@@ -619,16 +566,16 @@ impl<'a> Interpreter<'a> {
         slots.insert(def, Binding::Place(place));
     }
 
-    /// Executes a `dict_entry` instruction: the symbolic analog of `subfield`. Resolves the
+    /// Executes a `dict_entry` operation: the symbolic analog of `subfield`. Resolves the
     /// dictionary operand to its interned id, reads function entry `entry_index` straight from the
     /// impl arena, and materializes it into a fresh cell
     /// whose place is bound — so `call`/`drop`/`memcpy` consume it exactly as a `project` result.
     #[inline(never)]
     fn exec_dict_entry(
         &mut self,
-        slots: &mut FxHashMap<ssa::Value, Binding>,
-        operands: &[ssa::Value],
-        def: ssa::Value,
+        slots: &mut FxHashMap<mir::Value, Binding>,
+        operands: &[mir::Value],
+        def: mir::Value,
         entry_index: TraitDictionaryEntryIndex,
         span: Location,
     ) -> Result<(), RuntimeError> {
@@ -645,7 +592,7 @@ impl<'a> Interpreter<'a> {
         Ok(())
     }
 
-    /// Executes a `subscript_member` instruction: the member-resolving analog of `dict_entry` for
+    /// Executes a `subscript_member` operation: the member-resolving analog of `dict_entry` for
     /// a first-class subscript. Resolves the subscript operand to its runtime value, picks its
     /// `ref`/`mut` member, and materializes the member function value — bundling the subscript's
     /// captured hidden evidence — into a fresh cell, so a `call`/`project` consumes it exactly
@@ -653,9 +600,9 @@ impl<'a> Interpreter<'a> {
     #[inline(never)]
     fn exec_subscript_member(
         &mut self,
-        slots: &mut FxHashMap<ssa::Value, Binding>,
-        operands: &[ssa::Value],
-        def: ssa::Value,
+        slots: &mut FxHashMap<mir::Value, Binding>,
+        operands: &[mir::Value],
+        def: mir::Value,
         mut_member: bool,
         span: Location,
     ) -> Result<(), RuntimeError> {
@@ -678,16 +625,16 @@ impl<'a> Interpreter<'a> {
         Ok(())
     }
 
-    /// Executes a `build_subscript` instruction: bundles the base subscript with captured hidden
+    /// Executes a `build_subscript` operation: bundles the base subscript with captured hidden
     /// evidence, mirroring `eval_build_subscript_value` — each capture operand is interned
     /// evidence, a symbolic dictionary or a subscript value read (non-consumingly) from its
     /// operand.
     #[inline(never)]
     fn exec_build_subscript(
         &mut self,
-        slots: &mut FxHashMap<ssa::Value, Binding>,
-        operands: &[ssa::Value],
-        def: ssa::Value,
+        slots: &mut FxHashMap<mir::Value, Binding>,
+        operands: &[mir::Value],
+        def: mir::Value,
     ) {
         let mut subscript = self.subscript_operand(slots, &operands[0]);
         for op in &operands[1..] {
@@ -702,13 +649,13 @@ impl<'a> Interpreter<'a> {
         slots.insert(def, Binding::Value(Value::subscript_value(subscript)));
     }
 
-    /// Executes a `load` instruction.
+    /// Executes a `load` operation.
     #[inline(never)]
     fn exec_load(
         &mut self,
-        slots: &mut FxHashMap<ssa::Value, Binding>,
-        operands: &[ssa::Value],
-        def: ssa::Value,
+        slots: &mut FxHashMap<mir::Value, Binding>,
+        operands: &[mir::Value],
+        def: mir::Value,
     ) -> Result<(), RuntimeError> {
         let place = self.place_operand(slots, &operands[0]);
         let v = self.load_copy(&place);
@@ -716,20 +663,20 @@ impl<'a> Interpreter<'a> {
         Ok(())
     }
 
-    /// Executes a `store` instruction. The stored operand is normally a value; the one exception
+    /// Executes a `store` operation. The stored operand is normally a value; the one exception
     /// is an `AddressorPlace` return, whose body ends by storing a *place* register — the returned
-    /// place pointer (see `doc/ssa-ir.md` §4.2) — into the `@ret` slot. A place-bound operand
+    /// place pointer (see `doc/mir-ir.md` §4.2) — into the `@ret` slot. A place-bound operand
     /// therefore stores the bridged `PlaceResult` pointer value, exactly the form a native
     /// addressor returns.
     #[inline(never)]
     fn exec_store(
         &mut self,
-        func: &ssa::Function,
-        slots: &mut FxHashMap<ssa::Value, Binding>,
-        operands: &[ssa::Value],
+        func: &mir::Function,
+        slots: &mut FxHashMap<mir::Value, Binding>,
+        operands: &[mir::Value],
     ) -> Result<(), RuntimeError> {
         let v = match &operands[0] {
-            op @ (ssa::Value::Register(_) | ssa::Value::Parameter(_))
+            op @ (mir::Value::Register(_) | mir::Value::Parameter(_))
                 if matches!(slots.get(op), Some(Binding::Place(_))) =>
             {
                 Value::native(PlaceResult::new(self.place_operand(slots, op)))
@@ -741,9 +688,9 @@ impl<'a> Interpreter<'a> {
     }
 
     /// Marks a place absent without running semantic drop. The overwritten state must already own
-    /// no resource; `clear` is the explicit SSA representation of initialization state, not a
+    /// no resource; `clear` is the explicit MIR representation of initialization state, not a
     /// replacement for `drop`.
-    fn exec_clear(&mut self, slots: &FxHashMap<ssa::Value, Binding>, operand: &ssa::Value) {
+    fn exec_clear(&mut self, slots: &FxHashMap<mir::Value, Binding>, operand: &mir::Value) {
         let place = self.place_operand(slots, operand);
         self.materialize_path(&place);
         let slot = place
@@ -754,14 +701,14 @@ impl<'a> Interpreter<'a> {
         old.discard_storage();
     }
 
-    /// Executes a `memcpy` instruction as a source-preserving representation copy. The boxed
+    /// Executes a `memcpy` operation as a source-preserving representation copy. The boxed
     /// interpreter copies native opt-in leaves and tuple-backed aggregates recursively; any other
-    /// representation is an SSA mis-lowering and fails rather than accidentally becoming a move.
+    /// representation is a MIR mis-lowering and fails rather than accidentally becoming a move.
     #[inline(never)]
     fn exec_memcpy(
         &mut self,
-        slots: &mut FxHashMap<ssa::Value, Binding>,
-        operands: &[ssa::Value],
+        slots: &mut FxHashMap<mir::Value, Binding>,
+        operands: &[mir::Value],
     ) -> Result<(), RuntimeError> {
         let source = self.place_operand(slots, &operands[0]);
         let destination = self.place_operand(slots, &operands[1]);
@@ -776,15 +723,15 @@ impl<'a> Interpreter<'a> {
         self.store(v, &destination)
     }
 
-    /// Executes a `move` instruction: a source-consuming move. Reads the source place out (leaving
+    /// Executes a `move` operation: a source-consuming move. Reads the source place out (leaving
     /// it uninitialized) and writes it straight into the destination place. The optional layout
     /// witness is metadata a backend uses to size the copy; the interpreter moves shape-agnostically
     /// and ignores it.
     #[inline(never)]
     fn exec_move(
         &mut self,
-        slots: &mut FxHashMap<ssa::Value, Binding>,
-        operands: &[ssa::Value],
+        slots: &mut FxHashMap<mir::Value, Binding>,
+        operands: &[mir::Value],
     ) -> Result<(), RuntimeError> {
         let source = self.place_operand(slots, &operands[0]);
         let destination = self.place_operand(slots, &operands[1]);
@@ -792,36 +739,36 @@ impl<'a> Interpreter<'a> {
         self.store(v, &destination)
     }
 
-    /// Executes a `comp_eq` instruction: a lowered `match` comparison. The scrutinee is read
+    /// Executes a `comp_eq` operation: a lowered `match` comparison. The scrutinee is read
     /// non-consumingly and the pattern's immutable literal representation compares directly with
     /// the runtime value. This preserves the HIR invariant that matching an owned value never
     /// converts it back into compiler constant data.
     #[inline(never)]
     fn exec_compare_equal(
         &mut self,
-        func: &ssa::Function,
-        slots: &mut FxHashMap<ssa::Value, Binding>,
-        operands: &[ssa::Value],
-        def: ssa::Value,
+        func: &mir::Function,
+        slots: &mut FxHashMap<mir::Value, Binding>,
+        operands: &[mir::Value],
+        def: mir::Value,
     ) {
         let pattern = self.pattern_literal_operand(&operands[1]);
         let equal = self.with_runtime_value(func, slots, &operands[0], |scrutinee| {
             pattern
                 .try_matches_runtime_value(scrutinee)
-                .expect("SSA match pattern and scrutinee have incompatible representations")
+                .expect("MIR match pattern and scrutinee have incompatible representations")
         });
         slots.insert(def, Binding::Value(Value::native(equal)));
     }
 
-    /// Executes an `extract_tag` instruction: reads the variant's tag without consuming it (the
+    /// Executes an `extract_tag` operation: reads the variant's tag without consuming it (the
     /// payload stays live for the match arms), encoded as the same `int` the HIR interpreter
     /// produces.
     #[inline(never)]
     fn exec_extract_tag(
         &mut self,
-        slots: &mut FxHashMap<ssa::Value, Binding>,
-        operands: &[ssa::Value],
-        def: ssa::Value,
+        slots: &mut FxHashMap<mir::Value, Binding>,
+        operands: &[mir::Value],
+        def: mir::Value,
     ) {
         let place = self.place_operand(slots, &operands[0]);
         let value = place
@@ -834,19 +781,18 @@ impl<'a> Interpreter<'a> {
         slots.insert(def, Binding::Value(Value::native(tag)));
     }
 
-    /// Executes an `end_project` instruction: resumes the accessor's slide to completion and
+    /// Executes an `end_project` operation: resumes the accessor's slide to completion and
     /// reclaims its frame. Reached on the normal path and inside cleanup pads
     /// (epilogue-on-unwind).
     #[inline(never)]
     fn exec_end_project(
         &mut self,
-        slots: &mut FxHashMap<ssa::Value, Binding>,
-        operands: &[ssa::Value],
-    ) -> Result<Step, RuntimeError> {
+        slots: &mut FxHashMap<mir::Value, Binding>,
+        operands: &[mir::Value],
+    ) -> Result<(), RuntimeError> {
         let SuspendedFrame {
             key,
             block,
-            idx,
             slots: acc_slots,
             frame_top,
         } = match slots.remove(&operands[0]) {
@@ -854,29 +800,29 @@ impl<'a> Interpreter<'a> {
             // A projection that completed immediately (an `AddressorPlace` member reached
             // through `project`'s runtime convention dispatch) has no suspended slide:
             // nothing to resume.
-            Some(Binding::Place(_)) => return Ok(Step::Advance),
+            Some(Binding::Place(_)) => return Ok(()),
             _ => panic!("end_project operand is not an open projection"),
         };
         let func = self.function(key);
-        let result = self.run_loop(func, acc_slots, block, idx);
+        let result = self.run_loop(func, acc_slots, block);
         // The accessor frame is torn down whichever way its slide ends: drop the depth it
         // held since the `project` and reclaim its stack cells, then surface any slide error.
         self.ctx.call_depth -= 1;
         self.reclaim_frame_storage(frame_top);
         match result? {
-            FrameOutcome::Completed => Ok(Step::Advance),
+            FrameOutcome::Completed => Ok(()),
             FrameOutcome::Suspended { .. } => {
                 panic!("a YieldedOnce accessor yielded more than once")
             }
         }
     }
 
-    /// Executes a `drop` instruction `[target, callee]`: if `target`'s pointee is initialized, runs
+    /// Executes a `drop` operation `[target, callee]`: if `target`'s pointee is initialized, runs
     /// the `Value::drop` `callee` on it and leaves the cell uninitialized.
     fn exec_drop(
         &mut self,
-        slots: &mut FxHashMap<ssa::Value, Binding>,
-        operands: &[ssa::Value],
+        slots: &mut FxHashMap<mir::Value, Binding>,
+        operands: &[mir::Value],
         span: Location,
     ) -> Result<(), RuntimeError> {
         let target = self.place_operand(slots, &operands[0]);
@@ -911,7 +857,7 @@ impl<'a> Interpreter<'a> {
             }
         } else {
             // Delegate to the HIR interpreter with the callee's module given explicitly; the
-            // delegate rotates its own ambient module internally, so the SSA interpreter never
+            // delegate rotates its own ambient module internally, so the MIR interpreter never
             // touches `ctx.module_id` (its IR is fully module-resolved).
             self.ctx
                 .call_resolved_function_with_extra(
@@ -947,10 +893,10 @@ impl<'a> Interpreter<'a> {
         drop_result
     }
 
-    /// Executes a `call` instruction whose operands are `[callee, args.., return-out-pointer]`.
+    /// Executes a `call` operation whose operands are `[callee, args.., return-out-pointer]`.
     ///
-    /// Per the `call` contract (see [`ssa::Instruction::call`]), the callee operand is either a
-    /// constant [`ssa::Value::Function`] (a direct static call) or the **place** of a first-class
+    /// Per the `call` contract (see [`mir::Operation::call`]), the callee operand is either a
+    /// constant [`mir::Value::Function`] (a direct static call) or the **place** of a first-class
     /// function value — a function variable, a closure, or a method slot projected out of a
     /// dictionary/witness table. The function value is read *by reference* and never loaded into a
     /// register, so a non-trivially-copyable closure environment is never copied or moved. A bare
@@ -959,15 +905,15 @@ impl<'a> Interpreter<'a> {
     /// leaving the closure itself in place for its scope-cleanup drop.
     fn exec_call(
         &mut self,
-        slots: &mut FxHashMap<ssa::Value, Binding>,
-        operands: &[ssa::Value],
+        slots: &mut FxHashMap<mir::Value, Binding>,
+        operands: &[mir::Value],
         span: Location,
     ) -> Result<(), RuntimeError> {
         let arg_ops = &operands[1..];
         let callee_op = &operands[0];
 
         // A constant function reference is a direct (bare) call.
-        if let ssa::Value::Function(r) = callee_op {
+        if let mir::Value::Function(r) = callee_op {
             return self.exec_resolved_call(
                 slots,
                 r.module,
@@ -1001,16 +947,16 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    /// Executes a `project` instruction `[callee, args.., ret-out]`: runs the `YieldedOnce` accessor
+    /// Executes a `project` operation `[callee, args.., ret-out]`: runs the `YieldedOnce` accessor
     /// `callee` to its `yield`, keeping the accessor frame live, and binds `def` to the exposed
     /// yielded place plus the suspended frame (a [`Binding::Projected`]). Mirrors the HIR
     /// interpreter's `call_accessor_until_yield`: the call depth incremented here stays held until the
     /// matching `end_project` resumes the slide and tears the frame down.
     fn exec_project(
         &mut self,
-        slots: &mut FxHashMap<ssa::Value, Binding>,
-        operands: &[ssa::Value],
-        def: ssa::Value,
+        slots: &mut FxHashMap<mir::Value, Binding>,
+        operands: &[mir::Value],
+        def: mir::Value,
         _ty: Type,
         span: Location,
     ) -> Result<(), RuntimeError> {
@@ -1020,7 +966,7 @@ impl<'a> Interpreter<'a> {
         // bindings exactly as `exec_closure_call` prepends a closure's (a subscript member carries
         // no captured environment).
         let (key, leading) = match &operands[0] {
-            ssa::Value::Function(r) => (
+            mir::Value::Function(r) => (
                 FunctionKey {
                     module: r.module,
                     identity: r.function,
@@ -1098,7 +1044,7 @@ impl<'a> Interpreter<'a> {
             for op in extra_ops {
                 let arg = if let Some(id) = self.try_dict_operand(slots, op) {
                     ValOrMut::Dictionary(id)
-                } else if let ssa::Value::Subscript(id) = op {
+                } else if let mir::Value::Subscript(id) = op {
                     ValOrMut::Val(Value::subscript(*id))
                 } else {
                     ValOrMut::Mut(self.place_operand(slots, op))
@@ -1141,11 +1087,11 @@ impl<'a> Interpreter<'a> {
         // script branch of `exec_resolved_call` (an extra parameter binds to its interned dictionary
         // or by-pointer place; every other operand, including the unused return out-pointer, binds to
         // its place).
-        let param_tags: Vec<ssa::ParameterTag> = self
+        let param_tags: Vec<mir::ParameterKind> = self
             .function(key)
             .parameters()
             .iter()
-            .map(|p| p.tag)
+            .map(|p| p.kind)
             .collect();
         let arg_ops = &operands[1..];
         let offset = leading.len();
@@ -1153,7 +1099,7 @@ impl<'a> Interpreter<'a> {
         args.extend(leading);
         for (k, op) in arg_ops.iter().enumerate() {
             let binding = match param_tags.get(offset + k) {
-                Some(ssa::ParameterTag::Dictionary) => self.evidence_binding(slots, op, span)?,
+                Some(mir::ParameterKind::Dictionary) => self.evidence_binding(slots, op, span)?,
                 _ => Binding::Place(self.place_operand(slots, op)),
             };
             args.push(binding);
@@ -1182,15 +1128,14 @@ impl<'a> Interpreter<'a> {
         self.ctx.call_depth += 1;
         let frame_top = self.ctx.environment.len();
         let func = self.function(key);
-        let mut acc_slots: FxHashMap<ssa::Value, Binding> = FxHashMap::default();
+        let mut acc_slots: FxHashMap<mir::Value, Binding> = FxHashMap::default();
         for (i, b) in args.into_iter().enumerate() {
-            acc_slots.insert(ssa::Value::Parameter(ssa::ParameterId::from_index(i)), b);
+            acc_slots.insert(mir::Value::Parameter(mir::ParameterId::from_index(i)), b);
         }
-        match self.run_loop(func, acc_slots, func.entry(), 0) {
+        match self.run_loop(func, acc_slots, func.entry()) {
             Ok(FrameOutcome::Suspended {
                 place,
                 block,
-                idx,
                 slots: acc_slots,
             }) => {
                 // Keep the depth incremented: the accessor frame is still live (resumed at
@@ -1202,7 +1147,6 @@ impl<'a> Interpreter<'a> {
                         frame: Box::new(SuspendedFrame {
                             key,
                             block,
-                            idx,
                             slots: acc_slots,
                             frame_top,
                         }),
@@ -1228,9 +1172,9 @@ impl<'a> Interpreter<'a> {
     /// place-carried evidence — is kept with its tag.
     #[cfg(debug_assertions)]
     fn call_boundary(
-        tags: &[ssa::ParameterTag],
+        tags: &[mir::ParameterKind],
         args: &[Binding],
-    ) -> Vec<(ssa::ParameterTag, Place)> {
+    ) -> Vec<(mir::ParameterKind, Place)> {
         tags.iter()
             .zip(args)
             .filter_map(|(tag, binding)| match binding {
@@ -1240,13 +1184,13 @@ impl<'a> Interpreter<'a> {
             .collect()
     }
 
-    /// Asserts the storage-state contract at a script-call boundary (debug only; `doc/ssa-ir.md`
+    /// Asserts the storage-state contract at a script-call boundary (debug only; `doc/mir-ir.md`
     /// §4.3): a `&mut`/`&`/trivial-copy argument points at a **live** value both before and after the
     /// call; the return out-pointer is **fresh** (an uninitialized husk, or a unit cell that carries
     /// nothing to drop) before the call and **fully initialized** when the callee returns normally.
     /// Evidence (an interned dictionary) is not value storage and is skipped.
     #[cfg(debug_assertions)]
-    fn check_call_boundary(&self, boundary: &[(ssa::ParameterTag, Place)], phase: CallPhase) {
+    fn check_call_boundary(&self, boundary: &[(mir::ParameterKind, Place)], phase: CallPhase) {
         for (tag, place) in boundary {
             // Read the pointee. A place that projects through (or ends at) uninitialized storage has
             // no value to read — `boundary_pointee` returns `None`, which the check treats as a husk
@@ -1254,25 +1198,25 @@ impl<'a> Interpreter<'a> {
             let is_husk = self.boundary_pointee(place).is_none_or(is_drop_husk);
             match tag {
                 // A `&mut`/`&`/trivial-copy argument must point at a live value, before and after.
-                ssa::ParameterTag::Parameter(passing) => assert!(
+                mir::ParameterKind::Parameter(passing) => assert!(
                     !is_husk,
-                    "SSA call boundary: an argument passed as {passing:?} is a husk {phase} the \
+                    "MIR call boundary: an argument passed as {passing:?} is a husk {phase} the \
                      call; a `&mut`/`&`/trivial-copy argument must point at a live value",
                 ),
                 // The return out-pointer must be fully initialized when the callee returns normally.
-                // There is no dynamic precondition on `@ret` here: the caller-side SSA ownership
+                // There is no dynamic precondition on `@ret` here: the caller-side MIR ownership
                 // analysis checks identifiable result storage, and opaque caller-owned storage is a
                 // calling-convention contract.
-                ssa::ParameterTag::Return => {
+                mir::ParameterKind::Return => {
                     if matches!(phase, CallPhase::After) {
                         assert!(
                             !is_husk,
-                            "SSA call boundary: the return out-pointer must be fully initialized when \
+                            "MIR call boundary: the return out-pointer must be fully initialized when \
                              the callee returns normally",
                         );
                     }
                 }
-                ssa::ParameterTag::Dictionary => {}
+                mir::ParameterKind::Dictionary => {}
             }
         }
     }
@@ -1323,12 +1267,12 @@ impl<'a> Interpreter<'a> {
     #[allow(clippy::too_many_arguments)]
     fn exec_resolved_call(
         &mut self,
-        slots: &mut FxHashMap<ssa::Value, Binding>,
+        slots: &mut FxHashMap<mir::Value, Binding>,
         callee_module: ModuleId,
         callee_identity: LocalFunctionId,
         leading: Vec<Binding>,
         closure_env_len: usize,
-        arg_ops: &[ssa::Value],
+        arg_ops: &[mir::Value],
         span: Location,
     ) -> Result<(), RuntimeError> {
         let key = FunctionKey {
@@ -1349,11 +1293,11 @@ impl<'a> Interpreter<'a> {
             // other parameter binds to its by-pointer place. Classifying by the callee's tag (rather
             // than guessing from the operand's runtime binding) is essential: a value operand must
             // bind as a place even if it could superficially resolve to a dictionary.
-            let param_tags: Vec<ssa::ParameterTag> = self
+            let param_tags: Vec<mir::ParameterKind> = self
                 .function(key)
                 .parameters()
                 .iter()
-                .map(|p| p.tag)
+                .map(|p| p.kind)
                 .collect();
             let offset = leading.len();
             let mut args: Vec<Binding> = Vec::with_capacity(offset + arg_ops.len());
@@ -1365,14 +1309,14 @@ impl<'a> Interpreter<'a> {
                     // `Dictionary` tag, so the operand disambiguates them. A non-extra
                     // (visible/return) parameter is always a by-pointer place, never reinterpreted
                     // as a dictionary.
-                    Some(ssa::ParameterTag::Dictionary) => {
+                    Some(mir::ParameterKind::Dictionary) => {
                         self.evidence_binding(slots, op, span)?
                     }
                     _ => Binding::Place(self.place_operand(slots, op)),
                 };
                 args.push(binding);
             }
-            // Check the storage-state contract at the call boundary (debug only; see `doc/ssa-ir.md`
+            // Check the storage-state contract at the call boundary (debug only; see `doc/mir-ir.md`
             // §4.3). Only the *visible* operand arguments and the return out-pointer are checked: the
             // leading closure-environment slots (`[..offset]`) are excluded, because the body may
             // legitimately consume a captured value, leaving its (per-call cloned) slot a husk.
@@ -1407,12 +1351,12 @@ impl<'a> Interpreter<'a> {
     #[allow(clippy::too_many_arguments)]
     fn exec_resolved_native_call(
         &mut self,
-        slots: &mut FxHashMap<ssa::Value, Binding>,
+        slots: &mut FxHashMap<mir::Value, Binding>,
         callee_module: ModuleId,
         callee_identity: LocalFunctionId,
         leading: Vec<Binding>,
         closure_env_len: usize,
-        arg_ops: &[ssa::Value],
+        arg_ops: &[mir::Value],
         span: Location,
     ) -> Result<(), RuntimeError> {
         let module = self.session.expect_fresh_module(callee_module);
@@ -1472,7 +1416,7 @@ impl<'a> Interpreter<'a> {
         for op in extra_ops {
             let arg = if let Some(id) = self.try_dict_operand(slots, op) {
                 ValOrMut::Dictionary(id)
-            } else if let ssa::Value::Subscript(id) = op {
+            } else if let mir::Value::Subscript(id) = op {
                 ValOrMut::Val(Value::subscript(*id))
             } else {
                 ValOrMut::Mut(self.place_operand(slots, op))
@@ -1490,7 +1434,7 @@ impl<'a> Interpreter<'a> {
         }
 
         // Delegate to the HIR interpreter with the callee's module given explicitly; the delegate
-        // rotates its own ambient module internally, so the SSA interpreter never touches
+        // rotates its own ambient module internally, so the MIR interpreter never touches
         // `ctx.module_id` (its IR is fully module-resolved).
         let result = self.ctx.call_resolved_function_with_extra(
             FunctionId {
@@ -1517,9 +1461,9 @@ impl<'a> Interpreter<'a> {
     /// by its scope cleanup), so it survives repeated calls.
     fn exec_closure_call(
         &mut self,
-        slots: &mut FxHashMap<ssa::Value, Binding>,
+        slots: &mut FxHashMap<mir::Value, Binding>,
         place: &Place,
-        arg_ops: &[ssa::Value],
+        arg_ops: &[mir::Value],
         span: Location,
     ) -> Result<(), RuntimeError> {
         let (module_id, function_id, hidden_args, env_len, env_dict, env_ptr) = {
@@ -1564,7 +1508,7 @@ impl<'a> Interpreter<'a> {
         // Clone the captured environment into a fresh environment temporary. `env_ptr` points into
         // the closure's heap box (stable across `environment` growth).
         // Check before cloning so a limit failure cannot leave a freshly cloned managed
-        // environment requiring semantic cleanup outside SSA's explicit drop path.
+        // environment requiring semantic cleanup outside MIR's explicit drop path.
         self.check_environment_cell_capacity(span)?;
         let cloned_env = match env_dict {
             // SAFETY: `env_ptr` targets the closure's environment, which lives in its heap box (stable
@@ -1625,7 +1569,7 @@ impl<'a> Interpreter<'a> {
                         Err(err) => {
                             // A non-returning semantic drop leaves its target live or partially dropped.
                             // Reclaim the temporary's Rust backing storage explicitly before
-                            // `restore_stack`: the stack-restore assertion is reserved for genuine SSA
+                            // `restore_stack`: the stack-restore assertion is reserved for genuine MIR
                             // lowering leaks, not an already-observed cleanup failure.
                             self.discard_place_storage(&target);
                             Err(err)
@@ -1651,8 +1595,8 @@ impl<'a> Interpreter<'a> {
     /// symbolic `env_dict` operand becomes the `Value` dictionary that clones/drops that environment.
     fn exec_build_closure(
         &mut self,
-        slots: &mut FxHashMap<ssa::Value, Binding>,
-        operands: &[ssa::Value],
+        slots: &mut FxHashMap<mir::Value, Binding>,
+        operands: &[mir::Value],
         function: &FunctionId,
         num_hidden_dicts: usize,
         has_env_dict: bool,
@@ -1699,8 +1643,8 @@ impl<'a> Interpreter<'a> {
     /// `eval::eval_clone_closure_env`, and returns the fresh closure value.
     fn exec_clone_closure_env(
         &mut self,
-        slots: &FxHashMap<ssa::Value, Binding>,
-        operand: &ssa::Value,
+        slots: &FxHashMap<mir::Value, Binding>,
+        operand: &mir::Value,
         span: Location,
     ) -> Result<Value, RuntimeError> {
         let place = self.place_operand(slots, operand);
@@ -1741,8 +1685,8 @@ impl<'a> Interpreter<'a> {
     /// `eval::eval_drop_closure_env`.
     fn exec_drop_closure_env(
         &mut self,
-        slots: &FxHashMap<ssa::Value, Binding>,
-        operand: &ssa::Value,
+        slots: &FxHashMap<mir::Value, Binding>,
+        operand: &mir::Value,
         span: Location,
     ) -> Result<(), RuntimeError> {
         let place = self.place_operand(slots, operand);
@@ -1774,16 +1718,16 @@ impl<'a> Interpreter<'a> {
         Ok(())
     }
 
-    /// Resolves a `drop` instruction's callee operand to the `(module, function)` it targets, per the
+    /// Resolves a `drop` operation's callee operand to the `(module, function)` it targets, per the
     /// same contract as `call`: either a constant function reference or the **place** of a function
     /// value (e.g. a `Value::drop` method slot projected out of a dictionary), read *by reference*
     /// and never consumed.
     fn callee_target(
         &mut self,
-        slots: &mut FxHashMap<ssa::Value, Binding>,
-        op: &ssa::Value,
+        slots: &mut FxHashMap<mir::Value, Binding>,
+        op: &mir::Value,
     ) -> (ModuleId, LocalFunctionId) {
-        if let ssa::Value::Function(r) = op {
+        if let mir::Value::Function(r) = op {
             return (r.module, r.function);
         }
         let place = self.place_operand(slots, op);
@@ -1811,7 +1755,7 @@ impl<'a> Interpreter<'a> {
             // through `aggregate_husk` so a zero-field aggregate (an empty `struct`/record) collapses
             // to a flat `Uninit` rather than `Tuple([])`: never-constructed storage must read back as
             // a husk, while `Tuple([])` is reserved for a *live* empty aggregate written explicitly at
-            // construction (see `doc/ssa-uninit-tracking.md`).
+            // construction (see `doc/mir-uninit-tracking.md`).
             TypeKind::Tuple(elems) => aggregate_husk(
                 elems
                     .iter()
@@ -1896,10 +1840,10 @@ impl<'a> Interpreter<'a> {
 
     /// Reclaims the interpreter backing storage of a completed or unwound script frame.
     ///
-    /// SSA cleanup has already performed the frame's semantic drops. Scratch cells may nevertheless
+    /// MIR cleanup has already performed the frame's semantic drops. Scratch cells may nevertheless
     /// contain abandoned partial constructions when evaluation transferred before producing a value;
     /// reclaiming their Rust storage mirrors `EvalCtx::truncate_environment_storage` in the HIR
-    /// interpreter and is distinct from an SSA `stack_restore`, whose live-resource assertion checks
+    /// interpreter and is distinct from a MIR `stack_restore`, whose live-resource assertion checks
     /// an explicit lowering contract.
     fn reclaim_frame_storage(&mut self, frame_top: usize) {
         self.ctx.truncate_environment_storage(frame_top);
@@ -1919,17 +1863,17 @@ impl<'a> Interpreter<'a> {
 
     /// Reclaims register-owned interpreter storage after a frame has become inactive.
     ///
-    /// Register ownership and consumption are verified from SSA before execution. Raw reclamation
+    /// Register ownership and consumption are verified from MIR before execution. Raw reclamation
     /// here only frees the boxed reference-interpreter representation; it makes no semantic
     /// ownership decision. An open projection remains invalid because its accessor epilogue is
     /// semantic cleanup and must have run through an unwind edge before the frame exits.
-    fn discard_inactive_bindings(&mut self, slots: FxHashMap<ssa::Value, Binding>) {
+    fn discard_inactive_bindings(&mut self, slots: FxHashMap<mir::Value, Binding>) {
         for binding in slots.into_values() {
             match binding {
                 Binding::Value(value) => value.discard_storage(),
                 Binding::Projected { .. } => {
                     panic!(
-                        "SSA frame exited with an open projection; its `end_project` cleanup edge \
+                        "MIR frame exited with an open projection; its `end_project` cleanup edge \
                          was not executed"
                     )
                 }
@@ -1938,13 +1882,13 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    /// Reclaims SSA-register-owned storage after poisoning without running Ferlium code.
+    /// Reclaims MIR-register-owned storage after poisoning without running Ferlium code.
     ///
     /// Ordinary values live in the shared environment, but closure construction and a few
-    /// instruction results can temporarily own boxed values in the register map. Open projections
+    /// operation results can temporarily own boxed values in the register map. Open projections
     /// additionally own suspended accessor frames. Pads normally consume both; poisoning bypasses
     /// pads, so host-controlled reclamation must visit these roots explicitly.
-    fn discard_bindings_after_poisoning(&mut self, slots: FxHashMap<ssa::Value, Binding>) {
+    fn discard_bindings_after_poisoning(&mut self, slots: FxHashMap<mir::Value, Binding>) {
         let mut suspended = Vec::new();
         for binding in slots.into_values() {
             match binding {
@@ -1973,7 +1917,7 @@ impl<'a> Interpreter<'a> {
     fn restore_stack(&mut self, marker: usize) {
         while self.ctx.environment.len() > marker {
             if let Some(ValOrMut::Val(v)) = self.ctx.environment.pop() {
-                // SSA ownership verification proves that stack restoration crosses no live
+                // MIR ownership verification proves that stack restoration crosses no live
                 // semantic drop obligation. This only frees the boxed interpreter representation.
                 v.discard_storage();
             }
@@ -1983,8 +1927,8 @@ impl<'a> Interpreter<'a> {
     /// Resolves a stack-marker operand to the saved `environment` length it carries.
     fn stack_marker_operand(
         &self,
-        slots: &FxHashMap<ssa::Value, Binding>,
-        v: &ssa::Value,
+        slots: &FxHashMap<mir::Value, Binding>,
+        v: &mir::Value,
     ) -> usize {
         match slots.get(v) {
             Some(Binding::StackMarker(m)) => *m,
@@ -1996,12 +1940,12 @@ impl<'a> Interpreter<'a> {
     /// constant `Dictionary(id)`, or a `Parameter`/`Register` bound to `Binding::Dictionary(id)`.
     fn try_dict_operand(
         &self,
-        slots: &FxHashMap<ssa::Value, Binding>,
-        v: &ssa::Value,
+        slots: &FxHashMap<mir::Value, Binding>,
+        v: &mir::Value,
     ) -> Option<TraitDictionaryId> {
         match v {
-            ssa::Value::Dictionary(id) => Some(*id),
-            ssa::Value::Register(_) | ssa::Value::Parameter(_) => match slots.get(v) {
+            mir::Value::Dictionary(id) => Some(*id),
+            mir::Value::Register(_) | mir::Value::Parameter(_) => match slots.get(v) {
                 Some(Binding::Dictionary(id)) => Some(*id),
                 _ => None,
             },
@@ -2009,15 +1953,15 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    /// Resolves a symbolic subscript operand — a constant [`ssa::Value::Subscript`] or the place of
+    /// Resolves a symbolic subscript operand — a constant [`mir::Value::Subscript`] or the place of
     /// a first-class subscript value (e.g. a forwarded evidence `@extra` parameter) — to its runtime
     /// [`SubscriptValue`], read non-consumingly.
     fn subscript_operand(
         &self,
-        slots: &FxHashMap<ssa::Value, Binding>,
-        v: &ssa::Value,
+        slots: &FxHashMap<mir::Value, Binding>,
+        v: &mir::Value,
     ) -> SubscriptValue {
-        if let ssa::Value::Subscript(id) = v {
+        if let mir::Value::Subscript(id) = v {
             return SubscriptValue::bare(*id);
         }
         let place = self.place_operand(slots, v);
@@ -2036,13 +1980,13 @@ impl<'a> Interpreter<'a> {
     /// anything else is already a place.
     fn evidence_binding(
         &mut self,
-        slots: &FxHashMap<ssa::Value, Binding>,
-        op: &ssa::Value,
+        slots: &FxHashMap<mir::Value, Binding>,
+        op: &mir::Value,
         span: Location,
     ) -> Result<Binding, RuntimeError> {
         if let Some(id) = self.try_dict_operand(slots, op) {
             Ok(Binding::Dictionary(id))
-        } else if let ssa::Value::Subscript(id) = op {
+        } else if let mir::Value::Subscript(id) = op {
             Ok(Binding::Place(
                 self.alloc_cell(Value::subscript(*id), span)?,
             ))
@@ -2055,17 +1999,17 @@ impl<'a> Interpreter<'a> {
     /// operand is not a dictionary.
     fn dict_operand(
         &self,
-        slots: &FxHashMap<ssa::Value, Binding>,
-        v: &ssa::Value,
+        slots: &FxHashMap<mir::Value, Binding>,
+        v: &mir::Value,
     ) -> TraitDictionaryId {
         self.try_dict_operand(slots, v)
             .unwrap_or_else(|| panic!("operand {v} is not a symbolic dictionary"))
     }
 
     /// Resolves a place-typed operand to its `Place`.
-    fn place_operand(&self, slots: &FxHashMap<ssa::Value, Binding>, v: &ssa::Value) -> Place {
+    fn place_operand(&self, slots: &FxHashMap<mir::Value, Binding>, v: &mir::Value) -> Place {
         match v {
-            ssa::Value::Register(_) | ssa::Value::Parameter(_) => match slots.get(v) {
+            mir::Value::Register(_) | mir::Value::Parameter(_) => match slots.get(v) {
                 Some(Binding::Place(p)) => p.clone(),
                 // An open scoped projection (a `project` result) is used as the place it exposes,
                 // exactly like a `Place` binding, until its `end_project` removes it.
@@ -2093,19 +2037,19 @@ impl<'a> Interpreter<'a> {
     /// of their register slot).
     fn value_operand(
         &mut self,
-        func: &ssa::Function,
-        slots: &mut FxHashMap<ssa::Value, Binding>,
-        v: &ssa::Value,
+        func: &mir::Function,
+        slots: &mut FxHashMap<mir::Value, Binding>,
+        v: &mir::Value,
     ) -> Value {
         match v {
-            ssa::Value::Register(_) | ssa::Value::Parameter(_) => match slots.get(v) {
+            mir::Value::Register(_) | mir::Value::Parameter(_) => match slots.get(v) {
                 // Reading an uninitialized register means a non-trivial value was already moved out
-                // by its consuming use and is being read again — a lowering bug, since SSA requires
+                // by its consuming use and is being read again — a lowering bug, since MIR requires
                 // exactly one consuming use. A trivially-copyable scalar/function takes the `Some`
                 // (copy) branch and leaves its slot intact, so it may be read any number of times.
                 Some(Binding::Value(Value::Uninit)) => panic!(
                     "value operand {v} read after being moved out: a non-trivial value register \
-                     must have exactly one consuming use (SSA mis-lowering)"
+                     must have exactly one consuming use (MIR mis-lowering)"
                 ),
                 Some(Binding::Value(val)) => match read_copy(val) {
                     Some(copy) => copy,
@@ -2130,21 +2074,21 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    /// Materializes a non-register SSA constant as a runtime value.
-    fn constant_value(&self, func: &ssa::Function, constant: &ssa::Value) -> Value {
+    /// Materializes a non-register MIR constant as a runtime value.
+    fn constant_value(&self, func: &mir::Function, constant: &mir::Value) -> Value {
         match constant {
-            ssa::Value::Constant(id) => func.constant(*id).representation.clone().into_value(),
-            ssa::Value::Function(r) => Value::function(*r),
-            ssa::Value::Dictionary(_) => panic!(
+            mir::Value::Constant(id) => func.constant(*id).representation.clone().into_value(),
+            mir::Value::Function(r) => Value::function(*r),
+            mir::Value::Dictionary(_) => panic!(
                 "a symbolic dictionary is evidence, not a value: it is consumed as a dictionary \
                  operand (see `dict_operand`)/call argument, never read with `value_operand`"
             ),
             // A bare static subscript materializes as a first-class subscript value (mirroring
             // `eval`'s `GetSubscript`, which yields `Value::subscript`).
-            ssa::Value::Subscript(id) => Value::subscript(*id),
-            ssa::Value::Pattern(_) => panic!("compile-time pattern data is not a runtime value"),
-            ssa::Value::Register(_) | ssa::Value::Parameter(_) => {
-                panic!("{constant} is not an SSA constant")
+            mir::Value::Subscript(id) => Value::subscript(*id),
+            mir::Value::Pattern(_) => panic!("compile-time pattern data is not a runtime value"),
+            mir::Value::Register(_) | mir::Value::Parameter(_) => {
+                panic!("{constant} is not a MIR constant")
             }
         }
     }
@@ -2153,13 +2097,13 @@ impl<'a> Interpreter<'a> {
     /// temporary Rust storage. Register/place operands remain borrowed and are never consumed.
     fn with_runtime_value<R>(
         &self,
-        func: &ssa::Function,
-        slots: &FxHashMap<ssa::Value, Binding>,
-        operand: &ssa::Value,
+        func: &mir::Function,
+        slots: &FxHashMap<mir::Value, Binding>,
+        operand: &mir::Value,
         use_value: impl FnOnce(&Value) -> R,
     ) -> R {
         match operand {
-            ssa::Value::Register(_) | ssa::Value::Parameter(_) => match slots.get(operand) {
+            mir::Value::Register(_) | mir::Value::Parameter(_) => match slots.get(operand) {
                 Some(Binding::Place(place)) => use_value(
                     place
                         .target_ref(&self.ctx)
@@ -2189,9 +2133,9 @@ impl<'a> Interpreter<'a> {
     }
 
     /// Returns the immutable literal representation carried by a pattern operand.
-    fn pattern_literal_operand(&self, operand: &ssa::Value) -> LiteralValue {
+    fn pattern_literal_operand(&self, operand: &mir::Value) -> LiteralValue {
         match operand {
-            ssa::Value::Pattern(value) => (**value).clone(),
+            mir::Value::Pattern(value) => (**value).clone(),
             other => panic!("comparison pattern operand {other} has no literal representation"),
         }
     }
@@ -2215,7 +2159,7 @@ impl<'a> Interpreter<'a> {
         std::mem::replace(slot, husk)
     }
 
-    /// Writes `v` into the cell denoted by `place`. A `store` **drops nothing**; SSA verification
+    /// Writes `v` into the cell denoted by `place`. A `store` **drops nothing**; MIR verification
     /// establishes that identifiable local storage carries no live semantic drop obligation.
     fn store(&mut self, v: Value, place: &Place) -> Result<(), RuntimeError> {
         // Generic (`alloca A`) storage starts flat-`Uninit`; a field store grows the enclosing
@@ -2232,7 +2176,7 @@ impl<'a> Interpreter<'a> {
 }
 
 /// Returns a representation copy of `v` iff the boxed interpreter representation may be duplicated
-/// by SSA `memcpy`.
+/// by MIR `memcpy`.
 ///
 /// Native opt-in leaves and tuple-backed tuples/records/named structs are copied recursively.
 /// Internal place pointers and bare function values are also representation-copyable even though
@@ -2286,7 +2230,7 @@ fn grow_value_to_path(value: &mut Value, path: &[isize]) {
     // skeleton so the field becomes addressable. (`Buffer`s and variant payloads are already
     // shaped, so only `Uninit` needs this.) The path is non-empty here (guarded above), so the
     // `Tuple` arm below immediately pushes at least one `Uninit` leaf: this never leaves a bare
-    // `Tuple([])`, upholding the empty-aggregate invariant (see `doc/ssa-uninit-tracking.md`).
+    // `Tuple([])`, upholding the empty-aggregate invariant (see `doc/mir-uninit-tracking.md`).
     if matches!(value, Value::Uninit) {
         *value = Value::tuple(Vec::<Value>::new());
     }
@@ -2317,7 +2261,7 @@ fn grow_value_to_path(value: &mut Value, path: &[isize]) {
 
 /// Wraps the husk skeletons of an aggregate's `fields` into a husk value.
 ///
-/// This is **the** chokepoint for the empty-aggregate invariant (see `doc/ssa-uninit-tracking.md`):
+/// This is **the** chokepoint for the empty-aggregate invariant (see `doc/mir-uninit-tracking.md`):
 /// a zero-field aggregate husk collapses to a flat `Uninit`, never `Tuple([])`. `Tuple([])` is
 /// reserved for a *live* empty aggregate (an empty `struct`/record), so no husk may ever be one —
 /// otherwise never-constructed or already-drained storage would look live and be dropped. Every
@@ -2340,7 +2284,7 @@ fn aggregate_husk(fields: Vec<Value>) -> Value {
 /// record liveness, so a live one is `Tuple([])` while a husked one is flat `Uninit`; the
 /// `!fields.is_empty()` guard keeps the vacuously-true `[].iter().all(..)` from misclassifying a
 /// constructed empty struct as a husk (which would skip its `Value::drop`, diverging from the HIR
-/// interpreter — see `doc/ssa-uninit-tracking.md`).
+/// interpreter — see `doc/mir-uninit-tracking.md`).
 fn is_drop_husk(v: &Value) -> bool {
     match v {
         Value::Uninit => true,
@@ -2363,7 +2307,7 @@ fn husk_like(v: &Value) -> Value {
 
 #[cfg(test)]
 mod husk_invariant_tests {
-    //! Pins the empty-aggregate invariant of `doc/ssa-uninit-tracking.md`: a husk is never
+    //! Pins the empty-aggregate invariant of `doc/mir-uninit-tracking.md`: a husk is never
     //! `Tuple([])`, which is reserved for a *live* empty aggregate.
     use super::{aggregate_husk, husk_like, is_drop_husk};
     use crate::hir::value::Value;

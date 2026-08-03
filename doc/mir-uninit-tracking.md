@@ -1,12 +1,14 @@
-# SSA storage initialization and drop tracking
+# MIR storage initialization and drop tracking
 
-SSA registers always contain values. Addressable storage is different: a local, temporary, return
+MIR registers always contain values. Addressable storage is different: a local, temporary, return
 slot, or aggregate field may be absent because it has not been initialized yet, has been moved, or
-has already been dropped. Cleanup must test that state so every live value is dropped at most once
-and, when semantic unwind completes, every still-live value is dropped.
+has already been dropped. Cleanup must test that state so every live value is dropped at most once.
+Ordinary completed cleanup drops every remaining obligation. If an accessor slide starts a source
+failure during inline cleanup, an error continuation runs the not-yet-started sibling actions and
+then the enclosing cleanup. The failed slide is absent on that edge and is never retried.
 
 This is an ownership property of storage, not a source-language `Option<T>`, and absence is not an
-`ssa::Value` operand. The SSA instructions make the relevant transitions explicit:
+`mir::Value` operand. MIR operations make the relevant transitions explicit:
 
 - `alloca` creates absent storage;
 - `store` initializes absent storage;
@@ -16,19 +18,19 @@ This is an ownership property of storage, not a source-language `Option<T>`, and
 - `clear` makes storage with no live semantic drop obligation absent without running semantic drop.
 
 The verifier derives this state for identifiable local places and product fields across normal and
-unwind edges. It joins ordinary ownership facts, while keeping different allocation frontiers and
-path-dependent stack-marker snapshots as separate alternatives. The state is analysis data, not part
-of `ssa::Function`.
+source-error edges. It joins ordinary ownership facts while retaining different allocation
+frontiers and path-dependent stack-marker snapshots as separate alternatives. The state is analysis
+data, not part of `mir::Function`.
 
 A machine backend may use that analysis to realize genuinely dynamic states with drop flags or
-bitsets, while eliminating flags proved constant. The SSA interpreter instead uses
+bitsets, while eliminating flags proved constant. The MIR interpreter instead uses
 `hir::Value::Uninit` inside its temporary boxed memory model as the concrete representation of an
-absent leaf. That interpreter detail is neither an SSA value kind nor part of the future dense-memory
+absent leaf. That interpreter detail is neither a MIR value kind nor part of the future dense-memory
 representation.
 
 ## Aggregate and empty storage
 
-The SSA lowering constructs, moves, and drops aggregates field by field. Consequently an aggregate
+The MIR lowering constructs, moves, and drops aggregates field by field. Consequently an aggregate
 slot can be partially initialized: some fields are present while others are absent. Initialization
 and cleanup are therefore recursive rather than one bit per whole aggregate.
 
@@ -59,11 +61,11 @@ cell like `bool` or `int`; lowering an immediate `()` initializes that cell norm
 
 ## Validation
 
-`ssa::verify` rejects identifiable overwrites, clears, moves, and stack restoration inconsistent
-with the derived state. See `doc/ssa-ir.md` for the complete verifier and call-boundary contracts.
+`mir::verify` rejects identifiable overwrites, clears, moves, and stack restoration inconsistent
+with the derived state. See `doc/mir-ir.md` for the complete verifier and call-boundary contracts.
 
 Physical allocation leak detection is a separate runtime concern. A future dense-memory
 implementation should account allocations in its runtime arena/allocator so instance teardown can
 prove that bytes and host resources were reclaimed. That complements this verifier: allocator
-accounting cannot prove that a required user-defined semantic drop ran, while SSA ownership analysis
+accounting cannot prove that a required user-defined semantic drop ran, while MIR ownership analysis
 cannot see arbitrary nested allocations made by a native runtime value.

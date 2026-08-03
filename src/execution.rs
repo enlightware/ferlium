@@ -12,12 +12,12 @@ use derive_new::new;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ExecutionTarget {
     Hir,
-    Ssa,
+    Mir,
 }
 
 impl ExecutionTarget {
     /// All execution targets, in canonical comparison order.
-    pub const ALL: [Self; 2] = [Self::Hir, Self::Ssa];
+    pub const ALL: [Self; 2] = [Self::Hir, Self::Mir];
 }
 
 /// Default fuel budget for interactive execution.
@@ -25,7 +25,7 @@ pub const DEFAULT_INTERACTIVE_FUEL_LIMIT: usize = 100_000;
 
 /// Backend-independent limits applied to one execution.
 ///
-/// HIR and SSA execution consume the same kinds of budget so selecting an execution backend does
+/// HIR and MIR execution consume the same kinds of budget so selecting an execution backend does
 /// not change a program's resource policy. Exceeding one of these limits poisons the current
 /// execution domain through the out-of-band sandbox-violation channel; it does not add the
 /// source-language `Fallible` effect or change a function's normal ABI. A `None` fuel limit disables
@@ -56,7 +56,7 @@ impl Default for ExecutionLimits {
     }
 }
 
-/// Limits specific to the boxed HIR and SSA reference interpreters.
+/// Limits specific to the boxed HIR and MIR reference interpreters.
 ///
 /// `environment_cell_limit` bounds entries in their shared [`EvalCtx`](crate::eval::EvalCtx)
 /// environment. A cell may indirectly own an arbitrary heap allocation, so this is a bookkeeping

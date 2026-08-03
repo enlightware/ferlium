@@ -91,7 +91,7 @@ fn bench_session() -> CompilerSession {
 
 fn bench_session_for_target(target: ExecutionTarget) -> (CompilerSession, ExecutionTarget) {
     let mut session = CompilerSession::new();
-    if target == ExecutionTarget::Ssa {
+    if target == ExecutionTarget::Mir {
         let std_id = session.std_module().module_id();
         session.prepare_execution_target(target, std_id);
     }
@@ -102,15 +102,15 @@ fn warm_initial_session_state() {
     drop(CompilerSession::new());
 }
 
-fn prepared_std_ssa_session() -> CompilerSession {
+fn prepared_std_mir_session() -> CompilerSession {
     let mut session = CompilerSession::new();
     let std_id = session.std_module().module_id();
-    session.prepare_execution_target(ExecutionTarget::Ssa, std_id);
+    session.prepare_execution_target(ExecutionTarget::Mir, std_id);
     session
 }
 
-fn warm_std_ssa_state() {
-    drop(prepared_std_ssa_session());
+fn warm_std_mir_state() {
+    drop(prepared_std_mir_session());
 }
 
 /// Drop benchmark-owned values after Gungraun has left the measured function.
@@ -155,17 +155,17 @@ fn bench_warm_session_load(_: ()) -> BenchOutput<()> {
 }
 
 #[library_benchmark(setup = bench_session, teardown = teardown_benchmark)]
-fn bench_std_ssa_build(mut session: CompilerSession) -> BenchOutput<()> {
+fn bench_std_mir_build(mut session: CompilerSession) -> BenchOutput<()> {
     let std_id = session.std_module().module_id();
-    measure(|| session.prepare_execution_target(ExecutionTarget::Ssa, std_id));
+    measure(|| session.prepare_execution_target(ExecutionTarget::Mir, std_id));
     BenchOutput {
         session,
         result: (),
     }
 }
 
-#[library_benchmark(setup = warm_std_ssa_state, teardown = teardown_benchmark)]
-fn bench_cached_std_ssa_session_load(_: ()) -> BenchOutput<()> {
+#[library_benchmark(setup = warm_std_mir_state, teardown = teardown_benchmark)]
+fn bench_cached_std_mir_session_load(_: ()) -> BenchOutput<()> {
     BenchOutput {
         session: measure(CompilerSession::new),
         result: (),
@@ -526,8 +526,8 @@ library_benchmark_group!(
     benchmarks = [
         bench_std_load,
         bench_warm_session_load,
-        bench_std_ssa_build,
-        bench_cached_std_ssa_session_load,
+        bench_std_mir_build,
+        bench_cached_std_mir_session_load,
         bench_user_code_compile_without_std_startup
     ]
 );

@@ -394,7 +394,7 @@ macro_rules! assert_val_eq {
     }};
 }
 
-/// Normalizes the *module id* of an SSA dictionary operand `dict(m<number>:i<number>)` — and
+/// Normalizes the *module id* of a MIR dictionary operand `dict(m<number>:i<number>)` — and
 /// likewise a subscript operand `subscript(m<number>:s<number>)` — to `dict(m<...>:i<number>)`:
 /// the module id is assigned by module load order (so it shifts as the std prelude grows), whereas
 /// the trailing impl/subscript id is an index within a fixed module and stays deterministic, so it
@@ -1129,14 +1129,14 @@ fn set_array_property_value_value_ref(value: &Value) {
 
 /// A snapshot of the harness's externally-mutable `@props` fixtures (`my_scope.my_var` and
 /// `my_scope.my_array`), used to give both backends the same preconditions in the fused
-/// HIR-and-SSA dual-run.
+/// HIR-and-MIR dual-run.
 ///
-/// That run executes one snippet through the HIR interpreter and then through the SSA interpreter in
+/// That run executes one snippet through the HIR interpreter and then through the MIR interpreter in
 /// a single pass. A snippet that mutates an `@props` fixture (e.g. `@props::my_scope.my_var += 1`)
-/// would otherwise apply that effect twice — once per backend — so the SSA run would start from the
+/// would otherwise apply that effect twice — once per backend — so the MIR run would start from the
 /// state the HIR run left behind, the two results would diverge spuriously, and the residual state
 /// would be doubly applied. Capturing the fixtures before the HIR run and restoring them before the
-/// SSA run lets both backends observe the same starting state and leaves exactly one logical
+/// MIR run lets both backends observe the same starting state and leaves exactly one logical
 /// application of the effects behind (matching a single interpreter run). These fixtures are the
 /// only program-mutable external state in the harness; the `effects` module's natives are no-ops.
 struct PropertyFixtures {
@@ -1250,7 +1250,7 @@ pub struct TestSession {
 impl TestSession {
     /// Create a new test session with std, testing, effects and props modules registered.
     ///
-    /// Every snippet run through the session is executed on *both* the HIR and SSA interpreters,
+    /// Every snippet run through the session is executed on *both* the HIR and MIR interpreters,
     /// which are asserted to agree (see [`TestSession::try_compile_and_run_value`]).
     pub fn new() -> Self {
         let mut compiler_session = CompilerSession::new();
@@ -1400,13 +1400,13 @@ impl TestSession {
         self.session.compile(src, name, Path::single_str(name))
     }
 
-    pub fn emit_ssa(&mut self, src: &str) -> String {
-        self.session.emit_ssa("<test>", src)
+    pub fn emit_mir(&mut self, src: &str) -> String {
+        self.session.emit_mir("<test>", src)
     }
 
-    /// Lower `src` to SSA, interpret its `fn main`, and return the rendered result.
-    pub fn _eval_ssa(&mut self, src: &str) -> String {
-        self.session.eval_ssa("<test>", src)
+    /// Lower `src` to MIR, interpret its `fn main`, and return the rendered result.
+    pub fn _eval_mir(&mut self, src: &str) -> String {
+        self.session.eval_mir("<test>", src)
     }
 
     /// Compile the src and return its module and expression
@@ -1439,7 +1439,7 @@ impl TestSession {
 
         // Run the expression if any through *both* interpreters, asserting their outcomes agree:
         // equal values, matching structural runtime-error kinds, or matching cleanup-failure causes
-        // and retained cause kinds. Return the HIR result. Running both on every snippet gives the SSA
+        // and retained cause kinds. Return the HIR result. Running both on every snippet gives the MIR
         // backend full coverage, including the error path: a failing snippet exercises both
         // backends rather than short-circuiting on the HIR error.
         if let Some(expr) = expr {
@@ -1453,63 +1453,63 @@ impl TestSession {
                 .ty
                 .ret;
             let value = {
-                // Snapshot the externally-mutable `@props` fixtures so the SSA run observes the
+                // Snapshot the externally-mutable `@props` fixtures so the MIR run observes the
                 // same preconditions as the HIR run. Without this, a snippet that mutates a
                 // fixture would apply its effect twice (once per backend) and the two backends
                 // would diverge spuriously. See `PropertyFixtures`.
                 let fixtures = PropertyFixtures::capture();
-                let [hir_result, ssa_result] = ExecutionTarget::ALL.map(|target| {
+                let [hir_result, mir_result] = ExecutionTarget::ALL.map(|target| {
                     fixtures.restore();
                     self.session
                         .run_entry(target, module_id, expr, vec![])
                         .map_err(Error::Runtime)
                 });
-                match (&hir_result, &ssa_result) {
-                    (Ok(hir_value), Ok(ssa_value)) => {
-                        if let Err(message) = compare_values(ssa_value, hir_value, "value") {
-                            panic!("SSA backend diverged from the HIR interpreter: {message}");
+                match (&hir_result, &mir_result) {
+                    (Ok(hir_value), Ok(mir_value)) => {
+                        if let Err(message) = compare_values(mir_value, hir_value, "value") {
+                            panic!("MIR backend diverged from the HIR interpreter: {message}");
                         }
                     }
-                    (Err(Error::Runtime(hir_err)), Err(Error::Runtime(ssa_err))) => {
+                    (Err(Error::Runtime(hir_err)), Err(Error::Runtime(mir_err))) => {
                         assert_eq!(
-                            ssa_err.kind(),
+                            mir_err.kind(),
                             hir_err.kind(),
-                            "SSA backend raised a different runtime error than the HIR \
+                            "MIR backend raised a different runtime error than the HIR \
                              interpreter"
                         );
                         match (
                             hir_err.failure_during_cleanup(),
-                            ssa_err.failure_during_cleanup(),
+                            mir_err.failure_during_cleanup(),
                         ) {
-                            (Some(hir_failure), Some(ssa_failure)) => {
+                            (Some(hir_failure), Some(mir_failure)) => {
                                 assert_eq!(
-                                    ssa_failure.initial().kind(),
+                                    mir_failure.initial().kind(),
                                     hir_failure.initial().kind(),
-                                    "SSA retained a different initial failure than HIR"
+                                    "MIR retained a different initial failure than HIR"
                                 );
                                 assert_eq!(
-                                    ssa_failure.during_cleanup().kind(),
+                                    mir_failure.during_cleanup().kind(),
                                     hir_failure.during_cleanup().kind(),
-                                    "SSA retained a different cleanup failure than HIR"
+                                    "MIR retained a different cleanup failure than HIR"
                                 );
                             }
                             (None, None) => {}
                             _ => panic!(
-                                "SSA backend disagreed with HIR about whether the runtime error \
+                                "MIR backend disagreed with HIR about whether the runtime error \
                                  was a structured failure during cleanup"
                             ),
                         }
                     }
-                    (hir, ssa) => panic!(
-                        "SSA backend diverged from the HIR interpreter: one produced a value \
-                         and the other a runtime error (HIR: {hir:?}, SSA: {ssa:?})"
+                    (hir, mir) => panic!(
+                        "MIR backend diverged from the HIR interpreter: one produced a value \
+                         and the other a runtime error (HIR: {hir:?}, MIR: {mir:?})"
                     ),
                 }
-                // The SSA value was only compared against the HIR result; reclaim its heap
+                // The MIR value was only compared against the HIR result; reclaim its heap
                 // storage explicitly (a `Value` payload is `ManuallyDrop`, so a plain Rust drop
                 // frees nothing).
-                if let Ok(ssa_value) = ssa_result {
-                    ssa_value.discard_storage();
+                if let Ok(mir_value) = mir_result {
+                    mir_value.discard_storage();
                 }
                 hir_result?
             };

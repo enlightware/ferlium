@@ -11,7 +11,7 @@ use ::std::{cell::RefCell, fmt, rc::Rc, sync::LazyLock};
 use derive_new::new;
 use itertools::Itertools;
 
-use super::artifacts::{ModuleArtifacts, SsaArtifacts, ensure_ssa_artifacts};
+use super::artifacts::{MirArtifacts, ModuleArtifacts, ensure_mir_artifacts};
 
 use crate::{
     FxHashSet, Location, SourceId, SourceTable, ast, compilation_error,
@@ -20,7 +20,7 @@ use crate::{
     compiler::pipeline::{
         ModuleRef, compile_with_source_id, new_ast_arena_sized_from_source, parse_module_and_expr,
     },
-    define_id_type, emit_ssa,
+    define_id_type, emit_mir,
     eval::{ControlFlow, EvalCtx, RuntimeError, ValOrMut, eval_function_with_ctx},
     execution::{DEFAULT_INTERACTIVE_FUEL_LIMIT, ExecutionTarget, ReferenceInterpreterLimits},
     format::FormatWith,
@@ -245,10 +245,10 @@ impl ModuleEntry {
             .artifacts
     }
 
-    pub(crate) fn has_ssa_artifacts_for_any_state(&self) -> bool {
+    pub(crate) fn has_mir_artifacts_for_any_state(&self) -> bool {
         self.revision
             .as_ref()
-            .is_some_and(|revision| revision.artifacts.has_ssa())
+            .is_some_and(|revision| revision.artifacts.has_mir())
     }
 
     pub(crate) fn replace_revision_with_placeholder(
@@ -259,11 +259,11 @@ impl ModuleEntry {
             .replace(Rc::new(ModuleRevision::new(placeholder)))
     }
 
-    pub(crate) fn current_ssa(&self) -> Option<&SsaArtifacts> {
+    pub(crate) fn current_mir(&self) -> Option<&MirArtifacts> {
         if self.stale {
             return None;
         }
-        self.revision.as_ref()?.artifacts.ssa()
+        self.revision.as_ref()?.artifacts.mir()
     }
 
     pub(crate) fn new_fresh_with_artifacts(
@@ -304,7 +304,7 @@ impl fmt::Debug for ModuleInfo<'_> {
             .field("latest_deps", &self.latest_deps())
             .field("stale", &self.is_stale())
             .field("has_compiled_module", &self.has_compiled_module())
-            .field("has_ssa_artifacts", &self.has_ssa_artifacts())
+            .field("has_mir_artifacts", &self.has_mir_artifacts())
             .finish()
     }
 }
@@ -344,9 +344,9 @@ impl<'a> ModuleInfo<'a> {
         self.entry.revision.is_some()
     }
 
-    /// Return whether the current fresh module revision has complete SSA artifacts.
-    pub fn has_ssa_artifacts(&self) -> bool {
-        self.entry.current_ssa().is_some()
+    /// Return whether the current fresh module revision has complete MIR artifacts.
+    pub fn has_mir_artifacts(&self) -> bool {
+        self.entry.current_mir().is_some()
     }
 }
 
@@ -1050,48 +1050,48 @@ impl CompilerSession {
         )
     }
 
-    /// Compiles `src` with std-only uses and emits its SSA form. Panics on compilation failure;
+    /// Compiles `src` with std-only uses and emits its MIR form. Panics on compilation failure;
     /// for source that is already compiled (e.g. with custom uses), use
-    /// [`emit_ssa_module`](Self::emit_ssa_module) instead.
-    pub fn emit_ssa(&mut self, source_name: &str, src: &str) -> String {
+    /// [`emit_mir_module`](Self::emit_mir_module) instead.
+    pub fn emit_mir(&mut self, source_name: &str, src: &str) -> String {
         let p = module::Path::single_str(source_name);
         let i = self
-            .compile_for(ExecutionTarget::Ssa, src, source_name, p)
+            .compile_for(ExecutionTarget::Mir, src, source_name, p)
             .unwrap()
             .module_id;
-        self.emit_ssa_module(i)
+        self.emit_mir_module(i)
     }
 
-    /// Emits the SSA form of the already-compiled module `module_id`.
-    pub fn emit_ssa_module(&mut self, module_id: ModuleId) -> String {
-        self.prepare_execution_target(ExecutionTarget::Ssa, module_id);
+    /// Emits the MIR form of the already-compiled module `module_id`.
+    pub fn emit_mir_module(&mut self, module_id: ModuleId) -> String {
+        self.prepare_execution_target(ExecutionTarget::Mir, module_id);
         let entry = self.expect_module_entry(module_id);
         let module = entry.module().unwrap();
         let artifacts = entry
-            .current_ssa()
-            .expect("SSA preparation must install complete artifacts");
-        emit_ssa::emit_ssa(module, self.raw_modules(), artifacts)
+            .current_mir()
+            .expect("MIR preparation must install complete artifacts");
+        emit_mir::emit_mir(module, self.raw_modules(), artifacts)
     }
 
-    /// Lowers `src` to SSA and interprets its `fn main` entry, returning a textual rendering of the
-    /// result. Used to check that the SSA lowering is semantically correct.
+    /// Lowers `src` to MIR and interprets its `fn main` entry, returning a textual rendering of the
+    /// result. Used to check that the MIR lowering is semantically correct.
     ///
     /// The source must define a no-argument `fn main`; its lowered body (and the bodies of any
-    /// script functions it calls) is run by the SSA interpreter, while native (std) callees are
+    /// script functions it calls) is run by the MIR interpreter, while native (std) callees are
     /// delegated to the HIR interpreter.
-    pub fn eval_ssa(&mut self, source_name: &str, src: &str) -> String {
-        use crate::ssa::interpreter::Interpreter;
+    pub fn eval_mir(&mut self, source_name: &str, src: &str) -> String {
+        use crate::mir::interpreter::Interpreter;
 
         let p = module::Path::single_str(source_name);
         let module_id = self
-            .compile_for(ExecutionTarget::Ssa, src, source_name, p)
+            .compile_for(ExecutionTarget::Mir, src, source_name, p)
             .unwrap()
             .module_id;
         let (main_id, ret_ty) = {
             let module = self.expect_fresh_module(module_id);
             let main_id = module
                 .get_local_function_id(ustr::ustr("main"))
-                .expect("eval_ssa requires a `fn main` entry");
+                .expect("eval_mir requires a `fn main` entry");
             let ret_ty = module
                 .get_function_by_id(main_id)
                 .unwrap()
@@ -1105,7 +1105,7 @@ impl CompilerSession {
         let value = {
             let mut interp = Interpreter::new(module_id, self);
             interp.run_main(module_id, main_id).unwrap_or_else(|error| {
-                panic!("SSA interpretation raised a runtime error: {error:?}")
+                panic!("MIR interpretation raised a runtime error: {error:?}")
             })
         };
 
@@ -1114,7 +1114,7 @@ impl CompilerSession {
             return "()".to_string();
         }
         self.value_to_inspect_text(module_id, value, ret_ty)
-            .unwrap_or_else(|error| panic!("rendering SSA result failed: {error}"))
+            .unwrap_or_else(|error| panic!("rendering MIR result failed: {error}"))
     }
 
     /// Interpret an already-compiled entry through the selected reference backend.
@@ -1159,8 +1159,8 @@ impl CompilerSession {
                 )
                 .map(ControlFlow::into_value)
             }
-            ExecutionTarget::Ssa => {
-                use crate::ssa::interpreter::Interpreter;
+            ExecutionTarget::Mir => {
+                use crate::mir::interpreter::Interpreter;
                 let mut interp = Interpreter::with_limits(module_id, self, limits);
                 interp.run_entry(module_id, entry, arguments)
             }
@@ -1170,8 +1170,8 @@ impl CompilerSession {
     /// Ensure that `module_id` and its dependencies have the artifacts needed by `target`.
     /// Existing artifacts for the same module revision are reused.
     pub fn prepare_execution_target(&mut self, target: ExecutionTarget, module_id: ModuleId) {
-        if target == ExecutionTarget::Ssa {
-            ensure_ssa_artifacts(&self.modules, module_id);
+        if target == ExecutionTarget::Mir {
+            ensure_mir_artifacts(&self.modules, module_id);
         }
     }
 
@@ -1322,33 +1322,33 @@ mod tests {
     }
 
     #[test]
-    fn std_ssa_artifacts_are_shared_between_existing_and_future_sessions() {
+    fn std_mir_artifacts_are_shared_between_existing_and_future_sessions() {
         let mut first = CompilerSession::new();
         let second = CompilerSession::new();
 
-        first.prepare_execution_target(ExecutionTarget::Ssa, STD_MODULE_ID);
+        first.prepare_execution_target(ExecutionTarget::Mir, STD_MODULE_ID);
         let third = CompilerSession::new();
 
-        let first_ssa = first
+        let first_mir = first
             .modules
             .get(STD_MODULE_ID)
             .unwrap()
-            .current_ssa()
+            .current_mir()
             .unwrap();
-        let second_ssa = second
+        let second_mir = second
             .modules
             .get(STD_MODULE_ID)
             .unwrap()
-            .current_ssa()
+            .current_mir()
             .unwrap();
-        let third_ssa = third
+        let third_mir = third
             .modules
             .get(STD_MODULE_ID)
             .unwrap()
-            .current_ssa()
+            .current_mir()
             .unwrap();
-        assert!(std::ptr::eq(first_ssa, second_ssa));
-        assert!(std::ptr::eq(first_ssa, third_ssa));
+        assert!(std::ptr::eq(first_mir, second_mir));
+        assert!(std::ptr::eq(first_mir, third_mir));
     }
 
     fn module_snapshot(

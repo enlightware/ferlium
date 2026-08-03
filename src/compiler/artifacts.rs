@@ -11,58 +11,58 @@ use std::cell::OnceCell;
 
 use crate::{
     compiler::Modules,
-    emit_ssa::build_ssa_function,
+    emit_mir::build_mir_function,
+    mir,
     module::{LocalFunctionId, Module, ModuleEnv, ModuleId, id::Id},
-    ssa,
 };
 
 /// Backend output derived from one completed semantic module revision.
 #[derive(Default)]
 pub(crate) struct ModuleArtifacts {
-    ssa: OnceCell<SsaArtifacts>,
+    mir: OnceCell<MirArtifacts>,
 }
 
 impl std::fmt::Debug for ModuleArtifacts {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ModuleArtifacts")
-            .field("ssa_function_slots", &self.ssa.get().map(SsaArtifacts::len))
+            .field("mir_function_slots", &self.mir.get().map(MirArtifacts::len))
             .finish()
     }
 }
 
 impl ModuleArtifacts {
-    pub(crate) fn with_ssa(module: &Module, modules: &Modules) -> Self {
+    pub(crate) fn with_mir(module: &Module, modules: &Modules) -> Self {
         let artifacts = Self::default();
         artifacts
-            .ssa
-            .set(SsaArtifacts::build(module, modules))
-            .unwrap_or_else(|_| unreachable!("a new artifact set cannot already contain SSA"));
+            .mir
+            .set(MirArtifacts::build(module, modules))
+            .unwrap_or_else(|_| unreachable!("a new artifact set cannot already contain MIR"));
         artifacts
     }
 
-    pub(crate) fn has_ssa(&self) -> bool {
-        self.ssa.get().is_some()
+    pub(crate) fn has_mir(&self) -> bool {
+        self.mir.get().is_some()
     }
 
-    pub(crate) fn ssa(&self) -> Option<&SsaArtifacts> {
-        self.ssa.get()
+    pub(crate) fn mir(&self) -> Option<&MirArtifacts> {
+        self.mir.get()
     }
 
-    pub(crate) fn set_ssa(&self, ssa: SsaArtifacts) {
-        self.ssa
-            .set(ssa)
-            .unwrap_or_else(|_| panic!("SSA artifacts may only be installed once per revision"));
+    pub(crate) fn set_mir(&self, mir: MirArtifacts) {
+        self.mir
+            .set(mir)
+            .unwrap_or_else(|_| panic!("MIR artifacts may only be installed once per revision"));
     }
 }
 
-/// SSA bodies aligned one-for-one with a module's dense local function table.
+/// MIR bodies aligned one-for-one with a module's dense local function table.
 ///
-/// Native functions have no SSA body; every script function has exactly one.
-pub(crate) struct SsaArtifacts {
-    functions: Vec<Option<ssa::Function>>,
+/// Native functions have no MIR body; every script function has exactly one.
+pub(crate) struct MirArtifacts {
+    functions: Vec<Option<mir::Function>>,
 }
 
-impl SsaArtifacts {
+impl MirArtifacts {
     pub(crate) fn build(module: &Module, modules: &Modules) -> Self {
         let env = ModuleEnv::new(module, modules);
         let functions = (0..module.function_count())
@@ -75,13 +75,13 @@ impl SsaArtifacts {
                     .code
                     .as_ref()
                     .as_script()
-                    .map(|_| build_ssa_function(id, env))
+                    .map(|_| build_mir_function(id, env))
             })
             .collect();
         Self { functions }
     }
 
-    pub(crate) fn get(&self, id: LocalFunctionId) -> Option<&ssa::Function> {
+    pub(crate) fn get(&self, id: LocalFunctionId) -> Option<&mir::Function> {
         self.functions.get(id.as_index())?.as_ref()
     }
 
@@ -90,16 +90,16 @@ impl SsaArtifacts {
     }
 }
 
-/// Install complete SSA artifacts for a fresh module and all of its dependencies.
-pub(crate) fn ensure_ssa_artifacts(modules: &Modules, module_id: ModuleId) {
+/// Install complete MIR artifacts for a fresh module and all of its dependencies.
+pub(crate) fn ensure_mir_artifacts(modules: &Modules, module_id: ModuleId) {
     let entry = modules
         .get(module_id)
         .unwrap_or_else(|| panic!("module {module_id} is not registered"));
     assert!(
         !entry.stale,
-        "module {module_id} is stale and cannot receive current SSA artifacts"
+        "module {module_id} is stale and cannot receive current MIR artifacts"
     );
-    if entry.current_ssa().is_some() {
+    if entry.current_mir().is_some() {
         return;
     }
 
@@ -109,16 +109,16 @@ pub(crate) fn ensure_ssa_artifacts(modules: &Modules, module_id: ModuleId) {
         .deps()
         .collect::<Vec<_>>();
     for dependency in dependencies {
-        ensure_ssa_artifacts(modules, dependency);
+        ensure_mir_artifacts(modules, dependency);
     }
 
-    let ssa = {
+    let mir = {
         let module = modules
             .get(module_id)
             .unwrap()
             .module()
             .expect("a fresh module entry must contain its module");
-        SsaArtifacts::build(module, modules)
+        MirArtifacts::build(module, modules)
     };
-    modules.get(module_id).unwrap().artifacts().set_ssa(ssa);
+    modules.get(module_id).unwrap().artifacts().set_mir(mir);
 }

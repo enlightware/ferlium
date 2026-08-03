@@ -109,6 +109,9 @@ If a snapshot of a structurally `TrivialCopy` aggregate is needed, `CloneValue::
 Implementation note: HIR and native callables expose semantic argument conventions.
 Target-specific ABI lowering will derive scalar or indirect physical transport later.
 The interpreter's native-Rust bridge makes the analogous `T` versus `&T` extraction decision separately from `ArgConvention`; both Rust adapter forms can implement a Ferlium `Let` parameter.
+Current MIR keeps both semantic argument conventions as places and gives every function an
+unconditional return out-pointer, including functions returning `()`. This uniform executable MIR
+form is intentionally independent of the direct/indirect physical ABI chosen by a machine backend.
 
 ## Return value
 

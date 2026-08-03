@@ -675,7 +675,7 @@ impl<'a> EvalCtx<'a> {
     /// Calls the function `local_id` of `module_id` directly, taking the target module explicitly
     /// rather than resolving it from the ambient `self.module_id`.
     ///
-    /// This is the entry point for callers that already know the callee's module (such as the SSA
+    /// This is the entry point for callers that already know the callee's module (such as the MIR
     /// interpreter, whose IR is fully module-resolved): `call_function` rotates `self.module_id` in
     /// and out around the call internally, so the caller never has to save/restore the ambient
     /// module itself.
@@ -2119,11 +2119,11 @@ fn drop_owned_locals_on_error_from(
 /// forms the interpreters produce.
 ///
 /// The HIR interpreter resolves dictionaries to interned [`TraitDictionaryId`]s and dispatches
-/// methods through the compiler's impl arena. The SSA interpreter — whose IR is meant to lower to a
+/// methods through the compiler's impl arena. The MIR interpreter — whose IR is meant to lower to a
 /// real backend — instead materializes a dictionary as a *witness table*: a `Value::Tuple` of the
 /// dictionary's function values, reachable through a [`Place`]. Associated constants occupy
 /// zero-argument getter-function entries just like any other dictionary function. `DictArg` lets
-/// the shared `Value` helpers serve both forms without requiring the SSA backend to reconstruct an
+/// the shared `Value` helpers serve both forms without requiring the MIR backend to reconstruct an
 /// interned id (a compiler-arena handle that does not exist in compiled code).
 ///
 /// A bare [`TraitDictionaryId`] converts into the [`DictArg::Interned`] form, so existing HIR
@@ -2131,7 +2131,7 @@ fn drop_owned_locals_on_error_from(
 pub(crate) enum DictArg {
     /// An interned dictionary resolved through the compiler session (HIR interpreter form).
     Interned(TraitDictionaryId),
-    /// A place holding a materialized witness-table tuple (SSA interpreter form).
+    /// A place holding a materialized witness-table tuple (MIR interpreter form).
     Witness(Place),
 }
 
@@ -2166,7 +2166,7 @@ impl DictArg {
                         .map_err(|err| RuntimeError::new(err, Some(span)))?;
                     let entries = table
                         .as_tuple()
-                        .expect("an SSA witness-table dictionary is a tuple value");
+                        .expect("a MIR witness-table dictionary is a tuple value");
                     let function = entries[entry_index.as_index()]
                         .as_function()
                         .expect("a witness-table method entry is a function value");
@@ -3104,16 +3104,38 @@ fn eval_with_yielded(
             AccessorMemberEpilogue::None => cont(Value::unit()),
         }
     };
-    if epilogue_result.is_ok() {
-        for cleanup in epilogue.cleanup_scopes {
-            if let Err(err) = drop_cleanup_locals(ctx, locals, &cleanup, span) {
-                epilogue_result = Err(err);
-                break;
-            }
+    let cleanup_scopes = epilogue.cleanup_scopes;
+    epilogue_result = match epilogue_result {
+        // The accessor argument temporaries are pending cleanup after a successful slide.
+        Ok(result) if !body_poisoned_executor => {
+            drop_accessor_cleanup_scopes(ctx, locals, &cleanup_scopes, span).map(|()| result)
         }
-    }
+        // A slide failure after a successful body is the primary source failure. Continue its
+        // unwind through the accessor argument temporaries; a failure there poisons execution.
+        Err(err) if body_result.is_ok() && !err.is_poisoning() => Err(ctx
+            .cleanup_after_error(err, |ctx| {
+                drop_accessor_cleanup_scopes(ctx, locals, &cleanup_scopes, span)
+            })),
+        result => result,
+    };
     ctx.truncate_environment_storage(temp_start);
     combine_with_yielded_body_and_epilogue(ctx, body_result, epilogue_result)
+}
+
+/// Drops the temporary-owning block scopes wrapped around an accessor, innermost first.
+///
+/// Their actions are `Value::drop` calls and therefore source-infallible. A sandbox violation stops
+/// semantic cleanup; the subsequent environment truncation still reclaims their backing storage.
+fn drop_accessor_cleanup_scopes(
+    ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
+    cleanup_scopes: &[Vec<LocalDeclId>],
+    span: Location,
+) -> Result<(), RuntimeError> {
+    for cleanup in cleanup_scopes {
+        drop_cleanup_locals(ctx, locals, cleanup, span)?;
+    }
+    Ok(())
 }
 
 fn eval_accessor_until_yield(

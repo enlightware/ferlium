@@ -8,7 +8,7 @@ use crate::{
     types::r#type::Type,
 };
 
-/// A value in the SSA form of Ferlium.
+/// A value in the MIR form of Ferlium.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Value {
     /// A typed opaque HIR immediate in the containing function's constant pool.
@@ -16,7 +16,7 @@ pub enum Value {
 
     /// A symbolic trait dictionary, identified by the canonical handle of the impl that satisfies
     /// it. The dictionary is kept symbolic (an interned id) rather than materialized into a tuple
-    /// of trait-function values (including associated-constant getters); the SSA interpreter
+    /// of trait-function values (including associated-constant getters); the MIR interpreter
     /// dispatches through it via `DictArg::Interned`, and a later tuple-lowering pass (for a real
     /// backend) rebuilds the witness table from the impl arena. A *forwarded* dictionary (one a
     /// generic function received as an extra parameter) is instead represented by its `Parameter`.
@@ -24,7 +24,7 @@ pub enum Value {
 
     /// A symbolic first-class subscript (projection evidence), identified by the id of the
     /// subscript it references. Like a dictionary it is kept symbolic rather than materialized: the
-    /// SSA interpreter resolves members through it via `subscript_member`, and a later lowering
+    /// MIR interpreter resolves members through it via `subscript_member`, and a later lowering
     /// pass (for a real backend) materializes it as a member-table value. A *forwarded* subscript
     /// (one a generic function received as an extra parameter) is instead represented by the
     /// `Parameter` slot it arrives in, not by this variant.
@@ -36,10 +36,10 @@ pub enum Value {
     /// A parameter in the containing function's signature.
     Parameter(ParameterId),
 
-    /// A function-local result value defined by an instruction.
+    /// A function-local result value defined by an operation.
     Register(ValueId),
 
-    /// Compile-time pattern data used only by a `comp_eq` instruction.
+    /// Compile-time pattern data used only by a `comp_eq` operation.
     Pattern(B<LiteralValue>),
 }
 
@@ -62,17 +62,17 @@ impl fmt::Display for Value {
 }
 
 crate::define_id_type!(
-    /// The stable identity of a typed immediate in an SSA function's constant pool.
+    /// The stable identity of a typed immediate in a MIR function's constant pool.
     ConstantId
 );
 
 crate::define_id_type!(
-    /// The stable identity of a parameter in an SSA function's signature.
+    /// The stable identity of a parameter in a MIR function's signature.
     ParameterId
 );
 
 crate::define_id_type!(
-    /// The stable identity of an instruction result within an SSA function.
+    /// The stable identity of an operation result within a MIR function.
     ValueId
 );
 
@@ -104,7 +104,7 @@ impl FormatWith<ModuleEnv<'_>> for Value {
             Value::Function(id) => {
                 let module = env
                     .module_by_id(id.module)
-                    .expect("SSA function operand refers to an unavailable module");
+                    .expect("MIR function operand refers to an unavailable module");
                 let function = module
                     .get_function_name_by_id(id.function)
                     .unwrap_or_else(|| "<anonymous>".into());

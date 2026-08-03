@@ -145,9 +145,9 @@ fn dictionary_from_arg(arg: ValOrMut, ctx: &mut EvalCtx<'_>) -> Result<DictArg, 
         ValOrMut::Dictionary(dictionary) => Ok(DictArg::Interned(dictionary)),
         ValOrMut::Mut(place) => {
             // The HIR interpreter passes a dictionary by reference to a `ValOrMut::Dictionary`
-            // metadata entry; the SSA interpreter passes a reference to a materialized
+            // metadata entry; the MIR interpreter passes a reference to a materialized
             // witness-table tuple. Prefer the interned id when the place resolves to one, otherwise
-            // accept a place holding a tuple as the SSA witness table.
+            // accept a place holding a tuple as the MIR witness table.
             if let Some(dictionary) = try_dictionary_from_place(&place, ctx) {
                 Ok(DictArg::Interned(dictionary))
             } else if place

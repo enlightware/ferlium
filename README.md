@@ -60,7 +60,7 @@ The same `CompilerSession` API is what powers the [Playground](https://enlightwa
 * **Algebraic data, traits, modules.** Structural records and tagged unions, recursive algebraic data types (including equirecursive structural types), Rust-style new types over them, traits (type classes) with multi-parameter and associated-type support, row polymorphism, and a `module::name` / `use module::*;` system.
 * **Functional core.** First-class and anonymous functions with closures (capture by value), pattern matching for destructuring data, and `|>` pipelining for chained transformations.
 * **Host-controlled capabilities.** The language has no I/O, no FFI, no filesystem, and no network of its own. Every function a script can call is one the embedding application has explicitly registered. There is no `eval`, no dynamic loader — the host is the security boundary.
-* **Compile-time effect tracking.** Effects (`read`, `write`, `fallible`) are inferred per function and propagate through call chains. They show up in inferred signatures and diagnostics, so a reviewer can see at a glance whether a function only computes, touches host state, or might fail. Effects are compile-time information, not a runtime sandbox; runtime isolation is the host's responsibility.
+* **Compile-time effect tracking.** Effects (`read`, `write`, `fallible`) are inferred per function and propagate through call chains. They show up in inferred signatures and diagnostics, so a reviewer can see at a glance whether a function only computes, touches host state, or might fail. Effects are compile-time information, not a runtime sandbox; the host configures execution limits and remains responsible for its isolation boundary.
 
 ## Getting started
 
@@ -81,22 +81,22 @@ If your host application benefits from catching type errors before the script ru
 The integration story also differs from other Rust-embedded scripting engines:
 
 * **No native-type duplication.** Ferlium's intermediate representation does not re-declare primitives like `int` and `bool` as language constructs — they remain native Rust types throughout, which keeps host bindings lean.
-* **Direct binding to Rust functions.** Native Rust functions are exposed as Ferlium-callable functions through direct binding (interpreted today, with a small [ABI](doc/abi.md) planned alongside the SSA/WASM backend) — no value-conversion ritual, no generated glue.
+* **Direct binding to Rust functions.** Native Rust functions are exposed as Ferlium-callable functions through direct binding (interpreted today, with a small [ABI](doc/abi.md) planned alongside the MIR/WebAssembly backend) — no value-conversion ritual, no generated glue.
 * **Native value handles for host objects.** Host-owned objects can be wrapped as opaque Ferlium values and threaded through scripts — useful for game-engine entities, GPU resources, file descriptors, and the like — without copying.
 
 ### Performance roadmap
 
-Ferlium executes through its HIR tree-walking interpreter by default. It also has an SSA lowering and
+Ferlium executes through its HIR tree-walking interpreter by default. It also has a MIR lowering and
 reference interpreter, exercised alongside the HIR interpreter by the language test suite. A
 [Gungraun](https://gungraun.github.io/gungraun/latest/html/index.html)-based benchmark suite tracks
-instruction counts to catch regressions reliably. A WebAssembly backend is planned on top of SSA,
+instruction counts to catch regressions reliably. A WebAssembly backend is planned on top of MIR,
 with the goal of calling Rust-compiled-to-WebAssembly hosts with no FFI overhead.
 
 ### Current limitations
 
 Ferlium is pre-1.0; expect breaking changes in syntax, APIs, and standard library.
 
-* The SSA reference interpreter can be selected through the embedding API or the REPL's `--ssa`
+* The MIR reference interpreter can be selected through the embedding API or the REPL's `--mir`
   mode. The WebAssembly backend is not implemented yet.
 * The compiler is single-threaded — it currently panics if its interned type-universe lock is contended.
 * Dynamic dispatch is out of scope.

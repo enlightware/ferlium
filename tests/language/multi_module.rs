@@ -12,8 +12,8 @@ use ferlium::{
     CompilerSession, ExecutionTarget, Path,
     compiler::test_support::{
         module_compilation_revision, module_diagnostics_len, module_entry_exists,
-        module_has_compiled_version, module_has_ssa_artifacts, module_is_stale, module_latest_deps,
-        module_source_version, module_ssa_function_slots,
+        module_has_compiled_version, module_has_mir_artifacts, module_is_stale, module_latest_deps,
+        module_mir_function_slots, module_source_version,
     },
     hir::value::Value,
     module::{ModuleId, Visibility, id::Id},
@@ -1227,23 +1227,23 @@ fn module_source_versions_and_compilation_revisions_are_tracked() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn ssa_artifacts_follow_the_published_module_revision() {
+fn mir_artifacts_follow_the_published_module_revision() {
     let mut session = CompilerSession::new();
     let module_id = session
         .compile_for(
-            ExecutionTarget::Ssa,
+            ExecutionTarget::Mir,
             "fn value() -> int { 1 }",
             "artifacts",
             Path::single_str("artifacts"),
         )
-        .expect("initial SSA compile should succeed")
+        .expect("initial MIR compile should succeed")
         .module_id;
 
-    assert_eq!(module_has_ssa_artifacts(&session, module_id), Some(true));
-    assert_eq!(module_ssa_function_slots(&session, module_id), Some(1));
+    assert_eq!(module_has_mir_artifacts(&session, module_id), Some(true));
+    assert_eq!(module_mir_function_slots(&session, module_id), Some(1));
     let initial_revision = module_compilation_revision(&session, module_id).unwrap();
 
-    session.prepare_execution_target(ExecutionTarget::Ssa, module_id);
+    session.prepare_execution_target(ExecutionTarget::Mir, module_id);
     assert_eq!(
         module_compilation_revision(&session, module_id),
         Some(initial_revision),
@@ -1255,15 +1255,15 @@ fn ssa_artifacts_follow_the_published_module_revision() {
             module_id,
             "fn value() -> int { 2 } fn other() -> int { value() }",
         )
-        .expect("SSA-enabled recompilation should succeed");
-    assert_eq!(module_has_ssa_artifacts(&session, module_id), Some(true));
-    assert_eq!(module_ssa_function_slots(&session, module_id), Some(2));
+        .expect("MIR-enabled recompilation should succeed");
+    assert_eq!(module_has_mir_artifacts(&session, module_id), Some(true));
+    assert_eq!(module_mir_function_slots(&session, module_id), Some(2));
 
     session
         .update_module_source(module_id, "this is not valid Ferlium")
         .expect("failed source compilation is recorded in the module entry");
     assert_eq!(
-        module_has_ssa_artifacts(&session, module_id),
+        module_has_mir_artifacts(&session, module_id),
         Some(false),
         "stale entries must not expose old artifacts as current"
     );
@@ -1271,13 +1271,13 @@ fn ssa_artifacts_follow_the_published_module_revision() {
     session
         .update_module_source(module_id, "fn value() -> int { 3 }")
         .expect("a valid update should recover the module");
-    assert_eq!(module_has_ssa_artifacts(&session, module_id), Some(true));
-    assert_eq!(module_ssa_function_slots(&session, module_id), Some(1));
+    assert_eq!(module_has_mir_artifacts(&session, module_id), Some(true));
+    assert_eq!(module_mir_function_slots(&session, module_id), Some(1));
 }
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn ssa_compilation_prepares_script_dependencies() {
+fn mir_compilation_prepares_script_dependencies() {
     let mut session = CompilerSession::new();
     let base_id = session
         .compile(
@@ -1287,19 +1287,19 @@ fn ssa_compilation_prepares_script_dependencies() {
         )
         .expect("base should compile as HIR")
         .module_id;
-    assert_eq!(module_has_ssa_artifacts(&session, base_id), Some(false));
+    assert_eq!(module_has_mir_artifacts(&session, base_id), Some(false));
 
     let user_id = session
         .compile_for(
-            ExecutionTarget::Ssa,
+            ExecutionTarget::Mir,
             "fn main() -> int { base::value() + 1 }",
             "user",
             Path::single_str("user"),
         )
-        .expect("SSA user should compile")
+        .expect("MIR user should compile")
         .module_id;
-    assert_eq!(module_has_ssa_artifacts(&session, base_id), Some(true));
-    assert_eq!(module_has_ssa_artifacts(&session, user_id), Some(true));
+    assert_eq!(module_has_mir_artifacts(&session, base_id), Some(true));
+    assert_eq!(module_has_mir_artifacts(&session, user_id), Some(true));
 
     let main = session
         .expect_fresh_module(user_id)
@@ -1307,7 +1307,7 @@ fn ssa_compilation_prepares_script_dependencies() {
         .expect("user should define main");
     assert_val_eq!(
         session
-            .run_entry(ExecutionTarget::Ssa, user_id, main, vec![])
+            .run_entry(ExecutionTarget::Mir, user_id, main, vec![])
             .unwrap(),
         int(42)
     );

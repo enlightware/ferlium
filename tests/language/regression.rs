@@ -136,8 +136,8 @@ fn if_else_after_nested_block_expression() {
     );
 }
 
-// A fully concrete (monomorphic) snippet, so the SSA backend can lower it. Like every snippet run
-// through a `TestSession`, it executes on both the HIR and SSA interpreters, which must agree.
+// A fully concrete (monomorphic) snippet, so the MIR backend can lower it. Like every snippet run
+// through a `TestSession`, it executes on both the HIR and MIR interpreters, which must agree.
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn concrete_if_else_runs_on_both_backends() {
@@ -170,11 +170,11 @@ fn concrete_if_else_runs_on_both_backends() {
     );
 }
 
-// Value-capturing closures (no hidden dictionary evidence) lower to SSA and run on both backends.
+// Value-capturing closures (no hidden dictionary evidence) lower to MIR and run on both backends.
 // Each case captures by value and is called, exercising `build_closure`, the per-call environment
 // clone (so mutations of the captured outer binding after capture do not leak in), the statelessness
 // of repeated calls, and the deep copy of a captured mutable array. Generic / dictionary-carrying
-// closures (e.g. `|x| x`, `|x| x + b`) are not lowered to SSA yet and stay in the HIR-only
+// closures (e.g. `|x| x`, `|x| x + b`) are not lowered to MIR yet and stay in the HIR-only
 // `simple::lambda` / `simple::closures` tests.
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
@@ -204,7 +204,7 @@ fn value_capturing_closures_run_on_both_backends() {
     );
 }
 
-// Record field access on a *generic* (row-polymorphic) record lowers to SSA and runs on both
+// Record field access on a *generic* (row-polymorphic) record lowers to MIR and runs on both
 // backends. The field offset is a hidden field-index dictionary parameter, so `v.x` is a `ProjectAt`
 // projecting the base place at a run-time index (loaded from that parameter) — never a materialized
 // temporary, so the generic field type needs no `Value` layout witness. These exercise: the field
@@ -511,7 +511,7 @@ fn broad_generic_alias_does_not_recurse_while_formatting_error() {
 
 // A `break` whose value itself diverges (e.g. `break return x`) terminates the current block while
 // lowering that value. The `break` handler must then skip its own unwind / `stack_restore` / jump
-// to the loop exit, otherwise the SSA emitter panics with "insertion after terminator".
+// to the loop exit, otherwise the MIR emitter panics with "insertion after terminator".
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn break_with_diverging_value_does_not_insert_after_terminator() {

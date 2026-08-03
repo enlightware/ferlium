@@ -2197,8 +2197,8 @@ fn borrow_checker() {
 /// before it is read for the second field, yielding `(a.1, a.1)` instead of the swap.
 ///
 /// Both backends avoid this: the HIR interpreter's `eval_assign` materializes the whole value
-/// first, and the SSA emitter routes an assignment whose previous value needs a `Value::drop`
-/// through a fresh temporary (see `emit_ssa.rs` `K::Assign`). Every aggregate type carries a
+/// first, and the MIR emitter routes an assignment whose previous value needs a `Value::drop`
+/// through a fresh temporary (see `emit_mir.rs` `K::Assign`). Every aggregate type carries a
 /// generated `Value::drop` — only the scalar `TrivialCopy` types (`int`, `bool`, `()`) skip it —
 /// so an aggregate right-hand side always takes that swap-safe path. The test session runs each
 /// snippet through *both* backends and asserts they agree, so a regression in either fails here.

@@ -1035,7 +1035,7 @@ impl Module {
 
     /// Registers a compiler-owned native representation name that is visible only within this
     /// module. Unlike an unsafe native alias, this does not expose a source-level escape hatch; it
-    /// merely gives internal HIR/SSA types a stable qualified name for diagnostics and formatting.
+    /// merely gives internal HIR/MIR types a stable qualified name for diagnostics and formatting.
     pub(crate) fn add_private_bare_native_type_alias_str(
         &mut self,
         name: &str,

@@ -1,6 +1,6 @@
 # Runtime memory limits
 
-The HIR and SSA reference interpreters share a boxed evaluation environment.
+The HIR and MIR reference interpreters share a boxed evaluation environment.
 `ReferenceInterpreterLimits::environment_cell_limit` bounds its simultaneously live entries. This
 is useful for containing runaway frames and temporaries, but is not a memory quota: one cell can own
 a large string, buffer, closure environment, or native value.

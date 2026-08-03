@@ -3675,6 +3675,44 @@ fn named_subscript_slide_error_unwinds_caller_owned_locals() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn named_subscript_slide_error_cleans_accessor_argument_temporaries() {
+    let mut session = experimental_session();
+    let source = indoc! { r#"
+        struct Probe(int)
+
+        impl Value for Probe {
+            fn eq(left: Probe, right: Probe) -> bool { left.0 == right.0 }
+            fn to_string(value: Probe) -> string { to_string(value.0) }
+            fn hash(value: Probe, state: &mut hasher) { hash(value.0, state) }
+            fn clone(source: Probe) -> Probe { Probe(source.0) }
+            fn drop(target: &mut Probe) { testing::record_tracked_drop(target.0) }
+        }
+
+        subscript cell(slot: &mut int, marker: Probe) -> int {
+            mut {
+                let mut local = slot;
+                yield local;
+                let ignored = marker;
+                let slide_error = [0][1];
+            }
+        }
+
+        testing::reset_tracked_drops();
+        let mut slot = 5;
+        slot->[cell](Probe(7)) = 9
+    "# };
+
+    assert_eq!(
+        session.fail_run(source),
+        SourceFailureKind::Aborted(Some(
+            "Array access out of bounds: index 1 for length 1".to_string()
+        ))
+    );
+    assert_val_eq!(session.run("testing::tracked_drop_log()"), int(7));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn named_subscript_slide_error_during_unwind_poisons_without_outer_semantic_cleanup() {
     let mut session = experimental_session();
     let source = indoc! { r#"

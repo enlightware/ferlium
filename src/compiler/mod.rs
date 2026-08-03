@@ -13,7 +13,7 @@ pub mod error;
 mod pipeline;
 mod session;
 
-pub(crate) use artifacts::{ModuleArtifacts, SsaArtifacts};
+pub(crate) use artifacts::{MirArtifacts, ModuleArtifacts};
 pub use diagnostics::ModuleDiagnostic;
 pub use error::*;
 pub(crate) use pipeline::add_code_to_module_with_capabilities;
@@ -75,21 +75,21 @@ pub mod test_support {
         Some(session.modules().info(module_id)?.latest_deps().to_vec())
     }
 
-    pub fn module_has_ssa_artifacts(
+    pub fn module_has_mir_artifacts(
         session: &CompilerSession,
         module_id: ModuleId,
     ) -> Option<bool> {
-        Some(session.modules().info(module_id)?.has_ssa_artifacts())
+        Some(session.modules().info(module_id)?.has_mir_artifacts())
     }
 
-    pub fn module_ssa_function_slots(
+    pub fn module_mir_function_slots(
         session: &CompilerSession,
         module_id: ModuleId,
     ) -> Option<usize> {
         session
             .modules
             .get(module_id)?
-            .current_ssa()
-            .map(|ssa| ssa.len())
+            .current_mir()
+            .map(|mir| mir.len())
     }
 }

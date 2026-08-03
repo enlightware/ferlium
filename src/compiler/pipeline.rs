@@ -15,7 +15,7 @@ use crate::{
     Location, SourceId, SourceTable,
     ast::{self, PExprArena, UnstableCollector, VisitExpr},
     compilation_error,
-    compiler::artifacts::ensure_ssa_artifacts,
+    compiler::artifacts::ensure_mir_artifacts,
     compiler::diagnostics::diagnostics_from_error,
     compiler::error::{CompilationError, LocatedError},
     compiler::session::{
@@ -87,16 +87,16 @@ pub(crate) fn compile_with_source_id(
             .unwrap_or_else(|| panic!("module {id} has no registered path"))
             .clone(),
     };
-    let (module_id, old_revision, had_ssa, compilation_revision) = match &module_ref {
+    let (module_id, old_revision, had_mir, compilation_revision) = match &module_ref {
         ModuleRef::ByPath(path) => {
             if let Some((id, entry)) = modules.get_mut_by_name(path) {
                 let compilation_revision = entry.next_compilation_revision();
-                let had_ssa = entry.has_ssa_artifacts_for_any_state();
+                let had_mir = entry.has_mir_artifacts_for_any_state();
                 let old = entry.replace_revision_with_placeholder(Module::new(
                     next_module_id,
                     Path::single_str("$recompile_placeholder"),
                 ));
-                (id, old, had_ssa, compilation_revision)
+                (id, old, had_mir, compilation_revision)
             } else {
                 (
                     next_module_id,
@@ -108,22 +108,22 @@ pub(crate) fn compile_with_source_id(
         }
         ModuleRef::Existing(id) => {
             let id = *id;
-            let (old, had_ssa, compilation_revision) = modules.get_mut(id).map_or(
+            let (old, had_mir, compilation_revision) = modules.get_mut(id).map_or(
                 (None, false, CompilationRevision::from_index(0)),
                 |e| {
                     let compilation_revision = e.next_compilation_revision();
-                    let had_ssa = e.has_ssa_artifacts_for_any_state();
+                    let had_mir = e.has_mir_artifacts_for_any_state();
                     let old = e.replace_revision_with_placeholder(Module::new(
                         next_module_id,
                         Path::single_str("$recompile_placeholder"),
                     ));
-                    (old, had_ssa, compilation_revision)
+                    (old, had_mir, compilation_revision)
                 },
             );
-            (id, old, had_ssa, compilation_revision)
+            (id, old, had_mir, compilation_revision)
         }
     };
-    let build_ssa = target == ExecutionTarget::Ssa || had_ssa;
+    let build_mir = target == ExecutionTarget::Mir || had_mir;
     let src_info = ModuleSrcInfo::new(source_id, source_version, uses.clone());
 
     // Closure called on every compilation failure, to restore the old module and mark dependencies.
@@ -260,11 +260,11 @@ pub(crate) fn compile_with_source_id(
         }
     } else {
         // No stale deps — store the fresh module.
-        let artifacts = if build_ssa {
+        let artifacts = if build_mir {
             for dependency in &deps {
-                ensure_ssa_artifacts(modules, *dependency);
+                ensure_mir_artifacts(modules, *dependency);
             }
-            ModuleArtifacts::with_ssa(&module, modules)
+            ModuleArtifacts::with_mir(&module, modules)
         } else {
             ModuleArtifacts::default()
         };

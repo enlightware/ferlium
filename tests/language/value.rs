@@ -1325,10 +1325,10 @@ fn generic_value_drop_runs_on_runtime_error() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn fallible_value_clone_impl_is_rejected() {
-    // The SSA emitter lowers synthesized `Value::clone`/`Value::drop` calls as plain `call`s with no
+    // The MIR emitter lowers synthesized `Value::clone`/`Value::drop` calls as plain `call`s with no
     // cleanup-pad unwind edge. That is sound only because these methods cannot raise: a `Value` impl
     // whose `clone`/`drop` body is fallible is a compile error (the trait declares an empty effect
-    // row). This pins the invariant the SSA lowering relies on.
+    // row). This pins the invariant the MIR lowering relies on.
     let mut session = TestSession::new();
     session.fail_compilation(
         r#"
@@ -1349,7 +1349,7 @@ fn fallible_value_clone_impl_is_rejected() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn nested_scope_drops_run_innermost_first_on_runtime_error() {
     // An abort in an inner block unwinds through both scopes' cleanup pads: the inner local is
-    // dropped first, then the outer one. Runs under both backends, so the SSA landing-pad chain is
+    // dropped first, then the outer one. Runs under both backends, so the MIR landing-pad chain is
     // checked against the HIR interpreter's frame unwind.
     let mut session = TestSession::new();
     let source = format!(
@@ -1593,7 +1593,7 @@ fn value_impl_for_foreign_named_adt_is_rejected() {
     }
 }
 
-// Testing the callee-side parameter passing metadata used by SSA lowering,
+// Testing the callee-side parameter passing metadata used by MIR lowering,
 // as described in `doc/hir-ownership.md` ("Call Argument Passing").
 
 fn hir_has_cleanup(arena: &ENodeArena, expected_local: LocalDeclId) -> bool {
@@ -2740,7 +2740,7 @@ fn mutable_literal_initialized_local_drop_is_resolved_from_its_type() {
 }
 
 /// An empty `struct` whose `Value::drop` records a side effect. A zero-field aggregate has no
-/// run-time leaf in which to record liveness, so the SSA interpreter must distinguish a constructed
+/// run-time leaf in which to record liveness, so the MIR interpreter must distinguish a constructed
 /// value (represented as `Tuple([])`) from uninitialized/dropped storage (a flat `Uninit`) the same
 /// way the HIR interpreter does — these tests pin that down on both backends.
 const EMPTY_VALUE_STRUCT: &str = r#"
@@ -2774,7 +2774,7 @@ fn owned_empty_struct_is_dropped_once_at_scope_exit() {
 fn reassigned_mutable_literal_initialized_local_is_dropped_at_scope_exit() {
     // The end-to-end scenario behind the resolution rule above: after reassignment `s` owns
     // the `string_concat` result, which must be dropped each iteration before the loop reuses
-    // the local's storage. An ownership-explicit backend (e.g. the SSA lowering) leaks the
+    // the local's storage. An ownership-explicit backend (e.g. the MIR lowering) leaks the
     // string on every iteration without that drop.
     let mut session = TestSession::new();
     let source = r#"
@@ -2855,14 +2855,14 @@ fn unconstructed_empty_struct_is_not_dropped() {
     );
     // The `else` branch never constructs `x`. Its storage stays uninitialized (a flat `Uninit`,
     // never the live `Tuple([])` marker), so no drop runs — matching the HIR interpreter. This is
-    // the case the SSA storage seeding must get right: an empty aggregate is *not* seeded `Tuple([])`.
+    // the case the MIR storage seeding must get right: an empty aggregate is *not* seeded `Tuple([])`.
     assert_val_eq!(session.run(&source), int(0));
 }
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn all_unit_aggregate_with_custom_drop_is_dropped() {
-    // A struct whose only field is `()` is the case that makes the SSA husk rule treat a unit leaf
+    // A struct whose only field is `()` is the case that makes the MIR husk rule treat a unit leaf
     // as *live*: its run-time storage is `Tuple([Native(())])`, and if `is_drop_husk` classified a
     // unit leaf as a husk, this aggregate would look dead and its `Value::drop` would be skipped —
     // diverging from the HIR interpreter. This pins that the custom drop runs exactly once.

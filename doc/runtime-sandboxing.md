@@ -1,7 +1,7 @@
 # Runtime sandboxing
 
 Ferlium separates source failures from host-enforced sandbox limits. MIR cleanup control flow is
-described in [ssa-error-propagation.md](ssa-error-propagation.md); memory accounting is described in
+described in [mir-error-propagation.md](mir-error-propagation.md); memory accounting is described in
 [runtime-memory-limits.md](runtime-memory-limits.md).
 
 ## Runtime outcomes

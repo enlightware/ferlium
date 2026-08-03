@@ -604,8 +604,8 @@ fn process_input(
         }
     }
 
-    if target == ExecutionTarget::Ssa {
-        println!("Module SSA:\n{}", session.emit_ssa_module(module_id));
+    if target == ExecutionTarget::Mir {
+        println!("Module MIR:\n{}", session.emit_mir_module(module_id));
     }
 
     // If there's an expression, evaluate it
@@ -734,8 +734,8 @@ fn process_pipe_input(
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let target = if args.iter().any(|arg| arg == "--ssa") {
-        ExecutionTarget::Ssa
+    let target = if args.iter().any(|arg| arg == "--mir") {
+        ExecutionTarget::Mir
     } else {
         ExecutionTarget::Hir
     };
@@ -762,7 +762,7 @@ fn main() {
         println!("Usage:");
         println!("  {} [--help|-h]        Show the help.", args[0]);
         println!(
-            "  {} [--ssa]            Compile to SSA, print it, and execute it with the SSA interpreter.",
+            "  {} [--mir]            Compile to MIR, print it, and execute it with the MIR interpreter.",
             args[0]
         );
         println!(
