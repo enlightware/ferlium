@@ -14,6 +14,7 @@ pub(crate) mod lints;
 mod pipeline;
 mod session;
 
+pub use artifacts::MirOptimization;
 pub(crate) use artifacts::{MirArtifacts, ModuleArtifacts};
 pub use diagnostics::{DiagnosticSeverity, ModuleDiagnostic};
 pub use error::*;
@@ -90,7 +91,7 @@ pub mod test_support {
         session
             .modules
             .get(module_id)?
-            .current_mir()
+            .raw_mir()
             .map(|mir| mir.len())
     }
 }

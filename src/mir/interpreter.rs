@@ -255,8 +255,7 @@ impl<'a> Interpreter<'a> {
     /// Returns the immutable MIR body stored beside the function's semantic module revision.
     fn function(&self, key: FunctionKey) -> &'a mir::Function {
         self.session
-            .expect_module_entry(key.module)
-            .current_mir()
+            .mir_artifacts(key.module)
             .unwrap_or_else(|| panic!("module {} has no current MIR artifacts", key.module))
             .get(key.identity)
             .unwrap_or_else(|| {

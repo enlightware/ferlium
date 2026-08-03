@@ -35,8 +35,8 @@ pub(crate) use compiler::add_code_to_module_with_capabilities;
 pub use compiler::error::{CompilationError, LocatedError};
 pub use compiler::{
     CompilationCapabilities, CompilationOutput, CompilationRevision, CompilerSession,
-    DiagnosticSeverity, ModuleDiagnostic, ModuleInfo, ModuleRegistry, ModuleSource, SourceVersion,
-    parse_module_and_expr,
+    DiagnosticSeverity, MirOptimization, ModuleDiagnostic, ModuleInfo, ModuleRegistry,
+    ModuleSource, SourceVersion, parse_module_and_expr,
 };
 pub use execution::ExecutionTarget;
 pub use ide::Compiler;

@@ -81,6 +81,25 @@ impl Operation {
         self.kind.result(self)
     }
 
+    /// Rebuilds an operation from its parts, without a result identity.
+    ///
+    /// Rewriting passes decompose an existing operation and reassemble it (possibly with remapped
+    /// operands) into a fresh [`FunctionBuilder`](crate::mir::builder::FunctionBuilder), which
+    /// assigns the new result identity on insertion. The per-kind constructors above remain the
+    /// only way to create an operation during lowering.
+    pub(crate) fn from_parts(
+        span: Location,
+        operands: Box<[mir::Value]>,
+        kind: OperationKind,
+    ) -> Self {
+        Operation {
+            result_id: None,
+            span,
+            operands,
+            kind,
+        }
+    }
+
     /// Classifies whether this operation can raise a source-level failure.
     ///
     /// Sandbox violations are deliberately not represented here: they leave the MIR CFG through

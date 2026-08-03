@@ -12,20 +12,46 @@ use std::cell::OnceCell;
 use crate::{
     compiler::Modules,
     emit_mir::build_mir_function,
-    mir,
+    mir::{self, pass::rebuild_function},
     module::{LocalFunctionId, Module, ModuleEnv, ModuleId, id::Id},
 };
 
+/// Whether a compilation session runs the MIR optimization passes.
+///
+/// Optimized bodies are stored beside the raw ones rather than replacing them, and a session only
+/// ever reads the stage it asked for. This matters because module revisions — the standard library
+/// in particular — are shared between sessions: one session enabling optimization must not change
+/// what another session executes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MirOptimization {
+    /// Execute the MIR the emitter produced.
+    #[default]
+    Disabled,
+    /// Execute optimized MIR, building it on demand.
+    Enabled,
+}
+
 /// Backend output derived from one completed semantic module revision.
+///
+/// Both stages are monotone: once installed, a stage is never replaced, so references handed out
+/// of a session stay valid and artifact reuse remains observable by pointer identity.
 #[derive(Default)]
 pub(crate) struct ModuleArtifacts {
-    mir: OnceCell<MirArtifacts>,
+    /// MIR as lowered from final HIR by `emit_mir`.
+    raw_mir: OnceCell<MirArtifacts>,
+    /// MIR after the optimization passes, installed at most once and only when some session
+    /// requested [`MirOptimization::Enabled`].
+    optimized_mir: OnceCell<MirArtifacts>,
 }
 
 impl std::fmt::Debug for ModuleArtifacts {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ModuleArtifacts")
-            .field("mir_function_slots", &self.mir.get().map(MirArtifacts::len))
+            .field(
+                "mir_function_slots",
+                &self.raw_mir.get().map(MirArtifacts::len),
+            )
+            .field("optimized", &self.optimized_mir.get().is_some())
             .finish()
     }
 }
@@ -34,24 +60,42 @@ impl ModuleArtifacts {
     pub(crate) fn with_mir(module: &Module, modules: &Modules) -> Self {
         let artifacts = Self::default();
         artifacts
-            .mir
+            .raw_mir
             .set(MirArtifacts::build(module, modules))
             .unwrap_or_else(|_| unreachable!("a new artifact set cannot already contain MIR"));
         artifacts
     }
 
     pub(crate) fn has_mir(&self) -> bool {
-        self.mir.get().is_some()
+        self.raw_mir.get().is_some()
     }
 
-    pub(crate) fn mir(&self) -> Option<&MirArtifacts> {
-        self.mir.get()
+    /// The MIR the emitter produced, before optimization.
+    pub(crate) fn raw_mir(&self) -> Option<&MirArtifacts> {
+        self.raw_mir.get()
+    }
+
+    /// The MIR to execute under `optimization`.
+    ///
+    /// A session that requested optimization but reaches a module whose optimized stage was never
+    /// built falls back to the raw bodies: they are equivalent, only slower.
+    pub(crate) fn mir(&self, optimization: MirOptimization) -> Option<&MirArtifacts> {
+        match optimization {
+            MirOptimization::Disabled => self.raw_mir.get(),
+            MirOptimization::Enabled => self.optimized_mir.get().or_else(|| self.raw_mir.get()),
+        }
     }
 
     pub(crate) fn set_mir(&self, mir: MirArtifacts) {
-        self.mir
+        self.raw_mir
             .set(mir)
             .unwrap_or_else(|_| panic!("MIR artifacts may only be installed once per revision"));
+    }
+
+    fn set_optimized_mir(&self, mir: MirArtifacts) {
+        self.optimized_mir.set(mir).unwrap_or_else(|_| {
+            panic!("optimized MIR artifacts may only be installed once per revision")
+        });
     }
 }
 
@@ -81,6 +125,24 @@ impl MirArtifacts {
         Self { functions }
     }
 
+    /// Runs the optimization passes over every body in `raw`.
+    ///
+    /// Only the identity rewrite exists today, so this currently produces equivalent bodies and
+    /// exists to exercise the staging path end to end. See `doc/plans/partial-evaluation.md`.
+    pub(crate) fn optimize(raw: &MirArtifacts, module: &Module, modules: &Modules) -> Self {
+        let env = ModuleEnv::new(module, modules);
+        let functions = raw
+            .functions
+            .iter()
+            .map(|function| {
+                function
+                    .as_ref()
+                    .map(|function| rebuild_function(function, env))
+            })
+            .collect();
+        Self { functions }
+    }
+
     pub(crate) fn get(&self, id: LocalFunctionId) -> Option<&mir::Function> {
         self.functions.get(id.as_index())?.as_ref()
     }
@@ -99,7 +161,7 @@ pub(crate) fn ensure_mir_artifacts(modules: &Modules, module_id: ModuleId) {
         !entry.stale,
         "module {module_id} is stale and cannot receive current MIR artifacts"
     );
-    if entry.current_mir().is_some() {
+    if entry.raw_mir().is_some() {
         return;
     }
 
@@ -121,4 +183,40 @@ pub(crate) fn ensure_mir_artifacts(modules: &Modules, module_id: ModuleId) {
         MirArtifacts::build(module, modules)
     };
     modules.get(module_id).unwrap().artifacts().set_mir(mir);
+}
+
+/// Install optimized MIR artifacts for a fresh module and all of its dependencies.
+///
+/// This is the post-installation optimization hook: unlike raw lowering — which runs while the
+/// module being compiled is not yet registered — it runs against fully installed module entries, so
+/// a pass may consult the bodies of the module it is optimizing as well as those of its
+/// dependencies.
+pub(crate) fn ensure_optimized_mir_artifacts(modules: &Modules, module_id: ModuleId) {
+    ensure_mir_artifacts(modules, module_id);
+
+    let entry = modules
+        .get(module_id)
+        .unwrap_or_else(|| panic!("module {module_id} is not registered"));
+    if entry.artifacts().optimized_mir.get().is_some() {
+        return;
+    }
+
+    let dependencies = entry
+        .module()
+        .expect("a fresh module entry must contain its module")
+        .deps()
+        .collect::<Vec<_>>();
+    for dependency in dependencies {
+        ensure_optimized_mir_artifacts(modules, dependency);
+    }
+
+    let entry = modules.get(module_id).unwrap();
+    let module = entry
+        .module()
+        .expect("a fresh module entry must contain its module");
+    let raw = entry
+        .raw_mir()
+        .expect("raw MIR artifacts were just ensured for this module");
+    let optimized = MirArtifacts::optimize(raw, module, modules);
+    entry.artifacts().set_optimized_mir(optimized);
 }

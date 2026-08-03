@@ -11,7 +11,10 @@ use ::std::{cell::RefCell, fmt, rc::Rc, sync::LazyLock};
 use derive_new::new;
 use itertools::Itertools;
 
-use super::artifacts::{MirArtifacts, ModuleArtifacts, ensure_mir_artifacts};
+use super::artifacts::{
+    MirArtifacts, MirOptimization, ModuleArtifacts, ensure_mir_artifacts,
+    ensure_optimized_mir_artifacts,
+};
 
 use crate::{
     FxHashSet, Location, SourceId, SourceTable, ast, compilation_error,
@@ -261,11 +264,20 @@ impl ModuleEntry {
             .replace(Rc::new(ModuleRevision::new(placeholder)))
     }
 
-    pub(crate) fn current_mir(&self) -> Option<&MirArtifacts> {
+    /// The MIR the emitter produced for the current fresh revision, before optimization.
+    pub(crate) fn raw_mir(&self) -> Option<&MirArtifacts> {
         if self.stale {
             return None;
         }
-        self.revision.as_ref()?.artifacts.mir()
+        self.revision.as_ref()?.artifacts.raw_mir()
+    }
+
+    /// The MIR of the current fresh revision to execute under `optimization`.
+    pub(crate) fn mir(&self, optimization: MirOptimization) -> Option<&MirArtifacts> {
+        if self.stale {
+            return None;
+        }
+        self.revision.as_ref()?.artifacts.mir(optimization)
     }
 
     pub(crate) fn new_fresh_with_artifacts(
@@ -349,7 +361,7 @@ impl<'a> ModuleInfo<'a> {
 
     /// Return whether the current fresh module revision has complete MIR artifacts.
     pub fn has_mir_artifacts(&self) -> bool {
-        self.entry.current_mir().is_some()
+        self.entry.raw_mir().is_some()
     }
 }
 
@@ -451,6 +463,8 @@ pub struct CompilerSession {
     pub(crate) initial_source_table_size: usize,
     /// Explicit feature capabilities enabled for source compiled through this session.
     pub(crate) capabilities: CompilationCapabilities,
+    /// Whether execution through this session runs optimized MIR.
+    pub(crate) mir_optimization: MirOptimization,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -504,6 +518,7 @@ impl InitialSessionState {
             scratch_module,
             initial_source_table_size,
             capabilities: CompilationCapabilities::default(),
+            mir_optimization: MirOptimization::default(),
         }
     }
 }
@@ -526,6 +541,21 @@ impl CompilerSession {
 
     pub fn compilation_capabilities(&self) -> CompilationCapabilities {
         self.capabilities
+    }
+
+    /// Whether execution through this session runs optimized MIR.
+    pub fn mir_optimization(&self) -> MirOptimization {
+        self.mir_optimization
+    }
+
+    /// Selects whether execution through this session runs optimized MIR.
+    ///
+    /// Optimization is off by default: it costs compilation time, so interactive hosts such as the
+    /// IDE and the REPL leave it off. Enabling it does not invalidate anything already compiled —
+    /// optimized bodies are built on demand beside the raw ones — and never affects another
+    /// session, even one sharing the same standard-library revision.
+    pub fn set_mir_optimization(&mut self, optimization: MirOptimization) {
+        self.mir_optimization = optimization;
     }
 
     pub fn set_allow_experimental(&mut self, allow: bool) {
@@ -1071,7 +1101,7 @@ impl CompilerSession {
         let entry = self.expect_module_entry(module_id);
         let module = entry.module().unwrap();
         let artifacts = entry
-            .current_mir()
+            .mir(self.mir_optimization)
             .expect("MIR preparation must install complete artifacts");
         emit_mir::emit_mir(module, self.raw_modules(), artifacts)
     }
@@ -1106,6 +1136,9 @@ impl CompilerSession {
         };
 
         let value = {
+            // Compilation installed raw MIR; this additionally installs the optimized bodies when
+            // the session asks for them, exactly as `run_entry` does.
+            self.prepare_execution_target(ExecutionTarget::Mir, module_id);
             let mut interp = Interpreter::new(module_id, self);
             interp.run_main(module_id, main_id).unwrap_or_else(|error| {
                 panic!("MIR interpretation raised a runtime error: {error:?}")
@@ -1173,9 +1206,19 @@ impl CompilerSession {
     /// Ensure that `module_id` and its dependencies have the artifacts needed by `target`.
     /// Existing artifacts for the same module revision are reused.
     pub fn prepare_execution_target(&mut self, target: ExecutionTarget, module_id: ModuleId) {
-        if target == ExecutionTarget::Mir {
-            ensure_mir_artifacts(&self.modules, module_id);
+        if target != ExecutionTarget::Mir {
+            return;
         }
+        match self.mir_optimization {
+            MirOptimization::Disabled => ensure_mir_artifacts(&self.modules, module_id),
+            MirOptimization::Enabled => ensure_optimized_mir_artifacts(&self.modules, module_id),
+        }
+    }
+
+    /// The MIR bodies of `module_id` to execute under this session's optimization setting.
+    pub(crate) fn mir_artifacts(&self, module_id: ModuleId) -> Option<&MirArtifacts> {
+        self.expect_module_entry(module_id)
+            .mir(self.mir_optimization)
     }
 
     /// Returns the entry for module_id, or panic if not found.
@@ -1332,24 +1375,14 @@ mod tests {
         first.prepare_execution_target(ExecutionTarget::Mir, STD_MODULE_ID);
         let third = CompilerSession::new();
 
-        let first_mir = first
-            .modules
-            .get(STD_MODULE_ID)
-            .unwrap()
-            .current_mir()
-            .unwrap();
+        let first_mir = first.modules.get(STD_MODULE_ID).unwrap().raw_mir().unwrap();
         let second_mir = second
             .modules
             .get(STD_MODULE_ID)
             .unwrap()
-            .current_mir()
+            .raw_mir()
             .unwrap();
-        let third_mir = third
-            .modules
-            .get(STD_MODULE_ID)
-            .unwrap()
-            .current_mir()
-            .unwrap();
+        let third_mir = third.modules.get(STD_MODULE_ID).unwrap().raw_mir().unwrap();
         assert!(std::ptr::eq(first_mir, second_mir));
         assert!(std::ptr::eq(first_mir, third_mir));
     }
