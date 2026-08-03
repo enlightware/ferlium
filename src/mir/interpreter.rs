@@ -12,6 +12,7 @@ use rustc_hash::FxHashMap;
 
 use crate::{
     CompilerSession, Location,
+    compiler::MirOptimization,
     eval::{
         ControlFlow, EvalCtx, Place, PlaceResult, RuntimeError, ValOrMut,
         call_value_clone_for_temp, call_value_drop_for_temp,
@@ -66,6 +67,26 @@ enum Binding {
     },
 }
 
+/// An argument supplied to [`Interpreter::call_with_known_arguments`], in the callee's parameter
+/// order.
+pub(crate) enum CallArgument {
+    /// An owned value for a visible parameter. The callee receives its place.
+    Value(Value),
+    /// A symbolic trait dictionary for a hidden evidence parameter.
+    Dictionary(TraitDictionaryId),
+}
+
+impl CallArgument {
+    /// Releases the storage owned by arguments that were never passed to a callee.
+    pub(crate) fn discard_all(arguments: Vec<CallArgument>) {
+        for argument in arguments {
+            if let CallArgument::Value(value) = argument {
+                value.discard_storage();
+            }
+        }
+    }
+}
+
 /// The outcome of running a frame's MIR CFG.
 enum FrameOutcome {
     Completed,
@@ -117,6 +138,13 @@ pub struct Interpreter<'a> {
     ctx: EvalCtx<'a>,
     /// The compiler session, used to resolve immutable module artifacts and native callees.
     session: &'a CompilerSession,
+    /// Which artifact stage this interpreter reads bodies from.
+    ///
+    /// Ordinary execution follows the session's setting. Const-evaluation pins this to
+    /// [`MirOptimization::Disabled`]: it runs while the optimized stage of the module being
+    /// optimized is still being built, and reading partially optimized bodies would make its
+    /// results depend on the order functions are optimized in.
+    stage: MirOptimization,
 }
 
 impl<'a> Interpreter<'a> {
@@ -138,9 +166,22 @@ impl<'a> Interpreter<'a> {
         session: &'a CompilerSession,
         limits: ReferenceInterpreterLimits,
     ) -> Self {
+        Self::with_limits_and_stage(module_id, session, limits, session.mir_optimization())
+    }
+
+    /// Creates an interpreter reading bodies from an explicitly chosen artifact stage.
+    ///
+    /// See [`Interpreter::stage`]; only const-evaluation needs this.
+    pub(crate) fn with_limits_and_stage(
+        module_id: ModuleId,
+        session: &'a CompilerSession,
+        limits: ReferenceInterpreterLimits,
+        stage: MirOptimization,
+    ) -> Self {
         Self {
             ctx: EvalCtx::with_limits(module_id, session, limits),
             session,
+            stage,
         }
     }
 
@@ -252,10 +293,124 @@ impl<'a> Interpreter<'a> {
         Ok(value)
     }
 
+    /// Runs `callee` on already-known arguments and returns the value it produces.
+    ///
+    /// This is the general form [`run_entry`](Self::run_entry) cannot express: a call site supplies
+    /// hidden evidence as well as visible arguments, so parameters are bound by the callee's own
+    /// signature order rather than assumed to be visible-only. `result_ty` shapes the return cell.
+    ///
+    /// Both callee kinds are handled, and the **native** one is the one that matters: natives have
+    /// no MIR body, yet they are what compile-time evaluation overwhelmingly reaches — every
+    /// arithmetic operator is a native `Num` impl function. A native is delegated to the HIR
+    /// interpreter and returns its result directly instead of writing through an out-pointer,
+    /// exactly as in [`exec_resolved_native_call`](Self::exec_resolved_native_call).
+    ///
+    /// On any failure the arguments and every cell allocated here are reclaimed before returning.
+    pub(crate) fn call_with_known_arguments(
+        &mut self,
+        callee: FunctionId,
+        arguments: Vec<CallArgument>,
+        result_ty: Type,
+        span: Location,
+    ) -> Result<Value, RuntimeError> {
+        if let Err(error) = self.ctx.ensure_runnable() {
+            CallArgument::discard_all(arguments);
+            return Err(error);
+        }
+        let key = FunctionKey {
+            module: callee.module,
+            identity: callee.function,
+        };
+        let is_script = self
+            .session
+            .expect_fresh_module(callee.module)
+            .get_function_by_id(callee.function)
+            .expect("callee function not found")
+            .code
+            .as_script()
+            .is_some();
+
+        let frame_top = self.ctx.environment.len();
+        let result = if is_script {
+            self.call_script_with_known_arguments(key, arguments, result_ty, span)
+        } else {
+            self.call_native_with_known_arguments(callee, arguments, span)
+        };
+        self.reclaim_frame_storage(frame_top);
+        result
+    }
+
+    /// The script branch of [`call_with_known_arguments`](Self::call_with_known_arguments): each
+    /// argument value is placed in a fresh cell, evidence binds symbolically, and the callee writes
+    /// its result through the trailing return out-pointer.
+    fn call_script_with_known_arguments(
+        &mut self,
+        key: FunctionKey,
+        arguments: Vec<CallArgument>,
+        result_ty: Type,
+        span: Location,
+    ) -> Result<Value, RuntimeError> {
+        let mut bindings = Vec::with_capacity(arguments.len() + 1);
+        for argument in arguments {
+            match argument {
+                CallArgument::Value(value) => match self.alloc_cell(value, span) {
+                    Ok(place) => bindings.push(Binding::Place(place)),
+                    Err(error) => {
+                        // `alloc_cell` consumed this argument; the remaining ones are reclaimed
+                        // with the frame by the caller.
+                        return Err(error);
+                    }
+                },
+                CallArgument::Dictionary(id) => bindings.push(Binding::Dictionary(id)),
+            }
+        }
+        let init = self.shaped_uninitialized_value(result_ty);
+        let ret = self.alloc_cell(init, span)?;
+        bindings.push(Binding::Place(ret.clone()));
+
+        debug_assert_eq!(
+            bindings.len(),
+            self.function(key).parameters().len(),
+            "known-argument call must bind every parameter of its callee"
+        );
+        self.run_function(key, bindings)?;
+        let slot = ret
+            .target_mut(&mut self.ctx)
+            .expect("return cell must be addressable");
+        Ok(std::mem::replace(slot, Value::uninit()))
+    }
+
+    /// The native branch of [`call_with_known_arguments`](Self::call_with_known_arguments).
+    fn call_native_with_known_arguments(
+        &mut self,
+        callee: FunctionId,
+        arguments: Vec<CallArgument>,
+        span: Location,
+    ) -> Result<Value, RuntimeError> {
+        let mut args: Vec<ValOrMut> = Vec::with_capacity(arguments.len());
+        for argument in arguments {
+            match argument {
+                // A native reads its arguments through places, exactly as a resolved native call
+                // marshals them.
+                CallArgument::Value(value) => {
+                    args.push(ValOrMut::Mut(self.alloc_cell(value, span)?))
+                }
+                CallArgument::Dictionary(id) => args.push(ValOrMut::Dictionary(id)),
+            }
+        }
+        let result = self
+            .ctx
+            .call_resolved_function_with_extra(callee, vec![], args, span)?;
+        match result {
+            ControlFlow::Continue(value) => Ok(value),
+            ControlFlow::Transfer(_) => panic!("unexpected control transfer from a native call"),
+        }
+    }
+
     /// Returns the immutable MIR body stored beside the function's semantic module revision.
     fn function(&self, key: FunctionKey) -> &'a mir::Function {
         self.session
-            .mir_artifacts(key.module)
+            .mir_artifacts_for(key.module, self.stage)
             .unwrap_or_else(|| panic!("module {} has no current MIR artifacts", key.module))
             .get(key.identity)
             .unwrap_or_else(|| {

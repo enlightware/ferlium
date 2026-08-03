@@ -10,7 +10,7 @@
 use std::cell::OnceCell;
 
 use crate::{
-    compiler::Modules,
+    compiler::{CompilerSession, Modules},
     emit_mir::build_mir_function,
     mir::{self, pass::rebuild_function},
     module::{LocalFunctionId, Module, ModuleEnv, ModuleId, id::Id},
@@ -129,7 +129,11 @@ impl MirArtifacts {
     ///
     /// Only the identity rewrite exists today, so this currently produces equivalent bodies and
     /// exists to exercise the staging path end to end. See `doc/plans/partial-evaluation.md`.
-    pub(crate) fn optimize(raw: &MirArtifacts, module: &Module, modules: &Modules) -> Self {
+    ///
+    /// Takes the whole session because the folding passes const-evaluate through the MIR
+    /// interpreter, which resolves callees, dictionaries, and native code through it.
+    pub(crate) fn optimize(raw: &MirArtifacts, module: &Module, session: &CompilerSession) -> Self {
+        let modules = session.raw_modules();
         let env = ModuleEnv::new(module, modules);
         let functions = raw
             .functions
@@ -191,7 +195,8 @@ pub(crate) fn ensure_mir_artifacts(modules: &Modules, module_id: ModuleId) {
 /// module being compiled is not yet registered — it runs against fully installed module entries, so
 /// a pass may consult the bodies of the module it is optimizing as well as those of its
 /// dependencies.
-pub(crate) fn ensure_optimized_mir_artifacts(modules: &Modules, module_id: ModuleId) {
+pub(crate) fn ensure_optimized_mir_artifacts(session: &CompilerSession, module_id: ModuleId) {
+    let modules = session.raw_modules();
     ensure_mir_artifacts(modules, module_id);
 
     let entry = modules
@@ -207,7 +212,7 @@ pub(crate) fn ensure_optimized_mir_artifacts(modules: &Modules, module_id: Modul
         .deps()
         .collect::<Vec<_>>();
     for dependency in dependencies {
-        ensure_optimized_mir_artifacts(modules, dependency);
+        ensure_optimized_mir_artifacts(session, dependency);
     }
 
     let entry = modules.get(module_id).unwrap();
@@ -217,6 +222,6 @@ pub(crate) fn ensure_optimized_mir_artifacts(modules: &Modules, module_id: Modul
     let raw = entry
         .raw_mir()
         .expect("raw MIR artifacts were just ensured for this module");
-    let optimized = MirArtifacts::optimize(raw, module, modules);
+    let optimized = MirArtifacts::optimize(raw, module, session);
     entry.artifacts().set_optimized_mir(optimized);
 }

@@ -28,6 +28,29 @@ propagate through enclosing cleanup scopes. Escalation happens only if another s
 already in flight. A sandbox violation always takes the sandbox path, including when it interrupts
 source-failure cleanup; it may retain the interrupted source failure for diagnostics.
 
+## Compile-time execution of native code
+
+The optimizer may execute Ferlium code *at compile time* to fold a call into its result. Which
+callees it may execute is decided from declared effects alone:
+
+> A function declaring neither `read` nor `write` is asserted to be pure and deterministic. The
+> compiler may execute it at compile time **zero times, once, or many times**, in any order, with
+> arguments the program would never actually produce.
+
+This is a contract, not a checked property. Effects are trusted: nothing verifies that a native
+implementation honours what its declaration claims. A host that registers a native reading the
+clock, a random source, engine state, or any other ambient input — or one that mutates state
+observable elsewhere — **must** declare `read` or `write` accordingly, or compiled programs may
+observe a value captured at compile time instead of the value at run time.
+
+`fallible` does not prevent compile-time execution: an evaluation that raises is simply not folded,
+and the call remains in the program. Unresolved effect *variables* do prevent it, since the
+instantiated effects are unknown.
+
+Compile-time evaluation runs under its own budget and its own poisoning domain, separate from any
+runtime execution domain. Exceeding that budget abandons the optimization; it never fails a
+compilation and never poisons a domain the program later runs in.
+
 ## Cleanup, reclamation, and revocation
 
 These operations have separate contracts:

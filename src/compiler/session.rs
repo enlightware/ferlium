@@ -1211,14 +1211,23 @@ impl CompilerSession {
         }
         match self.mir_optimization {
             MirOptimization::Disabled => ensure_mir_artifacts(&self.modules, module_id),
-            MirOptimization::Enabled => ensure_optimized_mir_artifacts(&self.modules, module_id),
+            // Driven from the session rather than from `Modules`: the optimization passes
+            // const-evaluate through the interpreter, which needs the whole session. Artifact
+            // installation goes through `OnceCell`, so a shared borrow suffices.
+            MirOptimization::Enabled => ensure_optimized_mir_artifacts(&*self, module_id),
         }
     }
 
-    /// The MIR bodies of `module_id` to execute under this session's optimization setting.
-    pub(crate) fn mir_artifacts(&self, module_id: ModuleId) -> Option<&MirArtifacts> {
-        self.expect_module_entry(module_id)
-            .mir(self.mir_optimization)
+    /// The MIR bodies of `module_id` at an explicitly chosen stage.
+    ///
+    /// Const-evaluation pins the stage rather than following the session, because it runs *while*
+    /// the optimized stage is being built.
+    pub(crate) fn mir_artifacts_for(
+        &self,
+        module_id: ModuleId,
+        optimization: MirOptimization,
+    ) -> Option<&MirArtifacts> {
+        self.expect_module_entry(module_id).mir(optimization)
     }
 
     /// Returns the entry for module_id, or panic if not found.
