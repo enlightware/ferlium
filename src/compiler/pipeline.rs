@@ -16,7 +16,9 @@ use crate::{
     ast::{self, PExprArena, UnstableCollector, VisitExpr},
     compilation_error,
     compiler::artifacts::ensure_mir_artifacts,
-    compiler::diagnostics::diagnostics_from_error,
+    compiler::diagnostics::{
+        CompilationWarning, diagnostics_from_error, diagnostics_from_warnings,
+    },
     compiler::error::{CompilationError, LocatedError},
     compiler::session::{
         AstInspectorCb, CompilationOutput, CompilationRevision, ModuleEntry, ModuleRevision,
@@ -125,6 +127,7 @@ pub(crate) fn compile_with_source_id(
     };
     let build_mir = target == ExecutionTarget::Mir || had_mir;
     let src_info = ModuleSrcInfo::new(source_id, source_version, uses.clone());
+    let mut warnings = Vec::<CompilationWarning>::new();
 
     // Closure called on every compilation failure, to restore the old module and mark dependencies.
     let process_compilation_failed =
@@ -132,16 +135,24 @@ pub(crate) fn compile_with_source_id(
          path_for_new: Option<Path>,
          src_info: ModuleSrcInfo,
          old_revision: Option<Rc<ModuleRevision>>,
-         error: &CompilationError| {
+         error: &CompilationError,
+         warnings: &[CompilationWarning]| {
             let error = error.clone();
-            let diagnostics = diagnostics_from_error(
+            let mut diagnostics = diagnostics_from_warnings(
+                module_id,
+                src_info.source_version,
+                compilation_revision,
+                src_info.source_id,
+                warnings.iter().copied(),
+            );
+            diagnostics.extend(diagnostics_from_error(
                 module_id,
                 src_info.source_version,
                 compilation_revision,
                 src_info.source_id,
                 &error,
                 source_table,
-            );
+            ));
             if let Some(entry) = modules.get_mut(module_id) {
                 entry.update_with_compilation_error(
                     src_info,
@@ -167,7 +178,14 @@ pub(crate) fn compile_with_source_id(
         Err(error) => {
             let error = compilation_error!(ParsingFailed(error));
             let path_for_new = module_ref.into_path();
-            process_compilation_failed(modules, path_for_new, src_info, old_revision, &error);
+            process_compilation_failed(
+                modules,
+                path_for_new,
+                src_info,
+                old_revision,
+                &error,
+                &warnings,
+            );
             return Err(error);
         }
     };
@@ -185,6 +203,7 @@ pub(crate) fn compile_with_source_id(
         modules,
         emit_from,
         capabilities,
+        &mut warnings,
     ) {
         Ok(result) => result,
         Err(failure) => {
@@ -193,7 +212,14 @@ pub(crate) fn compile_with_source_id(
             let env = ModuleEnv::new(&failure.module, modules);
             let error = CompilationError::resolve_types(failure.error, &env, source_table);
             let path_for_new = module_ref.into_path();
-            process_compilation_failed(modules, path_for_new, src_info, old_revision, &error);
+            process_compilation_failed(
+                modules,
+                path_for_new,
+                src_info,
+                old_revision,
+                &error,
+                &warnings,
+            );
             return Err(error);
         }
     };
@@ -207,6 +233,7 @@ pub(crate) fn compile_with_source_id(
             modules,
             vec![],
             capabilities,
+            &mut warnings,
         ) {
             Ok(result) => result,
             Err(error) => {
@@ -214,7 +241,14 @@ pub(crate) fn compile_with_source_id(
                 let env = ModuleEnv::new(&module, modules);
                 let error = CompilationError::resolve_types(error, &env, source_table);
                 let path_for_new = module_ref.into_path();
-                process_compilation_failed(modules, path_for_new, src_info, old_revision, &error);
+                process_compilation_failed(
+                    modules,
+                    path_for_new,
+                    src_info,
+                    old_revision,
+                    &error,
+                    &warnings,
+                );
                 return Err(error);
             }
         };
@@ -238,7 +272,14 @@ pub(crate) fn compile_with_source_id(
             span: Location::new_synthesized(),
         });
         let path_for_new = module_ref.into_path();
-        process_compilation_failed(modules, path_for_new, src_info, old_revision, &error);
+        process_compilation_failed(
+            modules,
+            path_for_new,
+            src_info,
+            old_revision,
+            &error,
+            &warnings,
+        );
         return Err(error);
     }
 
@@ -247,14 +288,34 @@ pub(crate) fn compile_with_source_id(
     let deps_stale = deps.iter().any(|&dep| modules.get(dep).unwrap().stale);
     if deps_stale {
         if let Some(entry) = modules.get_mut(module_id) {
-            entry.update_with_stale(src_info, old_revision, deps, compilation_revision);
+            let diagnostics = diagnostics_from_warnings(
+                module_id,
+                source_version,
+                compilation_revision,
+                source_id,
+                warnings.iter().copied(),
+            );
+            entry.update_with_stale(
+                src_info,
+                old_revision,
+                deps,
+                compilation_revision,
+                diagnostics,
+            );
             mark_stale_transitively(modules, module_id);
         } else {
             // Only reachable for ByPath when the module does not yet exist.
             if let Some(path) = module_ref.into_path() {
+                let diagnostics = diagnostics_from_warnings(
+                    module_id,
+                    source_version,
+                    compilation_revision,
+                    source_id,
+                    warnings.iter().copied(),
+                );
                 modules.insert(
                     path,
-                    ModuleEntry::new_stale(src_info, deps, compilation_revision),
+                    ModuleEntry::new_stale(src_info, deps, compilation_revision, diagnostics),
                 );
             }
         }
@@ -268,6 +329,13 @@ pub(crate) fn compile_with_source_id(
         } else {
             ModuleArtifacts::default()
         };
+        let diagnostics = diagnostics_from_warnings(
+            module_id,
+            source_version,
+            compilation_revision,
+            source_id,
+            warnings.iter().copied(),
+        );
         // For ByPath: consume the path out of module_ref (no extra clone).
         // For Existing: write directly through the known ID.
         match module_ref {
@@ -279,6 +347,7 @@ pub(crate) fn compile_with_source_id(
                         module,
                         artifacts,
                         compilation_revision,
+                        diagnostics,
                     ),
                 );
             }
@@ -288,6 +357,7 @@ pub(crate) fn compile_with_source_id(
                     module,
                     artifacts,
                     compilation_revision,
+                    diagnostics,
                 );
             }
         }
@@ -482,6 +552,7 @@ pub(crate) fn add_code_to_module_with_capabilities(
         other_modules,
         emit_from,
         capabilities,
+        &mut Vec::new(),
     )
     .map_err(|failure| {
         let env = ModuleEnv::new(&failure.module, other_modules);

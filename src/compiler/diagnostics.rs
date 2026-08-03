@@ -8,6 +8,8 @@
 //
 
 use std::ops::Deref;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
 
 use crate::{
     Location, SourceId, SourceTable,
@@ -18,6 +20,38 @@ use crate::{
     format::FormatWith,
     module::ModuleId,
 };
+
+/// Severity of a source diagnostic produced by the compiler.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DiagnosticSeverity {
+    Error,
+    Warning,
+}
+
+/// A non-fatal diagnostic discovered while compiling source HIR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum CompilationWarning {
+    UnreachableCode { location: Location },
+}
+
+impl CompilationWarning {
+    pub(crate) fn unreachable_code(location: Location) -> Self {
+        Self::UnreachableCode { location }
+    }
+
+    fn location(self) -> Location {
+        match self {
+            Self::UnreachableCode { location } => location,
+        }
+    }
+
+    fn message(self) -> &'static str {
+        match self {
+            Self::UnreachableCode { .. } => "unreachable code",
+        }
+    }
+}
 
 /// A source diagnostic produced by the latest compilation attempt for a module.
 #[derive(Debug, Clone)]
@@ -36,8 +70,40 @@ pub struct ModuleDiagnostic {
     pub location: Location,
     /// Compilation attempt that produced this diagnostic.
     pub compilation_revision: CompilationRevision,
+    /// Whether this diagnostic blocks successful compilation.
+    pub severity: DiagnosticSeverity,
     /// Human-readable diagnostic message.
     pub message: String,
+}
+
+/// Decorate compiler warnings with the source-version and compilation-attempt metadata used by
+/// incremental clients. Duplicate warnings can arise when a late HIR substitution exposes the
+/// same unreachable suffix as an earlier inference check, so deduplicate them here.
+pub(crate) fn diagnostics_from_warnings(
+    module_id: ModuleId,
+    source_version: SourceVersion,
+    compilation_revision: CompilationRevision,
+    source_id: SourceId,
+    warnings: impl IntoIterator<Item = CompilationWarning>,
+) -> Vec<ModuleDiagnostic> {
+    let mut warnings = warnings.into_iter().collect::<Vec<_>>();
+    warnings.sort_by_key(|warning| {
+        let location = warning.location();
+        (location.start(), location.end())
+    });
+    warnings.dedup();
+    warnings
+        .into_iter()
+        .map(|warning| ModuleDiagnostic {
+            module_id,
+            source_version,
+            source_id,
+            location: warning.location(),
+            compilation_revision,
+            severity: DiagnosticSeverity::Warning,
+            message: warning.message().to_string(),
+        })
+        .collect()
 }
 
 /// Convert a structured compiler error into module diagnostics.
@@ -61,6 +127,7 @@ pub(crate) fn diagnostics_from_error(
         source_id,
         location,
         message: message.clone(),
+        severity: DiagnosticSeverity::Error,
     };
 
     use CompilationErrorImpl::*;
@@ -75,6 +142,7 @@ pub(crate) fn diagnostics_from_error(
                     source_id,
                     location: *location,
                     message: message.clone(),
+                    severity: DiagnosticSeverity::Error,
                 })
                 .collect();
         }

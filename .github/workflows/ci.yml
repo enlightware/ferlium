@@ -159,6 +159,28 @@ jobs:
       - name: Validate Lezer grammar
         run: make validate-grammar
 
+  playground_tests:
+    name: Playground unit tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: playground
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+
+      - name: Install npm dependencies
+        run: npm install
+
+      - name: Run playground unit tests
+        run: npm test
+
   deploy_pages:
     name: Deploy playground and book to GitHub Pages
     environment:
@@ -173,6 +195,7 @@ jobs:
       - wasm
       - build_site
       - validate_lezer_grammar
+      - playground_tests
     steps:
       - name: Deploy to GitHub Pages
         id: deployment

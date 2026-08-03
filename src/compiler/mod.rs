@@ -14,7 +14,7 @@ mod pipeline;
 mod session;
 
 pub(crate) use artifacts::{MirArtifacts, ModuleArtifacts};
-pub use diagnostics::ModuleDiagnostic;
+pub use diagnostics::{DiagnosticSeverity, ModuleDiagnostic};
 pub use error::*;
 pub(crate) use pipeline::add_code_to_module_with_capabilities;
 pub use pipeline::parse_module_and_expr;

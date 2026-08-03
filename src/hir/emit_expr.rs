@@ -11,13 +11,15 @@ use std::mem;
 use crate::{
     FxHashMap, FxHashSet, Location, Modules,
     ast::{PExprArena, PExprId},
-    compiler::{CompilationCapabilities, error::InternalCompilationError},
+    compiler::{
+        CompilationCapabilities, diagnostics::CompilationWarning, error::InternalCompilationError,
+    },
     desugar::desugar_expr_with_empty_ctx,
     hir::{self, UNodeArena},
     hir::{
         borrow_checker::check_elaborated_borrows,
         dictionary::DictElaborationCtx,
-        elaboration::{elaborate_generated_functions, elaborate_hir},
+        elaboration::{elaborate_generated_functions, elaborate_hir_with_warnings},
         emit_functions::check_unbounds,
         emit_hir::{
             PendingModuleFunctions, PubTypeConstraintPtr, add_pending_function_anonymous,
@@ -116,6 +118,7 @@ pub fn emit_expr_unsafe(
     others: &Modules,
     locals: Vec<LocalDecl>,
 ) -> Result<hir::ENodeId, InternalCompilationError> {
+    let mut warnings = Vec::new();
     emit_expr_unsafe_with_options(
         source,
         parsed_arena,
@@ -126,6 +129,7 @@ pub fn emit_expr_unsafe(
             capabilities: CompilationCapabilities::default(),
             private_impl_module: None,
         },
+        &mut warnings,
     )
     .map(|pending| pending.expr)
 }
@@ -137,6 +141,7 @@ fn emit_expr_unsafe_with_options(
     others: &Modules,
     locals: Vec<LocalDecl>,
     options: ExprEmissionOptions,
+    warnings: &mut Vec<CompilationWarning>,
 ) -> Result<PendingExprEntry, InternalCompilationError> {
     let mut expr_arena = UNodeArena::default();
     emit_expr_unsafe_inner(
@@ -147,9 +152,11 @@ fn emit_expr_unsafe_with_options(
         locals,
         &mut expr_arena,
         options,
+        warnings,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_expr_unsafe_inner(
     source: PExprId,
     parsed_arena: &PExprArena,
@@ -158,6 +165,7 @@ fn emit_expr_unsafe_inner(
     mut locals: Vec<LocalDecl>,
     expr_arena: &mut UNodeArena,
     options: ExprEmissionOptions,
+    warnings: &mut Vec<CompilationWarning>,
 ) -> Result<PendingExprEntry, InternalCompilationError> {
     let ExprEmissionOptions {
         capabilities,
@@ -201,6 +209,7 @@ fn emit_expr_unsafe_inner(
         module.functions.len() as u32,
         &desugared_arena,
         expr_arena,
+        warnings,
     );
     ty_env.compilation_capabilities = capabilities;
     let mut ty_inf = TypeInference::new_empty();
@@ -483,7 +492,14 @@ fn emit_expr_unsafe_inner(
         generated_projection_subscripts,
     );
     elaborate_local_ownership_and_value_dispatches(expr_arena, &mut locals, &mut ctx)?;
-    let elaborated = elaborate_hir(expr_arena, node_id, &mut module.hir_arena, &mut ctx, locals)?;
+    let elaborated = elaborate_hir_with_warnings(
+        expr_arena,
+        node_id,
+        &mut module.hir_arena,
+        &mut ctx,
+        locals,
+        warnings,
+    )?;
     let expr = elaborated.root;
     check_elaborated_borrows(&module.hir_arena, expr)?;
     for lambda_id in lambda_functions.iter() {
@@ -494,6 +510,7 @@ fn emit_expr_unsafe_inner(
             &mut pending_functions,
             &mut ctx,
             *lambda_id,
+            warnings,
         )?;
     }
     let generated_projection_subscripts = ctx.take_generated_projection_subscripts();
@@ -526,6 +543,7 @@ pub(crate) fn emit_expr_entry_with_capabilities(
     others: &Modules,
     locals: Vec<LocalDecl>,
     capabilities: CompilationCapabilities,
+    warnings: &mut Vec<CompilationWarning>,
 ) -> Result<LocalFunctionId, InternalCompilationError> {
     let pending = emit_expr_with_options(
         source,
@@ -537,6 +555,7 @@ pub(crate) fn emit_expr_entry_with_capabilities(
             capabilities,
             private_impl_module: None,
         },
+        warnings,
     )?;
     Ok(pending.into_entry_with_runtime_args(module, 0))
 }
@@ -552,6 +571,7 @@ pub(crate) fn emit_expr_entry_with_private_impls(
     private_impl_module: ModuleId,
 ) -> Result<LocalFunctionId, InternalCompilationError> {
     let runtime_arg_count = locals.len();
+    let mut warnings = Vec::new();
     let pending = emit_expr_with_options(
         source,
         parsed_arena,
@@ -562,6 +582,7 @@ pub(crate) fn emit_expr_entry_with_private_impls(
             capabilities,
             private_impl_module: Some(private_impl_module),
         },
+        &mut warnings,
     )?;
     Ok(pending.into_entry_with_runtime_args(module, runtime_arg_count))
 }
@@ -573,10 +594,18 @@ fn emit_expr_with_options(
     others: &Modules,
     locals: Vec<LocalDecl>,
     options: ExprEmissionOptions,
+    warnings: &mut Vec<CompilationWarning>,
 ) -> Result<PendingExprEntry, InternalCompilationError> {
     let span = parsed_arena[source].span;
-    let PendingExprEntry { ty, expr, locals } =
-        emit_expr_unsafe_with_options(source, parsed_arena, module, others, locals, options)?;
+    let PendingExprEntry { ty, expr, locals } = emit_expr_unsafe_with_options(
+        source,
+        parsed_arena,
+        module,
+        others,
+        locals,
+        options,
+        warnings,
+    )?;
     validate_safe_expr_type_scheme(&ty, span)?;
     Ok(PendingExprEntry { ty, expr, locals })
 }

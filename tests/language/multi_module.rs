@@ -9,12 +9,13 @@
 use test_log::test;
 
 use ferlium::{
-    CompilerSession, ExecutionTarget, Path,
+    CompilerSession, DiagnosticSeverity, ExecutionTarget, Path,
     compiler::test_support::{
         module_compilation_revision, module_diagnostics_len, module_entry_exists,
         module_has_compiled_version, module_has_mir_artifacts, module_is_stale, module_latest_deps,
         module_mir_function_slots, module_source_version,
     },
+    format::FormatWith,
     hir::value::Value,
     module::{ModuleId, Visibility, id::Id},
     types::r#type::Type,
@@ -1223,6 +1224,127 @@ fn module_source_versions_and_compilation_revisions_are_tracked() {
     assert_eq!(unchanged.source_version().unwrap().as_index(), 1);
     assert_eq!(unchanged.compilation_revision().as_index(), 2);
     assert!(unchanged.diagnostics().is_empty());
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn successful_compilation_records_and_clears_unreachable_code_warnings() {
+    let mut session = CompilerSession::new();
+    let source = "fn value() -> int { return 1; 999 }";
+    let module_id = session
+        .compile(source, "warnings", Path::single_str("warnings"))
+        .expect("unreachable code is a warning, not an error")
+        .module_id;
+
+    let diagnostics = session.modules().info(module_id).unwrap().diagnostics();
+    assert_eq!(diagnostics.len(), 1);
+    let warning = &diagnostics[0];
+    assert_eq!(warning.severity, DiagnosticSeverity::Warning);
+    assert_eq!(warning.message, "unreachable code");
+    assert_eq!(source[warning.location.as_range()].trim(), "999");
+    let module = session.expect_fresh_module(module_id);
+    let rendered = module.format_with(&session.modules()).to_string();
+    assert!(
+        !rendered.contains("999"),
+        "unreachable literal should not survive in final HIR:\n{rendered}"
+    );
+
+    session
+        .update_module_source(module_id, "fn value() -> int { 1 }")
+        .expect("clean replacement should compile");
+    assert!(
+        session
+            .modules()
+            .info(module_id)
+            .unwrap()
+            .diagnostics()
+            .is_empty()
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn tail_divergence_does_not_report_unreachable_code() {
+    let mut session = CompilerSession::new();
+    let module_id = session
+        .compile(
+            "fn value() -> int { return 1 }",
+            "reachable",
+            Path::single_str("reachable"),
+        )
+        .expect("tail return should compile")
+        .module_id;
+
+    assert!(
+        session
+            .modules()
+            .info(module_id)
+            .unwrap()
+            .diagnostics()
+            .is_empty()
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn unreachable_aggregate_suffix_reports_its_first_expression() {
+    let mut session = CompilerSession::new();
+    let source = "fn value() -> int { let x = ({ return 1 }, 999, 1000); x }";
+    let module_id = session
+        .compile(source, "aggregate", Path::single_str("aggregate"))
+        .expect("dead tuple members should not constrain inference")
+        .module_id;
+
+    let diagnostics = session.modules().info(module_id).unwrap().diagnostics();
+    assert_eq!(diagnostics.len(), 2);
+    assert!(
+        diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.severity == DiagnosticSeverity::Warning)
+    );
+    let warned = diagnostics
+        .iter()
+        .map(|diagnostic| source[diagnostic.location.as_range()].trim())
+        .collect::<Vec<_>>();
+    assert_eq!(warned, ["999", "x"]);
+    let rendered = session
+        .expect_fresh_module(module_id)
+        .format_with(&session.modules())
+        .to_string();
+    assert!(!rendered.contains("999"));
+    assert!(!rendered.contains("1000"));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn failed_compilation_reports_warnings_beside_errors() {
+    let mut session = CompilerSession::new();
+    let source = indoc! { r#"
+        fn broken(flag: bool) -> bool {
+            if flag { return true; 999 };
+            1
+        }
+    "# };
+    assert!(
+        session
+            .compile(source, "diagnostics", Path::single_str("diagnostics"))
+            .is_err()
+    );
+    let module_id = session
+        .modules()
+        .id_by_path(&Path::single_str("diagnostics"))
+        .expect("failed source module should remain registered");
+    let diagnostics = session.modules().info(module_id).unwrap().diagnostics();
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.severity == DiagnosticSeverity::Warning)
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error)
+    );
 }
 
 #[test]

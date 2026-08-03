@@ -50,7 +50,9 @@ use ustr::Ustr;
 
 use crate::{
     ast::{self, *},
-    compiler::{CompilationCapabilities, error::InternalCompilationError},
+    compiler::{
+        CompilationCapabilities, diagnostics::CompilationWarning, error::InternalCompilationError,
+    },
     containers::{b, iterable_to_string},
     format::FormatWith,
     hir::{self, UNodeArena},
@@ -314,13 +316,15 @@ pub(super) fn borrow_check_and_elaborate_pending_function(
     pending_functions: &mut PendingModuleFunctions,
     ctx: &mut DictElaborationCtx<'_, '_, '_>,
     id: LocalFunctionId,
+    warnings: &mut Vec<CompilationWarning>,
 ) -> Result<(), InternalCompilationError> {
     let mut function = pending_functions
         .remove(&id)
         .expect("expected pending function body");
     function.definition = function_slot.definition.clone();
     function.spans = function_slot.spans.clone();
-    let elaborated = function.check_borrows_and_elaborate_hir(dst_arena, ctx)?;
+    let elaborated =
+        function.check_borrows_and_elaborate_hir_with_warnings(dst_arena, ctx, warnings)?;
     *function_slot = elaborated;
     Ok(())
 }
@@ -452,6 +456,7 @@ pub(super) fn borrow_check_and_elaborate_dict(
     dicts: &ExtraParameters,
     module_inst_data: &FxHashMap<LocalFunctionId, ExtraParameters>,
     id: &LocalFunctionId,
+    warnings: &mut Vec<CompilationWarning>,
 ) -> Result<(), InternalCompilationError> {
     let generated_projection_subscripts =
         PendingGeneratedStructuralProjectionSubscripts::new(output);
@@ -470,6 +475,7 @@ pub(super) fn borrow_check_and_elaborate_dict(
             pending_functions,
             &mut ctx,
             function_id,
+            warnings,
         )?;
     }
     let generated_projection_subscripts = ctx.take_generated_projection_subscripts();
@@ -708,6 +714,7 @@ pub fn emit_module(
     others: &Modules,
     emit_from: EmitModuleFrom,
 ) -> Result<Module, InternalCompilationError> {
+    let mut warnings = Vec::new();
     emit_module_with_capabilities(
         source,
         parsed_arena,
@@ -716,10 +723,12 @@ pub fn emit_module(
         others,
         emit_from,
         CompilationCapabilities::default(),
+        &mut warnings,
     )
     .map_err(|failure| failure.error)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_module_with_capabilities(
     source: ast::PModule,
     parsed_arena: &PExprArena,
@@ -728,13 +737,21 @@ pub(crate) fn emit_module_with_capabilities(
     others: &Modules,
     emit_from: EmitModuleFrom,
     capabilities: CompilationCapabilities,
+    warnings: &mut Vec<CompilationWarning>,
 ) -> Result<Module, Box<ModuleEmissionError>> {
     let mut output = match emit_from {
         EmitModuleFrom::Uses(uses) => Module::from_uses(module_id, module_path, uses),
         EmitModuleFrom::Existing(module) => *module,
     };
 
-    match emit_module_contents(source, parsed_arena, others, &mut output, capabilities) {
+    match emit_module_contents(
+        source,
+        parsed_arena,
+        others,
+        &mut output,
+        capabilities,
+        warnings,
+    ) {
         Ok(()) => Ok(output),
         Err(error) => Err(Box::new(ModuleEmissionError {
             error,
@@ -749,6 +766,7 @@ fn emit_module_contents(
     others: &Modules,
     output: &mut Module,
     capabilities: CompilationCapabilities,
+    warnings: &mut Vec<CompilationWarning>,
 ) -> Result<(), InternalCompilationError> {
     // Preliminary: Make sure no name is defined multiple times.
     validate_name_uniqueness(&source)?;
@@ -945,6 +963,7 @@ fn emit_module_contents(
             None,
             &recursive_function_names,
             capabilities,
+            warnings,
         )?;
     }
 
@@ -1028,6 +1047,7 @@ fn emit_module_contents(
             Some(trait_ctx),
             &recursive_function_names,
             capabilities,
+            warnings,
         )?
         .unwrap();
 

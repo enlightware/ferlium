@@ -10,8 +10,8 @@
 use std::sync::LazyLock;
 
 use crate::{
-    CompilationError, CompilationOutput, CompilerSession, FxHashMap, FxHashSet, ModuleEnv, Path,
-    SourceId, call_fn,
+    CompilationError, CompilationOutput, CompilerSession, DiagnosticSeverity, FxHashMap, FxHashSet,
+    ModuleEnv, Path, SourceId, call_fn,
     eval::EvalCtx,
     execution::{DEFAULT_INTERACTIVE_FUEL_LIMIT, ReferenceInterpreterLimits},
     format::FormatWith,
@@ -30,7 +30,7 @@ use wasm_bindgen::prelude::*;
 use super::{
     annotations::{AnnotationData, display_annotations},
     char_index_lookup::CharIndexLookup,
-    diagnostics::{ErrorData, compilation_error_to_data},
+    diagnostics::{CompilationReport, ErrorData, compilation_error_to_data},
     execution::{ExecutionErrorData, ExecutionResult},
     signatures::{FunctionSignature, remove_effects},
 };
@@ -71,21 +71,69 @@ impl Compiler {
     }
 
     pub fn compile(&mut self, src: &str) -> Option<Vec<ErrorData>> {
-        match self.compile_internal(src) {
-            Ok(()) => None,
-            Err(err) => Some(
-                compilation_error_to_data(&err, &self.session.source_table)
+        let report = self.compile_report(src);
+        if report.succeeded {
+            None
+        } else {
+            Some(
+                report
+                    .diagnostics
                     .into_iter()
-                    .map(|data| {
-                        let source_id = data.source_id;
-                        data.map(|pos| {
-                            self.char_index_lookup(source_id)
-                                .byte_to_char_position(pos as usize)
-                                as u32
-                        })
-                    })
+                    .filter(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error)
                     .collect(),
-            ),
+            )
+        }
+    }
+
+    /// Compile source and return every warning or error from this attempt. Warnings do not make
+    /// the report unsuccessful and therefore do not disable execution in IDE clients.
+    pub fn compile_report(&mut self, src: &str) -> CompilationReport {
+        let result = self.compile_internal(src);
+        let succeeded = result.is_ok();
+        let path = Path::single_str(MODULE_NAME);
+        let warning_diagnostics = self
+            .session
+            .modules()
+            .id_by_path(&path)
+            .and_then(|module_id| self.session.modules().info(module_id))
+            .map(|info| {
+                info.diagnostics()
+                    .iter()
+                    .filter(|diagnostic| diagnostic.severity == DiagnosticSeverity::Warning)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let mut diagnostics = warning_diagnostics
+            .into_iter()
+            .map(|diagnostic| {
+                ErrorData::from_location_with_severity(
+                    diagnostic.location,
+                    self.session.source_table(),
+                    diagnostic.message,
+                    diagnostic.severity,
+                )
+            })
+            .collect::<Vec<_>>();
+        if let Err(error) = result {
+            diagnostics.extend(compilation_error_to_data(
+                &error,
+                &self.session.source_table,
+            ));
+        }
+        let diagnostics = diagnostics
+            .into_iter()
+            .map(|data| {
+                let source_id = data.source_id;
+                data.map(|pos| {
+                    self.char_index_lookup(source_id)
+                        .byte_to_char_position(pos as usize) as u32
+                })
+            })
+            .collect();
+        CompilationReport {
+            succeeded,
+            diagnostics,
         }
     }
 
@@ -479,6 +527,29 @@ mod tests {
             .run_expr()
             .expect("replacement expression should exist");
         assert_eq!(recovery.html_message(), "42: int");
+    }
+
+    #[test]
+    fn compile_report_keeps_warnings_non_fatal_and_uses_character_offsets() {
+        let mut compiler = Compiler::new();
+        let source = "fn f() -> int { return 1; é = 2 }";
+        let report = compiler.compile_report(source);
+
+        assert!(report.succeeded);
+        assert_eq!(report.diagnostics.len(), 1);
+        let warning = &report.diagnostics[0];
+        assert_eq!(warning.severity, DiagnosticSeverity::Warning);
+        assert_eq!(warning.text, "unreachable code");
+        let warned_text = source.chars().collect::<Vec<_>>()
+            [warning.from as usize..warning.to as usize]
+            .iter()
+            .collect::<String>();
+        assert_eq!(warned_text.trim(), "é = 2");
+
+        let execution = compiler
+            .run_fn_unit_o::<isize>("f")
+            .expect("a warning-only compilation remains executable");
+        assert_eq!(execution, 1);
     }
 
     #[test]

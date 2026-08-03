@@ -169,6 +169,7 @@ impl ModuleEntry {
         src_info: ModuleSrcInfo,
         deps: Vec<ModuleId>,
         compilation_revision: CompilationRevision,
+        diagnostics: Vec<ModuleDiagnostic>,
     ) -> Self {
         ModuleEntry {
             src_info: Some(src_info),
@@ -176,7 +177,7 @@ impl ModuleEntry {
             last_error: None,
             latest_deps: deps,
             compilation_revision,
-            diagnostics: Vec::new(),
+            diagnostics,
             stale: true,
         }
     }
@@ -206,13 +207,14 @@ impl ModuleEntry {
         old_revision: Option<Rc<ModuleRevision>>,
         latest_deps: Vec<ModuleId>,
         compilation_revision: CompilationRevision,
+        diagnostics: Vec<ModuleDiagnostic>,
     ) {
         self.src_info = Some(src_info);
         self.revision = old_revision;
         self.last_error = None;
         self.latest_deps = latest_deps;
         self.compilation_revision = compilation_revision;
-        self.diagnostics.clear();
+        self.diagnostics = diagnostics;
         self.stale = true;
     }
 
@@ -271,6 +273,7 @@ impl ModuleEntry {
         module: Module,
         artifacts: ModuleArtifacts,
         compilation_revision: CompilationRevision,
+        diagnostics: Vec<ModuleDiagnostic>,
     ) -> Self {
         let deps = module.deps().collect();
         Self {
@@ -279,7 +282,7 @@ impl ModuleEntry {
             last_error: None,
             latest_deps: deps,
             compilation_revision,
-            diagnostics: Vec::new(),
+            diagnostics,
             stale: false,
         }
     }

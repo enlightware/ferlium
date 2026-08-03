@@ -13,6 +13,7 @@ use crate::{
     ast::{self, DExprArena, UstrSpan},
     compiler::{
         CompilationCapabilities,
+        diagnostics::CompilationWarning,
         error::{InternalCompilationError, UnsafeFeature},
     },
     hir::function::{ArgConvention, CallableDefinition},
@@ -140,6 +141,8 @@ pub struct TypingEnv<'m> {
     pub(crate) ast_arena: &'m DExprArena,
     /// The HIR node arena, used to allocate HIR nodes during type inference.
     pub(crate) ir_arena: &'m mut NodeArena,
+    /// Non-fatal source diagnostics discovered while this compilation attempt emits HIR.
+    pub(crate) warnings: &'m mut Vec<CompilationWarning>,
     #[new(default)]
     pub(crate) compilation_capabilities: CompilationCapabilities,
     #[new(default)]

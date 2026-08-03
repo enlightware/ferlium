@@ -12,11 +12,14 @@ use crate::{
         self, DExprArena, DExprId, Desugared, ExprKind, Pattern, PatternConstraintKind,
         PatternKind, PatternVar, PropertyAccess, RecordField, RecordFields, UnnamedArg, UstrSpan,
     },
-    compiler::error::{
-        DuplicatedFieldContext, InternalCompilationError, InvalidLoopControlKind,
-        InvalidSubscriptDefinitionKind, InvalidSubscriptUseKind, InvalidYieldKind, LoopControlKind,
-        SubscriptDefinitionSubject, UnsafeFeature, UnsupportedSubscriptFeatureKind,
-        WhatIsNotAProductType, WhichProductTypeIsNot,
+    compiler::{
+        diagnostics::CompilationWarning,
+        error::{
+            DuplicatedFieldContext, InternalCompilationError, InvalidLoopControlKind,
+            InvalidSubscriptDefinitionKind, InvalidSubscriptUseKind, InvalidYieldKind,
+            LoopControlKind, SubscriptDefinitionSubject, UnsafeFeature,
+            UnsupportedSubscriptFeatureKind, WhatIsNotAProductType, WhichProductTypeIsNot,
+        },
     },
     containers::{SVec2, b, continuous_hashmap_to_vec},
     format::FormatWith,
@@ -632,6 +635,7 @@ impl TypeInference {
             env.base_local_function_index,
             env.ast_arena,
             &mut fn_arena,
+            env.warnings,
         );
         inner_env.compilation_capabilities = env.compilation_capabilities;
         inner_env.subscript_member = env.subscript_member;
@@ -5388,7 +5392,7 @@ impl TypeInference {
         let mut tys = Vec::with_capacity(exprs.len());
         let mut effects = Vec::with_capacity(exprs.len());
         let mut diverges = false;
-        for expr in exprs {
+        for (index, expr) in exprs.iter().enumerate() {
             let yield_count_before = env
                 .yield_context
                 .as_ref()
@@ -5408,6 +5412,14 @@ impl TypeInference {
                     continue;
                 }
                 diverges = true;
+                if let Some(location) = exprs
+                    .get(index + 1)
+                    .map(|expr| env.ast_arena[*expr].span)
+                    .filter(|location| !location.is_synthesized())
+                {
+                    env.warnings
+                        .push(CompilationWarning::unreachable_code(location));
+                }
                 break;
             }
         }

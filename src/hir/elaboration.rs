@@ -12,7 +12,7 @@ use ustr::{Ustr, ustr};
 
 use crate::{
     Location,
-    compiler::error::InternalCompilationError,
+    compiler::{diagnostics::CompilationWarning, error::InternalCompilationError},
     hir::hir_syn::{call_dictionary_function, get_dictionary, static_apply},
     hir::{
         dictionary::{
@@ -311,15 +311,39 @@ pub struct ElaboratedHir {
     pub locals: Vec<ELocalDecl>,
 }
 
+fn node_contains_yield(arena: &UNodeArena, root: UNodeId) -> bool {
+    matches!(arena[root].kind, NodeKind::Yield(_))
+        || arena[root]
+            .kind
+            .child_node_ids()
+            .into_iter()
+            .any(|child| node_contains_yield(arena, child))
+}
+
 /// Elaborate a pre-dictionary-passing HIR tree into the final HIR arena.
-pub fn elaborate_hir<'d, 'sr, 'sm>(
+#[cfg(test)]
+fn elaborate_hir<'d, 'sr, 'sm>(
     src: &UNodeArena,
     root: UNodeId,
     dst: &mut ENodeArena,
     ctx: &mut DictElaborationCtx<'d, 'sr, 'sm>,
     locals: Vec<LocalDecl>,
 ) -> Result<ElaboratedHir, InternalCompilationError> {
-    let mut elaboration = HirElaboration::new(dst, ctx, locals);
+    let mut warnings = Vec::new();
+    elaborate_hir_with_warnings(src, root, dst, ctx, locals, &mut warnings)
+}
+
+/// Elaborate HIR while reporting unreachable suffixes that became visible only after final type
+/// substitution. Most suffixes are already diagnosed and pruned during inference.
+pub(crate) fn elaborate_hir_with_warnings<'d, 'sr, 'sm>(
+    src: &UNodeArena,
+    root: UNodeId,
+    dst: &mut ENodeArena,
+    ctx: &mut DictElaborationCtx<'d, 'sr, 'sm>,
+    locals: Vec<LocalDecl>,
+    warnings: &mut Vec<CompilationWarning>,
+) -> Result<ElaboratedHir, InternalCompilationError> {
+    let mut elaboration = HirElaboration::new(dst, ctx, locals, warnings);
     let root = elaboration.elaborate_node(src, root)?;
     LocalDecl::assign_sequential_slots(&mut elaboration.locals);
     Ok(ElaboratedHir {
@@ -382,13 +406,14 @@ pub fn elaborate_generated_functions(
 }
 
 /// Stateful worker that appends elaborated HIR nodes while tracking UNodeId-to-ENodeId remaps.
-struct HirElaboration<'a, 'd, 'sr, 'sm> {
+struct HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
     generated: UNodeArena,
     dst: &'a mut ENodeArena,
     ctx: &'a mut DictElaborationCtx<'d, 'sr, 'sm>,
     locals: Vec<LocalDecl>,
     remap: FxHashMap<UNodeId, ENodeId>,
     in_progress: FxHashSet<UNodeId>,
+    warnings: &'w mut Vec<CompilationWarning>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -408,11 +433,12 @@ struct ElaboratedCallArguments {
     cleanup: Vec<LocalDeclId>,
 }
 
-impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
+impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
     fn new(
         dst: &'a mut ENodeArena,
         ctx: &'a mut DictElaborationCtx<'d, 'sr, 'sm>,
         locals: Vec<LocalDecl>,
+        warnings: &'w mut Vec<CompilationWarning>,
     ) -> Self {
         Self {
             generated: UNodeArena::default(),
@@ -421,6 +447,7 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
             locals,
             remap: FxHashMap::default(),
             in_progress: FxHashSet::default(),
+            warnings,
         }
     }
 
@@ -1445,10 +1472,23 @@ impl<'a, 'd, 'sr, 'sm> HirElaboration<'a, 'd, 'sr, 'sm> {
             Return(node) => Return(self.elaborate_node(src, *node)?),
             Block(block) => {
                 let cleanup = block.cleanup.clone();
+                let mut body = Vec::with_capacity(block.body.len());
+                for (index, node) in block.body.iter().copied().enumerate() {
+                    body.push(self.elaborate_node(src, node)?);
+                    if src[node].ty == Type::never()
+                        && !node_contains_yield(src, node)
+                        && let Some(location) =
+                            block.body.get(index + 1).map(|node| src[*node].span)
+                    {
+                        if !location.is_synthesized() {
+                            self.warnings
+                                .push(CompilationWarning::unreachable_code(location));
+                        }
+                        break;
+                    }
+                }
                 Block(b(hir::Block {
-                    body: b(SVec2::from_vec(
-                        self.elaborate_node_iter(src, block.body.iter().copied())?,
-                    )),
+                    body: b(SVec2::from_vec(body)),
                     cleanup,
                 }))
             }
@@ -1655,6 +1695,84 @@ mod tests {
             TraitAssociatedConst::new("SIZE", Type::primitive::<isize>(), "Size in bytes."),
             TraitAssociatedConst::new("ALIGN", Type::primitive::<isize>(), "Alignment in bytes."),
         ])
+    }
+
+    #[test]
+    fn final_elaboration_prunes_suffix_after_late_never_substitution() {
+        let source_id = crate::SourceId::from_index(1);
+        let live_span = Location::new(0, 6, source_id);
+        let dead_span = Location::new(8, 11, source_id);
+        let block_span = Location::new(0, 11, source_id);
+        let mut arena = NodeArena::default();
+        // This models a node whose type became Never only when final substitutions were applied.
+        let diverging = arena.alloc(Node::new(
+            NodeKind::Immediate(LiteralValue::new_native(())),
+            Type::never(),
+            no_effects(),
+            live_span,
+        ));
+        let dead = arena.alloc(Node::new(
+            NodeKind::Immediate(LiteralValue::new_native(999isize)),
+            int_type(),
+            no_effects(),
+            dead_span,
+        ));
+        let root = arena.alloc(Node::new(
+            NodeKind::Block(b(hir::Block {
+                body: b(SVec2::from_vec(vec![diverging, dead])),
+                cleanup: Vec::new(),
+            })),
+            Type::never(),
+            no_effects(),
+            block_span,
+        ));
+
+        let modules = Modules::new();
+        let current_module = Module::new(ModuleId::new(0), Path::single_str("$elaboration_test"));
+        let mut impls = TraitImpls::new(ModuleId::new(0));
+        let mut deps = FxHashSet::default();
+        let mut solver = TraitSolver::new(
+            CurrentTypeItems::new_from_module(&current_module),
+            &mut impls,
+            FxHashMap::default(),
+            &mut deps,
+            CurrentProjectionSubscriptTypes::empty(),
+            PendingFunctionCollector::new(0),
+            &modules,
+        );
+        let dicts = ExtraParameters {
+            requirements: vec![],
+            repr_map: FxHashMap::default(),
+        };
+        let generated_projection_subscripts =
+            PendingGeneratedStructuralProjectionSubscripts::new(&current_module);
+        let mut ctx = DictElaborationCtx::new_with_generated_projection_subscripts(
+            &dicts,
+            None,
+            &mut solver,
+            generated_projection_subscripts,
+        );
+        let mut elaborated_arena = ENodeArena::default();
+        let mut warnings = Vec::new();
+
+        let elaborated = elaborate_hir_with_warnings(
+            &arena,
+            root,
+            &mut elaborated_arena,
+            &mut ctx,
+            Vec::new(),
+            &mut warnings,
+        )
+        .unwrap();
+
+        let NodeKind::Block(block) = &elaborated_arena[elaborated.root].kind else {
+            panic!("expected elaborated block");
+        };
+        assert_eq!(block.body.len(), 1);
+        assert_eq!(
+            warnings,
+            vec![CompilationWarning::unreachable_code(dead_span)]
+        );
     }
 
     fn get_associated_const_node(

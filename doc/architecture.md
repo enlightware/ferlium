@@ -27,7 +27,7 @@ The main phases are:
 1. Parse source text into parsed AST.
 2. Validate parsed AST features that are not accepted in user code.
 3. Desugar parsed AST syntax and module declarations.
-4. Resolve symbols and emit typed HIR while collecting type, effect, mutability, and trait constraints. Some HIR decisions, such as local storage ownership and value argument passing, may remain explicitly unresolved.
+4. Resolve symbols and emit typed HIR while collecting type, effect, mutability, and trait constraints. Definite unreachable suffixes are reported as warnings and omitted without constraining inference. Some HIR decisions, such as local storage ownership and value argument passing, may remain explicitly unresolved.
 5. Unify type, effect, and mutability constraints.
 6. Resolve deferred local storage decisions from the unified mutability facts, then activate the `Value` constraints required by finalized ownership and take-local semantics.
 7. Simplify and default remaining trait constraints, then build final type schemes and hidden dictionary/evidence parameter lists.
@@ -36,6 +36,10 @@ The main phases are:
 10. Execute final HIR through the tree-walking interpreter, or lower it to MIR and execute it through the MIR reference interpreter.
 
 Future backend work may lower MIR to WebAssembly, bytecode, JIT, or native code.
+
+Every compilation attempt stores severity-tagged source diagnostics on its module entry. Errors make
+the attempt fail; warnings remain available through `ModuleInfo::diagnostics` on a successful
+module. IDE compilation reports both and keep execution enabled when only warnings are present.
 
 HIR and MIR interpretation share `ExecutionLimits`; their boxed reference implementations add an
 environment-cell guard. Runtime failure and poisoning semantics are specified in

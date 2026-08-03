@@ -13,7 +13,7 @@ use std::{
 };
 
 use crate::{
-    CompilationError, Location, SourceId,
+    CompilationError, DiagnosticSeverity, Location, SourceId,
     compiler::error::{
         CompilationErrorImpl, ImportKind, InfiniteTypeKind, InvalidRecordFieldContext,
         MutabilityMustBeWhat, WhatIsNotAProductType, WhichProductTypeIsNot,
@@ -33,11 +33,21 @@ pub struct ErrorData {
     pub to: u32,
     pub file: String,
     pub text: String,
+    pub severity: DiagnosticSeverity,
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 impl ErrorData {
     pub(super) fn from_location(loc: Location, source_table: &SourceTable, text: String) -> Self {
+        Self::from_location_with_severity(loc, source_table, text, DiagnosticSeverity::Error)
+    }
+
+    pub(super) fn from_location_with_severity(
+        loc: Location,
+        source_table: &SourceTable,
+        text: String,
+        severity: DiagnosticSeverity,
+    ) -> Self {
         Self {
             source_id: loc.source_id(),
             from: loc.start(),
@@ -47,6 +57,7 @@ impl ErrorData {
                 .unwrap_or(&format!("#{}", loc.source_id()))
                 .to_string(),
             text,
+            severity,
         }
     }
 
@@ -57,8 +68,17 @@ impl ErrorData {
             to: f(self.to),
             file: self.file,
             text: self.text,
+            severity: self.severity,
         }
     }
+}
+
+/// Diagnostics and success state from one IDE compilation attempt.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
+#[derive(Debug, Clone)]
+pub struct CompilationReport {
+    pub succeeded: bool,
+    pub diagnostics: Vec<ErrorData>,
 }
 
 impl Display for ErrorData {

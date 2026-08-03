@@ -11,6 +11,7 @@ use crate::{
     ast::{self, DExprArena, DModuleFunctionArg},
     compiler::{
         CompilationCapabilities,
+        diagnostics::CompilationWarning,
         error::{
             AttributeTarget, InternalCompilationError, InvalidAttributeKind,
             InvalidSubscriptDefinitionKind, SubscriptDefinitionSubject, UnsafeFeature,
@@ -523,6 +524,7 @@ pub(super) fn emit_functions<'a, F, I>(
     trait_ctx: Option<EmitTraitCtx>,
     recursive_function_names: &FxHashSet<Ustr>,
     capabilities: CompilationCapabilities,
+    warnings: &mut Vec<CompilationWarning>,
 ) -> Result<Option<EmitTraitOutput>, InternalCompilationError>
 where
     I: Iterator<Item = EmitFunctionInput<'a>>,
@@ -991,6 +993,7 @@ where
             output.functions.len() as u32,
             desugared_arena,
             &mut fn_arena,
+            warnings,
         );
         ty_env.function_name = Some(function.name.0);
         if let EmitFunctionKind::SubscriptMember {
@@ -1464,6 +1467,7 @@ where
                 &dicts,
                 &module_inst_data,
                 id,
+                warnings,
             )?;
         }
 
@@ -1818,6 +1822,7 @@ where
                 dicts,
                 &module_inst_data,
                 id,
+                warnings,
             )?;
         }
 

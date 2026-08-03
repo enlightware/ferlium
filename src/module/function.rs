@@ -31,7 +31,7 @@ use crate::{
         function::ScriptFunction,
     },
     hir::{
-        dictionary::DictElaborationCtx, elaboration::elaborate_hir,
+        dictionary::DictElaborationCtx, elaboration::elaborate_hir_with_warnings,
         value_dispatch::elaborate_local_ownership_and_value_dispatches,
     },
     internal_compilation_error,
@@ -580,9 +580,19 @@ impl PendingModuleFunction {
     }
 
     pub fn check_borrows_and_elaborate_hir(
+        self,
+        dst_arena: &mut ENodeArena,
+        ctx: &mut DictElaborationCtx<'_, '_, '_>,
+    ) -> Result<EModuleFunction, InternalCompilationError> {
+        let mut warnings = Vec::new();
+        self.check_borrows_and_elaborate_hir_with_warnings(dst_arena, ctx, &mut warnings)
+    }
+
+    pub(crate) fn check_borrows_and_elaborate_hir_with_warnings(
         mut self,
         dst_arena: &mut ENodeArena,
         ctx: &mut DictElaborationCtx<'_, '_, '_>,
+        warnings: &mut Vec<crate::compiler::diagnostics::CompilationWarning>,
     ) -> Result<EModuleFunction, InternalCompilationError> {
         let root = self.code.entry_node_id;
         LocalDecl::assign_sequential_slots(&mut self.locals);
@@ -622,7 +632,14 @@ impl PendingModuleFunction {
         } else {
             None
         };
-        let elaborated = elaborate_hir(&self.code.arena, root, dst_arena, ctx, self.locals)?;
+        let elaborated = elaborate_hir_with_warnings(
+            &self.code.arena,
+            root,
+            dst_arena,
+            ctx,
+            self.locals,
+            warnings,
+        )?;
         if self.code.yield_node_id.is_some() {
             check_elaborated_yield_roots(dst_arena, elaborated.root, &elaborated.locals)?;
         }

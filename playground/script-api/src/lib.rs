@@ -17,7 +17,7 @@ use ferlium::{
 };
 
 pub use ferlium::ide::ExecutionResult;
-pub use ferlium::ide::{AnnotationData, ErrorData, ExecutionErrorData};
+pub use ferlium::ide::{AnnotationData, CompilationReport, ErrorData, ExecutionErrorData};
 
 #[wasm_bindgen]
 pub struct PlaygroundCompiler {
@@ -45,8 +45,8 @@ impl PlaygroundCompiler {
         }
     }
 
-    pub fn compile(&mut self, src: &str) -> Option<Vec<ErrorData>> {
-        self.inner.compile(src)
+    pub fn compile(&mut self, src: &str) -> CompilationReport {
+        self.inner.compile_report(src)
     }
 
     pub fn run_expr(&mut self) -> Option<ExecutionResult> {

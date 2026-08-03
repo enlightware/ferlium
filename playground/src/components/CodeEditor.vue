@@ -1,7 +1,7 @@
 <script setup lang="ts">
 
 import { ref, onMounted, watch } from "vue";
-import { PlaygroundCompiler as Compiler, ErrorData } from "script-api";
+import { DiagnosticSeverity, PlaygroundCompiler as Compiler, ErrorData } from "../compiler-api";
 
 import { EditorView, keymap, ViewUpdate, scrollPastEnd } from "@codemirror/view";
 import { indentWithTab } from "@codemirror/commands";
@@ -71,16 +71,16 @@ const extensions = [
 	editorTheme,
 ];
 
-function fillDiagnostics(errorData: ErrorData[]) {
+function fillDiagnostics(diagnosticData: ErrorData[]) {
 	diagnostics.length = 0;
-	for (const data of errorData) {
+	for (const data of diagnosticData) {
 		if (data.file != "<ide>") {
 			continue;
 		}
 		diagnostics.push({
 			from: data.from,
 			to: data.to,
-			severity: "error",
+			severity: data.severity === DiagnosticSeverity.Warning ? "warning" : "error",
 			message: data.text,
 		});
 	}
@@ -90,15 +90,14 @@ function processUpdate(update: ViewUpdate) {
 	const text = update.state.doc.toString();
 	const view = update.view;
 	if (update.docChanged) {
-		const errorData = compiler.compile(text);
-		if (errorData !== undefined) {
+		const report = compiler.compile(text);
+		fillDiagnostics(report.diagnostics);
+		if (!report.succeeded) {
 			annotationsAvailable = false;
-			fillDiagnostics(errorData);
 			setAnnotations(view, []);
 			emit("setRunAvailability", false);
 		} else {
 			annotationsAvailable = true;
-			diagnostics.length = 0;
 			refreshAnnotations();
 			emit("setRunAvailability", true);
 		}
