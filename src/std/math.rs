@@ -20,7 +20,7 @@ use ustr::ustr;
 
 use crate::{
     cached_primitive_ty,
-    compiler::error::RuntimeErrorKind,
+    compiler::error::SourceFailureKind,
     containers::b,
     hir::function::{
         BinaryNativeFnNMN, BinaryNativeFnNNFN, BinaryNativeFnNNN, BinaryNativeFnNNV, Function,
@@ -165,8 +165,8 @@ impl NativeDisplay for Float {
     }
 }
 
-fn invalid_real_argument(message: StdString) -> RuntimeErrorKind {
-    RuntimeErrorKind::InvalidArgument(message)
+fn invalid_real_argument(message: StdString) -> SourceFailureKind {
+    SourceFailureKind::InvalidArgument(message)
 }
 
 fn saturated_real_result(value: f64) -> Float {
@@ -322,9 +322,9 @@ fn mul_float(lhs: Float, rhs: Float) -> Float {
     Float::new_saturating(lhs.into_inner() * rhs.into_inner())
 }
 
-fn div_float(lhs: Float, rhs: Float) -> Result<Float, RuntimeErrorKind> {
+fn div_float(lhs: Float, rhs: Float) -> Result<Float, SourceFailureKind> {
     if rhs.into_inner() == 0.0 {
-        Err(RuntimeErrorKind::DivisionByZero)
+        Err(SourceFailureKind::DivisionByZero)
     } else {
         Ok(Float::new_saturating(lhs.into_inner() / rhs.into_inner()))
     }
@@ -342,7 +342,7 @@ fn tan_float(value: Float) -> Float {
     saturated_real_result(value.into_inner().tan())
 }
 
-fn asin_float(value: Float) -> Result<Float, RuntimeErrorKind> {
+fn asin_float(value: Float) -> Result<Float, SourceFailureKind> {
     let value = value.into_inner();
     Float::new(value.asin()).map_err(|_| {
         invalid_real_argument(format!(
@@ -351,7 +351,7 @@ fn asin_float(value: Float) -> Result<Float, RuntimeErrorKind> {
     })
 }
 
-fn acos_float(value: Float) -> Result<Float, RuntimeErrorKind> {
+fn acos_float(value: Float) -> Result<Float, SourceFailureKind> {
     let value = value.into_inner();
     Float::new(value.acos()).map_err(|_| {
         invalid_real_argument(format!(
@@ -384,7 +384,7 @@ fn asinh_float(value: Float) -> Float {
     saturated_real_result(value.into_inner().asinh())
 }
 
-fn acosh_float(value: Float) -> Result<Float, RuntimeErrorKind> {
+fn acosh_float(value: Float) -> Result<Float, SourceFailureKind> {
     let value = value.into_inner();
     Float::new(value.acosh()).map_err(|_| {
         invalid_real_argument(format!(
@@ -393,7 +393,7 @@ fn acosh_float(value: Float) -> Result<Float, RuntimeErrorKind> {
     })
 }
 
-fn atanh_float(value: Float) -> Result<Float, RuntimeErrorKind> {
+fn atanh_float(value: Float) -> Result<Float, SourceFailureKind> {
     let value = value.into_inner();
     Float::new(value.atanh()).map_err(|_| {
         invalid_real_argument(format!(
@@ -406,7 +406,7 @@ fn exp_float(value: Float) -> Float {
     saturated_real_result(value.into_inner().exp())
 }
 
-fn log_float(value: Float) -> Result<Float, RuntimeErrorKind> {
+fn log_float(value: Float) -> Result<Float, SourceFailureKind> {
     let value = value.into_inner();
     Float::new(value.ln()).map_err(|_| {
         invalid_real_argument(format!(
@@ -415,7 +415,7 @@ fn log_float(value: Float) -> Result<Float, RuntimeErrorKind> {
     })
 }
 
-fn pow_float(base: Float, exponent: Float) -> Result<Float, RuntimeErrorKind> {
+fn pow_float(base: Float, exponent: Float) -> Result<Float, SourceFailureKind> {
     let base = base.into_inner();
     let exponent = exponent.into_inner();
     let result = base.powf(exponent);
@@ -428,7 +428,7 @@ fn pow_float(base: Float, exponent: Float) -> Result<Float, RuntimeErrorKind> {
     }
 }
 
-fn sqrt_float(value: Float) -> Result<Float, RuntimeErrorKind> {
+fn sqrt_float(value: Float) -> Result<Float, SourceFailureKind> {
     let value = value.into_inner();
     Float::new(value.sqrt()).map_err(|_| {
         invalid_real_argument(format!(
@@ -466,7 +466,7 @@ fn float_to_string(value: Float) -> String {
 }
 
 pub fn add_to_module(to: &mut Module) {
-    use RuntimeErrorKind::*;
+    use SourceFailureKind::*;
     let value_trait_id = to.expect_std_trait_id_in_current_module(VALUE_TRAIT_NAME);
     let inspect_trait_id = to.expect_std_trait_id_in_current_module(INSPECT_TRAIT_NAME);
     let num_trait_id = to.expect_std_trait_id_in_current_module(NUM_TRAIT_NAME);

@@ -6,7 +6,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use ferlium::compiler::error::{CompilationErrorImpl, RuntimeErrorKind};
+use ferlium::compiler::error::{CompilationErrorImpl, SourceFailureKind};
 use indoc::indoc;
 use test_log::test;
 
@@ -230,45 +230,45 @@ fn real_domain_errors() {
     let mut session = TestSession::new();
     assert_eq!(
         session.fail_run("asin(2.0)"),
-        RuntimeErrorKind::InvalidArgument(
+        SourceFailureKind::InvalidArgument(
             "Taking the arcsine of 2 is undefined because it is outside [-1, 1]".into()
         )
     );
     assert_eq!(
         session.fail_run("acos(2.0)"),
-        RuntimeErrorKind::InvalidArgument(
+        SourceFailureKind::InvalidArgument(
             "Taking the arccosine of 2 is undefined because it is outside [-1, 1]".into()
         )
     );
     assert_eq!(
         session.fail_run("acosh(0.0)"),
-        RuntimeErrorKind::InvalidArgument(
+        SourceFailureKind::InvalidArgument(
             "Taking the inverse hyperbolic cosine of 0 is undefined because it is less than 1"
                 .into()
         )
     );
     assert_eq!(
         session.fail_run("atanh(1.0)"),
-        RuntimeErrorKind::InvalidArgument(
+        SourceFailureKind::InvalidArgument(
             "Taking the inverse hyperbolic tangent of 1 is undefined because it is outside (-1, 1)"
                 .into()
         )
     );
     assert_eq!(
         session.fail_run("log(0.0)"),
-        RuntimeErrorKind::InvalidArgument(
+        SourceFailureKind::InvalidArgument(
             "Taking the logarithm of 0 is undefined because it is not positive".into()
         )
     );
     assert_eq!(
         session.fail_run("pow(-1.0, 0.5)"),
-        RuntimeErrorKind::InvalidArgument(
+        SourceFailureKind::InvalidArgument(
             "Raising -1 to the power 0.5 is undefined as a real number".into()
         )
     );
     assert_eq!(
         session.fail_run("sqrt(-1.0)"),
-        RuntimeErrorKind::InvalidArgument(
+        SourceFailureKind::InvalidArgument(
             "Taking the square root of -1 is undefined because it is negative".into()
         )
     );

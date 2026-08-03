@@ -52,9 +52,9 @@ read. Values live in registers or in storage reached through a *place*.
 - The first block is the **entry**.
 - **Every block is non-empty and ends in exactly one terminator**, which appears *only* as the
   block's last instruction. Unreachable blocks are permitted but must still be complete.
-- The terminators are `ret`, `br`, `condbr`, `invoke`, `resume`, and the unwind-capable forms of the
-  runtime checks (classified exhaustively by `InstructionKind::is_terminator`).
-- Every branch target (`br`/`condbr`/`invoke` successor, runtime-check successor, and sparse
+- The terminators are `ret`, `br`, `condbr`, `invoke`, and `resume` (classified exhaustively by
+  `InstructionKind::is_terminator`).
+- Every branch target (`br`/`condbr`/`invoke` successor and sparse
   implicit-unwind-table target) names an existing block of the same function.
 
 These are part of what `ssa::verify::verify_function` asserts, in addition to the derived semantic
@@ -170,18 +170,17 @@ count. Roles: **p** = place, **v** = value, **d** = dictionary, **m** = stack ma
 |-------|----------|--------|-----------|
 | `call` | `[callee, args.., ret-out:p]` | — | `n ≥ 2`. Callee is a constant `Function` or the **place** of a function value, always read *by reference* (never loaded — so a closure environment is never copied). Every call, including a unit-returning call, has a trailing result place. |
 | `invoke … -> bN unwind bM` ★ | as `call` | — | `n ≥ 2`. A *fallible* call: normal completion falls to `bN`, a raised error to the cleanup pad `bM`. Only fallible calls with cleanup to run become `invoke` (see `ssa-error-propagation.md`). |
-| `check_call_depth` | — | — | `n == 0`; enforces the runtime's maximum active script-frame depth. With pending cleanup it is a terminator written `check_call_depth -> bN unwind bM`. |
-| `check_fuel` | — | — | `n == 0`; consumes one unit of optional execution fuel at a loop/back-edge guard. With pending cleanup it is a terminator written `check_fuel -> bN unwind bM`. |
+| `check_call_depth` | — | — | `n == 0`; pinned guard enforcing the maximum active script-frame depth. Violation leaves the MIR CFG and poisons the executor. |
+| `check_fuel` | — | — | `n == 0`; pinned guard consuming one unit of optional execution fuel. Violation leaves the MIR CFG and poisons the executor. |
 | `ret` ★ | — | — | `n == 0`; the result is already in `@ret`. |
 | `br bN` ★ | — | — | `n == 0`; unconditional branch. |
 | `condbr cond, bN, bM` ★ | `[cond:v(bool)]` | — | `n == 1`. |
 | `resume` ★ | — | — | `n == 0`; continues the unwind a cleanup pad interrupted, handing the in-flight error to the caller (not a fresh throw). Terminates an outermost pad. |
 
 Instructions without explicit unwind successors may have an entry in the function's sparse
-implicit unwind table. The entry is an exceptional CFG edge to a cleanup pad; it covers
-resource failures and fallible scoped-accessor ramps/slides without adding fields to every
-instruction. Cleanup instructions inside a landing pad have no further unwind entry: if one raises
-while the original error is pending, execution hard-aborts. See
+implicit unwind table. The entry is an exceptional CFG edge to a cleanup pad for a source failure;
+sandbox violations bypass it. Cleanup instructions inside a landing pad have no further unwind
+entry: a second source failure produces failure-during-cleanup poisoning. See
 [ssa-error-propagation.md](ssa-error-propagation.md).
 
 ### Scoped (`YieldedOnce`) subscripts
@@ -190,7 +189,7 @@ while the original error is pending, execution hard-aborts. See
 |-------|----------|--------|-----------|
 | `project` | `[callee, args..]` (as `call`, **no** ret-out) | place `*ty` (the yielded place) | `n ≥ 1`; runs the accessor ramp to its `yield`, keeping the frame suspended, and exposes the yielded place as its result register. A ramp error follows the instruction's sparse unwind edge when caller cleanup is live. |
 | `yield` | `[place:p]` | — | `n == 1`; inside the accessor body — exposes the place to the driving `project` and suspends the frame. The instructions after it are the *slide* (epilogue), reached only on resume. |
-| `end_project` | `[place:p]` (the `project` result) | — | `n == 1`; resumes the suspended accessor's slide and reclaims its frame. Distinct from the unwind `resume`. Runs on the normal exit **and** in the cleanup pad (slide-on-error). A primary slide error follows its sparse unwind edge; a slide error during an active unwind hard-aborts. |
+| `end_project` | `[place:p]` (the `project` result) | — | `n == 1`; resumes the suspended accessor's slide and reclaims its frame. Distinct from the unwind `resume`. Runs on the normal exit **and** in the cleanup pad (slide-on-error). A primary slide error follows its sparse unwind edge; a second source failure during an active unwind poisons the executor. |
 
 ### Cleanup
 

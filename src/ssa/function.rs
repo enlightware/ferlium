@@ -65,8 +65,8 @@ pub struct Function {
 
     /// Cleanup landing pads for instructions whose implicit exceptional exit must unwind live
     /// locals. Kept sparse because only instructions emitted inside a scope with ownership
-    /// obligations need an entry, and consulted only on the exceptional path. The exit may carry a
-    /// language failure or out-of-band execution cancellation; neither changes the normal result.
+    /// obligations need an entry, and consulted only on the source-failure path. Sandbox violations
+    /// bypass this table and leave the MIR CFG through executor poisoning.
     implicit_unwind_targets: Vec<(InstructionId, BlockId)>,
 }
 
@@ -188,8 +188,8 @@ impl Function {
         }
     }
 
-    /// Records the cleanup landing pad to enter if `instruction` exits exceptionally without an
-    /// explicit unwind successor of its own.
+    /// Records the cleanup landing pad to enter if `instruction` raises a source failure without
+    /// an explicit unwind successor of its own.
     pub fn set_implicit_unwind_target(&mut self, instruction: InstructionId, target: BlockId) {
         debug_assert!(
             self.implicit_unwind_target(instruction).is_none(),
@@ -198,14 +198,14 @@ impl Function {
         self.implicit_unwind_targets.push((instruction, target));
     }
 
-    /// Returns the cleanup landing pad for an implicit exceptional exit at `instruction`.
+    /// Returns the cleanup landing pad for an implicit source-failure exit at `instruction`.
     pub fn implicit_unwind_target(&self, instruction: InstructionId) -> Option<BlockId> {
         self.implicit_unwind_targets
             .iter()
             .find_map(|&(candidate, target)| (candidate == instruction).then_some(target))
     }
 
-    /// Iterates over the exceptional cleanup edges carried in the function's sparse unwind table.
+    /// Iterates over the source-failure cleanup edges carried in the sparse unwind table.
     pub fn implicit_unwind_targets(&self) -> impl Iterator<Item = (InstructionId, BlockId)> + '_ {
         self.implicit_unwind_targets.iter().copied()
     }

@@ -75,7 +75,7 @@ fn effects_in_mod() {
     let mod_src = "fn rw() { effects::write(); effects::read() } fn o() { ((rw, ).0)() } ";
     test_mod(&mut session, mod_src, "o", effects(&[Read, Write]));
     let mod_src = "fn exits_loop() { loop { break } }";
-    test_mod(&mut session, mod_src, "exits_loop", effect(Fallible));
+    test_mod(&mut session, mod_src, "exits_loop", no_effects());
 }
 
 #[test]
@@ -90,11 +90,7 @@ fn effects_in_expr() {
         "let a = |f| f(); a(|| effects::write())",
         effect(Write),
     );
-    test_expr(
-        &mut session,
-        "loop { break effects::read() }",
-        effects(&[Fallible, Read]),
-    );
+    test_expr(&mut session, "loop { break effects::read() }", effect(Read));
 }
 
 #[test]
@@ -149,13 +145,13 @@ fn effects_from_fn_value() {
         &mut session,
         mod_src,
         "a",
-        effects(&[Fallible, Write]).union(&effect_vars(&[0, 1])),
+        effect(Write).union(&effect_vars(&[0, 1])),
     );
     test_mod(
         &mut session,
         mod_src,
         "b",
-        effects(&[Fallible, Write]).union(&effect_var(0)),
+        effect(Write).union(&effect_var(0)),
     );
 
     let mod_src = "fn b(f) { a(f, || effects::write()) } fn a(f, g) { b(f); f(); g(); () } ";
@@ -163,13 +159,13 @@ fn effects_from_fn_value() {
         &mut session,
         mod_src,
         "a",
-        effects(&[Fallible, Write]).union(&effect_vars(&[0, 1])),
+        effect(Write).union(&effect_vars(&[0, 1])),
     );
     test_mod(
         &mut session,
         mod_src,
         "b",
-        effects(&[Fallible, Write]).union(&effect_var(0)),
+        effect(Write).union(&effect_var(0)),
     );
 }
 
@@ -212,26 +208,14 @@ fn branch_returning_composed_closures_unifies_multiple_effect_variables() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn effects_in_recursive_fns() {
     let mut session = TestSession::new();
-    use PrimitiveEffect::Fallible;
-
     let mod_src = "fn a(f) { b(f); f() } fn b(f) { a(f) }";
-    test_mod(
-        &mut session,
-        mod_src,
-        "b",
-        effect(Fallible).union(&effect_var(0)),
-    );
+    test_mod(&mut session, mod_src, "b", effect_var(0));
 
     let mod_src = "fn a(f, g) { b(f, g); f() } fn b(f, g) { a(f, g); g() }";
-    test_mod(
-        &mut session,
-        mod_src,
-        "a",
-        effect(Fallible).union(&effect_vars(&[0, 1])),
-    );
+    test_mod(&mut session, mod_src, "a", effect_vars(&[0, 1]));
 
     let mod_src = "fn apply(f) { f() } fn rf() { apply(rf) }";
-    test_mod(&mut session, mod_src, "rf", effect(Fallible));
+    test_mod(&mut session, mod_src, "rf", no_effects());
 }
 
 #[test]

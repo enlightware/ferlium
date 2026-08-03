@@ -472,6 +472,13 @@ mod tests {
         let error = result.error_content().expect("execution should fail");
 
         assert_eq!(error.summary, "Execution fuel exhausted");
+
+        assert!(compiler.compile("40 + 2").is_none());
+        compiler.set_execution_fuel_limit(100);
+        let recovery = compiler
+            .run_expr()
+            .expect("replacement expression should exist");
+        assert_eq!(recovery.html_message(), "42: int");
     }
 
     #[test]

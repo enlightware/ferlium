@@ -10,7 +10,7 @@ use test_log::test;
 
 use crate::harness::{TestSession, int, string};
 use ferlium::{
-    compiler::error::{CompilationErrorImpl, RuntimeErrorKind},
+    compiler::error::{CompilationErrorImpl, SourceFailureKind},
     format::FormatWith,
     hir::{self, ENodeArena, ENodeId, NodeKind, function::ArgConvention},
     module::{
@@ -1286,7 +1286,7 @@ fn lexical_drop_runs_on_runtime_error() {
     );
     assert_eq!(
         session.fail_run(&source),
-        RuntimeErrorKind::Aborted(Some(
+        SourceFailureKind::Aborted(Some(
             "Array access out of bounds: index 1 for length 1".to_string()
         ))
     );
@@ -1315,7 +1315,7 @@ fn generic_value_drop_runs_on_runtime_error() {
     );
     assert_eq!(
         session.fail_run(&source),
-        RuntimeErrorKind::Aborted(Some(
+        SourceFailureKind::Aborted(Some(
             "Array access out of bounds: index 1 for length 1".to_string()
         ))
     );
@@ -1367,7 +1367,7 @@ fn nested_scope_drops_run_innermost_first_on_runtime_error() {
         "#,
         tracked_probe_value_impl()
     );
-    assert_eq!(session.fail_run(&source), RuntimeErrorKind::DivisionByZero);
+    assert_eq!(session.fail_run(&source), SourceFailureKind::DivisionByZero);
     // Drops, in order: inner Probe(2), then outer Probe(1) → the digit sequence 21.
     assert_val_eq!(session.run("testing::tracked_drop_log()"), int(21));
 }
@@ -1394,7 +1394,7 @@ fn cross_frame_drops_run_callee_first_on_runtime_error() {
         "#,
         tracked_probe_value_impl()
     );
-    assert_eq!(session.fail_run(&source), RuntimeErrorKind::DivisionByZero);
+    assert_eq!(session.fail_run(&source), SourceFailureKind::DivisionByZero);
     // Drops, in order: callee Probe(3), then caller Probe(1) → the digit sequence 31.
     assert_val_eq!(session.run("testing::tracked_drop_log()"), int(31));
 }
@@ -2907,6 +2907,6 @@ fn aggregate_with_unit_field_dropped_once_on_error_after_field_borrow() {
         "#,
         tracked_probe_value_impl()
     );
-    assert_eq!(session.fail_run(&source), RuntimeErrorKind::DivisionByZero);
+    assert_eq!(session.fail_run(&source), SourceFailureKind::DivisionByZero);
     assert_val_eq!(session.run("testing::tracked_drop_log()"), int(7));
 }

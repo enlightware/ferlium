@@ -16,7 +16,7 @@ use crate::std::array::array_value_from_vec;
 use crate::std::value::{VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX};
 use crate::{
     CompilerSession, FxHashMap, Location, ModuleRegistry, SourceId, SourceTable,
-    compiler::error::RuntimeErrorKind,
+    compiler::error::{RuntimeErrorKind, SandboxViolationKind, SourceFailureKind},
     containers::b,
     execution::ReferenceInterpreterLimits,
     format::{FormatWith, write_with_separator},
@@ -73,7 +73,7 @@ impl ValOrMut {
     pub fn as_mut_primitive<'a, 'b, T: 'static>(
         &self,
         ctx: &'a mut EvalCtx<'b>,
-    ) -> Result<Option<&'a mut T>, RuntimeErrorKind> {
+    ) -> Result<Option<&'a mut T>, SourceFailureKind> {
         Ok(match self {
             ValOrMut::Val(_) => None,
             ValOrMut::Dictionary(_) => None,
@@ -85,7 +85,7 @@ impl ValOrMut {
     pub fn as_primitive<'a, T: 'static>(
         &'a self,
         ctx: &'a EvalCtx<'_>,
-    ) -> Result<Option<&'a T>, RuntimeErrorKind> {
+    ) -> Result<Option<&'a T>, SourceFailureKind> {
         Ok(match self {
             ValOrMut::Val(val) => val.as_primitive_ty::<T>(),
             ValOrMut::Dictionary(_) => None,
@@ -99,7 +99,10 @@ impl ValOrMut {
         })
     }
 
-    pub fn as_value_ref<'a>(&'a self, ctx: &'a EvalCtx<'_>) -> Result<&'a Value, RuntimeErrorKind> {
+    pub fn as_value_ref<'a>(
+        &'a self,
+        ctx: &'a EvalCtx<'_>,
+    ) -> Result<&'a Value, SourceFailureKind> {
         Ok(match self {
             ValOrMut::Val(value) => {
                 if matches!(value, Value::Uninit) {
@@ -243,10 +246,7 @@ impl<'a> EvalCtx<'a> {
             return cont(Value::unit());
         };
         if *fuel == 0 {
-            Err(RuntimeError::new(
-                RuntimeErrorKind::FuelExhausted,
-                Some(span),
-            ))
+            Err(self.sandbox_violation(SandboxViolationKind::FuelExhausted, Some(span)))
         } else {
             *fuel -= 1;
             cont(Value::unit())
@@ -255,8 +255,8 @@ impl<'a> EvalCtx<'a> {
 
     pub fn check_call_depth(&mut self, span: Location) -> EvalControlFlowResult {
         if self.call_depth >= self.call_depth_limit {
-            Err(RuntimeError::new(
-                RuntimeErrorKind::CallDepthLimitExceeded {
+            Err(self.sandbox_violation(
+                SandboxViolationKind::CallDepthLimitExceeded {
                     limit: self.call_depth_limit,
                 },
                 Some(span),
@@ -272,7 +272,7 @@ impl<'a> EvalCtx<'a> {
     /// index they are about to materialize. `span` is `None` at call-frame entry, where the caller
     /// attaches the call site as a backtrace frame.
     pub(crate) fn check_environment_cell_limit(
-        &self,
+        &mut self,
         next_index: usize,
         span: Option<Location>,
     ) -> Result<(), RuntimeError> {
@@ -282,13 +282,28 @@ impl<'a> EvalCtx<'a> {
         Ok(())
     }
 
-    pub(crate) fn environment_cell_limit_error(&self, span: Option<Location>) -> RuntimeError {
-        RuntimeError::new(
-            RuntimeErrorKind::EnvironmentCellLimitExceeded {
+    pub(crate) fn environment_cell_limit_error(&mut self, span: Option<Location>) -> RuntimeError {
+        self.sandbox_violation(
+            SandboxViolationKind::EnvironmentCellLimitExceeded {
                 limit: self.environment_cell_limit,
             },
             span,
         )
+    }
+
+    fn sandbox_violation(
+        &mut self,
+        kind: SandboxViolationKind,
+        location: Option<Location>,
+    ) -> RuntimeError {
+        let RuntimeError::SandboxViolation(violation) =
+            RuntimeError::new_sandbox_violation(kind, location)
+        else {
+            unreachable!()
+        };
+        self.execution_state =
+            ExecutionState::Poisoned(PoisonReason::SandboxViolation(violation.clone()));
+        RuntimeError::SandboxViolation(violation)
     }
 
     pub fn pop_environment_entry(&mut self) -> Option<ValOrMut> {
@@ -391,13 +406,16 @@ impl<'a> EvalCtx<'a> {
         module.get_function_by_id(function.function).unwrap()
     }
 
-    /// Rejects entry into an executor whose semantic unwind has already failed.
+    /// Rejects entry into a poisoned execution domain.
     pub(crate) fn ensure_runnable(&self) -> Result<(), RuntimeError> {
         match &self.execution_state {
             ExecutionState::Running => Ok(()),
-            ExecutionState::Poisoned(abort) => {
-                Err(RuntimeError::HardAbort(Box::new(abort.clone())))
+            ExecutionState::Poisoned(PoisonReason::SandboxViolation(violation)) => {
+                Err(RuntimeError::SandboxViolation(violation.clone()))
             }
+            ExecutionState::Poisoned(PoisonReason::FailureDuringCleanup(failure)) => Err(
+                RuntimeError::FailureDuringCleanup(Box::new(failure.clone())),
+            ),
         }
     }
 
@@ -412,15 +430,23 @@ impl<'a> EvalCtx<'a> {
         cleanup: impl FnOnce(&mut Self) -> Result<(), RuntimeError>,
     ) -> RuntimeError {
         let initial = match initial {
-            RuntimeError::Failure(_) => initial,
-            RuntimeError::HardAbort(abort) => {
-                self.execution_state = ExecutionState::Poisoned((*abort).clone());
-                return RuntimeError::HardAbort(abort);
-            }
+            RuntimeError::SourceFailure(failure) => failure,
+            poisoning => return self.record_poisoning_error(poisoning),
         };
         match cleanup(self) {
-            Ok(()) => initial,
-            Err(during_cleanup) => self.poison(initial, during_cleanup),
+            Ok(()) => RuntimeError::SourceFailure(initial),
+            Err(RuntimeError::SourceFailure(during_cleanup)) => {
+                self.poison_source_failures(initial, during_cleanup)
+            }
+            Err(RuntimeError::SandboxViolation(mut violation)) => {
+                if violation.interrupted_source_failure.is_none() {
+                    violation.interrupted_source_failure = Some(Box::new(initial));
+                }
+                self.record_poisoning_error(RuntimeError::SandboxViolation(violation))
+            }
+            Err(failure @ RuntimeError::FailureDuringCleanup(_)) => {
+                self.record_poisoning_error(failure)
+            }
         }
     }
 
@@ -429,26 +455,51 @@ impl<'a> EvalCtx<'a> {
         initial: RuntimeError,
         during_cleanup: RuntimeError,
     ) -> RuntimeError {
-        let initial = match initial {
-            RuntimeError::Failure(failure) => failure,
-            RuntimeError::HardAbort(abort) => {
-                self.execution_state = ExecutionState::Poisoned((*abort).clone());
-                return RuntimeError::HardAbort(abort);
+        match (initial, during_cleanup) {
+            (RuntimeError::SourceFailure(initial), RuntimeError::SourceFailure(during_cleanup)) => {
+                self.poison_source_failures(initial, during_cleanup)
             }
-        };
-        let during_cleanup = match during_cleanup {
-            RuntimeError::Failure(failure) => failure,
-            RuntimeError::HardAbort(abort) => {
-                self.execution_state = ExecutionState::Poisoned((*abort).clone());
-                return RuntimeError::HardAbort(abort);
+            (
+                RuntimeError::SourceFailure(initial),
+                RuntimeError::SandboxViolation(mut violation),
+            ) => {
+                if violation.interrupted_source_failure.is_none() {
+                    violation.interrupted_source_failure = Some(Box::new(initial));
+                }
+                self.record_poisoning_error(RuntimeError::SandboxViolation(violation))
             }
-        };
-        let abort = HardAbort {
+            (poisoning, _) if poisoning.is_poisoning() => self.record_poisoning_error(poisoning),
+            (_, poisoning) => self.record_poisoning_error(poisoning),
+        }
+    }
+
+    fn poison_source_failures(
+        &mut self,
+        initial: SourceFailure,
+        during_cleanup: SourceFailure,
+    ) -> RuntimeError {
+        let failure = FailureDuringCleanup {
             initial,
             during_cleanup,
         };
-        self.execution_state = ExecutionState::Poisoned(abort.clone());
-        RuntimeError::HardAbort(Box::new(abort))
+        self.execution_state =
+            ExecutionState::Poisoned(PoisonReason::FailureDuringCleanup(failure.clone()));
+        RuntimeError::FailureDuringCleanup(Box::new(failure))
+    }
+
+    fn record_poisoning_error(&mut self, error: RuntimeError) -> RuntimeError {
+        self.execution_state = ExecutionState::Poisoned(match &error {
+            RuntimeError::SandboxViolation(violation) => {
+                PoisonReason::SandboxViolation(violation.clone())
+            }
+            RuntimeError::FailureDuringCleanup(failure) => {
+                PoisonReason::FailureDuringCleanup((**failure).clone())
+            }
+            RuntimeError::SourceFailure(_) => {
+                panic!("source failure cannot directly poison an execution domain")
+            }
+        });
+        error
     }
 
     pub fn is_poisoned(&self) -> bool {
@@ -758,7 +809,7 @@ impl<'a> EvalCtx<'a> {
 
     /// Tears down a suspended accessor without running its Ferlium epilogue.
     ///
-    /// Used only after hard abort, when semantic cleanup must stop but trusted interpreter storage
+    /// Used only after executor poisoning, when semantic cleanup must stop but trusted storage
     /// still has to be reclaimed.
     fn abandon_suspended_accessor(&mut self, suspension: SuspendedAccessor) {
         self.call_depth -= 1;
@@ -953,8 +1004,8 @@ impl AccessorEpilogue {
     }
 }
 
-fn invalid_buffer_index(index: isize, len: usize) -> RuntimeErrorKind {
-    RuntimeErrorKind::InvalidArgument(format!(
+fn invalid_buffer_index(index: isize, len: usize) -> SourceFailureKind {
+    SourceFailureKind::InvalidArgument(format!(
         "Buffer index {index} is out of bounds for buffer of length {len}"
     ))
 }
@@ -995,7 +1046,7 @@ impl Place {
     }
 
     /// Get a mutable reference to the target value
-    pub fn target_mut<'c>(&self, ctx: &'c mut EvalCtx) -> Result<&'c mut Value, RuntimeErrorKind> {
+    pub fn target_mut<'c>(&self, ctx: &'c mut EvalCtx) -> Result<&'c mut Value, SourceFailureKind> {
         let (path, index) = self.resolved_path_and_index(ctx);
         let mut target = ctx.environment[index].as_val_mut().unwrap();
         for &index in path.iter() {
@@ -1031,7 +1082,7 @@ impl Place {
     pub(crate) fn target_ref_allow_uninit<'c>(
         &self,
         ctx: &'c EvalCtx,
-    ) -> Result<&'c Value, RuntimeErrorKind> {
+    ) -> Result<&'c Value, SourceFailureKind> {
         let mut path = self.path.iter().copied().collect::<VecDeque<_>>();
         let mut index = self.target;
         let mut target = loop {
@@ -1081,7 +1132,7 @@ impl Place {
     }
 
     /// Get a shared reference to the target value
-    pub fn target_ref<'c>(&self, ctx: &'c EvalCtx) -> Result<&'c Value, RuntimeErrorKind> {
+    pub fn target_ref<'c>(&self, ctx: &'c EvalCtx) -> Result<&'c Value, SourceFailureKind> {
         let target = self.target_ref_allow_uninit(ctx)?;
         if matches!(target, Value::Uninit) {
             panic!("attempted to read an uninitialized value");
@@ -1227,55 +1278,104 @@ impl FormatWith<(&SourceTable, ModuleRegistry<'_>)> for BacktraceFrame {
     }
 }
 
-/// A runtime error that occurred during evaluation and is propagated upwards.
+/// A runtime outcome that escaped the current Ferlium invocation.
 #[derive(Debug, Clone)]
 pub enum RuntimeError {
-    /// A primary language failure or host-enforced execution cancellation.
-    Failure(RuntimeFailure),
-    /// Recovery from `initial` raised `during_cleanup`; no further Ferlium cleanup may run.
-    HardAbort(Box<HardAbort>),
+    /// A failure declared by the source-level `Fallible` effect.
+    SourceFailure(SourceFailure),
+    /// A host-enforced limit violation. Guest cleanup must not run after this point.
+    SandboxViolation(SandboxViolation),
+    /// A second source failure raised while cleaning up an earlier one.
+    FailureDuringCleanup(Box<FailureDuringCleanup>),
 }
 
-/// One non-recursive runtime failure with its source location and accumulated call stack.
+/// Source location and accumulated call stack shared by runtime diagnostics.
 #[derive(Debug, Clone)]
-pub struct RuntimeFailure {
-    kind: RuntimeErrorKind,
+pub struct FailureContext {
     location: Option<Location>,
     backtrace: Vec<BacktraceFrame>,
 }
 
-/// The two failures that forced an executor to abandon semantic cleanup and become poisoned.
+/// One source-level failure and its diagnostic context.
 #[derive(Debug, Clone)]
-pub struct HardAbort {
-    initial: RuntimeFailure,
-    during_cleanup: RuntimeFailure,
+pub struct SourceFailure {
+    kind: SourceFailureKind,
+    context: FailureContext,
 }
 
-impl HardAbort {
-    pub fn initial(&self) -> &RuntimeFailure {
+/// A host-enforced limit violation and the source failure, if any, whose cleanup it interrupted.
+#[derive(Debug, Clone)]
+pub struct SandboxViolation {
+    kind: SandboxViolationKind,
+    context: FailureContext,
+    interrupted_source_failure: Option<Box<SourceFailure>>,
+}
+
+/// The two source failures that made semantic cleanup impossible to complete.
+#[derive(Debug, Clone)]
+pub struct FailureDuringCleanup {
+    initial: SourceFailure,
+    during_cleanup: SourceFailure,
+}
+
+/// Why an execution domain can no longer run Ferlium code.
+#[derive(Debug, Clone)]
+pub enum PoisonReason {
+    SandboxViolation(SandboxViolation),
+    FailureDuringCleanup(FailureDuringCleanup),
+}
+
+impl FailureDuringCleanup {
+    pub fn initial(&self) -> &SourceFailure {
         &self.initial
     }
 
-    pub fn during_cleanup(&self) -> &RuntimeFailure {
+    pub fn during_cleanup(&self) -> &SourceFailure {
         &self.during_cleanup
     }
 }
 
-impl RuntimeFailure {
-    pub fn kind(&self) -> RuntimeErrorKind {
+impl SourceFailure {
+    pub fn kind(&self) -> SourceFailureKind {
         self.kind.clone()
     }
 
     pub fn location(&self) -> Option<Location> {
-        self.location
+        self.context.location
     }
 
     pub fn backtrace(&self) -> &[BacktraceFrame] {
-        &self.backtrace
+        &self.context.backtrace
     }
 
     fn with_frame(mut self, function_id: FunctionId, location: Location) -> Self {
-        self.backtrace.push(BacktraceFrame {
+        self.context.backtrace.push(BacktraceFrame {
+            function_id,
+            call_site: location,
+        });
+        self
+    }
+}
+
+impl SandboxViolation {
+    pub fn kind(&self) -> SandboxViolationKind {
+        self.kind.clone()
+    }
+
+    pub fn location(&self) -> Option<Location> {
+        self.context.location
+    }
+
+    pub fn backtrace(&self) -> &[BacktraceFrame] {
+        &self.context.backtrace
+    }
+
+    pub fn interrupted_source_failure(&self) -> Option<&SourceFailure> {
+        self.interrupted_source_failure.as_deref()
+    }
+
+    fn with_frame(mut self, function_id: FunctionId, location: Location) -> Self {
+        self.context.backtrace.push(BacktraceFrame {
             function_id,
             call_site: location,
         });
@@ -1286,62 +1386,102 @@ impl RuntimeFailure {
 #[derive(Debug, Clone)]
 enum ExecutionState {
     Running,
-    Poisoned(HardAbort),
+    Poisoned(PoisonReason),
 }
 
 impl RuntimeError {
-    pub fn new(kind: RuntimeErrorKind, location: Option<Location>) -> Self {
-        Self::Failure(RuntimeFailure {
+    pub fn new(kind: SourceFailureKind, location: Option<Location>) -> Self {
+        Self::SourceFailure(SourceFailure {
             kind,
-            location,
-            backtrace: Vec::new(),
+            context: FailureContext {
+                location,
+                backtrace: Vec::new(),
+            },
         })
     }
 
-    pub fn new_native(kind: RuntimeErrorKind) -> Self {
+    pub fn new_native(kind: SourceFailureKind) -> Self {
         Self::new(kind, None)
+    }
+
+    fn new_sandbox_violation(kind: SandboxViolationKind, location: Option<Location>) -> Self {
+        Self::SandboxViolation(SandboxViolation {
+            kind,
+            context: FailureContext {
+                location,
+                backtrace: Vec::new(),
+            },
+            interrupted_source_failure: None,
+        })
     }
 
     pub fn with_frame(self, function_id: FunctionId, location: Location) -> Self {
         match self {
-            Self::Failure(failure) => Self::Failure(failure.with_frame(function_id, location)),
-            Self::HardAbort(abort) => Self::HardAbort(Box::new(HardAbort {
-                initial: abort.initial.with_frame(function_id, location),
-                during_cleanup: abort.during_cleanup.with_frame(function_id, location),
-            })),
+            Self::SourceFailure(failure) => {
+                Self::SourceFailure(failure.with_frame(function_id, location))
+            }
+            Self::SandboxViolation(violation) => {
+                Self::SandboxViolation(violation.with_frame(function_id, location))
+            }
+            Self::FailureDuringCleanup(failure) => {
+                Self::FailureDuringCleanup(Box::new(FailureDuringCleanup {
+                    initial: failure.initial.with_frame(function_id, location),
+                    during_cleanup: failure.during_cleanup.with_frame(function_id, location),
+                }))
+            }
+        }
+    }
+
+    pub fn source_failure(&self) -> Option<&SourceFailure> {
+        match self {
+            Self::SourceFailure(failure) => Some(failure),
+            Self::SandboxViolation(_) | Self::FailureDuringCleanup(_) => None,
         }
     }
 
     pub fn kind(&self) -> RuntimeErrorKind {
         match self {
-            Self::Failure(failure) => failure.kind(),
-            Self::HardAbort(_) => RuntimeErrorKind::HardAbort,
+            Self::SourceFailure(failure) => RuntimeErrorKind::SourceFailure(failure.kind()),
+            Self::SandboxViolation(violation) => {
+                RuntimeErrorKind::SandboxViolation(violation.kind())
+            }
+            Self::FailureDuringCleanup(_) => RuntimeErrorKind::FailureDuringCleanup,
+        }
+    }
+
+    pub fn sandbox_violation(&self) -> Option<&SandboxViolation> {
+        match self {
+            Self::SandboxViolation(violation) => Some(violation),
+            Self::SourceFailure(_) | Self::FailureDuringCleanup(_) => None,
+        }
+    }
+
+    pub fn failure_during_cleanup(&self) -> Option<&FailureDuringCleanup> {
+        match self {
+            Self::FailureDuringCleanup(failure) => Some(failure),
+            Self::SourceFailure(_) | Self::SandboxViolation(_) => None,
         }
     }
 
     pub fn location(&self) -> Option<Location> {
         match self {
-            Self::Failure(failure) => failure.location(),
-            Self::HardAbort(abort) => abort.initial.location(),
+            Self::SourceFailure(failure) => failure.location(),
+            Self::SandboxViolation(violation) => violation.location(),
+            Self::FailureDuringCleanup(failure) => failure.initial.location(),
         }
     }
 
     pub fn backtrace(&self) -> &[BacktraceFrame] {
         match self {
-            Self::Failure(failure) => failure.backtrace(),
-            Self::HardAbort(abort) => abort.initial.backtrace(),
+            Self::SourceFailure(failure) => failure.backtrace(),
+            Self::SandboxViolation(violation) => violation.backtrace(),
+            Self::FailureDuringCleanup(failure) => failure.initial.backtrace(),
         }
     }
 
-    pub fn hard_abort(&self) -> Option<&HardAbort> {
-        match self {
-            Self::Failure(_) => None,
-            Self::HardAbort(abort) => Some(abort),
-        }
-    }
-
-    pub fn is_hard_abort(&self) -> bool {
-        matches!(self, Self::HardAbort(_))
+    /// Whether this error poisons its execution domain and forbids further guest cleanup.
+    pub fn is_poisoning(&self) -> bool {
+        !matches!(self, Self::SourceFailure(_))
     }
 
     pub fn top_most_location_in(&self, source_id: SourceId) -> Option<Location> {
@@ -1366,39 +1506,69 @@ impl FormatWith<(&SourceTable, &Modules)> for RuntimeError {
         data: &(&SourceTable, &Modules),
     ) -> std::fmt::Result {
         match self {
-            Self::Failure(failure) => failure.fmt_with(f, data)?,
-            Self::HardAbort(abort) => {
-                writeln!(f, "Execution hard-aborted while unwinding:")?;
+            Self::SourceFailure(failure) => failure.fmt_with(f, data)?,
+            Self::SandboxViolation(violation) => violation.fmt_with(f, data)?,
+            Self::FailureDuringCleanup(failure) => {
+                writeln!(f, "Execution poisoned by a failure during cleanup:")?;
                 writeln!(f, "initial failure:")?;
-                abort.initial.fmt_with(f, data)?;
+                failure.initial.fmt_with(f, data)?;
                 writeln!(f, "failure during cleanup:")?;
-                abort.during_cleanup.fmt_with(f, data)?;
+                failure.during_cleanup.fmt_with(f, data)?;
             }
         }
         Ok(())
     }
 }
 
-impl FormatWith<(&SourceTable, &Modules)> for RuntimeFailure {
+impl FormatWith<(&SourceTable, &Modules)> for SourceFailure {
     fn fmt_with(
         &self,
         f: &mut std::fmt::Formatter<'_>,
         data: &(&SourceTable, &Modules),
     ) -> std::fmt::Result {
         write!(f, "Execution error: {}", self.kind)?;
-        if let Some(location) = self.location {
+        if let Some(location) = self.context.location {
             write!(f, " at {}", location.format_with(data.0))?;
         }
         writeln!(f)?;
-        if !self.backtrace.is_empty() {
+        if !self.context.backtrace.is_empty() {
             writeln!(f, "stack backtrace:")?;
-            let mut suspended_at = self.location;
-            for (i, frame) in self.backtrace.iter().enumerate() {
+            let mut suspended_at = self.context.location;
+            for (i, frame) in self.context.backtrace.iter().enumerate() {
                 write!(f, "  {i}: ")?;
                 frame.fmt_with_suspended_at(f, data, suspended_at)?;
                 writeln!(f)?;
                 suspended_at = Some(frame.call_site);
             }
+        }
+        Ok(())
+    }
+}
+
+impl FormatWith<(&SourceTable, &Modules)> for SandboxViolation {
+    fn fmt_with(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+        data: &(&SourceTable, &Modules),
+    ) -> std::fmt::Result {
+        write!(f, "Sandbox violation: {}", self.kind)?;
+        if let Some(location) = self.context.location {
+            write!(f, " at {}", location.format_with(data.0))?;
+        }
+        writeln!(f)?;
+        if !self.context.backtrace.is_empty() {
+            writeln!(f, "stack backtrace:")?;
+            let mut suspended_at = self.context.location;
+            for (i, frame) in self.context.backtrace.iter().enumerate() {
+                write!(f, "  {i}: ")?;
+                frame.fmt_with_suspended_at(f, data, suspended_at)?;
+                writeln!(f)?;
+                suspended_at = Some(frame.call_site);
+            }
+        }
+        if let Some(interrupted) = &self.interrupted_source_failure {
+            writeln!(f, "interrupted source failure:")?;
+            interrupted.fmt_with(f, data)?;
         }
         Ok(())
     }
@@ -1873,9 +2043,9 @@ fn call_local_drop_dispatch(
     ))
 }
 
-/// Attempts a local's semantic drop and ends the target lifetime even if that attempt raises.
+/// Attempts a local's semantic drop and ends the target lifetime even if execution aborts.
 ///
-/// Once a drop action starts, the value may be partially destroyed—or cancellation may prevent
+/// Once a drop action starts, the value may be partially destroyed—or a sandbox violation may prevent
 /// entry into its drop body—and must never be observed or retried. Reclaiming and invalidating its
 /// boxed storage is therefore unconditional; the original drop result is then propagated.
 fn drop_local_value_at_place(
@@ -1891,7 +2061,7 @@ fn drop_local_value_at_place(
             discard_result.is_ok(),
             "failed to invalidate a drop target after its semantic drop also failed"
         );
-        // The semantic-drop failure is the primary error. In release builds, retain it even if the
+        // The drop's non-returning outcome is primary. In release builds, retain it even if the
         // interpreter also failed to address the target for invalidation.
         drop_result
     } else {
@@ -2920,8 +3090,8 @@ fn eval_with_yielded(
     let body_result = eval_node_with_ctx(arena, node.body, ctx, locals);
     ctx.set_environment_entry(binding_index, ValOrMut::Val(Value::uninit()));
 
-    let body_hard_aborted = body_result.as_ref().is_err_and(RuntimeError::is_hard_abort);
-    let mut epilogue_result = if body_hard_aborted {
+    let body_poisoned_executor = body_result.as_ref().is_err_and(RuntimeError::is_poisoning);
+    let mut epilogue_result = if body_poisoned_executor {
         if let AccessorMemberEpilogue::Suspended(suspension) = epilogue.member {
             ctx.abandon_suspended_accessor(suspension);
         }
@@ -3398,7 +3568,7 @@ fn eval_block_with_cleanup(
                 let err = ctx.cleanup_after_error(err, |ctx| {
                     drop_cleanup_locals(ctx, locals, cleanup_drops, arena[*node].span)
                 });
-                if !err.is_hard_abort() {
+                if !err.is_poisoning() {
                     ctx.assert_no_owned_local_leaks_before_truncate(
                         locals,
                         env_size,
@@ -3910,7 +4080,7 @@ mod tests {
 
     use crate::{
         CompilerSession, Location,
-        compiler::error::RuntimeErrorKind,
+        compiler::error::{RuntimeErrorKind, SourceFailureKind},
         containers::{SVec2, b},
         eval::{
             ControlFlow, ControlTransfer, EvalCtx, RuntimeError,
@@ -4038,7 +4208,7 @@ mod tests {
         let mut ctx = EvalCtx::new(ModuleId::from_index(0), &session);
         let result = combine_with_yielded_body_and_epilogue(
             &mut ctx,
-            Err(RuntimeError::new_native(RuntimeErrorKind::Aborted(Some(
+            Err(RuntimeError::new_native(SourceFailureKind::Aborted(Some(
                 "body".into(),
             )))),
             ret(Value::native(2 as Int)),
@@ -4047,7 +4217,7 @@ mod tests {
         let err = result.expect_err("expected body error to win over epilogue transfer");
         assert_eq!(
             err.kind(),
-            RuntimeErrorKind::Aborted(Some("body".to_string()))
+            RuntimeErrorKind::SourceFailure(SourceFailureKind::Aborted(Some("body".to_string())))
         );
     }
 

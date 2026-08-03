@@ -22,7 +22,7 @@ use ferlium_macros::declare_native_fn_aliases;
 use crate::{
     Location,
     ast::{Attribute, UstrSpan},
-    compiler::error::RuntimeErrorKind,
+    compiler::error::SourceFailureKind,
     eval::{
         ControlFlow, EvalControlFlowResult, EvalCtx, PlaceResult, RuntimeError, ValOrMut,
         ValOrMutArgs, cont, drop_frame_owned_locals_on_error, eval_node_with_ctx,
@@ -696,14 +696,14 @@ impl Callable for StructuralFieldAddressor {
             ValOrMut::Mut(place) => place,
             ValOrMut::Val(value) => {
                 value.discard_storage();
-                return Err(RuntimeError::new_native(RuntimeErrorKind::InvalidArgument(
-                    "structural projection receiver".into(),
-                )));
+                return Err(RuntimeError::new_native(
+                    SourceFailureKind::InvalidArgument("structural projection receiver".into()),
+                ));
             }
             ValOrMut::Ref(_) | ValOrMut::Dictionary(_) => {
-                return Err(RuntimeError::new_native(RuntimeErrorKind::InvalidArgument(
-                    "structural projection receiver".into(),
-                )));
+                return Err(RuntimeError::new_native(
+                    SourceFailureKind::InvalidArgument("structural projection receiver".into()),
+                ));
             }
         };
         place.path.push(self.index);
@@ -800,7 +800,7 @@ pub(crate) fn copy_boxed_trivial_copy_native(value: &Value) -> Option<Value> {
 pub fn extract_trivial_native_input<T: NativeTrivialCopy>(
     arg: &ValOrMut,
     ctx: &mut CallCtx,
-) -> Result<T, RuntimeErrorKind> {
+) -> Result<T, SourceFailureKind> {
     match arg.as_primitive::<T>(ctx)? {
         Some(value) => Ok(*value),
         None => panic!(
@@ -814,7 +814,7 @@ pub fn extract_trivial_native_input<T: NativeTrivialCopy>(
 pub fn extract_native_ref<'m, T: 'static>(
     arg: &'m ValOrMut,
     ctx: &'m mut CallCtx,
-) -> Result<&'m T, RuntimeErrorKind> {
+) -> Result<&'m T, SourceFailureKind> {
     match arg.as_primitive::<T>(ctx)? {
         Some(value) => Ok(value),
         None => panic!(
@@ -833,7 +833,7 @@ pub trait ArgExtractor {
     fn extract<'m>(
         arg: &'m ValOrMut,
         ctx: &'m mut CallCtx,
-    ) -> Result<Self::Output<'m>, RuntimeErrorKind>;
+    ) -> Result<Self::Output<'m>, SourceFailureKind>;
     fn default_ty() -> Type;
 }
 
@@ -843,7 +843,7 @@ impl ArgExtractor for Value {
     fn extract<'m>(
         arg: &'m ValOrMut,
         ctx: &'m mut CallCtx,
-    ) -> Result<Self::Output<'m>, RuntimeErrorKind> {
+    ) -> Result<Self::Output<'m>, SourceFailureKind> {
         arg.as_value_ref(ctx)
     }
     fn default_ty() -> Type {
@@ -857,7 +857,7 @@ impl ArgExtractor for &'_ mut Value {
     fn extract<'m>(
         arg: &'m ValOrMut,
         ctx: &'m mut CallCtx,
-    ) -> Result<Self::Output<'m>, RuntimeErrorKind> {
+    ) -> Result<Self::Output<'m>, SourceFailureKind> {
         arg.as_place().target_mut(ctx)
     }
     fn default_ty() -> Type {
@@ -871,7 +871,7 @@ impl<T: NativeTrivialCopy> ArgExtractor for NatVal<T> {
     fn extract<'m>(
         arg: &'m ValOrMut,
         ctx: &'m mut CallCtx,
-    ) -> Result<Self::Output<'m>, RuntimeErrorKind> {
+    ) -> Result<Self::Output<'m>, SourceFailureKind> {
         extract_trivial_native_input(arg, ctx)
     }
     fn default_ty() -> Type {
@@ -885,7 +885,7 @@ impl<T: 'static> ArgExtractor for NatRef<T> {
     fn extract<'m>(
         arg: &'m ValOrMut,
         ctx: &'m mut CallCtx,
-    ) -> Result<Self::Output<'m>, RuntimeErrorKind> {
+    ) -> Result<Self::Output<'m>, SourceFailureKind> {
         extract_native_ref(arg, ctx)
     }
     fn default_ty() -> Type {
@@ -899,7 +899,7 @@ impl<T: 'static> ArgExtractor for NatMut<T> {
     fn extract<'m>(
         arg: &'m ValOrMut,
         ctx: &'m mut CallCtx,
-    ) -> Result<Self::Output<'m>, RuntimeErrorKind> {
+    ) -> Result<Self::Output<'m>, SourceFailureKind> {
         Ok(arg.as_mut_primitive::<T>(ctx)?.unwrap())
     }
     fn default_ty() -> Type {
@@ -930,7 +930,7 @@ impl<O: NativeOutput> OutputBuilder for NatVal<O> {
 }
 
 impl<O: NativeOutput> OutputBuilder for Fallible<NatVal<O>> {
-    type Input = Result<O, RuntimeErrorKind>;
+    type Input = Result<O, SourceFailureKind>;
     fn build(result: Self::Input) -> EvalControlFlowResult {
         cont(Value::native(result.map_err(RuntimeError::new_native)?))
     }
@@ -950,7 +950,7 @@ impl OutputBuilder for Value {
 }
 
 impl OutputBuilder for Fallible<Value> {
-    type Input = Result<Value, RuntimeErrorKind>;
+    type Input = Result<Value, SourceFailureKind>;
     fn build(result: Self::Input) -> EvalControlFlowResult {
         cont(result.map_err(RuntimeError::new_native)?)
     }

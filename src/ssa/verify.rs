@@ -572,17 +572,6 @@ impl<'a> Verifier<'a> {
                     self.func.name,
                     block.raw()
                 ),
-                InstructionKind::CheckCallDepth {
-                    successors: Some((normal, unwind)),
-                }
-                | InstructionKind::CheckFuel {
-                    successors: Some((normal, unwind)),
-                } => assert!(
-                    target_ok(*normal) && target_ok(*unwind),
-                    "SSA function `{}` block {}: runtime check targets a missing or empty block",
-                    self.func.name,
-                    block.raw()
-                ),
                 _ => {}
             }
         }
@@ -793,8 +782,8 @@ impl<'a> Verifier<'a> {
             | InstructionKind::Ret
             | InstructionKind::Variant { .. }
             | InstructionKind::StackSave
-            | InstructionKind::CheckCallDepth { .. }
-            | InstructionKind::CheckFuel { .. } => {}
+            | InstructionKind::CheckCallDepth
+            | InstructionKind::CheckFuel => {}
             InstructionKind::Call | InstructionKind::Invoke { .. } => {
                 assert!(
                     matches!(
@@ -1692,15 +1681,6 @@ impl<'a> Verifier<'a> {
                 result.push((first(target), EdgeKind::Normal));
             }
             InstructionKind::Invoke { normal, unwind } => {
-                result.push((first(normal), EdgeKind::Normal));
-                result.push((first(unwind), EdgeKind::Unwind));
-            }
-            InstructionKind::CheckCallDepth {
-                successors: Some((normal, unwind)),
-            }
-            | InstructionKind::CheckFuel {
-                successors: Some((normal, unwind)),
-            } => {
                 result.push((first(normal), EdgeKind::Normal));
                 result.push((first(unwind), EdgeKind::Unwind));
             }

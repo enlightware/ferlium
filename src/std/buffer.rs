@@ -12,7 +12,7 @@ use ustr::ustr;
 
 use crate::{
     Location,
-    compiler::error::RuntimeErrorKind,
+    compiler::error::SourceFailureKind,
     eval::{
         DictArg, EvalControlFlowResult, EvalCtx, Place, PlaceResult, RuntimeError, ValOrMut,
         ValOrMutArgs, call_value_clone_to_target, call_value_drop_for_temp, cont,
@@ -140,7 +140,7 @@ fn native_function(
 
 fn dictionary_from_arg(arg: ValOrMut, ctx: &mut EvalCtx<'_>) -> Result<DictArg, RuntimeError> {
     let invalid =
-        || RuntimeError::new_native(RuntimeErrorKind::InvalidArgument("dictionary".into()));
+        || RuntimeError::new_native(SourceFailureKind::InvalidArgument("dictionary".into()));
     match arg {
         ValOrMut::Dictionary(dictionary) => Ok(DictArg::Interned(dictionary)),
         ValOrMut::Mut(place) => {
@@ -172,12 +172,12 @@ fn place_from_arg(arg: ValOrMut) -> Result<Place, RuntimeError> {
         ValOrMut::Mut(place) => Ok(place),
         ValOrMut::Val(value) => {
             value.discard_storage();
-            Err(RuntimeError::new_native(RuntimeErrorKind::InvalidArgument(
-                "buffer".into(),
-            )))
+            Err(RuntimeError::new_native(
+                SourceFailureKind::InvalidArgument("buffer".into()),
+            ))
         }
         ValOrMut::Dictionary(_) | ValOrMut::Ref(_) => Err(RuntimeError::new_native(
-            RuntimeErrorKind::InvalidArgument("buffer".into()),
+            SourceFailureKind::InvalidArgument("buffer".into()),
         )),
     }
 }

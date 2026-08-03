@@ -15,7 +15,7 @@ use std::{
 
 use super::string::String as Str;
 use crate::{
-    compiler::error::RuntimeErrorKind,
+    compiler::error::SourceFailureKind,
     hir::function::{UnaryNativeFnRFV, UnaryNativeFnRN},
     hir::value::Value,
     module::{Module, Visibility},
@@ -53,10 +53,10 @@ fn escape_json_string(input: &Str) -> Str {
 
 fn next_event<R: Read>(
     reader: &'_ mut ReaderJsonParser<R>,
-) -> Result<json_event_parser::JsonEvent<'_>, RuntimeErrorKind> {
+) -> Result<json_event_parser::JsonEvent<'_>, SourceFailureKind> {
     reader
         .parse_next()
-        .map_err(|e| RuntimeErrorKind::InvalidArgument(format!("Failed to parse JSON: {}", e)))
+        .map_err(|e| SourceFailureKind::InvalidArgument(format!("Failed to parse JSON: {}", e)))
 }
 
 #[derive(Debug, EnumAsInner)]
@@ -69,7 +69,7 @@ enum ParseResult {
 
 fn parse_json_stream<R: Read>(
     reader: &mut ReaderJsonParser<R>,
-) -> Result<ParseResult, RuntimeErrorKind> {
+) -> Result<ParseResult, SourceFailureKind> {
     let variant = |tag, value| Value::tuple_variant(ustr(tag), [value]);
     let event = next_event(reader)?;
     use json_event_parser::JsonEvent::*;
@@ -84,7 +84,7 @@ fn parse_json_stream<R: Read>(
             {
                 variant("Float", float_value(f))
             } else {
-                return Err(RuntimeErrorKind::InvalidArgument(format!(
+                return Err(SourceFailureKind::InvalidArgument(format!(
                     "Invalid number in JSON: {}",
                     n
                 )));
@@ -130,7 +130,7 @@ fn parse_json_stream<R: Read>(
     Ok(ParseResult::Value(value))
 }
 
-fn parse_json(input: &Str) -> Result<Value, RuntimeErrorKind> {
+fn parse_json(input: &Str) -> Result<Value, SourceFailureKind> {
     let reader = Cursor::new(input.as_ref().as_bytes());
     let mut reader = ReaderJsonParser::new(reader);
     let value = parse_json_stream(&mut reader)?;

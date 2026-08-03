@@ -42,9 +42,12 @@ A member that contains `yield` uses `SubscriptResultConvention::YieldedOnce`, ex
 The yielded place is valid only while the accessor frame is suspended, so HIR must consume the call through `WithYielded { accessor, binding, body }`.
 `WithYielded` runs the accessor to its single `Yield(place)`, binds that place to an internal non-owning `binding`, evaluates `body`, then resumes the accessor epilogue.
 The binding is not source-visible storage and must not be captured, returned, or stored as a value.
-If `body` exits by return, break, continue, or runtime error, the accessor epilogue and normal frame cleanup are attempted before the transfer continues.
-If an epilogue or cleanup action raises while a runtime error is already unwinding, execution instead escalates to hard abort and no further Ferlium cleanup runs.
+If `body` exits by return, break, continue, or source failure, the accessor epilogue and normal frame cleanup are attempted before the transfer continues.
+If an epilogue or cleanup action raises a second source failure while another source failure is already propagating, execution is poisoned by `FailureDuringCleanup` and no further Ferlium cleanup runs.
+A sandbox violation always poisons immediately and bypasses cleanup.
 If the accessor fails before yielding, no yielded binding exists and no post-yield epilogue runs.
+See [ssa-error-propagation.md](ssa-error-propagation.md) for the current SSA cleanup CFG and its
+transitional limitations, and [runtime-sandboxing.md](runtime-sandboxing.md) for executor poisoning.
 
 A member without `yield` uses `SubscriptResultConvention::AddressorPlace`, exposed on selected HIR calls as `CallResultConvention::ADDRESSOR_PLACE`, and keeps caller-rooted projection behavior.
 Its place-producing base argument uses `Let` (or `MutableRef`) access, so the returned place remains rooted in caller storage rather than a short-lived copied argument.
@@ -104,19 +107,19 @@ Lexical cleanup is represented by `Block.cleanup`, a list of locals in declarati
 When a block is exited, cleanup runs in reverse order.
 After local storage resolution, cleanup is a no-op for non-owning locals.
 For owned locals it applies the resolved `LocalDrop`: `Skip` reclaims only storage, while static and dictionary modes call `Value::drop` before discarding storage.
-Once a semantic-drop action starts, the target lifetime has ended even if the call raises before entering the drop body; the target is invalidated and must not be observed or retried.
+Once a semantic-drop action starts, the target lifetime has ended even if a sandbox violation stops execution before or during the drop body; the target is invalidated and must not be observed or retried.
 
 Assignments to initialized storage carry an optional `Assignment::drop`.
 If present, the old destination lifetime ends before the new value replaces it; the resolved mode may be `Skip`.
 Assignments to uninitialized storage use `assignment_mode == InitializeStorage` and must not drop the destination first.
 
-SSA must preserve the same cleanup behavior on all exits:
+Final-HIR evaluation and lowering must preserve this cleanup behavior on all exits:
 
 - Normal scope exit runs the block's cleanup.
 - A moved local is not dropped again.
-- Runtime-error edges attempt semantic drops for initialized owned locals created in the exited scope, in reverse order, before storage is reclaimed.
-  If one of those drops raises during the unwind, execution hard-aborts and remaining storage is reclaimed without further semantic drops.
-- If a drop raises as the primary error during normal inline cleanup, remaining siblings in that same cleanup sequence are currently skipped, while enclosing scopes continue unwinding.
+- Source-failure edges attempt semantic drops for initialized owned locals created in the exited scope, in reverse order, before storage is reclaimed.
+  `Value::drop` is source-infallible by contract.
+- Accessor slides follow the source-failure and poisoning rules described under `WithYielded` above.
 - `return`, `break`, and `continue` edges run the cleanup for each lexical block they exit.
 - A value carried by `return` or `break` is prepared before cleanup runs: a local owned by the exited scope is moved with `TakeLocalValue`, while a still-live place is materialized with `CloneValue` or a trivial copy.
 - If a transfer exits a `WithYielded` body, the suspended accessor epilogue runs before the transfer continues past the `WithYielded`.

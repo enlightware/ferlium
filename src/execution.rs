@@ -26,9 +26,10 @@ pub const DEFAULT_INTERACTIVE_FUEL_LIMIT: usize = 100_000;
 /// Backend-independent limits applied to one execution.
 ///
 /// HIR and SSA execution consume the same kinds of budget so selecting an execution backend does
-/// not change a program's resource policy. Exceeding one of these limits cancels execution through
-/// the executor's out-of-band error channel; it does not add the source-language `Fallible` effect
-/// or change a function's normal ABI. A `None` fuel limit disables fuel accounting.
+/// not change a program's resource policy. Exceeding one of these limits poisons the current
+/// execution domain through the out-of-band sandbox-violation channel; it does not add the
+/// source-language `Fallible` effect or change a function's normal ABI. A `None` fuel limit disables
+/// fuel accounting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, new)]
 pub struct ExecutionLimits {
     pub call_depth_limit: usize,

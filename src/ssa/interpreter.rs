@@ -77,7 +77,7 @@ enum Step {
     /// Resume the unwind that this frame's cleanup pad interrupted: hand the in-flight error back to
     /// the caller so propagation continues up the stack.
     ///
-    /// When a language failure or execution cancellation reaches a cleanup edge, the error does not
+    /// When a source failure reaches a cleanup edge, the error does not
     /// leave the frame immediately: control first enters a pad that runs the frame's drops. That pad
     /// has *paused* the unwind. After the drops, this step (the pad's `resume` terminator) lets it
     /// continue: the same error — stashed when control entered the pad — is returned to the caller,
@@ -174,7 +174,7 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    /// Whether a failure during semantic unwind made this interpreter unsafe to re-enter.
+    /// Whether this interpreter's execution domain is poisoned and may no longer be entered.
     pub fn is_poisoned(&self) -> bool {
         self.ctx.is_poisoned()
     }
@@ -192,7 +192,7 @@ impl<'a> Interpreter<'a> {
     /// the [`RuntimeError`] it raised.
     ///
     /// Entry functions cannot require hidden dictionary parameters. An ordinary error has already
-    /// unwound the callee's frames through their cleanup pads; a hard abort has instead reclaimed
+    /// unwound the callee's frames through their cleanup pads; poisoning has instead reclaimed
     /// all known interpreter-owned roots without running further Ferlium cleanup.
     pub fn run_entry(
         &mut self,
@@ -354,13 +354,13 @@ impl<'a> Interpreter<'a> {
             let step = match self.exec(func, &mut slots, &mut pending, i) {
                 Ok(step) => step,
                 Err(error) => {
-                    if error.is_hard_abort() {
-                        self.discard_bindings_after_hard_abort(slots);
-                        return Err(error);
-                    }
                     if let Some(initial) = pending.take() {
                         let error = self.ctx.poison(initial, error);
-                        self.discard_bindings_after_hard_abort(slots);
+                        self.discard_bindings_after_poisoning(slots);
+                        return Err(error);
+                    }
+                    if error.is_poisoning() {
+                        self.discard_bindings_after_poisoning(slots);
                         return Err(error);
                     }
                     let Some(unwind) = func.implicit_unwind_target(i) else {
@@ -514,11 +514,11 @@ impl<'a> Interpreter<'a> {
                 match self.exec_call(slots, &instr.operands, span) {
                     Ok(()) => Step::Goto(*normal),
                     Err(err) => {
-                        if err.is_hard_abort() {
-                            return Err(err);
-                        }
                         if let Some(initial) = pending.take() {
                             return Err(self.ctx.poison(initial, err));
+                        }
+                        if err.is_poisoning() {
+                            return Err(err);
                         }
                         *pending = Some(err);
                         Step::Goto(*unwind)
@@ -552,12 +552,11 @@ impl<'a> Interpreter<'a> {
                 self.restore_stack(marker);
                 Step::Advance
             }
-            InstructionKind::CheckCallDepth { successors } => {
-                return self
-                    .exec_runtime_check(pending, *successors, |ctx| ctx.check_call_depth(span));
+            InstructionKind::CheckCallDepth => {
+                return self.exec_runtime_check(|ctx| ctx.check_call_depth(span));
             }
-            InstructionKind::CheckFuel { successors } => {
-                return self.exec_runtime_check(pending, *successors, |ctx| ctx.check_fuel(span));
+            InstructionKind::CheckFuel => {
+                return self.exec_runtime_check(|ctx| ctx.check_fuel(span));
             }
             InstructionKind::BuildClosure {
                 function,
@@ -589,29 +588,14 @@ impl<'a> Interpreter<'a> {
 
     fn exec_runtime_check(
         &mut self,
-        pending: &mut Option<RuntimeError>,
-        successors: Option<(BlockId, BlockId)>,
         check: impl FnOnce(&mut EvalCtx<'a>) -> crate::eval::EvalControlFlowResult,
     ) -> Result<Step, RuntimeError> {
         match check(&mut self.ctx) {
             Ok(result) => {
                 result.into_value().discard_storage();
-                Ok(successors.map_or(Step::Advance, |(normal, _)| Step::Goto(normal)))
+                Ok(Step::Advance)
             }
-            Err(error) => {
-                if error.is_hard_abort() {
-                    return Err(error);
-                }
-                if let Some(initial) = pending.take() {
-                    return Err(self.ctx.poison(initial, error));
-                }
-                if let Some((_, unwind)) = successors {
-                    *pending = Some(error);
-                    Ok(Step::Goto(unwind))
-                } else {
-                    Err(error)
-                }
-            }
+            Err(error) => Err(error),
         }
     }
 
@@ -1612,7 +1596,7 @@ impl<'a> Interpreter<'a> {
         // Drop the cloned environment temporary (running the captures' `Value::drop`), then reclaim
         // every cell allocated since the marker (the temporary's husk and the callee's frame). The
         // closure itself is left untouched in `place`.
-        let drop_result = if call_result.as_ref().is_err_and(RuntimeError::is_hard_abort) {
+        let drop_result = if call_result.as_ref().is_err_and(RuntimeError::is_poisoning) {
             self.discard_place_storage(&Place {
                 target: env_idx,
                 path: vec![],
@@ -1639,7 +1623,7 @@ impl<'a> Interpreter<'a> {
                             panic!("unexpected control transfer from a closure environment drop")
                         }
                         Err(err) => {
-                            // A failed semantic drop leaves its target live or partially dropped.
+                            // A non-returning semantic drop leaves its target live or partially dropped.
                             // Reclaim the temporary's Rust backing storage explicitly before
                             // `restore_stack`: the stack-restore assertion is reserved for genuine SSA
                             // lowering leaks, not an already-observed cleanup failure.
@@ -1890,9 +1874,8 @@ impl<'a> Interpreter<'a> {
 
     /// Allocates a fresh environment cell initialized to `init` and returns its place.
     ///
-    /// On exhaustion, the current instruction's implicit unwind target runs the ordinary SSA
-    /// cleanup pads. Cleanup remains subject to the same quota; a secondary failure while dropping
-    /// hard-aborts the unwind, poisons the executor, and bypasses all remaining semantic cleanup.
+    /// Exhaustion poisons the executor and bypasses MIR cleanup. The host-side reclamation path
+    /// releases known boxed roots without running Ferlium code.
     fn alloc_cell(&mut self, init: Value, span: Location) -> Result<Place, RuntimeError> {
         if let Err(error) = self.check_environment_cell_capacity(span) {
             init.discard_storage();
@@ -1955,13 +1938,13 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    /// Reclaims SSA-register-owned storage after hard abort without running Ferlium code.
+    /// Reclaims SSA-register-owned storage after poisoning without running Ferlium code.
     ///
     /// Ordinary values live in the shared environment, but closure construction and a few
     /// instruction results can temporarily own boxed values in the register map. Open projections
-    /// additionally own suspended accessor frames. Pads normally consume both; hard abort bypasses
+    /// additionally own suspended accessor frames. Pads normally consume both; poisoning bypasses
     /// pads, so host-controlled reclamation must visit these roots explicitly.
-    fn discard_bindings_after_hard_abort(&mut self, slots: FxHashMap<ssa::Value, Binding>) {
+    fn discard_bindings_after_poisoning(&mut self, slots: FxHashMap<ssa::Value, Binding>) {
         let mut suspended = Vec::new();
         for binding in slots.into_values() {
             match binding {
@@ -1975,7 +1958,7 @@ impl<'a> Interpreter<'a> {
         // frames first so truncating an outer frame cannot invalidate a still-to-be-visited root.
         suspended.sort_unstable_by_key(|frame| std::cmp::Reverse(frame.frame_top));
         for frame in suspended {
-            self.discard_bindings_after_hard_abort(frame.slots);
+            self.discard_bindings_after_poisoning(frame.slots);
             self.ctx.call_depth = self
                 .ctx
                 .call_depth

@@ -8,7 +8,7 @@
 //
 use ferlium::{
     CompilationOutput, CompilerSession, ExecutionTarget, FxHashSet, Location, SourceTable,
-    compiler::error::{CompilationError, RuntimeErrorKind},
+    compiler::error::{CompilationError, SourceFailureKind},
     eval::{EvalControlFlowResult, EvalCtx, EvalResult, RuntimeError, ValOrMut, cont},
     hir::function::{
         ArgConvention, BinaryNativeFnNNV, BinaryNativeFnRMN, BinaryNativeFnRRN, Callable,
@@ -1438,8 +1438,8 @@ impl TestSession {
             self.try_compile(src).map_err(Error::Compilation)?;
 
         // Run the expression if any through *both* interpreters, asserting their outcomes agree:
-        // equal values, matching ordinary runtime-error kinds, or matching hard-abort summaries and
-        // retained cause kinds. Return the HIR result. Running both on every snippet gives the SSA
+        // equal values, matching structural runtime-error kinds, or matching cleanup-failure causes
+        // and retained cause kinds. Return the HIR result. Running both on every snippet gives the SSA
         // backend full coverage, including the error path: a failing snippet exercises both
         // backends rather than short-circuiting on the HIR error.
         if let Some(expr) = expr {
@@ -1477,23 +1477,26 @@ impl TestSession {
                             "SSA backend raised a different runtime error than the HIR \
                              interpreter"
                         );
-                        match (hir_err.hard_abort(), ssa_err.hard_abort()) {
-                            (Some(hir_abort), Some(ssa_abort)) => {
+                        match (
+                            hir_err.failure_during_cleanup(),
+                            ssa_err.failure_during_cleanup(),
+                        ) {
+                            (Some(hir_failure), Some(ssa_failure)) => {
                                 assert_eq!(
-                                    ssa_abort.initial().kind(),
-                                    hir_abort.initial().kind(),
-                                    "SSA hard abort retained a different initial failure than HIR"
+                                    ssa_failure.initial().kind(),
+                                    hir_failure.initial().kind(),
+                                    "SSA retained a different initial failure than HIR"
                                 );
                                 assert_eq!(
-                                    ssa_abort.during_cleanup().kind(),
-                                    hir_abort.during_cleanup().kind(),
-                                    "SSA hard abort retained a different cleanup failure than HIR"
+                                    ssa_failure.during_cleanup().kind(),
+                                    hir_failure.during_cleanup().kind(),
+                                    "SSA retained a different cleanup failure than HIR"
                                 );
                             }
                             (None, None) => {}
                             _ => panic!(
                                 "SSA backend disagreed with HIR about whether the runtime error \
-                                 was a structured hard abort"
+                                 was a structured failure during cleanup"
                             ),
                         }
                     }
@@ -1560,13 +1563,16 @@ impl TestSession {
     }
 
     /// Compile and run the src and expect a runtime error
-    pub fn fail_run(&mut self, src: &str) -> RuntimeErrorKind {
+    pub fn fail_run(&mut self, src: &str) -> SourceFailureKind {
         match self.try_run_value(src) {
             Ok(value) => {
                 let rendered = self.value_to_assertion_text(value.module_id, value.value, value.ty);
                 panic!("Expected runtime error, got value: {rendered}");
             }
-            Err(error) => error.kind(),
+            Err(error) => error
+                .source_failure()
+                .unwrap_or_else(|| panic!("Expected source failure, got {error:?}"))
+                .kind(),
         }
     }
 

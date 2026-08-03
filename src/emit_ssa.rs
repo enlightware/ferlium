@@ -306,8 +306,8 @@ impl<'a> Emitter<'a> {
         // The callee is the place of the `Value::clone` method entry; the call reads the function
         // value by reference (never loaded into a register — see the `call` contract). A plain
         // `call`, not an `invoke`: `Value::clone` is infallible by its trait contract (a fallible
-        // clone impl is a compile error). `insert` may still attach an implicit unwind edge for
-        // out-of-band execution cancellation.
+        // clone impl is a compile error). The transitional implicit-edge classification may still
+        // attach an edge, but sandbox violations bypass it.
         self.insert(Instruction::call(span, method_place, [source, target]));
     }
 
@@ -579,7 +579,7 @@ impl<'a> Emitter<'a> {
     /// `pending_pads`; their bodies are emitted at function finalization (see `fill_pending_pads`),
     /// because a block is a contiguous range in the shared instruction arena and so cannot be filled
     /// in the middle of lowering another block. Returns `None` when no enclosing scope has drop
-    /// obligations — the frame has nothing to clean up, so the failure or cancellation propagates
+    /// obligations — the frame has nothing to clean up, so the source failure propagates
     /// straight to the caller.
     fn innermost_pad(&mut self, span: Location) -> Option<BlockId> {
         let depth = self
@@ -632,7 +632,7 @@ impl<'a> Emitter<'a> {
     /// empty until now, so filling them here — after the body's last block is terminated — keeps every
     /// block a contiguous instruction range. A pad runs its (init-guarded) cleanup, then `br`s to its
     /// outer pad or `resume`s. Cleanup instructions emitted inside a pad receive no further cleanup
-    /// edge: if one raises while the original error is in flight, the executor hard-aborts instead of
+    /// edge: a second source failure while the original is in flight poisons the executor instead of
     /// starting a replacement unwind.
     fn fill_pending_pads(&mut self) {
         let pads = std::mem::take(&mut self.context.pending_pads);
@@ -659,8 +659,8 @@ impl<'a> Emitter<'a> {
     /// `invoke` whose unwind edge runs that pad (dropping the frame's live locals before the error
     /// propagates), with lowering continuing in a fresh continuation block; any other call is a plain
     /// `call`. This is the only place `invoke` is introduced, and the single point at which a call's
-    /// source-level fallibility is decided. A plain call may separately receive an implicit unwind
-    /// edge for out-of-band execution cancellation in [`insert`](Self::insert).
+    /// source-level fallibility is decided. The transitional implicit-edge classification may
+    /// conservatively attach an edge to a plain call; sandbox violations never follow that edge.
     fn emit_call(
         &mut self,
         span: Location,
@@ -679,26 +679,15 @@ impl<'a> Emitter<'a> {
         self.insert(Instruction::call(span, callee, arguments));
     }
 
-    /// Emits a fallible runtime resource check, giving it an explicit unwind edge whenever the
-    /// current scope has cleanup obligations. This is the non-call analogue of `emit_call`.
+    /// Emits a pinned sandbox guard. A violated guard leaves the MIR CFG through executor abort
+    /// management, so it has neither a source-error successor nor a guest-cleanup edge.
     fn emit_runtime_check(&mut self, span: Location, call_depth: bool) {
-        if let Some(pad) = self.innermost_pad(span) {
-            let cont = self.context.function.add_block().id();
-            let check = if call_depth {
-                Instruction::invoke_check_call_depth(span, cont, pad)
-            } else {
-                Instruction::invoke_check_fuel(span, cont, pad)
-            };
-            self.insert(check);
-            self.context.point = InsertionPoint::End(cont);
+        let check = if call_depth {
+            Instruction::check_call_depth(span)
         } else {
-            let check = if call_depth {
-                Instruction::check_call_depth(span)
-            } else {
-                Instruction::check_fuel(span)
-            };
-            self.insert(check);
-        }
+            Instruction::check_fuel(span)
+        };
+        self.insert(check);
     }
 
     /// Emits a call to `callee` in value position: the result out-pointer — `destination`, or
@@ -1787,8 +1776,7 @@ impl<'a> Emitter<'a> {
 
                         // A plain `call`, not an `invoke`: `Value::clone` is declared with an empty
                         // effect row (a fallible clone impl is a compile error —
-                        // `TraitMethodEffectMismatch`). `insert` still records any implicit
-                        // execution-cancellation edge.
+                        // `TraitMethodEffectMismatch`).
                         self.insert(Instruction::call(node.span, f, [source.clone(), target]));
                         if let Some(spec) = temp_drop {
                             self.emit_drop(node.span, source, source_node.ty, spec);
@@ -1840,8 +1828,7 @@ impl<'a> Emitter<'a> {
                         let (source, temp_drop) = self.lower_clone_source(&clone, source_node);
 
                         // A plain `call`: `Value::clone` has no language-failure edge by its trait
-                        // contract (see the `StoreLocal` clone above). Execution cancellation remains
-                        // an implicit edge.
+                        // contract (see the `StoreLocal` clone above).
                         self.insert(Instruction::call(node.span, f, [source.clone(), target]));
                         if let Some(spec) = temp_drop {
                             self.emit_drop(node.span, source, source_node.ty, spec);
@@ -1898,8 +1885,7 @@ impl<'a> Emitter<'a> {
                             ResolvedLocalClone::Static(f) => {
                                 let f = self.function_value(f);
                                 let source = self.place_of_local(n.id);
-                                // Plain `call`: `Value::clone` is source-level infallible; execution
-                                // cancellation remains an implicit edge.
+                                // Plain `call`: `Value::clone` is source-level infallible.
                                 self.insert(Instruction::call(node.span, f, [source, destination]));
                             }
                             ResolvedLocalClone::Dictionary(dictionary) => {
@@ -2551,8 +2537,8 @@ struct DropObligation {
 /// Whether a call's source effect row can return a language failure, and so needs an explicit unwind
 /// edge to a cleanup pad. A concrete `Fallible` primitive effect is exact; an unresolved effect
 /// variable is treated conservatively as potentially fallible, so a generic callee that instantiates
-/// fallibly still runs its caller's cleanup on the error path. Out-of-band cancellation is classified
-/// independently by [`Instruction::may_raise_implicitly`].
+/// fallibly still runs its caller's cleanup on the error path. Sandbox violations bypass this
+/// source-error classification.
 fn effects_are_fallible(effects: &EffType) -> bool {
     effects.contains(Effect::Primitive(PrimitiveEffect::Fallible)) || effects.has_variables()
 }

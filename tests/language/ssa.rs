@@ -1,13 +1,13 @@
 use test_log::test;
 
 use ferlium::{
-    ExecutionTarget, Location,
-    compiler::error::RuntimeErrorKind,
-    eval::{EvalCtx, RuntimeError},
+    ExecutionTarget,
+    compiler::error::{RuntimeErrorKind, SandboxViolationKind, SourceFailureKind},
+    eval::RuntimeError,
     execution::ReferenceInterpreterLimits,
     format::FormatWith,
     hir::value::Value,
-    module::{FunctionId, ShowModuleWithOptions},
+    module::ShowModuleWithOptions,
     ssa::interpreter::Interpreter,
 };
 
@@ -42,35 +42,6 @@ fn run_ssa_with_limits(
     interpreter.run_main(module_id, main_id)
 }
 
-fn run_main_with_environment_cell_limit(
-    session: &mut TestSession,
-    source: &str,
-    limit: usize,
-    via_ssa: bool,
-) -> Result<Value, RuntimeError> {
-    let module_id = session.compile(source).module_id;
-    let main_id = session
-        .session()
-        .expect_fresh_module(module_id)
-        .get_local_function_id(ustr::ustr("main"))
-        .expect("test source must define `fn main`");
-    let limits = ReferenceInterpreterLimits::default().with_environment_cell_limit(limit);
-    if via_ssa {
-        prepare_ssa(session, module_id);
-        let mut interpreter = Interpreter::with_limits(module_id, session.session(), limits);
-        interpreter.run_main(module_id, main_id)
-    } else {
-        let mut interpreter = EvalCtx::with_limits(module_id, session.session(), limits);
-        interpreter
-            .call_function_id(
-                FunctionId::new(module_id, main_id),
-                vec![],
-                Location::new_synthesized(),
-            )
-            .map(|control| control.into_value())
-    }
-}
-
 #[test]
 fn execution_targets_accept_by_value_arguments() {
     let mut session = TestSession::new();
@@ -96,8 +67,13 @@ fn execution_targets_accept_by_value_arguments() {
 #[test]
 fn execution_targets_use_configured_limits() {
     let mut session = TestSession::new();
-    let output = session.compile("loop {}");
+    let output = session.compile("fn recover() -> int { 40 + 2 } loop {}");
     let entry = output.expr.expect("test source should have an expression");
+    let recovery_entry = session
+        .session()
+        .expect_fresh_module(output.module_id)
+        .get_local_function_id(ustr::ustr("recover"))
+        .expect("test source should define a recovery function");
     let limits = ReferenceInterpreterLimits::default().with_fuel_limit(Some(0));
 
     for target in ExecutionTarget::ALL {
@@ -105,17 +81,171 @@ fn execution_targets_use_configured_limits() {
             .session_mut()
             .run_entry_with_limits(target, output.module_id, entry, vec![], limits)
             .expect_err("execution must consume the configured fuel");
-        assert_eq!(error.kind(), RuntimeErrorKind::FuelExhausted);
+        assert_eq!(
+            error.kind(),
+            RuntimeErrorKind::SandboxViolation(SandboxViolationKind::FuelExhausted)
+        );
+
+        // CompilerSession owns compiled artifacts, not one mutable executor generation. Interactive
+        // front ends can therefore report a poisoned run and create a fresh executor for the next
+        // evaluation without rebuilding the compiler session.
+        assert_val_eq!(
+            session
+                .session_mut()
+                .run_entry(target, output.module_id, recovery_entry, vec![])
+                .expect("a fresh execution after a sandbox violation should succeed"),
+            int(42)
+        );
     }
 }
 
-fn tracked_drop_log(session: &mut TestSession) -> isize {
-    let value = session.run("testing::tracked_drop_log()");
-    let log = *value
-        .as_primitive_ty::<isize>()
-        .expect("tracked drop log must be an int");
-    value.discard_storage();
-    log
+#[test]
+fn sandbox_violation_during_source_failure_cleanup_retains_both_causes() {
+    let mut session = TestSession::new();
+    let module_id = session
+        .compile(
+            r#"
+                struct Bomb(int)
+
+                impl Value for Bomb {
+                    fn eq(left: Bomb, right: Bomb) -> bool { left.0 == right.0 }
+                    fn to_string(value: Bomb) -> string { to_string(value.0) }
+                    fn hash(value: Bomb, state: &mut hasher) { hash(value.0, state) }
+                    fn clone(source: Bomb) -> Bomb { Bomb(source.0) }
+                    fn drop(target: &mut Bomb) { loop {} }
+                }
+
+                fn main() -> int {
+                    let bomb = Bomb(0);
+                    idiv(1, 0)
+                }
+            "#,
+        )
+        .module_id;
+    let main_id = session
+        .session()
+        .expect_fresh_module(module_id)
+        .get_local_function_id(ustr::ustr("main"))
+        .expect("test source should define `main`");
+    let limits = ReferenceInterpreterLimits::default().with_fuel_limit(Some(0));
+
+    for target in ExecutionTarget::ALL {
+        let error = session
+            .session_mut()
+            .run_entry_with_limits(target, module_id, main_id, vec![], limits)
+            .expect_err("the source failure's cleanup must exhaust fuel");
+        let violation = error
+            .sandbox_violation()
+            .expect("cleanup fuel exhaustion must be a sandbox violation");
+        assert_eq!(violation.kind(), SandboxViolationKind::FuelExhausted);
+        assert_eq!(
+            violation
+                .interrupted_source_failure()
+                .expect("the interrupted source failure must be retained")
+                .kind(),
+            SourceFailureKind::DivisionByZero
+        );
+    }
+}
+
+fn assert_fuel_violation_during_cleanup(
+    session: &mut TestSession,
+    source: &str,
+    expected_drop_log: isize,
+) {
+    let limits = ReferenceInterpreterLimits::default().with_fuel_limit(Some(0));
+
+    for target in ExecutionTarget::ALL {
+        session
+            .run("testing::reset_tracked_drops()")
+            .discard_storage();
+        let module_id = session.compile(source).module_id;
+        let main_id = session
+            .session()
+            .expect_fresh_module(module_id)
+            .get_local_function_id(ustr::ustr("main"))
+            .expect("test source should define `main`");
+        let error = session
+            .session_mut()
+            .run_entry_with_limits(target, module_id, main_id, vec![], limits)
+            .expect_err("cleanup must exhaust fuel");
+        assert_eq!(
+            error.kind(),
+            RuntimeErrorKind::SandboxViolation(SandboxViolationKind::FuelExhausted)
+        );
+        assert_val_eq!(
+            session.run("testing::tracked_drop_log()"),
+            int(expected_drop_log)
+        );
+    }
+}
+
+#[test]
+fn sandbox_violation_during_inline_return_cleanup_reclaims_storage() {
+    let mut session = TestSession::new();
+    assert_fuel_violation_during_cleanup(
+        &mut session,
+        r#"
+            struct Probe(int)
+            struct Bomb(int)
+
+            impl Value for Probe {
+                fn eq(left: Probe, right: Probe) -> bool { left.0 == right.0 }
+                fn to_string(value: Probe) -> string { to_string(value.0) }
+                fn hash(value: Probe, state: &mut hasher) { hash(value.0, state) }
+                fn clone(source: Probe) -> Probe { Probe(source.0) }
+                fn drop(target: &mut Probe) { testing::record_tracked_drop(target.0) }
+            }
+
+            impl Value for Bomb {
+                fn eq(left: Bomb, right: Bomb) -> bool { left.0 == right.0 }
+                fn to_string(value: Bomb) -> string { to_string(value.0) }
+                fn hash(value: Bomb, state: &mut hasher) { hash(value.0, state) }
+                fn clone(source: Bomb) -> Bomb { Bomb(source.0) }
+                fn drop(target: &mut Bomb) {
+                    testing::record_tracked_drop(target.0);
+                    loop {}
+                }
+            }
+
+            fn main() {
+                let outer = Probe(9);
+                {
+                    let bomb = Bomb(1);
+                    return ();
+                }
+            }
+        "#,
+        1,
+    );
+}
+
+#[test]
+fn sandbox_violation_during_assignment_drop_reclaims_storage() {
+    let mut session = TestSession::new();
+    assert_fuel_violation_during_cleanup(
+        &mut session,
+        r#"
+            struct Bomb(int)
+
+            impl Value for Bomb {
+                fn eq(left: Bomb, right: Bomb) -> bool { left.0 == right.0 }
+                fn to_string(value: Bomb) -> string { to_string(value.0) }
+                fn hash(value: Bomb, state: &mut hasher) { hash(value.0, state) }
+                fn clone(source: Bomb) -> Bomb { Bomb(source.0) }
+                fn drop(target: &mut Bomb) {
+                    testing::record_tracked_drop(target.0);
+                    loop {}
+                }
+            }
+
+            fn main() {
+                let mut value = Bomb(1);
+                value = Bomb(2);
+            }
+        "#,
+        1,
+    );
 }
 
 /// Print the elaborated HIR of `src` for parameter-passing experiments.
@@ -284,7 +414,9 @@ fn ssa_call_depth_limit_stops_recursive_execution() {
     .expect_err("recursive SSA execution must reach the configured call-depth limit");
     assert_eq!(
         error.kind(),
-        RuntimeErrorKind::CallDepthLimitExceeded { limit: 4 }
+        RuntimeErrorKind::SandboxViolation(SandboxViolationKind::CallDepthLimitExceeded {
+            limit: 4
+        })
     );
 }
 
@@ -307,85 +439,88 @@ fn ssa_environment_cell_limit_stops_allocation_and_leaves_session_usable() {
         .expect_err("SSA allocation must respect the configured environment cell limit");
     assert_eq!(
         error.kind(),
-        RuntimeErrorKind::EnvironmentCellLimitExceeded { limit: 1 }
+        RuntimeErrorKind::SandboxViolation(SandboxViolationKind::EnvironmentCellLimitExceeded {
+            limit: 1
+        })
     );
-    assert!(!interpreter.is_poisoned());
+    assert!(interpreter.is_poisoned());
+    assert_eq!(
+        interpreter
+            .run_main(module_id, main_id)
+            .expect_err("a poisoned interpreter must reject re-entry")
+            .kind(),
+        RuntimeErrorKind::SandboxViolation(SandboxViolationKind::EnvironmentCellLimitExceeded {
+            limit: 1
+        })
+    );
 
     let mut interpreter = Interpreter::new(module_id, session.session());
     assert_val_eq!(interpreter.run_main(module_id, main_id).unwrap(), int(1));
 }
 
 #[test]
-fn environment_cell_exhaustion_unwinds_owned_locals_in_both_interpreters() {
+fn sandbox_violation_during_closure_environment_drop_reclaims_the_temporary() {
     let mut session = TestSession::new();
-    let source = r#"
-        struct Probe(int)
+    let module_id = session
+        .compile(
+            r#"
+                struct Bomb(string)
 
-        impl Value for Probe {
-            fn eq(left: Probe, right: Probe) -> bool { left.0 == right.0 }
-            fn to_string(value: Probe) -> string { to_string(value.0) }
-            fn hash(value: Probe, state: &mut hasher) { hash(value.0, state) }
-            fn clone(source: Probe) -> Probe { Probe(source.0) }
-            fn drop(target: &mut Probe) { testing::record_tracked_drop(target.0) }
-        }
+                impl Value for Bomb {
+                    fn eq(left: Bomb, right: Bomb) -> bool { left.0 == right.0 }
+                    fn to_string(value: Bomb) -> string { to_string(value.0) }
+                    fn hash(value: Bomb, state: &mut hasher) { hash(value.0, state) }
+                    fn clone(source: Bomb) -> Bomb { Bomb(source.0) }
+                    fn drop(target: &mut Bomb) {
+                        let a00 = 0; let a01 = 0; let a02 = 0; let a03 = 0;
+                        let a04 = 0; let a05 = 0; let a06 = 0; let a07 = 0;
+                        let a08 = 0; let a09 = 0; let a10 = 0; let a11 = 0;
+                        let a12 = 0; let a13 = 0; let a14 = 0; let a15 = 0;
+                    }
+                }
 
-        fn exhaust_environment() {
-            let cell = 1;
-            exhaust_environment()
-        }
-
-        fn main() {
-            let owned = Probe(7);
-            exhaust_environment()
-        }
-    "#;
-    session
-        .run("testing::reset_tracked_drops()")
-        .discard_storage();
-    let module_id = session.compile(source).module_id;
-    let main_id = session
-        .session()
-        .expect_fresh_module(module_id)
-        .get_local_function_id(ustr::ustr("main"))
-        .expect("test source must define `fn main`");
-    let limits = ReferenceInterpreterLimits::default()
-        .with_call_depth_limit(1_024)
-        .with_environment_cell_limit(32);
-
-    prepare_ssa(&mut session, module_id);
-    let mut interpreter = Interpreter::with_limits(module_id, session.session(), limits);
-    let error = interpreter
-        .run_main(module_id, main_id)
-        .expect_err("SSA recursion must exhaust the environment-cell quota");
-    assert_eq!(
-        error.kind(),
-        RuntimeErrorKind::EnvironmentCellLimitExceeded { limit: 32 }
-    );
-    drop(interpreter);
-    assert_val_eq!(session.run("testing::tracked_drop_log()"), int(7));
-
-    session
-        .run("testing::reset_tracked_drops()")
-        .discard_storage();
-    let module_id = session.compile(source).module_id;
-    let main_id = session
-        .session()
-        .expect_fresh_module(module_id)
-        .get_local_function_id(ustr::ustr("main"))
-        .expect("test source must define `fn main`");
-    let mut ctx = EvalCtx::with_limits(module_id, session.session(), limits);
-    let error = ctx
-        .call_function_id(
-            FunctionId::new(module_id, main_id),
-            vec![],
-            Location::new_synthesized(),
+                fn main() {
+                    let bomb = Bomb("owns a heap string");
+                    let f = || bomb.0;
+                    f()
+                }
+            "#,
         )
-        .expect_err("HIR recursion must exhaust the environment-cell quota");
-    assert_eq!(
-        error.kind(),
-        RuntimeErrorKind::EnvironmentCellLimitExceeded { limit: 32 }
+        .module_id;
+    let main_id = session
+        .session()
+        .expect_fresh_module(module_id)
+        .get_local_function_id(ustr::ustr("main"))
+        .expect("test source should define `main`");
+    prepare_ssa(&mut session, module_id);
+
+    // Sweep this implementation-detail limit to reach the cloned closure environment's drop.
+    // A regression used to leave its resource-owning temporary live when the drop was cancelled,
+    // causing native stack reclamation to panic in debug builds. Poisoning must instead reclaim
+    // the backing storage without invoking further Ferlium cleanup.
+    let mut observed_violation = false;
+    for limit in 8..64 {
+        let limits = ReferenceInterpreterLimits::default().with_environment_cell_limit(limit);
+        let mut interpreter = Interpreter::with_limits(module_id, session.session(), limits);
+        match interpreter.run_main(module_id, main_id) {
+            Ok(value) => value.discard_storage(),
+            Err(error) => {
+                if matches!(
+                    error.kind(),
+                    RuntimeErrorKind::SandboxViolation(
+                        SandboxViolationKind::EnvironmentCellLimitExceeded { .. }
+                    )
+                ) {
+                    assert!(interpreter.is_poisoned());
+                    observed_violation = true;
+                }
+            }
+        }
+    }
+    assert!(
+        observed_violation,
+        "the swept limits should violate the environment-cell quota"
     );
-    assert_val_eq!(session.run("testing::tracked_drop_log()"), int(7));
 }
 
 #[test]
@@ -444,334 +579,6 @@ fn reused_ssa_interpreter_reclaims_dropped_frames() {
     }
     drop(interpreter);
     assert_val_eq!(session.run("testing::tracked_drop_log()"), int(7));
-}
-
-#[test]
-fn ssa_fuel_exhaustion_unwinds_owned_locals() {
-    let mut session = TestSession::new();
-    let source = r#"
-        struct Probe(int)
-
-        impl Value for Probe {
-            fn eq(left: Probe, right: Probe) -> bool { left.0 == right.0 }
-            fn to_string(value: Probe) -> string { to_string(value.0) }
-            fn hash(value: Probe, state: &mut hasher) { hash(value.0, state) }
-            fn clone(source: Probe) -> Probe { Probe(source.0) }
-            fn drop(target: &mut Probe) { testing::record_tracked_drop(target.0) }
-        }
-
-        fn main() {
-            testing::reset_tracked_drops();
-            let owned = Probe(7);
-            loop {}
-        }
-    "#;
-    let error = run_ssa_with_limits(&mut session, source, 128, Some(0))
-        .expect_err("an SSA loop must consume execution fuel");
-    assert_eq!(error.kind(), RuntimeErrorKind::FuelExhausted);
-    assert_val_eq!(session.run("testing::tracked_drop_log()"), int(7));
-}
-
-#[test]
-fn failure_during_cancellation_unwind_hard_aborts_and_poisons_both_interpreters() {
-    let mut session = TestSession::new();
-    let source = r#"
-        struct Probe(string)
-        struct Bomb(string)
-
-        impl Value for Probe {
-            fn eq(left: Probe, right: Probe) -> bool { left.0 == right.0 }
-            fn to_string(value: Probe) -> string { to_string(value.0) }
-            fn hash(value: Probe, state: &mut hasher) { hash(value.0, state) }
-            fn clone(source: Probe) -> Probe { Probe(source.0) }
-            fn drop(target: &mut Probe) { testing::record_tracked_drop(7) }
-        }
-
-        impl Value for Bomb {
-            fn eq(left: Bomb, right: Bomb) -> bool { left.0 == right.0 }
-            fn to_string(value: Bomb) -> string { to_string(value.0) }
-            fn hash(value: Bomb, state: &mut hasher) { hash(value.0, state) }
-            fn clone(source: Bomb) -> Bomb { Bomb(source.0) }
-            fn drop(target: &mut Bomb) {
-                let a00 = 0; let a01 = 0; let a02 = 0; let a03 = 0;
-                let a04 = 0; let a05 = 0; let a06 = 0; let a07 = 0;
-                let a08 = 0; let a09 = 0; let a10 = 0; let a11 = 0;
-            }
-        }
-
-        fn main() {
-            testing::reset_tracked_drops();
-            let outer = Probe("outer");
-            let bomb = Bomb("bomb");
-            loop {}
-        }
-    "#;
-    let module_id = session.compile(source).module_id;
-    let main_id = session
-        .session()
-        .expect_fresh_module(module_id)
-        .get_local_function_id(ustr::ustr("main"))
-        .expect("test source must define `fn main`");
-    prepare_ssa(&mut session, module_id);
-    let mut observed_ssa_hard_abort = false;
-    for limit in 4..64 {
-        let limits = ReferenceInterpreterLimits::default()
-            .with_fuel_limit(Some(0))
-            .with_environment_cell_limit(limit);
-        let mut ssa = Interpreter::with_limits(module_id, session.session(), limits);
-        let error = ssa
-            .run_main(module_id, main_id)
-            .expect_err("the loop must be cancelled");
-        let Some(abort) = error.hard_abort() else {
-            continue;
-        };
-        if abort.initial().kind() != RuntimeErrorKind::FuelExhausted {
-            continue;
-        }
-        assert_eq!(
-            abort.during_cleanup().kind(),
-            RuntimeErrorKind::EnvironmentCellLimitExceeded { limit }
-        );
-        assert!(ssa.is_poisoned());
-        assert_eq!(
-            ssa.run_main(module_id, main_id)
-                .expect_err("a poisoned SSA interpreter must reject re-entry")
-                .kind(),
-            RuntimeErrorKind::HardAbort
-        );
-        observed_ssa_hard_abort = true;
-        break;
-    }
-    assert!(
-        observed_ssa_hard_abort,
-        "a swept SSA environment limit should cancel the failure unwind"
-    );
-
-    let mut observed_hir_hard_abort = false;
-    for limit in 4..64 {
-        let limits = ReferenceInterpreterLimits::default()
-            .with_fuel_limit(Some(0))
-            .with_environment_cell_limit(limit);
-        let mut hir = EvalCtx::with_limits(module_id, session.session(), limits);
-        let error = hir
-            .call_function_id(
-                FunctionId::new(module_id, main_id),
-                vec![],
-                Location::new_synthesized(),
-            )
-            .expect_err("the loop must be cancelled");
-        let Some(abort) = error.hard_abort() else {
-            continue;
-        };
-        if abort.initial().kind() != RuntimeErrorKind::FuelExhausted {
-            continue;
-        }
-        assert_eq!(
-            abort.during_cleanup().kind(),
-            RuntimeErrorKind::EnvironmentCellLimitExceeded { limit }
-        );
-        assert!(hir.is_poisoned());
-        assert_eq!(
-            hir.call_function_id(
-                FunctionId::new(module_id, main_id),
-                vec![],
-                Location::new_synthesized(),
-            )
-            .expect_err("a poisoned HIR executor must reject re-entry")
-            .kind(),
-            RuntimeErrorKind::HardAbort
-        );
-        observed_hir_hard_abort = true;
-        break;
-    }
-    assert!(
-        observed_hir_hard_abort,
-        "a swept HIR environment limit should cancel the failure unwind"
-    );
-
-    assert_val_eq!(session.run("testing::tracked_drop_log()"), int(0));
-}
-
-#[test]
-fn cancellation_during_inline_return_cleanup_continues_with_outer_scope() {
-    let mut session = TestSession::new();
-    let source = r#"
-        struct Probe(int)
-        struct Bomb(int)
-
-        impl Value for Probe {
-            fn eq(left: Probe, right: Probe) -> bool { left.0 == right.0 }
-            fn to_string(value: Probe) -> string { to_string(value.0) }
-            fn hash(value: Probe, state: &mut hasher) { hash(value.0, state) }
-            fn clone(source: Probe) -> Probe { Probe(source.0) }
-            fn drop(target: &mut Probe) { testing::record_tracked_drop(target.0) }
-        }
-
-        impl Value for Bomb {
-            fn eq(left: Bomb, right: Bomb) -> bool { left.0 == right.0 }
-            fn to_string(value: Bomb) -> string { to_string(value.0) }
-            fn hash(value: Bomb, state: &mut hasher) { hash(value.0, state) }
-            fn clone(source: Bomb) -> Bomb { Bomb(source.0) }
-            fn drop(target: &mut Bomb) {
-                let a00 = 0; let a01 = 0; let a02 = 0; let a03 = 0;
-                let a04 = 0; let a05 = 0; let a06 = 0; let a07 = 0;
-                let a08 = 0; let a09 = 0; let a10 = 0; let a11 = 0;
-            }
-        }
-
-        fn main() {
-            let outer = Probe(7);
-            {
-                let bomb = Bomb(0);
-                return ();
-            }
-        }
-    "#;
-
-    for (backend, via_ssa) in [("SSA", true), ("HIR", false)] {
-        let mut observed_cancellation = false;
-        for limit in 8..40 {
-            session
-                .run("testing::reset_tracked_drops()")
-                .discard_storage();
-            let result = run_main_with_environment_cell_limit(&mut session, source, limit, via_ssa);
-            let is_expected_cancellation = result.as_ref().is_err_and(|error| {
-                error.kind() == RuntimeErrorKind::EnvironmentCellLimitExceeded { limit }
-                    && !error.is_hard_abort()
-            });
-            if let Ok(value) = result {
-                value.discard_storage();
-            }
-            if is_expected_cancellation && tracked_drop_log(&mut session) == 7 {
-                observed_cancellation = true;
-                break;
-            }
-        }
-        assert!(
-            observed_cancellation,
-            "a swept {backend} limit should make the inner drop fail as a primary cancellation \
-             while the outer scope still unwinds"
-        );
-    }
-}
-
-#[test]
-fn failed_assignment_drop_consumes_the_old_value_in_both_interpreters() {
-    let mut session = TestSession::new();
-    let source = r#"
-        struct Probe(int)
-        struct Bomb(int)
-
-        impl Value for Probe {
-            fn eq(left: Probe, right: Probe) -> bool { left.0 == right.0 }
-            fn to_string(value: Probe) -> string { to_string(value.0) }
-            fn hash(value: Probe, state: &mut hasher) { hash(value.0, state) }
-            fn clone(source: Probe) -> Probe { Probe(source.0) }
-            fn drop(target: &mut Probe) { testing::record_tracked_drop(target.0) }
-        }
-
-        impl Value for Bomb {
-            fn eq(left: Bomb, right: Bomb) -> bool { left.0 == right.0 }
-            fn to_string(value: Bomb) -> string { to_string(value.0) }
-            fn hash(value: Bomb, state: &mut hasher) { hash(value.0, state) }
-            fn clone(source: Bomb) -> Bomb { Bomb(source.0) }
-            fn drop(target: &mut Bomb) {
-                let a00 = 0; let a01 = 0; let a02 = 0; let a03 = 0;
-                let a04 = 0; let a05 = 0; let a06 = 0; let a07 = 0;
-                let a08 = 0; let a09 = 0; let a10 = 0; let a11 = 0;
-            }
-        }
-
-        fn main() {
-            let outer = Probe(7);
-            let mut value = Bomb(0);
-            value = Bomb(1);
-        }
-    "#;
-
-    for (backend, via_ssa) in [("SSA", true), ("HIR", false)] {
-        let mut observed_cancellation = false;
-        for limit in 8..48 {
-            session
-                .run("testing::reset_tracked_drops()")
-                .discard_storage();
-            let result = run_main_with_environment_cell_limit(&mut session, source, limit, via_ssa);
-            let is_expected_cancellation = result.as_ref().is_err_and(|error| {
-                error.kind() == RuntimeErrorKind::EnvironmentCellLimitExceeded { limit }
-                    && !error.is_hard_abort()
-            });
-            if let Ok(value) = result {
-                value.discard_storage();
-            }
-
-            if is_expected_cancellation && tracked_drop_log(&mut session) == 7 {
-                observed_cancellation = true;
-                break;
-            }
-        }
-        assert!(
-            observed_cancellation,
-            "a swept {backend} limit should make assignment's old-value drop fail once, consume \
-             that target, and continue unwinding the outer scope"
-        );
-    }
-}
-
-#[test]
-fn cancellation_during_closure_environment_drop_reclaims_the_temporary() {
-    let mut session = TestSession::new();
-    let source = r#"
-        struct Bomb(string)
-
-        impl Value for Bomb {
-            fn eq(left: Bomb, right: Bomb) -> bool { left.0 == right.0 }
-            fn to_string(value: Bomb) -> string { to_string(value.0) }
-            fn hash(value: Bomb, state: &mut hasher) { hash(value.0, state) }
-            fn clone(source: Bomb) -> Bomb { Bomb(source.0) }
-            fn drop(target: &mut Bomb) {
-                let a00 = 0; let a01 = 0; let a02 = 0; let a03 = 0;
-                let a04 = 0; let a05 = 0; let a06 = 0; let a07 = 0;
-                let a08 = 0; let a09 = 0; let a10 = 0; let a11 = 0;
-                let a12 = 0; let a13 = 0; let a14 = 0; let a15 = 0;
-            }
-        }
-
-        fn main() {
-            let bomb = Bomb("owns a heap string");
-            let f = || bomb.0;
-            f()
-        }
-    "#;
-    let module_id = session.compile(source).module_id;
-    let main_id = session
-        .session()
-        .expect_fresh_module(module_id)
-        .get_local_function_id(ustr::ustr("main"))
-        .expect("test source must define `fn main`");
-    prepare_ssa(&mut session, module_id);
-
-    // The exact number of reference-interpreter cells used is an implementation detail. Sweep a
-    // small range to exercise cancellation specifically while the cloned closure environment is
-    // being dropped. Before the regression fix this reached `restore_stack` with a live
-    // resource-owning temporary and tripped its SSA-leak assertion.
-    let mut observed_cancellation = false;
-    for limit in 8..64 {
-        let limits = ReferenceInterpreterLimits::default().with_environment_cell_limit(limit);
-        let mut interpreter = Interpreter::with_limits(module_id, session.session(), limits);
-        match interpreter.run_main(module_id, main_id) {
-            Ok(value) => value.discard_storage(),
-            Err(error) => {
-                observed_cancellation |= matches!(
-                    error.kind(),
-                    RuntimeErrorKind::EnvironmentCellLimitExceeded { .. }
-                );
-            }
-        }
-    }
-    assert!(
-        observed_cancellation,
-        "the swept limits should exercise environment-cell cancellation"
-    );
 }
 
 #[test]
@@ -1164,27 +971,27 @@ fn std::Value<[std::int]>::SIZE#impl:9ddb92fe(%p0: @ret int):
 
 fn std::Value<[std::int]>::clone#impl:94a041f9(%p0: @arg let [int], %p1: @ret [int]):
   b0:
-    %r0 = call std::Value<[A]>::clone#impl:5d7e5692(dict(<test>::std::Value<[std::int]>), dict(std::Value<std::int>), %p0, %p1)
+    %r0 = call std::Value<[A]>::clone#impl:d3305f1a(dict(std::Value<std::int>), dict(<test>::std::Value<[std::int]>), %p0, %p1)
     %r1 = ret
 
 fn std::Value<[std::int]>::drop#impl:a4f41aeb(%p0: @arg &mut [int], %p1: @ret ()):
   b0:
-    %r0 = call std::Value<[A]>::drop#impl:4499dda8(dict(<test>::std::Value<[std::int]>), dict(std::Value<std::int>), %p0, %p1)
+    %r0 = call std::Value<[A]>::drop#impl:6cacf658(dict(std::Value<std::int>), dict(<test>::std::Value<[std::int]>), %p0, %p1)
     %r1 = ret
 
 fn std::Value<[std::int]>::eq#impl:7e1688d4(%p0: @arg let [int], %p1: @arg let [int], %p2: @ret bool):
   b0:
-    %r0 = call std::Value<[A]>::eq#impl:82e999e1(dict(<test>::std::Value<[std::int]>), dict(std::Value<std::int>), %p0, %p1, %p2)
+    %r0 = call std::Value<[A]>::eq#impl:0ac782c1(dict(std::Value<std::int>), dict(<test>::std::Value<[std::int]>), %p0, %p1, %p2)
     %r1 = ret
 
 fn std::Value<[std::int]>::hash#impl:0aca59c2(%p0: @arg let [int], %p1: @arg &mut hasher, %p2: @ret ()):
   b0:
-    %r0 = call std::Value<[A]>::hash#impl:2f76a94b(dict(<test>::std::Value<[std::int]>), dict(std::Value<std::int>), %p0, %p1, %p2)
+    %r0 = call std::Value<[A]>::hash#impl:90d7c903(dict(std::Value<std::int>), dict(<test>::std::Value<[std::int]>), %p0, %p1, %p2)
     %r1 = ret
 
 fn std::Value<[std::int]>::to_string#impl:892a091b(%p0: @arg let [int], %p1: @ret string):
   b0:
-    %r0 = call std::Value<[A]>::to_string#impl:c74a3a78(dict(<test>::std::Value<[std::int]>), dict(std::Value<std::int>), %p0, %p1)
+    %r0 = call std::Value<[A]>::to_string#impl:6a7dc628(dict(std::Value<std::int>), dict(<test>::std::Value<[std::int]>), %p0, %p1)
     %r1 = ret
 "#,
     );
@@ -3330,7 +3137,7 @@ fn yielded_subscript_body_error_propagates() {
         session.fail_run(&format!(
             "{CELL_SUBSCRIPT}fn bad(a: &mut int, w: int) {{ a->[cell] = idiv(1, w) }}\nfn driver() -> int {{ let mut x = 5; bad(x, 0); x }}\ndriver()"
         )),
-        ferlium::compiler::error::RuntimeErrorKind::DivisionByZero,
+        SourceFailureKind::DivisionByZero,
     );
 }
 

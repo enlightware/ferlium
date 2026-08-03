@@ -138,26 +138,17 @@ The calling convention for return values is:
 
 For a `Fallible` function, status is 0 on success and non-zero on language failure.
 
-### Execution cancellation
+### Sandbox violations
 
-Host-enforced execution cancellation is separate from the source-language `Fallible` effect. Fuel,
+Host-enforced sandbox violations are separate from the source-language `Fallible` effect. Fuel,
 call-depth, interpreter-environment, and future accounted-memory limits do not make every function
 that can allocate or execute a loop source-level `Fallible`; Ferlium code cannot catch these
-cancellations.
+violations.
 
-Cancellation therefore does not change the normal return forms above. A backend that promises
-recoverable cancellation and semantic unwinding must provide an out-of-band propagation mechanism,
-such as target exception handling or an equivalent hidden internal channel. Cleanup edges may run
-while cancellation propagates through functions whose ordinary ABI has no status result. If a
-cleanup action raises while an error or cancellation is already unwinding, the runtime hard-aborts
-instead of starting a replacement unwind; see [runtime-sandboxing.md](runtime-sandboxing.md). If a
-backend cannot provide the out-of-band channel, its alternatives are a universal hidden status
-convention or abort/trap semantics without guaranteed cleanup; this specification does not silently
-reinterpret a normal direct return as a fallible status return.
-
-Only failures reported by Ferlium's accounted runtime participate in recoverable cancellation.
-Unrecoverable exhaustion in the host allocator or target runtime may still abort or trap at a lower
-level.
+A sandbox violation therefore does not change the normal return forms above.
+It exits ordinary MIR control flow, poisons the affected runtime domain, and runs no Ferlium semantic cleanup.
+A backend may implement this as a trap or non-returning runtime abort entry that captures diagnostics and performs bounded host-side revocation and storage reset.
+Failures raised by Ferlium's accounted runtime use this defined path; exhaustion below that runtime, such as failure of the host allocator, may still abort or trap at a lower level. See [runtime-sandboxing.md](runtime-sandboxing.md).
 
 ## Wasm
 

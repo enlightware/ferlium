@@ -17,7 +17,7 @@ use crate::harness::{
 };
 use ferlium::{
     SourceTable,
-    compiler::error::{CompilationErrorImpl, RuntimeErrorKind},
+    compiler::error::{CompilationErrorImpl, SourceFailureKind},
     format::FormatWith,
     hir::value::{LiteralValue, Value},
     hir::{ENodeArena, ENodeId, NodeKind},
@@ -1017,13 +1017,13 @@ fn any_on_arrays() {
         &mut session,
         "fn f() { let a = [(1: int)]; any(a, |v| { v >= 1 }) }",
         "f",
-        effect(Fallible),
+        no_effects(),
     );
     test_mod_for_effects(
         &mut session,
         "fn f() { let a = [(1: int)]; any(a, |v| { effects::read(); v >= 1 }) }",
         "f",
-        effects(&[Fallible, Read]),
+        effect(Read),
     );
 }
 
@@ -1041,13 +1041,13 @@ fn all_on_arrays() {
         &mut session,
         "fn f() { let a = [(1: int)]; all(a, |v| { v >= 1 }) }",
         "f",
-        effect(Fallible),
+        no_effects(),
     );
     test_mod_for_effects(
         &mut session,
         "fn f() { let a = [(1: int)]; all(a, |v| { effects::read(); v >= 1 }) }",
         "f",
-        effects(&[Fallible, Read]),
+        effect(Read),
     );
 }
 
@@ -1779,7 +1779,7 @@ fn string_split() {
     );
     assert_eq!(
         session.fail_run(r#"split("abc", "")"#),
-        RuntimeErrorKind::InvalidArgument("separator must not be empty".into())
+        SourceFailureKind::InvalidArgument("separator must not be empty".into())
     );
 }
 
@@ -1813,7 +1813,7 @@ fn array_split() {
     );
     assert_eq!(
         session.fail_run("split([1, 2], [])"),
-        RuntimeErrorKind::InvalidArgument("separator must not be empty".into())
+        SourceFailureKind::InvalidArgument("separator must not be empty".into())
     );
 }
 

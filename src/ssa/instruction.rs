@@ -67,10 +67,9 @@ impl Instruction {
     /// Returns whether executing this instruction can leave normally sequenced control without
     /// carrying an explicit unwind successor of its own.
     ///
-    /// This includes both language failure from non-call-shaped operations and out-of-band execution
-    /// cancellation such as reference-interpreter storage exhaustion. Keeping the classification
-    /// here makes adding an instruction an exhaustive decision: SSA lowering can attach the current
-    /// cleanup landing pad wherever one is required without changing the instruction's normal ABI.
+    /// This transitional classification over-approximates source failures from non-call-shaped
+    /// operations. Sandbox violations always bypass MIR cleanup even when an instruction has an
+    /// implicit edge; the canonical MIR refactor replaces this with retained call-site effects.
     pub fn may_raise_implicitly(&self) -> bool {
         use InstructionKind::*;
 
@@ -105,8 +104,8 @@ impl Instruction {
             | Clear
             | StackSave
             | StackRestore
-            | CheckCallDepth { .. }
-            | CheckFuel { .. } => false,
+            | CheckCallDepth
+            | CheckFuel => false,
         }
     }
 
@@ -207,8 +206,7 @@ impl Instruction {
     /// [`call`](Self::call) (`[callee, args.., ret-out]`) and the callee contract is the same; only
     /// *fallible* calls that have cleanup to run on the error path are lowered as `invoke` — a
     /// source-level infallible call, or one with nothing to clean up in its frame, stays a plain
-    /// [`call`](Self::call). A plain call can separately carry a function-level implicit unwind edge
-    /// for out-of-band execution cancellation.
+    /// [`call`](Self::call).
     pub fn invoke<T: IntoIterator<Item = ssa::Value>>(
         span: Location,
         callee: ssa::Value,
@@ -230,11 +228,12 @@ impl Instruction {
     /// up the stack.
     ///
     /// Named after LLVM's `resume` (the third of `invoke`/`landingpad`/`resume`). It is not a *throw*:
-    /// the error was already raised — by a language failure or execution cancellation — and is
+    /// the source failure was already raised and is
     /// merely *paused* while the pad runs the frame's drops. `resume` lifts that pause. A terminator
     /// with no successors (like [`ret`](Self::ret)): it is the last instruction of an outermost
     /// cleanup pad, reached after that pad and the pads it chains from have successfully dropped the
-    /// frame's live locals. If a drop raises, hard abort occurs instead and `resume` is not reached.
+    /// frame's live locals. If a source-fallible cleanup action raises,
+    /// failure-during-cleanup poisoning occurs instead and `resume` is not reached.
     /// The caller's
     /// explicit or implicit exceptional edge at the originating call site routes the resumed error
     /// into the caller's own pad — giving the cross-frame unwind.
@@ -495,7 +494,7 @@ impl Instruction {
         Instruction {
             span,
             operands: Box::new([]),
-            kind: InstructionKind::CheckCallDepth { successors: None },
+            kind: InstructionKind::CheckCallDepth,
         }
     }
 
@@ -504,33 +503,7 @@ impl Instruction {
         Instruction {
             span,
             operands: Box::new([]),
-            kind: InstructionKind::CheckFuel { successors: None },
-        }
-    }
-
-    /// Creates a call-depth guard with explicit normal and unwind successors.
-    pub fn invoke_check_call_depth(
-        span: Location,
-        normal: ssa::BlockId,
-        unwind: ssa::BlockId,
-    ) -> Self {
-        Instruction {
-            span,
-            operands: Box::new([]),
-            kind: InstructionKind::CheckCallDepth {
-                successors: Some((normal, unwind)),
-            },
-        }
-    }
-
-    /// Creates a fuel guard with explicit normal and unwind successors.
-    pub fn invoke_check_fuel(span: Location, normal: ssa::BlockId, unwind: ssa::BlockId) -> Self {
-        Instruction {
-            span,
-            operands: Box::new([]),
-            kind: InstructionKind::CheckFuel {
-                successors: Some((normal, unwind)),
-            },
+            kind: InstructionKind::CheckFuel,
         }
     }
 
@@ -752,13 +725,9 @@ pub enum InstructionKind {
     /// Restore a previously saved stack top.
     StackRestore,
     /// Enforce the configured script call-depth limit.
-    CheckCallDepth {
-        successors: Option<(ssa::BlockId, ssa::BlockId)>,
-    },
+    CheckCallDepth,
     /// Consume one unit of optional execution fuel.
-    CheckFuel {
-        successors: Option<(ssa::BlockId, ssa::BlockId)>,
-    },
+    CheckFuel,
     /// Semantically drop an initialized value through its `Value::drop` function.
     Drop,
     /// Construct a closure from a function and its captured environment.
@@ -853,8 +822,8 @@ impl InstructionKind {
             | Memcpy
             | Move
             | StackRestore
-            | CheckCallDepth { .. }
-            | CheckFuel { .. }
+            | CheckCallDepth
+            | CheckFuel
             | Drop
             | DropClosureEnv => InstructionResult::Nothing,
         }
@@ -868,12 +837,6 @@ impl InstructionKind {
                 | Self::ConditionalBranch { .. }
                 | Self::UnconditionalBranch { .. }
                 | Self::Ret
-                | Self::CheckCallDepth {
-                    successors: Some(_)
-                }
-                | Self::CheckFuel {
-                    successors: Some(_)
-                }
         )
     }
 
@@ -988,7 +951,7 @@ impl InstructionKind {
                 1,
                 "stack_restore takes exactly the saved marker"
             ),
-            CheckCallDepth { .. } | CheckFuel { .. } => {
+            CheckCallDepth | CheckFuel => {
                 assert!(whole.operands.is_empty(), "runtime checks take no operands")
             }
             Drop => assert_eq!(
@@ -1132,8 +1095,8 @@ impl InstructionKind {
             }
             StackSave => write!(f, "stack_save"),
             StackRestore => write!(f, "stack_restore {}", whole.operands[0].format_with(env)),
-            CheckCallDepth { successors } => fmt_runtime_check(f, "check_call_depth", *successors),
-            CheckFuel { successors } => fmt_runtime_check(f, "check_fuel", *successors),
+            CheckCallDepth => write!(f, "check_call_depth"),
+            CheckFuel => write!(f, "check_fuel"),
             Drop => write!(
                 f,
                 "drop {} via {}",
@@ -1177,18 +1140,6 @@ fn fmt_callee_and_args(
         write!(f, "{}", operand.format_with(env))?;
     }
     write!(f, ")")
-}
-
-fn fmt_runtime_check(
-    f: &mut fmt::Formatter<'_>,
-    name: &str,
-    successors: Option<(ssa::BlockId, ssa::BlockId)>,
-) -> fmt::Result {
-    write!(f, "{name}")?;
-    if let Some((normal, unwind)) = successors {
-        write!(f, " -> b{} unwind b{}", normal.raw(), unwind.raw())?;
-    }
-    Ok(())
 }
 
 #[cfg(all(test, target_pointer_width = "64"))]

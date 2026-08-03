@@ -19,7 +19,7 @@ use ustr::{Ustr, ustr};
 
 use crate::{
     cached_primitive_ty, cached_ty,
-    compiler::error::RuntimeErrorKind,
+    compiler::error::SourceFailureKind,
     containers::b,
     hir::function::{
         BinaryNativeFnMRN, BinaryNativeFnRMN, BinaryNativeFnRRFN, BinaryNativeFnRRN,
@@ -273,9 +273,9 @@ impl String {
         indices
     }
 
-    fn split_iterator(&self, separator: &Self) -> Result<StringSplitIterator, RuntimeErrorKind> {
+    fn split_iterator(&self, separator: &Self) -> Result<StringSplitIterator, SourceFailureKind> {
         if separator.is_empty() {
-            return Err(RuntimeErrorKind::InvalidArgument(
+            return Err(SourceFailureKind::InvalidArgument(
                 "separator must not be empty".into(),
             ));
         }

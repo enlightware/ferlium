@@ -17,7 +17,7 @@ use crate::harness::{
 use ferlium::{
     compiler::error::{
         CompilationErrorImpl, DuplicatedVariantContext, InvalidLoopControlKind, LoopControlKind,
-        MutabilityMustBeWhat, RuntimeErrorKind,
+        MutabilityMustBeWhat, RuntimeErrorKind, SandboxViolationKind, SourceFailureKind,
     },
     eval::{EvalCtx, eval_function_with_ctx},
     execution::ReferenceInterpreterLimits,
@@ -2246,7 +2246,7 @@ fn assign_rhs_aliasing_destination() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn execution_errors() {
     let mut session = TestSession::new();
-    use RuntimeErrorKind::*;
+    use SourceFailureKind::*;
     assert_eq!(session.fail_run("abort()"), Aborted(None));
     assert_eq!(
         session.fail_run("panic(\"oh no\")"),
@@ -2262,7 +2262,7 @@ fn execution_errors() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn arithmetic_execution_errors() {
     let mut session = TestSession::new();
-    use RuntimeErrorKind::*;
+    use SourceFailureKind::*;
     assert_eq!(session.fail_run("1.0 / 0.0"), DivisionByZero);
     assert_eq!(
         session.fail_run("let v = || 0.0; 1.0 / v()"),
@@ -2289,7 +2289,7 @@ fn arithmetic_execution_errors() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_execution_errors() {
     let mut session = TestSession::new();
-    use RuntimeErrorKind::*;
+    use SourceFailureKind::*;
     let index_one_len_one = Aborted(Some(
         "Array access out of bounds: index 1 for length 1".to_string(),
     ));
@@ -2363,7 +2363,9 @@ fn hir_execution_uses_configured_limits() {
         .expect_err("recursive HIR execution must reach the configured call-depth limit");
     assert_eq!(
         error.kind(),
-        RuntimeErrorKind::CallDepthLimitExceeded { limit: 4 }
+        RuntimeErrorKind::SandboxViolation(SandboxViolationKind::CallDepthLimitExceeded {
+            limit: 4
+        })
     );
 
     let looping = session.compile("loop {}");
@@ -2372,26 +2374,37 @@ fn hir_execution_uses_configured_limits() {
     let mut ctx = EvalCtx::with_limits(looping.module_id, session.session(), limits);
     let error = eval_function_with_ctx(looping.module_id, expr, vec![], &mut ctx)
         .expect_err("looping HIR execution must consume the configured fuel");
-    assert_eq!(error.kind(), RuntimeErrorKind::FuelExhausted);
+    assert_eq!(
+        error.kind(),
+        RuntimeErrorKind::SandboxViolation(SandboxViolationKind::FuelExhausted)
+    );
 }
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn recursive_execution_errors() {
     let mut session = TestSession::new();
-    use RuntimeErrorKind::*;
-    assert_eq!(
-        session.fail_run("fn f() { g() } fn g() { f() } f()"),
-        CallDepthLimitExceeded { limit: 128 }
-    );
-    assert_eq!(
-        session.fail_run("fn rf() { rf() } rf() + 0"),
-        CallDepthLimitExceeded { limit: 128 }
-    );
-    assert_eq!(
-        session.fail_run("fn apply(f) { f() } fn rf() { apply(rf) } rf() + 0"),
-        CallDepthLimitExceeded { limit: 128 }
-    );
+    for source in [
+        "fn f() { g() } fn g() { f() } f()",
+        "fn rf() { rf() } rf() + 0",
+        "fn apply(f) { f() } fn rf() { apply(rf) } rf() + 0",
+    ] {
+        let output = session.compile(source);
+        let entry = output.expr.expect("test source should have an expression");
+        let limits = ReferenceInterpreterLimits::default().with_call_depth_limit(4);
+        for target in ferlium::ExecutionTarget::ALL {
+            let error = session
+                .session_mut()
+                .run_entry_with_limits(target, output.module_id, entry, vec![], limits)
+                .expect_err("recursive execution must exceed its call-depth limit");
+            assert_eq!(
+                error.kind(),
+                RuntimeErrorKind::SandboxViolation(SandboxViolationKind::CallDepthLimitExceeded {
+                    limit: 4
+                })
+            );
+        }
+    }
 }
 
 #[test]
@@ -2448,9 +2461,19 @@ fn environment_cell_limit_exceeded() {
 
     assert_eq!(
         error.kind(),
-        RuntimeErrorKind::EnvironmentCellLimitExceeded { limit: 1 }
+        RuntimeErrorKind::SandboxViolation(SandboxViolationKind::EnvironmentCellLimitExceeded {
+            limit: 1
+        })
     );
-    assert!(!ctx.is_poisoned());
+    assert!(ctx.is_poisoned());
+    assert_eq!(
+        eval_function_with_ctx(module_and_expr.module_id, expr, vec![], &mut ctx)
+            .expect_err("a poisoned HIR executor must reject re-entry")
+            .kind(),
+        RuntimeErrorKind::SandboxViolation(SandboxViolationKind::EnvironmentCellLimitExceeded {
+            limit: 1
+        })
+    );
     assert_eq!(ctx.environment.len(), 0);
     assert_eq!(ctx.call_depth, 0);
 }
@@ -2519,7 +2542,7 @@ fn runtime_backtrace_debug_info_respects_local_scope() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn never_type() {
     let mut session = TestSession::new();
-    use RuntimeErrorKind::*;
+    use SourceFailureKind::*;
     assert_val_eq!(session.run("if true { 2 } else { abort() }"), int(2));
     assert_eq!(
         session.fail_run("if false { 2 } else { abort() }"),

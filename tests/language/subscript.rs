@@ -13,7 +13,7 @@ use ferlium::{
     ast::{ModuleDisplay, PExprKind, SubscriptMemberMode},
     compiler::error::{
         CompilationErrorImpl, InvalidRecordFieldContext, InvalidSubscriptDefinitionKind,
-        InvalidYieldKind, MutabilityMustBeWhat, RuntimeErrorKind, SubscriptDefinitionSubject,
+        InvalidYieldKind, MutabilityMustBeWhat, SourceFailureKind, SubscriptDefinitionSubject,
         UnsupportedSubscriptFeatureKind,
     },
     format::FormatWith,
@@ -3627,7 +3627,7 @@ fn named_subscript_body_error_runs_epilogue_before_propagating() {
 
     assert_eq!(
         session.fail_run(source),
-        RuntimeErrorKind::Aborted(Some(
+        SourceFailureKind::Aborted(Some(
             "Array access out of bounds: index 1 for length 1".to_string()
         ))
     );
@@ -3666,7 +3666,7 @@ fn named_subscript_slide_error_unwinds_caller_owned_locals() {
 
     assert_eq!(
         session.fail_run(source),
-        RuntimeErrorKind::Aborted(Some(
+        SourceFailureKind::Aborted(Some(
             "Array access out of bounds: index 1 for length 1".to_string()
         ))
     );
@@ -3675,7 +3675,7 @@ fn named_subscript_slide_error_unwinds_caller_owned_locals() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn named_subscript_slide_error_during_unwind_hard_aborts_without_outer_semantic_cleanup() {
+fn named_subscript_slide_error_during_unwind_poisons_without_outer_semantic_cleanup() {
     let mut session = experimental_session();
     let source = indoc! { r#"
         struct Probe(int)
@@ -3704,23 +3704,23 @@ fn named_subscript_slide_error_during_unwind_hard_aborts_without_outer_semantic_
     "# };
 
     // The body starts unwinding with index 2, then the accessor slide raises index 1. A second
-    // failure during semantic unwind hard-aborts the executor, retaining both causes and skipping
+    // failure during semantic unwind poisons the executor, retaining both causes and skipping
     // all remaining Ferlium cleanup.
     let error = session
         .try_run(source)
         .expect_err("the accessor body and slide must both fail");
-    let abort = error
-        .hard_abort()
-        .expect("a failure during unwind must produce a structured hard abort");
+    let failure = error
+        .failure_during_cleanup()
+        .expect("a second source failure during cleanup must be retained structurally");
     assert_eq!(
-        abort.initial().kind(),
-        RuntimeErrorKind::Aborted(Some(
+        failure.initial().kind(),
+        SourceFailureKind::Aborted(Some(
             "Array access out of bounds: index 2 for length 1".to_string()
         ))
     );
     assert_eq!(
-        abort.during_cleanup().kind(),
-        RuntimeErrorKind::Aborted(Some(
+        failure.during_cleanup().kind(),
+        SourceFailureKind::Aborted(Some(
             "Array access out of bounds: index 1 for length 1".to_string()
         ))
     );
@@ -3750,7 +3750,7 @@ fn named_subscript_prologue_error_skips_epilogue() {
 
     assert_eq!(
         session.fail_run(source),
-        RuntimeErrorKind::Aborted(Some(
+        SourceFailureKind::Aborted(Some(
             "Array access out of bounds: index 1 for length 1".to_string()
         ))
     );
@@ -3789,7 +3789,7 @@ fn named_subscript_prologue_error_unwinds_caller_owned_locals() {
 
     assert_eq!(
         session.fail_run(source),
-        RuntimeErrorKind::Aborted(Some(
+        SourceFailureKind::Aborted(Some(
             "Array access out of bounds: index 1 for length 1".to_string()
         ))
     );

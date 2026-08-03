@@ -1900,7 +1900,7 @@ impl TypeInference {
                     let check_id = env.ir_arena.alloc(N::new(
                         K::CheckFuel,
                         Type::unit(),
-                        effect(PrimitiveEffect::Fallible),
+                        EffType::empty(),
                         expr_span,
                     ));
                     let body_effects = env.ir_arena[body_id].effects.clone();

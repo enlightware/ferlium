@@ -10,7 +10,7 @@
 use ustr::ustr;
 
 use crate::{
-    compiler::error::RuntimeErrorKind,
+    compiler::error::SourceFailureKind,
     hir::{
         function::{UnaryNativeFnRFV, UnaryNativeFnRN},
         value::Value,
@@ -88,7 +88,7 @@ impl<'a> Parser<'a> {
         Self { input, pos: 0 }
     }
 
-    fn parse(mut self) -> Result<Value, RuntimeErrorKind> {
+    fn parse(mut self) -> Result<Value, SourceFailureKind> {
         let value = self.parse_value()?;
         self.skip_ws_and_comments()?;
         if self.pos == self.input.len() {
@@ -98,8 +98,8 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn error(&self, message: &str) -> RuntimeErrorKind {
-        RuntimeErrorKind::InvalidArgument(format!("{message} at byte {}", self.pos))
+    fn error(&self, message: &str) -> SourceFailureKind {
+        SourceFailureKind::InvalidArgument(format!("{message} at byte {}", self.pos))
     }
 
     fn peek_char(&self) -> Option<char> {
@@ -121,7 +121,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn expect_char(&mut self, expected: char) -> Result<(), RuntimeErrorKind> {
+    fn expect_char(&mut self, expected: char) -> Result<(), SourceFailureKind> {
         if self.consume_char(expected) {
             Ok(())
         } else {
@@ -133,7 +133,7 @@ impl<'a> Parser<'a> {
         self.input[self.pos..].starts_with(value)
     }
 
-    fn skip_ws_and_comments(&mut self) -> Result<(), RuntimeErrorKind> {
+    fn skip_ws_and_comments(&mut self) -> Result<(), SourceFailureKind> {
         loop {
             while self.peek_char().is_some_and(char::is_whitespace) {
                 self.bump_char();
@@ -156,7 +156,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_value(&mut self) -> Result<Value, RuntimeErrorKind> {
+    fn parse_value(&mut self) -> Result<Value, SourceFailureKind> {
         self.skip_ws_and_comments()?;
         match self.peek_char() {
             Some('"') => self
@@ -174,7 +174,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_paren_value(&mut self) -> Result<Value, RuntimeErrorKind> {
+    fn parse_paren_value(&mut self) -> Result<Value, SourceFailureKind> {
         self.expect_char('(')?;
         self.skip_ws_and_comments()?;
         if self.consume_char(')') {
@@ -204,7 +204,7 @@ impl<'a> Parser<'a> {
         Ok(data_array_variant("Tuple", values))
     }
 
-    fn parse_object(&mut self) -> Result<Value, RuntimeErrorKind> {
+    fn parse_object(&mut self) -> Result<Value, SourceFailureKind> {
         self.expect_char('{')?;
         let mut entries = Vec::new();
         loop {
@@ -231,7 +231,7 @@ impl<'a> Parser<'a> {
         Ok(data_array_variant("Record", entries))
     }
 
-    fn parse_sequence(&mut self, open: char, close: char) -> Result<Vec<Value>, RuntimeErrorKind> {
+    fn parse_sequence(&mut self, open: char, close: char) -> Result<Vec<Value>, SourceFailureKind> {
         self.expect_char(open)?;
         let mut values = Vec::new();
         loop {
@@ -250,7 +250,7 @@ impl<'a> Parser<'a> {
         Ok(values)
     }
 
-    fn parse_identifier_value(&mut self) -> Result<Value, RuntimeErrorKind> {
+    fn parse_identifier_value(&mut self) -> Result<Value, SourceFailureKind> {
         let ident = self.parse_identifier()?;
         match ident.as_str() {
             "null" => Ok(data_unit_variant("Null")),
@@ -300,7 +300,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_map_entries(&mut self) -> Result<Vec<Value>, RuntimeErrorKind> {
+    fn parse_map_entries(&mut self) -> Result<Vec<Value>, SourceFailureKind> {
         self.expect_char('{')?;
         let mut entries = Vec::new();
         loop {
@@ -326,7 +326,7 @@ impl<'a> Parser<'a> {
         Ok(entries)
     }
 
-    fn parse_identifier(&mut self) -> Result<String, RuntimeErrorKind> {
+    fn parse_identifier(&mut self) -> Result<String, SourceFailureKind> {
         self.skip_ws_and_comments()?;
         let Some(first) = self.peek_char() else {
             return Err(self.error("Expected identifier"));
@@ -342,7 +342,7 @@ impl<'a> Parser<'a> {
         Ok(self.input[start..self.pos].to_string())
     }
 
-    fn parse_string(&mut self) -> Result<String, RuntimeErrorKind> {
+    fn parse_string(&mut self) -> Result<String, SourceFailureKind> {
         self.expect_char('"')?;
         let mut output = String::new();
         loop {
@@ -357,7 +357,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_escape(&mut self) -> Result<char, RuntimeErrorKind> {
+    fn parse_escape(&mut self) -> Result<char, SourceFailureKind> {
         let Some(ch) = self.bump_char() else {
             return Err(self.error("Unterminated escape"));
         };
@@ -383,7 +383,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_number(&mut self) -> Result<Value, RuntimeErrorKind> {
+    fn parse_number(&mut self) -> Result<Value, SourceFailureKind> {
         let start = self.pos;
         self.consume_char('-');
         while self.peek_char().is_some_and(|ch| ch.is_ascii_digit()) {
@@ -432,7 +432,7 @@ fn is_identifier_continue(ch: char) -> bool {
     ch == '_' || ch.is_ascii_alphanumeric()
 }
 
-fn parse_data_text(input: &Str) -> Result<Value, RuntimeErrorKind> {
+fn parse_data_text(input: &Str) -> Result<Value, SourceFailureKind> {
     Parser::new(input.as_ref()).parse()
 }
 

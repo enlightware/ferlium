@@ -12,7 +12,7 @@ use test_log::test;
 use crate::harness::{
     TestSession, bool, float, int, none, some, string, unit, variant_0, variant_raw, variant_t1,
 };
-use ferlium::{compiler::error::RuntimeErrorKind, hir::value::Value};
+use ferlium::{compiler::error::SourceFailureKind, hir::value::Value};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
@@ -370,7 +370,7 @@ fn json_rejects_non_finite_float() {
     let mut session = TestSession::new();
     assert_eq!(
         session.fail_run(r#"json_decode("1e999")"#),
-        RuntimeErrorKind::InvalidArgument("Invalid number in JSON: 1e999".into())
+        SourceFailureKind::InvalidArgument("Invalid number in JSON: 1e999".into())
     );
 }
 

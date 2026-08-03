@@ -15,35 +15,19 @@ use crate::parser::location::{Location, SourceTable};
 
 use super::MutabilityMustBeContext;
 
-/// The summary kind of a runtime failure, cancellation, or hard abort.
-///
-/// `Fallible` language operations participate in the function ABI, while call-depth, environment,
-/// and fuel exhaustion cancel execution out of band and are not source effects. The full
-/// [`crate::eval::RuntimeError::HardAbort`] retains both the initial and cleanup failures; this enum
-/// exposes `HardAbort` as its stable summary kind.
-
+/// A failure declared by Ferlium's `Fallible` source effect.
 #[derive(Debug, Clone, PartialEq, Eq, EnumAsInner)]
-pub enum RuntimeErrorKind {
-    /// Recovery from an earlier failure itself failed, poisoning this executor.
-    HardAbort,
+pub enum SourceFailureKind {
     Aborted(Option<String>),
     DivisionByZero,
     RemainderByZero,
     InvalidArgument(String),
-    CallDepthLimitExceeded {
-        limit: usize,
-    },
-    EnvironmentCellLimitExceeded {
-        limit: usize,
-    },
-    FuelExhausted,
 }
 
-impl Display for RuntimeErrorKind {
+impl Display for SourceFailureKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        use RuntimeErrorKind::*;
+        use SourceFailureKind::*;
         match self {
-            HardAbort => write!(f, "Hard abort while unwinding an earlier failure"),
             Aborted(msg) => match msg {
                 Some(msg) => write!(f, "Aborted: {msg}"),
                 None => write!(f, "Aborted"),
@@ -51,6 +35,22 @@ impl Display for RuntimeErrorKind {
             DivisionByZero => write!(f, "Division by zero"),
             RemainderByZero => write!(f, "Remainder by zero"),
             InvalidArgument(reason) => write!(f, "Invalid argument: {reason}"),
+        }
+    }
+}
+
+/// A host-enforced resource limit that terminates and poisons an execution domain.
+#[derive(Debug, Clone, PartialEq, Eq, EnumAsInner)]
+pub enum SandboxViolationKind {
+    CallDepthLimitExceeded { limit: usize },
+    EnvironmentCellLimitExceeded { limit: usize },
+    FuelExhausted,
+}
+
+impl Display for SandboxViolationKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use SandboxViolationKind::*;
+        match self {
             CallDepthLimitExceeded { limit } => {
                 write!(f, "Call depth limit exceeded: limit is {limit}")
             }
@@ -65,15 +65,23 @@ impl Display for RuntimeErrorKind {
     }
 }
 
-impl RuntimeErrorKind {
-    /// Whether this failure was imposed by the executor rather than declared by Ferlium code.
-    pub fn is_execution_cancellation(&self) -> bool {
-        matches!(
-            self,
-            Self::CallDepthLimitExceeded { .. }
-                | Self::EnvironmentCellLimitExceeded { .. }
-                | Self::FuelExhausted
-        )
+/// Stable summary of the structurally distinct outcomes carried by `RuntimeError`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeErrorKind {
+    SourceFailure(SourceFailureKind),
+    SandboxViolation(SandboxViolationKind),
+    FailureDuringCleanup,
+}
+
+impl Display for RuntimeErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SourceFailure(kind) => kind.fmt(f),
+            Self::SandboxViolation(kind) => kind.fmt(f),
+            Self::FailureDuringCleanup => {
+                f.write_str("A second source failure occurred during cleanup")
+            }
+        }
     }
 }
 

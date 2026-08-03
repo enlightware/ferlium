@@ -42,7 +42,6 @@ use crate::{
     },
     std::STD_MODULE_ID,
     types::{
-        effects::{PrimitiveEffect, effect},
         mutability::MutType,
         r#trait::{Trait, TraitMethodIndex},
         trait_solver::{TraitSolver, trait_solver_from_module},
@@ -308,7 +307,7 @@ fn wrap_body_with_call_depth_check_if_recursive(
     let check_id = arena.alloc(hir::Node::new(
         hir::NodeKind::CheckCallDepth,
         Type::unit(),
-        effect(PrimitiveEffect::Fallible),
+        EffType::empty(),
         check_span,
     ));
     let body_effects = arena[body_id].effects.clone();

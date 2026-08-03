@@ -9,7 +9,7 @@
 use ustr::ustr;
 
 use crate::{
-    compiler::error::RuntimeErrorKind,
+    compiler::error::SourceFailureKind,
     hir::function::{NullaryNativeFnFN, UnaryNativeFnRFN},
     module::Module,
     std::string::String as Str,
@@ -20,16 +20,16 @@ use crate::{
 
 use super::string::string_type;
 
-fn abort() -> Result<(), RuntimeErrorKind> {
-    Err(RuntimeErrorKind::Aborted(None))
+fn abort() -> Result<(), SourceFailureKind> {
+    Err(SourceFailureKind::Aborted(None))
 }
 
-fn panic(msg: &Str) -> Result<(), RuntimeErrorKind> {
-    Err(RuntimeErrorKind::Aborted(Some(msg.as_ref().to_string())))
+fn panic(msg: &Str) -> Result<(), SourceFailureKind> {
+    Err(SourceFailureKind::Aborted(Some(msg.as_ref().to_string())))
 }
 
-fn invalid_argument(msg: &Str) -> Result<(), RuntimeErrorKind> {
-    Err(RuntimeErrorKind::InvalidArgument(msg.as_ref().to_string()))
+fn invalid_argument(msg: &Str) -> Result<(), SourceFailureKind> {
+    Err(SourceFailureKind::InvalidArgument(msg.as_ref().to_string()))
 }
 
 pub fn add_to_module(to: &mut Module) {
