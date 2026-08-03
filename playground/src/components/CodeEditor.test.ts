@@ -101,6 +101,42 @@ describe("CodeEditor", () => {
 		expect(editor(mounted).runCode()).toBe(result);
 	});
 
+	it("displays multiple diagnostics from one compilation", async () => {
+		const source = "fn value(x) { if x == 0 { loop {}; 1 } else { loop {}; 2 } }";
+		const first = source.indexOf("1");
+		const second = source.indexOf("2");
+		compiler.compile.mockReturnValue({
+			succeeded: true,
+			diagnostics: [
+				{
+					file: "<ide>",
+					from: first,
+					to: first + 1,
+					severity: 1,
+					text: "unreachable code",
+				},
+				{
+					file: "<ide>",
+					from: second,
+					to: second + 1,
+					severity: 1,
+					text: "unreachable code",
+				},
+			],
+		});
+
+		const mounted = mount(CodeEditor, {
+			attachTo: document.body,
+			props: { annotationMode: "none" },
+		});
+		wrapper = mounted;
+		editor(mounted).setText(source);
+
+		await vi.waitFor(() => {
+			expect(mounted.findAll(".cm-lintRange-warning")).toHaveLength(2);
+		});
+	});
+
 	it("disables execution and displays an error after failed compilation", async () => {
 		const source = "fn value() -> bool { 1 }";
 		const from = source.indexOf("1");

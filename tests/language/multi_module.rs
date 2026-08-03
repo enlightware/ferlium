@@ -1228,7 +1228,7 @@ fn module_source_versions_and_compilation_revisions_are_tracked() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn successful_compilation_records_and_clears_unreachable_code_warnings() {
+fn successful_compilation_records_and_clears_warnings() {
     let mut session = CompilerSession::new();
     let source = "fn value() -> int { return 1; 999 }";
     let module_id = session
@@ -1237,11 +1237,25 @@ fn successful_compilation_records_and_clears_unreachable_code_warnings() {
         .module_id;
 
     let diagnostics = session.modules().info(module_id).unwrap().diagnostics();
-    assert_eq!(diagnostics.len(), 1);
-    let warning = &diagnostics[0];
-    assert_eq!(warning.severity, DiagnosticSeverity::Warning);
-    assert_eq!(warning.message, "unreachable code");
-    assert_eq!(source[warning.location.as_range()].trim(), "999");
+    assert_eq!(diagnostics.len(), 2);
+    assert!(
+        diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.severity == DiagnosticSeverity::Warning)
+    );
+    let messages_and_spans = diagnostics
+        .iter()
+        .map(|diagnostic| {
+            (
+                diagnostic.message.as_str(),
+                source[diagnostic.location.as_range()].trim(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        messages_and_spans,
+        [("needless return", "return 1"), ("unreachable code", "999"),]
+    );
     let module = session.expect_fresh_module(module_id);
     let rendered = module.format_with(&session.modules()).to_string();
     assert!(
@@ -1286,6 +1300,118 @@ fn final_return_reports_needless_return_instead_of_the_closing_brace() {
     assert_eq!(warning.severity, DiagnosticSeverity::Warning);
     assert_eq!(warning.message, "needless return");
     assert_eq!(&source[warning.location.as_range()], "return 1");
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn final_return_before_unreachable_code_is_still_needless() {
+    let mut session = CompilerSession::new();
+    let source = indoc! { r#"
+        fn value(x) {
+            if x == 0 {
+                return 2;
+            };
+            return 1;
+            let a = 4;
+        }
+    "# };
+    let module_id = session
+        .compile(
+            source,
+            "needless_return_before_dead_code",
+            Path::single_str("needless_return_before_dead_code"),
+        )
+        .expect("a tail return followed by dead code should compile")
+        .module_id;
+
+    let diagnostics = session.modules().info(module_id).unwrap().diagnostics();
+    assert_eq!(diagnostics.len(), 2);
+    let messages_and_spans = diagnostics
+        .iter()
+        .map(|diagnostic| {
+            (
+                diagnostic.message.as_str(),
+                source[diagnostic.location.as_range()].trim(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        messages_and_spans,
+        [
+            ("needless return", "return 1"),
+            ("unreachable code", "let a = 4;"),
+        ]
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn separate_unreachable_regions_in_one_function_are_all_reported() {
+    let mut session = CompilerSession::new();
+    let source = indoc! { r#"
+        fn diverge(x) {
+            if x == 0 {
+                loop {};
+                let a = 4;
+            } else {
+                loop {};
+                let b = 5;
+            }
+        }
+    "# };
+    let module_id = session
+        .compile(
+            source,
+            "multiple_unreachable_regions",
+            Path::single_str("multiple_unreachable_regions"),
+        )
+        .expect("multiple unreachable regions should remain non-fatal")
+        .module_id;
+
+    let diagnostics = session.modules().info(module_id).unwrap().diagnostics();
+    assert_eq!(diagnostics.len(), 2);
+    assert!(
+        diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.message == "unreachable code")
+    );
+    let warned = diagnostics
+        .iter()
+        .map(|diagnostic| source[diagnostic.location.as_range()].trim())
+        .collect::<Vec<_>>();
+    assert_eq!(warned, ["let a = 4;", "let b = 5;"]);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn unreachable_warning_covers_the_entire_dead_suffix() {
+    let mut session = CompilerSession::new();
+    let source = indoc! { r#"
+        fn f(x) {
+            loop {};
+            let a = 4;
+            return 1;
+            let b = 3;
+        }
+    "# };
+    let module_id = session
+        .compile(
+            source,
+            "entire_unreachable_suffix",
+            Path::single_str("entire_unreachable_suffix"),
+        )
+        .expect("an unreachable suffix should remain non-fatal")
+        .module_id;
+
+    let diagnostics = session.modules().info(module_id).unwrap().diagnostics();
+    assert_eq!(diagnostics.len(), 1);
+    let warning = &diagnostics[0];
+    assert_eq!(warning.message, "unreachable code");
+    let warned = source[warning.location.as_range()].trim();
+    assert_eq!(
+        warned.lines().map(str::trim).collect::<Vec<_>>(),
+        ["let a = 4;", "return 1;", "let b = 3;"]
+    );
 }
 
 #[test]
@@ -1350,7 +1476,7 @@ fn tail_returns_in_branches_and_lambdas_are_reported_as_needless() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn unreachable_aggregate_suffix_reports_its_first_expression() {
+fn unreachable_aggregate_suffix_reports_its_full_extent() {
     let mut session = CompilerSession::new();
     let source = "fn value() -> int { let x = ({ return 1 }, 999, 1000); x }";
     let module_id = session
@@ -1369,7 +1495,7 @@ fn unreachable_aggregate_suffix_reports_its_first_expression() {
         .iter()
         .map(|diagnostic| source[diagnostic.location.as_range()].trim())
         .collect::<Vec<_>>();
-    assert_eq!(warned, ["999", "x"]);
+    assert_eq!(warned, ["999, 1000", "x"]);
     let rendered = session
         .expect_fresh_module(module_id)
         .format_with(&session.modules())

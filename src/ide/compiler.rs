@@ -536,10 +536,13 @@ mod tests {
         let report = compiler.compile_report(source);
 
         assert!(report.succeeded);
-        assert_eq!(report.diagnostics.len(), 1);
-        let warning = &report.diagnostics[0];
+        assert_eq!(report.diagnostics.len(), 2);
+        let warning = report
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.text == "unreachable code")
+            .expect("the unreachable suffix should be reported");
         assert_eq!(warning.severity, DiagnosticSeverity::Warning);
-        assert_eq!(warning.text, "unreachable code");
         let warned_text = source.chars().collect::<Vec<_>>()
             [warning.from as usize..warning.to as usize]
             .iter()
@@ -579,6 +582,72 @@ mod tests {
             .iter()
             .collect::<String>();
         assert_eq!(warned_text, "return 1");
+    }
+
+    #[test]
+    fn compile_report_keeps_needless_return_beside_unreachable_code() {
+        let mut compiler = Compiler::new();
+        let source = indoc::indoc! { r#"
+            fn f(x) {
+                if x == 0 {
+                    return 2;
+                };
+                return 1;
+                let a = 4;
+            }
+        "# };
+        let report = compiler.compile_report(source);
+
+        assert!(report.succeeded);
+        let warnings = report
+            .diagnostics
+            .iter()
+            .map(|warning| {
+                let warned_text = source.chars().collect::<Vec<_>>()
+                    [warning.from as usize..warning.to as usize]
+                    .iter()
+                    .collect::<String>();
+                (warning.text.as_str(), warned_text.trim().to_string())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            warnings,
+            [
+                ("needless return", "return 1".to_string()),
+                ("unreachable code", "let a = 4;".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn compile_report_highlights_the_entire_unreachable_suffix() {
+        let mut compiler = Compiler::new();
+        let source = indoc::indoc! { r#"
+            fn f(x) {
+                loop {};
+                let a = 4;
+                return 1;
+                let b = 3;
+            }
+        "# };
+        let report = compiler.compile_report(source);
+
+        assert!(report.succeeded);
+        assert_eq!(report.diagnostics.len(), 1);
+        let warning = &report.diagnostics[0];
+        assert_eq!(warning.text, "unreachable code");
+        let warned_text = source.chars().collect::<Vec<_>>()
+            [warning.from as usize..warning.to as usize]
+            .iter()
+            .collect::<String>();
+        assert_eq!(
+            warned_text
+                .trim()
+                .lines()
+                .map(str::trim)
+                .collect::<Vec<_>>(),
+            ["let a = 4;", "return 1;", "let b = 3;"]
+        );
     }
 
     #[test]

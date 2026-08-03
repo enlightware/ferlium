@@ -1477,13 +1477,17 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                     body.push(self.elaborate_node(src, node)?);
                     if src[node].ty == Type::never()
                         && !node_contains_yield(src, node)
-                        && let Some(location) =
-                            block.body.get(index + 1).map(|node| src[*node].span)
+                        && let Some(location) = Location::fuse(
+                            block
+                                .body
+                                .iter()
+                                .skip(index + 1)
+                                .map(|node| src[*node].span)
+                                .filter(|location| !location.is_synthesized()),
+                        )
                     {
-                        if !location.is_synthesized() {
-                            self.warnings
-                                .push(CompilationWarning::unreachable_code(location));
-                        }
+                        self.warnings
+                            .push(CompilationWarning::unreachable_code(location));
                         break;
                     }
                 }
@@ -1702,7 +1706,8 @@ mod tests {
         let source_id = crate::SourceId::from_index(1);
         let live_span = Location::new(0, 6, source_id);
         let dead_span = Location::new(8, 11, source_id);
-        let block_span = Location::new(0, 11, source_id);
+        let other_dead_span = Location::new(13, 17, source_id);
+        let block_span = Location::new(0, 17, source_id);
         let mut arena = NodeArena::default();
         // This models a node whose type became Never only when final substitutions were applied.
         let diverging = arena.alloc(Node::new(
@@ -1717,9 +1722,15 @@ mod tests {
             no_effects(),
             dead_span,
         ));
+        let other_dead = arena.alloc(Node::new(
+            NodeKind::Immediate(LiteralValue::new_native(1000isize)),
+            int_type(),
+            no_effects(),
+            other_dead_span,
+        ));
         let root = arena.alloc(Node::new(
             NodeKind::Block(b(hir::Block {
-                body: b(SVec2::from_vec(vec![diverging, dead])),
+                body: b(SVec2::from_vec(vec![diverging, dead, other_dead])),
                 cleanup: Vec::new(),
             })),
             Type::never(),
@@ -1771,7 +1782,11 @@ mod tests {
         assert_eq!(block.body.len(), 1);
         assert_eq!(
             warnings,
-            vec![CompilationWarning::unreachable_code(dead_span)]
+            vec![CompilationWarning::unreachable_code(Location::new(
+                dead_span.start(),
+                other_dead_span.end(),
+                source_id,
+            ))]
         );
     }
 

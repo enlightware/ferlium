@@ -979,7 +979,6 @@ where
         let mut fn_arena = NodeArena::default();
         LocalDecl::assign_sequential_slots(&mut locals);
         let cur_locals = (0..locals.len()).map(LocalDeclId::from_index).collect();
-        report_needless_returns_in_tail(desugared_arena, function.body, warnings);
         let mut ty_env = TypingEnv::new(
             &mut locals,
             cur_locals,
@@ -1040,6 +1039,7 @@ where
                 expected_span,
             )?
         };
+        report_needless_returns_in_tail(ty_env.ast_arena, function.body, ty_env.warnings);
         let yield_node_id =
             ty_env
                 .yield_context

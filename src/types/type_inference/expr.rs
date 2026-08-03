@@ -546,8 +546,6 @@ impl TypeInference {
         use hir::Node as N;
         use hir::NodeKind as K;
 
-        report_needless_returns_in_tail(env.ast_arena, body, env.warnings);
-
         // 1. Collect free variables in the body.
         let mut free_vars = FxHashSet::default();
         let mut bound_vars = vec![FxHashSet::default()];
@@ -655,6 +653,7 @@ impl TypeInference {
             code_id =
                 self.materialize_owned_value(&mut inner_env, code_id, env.ast_arena[body].span);
         }
+        report_needless_returns_in_tail(inner_env.ast_arena, body, inner_env.warnings);
 
         let code = &inner_env.ir_arena[code_id];
         let effects = code.effects.clone();
@@ -5415,11 +5414,13 @@ impl TypeInference {
                     continue;
                 }
                 diverges = true;
-                if let Some(location) = exprs
-                    .get(index + 1)
-                    .map(|expr| env.ast_arena[*expr].span)
-                    .filter(|location| !location.is_synthesized())
-                {
+                if let Some(location) = Location::fuse(
+                    exprs
+                        .iter()
+                        .skip(index + 1)
+                        .map(|expr| env.ast_arena[*expr].span)
+                        .filter(|location| !location.is_synthesized()),
+                ) {
                     env.warnings
                         .push(CompilationWarning::unreachable_code(location));
                 }
