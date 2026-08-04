@@ -31,6 +31,7 @@
 
 pub(crate) mod budget;
 pub(crate) mod dataflow;
+pub(crate) mod dce;
 pub(crate) mod fold;
 
 use crate::{
@@ -59,9 +60,16 @@ pub(crate) fn optimize_function(
         };
         current = Some(folded);
     }
+    // Cleanup runs once, after the rounds have settled: it only removes storage the rewrites made
+    // dead, so there is nothing for it to do until they have stopped.
+    if let Some(folded) = &current
+        && let Some(cleaned) = dce::remove_dead_storage(folded, env)
+    {
+        current = Some(cleaned);
+    }
     // An unchanged function is still opened and closed, which re-verifies it and is the identity.
     match current {
-        Some(folded) => folded,
+        Some(rewritten) => rewritten,
         None => FunctionEdit::new(function.clone()).finish(env),
     }
 }

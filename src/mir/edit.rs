@@ -212,6 +212,57 @@ impl FunctionEdit {
         self.blocks = retained;
     }
 
+    /// Drops constants no operand names any more, renumbering the rest.
+    ///
+    /// Like [`remove_unreachable_blocks`](Self::remove_unreachable_blocks) this is explicit rather
+    /// than automatic: it moves every [`ConstantId`], so a pass asks for it once its edits have
+    /// settled. Value identities are untouched.
+    pub(crate) fn prune_constants(&mut self) {
+        let mut used = FxHashSet::default();
+        self.visit_operands(|operand| {
+            if let mir::Value::Constant(id) = operand {
+                used.insert(*id);
+            }
+        });
+        if used.len() == self.constants.len() {
+            return;
+        }
+
+        let mut renumbered = FxHashMap::default();
+        let mut retained = Vec::with_capacity(used.len());
+        for (index, constant) in std::mem::take(&mut self.constants).into_iter().enumerate() {
+            let id = ConstantId::from_index(index);
+            if used.contains(&id) {
+                renumbered.insert(id, ConstantId::from_index(retained.len()));
+                retained.push(constant);
+            }
+        }
+        self.constants = retained;
+        self.visit_operands_mut(|operand| {
+            if let mir::Value::Constant(id) = operand {
+                *id = renumbered[id];
+            }
+        });
+    }
+
+    fn visit_operands(&self, mut visit: impl FnMut(&mir::Value)) {
+        for block in &self.blocks {
+            for operation in &block.operations {
+                operation.operands.iter().for_each(&mut visit);
+            }
+            visit_terminator_operands(&block.terminator, &mut visit);
+        }
+    }
+
+    fn visit_operands_mut(&mut self, mut visit: impl FnMut(&mut mir::Value)) {
+        for block in &mut self.blocks {
+            for operation in &mut block.operations {
+                operation.operands.iter_mut().for_each(&mut visit);
+            }
+            visit_terminator_operands_mut(&mut block.terminator, &mut visit);
+        }
+    }
+
     /// Restores canonical form, verifying every MIR invariant in debug and test builds — the same
     /// boundary check [`FunctionBuilder::finish`](crate::mir::builder::FunctionBuilder::finish)
     /// performs.
@@ -249,6 +300,33 @@ impl EditBlock {
             operation.assign_result_id(previous.result_id());
         }
         std::mem::replace(&mut self.operations[index], operation)
+    }
+}
+
+fn visit_terminator_operands(terminator: &Terminator, visit: &mut impl FnMut(&mir::Value)) {
+    match &terminator.kind {
+        TerminatorKind::Invoke { operation, .. } => operation.operands.iter().for_each(visit),
+        TerminatorKind::CondBr { condition, .. } => visit(condition),
+        TerminatorKind::Yield { place, .. } => visit(place),
+        TerminatorKind::Goto { .. }
+        | TerminatorKind::Return
+        | TerminatorKind::PropagateError
+        | TerminatorKind::FailureDuringCleanup => {}
+    }
+}
+
+fn visit_terminator_operands_mut(
+    terminator: &mut Terminator,
+    visit: &mut impl FnMut(&mut mir::Value),
+) {
+    match &mut terminator.kind {
+        TerminatorKind::Invoke { operation, .. } => operation.operands.iter_mut().for_each(visit),
+        TerminatorKind::CondBr { condition, .. } => visit(condition),
+        TerminatorKind::Yield { place, .. } => visit(place),
+        TerminatorKind::Goto { .. }
+        | TerminatorKind::Return
+        | TerminatorKind::PropagateError
+        | TerminatorKind::FailureDuringCleanup => {}
     }
 }
 
