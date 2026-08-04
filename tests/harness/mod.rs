@@ -7,7 +7,8 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 use ferlium::{
-    CompilationOutput, CompilerSession, ExecutionTarget, FxHashSet, Location, SourceTable,
+    CompilationOutput, CompilerSession, ExecutionTarget, FxHashSet, Location, MirOptimization,
+    SourceTable,
     compiler::error::{CompilationError, SourceFailureKind},
     eval::{EvalControlFlowResult, EvalCtx, EvalResult, RuntimeError, ValOrMut, cont},
     hir::function::{
@@ -352,6 +353,102 @@ pub(crate) fn compare_values(actual: &Value, expected: &Value, path: &str) -> Re
             value_shape(expected),
             value_shape(actual)
         )),
+    }
+}
+
+/// How a snippet is executed by the test harness.
+///
+/// By default every snippet runs under all of these, and each is checked against the first — the
+/// HIR interpreter. That is what gives the MIR backend and the optimization passes their coverage:
+/// a divergence surfaces in whichever test happens to exercise the construct, rather than only in a
+/// hand-picked corpus. A test that must not run under some mode selects its own set; see
+/// [`TestSession::without_optimized_mode`] and [`TestSession::only_optimized_mode`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RunMode {
+    /// The HIR interpreter: the reference.
+    Hir,
+    /// The MIR interpreter on the bodies the emitter produced.
+    Mir,
+    /// The MIR interpreter on optimized bodies (partial evaluation).
+    OptimizedMir,
+}
+
+impl RunMode {
+    pub const ALL: [Self; 3] = [Self::Hir, Self::Mir, Self::OptimizedMir];
+
+    fn target(self) -> ExecutionTarget {
+        match self {
+            Self::Hir => ExecutionTarget::Hir,
+            Self::Mir | Self::OptimizedMir => ExecutionTarget::Mir,
+        }
+    }
+
+    fn optimization(self) -> MirOptimization {
+        match self {
+            Self::Hir | Self::Mir => MirOptimization::Disabled,
+            Self::OptimizedMir => MirOptimization::Enabled,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Hir => "the HIR interpreter",
+            Self::Mir => "the MIR backend",
+            Self::OptimizedMir => "the optimized MIR backend",
+        }
+    }
+}
+
+/// Asserts that one execution mode agreed with the reference run, in value or in failure.
+///
+/// Optimization may change how much fuel or call depth a program consumes (sandbox policy, not
+/// source-visible semantics), but never what it computes or whether it raises.
+fn assert_outcomes_agree(
+    reference: &Result<Value, Error>,
+    actual: &Result<Value, Error>,
+    label: &str,
+) {
+    // Optimization may change fuel and call-depth consumption, which is sandbox policy rather than
+    // source-visible semantics; it may never change the value or whether the program raises.
+    match (reference, actual) {
+        (Ok(expected), Ok(actual)) => {
+            if let Err(message) = compare_values(actual, expected, "value") {
+                panic!("{label} diverged from the HIR interpreter: {message}");
+            }
+        }
+        (Err(Error::Runtime(expected)), Err(Error::Runtime(actual))) => {
+            assert_eq!(
+                actual.kind(),
+                expected.kind(),
+                "{label} raised a different runtime error than the HIR interpreter"
+            );
+            match (
+                expected.failure_during_cleanup(),
+                actual.failure_during_cleanup(),
+            ) {
+                (Some(expected), Some(actual)) => {
+                    assert_eq!(
+                        actual.initial().kind(),
+                        expected.initial().kind(),
+                        "{label} retained a different initial failure than HIR"
+                    );
+                    assert_eq!(
+                        actual.during_cleanup().kind(),
+                        expected.during_cleanup().kind(),
+                        "{label} retained a different cleanup failure than HIR"
+                    );
+                }
+                (None, None) => {}
+                _ => panic!(
+                    "{label} disagreed with HIR about whether the runtime error was a structured \
+                     failure during cleanup"
+                ),
+            }
+        }
+        (expected, actual) => panic!(
+            "{label} diverged from the HIR interpreter: one produced a value and the other a \
+             runtime error (HIR: {expected:?}, {label}: {actual:?})"
+        ),
     }
 }
 
@@ -1008,7 +1105,7 @@ fn testing_module(
             reset_clone_tracked_clones,
             [],
             "Resets the clone counter for clone-counting native test values.",
-            no_effects(),
+            effect(PrimitiveEffect::Write),
         ),
     );
     module.add_function(
@@ -1017,7 +1114,7 @@ fn testing_module(
             clone_tracked_clone_count,
             [],
             "Returns the clone counter for clone-counting native test values.",
-            no_effects(),
+            effect(PrimitiveEffect::Read),
         ),
     );
     module.add_function(
@@ -1025,6 +1122,9 @@ fn testing_module(
         UnaryNativeFnNN::description_with_default_ty(
             record_tracked_drop,
             ["value"],
+            // Declared pure because `Value::drop` is: the trait's method carries no effects, so an
+            // impl that records the drop cannot declare one either. The folding pass does not
+            // remove unit-returning calls, which is what keeps this instrumentation observable.
             "Records a dropped test value in the drop log.",
             no_effects(),
         ),
@@ -1035,7 +1135,7 @@ fn testing_module(
             reset_tracked_drops,
             [],
             "Resets the tracked drop log.",
-            no_effects(),
+            effect(PrimitiveEffect::Write),
         ),
     );
     module.add_function(
@@ -1044,12 +1144,17 @@ fn testing_module(
             tracked_drop_log,
             [],
             "Returns the tracked drop log.",
-            no_effects(),
+            effect(PrimitiveEffect::Read),
         ),
     );
     module
 }
 
+/// The natives above that touch the process-global counters declare `Read` or `Write`
+/// accordingly, and must keep doing so. A native declaring neither is *asserted* by its host to be
+/// pure and deterministic, and the compiler may then execute it at compile time — zero times, once,
+/// or many (see `doc/runtime-sandboxing.md`). A drop counter declared pure gets folded to whatever
+/// it happened to read during compilation.
 fn test_effect_module(module_id: ModuleId) -> Module {
     let mut module = Module::new(module_id, Path::single_str("effects"));
     module.add_function(
@@ -1246,12 +1351,16 @@ fn add_deep_modules(session: &mut CompilerSession) {
 #[derive(Debug)]
 pub struct TestSession {
     session: CompilerSession,
+    /// The execution modes snippets run under. The first is the reference the others are checked
+    /// against, and whose result is returned.
+    modes: Vec<RunMode>,
 }
 impl TestSession {
     /// Create a new test session with std, testing, effects and props modules registered.
     ///
-    /// Every snippet run through the session is executed on *both* the HIR and MIR interpreters,
-    /// which are asserted to agree (see [`TestSession::try_compile_and_run_value`]).
+    /// Every snippet run through the session is executed under every [`RunMode`] — the HIR
+    /// interpreter, the MIR interpreter, and the MIR interpreter on optimized bodies — which are
+    /// asserted to agree (see [`TestSession::try_compile_and_run_value`]).
     pub fn new() -> Self {
         let mut compiler_session = CompilerSession::new();
         let std_iterator_trait = compiler_session
@@ -1280,7 +1389,38 @@ impl TestSession {
         add_deep_modules(&mut compiler_session);
         Self {
             session: compiler_session,
+            modes: RunMode::ALL.to_vec(),
         }
+    }
+
+    /// Selects the execution modes snippets run under. The first is the reference the others are
+    /// checked against, and the one whose result is returned.
+    pub fn run_modes(&mut self, modes: impl IntoIterator<Item = RunMode>) -> &mut Self {
+        self.modes = modes.into_iter().collect();
+        assert!(!self.modes.is_empty(), "a snippet must run somewhere");
+        self
+    }
+
+    /// Excludes the optimized-MIR mode, for a test whose expectation only holds without
+    /// optimization.
+    ///
+    /// The case this exists for: the language declares `Value::drop` effect-free, so a host that
+    /// instruments drops must declare that instrumentation pure — and a pure function is then
+    /// eligible for compile-time evaluation, which runs those drops while compiling instead of at
+    /// run time. A test counting the drops of a pure function's locals therefore cannot also assert
+    /// on the optimized run. That is the compile-time execution contract working as documented (see
+    /// `doc/runtime-sandboxing.md`), not a divergence.
+    pub fn without_optimized_mode(&mut self) -> &mut Self {
+        self.run_modes([RunMode::Hir, RunMode::Mir])
+    }
+
+    /// Runs snippets *only* under optimized MIR, for a test aimed at the effect of optimization
+    /// itself.
+    ///
+    /// Nothing cross-checks the result then — the test's own assertions are the check — so prefer
+    /// the default modes unless running the other backends would itself perturb what is measured.
+    pub fn only_optimized_mode(&mut self) -> &mut Self {
+        self.run_modes([RunMode::OptimizedMir])
     }
 
     /// Get the compiler session of this test session.
@@ -1437,11 +1577,12 @@ impl TestSession {
         let CompilationOutput { module_id, expr } =
             self.try_compile(src).map_err(Error::Compilation)?;
 
-        // Run the expression if any through *both* interpreters, asserting their outcomes agree:
-        // equal values, matching structural runtime-error kinds, or matching cleanup-failure causes
-        // and retained cause kinds. Return the HIR result. Running both on every snippet gives the MIR
-        // backend full coverage, including the error path: a failing snippet exercises both
-        // backends rather than short-circuiting on the HIR error.
+        // Run the expression through every execution mode, asserting they all agree with the HIR
+        // interpreter: equal values, matching structural runtime-error kinds, or matching
+        // cleanup-failure causes and retained cause kinds. Return the HIR result. Running every
+        // mode on every snippet is what gives the MIR backend, and the optimization passes, full
+        // coverage — including the error path, since a failing snippet exercises all of them rather
+        // than short-circuiting on the HIR error.
         if let Some(expr) = expr {
             let ty = self
                 .session
@@ -1453,65 +1594,38 @@ impl TestSession {
                 .ty
                 .ret;
             let value = {
-                // Snapshot the externally-mutable `@props` fixtures so the MIR run observes the
-                // same preconditions as the HIR run. Without this, a snippet that mutates a
-                // fixture would apply its effect twice (once per backend) and the two backends
-                // would diverge spuriously. See `PropertyFixtures`.
+                // Snapshot the externally-mutable `@props` fixtures so every mode observes the
+                // same preconditions. Without this, a snippet that mutates a fixture would apply
+                // its effect once per mode and they would diverge spuriously. See
+                // `PropertyFixtures`.
                 let fixtures = PropertyFixtures::capture();
-                let [hir_result, mir_result] = ExecutionTarget::ALL.map(|target| {
-                    fixtures.restore();
-                    self.session
-                        .run_entry(target, module_id, expr, vec![])
-                        .map_err(Error::Runtime)
-                });
-                match (&hir_result, &mir_result) {
-                    (Ok(hir_value), Ok(mir_value)) => {
-                        if let Err(message) = compare_values(mir_value, hir_value, "value") {
-                            panic!("MIR backend diverged from the HIR interpreter: {message}");
-                        }
-                    }
-                    (Err(Error::Runtime(hir_err)), Err(Error::Runtime(mir_err))) => {
-                        assert_eq!(
-                            mir_err.kind(),
-                            hir_err.kind(),
-                            "MIR backend raised a different runtime error than the HIR \
-                             interpreter"
-                        );
-                        match (
-                            hir_err.failure_during_cleanup(),
-                            mir_err.failure_during_cleanup(),
-                        ) {
-                            (Some(hir_failure), Some(mir_failure)) => {
-                                assert_eq!(
-                                    mir_failure.initial().kind(),
-                                    hir_failure.initial().kind(),
-                                    "MIR retained a different initial failure than HIR"
-                                );
-                                assert_eq!(
-                                    mir_failure.during_cleanup().kind(),
-                                    hir_failure.during_cleanup().kind(),
-                                    "MIR retained a different cleanup failure than HIR"
-                                );
-                            }
-                            (None, None) => {}
-                            _ => panic!(
-                                "MIR backend disagreed with HIR about whether the runtime error \
-                                 was a structured failure during cleanup"
-                            ),
-                        }
-                    }
-                    (hir, mir) => panic!(
-                        "MIR backend diverged from the HIR interpreter: one produced a value \
-                         and the other a runtime error (HIR: {hir:?}, MIR: {mir:?})"
-                    ),
+                let selected = self.session.mir_optimization();
+                let modes = self.modes.clone();
+                let results: Vec<_> = modes
+                    .iter()
+                    .map(|mode| {
+                        fixtures.restore();
+                        self.session.set_mir_optimization(mode.optimization());
+                        self.session
+                            .run_entry(mode.target(), module_id, expr, vec![])
+                            .map_err(Error::Runtime)
+                    })
+                    .collect();
+                self.session.set_mir_optimization(selected);
+
+                // The first mode — the HIR interpreter unless a test says otherwise — is the
+                // reference every other one is checked against.
+                for (mode, result) in modes.iter().zip(&results).skip(1) {
+                    assert_outcomes_agree(&results[0], result, mode.label());
                 }
-                // The MIR value was only compared against the HIR result; reclaim its heap
-                // storage explicitly (a `Value` payload is `ManuallyDrop`, so a plain Rust drop
-                // frees nothing).
-                if let Ok(mir_value) = mir_result {
-                    mir_value.discard_storage();
+                // Only the reference value is returned; the rest own storage that a plain Rust
+                // drop would not reclaim, `Value` being `ManuallyDrop`-based.
+                let mut results = results.into_iter();
+                let reference = results.next().expect("at least one mode runs");
+                for value in results.flatten() {
+                    value.discard_storage();
                 }
-                hir_result?
+                reference?
             };
             Ok(RunValue {
                 module_id,

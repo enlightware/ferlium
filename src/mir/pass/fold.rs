@@ -41,7 +41,7 @@ use crate::{
         value::Constant,
     },
     module::{ModuleEnv, ModuleId},
-    types::r#type::CallImplType,
+    types::r#type::{CallImplType, Type},
 };
 
 use super::dataflow::{self, Const, Fact, State};
@@ -181,6 +181,14 @@ fn try_fold_call(
             Some(literal) => arguments.push(ConstArgument::Value(literal.into_value())),
             None => return discard(arguments, NotFoldable::Failed),
         }
+    }
+
+    // A unit result carries no information, so replacing such a call with a store of `()` gains
+    // nothing — and it would delete a call the host may be relying on. `Value::drop` is declared
+    // effect-free by its trait, so a host that instruments drops *must* declare that instrumentation
+    // pure; folding pure unit-returning calls would silently remove it for no benefit.
+    if ty.ret() == Type::unit() {
+        return discard(arguments, NotFoldable::UnsupportedConvention);
     }
 
     let _ = func;

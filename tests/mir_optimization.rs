@@ -8,15 +8,18 @@
 //
 //! Staging and rewritability checks for the MIR optimization pipeline.
 //!
-//! Optimization must never change what a program computes, only how. These tests hold optimized MIR
-//! to that: every corpus snippet must produce the same result and the same failure with the flag on
-//! as with it off, while folding is allowed to — and must — remove work.
+//! Structural properties of optimized MIR, and the staging rules around it.
 //!
-//! Every function reachable from a snippet, including every function of the standard library, is
-//! rewritten through `FunctionEdit`, which runs the full MIR verifier on the result in test builds.
-//! See `doc/plans/partial-evaluation.md`.
+//! That optimization preserves *behaviour* is checked elsewhere, and far more broadly: the test
+//! harness runs every language snippet under `RunMode::OptimizedMir` beside the HIR and MIR
+//! interpreters and asserts all three agree, in value and in failure. What belongs here is what
+//! that cannot see — the shape of the emitted MIR, and which stage a session reads.
+//!
+//! Every function reachable from a corpus snippet, including every function of the standard
+//! library, is rewritten through `FunctionEdit`, which runs the full MIR verifier on the result in
+//! test builds. See `doc/plans/partial-evaluation.md`.
 
-use ferlium::{CompilerSession, ExecutionTarget, MirOptimization, module::Path, ustr};
+use ferlium::{CompilerSession, MirOptimization};
 
 /// Snippets chosen to cover the operation and control-flow forms a rewrite must carry through:
 /// calls, generics and dictionary passing, closures, aggregates, variants and matching, loops,
@@ -79,28 +82,6 @@ fn emit(name: &str, src: &str, optimization: MirOptimization) -> String {
     session(optimization).emit_mir(name, src)
 }
 
-/// Runs `main` under `optimization`, in a fresh session, and renders the result.
-fn run(name: &str, src: &str, optimization: MirOptimization) -> String {
-    session(optimization).eval_mir(name, src)
-}
-
-/// Runs `main` under `optimization` and renders the runtime error it must raise.
-fn run_failing(name: &str, src: &str, optimization: MirOptimization) -> String {
-    let mut session = session(optimization);
-    let output = session
-        .compile_for(ExecutionTarget::Mir, src, name, Path::single_str(name))
-        .unwrap_or_else(|error| panic!("{name} must compile: {error:?}"));
-    let main = session
-        .expect_fresh_module(output.module_id)
-        .get_local_function_id(ustr("main"))
-        .unwrap_or_else(|| panic!("{name} must define main"));
-    let error = session
-        .run_entry(ExecutionTarget::Mir, output.module_id, main, vec![])
-        .err()
-        .unwrap_or_else(|| panic!("{name} must fail at run time"));
-    format!("{:?}", error.kind())
-}
-
 /// Optimization may only remove calls, never add them.
 ///
 /// A panic here means a pass produced a function the verifier rejects — which is the real point of
@@ -142,29 +123,6 @@ fn calls(mir: &str) -> usize {
         .filter(|line| line.trim_start().starts_with("call "))
         .count()
 }
-
-#[test]
-fn optimized_mir_executes_identically_to_raw_mir() {
-    for (name, src) in CORPUS {
-        let raw = run(name, src, MirOptimization::Disabled);
-        let optimized = run(name, src, MirOptimization::Enabled);
-        assert_eq!(
-            raw, optimized,
-            "optimization changed the result of `{name}`"
-        );
-    }
-}
-
-/// The error path must survive a rewrite too: a snippet that raises must raise the same way.
-#[test]
-fn optimized_mir_fails_identically_to_raw_mir() {
-    let (name, src) = ("out_of_bounds", "fn main() -> int { let a = [1]; a[3] }");
-    assert_eq!(
-        run_failing(name, src, MirOptimization::Disabled),
-        run_failing(name, src, MirOptimization::Enabled),
-    );
-}
-
 /// Optimization is a per-session choice over shared module revisions: the standard library's
 /// artifacts are reused across sessions, so a session that optimizes must not change what a
 /// session that does not optimize executes, in either order.

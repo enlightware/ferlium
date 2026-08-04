@@ -104,6 +104,9 @@ fn array_clone_returns_owned_array_without_extra_drop() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn named_generic_struct_auto_derives_value() {
     let mut session = TestSession::new();
+    // Counts drops of a pure function's locals, which compile-time evaluation would perform
+    // while compiling; see `TestSession::without_optimized_mode`.
+    session.without_optimized_mode();
     assert_val_eq!(
         session.run(
             r#"
@@ -555,10 +558,41 @@ fn indexed_array_literal_owned_temp_uses_semantic_drop() {
     );
 }
 
+/// The compile-time execution contract, observed: a function the effect system considers pure may
+/// be evaluated while compiling, and its locals' drops run *then* rather than at run time.
+///
+/// The drop log therefore stays empty at run time. This is why the drop-counting tests above opt out
+/// of the optimized mode: the language declares `Value::drop` effect-free, so instrumentation inside
+/// a drop is invisible to the effect system and cannot hold folding back. See
+/// `doc/runtime-sandboxing.md`.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn compile_time_evaluation_runs_drops_while_compiling() {
+    let mut session = TestSession::new();
+    session.only_optimized_mode();
+    let source = format!(
+        r#"
+        {}
+        fn run() -> int {{
+            let probe = Probe(1);
+            5
+        }}
+
+        testing::reset_tracked_drops();
+        run() * 100 + testing::tracked_drop_log()
+        "#,
+        tracked_probe_value_impl()
+    );
+    assert_val_eq!(session.run(&source), int(500));
+}
+
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn lexical_drops_run_before_early_return() {
     let mut session = TestSession::new();
+    // Counts drops of a pure function's locals, which compile-time evaluation would perform
+    // while compiling; see `TestSession::without_optimized_mode`.
+    session.without_optimized_mode();
     let source = format!(
         r#"
         {}
@@ -580,6 +614,9 @@ fn lexical_drops_run_before_early_return() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn block_result_moves_owned_local_without_dropping_it() {
     let mut session = TestSession::new();
+    // Counts drops of a pure function's locals, which compile-time evaluation would perform
+    // while compiling; see `TestSession::without_optimized_mode`.
+    session.without_optimized_mode();
     let source = format!(
         r#"
         {}
@@ -602,6 +639,9 @@ fn block_result_moves_owned_local_without_dropping_it() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn return_moves_owned_local_without_dropping_it() {
     let mut session = TestSession::new();
+    // Counts drops of a pure function's locals, which compile-time evaluation would perform
+    // while compiling; see `TestSession::without_optimized_mode`.
+    session.without_optimized_mode();
     let source = format!(
         r#"
         {}
@@ -1153,6 +1193,9 @@ fn array_index_base_temp_is_dropped_when_later_argument_returns() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn discarded_owned_temporary_is_dropped_before_early_return() {
     let mut session = TestSession::new();
+    // Counts drops of a pure function's locals, which compile-time evaluation would perform
+    // while compiling; see `TestSession::without_optimized_mode`.
+    session.without_optimized_mode();
     let source = format!(
         r#"
         {}
@@ -1175,6 +1218,9 @@ fn discarded_owned_temporary_is_dropped_before_early_return() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn call_argument_temp_is_dropped_when_later_argument_returns() {
     let mut session = TestSession::new();
+    // Counts drops of a pure function's locals, which compile-time evaluation would perform
+    // while compiling; see `TestSession::without_optimized_mode`.
+    session.without_optimized_mode();
     let source = format!(
         r#"
         {}
@@ -1201,6 +1247,9 @@ fn call_argument_temp_is_dropped_when_later_argument_returns() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn call_argument_temp_is_dropped_when_later_argument_returns_at_runtime() {
     let mut session = TestSession::new();
+    // Counts drops of a pure function's locals, which compile-time evaluation would perform
+    // while compiling; see `TestSession::without_optimized_mode`.
+    session.without_optimized_mode();
     let source = format!(
         r#"
         {}
@@ -1252,6 +1301,9 @@ fn call_argument_temp_is_dropped_when_later_argument_errors_at_runtime() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn tuple_element_temp_is_dropped_when_later_element_returns() {
     let mut session = TestSession::new();
+    // Counts drops of a pure function's locals, which compile-time evaluation would perform
+    // while compiling; see `TestSession::without_optimized_mode`.
+    session.without_optimized_mode();
     let source = format!(
         r#"
         {}
