@@ -34,8 +34,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     mir::{
-        self, BlockId, Function, OperationKind, edit::FunctionEdit,
-        terminator::TerminatorKind, value::ValueId,
+        self, BlockId, Function, OperationKind, edit::FunctionEdit, terminator::TerminatorKind,
+        value::ValueId,
     },
     module::ModuleEnv,
 };

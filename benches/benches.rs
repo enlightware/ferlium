@@ -252,7 +252,13 @@ fn setup_quicksort(target: BenchTarget) -> RuntimeBench<Vec<isize>> {
         .unwrap()
         .module_id;
     let random_data = lcg_seq(300, 42);
-    runtime_bench(target.target(), session, module_id, "quicksort_int_a", random_data)
+    runtime_bench(
+        target.target(),
+        session,
+        module_id,
+        "quicksort_int_a",
+        random_data,
+    )
 }
 
 #[library_benchmark(teardown = teardown_benchmark)]
@@ -363,7 +369,13 @@ fn setup_rle_encode(target: BenchTarget) -> RuntimeBench<Str> {
         .unwrap()
         .module_id;
     let input = Str::new(&"aabccccccc".repeat(50));
-    runtime_bench(target.target(), session, module_id, "rle_encode_string", input)
+    runtime_bench(
+        target.target(),
+        session,
+        module_id,
+        "rle_encode_string",
+        input,
+    )
 }
 
 #[library_benchmark(teardown = teardown_benchmark)]

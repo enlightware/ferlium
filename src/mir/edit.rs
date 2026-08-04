@@ -294,7 +294,11 @@ impl FunctionEdit {
 impl EditBlock {
     /// Replaces the operation at `index`, keeping its result identity if the replacement produces
     /// one. Returns the operation that was there.
-    pub(crate) fn replace_operation(&mut self, index: usize, mut operation: Operation) -> Operation {
+    pub(crate) fn replace_operation(
+        &mut self,
+        index: usize,
+        mut operation: Operation,
+    ) -> Operation {
         let previous = &self.operations[index];
         if operation.result() != OperationResult::Nothing {
             operation.assign_result_id(previous.result_id());
@@ -366,9 +370,7 @@ fn successors_mut(terminator: &mut Terminator) -> Vec<&mut BlockId> {
 mod tests {
     use super::*;
     use crate::{
-        CompilerSession, Location,
-        format::FormatWith,
-        mir::builder::FunctionBuilder,
+        CompilerSession, Location, format::FormatWith, mir::builder::FunctionBuilder,
         std::math::int_type,
     };
 
@@ -473,7 +475,11 @@ mod tests {
         let session = CompilerSession::new();
         let env = session.module_env();
         let mut edit = FunctionEdit::new(conditional(&session));
-        let existing = edit.add_constant(Type::primitive::<bool>(), LiteralValue::new_native(true), &env);
+        let existing = edit.add_constant(
+            Type::primitive::<bool>(),
+            LiteralValue::new_native(true),
+            &env,
+        );
         assert_eq!(existing.as_index(), 0, "an identical constant is reused");
         let fresh = edit.add_constant(int_type(), LiteralValue::new_native(7isize), &env);
         assert_eq!(fresh.as_index(), 1);

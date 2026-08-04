@@ -211,8 +211,6 @@ impl<'a> ConstEvaluator<'a> {
     }
 }
 
-
-
 /// Maps a runtime outcome to a refusal reason. Nothing escapes as a compilation error.
 fn classify(error: RuntimeError) -> NotFoldable {
     match error {
@@ -500,12 +498,8 @@ mod tests {
         // callee is never entered, so the tracked natives stand in for values of any type without
         // being read.
         let limits = ReferenceInterpreterLimits::new(ExecutionLimits::new(8, Some(1_000)), 1);
-        let mut interpreter = Interpreter::with_limits_and_stage(
-            module,
-            &session,
-            limits,
-            MirOptimization::Disabled,
-        );
+        let mut interpreter =
+            Interpreter::with_limits_and_stage(module, &session, limits, MirOptimization::Disabled);
         let arguments = vec![
             CallArgument::Value(Value::native(DropTracked)),
             CallArgument::Value(Value::native(DropTracked)),

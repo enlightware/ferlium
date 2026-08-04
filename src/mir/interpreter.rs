@@ -388,9 +388,9 @@ impl<'a> Interpreter<'a> {
         // released by `CallArguments` when this returns early.
         for argument in arguments.by_ref() {
             match argument {
-                CallArgument::Value(value) => bindings.push(Binding::Place(
-                    self.alloc_cell(value, span)?,
-                )),
+                CallArgument::Value(value) => {
+                    bindings.push(Binding::Place(self.alloc_cell(value, span)?))
+                }
                 CallArgument::Dictionary(id) => bindings.push(Binding::Dictionary(id)),
             }
         }
@@ -423,7 +423,9 @@ impl<'a> Interpreter<'a> {
             match argument {
                 // A native reads its arguments through places, exactly as a resolved native call
                 // marshals them.
-                CallArgument::Value(value) => args.push(ValOrMut::Mut(self.alloc_cell(value, span)?)),
+                CallArgument::Value(value) => {
+                    args.push(ValOrMut::Mut(self.alloc_cell(value, span)?))
+                }
                 CallArgument::Dictionary(id) => args.push(ValOrMut::Dictionary(id)),
             }
         }
@@ -1411,14 +1413,14 @@ impl<'a> Interpreter<'a> {
     #[cfg(debug_assertions)]
     fn boundary_pointee(&self, place: &Place) -> Option<&Value> {
         let mut path: VecDeque<isize> = place.path.iter().copied().collect();
-        let mut index = place.target;
+        let mut index = place.root;
         let mut target = loop {
             match self.ctx.environment.get(index)? {
                 ValOrMut::Val(t) => break t,
                 // SAFETY: the referent outlives the borrow, as in `target_ref_allow_uninit`.
                 ValOrMut::Ref(t) => break unsafe { &**t },
                 ValOrMut::Mut(p) => {
-                    index = p.target;
+                    index = p.root;
                     for &i in p.path.iter().rev() {
                         path.push_front(i);
                     }
@@ -1702,10 +1704,10 @@ impl<'a> Interpreter<'a> {
             }
             None => Value::uninit(),
         };
-        let env_idx = self.alloc_cell(cloned_env, span)?.target;
+        let env_idx = self.alloc_cell(cloned_env, span)?.root;
         for i in 0..env_len {
             leading.push(Binding::Place(Place {
-                target: env_idx,
+                root: env_idx,
                 path: vec![i as isize],
             }));
         }
@@ -1725,7 +1727,7 @@ impl<'a> Interpreter<'a> {
         // closure itself is left untouched in `place`.
         let drop_result = if call_result.as_ref().is_err_and(RuntimeError::is_poisoning) {
             self.discard_place_storage(&Place {
-                target: env_idx,
+                root: env_idx,
                 path: vec![],
             });
             Ok(())
@@ -1733,7 +1735,7 @@ impl<'a> Interpreter<'a> {
             match env_dict {
                 Some(dict) => {
                     let target = Place {
-                        target: env_idx,
+                        root: env_idx,
                         path: vec![],
                     };
                     match call_value_drop_for_temp(
@@ -1975,13 +1977,13 @@ impl<'a> Interpreter<'a> {
     /// array `Buffer` slots, and variant payloads — so an element store into an array of aggregates
     /// (`[…][i].field`) materializes the still-flat element skeleton in place.
     fn materialize_path(&mut self, place: &Place) {
-        let mut index = place.target;
+        let mut index = place.root;
         let mut path: VecDeque<isize> = place.path.iter().copied().collect();
         loop {
             match self.ctx.environment.get(index) {
                 Some(ValOrMut::Val(_)) => break,
                 Some(ValOrMut::Mut(p)) => {
-                    index = p.target;
+                    index = p.root;
                     for &i in p.path.iter().rev() {
                         path.push_front(i);
                     }
@@ -2011,7 +2013,7 @@ impl<'a> Interpreter<'a> {
         let target = self.ctx.environment.len();
         self.ctx.environment.push(ValOrMut::Val(init));
         Ok(Place {
-            target,
+            root: target,
             path: vec![],
         })
     }

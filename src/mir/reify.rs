@@ -264,7 +264,7 @@ mod tests {
             (
                 "bridged place",
                 Value::native(PlaceResult::new(crate::eval::Place {
-                    target: 0,
+                    root: 0,
                     path: vec![],
                 })),
                 int_type(),

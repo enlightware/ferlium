@@ -218,9 +218,7 @@ fn discard(arguments: Vec<ConstArgument>, reason: NotFoldable) -> Result<Constan
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        CompilerSession, ExecutionTarget, MirOptimization, module::Path, ustr,
-    };
+    use crate::{CompilerSession, ExecutionTarget, MirOptimization, module::Path, ustr};
 
     /// The gate example: constant arithmetic collapses into a single store into `@ret`.
     #[test]

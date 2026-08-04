@@ -597,10 +597,10 @@ impl<'a> EvalCtx<'a> {
             arguments
         } else {
             let mut prepared = Vec::with_capacity(function_value.closure_env_len + arguments.len());
-            if let Some(target) = closure_env_temp {
+            if let Some(root) = closure_env_temp {
                 prepared.extend((0..function_value.closure_env_len).map(|index| {
                     ValOrMut::Mut(Place {
-                        target,
+                        root,
                         path: vec![index as isize],
                     })
                 }));
@@ -613,11 +613,11 @@ impl<'a> EvalCtx<'a> {
             .call_function(function_id, function_value.hidden_args.clone(), arguments)
             .map_err(|err| err.with_frame(function_id, location));
 
-        if let Some(target) = closure_env_temp {
+        if let Some(root) = closure_env_temp {
             let dictionary =
                 closure_env_dictionary.expect("closure environment dictionary disappeared");
             let place = Place {
-                target,
+                root,
                 path: Vec::new(),
             };
             let result = match result {
@@ -934,7 +934,7 @@ impl<'a> EvalCtx<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Place {
     // index of target variable, absolute in the environment, to allow to access parent frames
-    pub target: usize,
+    pub root: usize,
     // path within the compound value located at `target`
     pub path: Vec<isize>,
 }
@@ -1014,7 +1014,7 @@ impl Place {
     /// Return a path and an index of a variable in the environment that is for sure a Value
     fn resolved_path_and_index(&self, ctx: &EvalCtx) -> (VecDeque<isize>, usize) {
         let mut path = self.path.iter().copied().collect::<VecDeque<_>>();
-        let mut index = self.target;
+        let mut index = self.root;
         loop {
             match &ctx.environment[index] {
                 ValOrMut::Val(_target) => {
@@ -1027,7 +1027,7 @@ impl Place {
                     panic!("cannot mutably access shared reference storage");
                 }
                 ValOrMut::Mut(place) => {
-                    index = place.target;
+                    index = place.root;
                     for &index in place.path.iter().rev() {
                         path.push_front(index);
                     }
@@ -1038,9 +1038,9 @@ impl Place {
     }
 
     fn resolved(&self, ctx: &EvalCtx) -> Self {
-        let (path, target) = self.resolved_path_and_index(ctx);
+        let (path, root) = self.resolved_path_and_index(ctx);
         Self {
-            target,
+            root,
             path: path.into_iter().collect(),
         }
     }
@@ -1084,7 +1084,7 @@ impl Place {
         ctx: &'c EvalCtx,
     ) -> Result<&'c Value, SourceFailureKind> {
         let mut path = self.path.iter().copied().collect::<VecDeque<_>>();
-        let mut index = self.target;
+        let mut index = self.root;
         let mut target = loop {
             match &ctx.environment[index] {
                 ValOrMut::Val(target) => break target,
@@ -1096,7 +1096,7 @@ impl Place {
                     break unsafe { &**target };
                 }
                 ValOrMut::Mut(place) => {
-                    index = place.target;
+                    index = place.root;
                     for &index in place.path.iter().rev() {
                         path.push_front(index);
                     }
@@ -1143,9 +1143,9 @@ impl Place {
 
 impl FormatWith<EvalCtx<'_>> for Place {
     fn fmt_with(&self, f: &mut std::fmt::Formatter<'_>, data: &EvalCtx<'_>) -> std::fmt::Result {
-        let Place { target, path } = self;
+        let Place { root, path } = self;
         let ctx = data;
-        let relative_index = *target as isize - ctx.frame_base as isize;
+        let relative_index = *root as isize - ctx.frame_base as isize;
         write!(f, "@{relative_index}")?;
         if !path.is_empty() {
             write!(f, ".")?;
@@ -1855,14 +1855,14 @@ fn try_dictionary_metadata_node(
 
 pub(crate) fn try_dictionary_from_place(place: &Place, ctx: &EvalCtx) -> Option<TraitDictionaryId> {
     let mut path = place.path.iter().copied().collect::<VecDeque<_>>();
-    let mut index = place.target;
+    let mut index = place.root;
     loop {
         match &ctx.environment[index] {
             ValOrMut::Dictionary(dictionary) => {
                 return path.is_empty().then_some(*dictionary);
             }
             ValOrMut::Mut(place) => {
-                index = place.target;
+                index = place.root;
                 for &index in place.path.iter().rev() {
                     path.push_front(index);
                 }
@@ -2258,7 +2258,7 @@ pub(crate) fn call_value_drop_for_temp(
             }
             ctx.environment.push(ValOrMut::Val(value));
             let place = Place {
-                target: target_index,
+                root: target_index,
                 path: Vec::new(),
             };
             (place, Some(target_index))
@@ -2334,7 +2334,7 @@ fn local_environment_index(ctx: &EvalCtx, locals: &[LocalDecl], id: LocalDeclId)
 
 fn local_place(ctx: &EvalCtx, locals: &[LocalDecl], id: LocalDeclId) -> Place {
     Place {
-        target: local_environment_index(ctx, locals, id),
+        root: local_environment_index(ctx, locals, id),
         path: Vec::new(),
     }
 }

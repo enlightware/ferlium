@@ -331,12 +331,7 @@ fn successors(kind: &TerminatorKind) -> Vec<BlockId> {
 ///
 /// Only the operations listed here are modelled; anything else has already caused its place
 /// operands to escape (see [`escaping_roots`]), so it needs no case.
-fn transfer(
-    operation: &Operation,
-    func: &Function,
-    escaped: &FxHashSet<Root>,
-    state: &mut State,
-) {
+fn transfer(operation: &Operation, func: &Function, escaped: &FxHashSet<Root>, state: &mut State) {
     let tracked = |key: &PlaceKey| !escaped.contains(&key.root);
     match &operation.kind {
         OperationKind::Alloca { .. } => {
