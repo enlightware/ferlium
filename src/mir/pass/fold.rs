@@ -151,7 +151,7 @@ pub(crate) fn plan_folds(
     module_id: ModuleId,
     refusals: &mut Option<&mut Vec<Refusal>>,
 ) -> Plan {
-    let analysis = dataflow::analyze(func);
+    let analysis = dataflow::analyze(func, env);
     let evaluator = ConstEvaluator::new(module_id, session);
     let mut plan = Plan::default();
 
@@ -181,7 +181,7 @@ pub(crate) fn plan_folds(
                 });
                 continue;
             }
-            analysis.step(func, operation, &mut state);
+            analysis.step(func, env, operation, &mut state);
         }
 
         match &basic_block.terminator().kind {
@@ -278,8 +278,14 @@ fn try_fold_call(
     let Some(call) = dataflow::call_operands(&operation.operands, ty) else {
         return Err(NotFoldable::UnsupportedConvention);
     };
-    let mir::Value::Function(callee) = call.callee else {
-        return Err(NotFoldable::CalleeNotDirect);
+    // A callee is either named directly, or read from a place the analysis knows holds a function
+    // — which is what an entry of a constant dictionary resolves to.
+    let callee = match call.callee {
+        mir::Value::Function(id) => *id,
+        operand => match state.place_of(operand).map(|key| state.place(&key)) {
+            Some(Fact::Known(Const::Function(id))) => id,
+            _ => return Err(NotFoldable::CalleeNotDirect),
+        },
     };
 
     let mut arguments = Vec::with_capacity(call.extras.len() + call.arguments.len());
@@ -318,7 +324,7 @@ fn try_fold_call(
     }
 
     let value = evaluator.try_call(
-        *callee,
+        callee,
         ty.effects(),
         ty.result_convention,
         ty.ret(),

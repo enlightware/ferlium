@@ -47,7 +47,8 @@ use crate::{
         terminator::TerminatorKind,
         value::{ParameterId, ValueId},
     },
-    module::{FunctionId, TraitDictionaryId},
+    module::{FunctionId, ModuleEnv, TraitDictionaryEntry, TraitDictionaryId},
+    types::r#trait::TraitDictionaryEntryIndex,
     types::r#type::CallImplType,
 };
 
@@ -58,6 +59,10 @@ pub(crate) enum Root {
     Alloca(ValueId),
     /// Storage owned by the caller and named by a parameter.
     Parameter(ParameterId),
+    /// The cell a `dict_entry` materializes its entry into. Not storage the function allocated, but
+    /// a place all the same, and the one devirtualization reads: an entry of a constant dictionary
+    /// is a known function.
+    DictEntry(ValueId),
 }
 
 /// A storage slot: a root plus the field path reaching it.
@@ -246,13 +251,19 @@ impl Analysis {
     /// stepping from its entry state. The folding pass walks blocks this way rather than through a
     /// callback, because it also needs to *inject* facts — a call it decides to fold makes its
     /// result place known for the rest of the walk.
-    pub(crate) fn step(&self, func: &Function, operation: &Operation, state: &mut State) {
-        transfer(operation, func, &self.escaped, state);
+    pub(crate) fn step(
+        &self,
+        func: &Function,
+        env: ModuleEnv<'_>,
+        operation: &Operation,
+        state: &mut State,
+    ) {
+        transfer(operation, func, env, &self.escaped, state);
     }
 }
 
 /// Runs the analysis to fixpoint over `func`.
-pub(crate) fn analyze(func: &Function) -> Analysis {
+pub(crate) fn analyze(func: &Function, env: ModuleEnv<'_>) -> Analysis {
     let escaped = escaping_roots(func);
 
     let mut entry_states: FxHashMap<BlockId, State> = FxHashMap::default();
@@ -271,10 +282,10 @@ pub(crate) fn analyze(func: &Function) -> Analysis {
             let mut state = entry;
             let block = func.block(block_id);
             for operation in block.operations() {
-                transfer(operation, func, &escaped, &mut state);
+                transfer(operation, func, env, &escaped, &mut state);
             }
             if let TerminatorKind::Invoke { operation, .. } = &block.terminator().kind {
-                transfer(operation, func, &escaped, &mut state);
+                transfer(operation, func, env, &escaped, &mut state);
             }
             for successor in successors(&block.terminator().kind) {
                 let updated = match entry_states.get(&successor) {
@@ -315,7 +326,13 @@ fn successors(kind: &TerminatorKind) -> Vec<BlockId> {
 ///
 /// Only the operations listed here are modelled; anything else has already caused its place
 /// operands to escape (see [`escaping_roots`]), so it needs no case.
-fn transfer(operation: &Operation, func: &Function, escaped: &FxHashSet<Root>, state: &mut State) {
+fn transfer(
+    operation: &Operation,
+    func: &Function,
+    env: ModuleEnv<'_>,
+    escaped: &FxHashSet<Root>,
+    state: &mut State,
+) {
     let tracked = |key: &PlaceKey| !escaped.contains(&key.root);
     match &operation.kind {
         OperationKind::Alloca { .. } => {
@@ -423,6 +440,24 @@ fn transfer(operation: &Operation, func: &Function, escaped: &FxHashSet<Root>, s
             };
             state.registers.insert(result, RegisterFact::Value(fact));
         }
+        OperationKind::DictEntry { entry_index, .. } => {
+            let Some(result) = operation.result_id() else {
+                return;
+            };
+            // The entry of a *constant* dictionary is a statically known function — this is what
+            // makes devirtualization fall out of inlining, once inlining has bound a callee's
+            // dictionary parameter to a constant.
+            let fact = match &operation.operands[0] {
+                mir::Value::Dictionary(id) => dictionary_entry(*id, *entry_index, env)
+                    .map(|function| Fact::Known(Const::Function(function)))
+                    .unwrap_or_default(),
+                _ => Fact::Unknown,
+            };
+            let key = PlaceKey::root(Root::DictEntry(result));
+            state.forget_root(key.root);
+            state.places.insert(key.clone(), fact);
+            state.registers.insert(result, RegisterFact::Place(key));
+        }
         OperationKind::Call { ty } => {
             // The callee writes its result through the trailing out-pointer, so whatever was known
             // about that slot no longer holds. The folding pass is what replaces a call with a
@@ -444,6 +479,24 @@ fn transfer(operation: &Operation, func: &Function, escaped: &FxHashSet<Root>, s
             }
         }
     }
+}
+
+/// Resolves one entry of a dictionary, from module metadata alone — exactly as the interpreter
+/// does when it executes a `dict_entry`.
+fn dictionary_entry(
+    dictionary: TraitDictionaryId,
+    entry: TraitDictionaryEntryIndex,
+    env: ModuleEnv<'_>,
+) -> Option<FunctionId> {
+    let module = env.module_by_id(dictionary.module_id)?;
+    let TraitDictionaryEntry::Function(function) = module
+        .get_impl_data(dictionary.impl_id)?
+        .dictionary_value
+        .entry(entry);
+    Some(FunctionId {
+        module: dictionary.module_id,
+        function,
+    })
 }
 
 /// The fact for an operand used as a materialized value.
@@ -493,6 +546,9 @@ fn escaping_roots(func: &Function) -> FxHashSet<Root> {
                 (OperationKind::Alloca { .. }, Some(result)) => {
                     register_roots.insert(result, Root::Alloca(result));
                 }
+                (OperationKind::DictEntry { .. }, Some(result)) => {
+                    register_roots.insert(result, Root::DictEntry(result));
+                }
                 (OperationKind::Subfield { .. }, Some(result)) => {
                     if let Some(root) = operand_root(&operation.operands[0], &register_roots) {
                         register_roots.insert(result, root);
@@ -517,6 +573,9 @@ fn escaping_roots(func: &Function) -> FxHashSet<Root> {
             // `comp_eq` borrows its scrutinee for a literal snapshot and never moves it, so the
             // place stays tracked; its second operand is compile-time pattern data.
             OperationKind::Load | OperationKind::Clear | OperationKind::CompareEqual => {}
+            // Its operand is evidence rather than storage, and its result is a place this analysis
+            // roots itself.
+            OperationKind::DictEntry { .. } => {}
             OperationKind::Subfield { .. } => {
                 // A dynamic field index would name a slot the analysis cannot distinguish.
                 if field_index(&operation.operands[1]).is_none() {
@@ -666,11 +725,11 @@ mod tests {
     }
 
     /// Every fact the analysis holds at the end of the entry block, for a single-block function.
-    fn entry_block_exit(func: &Function) -> State {
-        let analysis = analyze(func);
+    fn entry_block_exit(func: &Function, env: ModuleEnv<'_>) -> State {
+        let analysis = analyze(func, env);
         let mut state = analysis.entry_state(func.entry());
         for operation in func.block(func.entry()).operations() {
-            analysis.step(func, operation, &mut state);
+            analysis.step(func, env, operation, &mut state);
         }
         state
     }
@@ -699,7 +758,7 @@ mod tests {
         builder.set_terminator(block, Terminator::ret(span));
         let func = builder.finish(env);
 
-        let state = entry_block_exit(&func);
+        let state = entry_block_exit(&func, env);
         let key = state.place_of(&slot).expect("the alloca names a place");
         let expected = Fact::Known(Const::Literal(LiteralValue::new_native(5isize)));
         assert_eq!(state.place(&key), expected);
@@ -718,7 +777,7 @@ mod tests {
         let module = compile(&mut session, "fn f() -> int { 2 + 3 }");
         let func = body(&session, module, "f");
 
-        let analysis = analyze(func);
+        let analysis = analyze(func, session.module_env());
         let escaped = allocas(func)
             .filter(|id| analysis.is_escaped(Root::Alloca(*id)))
             .count();
@@ -739,7 +798,7 @@ mod tests {
         );
         let func = body(&session, module, "f");
 
-        let analysis = analyze(func);
+        let analysis = analyze(func, session.module_env());
         let escaped = allocas(func)
             .filter(|id| analysis.is_escaped(Root::Alloca(*id)))
             .count();
@@ -777,9 +836,65 @@ mod tests {
         builder.set_terminator(block, Terminator::ret(span));
         let func = builder.finish(env);
 
-        let state = entry_block_exit(&func);
+        let state = entry_block_exit(&func, env);
         let source_key = state.place_of(&source).expect("a tracked source place");
         assert_eq!(state.place(&source_key), Fact::Uninit);
+    }
+
+    /// An entry of a *constant* dictionary is a known function — the fact devirtualization reads.
+    ///
+    /// Constant dictionary operands do not appear in emitted MIR: a `dict_entry` reads a
+    /// dictionary *parameter*, which only becomes constant once inlining substitutes the caller's
+    /// operand for it. So this is exercised on a hand-built function until inlining lands.
+    #[test]
+    fn an_entry_of_a_constant_dictionary_is_a_known_function() {
+        let mut session = CompilerSession::new();
+        // Harvest a real dictionary from lowered MIR rather than fabricating one.
+        let module = compile(
+            &mut session,
+            "fn addg(a, b) { a + b }\nfn main() -> int { addg(1, 2) }",
+        );
+        let dictionary = body(&session, module, "main")
+            .blocks()
+            .flat_map(|block| {
+                body(&session, module, "main")
+                    .block(block)
+                    .operations()
+                    .to_vec()
+            })
+            .find_map(|operation| {
+                operation.operands.iter().find_map(|operand| match operand {
+                    mir::Value::Dictionary(id) => Some(*id),
+                    _ => None,
+                })
+            })
+            .expect("the generic call passes a constant dictionary");
+
+        let span = Location::new_synthesized();
+        let env = session.module_env();
+        let mut builder = FunctionBuilder::new("entry".into(), Default::default());
+        let block = builder.add_block();
+        let entry = builder
+            .append_operation(
+                block,
+                Operation::dict_entry(
+                    span,
+                    mir::Value::Dictionary(dictionary),
+                    crate::types::r#trait::TraitDictionaryEntryIndex::new(0),
+                    int_type(),
+                ),
+            )
+            .unwrap();
+        builder.set_terminator(block, Terminator::ret(span));
+        let func = builder.finish(env);
+
+        let state = entry_block_exit(&func, env);
+        let key = state.place_of(&entry).expect("the entry names a place");
+        assert!(
+            matches!(state.place(&key), Fact::Known(Const::Function(_))),
+            "an entry of a constant dictionary must resolve: {:?}",
+            state.place(&key)
+        );
     }
 
     /// Facts that disagree on two paths join to `Unknown`.
