@@ -613,11 +613,11 @@ impl<'a> Interpreter<'a> {
             OperationKind::Alloca { ty } => {
                 let init = self.shaped_uninitialized_value(*ty);
                 let place = self.alloc_cell(init, span)?;
-                slots.insert(def.unwrap(), Binding::Place(place));
+                Self::bind(slots, def.unwrap(), Binding::Place(place));
             }
             OperationKind::AllocaPlace { .. } => {
                 let place = self.alloc_cell(Value::uninit(), span)?;
-                slots.insert(def.unwrap(), Binding::Place(place));
+                Self::bind(slots, def.unwrap(), Binding::Place(place));
             }
             OperationKind::Subfield { .. } => {
                 self.exec_subfield(func, slots, &operation.operands, def.unwrap());
@@ -662,7 +662,8 @@ impl<'a> Interpreter<'a> {
                 // materialized into a temporary. A flat `Uninit` payload grows into the right
                 // aggregate skeleton on the first field store (see `grow_value_to_path`); a unit
                 // payload is written explicitly by the emitter.
-                slots.insert(
+                Self::bind(
+                    slots,
                     def.unwrap(),
                     Binding::Value(Value::raw_variant(*tag, Value::uninit())),
                 );
@@ -684,7 +685,7 @@ impl<'a> Interpreter<'a> {
             }
             OperationKind::StackSave => {
                 let marker = self.ctx.environment.len();
-                slots.insert(def.unwrap(), Binding::StackMarker(marker));
+                Self::bind(slots, def.unwrap(), Binding::StackMarker(marker));
             }
             OperationKind::StackRestore => {
                 let marker = self.stack_marker_operand(slots, &operation.operands[0]);
@@ -709,11 +710,11 @@ impl<'a> Interpreter<'a> {
                     *num_hidden_dicts as usize,
                     *has_env_dict,
                 )?;
-                slots.insert(def.unwrap(), Binding::Value(closure));
+                Self::bind(slots, def.unwrap(), Binding::Value(closure));
             }
             OperationKind::CloneClosureEnv { .. } => {
                 let cloned = self.exec_clone_closure_env(slots, &operation.operands[0], span)?;
-                slots.insert(def.unwrap(), Binding::Value(cloned));
+                Self::bind(slots, def.unwrap(), Binding::Value(cloned));
             }
             OperationKind::DropClosureEnv => {
                 self.exec_drop_closure_env(slots, &operation.operands[0], span)?;
@@ -739,6 +740,20 @@ impl<'a> Interpreter<'a> {
     /// constant for a static field, or a register holding a run-time offset. Either way it
     /// resolves to an `isize`.
     #[inline(never)]
+    /// Binds `def` to `binding`, releasing whatever that register held before.
+    ///
+    /// A loop redefines its registers on every iteration, and `Value` is `ManuallyDrop`-based, so
+    /// letting the previous binding drop would leak its storage — silently, and in proportion to
+    /// the iteration count. Raw reclamation is the right kind here: MIR's linear-use discipline
+    /// means an owned value has already been consumed by this point (leaving `Uninit` behind), so
+    /// nothing semantic is owed. Place, marker and dictionary bindings own no storage, and an open
+    /// projection cannot be redefined — its `end_project` consumes it first.
+    fn bind(slots: &mut FxHashMap<mir::Value, Binding>, def: mir::Value, binding: Binding) {
+        if let Some(Binding::Value(previous)) = slots.insert(def, binding) {
+            previous.discard_storage();
+        }
+    }
+
     fn exec_subfield(
         &mut self,
         func: &mir::Function,
@@ -755,7 +770,7 @@ impl<'a> Interpreter<'a> {
                 .expect("subfield index must be an int")
         });
         place.path.push(index);
-        slots.insert(def, Binding::Place(place));
+        Self::bind(slots, def, Binding::Place(place));
     }
 
     /// Executes a `dict_entry` operation: the symbolic analog of `subfield`. Resolves the
@@ -780,7 +795,7 @@ impl<'a> Interpreter<'a> {
             }),
         };
         let place = self.alloc_cell(value, span)?;
-        slots.insert(def, Binding::Place(place));
+        Self::bind(slots, def, Binding::Place(place));
         Ok(())
     }
 
@@ -813,7 +828,7 @@ impl<'a> Interpreter<'a> {
             ))
         };
         let place = self.alloc_cell(value, span)?;
-        slots.insert(def, Binding::Place(place));
+        Self::bind(slots, def, Binding::Place(place));
         Ok(())
     }
 
@@ -838,7 +853,11 @@ impl<'a> Interpreter<'a> {
             };
             subscript.hidden_args.push(arg);
         }
-        slots.insert(def, Binding::Value(Value::subscript_value(subscript)));
+        Self::bind(
+            slots,
+            def,
+            Binding::Value(Value::subscript_value(subscript)),
+        );
     }
 
     /// Executes a `load` operation.
@@ -851,7 +870,7 @@ impl<'a> Interpreter<'a> {
     ) -> Result<(), RuntimeError> {
         let place = self.place_operand(slots, &operands[0]);
         let v = self.load_copy(&place);
-        slots.insert(def, Binding::Value(v));
+        Self::bind(slots, def, Binding::Value(v));
         Ok(())
     }
 
@@ -949,7 +968,7 @@ impl<'a> Interpreter<'a> {
                 .try_matches_runtime_value(scrutinee)
                 .expect("MIR match pattern and scrutinee have incompatible representations")
         });
-        slots.insert(def, Binding::Value(Value::native(equal)));
+        Self::bind(slots, def, Binding::Value(Value::native(equal)));
     }
 
     /// Executes an `extract_tag` operation: reads the variant's tag without consuming it (the
@@ -970,7 +989,7 @@ impl<'a> Interpreter<'a> {
             .as_variant()
             .expect("extract_tag of a non-variant value");
         let tag = variant.tag_as_isize();
-        slots.insert(def, Binding::Value(Value::native(tag)));
+        Self::bind(slots, def, Binding::Value(Value::native(tag)));
     }
 
     /// Executes an `end_project` operation: resumes the accessor's slide to completion and
@@ -1271,7 +1290,7 @@ impl<'a> Interpreter<'a> {
                 .expect("an addressor member must return a place")
                 .place()
                 .clone();
-            slots.insert(def, Binding::Place(place));
+            Self::bind(slots, def, Binding::Place(place));
             return Ok(());
         }
 
@@ -1310,7 +1329,7 @@ impl<'a> Interpreter<'a> {
                 .expect("an AddressorPlace member must return a place through its out-slot")
                 .place()
                 .clone();
-            slots.insert(def, Binding::Place(place));
+            Self::bind(slots, def, Binding::Place(place));
             return Ok(());
         }
 
