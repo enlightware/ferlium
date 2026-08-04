@@ -57,17 +57,28 @@ struct Fold {
     constant: Constant,
 }
 
+/// A source-fallible call the pass decided to replace, in its block's `Invoke` terminator.
+struct InvokeFold {
+    block: BlockId,
+    destination: mir::Value,
+    constant: Constant,
+    /// The successor the call would have taken on success — where control goes now that it cannot
+    /// fail.
+    normal: BlockId,
+}
+
 /// What one pass over a function decided to rewrite.
 #[derive(Default)]
 struct Plan {
     calls: Vec<Fold>,
+    invokes: Vec<InvokeFold>,
     /// Conditional branches whose condition is known, and the successor they always take.
     branches: Vec<(BlockId, BlockId)>,
 }
 
 impl Plan {
     fn is_empty(&self) -> bool {
-        self.calls.is_empty() && self.branches.is_empty()
+        self.calls.is_empty() && self.invokes.is_empty() && self.branches.is_empty()
     }
 }
 
@@ -92,11 +103,26 @@ pub(crate) fn fold_function(
             Operation::store(span, mir::Value::Constant(constant), fold.destination),
         );
     }
+    for invoke in plan.invokes {
+        let constant = edit.add_constant(invoke.constant.ty, invoke.constant.representation, &env);
+        let span = edit.block(invoke.block).terminator.span;
+        // The call becomes an ordinary store at the end of the block, and the terminator loses its
+        // error edge: an evaluated call cannot fail. Appending keeps the indices the operation
+        // folds above were planned against.
+        let block = edit.block_mut(invoke.block);
+        block.operations.push(Operation::store(
+            span,
+            mir::Value::Constant(constant),
+            invoke.destination,
+        ));
+        block.terminator = Terminator::goto(span, invoke.normal);
+    }
     for (block, target) in plan.branches {
         let span = edit.block(block).terminator.span;
         edit.block_mut(block).terminator = Terminator::goto(span, target);
     }
-    // Folding a branch is what strands blocks, so the pass prunes once its edits have settled.
+    // Folding a branch or an invoke is what strands blocks — an error edge that dies leaves its
+    // cleanup pad unreachable — so the pass prunes once its edits have settled.
     edit.remove_unreachable_blocks();
     Some(edit.finish(env))
 }
@@ -140,18 +166,42 @@ fn plan_folds(
             analysis.step(func, operation, &mut state);
         }
 
-        // A source-fallible call lives in the terminator rather than the operation list, and
-        // folding it means rewriting control flow — the error edge dies. That rewrite is not done
-        // yet, so such a call is left alone; only a decided branch is rewritten here.
-        if let TerminatorKind::CondBr {
-            condition,
-            then_target,
-            else_target,
-        } = &basic_block.terminator().kind
-            && let Some(taken) = known_condition(condition, &state)
-        {
-            plan.branches
-                .push((block, if taken { *then_target } else { *else_target }));
+        match &basic_block.terminator().kind {
+            // A source-fallible call lives in the terminator rather than the operation list.
+            // Folding it rewrites control flow: the call cannot fail once it has been evaluated, so
+            // the terminator becomes a jump to the normal successor and the error edge dies. An
+            // evaluation that *does* fail is refused by `try_fold_call`, which is what keeps a
+            // failure the program is entitled to observe.
+            TerminatorKind::Invoke {
+                operation, normal, ..
+            } => {
+                if let OperationKind::Call { ty } = &operation.kind
+                    && let Ok(constant) = try_fold_call(operation, ty, &state, &evaluator, &env)
+                    && let Some(call) = dataflow::call_operands(&operation.operands, ty)
+                {
+                    plan.invokes.push(InvokeFold {
+                        block,
+                        destination: call.result.clone(),
+                        constant,
+                        normal: *normal,
+                    });
+                }
+            }
+            TerminatorKind::CondBr {
+                condition,
+                then_target,
+                else_target,
+            } => {
+                if let Some(taken) = known_condition(condition, &state) {
+                    plan.branches
+                        .push((block, if taken { *then_target } else { *else_target }));
+                }
+            }
+            TerminatorKind::Goto { .. }
+            | TerminatorKind::Yield { .. }
+            | TerminatorKind::Return
+            | TerminatorKind::PropagateError
+            | TerminatorKind::FailureDuringCleanup => {}
         }
     }
     plan
@@ -275,6 +325,34 @@ mod tests {
             "the untaken arm's constant must be pruned:\n{main}"
         );
         assert!(main.contains("= 1"), "{main}");
+    }
+
+    /// A source-fallible call whose evaluation succeeds folds too: the terminator loses its error
+    /// edge and the cleanup pad it reached becomes unreachable.
+    #[test]
+    fn a_fallible_call_that_succeeds_folds_away_its_error_edge() {
+        let main = optimized_main("fn main() -> int { idiv(6, 3) }");
+        assert!(!main.contains("invoke"), "the call must fold:\n{main}");
+        assert!(
+            !main.contains("propagate_error"),
+            "the error path must be unreachable and pruned:\n{main}"
+        );
+        assert!(
+            main.contains("= 2"),
+            "the result must be a constant:\n{main}"
+        );
+    }
+
+    /// A call that raises must not fold: the program is entitled to observe the failure, so the
+    /// `invoke` and its error edge stay exactly as lowered.
+    #[test]
+    fn a_fallible_call_that_fails_is_left_alone() {
+        let main = optimized_main("fn main() -> int { idiv(6, 0) }");
+        assert!(
+            main.contains("invoke"),
+            "a failing call must stay a runtime call:\n{main}"
+        );
+        assert!(main.contains("propagate_error"), "{main}");
     }
 
     /// The gate example: constant arithmetic collapses into a single store into `@ret`.

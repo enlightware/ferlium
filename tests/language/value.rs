@@ -1192,6 +1192,10 @@ fn temporary_record_projection_let_base_is_dropped() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_index_base_temp_is_dropped_when_later_argument_returns() {
     let mut session = TestSession::new();
+    // Counts drops of a pure function's locals, which compile-time evaluation would perform
+    // while compiling; see `TestSession::without_optimized_mode`. Folding reaches this one only
+    // since source-fallible calls became foldable — the array index used to hold it back.
+    session.without_optimized_mode();
     let source = format!(
         r#"
         {}
