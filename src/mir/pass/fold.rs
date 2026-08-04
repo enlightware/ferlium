@@ -96,8 +96,15 @@ fn plan_folds(
         // block updates that state as it goes, so `2 + 3` then `* 7` folds in a single walk.
         let mut folded_here: Vec<(usize, Constant, mir::Value)> = Vec::new();
         let mut local: Option<State> = None;
+        // A source-fallible call lives in the block's `Invoke` terminator rather than its operation
+        // list, and replacing it means rewriting control flow — the terminator becomes a `goto` and
+        // the error edge dies. Until that rewrite exists, such a call is left alone.
+        let operation_count = func.block(block).operations().len();
         analysis.replay(func, block, |index, operation, state| {
             let state = local.as_ref().unwrap_or(state);
+            if index >= operation_count {
+                return;
+            }
             let OperationKind::Call { ty } = &operation.kind else {
                 return;
             };

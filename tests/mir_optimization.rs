@@ -59,6 +59,9 @@ const CORPUS: &[(&str, &str)] = &[
     ),
     // Indexing is source-fallible, so this lowers through `invoke` terminators and error edges.
     ("invoke", "fn main() -> int { let a = [1, 2]; a[0] + a[1] }"),
+    // A fallible call whose arguments *are* known: it is a fold candidate in every respect except
+    // that folding it would have to rewrite the `invoke` terminator's control flow.
+    ("invoke_constant", "fn main() -> int { idiv(6, 3) }"),
     (
         "recursion",
         "fn fact(n) { if n <= 1 { 1 } else { n * fact(n - 1) } }\nfn main() -> int { fact(5) }",
