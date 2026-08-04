@@ -67,6 +67,9 @@ repl:
 repl-mir:
 	RUST_BACKTRACE=1 RUST_LOG=ferlium=debug cargo run --example ferlium -- --mir
 
+repl-opt:
+	RUST_BACKTRACE=1 RUST_LOG=ferlium=debug cargo run --example ferlium -- --optimize
+
 print-std:
 	cargo run --example ferlium -- --print-std
 

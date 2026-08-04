@@ -28,8 +28,8 @@ use ferlium::std::new_module_using_std;
 use ferlium::std::string::String as FerliumString;
 use ferlium::types::effects::{PrimitiveEffect, effect};
 use ferlium::{
-    CompilationOutput, CompilerSession, ExecutionTarget, Location, SourceId, SourceTable,
-    SubOrSameType, parse_module_and_expr,
+    CompilationOutput, CompilerSession, ExecutionTarget, Location, MirOptimization, SourceId,
+    SourceTable, SubOrSameType, parse_module_and_expr,
 };
 use rustyline::DefaultEditor;
 use rustyline::{config::Configurer, error::ReadlineError};
@@ -462,9 +462,33 @@ fn print_help() {
         "\\function FN_NAME_OR_INDEX MOD_NAME?: Shows the code of a function given by its name or index, in a given module."
     );
     println!("\\function MOD_NAME::FN_NAME: Shows the code of a function using a qualified name.");
+    println!(
+        "\\opt on|off: Shows or sets MIR optimization (partial evaluation). With MIR enabled, both the raw and the optimized MIR are shown."
+    );
     println!("\\history: Shows the modules in this session's history.");
     println!("CTRL-D: Exits the REPL.");
     println!("\nNote: expression locals do not persist across REPL inputs.");
+}
+
+/// Prints the module's MIR — both stages when the session optimizes, so the effect of the
+/// partial-evaluation passes is visible side by side.
+///
+/// Rendering a stage means asking the session for it, so this flips the setting around each render
+/// and restores it. Optimized bodies are built on demand beside the raw ones, so nothing already
+/// compiled is invalidated.
+fn print_mir(session: &mut CompilerSession, module_id: ModuleId) {
+    let optimization = session.mir_optimization();
+    if optimization == MirOptimization::Disabled {
+        println!("Module MIR:\n{}", session.emit_mir_module(module_id));
+        return;
+    }
+    session.set_mir_optimization(MirOptimization::Disabled);
+    let raw = session.emit_mir_module(module_id);
+    session.set_mir_optimization(MirOptimization::Enabled);
+    let optimized = session.emit_mir_module(module_id);
+    session.set_mir_optimization(optimization);
+    println!("Module MIR (raw):\n{raw}");
+    println!("Module MIR (optimized):\n{optimized}");
 }
 
 fn console_print(message: &FerliumString) {
@@ -605,7 +629,7 @@ fn process_input(
     }
 
     if target == ExecutionTarget::Mir {
-        println!("Module MIR:\n{}", session.emit_mir_module(module_id));
+        print_mir(session, module_id);
     }
 
     // If there's an expression, evaluate it
@@ -698,6 +722,7 @@ fn process_pipe_input(
     print_annotations: bool,
     allow_experimental: bool,
     target: ExecutionTarget,
+    optimization: MirOptimization,
 ) -> i32 {
     // Read all input from stdin
     let mut input = String::new();
@@ -718,6 +743,7 @@ fn process_pipe_input(
     // Initialize ferlium contexts
     let mut session = CompilerSession::new();
     session.set_allow_experimental(allow_experimental);
+    session.set_mir_optimization(optimization);
 
     // Process the input
     process_input("<stdin>", &input, 0, &mut session, false, target, None).map_or_else(
@@ -734,10 +760,17 @@ fn process_pipe_input(
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let target = if args.iter().any(|arg| arg == "--mir") {
+    // Optimization only applies to MIR, so asking for it selects that target.
+    let optimize = args.iter().any(|arg| arg == "--optimize");
+    let target = if optimize || args.iter().any(|arg| arg == "--mir") {
         ExecutionTarget::Mir
     } else {
         ExecutionTarget::Hir
+    };
+    let optimization = if optimize {
+        MirOptimization::Enabled
+    } else {
+        MirOptimization::Disabled
     };
 
     // Check if we're being used in pipe mode (stdin is not a terminal)
@@ -751,6 +784,7 @@ fn main() {
             print_annotations,
             allow_experimental,
             target,
+            optimization,
         ));
     }
 
@@ -763,6 +797,10 @@ fn main() {
         println!("  {} [--help|-h]        Show the help.", args[0]);
         println!(
             "  {} [--mir]            Compile to MIR, print it, and execute it with the MIR interpreter.",
+            args[0]
+        );
+        println!(
+            "  {} [--optimize]       Enable MIR partial evaluation, and print raw and optimized MIR (implies --mir).",
             args[0]
         );
         println!(
@@ -839,16 +877,21 @@ fn main() {
     }
 
     // Interactive REPL mode
-    run_interactive_repl(allow_experimental, target);
+    run_interactive_repl(allow_experimental, target, optimization);
 }
 
-fn run_interactive_repl(allow_experimental: bool, target: ExecutionTarget) {
+fn run_interactive_repl(
+    allow_experimental: bool,
+    target: ExecutionTarget,
+    optimization: MirOptimization,
+) {
     // Logging
     env_logger::init();
 
     // ferlium emission and evaluation contexts
     let mut session = CompilerSession::new();
     session.set_allow_experimental(allow_experimental);
+    session.set_mir_optimization(optimization);
     session.register_module(
         Path::single_str("console"),
         console_module(session.modules().next_id()),
@@ -886,6 +929,33 @@ fn run_interactive_repl(allow_experimental: bool, target: ExecutionTarget) {
                     let store = match args[0] {
                         "help" => {
                             print_help();
+                            true
+                        }
+                        "opt" => {
+                            let setting = match args.get(1).copied() {
+                                None => Some(session.mir_optimization()),
+                                Some("on" | "yes") => Some(MirOptimization::Enabled),
+                                Some("off" | "no") => Some(MirOptimization::Disabled),
+                                Some(other) => {
+                                    println!("Unknown optimization setting \"{other}\".");
+                                    None
+                                }
+                            };
+                            if let Some(setting) = setting {
+                                session.set_mir_optimization(setting);
+                                let state = match setting {
+                                    MirOptimization::Enabled => "on",
+                                    MirOptimization::Disabled => "off",
+                                };
+                                println!("MIR optimization: {state}");
+                                if setting == MirOptimization::Enabled
+                                    && target != ExecutionTarget::Mir
+                                {
+                                    println!(
+                                        "Note: optimization applies to MIR only; restart with --mir to use it."
+                                    );
+                                }
+                            }
                             true
                         }
                         "fuel" => match args.get(1).copied() {
