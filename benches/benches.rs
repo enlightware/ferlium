@@ -13,11 +13,50 @@ use gungraun::{
 use std::hint::black_box;
 
 use ferlium::{
-    CompilerSession, ExecutionTarget, Path,
+    CompilerSession, ExecutionTarget, MirOptimization, Path,
     hir::value::Value,
     module::{LocalFunctionId, ModuleId},
     std::{array::array_value_from_vec, string::String as Str},
 };
+
+/// What a benchmark runs against.
+///
+/// Optimization is a per-compilation session setting rather than an execution target — the target
+/// says *which interpreter*, the setting says *which artifact stage* — so the two axes are combined
+/// here rather than by adding a variant to [`ExecutionTarget`]. Every benchmark that iterates
+/// targets runs all three, which is what makes the cost of partial evaluation, at compile time and
+/// at run time, directly comparable to the two baselines.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum BenchTarget {
+    Hir,
+    Mir,
+    OptimizedMir,
+}
+
+impl BenchTarget {
+    const ALL: [Self; 3] = [Self::Hir, Self::Mir, Self::OptimizedMir];
+
+    fn target(self) -> ExecutionTarget {
+        match self {
+            Self::Hir => ExecutionTarget::Hir,
+            Self::Mir | Self::OptimizedMir => ExecutionTarget::Mir,
+        }
+    }
+
+    fn optimization(self) -> MirOptimization {
+        match self {
+            Self::Hir | Self::Mir => MirOptimization::Disabled,
+            Self::OptimizedMir => MirOptimization::Enabled,
+        }
+    }
+
+    /// A fresh session configured for this target.
+    fn session(self) -> CompilerSession {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(self.optimization());
+        session
+    }
+}
 
 // --- User-code corpus ---
 //
@@ -89,13 +128,13 @@ fn bench_session() -> CompilerSession {
     CompilerSession::new()
 }
 
-fn bench_session_for_target(target: ExecutionTarget) -> (CompilerSession, ExecutionTarget) {
-    let mut session = CompilerSession::new();
-    if target == ExecutionTarget::Mir {
+fn bench_session_for_target(target: BenchTarget) -> (CompilerSession, ExecutionTarget) {
+    let mut session = target.session();
+    if target.target() == ExecutionTarget::Mir {
         let std_id = session.std_module().module_id();
-        session.prepare_execution_target(target, std_id);
+        session.prepare_execution_target(target.target(), std_id);
     }
-    (session, target)
+    (session, target.target())
 }
 
 fn warm_initial_session_state() {
@@ -164,6 +203,21 @@ fn bench_std_mir_build(mut session: CompilerSession) -> BenchOutput<()> {
     }
 }
 
+// The cost of the optimization passes, over every body of the standard library. Optimization is
+// driven by `prepare_execution_target`, not by compiling, so this is where its compile-time cost
+// shows up — the user-code compile benchmarks never enter it. Read against `bench_std_mir_build`,
+// which does the same work with the passes off. (Gungraun's macro rejects doc comments here.)
+#[library_benchmark(setup = bench_session, teardown = teardown_benchmark)]
+fn bench_std_mir_optimize(mut session: CompilerSession) -> BenchOutput<()> {
+    session.set_mir_optimization(MirOptimization::Enabled);
+    let std_id = session.std_module().module_id();
+    measure(|| session.prepare_execution_target(ExecutionTarget::Mir, std_id));
+    BenchOutput {
+        session,
+        result: (),
+    }
+}
+
 #[library_benchmark(setup = warm_std_mir_state, teardown = teardown_benchmark)]
 fn bench_cached_std_mir_session_load(_: ()) -> BenchOutput<()> {
     BenchOutput {
@@ -173,7 +227,7 @@ fn bench_cached_std_mir_session_load(_: ()) -> BenchOutput<()> {
 }
 
 #[library_benchmark(teardown = teardown_benchmark)]
-#[benches::target(iter = ExecutionTarget::ALL, setup = bench_session_for_target)]
+#[benches::target(iter = BenchTarget::ALL, setup = bench_session_for_target)]
 fn bench_user_code_compile_without_std_startup(
     (mut session, target): (CompilerSession, ExecutionTarget),
 ) -> BenchOutput<()> {
@@ -186,11 +240,11 @@ fn bench_user_code_compile_without_std_startup(
 
 // --- Runtime benchmarks ---
 
-fn setup_quicksort(target: ExecutionTarget) -> RuntimeBench<Vec<isize>> {
-    let mut session = CompilerSession::new();
+fn setup_quicksort(target: BenchTarget) -> RuntimeBench<Vec<isize>> {
+    let mut session = target.session();
     let module_id = session
         .compile_for(
-            target,
+            target.target(),
             include_str!("../tests/modules/quicksort.fer"),
             "quicksort.fer",
             Path::single_str("quicksort"),
@@ -198,11 +252,11 @@ fn setup_quicksort(target: ExecutionTarget) -> RuntimeBench<Vec<isize>> {
         .unwrap()
         .module_id;
     let random_data = lcg_seq(300, 42);
-    runtime_bench(target, session, module_id, "quicksort_int_a", random_data)
+    runtime_bench(target.target(), session, module_id, "quicksort_int_a", random_data)
 }
 
 #[library_benchmark(teardown = teardown_benchmark)]
-#[benches::target(iter = ExecutionTarget::ALL, setup = setup_quicksort)]
+#[benches::target(iter = BenchTarget::ALL, setup = setup_quicksort)]
 fn bench_quicksort_run(bench: RuntimeBench<Vec<isize>>) -> BenchOutput<Value> {
     let RuntimeBench {
         target,
@@ -219,22 +273,22 @@ fn bench_quicksort_run(bench: RuntimeBench<Vec<isize>>) -> BenchOutput<Value> {
     BenchOutput { session, result }
 }
 
-fn setup_fibonacci(target: ExecutionTarget) -> RuntimeBench<()> {
-    let mut session = CompilerSession::new();
+fn setup_fibonacci(target: BenchTarget) -> RuntimeBench<()> {
+    let mut session = target.session();
     let module_id = session
         .compile_for(
-            target,
+            target.target(),
             include_str!("../tests/modules/fibonacci.fer"),
             "fibonacci.fer",
             Path::single_str("fibonacci"),
         )
         .unwrap()
         .module_id;
-    runtime_bench(target, session, module_id, "fibonacci_rec", ())
+    runtime_bench(target.target(), session, module_id, "fibonacci_rec", ())
 }
 
 #[library_benchmark(teardown = teardown_benchmark)]
-#[benches::target(iter = ExecutionTarget::ALL, setup = setup_fibonacci)]
+#[benches::target(iter = BenchTarget::ALL, setup = setup_fibonacci)]
 fn bench_fibonacci(bench: RuntimeBench<()>) -> BenchOutput<isize> {
     let RuntimeBench {
         target,
@@ -258,22 +312,22 @@ fn bench_fibonacci(bench: RuntimeBench<()>) -> BenchOutput<isize> {
     BenchOutput { session, result }
 }
 
-fn setup_sieve(target: ExecutionTarget) -> RuntimeBench<()> {
-    let mut session = CompilerSession::new();
+fn setup_sieve(target: BenchTarget) -> RuntimeBench<()> {
+    let mut session = target.session();
     let module_id = session
         .compile_for(
-            target,
+            target.target(),
             include_str!("../tests/modules/sieve.fer"),
             "sieve.fer",
             Path::single_str("sieve"),
         )
         .unwrap()
         .module_id;
-    runtime_bench(target, session, module_id, "prime_count", ())
+    runtime_bench(target.target(), session, module_id, "prime_count", ())
 }
 
 #[library_benchmark(teardown = teardown_benchmark)]
-#[benches::target(iter = ExecutionTarget::ALL, setup = setup_sieve)]
+#[benches::target(iter = BenchTarget::ALL, setup = setup_sieve)]
 fn bench_sieve(bench: RuntimeBench<()>) -> BenchOutput<isize> {
     let RuntimeBench {
         target,
@@ -297,11 +351,11 @@ fn bench_sieve(bench: RuntimeBench<()>) -> BenchOutput<isize> {
     BenchOutput { session, result }
 }
 
-fn setup_rle_encode(target: ExecutionTarget) -> RuntimeBench<Str> {
-    let mut session = CompilerSession::new();
+fn setup_rle_encode(target: BenchTarget) -> RuntimeBench<Str> {
+    let mut session = target.session();
     let module_id = session
         .compile_for(
-            target,
+            target.target(),
             include_str!("../tests/modules/rle_encode.fer"),
             "rle_encode.fer",
             Path::single_str("rle_encode"),
@@ -309,11 +363,11 @@ fn setup_rle_encode(target: ExecutionTarget) -> RuntimeBench<Str> {
         .unwrap()
         .module_id;
     let input = Str::new(&"aabccccccc".repeat(50));
-    runtime_bench(target, session, module_id, "rle_encode_string", input)
+    runtime_bench(target.target(), session, module_id, "rle_encode_string", input)
 }
 
 #[library_benchmark(teardown = teardown_benchmark)]
-#[benches::target(iter = ExecutionTarget::ALL, setup = setup_rle_encode)]
+#[benches::target(iter = BenchTarget::ALL, setup = setup_rle_encode)]
 fn bench_rle_encode(bench: RuntimeBench<Str>) -> BenchOutput<Str> {
     let RuntimeBench {
         target,
@@ -332,22 +386,22 @@ fn bench_rle_encode(bench: RuntimeBench<Str>) -> BenchOutput<Str> {
     BenchOutput { session, result }
 }
 
-fn setup_csv(target: ExecutionTarget) -> RuntimeBench<()> {
-    let mut session = CompilerSession::new();
+fn setup_csv(target: BenchTarget) -> RuntimeBench<()> {
+    let mut session = target.session();
     let module_id = session
         .compile_for(
-            target,
+            target.target(),
             include_str!("../tests/modules/csv.fer"),
             "csv.fer",
             Path::single_str("csv"),
         )
         .unwrap()
         .module_id;
-    runtime_bench(target, session, module_id, "csv_table", ())
+    runtime_bench(target.target(), session, module_id, "csv_table", ())
 }
 
 #[library_benchmark(teardown = teardown_benchmark)]
-#[benches::target(iter = ExecutionTarget::ALL, setup = setup_csv)]
+#[benches::target(iter = BenchTarget::ALL, setup = setup_csv)]
 fn bench_csv(bench: RuntimeBench<()>) -> BenchOutput<Str> {
     let RuntimeBench {
         target,
@@ -371,24 +425,24 @@ fn bench_csv(bench: RuntimeBench<()>) -> BenchOutput<Str> {
     BenchOutput { session, result }
 }
 
-fn setup_bank_account(target: ExecutionTarget) -> RuntimeBench<()> {
+fn setup_bank_account(target: BenchTarget) -> RuntimeBench<()> {
     use indoc::indoc;
-    let mut session = CompilerSession::new();
+    let mut session = target.session();
     let _ = session.compile_for(
-        target,
+        target.target(),
         include_str!("../tests/modules/quicksort.fer"),
         "quicksort.fer",
         Path::single_str("quicksort"),
     );
     let _ = session.compile_for(
-        target,
+        target.target(),
         include_str!("../tests/modules/bank_account.fer"),
         "bank_account.fer",
         Path::single_str("account"),
     );
     let module_id = session
         .compile_for(
-            target,
+            target.target(),
             indoc! { r#"
             fn test() {
                 let data = account::test_data();
@@ -403,11 +457,11 @@ fn setup_bank_account(target: ExecutionTarget) -> RuntimeBench<()> {
         )
         .unwrap()
         .module_id;
-    runtime_bench(target, session, module_id, "test", ())
+    runtime_bench(target.target(), session, module_id, "test", ())
 }
 
 #[library_benchmark(teardown = teardown_benchmark)]
-#[benches::target(iter = ExecutionTarget::ALL, setup = setup_bank_account)]
+#[benches::target(iter = BenchTarget::ALL, setup = setup_bank_account)]
 fn bench_bank_account_run(bench: RuntimeBench<()>) -> BenchOutput<Str> {
     let RuntimeBench {
         target,
@@ -426,22 +480,22 @@ fn bench_bank_account_run(bench: RuntimeBench<()>) -> BenchOutput<Str> {
     BenchOutput { session, result }
 }
 
-fn setup_sudoku(target: ExecutionTarget) -> RuntimeBench<()> {
-    let mut session = CompilerSession::new();
+fn setup_sudoku(target: BenchTarget) -> RuntimeBench<()> {
+    let mut session = target.session();
     let module_id = session
         .compile_for(
-            target,
+            target.target(),
             include_str!("../tests/modules/sudoku.fer"),
             "sudoku.fer",
             Path::single_str("sudoku"),
         )
         .unwrap()
         .module_id;
-    runtime_bench(target, session, module_id, "solved_cell", ())
+    runtime_bench(target.target(), session, module_id, "solved_cell", ())
 }
 
 #[library_benchmark(teardown = teardown_benchmark)]
-#[benches::target(iter = ExecutionTarget::ALL, setup = setup_sudoku)]
+#[benches::target(iter = BenchTarget::ALL, setup = setup_sudoku)]
 fn bench_sudoku_run(bench: RuntimeBench<()>) -> BenchOutput<isize> {
     let RuntimeBench {
         target,
@@ -468,11 +522,11 @@ fn bench_sudoku_run(bench: RuntimeBench<()>) -> BenchOutput<isize> {
     BenchOutput { session, result }
 }
 
-fn setup_calculator(target: ExecutionTarget) -> RuntimeBench<Str> {
-    let mut session = CompilerSession::new();
+fn setup_calculator(target: BenchTarget) -> RuntimeBench<Str> {
+    let mut session = target.session();
     let module_id = session
         .compile_for(
-            target,
+            target.target(),
             include_str!("../tests/modules/calculator.fer"),
             "calculator.fer",
             Path::single_str("calculator"),
@@ -480,11 +534,11 @@ fn setup_calculator(target: ExecutionTarget) -> RuntimeBench<Str> {
         .unwrap()
         .module_id;
     let expr = Str::new("((1 + 2) * (3 + 4) - 5) * 6 / 2 + 100");
-    runtime_bench(target, session, module_id, "calculate", expr)
+    runtime_bench(target.target(), session, module_id, "calculate", expr)
 }
 
 #[library_benchmark(teardown = teardown_benchmark)]
-#[benches::target(iter = ExecutionTarget::ALL, setup = setup_calculator)]
+#[benches::target(iter = BenchTarget::ALL, setup = setup_calculator)]
 fn bench_calculator_run(bench: RuntimeBench<Str>) -> BenchOutput<isize> {
     let RuntimeBench {
         target,
@@ -527,6 +581,7 @@ library_benchmark_group!(
         bench_std_load,
         bench_warm_session_load,
         bench_std_mir_build,
+        bench_std_mir_optimize,
         bench_cached_std_mir_session_load,
         bench_user_code_compile_without_std_startup
     ]
