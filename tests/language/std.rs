@@ -2617,6 +2617,10 @@ fn string_normalization() {
     // Strings are stored in NFC form. U+0065 (e) + U+0301 (combining acute) in
     // NFD is 3 bytes; its NFC precomposed form U+00E9 (é) is 2 bytes.
     // string_byte_len distinguishes the two forms.
+    //
+    // The literal cases below also guard `String::from_static`, which skips normalization because
+    // `StaticStr::new` already normalized when the literal was interned. Moving normalization out
+    // of either one breaks these.
     assert_val_eq!(
         session.run("string_byte_len(\"e\\u{0301}\")"),
         int(2) // NFC: U+00E9 → 2 bytes, not NFD 3 bytes

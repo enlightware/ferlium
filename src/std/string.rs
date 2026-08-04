@@ -94,8 +94,31 @@ impl String {
         Self(Rc::new(s.nfc().collect()))
     }
 
+    /// Wraps text that is *already* NFC-normalized, skipping normalization.
+    ///
+    /// The invariant is the caller's to uphold: this type's comparisons, hashing and grapheme
+    /// handling all assume NFC, so passing unnormalized text produces a `String` that misbehaves
+    /// against every other one. Debug builds check it.
+    fn from_normalized(s: &str) -> Self {
+        debug_assert!(
+            unicode_normalization::is_nfc(s),
+            "`String::from_normalized` requires NFC-normalized text"
+        );
+        Self(Rc::new(s.to_string()))
+    }
+
+    /// Materializes a string literal.
+    ///
+    /// `StaticStr::new` normalizes when the literal is interned — at compile time, once — so the
+    /// text is already NFC here and normalizing again would repeat that work on every execution.
+    /// This is the hot path it matters on: every string literal in a program lowers to a call here,
+    /// and a literal inside a loop pays per iteration.
+    ///
+    /// Only *this* path may skip normalization. Strings built at run time must still normalize:
+    /// NFC is not closed under concatenation, so joining two normalized strings can produce text
+    /// that is not.
     fn from_static(value: StaticStr) -> Self {
-        Self::new(value.as_str())
+        Self::from_normalized(value.as_str())
     }
 
     pub fn push_str(&mut self, value: &Self) {
