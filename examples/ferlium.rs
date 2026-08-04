@@ -529,6 +529,7 @@ fn split_qualified_function_name(name: &str) -> Option<(Path, &str)> {
 
 /// Process a single input: parse, compile module, and evaluate expression if present.
 /// Returns Ok(module) if successful and Err(exit_code) if there was a failure.
+#[allow(clippy::too_many_arguments)]
 fn process_input(
     name: &str,
     input: &str,
@@ -537,6 +538,7 @@ fn process_input(
     is_repl: bool,
     target: ExecutionTarget,
     fuel_limit: Option<usize>,
+    print_optimization_report: bool,
 ) -> Result<ModuleId, i32> {
     // Parse the input once to get the list of symbols this module defines.
     let source_id = session.source_table().next_id();
@@ -631,6 +633,12 @@ fn process_input(
     if target == ExecutionTarget::Mir {
         print_mir(session, module_id);
     }
+    if print_optimization_report {
+        let report = session.optimization_report(module_id);
+        let module = session.expect_fresh_module(module_id);
+        let module_env = session.modules().env_for(module);
+        println!("Optimization report:\n{}", report.format_with(&module_env));
+    }
 
     // If there's an expression, evaluate it
     if let Some(expr) = expr {
@@ -723,6 +731,7 @@ fn process_pipe_input(
     allow_experimental: bool,
     target: ExecutionTarget,
     optimization: MirOptimization,
+    optimization_report: bool,
 ) -> i32 {
     // Read all input from stdin
     let mut input = String::new();
@@ -746,7 +755,17 @@ fn process_pipe_input(
     session.set_mir_optimization(optimization);
 
     // Process the input
-    process_input("<stdin>", &input, 0, &mut session, false, target, None).map_or_else(
+    process_input(
+        "<stdin>",
+        &input,
+        0,
+        &mut session,
+        false,
+        target,
+        None,
+        optimization_report,
+    )
+    .map_or_else(
         |code| code,
         |module_id| {
             if print_module {
@@ -761,7 +780,9 @@ fn process_pipe_input(
 fn main() {
     let args: Vec<String> = env::args().collect();
     // Optimization only applies to MIR, so asking for it selects that target.
-    let optimize = args.iter().any(|arg| arg == "--optimize");
+    // Reporting is about what optimization did, so asking for it turns optimization on.
+    let optimization_report = args.iter().any(|arg| arg == "--optimization-report");
+    let optimize = optimization_report || args.iter().any(|arg| arg == "--optimize");
     let target = if optimize || args.iter().any(|arg| arg == "--mir") {
         ExecutionTarget::Mir
     } else {
@@ -785,6 +806,7 @@ fn main() {
             allow_experimental,
             target,
             optimization,
+            optimization_report,
         ));
     }
 
@@ -801,6 +823,10 @@ fn main() {
         );
         println!(
             "  {} [--optimize]       Enable MIR partial evaluation, and print raw and optimized MIR (implies --mir).",
+            args[0]
+        );
+        println!(
+            "  {} [--optimization-report] Report what optimization folded and what it declined (implies --optimize).",
             args[0]
         );
         println!(
@@ -877,13 +903,19 @@ fn main() {
     }
 
     // Interactive REPL mode
-    run_interactive_repl(allow_experimental, target, optimization);
+    run_interactive_repl(
+        allow_experimental,
+        target,
+        optimization,
+        optimization_report,
+    );
 }
 
 fn run_interactive_repl(
     allow_experimental: bool,
     target: ExecutionTarget,
     optimization: MirOptimization,
+    optimization_report: bool,
 ) {
     // Logging
     env_logger::init();
@@ -1120,7 +1152,16 @@ fn run_interactive_repl(
 
         // Process the input using the shared function
         let name = &format!("repl{counter}");
-        let result = process_input(name, &src, counter, &mut session, true, target, fuel_limit);
+        let result = process_input(
+            name,
+            &src,
+            counter,
+            &mut session,
+            true,
+            target,
+            fuel_limit,
+            optimization_report,
+        );
         if let Ok(module) = result {
             last_module = module;
         }

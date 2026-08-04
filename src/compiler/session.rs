@@ -18,18 +18,20 @@ use super::artifacts::{
 
 use crate::{
     FxHashSet, Location, SourceId, SourceTable, ast, compilation_error,
-    compiler::diagnostics::ModuleDiagnostic,
-    compiler::error::{CompilationError, InternalCompilationError, LocatedError},
-    compiler::pipeline::{
-        ModuleRef, compile_with_source_id, new_ast_arena_sized_from_source, parse_module_and_expr,
+    compiler::{
+        diagnostics::ModuleDiagnostic,
+        error::{CompilationError, InternalCompilationError, LocatedError},
+        pipeline::{
+            ModuleRef, compile_with_source_id, new_ast_arena_sized_from_source,
+            parse_module_and_expr,
+        },
     },
     define_id_type, emit_mir,
     eval::{ControlFlow, EvalCtx, RuntimeError, ValOrMut, eval_function_with_ctx},
     execution::{DEFAULT_INTERACTIVE_FUEL_LIMIT, ExecutionTarget, ReferenceInterpreterLimits},
     format::FormatWith,
-    hir::emit_expr::emit_expr_entry_with_private_impls,
-    hir::value::Value,
-    hir::{self, hir_syn::local},
+    hir::{self, emit_expr::emit_expr_entry_with_private_impls, hir_syn::local, value::Value},
+    mir::pass::report::OptimizationReport,
     module::{
         self, LocalFunctionId, Module, ModuleEnv, ModuleFunction, ModuleId, Path,
         ResolvedValueLayout, Uses,
@@ -1228,6 +1230,29 @@ impl CompilerSession {
         optimization: MirOptimization,
     ) -> Option<&MirArtifacts> {
         self.expect_module_entry(module_id).mir(optimization)
+    }
+
+    /// What optimizing `module_id` achieved, and what it declined to do.
+    ///
+    /// Opt-in and derived: nothing is recorded during optimization to produce this, so a session
+    /// that never asks pays nothing. Asking costs one analysis pass over the module's optimized
+    /// bodies, plus preparing both artifact stages if they are not built yet.
+    ///
+    /// This is what lets a user check whether making a hot path concrete had the intended effect,
+    /// and what tells us which refusal dominates — the number that sizes inlining against
+    /// specialization. It is never a diagnostic: an unfolded call is ordinary.
+    pub fn optimization_report(&mut self, module_id: ModuleId) -> OptimizationReport {
+        ensure_mir_artifacts(&self.modules, module_id);
+        ensure_optimized_mir_artifacts(&*self, module_id);
+        let raw = self
+            .mir_artifacts_for(module_id, MirOptimization::Disabled)
+            .expect("raw MIR must be prepared");
+        let optimized = self
+            .mir_artifacts_for(module_id, MirOptimization::Enabled)
+            .expect("optimized MIR must be prepared");
+        let module = self.expect_fresh_module(module_id);
+        let env = ModuleEnv::new(module, self.raw_modules());
+        crate::mir::pass::report::build(self, module_id, raw.bodies(), optimized.bodies(), env)
     }
 
     /// Returns the entry for module_id, or panic if not found.

@@ -33,6 +33,7 @@ pub(crate) mod budget;
 pub(crate) mod dataflow;
 pub(crate) mod dce;
 pub(crate) mod fold;
+pub mod report;
 
 use crate::{
     compiler::CompilerSession,

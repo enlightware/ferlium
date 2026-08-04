@@ -72,6 +72,23 @@ pub(crate) enum NotFoldable {
     Failed,
     /// The attempt exhausted its compile-time budget, or poisoned its evaluation context.
     BudgetExceeded,
+    /// The callee is not statically known, so there is nothing to evaluate. Devirtualization —
+    /// through inlining, or specialization — is what would resolve it.
+    CalleeNotDirect,
+    /// An argument's value is not known at this call site.
+    ArgumentNotKnown,
+    /// A hidden evidence operand is not a constant dictionary, so the callee's instantiation is not
+    /// known. Specialization is what would resolve it.
+    EvidenceNotKnown,
+    /// An argument arrives by `MutableRef`, so the callee may write through it; folding would have
+    /// to reify those writes too.
+    MutableArgument,
+    /// The call produces no value, so folding it would gain nothing — and would delete a call the
+    /// host may be relying on, `Value::drop` being declared effect-free.
+    UnitResult,
+    /// The call would fold, but optimization stopped before reaching it: folding and inlining run
+    /// for a bounded number of rounds.
+    RoundsExhausted,
     /// The call was evaluated, but its result cannot be expressed as MIR. Raised by
     /// [`reify`](crate::mir::reify::reify) rather than by the evaluator: today the constant pool
     /// holds only trivially-copyable representations, so a folded `String`, list, variant, or
@@ -80,6 +97,29 @@ pub(crate) enum NotFoldable {
     /// Worth reporting separately from the engine-level refusals: how often it occurs is what
     /// decides whether that phase is worth doing.
     NotReifiable,
+}
+
+impl NotFoldable {
+    /// A short phrase naming the reason, for the optimization report.
+    ///
+    /// User-visible: prefer describing what is missing over naming an internal mechanism, and keep
+    /// the wording stable — people grep for these.
+    pub(crate) fn description(self) -> &'static str {
+        match self {
+            Self::Effectful => "callee is effectful",
+            Self::NoBody => "callee has no body the compiler can run",
+            Self::UnsupportedConvention => "result convention is not supported",
+            Self::Failed => "evaluation raised a failure",
+            Self::BudgetExceeded => "compile-time budget exhausted",
+            Self::CalleeNotDirect => "callee not statically known",
+            Self::ArgumentNotKnown => "argument not known",
+            Self::EvidenceNotKnown => "trait instantiation not known",
+            Self::MutableArgument => "argument passed by mutable reference",
+            Self::UnitResult => "call produces no value",
+            Self::RoundsExhausted => "optimization rounds exhausted",
+            Self::NotReifiable => "result cannot be expressed as a constant",
+        }
+    }
 }
 
 /// Whether a call with these effects may be executed at compile time.

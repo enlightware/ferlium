@@ -31,7 +31,7 @@
 #![allow(dead_code)]
 
 use crate::{
-    CompilerSession,
+    CompilerSession, Location,
     hir::function::ArgConvention,
     mir::{
         self, BlockId, Function, Operation, OperationKind,
@@ -41,7 +41,7 @@ use crate::{
         terminator::{Terminator, TerminatorKind},
         value::Constant,
     },
-    module::{ModuleEnv, ModuleId},
+    module::{FunctionId, ModuleEnv, ModuleId},
     types::r#type::{CallImplType, Type},
 };
 
@@ -69,7 +69,7 @@ struct InvokeFold {
 
 /// What one pass over a function decided to rewrite.
 #[derive(Default)]
-struct Plan {
+pub(crate) struct Plan {
     calls: Vec<Fold>,
     invokes: Vec<InvokeFold>,
     /// Conditional branches whose condition is known, and the successor they always take.
@@ -77,9 +77,22 @@ struct Plan {
 }
 
 impl Plan {
+    /// How many call sites this plan would fold — what the report calls round-exhausted when it
+    /// finds any in an already-optimized body.
+    pub(crate) fn foldable_calls(&self) -> usize {
+        self.calls.len() + self.invokes.len()
+    }
+
     fn is_empty(&self) -> bool {
         self.calls.is_empty() && self.invokes.is_empty() && self.branches.is_empty()
     }
+}
+
+/// Why one call site was not folded, and where it is.
+pub(crate) struct Refusal {
+    pub site: Location,
+    pub callee: Option<FunctionId>,
+    pub reason: NotFoldable,
 }
 
 /// Folds what can be folded in `func`, returning a rewritten function if anything was.
@@ -89,7 +102,7 @@ pub(crate) fn fold_function(
     session: &CompilerSession,
     module_id: ModuleId,
 ) -> Option<Function> {
-    let plan = plan_folds(func, env, session, module_id);
+    let plan = plan_folds(func, env, session, module_id, &mut None);
     if plan.is_empty() {
         return None;
     }
@@ -128,11 +141,15 @@ pub(crate) fn fold_function(
 }
 
 /// Decides what to rewrite, without touching the function.
-fn plan_folds(
+///
+/// `refusals`, when present, collects why each call site was left alone — the optimization report
+/// runs this over an already-optimized body precisely so its answers cannot drift from the pass's.
+pub(crate) fn plan_folds(
     func: &Function,
     env: ModuleEnv<'_>,
     session: &CompilerSession,
     module_id: ModuleId,
+    refusals: &mut Option<&mut Vec<Refusal>>,
 ) -> Plan {
     let analysis = dataflow::analyze(func);
     let evaluator = ConstEvaluator::new(module_id, session);
@@ -145,7 +162,8 @@ fn plan_folds(
         let basic_block = func.block(block);
         for (index, operation) in basic_block.operations().iter().enumerate() {
             if let OperationKind::Call { ty } = &operation.kind
-                && let Ok(constant) = try_fold_call(operation, ty, &state, &evaluator, &env)
+                && let Some(constant) =
+                    fold_outcome(operation, ty, &state, &evaluator, &env, refusals)
                 && let Some(call) = dataflow::call_operands(&operation.operands, ty)
             {
                 let destination = call.result.clone();
@@ -176,7 +194,8 @@ fn plan_folds(
                 operation, normal, ..
             } => {
                 if let OperationKind::Call { ty } = &operation.kind
-                    && let Ok(constant) = try_fold_call(operation, ty, &state, &evaluator, &env)
+                    && let Some(constant) =
+                        fold_outcome(operation, ty, &state, &evaluator, &env, refusals)
                     && let Some(call) = dataflow::call_operands(&operation.operands, ty)
                 {
                     plan.invokes.push(InvokeFold {
@@ -207,6 +226,33 @@ fn plan_folds(
     plan
 }
 
+/// Evaluates a call site, recording the refusal if one was asked for.
+fn fold_outcome(
+    operation: &Operation,
+    ty: &CallImplType,
+    state: &State,
+    evaluator: &ConstEvaluator<'_>,
+    env: &ModuleEnv<'_>,
+    refusals: &mut Option<&mut Vec<Refusal>>,
+) -> Option<Constant> {
+    match try_fold_call(operation, ty, state, evaluator, env) {
+        Ok(constant) => Some(constant),
+        Err(reason) => {
+            if let Some(refusals) = refusals {
+                refusals.push(Refusal {
+                    site: operation.span,
+                    callee: match &operation.operands[0] {
+                        mir::Value::Function(id) => Some(*id),
+                        _ => None,
+                    },
+                    reason,
+                });
+            }
+            None
+        }
+    }
+}
+
 /// The value of a branch condition, when the analysis knows it.
 fn known_condition(condition: &mir::Value, state: &State) -> Option<bool> {
     let mir::Value::Register(id) = condition else {
@@ -233,8 +279,7 @@ fn try_fold_call(
         return Err(NotFoldable::UnsupportedConvention);
     };
     let mir::Value::Function(callee) = call.callee else {
-        // An indirect callee: devirtualization has not (or cannot) resolve it.
-        return Err(NotFoldable::NoBody);
+        return Err(NotFoldable::CalleeNotDirect);
     };
 
     let mut arguments = Vec::with_capacity(call.extras.len() + call.arguments.len());
@@ -242,14 +287,14 @@ fn try_fold_call(
         match extra {
             mir::Value::Dictionary(id) => arguments.push(ConstArgument::Dictionary(*id)),
             // A forwarded dictionary parameter is not known here; specialization is a later phase.
-            _ => return discard(arguments, NotFoldable::Effectful),
+            _ => return discard(arguments, NotFoldable::EvidenceNotKnown),
         }
     }
     for (operand, convention) in &call.arguments {
         // Write-back of a `MutableRef` argument is out of scope: the callee's writes would have to
         // be reified too.
         if !matches!(convention, ArgConvention::Let) {
-            return discard(arguments, NotFoldable::UnsupportedConvention);
+            return discard(arguments, NotFoldable::MutableArgument);
         }
         let known = state
             .place_of(operand)
@@ -260,7 +305,7 @@ fn try_fold_call(
             });
         match known {
             Some(literal) => arguments.push(ConstArgument::Value(literal.into_value())),
-            None => return discard(arguments, NotFoldable::Failed),
+            None => return discard(arguments, NotFoldable::ArgumentNotKnown),
         }
     }
 
@@ -269,7 +314,7 @@ fn try_fold_call(
     // effect-free by its trait, so a host that instruments drops *must* declare that instrumentation
     // pure; folding pure unit-returning calls would silently remove it for no benefit.
     if ty.ret() == Type::unit() {
-        return discard(arguments, NotFoldable::UnsupportedConvention);
+        return discard(arguments, NotFoldable::UnitResult);
     }
 
     let value = evaluator.try_call(

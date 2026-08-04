@@ -152,6 +152,11 @@ impl MirArtifacts {
         self.functions.get(id.as_index())?.as_ref()
     }
 
+    /// Every body, in local function order, with `None` where a function has no MIR (a native).
+    pub(crate) fn bodies(&self) -> &[Option<mir::Function>] {
+        &self.functions
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.functions.len()
     }
