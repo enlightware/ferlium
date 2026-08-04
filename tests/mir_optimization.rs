@@ -8,13 +8,12 @@
 //
 //! Staging and rewritability checks for the MIR optimization pipeline.
 //!
-//! The only pass installed today is the identity rewrite, so optimized MIR must be structurally
-//! identical to raw MIR — up to value renumbering, which is unobservable — and must execute
-//! identically. That makes these tests the round-trip gate
-//! described in `doc/plans/partial-evaluation.md`: every function reachable from a snippet —
-//! including every function of the standard library, which is optimized as a dependency — is
-//! decomposed and reassembled through `FunctionBuilder`, which runs the full MIR verifier on the
-//! result in test builds.
+//! No pass edits anything today, so optimized MIR must be *identical* to raw MIR — not merely
+//! equivalent — and must execute identically. Editing preserves value and block identities
+//! (`src/mir/edit.rs`), so there is nothing to normalize away: a difference here is a bug.
+//! Every function reachable from a snippet — including every function of the standard library,
+//! which is optimized as a dependency — is opened for editing and closed again, which runs the full
+//! MIR verifier on the result in test builds. See `doc/plans/partial-evaluation.md`.
 
 use ferlium::{CompilerSession, ExecutionTarget, MirOptimization, module::Path, ustr};
 
@@ -98,57 +97,16 @@ fn run_failing(name: &str, src: &str, optimization: MirOptimization) -> String {
     format!("{:?}", error.kind())
 }
 
-/// Renumbers every `%rN` register by order of first appearance.
+/// The editing gate: opening and closing every reachable function must leave it unchanged.
 ///
-/// Reassembly allocates value identities in traversal order, which need not match the order the
-/// emitter happened to allocate them in. That renumbering is unobservable — nothing outside a
-/// function references its value identities — so comparing structure means comparing modulo a
-/// bijective renaming of registers, which normalizing by first appearance performs.
-fn normalize_registers(mir: &str) -> String {
-    let mut normalized = String::with_capacity(mir.len());
-    // Identities are function-local, so the renaming is too: it restarts at every signature line.
-    let mut names: Vec<&str> = Vec::new();
-    for line in mir.lines() {
-        if line.starts_with("fn ") {
-            names.clear();
-        }
-        let mut rest = line;
-        while let Some(start) = rest.find("%r") {
-            normalized.push_str(&rest[..start]);
-            let digits = rest[start + 2..]
-                .find(|c: char| !c.is_ascii_digit())
-                .unwrap_or(rest.len() - start - 2);
-            let name = &rest[start + 2..start + 2 + digits];
-            let index = names
-                .iter()
-                .position(|seen| *seen == name)
-                .unwrap_or_else(|| {
-                    names.push(name);
-                    names.len() - 1
-                });
-            normalized.push_str(&format!("%r{index}"));
-            rest = &rest[start + 2 + digits..];
-        }
-        normalized.push_str(rest);
-        normalized.push('\n');
-    }
-    normalized
-}
-
-/// The round-trip gate: reassembling every reachable function must preserve its structure.
-///
-/// A divergence here means the emitter produces a function `FunctionBuilder` cannot reproduce; a
-/// panic means it produces one the verifier rejects after reassembly.
+/// A divergence here means an edit-and-restore round trip is not the identity; a panic means it
+/// produces a function the verifier rejects.
 #[test]
-fn optimized_mir_is_structurally_identical_to_raw_mir() {
+fn optimized_mir_is_identical_to_raw_mir() {
     for (name, src) in CORPUS {
         let raw = emit(name, src, MirOptimization::Disabled);
         let optimized = emit(name, src, MirOptimization::Enabled);
-        assert_eq!(
-            normalize_registers(&raw),
-            normalize_registers(&optimized),
-            "the identity rewrite changed the MIR of `{name}`"
-        );
+        assert_eq!(raw, optimized, "an empty edit changed the MIR of `{name}`");
     }
 }
 
@@ -186,10 +144,7 @@ fn optimization_of_one_session_does_not_leak_into_another() {
 
     let optimized_first = optimizing.emit_mir(name, src);
     let plain_after = plain.emit_mir(name, src);
-    assert_eq!(
-        normalize_registers(&optimized_first),
-        normalize_registers(&plain_after)
-    );
+    assert_eq!(optimized_first, plain_after);
 
     // And a session created after std was optimized still reads the raw bodies by default.
     let fresh = CompilerSession::new();

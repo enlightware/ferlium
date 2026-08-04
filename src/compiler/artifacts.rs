@@ -12,7 +12,7 @@ use std::cell::OnceCell;
 use crate::{
     compiler::{CompilerSession, Modules},
     emit_mir::build_mir_function,
-    mir::{self, pass::rebuild_function},
+    mir::{self, edit::FunctionEdit},
     module::{LocalFunctionId, Module, ModuleEnv, ModuleId, id::Id},
 };
 
@@ -127,8 +127,9 @@ impl MirArtifacts {
 
     /// Runs the optimization passes over every body in `raw`.
     ///
-    /// Only the identity rewrite exists today, so this currently produces equivalent bodies and
-    /// exists to exercise the staging path end to end. See `doc/plans/partial-evaluation.md`.
+    /// No pass edits anything today, so each body is opened for editing and closed again — which
+    /// re-verifies it and, since editing preserves identities, must reproduce it exactly. See
+    /// `doc/plans/partial-evaluation.md`.
     ///
     /// Takes the whole session because the folding passes const-evaluate through the MIR
     /// interpreter, which resolves callees, dictionaries, and native code through it.
@@ -141,7 +142,7 @@ impl MirArtifacts {
             .map(|function| {
                 function
                     .as_ref()
-                    .map(|function| rebuild_function(function, env))
+                    .map(|function| FunctionEdit::new(function.clone()).finish(env))
             })
             .collect();
         Self { functions }

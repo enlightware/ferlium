@@ -1,9 +1,9 @@
 pub(crate) mod builder;
 pub(crate) mod const_eval;
+pub(crate) mod edit;
 pub mod function;
 pub mod interpreter;
 pub mod operation;
-pub(crate) mod pass;
 pub mod terminator;
 pub mod value;
 #[cfg(any(debug_assertions, test))]

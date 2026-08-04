@@ -40,6 +40,7 @@ use crate::{
 };
 
 /// A non-terminating operation in Ferlium MIR.
+#[derive(Clone)]
 pub struct Operation {
     /// The function-local identity assigned to this operation's result, if it has one.
     ///
@@ -79,25 +80,6 @@ impl Operation {
     /// The type of the operation's result.
     pub fn result(&self) -> OperationResult {
         self.kind.result(self)
-    }
-
-    /// Rebuilds an operation from its parts, without a result identity.
-    ///
-    /// Rewriting passes decompose an existing operation and reassemble it (possibly with remapped
-    /// operands) into a fresh [`FunctionBuilder`](crate::mir::builder::FunctionBuilder), which
-    /// assigns the new result identity on insertion. The per-kind constructors above remain the
-    /// only way to create an operation during lowering.
-    pub(crate) fn from_parts(
-        span: Location,
-        operands: Box<[mir::Value]>,
-        kind: OperationKind,
-    ) -> Self {
-        Operation {
-            result_id: None,
-            span,
-            operands,
-            kind,
-        }
     }
 
     /// Classifies whether this operation can raise a source-level failure.

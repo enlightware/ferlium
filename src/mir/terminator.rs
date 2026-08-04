@@ -10,6 +10,7 @@ use crate::{
 };
 
 /// The single control-flow exit of a MIR basic block.
+#[derive(Clone)]
 pub struct Terminator {
     /// The source region associated with the transfer.
     pub span: Location,
@@ -102,6 +103,7 @@ impl Terminator {
 }
 
 /// Control-flow forms of canonical MIR.
+#[derive(Clone)]
 pub enum TerminatorKind {
     Goto {
         target: mir::BlockId,

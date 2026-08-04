@@ -26,6 +26,7 @@ pub enum ParameterKind {
 }
 
 /// A parameter in a MIR function signature.
+#[derive(Clone)]
 pub struct Parameter {
     pub ty: Type,
     pub kind: ParameterKind,
@@ -41,6 +42,7 @@ crate::define_id_type!(
 /// Canonical blocks always contain zero or more non-terminating operations followed by exactly one
 /// terminator. Forward declarations and temporarily unterminated blocks exist only in
 /// [`FunctionBuilder`](crate::mir::builder::FunctionBuilder).
+#[derive(Clone)]
 pub struct BasicBlock {
     operations: Vec<Operation>,
     terminator: Terminator,
@@ -61,9 +63,19 @@ impl BasicBlock {
     pub fn terminator(&self) -> &Terminator {
         &self.terminator
     }
+
+    /// Decomposes the block for editing. Canonical form is restored by
+    /// [`FunctionEdit::finish`](crate::mir::edit::FunctionEdit::finish).
+    pub(crate) fn into_parts(self) -> (Vec<Operation>, Terminator) {
+        (self.operations, self.terminator)
+    }
 }
 
 /// A canonical Ferlium MIR function.
+///
+/// Plain immutable data: cloning one is what a pass does before opening it for editing, since the
+/// raw stage must survive alongside the optimized one.
+#[derive(Clone)]
 pub struct Function {
     pub name: Ustr,
     result_convention: CallResultConvention,
@@ -119,6 +131,26 @@ impl Function {
 
     pub fn block(&self, block: BlockId) -> &BasicBlock {
         &self.blocks[block.as_index()]
+    }
+
+    /// Decomposes the function for editing. Canonical form is restored by
+    /// [`FunctionEdit::finish`](crate::mir::edit::FunctionEdit::finish), which re-verifies it.
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        Ustr,
+        CallResultConvention,
+        Vec<Parameter>,
+        Vec<Constant>,
+        Vec<BasicBlock>,
+    ) {
+        (
+            self.name,
+            self.result_convention,
+            self.parameters,
+            self.constants,
+            self.blocks,
+        )
     }
 }
 
