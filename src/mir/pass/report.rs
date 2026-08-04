@@ -70,16 +70,21 @@ impl Remark {
 }
 
 /// What optimizing a module achieved, and what it declined.
+///
+/// The two counts are stated rather than a single "folded" figure, because inlining copies a
+/// callee's calls into its caller: the difference between them is a net, not a count of folds, and
+/// it can be negative. Recovering a true fold count needs the passes to record their own rewrites;
+/// until then the report says what it can actually measure.
 pub struct OptimizationReport {
-    /// Call sites the optimizer removed.
-    pub folded: usize,
+    /// Call sites the module had before optimization.
+    pub call_sites_before: usize,
     pub remarks: Vec<Remark>,
 }
 
 impl OptimizationReport {
-    /// Every call site the raw module contained.
-    pub fn call_sites(&self) -> usize {
-        self.folded + self.remarks.len()
+    /// Call sites that remain — every one of which has a remark saying why.
+    pub fn call_sites_after(&self) -> usize {
+        self.remarks.len()
     }
 
     /// Reasons and their counts, most frequent first — the summary line of the whole exercise.
@@ -106,16 +111,14 @@ pub(crate) fn build(
     optimized: &[Option<Function>],
     env: ModuleEnv<'_>,
 ) -> OptimizationReport {
-    let mut folded = 0usize;
+    let mut call_sites_before = 0usize;
     let mut remarks = Vec::new();
 
     for (raw_body, optimized_body) in raw.iter().zip(optimized) {
         let (Some(raw_body), Some(optimized_body)) = (raw_body, optimized_body) else {
             continue;
         };
-        // What disappeared was folded. This holds while folding is the only pass that changes call
-        // counts; inlining will move call sites in both directions and needs its own accounting.
-        folded += call_sites(raw_body).saturating_sub(call_sites(optimized_body));
+        call_sites_before += call_sites(raw_body);
 
         let mut refusals = Vec::new();
         let plan = fold::plan_folds(
@@ -144,7 +147,10 @@ pub(crate) fn build(
         }
     }
 
-    OptimizationReport { folded, remarks }
+    OptimizationReport {
+        call_sites_before,
+        remarks,
+    }
 }
 
 /// Counts the `call` operations of a function, including one in an `invoke` terminator.
@@ -172,11 +178,12 @@ impl FormatWith<ModuleEnv<'_>> for OptimizationReport {
     fn fmt_with(&self, f: &mut fmt::Formatter<'_>, env: &ModuleEnv<'_>) -> fmt::Result {
         writeln!(
             f,
-            "{} of {} call sites folded",
-            self.folded,
-            self.call_sites()
+            "{} call sites before optimization, {} after",
+            self.call_sites_before,
+            self.call_sites_after()
         )?;
         if self.remarks.is_empty() {
+            writeln!(f, "  everything folded")?;
             return Ok(());
         }
         writeln!(f, "  {} not folded", self.remarks.len())?;
@@ -228,18 +235,14 @@ mod tests {
         (report, rendered)
     }
 
-    /// Everything folds in a constant expression, so the report says so and lists nothing.
+    /// Everything folds in a constant expression, so nothing remains to remark on.
     #[test]
     fn a_fully_folded_function_has_no_remarks() {
         let (report, rendered) = report_for("fn main() -> int { let x = 2 + 3; x * 7 }");
         assert!(report.remarks.is_empty(), "{rendered}");
-        assert_eq!(report.folded, report.call_sites());
-        assert!(report.folded > 0, "{rendered}");
-        assert!(rendered.starts_with(&format!(
-            "{} of {} call sites folded",
-            report.folded,
-            report.call_sites()
-        )));
+        assert_eq!(report.call_sites_after(), 0);
+        assert!(report.call_sites_before > 0, "{rendered}");
+        assert!(rendered.contains("everything folded"), "{rendered}");
     }
 
     /// A call on a runtime value cannot fold, and the report says which argument-shaped reason it
@@ -254,12 +257,16 @@ mod tests {
         );
     }
 
-    /// The rendering leads with the ratio, since that is what both audiences read first.
+    /// The rendering leads with the counts, since that is what both audiences read first.
     #[test]
-    fn the_summary_counts_every_call_site() {
+    fn the_summary_states_both_counts() {
         let (report, rendered) =
             report_for("fn f(n: int) -> int { n + 1 }\nfn main() -> int { 2 + 3 }");
-        assert_eq!(report.call_sites(), report.folded + report.remarks.len());
-        assert!(rendered.contains("call sites folded"), "{rendered}");
+        assert_eq!(report.call_sites_after(), report.remarks.len());
+        assert!(report.call_sites_before > 0);
+        assert!(
+            rendered.contains("call sites before optimization"),
+            "{rendered}"
+        );
     }
 }

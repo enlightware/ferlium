@@ -29,10 +29,11 @@
 //!
 //! See `doc/plans/partial-evaluation.md`.
 
-pub(crate) mod budget;
+pub mod budget;
 pub(crate) mod dataflow;
 pub(crate) mod dce;
 pub(crate) mod fold;
+pub(crate) mod inline;
 pub mod report;
 
 use crate::{
@@ -40,6 +41,13 @@ use crate::{
     mir::{Function, edit::FunctionEdit},
     module::{ModuleEnv, ModuleId},
 };
+
+/// The number of operations in a function — the unit the inlining budgets are counted in.
+fn function_size(func: &Function) -> usize {
+    func.blocks()
+        .map(|block| func.block(block).operations().len())
+        .sum()
+}
 
 /// Optimizes one function, returning the body to install.
 ///
@@ -53,13 +61,28 @@ pub(crate) fn optimize_function(
     session: &CompilerSession,
     module_id: ModuleId,
 ) -> Function {
+    let original_size = function_size(function);
     let mut current: Option<Function> = None;
     for _round in 0..budget::MAX_ROUNDS {
+        // Fold first: it is cheap, it is what makes arguments known, and it shrinks a function
+        // before the inliner measures it against its growth budget. Inlining then hands the next
+        // round a body whose parameters have become the caller's places.
+        let mut changed = false;
         let source = current.as_ref().unwrap_or(function);
-        let Some(folded) = fold::fold_function(source, env, session, module_id) else {
+        if let Some(folded) = fold::fold_function(source, env, session, module_id) {
+            current = Some(folded);
+            changed = true;
+        }
+        let source = current.as_ref().unwrap_or(function);
+        if let Some(inlined) =
+            inline::inline_function(source, original_size, env, session, module_id)
+        {
+            current = Some(inlined);
+            changed = true;
+        }
+        if !changed {
             break;
-        };
-        current = Some(folded);
+        }
     }
     // Cleanup runs once, after the rounds have settled: it only removes storage the rewrites made
     // dead, so there is nothing for it to do until they have stopped.

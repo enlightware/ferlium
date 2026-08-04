@@ -19,7 +19,7 @@
 //! library, is rewritten through `FunctionEdit`, which runs the full MIR verifier on the result in
 //! test builds. See `doc/plans/partial-evaluation.md`.
 
-use ferlium::{CompilerSession, MirOptimization};
+use ferlium::{CompilerSession, MirOptimization, mir::pass::budget::INLINE_FUNCTION_GROWTH};
 
 /// Snippets chosen to cover the operation and control-flow forms a rewrite must carry through:
 /// calls, generics and dictionary passing, closures, aggregates, variants and matching, loops,
@@ -82,22 +82,46 @@ fn emit(name: &str, src: &str, optimization: MirOptimization) -> String {
     session(optimization).emit_mir(name, src)
 }
 
-/// Optimization may only remove calls, never add them.
+/// Optimization respects its growth budget.
+///
+/// Folding only removes operations, but inlining copies a callee's body into its caller, so
+/// "optimization never adds anything" stopped being true — what remains true, and is what the
+/// stability requirement rests on, is that a function grows by at most
+/// `INLINE_FUNCTION_GROWTH` operations over the whole of optimization, not per round or per site.
 ///
 /// A panic here means a pass produced a function the verifier rejects — which is the real point of
 /// running this over the whole corpus and the whole standard library.
 #[test]
-fn optimization_never_adds_calls() {
+fn optimization_respects_its_growth_budget() {
     for (name, src) in CORPUS {
-        let raw = emit(name, src, MirOptimization::Disabled);
-        let optimized = emit(name, src, MirOptimization::Enabled);
-        assert!(
-            calls(&optimized) <= calls(&raw),
-            "optimizing `{name}` added calls: {} -> {}",
-            calls(&raw),
-            calls(&optimized)
-        );
+        let raw = operations_per_function(&emit(name, src, MirOptimization::Disabled));
+        let optimized = operations_per_function(&emit(name, src, MirOptimization::Enabled));
+        for (function, before) in raw {
+            let Some(after) = optimized.get(&function) else {
+                continue;
+            };
+            assert!(
+                *after <= before + INLINE_FUNCTION_GROWTH,
+                "optimizing `{name}` grew `{function}` from {before} to {after}, beyond the \
+                 budget of {INLINE_FUNCTION_GROWTH}"
+            );
+        }
     }
+}
+
+/// Operation counts per rendered function, keyed by signature line.
+fn operations_per_function(mir: &str) -> std::collections::HashMap<String, usize> {
+    let mut counts = std::collections::HashMap::new();
+    let mut current = String::new();
+    for line in mir.lines() {
+        if let Some(signature) = line.strip_prefix("fn ") {
+            current = signature.split('(').next().unwrap_or(signature).to_string();
+            counts.entry(current.clone()).or_insert(0);
+        } else if line.starts_with("    ") && !line.trim_start().starts_with("b") {
+            *counts.entry(current.clone()).or_insert(0) += 1;
+        }
+    }
+    counts
 }
 
 /// The folding gate from `doc/plans/partial-evaluation.md`: constant arithmetic collapses into a

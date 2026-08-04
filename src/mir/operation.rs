@@ -90,6 +90,23 @@ impl Operation {
         self.kind.result(self)
     }
 
+    /// Rebuilds an operation from its parts, without a result identity.
+    ///
+    /// Inlining decomposes a callee's operation and reassembles it with the caller's operands; the
+    /// per-kind constructors above remain the only way to create one during lowering.
+    pub(crate) fn from_parts(
+        span: Location,
+        operands: Box<[mir::Value]>,
+        kind: OperationKind,
+    ) -> Self {
+        Operation {
+            result_id: None,
+            span,
+            operands,
+            kind,
+        }
+    }
+
     /// Classifies whether this operation can raise a source-level failure.
     ///
     /// Sandbox violations are deliberately not represented here: they leave the MIR CFG through

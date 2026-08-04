@@ -22,9 +22,6 @@
 //! [`crate::mir::const_eval`].
 //!
 //! See `doc/plans/partial-evaluation.md`.
-//!
-//! The driver's round loop arrives with the folding pass, so these have no reader yet.
-#![allow(dead_code)]
 
 /// How many fold/inline rounds a single function may go through.
 ///
@@ -33,4 +30,22 @@
 /// pass of each is not enough. In practice the chain is short; this bounds the outer loop of the
 /// driver, and is the last of the three bounds that make optimization terminate (the other two
 /// being the monotone lattice and the inlining growth budget).
-pub(crate) const MAX_ROUNDS: usize = 4;
+pub const MAX_ROUNDS: usize = 4;
+
+/// The largest callee, in operations, that inlining will copy into a caller.
+///
+/// Generous rather than tuned: the point of inlining here is to hand folding a body whose arguments
+/// are known, and the callees that pays off for are small — accessors, arithmetic helpers, trait
+/// method bodies. A cap that a routine edit can cross would make the speedup fragile, which is the
+/// stability requirement in `doc/plans/partial-evaluation.md`.
+pub const INLINE_CALLEE_OPERATIONS: usize = 32;
+
+/// How much inlining may grow one function, in operations, beyond the size it had *before*
+/// optimization started.
+///
+/// Bounds the whole of optimization rather than each site or each round: a function full of small
+/// calls would otherwise inline all of them, and measuring against the current size would let each
+/// round grant the budget afresh. Together with the callee cap this is what bounds code growth, and
+/// it is public because a budget change is a user-visible change — the optimization report cites
+/// these by name.
+pub const INLINE_FUNCTION_GROWTH: usize = 128;

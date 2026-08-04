@@ -12,7 +12,7 @@ pub(crate) mod edit;
 pub mod function;
 pub mod interpreter;
 pub mod operation;
-pub(crate) mod pass;
+pub mod pass;
 pub(crate) mod reify;
 pub mod terminator;
 pub mod value;
