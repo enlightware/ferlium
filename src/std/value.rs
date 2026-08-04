@@ -1775,7 +1775,17 @@ fn derive_value_clone_body(
                 }
                 _ => {
                     drop(shape_data);
-                    build_assign_whole(arena)
+                    if shape_ty == Type::unit() {
+                        // An empty aggregate holds no data, so cloning it constructs a fresh empty
+                        // value rather than copying storage. It is typed as `unit` rather than as
+                        // the named type because an immediate must be trivially copyable, which a
+                        // generic named type is not — while its representation is exactly unit.
+                        // Copying the whole value instead would lower to a `memcpy` of that named
+                        // type: invalid MIR for a legal program.
+                        n(arena, native(()), Type::unit())
+                    } else {
+                        build_assign_whole(arena)
+                    }
                 }
             }
         }

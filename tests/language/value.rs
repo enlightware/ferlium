@@ -100,6 +100,29 @@ fn array_clone_returns_owned_array_without_extra_drop() {
     assert_val_eq!(session.run(&source), int(3221));
 }
 
+/// A unit-shaped generic type has no data to copy, so its derived `Value::clone` must construct a
+/// fresh value rather than copy the whole one — a `memcpy` of a generic named type is not
+/// statically trivially copyable, and lowering emitted MIR the verifier rejects. Found by the
+/// grammar fuzzer.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn empty_generic_struct_derives_value() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(
+            r#"
+            struct Empty<T>;
+
+            fn count(first: Empty<int>, second: Empty<int>) -> int { 2 }
+
+            let value = Empty;
+            count(value, value)
+            "#
+        ),
+        int(2)
+    );
+}
+
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn named_generic_struct_auto_derives_value() {
