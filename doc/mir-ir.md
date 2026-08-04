@@ -50,6 +50,13 @@ MIR uses independent, function-local `ValueId`s rather than operation locations:
 Moving an operation therefore does not renumber unrelated values. A derived def-use map locates the
 operation that defines each `ValueId` when an analysis needs it.
 
+The constant pool is also the target of *reification* — expressing a value computed at compile time
+back as MIR (`src/mir/reify.rs`). Because `@cN` is pinned to a `TrivialCopy` representation, only a
+trivially-copyable leaf, or a tuple or record of those, can be reified; a compile-time `String`,
+list, variant, or closure has no constant form, and the computation that produced it is left as
+runtime code. Lifting that restriction requires a frozen-prototype representation in the pool and an
+operation to clone one, described in `doc/plans/partial-evaluation.md`.
+
 The verifier derives these roles from parameter kinds and operation results:
 
 | Role | Meaning |

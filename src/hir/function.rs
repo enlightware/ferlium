@@ -28,7 +28,7 @@ use crate::{
         ValOrMutArgs, cont, drop_frame_owned_locals_on_error, eval_node_with_ctx,
     },
     format::{FormatWith, escape_identifier, format_generic_param_list, write_identifier},
-    hir::value::{NativeValue, Value},
+    hir::value::{LiteralNativeValue, LiteralValue, NativeValue, Value},
     hir::{self, ENodeId, UNodeArena, UNodeId},
     module::{ELocalDecl, ModuleEnv, ModuleFunction, ULocalDecl},
     types::effects::EffType,
@@ -776,25 +776,40 @@ unsafe impl NativeTrivialCopy for isize {}
 impl trivial_copy_private::Sealed for crate::std::math::Float {}
 unsafe impl NativeTrivialCopy for crate::std::math::Float {}
 
-fn copy_boxed_trivial_copy_native_typed<T: NativeTrivialCopy + NativeValue>(
+fn literal_of_trivial_copy_native_typed<T: NativeTrivialCopy + LiteralNativeValue>(
     value: &Value,
-) -> Option<Value> {
+) -> Option<LiteralValue> {
     value
         .as_primitive_ty::<T>()
-        .map(|value| Value::native(*value))
+        .map(|value| LiteralValue::new_native(*value))
+}
+
+/// Freeze one of the boxed interpreter's native `TrivialCopy` representations into the immutable
+/// literal form a MIR constant pool holds.
+///
+/// A boxed native is a `dyn NativeValue`, which carries no way to recover its
+/// Rust type, so this is a downcast chain over the sealed opt-ins above rather
+/// than a cast. Keeping the chain beside them makes adding a native leaf a
+/// single Rust-side change. Language-level trait registration remains explicit
+/// in the standard module.
+///
+/// This is the leaf half of reifying a compile-time value into MIR (see `src/mir/reify.rs`), and
+/// the inverse of [`LiteralValue::into_value`].
+pub(crate) fn literal_of_trivial_copy_native(value: &Value) -> Option<LiteralValue> {
+    literal_of_trivial_copy_native_typed::<()>(value)
+        .or_else(|| literal_of_trivial_copy_native_typed::<bool>(value))
+        .or_else(|| literal_of_trivial_copy_native_typed::<isize>(value))
+        .or_else(|| literal_of_trivial_copy_native_typed::<crate::std::math::Float>(value))
+        .or_else(|| literal_of_trivial_copy_native_typed::<crate::std::string::StaticStr>(value))
 }
 
 /// Copy one of the boxed interpreter's native `TrivialCopy` representations.
 ///
-/// Keeping this dispatch beside the sealed Rust opt-ins makes adding a native
-/// leaf a single Rust-side change. Language-level trait registration remains
-/// explicit in the standard module.
+/// Copying such a leaf *is* freezing it and thawing it again: both rebuild the same concrete Rust
+/// value into a fresh box, and `into_value` reuses the box the freeze allocated. Defining it that
+/// way keeps one downcast chain for the sealed set instead of two that can drift apart.
 pub(crate) fn copy_boxed_trivial_copy_native(value: &Value) -> Option<Value> {
-    copy_boxed_trivial_copy_native_typed::<()>(value)
-        .or_else(|| copy_boxed_trivial_copy_native_typed::<bool>(value))
-        .or_else(|| copy_boxed_trivial_copy_native_typed::<isize>(value))
-        .or_else(|| copy_boxed_trivial_copy_native_typed::<crate::std::math::Float>(value))
-        .or_else(|| copy_boxed_trivial_copy_native_typed::<crate::std::string::StaticStr>(value))
+    literal_of_trivial_copy_native(value).map(LiteralValue::into_value)
 }
 
 pub fn extract_trivial_native_input<T: NativeTrivialCopy>(

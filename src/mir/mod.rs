@@ -4,6 +4,7 @@ pub(crate) mod edit;
 pub mod function;
 pub mod interpreter;
 pub mod operation;
+pub(crate) mod reify;
 pub mod terminator;
 pub mod value;
 #[cfg(any(debug_assertions, test))]

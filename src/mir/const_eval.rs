@@ -72,6 +72,14 @@ pub(crate) enum NotFoldable {
     Failed,
     /// The attempt exhausted its compile-time budget, or poisoned its evaluation context.
     BudgetExceeded,
+    /// The call was evaluated, but its result cannot be expressed as MIR. Raised by
+    /// [`reify`](crate::mir::reify::reify) rather than by the evaluator: today the constant pool
+    /// holds only trivially-copyable representations, so a folded `String`, list, variant, or
+    /// closure has nowhere to go. See Phase 5 of `doc/plans/partial-evaluation.md`.
+    ///
+    /// Worth reporting separately from the engine-level refusals: how often it occurs is what
+    /// decides whether that phase is worth doing.
+    NotReifiable,
 }
 
 /// Whether a call with these effects may be executed at compile time.
@@ -509,6 +517,67 @@ mod tests {
             3,
             "an argument that was never bound must still be released"
         );
+    }
+
+    /// The two halves the folding pass needs, joined: evaluate a real call site, then express its
+    /// result as MIR.
+    #[test]
+    fn a_folded_arithmetic_result_reifies_into_a_constant() {
+        use crate::mir::reify::{Reification, reify};
+
+        let mut session = CompilerSession::new();
+        let module = compile(&mut session, "fn f() -> int { 2 + 3 }");
+        let sites = call_sites(body(&session, module, "f"));
+        let add = sites.last().expect("`2 + 3` lowers to a call");
+
+        let result = try_call(&session, module, add, vec![int(2), int(3)]).expect("must fold");
+        let env = session
+            .modules()
+            .env_for(session.expect_fresh_module(module));
+        let reified = match reify(&result, add.ty.ret(), &env) {
+            Ok(Reification::Constant(constant)) => constant,
+            other => panic!("an integer result must reify into a constant, got {other:?}"),
+        };
+        assert_eq!(reified.representation.as_primitive_ty::<isize>(), Some(&5));
+        result.discard_storage();
+    }
+
+    /// The same call site shape with a heap result: it evaluates, and reification is what refuses.
+    /// Phase 5 of `doc/plans/partial-evaluation.md` is what would lift this.
+    #[test]
+    fn a_folded_string_result_is_not_reifiable() {
+        use crate::mir::reify::is_reifiable;
+
+        let mut session = CompilerSession::new();
+        let module = compile(
+            &mut session,
+            "fn f() -> string { string_concat(\"ab\", \"cd\") }",
+        );
+        let sites = call_sites(body(&session, module, "f"));
+        let concat = sites
+            .iter()
+            .find(|site| {
+                session
+                    .expect_fresh_module(site.callee.module)
+                    .get_function_name_by_id(site.callee.function)
+                    .is_some_and(|name| name == "string_concat")
+            })
+            .expect("`string_concat` must be called directly");
+
+        let arguments = vec![
+            ConstArgument::Value(Value::native(crate::std::string::String::from(
+                "ab".to_string(),
+            ))),
+            ConstArgument::Value(Value::native(crate::std::string::String::from(
+                "cd".to_string(),
+            ))),
+        ];
+        let result = try_call(&session, module, concat, arguments).expect("must fold");
+        let env = session
+            .modules()
+            .env_for(session.expect_fresh_module(module));
+        assert!(!is_reifiable(&result, concat.ty.ret(), &env));
+        result.discard_storage();
     }
 
     #[test]
