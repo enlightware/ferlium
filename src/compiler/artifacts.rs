@@ -142,7 +142,7 @@ impl MirArtifacts {
             .map(|function| {
                 function
                     .as_ref()
-                    .map(|function| optimize_function(function, env, session))
+                    .map(|function| optimize_function(function, env, session, module.module_id()))
             })
             .collect();
         Self { functions }

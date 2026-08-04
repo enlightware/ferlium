@@ -31,23 +31,37 @@
 
 pub(crate) mod budget;
 pub(crate) mod dataflow;
+pub(crate) mod fold;
 
 use crate::{
     compiler::CompilerSession,
     mir::{Function, edit::FunctionEdit},
-    module::ModuleEnv,
+    module::{ModuleEnv, ModuleId},
 };
 
 /// Optimizes one function, returning the body to install.
 ///
-/// No pass rewrites anything yet, so this opens the function and closes it again: an empty edit is
-/// the identity, which is what keeps optimized MIR byte-identical to raw MIR until a pass actually
-/// changes something. The round loop described above arrives with the folding pass, which is the
-/// first thing that can report having changed anything.
+/// Each round rewrites an immutable function into a new one, so a pass never reads an analysis that
+/// its own edits have invalidated. A round that changes nothing ends the loop; the rounds exist
+/// because folding and inlining feed each other, and because a chain of folds that crosses block
+/// boundaries needs the analysis to be re-run to propagate.
 pub(crate) fn optimize_function(
     function: &Function,
     env: ModuleEnv<'_>,
-    _session: &CompilerSession,
+    session: &CompilerSession,
+    module_id: ModuleId,
 ) -> Function {
-    FunctionEdit::new(function.clone()).finish(env)
+    let mut current: Option<Function> = None;
+    for _round in 0..budget::MAX_ROUNDS {
+        let source = current.as_ref().unwrap_or(function);
+        let Some(folded) = fold::fold_function(source, env, session, module_id) else {
+            break;
+        };
+        current = Some(folded);
+    }
+    // An unchanged function is still opened and closed, which re-verifies it and is the identity.
+    match current {
+        Some(folded) => folded,
+        None => FunctionEdit::new(function.clone()).finish(env),
+    }
 }

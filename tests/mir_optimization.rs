@@ -8,12 +8,13 @@
 //
 //! Staging and rewritability checks for the MIR optimization pipeline.
 //!
-//! No pass edits anything today, so optimized MIR must be *identical* to raw MIR — not merely
-//! equivalent — and must execute identically. Editing preserves value and block identities
-//! (`src/mir/edit.rs`), so there is nothing to normalize away: a difference here is a bug.
-//! Every function reachable from a snippet — including every function of the standard library,
-//! which is optimized as a dependency — is opened for editing and closed again, which runs the full
-//! MIR verifier on the result in test builds. See `doc/plans/partial-evaluation.md`.
+//! Optimization must never change what a program computes, only how. These tests hold optimized MIR
+//! to that: every corpus snippet must produce the same result and the same failure with the flag on
+//! as with it off, while folding is allowed to — and must — remove work.
+//!
+//! Every function reachable from a snippet, including every function of the standard library, is
+//! rewritten through `FunctionEdit`, which runs the full MIR verifier on the result in test builds.
+//! See `doc/plans/partial-evaluation.md`.
 
 use ferlium::{CompilerSession, ExecutionTarget, MirOptimization, module::Path, ustr};
 
@@ -97,17 +98,46 @@ fn run_failing(name: &str, src: &str, optimization: MirOptimization) -> String {
     format!("{:?}", error.kind())
 }
 
-/// The editing gate: opening and closing every reachable function must leave it unchanged.
+/// Optimization may only remove calls, never add them.
 ///
-/// A divergence here means an edit-and-restore round trip is not the identity; a panic means it
-/// produces a function the verifier rejects.
+/// A panic here means a pass produced a function the verifier rejects — which is the real point of
+/// running this over the whole corpus and the whole standard library.
 #[test]
-fn optimized_mir_is_identical_to_raw_mir() {
+fn optimization_never_adds_calls() {
     for (name, src) in CORPUS {
         let raw = emit(name, src, MirOptimization::Disabled);
         let optimized = emit(name, src, MirOptimization::Enabled);
-        assert_eq!(raw, optimized, "an empty edit changed the MIR of `{name}`");
+        assert!(
+            calls(&optimized) <= calls(&raw),
+            "optimizing `{name}` added calls: {} -> {}",
+            calls(&raw),
+            calls(&optimized)
+        );
     }
+}
+
+/// The folding gate from `doc/plans/partial-evaluation.md`: constant arithmetic collapses into a
+/// single store into the return place, with no call left.
+#[test]
+fn constant_arithmetic_folds_away() {
+    let (name, src) = CORPUS[1];
+    let optimized = emit(name, src, MirOptimization::Enabled);
+    let main = optimized
+        .split("fn main")
+        .nth(1)
+        .expect("the corpus defines main");
+    assert_eq!(calls(main), 0, "`let x = 2 + 3; x * 7` must fold:\n{main}");
+    assert!(
+        main.contains("to %p0"),
+        "the folded result must reach the return place:\n{main}"
+    );
+}
+
+/// Counts `call` operations in rendered MIR.
+fn calls(mir: &str) -> usize {
+    mir.lines()
+        .filter(|line| line.trim_start().starts_with("call "))
+        .count()
 }
 
 #[test]
@@ -142,9 +172,17 @@ fn optimization_of_one_session_does_not_leak_into_another() {
     let mut optimizing = session(MirOptimization::Enabled);
     let mut plain = session(MirOptimization::Disabled);
 
+    let baseline = emit(name, src, MirOptimization::Disabled);
     let optimized_first = optimizing.emit_mir(name, src);
     let plain_after = plain.emit_mir(name, src);
-    assert_eq!(optimized_first, plain_after);
+    assert_ne!(
+        optimized_first, baseline,
+        "this snippet must be one optimization changes, or the test proves nothing"
+    );
+    assert_eq!(
+        plain_after, baseline,
+        "a session that does not optimize must still see raw MIR"
+    );
 
     // And a session created after std was optimized still reads the raw bodies by default.
     let fresh = CompilerSession::new();

@@ -125,6 +125,18 @@ pub(crate) enum ConstArgument {
     Dictionary(TraitDictionaryId),
 }
 
+impl ConstArgument {
+    /// Releases the storage of arguments prepared for a call that is never made. `Value` is
+    /// `ManuallyDrop`-based, so dropping them instead would leak.
+    pub(crate) fn discard_all(arguments: Vec<ConstArgument>) {
+        for argument in arguments {
+            if let ConstArgument::Value(value) = argument {
+                value.discard_storage();
+            }
+        }
+    }
+}
+
 impl<'a> ConstEvaluator<'a> {
     pub(crate) fn new(module_id: ModuleId, session: &'a CompilerSession) -> Self {
         Self { session, module_id }
@@ -148,15 +160,15 @@ impl<'a> ConstEvaluator<'a> {
         span: Location,
     ) -> Result<Value, NotFoldable> {
         if !effects_allow_const_eval(effects) {
-            discard(arguments);
+            ConstArgument::discard_all(arguments);
             return Err(NotFoldable::Effectful);
         }
         if !convention_allows_const_eval(convention) {
-            discard(arguments);
+            ConstArgument::discard_all(arguments);
             return Err(NotFoldable::UnsupportedConvention);
         }
         if !self.callee_has_body(callee) {
-            discard(arguments);
+            ConstArgument::discard_all(arguments);
             return Err(NotFoldable::NoBody);
         }
 
@@ -199,13 +211,7 @@ impl<'a> ConstEvaluator<'a> {
     }
 }
 
-fn discard(arguments: Vec<ConstArgument>) {
-    for argument in arguments {
-        if let ConstArgument::Value(value) = argument {
-            value.discard_storage();
-        }
-    }
-}
+
 
 /// Maps a runtime outcome to a refusal reason. Nothing escapes as a compilation error.
 fn classify(error: RuntimeError) -> NotFoldable {
