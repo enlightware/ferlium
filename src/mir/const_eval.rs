@@ -447,6 +447,70 @@ mod tests {
         );
     }
 
+    /// A refused call must release every argument, including the ones it never bound.
+    ///
+    /// `Value` is `ManuallyDrop`-based, so an argument that is dropped rather than discarded leaks
+    /// its Rust payload — a Ferlium `String`'s heap buffer, for instance. The interpreter reclaims
+    /// what reached a cell when it truncates the frame; this covers the arguments that did not,
+    /// because binding ran out of environment cells partway through.
+    #[test]
+    fn arguments_are_released_when_binding_runs_out_of_cells() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static DROPPED: AtomicUsize = AtomicUsize::new(0);
+
+        #[derive(Debug)]
+        struct DropTracked;
+
+        impl Drop for DropTracked {
+            fn drop(&mut self) {
+                DROPPED.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        impl crate::hir::value::NativeDisplay for DropTracked {
+            fn fmt_repr(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "<drop-tracked>")
+            }
+        }
+
+        let mut session = CompilerSession::new();
+        let module = compile(
+            &mut session,
+            "fn add3(a: int, b: int, c: int) -> int { a + b + c }",
+        );
+        let callee = function_id(&session, module, "add3");
+
+        // One cell: the first argument binds, the second is refused by `alloc_cell`, and the third
+        // is never even reached — the case that leaks if a refusal only reclaims bound cells. The
+        // callee is never entered, so the tracked natives stand in for values of any type without
+        // being read.
+        let limits = ReferenceInterpreterLimits::new(ExecutionLimits::new(8, Some(1_000)), 1);
+        let mut interpreter = Interpreter::with_limits_and_stage(
+            module,
+            &session,
+            limits,
+            MirOptimization::Disabled,
+        );
+        let arguments = vec![
+            CallArgument::Value(Value::native(DropTracked)),
+            CallArgument::Value(Value::native(DropTracked)),
+            CallArgument::Value(Value::native(DropTracked)),
+        ];
+        let result = interpreter.call_with_known_arguments(
+            callee,
+            arguments,
+            crate::std::math::int_type(),
+            Location::new_synthesized(),
+        );
+        assert!(result.is_err(), "binding must run out of cells");
+        assert_eq!(
+            DROPPED.load(Ordering::Relaxed),
+            3,
+            "an argument that was never bound must still be released"
+        );
+    }
+
     #[test]
     fn refuses_a_callee_without_a_body() {
         let mut session = CompilerSession::new();

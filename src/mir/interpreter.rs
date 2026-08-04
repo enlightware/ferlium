@@ -76,10 +76,36 @@ pub(crate) enum CallArgument {
     Dictionary(TraitDictionaryId),
 }
 
-impl CallArgument {
-    /// Releases the storage owned by arguments that were never passed to a callee.
-    pub(crate) fn discard_all(arguments: Vec<CallArgument>) {
-        for argument in arguments {
+/// Owned call arguments, consumed one at a time as they are bound to parameters.
+///
+/// Binding can stop partway — a callee's frame may exhaust the environment-cell budget — and
+/// [`Value`] is `ManuallyDrop`-based, so an argument that is merely dropped leaks its payload.
+/// This guard makes that unrepresentable: whatever has not been consumed when it goes out of scope,
+/// on any path including an early return, is discarded. It is the same idiom as
+/// [`ValOrMutArgs`](crate::eval::ValOrMutArgs) and `CallArgsStorageGuard` on the HIR side.
+pub(crate) struct CallArguments(std::vec::IntoIter<CallArgument>);
+
+impl CallArguments {
+    pub(crate) fn new(arguments: Vec<CallArgument>) -> Self {
+        Self(arguments.into_iter())
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
+impl Iterator for CallArguments {
+    type Item = CallArgument;
+
+    fn next(&mut self) -> Option<CallArgument> {
+        self.0.next()
+    }
+}
+
+impl Drop for CallArguments {
+    fn drop(&mut self) {
+        for argument in self.0.by_ref() {
             if let CallArgument::Value(value) = argument {
                 value.discard_storage();
             }
@@ -313,10 +339,9 @@ impl<'a> Interpreter<'a> {
         result_ty: Type,
         span: Location,
     ) -> Result<Value, RuntimeError> {
-        if let Err(error) = self.ctx.ensure_runnable() {
-            CallArgument::discard_all(arguments);
-            return Err(error);
-        }
+        // Built before the first fallible step, so every early return releases the arguments.
+        let arguments = CallArguments::new(arguments);
+        self.ctx.ensure_runnable()?;
         let key = FunctionKey {
             module: callee.module,
             identity: callee.function,
@@ -346,21 +371,18 @@ impl<'a> Interpreter<'a> {
     fn call_script_with_known_arguments(
         &mut self,
         key: FunctionKey,
-        arguments: Vec<CallArgument>,
+        mut arguments: CallArguments,
         result_ty: Type,
         span: Location,
     ) -> Result<Value, RuntimeError> {
         let mut bindings = Vec::with_capacity(arguments.len() + 1);
-        for argument in arguments {
+        // Bound cells are reclaimed with the frame by the caller; arguments not yet bound are
+        // released by `CallArguments` when this returns early.
+        for argument in arguments.by_ref() {
             match argument {
-                CallArgument::Value(value) => match self.alloc_cell(value, span) {
-                    Ok(place) => bindings.push(Binding::Place(place)),
-                    Err(error) => {
-                        // `alloc_cell` consumed this argument; the remaining ones are reclaimed
-                        // with the frame by the caller.
-                        return Err(error);
-                    }
-                },
+                CallArgument::Value(value) => bindings.push(Binding::Place(
+                    self.alloc_cell(value, span)?,
+                )),
                 CallArgument::Dictionary(id) => bindings.push(Binding::Dictionary(id)),
             }
         }
@@ -384,17 +406,16 @@ impl<'a> Interpreter<'a> {
     fn call_native_with_known_arguments(
         &mut self,
         callee: FunctionId,
-        arguments: Vec<CallArgument>,
+        mut arguments: CallArguments,
         span: Location,
     ) -> Result<Value, RuntimeError> {
         let mut args: Vec<ValOrMut> = Vec::with_capacity(arguments.len());
-        for argument in arguments {
+        // As in the script branch, an early return releases the arguments still held by the guard.
+        for argument in arguments.by_ref() {
             match argument {
                 // A native reads its arguments through places, exactly as a resolved native call
                 // marshals them.
-                CallArgument::Value(value) => {
-                    args.push(ValOrMut::Mut(self.alloc_cell(value, span)?))
-                }
+                CallArgument::Value(value) => args.push(ValOrMut::Mut(self.alloc_cell(value, span)?)),
                 CallArgument::Dictionary(id) => args.push(ValOrMut::Dictionary(id)),
             }
         }
