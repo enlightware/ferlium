@@ -523,10 +523,14 @@ impl<'a> Interpreter<'a> {
                     then_target,
                     else_target,
                 } => {
-                    let value = self.value_operand(func, &mut slots, condition);
-                    let taken = *value
-                        .as_primitive_ty::<bool>()
-                        .expect("condbr condition must be a bool");
+                    // Borrowed rather than read out: `value_operand` yields an owned `Value` even
+                    // for a trivially-copyable read, and a `Value` dropped rather than discarded
+                    // leaks its box.
+                    let taken = self.with_runtime_value(func, &slots, condition, |value| {
+                        *value
+                            .as_primitive_ty::<bool>()
+                            .expect("condbr condition must be a bool")
+                    });
                     block = if taken { *then_target } else { *else_target };
                 }
                 TerminatorKind::Invoke {
@@ -743,10 +747,13 @@ impl<'a> Interpreter<'a> {
         def: mir::Value,
     ) {
         let mut place = self.place_operand(slots, &operands[0]);
-        let index = self.value_operand(func, slots, &operands[1]);
-        let index = *index
-            .as_primitive_ty::<isize>()
-            .expect("subfield index must be an int");
+        // Borrowed rather than read out, as in `condbr`: the index is only inspected, and an owned
+        // `Value` dropped rather than discarded leaks its box.
+        let index = self.with_runtime_value(func, slots, &operands[1], |value| {
+            *value
+                .as_primitive_ty::<isize>()
+                .expect("subfield index must be an int")
+        });
         place.path.push(index);
         slots.insert(def, Binding::Place(place));
     }
@@ -2280,6 +2287,11 @@ impl<'a> Interpreter<'a> {
 
     /// Borrows a runtime operand for the duration of `use_value`, materializing constants only in
     /// temporary Rust storage. Register/place operands remain borrowed and are never consumed.
+    ///
+    /// This is what an operation that only *inspects* an operand must use.
+    /// [`value_operand`](Self::value_operand) yields an owned `Value` — a fresh box even for a
+    /// trivially-copyable read — and `Value` is `ManuallyDrop`-based, so dropping one rather than
+    /// discarding it leaks.
     fn with_runtime_value<R>(
         &self,
         func: &mir::Function,
@@ -2289,24 +2301,22 @@ impl<'a> Interpreter<'a> {
     ) -> R {
         match operand {
             mir::Value::Register(_) | mir::Value::Parameter(_) => match slots.get(operand) {
-                Some(Binding::Place(place)) => use_value(
-                    place
-                        .target_ref(&self.ctx)
-                        .expect("comparison of an invalid place"),
-                ),
+                Some(Binding::Place(place)) => {
+                    use_value(place.target_ref(&self.ctx).expect("operand is an invalid place"))
+                }
                 Some(Binding::Projected { place, .. }) => use_value(
                     place
                         .target_ref(&self.ctx)
-                        .expect("comparison of an invalid open projection"),
+                        .expect("operand is an invalid open projection"),
                 ),
                 Some(Binding::Value(value)) => use_value(value),
                 Some(Binding::StackMarker(_)) => {
-                    panic!("comparison operand {operand} is bound to a stack marker")
+                    panic!("expected a value but {operand} is bound to a stack marker")
                 }
                 Some(Binding::Dictionary(_)) => {
-                    panic!("comparison operand {operand} is bound to a symbolic dictionary")
+                    panic!("expected a value but {operand} is bound to a symbolic dictionary")
                 }
-                None => panic!("unbound comparison operand {operand}"),
+                None => panic!("unbound value operand {operand}"),
             },
             _ => {
                 let value = self.constant_value(func, operand);
