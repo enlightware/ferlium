@@ -240,29 +240,13 @@ impl Analysis {
         self.entry_states.get(&block).cloned().unwrap_or_default()
     }
 
-    /// Replays `block` from its entry state, calling `visit` before each operation with the state
-    /// that holds at that point. This is how the folding pass walks a function: the per-block entry
-    /// states are the fixpoint, and everything inside a block is recomputed on demand.
-    pub(crate) fn replay(
-        &self,
-        func: &Function,
-        block: BlockId,
-        mut visit: impl FnMut(usize, &Operation, &State),
-    ) -> State {
-        let mut state = self.entry_state(block);
-        let basic_block = func.block(block);
-        for (index, operation) in basic_block.operations().iter().enumerate() {
-            visit(index, operation, &state);
-            self.apply(func, operation, &mut state);
-        }
-        if let TerminatorKind::Invoke { operation, .. } = &basic_block.terminator().kind {
-            visit(basic_block.operations().len(), operation, &state);
-            self.apply(func, operation, &mut state);
-        }
-        state
-    }
-
-    fn apply(&self, func: &Function, operation: &Operation, state: &mut State) {
+    /// Applies one operation's transfer function to `state`.
+    ///
+    /// The per-block entry states are the fixpoint; everything inside a block is recomputed by
+    /// stepping from its entry state. The folding pass walks blocks this way rather than through a
+    /// callback, because it also needs to *inject* facts — a call it decides to fold makes its
+    /// result place known for the rest of the walk.
+    pub(crate) fn step(&self, func: &Function, operation: &Operation, state: &mut State) {
         transfer(operation, func, &self.escaped, state);
     }
 }
@@ -411,6 +395,34 @@ fn transfer(operation: &Operation, func: &Function, escaped: &FxHashSet<Root>, s
                 state.set_place(key, Fact::Uninit);
             }
         }
+        OperationKind::CompareEqual => {
+            let Some(result) = operation.result_id() else {
+                return;
+            };
+            // Operands are `[scrutinee, pattern]`, the scrutinee read non-consumingly — as a value,
+            // or as the pointee of a place.
+            let scrutinee = match state.place_of(&operation.operands[0]) {
+                Some(key) if tracked(&key) => state.place(&key),
+                Some(_) => Fact::Unknown,
+                None => value_operand_fact(&operation.operands[0], func, state),
+            };
+            let fact = match (scrutinee.known(), &operation.operands[1]) {
+                (Some(Const::Literal(literal)), mir::Value::Pattern(pattern)) => {
+                    // Compared exactly as the interpreter does, rather than by comparing literal
+                    // trees: pattern matching has representation rules of its own (a `StaticStr`
+                    // pattern matches a `String` value), and this must not disagree with them.
+                    let value = literal.clone().into_value();
+                    let equal = pattern.try_matches_runtime_value(&value);
+                    value.discard_storage();
+                    match equal {
+                        Ok(equal) => Fact::Known(Const::Literal(LiteralValue::new_native(equal))),
+                        Err(_) => Fact::Unknown,
+                    }
+                }
+                _ => Fact::Unknown,
+            };
+            state.registers.insert(result, RegisterFact::Value(fact));
+        }
         OperationKind::Call { ty } => {
             // The callee writes its result through the trailing out-pointer, so whatever was known
             // about that slot no longer holds. The folding pass is what replaces a call with a
@@ -502,7 +514,9 @@ fn escaping_roots(func: &Function) -> FxHashSet<Root> {
         match &operation.kind {
             // Modelled: these consume places in ways the transfer functions describe exactly.
             OperationKind::Alloca { .. } => {}
-            OperationKind::Load | OperationKind::Clear => {}
+            // `comp_eq` borrows its scrutinee for a literal snapshot and never moves it, so the
+            // place stays tracked; its second operand is compile-time pattern data.
+            OperationKind::Load | OperationKind::Clear | OperationKind::CompareEqual => {}
             OperationKind::Subfield { .. } => {
                 // A dynamic field index would name a slot the analysis cannot distinguish.
                 if field_index(&operation.operands[1]).is_none() {
@@ -654,7 +668,11 @@ mod tests {
     /// Every fact the analysis holds at the end of the entry block, for a single-block function.
     fn entry_block_exit(func: &Function) -> State {
         let analysis = analyze(func);
-        analysis.replay(func, func.entry(), |_, _, _| {})
+        let mut state = analysis.entry_state(func.entry());
+        for operation in func.block(func.entry()).operations() {
+            analysis.step(func, operation, &mut state);
+        }
+        state
     }
 
     /// A literal stored into a local is known; the place holding a call result is not, because

@@ -38,13 +38,14 @@ use crate::{
         const_eval::{ConstArgument, ConstEvaluator, NotFoldable},
         edit::FunctionEdit,
         reify::{Reification, reify},
+        terminator::{Terminator, TerminatorKind},
         value::Constant,
     },
     module::{ModuleEnv, ModuleId},
     types::r#type::{CallImplType, Type},
 };
 
-use super::dataflow::{self, Const, Fact, State};
+use super::dataflow::{self, Const, Fact, RegisterFact, State};
 
 /// A call site the pass decided to replace, and what to replace it with.
 struct Fold {
@@ -56,20 +57,34 @@ struct Fold {
     constant: Constant,
 }
 
-/// Folds every call in `func` that can be folded, returning a rewritten function if any was.
+/// What one pass over a function decided to rewrite.
+#[derive(Default)]
+struct Plan {
+    calls: Vec<Fold>,
+    /// Conditional branches whose condition is known, and the successor they always take.
+    branches: Vec<(BlockId, BlockId)>,
+}
+
+impl Plan {
+    fn is_empty(&self) -> bool {
+        self.calls.is_empty() && self.branches.is_empty()
+    }
+}
+
+/// Folds what can be folded in `func`, returning a rewritten function if anything was.
 pub(crate) fn fold_function(
     func: &Function,
     env: ModuleEnv<'_>,
     session: &CompilerSession,
     module_id: ModuleId,
 ) -> Option<Function> {
-    let folds = plan_folds(func, env, session, module_id);
-    if folds.is_empty() {
+    let plan = plan_folds(func, env, session, module_id);
+    if plan.is_empty() {
         return None;
     }
 
     let mut edit = FunctionEdit::new(func.clone());
-    for fold in folds {
+    for fold in plan.calls {
         let constant = edit.add_constant(fold.constant.ty, fold.constant.representation, &env);
         let span = edit.block(fold.block).operations[fold.index].span;
         edit.block_mut(fold.block).replace_operation(
@@ -77,71 +92,89 @@ pub(crate) fn fold_function(
             Operation::store(span, mir::Value::Constant(constant), fold.destination),
         );
     }
+    for (block, target) in plan.branches {
+        let span = edit.block(block).terminator.span;
+        edit.block_mut(block).terminator = Terminator::goto(span, target);
+    }
+    // Folding a branch is what strands blocks, so the pass prunes once its edits have settled.
+    edit.remove_unreachable_blocks();
     Some(edit.finish(env))
 }
 
-/// Decides which calls to fold, without touching the function.
+/// Decides what to rewrite, without touching the function.
 fn plan_folds(
     func: &Function,
     env: ModuleEnv<'_>,
     session: &CompilerSession,
     module_id: ModuleId,
-) -> Vec<Fold> {
+) -> Plan {
     let analysis = dataflow::analyze(func);
     let evaluator = ConstEvaluator::new(module_id, session);
-    let mut folds = Vec::new();
+    let mut plan = Plan::default();
 
     for block in func.blocks() {
-        // Replaying a block yields the state before each operation; a fold discovered inside the
-        // block updates that state as it goes, so `2 + 3` then `* 7` folds in a single walk.
-        let mut folded_here: Vec<(usize, Constant, mir::Value)> = Vec::new();
-        let mut local: Option<State> = None;
-        // A source-fallible call lives in the block's `Invoke` terminator rather than its operation
-        // list, and replacing it means rewriting control flow — the terminator becomes a `goto` and
-        // the error edge dies. Until that rewrite exists, such a call is left alone.
-        let operation_count = func.block(block).operations().len();
-        analysis.replay(func, block, |index, operation, state| {
-            let state = local.as_ref().unwrap_or(state);
-            if index >= operation_count {
-                return;
+        // Stepping from the block's entry state, rather than only reading it, lets a fold teach the
+        // rest of the walk what it produced: `2 + 3` then `* 7` folds in one pass.
+        let mut state = analysis.entry_state(block);
+        let basic_block = func.block(block);
+        for (index, operation) in basic_block.operations().iter().enumerate() {
+            if let OperationKind::Call { ty } = &operation.kind
+                && let Ok(constant) = try_fold_call(operation, ty, &state, &evaluator, &env)
+                && let Some(call) = dataflow::call_operands(&operation.operands, ty)
+            {
+                let destination = call.result.clone();
+                if let Some(key) = state.place_of(&destination) {
+                    state.set_place_known(
+                        key,
+                        Fact::Known(Const::Literal(constant.representation.clone())),
+                    );
+                }
+                plan.calls.push(Fold {
+                    block,
+                    index,
+                    destination,
+                    constant,
+                });
+                continue;
             }
-            let OperationKind::Call { ty } = &operation.kind else {
-                return;
-            };
-            let Ok(constant) = try_fold_call(func, operation, ty, state, &evaluator, &env) else {
-                return;
-            };
-            let Some(call) = dataflow::call_operands(&operation.operands, ty) else {
-                return;
-            };
-            let destination = call.result.clone();
-            // Teach the rest of the walk what this call now produces.
-            let mut updated = state.clone();
-            if let Some(key) = updated.place_of(&destination) {
-                updated.set_place_known(
-                    key,
-                    Fact::Known(Const::Literal(constant.representation.clone())),
-                );
-            }
-            local = Some(updated);
-            folded_here.push((index, constant, destination));
-        });
-        for (index, constant, destination) in folded_here {
-            folds.push(Fold {
+            analysis.step(func, operation, &mut state);
+        }
+
+        // A source-fallible call lives in the terminator rather than the operation list, and
+        // folding it means rewriting control flow — the error edge dies. That rewrite is not done
+        // yet, so such a call is left alone; only a decided branch is rewritten here.
+        if let TerminatorKind::CondBr {
+            condition,
+            then_target,
+            else_target,
+        } = &basic_block.terminator().kind
+            && let Some(taken) = known_condition(condition, &state)
+        {
+            plan.branches.push((
                 block,
-                index,
-                destination,
-                constant,
-            });
+                if taken { *then_target } else { *else_target },
+            ));
         }
     }
-    folds
+    plan
+}
+
+/// The value of a branch condition, when the analysis knows it.
+fn known_condition(condition: &mir::Value, state: &State) -> Option<bool> {
+    let mir::Value::Register(id) = condition else {
+        return None;
+    };
+    match state.register(*id)? {
+        RegisterFact::Value(Fact::Known(Const::Literal(literal))) => {
+            literal.as_primitive_ty::<bool>().copied()
+        }
+        _ => None,
+    }
 }
 
 /// Evaluates one call site at compile time and expresses the result as a constant, or explains why
 /// it cannot be.
 fn try_fold_call(
-    func: &Function,
     operation: &Operation,
     ty: &CallImplType,
     state: &State,
@@ -191,7 +224,6 @@ fn try_fold_call(
         return discard(arguments, NotFoldable::UnsupportedConvention);
     }
 
-    let _ = func;
     let value = evaluator.try_call(
         *callee,
         ty.effects(),
@@ -218,19 +250,39 @@ fn discard(arguments: Vec<ConstArgument>, reason: NotFoldable) -> Result<Constan
 
 #[cfg(test)]
 mod tests {
-    use crate::{CompilerSession, ExecutionTarget, MirOptimization, module::Path, ustr};
+    use crate::{CompilerSession, MirOptimization};
+
+    fn optimized_main(src: &str) -> String {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        let module = session.emit_mir("fold", src);
+        module
+            .split("fn main")
+            .nth(1)
+            .expect("the module defines main")
+            .to_string()
+    }
+
+    /// A branch whose condition is known becomes a jump, and the arm not taken disappears — with
+    /// the constants only it named.
+    #[test]
+    fn a_known_condition_drops_the_arm_not_taken() {
+        let main = optimized_main("fn main() -> int { if true { 1 } else { 2 } }");
+        assert!(
+            !main.contains("condbr"),
+            "the branch must be decided:\n{main}"
+        );
+        assert!(
+            !main.contains("= 2"),
+            "the untaken arm's constant must be pruned:\n{main}"
+        );
+        assert!(main.contains("= 1"), "{main}");
+    }
 
     /// The gate example: constant arithmetic collapses into a single store into `@ret`.
     #[test]
     fn constant_arithmetic_folds_to_a_store() {
-        let mut session = CompilerSession::new();
-        session.set_mir_optimization(MirOptimization::Enabled);
-        let optimized = session.emit_mir("fold", "fn main() -> int { let x = 2 + 3; x * 7 }");
-
-        let main = optimized
-            .split("fn main")
-            .nth(1)
-            .expect("the module defines main");
+        let main = optimized_main("fn main() -> int { let x = 2 + 3; x * 7 }");
         assert!(
             !main.contains("call "),
             "every call of a constant expression must fold:\n{main}"
@@ -239,8 +291,5 @@ mod tests {
             main.contains("store @c") && main.contains("to %p0"),
             "the result must be stored into the return place:\n{main}"
         );
-        let _ = ustr("");
-        let _ = ExecutionTarget::Mir;
-        let _ = Path::single_str("x");
     }
 }
