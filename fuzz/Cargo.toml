@@ -14,8 +14,8 @@ ferlium = { path = ".." }
 libfuzzer-sys = "0.4"
 
 [[bin]]
-name = "parse_any"
-path = "fuzz_targets/parse_any.rs"
+name = "grammar_optimization_differential"
+path = "fuzz_targets/grammar_optimization_differential.rs"
 test = false
 doc = false
 bench = false

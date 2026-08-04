@@ -150,10 +150,8 @@ fn plan_folds(
         } = &basic_block.terminator().kind
             && let Some(taken) = known_condition(condition, &state)
         {
-            plan.branches.push((
-                block,
-                if taken { *then_target } else { *else_target },
-            ));
+            plan.branches
+                .push((block, if taken { *then_target } else { *else_target }));
         }
     }
     plan

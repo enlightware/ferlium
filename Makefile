@@ -11,8 +11,11 @@ FUZZ_LOG_DIR ?= fuzz/logs
 CXX_STDLIB_PATH ?= $(shell c++ -print-file-name=libstdc++.so 2>/dev/null)
 CXX_STDLIB_DIR ?= $(if $(filter /%,$(CXX_STDLIB_PATH)),$(dir $(CXX_STDLIB_PATH)))
 FUZZ_ENV := ASAN_OPTIONS=detect_leaks=0
+# Leak detection costs roughly 3x throughput, so it is opt-in rather than on by default.
+FUZZ_ENV_LEAKS := ASAN_OPTIONS=detect_leaks=1
 ifneq ($(strip $(CXX_STDLIB_DIR)),)
 FUZZ_ENV += LIBRARY_PATH=$(CXX_STDLIB_DIR):$${LIBRARY_PATH}
+FUZZ_ENV_LEAKS += LIBRARY_PATH=$(CXX_STDLIB_DIR):$${LIBRARY_PATH}
 endif
 
 install-deps:
@@ -33,23 +36,23 @@ test-miri:
 bench:
 	cargo bench
 
-fuzz-parse:
-	mkdir -p fuzz/corpus-generated/parse_any $(FUZZ_LOG_DIR)/parse_any
-	cd $(FUZZ_LOG_DIR)/parse_any && $(FUZZ_ENV) cargo +nightly fuzz run --fuzz-dir $(CURDIR)/fuzz --target-dir $(CURDIR)/target parse_any $(CURDIR)/fuzz/corpus-generated/parse_any $(CURDIR)/fuzz/corpus/parse_any -- -max_total_time=$(FUZZ_TIME) -timeout=$(FUZZ_ITEM_TIMEOUT) -jobs=$(FUZZ_JOBS) -workers=$(FUZZ_JOBS)
-
 fuzz-ide:
 	mkdir -p fuzz/corpus-generated/ide_compile_any $(FUZZ_LOG_DIR)/ide_compile_any
-	cd $(FUZZ_LOG_DIR)/ide_compile_any && $(FUZZ_ENV) cargo +nightly fuzz run --fuzz-dir $(CURDIR)/fuzz --target-dir $(CURDIR)/target ide_compile_any $(CURDIR)/fuzz/corpus-generated/ide_compile_any $(CURDIR)/fuzz/corpus/programs $(CURDIR)/fuzz/corpus/diagnostics -- -max_total_time=$(FUZZ_TIME) -timeout=$(FUZZ_ITEM_TIMEOUT) -jobs=$(FUZZ_JOBS) -workers=$(FUZZ_JOBS)
+	cd $(FUZZ_LOG_DIR)/ide_compile_any && $(FUZZ_ENV) cargo +nightly fuzz run --fuzz-dir $(CURDIR)/fuzz --target-dir $(CURDIR)/target ide_compile_any $(CURDIR)/fuzz/corpus-generated/ide_compile_any $(CURDIR)/fuzz/corpus/programs $(CURDIR)/fuzz/corpus/diagnostics $(CURDIR)/fuzz/corpus/parse_any -- -max_total_time=$(FUZZ_TIME) -timeout=$(FUZZ_ITEM_TIMEOUT) -jobs=$(FUZZ_JOBS) -workers=$(FUZZ_JOBS)
 
 fuzz-grammar:
 	mkdir -p fuzz/corpus-generated/grammar_ide_compile $(FUZZ_LOG_DIR)/grammar_ide_compile
 	cd $(FUZZ_LOG_DIR)/grammar_ide_compile && $(FUZZ_ENV) cargo +nightly fuzz run --fuzz-dir $(CURDIR)/fuzz --target-dir $(CURDIR)/target grammar_ide_compile $(CURDIR)/fuzz/corpus-generated/grammar_ide_compile $(CURDIR)/fuzz/corpus/grammar_ide_compile -- -max_total_time=$(FUZZ_TIME) -timeout=$(FUZZ_ITEM_TIMEOUT) -jobs=$(FUZZ_JOBS) -workers=$(FUZZ_JOBS)
 
-fuzz: fuzz-parse fuzz-ide fuzz-grammar
+fuzz-optimization:
+	mkdir -p fuzz/corpus-generated/grammar_optimization_differential $(FUZZ_LOG_DIR)/grammar_optimization_differential
+	cd $(FUZZ_LOG_DIR)/grammar_optimization_differential && $(FUZZ_ENV) cargo +nightly fuzz run --fuzz-dir $(CURDIR)/fuzz --target-dir $(CURDIR)/target grammar_optimization_differential $(CURDIR)/fuzz/corpus-generated/grammar_optimization_differential $(CURDIR)/fuzz/corpus/grammar_ide_compile -- -max_total_time=$(FUZZ_TIME) -timeout=$(FUZZ_ITEM_TIMEOUT) -jobs=$(FUZZ_JOBS) -workers=$(FUZZ_JOBS)
 
-fuzz-cmin-parse:
-	mkdir -p fuzz/corpus-generated/parse_any
-	$(FUZZ_ENV) cargo +nightly fuzz cmin --fuzz-dir $(CURDIR)/fuzz --target-dir $(CURDIR)/target parse_any $(CURDIR)/fuzz/corpus-generated/parse_any -- -timeout=$(FUZZ_ITEM_TIMEOUT)
+fuzz-optimization-leaks:
+	mkdir -p fuzz/corpus-generated/grammar_optimization_differential $(FUZZ_LOG_DIR)/grammar_optimization_differential
+	cd $(FUZZ_LOG_DIR)/grammar_optimization_differential && $(FUZZ_ENV_LEAKS) cargo +nightly fuzz run --fuzz-dir $(CURDIR)/fuzz --target-dir $(CURDIR)/target grammar_optimization_differential $(CURDIR)/fuzz/corpus-generated/grammar_optimization_differential $(CURDIR)/fuzz/corpus/grammar_ide_compile -- -max_total_time=$(FUZZ_TIME) -timeout=$(FUZZ_ITEM_TIMEOUT) -jobs=$(FUZZ_JOBS) -workers=$(FUZZ_JOBS)
+
+fuzz: fuzz-ide fuzz-grammar fuzz-optimization
 
 fuzz-cmin-ide:
 	mkdir -p fuzz/corpus-generated/ide_compile_any
@@ -59,7 +62,11 @@ fuzz-cmin-grammar:
 	mkdir -p fuzz/corpus-generated/grammar_ide_compile
 	$(FUZZ_ENV) cargo +nightly fuzz cmin --fuzz-dir $(CURDIR)/fuzz --target-dir $(CURDIR)/target grammar_ide_compile $(CURDIR)/fuzz/corpus-generated/grammar_ide_compile -- -timeout=$(FUZZ_ITEM_TIMEOUT)
 
-fuzz-cmin: fuzz-cmin-parse fuzz-cmin-ide fuzz-cmin-grammar
+fuzz-cmin-optimization:
+	mkdir -p fuzz/corpus-generated/grammar_optimization_differential
+	$(FUZZ_ENV) cargo +nightly fuzz cmin --fuzz-dir $(CURDIR)/fuzz --target-dir $(CURDIR)/target grammar_optimization_differential $(CURDIR)/fuzz/corpus-generated/grammar_optimization_differential -- -timeout=$(FUZZ_ITEM_TIMEOUT)
+
+fuzz-cmin: fuzz-cmin-ide fuzz-cmin-grammar fuzz-cmin-optimization
 
 repl:
 	RUST_BACKTRACE=1 RUST_LOG=ferlium=debug cargo run --example ferlium

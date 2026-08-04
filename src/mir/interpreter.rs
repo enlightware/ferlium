@@ -2301,9 +2301,11 @@ impl<'a> Interpreter<'a> {
     ) -> R {
         match operand {
             mir::Value::Register(_) | mir::Value::Parameter(_) => match slots.get(operand) {
-                Some(Binding::Place(place)) => {
-                    use_value(place.target_ref(&self.ctx).expect("operand is an invalid place"))
-                }
+                Some(Binding::Place(place)) => use_value(
+                    place
+                        .target_ref(&self.ctx)
+                        .expect("operand is an invalid place"),
+                ),
                 Some(Binding::Projected { place, .. }) => use_value(
                     place
                         .target_ref(&self.ctx)
