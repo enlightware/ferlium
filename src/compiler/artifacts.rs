@@ -12,7 +12,7 @@ use std::cell::OnceCell;
 use crate::{
     compiler::{CompilerSession, Modules},
     emit_mir::build_mir_function,
-    mir::{self, edit::FunctionEdit},
+    mir::{self, pass::optimize_function},
     module::{LocalFunctionId, Module, ModuleEnv, ModuleId, id::Id},
 };
 
@@ -142,7 +142,7 @@ impl MirArtifacts {
             .map(|function| {
                 function
                     .as_ref()
-                    .map(|function| FunctionEdit::new(function.clone()).finish(env))
+                    .map(|function| optimize_function(function, env, session))
             })
             .collect();
         Self { functions }
