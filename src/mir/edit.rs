@@ -22,13 +22,14 @@
 //! ones are allocated beyond the highest already in use, so an analysis keyed on value identity
 //! stays valid from one pass to the next and an identity edit is genuinely the identity. That costs
 //! nothing: the verifier and the interpreter only ever use a `ValueId` as a map key, never as an
-//! index. [`BlockId`] is different — it indexes the block table — so blocks stay dense and
-//! [`remove_unreachable_blocks`](FunctionEdit::remove_unreachable_blocks) is the one operation that
-//! renumbers them, explicitly and on request.
+//! index. [`BlockId`] is different — it indexes the block table — so blocks stay dense, and the two
+//! operations that renumber them
+//! ([`remove_unreachable_blocks`](FunctionEdit::remove_unreachable_blocks) and
+//! [`reorder_blocks_in_reverse_postorder`](FunctionEdit::reorder_blocks_in_reverse_postorder)) are
+//! explicit and run on request.
 //!
 //! The optimization hook opens and closes every body without editing it, which is what checks the
-//! identity property at corpus scale. The editing operations themselves have no caller until the
-//! folding pass lands.
+//! identity property at corpus scale.
 #![allow(dead_code)]
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -212,6 +213,68 @@ impl FunctionEdit {
         self.blocks = retained;
     }
 
+    /// Reorders blocks into reverse postorder, keeping any unreachable block after them.
+    ///
+    /// A pass that appends a block can leave a *use* before the *definition* it names in block
+    /// order. Dominance still holds — the definition's block dominates the use's — but block order
+    /// is what MIR's own consumers walk: the verifier resolves an operation's result role from the
+    /// role of its operand (a `load`'s type is its pointer's pointee), so it needs the definition to
+    /// come first. Reverse postorder gives that for free, since a dominator always precedes what it
+    /// dominates in one.
+    ///
+    /// Like [`remove_unreachable_blocks`](Self::remove_unreachable_blocks) this moves every
+    /// [`BlockId`] and is therefore explicit; unlike it, nothing is dropped — an unreachable block
+    /// keeps its relative position at the end, because removing it is a separate decision.
+    pub(crate) fn reorder_blocks_in_reverse_postorder(&mut self) {
+        let mut order = Vec::with_capacity(self.blocks.len());
+        let mut visited = FxHashSet::default();
+        let mut stack = vec![(self.entry(), 0usize)];
+        visited.insert(self.entry());
+        while let Some((block, next)) = stack.pop() {
+            let successors = successors(&self.block(block).terminator);
+            match successors.get(next) {
+                Some(successor) => {
+                    stack.push((block, next + 1));
+                    if visited.insert(*successor) {
+                        stack.push((*successor, 0));
+                    }
+                }
+                None => order.push(block),
+            }
+        }
+        order.reverse();
+        order.extend(self.blocks().filter(|block| !visited.contains(block)));
+        if order
+            .iter()
+            .enumerate()
+            .all(|(index, block)| block.as_index() == index)
+        {
+            return;
+        }
+
+        let mut renumbered = FxHashMap::default();
+        for (index, block) in order.iter().enumerate() {
+            renumbered.insert(*block, BlockId::from_index(index));
+        }
+        let mut previous: Vec<Option<EditBlock>> = std::mem::take(&mut self.blocks)
+            .into_iter()
+            .map(Some)
+            .collect();
+        self.blocks = order
+            .iter()
+            .map(|block| {
+                previous[block.as_index()]
+                    .take()
+                    .expect("each block is placed exactly once")
+            })
+            .collect();
+        for block in &mut self.blocks {
+            for target in successors_mut(&mut block.terminator) {
+                *target = renumbered[target];
+            }
+        }
+    }
+
     /// Drops constants no operand names any more, renumbering the rest.
     ///
     /// Like [`remove_unreachable_blocks`](Self::remove_unreachable_blocks) this is explicit rather
@@ -334,7 +397,7 @@ fn visit_terminator_operands_mut(
     }
 }
 
-fn successors(terminator: &Terminator) -> Vec<BlockId> {
+pub(crate) fn successors(terminator: &Terminator) -> Vec<BlockId> {
     match &terminator.kind {
         TerminatorKind::Goto { target } => vec![*target],
         TerminatorKind::CondBr {

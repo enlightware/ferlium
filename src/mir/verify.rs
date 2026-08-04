@@ -1715,9 +1715,15 @@ impl<'a> Verifier<'a> {
         else {
             return;
         };
-        let target = state.roots[root]
-            .at_path(&path)
-            .expect("tracked clear path must exist");
+        let Some(target) = state.roots[root].at_path(&path) else {
+            // The projection is inside an opaque shell — a variant payload, a native interior —
+            // which retains its ownership as a whole. Clearing a subplace of one cannot be
+            // represented, and must not erase the shell's obligation, so the state is left alone;
+            // `transfer_store` gives up on the same paths for the same reason. Emitted MIR clears
+            // such a place only through a parameter, which is not a tracked root at all, but
+            // inlining rebases a callee's parameter onto the caller's `alloca`.
+            return;
+        };
         assert!(
             target.state.may_be_overwritten_without_drop(),
             "MIR function `{}`: clear discards a live semantic drop obligation",

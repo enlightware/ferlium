@@ -777,11 +777,39 @@ fn process_pipe_input(
     )
 }
 
+/// Prints the optimization report for the standard library.
+fn print_std_optimization_report() {
+    let mut session = CompilerSession::new();
+    session.set_mir_optimization(MirOptimization::Enabled);
+    let module_id = session
+        .modules()
+        .get_by_path(&Path::single_str("std"))
+        .expect("the standard library is always registered")
+        .0;
+    let report = session.optimization_report(module_id);
+    let (_, module) = session
+        .modules()
+        .get_by_path(&Path::single_str("std"))
+        .unwrap();
+    let module_env = session.modules().env_for(module);
+    println!(
+        "Optimization report for std:\n{}",
+        report.format_with(&module_env)
+    );
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     // Optimization only applies to MIR, so asking for it selects that target.
     // Reporting is about what optimization did, so asking for it turns optimization on.
     let optimization_report = args.iter().any(|arg| arg == "--optimization-report");
+    // The same question about the standard library, which is where most of the code a program
+    // calls actually lives — and the corpus the optimizer's budgets were sized against. It is a
+    // one-shot query rather than a mode, so it answers and exits.
+    if args.iter().any(|arg| arg == "--optimization-report-std") {
+        print_std_optimization_report();
+        return;
+    }
     let optimize = optimization_report || args.iter().any(|arg| arg == "--optimize");
     let target = if optimize || args.iter().any(|arg| arg == "--mir") {
         ExecutionTarget::Mir

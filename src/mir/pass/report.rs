@@ -18,10 +18,13 @@
 //! refusals alone cannot distinguish "not folded" from "not a call site".
 //!
 //! **Nothing is instrumented to produce it.** The report is *derived*, on request, from the two
-//! artifact stages a module already keeps: what disappeared between the raw and optimized bodies
-//! was folded, and each call that remains is re-classified by the folding pass's own predicate — so
-//! the answers cannot drift from what the pass actually decided. A session that never asks pays
-//! nothing.
+//! artifact stages a module already keeps: their call sites are counted, and each call that remains
+//! is re-classified by each pass's own predicate — so the answers cannot drift from what the passes
+//! actually decided. A session that never asks pays nothing.
+//!
+//! **Each pass speaks for itself.** A site both passes declined carries a remark from each, because
+//! "why was this not evaluated away?" and "why was the callee not copied in?" have different
+//! answers and different remedies — a native folds readily and can never be inlined.
 
 use std::fmt;
 
@@ -33,39 +36,55 @@ use crate::{
     module::{FunctionId, ModuleEnv, ModuleId},
 };
 
-use super::fold;
+use super::{fold, inline, inline::NotInlinable};
 
 /// The pass a remark came from.
 ///
-/// Only folding reports today. The field exists so that inlining and specialization — which will
-/// want to say the same kind of thing about the same call sites — extend this rather than growing a
-/// second, parallel surface.
+/// A call site left alone gets a remark from each pass that declined it, so the two questions —
+/// "why was this not evaluated away?" and "why was the callee not copied in?" — are answered
+/// separately. They have different answers and different remedies; a native, for instance, can
+/// never be inlined but folds readily.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum OptimizationPass {
     Fold,
+    Inline,
+}
+
+impl OptimizationPass {
+    pub const ALL: [Self; 2] = [Self::Fold, Self::Inline];
 }
 
 impl fmt::Display for OptimizationPass {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Fold => write!(f, "fold"),
+            Self::Inline => write!(f, "inline"),
         }
     }
 }
 
-/// One call site the optimizer left alone, and why.
+/// Why a pass left a call site alone. Each pass has its own vocabulary.
+enum RemarkReason {
+    Fold(NotFoldable),
+    Inline(NotInlinable),
+}
+
+/// One call site a pass left alone, and why.
 pub struct Remark {
     pub site: Location,
     /// The callee, when it is statically known — it is not, precisely when that is the reason.
     pub callee: Option<FunctionId>,
     pub pass: OptimizationPass,
-    reason: NotFoldable,
+    reason: RemarkReason,
 }
 
 impl Remark {
     /// A short phrase naming the reason.
     pub fn reason(&self) -> &'static str {
-        self.reason.description()
+        match self.reason {
+            RemarkReason::Fold(reason) => reason.description(),
+            RemarkReason::Inline(reason) => reason.description(),
+        }
     }
 }
 
@@ -78,19 +97,18 @@ impl Remark {
 pub struct OptimizationReport {
     /// Call sites the module had before optimization.
     pub call_sites_before: usize,
+    /// Call sites that remain. Counted rather than derived from the remarks: a site that neither
+    /// pass could take carries one remark from each.
+    pub call_sites_after: usize,
     pub remarks: Vec<Remark>,
 }
 
 impl OptimizationReport {
-    /// Call sites that remain — every one of which has a remark saying why.
-    pub fn call_sites_after(&self) -> usize {
-        self.remarks.len()
-    }
-
-    /// Reasons and their counts, most frequent first — the summary line of the whole exercise.
-    pub fn reasons(&self) -> Vec<(&'static str, usize)> {
+    /// Reasons and their counts for one pass, most frequent first — the summary line of the whole
+    /// exercise.
+    pub fn reasons(&self, pass: OptimizationPass) -> Vec<(&'static str, usize)> {
         let mut counts: Vec<(&'static str, usize)> = Vec::new();
-        for remark in &self.remarks {
+        for remark in self.remarks.iter().filter(|remark| remark.pass == pass) {
             match counts.iter_mut().find(|(name, _)| *name == remark.reason()) {
                 Some((_, count)) => *count += 1,
                 None => counts.push((remark.reason(), 1)),
@@ -112,6 +130,7 @@ pub(crate) fn build(
     env: ModuleEnv<'_>,
 ) -> OptimizationReport {
     let mut call_sites_before = 0usize;
+    let mut call_sites_after = 0usize;
     let mut remarks = Vec::new();
 
     for (raw_body, optimized_body) in raw.iter().zip(optimized) {
@@ -119,6 +138,18 @@ pub(crate) fn build(
             continue;
         };
         call_sites_before += call_sites(raw_body);
+        call_sites_after += call_sites(optimized_body);
+
+        remarks.extend(
+            inline::refusals_of(optimized_body, session)
+                .into_iter()
+                .map(|refusal| Remark {
+                    site: refusal.site,
+                    callee: refusal.callee,
+                    pass: OptimizationPass::Inline,
+                    reason: RemarkReason::Inline(refusal.reason),
+                }),
+        );
 
         let mut refusals = Vec::new();
         let plan = fold::plan_folds(
@@ -132,7 +163,7 @@ pub(crate) fn build(
             site: refusal.site,
             callee: refusal.callee,
             pass: OptimizationPass::Fold,
-            reason: refusal.reason,
+            reason: RemarkReason::Fold(refusal.reason),
         }));
         // A call the pass would still fold means optimization stopped before reaching it, which is
         // the round budget talking. Worth saying out loud: it is the one refusal we control
@@ -142,13 +173,14 @@ pub(crate) fn build(
                 site: Location::new_synthesized(),
                 callee: None,
                 pass: OptimizationPass::Fold,
-                reason: NotFoldable::RoundsExhausted,
+                reason: RemarkReason::Fold(NotFoldable::RoundsExhausted),
             });
         }
     }
 
     OptimizationReport {
         call_sites_before,
+        call_sites_after,
         remarks,
     }
 }
@@ -179,16 +211,22 @@ impl FormatWith<ModuleEnv<'_>> for OptimizationReport {
         writeln!(
             f,
             "{} call sites before optimization, {} after",
-            self.call_sites_before,
-            self.call_sites_after()
+            self.call_sites_before, self.call_sites_after
         )?;
         if self.remarks.is_empty() {
             writeln!(f, "  everything folded")?;
             return Ok(());
         }
-        writeln!(f, "  {} not folded", self.remarks.len())?;
-        for (reason, count) in self.reasons() {
-            writeln!(f, "  {count:>6}  {reason}")?;
+        for pass in OptimizationPass::ALL {
+            let reasons = self.reasons(pass);
+            if reasons.is_empty() {
+                continue;
+            }
+            let total: usize = reasons.iter().map(|(_, count)| count).sum();
+            writeln!(f, "  {total} sites declined by {pass}")?;
+            for (reason, count) in reasons {
+                writeln!(f, "  {count:>6}  {reason}")?;
+            }
         }
         for remark in &self.remarks {
             let callee = match remark.callee {
@@ -212,6 +250,7 @@ impl FormatWith<ModuleEnv<'_>> for OptimizationReport {
 
 #[cfg(test)]
 mod tests {
+    use super::OptimizationPass;
     use crate::{
         CompilerSession, ExecutionTarget, MirOptimization, format::FormatWith, module::Path,
     };
@@ -240,7 +279,7 @@ mod tests {
     fn a_fully_folded_function_has_no_remarks() {
         let (report, rendered) = report_for("fn main() -> int { let x = 2 + 3; x * 7 }");
         assert!(report.remarks.is_empty(), "{rendered}");
-        assert_eq!(report.call_sites_after(), 0);
+        assert_eq!(report.call_sites_after, 0);
         assert!(report.call_sites_before > 0, "{rendered}");
         assert!(rendered.contains("everything folded"), "{rendered}");
     }
@@ -250,10 +289,57 @@ mod tests {
     #[test]
     fn an_unknown_argument_is_reported_as_such() {
         let (report, rendered) = report_for("fn twice(n: int) -> int { n + n }");
-        let reasons: Vec<&str> = report.reasons().into_iter().map(|(name, _)| name).collect();
+        let reasons: Vec<&str> = report
+            .reasons(OptimizationPass::Fold)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
         assert!(
             reasons.contains(&"argument not known"),
             "expected an unknown-argument remark:\n{rendered}"
+        );
+    }
+
+    /// A call site declined by both passes is reported by both, in each pass's own vocabulary: a
+    /// native folds when its arguments are known but can never be inlined, and the report has to
+    /// say which of the two is the missing piece.
+    #[test]
+    fn a_remaining_call_is_classified_by_each_pass() {
+        let (report, rendered) = report_for("fn twice(n: int) -> int { n + n }");
+        let inline: Vec<&str> = report
+            .reasons(OptimizationPass::Inline)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert!(
+            inline.contains(&"callee has no body to copy"),
+            "a native callee is not inlinable:\n{rendered}"
+        );
+        let fold: Vec<&str> = report
+            .reasons(OptimizationPass::Fold)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert!(
+            fold.contains(&"argument not known"),
+            "and folding refuses it for its own reason:\n{rendered}"
+        );
+    }
+
+    /// A generic callee is the refusal Phase 4 exists to lift, so it gets its own reason rather
+    /// than being folded into a general "shape" bucket.
+    #[test]
+    fn a_generic_callee_is_reported_as_generic() {
+        let (report, rendered) =
+            report_for("fn identity(x) { x }\nfn use_it(n: int) -> int { identity(n) }");
+        let inline: Vec<&str> = report
+            .reasons(OptimizationPass::Inline)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert!(
+            inline.contains(&"callee is generic"),
+            "expected a generic-callee remark:\n{rendered}"
         );
     }
 
@@ -262,7 +348,7 @@ mod tests {
     fn the_summary_states_both_counts() {
         let (report, rendered) =
             report_for("fn f(n: int) -> int { n + 1 }\nfn main() -> int { 2 + 3 }");
-        assert_eq!(report.call_sites_after(), report.remarks.len());
+        assert!(report.call_sites_after > 0);
         assert!(report.call_sites_before > 0);
         assert!(
             rendered.contains("call sites before optimization"),
