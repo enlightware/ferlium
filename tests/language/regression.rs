@@ -21,6 +21,31 @@ use crate::harness::{TestSession, float, int};
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
 
+/// A compound assignment whose index operands contain assignments makes the borrow checker panic
+/// with "Cannot resolve a non-place node" instead of reporting a diagnostic.
+///
+/// Found by `grammar_optimization_differential`, which reached these shapes because it compiles
+/// grammar-generated programs; all three reproducers reduce to the same defect. The bug predates
+/// the MIR optimization work and has nothing to do with it — the fuzzer simply exercises the
+/// compile path. Ignored until the borrow checker resolves, or rejects, these nodes.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[ignore = "open bug: the borrow checker panics on a compound assignment through a computed index"]
+fn compound_assignment_through_assigning_index_does_not_panic() {
+    for source in [
+        "map[a = a = a] += a = a = 0",
+        "map[match a = a {a => a}] += a = a = 0",
+        "match map[a = a] += a = 0 {a => a = 0}",
+    ] {
+        let mut session = TestSession::new();
+        // Compiling must fail with a diagnostic — `map` and `a` are undefined — and must not panic.
+        assert!(
+            session.try_compile(source).is_err(),
+            "`{source}` must be rejected"
+        );
+    }
+}
+
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn ide_diagnostic_inside_multibyte_char_does_not_panic() {
