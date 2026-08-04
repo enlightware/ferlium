@@ -590,9 +590,14 @@ impl LiteralValue {
     pub(crate) fn has_representation_type_in(&self, ty: Type, env: &ModuleEnv<'_>) -> bool {
         self.has_representation_type_with(
             ty,
-            &mut |ty| match &*ty.data() {
-                TypeKind::Named(named) => Some(named.instantiated_shape(env)),
-                _ => None,
+            &mut |ty| {
+                // The universe lock is not reentrant, and `instantiated_shape` interns types, so
+                // the read guard from `data()` has to be released before calling it.
+                let named = match &*ty.data() {
+                    TypeKind::Named(named) => named.clone(),
+                    _ => return None,
+                };
+                Some(named.instantiated_shape(env))
             },
             &mut FxHashSet::default(),
         )
