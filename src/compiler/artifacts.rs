@@ -127,9 +127,9 @@ impl MirArtifacts {
 
     /// Runs the optimization passes over every body in `raw`.
     ///
-    /// No pass edits anything today, so each body is opened for editing and closed again — which
-    /// re-verifies it and, since editing preserves identities, must reproduce it exactly. See
-    /// `doc/plans/partial-evaluation.md`.
+    /// Every body is opened for editing and closed again, whether or not a pass changed it: closing
+    /// re-verifies, so a body no pass touched still proves that editing preserves identities and is
+    /// genuinely the identity. See `doc/plans/partial-evaluation.md`.
     ///
     /// Takes the whole session because the folding passes const-evaluate through the MIR
     /// interpreter, which resolves callees, dictionaries, and native code through it.

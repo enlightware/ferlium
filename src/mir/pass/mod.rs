@@ -16,6 +16,13 @@
 //! for both. Fold first within a round — it is cheap, it is what makes arguments known, and it
 //! shrinks a function before the inliner measures it against its growth budget.
 //!
+//! Both passes **merge** jump-joined blocks before closing their own edit, because both leave them:
+//! inlining splits every call site's block whether or not the callee needed it, and folding turns a
+//! `condbr` on a known condition into a jump. Merging belongs inside each pass rather than as a
+//! round of its own — a separate open-and-verify cycle measured *more* expensive than the merge
+//! saves, since closing an edit re-verifies the whole function. See
+//! `doc/plans/partial-evaluation.md`.
+//!
 //! Optimization terminates on three independent bounds: the dataflow lattice is monotone within a
 //! run, inlining is bounded by its growth budget and the non-recursive restriction, and
 //! [`MAX_ROUNDS`](budget::MAX_ROUNDS) bounds the outer loop.
@@ -95,5 +102,64 @@ pub(crate) fn optimize_function(
     match current {
         Some(rewritten) => rewritten,
         None => FunctionEdit::new(function.clone()).finish(env),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{CompilerSession, MirOptimization};
+
+    fn optimized(src: &str) -> String {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        session.emit_mir("merge", src)
+    }
+
+    fn body_of<'a>(module: &'a str, name: &str) -> &'a str {
+        module
+            .split(&format!("fn {name}"))
+            .nth(1)
+            .unwrap_or_else(|| panic!("module has no `{name}`:\n{module}"))
+    }
+
+    /// Splicing a straight-line callee splits the call site's block and joins the pieces with
+    /// jumps; merging must collapse them again, or every inlined call would cost two blocks that
+    /// each later round re-walks.
+    ///
+    /// The argument is deliberately unknown, so nothing folds away and what remains to observe is
+    /// the block structure itself.
+    #[test]
+    fn inlining_a_straight_line_callee_leaves_one_block() {
+        let module = optimized(
+            "fn add_one(x: int) -> int { x + 1 }\n\
+             fn use_it(n: int) -> int { add_one(n) }",
+        );
+        let caller = body_of(&module, "use_it");
+        assert!(
+            !caller.contains("call merge::add_one"),
+            "the callee must be inlined:\n{caller}"
+        );
+        assert!(
+            !caller.contains("br b"),
+            "the spliced pieces must be merged back into one block:\n{caller}"
+        );
+    }
+
+    /// Merging must not join a block a second predecessor also reaches: the arms of a branch meet
+    /// at a join block, which has to stay a block of its own.
+    #[test]
+    fn a_join_block_is_not_merged() {
+        let module = optimized(
+            "fn use_it(n: int) -> int { let mut x = 0; if n > 10 { x = 1 } else { x = 2 }; x }",
+        );
+        let caller = body_of(&module, "use_it");
+        assert!(
+            caller.contains("condbr"),
+            "the branch must survive an unknown condition:\n{caller}"
+        );
+        assert!(
+            caller.contains("br b"),
+            "the arms must still jump to their join block:\n{caller}"
+        );
     }
 }

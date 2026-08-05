@@ -135,8 +135,12 @@ pub(crate) fn fold_function(
         edit.block_mut(block).terminator = Terminator::goto(span, target);
     }
     // Folding a branch or an invoke is what strands blocks — an error edge that dies leaves its
-    // cleanup pad unreachable — so the pass prunes once its edits have settled.
+    // cleanup pad unreachable — so the pass prunes once its edits have settled. Resolving a
+    // `condbr` also leaves its surviving target with a single predecessor, so merging follows the
+    // prune, in this pass's own edit: a separate open-and-verify cycle for it costs more than the
+    // merge saves (see `doc/plans/partial-evaluation.md`).
     edit.remove_unreachable_blocks();
+    edit.merge_blocks_into_predecessors();
     Some(edit.finish(env))
 }
 

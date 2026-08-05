@@ -21,7 +21,8 @@
 //! - **the call site's block is split.** For a `call` operation, the operations after it and the
 //!   block's terminator move to a continuation block; for an `invoke`, the continuation already
 //!   exists as the terminator's normal successor. The call's block then jumps into the callee's
-//!   entry.
+//!   entry. Splitting is unconditional, so a callee that needed none arrives as three blocks joined
+//!   by jumps; the driver's merge step collapses those again (see [`super::merge_function`]).
 //! - **parameters are substituted by the caller's operands.** A call's operands are exactly the
 //!   callee's parameters in signature order (`@extra`, `@arg`, `@ret`), so the substitution is
 //!   positional. It is also why inlining hands folding known arguments: what was `%pN` becomes the
@@ -168,6 +169,12 @@ pub(crate) fn inline_function(
             .expect("planning read this body from the same artifacts");
         inline_at(&mut edit, &body, inlining.site, env);
     }
+    // Splicing always splits the call site's block and joins the pieces with jumps, so a callee
+    // that needed no split arrives as three blocks. Collapse them here, in this pass's own edit,
+    // rather than in a separate driver step: the step costs an extra clone and an extra
+    // verification per round and measured worse than the merge saves (see
+    // `doc/plans/partial-evaluation.md`).
+    edit.merge_blocks_into_predecessors();
     // A splice appends the continuation and the callee's blocks, which can leave a block that uses
     // a value before the block defining it. Dominance is unaffected, but block order is what MIR's
     // consumers walk, so canonical order is restored before the function is closed.

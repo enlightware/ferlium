@@ -22,14 +22,15 @@
 //! ones are allocated beyond the highest already in use, so an analysis keyed on value identity
 //! stays valid from one pass to the next and an identity edit is genuinely the identity. That costs
 //! nothing: the verifier and the interpreter only ever use a `ValueId` as a map key, never as an
-//! index. [`BlockId`] is different — it indexes the block table — so blocks stay dense, and the two
+//! index. [`BlockId`] is different — it indexes the block table — so blocks stay dense, and the
 //! operations that renumber them
-//! ([`remove_unreachable_blocks`](FunctionEdit::remove_unreachable_blocks) and
-//! [`reorder_blocks_in_reverse_postorder`](FunctionEdit::reorder_blocks_in_reverse_postorder)) are
-//! explicit and run on request.
+//! ([`remove_unreachable_blocks`](FunctionEdit::remove_unreachable_blocks),
+//! [`reorder_blocks_in_reverse_postorder`](FunctionEdit::reorder_blocks_in_reverse_postorder) and
+//! [`merge_blocks_into_predecessors`](FunctionEdit::merge_blocks_into_predecessors)) are explicit
+//! and run on request.
 //!
-//! The optimization hook opens and closes every body without editing it, which is what checks the
-//! identity property at corpus scale.
+//! The optimization hook opens and closes every body, including those no pass changed, which is what
+//! checks the identity property at corpus scale.
 #![allow(dead_code)]
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -273,6 +274,73 @@ impl FunctionEdit {
                 *target = renumbered[target];
             }
         }
+    }
+
+    /// Merges every block that has a single predecessor into it, when that predecessor ends in an
+    /// unconditional jump.
+    ///
+    /// Inlining manufactures exactly this shape and nothing else removes it. Splicing a callee
+    /// always splits the call site's block — the operations after the call become a continuation —
+    /// and joins the pieces with jumps, so a callee of one block arrives as *three*: the call's
+    /// block, the callee's body, and the continuation, each edge a jump to a block no one else
+    /// reaches. Every later round then walks all three, and the dataflow analysis pays per block.
+    ///
+    /// **Block order stays correct, and the argument is worth stating** because the verifier depends
+    /// on it: it resolves an operation's result role from the role of its operand while walking
+    /// blocks in index order, so a definition must *precede* its uses there, not merely dominate
+    /// them. Merging moves the successor's operations earlier, to the predecessor's position, which
+    /// could in principle overtake a definition they name. It cannot: the successor's only path from
+    /// entry runs through the predecessor, so anything dominating the successor dominates the
+    /// predecessor too, and therefore already precedes it. Nothing the merged operations name can
+    /// live between the two.
+    ///
+    /// Emptied blocks are left unreachable and dropped by
+    /// [`remove_unreachable_blocks`](Self::remove_unreachable_blocks), which is also what renumbers.
+    /// Like the other structural operations this moves every [`BlockId`], so it is explicit.
+    pub(crate) fn merge_blocks_into_predecessors(&mut self) {
+        let mut merged_any = false;
+        // A merge can expose another — a chain of jumps collapses one link at a time — so this runs
+        // to fixpoint. It terminates because each merge empties one block for good.
+        while let Some((predecessor, successor)) = self.next_mergeable_pair() {
+            let operations = std::mem::take(&mut self.blocks[successor.as_index()].operations);
+            let span = self.blocks[successor.as_index()].terminator.span;
+            // Leave the emptied block terminal, so it stops contributing edges to the predecessor
+            // counts the next iteration computes.
+            let terminator = std::mem::replace(
+                &mut self.blocks[successor.as_index()].terminator,
+                Terminator::ret(span),
+            );
+            let block = &mut self.blocks[predecessor.as_index()];
+            block.operations.extend(operations);
+            block.terminator = terminator;
+            merged_any = true;
+        }
+        if merged_any {
+            self.remove_unreachable_blocks();
+        }
+    }
+
+    /// The next `(predecessor, successor)` pair the above may collapse, if any.
+    fn next_mergeable_pair(&self) -> Option<(BlockId, BlockId)> {
+        // Incoming *edges*, not distinct predecessors: a `condbr` whose arms share a target counts
+        // twice, which correctly disqualifies that target.
+        let mut incoming: FxHashMap<BlockId, usize> = FxHashMap::default();
+        for block in self.blocks() {
+            for target in successors(&self.block(block).terminator) {
+                *incoming.entry(target).or_default() += 1;
+            }
+        }
+        self.blocks().find_map(|predecessor| {
+            let TerminatorKind::Goto { target } = self.block(predecessor).terminator.kind else {
+                return None;
+            };
+            // The entry block keeps its identity as the function's start, and a self-loop is not a
+            // merge.
+            if target == self.entry() || target == predecessor {
+                return None;
+            }
+            (incoming.get(&target).copied() == Some(1)).then_some((predecessor, target))
+        })
     }
 
     /// Drops constants no operand names any more, renumbering the rest.
