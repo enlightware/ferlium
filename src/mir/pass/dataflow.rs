@@ -396,7 +396,7 @@ fn transfer(
             // slot, which the escape scan has already accounted for by escaping the root.
             let binding = match (
                 state.place_of(&operation.operands[0]),
-                field_index(&operation.operands[1]),
+                field_index(&operation.operands[1], func),
             ) {
                 (Some(base), Some(index)) if tracked(&base) => {
                     RegisterFact::Place(base.field(index))
@@ -534,13 +534,22 @@ fn value_operand_fact(operand: &mir::Value, func: &Function, state: &State) -> F
     }
 }
 
-fn field_index(operand: &mir::Value) -> Option<usize> {
-    match operand {
-        mir::Value::Pattern(literal) => literal
-            .as_primitive_ty::<isize>()
-            .and_then(|index| usize::try_from(*index).ok()),
-        _ => None,
-    }
+/// The constant field index a `subfield` selects, if it is one.
+///
+/// Both forms have to be accepted. Lowering emits the index as a **constant-pool reference**
+/// (`subfield @c0 from %r0`), while hand-built MIR and patterns carry it inline. Recognizing only
+/// the inline form silently disabled every field-sensitive answer this analysis can give: the
+/// transfer function fell back to an unknown value for *every* `subfield`, and the escape scan read
+/// the same `None` as "dynamic index" and escaped the base root.
+fn field_index(operand: &mir::Value, func: &Function) -> Option<usize> {
+    let literal = match operand {
+        mir::Value::Pattern(literal) => literal,
+        mir::Value::Constant(id) => &func.constant(*id).representation,
+        _ => return None,
+    };
+    literal
+        .as_primitive_ty::<isize>()
+        .and_then(|index| usize::try_from(*index).ok())
 }
 
 /// Roots that reach a context the analysis does not model, and are therefore never tracked.
@@ -591,7 +600,7 @@ fn escaping_roots(func: &Function) -> (FxHashSet<Root>, FxHashMap<ValueId, Root>
             OperationKind::DictEntry { .. } => {}
             OperationKind::Subfield { .. } => {
                 // A dynamic field index would name a slot the analysis cannot distinguish.
-                if field_index(&operation.operands[1]).is_none() {
+                if field_index(&operation.operands[1], func).is_none() {
                     escape_operand(&operation.operands[0], escaped);
                 }
             }
@@ -818,6 +827,29 @@ mod tests {
         assert!(
             escaped > 0,
             "the string temporaries are dropped, which this analysis does not model"
+        );
+    }
+
+    /// Lowering emits a `subfield`'s index as a constant-pool reference, not an inline literal, so
+    /// the analysis has to resolve the pool to track fields at all. Reading only the inline form
+    /// silently disabled every field-sensitive answer — and, through the escape scan, escaped the
+    /// base of every `subfield` as though its index were dynamic.
+    #[test]
+    fn a_field_index_from_the_constant_pool_is_resolved() {
+        let mut session = CompilerSession::new();
+        let module = compile(
+            &mut session,
+            "struct S { a: int, b: int }\nfn f() -> int { let s = S { a: 1, b: 2 }; s.a }",
+        );
+        let func = body(&session, module, "f");
+
+        let analysis = analyze(func, session.module_env());
+        let escaped = allocas(func)
+            .filter(|id| analysis.is_escaped(Root::Alloca(*id)))
+            .count();
+        assert_eq!(
+            escaped, 0,
+            "a constant field index is not a dynamic one, so nothing may escape"
         );
     }
 

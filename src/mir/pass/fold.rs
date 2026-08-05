@@ -479,6 +479,26 @@ mod tests {
             .to_string()
     }
 
+    /// Reading a field of a struct built from constants folds. This is the capability field
+    /// tracking exists for, and it was unreachable until `field_index` learned to resolve a
+    /// constant-pool index: every `subfield` produced an unknown value, so no field of any
+    /// aggregate was ever known.
+    #[test]
+    fn a_field_of_a_constant_struct_folds() {
+        let module = optimized_main(
+            "struct S { a: int, b: int }\n\
+             fn main() -> int { let s = S { a: 20, b: 22 }; s.a + s.b }",
+        );
+        // `optimized_main` returns everything after `fn main`, which includes the derived `Value`
+        // impls; only main's own body is the subject here.
+        let main = module.split("\nfn ").next().expect("main has a body");
+        assert!(
+            !main.contains("call "),
+            "the addition must fold through the fields:\n{main}"
+        );
+        assert!(main.contains("= 42"), "and yield the sum:\n{main}");
+    }
+
     /// A branch whose condition is known becomes a jump, and the arm not taken disappears — with
     /// the constants only it named.
     #[test]
