@@ -30,6 +30,8 @@
 //! See `doc/plans/partial-evaluation.md`.
 #![allow(dead_code)]
 
+use rustc_hash::FxHashSet;
+
 use crate::{
     CompilerSession, Location,
     hir::function::ArgConvention,
@@ -45,7 +47,7 @@ use crate::{
     types::r#type::{CallImplType, Type},
 };
 
-use super::dataflow::{self, Const, Fact, RegisterFact, State};
+use super::dataflow::{self, Analysis, Const, Fact, RegisterFact, Root, State};
 
 /// A call site the pass decided to replace, and what to replace it with.
 struct Fold {
@@ -86,6 +88,19 @@ impl Plan {
     fn is_empty(&self) -> bool {
         self.calls.is_empty() && self.invokes.is_empty() && self.branches.is_empty()
     }
+}
+
+/// Everything a call site is judged against, gathered once per function.
+///
+/// The evaluator and the environment answer "what does this return?"; the analysis and the
+/// destination set answer "and if not, why not?" — the latter two exist only to classify refusals,
+/// which is why they are computed once here rather than per call site.
+struct FoldContext<'a> {
+    evaluator: ConstEvaluator<'a>,
+    env: ModuleEnv<'a>,
+    analysis: Analysis,
+    /// The `alloca`s a call writes its result into. See [`call_destinations`].
+    call_destinations: FxHashSet<mir::ValueId>,
 }
 
 /// Why one call site was not folded, and where it is.
@@ -155,8 +170,15 @@ pub(crate) fn plan_folds(
     module_id: ModuleId,
     refusals: &mut Option<&mut Vec<Refusal>>,
 ) -> Plan {
-    let analysis = dataflow::analyze(func, env);
-    let evaluator = ConstEvaluator::new(module_id, session);
+    // Computed once for the whole function: classifying a refusal is then a set lookup rather than
+    // a scan, so the report's detail costs the optimizer nothing per call site.
+    let context = FoldContext {
+        evaluator: ConstEvaluator::new(module_id, session),
+        env,
+        analysis: dataflow::analyze(func, env),
+        call_destinations: call_destinations(func),
+    };
+    let analysis = &context.analysis;
     let mut plan = Plan::default();
 
     for block in func.blocks() {
@@ -166,8 +188,7 @@ pub(crate) fn plan_folds(
         let basic_block = func.block(block);
         for (index, operation) in basic_block.operations().iter().enumerate() {
             if let OperationKind::Call { ty } = &operation.kind
-                && let Some(constant) =
-                    fold_outcome(operation, ty, &state, &evaluator, &env, refusals)
+                && let Some(constant) = fold_outcome(operation, ty, &state, &context, refusals)
                 && let Some(call) = dataflow::call_operands(&operation.operands, ty)
             {
                 let destination = call.result.clone();
@@ -198,8 +219,7 @@ pub(crate) fn plan_folds(
                 operation, normal, ..
             } => {
                 if let OperationKind::Call { ty } = &operation.kind
-                    && let Some(constant) =
-                        fold_outcome(operation, ty, &state, &evaluator, &env, refusals)
+                    && let Some(constant) = fold_outcome(operation, ty, &state, &context, refusals)
                     && let Some(call) = dataflow::call_operands(&operation.operands, ty)
                 {
                     plan.invokes.push(InvokeFold {
@@ -235,11 +255,10 @@ fn fold_outcome(
     operation: &Operation,
     ty: &CallImplType,
     state: &State,
-    evaluator: &ConstEvaluator<'_>,
-    env: &ModuleEnv<'_>,
+    context: &FoldContext<'_>,
     refusals: &mut Option<&mut Vec<Refusal>>,
 ) -> Option<Constant> {
-    match try_fold_call(operation, ty, state, evaluator, env) {
+    match try_fold_call(operation, ty, state, context) {
         Ok(constant) => Some(constant),
         Err(reason) => {
             if let Some(refusals) = refusals {
@@ -255,6 +274,98 @@ fn fold_outcome(
             None
         }
     }
+}
+
+/// Why an argument's value is not known, in the terms that say what would fix it.
+///
+/// "Argument not known" is by far the largest refusal bucket, and undivided it says nothing: it
+/// cannot distinguish a case specialization would lift from one that is merely downstream of
+/// another refusal. Each answer here names a different remedy, which is the point — see
+/// `doc/plans/partial-evaluation.md`.
+fn why_argument_unknown(
+    operand: &mir::Value,
+    state: &State,
+    context: &FoldContext<'_>,
+) -> NotFoldable {
+    let Some(key) = state.place_of(operand) else {
+        return why_operand_names_no_place(operand, state, &context.analysis);
+    };
+    match state.place(&key) {
+        // Known, but not in a form compile-time evaluation accepts.
+        Fact::Known(_) => NotFoldable::ArgumentNotLiteral,
+        // An uninitialized slot is not an analysis gap; it is a slot with nothing in it.
+        Fact::Uninit => NotFoldable::ArgumentStorageNotModelled,
+        Fact::Unknown => match key.root {
+            Root::Parameter(_) => NotFoldable::ArgumentIsParameter,
+            Root::DictEntry(_) => NotFoldable::ArgumentNotLiteral,
+            Root::Alloca(id) if context.call_destinations.contains(&id) => {
+                NotFoldable::ArgumentFromCall
+            }
+            Root::Alloca(_) => NotFoldable::ArgumentFromOperation,
+        },
+    }
+}
+
+/// Why an operand names no slot the analysis tracks — the three causes have three remedies.
+///
+/// A register with no binding in the state is the interesting case, and the state alone cannot
+/// explain it: the transfer function declines to bind an escaped root, so "escaped" and "never had
+/// a root" look identical from here. The structural map the escape scan already built is what tells
+/// them apart, which is why [`Analysis::root_of_register`] exists.
+fn why_operand_names_no_place(
+    operand: &mir::Value,
+    state: &State,
+    analysis: &Analysis,
+) -> NotFoldable {
+    let mir::Value::Register(id) = operand else {
+        return NotFoldable::ArgumentStorageNotModelled;
+    };
+    match state.register(*id) {
+        // Bound, but to a value rather than a slot. Folding reads arguments only through places,
+        // so a *known* value here is a gap rather than a missing analysis — worth separating,
+        // because the two have completely different costs to close.
+        Some(RegisterFact::Value(Fact::Known(Const::Literal(_)))) => {
+            NotFoldable::ArgumentValueKnownButUnread
+        }
+        Some(RegisterFact::Value(_)) => NotFoldable::ArgumentIsUnknownValue,
+        Some(RegisterFact::Place(_)) => NotFoldable::ArgumentStorageNotModelled,
+        None => match analysis.root_of_register(*id) {
+            Some(root) if analysis.is_escaped(root) => NotFoldable::ArgumentStorageEscaped,
+            _ => NotFoldable::ArgumentStorageNotModelled,
+        },
+    }
+}
+
+/// The `alloca`s that some call in this function writes its result into.
+///
+/// Used to separate "this argument is unknown because the call producing it did not fold" — which
+/// needs no new machinery, only the other refusal lifted — from "unknown because the analysis does
+/// not model what wrote it", which does.
+///
+/// Deliberately approximate: it matches a call's result operand by register identity, so it sees
+/// the `%r = alloca; call f(.., %r)` shape that lowering actually emits and not a write through a
+/// `subfield`. It reads call layout through [`dataflow::call_operands`] rather than restating it.
+/// This feeds a report, not a rewrite, so an approximation that is honest about its edges is the
+/// right trade — a precise answer would mean recording a cause alongside every `Unknown` the
+/// dataflow produces.
+fn call_destinations(func: &Function) -> FxHashSet<mir::ValueId> {
+    let mut destinations = FxHashSet::default();
+    let mut record = |operation: &Operation| {
+        if let OperationKind::Call { ty } = &operation.kind
+            && let Some(call) = dataflow::call_operands(&operation.operands, ty)
+            && let mir::Value::Register(id) = call.result
+        {
+            destinations.insert(*id);
+        }
+    };
+    for block in func.blocks() {
+        let block = func.block(block);
+        block.operations().iter().for_each(&mut record);
+        if let TerminatorKind::Invoke { operation, .. } = &block.terminator().kind {
+            record(operation);
+        }
+    }
+    destinations
 }
 
 /// The value of a branch condition, when the analysis knows it.
@@ -276,8 +387,7 @@ fn try_fold_call(
     operation: &Operation,
     ty: &CallImplType,
     state: &State,
-    evaluator: &ConstEvaluator<'_>,
-    env: &ModuleEnv<'_>,
+    context: &FoldContext<'_>,
 ) -> Result<Constant, NotFoldable> {
     let Some(call) = dataflow::call_operands(&operation.operands, ty) else {
         return Err(NotFoldable::UnsupportedConvention);
@@ -315,7 +425,10 @@ fn try_fold_call(
             });
         match known {
             Some(literal) => arguments.push(ConstArgument::Value(literal.into_value())),
-            None => return discard(arguments, NotFoldable::ArgumentNotKnown),
+            None => {
+                let reason = why_argument_unknown(operand, state, context);
+                return discard(arguments, reason);
+            }
         }
     }
 
@@ -327,7 +440,7 @@ fn try_fold_call(
         return discard(arguments, NotFoldable::UnitResult);
     }
 
-    let value = evaluator.try_call(
+    let value = context.evaluator.try_call(
         callee,
         ty.effects(),
         ty.result_convention,
@@ -335,7 +448,7 @@ fn try_fold_call(
         arguments,
         operation.span,
     )?;
-    let reified = reify(&value, ty.ret(), env);
+    let reified = reify(&value, ty.ret(), &context.env);
     value.discard_storage();
     match reified? {
         Reification::Constant(constant) => Ok(constant),

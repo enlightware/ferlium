@@ -75,8 +75,42 @@ pub(crate) enum NotFoldable {
     /// The callee is not statically known, so there is nothing to evaluate. Devirtualization —
     /// through inlining, or specialization — is what would resolve it.
     CalleeNotDirect,
-    /// An argument's value is not known at this call site.
-    ArgumentNotKnown,
+    /// An argument's value is not known at this call site, because it is a parameter of the
+    /// function being optimized. Specialization — or inlining this function into a caller that
+    /// knows the value — is what would resolve it.
+    ArgumentIsParameter,
+    /// An argument's value is not known because it was written by a call that did not itself fold.
+    /// Nothing new is needed for these: they are downstream of another refusal, and lifting that
+    /// one lifts these with it. Counting them separately is what stops them inflating the buckets
+    /// that *do* imply work.
+    ArgumentFromCall,
+    /// An argument's value is not known because it was written by an operation the dataflow does
+    /// not model — a `variant` construction, say. Store-to-load forwarding and the `extract_tag` /
+    /// `variant` transfer functions are what would resolve these.
+    ArgumentFromOperation,
+    /// An argument's storage escaped the dataflow: some operation outside its modelled whitelist
+    /// touched the root, so it is `Unknown` everywhere by construction. Widening that whitelist —
+    /// giving the operation in question a transfer function — is what would resolve it.
+    ArgumentStorageEscaped,
+    /// An argument is a register holding a materialized value rather than naming a slot, and the
+    /// analysis does not know that value either.
+    ArgumentIsUnknownValue,
+    /// An argument is a register holding a materialized value that the analysis **does** know, but
+    /// folding reads arguments only through places and so never looks. Unlike every other reason
+    /// here this one would name a gap rather than a missing analysis: the fact is already computed,
+    /// so closing it would be nearly free.
+    ///
+    /// **Measured zero over the standard library**, which is why folding still reads only places.
+    /// Kept as a sentinel: a by-pointer ABI passes arguments as places, so a non-zero count here
+    /// means either lowering changed or a pass is producing something it did not before, and either
+    /// is worth knowing about.
+    ArgumentValueKnownButUnread,
+    /// An argument names no storage the analysis has any structural account of — neither an
+    /// `alloca`, a `dict_entry`, a `subfield` of either, nor a parameter.
+    ArgumentStorageNotModelled,
+    /// An argument's value *is* known, but as a function or a dictionary rather than a literal, and
+    /// only literals can be passed to compile-time evaluation today.
+    ArgumentNotLiteral,
     /// A hidden evidence operand is not a constant dictionary, so the callee's instantiation is not
     /// known. Specialization is what would resolve it.
     EvidenceNotKnown,
@@ -112,7 +146,14 @@ impl NotFoldable {
             Self::Failed => "evaluation raised a failure",
             Self::BudgetExceeded => "compile-time budget exhausted",
             Self::CalleeNotDirect => "callee not statically known",
-            Self::ArgumentNotKnown => "argument not known",
+            Self::ArgumentIsParameter => "argument is a parameter",
+            Self::ArgumentFromCall => "argument comes from a call that did not fold",
+            Self::ArgumentFromOperation => "argument built by an unmodelled operation",
+            Self::ArgumentStorageEscaped => "argument storage escaped the analysis",
+            Self::ArgumentIsUnknownValue => "argument is a value the analysis does not know",
+            Self::ArgumentValueKnownButUnread => "argument value is known but not read",
+            Self::ArgumentStorageNotModelled => "argument storage is not modelled",
+            Self::ArgumentNotLiteral => "argument is known but not a literal",
             Self::EvidenceNotKnown => "trait instantiation not known",
             Self::MutableArgument => "argument passed by mutable reference",
             Self::UnitResult => "call produces no value",

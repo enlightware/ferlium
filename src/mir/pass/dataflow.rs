@@ -232,12 +232,24 @@ impl State {
 pub(crate) struct Analysis {
     entry_states: FxHashMap<BlockId, State>,
     escaped: FxHashSet<Root>,
+    /// Which root each register names, discovered structurally by [`escaping_roots`].
+    ///
+    /// The dataflow does not need this — it rediscovers the binding as it goes — but the
+    /// optimization report does: when a register has no binding in a `State`, this is what says
+    /// whether that is because its root escaped or because nothing ever named a root for it. The
+    /// two have different remedies, so the report must tell them apart.
+    register_roots: FxHashMap<ValueId, Root>,
 }
 
 impl Analysis {
     /// Whether `root` is tracked at all. An escaped root is `Unknown` everywhere.
     pub(crate) fn is_escaped(&self, root: Root) -> bool {
         self.escaped.contains(&root)
+    }
+
+    /// The root a register names, if this function's structure gives it one.
+    pub(crate) fn root_of_register(&self, id: ValueId) -> Option<Root> {
+        self.register_roots.get(&id).copied()
     }
 
     /// The state on entry to `block`.
@@ -264,7 +276,7 @@ impl Analysis {
 
 /// Runs the analysis to fixpoint over `func`.
 pub(crate) fn analyze(func: &Function, env: ModuleEnv<'_>) -> Analysis {
-    let escaped = escaping_roots(func);
+    let (escaped, register_roots) = escaping_roots(func);
 
     let mut entry_states: FxHashMap<BlockId, State> = FxHashMap::default();
     entry_states.insert(func.entry(), State::default());
@@ -303,6 +315,7 @@ pub(crate) fn analyze(func: &Function, env: ModuleEnv<'_>) -> Analysis {
     Analysis {
         entry_states,
         escaped,
+        register_roots,
     }
 }
 
@@ -536,7 +549,7 @@ fn field_index(operand: &mir::Value) -> Option<usize> {
 /// of a place escapes its root. A root also escapes if it is reached other than through an `alloca`
 /// result or a parameter — an operand this scan cannot resolve to a root escapes nothing precisely
 /// because nothing was tracked for it in the first place.
-fn escaping_roots(func: &Function) -> FxHashSet<Root> {
+fn escaping_roots(func: &Function) -> (FxHashSet<Root>, FxHashMap<ValueId, Root>) {
     // Registers that name a root, discovered structurally rather than by dataflow: an `alloca`
     // defines one, and a `subfield` of a rooted place stays in the same root.
     let mut register_roots: FxHashMap<ValueId, Root> = FxHashMap::default();
@@ -637,7 +650,7 @@ fn escaping_roots(func: &Function) -> FxHashSet<Root> {
             | TerminatorKind::FailureDuringCleanup => {}
         }
     }
-    escaped
+    (escaped, register_roots)
 }
 
 /// How a `call` operation uses each of its operands.

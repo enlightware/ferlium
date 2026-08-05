@@ -295,8 +295,33 @@ mod tests {
             .map(|(name, _)| name)
             .collect();
         assert!(
-            reasons.contains(&"argument not known"),
+            reasons.contains(&"argument is a parameter"),
             "expected an unknown-argument remark:\n{rendered}"
+        );
+    }
+
+    /// The unknown-argument bucket is subdivided by what would lift it, so the two commonest cases
+    /// must not land in the same one: `n` is a parameter, which specialization reaches, while the
+    /// result of a call that itself refused is merely downstream of that refusal and needs nothing
+    /// new. Counting them together is what made the bucket uninformative.
+    #[test]
+    fn unknown_arguments_are_split_by_what_would_lift_them() {
+        let (report, rendered) = report_for(
+            "fn opaque(n: int) -> int { n + 1 }\n\
+             fn twice(n: int) -> int { opaque(n) + opaque(n) }",
+        );
+        let reasons: Vec<&str> = report
+            .reasons(OptimizationPass::Fold)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert!(
+            reasons.contains(&"argument is a parameter"),
+            "the parameter case must be named:\n{rendered}"
+        );
+        assert!(
+            reasons.contains(&"argument comes from a call that did not fold"),
+            "the downstream case must be named separately:\n{rendered}"
         );
     }
 
@@ -321,7 +346,7 @@ mod tests {
             .map(|(name, _)| name)
             .collect();
         assert!(
-            fold.contains(&"argument not known"),
+            fold.contains(&"argument is a parameter"),
             "and folding refuses it for its own reason:\n{rendered}"
         );
     }
