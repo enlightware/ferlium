@@ -54,8 +54,9 @@ The constant pool is also the target of *reification* — expressing a value com
 back as MIR (`src/mir/reify.rs`). Because `@cN` is pinned to a `TrivialCopy` representation, only a
 trivially-copyable leaf, or a tuple or record of those, can be reified; a compile-time `String`,
 list, variant, or closure has no constant form, and the computation that produced it is left as
-runtime code. Lifting that restriction requires a frozen-prototype representation in the pool and an
-operation to clone one, described in `doc/plans/partial-evaluation.md`.
+runtime code. Lifting that restriction requires either a frozen-prototype representation in the pool
+with an operation to clone one, or emitting the MIR that rebuilds the value from constants it can
+hold.
 
 The verifier derives these roles from parameter kinds and operation results:
 

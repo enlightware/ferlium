@@ -34,7 +34,7 @@ The main phases are:
 7. Simplify and default remaining trait constraints, then build final type schemes and hidden dictionary/evidence parameter lists.
 8. Elaborate dictionaries, ownership and value dispatch, record field access, and call lifetime plans into final HIR.
 9. Validate final-HIR ownership, literal, borrow, place-lifetime, and yield invariants.
-10. Execute final HIR through the tree-walking interpreter, or lower it to MIR and execute it through the MIR reference interpreter. MIR execution optionally runs rewriting passes first, selected per session through `MirOptimization`; optimized bodies are stored beside the raw ones, so enabling optimization never changes what another session executes. See [plans/partial-evaluation.md](plans/partial-evaluation.md).
+10. Execute final HIR through the tree-walking interpreter, or lower it to MIR and execute it through the MIR reference interpreter. MIR execution optionally runs rewriting passes first, selected per session through `MirOptimization`; optimized bodies are stored beside the raw ones, so enabling optimization never changes what another session executes.
 
 Future backend work may lower MIR to WebAssembly, bytecode, JIT, or native code.
 
