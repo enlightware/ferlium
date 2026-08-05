@@ -112,9 +112,20 @@ The operation kind fixes operand arity, roles, and result shape. The main groups
 | matching | `comp_eq` | Compares a borrowed/materialized runtime value with compile-time pattern data. |
 | stack/runtime | `stack_save`, `stack_restore`, `check_call_depth`, `check_fuel` | Stack markers describe allocation frontiers. Runtime guards are pinned operations whose sandbox violations leave the MIR CFG. |
 
+A `call` additionally carries **how it instantiated its callee**, when the callee is statically known
+and generic: the type and effect arguments its quantifiers stand for, positionally. They are carried
+down from HIR rather than recovered by matching the callee's generic signature against this call's
+concrete one — see [generic-instantiation.md](generic-instantiation.md). The operand is absent for an
+indirect call, for a non-generic callee, and at call sites the compiler synthesizes rather than
+lowers from a generic application; a consumer treats absence as "not known", which costs an
+optimization rather than correctness.
+
 `Operation::verify` checks kind-local arity. The function verifier additionally checks operand
 roles, types where independently known, dominance, linear uses, source-failure flow, and storage
-ownership.
+ownership. For a call that records an instantiation it also checks that substituting the callee's
+declared signature by the recorded arguments reproduces the call's own type — the invariant that
+keeps the two from drifting between the inference that records them and the passes that consume
+them.
 
 ## Source failures and sandbox exits
 

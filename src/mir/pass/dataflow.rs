@@ -469,7 +469,7 @@ fn transfer(
             state.places.insert(key.clone(), fact);
             state.registers.insert(result, RegisterFact::Place(key));
         }
-        OperationKind::Call { ty } => {
+        OperationKind::Call { ty, .. } => {
             // The callee writes its result through the trailing out-pointer, so whatever was known
             // about that slot no longer holds. The folding pass is what replaces a call with a
             // store of a known constant; until it does, the result is unknown.
@@ -612,7 +612,7 @@ fn escaping_roots(func: &Function) -> (FxHashSet<Root>, FxHashMap<ValueId, Root>
                     escape_operand(operand, escaped);
                 }
             }
-            OperationKind::Call { ty } => match call_operands(&operation.operands, ty) {
+            OperationKind::Call { ty, .. } => match call_operands(&operation.operands, ty) {
                 // A `Let` argument is immutable and non-escaping by the language's own convention,
                 // and the callee reads its function value and evidence by reference. What a call
                 // does change is its result place, which the transfer function kills. Anything the

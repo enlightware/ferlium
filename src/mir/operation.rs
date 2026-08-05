@@ -41,7 +41,7 @@ use crate::{
     mir,
     module::{FunctionId, ModuleEnv},
     types::{
-        effects::{Effect, PrimitiveEffect},
+        effects::{EffType, Effect, PrimitiveEffect},
         r#trait::TraitDictionaryEntryIndex,
         r#type::{CallImplType, Type},
     },
@@ -115,7 +115,7 @@ impl Operation {
     /// resolves context-dependent operations before enforcing the same rule.
     pub fn source_fallibility(&self) -> SourceFallibility {
         let effects = match &self.kind {
-            OperationKind::Call { ty } | OperationKind::Project { ty, .. } => ty.effects(),
+            OperationKind::Call { ty, .. } | OperationKind::Project { ty, .. } => ty.effects(),
             // The defining `Project` carries the accessor type. Resolving this case therefore
             // requires the function-local role of the operand.
             OperationKind::EndProject => return SourceFallibility::FromOpenProjection,
@@ -205,13 +205,29 @@ impl Operation {
         arguments: T,
         ty: CallImplType,
     ) -> Self {
+        Self::instantiated_call(span, callee, arguments, ty, None)
+    }
+
+    /// Creates a `call` operation that records how it instantiated a generic callee.
+    ///
+    /// See [`Instantiation`] and `doc/generic-instantiation.md`.
+    pub fn instantiated_call<T: IntoIterator<Item = mir::Value>>(
+        span: Location,
+        callee: mir::Value,
+        arguments: T,
+        ty: CallImplType,
+        instantiation: Option<Instantiation>,
+    ) -> Self {
         let mut operands = vec![callee];
         operands.extend(arguments);
         Operation {
             result_id: None,
             span,
             operands: operands.into_boxed_slice(),
-            kind: OperationKind::Call { ty: b(ty) },
+            kind: OperationKind::Call {
+                ty: b(ty),
+                instantiation: instantiation.map(b),
+            },
         }
     }
 
@@ -623,6 +639,19 @@ pub enum SourceFallibility {
 /// The kind-specific metadata of a MIR operation.
 ///
 /// Operands stay in [`Operation::operands`] so generic MIR traversals can inspect and rewrite
+/// How a call site instantiated a generic callee: the type and effect arguments its quantifiers
+/// stand for, positionally.
+///
+/// Carried down from HIR's `FnInstData` rather than recovered by matching the callee's generic
+/// signature against this call's concrete one. Written in the type environment of the *containing*
+/// function, so a generic caller records its own quantifiers; substituting the container therefore
+/// composes the two instantiations. See `doc/generic-instantiation.md`.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct Instantiation {
+    pub ty_args: Vec<Type>,
+    pub eff_args: Vec<EffType>,
+}
+
 /// them uniformly. This enum contains only metadata whose shape is specific to an operation.
 #[derive(Clone)]
 pub enum OperationKind {
@@ -630,10 +659,14 @@ pub enum OperationKind {
     Alloca { ty: Type },
     /// Stack storage for a pointer to a value of `pointing_to`.
     AllocaPlace { pointing_to: Type },
-    /// A statically or dynamically resolved function call with its instantiated call-site type.
-    /// The type is boxed to keep every operation compact despite the signature's variable-sized
-    /// metadata.
-    Call { ty: B<CallImplType> },
+    /// A statically or dynamically resolved function call with its instantiated call-site type,
+    /// and — when the callee is statically known and generic — how this call site instantiated it.
+    /// Both are boxed to keep every operation compact despite the variable-sized metadata; the
+    /// instantiation is additionally optional because most calls have none.
+    Call {
+        ty: B<CallImplType>,
+        instantiation: Option<B<Instantiation>>,
+    },
     /// Enter a scoped subscript accessor and expose its yielded place.
     /// The call-site type is boxed for the same compactness reason as [`Self::Call`].
     Project { yielded: Type, ty: B<CallImplType> },

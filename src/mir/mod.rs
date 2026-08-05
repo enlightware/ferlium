@@ -20,5 +20,5 @@ pub mod value;
 pub(crate) mod verify;
 
 pub use function::{BasicBlock, BlockId, Function, Parameter, ParameterKind};
-pub use operation::{Operation, OperationKind, OperationResult};
+pub use operation::{Instantiation, Operation, OperationKind, OperationResult};
 pub use value::{ParameterId, Value, ValueId};

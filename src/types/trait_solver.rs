@@ -9,8 +9,6 @@
 
 use std::{borrow::Cow, iter::repeat, mem, rc::Rc};
 
-use itertools::Itertools;
-
 use crate::{FxHashMap, FxHashSet, Modules, types::type_scheme::PubTypeConstraint};
 
 use ustr::Ustr;
@@ -2346,24 +2344,15 @@ impl<'a> TraitSolver<'a> {
                 definition.ty_scheme.ty.clone(),
                 definition.result_convention,
             ),
-            // A thunk forwards at the callee's own signature, so the instantiation is the identity.
-            // Recorded explicitly so the argument lists stay as long as the quantifier lists.
-            inst_data: FnInstData::new(
-                runtime_requirements,
-                definition
-                    .ty_scheme
-                    .ty_quantifiers
-                    .iter()
-                    .map(|quantifier| Type::variable(*quantifier))
-                    .collect(),
-                definition
-                    .ty_scheme
-                    .eff_quantifiers
-                    .iter()
-                    .sorted()
-                    .map(|quantifier| EffType::single_variable(*quantifier))
-                    .collect(),
-            ),
+            // No instantiation is recorded. The thunk's own signature is concrete while the callee
+            // is the generic blanket method, so this *is* a real instantiation — but nothing here
+            // knows it: the callee's quantifiers are the blanket impl's parameters, which are
+            // neither the thunk's (it has none) nor the trait's variables (the impl may be generic
+            // over fewer). Recovering it means matching the callee's generic signature against
+            // `definition`'s concrete one, which is the derivation this recording exists to avoid.
+            // A consumer treats absence as "not known", which costs an optimization, not
+            // correctness.
+            inst_data: FnInstData::new(runtime_requirements, Vec::new(), Vec::new()),
         }));
         let apply_id = body_arena.alloc(Node::new(
             apply,

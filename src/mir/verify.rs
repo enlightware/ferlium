@@ -17,6 +17,8 @@ use std::collections::VecDeque;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use itertools::Itertools;
+
 use crate::{
     format::FormatWith,
     mir::{
@@ -989,7 +991,8 @@ impl<'a> Verifier<'a> {
             | OperationKind::StackSave
             | OperationKind::CheckCallDepth
             | OperationKind::CheckFuel => {}
-            OperationKind::Call { ty } => {
+            OperationKind::Call { ty, instantiation } => {
+                self.verify_instantiation(node, &operands[0], ty, instantiation.as_deref());
                 let visible_start = operands
                     .len()
                     .checked_sub(ty.fn_ty.args.len() + 1)
@@ -1351,6 +1354,93 @@ impl<'a> Verifier<'a> {
             ValueRole::OpenProjection { yielded, .. } => Some(MirType::Lowered(yielded)),
             _ => None,
         }
+    }
+
+    /// Checks that a call's recorded instantiation actually explains its call-site type.
+    ///
+    /// Substituting the callee's declared signature by the recorded arguments must reproduce the
+    /// concrete signature the call site carries. This is the invariant that makes the instantiation
+    /// trustworthy: it is recorded during inference and consumed much later by specialization, and
+    /// nothing in between would otherwise notice if the two drifted apart.
+    ///
+    /// Only checked for a statically known callee — an indirect call has no declared signature to
+    /// substitute — and only when an instantiation was recorded. A generic callee with none is not
+    /// an error here: some call sites are synthesized by the compiler rather than lowered from a
+    /// generic application.
+    fn verify_instantiation(
+        &self,
+        node: usize,
+        callee: &mir::Value,
+        ty: &CallImplType,
+        instantiation: Option<&mir::Instantiation>,
+    ) {
+        let (Some(instantiation), mir::Value::Function(callee)) = (instantiation, callee) else {
+            return;
+        };
+        let Some(module) = self.env.module_by_id(callee.module) else {
+            return;
+        };
+        let Some(function) = module.get_function_by_id(callee.function) else {
+            return;
+        };
+        let scheme = &function.definition.ty_scheme;
+        assert_eq!(
+            instantiation.ty_args.len(),
+            scheme.ty_quantifiers.len(),
+            "MIR function `{}` node {}: call records {} type arguments for a callee with {} type \
+             quantifiers",
+            self.func.name,
+            node,
+            instantiation.ty_args.len(),
+            scheme.ty_quantifiers.len()
+        );
+
+        // Rebuilt in the callee's own variable numbering, which is what the recorded arguments are
+        // positional against.
+        let subst = (
+            scheme
+                .ty_quantifiers
+                .iter()
+                .copied()
+                .zip(instantiation.ty_args.iter().copied())
+                .collect(),
+            scheme
+                .eff_quantifiers
+                .iter()
+                .sorted()
+                .copied()
+                .zip(instantiation.eff_args.iter().cloned())
+                .collect(),
+        );
+        let substituted = scheme.ty.instantiate_simple(&subst);
+        assert_eq!(
+            substituted.args.len(),
+            ty.fn_ty.args.len(),
+            "MIR function `{}` node {}: instantiating the callee's signature gives {} arguments \
+             but the call site's type has {}",
+            self.func.name,
+            node,
+            substituted.args.len(),
+            ty.fn_ty.args.len()
+        );
+        // Rendered rather than compared by handle: a mismatch here is a lowering bug, and the two
+        // types are what identifies it.
+        assert!(
+            substituted.ret == ty.fn_ty.ret,
+            "MIR function `{}` node {}: instantiating {}'s signature by the recorded arguments \
+             [{}] gives return type {}, but the call site's type says {}",
+            self.func.name,
+            node,
+            mir::Value::Function(*callee).format_with(&self.env),
+            instantiation
+                .ty_args
+                .iter()
+                .map(|ty| ty.format_with(&self.env).to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+            substituted.ret.format_with(&self.env),
+            ty.fn_ty.ret.format_with(&self.env),
+        );
     }
 
     fn verify_place_representation(

@@ -345,12 +345,12 @@ impl FnInstData {
         for req in &mut self.dicts_req {
             req.instantiate_in_place(mapper);
         }
-        for ty in &mut self.ty_args {
-            *ty = mapper.map_type(*ty);
-        }
-        for effects in &mut self.eff_args {
-            *effects = mapper.map_effect_type(effects);
-        }
+        // The recursive traversals, not `mapper.map_type` directly: an argument like `Option<A>`
+        // needs its *inner* variables rewritten, and a bare mapper call only sees the outermost
+        // type. Getting this wrong leaves the arguments naming variables the call's own type no
+        // longer uses.
+        instantiate_types_in_place(&mut self.ty_args, mapper);
+        instantiate_effect_types_in_place(&mut self.eff_args, mapper);
     }
 }
 

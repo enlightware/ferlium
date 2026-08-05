@@ -357,7 +357,7 @@ mod tests {
     fn call_sites(func: &Function) -> Vec<CallSite> {
         let mut sites = Vec::new();
         let mut collect = |operation: &crate::mir::Operation| {
-            if let OperationKind::Call { ty } = &operation.kind
+            if let OperationKind::Call { ty, .. } = &operation.kind
                 && let crate::mir::Value::Function(callee) = &operation.operands[0]
             {
                 sites.push(CallSite {

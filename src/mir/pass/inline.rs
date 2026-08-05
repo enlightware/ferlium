@@ -216,7 +216,7 @@ fn plan_inlinings(
             });
 
         for (site, operation) in candidates {
-            let OperationKind::Call { ty } = &operation.kind else {
+            let OperationKind::Call { ty, .. } = &operation.kind else {
                 continue;
             };
             let callee = match &operation.operands[0] {

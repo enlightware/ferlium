@@ -11,7 +11,8 @@ use ustr::Ustr;
 
 use crate::hir::function::ArgConvention;
 use crate::mir::{
-    Operation, builder::FunctionBuilder, operation::SourceFallibility, terminator::Terminator,
+    Instantiation, Operation, builder::FunctionBuilder, operation::SourceFallibility,
+    terminator::Terminator,
 };
 use crate::module::{
     ExtraParameterId, ResolvedLocalClone, ResolvedLocalDrop, ResolvedTakeLocalValueMode,
@@ -724,8 +725,29 @@ impl<'a> Emitter<'a> {
         callee: mir::Value,
         arguments: Vec<mir::Value>,
         ty: &CallImplType,
+        instantiation: Option<Instantiation>,
     ) {
-        self.insert(Operation::call(span, callee, arguments, ty.clone()));
+        self.insert(Operation::instantiated_call(
+            span,
+            callee,
+            arguments,
+            ty.clone(),
+            instantiation,
+        ));
+    }
+
+    /// The instantiation to record on a call, from the HIR call node's data.
+    ///
+    /// `None` when the callee is not generic, which is the common case and what keeps the operand
+    /// off most operations. See `doc/generic-instantiation.md`.
+    fn instantiation_of(inst_data: &hir::FnInstData) -> Option<Instantiation> {
+        if inst_data.ty_args.is_empty() && inst_data.eff_args.is_empty() {
+            return None;
+        }
+        Some(Instantiation {
+            ty_args: inst_data.ty_args.clone(),
+            eff_args: inst_data.eff_args.clone(),
+        })
     }
 
     /// Emits a pinned sandbox guard. A violated guard leaves the MIR CFG through executor abort
@@ -750,9 +772,10 @@ impl<'a> Emitter<'a> {
         mut arguments: Vec<mir::Value>,
         ty: &CallImplType,
         destination: Option<mir::Value>,
+        instantiation: Option<Instantiation>,
     ) {
         arguments.push(destination.unwrap_or_else(|| self.allocate_result(node, ty)));
-        self.emit_call(node.span, callee, arguments, ty);
+        self.emit_call(node.span, callee, arguments, ty, instantiation);
     }
 
     /// Emits a call to `callee` in place position: the result storage is allocated per `ty`'s
@@ -765,10 +788,11 @@ impl<'a> Emitter<'a> {
         callee: mir::Value,
         mut arguments: Vec<mir::Value>,
         ty: &CallImplType,
+        instantiation: Option<Instantiation>,
     ) -> mir::Value {
         let result_storage = self.allocate_result(node, ty);
         arguments.push(result_storage.clone());
-        self.emit_call(node.span, callee, arguments, ty);
+        self.emit_call(node.span, callee, arguments, ty, instantiation);
         if ty.returns_place() {
             self.insert(Operation::load(node.span, result_storage))
                 .unwrap()
@@ -1212,7 +1236,7 @@ impl<'a> Emitter<'a> {
                     .iter()
                     .map(|arg| self.lower_argument(arg))
                     .collect();
-                self.emit_call_as_place(node, f, arguments, &n.ty)
+                self.emit_call_as_place(node, f, arguments, &n.ty, None)
             }
 
             K::StaticApply(n) => {
@@ -1224,7 +1248,13 @@ impl<'a> Emitter<'a> {
                 for arg in &n.arguments {
                     arguments.push(self.lower_as_place(&self.hir_arena[arg.value]));
                 }
-                self.emit_call_as_place(node, f, arguments, &n.ty)
+                self.emit_call_as_place(
+                    node,
+                    f,
+                    arguments,
+                    &n.ty,
+                    Self::instantiation_of(&n.inst_data),
+                )
             }
 
             K::SubscriptApply(n) => {
@@ -1238,14 +1268,14 @@ impl<'a> Emitter<'a> {
                     .iter()
                     .map(|arg| self.lower_argument(arg))
                     .collect();
-                self.emit_call_as_place(node, f, arguments, &n.ty)
+                self.emit_call_as_place(node, f, arguments, &n.ty, None)
             }
 
             K::CallDictionaryFunction(n) => {
                 // A place-returning method dispatched through a dictionary: project+load the
                 // method, call it with a place out-pointer, then load the returned place.
                 let (function, arguments) = self.lower_dictionary_function_target(node, n);
-                self.emit_call_as_place(node, function, arguments, &n.ty)
+                self.emit_call_as_place(node, function, arguments, &n.ty, None)
             }
 
             K::GetDictionaryFunction(n) => {
@@ -1996,7 +2026,14 @@ impl<'a> Emitter<'a> {
                 }
 
                 assert_eq!(node.ty, n.ty.ret());
-                self.emit_call_into(node, f, arguments, &n.ty, destination);
+                self.emit_call_into(
+                    node,
+                    f,
+                    arguments,
+                    &n.ty,
+                    destination,
+                    Self::instantiation_of(&n.inst_data),
+                );
             }
 
             K::GetDictionary(d) => {
@@ -2065,7 +2102,7 @@ impl<'a> Emitter<'a> {
                     .iter()
                     .map(|arg| self.lower_argument(arg))
                     .collect();
-                self.emit_call_into(node, f, arguments, &n.ty, destination);
+                self.emit_call_into(node, f, arguments, &n.ty, destination, None);
             }
 
             K::GetFunction(n) => {
@@ -2173,7 +2210,7 @@ impl<'a> Emitter<'a> {
                     .iter()
                     .map(|arg| self.lower_argument(arg))
                     .collect();
-                self.emit_call_into(node, f, arguments, &n.ty, destination);
+                self.emit_call_into(node, f, arguments, &n.ty, destination, None);
             }
 
             K::Project(_) => {
@@ -2329,7 +2366,7 @@ impl<'a> Emitter<'a> {
                 // Project the function out of the dictionary, load it, then call it into the
                 // destination (or a throwaway result for a discarded call).
                 let (function, arguments) = self.lower_dictionary_function_target(node, n);
-                self.emit_call_into(node, function, arguments, &n.ty, destination);
+                self.emit_call_into(node, function, arguments, &n.ty, destination, None);
             }
 
             K::CheckCallDepth => self.emit_runtime_check(node.span, true),

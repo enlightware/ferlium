@@ -186,7 +186,7 @@ pub(crate) fn plan_folds(
         let mut state = analysis.entry_state(block);
         let basic_block = func.block(block);
         for (index, operation) in basic_block.operations().iter().enumerate() {
-            if let OperationKind::Call { ty } = &operation.kind
+            if let OperationKind::Call { ty, .. } = &operation.kind
                 && let Some(constant) = fold_outcome(operation, ty, &state, &context, refusals)
                 && let Some(call) = dataflow::call_operands(&operation.operands, ty)
             {
@@ -217,7 +217,7 @@ pub(crate) fn plan_folds(
             TerminatorKind::Invoke {
                 operation, normal, ..
             } => {
-                if let OperationKind::Call { ty } = &operation.kind
+                if let OperationKind::Call { ty, .. } = &operation.kind
                     && let Some(constant) = fold_outcome(operation, ty, &state, &context, refusals)
                     && let Some(call) = dataflow::call_operands(&operation.operands, ty)
                 {
@@ -349,7 +349,7 @@ fn why_operand_names_no_place(
 fn call_destinations(func: &Function) -> FxHashSet<mir::ValueId> {
     let mut destinations = FxHashSet::default();
     let mut record = |operation: &Operation| {
-        if let OperationKind::Call { ty } = &operation.kind
+        if let OperationKind::Call { ty, .. } = &operation.kind
             && let Some(call) = dataflow::call_operands(&operation.operands, ty)
             && let mir::Value::Register(id) = call.result
         {
