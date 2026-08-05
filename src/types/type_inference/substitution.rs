@@ -282,6 +282,10 @@ impl UnifiedTypeInference {
                 }
             }
         }
+        // The arguments hold the fresh variables allocated when the callee's scheme was
+        // instantiated; this is where they become the types unification solved them to.
+        self.substitute_in_types_in_place(&mut inst_data.ty_args);
+        self.substitute_in_effect_types_in_place(&mut inst_data.eff_args);
     }
 
     pub fn substitute_in_constraint(

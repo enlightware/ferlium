@@ -843,7 +843,34 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
             &self.extra_parameters(env).requirements,
             &mut mapper,
         );
-        (ty, FnInstData::new(dict_req), subst)
+        // Record the instantiation positionally (see doc/generic-instantiation.md). Built from the
+        // quantifiers rather than from `subst`, which the `trait_var_counts` path above extends with
+        // entries beyond them.
+        let ty_args = self
+            .ty_quantifiers
+            .iter()
+            .map(|quantifier| {
+                *subst
+                    .0
+                    .get(quantifier)
+                    .expect("every type quantifier is instantiated")
+            })
+            .collect();
+        // `eff_quantifiers` is a set; sorting matches this scheme's `Hash` impl, so there is one
+        // canonical order rather than two.
+        let eff_args = self
+            .eff_quantifiers
+            .iter()
+            .sorted()
+            .map(|quantifier| {
+                subst
+                    .1
+                    .get(quantifier)
+                    .expect("every effect quantifier is instantiated")
+                    .clone()
+            })
+            .collect();
+        (ty, FnInstData::new(dict_req, ty_args, eff_args), subst)
     }
 
     /// Helper function to list free type variables in a type and its constraints.

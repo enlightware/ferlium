@@ -158,7 +158,7 @@ fn get_projection_subscript_node_kind(
     NodeKind::GetSubscript(b(hir::GetSubscript {
         subscript,
         subscript_path: crate::ast::Path::new(vec![(name, span)]),
-        inst_data: hir::FnInstData::new(Vec::new()),
+        inst_data: hir::FnInstData::none(),
     }))
 }
 

@@ -313,22 +313,43 @@ fn is_evidence_node<P: HirPhase>(kind: &NodeKind<P>) -> bool {
     )
 }
 
-/// Function instantiation data that are needed to fill dictionaries
+/// How a generic callee was instantiated at one call site: the types its quantifiers stand for, and
+/// the dictionaries satisfying its constraints at those types.
+///
+/// The arguments are positional against the callee's quantifiers, and are written in the type
+/// environment of the function containing the call — so a generic caller records its own
+/// quantifiers. See [generic-instantiation.md](../../doc/generic-instantiation.md).
 #[derive(Debug, Clone, new)]
 pub struct FnInstData {
     pub dicts_req: DictionariesReq,
+    /// The type each type quantifier was instantiated at, in quantifier order.
+    pub ty_args: Vec<Type>,
+    /// The effects each effect quantifier was instantiated at, in sorted quantifier order.
+    pub eff_args: Vec<EffType>,
 }
 impl FnInstData {
     pub fn none() -> Self {
-        Self { dicts_req: vec![] }
+        Self {
+            dicts_req: vec![],
+            ty_args: vec![],
+            eff_args: vec![],
+        }
     }
     pub fn any(&self) -> bool {
         !self.dicts_req.is_empty()
     }
-    /// Instantiate the dictionary requirements in place with the caller-supplied mapper.
+    /// Instantiate the requirements and the arguments in place with the caller-supplied mapper.
+    ///
+    /// Mapping the arguments is what composes one instantiation with another.
     pub(crate) fn instantiate_in_place<M: TypeMapper>(&mut self, mapper: &mut M) {
         for req in &mut self.dicts_req {
             req.instantiate_in_place(mapper);
+        }
+        for ty in &mut self.ty_args {
+            *ty = mapper.map_type(*ty);
+        }
+        for effects in &mut self.eff_args {
+            *effects = mapper.map_effect_type(effects);
         }
     }
 }

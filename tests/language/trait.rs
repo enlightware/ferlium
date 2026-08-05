@@ -187,6 +187,74 @@ fn first_class_trait_methods_can_be_passed_as_arguments() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_call_site_records_how_it_instantiated_its_callee() {
+    let mut session = TestSession::new();
+    let module = session.compile_and_get_module(indoc! {r#"
+        fn twice_it<T>(x: T) -> T
+        where
+            T: Num,
+            T: Value
+        {
+            x + x
+        }
+
+        fn concrete(n: int) -> int { twice_it(n) }
+
+        fn forwarding<U>(y: U) -> U
+        where
+            U: Num,
+            U: Value
+        {
+            twice_it(y)
+        }
+
+        concrete(21)
+    "#});
+
+    // The instantiation is recorded per call site, in the type environment of the function
+    // containing it — so a concrete caller records a concrete type, while a generic caller records
+    // its *own* quantifier. That second case is what lets specialization cascade: instantiating the
+    // outer function rewrites the inner call's recorded argument along with everything else.
+    // Collected before rendering: the module borrow has to end before the session can hand out a
+    // `ModuleEnv`, and a `Type` is a cheap interned handle.
+    let instantiations: Vec<Vec<Type>> = module
+        .hir_arena
+        .iter()
+        .filter_map(|(_, node)| match &node.kind {
+            NodeKind::StaticApply(app) if !app.inst_data.ty_args.is_empty() => {
+                Some(app.inst_data.ty_args.clone())
+            }
+            _ => None,
+        })
+        .collect();
+
+    let env = session.session().module_env();
+    let recorded: Vec<String> = instantiations
+        .iter()
+        .map(|ty_args| {
+            ty_args
+                .iter()
+                .map(|ty| ty.format_with(&env).to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .collect();
+
+    assert!(
+        recorded.iter().any(|args| args == "int"),
+        "`concrete` calls `twice_it` at int, so that call must record `int`; recorded: {recorded:?}"
+    );
+    // Rendered `A` rather than the source's `U`: generalization normalizes a function's quantifiers,
+    // so the recorded argument is `forwarding`'s first quantifier under its canonical name.
+    assert!(
+        recorded.iter().any(|args| args == "A"),
+        "`forwarding` calls `twice_it` at its own quantifier, so that call must record a type \
+         variable; recorded: {recorded:?}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn generic_trait_method_function_argument_keeps_source_place_passing() {
     let mut session = TestSession::new();
     let module = session.compile_and_get_module(indoc! {r#"
