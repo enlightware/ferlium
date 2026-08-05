@@ -20,8 +20,6 @@
 //! linear in function count with a predictable constant. The compile-time evaluation budgets — fuel,
 //! call depth, environment cells — live with the engine that spends them, in
 //! [`crate::mir::const_eval`].
-//!
-//! See `doc/plans/partial-evaluation.md`.
 
 /// How many fold/inline rounds a single function may go through.
 ///
@@ -37,7 +35,8 @@ pub const MAX_ROUNDS: usize = 4;
 /// Generous rather than tuned: the point of inlining here is to hand folding a body whose arguments
 /// are known, and the callees that pays off for are small — accessors, arithmetic helpers, trait
 /// method bodies. A cap that a routine edit can cross would make the speedup fragile, which is the
-/// stability requirement in `doc/plans/partial-evaluation.md`.
+/// stability requirement that a user who annotates a hot path must not lose the optimization to
+/// an unrelated edit.
 pub const INLINE_CALLEE_OPERATIONS: usize = 32;
 
 /// How much inlining may grow one function, in operations, beyond the size it had *before*

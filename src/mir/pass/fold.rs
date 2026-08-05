@@ -26,8 +26,7 @@
 //! is never stale with respect to the edits it makes. Within a block, a fold updates the local state
 //! immediately, so a chain of calls in straight-line code folds in one pass; a chain that crosses
 //! blocks folds over the driver's rounds.
-//!
-//! See `doc/plans/partial-evaluation.md`.
+
 #![allow(dead_code)]
 
 use rustc_hash::FxHashSet;
@@ -152,8 +151,8 @@ pub(crate) fn fold_function(
     // Folding a branch or an invoke is what strands blocks — an error edge that dies leaves its
     // cleanup pad unreachable — so the pass prunes once its edits have settled. Resolving a
     // `condbr` also leaves its surviving target with a single predecessor, so merging follows the
-    // prune, in this pass's own edit: a separate open-and-verify cycle for it costs more than the
-    // merge saves (see `doc/plans/partial-evaluation.md`).
+    // prune, in this pass's own edit: a separate open-and-verify cycle for it costs more
+    // than the merge saves.
     edit.remove_unreachable_blocks();
     edit.merge_blocks_into_predecessors();
     Some(edit.finish(env))
@@ -280,8 +279,7 @@ fn fold_outcome(
 ///
 /// "Argument not known" is by far the largest refusal bucket, and undivided it says nothing: it
 /// cannot distinguish a case specialization would lift from one that is merely downstream of
-/// another refusal. Each answer here names a different remedy, which is the point — see
-/// `doc/plans/partial-evaluation.md`.
+/// another refusal. Each answer here names a different remedy, which is the point.
 fn why_argument_unknown(
     operand: &mir::Value,
     state: &State,

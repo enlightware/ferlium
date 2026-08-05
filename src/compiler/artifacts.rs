@@ -129,7 +129,7 @@ impl MirArtifacts {
     ///
     /// Every body is opened for editing and closed again, whether or not a pass changed it: closing
     /// re-verifies, so a body no pass touched still proves that editing preserves identities and is
-    /// genuinely the identity. See `doc/plans/partial-evaluation.md`.
+    /// genuinely the identity.
     ///
     /// Takes the whole session because the folding passes const-evaluate through the MIR
     /// interpreter, which resolves callees, dictionaries, and native code through it.

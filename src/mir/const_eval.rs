@@ -11,7 +11,7 @@
 //! This is the engine the partial-evaluation passes ask "what does this call return?". It answers
 //! with a runtime [`Value`] or refuses with a [`NotFoldable`] reason; it never produces a
 //! compilation error, because Ferlium has no explicit const context yet and folding is purely
-//! opportunistic. See `doc/plans/partial-evaluation.md`.
+//! opportunistic.
 //!
 //! Nothing here rewrites MIR: turning a returned value back into a constant is reification, which
 //! is a separate concern.
@@ -126,7 +126,7 @@ pub(crate) enum NotFoldable {
     /// The call was evaluated, but its result cannot be expressed as MIR. Raised by
     /// [`reify`](crate::mir::reify::reify) rather than by the evaluator: today the constant pool
     /// holds only trivially-copyable representations, so a folded `String`, list, variant, or
-    /// closure has nowhere to go. See Phase 5 of `doc/plans/partial-evaluation.md`.
+    /// closure has nowhere to go.
     ///
     /// Worth reporting separately from the engine-level refusals: how often it occurs is what
     /// decides whether that phase is worth doing.
@@ -624,7 +624,7 @@ mod tests {
     }
 
     /// The same call site shape with a heap result: it evaluates, and reification is what refuses.
-    /// Phase 5 of `doc/plans/partial-evaluation.md` is what would lift this.
+    /// Reifying non-trivial values is what would lift this.
     #[test]
     fn a_folded_string_result_is_not_reifiable() {
         use crate::mir::reify::is_reifiable;

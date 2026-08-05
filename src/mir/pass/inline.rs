@@ -41,8 +41,7 @@
 //! Two restrictions remain, both refusals rather than approximations: a callee whose types are not
 //! all concrete (see [`check_inlinable`]), and a call site inside a cleanup path when the callee has
 //! error flow of its own (see [`cleanup_blocks`]).
-//!
-//! See `doc/plans/partial-evaluation.md`.
+
 #![allow(dead_code)]
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -171,9 +170,8 @@ pub(crate) fn inline_function(
     }
     // Splicing always splits the call site's block and joins the pieces with jumps, so a callee
     // that needed no split arrives as three blocks. Collapse them here, in this pass's own edit,
-    // rather than in a separate driver step: the step costs an extra clone and an extra
-    // verification per round and measured worse than the merge saves (see
-    // `doc/plans/partial-evaluation.md`).
+    // rather than in a separate driver step: the step costs an extra clone and an
+    // extra verification per round, and measured worse than the merge saves.
     edit.merge_blocks_into_predecessors();
     // A splice appends the continuation and the callee's blocks, which can leave a block that uses
     // a value before the block defining it. Dominance is unaffected, but block order is what MIR's

@@ -29,8 +29,6 @@
 //! is an unfolded call. The set of *modelled* operations is the whitelist; everything else escapes
 //! its place operands.
 //!
-//! See `doc/plans/partial-evaluation.md`.
-//!
 //! The folding pass that consumes this is the next deliverable, so the items here are exercised
 //! only by the tests below.
 #![allow(dead_code)]

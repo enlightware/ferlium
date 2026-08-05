@@ -26,8 +26,7 @@
 //! Anything else about the place — a `load`, a `subfield`, a `drop`, a call argument, a store of a
 //! register — disqualifies it. Widening the rule means proving the drop obligation is discharged,
 //! and should happen only against the whole corpus.
-//!
-//! See `doc/plans/partial-evaluation.md`.
+
 #![allow(dead_code)]
 
 use rustc_hash::{FxHashMap, FxHashSet};

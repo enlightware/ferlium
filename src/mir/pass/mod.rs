@@ -20,8 +20,7 @@
 //! inlining splits every call site's block whether or not the callee needed it, and folding turns a
 //! `condbr` on a known condition into a jump. Merging belongs inside each pass rather than as a
 //! round of its own — a separate open-and-verify cycle measured *more* expensive than the merge
-//! saves, since closing an edit re-verifies the whole function. See
-//! `doc/plans/partial-evaluation.md`.
+//! saves, since closing an edit re-verifies the whole function.
 //!
 //! Optimization terminates on three independent bounds: the dataflow lattice is monotone within a
 //! run, inlining is bounded by its growth budget and the non-recursive restriction, and
@@ -33,8 +32,6 @@
 //! subscript identities are global while constant identities are function-local and remapped into
 //! the caller's pool. This is not whole-program optimization: nothing outside the module being
 //! optimized is modified.
-//!
-//! See `doc/plans/partial-evaluation.md`.
 
 pub mod budget;
 pub(crate) mod dataflow;

@@ -16,9 +16,9 @@
 //! It is deliberately restricted to values a MIR constant pool can already hold: a `TrivialCopy`
 //! native leaf, or a tuple of those (which is also how a record is represented at run time).
 //! `doc/mir-ir.md` pins `@cN` to that representation, so anything else — a `String`, a list, a
-//! variant, a closure — is refused here and left as a runtime call. Lifting that restriction needs
-//! frozen prototypes in the constant pool and an operation to clone them, which is Phase 5 of
-//! `doc/plans/partial-evaluation.md`.
+//! variant, a closure — is refused here and left as a runtime call. Lifting that restriction is a
+//! separate piece of work: reifying a non-trivial value needs a way to express it as static data
+//! and rebuild it at run time.
 //!
 //! Refusal is always a normal outcome: it costs an optimization, never a program.
 //!
