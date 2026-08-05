@@ -18,6 +18,19 @@ FUZZ_ENV += LIBRARY_PATH=$(CXX_STDLIB_DIR):$${LIBRARY_PATH}
 FUZZ_ENV_LEAKS += LIBRARY_PATH=$(CXX_STDLIB_DIR):$${LIBRARY_PATH}
 endif
 
+# Number of callgrind benchmarks to run in parallel: physical cores, not logical threads.
+#
+# Parallelism is sound here in a way it is not for wall-clock benchmarking. Callgrind counts the
+# instructions of the *simulated* program and simulates the cache with fixed parameters, so neither
+# metric can be perturbed by what else runs on the machine.
+#
+# Physical cores rather than `nproc` because a callgrind worker is a serial, CPU-bound simulator
+# with a large shadow-memory working set: two of them on one physical core contend for the same L1
+# and L2 and the same execution ports, so an SMT sibling buys much less than a core does.
+BENCH_JOBS ?= $(shell c=$$(lscpu -p=Core,Socket 2>/dev/null | grep -v '^\#' | sort -u | wc -l); \
+	if [ "$$c" -gt 0 ] 2>/dev/null; then echo $$c; \
+	else nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1; fi)
+
 install-deps:
 	cargo install cargo-nextest --locked
 	cargo install --version 0.18.2 gungraun-runner
@@ -34,7 +47,7 @@ test-miri:
 	cargo +nightly miri test hir::value::tests::discard_storage_recursively_reclaims_runtime_payloads --lib
 
 bench:
-	cargo bench
+	GUNGRAUN_PARALLEL=$(BENCH_JOBS) cargo bench
 
 fuzz-ide:
 	mkdir -p fuzz/corpus-generated/ide_compile_any $(FUZZ_LOG_DIR)/ide_compile_any
