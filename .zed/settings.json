@@ -3,6 +3,12 @@
     "rust-analyzer": {
       "initialization_options": {
         "linkedProjects": ["./Cargo.toml"],
+        "cargo": {
+          // Cargo metadata reports both target-specific ABI features for the
+          // proc-macro crate. On this 64-bit host, suppress the inactive one so
+          // rust-analyzer can expand Ferlium's procedural macros correctly.
+          "cfgs": ["debug_assertions", "miri", "!feature=ferlium_abi_32"],
+        },
         "check": {
           "workspace": false,
         },
