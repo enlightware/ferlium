@@ -80,6 +80,9 @@ pub(crate) struct SpecializationKey {
 /// how naive specialization explodes.
 #[derive(Default)]
 pub(crate) struct Specializations {
+    /// The module whose optimized artifacts will hold these, which is not in general the module a
+    /// specialized callee came from: the identities below index *this* module's table.
+    module: ModuleId,
     created: Vec<Specialization>,
     /// Each specialization as it was created, before the worklist optimized it.
     ///
@@ -94,9 +97,10 @@ pub(crate) struct Specializations {
 }
 
 impl Specializations {
-    /// Starts an empty table for a module whose HIR function table has `function_count` entries.
-    pub(crate) fn new(function_count: usize) -> Self {
+    /// Starts an empty table for `module`, whose HIR function table has `function_count` entries.
+    pub(crate) fn new(module: ModuleId, function_count: usize) -> Self {
         Self {
+            module,
             created: Vec::new(),
             raw: Vec::new(),
             cache: FxHashMap::default(),
@@ -157,7 +161,11 @@ impl Specializations {
         // Allocated before the body is built, because a recursive callee has to be able to name
         // itself: see `redirect_recursion`.
         let id = LocalFunctionId::from_index(self.first_index + self.created.len());
-        let mut specialized = FunctionEdit::new(specialize(body, scheme, &key, id, env));
+        let own = FunctionId {
+            module: self.module,
+            function: id,
+        };
+        let mut specialized = FunctionEdit::new(specialize(body, scheme, &key, own, env));
         // The body carries its original's name until renamed, which would print two functions under
         // one header in a MIR dump.
         specialized.set_name(name);
@@ -257,7 +265,7 @@ pub(crate) fn specialize<Ty: TypeLike>(
     body: &Function,
     scheme: &TypeScheme<Ty>,
     key: &SpecializationKey,
-    own_id: LocalFunctionId,
+    own: FunctionId,
     env: ModuleEnv<'_>,
 ) -> Function {
     let subst = key.instantiation.substitution(scheme);
@@ -268,7 +276,7 @@ pub(crate) fn specialize<Ty: TypeLike>(
     let mut edit = FunctionEdit::new(body.clone());
     map_types(&mut edit, &mut mapper);
     bind_dictionaries(&mut edit, &key.dictionaries);
-    redirect_recursion(&mut edit, key.callee, own_id);
+    redirect_recursion(&mut edit, key.callee, own);
     demote_infallible_invokes(&mut edit);
     drop_redundant_layout_witnesses(&mut edit, env);
     elide_trivial_ownership_operations(&mut edit, env);
@@ -290,11 +298,8 @@ pub(crate) fn specialize<Ty: TypeLike>(
 /// [`specialize_call_sites`] resolves it through the cache like any other.
 ///
 /// The specialization keeps its original's signature, so the operands need no adjustment.
-fn redirect_recursion(edit: &mut FunctionEdit, original: FunctionId, own_id: LocalFunctionId) {
-    let own = mir::Value::Function(FunctionId {
-        module: original.module,
-        function: own_id,
-    });
+fn redirect_recursion(edit: &mut FunctionEdit, original: FunctionId, own: FunctionId) {
+    let own = mir::Value::Function(own);
     for block_id in edit.blocks().collect::<Vec<_>>() {
         let block = edit.block_mut(block_id);
         let operations = block
@@ -648,7 +653,9 @@ fn specialization_for(
     let mir::Value::Function(callee) = &operation.operands[0] else {
         return None;
     };
-    if callee.module != module_id || specializations.is_specialization(callee.function) {
+    // A specialization is never a callee to specialize again. The check only means anything for
+    // this module's own table; another module's raw bodies contain no specializations at all.
+    if callee.module == module_id && specializations.is_specialization(callee.function) {
         return None;
     }
     // A caller that still names its own quantifiers here would produce a specialization as generic
@@ -657,7 +664,11 @@ fn specialization_for(
         return None;
     }
 
-    let module = session.expect_fresh_module(module_id);
+    // The callee's own module, which need not be the one being optimized: a user module calling a
+    // generic `std` helper is the case that matters, since otherwise every std generic stays generic
+    // and uninlinable in every module but its own. Safe for the same reason cross-module *inlining*
+    // is: a dependency's revision is immutable, so its raw body cannot change under us.
+    let module = session.expect_fresh_module(callee.module);
     let scheme = &module
         .get_function_by_id(callee.function)?
         .definition
@@ -668,7 +679,7 @@ fn specialization_for(
     // Raw rather than optimized, like every other body the driver consults, so that what a
     // specialization contains never depends on the order functions are optimized in.
     let body = session
-        .mir_artifacts_for(module_id, MirOptimization::Disabled)?
+        .mir_artifacts_for(callee.module, MirOptimization::Disabled)?
         .get(callee.function)?;
 
     let visible_start = operation
@@ -776,10 +787,13 @@ mod tests {
     }
 
     impl Site {
-        /// Specializes as the table would, at the first identity past the module's own functions.
+        /// Specializes as the table would, at an identity past the module's own functions.
         fn specialize(&self, env: ModuleEnv<'_>) -> Function {
-            let own_id = LocalFunctionId::from_index(1000);
-            specialize(&self.body, &self.scheme, &self.key, own_id, env)
+            let own = FunctionId {
+                module: self.key.callee.module,
+                function: LocalFunctionId::from_index(1000),
+            };
+            specialize(&self.body, &self.scheme, &self.key, own, env)
         }
     }
 
@@ -1198,8 +1212,11 @@ mod tests {
                         instantiation: instantiation.as_ref().clone(),
                         dictionaries,
                     };
-                    let own_id = LocalFunctionId::from_index(artifacts.bodies().len());
-                    specialize(body, scheme, &key, own_id, session.module_env());
+                    let own = FunctionId {
+                        module: std_id,
+                        function: LocalFunctionId::from_index(artifacts.bodies().len()),
+                    };
+                    specialize(body, scheme, &key, own, session.module_env());
                     specialized += 1;
                 }
             }

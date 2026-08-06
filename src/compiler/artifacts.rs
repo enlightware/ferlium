@@ -175,7 +175,7 @@ impl MirArtifacts {
         let modules = session.raw_modules();
         let env = ModuleEnv::new(module, modules);
         let module_id = module.module_id();
-        let mut specializations = Specializations::new(raw.functions.len());
+        let mut specializations = Specializations::new(module_id, raw.functions.len());
 
         let functions: Vec<Option<mir::Function>> = raw
             .functions
