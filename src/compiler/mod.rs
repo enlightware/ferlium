@@ -15,6 +15,9 @@ mod pipeline;
 mod session;
 
 pub use artifacts::MirOptimization;
+/// Re-exported for tests that read a module's MIR without going through a compilation.
+#[cfg(test)]
+pub(crate) use artifacts::ensure_mir_artifacts;
 pub(crate) use artifacts::{MirArtifacts, ModuleArtifacts};
 pub use diagnostics::{DiagnosticSeverity, ModuleDiagnostic};
 pub use error::*;

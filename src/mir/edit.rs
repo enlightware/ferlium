@@ -398,7 +398,7 @@ impl FunctionEdit {
         }
     }
 
-    fn visit_operands_mut(&mut self, mut visit: impl FnMut(&mut mir::Value)) {
+    pub(crate) fn visit_operands_mut(&mut self, mut visit: impl FnMut(&mut mir::Value)) {
         for block in &mut self.blocks {
             for operation in &mut block.operations {
                 operation.operands.iter_mut().for_each(&mut visit);
