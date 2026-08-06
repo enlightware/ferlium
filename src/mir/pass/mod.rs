@@ -78,8 +78,9 @@ pub(crate) fn optimize_function(
         let mut changed = false;
         let source = current.as_ref().unwrap_or(function);
         if let Some(folded) = fold::fold_function(source, env, session, module_id) {
-            current = Some(folded);
-            changed = true;
+            current = Some(folded.body);
+            // A rewrite that cannot enable another one must not buy a round; see `Folded`.
+            changed |= folded.warrants_another_round;
         }
         // Specialization before inlining: it rewrites a generic call into a call on a concrete
         // copy, whose dictionaries are constants the *next* round's folding resolves. That is what
