@@ -33,7 +33,7 @@ use crate::{
     hir::{self, emit_expr::emit_expr_entry_with_private_impls, hir_syn::local, value::Value},
     mir::pass::report::OptimizationReport,
     module::{
-        self, LocalFunctionId, Module, ModuleEnv, ModuleFunction, ModuleId, Path,
+        self, FunctionId, LocalFunctionId, Module, ModuleEnv, ModuleFunction, ModuleId, Path,
         ResolvedValueLayout, Uses,
         id::{Id, NamedIndexed},
     },
@@ -1230,6 +1230,22 @@ impl CompilerSession {
         optimization: MirOptimization,
     ) -> Option<&MirArtifacts> {
         self.expect_module_entry(module_id).mir(optimization)
+    }
+
+    /// The function whose HIR record describes `id`, following a specialization to its original.
+    ///
+    /// A specialization has no entry in the module's HIR function table — nothing in the source
+    /// declared it — so everything outside its MIR body comes from the function it was specialized
+    /// from: whether it is script or native, its return convention, its parameter passing, its
+    /// name. This one indirection is the whole price of storing specializations past the end of the
+    /// table, and it is why a specialized body keeps its original's signature.
+    ///
+    /// Takes the stage because a `FunctionId` past the HIR count only means anything in the
+    /// optimized one; in the raw stage it is simply out of range.
+    pub(crate) fn hir_identity_of(&self, id: FunctionId, stage: MirOptimization) -> FunctionId {
+        self.mir_artifacts_for(id.module, stage)
+            .and_then(|artifacts| artifacts.specialization(id.function))
+            .map_or(id, |specialization| specialization.original)
     }
 
     /// What optimizing `module_id` achieved, and what it declined to do.

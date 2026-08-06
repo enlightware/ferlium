@@ -113,6 +113,12 @@ impl FunctionEdit {
         &self.parameters
     }
 
+    /// Renames the function, for a pass that produces a new one from an existing body — a
+    /// specialization, whose name says which original and which instantiation it came from.
+    pub(crate) fn set_name(&mut self, name: Ustr) {
+        self.name = name;
+    }
+
     /// The parameters, for a pass that rewrites their types. Their count and kinds are part of the
     /// function's calling convention and must not change under an edit.
     pub(crate) fn parameters_mut(&mut self) -> &mut [Parameter] {

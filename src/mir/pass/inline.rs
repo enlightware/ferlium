@@ -58,7 +58,7 @@ use crate::{
     types::{r#type::CallResultConvention, type_like::TypeLike},
 };
 
-use super::{budget, function_size};
+use super::{Specializations, budget, function_size};
 
 /// Where the call to inline sits in the caller.
 #[derive(Clone, Copy)]
@@ -152,9 +152,16 @@ pub(crate) fn inline_function(
     env: ModuleEnv<'_>,
     session: &CompilerSession,
     module_id: ModuleId,
+    specializations: &Specializations,
 ) -> Option<Function> {
     let _ = module_id;
-    let sites = plan_inlinings(func, original_size, session, &mut None);
+    let sites = plan_inlinings(
+        func,
+        original_size,
+        session,
+        Some(specializations),
+        &mut None,
+    );
     if sites.is_empty() {
         return None;
     }
@@ -164,7 +171,7 @@ pub(crate) fn inline_function(
     // that is the terminator before the operations, and the operations in decreasing index — which
     // is the reverse of the order they were planned in.
     for inlining in sites.into_iter().rev() {
-        let body = callee_body(session, inlining.callee)
+        let body = callee_body(session, inlining.callee, Some(specializations))
             .expect("planning read this body from the same artifacts");
         inline_at(&mut edit, &body, inlining.site, env);
     }
@@ -192,6 +199,7 @@ fn plan_inlinings(
     func: &Function,
     original_size: usize,
     session: &CompilerSession,
+    specializations: Option<&Specializations>,
     refusals: &mut Option<&mut Vec<Refusal>>,
 ) -> Vec<Inlining> {
     let mut sites = Vec::new();
@@ -241,7 +249,7 @@ fn plan_inlinings(
                 refuse(NotInlinable::CalleeNotDirect);
                 continue;
             };
-            let Some(body) = callee_body(session, callee) else {
+            let Some(body) = callee_body(session, callee, specializations) else {
                 refuse(NotInlinable::NoBody);
                 continue;
             };
@@ -273,7 +281,13 @@ pub(crate) fn refusals_of(func: &Function, session: &CompilerSession) -> Vec<Ref
     let mut refusals = Vec::new();
     // Measured against the body as it stands: the question the report answers is whether *another*
     // round would inline this site, not what the budget was when optimization started.
-    plan_inlinings(func, function_size(func), session, &mut Some(&mut refusals));
+    plan_inlinings(
+        func,
+        function_size(func),
+        session,
+        None,
+        &mut Some(&mut refusals),
+    );
     refusals
 }
 
@@ -282,7 +296,22 @@ pub(crate) fn refusals_of(func: &Function, session: &CompilerSession) -> Vec<Ref
 /// Deliberately raw rather than optimized: the driver reads raw bodies everywhere so that a result
 /// never depends on the order functions are optimized in. Folding runs over the inlined body
 /// afterwards, which recovers most of what an already-simplified callee would have given.
-fn callee_body(session: &CompilerSession, callee: FunctionId) -> Option<Function> {
+///
+/// A specialization the optimizer created has no raw *artifact* — it exists only in the stage being
+/// built — so its equivalent comes from the table, which keeps each body as it was created, before
+/// the worklist optimized it. Same rule, same reason. `specializations` is `None` for the
+/// optimization report, which runs after the table is consumed into the artifacts; a specialization
+/// then reports as having no body, which is a cosmetic gap in the report rather than a decision.
+fn callee_body(
+    session: &CompilerSession,
+    callee: FunctionId,
+    specializations: Option<&Specializations>,
+) -> Option<Function> {
+    if let Some(specializations) = specializations
+        && specializations.is_specialization(callee.function)
+    {
+        return specializations.raw_body(callee.function).cloned();
+    }
     session
         .mir_artifacts_for(callee.module, MirOptimization::Disabled)?
         .get(callee.function)
@@ -324,8 +353,15 @@ fn cleanup_blocks(func: &Function) -> FxHashSet<BlockId> {
 /// environment. Copying them into a caller with a different instantiation silently reinterprets
 /// them: inlining a generic `Value<A>::clone` into a concrete caller makes its `A` mean whatever
 /// `A` happens to be there. Making that sound requires substituting the call site's instantiation
-/// through the body, which is what specialization does — so until then, only callees that carry no
-/// type variables at all are inlined.
+/// through the body, which is what specialization does — so only callees that carry no type
+/// variables at all are inlined.
+///
+/// **A dictionary parameter is not itself a reason to refuse**, which is what lets a specialization
+/// be inlined. Splicing binds `@extra` parameters to the caller's operands like any other, and a
+/// genuinely generic body is already refused above: its evidence parameter's own type mentions the
+/// variables it is evidence for, so it is not constant. What remains is a body whose dictionary
+/// parameters are concrete — a specialization, whose evidence has already been bound to constants
+/// inside it, leaving those parameters unread.
 ///
 /// A recursive callee carries a call-depth guard, so the presence of `check_call_depth` *is* the
 /// recursion test — a local check on the callee, which is also what bounds inlining. Scoped
@@ -336,9 +372,10 @@ fn check_inlinable(
     has_error_successor: bool,
     in_cleanup: bool,
 ) -> Result<(), NotInlinable> {
-    let generic = body.parameters().iter().any(|parameter| {
-        matches!(parameter.kind, mir::ParameterKind::Dictionary) || !parameter.ty.is_constant()
-    });
+    let generic = body
+        .parameters()
+        .iter()
+        .any(|parameter| !parameter.ty.is_constant());
     if generic {
         return Err(NotInlinable::Generic);
     }

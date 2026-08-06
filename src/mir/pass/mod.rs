@@ -41,6 +41,8 @@ pub(crate) mod inline;
 pub(crate) mod monomorphize;
 pub mod report;
 
+pub(crate) use monomorphize::Specializations;
+
 use crate::{
     compiler::CompilerSession,
     mir::{Function, edit::FunctionEdit},
@@ -65,6 +67,7 @@ pub(crate) fn optimize_function(
     env: ModuleEnv<'_>,
     session: &CompilerSession,
     module_id: ModuleId,
+    specializations: &mut Specializations,
 ) -> Function {
     let original_size = function_size(function);
     let mut current: Option<Function> = None;
@@ -78,10 +81,25 @@ pub(crate) fn optimize_function(
             current = Some(folded);
             changed = true;
         }
+        // Specialization before inlining: it rewrites a generic call into a call on a concrete
+        // copy, whose dictionaries are constants the *next* round's folding resolves. That is what
+        // reaches this language's generic code at all — see `monomorphize`.
         let source = current.as_ref().unwrap_or(function);
-        if let Some(inlined) =
-            inline::inline_function(source, original_size, env, session, module_id)
+        if let Some(specialized) =
+            monomorphize::specialize_call_sites(source, env, session, module_id, specializations)
         {
+            current = Some(specialized);
+            changed = true;
+        }
+        let source = current.as_ref().unwrap_or(function);
+        if let Some(inlined) = inline::inline_function(
+            source,
+            original_size,
+            env,
+            session,
+            module_id,
+            specializations,
+        ) {
             current = Some(inlined);
             changed = true;
         }

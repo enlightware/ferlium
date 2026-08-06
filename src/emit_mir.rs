@@ -64,17 +64,25 @@ pub(crate) fn emit_mir(
         })
         .collect();
     functions.sort_by_key(|(name, id)| (*name, id.as_index()));
-    functions
-        .into_iter()
-        .map(|(_, f)| {
-            let lowered = artifacts
-                .get(f)
-                .expect("every script function must have a MIR artifact");
-            let env = ModuleEnv::new(module, others);
-            format!("{}", lowered.format_with(&env))
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    let env = ModuleEnv::new(module, others);
+    let declared = functions.into_iter().map(|(_, f)| {
+        let lowered = artifacts
+            .get(f)
+            .expect("every script function must have a MIR artifact");
+        format!("{}", lowered.format_with(&env))
+    });
+    // Specialized bodies have no entry in the function table above — nothing in the source declared
+    // them — so they are appended in creation order, each under the generated name saying which
+    // original and which instantiation it came from. Without this a dump would show call sites
+    // reaching bodies it never printed.
+    let specialized = artifacts.specializations().iter().map(|specialization| {
+        format!(
+            "// specialization of {}\n{}",
+            mir::Value::Function(specialization.original).format_with(&env),
+            specialization.body.format_with(&env)
+        )
+    });
+    declared.chain(specialized).collect::<Vec<_>>().join("\n")
 }
 
 /// The MIR blocks involved in the lowering of a case in a match expression.

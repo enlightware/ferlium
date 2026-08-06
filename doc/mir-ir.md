@@ -37,6 +37,19 @@ terminators and forward-declared block bodies exist only in the private `Functio
 cannot occur in a finalized function. In debug builds, `FunctionBuilder::finish` runs the full MIR
 verifier at this boundary.
 
+**A `FunctionId` names a function in a context, and the context is `(module, artifact stage)`.** A
+module's MIR bodies line up one-for-one with its HIR function table — except in the *optimized*
+stage, which the optimizer may extend past the end with **specializations**: private copies of a
+generic function with one call site's types substituted and its trait dictionaries bound to
+constants. The raw stage is always exactly the HIR table, which is also what lets the two stages be
+told apart without a flag.
+
+A specialization has no HIR entry, since nothing in the source declared it. Everything outside its
+MIR body — whether it is script or native, its return convention, its parameter passing, its name —
+is read from the function it was specialized from, through one indirection. That is why a
+specialization keeps its original's signature exactly: binding a dictionary parameter replaces the
+parameter's *uses* and leaves the parameter in place, so no metadata has to be duplicated.
+
 ## Values and roles
 
 MIR uses independent, function-local `ValueId`s rather than operation locations:

@@ -12,9 +12,14 @@ use std::cell::OnceCell;
 use crate::{
     compiler::{CompilerSession, Modules},
     emit_mir::build_mir_function,
-    mir::{self, pass::optimize_function},
-    module::{LocalFunctionId, Module, ModuleEnv, ModuleId, id::Id},
+    mir::{
+        self,
+        pass::{Specializations, optimize_function},
+    },
+    module::{FunctionId, LocalFunctionId, Module, ModuleEnv, ModuleId, id::Id},
 };
+
+use ustr::Ustr;
 
 /// Whether a compilation session runs the MIR optimization passes.
 ///
@@ -99,11 +104,34 @@ impl ModuleArtifacts {
     }
 }
 
-/// MIR bodies aligned one-for-one with a module's dense local function table.
+/// A body the optimizer created by specializing another function at one instantiation.
+///
+/// It has no entry in the module's HIR function table — nothing in the source declared it — so
+/// everything the rest of the compiler reads through a `FunctionId` comes from `original` instead.
+/// That indirection is the whole cost of specialization's storage, and it is cheap precisely because
+/// a specialized body keeps its original's signature: only the *body* differs, so no metadata is
+/// duplicated.
+pub(crate) struct Specialization {
+    /// The function this was specialized from, and the source of all its metadata.
+    pub(crate) original: FunctionId,
+    /// A generated name, following the same shape as the compiler's generated impl functions:
+    /// a readable original, a `#spec:` marker, and a discriminator.
+    pub(crate) name: Ustr,
+    pub(crate) body: mir::Function,
+}
+
+/// MIR bodies aligned one-for-one with a module's dense local function table, plus any bodies the
+/// optimizer specialized.
 ///
 /// Native functions have no MIR body; every script function has exactly one.
+///
+/// **Specializations extend the table past the HIR function count.** A [`LocalFunctionId`] at or
+/// beyond `functions.len()` names one, and only ever in the optimized stage — the raw stage is
+/// always exactly the HIR table. That is what makes a `FunctionId` meaningful only in a
+/// `(module, stage)` context, and what lets the two stages be told apart without a flag.
 pub(crate) struct MirArtifacts {
     functions: Vec<Option<mir::Function>>,
+    specializations: Vec<Specialization>,
 }
 
 impl MirArtifacts {
@@ -122,7 +150,10 @@ impl MirArtifacts {
                     .map(|_| build_mir_function(id, env))
             })
             .collect();
-        Self { functions }
+        Self {
+            functions,
+            specializations: Vec::new(),
+        }
     }
 
     /// Runs the optimization passes over every body in `raw`.
@@ -133,28 +164,75 @@ impl MirArtifacts {
     ///
     /// Takes the whole session because the folding passes const-evaluate through the MIR
     /// interpreter, which resolves callees, dictionaries, and native code through it.
+    ///
+    /// Specialization makes this two-staged. Optimizing a body may ask for a specialized copy of a
+    /// callee, which is itself a body needing optimization — that is the whole point, since binding
+    /// its dictionaries is what lets folding resolve them. So the declared functions are optimized
+    /// first, then the specializations they requested are drained as a worklist, which may request
+    /// more. [`MAX_SPECIALIZATIONS`](crate::mir::pass::budget::MAX_SPECIALIZATIONS) bounds the
+    /// total, so a chain of generic callees cannot expand without end.
     pub(crate) fn optimize(raw: &MirArtifacts, module: &Module, session: &CompilerSession) -> Self {
         let modules = session.raw_modules();
         let env = ModuleEnv::new(module, modules);
-        let functions = raw
+        let module_id = module.module_id();
+        let mut specializations = Specializations::new(raw.functions.len());
+
+        let functions: Vec<Option<mir::Function>> = raw
             .functions
             .iter()
             .map(|function| {
-                function
-                    .as_ref()
-                    .map(|function| optimize_function(function, env, session, module.module_id()))
+                function.as_ref().map(|function| {
+                    optimize_function(function, env, session, module_id, &mut specializations)
+                })
             })
             .collect();
-        Self { functions }
+
+        // Drain the worklist. A specialization created while optimizing one is appended past the
+        // end, so this walk reaches it too.
+        let mut next = 0;
+        while next < specializations.len() {
+            let id = LocalFunctionId::from_index(functions.len() + next);
+            let body = specializations
+                .body(id)
+                .expect("a specialization just created has a body")
+                .clone();
+            let optimized = optimize_function(&body, env, session, module_id, &mut specializations);
+            specializations.set_body(id, optimized);
+            next += 1;
+        }
+
+        Self {
+            functions,
+            specializations: specializations.into_created(),
+        }
     }
 
     pub(crate) fn get(&self, id: LocalFunctionId) -> Option<&mir::Function> {
-        self.functions.get(id.as_index())?.as_ref()
+        match self.specialization(id) {
+            Some(specialization) => Some(&specialization.body),
+            None => self.functions.get(id.as_index())?.as_ref(),
+        }
     }
 
-    /// Every body, in local function order, with `None` where a function has no MIR (a native).
+    /// The specialization `id` names, if it names one rather than a function the source declared.
+    pub(crate) fn specialization(&self, id: LocalFunctionId) -> Option<&Specialization> {
+        self.specializations
+            .get(id.as_index().checked_sub(self.functions.len())?)
+    }
+
+    /// Every body the *source* declared, in local function order, with `None` where a function has
+    /// no MIR (a native).
+    ///
+    /// Deliberately excludes specializations: this is what pairs the two artifact stages up, and
+    /// only the HIR-declared prefix exists in both. A caller that wants specializations too has to
+    /// ask for them, which is what stops them being silently dropped from a zip.
     pub(crate) fn bodies(&self) -> &[Option<mir::Function>] {
         &self.functions
+    }
+
+    /// Every specialized body, in the order the optimizer created them.
+    pub(crate) fn specializations(&self) -> &[Specialization] {
+        &self.specializations
     }
 
     pub(crate) fn len(&self) -> usize {

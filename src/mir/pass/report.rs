@@ -353,10 +353,14 @@ mod tests {
 
     /// A generic callee is the refusal Phase 4 exists to lift, so it gets its own reason rather
     /// than being folded into a general "shape" bucket.
+    ///
+    /// The caller is deliberately generic too. A *concrete* caller now has its call specialized,
+    /// which lifts this refusal and replaces it with one about the specialization — so the snippet
+    /// has to be one specialization cannot reach: a caller that forwards its own quantifier records
+    /// a variable instantiation, which is not something to specialize at.
     #[test]
     fn a_generic_callee_is_reported_as_generic() {
-        let (report, rendered) =
-            report_for("fn identity(x) { x }\nfn use_it(n: int) -> int { identity(n) }");
+        let (report, rendered) = report_for("fn identity(x) { x }\nfn use_it(n) { identity(n) }");
         let inline: Vec<&str> = report
             .reasons(OptimizationPass::Inline)
             .into_iter()

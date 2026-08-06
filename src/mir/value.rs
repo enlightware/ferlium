@@ -115,6 +115,11 @@ impl FormatWith<ModuleEnv<'_>> for Value {
                     .expect("MIR function operand refers to an unavailable module");
                 let function = module
                     .get_function_name_by_id(id.function)
+                    // A specialization has no entry in the function table, so its generated name
+                    // comes from the artifacts that hold it. Without this a call to one renders as
+                    // `<anonymous>`, which is exactly where a reader most needs to be told which
+                    // original and which instantiation they are looking at.
+                    .or_else(|| env.specialization_name(*id))
                     .unwrap_or_else(|| "<anonymous>".into());
                 let module_name = env
                     .modules

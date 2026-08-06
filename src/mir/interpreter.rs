@@ -32,8 +32,8 @@ use crate::{
     },
     mir::{self, BlockId, Operation, OperationKind, terminator::TerminatorKind},
     module::{
-        FunctionId, LocalFunctionId, ModuleEnv, ModuleId, TraitDictionaryId, id::Id,
-        trait_impl::TraitDictionaryEntry,
+        FunctionId, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleId, TraitDictionaryId,
+        id::Id, trait_impl::TraitDictionaryEntry,
     },
     std::buffer,
     types::{
@@ -355,10 +355,7 @@ impl<'a> Interpreter<'a> {
             identity: callee.function,
         };
         let is_script = self
-            .session
-            .expect_fresh_module(callee.module)
-            .get_function_by_id(callee.function)
-            .expect("callee function not found")
+            .hir_function(callee.module, callee.function)
             .code
             .as_script()
             .is_some();
@@ -436,6 +433,23 @@ impl<'a> Interpreter<'a> {
             ControlFlow::Continue(value) => Ok(value),
             ControlFlow::Transfer(_) => panic!("unexpected control transfer from a native call"),
         }
+    }
+
+    /// The HIR record describing `callee`, following a specialization to its original.
+    ///
+    /// A specialization is a body the optimizer created; it has no entry in the module's HIR
+    /// function table, so everything outside its MIR — script or native, return convention,
+    /// parameter passing, name — is read from the function it was specialized from. Every such
+    /// lookup goes through this rather than the table directly, which is what keeps the one
+    /// indirection specialization costs in one place.
+    fn hir_function(&self, module: ModuleId, function: LocalFunctionId) -> &'a ModuleFunction {
+        let id = self
+            .session
+            .hir_identity_of(FunctionId { module, function }, self.stage);
+        self.session
+            .expect_fresh_module(id.module)
+            .get_function_by_id(id.function)
+            .expect("callee function not found")
     }
 
     /// Returns the immutable MIR body stored beside the function's semantic module revision.
@@ -1051,11 +1065,7 @@ impl<'a> Interpreter<'a> {
             return Ok(());
         }
         let (module, identity) = self.callee_target(slots, &operands[1]);
-        let f = self
-            .session
-            .expect_fresh_module(module)
-            .get_function_by_id(identity)
-            .expect("drop callee not found");
+        let f = self.hir_function(module, identity);
         let drop_result = if f.code.as_script().is_some() {
             // A script `Value::drop(&mut self)` in the uniform by-pointer ABI: `drop(self, ())`. Its
             // `()` out-pointer starts a husk like any `@ret`; the drop body writes it (discarded after).
@@ -1224,11 +1234,7 @@ impl<'a> Interpreter<'a> {
         // mirroring `eval_accessor_until_yield`: the generic caller cannot know whether the
         // concrete member is native or script, or whether it yields or returns a caller-rooted
         // place.
-        let f = self
-            .session
-            .expect_fresh_module(key.module)
-            .get_function_by_id(key.identity)
-            .expect("project callee not found");
+        let f = self.hir_function(key.module, key.identity);
         let convention = f.definition.return_convention();
 
         if f.code.as_script().is_none() {
@@ -1490,10 +1496,7 @@ impl<'a> Interpreter<'a> {
             module: callee_module,
             identity: callee_identity,
         };
-        let module = self.session.expect_fresh_module(callee_module);
-        let f = module
-            .get_function_by_id(callee_identity)
-            .expect("callee function not found");
+        let f = self.hir_function(callee_module, callee_identity);
         let is_script = f.code.as_script().is_some();
 
         if is_script {
@@ -1570,10 +1573,7 @@ impl<'a> Interpreter<'a> {
         arg_ops: &[mir::Value],
         span: Location,
     ) -> Result<(), RuntimeError> {
-        let module = self.session.expect_fresh_module(callee_module);
-        let f = module
-            .get_function_by_id(callee_identity)
-            .expect("callee function not found");
+        let f = self.hir_function(callee_module, callee_identity);
 
         // Native callee: marshal the extra (dictionary) arguments and the visible arguments,
         // delegate to the HIR interpreter, then write the returned value through the return

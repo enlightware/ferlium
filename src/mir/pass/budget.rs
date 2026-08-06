@@ -48,3 +48,16 @@ pub const INLINE_CALLEE_OPERATIONS: usize = 32;
 /// it is public because a budget change is a user-visible change — the optimization report cites
 /// these by name.
 pub const INLINE_FUNCTION_GROWTH: usize = 128;
+
+/// How many specialized bodies one module's optimization may create.
+///
+/// Specialization cascades by design: monomorphizing a caller makes the dictionaries it forwards
+/// constant, which brings its own generic calls into reach, which may specialize further. The cache
+/// bounds the *breadth* — one body per distinct instantiation rather than per call site — but not
+/// the depth, so this bounds the total.
+///
+/// Per module rather than per function, unlike the inlining budgets, because a specialization is
+/// shared between every call site that asks for it: charging it to whichever function happened to
+/// ask first would make the cost depend on optimization order. It is deliberately generous; the
+/// standard library's whole specializable population is in the low hundreds.
+pub const MAX_SPECIALIZATIONS: usize = 512;

@@ -9,11 +9,12 @@
 use crate::{
     FxHashMap, Location,
     ast::{self, UstrSpan},
+    compiler::MirOptimization,
     compiler::error::InternalCompilationError,
     format::FormatWith,
     internal_compilation_error,
     module::{
-        Module, ModuleFunction, ModuleId, Modules, ProjectionEntry, ProjectionKey,
+        FunctionId, Module, ModuleFunction, ModuleId, Modules, ProjectionEntry, ProjectionKey,
         ProjectionOrigin, ProjectionReceiverKey, SubscriptId, SubscriptMemberFunctionKind, TraitId,
         TypeDefId, YieldProvenance, disambiguated_subscript_member_function_name,
         id::Id,
@@ -541,6 +542,24 @@ impl<'m> ModuleEnv<'m> {
         } else {
             self.modules.get(module_id).and_then(|entry| entry.module())
         }
+    }
+
+    /// The generated name of the specialization `id` names, if it names one.
+    ///
+    /// Specializations live in the optimized MIR artifacts rather than the module's function table,
+    /// so this is the only way to put a name on one. Returns `None` while a module is being
+    /// optimized — its optimized artifacts are not installed yet — which is correct: only
+    /// already-declared functions are named at that point.
+    pub(crate) fn specialization_name(&self, id: FunctionId) -> Option<Ustr> {
+        let entry = self.modules.get(id.module)?;
+        entry.module()?;
+        Some(
+            entry
+                .artifacts()
+                .mir(MirOptimization::Enabled)?
+                .specialization(id.function)?
+                .name,
+        )
     }
 
     pub fn type_alias_name(&self, ty: Type) -> Option<String> {
