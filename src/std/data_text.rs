@@ -70,8 +70,8 @@ fn escape_string(value: &str) -> String {
 
 fn is_record_data(value: &Value) -> bool {
     value
-        .as_variant()
-        .is_some_and(|variant| variant.tag.as_str() == "Record")
+        .variant_tag()
+        .is_some_and(|tag| tag.as_str() == "Record")
 }
 
 fn escape_data_text_string(input: &Str) -> Str {

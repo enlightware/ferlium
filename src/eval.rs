@@ -23,6 +23,7 @@ use crate::{
     hir::function::{ArgConvention, copy_boxed_trivial_copy_native},
     hir::value::{
         FunctionValue, HiddenEvidenceArgValue, NativeValue, NativeValueType, SubscriptValue, Value,
+        ustr_to_isize,
     },
     module::{
         ELocalDecl as LocalDecl, ExtraParameterId, FunctionId, LocalDebugVisibility, LocalDeclId,
@@ -1053,7 +1054,8 @@ impl Place {
             use Value::*;
             target = match target {
                 Tuple(tuple) => tuple.get_mut(index as usize).unwrap(),
-                Variant(variant) if index == 0 => &mut variant.value,
+                // A payload-free case has no slot until something writes one.
+                Variant(..) if index == 0 => target.variant_payload_mut().unwrap(),
                 Native(primitive) => {
                     let buffer = primitive
                         .as_mut()
@@ -1069,7 +1071,7 @@ impl Place {
                     }
                 }
                 Uninit => panic!("cannot access a field of an uninitialized value"),
-                Variant(_) => panic!("Cannot access a variant payload with a non-zero index"),
+                Variant(..) => panic!("Cannot access a variant payload with a non-zero index"),
                 _ => panic!(
                     "Cannot access a non-compound value while following mutable place path: index {}, full place {:?}",
                     index, self
@@ -1107,7 +1109,7 @@ impl Place {
             use Value::*;
             target = match target {
                 Tuple(tuple) => tuple.get(index as usize).unwrap(),
-                Variant(variant) if index == 0 => &variant.value,
+                Variant(_, Some(payload)) if index == 0 => payload,
                 Native(primitive) => {
                     let buffer = NativeValue::as_any(primitive.as_ref())
                         .downcast_ref::<buffer::Buffer>()
@@ -1121,7 +1123,7 @@ impl Place {
                     }
                 }
                 Uninit => panic!("cannot read a field of an uninitialized value"),
-                Variant(_) => panic!("Cannot access a variant payload with a non-zero index"),
+                Variant(..) => panic!("Cannot access a variant payload with a non-zero index"),
                 other => panic!(
                     "Cannot access a non-compound value while following place path: target {:?}, index {}, full place {:?}",
                     other, index, self
@@ -2963,12 +2965,14 @@ fn copy_boxed_trivial_copy_representation(value: &Value) -> Option<Value> {
     if let Some(value) = copy_boxed_trivial_copy_native(value) {
         return Some(value);
     }
-    if let Some(variant) = value.as_variant() {
-        let payload = match &variant.value {
-            Value::Uninit => Value::uninit(),
-            payload => copy_boxed_trivial_copy_representation(payload)?,
-        };
-        return Some(Value::raw_variant(variant.tag, payload));
+    if let Some(tag) = value.variant_tag() {
+        return Some(match value.variant_payload() {
+            None => Value::unit_variant(tag),
+            Some(Value::Uninit) => Value::raw_variant(tag, Value::uninit()),
+            Some(payload) => {
+                Value::raw_variant(tag, copy_boxed_trivial_copy_representation(payload)?)
+            }
+        });
     }
     let values = value.as_tuple()?;
     Some(Value::tuple(
@@ -3762,13 +3766,15 @@ fn eval_extract_tag(
         let value = place
             .target_ref(ctx)
             .map_err(|err| RuntimeError::new(err, Some(arena[node].span)))?;
-        let variant = value.as_variant().unwrap();
-        let tag = variant.tag_as_isize();
-        return cont(Value::native(tag));
+        let tag = value.variant_tag().expect("extract_tag of a non-variant");
+        return cont(Value::native(ustr_to_isize(tag)));
     }
     let value = eval_or_return!(eval_node_with_ctx(arena, node, ctx, locals));
-    let variant = value.into_variant().unwrap();
-    cont(Value::native(variant.tag_as_isize()))
+    let (tag, payload) = value.into_variant().expect("extract_tag of a non-variant");
+    if let Some(payload) = payload {
+        payload.discard_storage();
+    }
+    cont(Value::native(ustr_to_isize(tag)))
 }
 
 #[inline(never)]

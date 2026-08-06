@@ -127,7 +127,7 @@ fn value_shape(value: &Value) -> &'static str {
     match value {
         Value::Uninit => "uninitialized value",
         Value::Native(_) => "native value",
-        Value::Variant(_) => "variant value",
+        Value::Variant(..) => "variant value",
         Value::Tuple(_) => "tuple value",
         Value::Function(_) => "function value",
         Value::Subscript(_) => "subscript value",
@@ -303,18 +303,29 @@ pub(crate) fn compare_values(actual: &Value, expected: &Value, path: &str) -> Re
             value_shape(actual)
         )),
         (Value::Native(_), Value::Native(_)) => compare_native_values(actual, expected, path),
-        (Value::Variant(actual), Value::Variant(expected)) => {
-            if actual.tag != expected.tag {
+        (Value::Variant(actual_tag, _), Value::Variant(expected_tag, _)) => {
+            if actual_tag != expected_tag {
                 return Err(format!(
-                    "{path}: expected variant tag {}, got {}",
-                    expected.tag, actual.tag
+                    "{path}: expected variant tag {expected_tag}, got {actual_tag}"
                 ));
             }
-            compare_values(
-                &actual.value,
-                &expected.value,
-                &format!("{path}.{}", actual.tag),
-            )
+            let path = format!("{path}.{actual_tag}");
+            // A case that carries nothing has two encodings: no payload at all, which is what a
+            // natively built variant uses, and a stored unit, which is what the MIR emitter leaves
+            // after filling a variant shell. They are the same value.
+            match (actual.variant_payload(), expected.variant_payload()) {
+                (None, None) => Ok(()),
+                (Some(actual), Some(expected)) => compare_values(actual, expected, &path),
+                (None, Some(present)) | (Some(present), None) => {
+                    if present.is_unit() {
+                        Ok(())
+                    } else {
+                        Err(format!(
+                            "{path}: one side carries a payload and the other does not"
+                        ))
+                    }
+                }
+            }
         }
         (Value::Function(actual), Value::Function(expected)) => {
             if actual.function != expected.function {

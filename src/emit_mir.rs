@@ -2334,16 +2334,20 @@ impl<'a> Emitter<'a> {
                     .insert(Operation::variant(node.span, n.tag, node.ty))
                     .unwrap();
                 self.store(node.span, shell, dest.clone());
-                let payload_index = self.int_constant(0);
-                let payload_place = self
-                    .insert(Operation::subfield(
-                        node.span,
-                        dest,
-                        payload_index,
-                        payload.ty,
-                    ))
-                    .unwrap();
-                self.lower_value_into(payload, Some(payload_place));
+                // A case carrying nothing has no payload to write, and writing unit would force the
+                // runtime to materialize the payload slot the representation exists to avoid.
+                if payload.ty != Type::unit() {
+                    let payload_index = self.int_constant(0);
+                    let payload_place = self
+                        .insert(Operation::subfield(
+                            node.span,
+                            dest,
+                            payload_index,
+                            payload.ty,
+                        ))
+                        .unwrap();
+                    self.lower_value_into(payload, Some(payload_place));
+                }
             }
 
             K::LoadDictionary(n) => {

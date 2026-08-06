@@ -117,17 +117,6 @@ pub fn ustr_to_isize(tag: Ustr) -> isize {
     tag.as_char_ptr() as isize
 }
 
-#[derive(Debug)]
-pub struct VariantValue {
-    pub tag: Ustr,
-    pub value: Value,
-}
-impl VariantValue {
-    pub fn tag_as_isize(&self) -> isize {
-        ustr_to_isize(self.tag)
-    }
-}
-
 /// Hidden constraint evidence captured by first-class capabilities.
 ///
 /// Typeclass constraints are represented as dictionaries. Projection
@@ -232,8 +221,9 @@ pub enum Value {
     Uninit,
     /// A native value, a pointer to the underlying Rust value
     Native(ManuallyDrop<B<dyn NativeValue>>),
-    /// A variant with its tag and payload
-    Variant(ManuallyDrop<B<VariantValue>>),
+    /// A variant: its tag inline, and its payload boxed only when it has one, so that a case
+    /// carrying nothing needs no allocation.
+    Variant(Ustr, Option<ManuallyDrop<B<Value>>>),
     /// A tuple of values, or the data of a record
     Tuple(ManuallyDrop<B<SVec2<Value>>>),
     /// A first-class function
@@ -268,11 +258,12 @@ impl Value {
     }
 
     pub fn raw_variant(tag: Ustr, value: Value) -> Self {
-        Self::Variant(ManuallyDrop::new(b(VariantValue { tag, value })))
+        Self::Variant(tag, Some(ManuallyDrop::new(b(value))))
     }
 
+    /// A variant case carrying nothing, which allocates nothing.
     pub fn unit_variant(tag: Ustr) -> Self {
-        Self::raw_variant(tag, Self::unit())
+        Self::Variant(tag, None)
     }
 
     pub fn tuple(values: impl IntoSVec2<Value>) -> Self {
@@ -324,23 +315,43 @@ impl Value {
         }
     }
 
-    pub fn as_variant(&self) -> Option<&B<VariantValue>> {
+    /// This variant's tag, if it is one.
+    pub fn variant_tag(&self) -> Option<Ustr> {
         match self {
-            Self::Variant(value) => Some(value),
+            Self::Variant(tag, _) => Some(*tag),
             _ => None,
         }
     }
 
-    pub fn as_variant_mut(&mut self) -> Option<&mut B<VariantValue>> {
+    /// This variant's payload, absent when the case carries nothing.
+    pub fn variant_payload(&self) -> Option<&Value> {
         match self {
-            Self::Variant(value) => Some(value),
+            Self::Variant(_, payload) => payload.as_deref().map(|payload| &**payload),
             _ => None,
         }
     }
 
-    pub fn into_variant(self) -> Option<B<VariantValue>> {
+    /// This variant's payload slot for writing, materialized if the case had none.
+    ///
+    /// A payload-free case stores no slot, so a first write has to create one — which is what the
+    /// MIR emitter does when it fills a freshly built variant shell.
+    pub fn variant_payload_mut(&mut self) -> Option<&mut Value> {
         match self {
-            Self::Variant(value) => Some(ManuallyDrop::into_inner(value)),
+            Self::Variant(_, payload) => {
+                let payload = payload.get_or_insert_with(|| ManuallyDrop::new(b(Value::Uninit)));
+                Some(&mut **payload)
+            }
+            _ => None,
+        }
+    }
+
+    /// This variant's tag and payload, consuming it.
+    pub fn into_variant(self) -> Option<(Ustr, Option<Value>)> {
+        match self {
+            Self::Variant(tag, payload) => Some((
+                tag,
+                payload.map(|payload| *ManuallyDrop::into_inner(payload)),
+            )),
             _ => None,
         }
     }
@@ -383,7 +394,10 @@ impl Value {
             Self::Tuple(values) => {
                 take_nth_discarding_rest(ManuallyDrop::into_inner(values), index)
             }
-            Self::Variant(value) if index == 0 => Some(ManuallyDrop::into_inner(value).value),
+            // A payload-free case projects to unit, the value it conceptually holds.
+            Self::Variant(_, payload) if index == 0 => {
+                Some(payload.map_or_else(Value::unit, |payload| *ManuallyDrop::into_inner(payload)))
+            }
             other => {
                 other.discard_storage();
                 None
@@ -439,10 +453,10 @@ impl Value {
         match self {
             Self::Uninit => {}
             Self::Native(value) => drop(ManuallyDrop::into_inner(value)),
-            Self::Variant(value) => {
-                let mut value = ManuallyDrop::into_inner(value);
-                let payload = std::mem::replace(&mut value.value, Value::uninit());
-                payload.discard_storage();
+            Self::Variant(_, payload) => {
+                if let Some(payload) = payload {
+                    ManuallyDrop::into_inner(payload).discard_storage();
+                }
             }
             Self::Tuple(values) => {
                 let values = ManuallyDrop::into_inner(values);
@@ -719,6 +733,23 @@ mod tests {
             let _value = Value::native(RustDropTracked);
         }
         assert_eq!(rust_drop_count(), 0);
+    }
+
+    /// `Value` is copied and moved constantly, so its width is worth pinning. The variant arm holds
+    /// a `Ustr` beside a niche-optimized `Option<Box<_>>`, which is exactly the 16 bytes
+    /// `Native`'s fat pointer already needs.
+    #[test]
+    fn a_value_is_no_wider_than_its_fat_pointer_arm() {
+        assert_eq!(std::mem::size_of::<Value>(), 24);
+    }
+
+    /// A case carrying nothing stores no payload at all — the point of holding the tag outside the
+    /// box. Every integer comparison produces one of these.
+    #[test]
+    fn a_payload_free_variant_allocates_nothing() {
+        let value = Value::unit_variant(ustr::ustr("Less"));
+        assert!(matches!(value, Value::Variant(_, None)));
+        assert!(value.variant_payload().is_none());
     }
 
     #[test]

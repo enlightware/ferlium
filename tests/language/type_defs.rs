@@ -2409,7 +2409,7 @@ fn create_mix_enum_values() {
     );
 
     let value = session.run(&format!("{mod_src} Message::Callback(|x| x + 1)"));
-    assert_eq!(value.as_variant().unwrap().tag, ustr("Callback"));
+    assert_eq!(value.variant_tag().unwrap(), ustr("Callback"));
 }
 
 #[test]

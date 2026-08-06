@@ -28,7 +28,10 @@ use crate::{
     execution::ReferenceInterpreterLimits,
     hir::{
         function::{ArgConvention, copy_boxed_trivial_copy_native},
-        value::{FunctionValue, HiddenEvidenceArgValue, LiteralValue, SubscriptValue, Value},
+        value::{
+            FunctionValue, HiddenEvidenceArgValue, LiteralValue, SubscriptValue, Value,
+            ustr_to_isize,
+        },
     },
     mir::{self, BlockId, Operation, OperationKind, terminator::TerminatorKind},
     module::{
@@ -679,7 +682,7 @@ impl<'a> Interpreter<'a> {
                 Self::bind(
                     slots,
                     def.unwrap(),
-                    Binding::Value(Value::raw_variant(*tag, Value::uninit())),
+                    Binding::Value(Value::Variant(*tag, None)),
                 );
             }
             OperationKind::ExtractTag => {
@@ -999,11 +1002,14 @@ impl<'a> Interpreter<'a> {
         let value = place
             .target_ref(&self.ctx)
             .expect("extract_tag of an invalid place");
-        let variant = value
-            .as_variant()
+        let tag = value
+            .variant_tag()
             .expect("extract_tag of a non-variant value");
-        let tag = variant.tag_as_isize();
-        Self::bind(slots, def, Binding::Value(Value::native(tag)));
+        Self::bind(
+            slots,
+            def,
+            Binding::Value(Value::native(ustr_to_isize(tag))),
+        );
     }
 
     /// Executes an `end_project` operation: resumes the accessor's slide to completion and
@@ -1463,7 +1469,7 @@ impl<'a> Interpreter<'a> {
         for &i in &path {
             target = match target {
                 Value::Tuple(t) => t.get(i as usize)?,
-                Value::Variant(v) if i == 0 => &v.value,
+                Value::Variant(_, Some(payload)) if i == 0 => payload,
                 Value::Native(p) => p
                     .as_ref()
                     .as_any()
@@ -2413,12 +2419,12 @@ fn read_copy(v: &Value) -> Option<Value> {
     // A payload-free sum type is trivially copyable — the tag is all there is. Only such variants
     // are classified so, hence the payload here is unit or, in a shell the constructing site has
     // not filled yet, uninitialized; both copy as themselves.
-    if let Some(variant) = v.as_variant() {
-        let payload = match &variant.value {
-            Value::Uninit => Value::uninit(),
-            payload => read_copy(payload)?,
-        };
-        return Some(Value::raw_variant(variant.tag, payload));
+    if let Some(tag) = v.variant_tag() {
+        return Some(match v.variant_payload() {
+            None => Value::unit_variant(tag),
+            Some(Value::Uninit) => Value::raw_variant(tag, Value::uninit()),
+            Some(payload) => Value::raw_variant(tag, read_copy(payload)?),
+        });
     }
     // A function value with no captured environment is trivially copyable: the emitter bare-`load`s
     // such values (e.g. a function-typed local, or a `Value::drop`/method loaded from a dictionary)
@@ -2478,8 +2484,8 @@ fn grow_value_to_path(value: &mut Value, path: &[isize]) {
                 grow_value_to_path(slot, rest);
             }
         }
-        Value::Variant(variant) if first == 0 => {
-            grow_value_to_path(&mut variant.value, rest);
+        Value::Variant(..) if first == 0 => {
+            grow_value_to_path(value.variant_payload_mut().unwrap(), rest);
         }
         _ => {}
     }
