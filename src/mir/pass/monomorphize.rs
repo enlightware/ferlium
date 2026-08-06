@@ -51,6 +51,7 @@ use crate::{
         stable_generated_name_hash, unique_generated_name,
     },
     std::value::type_has_static_layout,
+    types::type_properties::concrete_type_is_trivial_copy,
     types::{
         r#type::Type, type_like::TypeLike, type_mapper::BitmapInstantiationMapper,
         type_mapper::TypeMapper, type_scheme::TypeScheme,
@@ -273,7 +274,44 @@ pub(crate) fn specialize<Ty: TypeLike>(
     bind_dictionaries(&mut edit, dictionaries);
     demote_infallible_invokes(&mut edit);
     drop_redundant_layout_witnesses(&mut edit, env);
+    elide_trivial_ownership_operations(&mut edit, env);
     edit.finish(env)
+}
+
+/// Rewrites the semantic ownership operations that substitution made unnecessary.
+///
+/// A generic body copies and releases through `Value::clone` and `Value::drop` because it cannot
+/// know whether its type owns anything. Substituting a concrete instantiation answers that, and when
+/// the answer is "nothing", the semantic forms have representation-level equivalents: a `clone`
+/// becomes a `memcpy`, and a `drop` becomes nothing at all. That is the same decision
+/// `resolve_local_drop` and `resolve_local_clone` make during elaboration, taken again now that the
+/// type is known — which is why a non-generic function never carries these in the first place.
+///
+/// The two are independent. The verifier's obligation model is type-based
+/// (`live_state_for_type` consults the same trivial-copy predicate), so a destination of a
+/// trivially-copyable type never carried an obligation, and removing its drop strands nothing.
+fn elide_trivial_ownership_operations(edit: &mut FunctionEdit, env: ModuleEnv<'_>) {
+    for block_id in edit.blocks().collect::<Vec<_>>() {
+        let block = edit.block_mut(block_id);
+        let mut dead_drops = Vec::new();
+        for (index, operation) in block.operations.iter_mut().enumerate() {
+            match &operation.kind {
+                OperationKind::Clone { ty } if concrete_type_is_trivial_copy(*ty, &env) => {
+                    let source = operation.operands[0].clone();
+                    let destination = operation.operands[1].clone();
+                    *operation = Operation::memcpy(operation.span, source, destination);
+                }
+                OperationKind::Drop { ty } if concrete_type_is_trivial_copy(*ty, &env) => {
+                    dead_drops.push(index);
+                }
+                _ => {}
+            }
+        }
+        // Descending, so an earlier removal cannot move a later one.
+        for index in dead_drops.into_iter().rev() {
+            block.operations.remove(index);
+        }
+    }
 }
 
 /// Drops a `Value` dictionary layout witness that substitution made redundant.
@@ -964,6 +1002,35 @@ mod tests {
                 !specialized.contains("using dict"),
                 "a specialized body must carry no layout witness for a concrete type:\n\
                  {specialized}"
+            );
+        }
+    }
+
+    /// A generic body copies and releases through `Value::clone` and `Value::drop`, because it
+    /// cannot know whether its type owns anything. Substitution answers that, and when the answer is
+    /// "nothing", the clone becomes a `memcpy` and the drop goes — leaving the dictionary entries
+    /// they read unread, for `dce` to remove.
+    #[test]
+    fn substitution_turns_trivial_clones_and_drops_into_representation_copies() {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        let module = session.emit_mir(
+            "own",
+            "fn swap(a, i, j) { let temp = a[i]; a[i] = a[j]; a[j] = temp }\n\
+             fn swap_ints(a: [int], i: int, j: int) { let mut t = a; swap(t, i, j); t }",
+        );
+        let specialized = module
+            .split("// specialization of ")
+            .nth(1)
+            .expect("swap must specialize");
+        assert!(
+            specialized.contains("memcpy"),
+            "a clone of a now-trivially-copyable type becomes a representation copy:\n{specialized}"
+        );
+        for spelling in ["clone ", "drop ", "dict_entry"] {
+            assert!(
+                !specialized.contains(spelling),
+                "no `{spelling}` may survive for a type that owns nothing:\n{specialized}"
             );
         }
     }

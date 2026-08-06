@@ -108,11 +108,12 @@ pub(crate) fn optimize_function(
             break;
         }
     }
-    // Cleanup runs once, after the rounds have settled: it only removes storage the rewrites made
-    // dead, so there is nothing for it to do until they have stopped.
-    if let Some(folded) = &current
-        && let Some(cleaned) = dce::remove_dead_storage(folded, env)
-    {
+    // Cleanup runs once, after the rounds have settled, and on every body rather than only on one a
+    // pass changed. A specialization arrives already carrying dead code — substitution turns its
+    // semantic clones and drops into representation copies and nothing, leaving the dictionary
+    // entries they read unread — so "nothing changed it, so nothing is dead" no longer holds.
+    let source = current.as_ref().unwrap_or(function);
+    if let Some(cleaned) = dce::remove_dead_storage(source, env) {
         current = Some(cleaned);
     }
     // An unchanged function is still opened and closed, which re-verifies it and is the identity.
