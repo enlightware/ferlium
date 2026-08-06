@@ -2142,7 +2142,7 @@ mod tests {
             terminator::Terminator,
         },
         module::{FunctionId, LocalFunctionId, ModuleId},
-        std::math::int_type,
+        std::{math::int_type, string::string_type},
         types::{
             effects::{PrimitiveEffect, effect, no_effects},
             r#type::{CallImplType, CallResultConvention, FnType, Type},
@@ -2167,8 +2167,10 @@ mod tests {
         f.set_terminator(block, Terminator::ret(span));
     }
 
+    /// A variant that owns something, so these tests have a drop obligation to violate. The payload
+    /// is load-bearing: a payload-free sum type is trivially copyable and has no obligation.
     fn managed_variant_ty() -> Type {
-        Type::variant([(ustr::ustr("A"), Type::unit())])
+        Type::variant([(ustr::ustr("A"), string_type())])
     }
 
     #[test]

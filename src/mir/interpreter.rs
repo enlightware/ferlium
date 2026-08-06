@@ -2410,6 +2410,16 @@ fn read_copy(v: &Value) -> Option<Value> {
         let copied = fields.iter().map(read_copy).collect::<Option<Vec<_>>>()?;
         return Some(Value::tuple(copied));
     }
+    // A payload-free sum type is trivially copyable — the tag is all there is. Only such variants
+    // are classified so, hence the payload here is unit or, in a shell the constructing site has
+    // not filled yet, uninitialized; both copy as themselves.
+    if let Some(variant) = v.as_variant() {
+        let payload = match &variant.value {
+            Value::Uninit => Value::uninit(),
+            payload => read_copy(payload)?,
+        };
+        return Some(Value::raw_variant(variant.tag, payload));
+    }
     // A function value with no captured environment is trivially copyable: the emitter bare-`load`s
     // such values (e.g. a function-typed local, or a `Value::drop`/method loaded from a dictionary)
     // and may read them more than once. A closure that captures an environment is *not* trivially

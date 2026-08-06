@@ -2955,9 +2955,20 @@ fn eval_take_local_value(
 /// use the same boxed tuple representation. This deliberately does not call
 /// `Value::clone`; an unsupported value indicates that HIR or the structural
 /// classifier incorrectly selected `ResolvedLocalClone::TrivialCopy`.
+///
+/// A variant is rebuilt from its tag and a copy of its payload — unit in practice, since only
+/// payload-free sum types are classified trivially copyable, but written generally so the copier
+/// cannot fall behind the classifier.
 fn copy_boxed_trivial_copy_representation(value: &Value) -> Option<Value> {
     if let Some(value) = copy_boxed_trivial_copy_native(value) {
         return Some(value);
+    }
+    if let Some(variant) = value.as_variant() {
+        let payload = match &variant.value {
+            Value::Uninit => Value::uninit(),
+            payload => copy_boxed_trivial_copy_representation(payload)?,
+        };
+        return Some(Value::raw_variant(variant.tag, payload));
     }
     let values = value.as_tuple()?;
     Some(Value::tuple(

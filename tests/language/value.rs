@@ -965,6 +965,51 @@ fn generic_owned_argument_from_mutable_place_uses_value_clone_and_owns_snapshot(
     assert_val_eq!(session.run(&source), int(35235));
 }
 
+/// A sum type whose cases carry nothing is just a tag, so it is trivially copyable and needs no
+/// drop — as a fieldless enum is `Copy` in Rust. A unit payload counts as carrying nothing.
+///
+/// `Ordering` is the case that matters in practice: every integer comparison produces one, and
+/// before this each produced a call to a nine-block derived drop that stored unit in every arm.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn payload_free_sum_types_need_no_drop() {
+    let mut session = TestSession::new();
+    let mir = session.session_mut().emit_mir(
+        "tc",
+        "fn compare(a: int, b: int) -> bool { a < b }\n\
+         fn loop_control(n: int) -> int { let mut t = 0; for i in 0..n { t = t + i }; t }",
+    );
+    assert!(
+        !mir.contains("Value<Equal | Greater | Less>::drop"),
+        "comparing integers must not drop the Ordering it produces:\n{mir}"
+    );
+    assert!(
+        !mir.contains("Value<Break | Continue"),
+        "a sum type whose only payload is unit carries nothing to drop:\n{mir}"
+    );
+}
+
+/// The complement, and the reason the rule stops at payload-free cases: a case carrying anything
+/// owned keeps its drop, since whether that payload lives inline or behind a pointer is a layout
+/// decision no backend has made.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_sum_type_with_a_payload_keeps_its_drop() {
+    let mut session = TestSession::new();
+    let mir = session.session_mut().emit_mir(
+        "tc",
+        "fn loop_sum(n: int) -> int { let mut t = 0; for i in 0..n { t = t + i }; t }",
+    );
+    let body = mir
+        .split("\nfn ")
+        .next()
+        .expect("loop_sum is emitted first");
+    assert!(
+        body.contains("drop") && body.contains("Value<None | Some (std::int)>::drop"),
+        "the iterator's Option<int> carries a payload and must keep its drop:\n{body}"
+    );
+}
+
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn concrete_trivial_copy_call_argument_uses_let_convention() {

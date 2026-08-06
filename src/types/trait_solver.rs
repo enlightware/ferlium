@@ -1020,6 +1020,11 @@ impl<'a> TraitSolver<'a> {
     /// Native types opt in through concrete `TrivialCopy` impls. Inline product
     /// types derive the property structurally, while named types do so only when
     /// they have no explicit custom `Value` impl overriding ownership behavior.
+    ///
+    /// A sum type qualifies only when no case carries a payload, as Rust's fieldless enums are
+    /// `Copy`: such a value owns nothing under any layout. Whether a *payload* is stored inline or
+    /// behind a pointer is a layout decision no backend has made yet, and a boxed one would have to
+    /// be released by `Value::drop` itself.
     pub(crate) fn concrete_type_is_trivial_copy(&self, ty: Type) -> bool {
         if !ty.is_constant() {
             return false;
@@ -1053,8 +1058,12 @@ impl<'a> TraitSolver<'a> {
                     self.concrete_type_is_trivial_copy_inner(shape_ty, active)
                 }
             }
+            // A unit payload is "no payload": it carries nothing under any layout, which is what
+            // lets `Continue(())` qualify alongside a bare `Break`.
+            TypeKind::Variant(cases) => cases
+                .into_iter()
+                .all(|(_, payload_ty)| payload_ty == Type::unit()),
             TypeKind::Native(_)
-            | TypeKind::Variant(_)
             | TypeKind::Function(_)
             | TypeKind::Subscript(_)
             | TypeKind::Never
