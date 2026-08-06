@@ -36,6 +36,10 @@ The main phases are:
 9. Validate final-HIR ownership, literal, borrow, place-lifetime, and yield invariants.
 10. Execute final HIR through the tree-walking interpreter, or lower it to MIR and execute it through the MIR reference interpreter. MIR execution optionally runs rewriting passes first, selected per session through `MirOptimization`; optimized bodies are stored beside the raw ones, so enabling optimization never changes what another session executes.
 
+MIR's structure and invariants are specified in [mir-ir.md](mir-ir.md); the rewriting passes, the
+order they run in, and the rules deciding where a pass belongs are in
+[mir-optimization.md](mir-optimization.md).
+
 Future backend work may lower MIR to WebAssembly, bytecode, JIT, or native code.
 
 Every compilation attempt stores severity-tagged source diagnostics on its module entry. Errors make
