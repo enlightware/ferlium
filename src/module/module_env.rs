@@ -23,12 +23,14 @@ use crate::{
         type_alias_name::{find_generic_alias_name, find_generic_alias_name_with},
     },
     std::STD_MODULE_ID,
+    std::core_traits_names::TRIVIAL_COPY_TRAIT_NAME,
     types::effects::EffType,
     types::r#trait::{Trait, TraitAssociatedConstIndex, TraitMethodIndex},
     types::r#type::{
         BareNativeTypeB, FnArgType, NativeType, Type, TypeAliasEntry, TypeAliases, TypeDef,
         TypeDefSlot,
     },
+    types::type_properties::{TypePropertyEnv, trivial_copy_impl_key},
     types::type_scheme::PubTypeConstraint,
     types::typing_env::TraitMethodDescription,
 };
@@ -1219,5 +1221,23 @@ impl<'m> ModuleEnv<'m> {
         getter: &impl Fn(&'a str, &'a Module, bool) -> Option<T>,
     ) -> Result<Option<(Option<ModuleId>, T)>, InternalCompilationError> {
         self.current.find_member(name, self.modules, getter)
+    }
+}
+
+/// Answers from installed modules only, so it is valid once a module has been installed — which is
+/// when the MIR optimizer asks. Mid-compilation a module's own `TrivialCopy` impls are not yet
+/// visible here, and the trait solver is what sees them.
+impl TypePropertyEnv for ModuleEnv<'_> {
+    fn has_trivial_copy_impl(&self, ty: Type) -> bool {
+        let trait_id = Module::expect_std_trait_id(self.modules, TRIVIAL_COPY_TRAIT_NAME);
+        let key = trivial_copy_impl_key(trait_id, ty);
+        // Through `module_by_id` so that optimizing std itself, where the impls live in `current`
+        // rather than in the registry, answers the same way.
+        self.module_by_id(trait_id.module)
+            .is_some_and(|module| module.impls.concrete_key_to_id.contains_key(&key))
+    }
+
+    fn type_def(&self, id: TypeDefId) -> &TypeDef {
+        ModuleEnv::type_def(self, id)
     }
 }

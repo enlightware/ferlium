@@ -12,6 +12,7 @@ pub mod mutability;
 pub mod r#trait;
 pub mod trait_solver;
 pub mod r#type;
+pub(crate) mod type_properties;
 pub mod type_scheme;
 pub mod typing_env;
 

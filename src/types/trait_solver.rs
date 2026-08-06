@@ -50,6 +50,9 @@ use crate::{
     types::type_inference::unify::UnifiedTypeInference,
     types::type_like::{TypeLike, instantiate_types},
     types::type_mapper::{BitmapInstantiationMapper, TypeMapper},
+    types::type_properties::{
+        TypePropertyEnv, concrete_type_is_trivial_copy, trivial_copy_impl_key,
+    },
 };
 
 #[cfg(debug_assertions)]
@@ -1017,60 +1020,10 @@ impl<'a> TraitSolver<'a> {
 
     /// Return whether representation-copying this concrete type is semantically valid.
     ///
-    /// Native types opt in through concrete `TrivialCopy` impls. Inline product
-    /// types derive the property structurally, while named types do so only when
-    /// they have no explicit custom `Value` impl overriding ownership behavior.
-    ///
-    /// A sum type qualifies only when no case carries a payload, as Rust's fieldless enums are
-    /// `Copy`: such a value owns nothing under any layout. Whether a *payload* is stored inline or
-    /// behind a pointer is a layout decision no backend has made yet, and a boxed one would have to
-    /// be released by `Value::drop` itself.
+    /// See [`concrete_type_is_trivial_copy`] for the rule; the solver supplies the environment,
+    /// which unlike a `ModuleEnv`'s also sees the impls of the module being compiled.
     pub(crate) fn concrete_type_is_trivial_copy(&self, ty: Type) -> bool {
-        if !ty.is_constant() {
-            return false;
-        }
-        self.concrete_type_is_trivial_copy_inner(ty, &mut FxHashSet::default())
-    }
-
-    fn concrete_type_is_trivial_copy_inner(&self, ty: Type, active: &mut FxHashSet<Type>) -> bool {
-        let trivial_copy_key =
-            ConcreteTraitImplKey::new(self.std_trait_id(TRIVIAL_COPY_TRAIT_NAME), vec![ty]);
-        if self.has_canonical_trait_impl(&trivial_copy_key) {
-            return true;
-        }
-        if !active.insert(ty) {
-            return false;
-        }
-
-        let kind = ty.data().clone();
-        let result = match kind {
-            TypeKind::Tuple(member_tys) => member_tys
-                .into_iter()
-                .all(|member_ty| self.concrete_type_is_trivial_copy_inner(member_ty, active)),
-            TypeKind::Record(fields) => fields
-                .into_iter()
-                .all(|(_, field_ty)| self.concrete_type_is_trivial_copy_inner(field_ty, active)),
-            TypeKind::Named(named) => {
-                let type_def = self.type_def(named.def);
-                !type_def.has_custom_value_impl && {
-                    let shape_ty = type_def
-                        .instantiated_shape_with_effects(&named.params, &named.effect_params);
-                    self.concrete_type_is_trivial_copy_inner(shape_ty, active)
-                }
-            }
-            // A unit payload is "no payload": it carries nothing under any layout, which is what
-            // lets `Continue(())` qualify alongside a bare `Break`.
-            TypeKind::Variant(cases) => cases
-                .into_iter()
-                .all(|(_, payload_ty)| payload_ty == Type::unit()),
-            TypeKind::Native(_)
-            | TypeKind::Function(_)
-            | TypeKind::Subscript(_)
-            | TypeKind::Never
-            | TypeKind::Variable(_) => false,
-        };
-        active.remove(&ty);
-        result
+        concrete_type_is_trivial_copy(ty, self)
     }
 
     /// Probe the canonical module that owns the trait rather than the current
@@ -3596,5 +3549,16 @@ impl<'a> Drop for TraitSolver<'a> {
                 "TraitSolver dropped without committing the created functions. Call .commit() to store them in the module."
             );
         }
+    }
+}
+
+impl TypePropertyEnv for TraitSolver<'_> {
+    fn has_trivial_copy_impl(&self, ty: Type) -> bool {
+        let key = trivial_copy_impl_key(self.std_trait_id(TRIVIAL_COPY_TRAIT_NAME), ty);
+        self.has_canonical_trait_impl(&key)
+    }
+
+    fn type_def(&self, id: TypeDefId) -> &TypeDef {
+        TraitSolver::type_def(self, id)
     }
 }
