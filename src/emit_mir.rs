@@ -319,16 +319,14 @@ impl<'a> Emitter<'a> {
                 method_ty,
             ))
             .unwrap();
-        let call_ty = self.value_method_call_type(cloned_ty, VALUE_CLONE_METHOD_INDEX);
-        // The callee is the place of the `Value::clone` method entry; the call reads the function
-        // value by reference (never loaded into a register — see the `call` contract). A plain
-        // `call`, not an `invoke`: `Value::clone` is source-infallible by its trait contract (a
-        // fallible clone impl is a compile error). Sandbox violations leave the MIR CFG directly.
-        self.insert(Operation::call(
+        // The callee is the place of the `Value::clone` method entry; the clone reads the function
+        // value by reference (never loaded into a register — the same callee contract as `call`).
+        self.insert(Operation::clone_value(
             span,
+            source,
+            target,
             method_place,
-            [source, target],
-            call_ty,
+            cloned_ty,
         ));
     }
 
@@ -349,17 +347,6 @@ impl<'a> Emitter<'a> {
             .as_tuple()
             .expect("Value dictionary should be a tuple type")[entry_index.as_index()];
         (entry_index, method_ty)
-    }
-
-    fn value_method_call_type(&self, ty: Type, method_index: TraitMethodIndex) -> CallImplType {
-        let (_, method_ty) = self.value_method(method_index, ty);
-        let data = method_ty.data();
-        let fn_ty = data
-            .as_function()
-            .expect("Value dictionary method entry must have a function type")
-            .clone();
-        drop(data);
-        CallImplType::value(*fn_ty)
     }
 
     /// Returns the `Value::drop` sibling of the statically resolved `Value::clone` method `clone`:
@@ -480,7 +467,7 @@ impl<'a> Emitter<'a> {
                 .unwrap()
             }
         };
-        self.insert(Operation::drop(span, place, callee));
+        self.insert(Operation::drop(span, place, callee, dropped_ty));
     }
 
     /// Builds the drop actions of the owned, non-`Skip` locals listed in `cleanup` (in declaration
@@ -1868,18 +1855,12 @@ impl<'a> Emitter<'a> {
                         let source_node = &self.hir_arena[n.value];
                         let (source, temp_drop) = self.lower_clone_source(&clone, source_node);
 
-                        // A plain `call`, not an `invoke`: `Value::clone` is declared with an empty
-                        // effect row (a fallible clone impl is a compile error —
-                        // `TraitMethodEffectMismatch`).
-                        let call_ty = self.value_method_call_type(
-                            self.local_declaration(n.id).ty,
-                            VALUE_CLONE_METHOD_INDEX,
-                        );
-                        self.insert(Operation::call(
+                        self.insert(Operation::clone_value(
                             node.span,
+                            source.clone(),
+                            target,
                             f,
-                            [source.clone(), target],
-                            call_ty,
+                            self.local_declaration(n.id).ty,
                         ));
                         if let Some(spec) = temp_drop {
                             self.emit_drop(node.span, source, source_node.ty, spec);
@@ -1930,15 +1911,12 @@ impl<'a> Emitter<'a> {
                         let source_node = &self.hir_arena[n.source];
                         let (source, temp_drop) = self.lower_clone_source(&clone, source_node);
 
-                        // A plain `call`: `Value::clone` has no language-failure edge by its trait
-                        // contract (see the `StoreLocal` clone above).
-                        let call_ty =
-                            self.value_method_call_type(node.ty, VALUE_CLONE_METHOD_INDEX);
-                        self.insert(Operation::call(
+                        self.insert(Operation::clone_value(
                             node.span,
+                            source.clone(),
+                            target,
                             f,
-                            [source.clone(), target],
-                            call_ty,
+                            node.ty,
                         ));
                         if let Some(spec) = temp_drop {
                             self.emit_drop(node.span, source, source_node.ty, spec);
@@ -1995,14 +1973,12 @@ impl<'a> Emitter<'a> {
                             ResolvedLocalClone::Static(f) => {
                                 let f = self.function_value(f);
                                 let source = self.place_of_local(n.id);
-                                // Plain `call`: `Value::clone` is source-level infallible.
-                                let call_ty =
-                                    self.value_method_call_type(node.ty, VALUE_CLONE_METHOD_INDEX);
-                                self.insert(Operation::call(
+                                self.insert(Operation::clone_value(
                                     node.span,
+                                    source,
+                                    destination,
                                     f,
-                                    [source, destination],
-                                    call_ty,
+                                    node.ty,
                                 ));
                             }
                             ResolvedLocalClone::Dictionary(dictionary) => {

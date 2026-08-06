@@ -554,12 +554,35 @@ impl Operation {
     /// `callee` follows the same contract as the [`call`](Self::call) callee: it is either a constant
     /// [`mir::Value::Function`] or the **place** of a function value (e.g. the `Value::drop` method
     /// slot `project`ed out of a dictionary), read by reference and never loaded into a register.
-    pub fn drop(span: Location, target: mir::Value, callee: mir::Value) -> Self {
+    pub fn drop(span: Location, target: mir::Value, callee: mir::Value, ty: Type) -> Self {
         Operation {
             result_id: None,
             span,
             operands: Box::new([target, callee]),
-            kind: OperationKind::Drop,
+            kind: OperationKind::Drop { ty },
+        }
+    }
+
+    /// Creates a `clone` operation.
+    ///
+    /// Copies the pointee of `source` (a place) into `destination` (an uninitialized place) by
+    /// invoking the `Value::clone` implementation named by `callee`, which follows the same contract
+    /// as [`drop`](Self::drop)'s. The destination takes on the drop obligation the copy creates.
+    ///
+    /// Source-infallible: `Value::clone` is declared with an empty effect row, and a fallible impl
+    /// is rejected at compile time, so a clone never needs an `invoke`.
+    pub fn clone_value(
+        span: Location,
+        source: mir::Value,
+        destination: mir::Value,
+        callee: mir::Value,
+        ty: Type,
+    ) -> Self {
+        Operation {
+            result_id: None,
+            span,
+            operands: Box::new([source, destination, callee]),
+            kind: OperationKind::Clone { ty },
         }
     }
 
@@ -744,8 +767,14 @@ pub enum OperationKind {
     CheckCallDepth,
     /// Consume one unit of optional execution fuel.
     CheckFuel,
+    /// Semantically copy a value through its `Value::clone` function.
+    ///
+    /// The counterpart of [`Self::Memcpy`]: both copy, but a `memcpy` duplicates a representation
+    /// while a `clone` runs the type's own copying logic. Which one lowering emits is decided by
+    /// whether the type is trivially copyable.
+    Clone { ty: Type },
     /// Semantically drop an initialized value through its `Value::drop` function.
-    Drop,
+    Drop { ty: Type },
     /// Construct a closure from a function and its captured environment.
     BuildClosure {
         function: FunctionId,
@@ -832,7 +861,8 @@ impl OperationKind {
             | StackRestore
             | CheckCallDepth
             | CheckFuel
-            | Drop
+            | Clone { .. }
+            | Drop { .. }
             | DropClosureEnv => OperationResult::Nothing,
         }
     }
@@ -929,10 +959,15 @@ impl OperationKind {
             CheckCallDepth | CheckFuel => {
                 assert!(whole.operands.is_empty(), "runtime checks take no operands")
             }
-            Drop => assert_eq!(
+            Drop { .. } => assert_eq!(
                 whole.operands.len(),
                 2,
                 "drop takes the target place and the Value::drop callee"
+            ),
+            Clone { .. } => assert_eq!(
+                whole.operands.len(),
+                3,
+                "clone takes the source and destination places and the Value::clone callee"
             ),
             BuildClosure {
                 num_hidden_dicts,
@@ -1053,11 +1088,23 @@ impl OperationKind {
             StackRestore => write!(f, "stack_restore {}", whole.operands[0].format_with(env)),
             CheckCallDepth => write!(f, "check_call_depth"),
             CheckFuel => write!(f, "check_fuel"),
-            Drop => write!(
+            // The type is printed bare, as `alloca` prints its own: it is what decides whether the
+            // semantic form is still needed after substitution, and for a dictionary-dispatched
+            // callee it is not recoverable from the rest of the line.
+            Drop { ty } => write!(
                 f,
-                "drop {} via {}",
+                "drop {} {} via {}",
+                ty.format_with(env),
                 whole.operands[0].format_with(env),
                 whole.operands[1].format_with(env)
+            ),
+            Clone { ty } => write!(
+                f,
+                "clone {} {} to {} via {}",
+                ty.format_with(env),
+                whole.operands[0].format_with(env),
+                whole.operands[1].format_with(env),
+                whole.operands[2].format_with(env)
             ),
             BuildClosure { function, .. } => {
                 write!(

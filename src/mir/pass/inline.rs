@@ -675,17 +675,17 @@ mod tests {
     }
 
     /// A generic callee is not inlined: its operations carry types written in its own type
-    /// environment, which would mean something else in the caller. Substituting them through the
-    /// call site's instantiation is specialization, a later phase.
+    /// environment, which would mean something else in the caller.
     ///
-    /// The argument is deliberately unknown — with a constant argument the call folds outright and
-    /// never reaches the inliner.
+    /// The caller is generic too, so that specialization cannot reach the call: it records a
+    /// variable instantiation, which is not something to specialize at. A *concrete* caller has its
+    /// call specialized and the concrete copy inlined, which is the whole point of Phase 4.
     #[test]
     fn a_generic_callee_is_not_inlined() {
-        let module = optimized("fn identity(x) { x }\nfn use_it(n: int) -> int { identity(n) }");
+        let module = optimized("fn identity(x) { x }\nfn use_it(n) { identity(n) }");
         let caller = body_of(&module, "use_it");
         assert!(
-            caller.contains("call "),
+            caller.contains("call inline::identity"),
             "a generic callee must be left alone:\n{caller}"
         );
     }

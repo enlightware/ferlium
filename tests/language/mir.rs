@@ -969,19 +969,19 @@ fn nested_place_call() {
     invoke call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r2, %r3) -> b1 error b2
   b1:
     %r4 = load %r3
-    call <test>::std::Value<[std::int]>::clone#impl:94a041f9(%r4, %r0)
+    clone [int] %r4 to %r0 via <test>::std::Value<[std::int]>::clone#impl:94a041f9
     %r5 = alloca int
     store @c2 to %r5
     %r6 = alloca_place int
     invoke call std::array_index::ref_mut#subscript:cb69b6f4(%r0, %r5, %r6) -> b3 error b2
   b2:
-    drop %r0 via <test>::std::Value<[std::int]>::drop#impl:a4f41aeb
+    drop [int] %r0 via <test>::std::Value<[std::int]>::drop#impl:a4f41aeb
     propagate_error
   b3:
     %r7 = load %r6
     memcpy %r7 to %r1
     move %r1 to %p1
-    drop %r0 via <test>::std::Value<[std::int]>::drop#impl:a4f41aeb
+    drop [int] %r0 via <test>::std::Value<[std::int]>::drop#impl:a4f41aeb
     ret
 
 fn std::Value<[std::int]>::ALIGN#impl:90f3bfea(%p0: @ret int):
@@ -1220,24 +1220,24 @@ fn std::Value<(std::int, std::bool)>::to_string#impl:8f2e215f(%p0: @arg let (int
     call std::Value<std::int>::to_string#impl:a5db1d9f(%r6, %r1)
     %r7 = alloca ()
     call std::string_push_str(%r0, %r1, %r7)
-    drop %r1 via std::Value<std::string>::drop#impl:1d429675
+    drop string %r1 via std::Value<std::string>::drop#impl:1d429675
     %r8 = alloca StaticStr
     store @c3 to %r8
     call std::string_from_static(%r8, %r2)
     %r9 = alloca ()
     call std::string_push_str(%r0, %r2, %r9)
-    drop %r2 via std::Value<std::string>::drop#impl:1d429675
+    drop string %r2 via std::Value<std::string>::drop#impl:1d429675
     %r10 = subfield @c4 from %p0
     call std::Value<std::bool>::to_string#impl:044f2674(%r10, %r3)
     %r11 = alloca ()
     call std::string_push_str(%r0, %r3, %r11)
-    drop %r3 via std::Value<std::string>::drop#impl:1d429675
+    drop string %r3 via std::Value<std::string>::drop#impl:1d429675
     %r12 = alloca StaticStr
     store @c5 to %r12
     call std::string_from_static(%r12, %r4)
     %r13 = alloca ()
     call std::string_push_str(%r0, %r4, %r13)
-    drop %r4 via std::Value<std::string>::drop#impl:1d429675
+    drop string %r4 via std::Value<std::string>::drop#impl:1d429675
     move %r0 to %p1
     ret
 "#,
@@ -1537,7 +1537,7 @@ fn generic_apply() {
     call %r2(%r3, %r0)
     call %r1(%p2, %r0, %p3)
     %r4 = dict_entry 4 from %p1
-    drop %r0 via %r4
+    drop A %r0 via %r4
     ret
 "#,
     );
@@ -1596,7 +1596,7 @@ fn capture(%p0: @ret int):
     %r4 = build_closure <test>::$lambda$1(%r3, dict(<test>::std::Value<(std::int,)>))
     store %r4 to %r1
     call %r1(%p0)
-    drop %r1 via <test>::$_ferlium_function_value_drop
+    drop () -> int %r1 via <test>::$_ferlium_function_value_drop
     ret
 
 fn std::Value<(std::int,)>::ALIGN#impl:2b73eccb(%p0: @ret int):
@@ -1677,13 +1677,13 @@ fn std::Value<(std::int,)>::to_string#impl:30b07f9c(%p0: @arg let (int,), %p1: @
     call std::Value<std::int>::to_string#impl:a5db1d9f(%r4, %r1)
     %r5 = alloca ()
     call std::string_push_str(%r0, %r1, %r5)
-    drop %r1 via std::Value<std::string>::drop#impl:1d429675
+    drop string %r1 via std::Value<std::string>::drop#impl:1d429675
     %r6 = alloca StaticStr
     store @c3 to %r6
     call std::string_from_static(%r6, %r2)
     %r7 = alloca ()
     call std::string_push_str(%r0, %r2, %r7)
-    drop %r2 via std::Value<std::string>::drop#impl:1d429675
+    drop string %r2 via std::Value<std::string>::drop#impl:1d429675
     move %r0 to %p1
     ret
 "#,
@@ -1746,7 +1746,7 @@ fn generic_multiple_ops_reuse_witness() {
     call %r2(%p2, %p2, %r0)
     call %r1(%r0, %p2, %p3)
     %r3 = dict_entry 4 from %p1
-    drop %r0 via %r3
+    drop A %r0 via %r3
     ret
 "#,
     );
@@ -1956,47 +1956,47 @@ fn std::Value<<test>::A>::to_string#impl:78412598(%p0: @arg let A, %p1: @ret str
     call std::string_from_static(%r10, %r1)
     %r11 = alloca ()
     call std::string_push_str(%r0, %r1, %r11)
-    drop %r1 via std::Value<std::string>::drop#impl:1d429675
+    drop string %r1 via std::Value<std::string>::drop#impl:1d429675
     %r12 = alloca StaticStr
     store @c3 to %r12
     call std::string_from_static(%r12, %r2)
     %r13 = alloca ()
     call std::string_push_str(%r0, %r2, %r13)
-    drop %r2 via std::Value<std::string>::drop#impl:1d429675
+    drop string %r2 via std::Value<std::string>::drop#impl:1d429675
     %r14 = subfield @c4 from %p0
     call std::Value<std::int>::to_string#impl:a5db1d9f(%r14, %r3)
     %r15 = alloca ()
     call std::string_push_str(%r0, %r3, %r15)
-    drop %r3 via std::Value<std::string>::drop#impl:1d429675
+    drop string %r3 via std::Value<std::string>::drop#impl:1d429675
     %r16 = alloca StaticStr
     store @c5 to %r16
     call std::string_from_static(%r16, %r4)
     %r17 = alloca ()
     call std::string_push_str(%r0, %r4, %r17)
-    drop %r4 via std::Value<std::string>::drop#impl:1d429675
+    drop string %r4 via std::Value<std::string>::drop#impl:1d429675
     %r18 = alloca StaticStr
     store @c6 to %r18
     call std::string_from_static(%r18, %r5)
     %r19 = alloca ()
     call std::string_push_str(%r0, %r5, %r19)
-    drop %r5 via std::Value<std::string>::drop#impl:1d429675
+    drop string %r5 via std::Value<std::string>::drop#impl:1d429675
     %r20 = alloca StaticStr
     store @c3 to %r20
     call std::string_from_static(%r20, %r6)
     %r21 = alloca ()
     call std::string_push_str(%r0, %r6, %r21)
-    drop %r6 via std::Value<std::string>::drop#impl:1d429675
+    drop string %r6 via std::Value<std::string>::drop#impl:1d429675
     %r22 = subfield @c7 from %p0
     call std::Value<std::int>::to_string#impl:a5db1d9f(%r22, %r7)
     %r23 = alloca ()
     call std::string_push_str(%r0, %r7, %r23)
-    drop %r7 via std::Value<std::string>::drop#impl:1d429675
+    drop string %r7 via std::Value<std::string>::drop#impl:1d429675
     %r24 = alloca StaticStr
     store @c8 to %r24
     call std::string_from_static(%r24, %r8)
     %r25 = alloca ()
     call std::string_push_str(%r0, %r8, %r25)
-    drop %r8 via std::Value<std::string>::drop#impl:1d429675
+    drop string %r8 via std::Value<std::string>::drop#impl:1d429675
     move %r0 to %p1
     ret
 
@@ -2117,47 +2117,47 @@ fn std::Value<<test>::Wrapper>::to_string#impl:7f6f6750(%p0: @arg let Wrapper, %
     call std::string_from_static(%r10, %r1)
     %r11 = alloca ()
     call std::string_push_str(%r0, %r1, %r11)
-    drop %r1 via std::Value<std::string>::drop#impl:1d429675
+    drop string %r1 via std::Value<std::string>::drop#impl:1d429675
     %r12 = alloca StaticStr
     store @c3 to %r12
     call std::string_from_static(%r12, %r2)
     %r13 = alloca ()
     call std::string_push_str(%r0, %r2, %r13)
-    drop %r2 via std::Value<std::string>::drop#impl:1d429675
+    drop string %r2 via std::Value<std::string>::drop#impl:1d429675
     %r14 = subfield @c4 from %p0
     call <test>::std::Value<<test>::A>::to_string#impl:78412598(%r14, %r3)
     %r15 = alloca ()
     call std::string_push_str(%r0, %r3, %r15)
-    drop %r3 via std::Value<std::string>::drop#impl:1d429675
+    drop string %r3 via std::Value<std::string>::drop#impl:1d429675
     %r16 = alloca StaticStr
     store @c5 to %r16
     call std::string_from_static(%r16, %r4)
     %r17 = alloca ()
     call std::string_push_str(%r0, %r4, %r17)
-    drop %r4 via std::Value<std::string>::drop#impl:1d429675
+    drop string %r4 via std::Value<std::string>::drop#impl:1d429675
     %r18 = alloca StaticStr
     store @c6 to %r18
     call std::string_from_static(%r18, %r5)
     %r19 = alloca ()
     call std::string_push_str(%r0, %r5, %r19)
-    drop %r5 via std::Value<std::string>::drop#impl:1d429675
+    drop string %r5 via std::Value<std::string>::drop#impl:1d429675
     %r20 = alloca StaticStr
     store @c3 to %r20
     call std::string_from_static(%r20, %r6)
     %r21 = alloca ()
     call std::string_push_str(%r0, %r6, %r21)
-    drop %r6 via std::Value<std::string>::drop#impl:1d429675
+    drop string %r6 via std::Value<std::string>::drop#impl:1d429675
     %r22 = subfield @c7 from %p0
     call <test>::std::Value<<test>::A>::to_string#impl:78412598(%r22, %r7)
     %r23 = alloca ()
     call std::string_push_str(%r0, %r7, %r23)
-    drop %r7 via std::Value<std::string>::drop#impl:1d429675
+    drop string %r7 via std::Value<std::string>::drop#impl:1d429675
     %r24 = alloca StaticStr
     store @c8 to %r24
     call std::string_from_static(%r24, %r8)
     %r25 = alloca ()
     call std::string_push_str(%r0, %r8, %r25)
-    drop %r8 via std::Value<std::string>::drop#impl:1d429675
+    drop string %r8 via std::Value<std::string>::drop#impl:1d429675
     move %r0 to %p1
     ret
 "#
@@ -2190,7 +2190,7 @@ fn copy_struct_with_explicit_clone() {
         mir,
         r#"fn f(%p0: @arg let Probe, %p1: @ret Probe):
   b0:
-    call <test>::std::Value<<test>::Probe>::clone#impl:a879cee3(%p0, %p1)
+    clone Probe %p0 to %p1 via <test>::std::Value<<test>::Probe>::clone#impl:a879cee3
     ret
 
 fn std::Value<<test>::Probe>::ALIGN#impl:79916c32(%p0: @ret int):
@@ -2259,7 +2259,7 @@ fn clone_value_generic_return() {
         r#"fn f(%p0: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A) -> A, (&mut A) -> (), () -> int, () -> int), %p1: @arg let A, %p2: @ret A):
   b0:
     %r0 = dict_entry 3 from %p0
-    call %r0(%p1, %p2)
+    clone A %p1 to %p2 via %r0
     ret
 "#,
     );
@@ -2281,11 +2281,11 @@ fn clone_value_generic_branch() {
     condbr %r0, b2, b3
   b2:
     %r1 = dict_entry 3 from %p0
-    call %r1(%p1, %p2)
+    clone A %p1 to %p2 via %r1
     br b4
   b3:
     %r2 = dict_entry 3 from %p0
-    call %r2(%p1, %p2)
+    clone A %p1 to %p2 via %r2
     br b4
   b4:
     ret
@@ -2306,12 +2306,12 @@ fn store_local_generic_clone_dictionary() {
   b0:
     %r0 = alloca A using %p0
     %r1 = dict_entry 3 from %p0
-    call %r1(%p1, %r0)
+    clone A %p1 to %r0 via %r1
     %r2 = alloca ()
     call <test>::g(%r0, %r2)
     store @c0 to %p2
     %r3 = dict_entry 4 from %p0
-    drop %r0 via %r3
+    drop A %r0 via %r3
     ret
 
 fn g(%p0: @arg &mut A, %p1: @ret ()):
@@ -2501,9 +2501,9 @@ fn reassign_generic() {
   b0:
     %r0 = alloca A using %p0
     %r1 = dict_entry 3 from %p0
-    call %r1(%p2, %r0)
+    clone A %p2 to %r0 via %r1
     %r2 = dict_entry 4 from %p0
-    drop %p1 via %r2
+    drop A %p1 via %r2
     move %r0 to %p1 using %p0
     store @c0 to %p3
     ret

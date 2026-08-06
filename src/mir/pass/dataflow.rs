@@ -480,6 +480,16 @@ fn transfer(
                 state.set_place(key, Fact::Unknown);
             }
         }
+        // A clone writes its destination through the callee, so that slot is unknown afterwards —
+        // the same reasoning as a call's result place, which is what a clone was until it became an
+        // operation of its own.
+        OperationKind::Clone { .. } => {
+            if let Some(key) = state.place_of(&operation.operands[1])
+                && tracked(&key)
+            {
+                state.set_place(key, Fact::Unknown);
+            }
+        }
         _ => {
             // Not modelled: the escape scan has escaped every place this operation touches, so
             // there is nothing left to invalidate. A result register, if any, is an unknown value.
@@ -630,6 +640,10 @@ fn escaping_roots(func: &Function) -> (FxHashSet<Root>, FxHashMap<ValueId, Root>
                     }
                 }
             },
+            // The source is read the way a `Let` argument is and the destination written the way a
+            // call's result place is, so neither escapes — exactly as when a clone was spelled as a
+            // call. The callee is read by reference.
+            OperationKind::Clone { .. } => {}
             // Everything else — projections, drops, closure building, comparisons — takes its
             // places outside what this analysis models.
             _ => {

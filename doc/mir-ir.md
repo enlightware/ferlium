@@ -121,9 +121,24 @@ The operation kind fixes operand arity, roles, and result shape. The main groups
 | aggregates | `subfield`, `variant`, `extract_tag` | Aggregate construction and ownership remain field-addressable. A variant operation first builds an uninitialized payload shell. |
 | evidence | `dict_entry`, `subscript_member`, `build_subscript` | Evidence remains symbolic and dictionary entries are function places. |
 | calls/projections | `call`, `project`, `end_project` | Proven source-infallible forms are ordinary operations. Potentially source-fallible forms occur only inside `invoke`. |
-| ownership | `drop`, `build_closure`, `clone_closure_env`, `drop_closure_env` | Semantic ownership actions are explicit. `Value::drop` is source-infallible by contract. |
+| ownership | `clone`, `drop`, `build_closure`, `clone_closure_env`, `drop_closure_env` | Semantic ownership actions are explicit. `Value::clone` and `Value::drop` are source-infallible by contract. |
 | matching | `comp_eq` | Compares a borrowed/materialized runtime value with compile-time pattern data. |
 | stack/runtime | `stack_save`, `stack_restore`, `check_call_depth`, `check_fuel` | Stack markers describe allocation frontiers. Runtime guards are pinned operations whose sandbox violations leave the MIR CFG. |
+
+**Copying and releasing come in a representation-level and a semantic form**, and both forms are
+operations rather than one being a call:
+
+| | representation | semantic |
+|---|---|---|
+| copy | `memcpy` | `clone <source> to <dest> via <callee>` |
+| transfer / release | `move` | `drop <target> via <callee>` |
+
+Lowering picks the representation form when the type is trivially copyable and the semantic form
+otherwise. `clone` and `drop` each carry the type they act on, so a pass that changes what a type is
+— substituting a concrete instantiation into a generic body — can re-ask whether the semantic form is
+still needed without recovering the type from the dictionary behind the callee. Their callee follows
+the same contract as a `call`'s: a constant function, or the place of a function value read by
+reference. A `clone` initializes its destination and gives it the drop obligation the copy creates.
 
 A `call` additionally carries **how it instantiated its callee**, when the callee is statically known
 and generic: the type and effect arguments its quantifiers stand for, positionally. They are carried

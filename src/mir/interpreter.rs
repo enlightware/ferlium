@@ -697,8 +697,11 @@ impl<'a> Interpreter<'a> {
                 self.exec_project(slots, &operation.operands, def.unwrap(), *yielded, span)?;
             }
             OperationKind::EndProject => self.exec_end_project(slots, &operation.operands)?,
-            OperationKind::Drop => {
+            OperationKind::Drop { .. } => {
                 self.exec_drop(slots, &operation.operands, span)?;
+            }
+            OperationKind::Clone { .. } => {
+                self.exec_clone(slots, &operation.operands, span)?;
             }
             OperationKind::StackSave => {
                 let marker = self.ctx.environment.len();
@@ -1050,6 +1053,28 @@ impl<'a> Interpreter<'a> {
 
     /// Executes a `drop` operation `[target, callee]`: if `target`'s pointee is initialized, runs
     /// the `Value::drop` `callee` on it and leaves the cell uninitialized.
+    /// Executes a `clone`: a call to `Value::clone` with the source and destination places as its
+    /// arguments, which is what it was before it became an operation of its own. The two places sit
+    /// contiguously at the front of the operand list, so the call machinery takes them unchanged.
+    #[inline(never)]
+    fn exec_clone(
+        &mut self,
+        slots: &mut FxHashMap<mir::Value, Binding>,
+        operands: &[mir::Value],
+        span: Location,
+    ) -> Result<(), RuntimeError> {
+        let (module, identity) = self.callee_target(slots, &operands[2]);
+        self.exec_resolved_call(
+            slots,
+            module,
+            identity,
+            Vec::new(),
+            0,
+            &operands[0..2],
+            span,
+        )
+    }
+
     fn exec_drop(
         &mut self,
         slots: &mut FxHashMap<mir::Value, Binding>,

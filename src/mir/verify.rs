@@ -1199,7 +1199,7 @@ impl<'a> Verifier<'a> {
                 self.func.name,
                 node
             ),
-            OperationKind::Drop => {
+            OperationKind::Drop { .. } => {
                 place(0);
                 assert!(
                     matches!(
@@ -1207,6 +1207,19 @@ impl<'a> Verifier<'a> {
                         ValueRole::Function | ValueRole::Place(_)
                     ),
                     "MIR function `{}` node {}: drop callee must be a function or function place",
+                    self.func.name,
+                    node
+                );
+            }
+            OperationKind::Clone { .. } => {
+                place(0);
+                place(1);
+                assert!(
+                    matches!(
+                        self.role(&operands[2]),
+                        ValueRole::Function | ValueRole::Place(_)
+                    ),
+                    "MIR function `{}` node {}: clone callee must be a function or function place",
                     self.func.name,
                     node
                 );
@@ -1594,9 +1607,15 @@ impl<'a> Verifier<'a> {
                 OperationKind::Clear => {
                     self.transfer_clear(&operands[0], &mut normal);
                 }
-                OperationKind::Drop => {
+                OperationKind::Drop { .. } => {
                     self.transfer_drop(&operands[0], &mut normal);
                     self.transfer_drop(&operands[0], &mut unwind);
+                }
+                // The destination takes on the obligation the copy creates, exactly as a call's
+                // result place does — a clone *is* a call to `Value::clone`, spelled as an
+                // operation so its subject is legible.
+                OperationKind::Clone { .. } => {
+                    self.initialize_call_result(node, &operands[1], &mut normal);
                 }
                 OperationKind::Call { .. } => {
                     // Operation arity and role verification establish that every call ends in a

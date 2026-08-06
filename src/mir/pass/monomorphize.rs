@@ -492,8 +492,8 @@ fn substitute_in_operation(operation: &mut Operation, mapper: &mut impl TypeMapp
         | OperationKind::StackRestore
         | OperationKind::CheckCallDepth
         | OperationKind::CheckFuel
-        | OperationKind::Drop
         | OperationKind::DropClosureEnv => {}
+        OperationKind::Clone { ty } | OperationKind::Drop { ty } => *ty = ty.map(mapper),
     }
 }
 
