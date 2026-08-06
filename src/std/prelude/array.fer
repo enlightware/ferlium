@@ -59,7 +59,10 @@ impl<A> Value for [A] where A: Value {
 			if i >= len {
 				return target;
 			};
-			buffer_clone_into(source.data, array_physical_index_unchecked(source, i), target.data, target.len);
+			builtin::init_place(
+				target.data->[buffer_slot](target.len),
+				source.data->[buffer_slot](array_physical_index_unchecked(source, i)),
+			);
 			target.len += 1;
 			i += 1;
 		}
@@ -73,7 +76,10 @@ impl<A> Value for [A] where A: Value {
 				return ();
 			};
 			let index = len - 1;
-			buffer_drop_at(target.data, array_physical_index_unchecked(target, index));
+			// Moving the element out and letting the temporary die is the drop: it goes through
+			// the ordinary drop machinery, which MIR sees, rather than through a native holding a
+			// runtime dictionary, which it does not. `buffer_take` never took a dictionary.
+			buffer_take(target.data, array_physical_index_unchecked(target, index));
 			target.len -= 1;
 		}
 	}
@@ -147,7 +153,7 @@ where
 			array.start - 1
 		};
 	};
-	buffer_clone_value_into(value, array.data, array.start);
+	builtin::init_place(array.data->[buffer_slot](array.start), value);
 	array.len += 1;
 }
 
@@ -212,7 +218,10 @@ where
 		let mut i = start;
 		loop {
 			if i < end {
-				buffer_clone_into(array.data, array_physical_index_unchecked(array, i), result.data, result.len);
+				builtin::init_place(
+					result.data->[buffer_slot](result.len),
+					array.data->[buffer_slot](array_physical_index_unchecked(array, i)),
+				);
 				result.len += 1;
 				i += 1;
 			} else {
@@ -231,7 +240,10 @@ impl Concat {
 		let mut i = 0;
 		loop {
 			if i < left_len {
-				buffer_clone_into(left.data, array_physical_index_unchecked(left, i), result.data, result.len);
+				builtin::init_place(
+					result.data->[buffer_slot](result.len),
+					left.data->[buffer_slot](array_physical_index_unchecked(left, i)),
+				);
 				result.len += 1;
 				i += 1;
 			} else {
@@ -241,7 +253,10 @@ impl Concat {
 		let mut i = 0;
 		loop {
 			if i < right_len {
-				buffer_clone_into(right.data, array_physical_index_unchecked(right, i), result.data, result.len);
+				builtin::init_place(
+					result.data->[buffer_slot](result.len),
+					right.data->[buffer_slot](array_physical_index_unchecked(right, i)),
+				);
 				result.len += 1;
 				i += 1;
 			} else {

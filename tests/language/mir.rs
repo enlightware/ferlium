@@ -998,27 +998,27 @@ fn std::Value<[std::int]>::SIZE#impl:9ddb92fe(%p0: @ret int):
 
 fn std::Value<[std::int]>::clone#impl:94a041f9(%p0: @arg let [int], %p1: @ret [int]):
   b0:
-    call std::Value<[A]>::clone#impl:d3305f1a(dict(std::Value<std::int>), dict(<test>::std::Value<[std::int]>), %p0, %p1)
+    call std::Value<[A]>::clone#impl:5d7e5692(dict(<test>::std::Value<[std::int]>), dict(std::Value<std::int>), %p0, %p1)
     ret
 
 fn std::Value<[std::int]>::drop#impl:a4f41aeb(%p0: @arg &mut [int], %p1: @ret ()):
   b0:
-    call std::Value<[A]>::drop#impl:6cacf658(dict(std::Value<std::int>), dict(<test>::std::Value<[std::int]>), %p0, %p1)
+    call std::Value<[A]>::drop#impl:4499dda8(dict(<test>::std::Value<[std::int]>), dict(std::Value<std::int>), %p0, %p1)
     ret
 
 fn std::Value<[std::int]>::eq#impl:7e1688d4(%p0: @arg let [int], %p1: @arg let [int], %p2: @ret bool):
   b0:
-    call std::Value<[A]>::eq#impl:0ac782c1(dict(std::Value<std::int>), dict(<test>::std::Value<[std::int]>), %p0, %p1, %p2)
+    call std::Value<[A]>::eq#impl:82e999e1(dict(<test>::std::Value<[std::int]>), dict(std::Value<std::int>), %p0, %p1, %p2)
     ret
 
 fn std::Value<[std::int]>::hash#impl:0aca59c2(%p0: @arg let [int], %p1: @arg &mut hasher, %p2: @ret ()):
   b0:
-    call std::Value<[A]>::hash#impl:90d7c903(dict(std::Value<std::int>), dict(<test>::std::Value<[std::int]>), %p0, %p1, %p2)
+    call std::Value<[A]>::hash#impl:2f76a94b(dict(<test>::std::Value<[std::int]>), dict(std::Value<std::int>), %p0, %p1, %p2)
     ret
 
 fn std::Value<[std::int]>::to_string#impl:892a091b(%p0: @arg let [int], %p1: @ret string):
   b0:
-    call std::Value<[A]>::to_string#impl:6a7dc628(dict(std::Value<std::int>), dict(<test>::std::Value<[std::int]>), %p0, %p1)
+    call std::Value<[A]>::to_string#impl:c74a3a78(dict(<test>::std::Value<[std::int]>), dict(std::Value<std::int>), %p0, %p1)
     ret
 "#,
     );

@@ -2117,69 +2117,6 @@ fn drop_owned_locals_on_error_from(
     Ok(())
 }
 
-/// A trait dictionary handed to a `Value`-trait helper (clone/drop), in either of the two runtime
-/// forms the interpreters produce.
-///
-/// The HIR interpreter resolves dictionaries to interned [`TraitDictionaryId`]s and dispatches
-/// methods through the compiler's impl arena. The MIR interpreter — whose IR is meant to lower to a
-/// real backend — instead materializes a dictionary as a *witness table*: a `Value::Tuple` of the
-/// dictionary's function values, reachable through a [`Place`]. Associated constants occupy
-/// zero-argument getter-function entries just like any other dictionary function. `DictArg` lets
-/// the shared `Value` helpers serve both forms without requiring the MIR backend to reconstruct an
-/// interned id (a compiler-arena handle that does not exist in compiled code).
-///
-/// A bare [`TraitDictionaryId`] converts into the [`DictArg::Interned`] form, so existing HIR
-/// callers pass one unchanged.
-pub(crate) enum DictArg {
-    /// An interned dictionary resolved through the compiler session (HIR interpreter form).
-    Interned(TraitDictionaryId),
-    /// A place holding a materialized witness-table tuple (MIR interpreter form).
-    Witness(Place),
-}
-
-impl From<TraitDictionaryId> for DictArg {
-    fn from(dictionary: TraitDictionaryId) -> Self {
-        DictArg::Interned(dictionary)
-    }
-}
-
-impl DictArg {
-    /// Dispatches the function at `entry_index` with `arguments`, handling both dictionary forms.
-    ///
-    /// For the interned form this defers to [`call_dictionary_function`]; for the witness form it
-    /// reads the function value straight out of the tuple at `entry_index` and calls it. A witness
-    /// entry is materialized bare (no captured evidence), exactly as
-    /// [`call_dictionary_function`] reconstructs it from an interned dictionary.
-    fn call_function(
-        &self,
-        ctx: &mut EvalCtx,
-        entry_index: TraitDictionaryEntryIndex,
-        arguments: Vec<ValOrMut>,
-        span: Location,
-    ) -> EvalControlFlowResult {
-        match self {
-            DictArg::Interned(dictionary) => {
-                call_dictionary_function(ctx, *dictionary, entry_index, arguments, span)
-            }
-            DictArg::Witness(place) => {
-                let method = {
-                    let table = place
-                        .target_ref(ctx)
-                        .map_err(|err| RuntimeError::new(err, Some(span)))?;
-                    let entries = table
-                        .as_tuple()
-                        .expect("a MIR witness-table dictionary is a tuple value");
-                    let function = entries[entry_index.as_index()]
-                        .as_function()
-                        .expect("a witness-table method entry is a function value");
-                    FunctionValue::bare(function.function)
-                };
-                ctx.call_function_value(&method, arguments, span)
-            }
-        }
-    }
-}
-
 fn call_value_clone_with(
     ctx: &mut EvalCtx,
     source: ValOrMut,
@@ -2191,41 +2128,19 @@ fn call_value_clone_with(
 
 pub(crate) fn call_value_clone_for_temp(
     ctx: &mut EvalCtx,
-    dictionary: impl Into<DictArg>,
+    dictionary: TraitDictionaryId,
     source: ValOrMut,
     span: Location,
 ) -> Result<Value, RuntimeError> {
-    let dictionary = dictionary.into();
     call_value_clone_with(ctx, source, span, |ctx, arguments| {
-        dictionary.call_function(
+        call_dictionary_function(
             ctx,
+            dictionary,
             TraitDictionaryEntryIndex::from_index(VALUE_CLONE_METHOD_INDEX.as_index()),
             arguments,
             span,
         )
     })
-}
-
-pub(crate) fn call_value_clone_to_target(
-    ctx: &mut EvalCtx,
-    dictionary: impl Into<DictArg>,
-    source: ValOrMut,
-    target: Place,
-    span: Location,
-) -> EvalControlFlowResult {
-    let target_value = target
-        .target_mut(ctx)
-        .map_err(|err| RuntimeError::new(err, Some(span)))?;
-    assert!(
-        matches!(target_value, Value::Uninit),
-        "Value::clone destination slot must be uninitialized"
-    );
-    let value = call_value_clone_for_temp(ctx, dictionary, source, span)?;
-    let target_value = target
-        .target_mut(ctx)
-        .map_err(|err| RuntimeError::new(err, Some(span)))?;
-    *target_value = value;
-    cont(Value::unit())
 }
 
 fn call_value_clone_dispatch_for_temp(
@@ -2243,11 +2158,10 @@ fn call_value_clone_dispatch_for_temp(
 
 pub(crate) fn call_value_drop_for_temp(
     ctx: &mut EvalCtx,
-    dictionary: impl Into<DictArg>,
+    dictionary: TraitDictionaryId,
     target: ValOrMut,
     span: Location,
 ) -> EvalControlFlowResult {
-    let dictionary = dictionary.into();
     let (target_place, temp_index) = match target {
         ValOrMut::Mut(place) => (place, None),
         ValOrMut::Ref(_) => panic!("cannot drop shared reference storage"),
@@ -2266,8 +2180,9 @@ pub(crate) fn call_value_drop_for_temp(
             (place, Some(target_index))
         }
     };
-    let result = discard_call_result(dictionary.call_function(
+    let result = discard_call_result(call_dictionary_function(
         ctx,
+        dictionary,
         TraitDictionaryEntryIndex::from_index(VALUE_DROP_METHOD_INDEX.as_index()),
         vec![ValOrMut::Mut(target_place.clone())],
         span,

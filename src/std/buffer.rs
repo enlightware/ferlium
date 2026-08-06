@@ -11,12 +11,10 @@ use std::mem;
 use ustr::ustr;
 
 use crate::{
-    Location,
     compiler::error::SourceFailureKind,
     eval::{
-        DictArg, EvalControlFlowResult, EvalCtx, Place, PlaceResult, RuntimeError, ValOrMut,
-        ValOrMutArgs, call_value_clone_to_target, call_value_drop_for_temp, cont,
-        try_dictionary_from_place,
+        EvalControlFlowResult, EvalCtx, Place, PlaceResult, RuntimeError, ValOrMut, ValOrMutArgs,
+        cont,
     },
     hir::{
         function::{
@@ -26,7 +24,7 @@ use crate::{
         },
         value::{NativeValueType, Value},
     },
-    module::{BlanketTraitImplSubKey, Module, ModuleFunction, TraitId},
+    module::{BlanketTraitImplSubKey, Module, ModuleFunction},
     std::core_traits_names::{INSPECT_TRAIT_NAME, VALUE_TRAIT_NAME},
     types::{
         effects::no_effects,
@@ -109,16 +107,6 @@ fn buffer_clone(_: &Buffer) -> Buffer {
 
 fn buffer_drop(_: &mut Buffer) {}
 
-fn value_constraint(value_trait_id: TraitId, ty: Type) -> Vec<PubTypeConstraint> {
-    vec![PubTypeConstraint::new_have_trait(
-        value_trait_id,
-        vec![ty],
-        vec![],
-        vec![],
-        Location::new_synthesized(),
-    )]
-}
-
 fn native_function(
     ty: FnType,
     constraints: impl Into<Vec<PubTypeConstraint>>,
@@ -136,35 +124,6 @@ fn native_function(
         None,
         Vec::new(),
     )
-}
-
-fn dictionary_from_arg(arg: ValOrMut, ctx: &mut EvalCtx<'_>) -> Result<DictArg, RuntimeError> {
-    let invalid =
-        || RuntimeError::new_native(SourceFailureKind::InvalidArgument("dictionary".into()));
-    match arg {
-        ValOrMut::Dictionary(dictionary) => Ok(DictArg::Interned(dictionary)),
-        ValOrMut::Mut(place) => {
-            // The HIR interpreter passes a dictionary by reference to a `ValOrMut::Dictionary`
-            // metadata entry; the MIR interpreter passes a reference to a materialized
-            // witness-table tuple. Prefer the interned id when the place resolves to one, otherwise
-            // accept a place holding a tuple as the MIR witness table.
-            if let Some(dictionary) = try_dictionary_from_place(&place, ctx) {
-                Ok(DictArg::Interned(dictionary))
-            } else if place
-                .target_ref(ctx)
-                .is_ok_and(|value| value.as_tuple().is_some())
-            {
-                Ok(DictArg::Witness(place))
-            } else {
-                Err(invalid())
-            }
-        }
-        ValOrMut::Val(value) => {
-            value.discard_storage();
-            Err(invalid())
-        }
-        ValOrMut::Ref(_) => Err(invalid()),
-    }
 }
 
 fn place_from_arg(arg: ValOrMut) -> Result<Place, RuntimeError> {
@@ -260,93 +219,6 @@ fn buffer_with_capacity_descr() -> ModuleFunction {
                 );
                 cont(Value::native(buffer_with_capacity(capacity)))
             },
-        ),
-    )
-}
-
-fn buffer_clone_value_into(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalControlFlowResult {
-    let dictionary = dictionary_from_arg(args.next().unwrap(), ctx)?;
-    let source = args.next().unwrap();
-    let target = args.next().unwrap();
-    let index = int_from_arg(
-        args.next().unwrap(),
-        ctx,
-        "buffer target index should be an int",
-    );
-    let target = buffer_slot_place(target, index)?;
-    call_value_clone_to_target(ctx, dictionary, source, target, Location::new_synthesized())
-}
-
-fn buffer_clone_value_into_descr(value_trait_id: TraitId) -> ModuleFunction {
-    let gen0 = Type::variable_id(0);
-    native_function(
-        FnType::new_mut_resolved(
-            [
-                (gen0, false),
-                (buffer_type(gen0), true),
-                (super::math::int_type(), false),
-            ],
-            Type::unit(),
-            no_effects(),
-        ),
-        value_constraint(value_trait_id, gen0),
-        ["source", "target", "target_index"],
-        "Clones a value into a buffer slot.",
-        ContextNativeFn::new(
-            "buffer_clone_value_into",
-            &[LET],
-            &[LET, MUTABLE_REF, LET],
-            buffer_clone_value_into,
-        ),
-    )
-}
-
-fn buffer_clone_into(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalControlFlowResult {
-    let dictionary = dictionary_from_arg(args.next().unwrap(), ctx)?;
-    let source = args.next().unwrap();
-    let source_index = int_from_arg(
-        args.next().unwrap(),
-        ctx,
-        "buffer source index should be an int",
-    );
-    let target = args.next().unwrap();
-    let target_index = int_from_arg(
-        args.next().unwrap(),
-        ctx,
-        "buffer target index should be an int",
-    );
-    let source = buffer_slot_place(source, source_index)?;
-    let target = buffer_slot_place(target, target_index)?;
-    call_value_clone_to_target(
-        ctx,
-        dictionary,
-        ValOrMut::Mut(source),
-        target,
-        Location::new_synthesized(),
-    )
-}
-
-fn buffer_clone_into_descr(value_trait_id: TraitId) -> ModuleFunction {
-    let gen0 = Type::variable_id(0);
-    native_function(
-        FnType::new_mut_resolved(
-            [
-                (buffer_type(gen0), false),
-                (super::math::int_type(), false),
-                (buffer_type(gen0), true),
-                (super::math::int_type(), false),
-            ],
-            Type::unit(),
-            no_effects(),
-        ),
-        value_constraint(value_trait_id, gen0),
-        ["source", "source_index", "target", "target_index"],
-        "Clones a buffer slot into another buffer slot.",
-        ContextNativeFn::new(
-            "buffer_clone_into",
-            &[LET],
-            &[LET, LET, MUTABLE_REF, LET],
-            buffer_clone_into,
         ),
     )
 }
@@ -455,43 +327,6 @@ fn buffer_take_descr() -> ModuleFunction {
     )
 }
 
-fn buffer_drop_at(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalControlFlowResult {
-    let dictionary = dictionary_from_arg(args.next().unwrap(), ctx)?;
-    let target = args.next().unwrap();
-    let index = int_from_arg(
-        args.next().unwrap(),
-        ctx,
-        "buffer drop index should be an int",
-    );
-    let target = buffer_slot_place(target, index)?;
-    call_value_drop_for_temp(
-        ctx,
-        dictionary,
-        ValOrMut::Mut(target),
-        Location::new_synthesized(),
-    )
-}
-
-fn buffer_drop_at_descr(value_trait_id: TraitId) -> ModuleFunction {
-    let gen0 = Type::variable_id(0);
-    native_function(
-        FnType::new_mut_resolved(
-            [(buffer_type(gen0), true), (super::math::int_type(), false)],
-            Type::unit(),
-            no_effects(),
-        ),
-        value_constraint(value_trait_id, gen0),
-        ["target", "index"],
-        "Drops a value stored in a buffer slot.",
-        ContextNativeFn::new(
-            "buffer_drop_at",
-            &[LET],
-            &[MUTABLE_REF, LET],
-            buffer_drop_at,
-        ),
-    )
-}
-
 pub fn add_to_module(to: &mut Module) {
     let value_trait_id = to.expect_std_trait_id_in_current_module(VALUE_TRAIT_NAME);
     let inspect_trait_id = to.expect_std_trait_id_in_current_module(INSPECT_TRAIT_NAME);
@@ -529,16 +364,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_private_unsafe_addressor_subscript(ustr("buffer_slot"), buffer_slot_descr());
     to.add_private_unsafe_function(ustr("buffer_with_capacity"), buffer_with_capacity_descr());
-    to.add_private_unsafe_function(
-        ustr("buffer_clone_value_into"),
-        buffer_clone_value_into_descr(value_trait_id),
-    );
-    to.add_private_unsafe_function(
-        ustr("buffer_clone_into"),
-        buffer_clone_into_descr(value_trait_id),
-    );
     to.add_private_unsafe_function(ustr("buffer_move"), buffer_move_descr());
     to.add_private_unsafe_function(ustr("buffer_move_into"), buffer_move_into_descr());
     to.add_private_unsafe_function(ustr("buffer_take"), buffer_take_descr());
-    to.add_private_unsafe_function(ustr("buffer_drop_at"), buffer_drop_at_descr(value_trait_id));
 }

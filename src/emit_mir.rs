@@ -1494,7 +1494,7 @@ impl<'a> Emitter<'a> {
 
     /// Returns the symbolic MIR dictionary lowered from `n`: the canonical interned handle of the
     /// impl that satisfies it. The dictionary is kept symbolic (not materialized into a witness-table
-    /// tuple); the MIR interpreter dispatches through it via `DictArg::Interned`, and a future
+    /// tuple); the MIR interpreter dispatches through the interned id, and a future
     /// tuple-lowering pass rebuilds the table from the impl arena.
     fn lower_dictionary(&mut self, n: &GetDictionary) -> mir::Value {
         mir::Value::Dictionary(self.dictionary_id(n.dictionary))

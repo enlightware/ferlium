@@ -25,7 +25,7 @@ pub enum Value {
     /// A symbolic trait dictionary, identified by the canonical handle of the impl that satisfies
     /// it. The dictionary is kept symbolic (an interned id) rather than materialized into a tuple
     /// of trait-function values (including associated-constant getters); the MIR interpreter
-    /// dispatches through it via `DictArg::Interned`, and a later tuple-lowering pass (for a real
+    /// dispatches through the interned id, and a later tuple-lowering pass (for a real
     /// backend) rebuilds the witness table from the impl arena. A *forwarded* dictionary (one a
     /// generic function received as an extra parameter) is instead represented by its `Parameter`.
     Dictionary(TraitDictionaryId),

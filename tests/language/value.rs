@@ -2733,29 +2733,6 @@ fn hir_prints_operator_static_apply_argument_names() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn context_native_parameter_passing_excludes_hidden_dictionary_args() {
-    let session = TestSession::new();
-    let function = session
-        .session()
-        .std_module()
-        .get_function(ustr("buffer_drop_at"))
-        .unwrap();
-    assert_eq!(
-        function.parameter_passing.as_slice(),
-        &[ArgConvention::MutableRef, ArgConvention::Let,][..],
-    );
-    assert_eq!(
-        function.code.runtime_argument_passing().unwrap(),
-        &[
-            ArgConvention::Let,
-            ArgConvention::MutableRef,
-            ArgConvention::Let,
-        ][..],
-    );
-}
-
-#[test]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn discarded_empty_struct_temporary_runs_semantic_drop() {
     let mut session = TestSession::new();
     let source = r#"

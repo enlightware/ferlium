@@ -1214,4 +1214,36 @@ mod tests {
 
         assert_eq!(NATIVE_ARG_DROP_COUNT.load(Ordering::Relaxed), 1);
     }
+
+    /// A native's hidden dictionary parameters are prepended to its runtime argument passing and
+    /// absent from its visible one — the two lists are not the same list.
+    ///
+    /// Tested on a directly built native rather than on a standard-library specimen. It used to be
+    /// asserted of `buffer_drop_at`, which is gone: no std native takes a dictionary any more, which
+    /// is the invariant the buffer rework establishes rather than an accident to work around. The
+    /// mechanism it exercises is still here, so the test moved to where the mechanism is.
+    #[test]
+    fn hidden_dictionary_arguments_are_prepended_to_runtime_argument_passing() {
+        fn unreachable_native(_: ValOrMutArgs, _: &mut CallCtx<'_>) -> EvalControlFlowResult {
+            unreachable!("the conventions are inspected, never the body")
+        }
+        let native = ContextNativeFn::new(
+            "hidden_dictionary_probe",
+            &[ArgConvention::Let],
+            &[ArgConvention::MutableRef, ArgConvention::Let],
+            unreachable_native,
+        );
+        assert_eq!(
+            native.runtime_argument_passing().unwrap(),
+            &[
+                ArgConvention::Let,
+                ArgConvention::MutableRef,
+                ArgConvention::Let
+            ][..],
+        );
+        assert_eq!(
+            native.visible_parameter_passing().unwrap(),
+            &[ArgConvention::MutableRef, ArgConvention::Let][..],
+        );
+    }
 }

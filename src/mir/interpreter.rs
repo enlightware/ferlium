@@ -64,7 +64,7 @@ enum Binding {
     Value(Value),
     Place(Place),
     /// A symbolic trait dictionary (an interned id), the binding of a `Dictionary` constant or a
-    /// forwarded dictionary `@extra` parameter. Dispatched through `DictArg::Interned`; never
+    /// forwarded dictionary `@extra` parameter. Dispatched through the interned id; never
     /// materialized into a tuple.
     Dictionary(TraitDictionaryId),
     /// A saved top of the stack (the `environment` length), the result of a `stack_save`.
