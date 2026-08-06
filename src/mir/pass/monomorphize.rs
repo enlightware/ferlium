@@ -1106,6 +1106,39 @@ mod tests {
         }
     }
 
+    /// The point of `builtin::init_place`: with a container's element copy expressed in MIR rather
+    /// than inside a native holding a runtime dictionary, substituting a trivially copyable element
+    /// type turns that copy into a representation copy.
+    ///
+    /// Asserted through `array_append` because that is the case the measurement named, and because
+    /// the property is not local — the clone is written in `array.fer` and only becomes a `memcpy`
+    /// after specialization has substituted `A := int` and the clone-elision pass has run. A
+    /// `Value::clone` call surviving here means the copy went back to being opaque.
+    #[test]
+    fn appending_a_trivially_copyable_element_becomes_a_representation_copy() {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        let module = session.emit_mir(
+            "append",
+            "fn grow(n: int) -> [int] { let mut a = []; array_append(a, n); a }",
+        );
+        let specialized = module
+            .split("fn array_append#spec:[int]")
+            .nth(1)
+            .expect("array_append must specialize at int, or this test proves nothing")
+            .split("\nfn ")
+            .next()
+            .expect("the specialization has a body");
+        assert!(
+            specialized.contains("memcpy"),
+            "the element copy must be a representation copy:\n{specialized}"
+        );
+        assert!(
+            !specialized.contains("buffer_clone_value_into"),
+            "the element copy must not go back through the opaque native:\n{specialized}"
+        );
+    }
+
     /// A recursive call records no instantiation — inference types a call within the defining group
     /// monomorphically rather than instantiating the scheme — so nothing else can redirect it. Left
     /// alone a specialization recurses into the generic original, and for a recursive algorithm

@@ -2677,3 +2677,25 @@ fn string_normalization() {
         int(2) // the é slice is still the 2-byte NFC form
     );
 }
+
+/// `builtin::init_place` writes into storage holding no value, so calling it on a place that does
+/// hold one leaks that value silently — no drop runs. Only the standard library may reach it, and
+/// the gate is the ordinary unsafe-item one rather than `effects_unsafe`: the obligation is about
+/// memory, not effects.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn init_place_builtin_is_rejected_in_user_code() {
+    let mut session = TestSession::new();
+    match session
+        .fail_compilation("let mut a = [1]; builtin::init_place(a[0], 2)")
+        .into_inner()
+    {
+        CompilationErrorImpl::UnsafeFeatureUseNotAllowed { feature, .. } => {
+            assert_eq!(
+                feature,
+                ferlium::compiler::error::UnsafeFeature::Function(ustr("builtin::init_place"))
+            );
+        }
+        other => panic!("expected UnsafeFeatureUseNotAllowed error, got {other:?}"),
+    }
+}

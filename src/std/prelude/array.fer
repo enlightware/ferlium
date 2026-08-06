@@ -130,7 +130,7 @@ where
 {
 	array_ensure_capacity(array, array.len + 1);
 	let index = array_wrap_index(array.capacity, array.start + array.len);
-	buffer_clone_value_into(value, array.data, index);
+	builtin::init_place(array.data->[buffer_slot](index), value);
 	array.len += 1;
 }
 

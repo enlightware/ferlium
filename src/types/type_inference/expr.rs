@@ -1280,6 +1280,15 @@ impl TypeInference {
                 return Ok((node_id, mut_ty));
             }
             Apply(data) => {
+                // A compiler builtin is recognized before anything else, because it is not a
+                // function and must never reach function resolution: see `Builtin`.
+                if let Identifier(path) = &env.ast_arena[data.func].kind
+                    && let Some(builtin) = builtin_for_path(path)
+                {
+                    let path_span = sp(data.func);
+                    let args: Vec<DExprId> = data.args.to_vec();
+                    return self.infer_builtin(env, builtin, path_span, &args, expr_span);
+                }
                 // Do we have a global function or variant?
                 if let Identifier(path) = &env.ast_arena[data.func].kind {
                     let is_variable = match &path.segments[..] {
@@ -3664,7 +3673,9 @@ impl TypeInference {
             expr_span,
             |this, env, place, place_ty| {
                 Ok((
-                    this.infer_assign_to_place(env, place, place_ty, value, sign_span, expr_span)?,
+                    this.infer_assign_to_place(
+                        env, place, place_ty, value, sign_span, expr_span, true,
+                    )?,
                     Type::unit(),
                 ))
             },
@@ -3690,13 +3701,17 @@ impl TypeInference {
                     env, place, place_ty, op_path, sign_span, value, expr_span,
                 )?;
                 Ok((
-                    this.assign_value_node_to_place(env, place, place_ty, value, expr_span),
+                    this.assign_value_node_to_place(env, place, place_ty, value, expr_span, true),
                     Type::unit(),
                 ))
             },
         )
     }
 
+    /// Infers a write of `value` into the already-inferred place `place`.
+    ///
+    /// `drop_old` is false only for `builtin::init_place`, whose destination holds no value to drop.
+    #[allow(clippy::too_many_arguments)]
     fn infer_assign_to_place(
         &mut self,
         env: &mut TypingEnv,
@@ -3705,6 +3720,7 @@ impl TypeInference {
         value: DExprId,
         sign_span: Location,
         expr_span: Location,
+        drop_old: bool,
     ) -> Result<NodeId, InternalCompilationError> {
         let value_id = self.infer_expr_drop_mut(env, value)?;
         self.add_sub_type_constraint(
@@ -3713,9 +3729,14 @@ impl TypeInference {
             place_ty,
             sign_span,
         );
-        Ok(self.assign_value_node_to_place(env, place, place_ty, value_id, expr_span))
+        Ok(self.assign_value_node_to_place(env, place, place_ty, value_id, expr_span, drop_old))
     }
 
+    /// Builds the `Assign` node writing `value` into `place`.
+    ///
+    /// `drop_old` false yields `hir::Assignment`'s `drop: None`, which the whole pipeline already
+    /// reads as "the destination storage is uninitialized" — no drop is emitted, and no `Value`
+    /// evidence is demanded for one. That is the entirety of `builtin::init_place`.
     fn assign_value_node_to_place(
         &mut self,
         env: &mut TypingEnv,
@@ -3723,6 +3744,7 @@ impl TypeInference {
         place_ty: Type,
         value: NodeId,
         expr_span: Location,
+        drop_old: bool,
     ) -> NodeId {
         let value_ty = env.ir_arena[value].ty;
         if value_ty == Type::never() {
@@ -3732,7 +3754,7 @@ impl TypeInference {
         let value_effects = env.ir_arena[value].effects.clone();
         let place_effects = env.ir_arena[place].effects.clone();
         let effects = self.make_dependent_effect([&value_effects, &place_effects]);
-        if self.type_needs_semantic_drop(env, place_ty) && !place_ty.is_function() {
+        if drop_old && self.type_needs_semantic_drop(env, place_ty) && !place_ty.is_function() {
             self.add_pub_constraint(PubTypeConstraint::new_have_trait(
                 value_trait_id(env),
                 vec![place_ty],
@@ -3745,7 +3767,7 @@ impl TypeInference {
             NodeKind::Assign(hir::Assignment {
                 place,
                 value,
-                drop: Some(PendingLocalDrop::Unknown),
+                drop: drop_old.then_some(PendingLocalDrop::Unknown),
             }),
             Type::unit(),
             effects,
@@ -5216,6 +5238,98 @@ impl TypeInference {
         )
     }
 
+    /// Infers a call to a compiler builtin.
+    ///
+    /// Gated to the standard library by the same rule that gates every other unsafe item, rather
+    /// than by `effects_unsafe`: the obligation here is about memory, not effects, and
+    /// `is_unsafe_item_unavailable_in_current_context` already keys on exactly "comes from std and
+    /// is unsafe". A caller outside std is refused before its arguments are even inferred.
+    fn infer_builtin(
+        &mut self,
+        env: &mut TypingEnv,
+        builtin: Builtin,
+        path_span: Location,
+        args: &[DExprId],
+        expr_span: Location,
+    ) -> Result<(NodeId, MutType), InternalCompilationError> {
+        if env.current_module_id() != STD_MODULE_ID {
+            return Err(
+                InternalCompilationError::new_unsafe_feature_use_not_allowed(
+                    UnsafeFeature::Function(ustr(builtin.name())),
+                    path_span,
+                ),
+            );
+        }
+        if args.len() != builtin.arity() {
+            return Err(internal_compilation_error!(WrongNumberOfArguments {
+                expected: builtin.arity(),
+                expected_span: path_span,
+                got: args.len(),
+                got_span: expr_span,
+            }));
+        }
+        match builtin {
+            Builtin::InitPlace => {
+                self.infer_init_place(env, args[0], args[1], path_span, expr_span)
+            }
+        }
+    }
+
+    /// Infers `builtin::init_place(place, value)`.
+    ///
+    /// The destination is an access chain in every intended use — a subscript place such as
+    /// `buffer.data->[buffer_slot](i)` — and it must be resolved through the same path an ordinary
+    /// assignment uses, with `SubscriptMemberKind::Mut`. Inferring it as a plain expression selects
+    /// the subscript's `ref` member instead and the write is then rejected as immutable.
+    ///
+    /// The one difference from assignment is `drop_old: false`, which becomes `hir::Assignment`'s
+    /// `drop: None`. Assignment asks `assignment_initializes_storage`, which answers for locals and
+    /// field chains and says `false` for a subscript place — correctly, since it cannot know a
+    /// dynamically indexed slot is empty. Saying `false` here would drop whatever bytes the fresh
+    /// slot happens to hold, which is why only std may call this.
+    fn infer_init_place(
+        &mut self,
+        env: &mut TypingEnv,
+        place: DExprId,
+        value: DExprId,
+        sign_span: Location,
+        expr_span: Location,
+    ) -> Result<(NodeId, MutType), InternalCompilationError> {
+        if !Self::is_access_chain_expr(&env.ast_arena[place].kind) {
+            // A plain place — a local, or a field of one. Not the intended use, but meaningful and
+            // cheaper to support than to reject, and it keeps the builtin's meaning independent of
+            // the shape of its destination.
+            let (place_id, place_mut) = self.infer_expr(env, place)?;
+            let place_span = env.ir_arena[place_id].span;
+            self.add_mut_be_at_least_constraint(
+                place_mut,
+                place_span,
+                MutType::mutable(),
+                sign_span,
+            );
+            let place_ty = env.ir_arena[place_id].ty;
+            let node_id = self.infer_assign_to_place(
+                env, place_id, place_ty, value, sign_span, expr_span, false,
+            )?;
+            return Ok((node_id, MutType::constant()));
+        }
+        let chain = self.access_chain_for_expr(env, place);
+        self.infer_access_chain_with_body(
+            env,
+            chain,
+            SubscriptMemberKind::Mut,
+            expr_span,
+            |this, env, place, place_ty| {
+                Ok((
+                    this.infer_assign_to_place(
+                        env, place, place_ty, value, sign_span, expr_span, false,
+                    )?,
+                    Type::unit(),
+                ))
+            },
+        )
+    }
+
     fn infer_static_apply(
         &mut self,
         env: &mut TypingEnv,
@@ -6084,6 +6198,68 @@ fn place_evaluation_depends_on_projection_place(arena: &NodeArena, node_id: Node
             .is_some_and(|node| place_evaluation_depends_on_projection_place(arena, *node)),
         WithPlace(node) => place_evaluation_depends_on_projection_place(arena, node.body),
         _ => false,
+    }
+}
+
+/// A compiler builtin: recognized by path, ahead of ordinary function resolution.
+///
+/// **A builtin is not a function.** It has no declared signature, no body, and no entry in any
+/// module's table, and that is the point rather than a shortcut. `init_place`'s destination is
+/// storage holding no value yet, and no argument type we can write down means that: `&mut T`
+/// promises an initialized `T`, which is exactly the promise the caller is breaking, so a signature
+/// would be a lie the optimizer is entitled to believe. Rust takes `*mut T` in `ptr::write` for this
+/// reason, and needs `MaybeUninit<T>` besides; Zig's `@memcpy` has no Zig-expressible type at all.
+/// Checking a builtin ad hoc costs nothing, because there is no signature to reconcile.
+///
+/// They live under a reserved path rather than behind a keyword so that adding one burns no
+/// identifier and needs no grammar change — `std` is already reserved, so `builtin` is a name inside
+/// it. Bare `init` would not have been available anyway: std's own `fold(seq, init, f)` takes it as a
+/// parameter name.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Builtin {
+    /// `builtin::init_place(place, value)` — clone `value` into `place`, whose storage holds nothing.
+    ///
+    /// Assignment minus the drop of the old value, which is the whole of it: `hir::Assignment`
+    /// already carries a `drop` that is `None` "only when the destination storage is uninitialized",
+    /// and `emit_mir` already skips the drop in that case. So this needs no node of its own, and
+    /// both the HIR and the MIR paths execute it without knowing it exists.
+    ///
+    /// It exists so that a container can initialize a slot it just allocated **in MIR** rather than
+    /// inside a native holding a runtime dictionary. A native that clones through a dictionary is
+    /// opaque to substitution, so specializing its caller cannot turn the clone into a `memcpy`;
+    /// with the clone expressed here, it can. Hence the invariant this serves: a native may take a
+    /// dictionary to dispatch, never to clone or drop.
+    InitPlace,
+}
+
+impl Builtin {
+    /// The name to report it by, which is the path a user would have written.
+    fn name(self) -> &'static str {
+        match self {
+            Self::InitPlace => "builtin::init_place",
+        }
+    }
+
+    /// How many arguments it takes.
+    fn arity(self) -> usize {
+        match self {
+            Self::InitPlace => 2,
+        }
+    }
+}
+
+/// The builtin `path` names, if it names one.
+///
+/// Matched on the whole path rather than the last segment, so an ordinary function called
+/// `init_place` is unaffected, and a `builtin` module a user happens to define shadows nothing —
+/// there is no such module for it to collide with.
+fn builtin_for_path(path: &ast::Path) -> Option<Builtin> {
+    match &path.segments[..] {
+        [(namespace, _), (name, _)] if namespace.as_str() == "builtin" => match name.as_str() {
+            "init_place" => Some(Builtin::InitPlace),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
