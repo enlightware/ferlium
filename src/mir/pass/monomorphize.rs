@@ -50,6 +50,7 @@ use crate::{
         FunctionId, LocalFunctionId, ModuleEnv, ModuleId, TraitDictionaryId, id::Id,
         stable_generated_name_hash, unique_generated_name,
     },
+    std::value::type_has_static_layout,
     types::{
         r#type::Type, type_like::TypeLike, type_mapper::BitmapInstantiationMapper,
         type_mapper::TypeMapper, type_scheme::TypeScheme,
@@ -271,7 +272,64 @@ pub(crate) fn specialize<Ty: TypeLike>(
     map_types(&mut edit, &mut mapper);
     bind_dictionaries(&mut edit, dictionaries);
     demote_infallible_invokes(&mut edit);
+    drop_redundant_layout_witnesses(&mut edit, env);
     edit.finish(env)
+}
+
+/// Drops a `Value` dictionary layout witness that substitution made redundant.
+///
+/// `alloca` and `move` carry one when the value's size is only known at run time — a type that is,
+/// or embeds, a bare type variable. Substituting a concrete instantiation is precisely what makes
+/// such a type statically sized, so the witness the generic body needed is dead weight here: for
+/// this type the emitter would have chosen the static form. Left in place it is a live use of the
+/// dictionary, and a backend would honour it and emit a dynamically-sized allocation for a value
+/// whose size it knows. The MIR interpreter ignores it, so this changes no behaviour today.
+fn drop_redundant_layout_witnesses(edit: &mut FunctionEdit, env: ModuleEnv<'_>) {
+    for block_id in edit.blocks().collect::<Vec<_>>() {
+        let block = edit.block_mut(block_id);
+        let operations = block
+            .operations
+            .iter_mut()
+            .chain(match &mut block.terminator.kind {
+                TerminatorKind::Invoke { operation, .. } => Some(operation),
+                _ => None,
+            });
+        for operation in operations {
+            let span = operation.span;
+            match &operation.kind {
+                // The operand is present exactly in the dynamic form; the type it describes is the
+                // operation's own.
+                OperationKind::Alloca { ty } => {
+                    if operation.operands.len() == 1 && type_has_static_layout(*ty, span, &env) {
+                        operation.operands = Box::new([]);
+                    }
+                }
+                // `move` records no type, so the witnessed type is read back from the `Value<T>`
+                // dictionary that witnesses it.
+                OperationKind::Move => {
+                    if operation.operands.len() == 3
+                        && let Some(ty) = witnessed_type(&operation.operands[2], env)
+                        && type_has_static_layout(ty, span, &env)
+                    {
+                        let source = operation.operands[0].clone();
+                        let destination = operation.operands[1].clone();
+                        operation.operands = Box::new([source, destination]);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// The type a `Value<T>` dictionary operand witnesses the layout of.
+fn witnessed_type(witness: &mir::Value, env: ModuleEnv<'_>) -> Option<Type> {
+    let mir::Value::Dictionary(id) = witness else {
+        return None;
+    };
+    let module = env.module_by_id(id.module_id)?;
+    let key = module.get_impl_trait_key_by_id(id.impl_id)?;
+    key.input_tys().first().copied()
 }
 
 /// Turns an `invoke` whose operation substitution made source-infallible back into an ordinary
@@ -880,6 +938,34 @@ mod tests {
             module.contains("fn twice_it#spec:[int]"),
             "and the specialization it came from must be named after its instantiation:\n{module}"
         );
+    }
+
+    /// A generic body allocates and moves dynamically-sized storage through a `Value` dictionary
+    /// witnessing the layout its type variable hides. Substitution is what makes that type
+    /// statically sized, so the witness must go with it — otherwise the specialization keeps a live
+    /// use of the dictionary, and a backend would emit a dynamically-sized allocation for a value
+    /// whose size it knows.
+    #[test]
+    fn substitution_drops_the_layout_witnesses_it_makes_redundant() {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        // `swap` is generic in the element type, so its temporary is allocated through a witness.
+        let module = session.emit_mir(
+            "wit",
+            "fn swap(a, i, j) { let temp = a[i]; a[i] = a[j]; a[j] = temp }\n\
+             fn swap_ints(a: [int], i: int, j: int) { let mut t = a; swap(t, i, j); t }",
+        );
+        assert!(
+            module.contains("#spec:"),
+            "the generic callee must specialize, or this test proves nothing:\n{module}"
+        );
+        for specialized in module.split("// specialization of ").skip(1) {
+            assert!(
+                !specialized.contains("using dict"),
+                "a specialized body must carry no layout witness for a concrete type:\n\
+                 {specialized}"
+            );
+        }
     }
 
     /// Substituting effects changes *control flow*, not only annotations.
