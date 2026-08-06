@@ -154,18 +154,14 @@ impl Specializations {
             return *existing;
         }
         let name = self.name_for(&key, body, env);
-        let mut specialized = FunctionEdit::new(specialize(
-            body,
-            scheme,
-            &key.instantiation,
-            &key.dictionaries,
-            env,
-        ));
+        // Allocated before the body is built, because a recursive callee has to be able to name
+        // itself: see `redirect_recursion`.
+        let id = LocalFunctionId::from_index(self.first_index + self.created.len());
+        let mut specialized = FunctionEdit::new(specialize(body, scheme, &key, id, env));
         // The body carries its original's name until renamed, which would print two functions under
         // one header in a MIR dump.
         specialized.set_name(name);
         let specialized = specialized.finish(env);
-        let id = LocalFunctionId::from_index(self.first_index + self.created.len());
         self.raw.push(specialized.clone());
         self.created.push(Specialization {
             original: key.callee,
@@ -260,22 +256,65 @@ impl Specializations {
 pub(crate) fn specialize<Ty: TypeLike>(
     body: &Function,
     scheme: &TypeScheme<Ty>,
-    instantiation: &Instantiation,
-    dictionaries: &[TraitDictionaryId],
+    key: &SpecializationKey,
+    own_id: LocalFunctionId,
     env: ModuleEnv<'_>,
 ) -> Function {
-    let subst = instantiation.substitution(scheme);
+    let subst = key.instantiation.substitution(scheme);
     // Bitmap rather than simple: one mapper is reused across every type in the body, which is what
     // makes its `affects_type` constant-time construction cost pay for itself.
     let mut mapper = BitmapInstantiationMapper::new(&subst);
 
     let mut edit = FunctionEdit::new(body.clone());
     map_types(&mut edit, &mut mapper);
-    bind_dictionaries(&mut edit, dictionaries);
+    bind_dictionaries(&mut edit, &key.dictionaries);
+    redirect_recursion(&mut edit, key.callee, own_id);
     demote_infallible_invokes(&mut edit);
     drop_redundant_layout_witnesses(&mut edit, env);
     elide_trivial_ownership_operations(&mut edit, env);
     edit.finish(env)
+}
+
+/// Points a specialized body's recursive calls at the specialization rather than the original.
+///
+/// **A recursive call records no instantiation**, so nothing else can redirect it: type inference
+/// types a call within the defining group monomorphically, against the function's own variables,
+/// rather than instantiating its scheme — there is no `FnInstData` to carry down. Left alone, a
+/// specialization recurses into the generic original and every level below the first runs
+/// unspecialized, which for a recursive algorithm is nearly all of them.
+///
+/// The redirection is sound for the same reason the instantiation is missing: Hindley-Milner cannot
+/// infer polymorphic recursion, so a self-call is necessarily at the caller's own instantiation —
+/// the one this body was specialized at. Only calls carrying *no* instantiation are redirected; one
+/// that carries an explicit instantiation is an ordinary call site, and
+/// [`specialize_call_sites`] resolves it through the cache like any other.
+///
+/// The specialization keeps its original's signature, so the operands need no adjustment.
+fn redirect_recursion(edit: &mut FunctionEdit, original: FunctionId, own_id: LocalFunctionId) {
+    let own = mir::Value::Function(FunctionId {
+        module: original.module,
+        function: own_id,
+    });
+    for block_id in edit.blocks().collect::<Vec<_>>() {
+        let block = edit.block_mut(block_id);
+        let operations = block
+            .operations
+            .iter_mut()
+            .chain(match &mut block.terminator.kind {
+                TerminatorKind::Invoke { operation, .. } => Some(operation),
+                _ => None,
+            });
+        for operation in operations {
+            if let OperationKind::Call {
+                instantiation: None,
+                ..
+            } = &operation.kind
+                && operation.operands[0] == mir::Value::Function(original)
+            {
+                operation.operands[0] = own.clone();
+            }
+        }
+    }
 }
 
 /// Rewrites the semantic ownership operations that substitution made unnecessary.
@@ -731,23 +770,16 @@ mod tests {
     /// A generic callee, its declared scheme, and how one concrete call site instantiated it —
     /// everything specialization consumes, harvested from real lowering rather than hand-built.
     struct Site {
-        callee: Function,
+        body: Function,
         scheme: crate::types::type_scheme::TypeScheme<crate::types::r#type::FnType>,
-        instantiation: Instantiation,
-        /// The constant dictionaries the call passes as `@extra` operands. Empty if any of them is
-        /// not constant, which is the caller forwarding evidence of its own.
-        dictionaries: Vec<TraitDictionaryId>,
+        key: SpecializationKey,
     }
 
     impl Site {
+        /// Specializes as the table would, at the first identity past the module's own functions.
         fn specialize(&self, env: ModuleEnv<'_>) -> Function {
-            specialize(
-                &self.callee,
-                &self.scheme,
-                &self.instantiation,
-                &self.dictionaries,
-                env,
-            )
+            let own_id = LocalFunctionId::from_index(1000);
+            specialize(&self.body, &self.scheme, &self.key, own_id, env)
         }
     }
 
@@ -827,10 +859,13 @@ mod tests {
                     .ty_scheme
                     .clone();
                 return Site {
-                    callee: body(session, module, callee_name).clone(),
+                    body: body(session, module, callee_name).clone(),
                     scheme,
-                    instantiation,
-                    dictionaries,
+                    key: SpecializationKey {
+                        callee: *callee,
+                        instantiation,
+                        dictionaries,
+                    },
                 };
             }
         }
@@ -891,7 +926,7 @@ mod tests {
         );
         let site = site(&session, module, "use_it", "twice_it");
         assert!(
-            !free_ty_vars(&site.callee, session.module_env()).is_empty(),
+            !free_ty_vars(&site.body, session.module_env()).is_empty(),
             "twice_it must be generic before specialization, or this test proves nothing"
         );
 
@@ -916,11 +951,11 @@ mod tests {
         );
         let site = site(&session, module, "use_it", "twice_it");
         assert!(
-            !site.dictionaries.is_empty(),
+            !site.key.dictionaries.is_empty(),
             "the call must pass constant evidence, or this test proves nothing"
         );
         let dictionary_parameters: Vec<mir::ParameterId> = site
-            .callee
+            .body
             .parameters()
             .iter()
             .enumerate()
@@ -928,7 +963,7 @@ mod tests {
             .map(|(index, _)| mir::ParameterId::from_index(index))
             .collect();
         assert!(
-            uses_any_parameter(&site.callee, &dictionary_parameters),
+            uses_any_parameter(&site.body, &dictionary_parameters),
             "twice_it must read its evidence, or this test proves nothing"
         );
 
@@ -1035,6 +1070,33 @@ mod tests {
         }
     }
 
+    /// A recursive call records no instantiation — inference types a call within the defining group
+    /// monomorphically rather than instantiating the scheme — so nothing else can redirect it. Left
+    /// alone a specialization recurses into the generic original, and for a recursive algorithm
+    /// every level below the first runs unspecialized.
+    #[test]
+    fn a_specialization_recurses_into_itself() {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        let module = session.emit_mir(
+            "rec",
+            "fn count_down(a, n) { if n <= 0 { a } else { count_down(a, n - 1) } }\n\
+             fn run(n: int) -> int { count_down(7, n) }",
+        );
+        let specialized = module
+            .split("// specialization of ")
+            .nth(1)
+            .expect("count_down must specialize");
+        assert!(
+            specialized.contains("count_down#spec:"),
+            "the recursive call must name the specialization:\n{specialized}"
+        );
+        assert!(
+            !specialized.contains("call rec::count_down("),
+            "and must not fall back into the generic original:\n{specialized}"
+        );
+    }
+
     /// Substituting effects changes *control flow*, not only annotations.
     ///
     /// A call whose effects are a variable is conservatively source-fallible, so lowering gives it
@@ -1131,13 +1193,13 @@ mod tests {
                         continue; // the caller forwards evidence of its own
                     };
 
-                    specialize(
-                        body,
-                        scheme,
-                        instantiation,
-                        &dictionaries,
-                        session.module_env(),
-                    );
+                    let key = SpecializationKey {
+                        callee: *callee,
+                        instantiation: instantiation.as_ref().clone(),
+                        dictionaries,
+                    };
+                    let own_id = LocalFunctionId::from_index(artifacts.bodies().len());
+                    specialize(body, scheme, &key, own_id, session.module_env());
                     specialized += 1;
                 }
             }
@@ -1179,7 +1241,12 @@ mod tests {
         );
         let inner = site(&session, module, "forwarding", "twice_it");
         assert!(
-            inner.instantiation.ty_args.iter().any(Type::is_variable),
+            inner
+                .key
+                .instantiation
+                .ty_args
+                .iter()
+                .any(Type::is_variable),
             "the forwarding call must record a variable, or this test proves nothing"
         );
 
