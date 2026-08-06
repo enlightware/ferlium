@@ -872,9 +872,9 @@ mod tests {
             "the generic callee must not survive as a call:\n{caller}"
         );
         assert!(
-            caller.contains("dict_entry 0 from dict(std::Num<std::int>)"),
-            "its body must arrive inlined, reading evidence from a constant rather than a \
-             parameter:\n{caller}"
+            caller.contains("call std::Num<std::int>::add"),
+            "its body must arrive inlined, with the evidence it read resolved all the way to a \
+             direct call on the concrete impl:\n{caller}"
         );
         assert!(
             module.contains("fn twice_it#spec:[int]"),

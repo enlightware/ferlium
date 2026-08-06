@@ -41,9 +41,13 @@ use crate::{
 
 /// Removes dead storage scaffolding, returning a rewritten function if anything was removed.
 pub(crate) fn remove_dead_storage(func: &Function, env: ModuleEnv<'_>) -> Option<Function> {
-    let dead = dead_allocas(func);
-    if dead.allocas.is_empty() {
+    let mut dead = dead_allocas(func);
+    let dead_entries = unread_dict_entries(func);
+    if dead.allocas.is_empty() && dead_entries.is_empty() {
         return None;
+    }
+    for (block, index) in dead_entries {
+        dead.operations.entry(block).or_default().insert(index);
     }
 
     let mut edit = FunctionEdit::new(func.clone());
@@ -63,6 +67,61 @@ pub(crate) fn remove_dead_storage(func: &Function, env: ModuleEnv<'_>) -> Option
     // keeps the pool an inventory of what the function actually uses.
     edit.prune_constants();
     Some(edit.finish(env))
+}
+
+/// The `dict_entry` operations nothing reads any more.
+///
+/// **Devirtualization is what makes these dead.** It rewrites a call through a resolved dictionary
+/// entry to name the callee directly, which removes the only use the entry usually had — so a
+/// successful devirtualization leaves an operation computing a place no one reads. Over
+/// `sudoku.fer` that is 86 of the 88 entries taken from a constant dictionary.
+///
+/// Removing one is safe without any of the analysis the `alloca` rule needs: `dict_entry` reads
+/// evidence rather than storage, has no side effect, and yields a *place* rather than an owned
+/// value — so an unread one discharges no drop obligation and consumes nothing. One pass suffices
+/// because its operand is a dictionary or a parameter, never another entry's result, so removing one
+/// can never make another dead.
+fn unread_dict_entries(func: &Function) -> Vec<(BlockId, usize)> {
+    let mut used: FxHashSet<ValueId> = FxHashSet::default();
+    let mut note = |operand: &mir::Value| {
+        if let mir::Value::Register(id) = operand {
+            used.insert(*id);
+        }
+    };
+    for block in func.blocks() {
+        let basic_block = func.block(block);
+        for operation in basic_block.operations() {
+            if matches!(operation.kind, OperationKind::DictEntry { .. }) {
+                // Its own operand, not its result: an entry never reads another entry.
+                continue;
+            }
+            operation.operands.iter().for_each(&mut note);
+        }
+        match &basic_block.terminator().kind {
+            TerminatorKind::Invoke { operation, .. } => {
+                operation.operands.iter().for_each(&mut note);
+            }
+            TerminatorKind::CondBr { condition, .. } => note(condition),
+            TerminatorKind::Yield { place, .. } => note(place),
+            TerminatorKind::Goto { .. }
+            | TerminatorKind::Return
+            | TerminatorKind::PropagateError
+            | TerminatorKind::FailureDuringCleanup => {}
+        }
+    }
+
+    let mut dead = Vec::new();
+    for block in func.blocks() {
+        for (index, operation) in func.block(block).operations().iter().enumerate() {
+            if matches!(operation.kind, OperationKind::DictEntry { .. })
+                && let Some(result) = operation.result_id()
+                && !used.contains(&result)
+            {
+                dead.push((block, index));
+            }
+        }
+    }
+    dead
 }
 
 /// The `alloca`s that can go, and the operations to remove with them.
@@ -171,5 +230,35 @@ mod tests {
         let stores = main.lines().filter(|line| line.contains("store ")).count();
         assert_eq!(stores, 1, "only the result store must remain:\n{main}");
         assert!(main.contains("to %p0"), "{main}");
+    }
+
+    /// Devirtualization takes a dictionary entry's only reader, leaving an operation that computes
+    /// a place nothing looks at. Over `sudoku.fer` that was 86 of the 88 entries read from a
+    /// constant dictionary, which is what motivated the rule.
+    #[test]
+    fn a_dictionary_entry_nothing_reads_is_removed() {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        let optimized = session.emit_mir(
+            "dce",
+            "fn twice_it(x) { x + x }\n\
+             fn use_it(n: int) -> int { twice_it(n) }",
+        );
+        let caller = optimized
+            .split("fn use_it")
+            .nth(1)
+            .expect("the module defines use_it")
+            .split("\nfn ")
+            .next()
+            .expect("use_it has a body");
+
+        assert!(
+            caller.contains("call std::Num<std::int>::add"),
+            "the call must have been devirtualized, or there is no dead entry to remove:\n{caller}"
+        );
+        assert!(
+            !caller.contains("dict_entry"),
+            "the entry it no longer reads must be gone:\n{caller}"
+        );
     }
 }
