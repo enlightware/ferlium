@@ -712,19 +712,29 @@ fn specialization_for(
     Some(specializations.get_or_create(key, &scheme, &body, env))
 }
 
-/// Whether a specialized copy of this body would be better than the original, judged from the body
+/// Whether a specialized copy of this body could be better than the original, judged from the body
 /// alone.
 ///
-/// **It must have a dictionary parameter that the body actually reads.** Binding that turns a
-/// `dict_entry` on a parameter into one on a constant, which folding resolves to a known function —
-/// the devirtualization that is specialization's payoff today.
+/// **It must have a dictionary parameter that the body actually reads.** A necessary condition, not
+/// a benefit estimate: what it proves is that the copy could differ from the original at all, since
+/// everything substitution buys is downstream of a dictionary read. It says nothing about how much,
+/// which is the cost model this pass still lacks.
 ///
-/// Substituting the types of a callee with *no* evidence parameters looks worth it too: the copy
-/// would be concrete, and a concrete body is one the inliner accepts. It is not, yet, and the reason
-/// is worth stating because it is the next step rather than an oversight. Every pass resolves a
-/// callee's body from the **raw** stage, so that what it decides never depends on the order
-/// functions are optimized in — and a specialization exists only in the optimized stage. Until a
-/// pass can reach one, such a copy would be created, verified, optimized and called by nobody.
+/// Necessary is weaker than it looks, because a read pays off three different ways and only the
+/// first is a devirtualization:
+///
+/// - a `dict_entry` feeding a call becomes a constant, and folding resolves it to a known function;
+/// - a `Value::clone` or `Value::drop` through the dictionary becomes a `memcpy` or nothing, once
+///   the concrete type is known to own nothing;
+/// - a layout witness goes, once the concrete type has a size the backend can see.
+///
+/// Narrowing this to the first — requiring a call whose callee is not already statically known —
+/// looks right against the standard library, where it rejects `array_ensure_capacity` and
+/// `array_append` at two instantiations each, 274 of 381 specialized operations that resolve nothing
+/// between them. It is wrong: `swap` has no indirect call and specializing it still sheds every
+/// `clone`, `drop` and `dict_entry` in the body. Two tests in this module cover exactly that, and
+/// they are the reason the narrowing is not here. Pricing the other two payoffs needs a benefit
+/// measure that counts calls and dictionary reads removed, not indirect calls resolved.
 fn worth_specializing(body: &Function, dictionaries: &[TraitDictionaryId]) -> bool {
     if dictionaries.is_empty() {
         return false;
@@ -741,16 +751,28 @@ fn worth_specializing(body: &Function, dictionaries: &[TraitDictionaryId]) -> bo
         // arise, and not one to guess at.
         return false;
     }
-    let mut read = false;
-    let mut edit = FunctionEdit::new(body.clone());
-    edit.visit_operands_mut(|operand| {
-        if let mir::Value::Parameter(id) = operand
-            && parameters.contains(id)
-        {
-            read = true;
+
+    let mut reads_dictionary = false;
+    for block in body.blocks() {
+        let block = body.block(block);
+        let operations = block
+            .operations()
+            .iter()
+            .chain(match &block.terminator().kind {
+                TerminatorKind::Invoke { operation, .. } => Some(operation),
+                _ => None,
+            });
+        for operation in operations {
+            for operand in operation.operands.iter() {
+                if let mir::Value::Parameter(id) = operand
+                    && parameters.contains(id)
+                {
+                    reads_dictionary = true;
+                }
+            }
         }
-    });
-    read
+    }
+    reads_dictionary
 }
 
 /// Rewrites a recorded instantiation, which is a list of types and effects like any other.
@@ -1227,6 +1249,40 @@ mod tests {
             "specialized only {specialized} std call sites; the population should be in the \
              hundreds, so this is a lowering or harvesting regression rather than a small library"
         );
+    }
+
+    /// Every specialization the report prices must have been priced against a body it found.
+    ///
+    /// The comparison reaches for the original in *its own* module and falls back to zero when there
+    /// is none, which is right for a report that must never bring a session down — and is also how
+    /// the instrument would fail silently. A missing baseline reads as "removed nothing", so a
+    /// lookup that quietly stopped working would report the whole population as inert and invite
+    /// exactly the wrong conclusion about specialization's value. Asserted over std because
+    /// cross-module specialization is what makes the lookup non-trivial: the original of a
+    /// specialization in a user module lives in `std`, not where the copy does.
+    #[test]
+    fn every_specialization_is_priced_against_a_body_that_was_found() {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        let (std_id, _) = session
+            .modules()
+            .get_by_path(&Path::single_str("std"))
+            .expect("the standard library is always registered");
+        let report = session.optimization_report(std_id);
+        assert!(
+            !report.specializations.is_empty(),
+            "std must specialize something, or this test proves nothing"
+        );
+        for specialization in &report.specializations {
+            assert!(
+                specialization.size > 0 && specialization.original_size > 0,
+                "{} is priced at {} operations against an original of {}, so the original was \
+                 not found and every payoff figure for it is meaningless",
+                specialization.name,
+                specialization.size,
+                specialization.original_size,
+            );
+        }
     }
 
     /// Whether any operand of `func` names one of `parameters`.

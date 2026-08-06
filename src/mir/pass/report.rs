@@ -28,11 +28,16 @@
 
 use std::fmt;
 
+use ustr::Ustr;
+
 use crate::{
-    Location,
-    compiler::CompilerSession,
+    Location, MirOptimization,
+    compiler::{CompilerSession, Specialization},
     format::FormatWith,
-    mir::{Function, OperationKind, const_eval::NotFoldable, terminator::TerminatorKind},
+    mir::{
+        self, Function, Operation, OperationKind, const_eval::NotFoldable,
+        terminator::TerminatorKind,
+    },
     module::{FunctionId, ModuleEnv, ModuleId},
 };
 
@@ -88,6 +93,83 @@ impl Remark {
     }
 }
 
+/// One body the optimizer specialized, priced against what specializing it achieved.
+///
+/// Unlike a [`Remark`], this reports an optimization the optimizer *took*. It is here because
+/// specialization is the one pass that trades code size for anything: folding and inlining are
+/// bounded by budgets stated up front, while a specialization is a whole extra body, kept forever,
+/// justified only by what substituting its types removed. Cost and payoff side by side are what a
+/// cost model would have to weigh, and neither is otherwise observable — a specialized body is in
+/// no source file and, deliberately, in neither stage's paired tables.
+///
+/// The payoff is three counts rather than one because substitution pays three ways, and a
+/// specialization can win on any of them alone. See [`SpecializationRemark::payoff`].
+pub struct SpecializationRemark {
+    /// The generated name, which carries the instantiation where it was short enough to render.
+    pub name: Ustr,
+    /// The function this was specialized from.
+    pub original: FunctionId,
+    /// Operations in the original's raw body: what asking for this copy duplicated, and the only
+    /// size a cost model could consult, since the decision is taken against the raw stage.
+    pub original_size: usize,
+    /// Operations in the original after *it* was optimized, where that is known.
+    ///
+    /// Only a diagnostic, and deliberately not a candidate predictor — it is unavailable at the
+    /// moment of the decision, and depends on optimization order besides. It is here to separate
+    /// two stories that `size` alone conflates: a specialization that is large because its body
+    /// genuinely is, and one that is large because being concrete made it a target the inliner
+    /// then filled. Only the second would be answered by re-pricing inlining rather than
+    /// specialization.
+    pub original_optimized_size: Option<usize>,
+    /// Operations in the specialized body, after it was itself optimized. The real cost, since
+    /// substitution deletes the clones, drops and layout witnesses it makes redundant.
+    pub size: usize,
+    /// Calls with no statically known callee in the original's raw body.
+    pub indirect_before: usize,
+    /// Calls with no statically known callee left in the specialized body. The drop from
+    /// `indirect_before` is the devirtualization actually realized, rather than the one
+    /// `worth_specializing` predicted from the presence of a dictionary read.
+    pub indirect_after: usize,
+    /// Calls of any kind in the original's raw body.
+    pub calls_before: usize,
+    /// Calls of any kind left in the specialized body.
+    ///
+    /// Reported next to the indirect counts because they answer different questions and a
+    /// specialization can win on either. Devirtualizing a call leaves the count alone; turning a
+    /// `Value::clone` into a `memcpy` lowers it without resolving anything. Reading only one of them
+    /// is how a specialization that pays its way looks like dead weight.
+    pub calls_after: usize,
+    /// Dictionary-reading operations in the original's raw body.
+    pub dictionary_reads_before: usize,
+    /// Dictionary-reading operations left in the specialized body — the third payoff, and the one
+    /// that catches a dropped layout witness, which changes neither call count.
+    pub dictionary_reads_after: usize,
+}
+
+impl SpecializationRemark {
+    /// Indirect calls this specialization resolved.
+    ///
+    /// Saturating rather than signed: a specialization that inlined a callee can end up with more
+    /// indirect calls than its original had, and "resolved none" is the honest reading of that.
+    pub fn resolved(&self) -> usize {
+        self.indirect_before.saturating_sub(self.indirect_after)
+    }
+
+    /// Everything this specialization removed that not knowing the type had cost: calls that are
+    /// gone, calls that are no longer indirect, and dictionary reads that are gone.
+    ///
+    /// A deliberately flat sum of three things a backend would weigh very differently. It exists to
+    /// separate a specialization that bought *nothing* from one that bought *something* — which is
+    /// the distinction a refusal can be built on — and not to rank the ones that did.
+    pub fn payoff(&self) -> usize {
+        self.calls_before.saturating_sub(self.calls_after)
+            + self.resolved()
+            + self
+                .dictionary_reads_before
+                .saturating_sub(self.dictionary_reads_after)
+    }
+}
+
 /// What optimizing a module achieved, and what it declined.
 ///
 /// The two counts are stated rather than a single "folded" figure, because inlining copies a
@@ -101,6 +183,11 @@ pub struct OptimizationReport {
     /// pass could take carries one remark from each.
     pub call_sites_after: usize,
     pub remarks: Vec<Remark>,
+    /// Every body the optimizer specialized, in the order it created them.
+    ///
+    /// These are counted in neither figure above, which pair the two stages and so cover only what
+    /// the source declared. A specialization exists in the optimized stage alone.
+    pub specializations: Vec<SpecializationRemark>,
 }
 
 impl OptimizationReport {
@@ -127,6 +214,7 @@ pub(crate) fn build(
     module_id: ModuleId,
     raw: &[Option<Function>],
     optimized: &[Option<Function>],
+    specializations: &[Specialization],
     env: ModuleEnv<'_>,
 ) -> OptimizationReport {
     let mut call_sites_before = 0usize;
@@ -182,28 +270,98 @@ pub(crate) fn build(
         call_sites_before,
         call_sites_after,
         remarks,
+        specializations: specializations
+            .iter()
+            .map(|specialization| specialization_remark(session, specialization))
+            .collect(),
     }
+}
+
+/// Prices one specialization against the original it was copied from.
+///
+/// The original is read from *its own* module's raw stage, which need not be the module being
+/// reported on: cross-module specialization is what puts a `std` generic in a user module's table.
+/// A missing original leaves the sizes at zero rather than panicking — the report is opt-in output,
+/// and must not be the thing that brings a session down.
+fn specialization_remark(
+    session: &CompilerSession,
+    specialization: &Specialization,
+) -> SpecializationRemark {
+    let body_of = |stage| {
+        session
+            .mir_artifacts_for(specialization.original.module, stage)
+            .and_then(|artifacts| artifacts.get(specialization.original.function).cloned())
+    };
+    let raw = body_of(MirOptimization::Disabled);
+    let optimized = body_of(MirOptimization::Enabled);
+    // The `_before` figures come from the *optimized* original wherever there is one, because the
+    // question is what specializing bought over what the call site would otherwise have reached —
+    // and what it would otherwise have reached is a body the optimizer had already been over.
+    // Measuring against the raw original instead credits specialization with every fold and inline
+    // the original got anyway, which is most of the difference on a body of any size.
+    let baseline = optimized.as_ref().or(raw.as_ref());
+    SpecializationRemark {
+        name: specialization.name,
+        original: specialization.original,
+        original_size: raw.as_ref().map_or(0, super::function_size),
+        original_optimized_size: optimized.as_ref().map(super::function_size),
+        size: super::function_size(&specialization.body),
+        indirect_before: baseline.map_or(0, indirect_calls),
+        indirect_after: indirect_calls(&specialization.body),
+        calls_before: baseline.map_or(0, call_sites),
+        calls_after: call_sites(&specialization.body),
+        dictionary_reads_before: baseline.map_or(0, dictionary_reads),
+        dictionary_reads_after: dictionary_reads(&specialization.body),
+    }
+}
+
+/// Every `call` operation of a function, including one in an `invoke` terminator.
+fn calls(func: &Function) -> impl Iterator<Item = &Operation> {
+    func.blocks().flat_map(|block| {
+        let block = func.block(block);
+        block
+            .operations()
+            .iter()
+            .chain(match &block.terminator().kind {
+                TerminatorKind::Invoke { operation, .. } => Some(operation),
+                _ => None,
+            })
+            .filter(|operation| matches!(operation.kind, OperationKind::Call { .. }))
+    })
 }
 
 /// Counts the `call` operations of a function, including one in an `invoke` terminator.
 fn call_sites(func: &Function) -> usize {
+    calls(func).count()
+}
+
+/// Counts the calls whose callee is not statically known — what devirtualization removes.
+fn indirect_calls(func: &Function) -> usize {
+    calls(func)
+        .filter(|operation| !matches!(operation.operands[0], mir::Value::Function(_)))
+        .count()
+}
+
+/// Counts the operations that read a trait dictionary.
+///
+/// The residue of not knowing a type: every entry read that a call goes through, and every layout
+/// witness an allocation consults. Substitution is what removes them, and their count is the one
+/// benefit measure that covers all three of specialization's payoffs rather than only
+/// devirtualization — a `Value::clone` that becomes a `memcpy` shows up here and nowhere else.
+fn dictionary_reads(func: &Function) -> usize {
     func.blocks()
-        .map(|block| {
+        .flat_map(|block| {
             let block = func.block(block);
-            let in_operations = block
+            block
                 .operations()
                 .iter()
-                .filter(|operation| matches!(operation.kind, OperationKind::Call { .. }))
-                .count();
-            let in_terminator = match &block.terminator().kind {
-                TerminatorKind::Invoke { operation, .. } => {
-                    usize::from(matches!(operation.kind, OperationKind::Call { .. }))
-                }
-                _ => 0,
-            };
-            in_operations + in_terminator
+                .chain(match &block.terminator().kind {
+                    TerminatorKind::Invoke { operation, .. } => Some(operation),
+                    _ => None,
+                })
         })
-        .sum()
+        .filter(|operation| matches!(operation.kind, OperationKind::DictEntry { .. }))
+        .count()
 }
 
 impl FormatWith<ModuleEnv<'_>> for OptimizationReport {
@@ -213,6 +371,43 @@ impl FormatWith<ModuleEnv<'_>> for OptimizationReport {
             "{} call sites before optimization, {} after",
             self.call_sites_before, self.call_sites_after
         )?;
+        if !self.specializations.is_empty() {
+            let operations: usize = self.specializations.iter().map(|s| s.size).sum();
+            let inert = self
+                .specializations
+                .iter()
+                .filter(|s| s.payoff() == 0)
+                .count();
+            writeln!(
+                f,
+                "  {} specializations, {operations} operations, {inert} buying nothing",
+                self.specializations.len()
+            )?;
+            // Costliest per unit of payoff first: a cost model has to reject from this end, so this
+            // is the order in which to read the list.
+            let mut ranked: Vec<&SpecializationRemark> = self.specializations.iter().collect();
+            ranked.sort_by_key(|s| std::cmp::Reverse(s.size / s.payoff().max(1)));
+            for s in ranked {
+                let original = match s.original_optimized_size {
+                    Some(optimized) => format!("{} raw, {optimized} optimized", s.original_size),
+                    None => format!("{} raw", s.original_size),
+                };
+                writeln!(
+                    f,
+                    "    {:>6}  {} ops (original {original}), \
+                     calls {}->{} ({} indirect->{}), dict reads {}->{}",
+                    s.size / s.payoff().max(1),
+                    s.size,
+                    s.calls_before,
+                    s.calls_after,
+                    s.indirect_before,
+                    s.indirect_after,
+                    s.dictionary_reads_before,
+                    s.dictionary_reads_after,
+                )?;
+                writeln!(f, "            {}", s.name)?;
+            }
+        }
         if self.remarks.is_empty() {
             writeln!(f, "  everything folded")?;
             return Ok(());

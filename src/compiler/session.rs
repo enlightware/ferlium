@@ -1268,7 +1268,14 @@ impl CompilerSession {
             .expect("optimized MIR must be prepared");
         let module = self.expect_fresh_module(module_id);
         let env = ModuleEnv::new(module, self.raw_modules());
-        crate::mir::pass::report::build(self, module_id, raw.bodies(), optimized.bodies(), env)
+        crate::mir::pass::report::build(
+            self,
+            module_id,
+            raw.bodies(),
+            optimized.bodies(),
+            optimized.specializations(),
+            env,
+        )
     }
 
     /// Returns the entry for module_id, or panic if not found.
