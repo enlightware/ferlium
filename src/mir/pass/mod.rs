@@ -38,6 +38,7 @@ pub(crate) mod dataflow;
 pub(crate) mod dce;
 pub(crate) mod fold;
 pub(crate) mod inline;
+pub(crate) mod monomorphize;
 pub mod report;
 
 use crate::{

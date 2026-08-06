@@ -113,6 +113,19 @@ impl FunctionEdit {
         &self.parameters
     }
 
+    /// The parameters, for a pass that rewrites their types. Their count and kinds are part of the
+    /// function's calling convention and must not change under an edit.
+    pub(crate) fn parameters_mut(&mut self) -> &mut [Parameter] {
+        &mut self.parameters
+    }
+
+    /// The constant pool, for a pass that rewrites the *types* of existing entries. Adding one goes
+    /// through [`Self::add_constant`], which dedups; removing one is [`Self::prune_constants`],
+    /// which renumbers.
+    pub(crate) fn constants_mut(&mut self) -> &mut [Constant] {
+        &mut self.constants
+    }
+
     pub(crate) fn result_convention(&self) -> CallResultConvention {
         self.result_convention
     }

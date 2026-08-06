@@ -32,6 +32,7 @@
 
 use std::fmt;
 
+use itertools::Itertools;
 use ustr::Ustr;
 
 use crate::{
@@ -44,6 +45,9 @@ use crate::{
         effects::{EffType, Effect, PrimitiveEffect},
         r#trait::TraitDictionaryEntryIndex,
         r#type::{CallImplType, Type},
+        type_inference::substitution::InstSubst,
+        type_like::TypeLike,
+        type_scheme::TypeScheme,
     },
 };
 
@@ -636,9 +640,6 @@ pub enum SourceFallibility {
     FromOpenProjection,
 }
 
-/// The kind-specific metadata of a MIR operation.
-///
-/// Operands stay in [`Operation::operands`] so generic MIR traversals can inspect and rewrite
 /// How a call site instantiated a generic callee: the type and effect arguments its quantifiers
 /// stand for, positionally.
 ///
@@ -652,6 +653,42 @@ pub struct Instantiation {
     pub eff_args: Vec<EffType>,
 }
 
+impl Instantiation {
+    /// Builds the substitution taking the callee's quantifiers to what this call site instantiated
+    /// them at, in the callee's own variable numbering.
+    ///
+    /// The arguments are positional against `scheme`'s quantifiers, `eff_quantifiers` being a set
+    /// and so ordered the one way `TypeScheme`'s `Hash` impl orders it. Panics if the lengths
+    /// disagree: that is a lowering bug, and the MIR verifier reports it with the callee named.
+    pub fn substitution<Ty: TypeLike>(&self, scheme: &TypeScheme<Ty>) -> InstSubst {
+        assert_eq!(
+            self.ty_args.len(),
+            scheme.ty_quantifiers.len(),
+            "instantiation records {} type arguments for {} quantifiers",
+            self.ty_args.len(),
+            scheme.ty_quantifiers.len()
+        );
+        (
+            scheme
+                .ty_quantifiers
+                .iter()
+                .copied()
+                .zip(self.ty_args.iter().copied())
+                .collect(),
+            scheme
+                .eff_quantifiers
+                .iter()
+                .sorted()
+                .copied()
+                .zip(self.eff_args.iter().cloned())
+                .collect(),
+        )
+    }
+}
+
+/// The kind-specific metadata of a MIR operation.
+///
+/// Operands stay in [`Operation::operands`] so generic MIR traversals can inspect and rewrite
 /// them uniformly. This enum contains only metadata whose shape is specific to an operation.
 #[derive(Clone)]
 pub enum OperationKind {

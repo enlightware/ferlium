@@ -17,8 +17,6 @@ use std::collections::VecDeque;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use itertools::Itertools;
-
 use crate::{
     format::FormatWith,
     mir::{
@@ -1395,23 +1393,9 @@ impl<'a> Verifier<'a> {
             scheme.ty_quantifiers.len()
         );
 
-        // Rebuilt in the callee's own variable numbering, which is what the recorded arguments are
-        // positional against.
-        let subst = (
-            scheme
-                .ty_quantifiers
-                .iter()
-                .copied()
-                .zip(instantiation.ty_args.iter().copied())
-                .collect(),
-            scheme
-                .eff_quantifiers
-                .iter()
-                .sorted()
-                .copied()
-                .zip(instantiation.eff_args.iter().cloned())
-                .collect(),
-        );
+        // The same substitution monomorphization applies to the callee's body, so the two cannot
+        // disagree about what the recorded arguments mean.
+        let subst = instantiation.substitution(scheme);
         let substituted = scheme.ty.instantiate_simple(&subst);
         assert_eq!(
             substituted.args.len(),
