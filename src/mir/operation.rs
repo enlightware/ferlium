@@ -1145,17 +1145,26 @@ fn fmt_callee_and_args(
     write!(f, ")")
 }
 
-#[cfg(all(test, target_pointer_width = "64"))]
+#[cfg(test)]
 mod tests {
     use std::mem::size_of;
 
     use super::{Operation, OperationKind};
 
     #[test]
+    #[cfg(any(target_pointer_width = "32", target_pointer_width = "64"))]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     fn operation_representation_stays_compact() {
         // Boxing call-site signatures prevents the largest operation variant from inflating every
         // operation in a basic block.
         assert_eq!(size_of::<OperationKind>(), 24);
-        assert_eq!(size_of::<Operation>(), 56);
+        assert_eq!(
+            size_of::<Operation>(),
+            if cfg!(target_pointer_width = "64") {
+                56
+            } else {
+                48
+            }
+        );
     }
 }

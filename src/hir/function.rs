@@ -1181,15 +1181,17 @@ mod tests {
     fn observe_value(_: &Value) {}
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     fn argument_convention_stays_compact() {
         assert_eq!(
             size_of::<ArgConvention>(),
             1,
             "ArgConvention should remain a compact semantic classification"
         );
-        assert!(
-            size_of::<CallArgument<Elaborated>>() <= size_of::<usize>(),
-            "CallArgument should remain pointer-sized after removing the layout payload"
+        assert_eq!(
+            size_of::<CallArgument<Elaborated>>(),
+            8,
+            "CallArgument should remain one compact node ID plus its convention"
         );
     }
 

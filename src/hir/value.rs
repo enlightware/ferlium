@@ -736,11 +736,16 @@ mod tests {
     }
 
     /// `Value` is copied and moved constantly, so its width is worth pinning. The variant arm holds
-    /// a `Ustr` beside a niche-optimized `Option<Box<_>>`, which is exactly the 16 bytes
-    /// `Native`'s fat pointer already needs.
+    /// a `Ustr` beside a niche-optimized `Option<Box<_>>`, which is exactly the two words
+    /// `Native`'s fat pointer already needs. The enum adds one more word on both supported pointer
+    /// widths.
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     fn a_value_is_no_wider_than_its_fat_pointer_arm() {
-        assert_eq!(std::mem::size_of::<Value>(), 24);
+        assert_eq!(
+            std::mem::size_of::<Value>(),
+            3 * std::mem::size_of::<usize>()
+        );
     }
 
     /// A case carrying nothing stores no payload at all — the point of holding the tag outside the
