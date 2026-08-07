@@ -31,7 +31,7 @@ use rustc_hash::FxHashMap;
 
 use crate::{
     mir::{self, Function, OperationKind, ParameterKind, terminator::TerminatorKind},
-    module::{LocalFunctionId, ModuleEnv, ModuleId, id::Id},
+    module::{FunctionId, LocalFunctionId, ModuleEnv, ModuleId, id::Id},
     types::r#type::CallResultConvention,
 };
 
@@ -55,6 +55,7 @@ pub(crate) enum ResultProvenance {
 }
 
 /// One module's result provenances, indexed like its function table.
+#[derive(Clone, Default)]
 pub(crate) struct Provenances {
     of: Vec<ResultProvenance>,
 }
@@ -65,10 +66,13 @@ impl Provenances {
     /// A component of more than one function is a recursive group, and its members are iterated to
     /// a fixpoint from `Unknown` — the *conservative* start, so that a cycle which never resolves
     /// stays `Unknown` rather than inventing a root for itself.
+    /// `external` answers for a callee in another module, whose summary was computed when *that*
+    /// module's artifacts were built — dependencies are always built first, so the answer is there.
     pub(crate) fn of_module(
         bodies: &[Option<Function>],
         module: ModuleId,
         env: ModuleEnv<'_>,
+        external: &dyn Fn(FunctionId) -> ResultProvenance,
     ) -> Self {
         let graph = CallGraph::of_module(bodies, module);
         let mut of = vec![ResultProvenance::Unknown; bodies.len()];
@@ -81,7 +85,7 @@ impl Provenances {
                 changed = false;
                 for &id in &component {
                     let derived = match &bodies[id.as_index()] {
-                        Some(body) => derive(body, module, &of, env),
+                        Some(body) => derive(body, module, &of, external, env),
                         // No body: a native, which declares the fact instead.
                         None => declared(id, env),
                     };
@@ -126,6 +130,7 @@ fn derive(
     body: &Function,
     module: ModuleId,
     known: &[ResultProvenance],
+    external: &dyn Fn(FunctionId) -> ResultProvenance,
     env: ModuleEnv<'_>,
 ) -> ResultProvenance {
     let parameters = body.parameters();
@@ -198,11 +203,14 @@ fn derive(
                     let mir::Value::Function(callee) = &operation.operands[0] else {
                         continue;
                     };
-                    if callee.module != module {
-                        continue;
-                    }
-                    let ResultProvenance::Argument(index) = known[callee.function.as_index()]
-                    else {
+                    // A callee in this module is being summarized alongside this one; one in
+                    // another module was summarized when that module's artifacts were built.
+                    let callee_provenance = if callee.module == module {
+                        known[callee.function.as_index()]
+                    } else {
+                        external(*callee)
+                    };
+                    let ResultProvenance::Argument(index) = callee_provenance else {
                         continue;
                     };
                     // Operands are `[callee, hidden evidence…, visible arguments…, ret-out]`, so a
@@ -278,6 +286,7 @@ mod tests {
                 artifacts.bodies(),
                 module_id,
                 ModuleEnv::new(module, modules),
+                &|_| ResultProvenance::Unknown,
             )
         };
         // Generated members carry a `#subscript:` hash, so a prefix match is what names them.
@@ -329,7 +338,12 @@ mod tests {
             .mir_artifacts_for(std_id, MirOptimization::Disabled)
             .expect("std raw MIR must be prepared");
         let provenances =
-            Provenances::of_module(artifacts.bodies(), std_id, ModuleEnv::new(module, modules));
+            Provenances::of_module(
+                artifacts.bodies(),
+                std_id,
+                ModuleEnv::new(module, modules),
+                &|_| ResultProvenance::Unknown,
+            );
 
         let named = |name: &str| {
             module
@@ -351,6 +365,41 @@ mod tests {
             provenances.get(named("array_index::ref_mut")),
             ResultProvenance::Argument(0),
             "and the accessor above it derives the same root through it"
+        );
+    }
+
+    /// What storing the summaries buys: a user accessor wrapping `std`'s array indexing roots in
+    /// its own array, which needs `std`'s answer read back rather than recomputed. Asked through
+    /// `MirArtifacts`, the way a consumer will ask.
+    #[test]
+    fn an_accessor_over_a_dependency_inherits_its_root() {
+        let mut session = CompilerSession::new();
+        let module_id = session
+            .compile_for(
+                ExecutionTarget::Mir,
+                "subscript first(a: &mut [int]) -> int { ref mut { return a[0] } }",
+                "test",
+                Path::single_str("provenance"),
+            )
+            .expect("the test source must compile")
+            .module_id;
+        let module = session.expect_fresh_module(module_id);
+        let id = module
+            .def_table
+            .iter()
+            .find_map(|(def, defined)| {
+                defined
+                    .filter(|defined| defined.starts_with("first::ref_mut"))
+                    .and_then(|_| def.kind.as_function().copied())
+            })
+            .expect("the module defines `first`");
+        let artifacts = session
+            .mir_artifacts_for(module_id, MirOptimization::Disabled)
+            .expect("raw MIR must be prepared");
+        assert_eq!(
+            artifacts.result_provenance(id),
+            ResultProvenance::Argument(0),
+            "the root must come through std's `array_index`, whose summary is stored"
         );
     }
 

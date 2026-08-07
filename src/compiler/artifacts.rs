@@ -14,7 +14,10 @@ use crate::{
     emit_mir::build_mir_function,
     mir::{
         self,
-        pass::{Specializations, optimize_function},
+        pass::{
+            Specializations, optimize_function,
+            provenance::{Provenances, ResultProvenance},
+        },
     },
     module::{FunctionId, LocalFunctionId, Module, ModuleEnv, ModuleId, id::Id},
 };
@@ -132,12 +135,19 @@ pub(crate) struct Specialization {
 pub(crate) struct MirArtifacts {
     functions: Vec<Option<mir::Function>>,
     specializations: Vec<Specialization>,
+    /// Where each function's returned place is rooted, for the addressors that have one.
+    ///
+    /// Derived once, from the *raw* bodies, and carried into the optimized stage unchanged:
+    /// provenance is a property of what a function does, which optimization preserves. Kept here
+    /// rather than recomputed because a consumer's callee is often in another module, and a
+    /// dependency's summaries have to be readable the way its bodies already are.
+    provenance: Provenances,
 }
 
 impl MirArtifacts {
     pub(crate) fn build(module: &Module, modules: &Modules) -> Self {
         let env = ModuleEnv::new(module, modules);
-        let functions = (0..module.function_count())
+        let functions: Vec<Option<mir::Function>> = (0..module.function_count())
             .map(LocalFunctionId::from_index)
             .map(|id| {
                 let function = module
@@ -150,9 +160,34 @@ impl MirArtifacts {
                     .map(|_| build_mir_function(id, env))
             })
             .collect();
+        // Every dependency's artifacts are built before this module's, so a cross-module callee's
+        // summary is already installed and can simply be read.
+        let external = |callee: FunctionId| {
+            modules
+                .get(callee.module)
+                .and_then(|entry| entry.raw_mir())
+                .map_or(ResultProvenance::Unknown, |artifacts| {
+                    artifacts.result_provenance(callee.function)
+                })
+        };
+        let provenance =
+            Provenances::of_module(&functions, module.module_id(), env, &external);
         Self {
             functions,
             specializations: Vec::new(),
+            provenance,
+        }
+    }
+
+    /// Where the place returned by `id` is rooted, if it returns one.
+    ///
+    /// A specialization answers with its original's: substituting types cannot move which argument
+    /// a place points into. An original in another module is not in this table, and reads as
+    /// unknown — always sound.
+    pub(crate) fn result_provenance(&self, id: LocalFunctionId) -> ResultProvenance {
+        match self.specialization(id) {
+            Some(specialization) => self.provenance.get(specialization.original.function),
+            None => self.provenance.get(id),
         }
     }
 
@@ -204,6 +239,9 @@ impl MirArtifacts {
         Self {
             functions,
             specializations: specializations.into_created(),
+            // Carried across unchanged: optimization cannot move which argument a returned place
+            // points into, and recomputing it here would answer the same thing more slowly.
+            provenance: raw.provenance.clone(),
         }
     }
 
