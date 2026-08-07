@@ -117,6 +117,16 @@ pub(crate) fn optimize_function(
             current = Some(merged);
             changed = true;
         }
+        // The place-producing operations are merged here too, before inlining rather than only
+        // after it, because their redundancy is already present: a generic body reads the same
+        // `dict_entry` once per use of the trait method. Merging them shrinks the body before the
+        // inliner prices it against its growth budget, and two calls whose only difference was
+        // which copy of an entry they named become one expression for the pass above.
+        let source = current.as_ref().unwrap_or(function);
+        if let Some(merged) = cse::eliminate_common_subexpressions(source, env) {
+            current = Some(merged);
+            changed = true;
+        }
         // Now inlining.
         let source = current.as_ref().unwrap_or(function);
         if let Some(inlined) = inline::inline_function(
@@ -134,11 +144,11 @@ pub(crate) fn optimize_function(
             break;
         }
     }
-    // Merging repeated address computations runs once, after the rounds, because inlining is what
-    // creates them: a spliced accessor brings its `subfield` chain to every call site. Running it
-    // inside a round would pay an extra open-and-verify cycle per round to catch redundancy that is
-    // mostly not there yet, and what it merges enables no further folding — the operands the fold
-    // analysis reads are the same ones, under one name instead of two.
+    // The same pass runs a second time, for the redundancy inlining itself created: a spliced
+    // accessor brings its `subfield` chain to every call site, and a raw body contains no such
+    // chain at all. The two placements catch different classes rather than repeating work — the
+    // one above sees the `dict_entry` reads a generic body starts with, most of which folding and
+    // devirtualization have resolved by the time this one runs.
     let source = current.as_ref().unwrap_or(function);
     if let Some(merged) = cse::eliminate_common_subexpressions(source, env) {
         current = Some(merged);

@@ -40,26 +40,25 @@
 //! dominates the use. That misses a value available on some paths only; catching those needs
 //! available-expressions and lazy code motion, a much larger machine and not what these bodies want.
 //!
-//! **The post-inline numbering covers `subfield` only, and the boundary is sharper than "pure".** A
-//! `subfield` *derives* a place
-//! from its operand: the result is the base's root and path with one index appended, holding no
-//! storage of its own. So it is valid exactly where its base is, and the base is valid at the
-//! duplicate — that is what the duplicate reads too. No intervening write can invalidate it either,
-//! since MIR registers are single-assignment. There is no kill analysis here at all.
+//! **The numbering merges two place-producing operations, which differ in what keeps them valid.**
+//! A `subfield` *derives* a place from its operand: the base's root and path with one index
+//! appended, holding no storage of its own. It is valid exactly where its base is, and the base is
+//! valid at the duplicate — that is what the duplicate reads too. Registers are single-assignment,
+//! so no intervening write invalidates it; there is no kill for it at all. A `dict_entry` instead
+//! *materializes* the function value into a freshly allocated cell, so what it yields lives in the
+//! current stack region: a `stack_restore` between two occurrences pops it, and a merged register
+//! would name storage that is gone. That is not hypothetical — it is what `bank_account` did before
+//! the kill existed. Popping a region therefore forgets every materialized place, and a scoped
+//! accessor counts as one.
 //!
-//! Three classes are deliberately out, each for its own reason:
+//! Two classes remain out, each for its own reason:
 //!
 //! - **A memory reader** — `load`, `comp_eq`, `extract_tag` — needs an aliasing argument about the
 //!   writes in between, which is what provenance is for.
 //! - **An owned materialized value**, `build_subscript` among them, cannot be merged at all: such a
 //!   register must have exactly one consuming use, and merging is precisely what gives it two.
-//! - **`dict_entry` and `subscript_member`**, despite computing a place from evidence that cannot
-//!   change. They **allocate a cell** to materialize the function value into, so the place they
-//!   yield lives in the current stack region rather than deriving from an operand's. A
-//!   `stack_restore` between the two occurrences pops it, and the merged register then names storage
-//!   that is gone — which is not a hypothetical: it is what `bank_account` did when they were
-//!   included. Merging them needs a kill on `stack_restore`, and is worth doing only if such a pair
-//!   is measured to survive one.
+//!   `subscript_member` is place-producing like `dict_entry` but is left out until its redundancy
+//!   is measured rather than assumed.
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -76,6 +75,7 @@ use crate::{
     },
     module::{FunctionId, ModuleEnv, id::Id},
     types::{
+        r#trait::TraitDictionaryEntryIndex,
         r#type::{CallImplType, CallResultConvention, Type},
         type_properties::concrete_type_is_trivial_copy,
     },
@@ -559,11 +559,45 @@ fn forget_root(state: &mut AvailableCalls, root: Root) {
     });
 }
 
-/// The identity of a field-address computation: the type of the place it yields, and its canonical
-/// operands — the field index and the base place. Two operations sharing one compute one address.
+/// What a place-producing operation computes, beside its operands.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Computation {
+    /// A field address *derived* from its operand: the base's root and path with an index appended.
+    Subfield { ty: Type },
+    /// A function place *materialized* from evidence into a freshly allocated cell.
+    DictEntry {
+        entry_index: TraitDictionaryEntryIndex,
+        ty: Type,
+    },
+}
+
+impl Computation {
+    fn of(kind: &OperationKind) -> Option<Self> {
+        match kind {
+            OperationKind::Subfield { ty } => Some(Self::Subfield { ty: *ty }),
+            OperationKind::DictEntry { entry_index, ty } => Some(Self::DictEntry {
+                entry_index: *entry_index,
+                ty: *ty,
+            }),
+            _ => None,
+        }
+    }
+
+    /// Whether the result lives in the current stack region rather than deriving from an operand's
+    /// storage, and so dies when that region is popped.
+    fn is_materialized(&self) -> bool {
+        match self {
+            Self::Subfield { .. } => false,
+            Self::DictEntry { .. } => true,
+        }
+    }
+}
+
+/// The identity of a place-producing operation: what it computes, and its canonical operands. Two
+/// operations sharing one yield the same place.
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct Expression {
-    ty: Type,
+    computation: Computation,
     operands: Box<[mir::Value]>,
 }
 
@@ -673,10 +707,23 @@ impl Numbering<'_> {
 
     fn number_block(&mut self, block: BlockId, undo: &mut Vec<(Expression, Option<Available>)>) {
         for (index, operation) in self.func.block(block).operations().iter().enumerate() {
-            let OperationKind::Subfield { ty } = operation.kind else {
+            // Popping a stack region frees every cell allocated inside it, so a materialized place
+            // does not survive one. A scoped accessor is opaque enough to count as one too.
+            if matches!(
+                operation.kind,
+                OperationKind::StackRestore
+                    | OperationKind::Project { .. }
+                    | OperationKind::EndProject
+            ) {
+                self.forget_materialized(undo);
+                continue;
+            }
+            let Some(computation) = Computation::of(&operation.kind) else {
                 continue;
             };
-            let result = operation.result_id().expect("a subfield defines a result");
+            let result = operation
+                .result_id()
+                .expect("a place-producing operation defines a result");
             let operands = operation
                 .operands
                 .iter()
@@ -688,7 +735,10 @@ impl Numbering<'_> {
                     _ => operand.clone(),
                 })
                 .collect();
-            let expression = Expression { ty, operands };
+            let expression = Expression {
+                computation,
+                operands,
+            };
             match self.available.get(&expression) {
                 // Dominance makes the merge *correct*; block order is what the verifier walks in
                 // when it resolves an operand's role, so a representative must also precede its new
@@ -707,6 +757,19 @@ impl Numbering<'_> {
                 }
             }
         }
+    }
+
+    /// Drops every materialized place from the scope, through the undo log so that a sibling
+    /// subtree — which did not pop the region — still sees them.
+    fn forget_materialized(&mut self, undo: &mut Vec<(Expression, Option<Available>)>) {
+        self.available.retain(|expression, available| {
+            if expression.computation.is_materialized() {
+                undo.push((expression.clone(), Some(*available)));
+                false
+            } else {
+                true
+            }
+        });
     }
 }
 
@@ -840,6 +903,38 @@ mod tests {
             body.matches("call std::array_resolve_index").count(),
             2,
             "append may reallocate the array, so the second address must be recomputed:\n{body}"
+        );
+    }
+
+    /// A generic body reads the same dictionary entry once per use of the trait method; merging
+    /// them is what makes this worth running before the inliner prices the body.
+    #[test]
+    fn a_repeated_dictionary_entry_is_read_once() {
+        let body = body_of(
+            "fn twice_clone(x) { let a = x; let b = x; (a, b) }\n\
+             fn use_it(v: int) -> (int, int) { twice_clone(v) }",
+            "twice_clone",
+        );
+        assert_eq!(
+            body.matches("= dict_entry").count(),
+            1,
+            "one entry read, reused by both clones:\n{body}"
+        );
+    }
+
+    /// The same scoping rule as for field addresses: neither arm dominates the other, so neither
+    /// may name the other's cell.
+    #[test]
+    fn a_dictionary_entry_is_not_shared_between_branch_arms() {
+        let body = body_of(
+            "fn arms(x, c: bool) { if c { let a = x; a } else { let b = x; b } }\n\
+             fn use_it(v: int, c: bool) -> int { arms(v, c) }",
+            "arms",
+        );
+        assert_eq!(
+            body.matches("= dict_entry").count(),
+            2,
+            "each arm reads its own entry:\n{body}"
         );
     }
 
