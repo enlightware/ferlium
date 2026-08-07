@@ -6,14 +6,16 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-//! Common-subexpression elimination over the address computations a body repeats.
+//! Common-subexpression elimination over the calls and address computations a body repeats.
 //!
 //! Two complementary passes run at different points. Before inlining, available-expression
-//! analysis merges repeatable `AddressorPlace` calls, copying the first returned pointer into the
-//! duplicate's out-slot. That is the economical point: `swap#spec:[int]` has four calls to
+//! analysis merges repeatable calls, copying the first result into the duplicate's out-slot. This
+//! covers both caller-rooted `AddressorPlace` calls and environment-independent `Value` calls whose
+//! result is `TrivialCopy`. That is the economical point: `swap#spec:[int]` has four calls to
 //! `array_index::ref_mut` but only two distinct `(array, index)` pairs, so only two accessor bodies
-//! are subsequently copied. After inlining, dominator-based value numbering merges repeated
-//! `subfield` chains which the remaining accessor copies expose.
+//! are subsequently copied; `(x - y) * (x - y)` similarly computes the subtraction once. After
+//! inlining, dominator-based value numbering merges repeated `subfield` chains which the remaining
+//! accessor copies expose.
 //!
 //! **Addressor availability.** A call is eligible only when its effects permit reevaluation, its
 //! callee's summary proves it repeatable, and provenance names the visible argument containing the
@@ -22,6 +24,13 @@
 //! while writing a value through an addressor-produced leaf does not reallocate its containing
 //! object. An `invoke` generates the expression only on its normal edge. Joins intersect available
 //! expressions, so a reused pointer always comes from a call which succeeded on every path.
+//!
+//! **Value availability.** A value call is eligible only when it is statically known, its effects
+//! permit compile-time evaluation, all visible arguments use `Let`, and its concrete result is
+//! `TrivialCopy`. Its cached result depends on the contents of every argument root and on the first
+//! result slot remaining live. Any write to one of those roots invalidates it. Restricting the
+//! result to `TrivialCopy` makes the replacement an ordinary `memcpy`; owned results would require
+//! explicit clone/drop accounting.
 //!
 //! **Dominator-based value numbering.** Each operation is keyed by its kind, its type metadata and
 //! the *canonical* identity of each operand, so comparing two arbitrarily deep expressions is one
@@ -66,7 +75,10 @@ use crate::{
         value::ValueId,
     },
     module::{FunctionId, ModuleEnv, id::Id},
-    types::r#type::{CallImplType, CallResultConvention, Type},
+    types::{
+        r#type::{CallImplType, CallResultConvention, Type},
+        type_properties::concrete_type_is_trivial_copy,
+    },
 };
 
 use super::{
@@ -74,8 +86,8 @@ use super::{
     provenance::{AddressorSummary, ResultProvenance},
 };
 
-/// A call identity without its out-parameter. The out-parameter is only where the returned pointer
-/// is stored, not an input to the address computation.
+/// A call identity without its out-parameter. The out-parameter is only where the result is stored,
+/// not an input to the computation.
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct CallExpression {
     ty: CallImplType,
@@ -84,9 +96,24 @@ struct CallExpression {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-struct AvailableCall {
-    output: mir::Value,
-    root: Root,
+enum AvailableCall {
+    Addressor {
+        output: mir::Value,
+        root: Root,
+    },
+    Value {
+        output: mir::Value,
+        dependencies: Box<[Root]>,
+        output_root: Root,
+    },
+}
+
+impl AvailableCall {
+    fn output(&self) -> &mir::Value {
+        match self {
+            AvailableCall::Addressor { output, .. } | AvailableCall::Value { output, .. } => output,
+        }
+    }
 }
 
 type AvailableCalls = FxHashMap<CallExpression, AvailableCall>;
@@ -225,18 +252,19 @@ struct CallReplacement {
     span: crate::Location,
 }
 
-/// Eliminates repeated, statically known addressor calls before the inliner expands them.
+/// Eliminates repeated, statically known addressor and trivially-copyable value calls before the
+/// inliner expands them.
 ///
 /// The analysis is an available-expression intersection over CFG edges. A fallible call becomes
 /// available only on its normal edge: replacing a later identical invoke is then both an address
 /// reuse and proof that its failure edge is unreachable, because the first call already succeeded.
-pub(crate) fn eliminate_common_addressor_calls(
+pub(crate) fn eliminate_common_calls(
     func: &Function,
     env: ModuleEnv<'_>,
     summary_of: &dyn Fn(FunctionId) -> AddressorSummary,
 ) -> Option<Function> {
     let origins = PlaceOrigins::of(func, summary_of);
-    let entry_states = available_call_states(func, &origins, summary_of);
+    let entry_states = available_call_states(func, env, &origins, summary_of);
     let mut replacements = Vec::new();
 
     for block_id in func.blocks() {
@@ -246,7 +274,7 @@ pub(crate) fn eliminate_common_addressor_calls(
         let block = func.block(block_id);
         for (index, operation) in block.operations().iter().enumerate() {
             if let Some((source, destination)) =
-                transfer(operation, &origins, summary_of, &mut state)
+                transfer(operation, env, &origins, summary_of, &mut state)
             {
                 replacements.push(CallReplacement {
                     site: ReplacementSite::Operation {
@@ -263,7 +291,7 @@ pub(crate) fn eliminate_common_addressor_calls(
             operation, normal, ..
         } = &block.terminator().kind
             && let Some((source, destination)) =
-                transfer(operation, &origins, summary_of, &mut state)
+                transfer(operation, env, &origins, summary_of, &mut state)
         {
             replacements.push(CallReplacement {
                 site: ReplacementSite::Invoke {
@@ -305,6 +333,7 @@ pub(crate) fn eliminate_common_addressor_calls(
 
 fn available_call_states(
     func: &Function,
+    env: ModuleEnv<'_>,
     origins: &PlaceOrigins,
     summary_of: &dyn Fn(FunctionId) -> AddressorSummary,
 ) -> FxHashMap<BlockId, AvailableCalls> {
@@ -319,7 +348,7 @@ fn available_call_states(
             };
             let block = func.block(block_id);
             for operation in block.operations() {
-                transfer(operation, origins, summary_of, &mut state);
+                transfer(operation, env, origins, summary_of, &mut state);
             }
             match &block.terminator().kind {
                 TerminatorKind::Invoke {
@@ -327,7 +356,7 @@ fn available_call_states(
                     normal,
                     error,
                 } => {
-                    transfer(operation, origins, summary_of, &mut state);
+                    transfer(operation, env, origins, summary_of, &mut state);
                     changed |= join_available(&mut entries, *normal, &state);
                     // No call result is available on failure. Empty is deliberately more
                     // conservative than preserving expressions from before the invoke.
@@ -362,18 +391,22 @@ fn join_available(
     }
 }
 
-/// Applies one operation and returns the pointer copy which replaces it when it is redundant.
+/// Applies one operation and returns the result copy which replaces it when it is redundant.
 fn transfer(
     operation: &Operation,
+    env: ModuleEnv<'_>,
     origins: &PlaceOrigins,
     summary_of: &dyn Fn(FunctionId) -> AddressorSummary,
     state: &mut AvailableCalls,
 ) -> Option<(mir::Value, mir::Value)> {
-    if let Some((expression, available)) = addressor_expression(operation, origins, summary_of) {
-        // Reusing one out-slot for another call overwrites the cached pointer stored there.
-        state.retain(|_, cached| cached.output != available.output);
+    if let Some((expression, available)) = call_expression(operation, origins, summary_of, env) {
+        // Every call writes its out-slot. This can invalidate another value expression whose input
+        // or cached result occupies the same root, and overwrites an addressor pointer cached in
+        // exactly that slot.
+        forget_write(state, origins, available.output());
+        state.retain(|_, cached| cached.output() != available.output());
         if let Some(previous) = state.get(&expression) {
-            return Some((previous.output.clone(), available.output));
+            return Some((previous.output().clone(), available.output().clone()));
         }
         state.insert(expression, available);
         return None;
@@ -385,26 +418,31 @@ fn transfer(
                 state.clear();
                 return None;
             };
-            state.retain(|_, cached| &cached.output != call.result);
+            forget_write(state, origins, call.result);
+            state.retain(|_, cached| cached.output() != call.result);
             // An address computation declared repeatable is independent of environmental state,
             // so effects alone do not kill it. Mutable access to its storage root does.
             for (argument, convention) in call.arguments {
-                if matches!(convention, ArgConvention::MutableRef)
-                    && let Some(origin) = origins.origin_of(argument)
-                {
-                    forget_root(state, origin.root);
+                if matches!(convention, ArgConvention::MutableRef) {
+                    match origins.origin_of(argument) {
+                        Some(origin) => forget_root(state, origin.root),
+                        None => state.clear(),
+                    }
                 }
             }
         }
-        OperationKind::Store => forget_structural_write(state, origins, &operation.operands[1]),
-        OperationKind::Clear => forget_structural_write(state, origins, &operation.operands[0]),
+        OperationKind::Store => forget_write(state, origins, &operation.operands[1]),
+        OperationKind::Clear => forget_write(state, origins, &operation.operands[0]),
         OperationKind::Memcpy | OperationKind::Move | OperationKind::Clone { .. } => {
-            forget_structural_write(state, origins, &operation.operands[1]);
+            if matches!(operation.kind, OperationKind::Move) {
+                forget_write(state, origins, &operation.operands[0]);
+            }
+            forget_write(state, origins, &operation.operands[1]);
         }
         OperationKind::Drop { .. }
         | OperationKind::DropClosureEnv
         | OperationKind::CloneClosureEnv { .. } => {
-            forget_structural_write(state, origins, &operation.operands[0]);
+            forget_write(state, origins, &operation.operands[0]);
         }
         // Restoring can pop the out-slot holding the cached pointer. Scoped projections can run
         // arbitrary setup/cleanup code and are outside the AddressorPlace contract.
@@ -416,32 +454,67 @@ fn transfer(
     None
 }
 
-fn addressor_expression(
+fn call_expression(
     operation: &Operation,
     origins: &PlaceOrigins,
     summary_of: &dyn Fn(FunctionId) -> AddressorSummary,
+    env: ModuleEnv<'_>,
 ) -> Option<(CallExpression, AvailableCall)> {
     let OperationKind::Call { ty, instantiation } = &operation.kind else {
         return None;
     };
-    if ty.result_convention != CallResultConvention::ADDRESSOR_PLACE
-        || !effects_allow_const_eval(ty.effects())
-    {
+    if !effects_allow_const_eval(ty.effects()) {
         return None;
     }
     let call = call_operands(&operation.operands, ty)?;
     let mir::Value::Function(callee) = call.callee else {
         return None;
     };
-    let summary = summary_of(*callee);
-    if !summary.repeatable {
-        return None;
-    }
-    let ResultProvenance::Argument(index) = summary.provenance else {
-        return None;
+    let available = match ty.result_convention {
+        CallResultConvention::ADDRESSOR_PLACE => {
+            let summary = summary_of(*callee);
+            if !summary.repeatable {
+                return None;
+            }
+            let ResultProvenance::Argument(index) = summary.provenance else {
+                return None;
+            };
+            let (base, _) = call.arguments.get(index as usize)?;
+            AvailableCall::Addressor {
+                output: call.result.clone(),
+                root: origins.origin_of(base)?.root,
+            }
+        }
+        CallResultConvention::Value => {
+            if !concrete_type_is_trivial_copy(ty.ret(), &env)
+                || call
+                    .arguments
+                    .iter()
+                    .any(|(_, convention)| *convention != ArgConvention::Let)
+            {
+                return None;
+            }
+            let dependencies: Box<[Root]> = call
+                .arguments
+                .iter()
+                .map(|(argument, _)| origins.origin_of(argument).map(|origin| origin.root))
+                .collect::<Option<Vec<_>>>()?
+                .into_boxed_slice();
+            let output_root = origins.origin_of(call.result)?.root;
+            // The call reads its arguments before writing its result. Keeping those roots distinct
+            // lets transfer invalidate the destination before looking up the old expression and is
+            // also the ordinary MIR lowering shape.
+            if dependencies.contains(&output_root) {
+                return None;
+            }
+            AvailableCall::Value {
+                output: call.result.clone(),
+                dependencies,
+                output_root,
+            }
+        }
+        _ => return None,
     };
-    let (base, _) = call.arguments.get(index as usize)?;
-    let root = origins.origin_of(base)?.root;
     Some((
         CallExpression {
             ty: ty.as_ref().clone(),
@@ -450,27 +523,40 @@ fn addressor_expression(
                 .to_vec()
                 .into_boxed_slice(),
         },
-        AvailableCall {
-            output: call.result.clone(),
-            root,
-        },
+        available,
     ))
 }
 
-fn forget_structural_write(
-    state: &mut AvailableCalls,
-    origins: &PlaceOrigins,
-    destination: &mir::Value,
-) {
-    if let Some(origin) = origins.origin_of(destination)
-        && origin.structural
-    {
-        forget_root(state, origin.root);
-    }
+fn forget_write(state: &mut AvailableCalls, origins: &PlaceOrigins, destination: &mir::Value) {
+    let Some(origin) = origins.origin_of(destination) else {
+        // An unknown destination may alias a value input. Repeatable addressors remain independent
+        // of leaf writes, and structural operations with unknown provenance clear the whole state
+        // separately.
+        state.retain(|_, available| matches!(available, AvailableCall::Addressor { .. }));
+        return;
+    };
+    state.retain(|_, available| match available {
+        AvailableCall::Addressor { root, .. } => !origin.structural || *root != origin.root,
+        AvailableCall::Value {
+            dependencies,
+            output_root,
+            ..
+        } => *output_root != origin.root && !dependencies.contains(&origin.root),
+    });
 }
 
 fn forget_root(state: &mut AvailableCalls, root: Root) {
-    state.retain(|_, available| available.root != root);
+    state.retain(|_, available| match available {
+        AvailableCall::Addressor {
+            root: available_root,
+            ..
+        } => *available_root != root,
+        AvailableCall::Value {
+            dependencies,
+            output_root,
+            ..
+        } => *output_root != root && !dependencies.contains(&root),
+    });
 }
 
 /// The identity of a field-address computation: the type of the place it yields, and its canonical
@@ -655,6 +741,70 @@ mod tests {
 
     fn subfields(body: &str) -> usize {
         body.matches("= subfield").count()
+    }
+
+    fn calls(body: &str, callee_fragment: &str) -> usize {
+        body.lines()
+            .filter(|line| line.contains("call ") && line.contains(callee_fragment))
+            .count()
+    }
+
+    #[test]
+    fn repeated_integer_value_call_is_computed_once() {
+        let body = body_of(
+            "fn repeated_int(x: int, y: int) -> int { (x - y) * (x - y) }",
+            "repeated_int",
+        );
+        assert_eq!(
+            calls(&body, "Num<std::int>::sub"),
+            1,
+            "the repeated subtraction should be copied from its first result:\n{body}"
+        );
+    }
+
+    #[test]
+    fn repeated_float_value_call_is_computed_once() {
+        let body = body_of(
+            "fn repeated_float(x: float, y: float) -> float { (x - y) * (x - y) }",
+            "repeated_float",
+        );
+        assert_eq!(
+            calls(&body, "Num<std::float>::sub"),
+            1,
+            "the repeated subtraction should be copied from its first result:\n{body}"
+        );
+    }
+
+    #[test]
+    fn repeated_boolean_value_call_is_computed_once() {
+        let body = body_of(
+            "fn repeated_bool(x: bool, y: bool) -> bool {\n\
+                 bit_or(bit_and(x, y), bit_and(x, y))\n\
+             }",
+            "repeated_bool",
+        );
+        assert_eq!(
+            calls(&body, "Bits<std::bool>::bit_and"),
+            1,
+            "the repeated boolean computation should be copied from its first result:\n{body}"
+        );
+    }
+
+    #[test]
+    fn changing_a_value_argument_invalidates_the_cached_call() {
+        let body = body_of(
+            "fn changed(mut x: int, y: int) -> int {\n\
+                 let before = x - y;\n\
+                 x = x + 1;\n\
+                 before * (x - y)\n\
+             }",
+            "changed",
+        );
+        assert_eq!(
+            calls(&body, "Num<std::int>::sub"),
+            2,
+            "the subtraction after changing x must be recomputed:\n{body}"
+        );
     }
 
     #[test]

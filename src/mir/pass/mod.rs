@@ -97,9 +97,10 @@ pub(crate) fn optimize_function(
             current = Some(specialized);
             changed = true;
         }
-        // Addressor calls are merged before inlining so one accessor body is copied per distinct
-        // address, rather than copying duplicates and trying to rediscover the whole computation
-        // afterwards. A specialization inherits its original's conservative addressor summary:
+        // Calls are merged before inlining so one body is copied per distinct computation, rather
+        // than copying duplicates and trying to rediscover the whole computation afterwards.
+        // Addressors additionally use provenance. A specialization inherits its original's
+        // conservative addressor summary:
         // substitution cannot change provenance, and a repeatability proof remains true when types
         // are substituted or operations removed. An unresolved original remains conservatively
         // non-repeatable even when its concrete copy could prove more.
@@ -112,7 +113,7 @@ pub(crate) fn optimize_function(
                     artifacts.addressor_summary(original.module, original.function)
                 })
         };
-        if let Some(merged) = cse::eliminate_common_addressor_calls(source, env, &summary_of) {
+        if let Some(merged) = cse::eliminate_common_calls(source, env, &summary_of) {
             current = Some(merged);
             changed = true;
         }

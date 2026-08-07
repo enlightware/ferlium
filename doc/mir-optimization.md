@@ -33,7 +33,7 @@ Per function (`mir::pass::optimize_function`):
 for round in 0..MAX_ROUNDS:
     fold          // constant folding, devirtualization; block merging inside its own edit
     specialize    // point generic calls at concrete copies
-    addressor CSE // merge repeated caller-rooted place calls before copying their bodies
+    call CSE      // merge repeated addressor and trivial value calls before copying their bodies
     inline        // budget-limited; block merging inside its own edit
     stop if nothing warranted another round
 subfield CSE       // merge repeated field addresses which inlining exposes
@@ -229,20 +229,28 @@ and remapped into the caller's pool.
 
 `mir::pass::cse` has a pre-inline call pass and a post-inline operation pass.
 
-The call pass merges statically known `AddressorPlace` calls with identical call metadata and input
-operands; the out-parameter is deliberately excluded from the key. It requires two independently
-derived callee facts: provenance names the visible argument containing the returned place, and
-repeatability proves the address computation has no external effects, does not mutate a visible
-argument, and selects a stable place until structural storage changes. `buffer_slot`, whose body is
-native, asserts both facts. A duplicate becomes a `memcpy` of the first returned pointer into the
-second out-slot.
+The call pass merges statically known calls with identical call metadata and input operands; the
+out-parameter is deliberately excluded from the key. For an `AddressorPlace` call it requires two
+independently derived callee facts: provenance names the visible argument containing the returned
+place, and repeatability proves the address computation has no external effects, does not mutate a
+visible argument, and selects a stable place until structural storage changes. `buffer_slot`, whose
+body is native, asserts both facts. A duplicate becomes a `memcpy` of the first returned pointer
+into the second out-slot.
 
-Availability is a forward CFG intersection. An `invoke` generates an address only on its normal
-edge, so replacing a later identical invoke also removes an error edge that the earlier successful
-call proved unreachable. A call receiving the provenance root by mutable reference invalidates its
+A `Value` call is eligible when it is direct, its effects permit compile-time evaluation, every
+visible argument uses `Let`, and its concrete result implements `TrivialCopy`. Its first result is
+then representation-copyable into every duplicate out-slot. The cached value depends on the
+contents of all its argument roots and on its first result slot remaining initialized, so a write
+to any of those roots invalidates it. Non-copy results remain excluded: reusing one would require
+semantic cloning plus ownership and drop accounting.
+
+Availability is a forward CFG intersection. An `invoke` generates a result only on its normal edge,
+so replacing a later identical invoke also removes an error edge that the earlier successful call
+proved unreachable. A call receiving the provenance root by mutable reference invalidates its
 addresses because it may reallocate the object; structural writes and `stack_restore` invalidate
 them as well. Writing a value through an addressor-produced leaf does not reallocate its containing
-object, which is why `swap` can reuse `a[j]`'s address across the assignment to `a[i]`.
+object, which is why `swap` can reuse `a[j]`'s address across the assignment to `a[i]`. The same
+write does invalidate a cached value call that read that leaf or its containing root.
 
 This runs inside each optimization round after specialization and before inlining. On
 `swap#spec:[int]`, four `array_index::ref_mut` calls become two before the accessor is copied, so the
