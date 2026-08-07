@@ -17,7 +17,11 @@ use ferlium::{
     call_fn,
     module::ModuleId,
     run_fn_native,
-    std::{array::array_type, math::int_type, string::String as Str},
+    std::{
+        array::array_type,
+        math::{Float, int_type},
+        string::String as Str,
+    },
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -198,6 +202,39 @@ fn calculator() {
     assert_eq!(calc("100 - 20 - 5"), 75); // left-associativity of -
     assert_eq!(calc("20 / 4 / 2"), 2); // left-associativity of /
     assert_eq!(calc("((1 + 2) * (3 + 4) - 5) * 6 / 2 + 100"), 148);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn linalg() {
+    let mut session = TestSession::new();
+    // The module reaches its elements through subscripts, which are gated as experimental.
+    session.allow_experimental();
+    let module_id = session
+        .compile(include_str!("../modules/linalg.fer"))
+        .module_id;
+
+    // Every value here is a dyadic rational, so the three backends agree exactly.
+    let pipeline =
+        run_fn_native!(session.session(), module_id, "transform_pipeline", [2 => isize] -> Float)
+            .unwrap();
+    assert_eq!(pipeline.into_inner(), 0.4345703125);
+
+    // The same generic bodies, instantiated at `int` instead.
+    assert_eq!(
+        run_native_int_int(&session, module_id, "transform_pipeline_int", 3),
+        42,
+    );
+
+    let grid = run_fn_native!(session.session(), module_id, "grid_simulation", [6 => isize, 2 => isize] -> Float)
+        .unwrap();
+    assert_eq!(grid.into_inner(), 40.25);
+
+    // The entry the benchmark uses, which runs both instantiations of the pipeline.
+    assert_eq!(
+        run_native_int_int(&session, module_id, "transform_pipeline_mixed", 3),
+        44,
+    );
 }
 
 // helpers for calling Ferlium functions from Rust

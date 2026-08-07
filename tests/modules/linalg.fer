@@ -1,0 +1,295 @@
+// A small dense linear-algebra library, generic over its element type and exercised at both
+// `int` and `float`, with paths that cross between them by casting.
+//
+// Ferlium has no fixed-size arrays, so a dimension is a property of the value rather than of the
+// type: a `Vector` is its data, and a `Matrix` is its shape together with its row-major data. The
+// shape is stored whole even though `rows` follows from the data length and the stride, as every
+// shape-dependent loop below would otherwise have to divide to recover it. The same code serves
+// both shapes of numeric workload — small dimensions, where the arithmetic is dwarfed by calls and
+// per-element copies, and large ones, where a wasted operation in the innermost loop is paid n^2 or
+// n^3 times.
+//
+// Element access goes through subscripts rather than accessor functions, which is what makes the
+// large case affordable at all: a subscript projects into the value in place, while a function
+// taking the matrix by value copies its whole data array on every call.
+
+pub struct Vector<T> {
+	data: [T],
+}
+
+pub struct Matrix<T> {
+	rows: int,
+	cols: int,
+	data: [T],
+}
+
+// --- Element access ---
+
+/// The `i`th element of a vector, as a place, so that reads and writes share one definition.
+pub subscript element<T>(v: &mut Vector<T>, i: int) -> T {
+	ref mut {
+		v.data[i]
+	}
+}
+
+/// The element at row `r`, column `c`, as a place.
+pub subscript at<T>(m: &mut Matrix<T>, r: int, c: int) -> T {
+	ref mut {
+		m.data[r * m.cols + c]
+	}
+}
+
+// --- Construction ---
+
+pub fn vector(data) {
+	Vector { data: data }
+}
+
+pub fn vector_from_fn(n, f) {
+	let mut data = [];
+	for i in 0..n {
+		array_append(data, f(i))
+	};
+	Vector { data: data }
+}
+
+pub fn matrix(rows, cols, data) {
+	if len(data) == rows * cols {
+		Matrix { rows: rows, cols: cols, data: data }
+	} else {
+		panic("matrix data length does not match its shape")
+	}
+}
+
+pub fn matrix_from_fn(rows, cols, f) {
+	let mut data = [];
+	for r in 0..rows {
+		for c in 0..cols {
+			array_append(data, f(r, c))
+		}
+	};
+	Matrix { rows: rows, cols: cols, data: data }
+}
+
+/// The `n` by `n` matrix with `one` on the diagonal and `zero` elsewhere.
+///
+/// The identity element cannot be produced from the element type alone, as `Num` offers no way to
+/// name it without an annotation at the call site, so both constants are passed in.
+pub fn matrix_identity(n, zero, one) {
+	matrix_from_fn(n, n, |r, c| if r == c { one } else { zero })
+}
+
+// --- Shape ---
+
+pub fn vector_len(v) {
+	len(v.data)
+}
+
+pub fn matrix_cols(m) {
+	m.cols
+}
+
+pub fn matrix_rows(m) {
+	m.rows
+}
+
+// --- Vector arithmetic ---
+
+pub fn vector_add(mut a, mut b) {
+	vector_from_fn(len(a.data), |i| a->[element](i) + b->[element](i))
+}
+
+pub fn vector_sub(mut a, mut b) {
+	vector_from_fn(len(a.data), |i| a->[element](i) - b->[element](i))
+}
+
+pub fn vector_scale(mut v, factor) {
+	vector_from_fn(len(v.data), |i| v->[element](i) * factor)
+}
+
+pub fn vector_neg(mut v) {
+	vector_from_fn(len(v.data), |i| -v->[element](i))
+}
+
+pub fn dot(mut a, mut b) {
+	let mut acc = a->[element](0) * b->[element](0);
+	for i in 1..len(a.data) {
+		acc = acc + a->[element](i) * b->[element](i)
+	};
+	acc
+}
+
+pub fn norm_squared(mut v) {
+	dot(v, v)
+}
+
+/// The 3D cross product, the one vector operation that is specific to a dimension.
+pub fn cross3(mut a, mut b) {
+	vector([
+		a->[element](1) * b->[element](2) - a->[element](2) * b->[element](1),
+		a->[element](2) * b->[element](0) - a->[element](0) * b->[element](2),
+		a->[element](0) * b->[element](1) - a->[element](1) * b->[element](0),
+	])
+}
+
+// --- Matrix arithmetic ---
+
+pub fn matrix_add(mut a, mut b) {
+	matrix_from_fn(a.rows, a.cols, |r, c| a->[at](r, c) + b->[at](r, c))
+}
+
+pub fn matrix_sub(mut a, mut b) {
+	matrix_from_fn(a.rows, a.cols, |r, c| a->[at](r, c) - b->[at](r, c))
+}
+
+pub fn matrix_scale(mut m, factor) {
+	matrix_from_fn(m.rows, m.cols, |r, c| m->[at](r, c) * factor)
+}
+
+pub fn transpose(mut m) {
+	matrix_from_fn(m.cols, m.rows, |r, c| m->[at](c, r))
+}
+
+pub fn trace(mut m) {
+	let mut acc = m->[at](0, 0);
+	for i in 1..m.rows {
+		acc = acc + m->[at](i, i)
+	};
+	acc
+}
+
+/// The matrix product, written as an explicit triple loop rather than through `dot` so that the
+/// innermost operation is an indexed multiply-add with nothing allocated per element.
+pub fn matrix_mul(mut a, mut b) {
+	let mut data = [];
+	for r in 0..a.rows {
+		for c in 0..b.cols {
+			let mut acc = a->[at](r, 0) * b->[at](0, c);
+			for k in 1..a.cols {
+				acc = acc + a->[at](r, k) * b->[at](k, c)
+			};
+			array_append(data, acc)
+		}
+	};
+	Matrix { rows: a.rows, cols: b.cols, data: data }
+}
+
+pub fn matrix_vector_mul(mut m, mut v) {
+	vector_from_fn(m.rows, |r| {
+		let mut acc = m->[at](r, 0) * v->[element](0);
+		for k in 1..m.cols {
+			acc = acc + m->[at](r, k) * v->[element](k)
+		};
+		acc
+	})
+}
+
+/// The determinant of a 3 by 3 matrix, by cofactor expansion along the first row.
+pub fn determinant3(mut m) {
+	let a = m->[at](0, 0);
+	let b = m->[at](0, 1);
+	let c = m->[at](0, 2);
+	let d = m->[at](1, 0);
+	let e = m->[at](1, 1);
+	let f = m->[at](1, 2);
+	let g = m->[at](2, 0);
+	let h = m->[at](2, 1);
+	let i = m->[at](2, 2);
+	a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g)
+}
+
+// --- Crossing between element types ---
+
+pub fn vector_to_float(mut v: Vector<int>) -> Vector<float> {
+	vector_from_fn(len(v.data), |i| v->[element](i) as float)
+}
+
+pub fn matrix_to_float(mut m: Matrix<int>) -> Matrix<float> {
+	matrix_from_fn(m.rows, m.cols, |r, c| m->[at](r, c) as float)
+}
+
+pub fn vector_to_int(mut v: Vector<float>) -> Vector<int> {
+	vector_from_fn(len(v.data), |i| v->[element](i) as int)
+}
+
+// --- Workloads ---
+
+/// Deterministic sample data: element (r, c) of an integer matrix.
+fn sample_int(r: int, c: int) {
+	rem(r * 7 + c * 3, 5) - 2
+}
+
+/// A 3D transform pipeline at small, fixed dimensions, the shape 2D and 3D game code has.
+///
+/// Every operation here is a handful of arithmetic operations wrapped in a call that allocates a
+/// result, so the cost is dominated by the calls themselves and by the copies at their edges.
+pub fn transform_pipeline(steps: int) -> float {
+	let m = matrix_to_float(matrix_from_fn(3, 3, sample_int));
+	let mut basis = matrix_add(m, matrix_identity(3, 0.0, 1.0));
+	let mut position = vector([1.0, 0.5, -0.25]);
+	let mut velocity = vector([0.125, -0.5, 0.75]);
+	let mut acc = 0.0;
+	for _step in 0..steps {
+		position = matrix_vector_mul(basis, position);
+		position = vector_add(position, velocity);
+		position = vector_scale(position, 0.5);
+		let mut normal = cross3(position, velocity);
+		acc = acc + dot(position, normal) + norm_squared(position);
+	};
+	acc + trace(basis) + determinant3(basis)
+}
+
+/// The same pipeline over integers, so that the two instantiations of every generic body above
+/// are both reached and can be compared.
+///
+/// The accumulator mixes in the transposed basis rather than a cross product, whose dot with its
+/// own operand would be identically zero and let the loop body fold away.
+pub fn transform_pipeline_int(steps: int) -> int {
+	let mut basis = matrix_add(matrix_from_fn(3, 3, sample_int), matrix_identity(3, 0, 1));
+	let mut adjoint = transpose(basis);
+	let mut position = vector([1, 2, -1]);
+	let mut velocity = vector([0, -1, 1]);
+	let mut acc = 0;
+	for _step in 0..steps {
+		position = matrix_vector_mul(basis, position);
+		position = vector_add(position, velocity);
+		position = vector_sub(position, vector_neg(velocity));
+		acc = acc + dot(position, matrix_vector_mul(adjoint, velocity));
+	};
+	acc + trace(basis) + determinant3(basis)
+}
+
+/// Both instantiations of the small-dimension pipeline, in one entry point.
+///
+/// The two are one benchmark rather than two because they measure the same thing: what the
+/// optimizer does with small bodies behind calls. Running both still reaches both specializations
+/// of every generic body above, which is what the `int` path is for.
+pub fn transform_pipeline_mixed(steps: int) -> int {
+	transform_pipeline(steps) as int + transform_pipeline_int(steps)
+}
+
+/// A dense `n` by `n` product followed by Jacobi smoothing sweeps, the shape grid simulation has:
+/// the outer structure is negligible and the innermost loop is run n^3 and n^2 times.
+pub fn grid_simulation(n: int, sweeps: int) -> float {
+	let a = matrix_to_float(matrix_from_fn(n, n, sample_int));
+	let mut field = matrix_mul(a, transpose(a));
+	for _sweep in 0..sweeps {
+		field = smooth(field)
+	};
+	trace(field)
+}
+
+/// One Jacobi sweep: each interior cell becomes the average of its four neighbours, with the
+/// border left as it is.
+fn smooth(mut m) {
+	matrix_from_fn(m.rows, m.cols, |r, c| {
+		if r == 0 or c == 0 or r == m.rows - 1 or c == m.cols - 1 {
+			m->[at](r, c)
+		} else {
+			(m->[at](r - 1, c)
+				+ m->[at](r + 1, c)
+				+ m->[at](r, c - 1)
+				+ m->[at](r, c + 1)) * 0.25
+		}
+	})
+}

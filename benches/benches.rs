@@ -16,7 +16,7 @@ use ferlium::{
     CompilerSession, ExecutionTarget, MirOptimization, Path,
     hir::value::Value,
     module::{LocalFunctionId, ModuleId},
-    std::{array::array_value_from_vec, string::String as Str},
+    std::{array::array_value_from_vec, math::Float, string::String as Str},
 };
 
 /// What a benchmark runs against.
@@ -534,6 +534,98 @@ fn bench_sudoku_run(bench: RuntimeBench<()>) -> BenchOutput<isize> {
     BenchOutput { session, result }
 }
 
+// --- Linear algebra ---
+//
+// Two profiles of the same library, deliberately kept as separate targets: the transform is
+// dominated by calls, dictionary passing and per-call copies on bodies where inlining and
+// specialization decide everything, while the grid is dominated by the quality of an innermost loop
+// run n^3 times. The first measured baseline separates them cleanly — the optimizer recovers ~19% of
+// the transform and ~7% of the grid — so a single number mixing the two would hide which half moved.
+//
+// The transform runs its `int` and `float` instantiations together, which is the one place a single
+// number is right: they measure the same thing, and the first baseline had them within 1.6 points of
+// each other. Running both still reaches both specializations of every generic body.
+//
+// Both are runtime-only — adding either to the compile corpus would move `bench_std_mir_optimize`
+// and break comparison against every figure recorded for it.
+
+fn linalg_session(target: BenchTarget, function_name: &str) -> RuntimeBench<()> {
+    let mut session = target.session();
+    // The module's element access goes through subscripts, which are gated as experimental.
+    session.set_allow_experimental(true);
+    let module_id = session
+        .compile_for(
+            target.target(),
+            include_str!("../tests/modules/linalg.fer"),
+            "linalg.fer",
+            Path::single_str("linalg"),
+        )
+        .unwrap()
+        .module_id;
+    runtime_bench(target.target(), session, module_id, function_name, ())
+}
+
+fn setup_linalg_transform(target: BenchTarget) -> RuntimeBench<()> {
+    linalg_session(target, "transform_pipeline_mixed")
+}
+
+fn setup_linalg_grid(target: BenchTarget) -> RuntimeBench<()> {
+    linalg_session(target, "grid_simulation")
+}
+
+#[library_benchmark(teardown = teardown_benchmark)]
+#[benches::target(iter = BenchTarget::ALL, setup = setup_linalg_transform)]
+fn bench_linalg_transform(bench: RuntimeBench<()>) -> BenchOutput<isize> {
+    let RuntimeBench {
+        target,
+        mut session,
+        module_id,
+        entry,
+        input: (),
+    } = bench;
+    let result = measure(|| {
+        session
+            .run_entry(
+                target,
+                module_id,
+                entry,
+                vec![Value::native(black_box(6isize))],
+            )
+            .unwrap()
+            .into_primitive_ty::<isize>()
+            .unwrap()
+    });
+    BenchOutput { session, result }
+}
+
+#[library_benchmark(teardown = teardown_benchmark)]
+#[benches::target(iter = BenchTarget::ALL, setup = setup_linalg_grid)]
+fn bench_linalg_grid(bench: RuntimeBench<()>) -> BenchOutput<Float> {
+    let RuntimeBench {
+        target,
+        mut session,
+        module_id,
+        entry,
+        input: (),
+    } = bench;
+    let result = measure(|| {
+        session
+            .run_entry(
+                target,
+                module_id,
+                entry,
+                vec![
+                    Value::native(black_box(8isize)),
+                    Value::native(black_box(2isize)),
+                ],
+            )
+            .unwrap()
+            .into_primitive_ty::<Float>()
+            .unwrap()
+    });
+    BenchOutput { session, result }
+}
+
 fn setup_calculator(target: BenchTarget) -> RuntimeBench<Str> {
     let mut session = target.session();
     let module_id = session
@@ -609,7 +701,9 @@ library_benchmark_group!(
         bench_csv,
         bench_bank_account_run,
         bench_sudoku_run,
-        bench_calculator_run
+        bench_calculator_run,
+        bench_linalg_transform,
+        bench_linalg_grid
     ]
 );
 
