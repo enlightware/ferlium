@@ -35,6 +35,7 @@
 
 pub mod budget;
 pub(crate) mod call_graph;
+pub(crate) mod cse;
 pub(crate) mod dataflow;
 pub(crate) mod dce;
 pub(crate) mod fold;
@@ -109,6 +110,15 @@ pub(crate) fn optimize_function(
         if !changed {
             break;
         }
+    }
+    // Merging repeated address computations runs once, after the rounds, because inlining is what
+    // creates them: a spliced accessor brings its `subfield` chain to every call site. Running it
+    // inside a round would pay an extra open-and-verify cycle per round to catch redundancy that is
+    // mostly not there yet, and what it merges enables no further folding — the operands the fold
+    // analysis reads are the same ones, under one name instead of two.
+    let source = current.as_ref().unwrap_or(function);
+    if let Some(merged) = cse::eliminate_common_subexpressions(source, env) {
+        current = Some(merged);
     }
     // Cleanup runs once, after the rounds have settled, and on every body rather than only on one a
     // pass changed. A specialization arrives already carrying dead code — substitution turns its

@@ -337,13 +337,12 @@ mod tests {
         let artifacts = session
             .mir_artifacts_for(std_id, MirOptimization::Disabled)
             .expect("std raw MIR must be prepared");
-        let provenances =
-            Provenances::of_module(
-                artifacts.bodies(),
-                std_id,
-                ModuleEnv::new(module, modules),
-                &|_| ResultProvenance::Unknown,
-            );
+        let provenances = Provenances::of_module(
+            artifacts.bodies(),
+            std_id,
+            ModuleEnv::new(module, modules),
+            &|_| ResultProvenance::Unknown,
+        );
 
         let named = |name: &str| {
             module

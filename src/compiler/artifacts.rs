@@ -170,8 +170,7 @@ impl MirArtifacts {
                     artifacts.result_provenance(callee.function)
                 })
         };
-        let provenance =
-            Provenances::of_module(&functions, module.module_id(), env, &external);
+        let provenance = Provenances::of_module(&functions, module.module_id(), env, &external);
         Self {
             functions,
             specializations: Vec::new(),

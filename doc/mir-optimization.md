@@ -35,6 +35,7 @@ for round in 0..MAX_ROUNDS:
     specialize    // point generic calls at concrete copies
     inline        // budget-limited; block merging inside its own edit
     stop if nothing warranted another round
+cse               // merge repeated address computations, which inlining is what creates
 dce               // on every body, not only a changed one
 finish            // restores canonical form and re-verifies
 ```
@@ -222,6 +223,39 @@ remains is a specialization, whose evidence parameters are concrete and unread.
 Cross-module inlining is allowed and is where most inlinable script callees live. It is sound because
 function, dictionary and subscript identities are global while constant identities are function-local
 and remapped into the caller's pool.
+
+## Common-subexpression elimination
+
+`mir::pass::cse` merges repeated `subfield` operations — the field addresses a body recomputes —
+by **dominator-based value numbering**: a table keyed on the result type and the *canonical*
+operands, scoped to the dominator tree, entered on the way down and undone on the way back up. A
+redundant operation is replaced when an equivalent one dominates it. Operands are already canonical
+when an operation is reached, so comparing two arbitrarily deep expressions is one key comparison and
+no subtree is re-walked. Partial redundancy — a value available on some paths only — is out of
+reach; that needs available expressions and lazy code motion.
+
+It runs **once, after the rounds**, because inlining is what creates the redundancy: splicing an
+accessor into every call site copies its `subfield` chain along with it. Per round it would pay an
+extra edit cycle to catch redundancy that is mostly not there yet, and what it merges enables no
+further folding — the fold analysis reads the same operands under one name instead of two.
+
+**`subfield` alone, and the boundary is narrower than "pure".** A `subfield` *derives* a place: the
+base's root and path with an index appended, holding no storage of its own, so it is valid exactly
+where its base is — and the base is valid at the duplicate, since that is what the duplicate reads
+too. Registers are single-assignment, so no intervening write invalidates it either: there is no kill
+analysis. Three classes are out, each for its own reason.
+
+- **A memory reader** — `load`, `comp_eq`, `extract_tag` — needs an aliasing argument about the
+  writes in between.
+- **An owned materialized value**, `build_subscript` among them, cannot be merged at all: such a
+  register must have exactly one consuming use, and merging is what gives it two.
+- **`dict_entry` and `subscript_member`** *allocate a cell* to materialize the function value into,
+  so what they yield lives in the current stack region rather than deriving from an operand's. A
+  `stack_restore` between two occurrences pops it. Merging them needs a kill on `stack_restore`.
+
+Dominance itself is `mir::dominance`, shared with the verifier, which dominates *instructions* rather
+than blocks because an invoked operation's result is anchored at the normal successor and must not
+reach the error one. It therefore takes bare successor lists rather than a `Function`.
 
 ## Dead code elimination
 

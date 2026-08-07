@@ -21,7 +21,7 @@ use crate::{
     format::FormatWith,
     mir::{
         self, BlockId, Function, Operation, OperationKind, OperationResult, ParameterKind,
-        operation::SourceFallibility, terminator::TerminatorKind,
+        dominance::Dominance, operation::SourceFallibility, terminator::TerminatorKind,
     },
     module::{ModuleEnv, id::Id},
     types::{
@@ -444,50 +444,6 @@ enum FailureState {
     Normal,
     Propagating,
     FailedDuringCleanup,
-}
-
-/// Constant-time dominance queries over the reachable node CFG.
-///
-/// Immediate dominators are computed with the Cooper-Harvey-Kennedy algorithm, then the resulting
-/// dominator tree is numbered in depth-first order. A node dominates another exactly when its tree
-/// interval contains the other's interval.
-struct NodeDominance {
-    preorder: Vec<usize>,
-    postorder: Vec<usize>,
-}
-
-impl NodeDominance {
-    const UNREACHABLE: usize = usize::MAX;
-
-    fn is_reachable(&self, node: usize) -> bool {
-        self.preorder[node] != Self::UNREACHABLE
-    }
-
-    fn dominates(&self, definition: usize, usage: usize) -> bool {
-        self.is_reachable(definition)
-            && self.is_reachable(usage)
-            && self.preorder[definition] <= self.preorder[usage]
-            && self.postorder[usage] <= self.postorder[definition]
-    }
-}
-
-fn intersect_dominator_paths(
-    mut left: usize,
-    mut right: usize,
-    immediate_dominator: &[Option<usize>],
-    reverse_postorder_index: &[usize],
-) -> usize {
-    while left != right {
-        while reverse_postorder_index[left] > reverse_postorder_index[right] {
-            left = immediate_dominator[left]
-                .expect("dominance intersection must stay on the known dominator tree");
-        }
-        while reverse_postorder_index[right] > reverse_postorder_index[left] {
-            right = immediate_dominator[right]
-                .expect("dominance intersection must stay on the known dominator tree");
-        }
-    }
-    left
 }
 
 struct RootInfo {
@@ -1254,108 +1210,21 @@ impl<'a> Verifier<'a> {
         }
     }
 
-    fn compute_instruction_dominance(&self) -> NodeDominance {
+    /// Dominance over *instructions*, not blocks: an invoked operation's result is anchored at
+    /// its normal successor and must not reach the error one, which a block-level tree cannot say.
+    fn compute_instruction_dominance(&self) -> Dominance {
         let node_count = self.node_order.len();
         let entry = self.node_index[&self.block_first[&self.func.entry()]];
         let mut successors = vec![Vec::new(); node_count];
-        let mut predecessors = vec![Vec::new(); node_count];
         for (node_index, &node) in self.node_order.iter().enumerate() {
             for (successor, _) in self.successors(node) {
                 let successor = self.node_index[&successor];
                 if !successors[node_index].contains(&successor) {
                     successors[node_index].push(successor);
-                    predecessors[successor].push(node_index);
                 }
             }
         }
-
-        // Compute reverse postorder without recursion so verifier capacity is independent of the
-        // host thread's call-stack size.
-        let mut visited = vec![false; node_count];
-        let mut postorder = Vec::new();
-        let mut stack = vec![(entry, 0)];
-        visited[entry] = true;
-        while let Some((node, next_successor)) = stack.last_mut() {
-            if let Some(&successor) = successors[*node].get(*next_successor) {
-                *next_successor += 1;
-                if !visited[successor] {
-                    visited[successor] = true;
-                    stack.push((successor, 0));
-                }
-            } else {
-                postorder.push(*node);
-                stack.pop();
-            }
-        }
-        postorder.reverse();
-        let reverse_postorder = postorder;
-        let mut reverse_postorder_index = vec![NodeDominance::UNREACHABLE; node_count];
-        for (index, &node) in reverse_postorder.iter().enumerate() {
-            reverse_postorder_index[node] = index;
-        }
-
-        // Dominance is defined over operations and terminators. In particular, an invoked
-        // operation's result is anchored at its normal successor and cannot dominate its error
-        // successor.
-        let mut immediate_dominator = vec![None; node_count];
-        immediate_dominator[entry] = Some(entry);
-        loop {
-            let mut changed = false;
-            for &node in reverse_postorder.iter().skip(1) {
-                let mut known_predecessors = predecessors[node]
-                    .iter()
-                    .copied()
-                    .filter(|&predecessor| immediate_dominator[predecessor].is_some());
-                let mut new_dominator = known_predecessors
-                    .next()
-                    .expect("a reachable non-entry node must have a known predecessor");
-                for predecessor in known_predecessors {
-                    new_dominator = intersect_dominator_paths(
-                        predecessor,
-                        new_dominator,
-                        &immediate_dominator,
-                        &reverse_postorder_index,
-                    );
-                }
-                if immediate_dominator[node] != Some(new_dominator) {
-                    immediate_dominator[node] = Some(new_dominator);
-                    changed = true;
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-
-        let mut dominator_tree = vec![Vec::new(); node_count];
-        for &node in reverse_postorder.iter().skip(1) {
-            let dominator = immediate_dominator[node]
-                .expect("every reachable node must have an immediate dominator");
-            dominator_tree[dominator].push(node);
-        }
-
-        let mut preorder = vec![NodeDominance::UNREACHABLE; node_count];
-        let mut postorder = vec![NodeDominance::UNREACHABLE; node_count];
-        let mut timestamp = 0;
-        let mut stack = vec![(entry, false)];
-        while let Some((node, exiting)) = stack.pop() {
-            if exiting {
-                postorder[node] = timestamp;
-                timestamp += 1;
-                continue;
-            }
-            preorder[node] = timestamp;
-            timestamp += 1;
-            stack.push((node, true));
-            for &child in dominator_tree[node].iter().rev() {
-                stack.push((child, false));
-            }
-        }
-
-        NodeDominance {
-            preorder,
-            postorder,
-        }
+        Dominance::of(&successors, entry)
     }
 
     fn place_pointee_type(&self, value: &mir::Value) -> Option<MirType> {

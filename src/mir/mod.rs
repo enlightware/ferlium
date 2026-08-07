@@ -8,6 +8,7 @@
 //
 pub(crate) mod builder;
 pub(crate) mod const_eval;
+pub(crate) mod dominance;
 pub(crate) mod edit;
 pub mod function;
 pub mod interpreter;
