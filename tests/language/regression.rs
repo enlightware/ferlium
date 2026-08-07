@@ -569,6 +569,33 @@ fn broad_generic_alias_does_not_recurse_while_formatting_error() {
         .expect_type_mismatch("()", "{  }");
 }
 
+// A trait method used as a first-class value is read out of a dictionary method slot, which holds a
+// code identity and never a closure. Copying one into a caller's storage is therefore a
+// representation copy, even though its function type — which says nothing about a captured
+// environment — is not `TrivialCopy`. Passing `len` as a callback is the ordinary way to reach this.
+//
+// Found by `grammar_optimization_differential`.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_trait_method_passed_as_a_value_is_copied_from_its_dictionary_slot() {
+    let mut session = TestSession::new();
+    // The callee is unknown in `apply`, so `len` reaches lowering with its evidence unresolved.
+    assert_val_eq!(
+        session.run("fn apply(g) { g(len) } apply(|k| k([1, 2]))"),
+        int(2)
+    );
+    // The same slot read, instantiated at a different `SizedSeq` impl.
+    assert_val_eq!(
+        session.run("fn apply(g) { g(len) } apply(|k| k(\"abc\"))"),
+        int(3)
+    );
+    // A generic function value that carries no dictionary is unaffected.
+    assert_val_eq!(
+        session.run("fn id(x) { x } fn apply(g) { g(id) } apply(|k| k(4))"),
+        int(4)
+    );
+}
+
 // A `break` whose value itself diverges (e.g. `break return x`) terminates the current block while
 // lowering that value. The `break` handler must then skip its own unwind / `stack_restore` / jump
 // to the loop exit, otherwise the MIR emitter panics with "insertion after terminator".

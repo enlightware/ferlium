@@ -1227,6 +1227,32 @@ impl<'a> Verifier<'a> {
         Dominance::of(&successors, entry)
     }
 
+    /// Whether a place holds a *bare* function value — a code identity with no owned environment.
+    ///
+    /// A function type is never `TrivialCopy`, because nothing in `(A) -> int` says whether the
+    /// value carries a captured environment, and copying one by representation would duplicate an
+    /// environment its storage owns. A dictionary method slot is where the type is silent but the
+    /// contract is not: a dictionary holds trait method function values, which are code identities
+    /// and never closures — the same contract [`Operation::call`] states when it admits "a method
+    /// slot `project`ed out of a dictionary" as a callee. Reading one as a first-class value is
+    /// therefore a representation copy, and the drop its consumer emits finds no environment to
+    /// release.
+    ///
+    /// A closure is unaffected: it lives in ordinary storage, is reached through its own place, and
+    /// is copied through `Value::clone` like any other owned value.
+    fn is_bare_function_slot(&self, value: &mir::Value) -> bool {
+        let mir::Value::Register(id) = value else {
+            return false;
+        };
+        let Some(node) = self.value_definition.get(id) else {
+            return false;
+        };
+        matches!(
+            self.operation(*node).map(|op| &op.kind),
+            Some(OperationKind::DictEntry { .. })
+        )
+    }
+
     fn place_pointee_type(&self, value: &mir::Value) -> Option<MirType> {
         match self.role(value) {
             ValueRole::Place(ty) => Some(ty),
@@ -1463,7 +1489,7 @@ impl<'a> Verifier<'a> {
                 OperationKind::Memcpy => {
                     if let Some(MirType::Lowered(ty)) = self.place_pointee_type(&operands[0]) {
                         assert!(
-                            self.is_trivial_copy(ty),
+                            self.is_trivial_copy(ty) || self.is_bare_function_slot(&operands[0]),
                             "MIR function `{}`: memcpy source type is not TrivialCopy",
                             self.func.name
                         );
