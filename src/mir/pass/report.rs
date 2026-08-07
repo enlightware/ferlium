@@ -229,7 +229,7 @@ pub(crate) fn build(
         call_sites_after += call_sites(optimized_body);
 
         remarks.extend(
-            inline::refusals_of(optimized_body, session)
+            inline::refusals_of(optimized_body, env, session)
                 .into_iter()
                 .map(|refusal| Remark {
                     site: refusal.site,

@@ -50,15 +50,15 @@ use crate::{
     CompilerSession, Location,
     compiler::MirOptimization,
     mir::{
-        self, BlockId, Function, Operation, OperationKind,
+        self, BlockId, Function, Instantiation, Operation, OperationKind,
         edit::{FunctionEdit, successors},
         terminator::{Terminator, TerminatorKind},
     },
     module::{FunctionId, ModuleEnv, ModuleId, id::Id},
-    types::type_like::TypeLike,
+    types::{r#type::Type, type_like::TypeLike},
 };
 
-use super::{Specializations, budget, function_size};
+use super::{Specializations, budget, function_size, monomorphize};
 
 /// Where the call to inline sits in the caller.
 #[derive(Clone, Copy)]
@@ -83,9 +83,13 @@ impl Site {
 }
 
 /// A call site to replace with its callee's body.
+///
+/// The body is carried rather than re-read at splice time: for a generic callee it is a *substituted*
+/// copy, and planning must check the same body the splice inserts.
 struct Inlining {
     site: Site,
     callee: FunctionId,
+    body: Function,
 }
 
 /// Why one call site was not inlined.
@@ -160,6 +164,7 @@ pub(crate) fn inline_function(
     let sites = plan_inlinings(
         func,
         original_size,
+        env,
         session,
         Some(specializations),
         &mut None,
@@ -173,9 +178,7 @@ pub(crate) fn inline_function(
     // that is the terminator before the operations, and the operations in decreasing index — which
     // is the reverse of the order they were planned in.
     for inlining in sites.into_iter().rev() {
-        let body = callee_body(session, inlining.callee, Some(specializations))
-            .expect("planning read this body from the same artifacts");
-        inline_at(&mut edit, &body, inlining.site, env);
+        inline_at(&mut edit, &inlining.body, inlining.site, env);
     }
     // Splicing always splits the call site's block and joins the pieces with jumps, so a callee
     // that needed no split arrives as three blocks. Collapse them here, in this pass's own edit,
@@ -200,6 +203,7 @@ pub(crate) fn inline_function(
 fn plan_inlinings(
     func: &Function,
     original_size: usize,
+    env: ModuleEnv<'_>,
     session: &CompilerSession,
     specializations: Option<&Specializations>,
     refusals: &mut Option<&mut Vec<Refusal>>,
@@ -226,7 +230,7 @@ fn plan_inlinings(
             });
 
         for (site, operation) in candidates {
-            let OperationKind::Call { ty, .. } = &operation.kind else {
+            let OperationKind::Call { ty, instantiation } = &operation.kind else {
                 continue;
             };
             let callee = match &operation.operands[0] {
@@ -258,10 +262,28 @@ fn plan_inlinings(
                 refuse(NotInlinable::NoBody);
                 continue;
             };
+            // Substitution never grows a body, so the generic size bounds the concrete one. Asking
+            // here keeps a callee that is too large either way from paying for a substitution whose
+            // only use would be to refuse it.
+            if function_size(&body) > budget::INLINE_CALLEE_OPERATIONS {
+                refuse(NotInlinable::CalleeTooLarge);
+                continue;
+            }
+            // Before substituting, not after: these checks read the body's *shape*, which
+            // substitution does not change, and a body refused for its shape must not pay for a
+            // substitution first. It must also not be handed to one — a scoped accessor's
+            // `project`/`end_project` pair is exactly what substitution cannot keep consistent.
             if let Err(reason) = check_inlinable(&body, site.has_error_successor(), in_cleanup) {
                 refuse(reason);
                 continue;
             }
+            let body = match concrete_body(body, callee, instantiation.as_deref(), session, env) {
+                Ok(body) => body,
+                Err(reason) => {
+                    refuse(reason);
+                    continue;
+                }
+            };
             let callee_size = function_size(&body);
             // The call goes; the callee's operations arrive, plus a `stack_save` and one
             // `stack_restore` per exit — bounded by the block count.
@@ -275,25 +297,71 @@ fn plan_inlinings(
                 continue;
             }
             size += cost;
-            sites.push(Inlining { site, callee });
+            sites.push(Inlining { site, callee, body });
         }
     }
     sites
 }
 
 /// Classifies every call site of `func` that inlining left alone, for the optimization report.
-pub(crate) fn refusals_of(func: &Function, session: &CompilerSession) -> Vec<Refusal> {
+pub(crate) fn refusals_of(
+    func: &Function,
+    env: ModuleEnv<'_>,
+    session: &CompilerSession,
+) -> Vec<Refusal> {
     let mut refusals = Vec::new();
     // Measured against the body as it stands: the question the report answers is whether *another*
     // round would inline this site, not what the budget was when optimization started.
     plan_inlinings(
         func,
         function_size(func),
+        env,
         session,
         None,
         &mut Some(&mut refusals),
     );
     refusals
+}
+
+/// `body` with the call site's instantiation substituted into it, when it is generic and the call
+/// records one.
+///
+/// **Inlining a generic callee needs no specialization.** A specialization is a whole extra body
+/// kept forever, which is why it has to be worth it; a body that is about to be spliced into one
+/// call site is neither. The inliner already substitutes the callee's *parameters* by the caller's
+/// operands, and this is the same substitution one level down, on its types. That matters beyond
+/// tidiness: `array_index` is generic and takes no dictionary, so `worth_specializing` refuses it and
+/// it would otherwise stay uninlinable forever — every array access a call.
+///
+/// Left generic, and so refused, when the call records no instantiation, or one that still names the
+/// caller's own quantifiers. Specializing the caller is what makes such a site concrete on a later
+/// round.
+fn concrete_body(
+    body: Function,
+    callee: FunctionId,
+    instantiation: Option<&Instantiation>,
+    session: &CompilerSession,
+    env: ModuleEnv<'_>,
+) -> Result<Function, NotInlinable> {
+    if body.parameters().iter().all(|p| p.ty.is_constant()) {
+        return Ok(body);
+    }
+    let Some(instantiation) = instantiation else {
+        return Err(NotInlinable::Generic);
+    };
+    if instantiation.ty_args.iter().any(Type::is_variable) {
+        return Err(NotInlinable::Generic);
+    }
+    let module = session.expect_fresh_module(callee.module);
+    let Some(function) = module.get_function_by_id(callee.function) else {
+        return Err(NotInlinable::Generic);
+    };
+    Ok(monomorphize::substitute_body(
+        &body,
+        &function.definition.ty_scheme,
+        instantiation,
+        env,
+    ))
 }
 
 /// The callee's body, read from the raw stage.
@@ -313,7 +381,7 @@ fn callee_body(
     specializations: Option<&Specializations>,
 ) -> Option<Function> {
     if let Some(specializations) = specializations
-        && specializations.is_specialization(callee.function)
+        && specializations.is_specialization(callee)
     {
         return specializations.raw_body(callee.function).cloned();
     }
@@ -353,20 +421,11 @@ fn cleanup_blocks(func: &Function) -> FxHashSet<BlockId> {
 
 /// Whether this callee can be copied into this call site, and what stops it if not.
 ///
-/// The subtle refusal is the generic one. An operation carries types — `clone_closure_env { ty }`,
-/// `alloca { ty }`, a call's `CallImplType` — and those are written in the *callee's* type
-/// environment. Copying them into a caller with a different instantiation silently reinterprets
-/// them: inlining a generic `Value<A>::clone` into a concrete caller makes its `A` mean whatever
-/// `A` happens to be there. Making that sound requires substituting the call site's instantiation
-/// through the body, which is what specialization does — so only callees that carry no type
-/// variables at all are inlined.
-///
-/// **A dictionary parameter is not itself a reason to refuse**, which is what lets a specialization
-/// be inlined. Splicing binds `@extra` parameters to the caller's operands like any other, and a
-/// genuinely generic body is already refused above: its evidence parameter's own type mentions the
-/// variables it is evidence for, so it is not constant. What remains is a body whose dictionary
-/// parameters are concrete — a specialization, whose evidence has already been bound to constants
-/// inside it, leaving those parameters unread.
+/// Every check here reads the body's *shape*, never its types, which is why this runs before
+/// [`concrete_body`] substitutes: a body refused for its shape should not pay for a substitution
+/// first, and a scoped accessor must not be handed to one at all — substitution can demote an
+/// infallible `project` while its `end_project` takes its fallibility from the projection and stays
+/// an `invoke`, which the verifier rejects.
 ///
 /// A recursive callee carries a call-depth guard, so the presence of `check_call_depth` *is* the
 /// recursion test — a local check on the callee, which is also what bounds inlining. Scoped
@@ -377,13 +436,6 @@ fn check_inlinable(
     has_error_successor: bool,
     in_cleanup: bool,
 ) -> Result<(), NotInlinable> {
-    let generic = body
-        .parameters()
-        .iter()
-        .any(|parameter| !parameter.ty.is_constant());
-    if generic {
-        return Err(NotInlinable::Generic);
-    }
     if body.blocks().next().is_none() {
         return Err(NotInlinable::UnsupportedShape);
     }
@@ -687,12 +739,27 @@ mod tests {
         );
     }
 
-    /// A generic callee is not inlined: its operations carry types written in its own type
-    /// environment, which would mean something else in the caller.
+    /// A generic callee *is* inlined when the call site says what it was instantiated at: the
+    /// inliner substitutes the types itself rather than waiting for a specialization, which for a
+    /// callee about to be spliced into one site would be a body created only to be erased.
     ///
-    /// The caller is generic too, so that specialization cannot reach the call: it records a
-    /// variable instantiation, which is not something to specialize at. A *concrete* caller has its
-    /// call specialized and the concrete copy inlined, which is what specialization is for.
+    /// `array_index` is the case that matters — generic, dictionary-free, so `worth_specializing`
+    /// refuses it and without this every array access would stay a call forever.
+    #[test]
+    fn a_generic_callee_is_inlined_at_a_concrete_call_site() {
+        let module = optimized_experimental(
+            "subscript at<A>(v: &mut (A, A), i: int) -> A { ref mut { return v.0 } }\n\
+             fn use_it(p: &mut (int, int)) { p->[at](0) = 5 }",
+        );
+        let caller = body_of(&module, "use_it");
+        assert!(
+            !caller.contains("call inline::at"),
+            "a generic accessor at a concrete call site must be inlined:\n{caller}"
+        );
+    }
+
+    /// A generic callee is not inlined when nothing says what to substitute: the caller is generic
+    /// too, so the call records a variable instantiation rather than a concrete one.
     #[test]
     fn a_generic_callee_is_not_inlined() {
         let module = optimized("fn identity(x) { x }\nfn use_it(n) { identity(n) }");

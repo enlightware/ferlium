@@ -117,8 +117,11 @@ impl Specializations {
     }
 
     /// Whether `id` names a specialization this table created.
-    pub(crate) fn is_specialization(&self, id: LocalFunctionId) -> bool {
-        id.as_index() >= self.first_index
+    ///
+    /// Takes a whole [`FunctionId`], because the local index alone is meaningless: it addresses
+    /// *this* module's table, and another module's ordinary function can share it.
+    pub(crate) fn is_specialization(&self, id: FunctionId) -> bool {
+        id.module == self.module && id.function.as_index() >= self.first_index
     }
 
     /// The body of a specialization this table created.
@@ -277,10 +280,41 @@ pub(crate) fn specialize<Ty: TypeLike>(
     map_types(&mut edit, &mut mapper);
     bind_dictionaries(&mut edit, &key.dictionaries);
     redirect_recursion(&mut edit, key.callee, own);
-    demote_infallible_invokes(&mut edit);
-    drop_redundant_layout_witnesses(&mut edit, env);
-    elide_trivial_ownership_operations(&mut edit, env);
+    simplify_after_substitution(&mut edit, env);
     edit.finish(env)
+}
+
+/// A generic body rewritten at one call site's instantiation, for a consumer that splices it rather
+/// than keeping it.
+///
+/// The same type substitution [`specialize`] applies, and deliberately none of the rest. There are
+/// no dictionaries to bind, because an inliner substitutes the caller's own evidence operands
+/// positionally like any other parameter; and no recursion to redirect, because no new function is
+/// created for a self-call to name — a recursive callee is refused by the inliner anyway.
+pub(crate) fn substitute_body<Ty: TypeLike>(
+    body: &Function,
+    scheme: &TypeScheme<Ty>,
+    instantiation: &Instantiation,
+    env: ModuleEnv<'_>,
+) -> Function {
+    let subst = instantiation.substitution(scheme);
+    let mut mapper = BitmapInstantiationMapper::new(&subst);
+
+    let mut edit = FunctionEdit::new(body.clone());
+    map_types(&mut edit, &mut mapper);
+    simplify_after_substitution(&mut edit, env);
+    edit.finish(env)
+}
+
+/// The rewrites that knowing the concrete types makes possible, shared by both substituting paths.
+///
+/// Each is a consequence of substitution rather than an optimization in its own right: an effect
+/// variable resolved to a concrete effect can make a conservatively-fallible call infallible, a
+/// concrete type can have a static layout, and a concrete type can own nothing.
+fn simplify_after_substitution(edit: &mut FunctionEdit, env: ModuleEnv<'_>) {
+    demote_infallible_invokes(edit);
+    drop_redundant_layout_witnesses(edit, env);
+    elide_trivial_ownership_operations(edit, env);
 }
 
 /// Points a specialized body's recursive calls at the specialization rather than the original.
@@ -616,9 +650,7 @@ pub(crate) fn specialize_call_sites(
                 _ => None,
             });
         for operation in operations {
-            if let Some(id) =
-                specialization_for(operation, env, session, module_id, specializations)
-            {
+            if let Some(id) = specialization_for(operation, env, session, specializations) {
                 operation.operands[0] = mir::Value::Function(FunctionId {
                     module: module_id,
                     function: id,
@@ -641,7 +673,6 @@ fn specialization_for(
     operation: &Operation,
     env: ModuleEnv<'_>,
     session: &CompilerSession,
-    module_id: ModuleId,
     specializations: &mut Specializations,
 ) -> Option<LocalFunctionId> {
     let OperationKind::Call {
@@ -656,7 +687,7 @@ fn specialization_for(
     };
     // A specialization is never a callee to specialize again. The check only means anything for
     // this module's own table; another module's raw bodies contain no specializations at all.
-    if callee.module == module_id && specializations.is_specialization(callee.function) {
+    if specializations.is_specialization(*callee) {
         return None;
     }
     // A caller that still names its own quantifiers here would produce a specialization as generic
