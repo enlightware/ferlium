@@ -173,17 +173,19 @@ fn derive(
             match &operation.kind {
                 // A field's address is rooted wherever its base is.
                 OperationKind::Subfield { .. } => {
-                    if let (Some(id), Some(root)) =
-                        (operation.result_id(), root_of(&operation.operands[0], &roots))
-                    {
+                    if let (Some(id), Some(root)) = (
+                        operation.result_id(),
+                        root_of(&operation.operands[0], &roots),
+                    ) {
                         roots.insert(id, root);
                     }
                 }
                 // Dereferencing a slot yields whatever a call wrote into it.
                 OperationKind::Load => {
-                    if let (Some(id), Some(root)) =
-                        (operation.result_id(), root_of(&operation.operands[0], &roots))
-                    {
+                    if let (Some(id), Some(root)) = (
+                        operation.result_id(),
+                        root_of(&operation.operands[0], &roots),
+                    ) {
                         roots.insert(id, root);
                     }
                 }

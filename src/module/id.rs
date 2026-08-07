@@ -14,6 +14,16 @@ use std::mem::swap;
 #[doc(hidden)]
 pub use nonmax::NonMaxU32 as IdRepr;
 
+/// A positional index that does not fit the compact representation an id type uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndexOutOfRange;
+
+impl std::fmt::Display for IndexOutOfRange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "index does not fit in this id type")
+    }
+}
+
 /// An ID that can be used as an index into a collection
 pub trait Id: Copy {
     fn from_index(index: usize) -> Self;
@@ -49,6 +59,19 @@ macro_rules! define_id_type {
             #[inline]
             pub const fn as_u32(self) -> u32 {
                 self.0.get()
+            }
+        }
+
+        /// Fallible widening back from a positional index.
+        impl std::convert::TryFrom<usize> for $name {
+            type Error = $crate::module::id::IndexOutOfRange;
+
+            #[inline]
+            fn try_from(index: usize) -> Result<Self, Self::Error> {
+                let index = u32::try_from(index).map_err(|_| $crate::module::id::IndexOutOfRange)?;
+                $crate::module::id::IdRepr::new(index)
+                    .map(Self)
+                    .ok_or($crate::module::id::IndexOutOfRange)
             }
         }
 

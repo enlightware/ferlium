@@ -264,10 +264,7 @@ pub(crate) fn compile_with_source_id(
             origin: modules.get_name(module_id).unwrap().to_string(),
             import_chain: cycle
                 .into_iter()
-                .map(|index| modules
-                    .get_name(ModuleId::from_index(index))
-                    .unwrap()
-                    .to_string())
+                .map(|id| modules.get_name(id).unwrap().to_string())
                 .collect(),
             span: Location::new_synthesized(),
         });
@@ -437,7 +434,7 @@ fn find_module_deps_cycle(
     module_id: ModuleId,
     module: &Module,
     has_old_module: bool,
-) -> Option<Vec<usize>> {
+) -> Option<Vec<ModuleId>> {
     struct ModuleNode(Vec<ModuleId>);
     impl graph::Node for ModuleNode {
         type Index = ModuleId;
@@ -476,7 +473,7 @@ fn find_module_deps_cycle(
         })
         .collect();
 
-    graph::find_cycle_from(&module_graph, module_id.as_index())
+    graph::find_cycle_from(&module_graph, module_id)
 }
 
 /// Parse a module from a source code and return the corresponding ASTs.

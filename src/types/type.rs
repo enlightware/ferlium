@@ -2872,13 +2872,15 @@ impl PartialOrd for TypeKind {
 }
 
 impl graph::Node for TypeKind {
-    type Index = u32;
+    // A position, because every consumer of these components indexes `kinds`, `resolved` and
+    // `subst_to_local` with them.
+    type Index = usize;
 
     fn neighbors(&self) -> impl Iterator<Item = Self::Index> {
         let mut neighbors = Vec::new();
         self.for_each_inner_type(|ty| {
             if ty.is_local() {
-                neighbors.push(ty.index());
+                neighbors.push(ty.index() as usize);
             }
         });
         neighbors.into_iter()

@@ -11,15 +11,30 @@ use std::collections::VecDeque;
 use crate::FxHashSet;
 
 pub(crate) trait Node {
-    type Index: TryInto<usize> + Copy;
+    /// How this graph names its own nodes.
+    ///
+    /// Both conversions are infallible in practice — a position comes from the graph's own length —
+    /// so the errors are unwrapped, which is why both need `Debug`.
+    type Index: TryInto<usize, Error: std::fmt::Debug>
+        + TryFrom<usize, Error: std::fmt::Debug>
+        + Copy;
     fn neighbors(&self) -> impl Iterator<Item = Self::Index>;
 }
 
+/// A position, in the caller's index type.
+fn index_of<I: TryFrom<usize, Error: std::fmt::Debug>>(position: usize) -> I {
+    I::try_from(position).expect("a position within the graph must fit its own index type")
+}
+
+/// A caller's index, as a position.
+fn position_of<I: TryInto<usize, Error: std::fmt::Debug>>(index: I) -> usize {
+    index
+        .try_into()
+        .expect("a graph index must be usable as a position")
+}
+
 #[allow(dead_code)]
-pub(crate) fn find_disjoint_subgraphs<N: Node>(graph: &[N]) -> Vec<Vec<usize>>
-where
-    <<N as Node>::Index as TryInto<usize>>::Error: std::fmt::Debug,
-{
+pub(crate) fn find_disjoint_subgraphs<N: Node>(graph: &[N]) -> Vec<Vec<N::Index>> {
     let mut visited = vec![false; graph.len()]; // Track visited nodes
     let mut disjoint_subgraphs = Vec::new(); // Store the result
 
@@ -35,7 +50,7 @@ where
                 continue; // Skip if already visited
             }
             visited[node_idx] = true; // Mark as visited
-            current_subgraph.push(node_idx); // Add to current subgraph
+            current_subgraph.push(index_of::<N::Index>(node_idx)); // Add to current subgraph
 
             // Add all unvisited connected nodes to the queue
             for neighbor_idx in graph[node_idx].neighbors() {
@@ -51,10 +66,7 @@ where
     disjoint_subgraphs
 }
 
-pub(crate) fn find_strongly_connected_components<N: Node>(graph: &[N]) -> Vec<Vec<usize>>
-where
-    <<N as Node>::Index as TryInto<usize>>::Error: std::fmt::Debug,
-{
+pub(crate) fn find_strongly_connected_components<N: Node>(graph: &[N]) -> Vec<Vec<N::Index>> {
     let mut index = 0;
     let mut stack = Vec::new();
     let mut in_stack = vec![false; graph.len()];
@@ -71,10 +83,8 @@ where
         indices: &mut [Option<usize>],
         low_link: &mut [usize],
         graph: &[N],
-        sccs: &mut Vec<Vec<usize>>,
-    ) where
-        <<N as Node>::Index as TryInto<usize>>::Error: std::fmt::Debug,
-    {
+        sccs: &mut Vec<Vec<N::Index>>,
+    ) {
         indices[node_index] = Some(*index);
         low_link[node_index] = *index;
         *index += 1;
@@ -109,7 +119,9 @@ where
             let mut scc = Vec::new();
             while let Some(w) = stack.pop() {
                 in_stack[w] = false;
-                scc.push(w);
+                // Converted here, at the one push that builds a component, rather than by a second
+                // pass over the finished answer.
+                scc.push(index_of::<N::Index>(w));
                 if w == node_index {
                     break;
                 }
@@ -137,15 +149,15 @@ where
     sccs
 }
 
-pub(crate) fn topological_sort_sccs<N: Node>(graph: &[N], sccs: &[Vec<usize>]) -> Vec<Vec<usize>>
-where
-    <<N as Node>::Index as TryInto<usize>>::Error: std::fmt::Debug,
-{
-    // Map each node to its SCC index for quick lookup
+pub(crate) fn topological_sort_sccs<N: Node>(
+    graph: &[N],
+    sccs: &[Vec<N::Index>],
+) -> Vec<Vec<N::Index>> {
+    // Map each node to its SCC index for quick lookup.
     let mut node_to_scc = vec![None; graph.len()];
     for (i, scc) in sccs.iter().enumerate() {
         for &node in scc {
-            node_to_scc[node] = Some(i);
+            node_to_scc[position_of::<N::Index>(node)] = Some(i);
         }
     }
 
@@ -155,7 +167,7 @@ where
 
     for (i, scc) in sccs.iter().enumerate() {
         for &node in scc {
-            for neighbor in graph[node].neighbors() {
+            for neighbor in graph[position_of::<N::Index>(node)].neighbors() {
                 let neighbor_index: usize = neighbor.try_into().unwrap();
                 if let Some(j) = node_to_scc[neighbor_index] {
                     if i != j
@@ -217,10 +229,8 @@ enum VisitState {
 /// from `0`, the result is `Some([1, 2])`.
 ///
 /// `start` must be a valid index into `graph`.
-pub(crate) fn find_cycle_from<N: Node>(graph: &[N], start: usize) -> Option<Vec<usize>>
-where
-    <<N as Node>::Index as TryInto<usize>>::Error: std::fmt::Debug,
-{
+pub(crate) fn find_cycle_from<N: Node>(graph: &[N], start: N::Index) -> Option<Vec<N::Index>> {
+    let start = position_of::<N::Index>(start);
     let mut state = vec![VisitState::Unvisited; graph.len()];
 
     // Each stack frame holds (node_index, index_of_next_child_to_visit).
@@ -254,6 +264,7 @@ where
                         .iter()
                         .copied()
                         .skip_while(|&id| id != neighbor)
+                        .map(index_of::<N::Index>)
                         .collect();
                     return Some(cycle);
                 }
@@ -395,7 +406,7 @@ mod tests {
         assert_eq!(subgraphs[2][0], 3);
     }
 
-    fn to_sorted_sets(sccs: Vec<Vec<usize>>) -> Vec<BTreeSet<usize>> {
+    fn to_sorted_sets<I: Ord>(sccs: Vec<Vec<I>>) -> Vec<BTreeSet<I>> {
         sccs.into_iter()
             .map(|scc| scc.into_iter().collect())
             .collect()
@@ -469,7 +480,7 @@ mod tests {
         assert!(sorted_sccs.contains(&BTreeSet::from([2, 3])));
     }
 
-    fn to_set_of_sets(sccs: Vec<Vec<usize>>) -> BTreeSet<BTreeSet<usize>> {
+    fn to_set_of_sets<I: Ord>(sccs: Vec<Vec<I>>) -> BTreeSet<BTreeSet<I>> {
         sccs.into_iter()
             .map(|scc| scc.into_iter().collect())
             .collect()

@@ -97,7 +97,10 @@ impl CallGraph {
     }
 
     /// The functions `id` calls within this module.
-    pub(crate) fn callees(&self, id: LocalFunctionId) -> impl Iterator<Item = LocalFunctionId> + '_ {
+    pub(crate) fn callees(
+        &self,
+        id: LocalFunctionId,
+    ) -> impl Iterator<Item = LocalFunctionId> + '_ {
         self.nodes[id.as_index()]
             .callees
             .iter()
@@ -122,7 +125,7 @@ impl CallGraph {
             .map(|component| {
                 component
                     .into_iter()
-                    .map(LocalFunctionId::from_index)
+                    .map(|index| LocalFunctionId::from_index(index as usize))
                     .collect()
             })
             .collect()
@@ -195,7 +198,8 @@ mod tests {
 
     #[test]
     fn a_call_becomes_an_edge() {
-        let (graph, id) = graph_of("fn leaf(x: int) -> int { x }\nfn root(x: int) -> int { leaf(x) }");
+        let (graph, id) =
+            graph_of("fn leaf(x: int) -> int { x }\nfn root(x: int) -> int { leaf(x) }");
         let callees: Vec<_> = graph.callees(id("root")).collect();
         assert!(
             callees.contains(&id("leaf")),
@@ -206,7 +210,8 @@ mod tests {
     /// Callees first is the whole reason this order exists: a summary of `root` needs `leaf`'s.
     #[test]
     fn components_put_callees_before_callers() {
-        let (graph, id) = graph_of("fn leaf(x: int) -> int { x }\nfn root(x: int) -> int { leaf(x) }");
+        let (graph, id) =
+            graph_of("fn leaf(x: int) -> int { x }\nfn root(x: int) -> int { leaf(x) }");
         let order = graph.components_callees_first();
         let position = |wanted: LocalFunctionId| {
             order
@@ -244,11 +249,7 @@ mod tests {
     #[test]
     fn every_function_appears_exactly_once() {
         let (graph, _) = graph_of("fn a(x: int) -> int { x }\nfn b(x: int) -> int { a(x) }");
-        let total: usize = graph
-            .components_callees_first()
-            .iter()
-            .map(Vec::len)
-            .sum();
+        let total: usize = graph.components_callees_first().iter().map(Vec::len).sum();
         assert_eq!(total, graph.len());
     }
 }
