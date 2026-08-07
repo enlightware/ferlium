@@ -184,7 +184,9 @@ fn buffer_slot_descr() -> ModuleFunction {
             Some(String::from("Returns the place for a buffer slot.")),
             Vec::new(),
         )
-        .with_result_convention(CallResultConvention::ADDRESSOR_PLACE),
+        .with_result_convention(CallResultConvention::ADDRESSOR_PLACE)
+        // The slot is inside the buffer: parameter 0.
+        .with_result_rooted_in(0),
         Box::new(ContextNativeFn::new(
             "buffer_slot",
             &[],

@@ -64,6 +64,19 @@ impl<'a, 'm> FunctionDisplayContext<'a, 'm> {
 pub struct CallableDefinition {
     pub ty_scheme: TypeScheme<FnType>,
     pub result_convention: CallResultConvention,
+    /// For an `AddressorPlace` native, which **visible argument** the place it returns points into.
+    ///
+    /// An index into `arg_names` and `ty_scheme`'s argument list, deliberately not a MIR parameter
+    /// index: MIR counts hidden evidence first, so the two differ for any callable that takes a
+    /// dictionary. They happen to coincide for every std native today — no std native takes a
+    /// dictionary — and depending on that silently is how a local index without its context becomes
+    /// a bug.
+    ///
+    /// Only natives set this. A function with a MIR body has it *derived* from that body instead
+    /// (`mir::pass::provenance`), which is both cheaper to keep true and checkable; a native
+    /// computes its address in Rust, so the fact has nowhere to be derived from and is asserted
+    /// here. `None` means "not stated", which every consumer reads as unknown.
+    pub result_rooted_in: Option<u32>,
     pub generic_params: Vec<UstrSpan>,
     pub generic_effect_params: Vec<UstrSpan>,
     pub arg_names: Vec<Ustr>,
@@ -76,6 +89,7 @@ impl CallableDefinition {
         Self {
             ty_scheme,
             result_convention: CallResultConvention::Value,
+            result_rooted_in: None,
             generic_params: vec![],
             generic_effect_params: vec![],
             arg_names,
@@ -93,6 +107,7 @@ impl CallableDefinition {
         Self {
             ty_scheme,
             result_convention: CallResultConvention::Value,
+            result_rooted_in: None,
             generic_params,
             generic_effect_params: vec![],
             arg_names,
@@ -112,6 +127,7 @@ impl CallableDefinition {
         Self {
             ty_scheme,
             result_convention: CallResultConvention::Value,
+            result_rooted_in: None,
             generic_params,
             generic_effect_params,
             arg_names,
@@ -129,6 +145,7 @@ impl CallableDefinition {
         CallableDefinition {
             ty_scheme: TypeScheme::new_infer_quantifiers(fn_ty),
             result_convention: CallResultConvention::Value,
+            result_rooted_in: None,
             generic_params: vec![],
             generic_effect_params: vec![],
             arg_names,
@@ -150,6 +167,7 @@ impl CallableDefinition {
                 constraints.into(),
             ),
             result_convention: CallResultConvention::Value,
+            result_rooted_in: None,
             generic_params: vec![],
             generic_effect_params: vec![],
             arg_names,
@@ -168,6 +186,13 @@ impl CallableDefinition {
 
     pub fn with_result_convention(mut self, result_convention: CallResultConvention) -> Self {
         self.result_convention = result_convention;
+        self
+    }
+
+    /// Declares which visible argument the returned place points into, for a native whose address
+    /// computation MIR cannot see.
+    pub fn with_result_rooted_in(mut self, argument: u32) -> Self {
+        self.result_rooted_in = Some(argument);
         self
     }
 
@@ -289,6 +314,7 @@ impl TypeLike for CallableDefinition {
         CallableDefinition {
             ty_scheme: self.ty_scheme.map(f),
             result_convention: self.result_convention,
+            result_rooted_in: self.result_rooted_in,
             generic_params: self.generic_params.clone(),
             generic_effect_params: self.generic_effect_params.clone(),
             arg_names: self.arg_names.clone(),

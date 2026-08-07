@@ -40,6 +40,7 @@ pub(crate) mod dce;
 pub(crate) mod fold;
 pub(crate) mod inline;
 pub(crate) mod monomorphize;
+pub(crate) mod provenance;
 pub mod report;
 
 pub(crate) use monomorphize::Specializations;
