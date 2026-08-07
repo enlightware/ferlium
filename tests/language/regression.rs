@@ -596,6 +596,22 @@ fn a_trait_method_passed_as_a_value_is_copied_from_its_dictionary_slot() {
     );
 }
 
+// A local needs its `Value` witness for two independent reasons, and allocation is one of them: a
+// local owning storage whose size is not statically known takes the dictionary as the `alloca`
+// operand supplying that size, whether or not it also needs the ownership methods. Here the local
+// constructs a variant in place — nothing to clone or drop — at a type the signature never mentions.
+//
+// Found by `grammar_optimization_differential`.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_generic_local_that_owns_storage_demands_its_layout_witness() {
+    let mut session = TestSession::new();
+    session.compile("pub fn f<T>() { let a: T = a; }");
+    session.compile("fn f<T>(mut y) { let a: T = a; let b = a; }");
+    // The witness is still demanded when the ownership methods are needed as well.
+    session.compile("pub fn f<T>() { let a: T = 1; }");
+}
+
 // A `break` whose value itself diverges (e.g. `break return x`) terminates the current block while
 // lowering that value. The `break` handler must then skip its own unwind / `stack_restore` / jump
 // to the loop exit, otherwise the MIR emitter panics with "insertion after terminator".

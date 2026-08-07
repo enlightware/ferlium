@@ -383,6 +383,18 @@ fn value_type_is_resolved_ignoring_function_surface(
     resolved
 }
 
+/// Whether storage for `ty` can only be allocated with a run-time layout witness.
+///
+/// A type variable outside a function surface leaves the size unknown whatever the type
+/// definitions say, so this answers the allocation question without a
+/// [`TypeLayoutEnv`] — usable during inference, where the module's own definitions are not yet
+/// resolvable. It is the necessary half of [`type_has_static_layout`]: a type this reports as
+/// dynamically sized has no static layout, while a resolved type may still lack one for reasons
+/// only the layout computation can see.
+pub(crate) fn value_type_needs_layout_witness(ty: Type) -> bool {
+    !value_type_is_resolved_ignoring_function_surface(ty, &mut FxHashSet::default())
+}
+
 /// True when every unresolved part of `ty` appears under a function type.
 /// Function `Value` impls are compiler-provided from their hidden closure env,
 /// so these types can use generated structural `Value` code without requiring a

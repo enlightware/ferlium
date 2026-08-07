@@ -14,7 +14,7 @@ use crate::{
     hir::{self, NodeArena, NodeId, NodeKind},
     module::{LocalDecl, TraitId, id::Id},
     parser::location::Location,
-    std::core_traits_names::NUM_TRAIT_NAME,
+    std::{core_traits_names::NUM_TRAIT_NAME, value::value_type_needs_layout_witness},
     types::{
         trait_solver::TraitSolver,
         r#type::{Type, TypeVar},
@@ -205,7 +205,19 @@ impl UnifiedTypeInference {
     ) {
         self.substitute_in_local_decls_in_place(locals);
         for local in &mut *locals {
-            if hir::resolve_deferred_local_storage_shape(arena, local) && !local.ty.is_function() {
+            // A local demands the `Value` witness for either of two independent reasons, and both
+            // must be asked for here: it needs the *ownership* methods when a deferred storage
+            // decision resolves to owned, and it needs the *layout* methods whenever it allocates
+            // storage whose size is not statically known — lowering passes the dictionary as the
+            // `alloca` operand supplying that size. A local that aliases existing storage allocates
+            // nothing and needs neither, whatever its type.
+            let deferred_storage_became_owned =
+                hir::resolve_deferred_local_storage_shape(arena, local);
+            let allocates_dynamically_sized_storage = local.owns_storage()
+                && value_type_needs_layout_witness(self.substitute_in_type(local.ty));
+            if (deferred_storage_became_owned || allocates_dynamically_sized_storage)
+                && !local.ty.is_function()
+            {
                 self.add_activated_value_constraint(value_trait_id, local.ty, local.scope);
             }
         }
