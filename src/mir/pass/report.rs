@@ -546,8 +546,8 @@ mod tests {
         );
     }
 
-    /// A generic callee is the refusal Phase 4 exists to lift, so it gets its own reason rather
-    /// than being folded into a general "shape" bucket.
+    /// A generic callee is the refusal specialization exists to lift, so it gets its own reason
+    /// rather than being folded into a general "shape" bucket.
     ///
     /// The caller is deliberately generic too. A *concrete* caller now has its call specialized,
     /// which lifts this refusal and replaces it with one about the specialization — so the snippet

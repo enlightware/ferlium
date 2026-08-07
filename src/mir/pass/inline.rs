@@ -55,7 +55,7 @@ use crate::{
         terminator::{Terminator, TerminatorKind},
     },
     module::{FunctionId, ModuleEnv, ModuleId, id::Id},
-    types::{r#type::CallResultConvention, type_like::TypeLike},
+    types::type_like::TypeLike,
 };
 
 use super::{Specializations, budget, function_size};
@@ -99,7 +99,9 @@ pub(crate) enum NotInlinable {
     CalleeNotDirect,
     /// The callee is a native, or otherwise has no MIR body.
     NoBody,
-    /// The callee returns through a convention the splice does not handle.
+    /// The callee returns through a scoped (`YieldedOnce`) convention, which suspends into a driver
+    /// the caller's frame does not stand in for. Seen from the call site, where
+    /// [`Self::UnsupportedShape`] sees the same thing in the callee's body.
     UnsupportedConvention,
     /// The callee is generic: its operations carry types written in its own type environment, and
     /// copying them without substituting the call site's instantiation would reinterpret them.
@@ -241,7 +243,10 @@ fn plan_inlinings(
                 }
             };
 
-            if ty.result_convention != CallResultConvention::Value {
+            // An `AddressorPlace` callee is an ordinary function that happens to return a pointer:
+            // its `@ret` is `**T` rather than `*T`, which the splice never inspects, and it exits
+            // through a plain `return`. Only a yield driver is beyond the splice.
+            if ty.result_convention.requires_yield_driver() {
                 refuse(NotInlinable::UnsupportedConvention);
                 continue;
             }
@@ -649,6 +654,14 @@ mod tests {
         session.emit_mir("inline", src)
     }
 
+    /// Named subscript access is still experimental, so a subscript test has to ask for it.
+    fn optimized_experimental(src: &str) -> String {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        session.set_allow_experimental(true);
+        session.emit_mir("inline", src)
+    }
+
     fn body_of<'a>(module: &'a str, name: &str) -> &'a str {
         module
             .split(&format!("fn {name}"))
@@ -679,7 +692,7 @@ mod tests {
     ///
     /// The caller is generic too, so that specialization cannot reach the call: it records a
     /// variable instantiation, which is not something to specialize at. A *concrete* caller has its
-    /// call specialized and the concrete copy inlined, which is the whole point of Phase 4.
+    /// call specialized and the concrete copy inlined, which is what specialization is for.
     #[test]
     fn a_generic_callee_is_not_inlined() {
         let module = optimized("fn identity(x) { x }\nfn use_it(n) { identity(n) }");
@@ -740,6 +753,39 @@ mod tests {
         assert!(
             !caller.contains("call inline::count_to"),
             "the looping callee must be inlined:\n{caller}"
+        );
+    }
+
+    /// An addressor subscript is an ordinary function that returns a pointer: its `@ret` is `**T`
+    /// rather than `*T`, which the positional parameter substitution never inspects, and it exits
+    /// through a plain `return`. Nothing about the splice depends on the difference.
+    #[test]
+    fn an_addressor_accessor_is_inlined() {
+        let module = optimized_experimental(
+            "struct Pair { a: int, b: int }\n\
+             subscript first(p: &mut Pair, i: int) -> int { ref mut { return p.a } }\n\
+             fn use_it(q: &mut Pair) { q->[first](0) = 5 }",
+        );
+        let caller = body_of(&module, "use_it");
+        assert!(
+            !caller.contains("call inline::first"),
+            "an addressor accessor must be inlined:\n{caller}"
+        );
+    }
+
+    /// A scoped accessor is not: it suspends into a driver that resumes it, and the caller's frame
+    /// does not stand in for that. The refusal is what separates it from the addressor above.
+    #[test]
+    fn a_scoped_accessor_is_not_inlined() {
+        let module = optimized_experimental(
+            "subscript cell(slot: &mut int) -> int \
+             { ref mut { let mut local = slot; yield local; slot = local } }\n\
+             fn use_it(s: &mut int) { s->[cell] = 5 }",
+        );
+        let caller = body_of(&module, "use_it");
+        assert!(
+            caller.contains("inline::cell"),
+            "a scoped accessor must be left alone:\n{caller}"
         );
     }
 }

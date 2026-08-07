@@ -584,7 +584,7 @@ fn substitute_in_operation(operation: &mut Operation, mapper: &mut impl TypeMapp
 /// Returns `None` if nothing changed. A site is rewritten when all of the following hold, and each
 /// is deliberately conservative — a refusal costs an optimization, never correctness:
 ///
-/// - the callee is statically known, declared in this module, and is not itself a specialization;
+/// - the callee is statically known and is not itself a specialization;
 /// - the callee is generic and has a body to copy;
 /// - the call records an instantiation, and that instantiation is fully concrete. A caller that
 ///   forwards its own quantifiers records them here, and specializing *it* is what makes this site
@@ -593,8 +593,9 @@ fn substitute_in_operation(operation: &mut Operation, mapper: &mut impl TypeMapp
 /// - specializing would achieve something (see [`worth_specializing`]);
 /// - the budget allows another specialization, unless this one is already cached.
 ///
-/// Intra-module only for now, per the phase's non-goal: a specialization lives in the optimizing
-/// module's table, and reaching another module's generic callees is a separate step.
+/// The callee may live in another module: the specialization is still created in the *optimizing*
+/// module's table, from the callee's raw body, which is safe because the session tracks the
+/// dependency.
 pub(crate) fn specialize_call_sites(
     func: &Function,
     env: ModuleEnv<'_>,
