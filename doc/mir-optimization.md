@@ -33,9 +33,10 @@ Per function (`mir::pass::optimize_function`):
 for round in 0..MAX_ROUNDS:
     fold          // constant folding, devirtualization; block merging inside its own edit
     specialize    // point generic calls at concrete copies
+    addressor CSE // merge repeated caller-rooted place calls before copying their bodies
     inline        // budget-limited; block merging inside its own edit
     stop if nothing warranted another round
-cse               // merge repeated address computations, which inlining is what creates
+subfield CSE       // merge repeated field addresses which inlining exposes
 dce               // on every body, not only a changed one
 finish            // restores canonical form and re-verifies
 ```
@@ -226,7 +227,28 @@ and remapped into the caller's pool.
 
 ## Common-subexpression elimination
 
-`mir::pass::cse` merges repeated `subfield` operations — the field addresses a body recomputes —
+`mir::pass::cse` has a pre-inline call pass and a post-inline operation pass.
+
+The call pass merges statically known `AddressorPlace` calls with identical call metadata and input
+operands; the out-parameter is deliberately excluded from the key. It requires two independently
+derived callee facts: provenance names the visible argument containing the returned place, and
+repeatability proves the address computation has no external effects, does not mutate a visible
+argument, and selects a stable place until structural storage changes. `buffer_slot`, whose body is
+native, asserts both facts. A duplicate becomes a `memcpy` of the first returned pointer into the
+second out-slot.
+
+Availability is a forward CFG intersection. An `invoke` generates an address only on its normal
+edge, so replacing a later identical invoke also removes an error edge that the earlier successful
+call proved unreachable. A call receiving the provenance root by mutable reference invalidates its
+addresses because it may reallocate the object; structural writes and `stack_restore` invalidate
+them as well. Writing a value through an addressor-produced leaf does not reallocate its containing
+object, which is why `swap` can reuse `a[j]`'s address across the assignment to `a[i]`.
+
+This runs inside each optimization round after specialization and before inlining. On
+`swap#spec:[int]`, four `array_index::ref_mut` calls become two before the accessor is copied, so the
+final body has two bounds/index computations and two `buffer_slot` calls rather than four of each.
+
+The operation pass merges repeated `subfield` operations — the field addresses a body recomputes —
 by **dominator-based value numbering**: a table keyed on the result type and the *canonical*
 operands, scoped to the dominator tree, entered on the way down and undone on the way back up. A
 redundant operation is replaced when an equivalent one dominates it. Operands are already canonical
@@ -234,7 +256,7 @@ when an operation is reached, so comparing two arbitrarily deep expressions is o
 no subtree is re-walked. Partial redundancy — a value available on some paths only — is out of
 reach; that needs available expressions and lazy code motion.
 
-It runs **once, after the rounds**, because inlining is what creates the redundancy: splicing an
+The `subfield` pass runs **once, after the rounds**, because inlining is what creates the redundancy: splicing an
 accessor into every call site copies its `subfield` chain along with it. Per round it would pay an
 extra edit cycle to catch redundancy that is mostly not there yet, and what it merges enables no
 further folding — the fold analysis reads the same operands under one name instead of two.

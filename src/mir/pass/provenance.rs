@@ -23,19 +23,19 @@
 //! address in Rust, so it declares [`CallableDefinition::result_rooted_in`] instead. That is the one
 //! surface where this can be wrong.
 //!
-//! Exercised only by its own tests until common-subexpression elimination consumes it; remove the
-//! allow below then.
-#![allow(dead_code)]
-
 use rustc_hash::FxHashMap;
 
 use crate::{
-    mir::{self, Function, OperationKind, ParameterKind, terminator::TerminatorKind},
+    hir::function::ArgConvention,
+    mir::{
+        self, Function, OperationKind, ParameterKind, const_eval::effects_allow_const_eval,
+        terminator::TerminatorKind,
+    },
     module::{FunctionId, LocalFunctionId, ModuleEnv, ModuleId, id::Id},
     types::r#type::CallResultConvention,
 };
 
-use super::call_graph::CallGraph;
+use super::{call_graph::CallGraph, dataflow::call_operands};
 
 /// Which of a function's parameters its returned place points into.
 ///
@@ -54,13 +54,30 @@ pub(crate) enum ResultProvenance {
     Unknown,
 }
 
-/// One module's result provenances, indexed like its function table.
-#[derive(Clone, Default)]
-pub(crate) struct Provenances {
-    of: Vec<ResultProvenance>,
+/// The properties of one addressor needed by callers reasoning about its returned place.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct AddressorSummary {
+    pub(crate) provenance: ResultProvenance,
+    /// The call only computes an address: it has no environmental effects and does not mutate a
+    /// visible argument on the way to returning it, and identical inputs select the same place
+    /// until their structural storage is mutated. `Fallible` is allowed.
+    pub(crate) repeatable: bool,
 }
 
-impl Provenances {
+impl AddressorSummary {
+    pub(crate) const UNKNOWN: Self = Self {
+        provenance: ResultProvenance::Unknown,
+        repeatable: false,
+    };
+}
+
+/// One module's cached addressor summaries, indexed like its function table.
+#[derive(Clone, Default)]
+pub(crate) struct AddressorSummaries {
+    of: Vec<AddressorSummary>,
+}
+
+impl AddressorSummaries {
     /// Derives the provenance of every function in `bodies`, callees before callers.
     ///
     /// A component of more than one function is a recursive group, and its members are iterated to
@@ -72,25 +89,48 @@ impl Provenances {
         bodies: &[Option<Function>],
         module: ModuleId,
         env: ModuleEnv<'_>,
-        external: &dyn Fn(FunctionId) -> ResultProvenance,
+        external: &dyn Fn(FunctionId) -> AddressorSummary,
     ) -> Self {
         let graph = CallGraph::of_module(bodies, module);
-        let mut of = vec![ResultProvenance::Unknown; bodies.len()];
+        let mut of = vec![AddressorSummary::UNKNOWN; bodies.len()];
 
-        for component in graph.components_callees_first() {
+        let components = graph.components_callees_first();
+        for component in &components {
             // A single function cannot depend on itself here: a self-call would have put it in a
             // component of its own size, so one pass settles it.
             let mut changed = true;
             while changed {
                 changed = false;
-                for &id in &component {
+                for &id in component {
                     let derived = match &bodies[id.as_index()] {
-                        Some(body) => derive(body, module, &of, external, env),
+                        Some(body) => derive_provenance(body, module, &of, external),
                         // No body: a native, which declares the fact instead.
-                        None => declared(id, env),
+                        None => declared(id, env).provenance,
                     };
-                    if derived != of[id.as_index()] {
-                        of[id.as_index()] = derived;
+                    if derived != of[id.as_index()].provenance {
+                        of[id.as_index()].provenance = derived;
+                        changed = true;
+                    }
+                }
+                if component.len() == 1 {
+                    break;
+                }
+            }
+        }
+
+        // Repeatability depends on callees in the same direction as provenance. Starting a
+        // recursive component at `false` is conservative: a cycle cannot prove itself pure.
+        for component in components {
+            let mut changed = true;
+            while changed {
+                changed = false;
+                for &id in &component {
+                    let repeatable = match &bodies[id.as_index()] {
+                        Some(body) => derive_repeatable(body, module, &of, external),
+                        None => declared(id, env).repeatable,
+                    };
+                    if repeatable != of[id.as_index()].repeatable {
+                        of[id.as_index()].repeatable = repeatable;
                         changed = true;
                     }
                 }
@@ -102,23 +142,25 @@ impl Provenances {
         Self { of }
     }
 
-    pub(crate) fn get(&self, id: LocalFunctionId) -> ResultProvenance {
+    pub(crate) fn summary(&self, id: LocalFunctionId) -> AddressorSummary {
         self.of
             .get(id.as_index())
             .copied()
-            .unwrap_or(ResultProvenance::Unknown)
+            .unwrap_or(AddressorSummary::UNKNOWN)
     }
 }
 
 /// What a native declares about where its result points.
-fn declared(id: LocalFunctionId, env: ModuleEnv<'_>) -> ResultProvenance {
-    match env
-        .current
-        .get_function_by_id(id)
-        .and_then(|function| function.definition.result_rooted_in)
-    {
-        Some(index) => ResultProvenance::Argument(index),
-        None => ResultProvenance::Unknown,
+fn declared(id: LocalFunctionId, env: ModuleEnv<'_>) -> AddressorSummary {
+    let Some(function) = env.current.get_function_by_id(id) else {
+        return AddressorSummary::UNKNOWN;
+    };
+    AddressorSummary {
+        provenance: function
+            .definition
+            .result_rooted_in
+            .map_or(ResultProvenance::Unknown, ResultProvenance::Argument),
+        repeatable: function.definition.repeatable_addressor,
     }
 }
 
@@ -126,12 +168,11 @@ fn declared(id: LocalFunctionId, env: ModuleEnv<'_>) -> ResultProvenance {
 ///
 /// `known` supplies the provenance of callees already summarized; a callee in another module, or
 /// one not yet settled inside a recursive group, reads as `Unknown` and makes this `Unknown` too.
-fn derive(
+fn derive_provenance(
     body: &Function,
     module: ModuleId,
-    known: &[ResultProvenance],
-    external: &dyn Fn(FunctionId) -> ResultProvenance,
-    env: ModuleEnv<'_>,
+    known: &[AddressorSummary],
+    external: &dyn Fn(FunctionId) -> AddressorSummary,
 ) -> ResultProvenance {
     let parameters = body.parameters();
     if !parameters
@@ -206,9 +247,9 @@ fn derive(
                     // A callee in this module is being summarized alongside this one; one in
                     // another module was summarized when that module's artifacts were built.
                     let callee_provenance = if callee.module == module {
-                        known[callee.function.as_index()]
+                        known[callee.function.as_index()].provenance
                     } else {
-                        external(*callee)
+                        external(*callee).provenance
                     };
                     let ResultProvenance::Argument(index) = callee_provenance else {
                         continue;
@@ -254,8 +295,213 @@ fn derive(
             }
         }
     }
-    let _ = env;
     result.unwrap_or(ResultProvenance::Unknown)
+}
+
+/// Whether an addressor body is a repeatable address computation.
+///
+/// Environment effects and writes through visible parameters are independent: assigning through a
+/// `MutableRef` is intentionally not a `Write` effect, so both checks are required. Calls through a
+/// rooted mutable argument are accepted only when the nested callee is itself a repeatable
+/// addressor; this is the `array_index -> buffer_slot` chain.
+#[derive(Clone, PartialEq, Eq)]
+enum StablePlace {
+    Argument(u32),
+    Subfield(Box<StablePlace>, mir::Value),
+    AddressorCall(FunctionId, Box<[mir::Value]>),
+}
+
+fn derive_repeatable(
+    body: &Function,
+    module: ModuleId,
+    known: &[AddressorSummary],
+    external: &dyn Fn(FunctionId) -> AddressorSummary,
+) -> bool {
+    if body.result_convention() != CallResultConvention::ADDRESSOR_PLACE {
+        return false;
+    }
+    let parameters = body.parameters();
+    let argument_of = |id: mir::ParameterId| -> Option<u32> {
+        let index = id.as_index();
+        matches!(parameters.get(index)?.kind, ParameterKind::Parameter(_)).then(|| {
+            parameters[..index]
+                .iter()
+                .filter(|parameter| matches!(parameter.kind, ParameterKind::Parameter(_)))
+                .count() as u32
+        })
+    };
+    let mut roots: FxHashMap<mir::ValueId, u32> = FxHashMap::default();
+    let mut places: FxHashMap<mir::ValueId, StablePlace> = FxHashMap::default();
+    let mut returned_places: FxHashMap<mir::ValueId, StablePlace> = FxHashMap::default();
+    let mut result_place: Option<StablePlace> = None;
+
+    let place_of =
+        |operand: &mir::Value, places: &FxHashMap<mir::ValueId, StablePlace>| match operand {
+            mir::Value::Parameter(id) => argument_of(*id).map(StablePlace::Argument),
+            mir::Value::Register(id) => places.get(id).cloned(),
+            _ => None,
+        };
+
+    for block_id in body.blocks() {
+        let block = body.block(block_id);
+        let operations = block
+            .operations()
+            .iter()
+            .chain(match &block.terminator().kind {
+                TerminatorKind::Invoke { operation, .. } => Some(operation),
+                _ => None,
+            });
+        for operation in operations {
+            let root_of = |operand: &mir::Value, roots: &FxHashMap<mir::ValueId, u32>| match operand
+            {
+                mir::Value::Parameter(id) => argument_of(*id),
+                mir::Value::Register(id) => roots.get(id).copied(),
+                _ => None,
+            };
+            match &operation.kind {
+                OperationKind::Subfield { .. } => {
+                    if let (Some(id), Some(root)) = (
+                        operation.result_id(),
+                        root_of(&operation.operands[0], &roots),
+                    ) {
+                        roots.insert(id, root);
+                    }
+                    if let (Some(id), Some(base)) = (
+                        operation.result_id(),
+                        place_of(&operation.operands[0], &places),
+                    ) {
+                        places.insert(
+                            id,
+                            StablePlace::Subfield(Box::new(base), operation.operands[1].clone()),
+                        );
+                    }
+                }
+                OperationKind::Load => {
+                    if let (Some(id), Some(root)) = (
+                        operation.result_id(),
+                        root_of(&operation.operands[0], &roots),
+                    ) {
+                        roots.insert(id, root);
+                    }
+                    if let (Some(id), mir::Value::Register(slot)) =
+                        (operation.result_id(), &operation.operands[0])
+                        && let Some(place) = returned_places.get(slot)
+                    {
+                        places.insert(id, place.clone());
+                    }
+                }
+                OperationKind::Call { ty, .. } => {
+                    if !effects_allow_const_eval(ty.effects()) {
+                        return false;
+                    }
+                    let Some(call) = call_operands(&operation.operands, ty) else {
+                        return false;
+                    };
+                    // Every call writes its result out-slot. Writing it directly into a visible
+                    // argument is an argument mutation, independently of argument conventions.
+                    if root_of(call.result, &roots).is_some() {
+                        return false;
+                    }
+                    let callee_summary = match call.callee {
+                        mir::Value::Function(callee) if callee.module == module => known
+                            .get(callee.function.as_index())
+                            .copied()
+                            .unwrap_or(AddressorSummary::UNKNOWN),
+                        mir::Value::Function(callee) => external(*callee),
+                        _ => AddressorSummary::UNKNOWN,
+                    };
+                    for (argument, convention) in &call.arguments {
+                        if matches!(convention, ArgConvention::MutableRef)
+                            && root_of(argument, &roots).is_some()
+                            && !(ty.result_convention == CallResultConvention::ADDRESSOR_PLACE
+                                && callee_summary.repeatable)
+                        {
+                            return false;
+                        }
+                    }
+                    if ty.result_convention == CallResultConvention::ADDRESSOR_PLACE
+                        && let ResultProvenance::Argument(index) = callee_summary.provenance
+                        && let Some((argument, _)) = call.arguments.get(index as usize)
+                        && let Some(root) = root_of(argument, &roots)
+                        && let mir::Value::Register(out) = call.result
+                    {
+                        roots.insert(*out, root);
+                    }
+                    if ty.result_convention == CallResultConvention::ADDRESSOR_PLACE
+                        && callee_summary.repeatable
+                        && let ResultProvenance::Argument(index) = callee_summary.provenance
+                        && let Some((argument, _)) = call.arguments.get(index as usize)
+                        && place_of(argument, &places).is_some()
+                        && let mir::Value::Function(callee) = call.callee
+                        && let mir::Value::Register(out) = call.result
+                    {
+                        returned_places.insert(
+                            *out,
+                            StablePlace::AddressorCall(
+                                *callee,
+                                operation.operands[..operation.operands.len() - 1]
+                                    .to_vec()
+                                    .into_boxed_slice(),
+                            ),
+                        );
+                    }
+                }
+                OperationKind::Store => {
+                    if matches!(&operation.operands[1], mir::Value::Parameter(id) if matches!(parameters[id.as_index()].kind, ParameterKind::Return))
+                    {
+                        let Some(stored) = place_of(&operation.operands[0], &places) else {
+                            return false;
+                        };
+                        match &result_place {
+                            None => result_place = Some(stored),
+                            Some(previous) if previous == &stored => {}
+                            Some(_) => return false,
+                        }
+                    }
+                    if root_of(&operation.operands[1], &roots).is_some() {
+                        return false;
+                    }
+                }
+                OperationKind::Clear => {
+                    if root_of(&operation.operands[0], &roots).is_some() {
+                        return false;
+                    }
+                }
+                OperationKind::Memcpy | OperationKind::Move => {
+                    if root_of(&operation.operands[1], &roots).is_some() {
+                        return false;
+                    }
+                }
+                OperationKind::Clone { .. } => {
+                    if root_of(&operation.operands[1], &roots).is_some() {
+                        return false;
+                    }
+                }
+                OperationKind::Drop { .. } => {
+                    if root_of(&operation.operands[0], &roots).is_some() {
+                        return false;
+                    }
+                }
+                OperationKind::DropClosureEnv => {
+                    if root_of(&operation.operands[0], &roots).is_some() {
+                        return false;
+                    }
+                }
+                OperationKind::BuildClosure { .. } | OperationKind::BuildSubscript { .. } => {
+                    if operation
+                        .operands
+                        .iter()
+                        .any(|operand| root_of(operand, &roots).is_some())
+                    {
+                        return false;
+                    }
+                }
+                OperationKind::Project { .. } | OperationKind::EndProject => return false,
+                _ => {}
+            }
+        }
+    }
+    result_place.is_some()
 }
 
 #[cfg(test)]
@@ -265,7 +511,7 @@ mod tests {
     use ustr::ustr;
 
     /// Provenance over a compiled module, plus a lookup from source name to local id.
-    fn provenance_of(src: &str) -> (Provenances, impl Fn(&str) -> LocalFunctionId) {
+    fn provenance_of(src: &str) -> (AddressorSummaries, impl Fn(&str) -> LocalFunctionId) {
         let mut session = CompilerSession::new();
         let module_id = session
             .compile_for(
@@ -282,11 +528,11 @@ mod tests {
             let artifacts = session
                 .mir_artifacts_for(module_id, MirOptimization::Disabled)
                 .expect("raw MIR must be prepared");
-            Provenances::of_module(
+            AddressorSummaries::of_module(
                 artifacts.bodies(),
                 module_id,
                 ModuleEnv::new(module, modules),
-                &|_| ResultProvenance::Unknown,
+                &|_| AddressorSummary::UNKNOWN,
             )
         };
         // Generated members carry a `#subscript:` hash, so a prefix match is what names them.
@@ -314,7 +560,7 @@ mod tests {
              subscript first(p: &mut Pair, i: int) -> int { ref mut { return p.a } }",
         );
         assert_eq!(
-            provenances.get(id("first::ref_mut")),
+            provenances.summary(id("first::ref_mut")).provenance,
             ResultProvenance::Argument(0),
             "the place is a field of parameter 0"
         );
@@ -337,11 +583,11 @@ mod tests {
         let artifacts = session
             .mir_artifacts_for(std_id, MirOptimization::Disabled)
             .expect("std raw MIR must be prepared");
-        let provenances = Provenances::of_module(
+        let provenances = AddressorSummaries::of_module(
             artifacts.bodies(),
             std_id,
             ModuleEnv::new(module, modules),
-            &|_| ResultProvenance::Unknown,
+            &|_| AddressorSummary::UNKNOWN,
         );
 
         let named = |name: &str| {
@@ -356,14 +602,30 @@ mod tests {
                 .unwrap_or_else(|| panic!("std has no `{name}`"))
         };
         assert_eq!(
-            provenances.get(named("buffer_slot::ref_mut")),
+            provenances
+                .summary(named("buffer_slot::ref_mut"))
+                .provenance,
             ResultProvenance::Argument(0),
             "the native declares its root"
         );
+        assert!(
+            provenances
+                .summary(named("buffer_slot::ref_mut"))
+                .repeatable,
+            "the native also declares its stable address computation"
+        );
         assert_eq!(
-            provenances.get(named("array_index::ref_mut")),
+            provenances
+                .summary(named("array_index::ref_mut"))
+                .provenance,
             ResultProvenance::Argument(0),
             "and the accessor above it derives the same root through it"
+        );
+        assert!(
+            provenances
+                .summary(named("array_index::ref_mut"))
+                .repeatable,
+            "array indexing inherits stable address computation through buffer_slot"
         );
     }
 
@@ -396,7 +658,7 @@ mod tests {
             .mir_artifacts_for(module_id, MirOptimization::Disabled)
             .expect("raw MIR must be prepared");
         assert_eq!(
-            artifacts.result_provenance(id),
+            artifacts.addressor_summary(module_id, id).provenance,
             ResultProvenance::Argument(0),
             "the root must come through std's `array_index`, whose summary is stored"
         );
@@ -406,6 +668,46 @@ mod tests {
     #[test]
     fn a_value_returning_function_has_no_provenance() {
         let (provenances, id) = provenance_of("fn double(x: int) -> int { x + x }");
-        assert_eq!(provenances.get(id("double")), ResultProvenance::Unknown);
+        assert_eq!(
+            provenances.summary(id("double")).provenance,
+            ResultProvenance::Unknown
+        );
+    }
+
+    #[test]
+    fn an_addressor_that_mutates_its_receiver_is_not_repeatable() {
+        let (provenances, id) = provenance_of(
+            "struct Pair { flag: bool, a: int, b: int }\n\
+             subscript chosen(p: &mut Pair) -> int {\n\
+                 ref mut {\n\
+                     p.flag = not p.flag;\n\
+                     if p.flag { return p.a } else { return p.b }\n\
+                 }\n\
+             }",
+        );
+        let summary = provenances.summary(id("chosen::ref_mut"));
+        assert_eq!(summary.provenance, ResultProvenance::Argument(0));
+        assert!(
+            !summary.repeatable,
+            "AddressorPlace permits mutation; repeatability must be proved separately"
+        );
+    }
+
+    #[test]
+    fn a_conditional_addressor_is_not_assumed_stable_under_leaf_writes() {
+        let (summaries, id) = provenance_of(
+            "struct Pair { selector: bool, other: bool }\n\
+             subscript chosen(p: &mut Pair) -> bool {\n\
+                 ref mut {\n\
+                     if p.selector { return p.selector } else { return p.other }\n\
+                 }\n\
+             }",
+        );
+        let summary = summaries.summary(id("chosen::ref_mut"));
+        assert_eq!(summary.provenance, ResultProvenance::Argument(0));
+        assert!(
+            !summary.repeatable,
+            "writing the selected leaf can change which leaf the next call selects"
+        );
     }
 }

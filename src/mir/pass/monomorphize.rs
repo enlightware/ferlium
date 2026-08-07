@@ -138,6 +138,14 @@ impl Specializations {
         id.module == self.module && id.function.as_index() >= self.first_index
     }
 
+    /// The source function whose body `id` specializes.
+    pub(crate) fn original(&self, id: FunctionId) -> Option<FunctionId> {
+        self.is_specialization(id)
+            .then(|| self.created.get(id.function.as_index() - self.first_index))
+            .flatten()
+            .map(|specialization| specialization.original)
+    }
+
     /// The body of a specialization this table created.
     pub(crate) fn body(&self, id: LocalFunctionId) -> Option<&Function> {
         Some(&self.created.get(id.as_index() - self.first_index)?.body)

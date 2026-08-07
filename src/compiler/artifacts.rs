@@ -16,7 +16,7 @@ use crate::{
         self,
         pass::{
             Specializations, optimize_function,
-            provenance::{Provenances, ResultProvenance},
+            provenance::{AddressorSummaries, AddressorSummary},
         },
     },
     module::{FunctionId, LocalFunctionId, Module, ModuleEnv, ModuleId, id::Id},
@@ -135,13 +135,13 @@ pub(crate) struct Specialization {
 pub(crate) struct MirArtifacts {
     functions: Vec<Option<mir::Function>>,
     specializations: Vec<Specialization>,
-    /// Where each function's returned place is rooted, for the addressors that have one.
+    /// The cached provenance and repeatability of every addressor.
     ///
     /// Derived once, from the *raw* bodies, and carried into the optimized stage unchanged:
-    /// provenance is a property of what a function does, which optimization preserves. Kept here
+    /// These are properties of what a function does, which optimization preserves. Kept here
     /// rather than recomputed because a consumer's callee is often in another module, and a
     /// dependency's summaries have to be readable the way its bodies already are.
-    provenance: Provenances,
+    addressor_summaries: AddressorSummaries,
 }
 
 impl MirArtifacts {
@@ -166,27 +166,35 @@ impl MirArtifacts {
             modules
                 .get(callee.module)
                 .and_then(|entry| entry.raw_mir())
-                .map_or(ResultProvenance::Unknown, |artifacts| {
-                    artifacts.result_provenance(callee.function)
+                .map_or(AddressorSummary::UNKNOWN, |artifacts| {
+                    artifacts.addressor_summary(callee.module, callee.function)
                 })
         };
-        let provenance = Provenances::of_module(&functions, module.module_id(), env, &external);
+        let addressor_summaries =
+            AddressorSummaries::of_module(&functions, module.module_id(), env, &external);
         Self {
             functions,
             specializations: Vec::new(),
-            provenance,
+            addressor_summaries,
         }
     }
 
-    /// Where the place returned by `id` is rooted, if it returns one.
+    /// The place and evaluation properties of the addressor `id`, if known.
     ///
-    /// A specialization answers with its original's: substituting types cannot move which argument
-    /// a place points into. An original in another module is not in this table, and reads as
-    /// unknown — always sound.
-    pub(crate) fn result_provenance(&self, id: LocalFunctionId) -> ResultProvenance {
+    /// A specialization of a local original inherits its summary. A cross-module specialization
+    /// cannot be answered from this module's table and is conservatively unknown; optimizer passes
+    /// resolve its `Specialization::original` before selecting that original module's artifacts.
+    pub(crate) fn addressor_summary(
+        &self,
+        module: ModuleId,
+        id: LocalFunctionId,
+    ) -> AddressorSummary {
         match self.specialization(id) {
-            Some(specialization) => self.provenance.get(specialization.original.function),
-            None => self.provenance.get(id),
+            Some(specialization) if specialization.original.module == module => self
+                .addressor_summaries
+                .summary(specialization.original.function),
+            Some(_) => AddressorSummary::UNKNOWN,
+            None => self.addressor_summaries.summary(id),
         }
     }
 
@@ -238,9 +246,10 @@ impl MirArtifacts {
         Self {
             functions,
             specializations: specializations.into_created(),
-            // Carried across unchanged: optimization cannot move which argument a returned place
-            // points into, and recomputing it here would answer the same thing more slowly.
-            provenance: raw.provenance.clone(),
+            // Carried across unchanged: optimization preserves a proved root and repeatability.
+            // A specialization may admit a more precise summary after substitution, but reusing
+            // its original's conservative answer is sound and avoids per-stage recomputation.
+            addressor_summaries: raw.addressor_summaries.clone(),
         }
     }
 

@@ -77,6 +77,15 @@ pub struct CallableDefinition {
     /// computes its address in Rust, so the fact has nowhere to be derived from and is asserted
     /// here. `None` means "not stated", which every consumer reads as unknown.
     pub result_rooted_in: Option<u32>,
+    /// Whether a native `AddressorPlace` call is a repeatable address computation.
+    ///
+    /// A repeatable addressor neither reads nor writes the external environment, does not mutate
+    /// its visible arguments before returning, and selects the same place for identical inputs
+    /// until their structural storage changes. This is independent of `result_rooted_in`, but a
+    /// consumer needs both facts to reuse the returned address and invalidate it soundly. Script
+    /// addressors have both properties derived from their MIR body; a native has no body to
+    /// inspect, so it must assert them explicitly.
+    pub repeatable_addressor: bool,
     pub generic_params: Vec<UstrSpan>,
     pub generic_effect_params: Vec<UstrSpan>,
     pub arg_names: Vec<Ustr>,
@@ -90,6 +99,7 @@ impl CallableDefinition {
             ty_scheme,
             result_convention: CallResultConvention::Value,
             result_rooted_in: None,
+            repeatable_addressor: false,
             generic_params: vec![],
             generic_effect_params: vec![],
             arg_names,
@@ -108,6 +118,7 @@ impl CallableDefinition {
             ty_scheme,
             result_convention: CallResultConvention::Value,
             result_rooted_in: None,
+            repeatable_addressor: false,
             generic_params,
             generic_effect_params: vec![],
             arg_names,
@@ -128,6 +139,7 @@ impl CallableDefinition {
             ty_scheme,
             result_convention: CallResultConvention::Value,
             result_rooted_in: None,
+            repeatable_addressor: false,
             generic_params,
             generic_effect_params,
             arg_names,
@@ -146,6 +158,7 @@ impl CallableDefinition {
             ty_scheme: TypeScheme::new_infer_quantifiers(fn_ty),
             result_convention: CallResultConvention::Value,
             result_rooted_in: None,
+            repeatable_addressor: false,
             generic_params: vec![],
             generic_effect_params: vec![],
             arg_names,
@@ -168,6 +181,7 @@ impl CallableDefinition {
             ),
             result_convention: CallResultConvention::Value,
             result_rooted_in: None,
+            repeatable_addressor: false,
             generic_params: vec![],
             generic_effect_params: vec![],
             arg_names,
@@ -192,7 +206,31 @@ impl CallableDefinition {
     /// Declares which visible argument the returned place points into, for a native whose address
     /// computation MIR cannot see.
     pub fn with_result_rooted_in(mut self, argument: u32) -> Self {
+        assert_eq!(
+            self.result_convention,
+            CallResultConvention::ADDRESSOR_PLACE,
+            "only an AddressorPlace callable can return a caller-rooted place"
+        );
+        assert!(
+            (argument as usize) < self.arg_names.len(),
+            "addressor result root must name a visible argument"
+        );
         self.result_rooted_in = Some(argument);
+        self
+    }
+
+    /// Declares that this native addressor only computes and returns its address.
+    pub fn with_repeatable_addressor(mut self) -> Self {
+        assert_eq!(
+            self.result_convention,
+            CallResultConvention::ADDRESSOR_PLACE,
+            "only an AddressorPlace callable can be a repeatable addressor"
+        );
+        assert!(
+            self.result_rooted_in.is_some(),
+            "a repeatable native addressor must first declare its result root"
+        );
+        self.repeatable_addressor = true;
         self
     }
 
@@ -315,6 +353,7 @@ impl TypeLike for CallableDefinition {
             ty_scheme: self.ty_scheme.map(f),
             result_convention: self.result_convention,
             result_rooted_in: self.result_rooted_in,
+            repeatable_addressor: self.repeatable_addressor,
             generic_params: self.generic_params.clone(),
             generic_effect_params: self.generic_effect_params.clone(),
             arg_names: self.arg_names.clone(),

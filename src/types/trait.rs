@@ -561,6 +561,7 @@ impl Trait {
                 ty_scheme: def.ty_scheme.map_simplified(&mut mapper),
                 result_convention: def.result_convention,
                 result_rooted_in: def.result_rooted_in,
+                repeatable_addressor: def.repeatable_addressor,
                 generic_params: def.generic_params.clone(),
                 generic_effect_params: def.generic_effect_params.clone(),
                 arg_names: def.arg_names.clone(),

@@ -47,10 +47,12 @@ pub mod report;
 pub(crate) use monomorphize::Specializations;
 
 use crate::{
-    compiler::CompilerSession,
+    compiler::{CompilerSession, MirOptimization},
     mir::{Function, edit::FunctionEdit},
     module::{ModuleEnv, ModuleId},
 };
+
+use self::provenance::AddressorSummary;
 
 /// The number of operations in a function — the unit the inlining budgets are counted in.
 fn function_size(func: &Function) -> usize {
@@ -95,6 +97,26 @@ pub(crate) fn optimize_function(
             current = Some(specialized);
             changed = true;
         }
+        // Addressor calls are merged before inlining so one accessor body is copied per distinct
+        // address, rather than copying duplicates and trying to rediscover the whole computation
+        // afterwards. A specialization inherits its original's conservative addressor summary:
+        // substitution cannot change provenance, and a repeatability proof remains true when types
+        // are substituted or operations removed. An unresolved original remains conservatively
+        // non-repeatable even when its concrete copy could prove more.
+        let source = current.as_ref().unwrap_or(function);
+        let summary_of = |callee| {
+            let original = specializations.original(callee).unwrap_or(callee);
+            session
+                .mir_artifacts_for(original.module, MirOptimization::Disabled)
+                .map_or(AddressorSummary::UNKNOWN, |artifacts| {
+                    artifacts.addressor_summary(original.module, original.function)
+                })
+        };
+        if let Some(merged) = cse::eliminate_common_addressor_calls(source, env, &summary_of) {
+            current = Some(merged);
+            changed = true;
+        }
+        // Now inlining.
         let source = current.as_ref().unwrap_or(function);
         if let Some(inlined) = inline::inline_function(
             source,

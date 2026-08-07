@@ -186,7 +186,9 @@ fn buffer_slot_descr() -> ModuleFunction {
         )
         .with_result_convention(CallResultConvention::ADDRESSOR_PLACE)
         // The slot is inside the buffer: parameter 0.
-        .with_result_rooted_in(0),
+        .with_result_rooted_in(0)
+        // Computing a slot neither mutates the buffer nor consults external state.
+        .with_repeatable_addressor(),
         Box::new(ContextNativeFn::new(
             "buffer_slot",
             &[],
