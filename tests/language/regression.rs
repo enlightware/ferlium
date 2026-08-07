@@ -9,7 +9,7 @@
 
 use ustr::ustr;
 
-use ferlium::compiler::error::CompilationErrorImpl;
+use ferlium::compiler::error::{CompilationErrorImpl, MutabilityMustBeWhat};
 use ferlium::hir::value::Value;
 use ferlium::{Compiler, Path, eval::eval_function};
 use test_log::test;
@@ -21,16 +21,12 @@ use crate::harness::{TestSession, float, int};
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
 
-/// A compound assignment whose index operands contain assignments makes the borrow checker panic
-/// with "Cannot resolve a non-place node" instead of reporting a diagnostic.
+/// A compound assignment whose index operands contain assignments must report a diagnostic rather
+/// than panicking in the borrow checker.
 ///
-/// Found by `grammar_optimization_differential`, which reached these shapes because it compiles
-/// grammar-generated programs; all three reproducers reduce to the same defect. The bug predates
-/// the MIR optimization work and has nothing to do with it — the fuzzer simply exercises the
-/// compile path. Ignored until the borrow checker resolves, or rejects, these nodes.
+/// Found by `grammar_optimization_differential`; all three reproducers reduce to the same defect.
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-#[ignore = "open bug: the borrow checker panics on a compound assignment through a computed index"]
 fn compound_assignment_through_assigning_index_does_not_panic() {
     for source in [
         "map[a = a = a] += a = a = 0",
@@ -44,6 +40,45 @@ fn compound_assignment_through_assigning_index_does_not_panic() {
             "`{source}` must be rejected"
         );
     }
+}
+
+/// A mutable argument that is not a place at all must be diagnosed rather than asserted on: the
+/// borrow checker's argument-overlap analysis sees it before the mutability check does.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_non_place_mutable_argument_does_not_panic() {
+    let mut session = TestSession::new();
+    for argument in ["1", "a + 1", "{ a }", "if true { a } else { a }"] {
+        session
+            .fail_compilation(&format!(
+                "fn g(x: &mut int) {{ x = x + 1 }}\nfn f() {{ let mut a = 1; g({argument}) }}\nf()"
+            ))
+            .expect_mutability_must_be(MutabilityMustBeWhat::Mutable);
+    }
+    // The overlap analysis it runs inside must still do its job on real places.
+    assert_val_eq!(
+        session.run("fn g(x: &mut int) { x = x + 1 }\nfn f() { let mut a = 1; g(a); a }\nf()"),
+        int(2)
+    );
+}
+
+/// The same analysis reaches a subscript index before type checking rejects it, so an index that is
+/// not an integer literal is dynamic rather than an integer to read out.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_non_integer_subscript_index_does_not_panic() {
+    let mut session = TestSession::new();
+    session
+        .fail_compilation("fn g(x: &mut int) { x = x + 1 }\nfn f(mut y) { g(y[()]) }\nf([1])")
+        .expect_type_mismatch("()", "int");
+    // A static index still resolves to one, so overlapping elements are still detected.
+    assert_val_eq!(
+        session.run(
+            "fn g(x: &mut int, y: int) { x = x + y }\n\
+             fn f() -> int { let mut a = [1, 2]; g(a[0], a[1]); a[0] }\nf()"
+        ),
+        int(3)
+    );
 }
 
 #[test]

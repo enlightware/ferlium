@@ -51,17 +51,11 @@ impl Path {
         }
     }
 
-    /// Builds a path for this node, assuming it is a place node, panicking otherwise.
-    fn from_node(arena: &NodeArena, node_id: NodeId) -> Self {
-        Self::try_from_node(arena, node_id).expect("Cannot resolve a non-place node")
-    }
-
     /// Builds a caller-storage path when `node_id` is rooted in an existing local.
     ///
-    /// Some projection nodes are place-shaped but rooted in a temporary value. They cannot alias
-    /// an earlier caller place and are deliberately rejected by this fallible form. The ordered
-    /// argument analysis runs before temporary-place normalization, unlike the established borrow
-    /// checks that use [`Self::from_node`].
+    /// `None` for anything else: a plain value, or a place-shaped node rooted in a temporary.
+    /// Neither can alias an earlier caller place, so callers skip it rather than treating it as an
+    /// error — the analyses here run before the mutability check, so both shapes reach them.
     fn try_from_node(arena: &NodeArena, node_id: NodeId) -> Option<Self> {
         let node = &arena[node_id];
         use NodeKind::*;
@@ -121,12 +115,15 @@ impl Path {
         Some(path)
     }
 
+    /// A subscript index is static only when it is a non-negative integer literal. Any other
+    /// immediate — a subscript may be indexed by any type — is dynamic, which overlaps everything
+    /// and so stays conservative.
     fn index_part(arena: &NodeArena, node_id: NodeId) -> PathPart {
-        if let NodeKind::Immediate(immediate) = &arena[node_id].kind {
-            let index = *immediate.as_primitive_ty::<isize>().unwrap();
-            if index >= 0 {
-                return PathPart::IndexStatic(index as usize);
-            }
+        if let NodeKind::Immediate(immediate) = &arena[node_id].kind
+            && let Some(&index) = immediate.as_primitive_ty::<isize>()
+            && index >= 0
+        {
+            return PathPart::IndexStatic(index as usize);
         }
         PathPart::IndexDynamic
     }
@@ -281,6 +278,8 @@ fn do_paths_overlap(a: &Path, b: &Path) -> bool {
 ///
 /// The pair contains `(let_argument_index, mutable_argument_index)`. Multiple immutable
 /// accesses may share a place; only immutable/mutable conflicts require a snapshot.
+///
+/// An argument that is not caller storage cannot overlap caller storage, and is skipped.
 pub(crate) fn let_arguments_overlapping_mutable(
     arena: &NodeArena,
     arguments: &[CallArgument],
@@ -289,7 +288,9 @@ pub(crate) fn let_arguments_overlapping_mutable(
         .iter()
         .enumerate()
         .filter(|(_, argument)| argument.passing == ArgConvention::MutableRef)
-        .map(|(index, argument)| (index, Path::from_node(arena, argument.value)))
+        .filter_map(|(index, argument)| {
+            Path::try_from_node(arena, argument.value).map(|path| (index, path))
+        })
         .collect::<Vec<_>>();
 
     arguments
@@ -302,8 +303,10 @@ pub(crate) fn let_arguments_overlapping_mutable(
                 // method value is metadata rather than aliasable source storage.
                 && !matches!(arena[argument.value].kind, NodeKind::GetTraitMethod(_))
         })
-        .flat_map(|(let_index, argument)| {
-            let let_path = Path::from_node(arena, argument.value);
+        .filter_map(|(let_index, argument)| {
+            Path::try_from_node(arena, argument.value).map(|path| (let_index, path))
+        })
+        .flat_map(|(let_index, let_path)| {
             mutable_paths
                 .iter()
                 .filter(move |(_, mutable_path)| do_paths_overlap(&let_path, mutable_path))
