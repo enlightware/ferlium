@@ -34,6 +34,7 @@
 //! optimized is modified.
 
 pub mod budget;
+pub(crate) mod call_graph;
 pub(crate) mod dataflow;
 pub(crate) mod dce;
 pub(crate) mod fold;
