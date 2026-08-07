@@ -657,3 +657,32 @@ fn break_with_diverging_value_does_not_insert_after_terminator() {
         int(1)
     );
 }
+
+// An `end_project` carries no fallibility of its own: it inherits it from the projection it closes.
+// When substituting a generic body at concrete types makes that projection infallible, both halves
+// must leave the `invoke` form together — demoting only the projection leaves a body whose
+// `end_project` form and fallibility disagree. Indexing an array reached through a struct field is
+// the ordinary way to reach this, as the accessor is a projection with an open effect.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_projection_and_its_end_project_leave_the_invoke_form_together() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            struct M { data: [int] }
+            fn get(m, i) { m.data[i] }
+            get(M { data: [1, 2] }, 1)
+        "# }),
+        int(2)
+    );
+    // The projection stays fallible when the index is not known, so the `invoke` form stays too.
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            struct M { cols: int, data: [int] }
+            fn get(m, r, c) { m.data[r * m.cols + c] }
+            fn run(i) { get(M { cols: 2, data: [1, 2, 3, 4] }, i, 1) }
+            run(1)
+        "# }),
+        int(4)
+    );
+}

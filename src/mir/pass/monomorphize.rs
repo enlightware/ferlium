@@ -53,6 +53,7 @@ use crate::{
         stable_generated_name_hash, unique_generated_name,
     },
     std::value::type_has_static_layout,
+    types::effects::{Effect, PrimitiveEffect},
     types::type_properties::concrete_type_is_trivial_copy,
     types::{
         r#type::Type, type_like::TypeLike, type_mapper::BitmapInstantiationMapper,
@@ -511,6 +512,7 @@ fn witnessed_type(witness: &mir::Value, env: ModuleEnv<'_>) -> Option<Type> {
 /// becomes a jump, and the dead error edge leaves its cleanup pad for
 /// [`FunctionEdit::remove_unreachable_blocks`].
 fn demote_infallible_invokes(edit: &mut FunctionEdit) {
+    let projections = open_projection_fallibility(edit);
     let mut demoted = false;
     for block_id in edit.blocks().collect::<Vec<_>>() {
         let block = edit.block_mut(block_id);
@@ -520,7 +522,7 @@ fn demote_infallible_invokes(edit: &mut FunctionEdit) {
         else {
             continue;
         };
-        if operation_is_source_fallible(operation) {
+        if operation_is_source_fallible(operation, &projections) {
             continue;
         }
         let span = block.terminator.span;
@@ -543,14 +545,52 @@ fn demote_infallible_invokes(edit: &mut FunctionEdit) {
 ///
 /// A call whose effects mention a variable counts as fallible: the instantiated effects are unknown,
 /// so the conservative answer is the only sound one.
-fn operation_is_source_fallible(operation: &Operation) -> bool {
+///
+/// An `end_project` states no fallibility of its own — it carries whatever the projection it closes
+/// carries — so it is resolved through `projections`, keyed by the projection's result. Judging it
+/// conservatively fallible instead is *not* safe here: a projection and its `end_project` must
+/// agree, so demoting the one while leaving the other an `invoke` produces a body the verifier
+/// rejects.
+fn operation_is_source_fallible(
+    operation: &Operation,
+    projections: &FxHashMap<mir::ValueId, bool>,
+) -> bool {
     match operation.source_fallibility() {
         SourceFallibility::Infallible => false,
         SourceFallibility::Fallible => true,
-        // Fallibility belongs to the open projection this resumes, which is not something
-        // substitution can settle from the operation alone. Left as it was found.
-        SourceFallibility::FromOpenProjection => true,
+        SourceFallibility::FromOpenProjection => match operation.operands.first() {
+            Some(mir::Value::Register(id)) => projections.get(id).copied().unwrap_or(false),
+            _ => false,
+        },
     }
+}
+
+/// Whether each open projection in the body can raise a source failure, keyed by its result.
+///
+/// The accessor contract lives on the defining `project`, so this is the substituting pass's
+/// equivalent of the operand role the verifier derives.
+fn open_projection_fallibility(edit: &FunctionEdit) -> FxHashMap<mir::ValueId, bool> {
+    let mut fallibility = FxHashMap::default();
+    let mut record = |operation: &Operation| {
+        if let OperationKind::Project { ty, .. } = &operation.kind
+            && let Some(result) = operation.result_id()
+        {
+            fallibility.insert(
+                result,
+                ty.effects()
+                    .contains(Effect::Primitive(PrimitiveEffect::Fallible))
+                    || ty.effects().has_variables(),
+            );
+        }
+    };
+    for block_id in edit.blocks() {
+        let block = edit.block(block_id);
+        block.operations.iter().for_each(&mut record);
+        if let TerminatorKind::Invoke { operation, .. } = &block.terminator.kind {
+            record(operation);
+        }
+    }
+    fallibility
 }
 
 /// Rewrites every type the body carries through `mapper`.
