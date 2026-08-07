@@ -33,6 +33,8 @@
 //! below then, as `const_eval.rs` did when folding started calling it.
 #![allow(dead_code)]
 
+use std::cell::RefCell;
+
 use rustc_hash::FxHashMap;
 use ustr::{Ustr, ustr};
 
@@ -92,6 +94,17 @@ pub(crate) struct Specializations {
     /// would make an inlining decision depend on whether that had happened yet.
     raw: Vec<Function>,
     cache: FxHashMap<SpecializationKey, LocalFunctionId>,
+    /// Bodies produced by substituting a generic callee at a call site's instantiation, memoized
+    /// for the duration of one module's optimization.
+    ///
+    /// Unlike `cache`, this keeps no function: an inlined body is spliced and then discarded, so
+    /// the entry exists only so that the same `(callee, instantiation)` pair is not substituted —
+    /// and re-verified — once per call site, per round, per caller. `array_index` at `[int]`
+    /// produces one body however many array accesses a module has.
+    ///
+    /// Interior mutability because the inliner's planner holds this by shared reference, and a memo
+    /// that changes no answer is exactly what that is for.
+    substituted: RefCell<FxHashMap<(FunctionId, Instantiation), Function>>,
     /// Where the module's HIR-declared functions end; specializations are numbered from here.
     first_index: usize,
 }
@@ -104,6 +117,7 @@ impl Specializations {
             created: Vec::new(),
             raw: Vec::new(),
             cache: FxHashMap::default(),
+            substituted: RefCell::new(FxHashMap::default()),
             first_index: function_count,
         }
     }
@@ -181,6 +195,30 @@ impl Specializations {
         });
         self.cache.insert(key, id);
         id
+    }
+
+    /// `body` substituted at `instantiation`, computed once per distinct pair.
+    ///
+    /// The substitution is deterministic in its inputs, so the memo changes no decision — it only
+    /// stops the inliner from rebuilding and re-verifying an identical body at every call site that
+    /// asks for it.
+    pub(crate) fn substituted_body<Ty: TypeLike>(
+        &self,
+        callee: FunctionId,
+        instantiation: &Instantiation,
+        scheme: &TypeScheme<Ty>,
+        body: &Function,
+        env: ModuleEnv<'_>,
+    ) -> Function {
+        let key = (callee, instantiation.clone());
+        if let Some(existing) = self.substituted.borrow().get(&key) {
+            return existing.clone();
+        }
+        let substituted = substitute_body(body, scheme, instantiation, env);
+        self.substituted
+            .borrow_mut()
+            .insert(key, substituted.clone());
+        substituted
     }
 
     /// A specialization's generated name.

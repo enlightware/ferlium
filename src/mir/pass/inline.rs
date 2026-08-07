@@ -277,7 +277,14 @@ fn plan_inlinings(
                 refuse(reason);
                 continue;
             }
-            let body = match concrete_body(body, callee, instantiation.as_deref(), session, env) {
+            let body = match concrete_body(
+                body,
+                callee,
+                instantiation.as_deref(),
+                session,
+                specializations,
+                env,
+            ) {
                 Ok(body) => body,
                 Err(reason) => {
                     refuse(reason);
@@ -341,6 +348,7 @@ fn concrete_body(
     callee: FunctionId,
     instantiation: Option<&Instantiation>,
     session: &CompilerSession,
+    specializations: Option<&Specializations>,
     env: ModuleEnv<'_>,
 ) -> Result<Function, NotInlinable> {
     if body.parameters().iter().all(|p| p.ty.is_constant()) {
@@ -356,12 +364,15 @@ fn concrete_body(
     let Some(function) = module.get_function_by_id(callee.function) else {
         return Err(NotInlinable::Generic);
     };
-    Ok(monomorphize::substitute_body(
-        &body,
-        &function.definition.ty_scheme,
-        instantiation,
-        env,
-    ))
+    let scheme = &function.definition.ty_scheme;
+    Ok(match specializations {
+        Some(specializations) => {
+            specializations.substituted_body(callee, instantiation, scheme, &body, env)
+        }
+        // The optimization report runs after the table is consumed, and makes one pass, so it has
+        // nothing to memoize into and nothing to gain from it.
+        None => monomorphize::substitute_body(&body, scheme, instantiation, env),
+    })
 }
 
 /// The callee's body, read from the raw stage.
