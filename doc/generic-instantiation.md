@@ -24,15 +24,27 @@ reason: a call applies types and dictionaries in one breath.
 
 ## Why they are recorded rather than recovered
 
-The compiler knows the mapping exactly once, in `TypeScheme::instantiate_with_fresh_vars`, which
-allocates a fresh inference variable per quantifier and returns the substitution. Nothing else ever
-knows it directly. A later stage can only *recover* it, by structurally matching the callee's generic
-signature against the call site's concrete one — work that is redone at every use and needs a matcher
-the type system otherwise has no reason to have.
+For an ordinary call the compiler knows the mapping exactly once, in
+`TypeScheme::instantiate_with_fresh_vars`, which allocates a fresh inference variable per quantifier
+and returns the substitution. Nothing later knows it directly. A later stage can only *recover* it,
+by structurally matching the callee's generic signature against the call site's concrete one — work
+that is redone at every use and needs a matcher the type system otherwise has no reason to have.
 
 So the substitution is stored at the moment it is created. At that point its values are the fresh
 variables; the end-of-inference substitution pass rewrites them into the types unification solved,
 by the same walk that already concretizes the dictionary requirements.
+
+Compiler-generated blanket-method thunks have a second, analogous source: matching the blanket
+implementation already computes its substitution. The trait solver preserves that result and
+projects the generic method's quantifiers through it when building the forwarding call. Blanket
+implementation normalization gives type variables canonical numeric identities, and registration
+requires every blanket method callable to quantify all implementation type variables in
+`0..ty_var_count` order. “All” matters: a variable introduced through an implementation constraint
+need not occur in the trait-reconstructed method signature, but it remains a quantifier of the actual
+callable. Effect quantifiers are unordered in `TypeScheme`, so every instantiation encodes them in
+sorted `EffectVar` order, as described under Encoding below. The thunk can therefore build the
+application from the blanket key and matched substitution without duplicating the callable's
+quantifier list in the implementation record or matching concrete signatures.
 
 This is the mainstream choice: rustc carries `GenericArgs` in the type of the callee operand, and
 Swift's SIL carries a `SubstitutionMap` on `apply`.

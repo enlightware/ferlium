@@ -724,7 +724,7 @@ impl TraitImpls {
         output_tys: Vec<Type>,
         output_effs: Vec<EffType>,
         associated_const_values: impl Into<Vec<LiteralValue>>,
-        functions: Vec<ModuleFunction>,
+        mut functions: Vec<ModuleFunction>,
         hir_arena: &mut ENodeArena,
         fn_collector: &mut FunctionCollector,
         qualified_name_env: &QualifiedNameEnv<'_>,
@@ -739,6 +739,17 @@ impl TraitImpls {
             associated_const_values.len(),
             functions.len(),
         );
+
+        // Every method callable in a blanket implementation quantifies all of that
+        // implementation's type variables, in their canonical numeric order. Some variables are
+        // introduced only through impl constraints and cannot be recovered from the trait method
+        // signature alone.
+        let method_ty_quantifiers = (0..sub_key.ty_var_count)
+            .map(TypeVar::new)
+            .collect::<Vec<_>>();
+        for function in &mut functions {
+            function.definition.ty_scheme.ty_quantifiers = method_ty_quantifiers.clone();
+        }
 
         // Add to local functions, collect their IDs and build the overall interface hash.
         let namer = |method_index: usize| {

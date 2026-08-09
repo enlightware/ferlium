@@ -11,6 +11,7 @@ use std::{borrow::Cow, iter::repeat, mem, rc::Rc};
 
 use crate::{FxHashMap, FxHashSet, Modules, types::type_scheme::PubTypeConstraint};
 
+use itertools::Itertools;
 use ustr::Ustr;
 
 use crate::{
@@ -47,6 +48,7 @@ use crate::{
     types::mutability::{MutType, MutVar},
     types::r#trait::{Trait, TraitAssociatedConstIndex, TraitMethodIndex},
     types::r#type::{CallImplType, SubscriptType, Type, TypeDef, TypeKind, TypeVar},
+    types::type_inference::substitution::InstSubst,
     types::type_inference::unify::UnifiedTypeInference,
     types::type_like::{TypeLike, instantiate_types},
     types::type_mapper::{BitmapInstantiationMapper, TypeMapper},
@@ -805,6 +807,8 @@ enum BlanketImplMatch {
         output_tys: Vec<Type>,
         output_effs: Vec<EffType>,
         runtime_requirements: Vec<ResolvedRuntimeRequirement>,
+        /// The blanket implementation's generic parameters resolved at this application.
+        instantiation: InstSubst,
     },
 }
 
@@ -2059,10 +2063,18 @@ impl<'a> TraitSolver<'a> {
         runtime_requirements.sort_by_key(|requirement| requirement.index);
         ty_inf.substitute_in_types_in_place(&mut imp_output_tys);
         ty_inf.substitute_in_effect_types_in_place(&mut imp_output_effs);
+        let mut instantiation = inst_subst;
+        for ty in instantiation.0.values_mut() {
+            *ty = ty_inf.substitute_in_type(*ty);
+        }
+        for eff in instantiation.1.values_mut() {
+            *eff = ty_inf.substitute_in_effect_type(eff);
+        }
         Ok(BlanketImplMatch::Yes {
             output_tys: imp_output_tys,
             output_effs: imp_output_effs,
             runtime_requirements,
+            instantiation,
         })
     }
 
@@ -2249,12 +2261,62 @@ impl<'a> TraitSolver<'a> {
         }
     }
 
+    fn blanket_method_inst_data(
+        generic_definition: &CallableDefinition,
+        blanket_ty_var_count: u32,
+        blanket_instantiation: &InstSubst,
+        runtime_requirements: Vec<DictionaryReq>,
+        fn_span: Location,
+    ) -> Result<FnInstData, InternalCompilationError> {
+        // Blanket registration guarantees that every method callable quantifies all blanket type
+        // variables in canonical numeric order, including variables visible only in impl
+        // constraints and therefore absent from the reconstructed trait method signature.
+        let ty_args = (0..blanket_ty_var_count)
+            .map(TypeVar::new)
+            .map(|quantifier| {
+                blanket_instantiation
+                    .0
+                    .get(&quantifier)
+                    .copied()
+                    .ok_or_else(|| {
+                        internal_compilation_error!(Internal {
+                            error: format!(
+                                "blanket method type quantifier {quantifier} was not resolved"
+                            ),
+                            span: fn_span,
+                        })
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let eff_args = generic_definition
+            .ty_scheme
+            .eff_quantifiers
+            .iter()
+            .sorted()
+            .map(|quantifier| {
+                blanket_instantiation
+                    .1
+                    .get(quantifier)
+                    .cloned()
+                    .ok_or_else(|| {
+                        internal_compilation_error!(Internal {
+                            error: format!(
+                                "blanket method effect quantifier {quantifier} was not resolved"
+                            ),
+                            span: fn_span,
+                        })
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(FnInstData::new(runtime_requirements, ty_args, eff_args))
+    }
+
     fn blanket_method_thunk_code_entry(
         &mut self,
         function_id: FunctionId,
         definition: &CallableDefinition,
         explicit_runtime_arg_infos: &[(NodeKind, Type)],
-        runtime_requirements: Vec<DictionaryReq>,
+        inst_data: FnInstData,
         fn_span: Location,
     ) -> Result<(PendingFunctionBody, Vec<LocalDecl>), InternalCompilationError> {
         let locals = definition.gen_locals_no_bounds(
@@ -2306,15 +2368,7 @@ impl<'a> TraitSolver<'a> {
                 definition.ty_scheme.ty.clone(),
                 definition.result_convention,
             ),
-            // No instantiation is recorded. The thunk's own signature is concrete while the callee
-            // is the generic blanket method, so this *is* a real instantiation — but nothing here
-            // knows it: the callee's quantifiers are the blanket impl's parameters, which are
-            // neither the thunk's (it has none) nor the trait's variables (the impl may be generic
-            // over fewer). Recovering it means matching the callee's generic signature against
-            // `definition`'s concrete one, which is the derivation this recording exists to avoid.
-            // A consumer treats absence as "not known", which costs an optimization, not
-            // correctness.
-            inst_data: FnInstData::new(runtime_requirements, Vec::new(), Vec::new()),
+            inst_data,
         }));
         let apply_id = body_arena.alloc(Node::new(
             apply,
@@ -2888,6 +2942,7 @@ impl<'a> TraitSolver<'a> {
                     output_tys,
                     output_effs,
                     runtime_requirements: resolved_runtime_requirements,
+                    instantiation: blanket_instantiation,
                 } = blanket_match
                 else {
                     continue_impl_loop!();
@@ -2963,11 +3018,19 @@ impl<'a> TraitSolver<'a> {
                         trait_def_from_parts(self.current_type_items, self.others, trait_id);
                     let definitions =
                         trait_def.instantiate_for_tys(input_tys, &output_tys, &output_effs);
+                    let generic_definitions = trait_def.instantiate_for_tys(
+                        imp_input_tys,
+                        &imp_output_tys,
+                        &imp_output_effs,
+                    );
                     let gen_functions = imp.methods.clone(); // clone to avoid borrowing issues
                     let mut methods = Vec::with_capacity(gen_functions.len());
                     let mut tys = Vec::with_capacity(gen_functions.len());
-                    for (method_index, (fn_id, def)) in
-                        gen_functions.iter().zip(definitions).enumerate()
+                    for (method_index, ((fn_id, generic_def), def)) in gen_functions
+                        .iter()
+                        .zip(generic_definitions)
+                        .zip(definitions)
+                        .enumerate()
                     {
                         let method_index = TraitMethodIndex::from_index(method_index);
                         // Build the concrete function type and hash its signature.
@@ -2983,16 +3046,23 @@ impl<'a> TraitSolver<'a> {
                                 Some(module_id) => self.function_id(module_id, *fn_id),
                                 None => self.function_id(self.current_type_items.module.id, *fn_id),
                             };
-
-                            let (body, locals) = self.blanket_method_thunk_code_entry(
-                                function_id,
-                                &def,
-                                &explicit_runtime_arg_infos,
+                            let inst_data = Self::blanket_method_inst_data(
+                                &generic_def,
+                                imp_ty_var_count,
+                                &blanket_instantiation,
                                 if has_projection_requirement {
                                     runtime_requirements.clone()
                                 } else {
                                     Vec::new()
                                 },
+                                fn_span,
+                            )?;
+
+                            let (body, locals) = self.blanket_method_thunk_code_entry(
+                                function_id,
+                                &def,
+                                &explicit_runtime_arg_infos,
+                                inst_data,
                                 fn_span,
                             )?;
                             let runtime_arg_count = def.arg_names.len();
@@ -3157,24 +3227,35 @@ impl<'a> TraitSolver<'a> {
                 let definitions =
                     trait_def_from_parts(self.current_type_items, self.others, trait_id)
                         .instantiate_for_tys(input_tys, &output_tys, &output_effs);
+                let generic_definitions =
+                    trait_def_from_parts(self.current_type_items, self.others, trait_id)
+                        .instantiate_for_tys(imp_input_tys, &imp_output_tys, &imp_output_effs);
                 let code_entries = gen_functions
                     .iter()
+                    .zip(generic_definitions)
                     .zip(definitions)
-                    .map(|(fn_id, def)| {
+                    .map(|((fn_id, generic_def), def)| {
                         let function_id = match imp_module_id {
                             Some(module_id) => self.function_id(module_id, *fn_id),
                             None => self.function_id(self.current_type_items.module.id, *fn_id),
                         };
-
-                        self.blanket_method_thunk_code_entry(
-                            function_id,
-                            &def,
-                            &explicit_runtime_arg_infos,
+                        let inst_data = Self::blanket_method_inst_data(
+                            &generic_def,
+                            imp_ty_var_count,
+                            &blanket_instantiation,
                             if has_projection_requirement {
                                 runtime_requirements.clone()
                             } else {
                                 Vec::new()
                             },
+                            fn_span,
+                        )?;
+
+                        self.blanket_method_thunk_code_entry(
+                            function_id,
+                            &def,
+                            &explicit_runtime_arg_infos,
+                            inst_data,
                             fn_span,
                         )
                     })

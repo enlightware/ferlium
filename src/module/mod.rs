@@ -1684,6 +1684,22 @@ impl Module {
     ) -> LocalImplId {
         let associated_const_values = associated_const_values.into();
         let associated_const_getters = associated_const_getters.into();
+        let is_blanket = emit_output.ty_var_count != 0 || emit_output.eff_var_count != 0;
+        if is_blanket {
+            let expected = (0..emit_output.ty_var_count)
+                .map(TypeVar::new)
+                .collect::<Vec<_>>();
+            for id in &emit_output.functions {
+                assert_eq!(
+                    self.functions[id.as_index()]
+                        .definition
+                        .ty_scheme
+                        .ty_quantifiers,
+                    expected,
+                    "blanket methods must quantify every impl type variable in canonical order"
+                );
+            }
+        }
         let dictionary_ty =
             self.computer_dictionary_ty(&emit_output.functions, associated_const_tys);
         let dictionary_value =
@@ -1699,7 +1715,7 @@ impl Module {
         )
         .with_associated_const_values(associated_const_values)
         .with_associated_const_getters(associated_const_getters);
-        if emit_output.ty_var_count == 0 && emit_output.eff_var_count == 0 {
+        if !is_blanket {
             let key = ConcreteTraitImplKey::new(trait_id, emit_output.input_tys);
             self.impls.add_concrete_struct(key, imp)
         } else {

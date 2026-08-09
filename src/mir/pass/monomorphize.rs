@@ -944,6 +944,128 @@ mod tests {
             .module_id
     }
 
+    /// A concrete dictionary method generated from a blanket implementation is a forwarding
+    /// thunk. Its body calls the original generic method, so that call must carry the blanket
+    /// match's instantiation just like a source-level generic call does. Without it the thunk is
+    /// correct at runtime but specialization cannot see through the forwarding layer.
+    #[test]
+    fn blanket_method_thunk_records_and_uses_its_generic_instantiation() {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        let module_id = compile(
+            &mut session,
+            "fn f(a: [[int]]) -> int { a[0][1] }\n\
+             fn g() -> [int] { [0, 1, 2] |> map(|x| x + 1) }",
+        );
+        let module = session.expect_fresh_module(module_id);
+        let thunk_id = (0..module.function_count())
+            .map(LocalFunctionId::from_index)
+            .find(|id| {
+                module
+                    .get_function_name_by_id(*id)
+                    .is_some_and(|name| name.starts_with("std::Value<[std::int]>::clone#impl:"))
+            })
+            .expect("array Value materialization must create a concrete clone thunk");
+        let thunk = session
+            .mir_artifacts_for(module_id, MirOptimization::Disabled)
+            .expect("raw MIR must be prepared")
+            .get(thunk_id)
+            .expect("the clone thunk must have a MIR body");
+
+        let call = thunk
+            .blocks()
+            .flat_map(|block_id| {
+                let block = thunk.block(block_id);
+                block
+                    .operations()
+                    .iter()
+                    .chain(match &block.terminator().kind {
+                        TerminatorKind::Invoke { operation, .. } => Some(operation),
+                        _ => None,
+                    })
+            })
+            .find(|operation| matches!(operation.kind, OperationKind::Call { .. }))
+            .expect("a blanket method thunk must forward to its generic method");
+        let Value::Function(callee) = call.operands[0] else {
+            panic!("the thunk must call a statically known generic method")
+        };
+        let callee_scheme = &session
+            .expect_fresh_module(callee.module)
+            .get_function_by_id(callee.function)
+            .expect("the generic method must exist")
+            .definition
+            .ty_scheme;
+        assert!(
+            !callee_scheme.ty_quantifiers.is_empty(),
+            "the forwarded method must be generic, or this test proves nothing"
+        );
+        let OperationKind::Call {
+            instantiation: Some(instantiation),
+            ..
+        } = &call.kind
+        else {
+            panic!("the thunk's generic call must record its instantiation")
+        };
+        assert_eq!(
+            instantiation.ty_args.len(),
+            callee_scheme.ty_quantifiers.len()
+        );
+        assert_eq!(
+            instantiation.eff_args.len(),
+            callee_scheme.eff_quantifiers.len()
+        );
+        assert!(
+            instantiation.ty_args.iter().all(Type::is_constant),
+            "a concrete thunk must instantiate every generic type parameter concretely"
+        );
+
+        let from_iter_thunk_id = (0..module.function_count())
+            .map(LocalFunctionId::from_index)
+            .find(|id| {
+                module.get_function_name_by_id(*id).is_some_and(|name| {
+                    name.starts_with("std::FromIterator<[std::int],")
+                        && name.contains("::from_iter#impl:")
+                })
+            })
+            .expect("array collection must create a two-quantifier FromIterator thunk");
+        let from_iter_thunk = session
+            .mir_artifacts_for(module_id, MirOptimization::Disabled)
+            .expect("raw MIR must be prepared")
+            .get(from_iter_thunk_id)
+            .expect("the FromIterator thunk must have a MIR body");
+        let from_iter_instantiation = from_iter_thunk
+            .blocks()
+            .flat_map(|block_id| {
+                let block = from_iter_thunk.block(block_id);
+                block
+                    .operations()
+                    .iter()
+                    .chain(match &block.terminator().kind {
+                        TerminatorKind::Invoke { operation, .. } => Some(operation),
+                        _ => None,
+                    })
+            })
+            .find_map(|operation| match &operation.kind {
+                OperationKind::Call {
+                    instantiation: Some(instantiation),
+                    ..
+                } => Some(instantiation),
+                _ => None,
+            })
+            .expect("the two-quantifier forwarding call must record its instantiation");
+        assert_eq!(from_iter_instantiation.ty_args.len(), 2);
+
+        // Preparing optimized MIR verifies both recorded applications against their actual callee
+        // schemes. In particular this catches swapping FromIterator's `[A, B]` to the equally
+        // valid as a scheme, but positionally incompatible, `[B, A]`.
+        let optimized = session.emit_mir_module(module_id);
+        assert!(
+            !optimized.contains("call std::Value<[A]>::clone#impl:"),
+            "specialization must remove the concrete thunk's call to the generic original:\n\
+             {optimized}"
+        );
+    }
+
     fn body<'a>(session: &'a CompilerSession, module: ModuleId, name: &str) -> &'a Function {
         let id = session
             .expect_fresh_module(module)

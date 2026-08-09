@@ -144,9 +144,10 @@ A `call` additionally carries **how it instantiated its callee**, when the calle
 and generic: the type and effect arguments its quantifiers stand for, positionally. They are carried
 down from HIR rather than recovered by matching the callee's generic signature against this call's
 concrete one — see [generic-instantiation.md](generic-instantiation.md). The operand is absent for an
-indirect call, for a non-generic callee, and at call sites the compiler synthesizes rather than
-lowers from a generic application; a consumer treats absence as "not known", which costs an
-optimization rather than correctness.
+indirect call, for a non-generic callee, and at synthesized call sites where no generic application
+substitution is available; a consumer treats absence as "not known", which costs an optimization
+rather than correctness. Blanket-method forwarding thunks are not such a case: blanket matching
+supplies their substitution, and their call records it.
 
 `Operation::verify` checks kind-local arity. The function verifier additionally checks operand
 roles, types where independently known, dominance, linear uses, source-failure flow, and storage
