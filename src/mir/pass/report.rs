@@ -342,12 +342,13 @@ fn indirect_calls(func: &Function) -> usize {
         .count()
 }
 
-/// Counts the operations that read a trait dictionary.
+/// Counts operations that consume evidence because a type's behavior or layout is not static.
 ///
 /// The residue of not knowing a type: every entry read that a call goes through, and every layout
-/// witness an allocation consults. Substitution is what removes them, and their count is the one
-/// benefit measure that covers all three of specialization's payoffs rather than only
-/// devirtualization — a `Value::clone` that becomes a `memcpy` shows up here and nowhere else.
+/// witness an allocation or move consults. Substitution is what removes them, and their count is
+/// the one benefit measure that covers all three of specialization's payoffs rather than only
+/// devirtualization — a `Value::clone` that becomes a `memcpy`, or a dynamic-layout `alloca` that
+/// becomes static, shows up here and nowhere else.
 fn dictionary_reads(func: &Function) -> usize {
     func.blocks()
         .flat_map(|block| {
@@ -360,7 +361,12 @@ fn dictionary_reads(func: &Function) -> usize {
                     _ => None,
                 })
         })
-        .filter(|operation| matches!(operation.kind, OperationKind::DictEntry { .. }))
+        .filter(|operation| match operation.kind {
+            OperationKind::DictEntry { .. } => true,
+            OperationKind::Alloca { .. } => operation.operands.len() == 1,
+            OperationKind::Move => operation.operands.len() == 3,
+            _ => false,
+        })
         .count()
 }
 
@@ -578,5 +584,27 @@ mod tests {
             rendered.contains("call sites before optimization"),
             "{rendered}"
         );
+    }
+
+    /// A layout witness is evidence just as a dictionary entry is. It is carried as the extra
+    /// operand of a dynamic `alloca` or `move`, so counting only `dict_entry` operations reports a
+    /// specialization such as `swap<int>` as buying nothing even though substitution makes its
+    /// temporary statically sized.
+    #[test]
+    fn specialization_payoff_counts_removed_layout_witnesses() {
+        let (report, rendered) = report_for(
+            "fn swap(a, i, j) { let temp = a[i]; a[i] = a[j]; a[j] = temp }\n\
+             fn swap_ints(a: [int], i: int, j: int) { let mut t = a; swap(t, i, j); t }",
+        );
+        let specialization = report
+            .specializations
+            .iter()
+            .find(|specialization| specialization.name.starts_with("swap#spec:"))
+            .unwrap_or_else(|| panic!("swap must specialize:\n{rendered}"));
+        assert!(
+            specialization.dictionary_reads_before > specialization.dictionary_reads_after,
+            "the removed layout witness must be counted as specialization payoff:\n{rendered}"
+        );
+        assert!(specialization.payoff() > 0, "{rendered}");
     }
 }
