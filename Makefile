@@ -31,6 +31,11 @@ BENCH_JOBS ?= $(shell c=$$(lscpu -p=Core,Socket 2>/dev/null | grep -v '^\#' | so
 	if [ "$$c" -gt 0 ] 2>/dev/null; then echo $$c; \
 	else nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1; fi)
 
+# Valgrind 3.18's Rust v0 demangler is broken, so Gungraun's Rust-symbol entry points silently
+# collect zero events. An uninstalled Valgrind build can be selected with VALGRIND=/path/vg-in-place.
+VALGRIND ?= valgrind
+VALGRIND_MIN_VERSION := 3.19.0
+
 install-deps:
 	cargo install cargo-nextest --locked
 	cargo install --version 0.18.2 gungraun-runner
@@ -46,8 +51,18 @@ test: test-local test-wasm
 test-miri:
 	cargo +nightly miri test hir::value::tests::discard_storage_recursively_reclaims_runtime_payloads --lib
 
-bench:
-	GUNGRAUN_PARALLEL=$(BENCH_JOBS) cargo bench
+check-valgrind:
+	@version=$$("$(VALGRIND)" --version 2>/dev/null | sed -n 's/^valgrind-\([0-9][0-9.]*\).*$$/\1/p'); \
+	if [ -z "$$version" ]; then \
+		echo "Could not run Valgrind at $(VALGRIND)" >&2; exit 1; \
+	fi; \
+	oldest=$$(printf '%s\n%s\n' "$(VALGRIND_MIN_VERSION)" "$$version" | sort -V | head -n1); \
+	if [ "$$oldest" != "$(VALGRIND_MIN_VERSION)" ]; then \
+		echo "Valgrind $$version is too old; Ferlium benchmarks require >= $(VALGRIND_MIN_VERSION) for Rust v0 symbol matching" >&2; exit 1; \
+	fi
+
+bench: check-valgrind
+	GUNGRAUN_VALGRIND_BIN="$(VALGRIND)" GUNGRAUN_PARALLEL=$(BENCH_JOBS) cargo bench
 
 fuzz-ide:
 	mkdir -p fuzz/corpus-generated/ide_compile_any $(FUZZ_LOG_DIR)/ide_compile_any

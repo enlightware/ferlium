@@ -124,7 +124,11 @@ Its inspirations are:
 
 ### Running benchmarks
 
-Install the dependencies once with `make install-deps` (Valgrind + the Gungraun runner), then run `cargo bench`. Gungraun measures instruction counts and other Valgrind-based metrics, which catch small optimisations and regressions reliably even in noisy environments.
+Install the Gungraun runner once with `make install-deps`, ensure Valgrind 3.19 or newer is
+available, then run `make bench`. Gungraun measures instruction counts and other Valgrind-based
+metrics, which catch small optimisations and regressions reliably even in noisy environments.
+Valgrind 3.18 silently collects zero events because its Rust v0 demangler is broken. Select a
+non-system or uninstalled build with `make bench VALGRIND=/path/to/vg-in-place`.
 
 For fast optimizer iteration, `make profile-mir` runs the same runtime workloads natively through
 the MIR interpreter and compares unweighted instruction counts for raw and optimized MIR. Select a
