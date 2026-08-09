@@ -126,6 +126,10 @@ Its inspirations are:
 
 Install the dependencies once with `make install-deps` (Valgrind + the Gungraun runner), then run `cargo bench`. Gungraun measures instruction counts and other Valgrind-based metrics, which catch small optimisations and regressions reliably even in noisy environments.
 
+For fast optimizer iteration, `make profile-mir` runs the same runtime workloads natively through
+the MIR interpreter and compares unweighted instruction counts for raw and optimized MIR. Select a
+subset with `make profile-mir WORKLOADS="fibonacci sieve"`; this does not require Valgrind.
+
 ### Fuzzing
 
 Crash-oriented fuzz targets live in `fuzz/` and are run explicitly with `cargo-fuzz`; see [doc/fuzzing.md](doc/fuzzing.md).

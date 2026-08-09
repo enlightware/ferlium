@@ -14,6 +14,7 @@ pub mod function;
 pub mod interpreter;
 pub mod operation;
 pub mod pass;
+pub mod profile;
 pub(crate) mod reify;
 pub mod terminator;
 pub mod value;

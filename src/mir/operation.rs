@@ -713,7 +713,12 @@ impl Instantiation {
 ///
 /// Operands stay in [`Operation::operands`] so generic MIR traversals can inspect and rewrite
 /// them uniformly. This enum contains only metadata whose shape is specific to an operation.
-#[derive(Clone)]
+#[derive(Clone, strum::EnumDiscriminants)]
+#[strum_discriminants(
+    name(OperationKindDiscriminant),
+    derive(Hash, PartialOrd, Ord, strum::Display),
+    strum(serialize_all = "snake_case")
+)]
 pub enum OperationKind {
     /// Stack storage for a value of `ty`, optionally using a run-time layout witness.
     Alloca { ty: Type },

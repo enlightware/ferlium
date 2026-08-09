@@ -111,7 +111,12 @@ impl Terminator {
 }
 
 /// Control-flow forms of canonical MIR.
-#[derive(Clone)]
+#[derive(Clone, strum::EnumDiscriminants)]
+#[strum_discriminants(
+    name(TerminatorKindDiscriminant),
+    derive(Hash, PartialOrd, Ord, strum::Display),
+    strum(serialize_all = "snake_case")
+)]
 pub enum TerminatorKind {
     Goto {
         target: mir::BlockId,

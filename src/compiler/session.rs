@@ -1205,6 +1205,44 @@ impl CompilerSession {
         }
     }
 
+    /// Interpret an entry through MIR and return its unweighted dynamic instruction profile.
+    ///
+    /// The session's [`MirOptimization`] setting selects the raw or optimized artifact stage. This
+    /// is intentionally separate from [`run_entry`](Self::run_entry): profiling is an analysis
+    /// facility rather than an execution target, and ordinary execution should allocate no counter
+    /// state.
+    pub fn run_mir_entry_profiled(
+        &mut self,
+        module_id: ModuleId,
+        entry: LocalFunctionId,
+        arguments: Vec<Value>,
+    ) -> Result<(Value, crate::mir::profile::MirExecutionProfile), RuntimeError> {
+        self.run_mir_entry_profiled_with_limits(
+            module_id,
+            entry,
+            arguments,
+            ReferenceInterpreterLimits::default(),
+        )
+    }
+
+    /// Profiled MIR interpretation with explicit backend-independent execution limits.
+    pub fn run_mir_entry_profiled_with_limits(
+        &mut self,
+        module_id: ModuleId,
+        entry: LocalFunctionId,
+        arguments: Vec<Value>,
+        limits: ReferenceInterpreterLimits,
+    ) -> Result<(Value, crate::mir::profile::MirExecutionProfile), RuntimeError> {
+        self.prepare_execution_target(ExecutionTarget::Mir, module_id);
+        let mut interpreter =
+            crate::mir::interpreter::Interpreter::with_profile(module_id, self, limits);
+        let value = interpreter.run_entry(module_id, entry, arguments)?;
+        let profile = interpreter
+            .take_profile()
+            .expect("a profiled MIR interpreter must carry a profile");
+        Ok((value, profile))
+    }
+
     /// Ensure that `module_id` and its dependencies have the artifacts needed by `target`.
     /// Existing artifacts for the same module revision are reused.
     pub fn prepare_execution_target(&mut self, target: ExecutionTarget, module_id: ModuleId) {

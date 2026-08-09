@@ -46,7 +46,7 @@ use crate::{
 };
 
 /// A key uniquely identifying a function across modules.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FunctionKey {
     pub module: ModuleId,
     pub identity: LocalFunctionId,
@@ -182,6 +182,9 @@ pub struct Interpreter<'a> {
     /// optimized is still being built, and reading partially optimized bodies would make its
     /// results depend on the order functions are optimized in.
     stage: MirOptimization,
+    /// Present only for explicitly profiled runs; ordinary interpretation pays one predictable
+    /// branch per executed MIR instruction and allocates no counter state.
+    profile: Option<mir::profile::MirExecutionProfile>,
 }
 
 impl<'a> Interpreter<'a> {
@@ -219,7 +222,24 @@ impl<'a> Interpreter<'a> {
             ctx: EvalCtx::with_limits(module_id, session, limits),
             session,
             stage,
+            profile: None,
         }
+    }
+
+    /// Creates an interpreter that records an unweighted dynamic MIR instruction profile.
+    pub fn with_profile(
+        module_id: ModuleId,
+        session: &'a CompilerSession,
+        limits: ReferenceInterpreterLimits,
+    ) -> Self {
+        let mut interpreter = Self::with_limits(module_id, session, limits);
+        interpreter.profile = Some(mir::profile::MirExecutionProfile::default());
+        interpreter
+    }
+
+    /// Takes the profile from a profiled interpreter, leaving profiling disabled.
+    pub fn take_profile(&mut self) -> Option<mir::profile::MirExecutionProfile> {
+        self.profile.take()
     }
 
     /// Whether this interpreter's execution domain is poisoned and may no longer be entered.
@@ -495,7 +515,7 @@ impl<'a> Interpreter<'a> {
         for (i, b) in args.into_iter().enumerate() {
             slots.insert(mir::Value::Parameter(mir::ParameterId::from_index(i)), b);
         }
-        match self.run_loop(func, slots, func.entry())? {
+        match self.run_loop(key, func, slots, func.entry())? {
             FrameOutcome::Completed => Ok(()),
             FrameOutcome::Suspended { .. } => {
                 panic!(
@@ -509,6 +529,7 @@ impl<'a> Interpreter<'a> {
     /// suspends at a yielded projection.
     fn run_loop(
         &mut self,
+        key: FunctionKey,
         func: &mir::Function,
         mut slots: FxHashMap<mir::Value, Binding>,
         mut block: BlockId,
@@ -520,7 +541,7 @@ impl<'a> Interpreter<'a> {
         loop {
             let current = func.block(block);
             for operation in current.operations() {
-                if let Err(error) = self.exec_operation(func, &mut slots, operation) {
+                if let Err(error) = self.exec_operation(key, func, &mut slots, operation) {
                     if error.is_poisoning() {
                         let error = match pending.take() {
                             Some(initial) => self.ctx.poison(initial, error),
@@ -533,6 +554,9 @@ impl<'a> Interpreter<'a> {
                 }
             }
 
+            if let Some(profile) = &mut self.profile {
+                profile.record_terminator(key, &current.terminator().kind);
+            }
             match &current.terminator().kind {
                 TerminatorKind::Goto { target } => block = *target,
                 TerminatorKind::CondBr {
@@ -554,7 +578,7 @@ impl<'a> Interpreter<'a> {
                     operation,
                     normal,
                     error,
-                } => match self.exec_operation(func, &mut slots, operation) {
+                } => match self.exec_operation(key, func, &mut slots, operation) {
                     Ok(()) => block = *normal,
                     Err(failure) if failure.is_poisoning() => {
                         let failure = match pending.take() {
@@ -620,10 +644,14 @@ impl<'a> Interpreter<'a> {
     /// Executes one MIR operation within the current frame.
     fn exec_operation(
         &mut self,
+        key: FunctionKey,
         func: &mir::Function,
         slots: &mut FxHashMap<mir::Value, Binding>,
         operation: &Operation,
     ) -> Result<(), RuntimeError> {
+        if let Some(profile) = &mut self.profile {
+            profile.record_operation(key, operation);
+        }
         let def = operation.result_id().map(mir::Value::Register);
         let span = operation.span;
         match &operation.kind {
@@ -1038,7 +1066,7 @@ impl<'a> Interpreter<'a> {
             _ => panic!("end_project operand is not an open projection"),
         };
         let func = self.function(key);
-        let result = self.run_loop(func, acc_slots, block);
+        let result = self.run_loop(key, func, acc_slots, block);
         // The accessor frame is torn down whichever way its slide ends: drop the depth it
         // held since the `project` and reclaim its stack cells, then surface any slide error.
         self.ctx.call_depth -= 1;
@@ -1380,7 +1408,7 @@ impl<'a> Interpreter<'a> {
         for (i, b) in args.into_iter().enumerate() {
             acc_slots.insert(mir::Value::Parameter(mir::ParameterId::from_index(i)), b);
         }
-        match self.run_loop(func, acc_slots, func.entry()) {
+        match self.run_loop(key, func, acc_slots, func.entry()) {
             Ok(FrameOutcome::Suspended {
                 place,
                 block,
