@@ -40,6 +40,7 @@ for round in 0..MAX_ROUNDS:
     stop if nothing warranted another round
 place CSE          // merge places which inlining exposes
 copy forward      // catch copies exposed after the last round
+branch forward    // bypass booleans stored in branch arms only to control a second branch
 dce               // on every body, not only a changed one
 finish            // restores canonical form and re-verifies
 ```
@@ -310,6 +311,22 @@ executed forwardable site, so this pass is not a justification for widening the 
 is the bounded cleanup that completes value-call CSE when that source shape occurs. A focused
 interpreter profile does execute the shape: `(x - y) * (x - y)` falls from six MIR events to four,
 losing one executed result allocation as well as the repeated call.
+
+## Boolean branch forwarding
+
+`mir::pass::branch_forward` removes a boolean storage round-trip created when one control-flow
+diamond materializes `true` or `false` and its join immediately compares that slot with a boolean
+literal to control a second `condbr`. Each incoming edge already determines the second branch, so
+the pass redirects it to that successor. Any `stack_restore`s preceding the comparison are copied
+onto every redirected edge; the now-unreachable join disappears, and final DCE removes the local
+boolean allocation and its constant stores.
+
+The proof is a linear use and predecessor census and deliberately narrower than general jump
+threading. The slot must be a local boolean `alloca`; its only uses must be one known-boolean store
+per incoming predecessor and the final comparison; every predecessor must jump unconditionally to
+the join; and the join may contain only `stack_restore`s before that comparison. Other operations,
+additional uses, unknown stores and self-edges all refuse the rewrite. Supporting integer values or
+variant tags would require evidence for a broader predicate-propagation analysis.
 
 ## Dead code elimination
 

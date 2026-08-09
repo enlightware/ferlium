@@ -33,6 +33,7 @@
 //! the caller's pool. This is not whole-program optimization: nothing outside the module being
 //! optimized is modified.
 
+pub(crate) mod branch_forward;
 pub mod budget;
 pub(crate) mod call_graph;
 pub(crate) mod copy_forward;
@@ -171,6 +172,13 @@ pub(crate) fn optimize_function(
     // Forward them before DCE, which can then remove scaffolding orphaned by the rewrite.
     let source = current.as_ref().unwrap_or(function);
     if let Some(forwarded) = copy_forward::forward_trivial_copies(source, env) {
+        current = Some(forwarded);
+    }
+    // Inlined predicates often materialize `true`/`false` in two arms only for the caller to
+    // compare that slot with `true` and branch again. Forward the known edge information while
+    // retaining any stack restoration at the join. DCE below then removes the dead slot/stores.
+    let source = current.as_ref().unwrap_or(function);
+    if let Some(forwarded) = branch_forward::forward_boolean_branches(source, env) {
         current = Some(forwarded);
     }
     // Cleanup runs once, after the rounds have settled, and on every body rather than only on one a
