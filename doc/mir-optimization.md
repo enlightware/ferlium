@@ -34,9 +34,12 @@ for round in 0..MAX_ROUNDS:
     fold          // constant folding, devirtualization; block merging inside its own edit
     specialize    // point generic calls at concrete copies
     call CSE      // merge repeated addressor and trivial value calls before copying their bodies
+    copy forward  // after specialization/call CSE changed the body; coalesce a redundant result slot
+    place CSE     // merge repeated subfield and dictionary-entry places
     inline        // budget-limited; block merging inside its own edit
     stop if nothing warranted another round
-subfield CSE       // merge repeated field addresses which inlining exposes
+place CSE          // merge places which inlining exposes
+copy forward      // catch copies exposed after the last round
 dce               // on every body, not only a changed one
 finish            // restores canonical form and re-verifies
 ```
@@ -256,36 +259,57 @@ This runs inside each optimization round after specialization and before inlinin
 `swap#spec:[int]`, four `array_index::ref_mut` calls become two before the accessor is copied, so the
 final body has two bounds/index computations and two `buffer_slot` calls rather than four of each.
 
-The operation pass merges repeated `subfield` operations — the field addresses a body recomputes —
-by **dominator-based value numbering**: a table keyed on the result type and the *canonical*
-operands, scoped to the dominator tree, entered on the way down and undone on the way back up. A
-redundant operation is replaced when an equivalent one dominates it. Operands are already canonical
-when an operation is reached, so comparing two arbitrarily deep expressions is one key comparison and
-no subtree is re-walked. Partial redundancy — a value available on some paths only — is out of
-reach; that needs available expressions and lazy code motion.
+The operation pass merges repeated `subfield` and `dict_entry` operations by **dominator-based value
+numbering**: a table keyed on the result type and the *canonical* operands, scoped to the dominator
+tree, entered on the way down and undone on the way back up. A redundant operation is replaced when
+an equivalent one dominates it. Operands are already canonical when an operation is reached, so
+comparing two arbitrarily deep expressions is one key comparison and no subtree is re-walked.
+Partial redundancy — a value available on some paths only — is out of reach; that needs available
+expressions and lazy code motion.
 
-The `subfield` pass runs **once, after the rounds**, because inlining is what creates the redundancy: splicing an
-accessor into every call site copies its `subfield` chain along with it. Per round it would pay an
-extra edit cycle to catch redundancy that is mostly not there yet, and what it merges enables no
-further folding — the fold analysis reads the same operands under one name instead of two.
+It runs before inlining to merge the repeated dictionary entries generic bodies start with, then
+again after the rounds because inlining copies a callee's `subfield` chains into the caller. These
+placements target different redundancies: the first shrinks the body the inliner prices, while the
+second cleans up what splicing created.
 
-**`subfield` alone, and the boundary is narrower than "pure".** A `subfield` *derives* a place: the
-base's root and path with an index appended, holding no storage of its own, so it is valid exactly
-where its base is — and the base is valid at the duplicate, since that is what the duplicate reads
-too. Registers are single-assignment, so no intervening write invalidates it either: there is no kill
-analysis. Three classes are out, each for its own reason.
+The boundary is narrower than "pure". A `subfield` *derives* a place: the base's root and path with
+an index appended, holding no storage of its own, so it is valid exactly where its base is. A
+`dict_entry` instead materializes a function place in a fresh cell; `stack_restore` and scoped
+projection boundaries therefore kill materialized entries before numbering continues. Other
+classes remain out for their own reasons.
 
 - **A memory reader** — `load`, `comp_eq`, `extract_tag` — needs an aliasing argument about the
   writes in between.
 - **An owned materialized value**, `build_subscript` among them, cannot be merged at all: such a
   register must have exactly one consuming use, and merging is what gives it two.
-- **`dict_entry` and `subscript_member`** *allocate a cell* to materialize the function value into,
-  so what they yield lives in the current stack region rather than deriving from an operand's. A
-  `stack_restore` between two occurrences pops it. Merging them needs a kill on `stack_restore`.
+- **`subscript_member`** also materializes a function place in a cell, but is not yet represented in
+  the computation key. If added, it needs the same stack-region kill as `dict_entry`.
 
 Dominance itself is `mir::dominance`, shared with the verifier, which dominates *instructions* rather
 than blocks because an invoked operation's result is anchored at the normal successor and must not
 reach the error one. It therefore takes bare successor lists rather than a `Function`.
+
+## Trivial-copy forwarding
+
+`mir::pass::copy_forward` is deliberately separate from call CSE. CSE proves that two computations
+produce equal values and safely replaces the duplicate with `memcpy first → second`; it does not
+prove that the two mutable result places have interchangeable identities. Forwarding supplies that
+storage proof, rewrites reads of the second place to the first, and removes both the copy and the
+second `alloca`.
+
+The proof is a linear whole-function use census. Both places must be local `alloca`s in one block,
+with the source allocated first. Each has exactly one whole-place write, the destination's write is
+the candidate `memcpy`, and every other use is a direct immutable read. A projection, mutable call
+argument, ownership transfer, independent write or other escaping use rejects the candidate.
+Allocating the source first proves it outlives the destination across any `stack_restore`.
+
+It runs after specialization or call CSE changes a round, before the inliner prices the body, and
+once more before final DCE. Structurally viable copies are selected before the whole-function use
+census, so unrelated allocations are not tracked. The ten-workload profile contains no dynamically
+executed forwardable site, so this pass is not a justification for widening the alias analysis: it
+is the bounded cleanup that completes value-call CSE when that source shape occurs. A focused
+interpreter profile does execute the shape: `(x - y) * (x - y)` falls from six MIR events to four,
+losing one executed result allocation as well as the repeated call.
 
 ## Dead code elimination
 
@@ -298,6 +322,9 @@ Deliberately narrow, and intra-function only.
 - A `dict_entry` goes when nothing reads its result. `dict_entry` reads evidence rather than storage,
   has no side effect, and yields a place, so an unread one discharges no obligation. One pass
   suffices: an entry's operand is never another entry's result.
+- A properly nested same-block `stack_save`/`stack_restore` pair with one restore goes when no
+  surviving operation inside may leave current-frame storage allocated. The paired rule runs after
+  the other removals, so storage cleanup can make a region empty first.
 
 Constants left unreferenced are pruned from the pool, explicitly, since that renumbers every
 `ConstantId`.

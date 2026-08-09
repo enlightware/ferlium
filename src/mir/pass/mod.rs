@@ -37,6 +37,7 @@ pub mod budget;
 pub(crate) mod call_graph;
 #[cfg(test)]
 mod census;
+pub(crate) mod copy_forward;
 pub(crate) mod cse;
 pub(crate) mod dataflow;
 pub(crate) mod dce;
@@ -83,6 +84,7 @@ pub(crate) fn optimize_function(
         // before the inliner measures it against its growth budget. Inlining then hands the next
         // round a body whose parameters have become the caller's places.
         let mut changed = false;
+        let mut may_have_new_trivial_copies = false;
         let source = current.as_ref().unwrap_or(function);
         if let Some(folded) = fold::fold_function(source, env, session, module_id) {
             current = Some(folded.body);
@@ -98,6 +100,7 @@ pub(crate) fn optimize_function(
         {
             current = Some(specialized);
             changed = true;
+            may_have_new_trivial_copies = true;
         }
         // Calls are merged before inlining so one body is copied per distinct computation, rather
         // than copying duplicates and trying to rediscover the whole computation afterwards.
@@ -118,6 +121,17 @@ pub(crate) fn optimize_function(
         if let Some(merged) = cse::eliminate_common_calls(source, env, &summary_of) {
             current = Some(merged);
             changed = true;
+            may_have_new_trivial_copies = true;
+        }
+        // Value-call CSE leaves its repeated result in a fresh slot via `memcpy`; storage
+        // forwarding is a separate proof from expression equivalence. Run it before inlining so
+        // the body being priced has already lost provably redundant result slots and copies.
+        if may_have_new_trivial_copies {
+            let source = current.as_ref().unwrap_or(function);
+            if let Some(forwarded) = copy_forward::forward_trivial_copies(source, env) {
+                current = Some(forwarded);
+                changed = true;
+            }
         }
         // The place-producing operations are merged here too, before inlining rather than only
         // after it, because their redundancy is already present: a generic body reads the same
@@ -154,6 +168,12 @@ pub(crate) fn optimize_function(
     let source = current.as_ref().unwrap_or(function);
     if let Some(merged) = cse::eliminate_common_subexpressions(source, env) {
         current = Some(merged);
+    }
+    // Folding, specialization and inlining can expose copies after the last pre-inline placement.
+    // Forward them before DCE, which can then remove scaffolding orphaned by the rewrite.
+    let source = current.as_ref().unwrap_or(function);
+    if let Some(forwarded) = copy_forward::forward_trivial_copies(source, env) {
+        current = Some(forwarded);
     }
     // Cleanup runs once, after the rounds have settled, and on every body rather than only on one a
     // pass changed. A specialization arrives already carrying dead code — substitution turns its
