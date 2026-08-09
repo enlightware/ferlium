@@ -12,20 +12,22 @@
 //! `alloca`s and stores in place: correct, since nothing reads them, but they still cost a cell and
 //! a write at run time and they bury the result in noise when the MIR is read.
 //!
-//! This is **not** general dead-code elimination. It removes an `alloca` only when *every* use of it
-//! is as the destination of a `store` whose value is a pool constant, and then removes those stores
-//! with it. Two properties make that safe without any ownership analysis:
+//! This is **not** general dead-code elimination. Its storage rule removes an `alloca` only when
+//! *every* use of it is as the destination of a `store` whose value is a pool constant, and then
+//! removes those stores with it. Two properties make that safe without any ownership analysis:
 //!
 //! - a constant is trivially copyable, so storing one creates no drop obligation and deleting the
 //!   store discards nothing that must be dropped;
 //! - the value operand is not a register, so no owned register loses its single consuming use —
 //!   which the verifier would reject, and which is the trap any wider rule falls into first.
 //!
-//! Constants left unreferenced by the removed stores are dropped from the pool with them.
+//! Unread `dict_entry` and `subfield` place derivations are also removed. They neither own a value
+//! nor have side effects, and a linear use-count worklist handles nested `subfield` chains.
+//! Constants left unreferenced by removed stores are dropped from the pool with them.
 //!
-//! Anything else about the place — a `load`, a `subfield`, a `drop`, a call argument, a store of a
-//! register — disqualifies it. Widening the rule means proving the drop obligation is discharged,
-//! and should happen only against the whole corpus.
+//! Any surviving use of an allocation — a `load`, a `subfield`, a `drop`, a call argument, or a
+//! store of a register — disqualifies that allocation. Widening the storage rule means proving the
+//! drop obligation is discharged, and should happen only against the whole corpus.
 
 #![allow(dead_code)]
 
@@ -42,8 +44,8 @@ use crate::{
 /// Removes dead storage scaffolding, returning a rewritten function if anything was removed.
 pub(crate) fn remove_dead_storage(func: &Function, env: ModuleEnv<'_>) -> Option<Function> {
     let mut dead = dead_allocas(func);
-    let dead_entries = unread_dict_entries(func);
-    for (block, index) in dead_entries {
+    let dead_places = unread_derived_places(func);
+    for (block, index) in dead_places {
         dead.operations.entry(block).or_default().insert(index);
     }
     remove_empty_local_stack_regions(func, &mut dead.operations);
@@ -191,7 +193,7 @@ fn may_leave_frame_storage(operation: &mir::Operation) -> bool {
     }
 }
 
-/// The `dict_entry` operations nothing reads any more.
+/// The pure place derivations nothing reads any more.
 ///
 /// **Devirtualization is what makes these dead.** It rewrites a call through a resolved dictionary
 /// entry to name the callee directly, which removes the only use the entry usually had — so a
@@ -199,24 +201,40 @@ fn may_leave_frame_storage(operation: &mir::Operation) -> bool {
 /// `sudoku.fer` that is 86 of the 88 entries taken from a constant dictionary.
 ///
 /// Removing one is safe without any of the analysis the `alloca` rule needs: `dict_entry` reads
-/// evidence rather than storage, has no side effect, and yields a *place* rather than an owned
-/// value — so an unread one discharges no drop obligation and consumes nothing. One pass suffices
-/// because its operand is a dictionary or a parameter, never another entry's result, so removing one
-/// can never make another dead.
-fn unread_dict_entries(func: &Function) -> Vec<(BlockId, usize)> {
-    let mut used: FxHashSet<ValueId> = FxHashSet::default();
+/// evidence and `subfield` only extends a place path. Neither has a side effect or yields an owned
+/// value, so an unread result discharges no drop obligation and consumes nothing.
+///
+/// `subfield`s can form chains, so use counts are retired through a worklist: deleting an unread
+/// leaf may make its base derivation unread too. The census and worklist are both linear in the
+/// number of operations and operands.
+fn unread_derived_places(func: &Function) -> Vec<(BlockId, usize)> {
+    let mut definitions: FxHashMap<ValueId, (BlockId, usize)> = FxHashMap::default();
+    for block in func.blocks() {
+        for (index, operation) in func.block(block).operations().iter().enumerate() {
+            if matches!(
+                operation.kind,
+                OperationKind::DictEntry { .. } | OperationKind::Subfield { .. }
+            ) && let Some(result) = operation.result_id()
+            {
+                definitions.insert(result, (block, index));
+            }
+        }
+    }
+    if definitions.is_empty() {
+        return Vec::new();
+    }
+
+    let mut uses: FxHashMap<ValueId, usize> = FxHashMap::default();
     let mut note = |operand: &mir::Value| {
-        if let mir::Value::Register(id) = operand {
-            used.insert(*id);
+        if let mir::Value::Register(id) = operand
+            && definitions.contains_key(id)
+        {
+            *uses.entry(*id).or_default() += 1;
         }
     };
     for block in func.blocks() {
         let basic_block = func.block(block);
         for operation in basic_block.operations() {
-            if matches!(operation.kind, OperationKind::DictEntry { .. }) {
-                // Its own operand, not its result: an entry never reads another entry.
-                continue;
-            }
             operation.operands.iter().for_each(&mut note);
         }
         match &basic_block.terminator().kind {
@@ -232,18 +250,34 @@ fn unread_dict_entries(func: &Function) -> Vec<(BlockId, usize)> {
         }
     }
 
-    let mut dead = Vec::new();
-    for block in func.blocks() {
-        for (index, operation) in func.block(block).operations().iter().enumerate() {
-            if matches!(operation.kind, OperationKind::DictEntry { .. })
-                && let Some(result) = operation.result_id()
-                && !used.contains(&result)
-            {
-                dead.push((block, index));
+    let mut pending: Vec<ValueId> = definitions
+        .keys()
+        .copied()
+        .filter(|result| !uses.contains_key(result))
+        .collect();
+    let mut dead_results: FxHashSet<ValueId> = FxHashSet::default();
+    while let Some(result) = pending.pop() {
+        if !dead_results.insert(result) {
+            continue;
+        }
+        let (block, index) = definitions[&result];
+        for operand in &func.block(block).operations()[index].operands {
+            let mir::Value::Register(operand) = operand else {
+                continue;
+            };
+            if let Some(count) = uses.get_mut(operand) {
+                *count -= 1;
+                if *count == 0 {
+                    pending.push(*operand);
+                }
             }
         }
     }
-    dead
+
+    dead_results
+        .into_iter()
+        .map(|result| definitions[&result])
+        .collect()
 }
 
 /// The `alloca`s that can go, and the operations to remove with them.
@@ -335,6 +369,10 @@ mod tests {
         session.emit_mir("dce", src)
     }
 
+    fn raw(src: &str) -> String {
+        CompilerSession::new().emit_mir("dce", src)
+    }
+
     fn body_of<'a>(module: &'a str, name: &str) -> &'a str {
         module
             .split(&format!("fn {name}"))
@@ -379,6 +417,35 @@ mod tests {
         assert!(
             !caller.contains("dict_entry"),
             "the entry it no longer reads must be gone:\n{caller}"
+        );
+    }
+
+    /// Lowering a variant pattern projects both layers of its payload, even when the source-level
+    /// binding is unused. The inner unread `subfield` must make the outer one dead through the
+    /// worklist.
+    #[test]
+    fn an_unread_chain_of_subfields_is_removed() {
+        let source = "fn has_value(x: None | Some(int)) -> bool { match x { Some(_n) => true, None => false } }";
+        let raw_module = raw(source);
+        let raw_body = body_of(&raw_module, "has_value");
+        let raw_subfields = raw_body
+            .lines()
+            .filter(|line| line.contains("subfield"))
+            .count();
+        assert_eq!(
+            raw_subfields, 2,
+            "the test needs the nested lowering artifact it exercises:\n{raw_body}"
+        );
+
+        let module = optimized(source);
+        let body = body_of(&module, "has_value");
+        let optimized_subfields = body
+            .lines()
+            .filter(|line| line.contains("subfield"))
+            .count();
+        assert_eq!(
+            optimized_subfields, 0,
+            "both unread payload projections must be gone:\n{body}"
         );
     }
 

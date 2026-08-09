@@ -319,9 +319,9 @@ Deliberately narrow, and intra-function only.
   constant, together with those stores. Safe with no ownership analysis: a constant is trivially
   copyable, so no drop obligation is discarded, and the value operand is not a register, so no owned
   register loses its single consuming use — the trap a wider rule hits first.
-- A `dict_entry` goes when nothing reads its result. `dict_entry` reads evidence rather than storage,
-  has no side effect, and yields a place, so an unread one discharges no obligation. One pass
-  suffices: an entry's operand is never another entry's result.
+- An unread `dict_entry` or `subfield` goes. Both derive places without side effects or owned
+  results, so deleting one discharges no obligation. A linear use-count worklist handles nested
+  `subfield` chains: removing an unread leaf can make its base derivation unread.
 - A properly nested same-block `stack_save`/`stack_restore` pair with one restore goes when no
   surviving operation inside may leave current-frame storage allocated. The paired rule runs after
   the other removals, so storage cleanup can make a region empty first.
