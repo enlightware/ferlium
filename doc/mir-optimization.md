@@ -137,8 +137,14 @@ type. See [generic-instantiation.md](generic-instantiation.md).
 
 All of: the callee is statically known and generic and has a body; it is not itself a specialization;
 the recorded instantiation is fully concrete; every evidence operand is a constant dictionary; the
-body reads at least one dictionary parameter; and the budget allows another specialization unless one
-is already cached.
+linear admission preflight finds a payoff that substitution can expose; and the budget allows
+another specialization unless one is already cached.
+
+The admission preflight recognizes local devirtualization, trivial-copy clone/drop simplification,
+static-layout witness removal, making a small generic body inlinable, and propagation of concrete
+types or evidence into a direct generic callee. The last two matter because an apparently unchanged
+specialized body can enable work in its caller or callees. Accepted and rejected specialization keys
+are both memoized, so a distinct raw body is scanned at most once however many call sites request it.
 
 A caller that forwards its own quantifiers records a *variable* instantiation and is skipped —
 specializing that caller is what makes its inner call sites concrete on a later round. This is the

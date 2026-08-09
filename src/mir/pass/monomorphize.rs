@@ -35,7 +35,7 @@
 
 use std::cell::RefCell;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use ustr::{Ustr, ustr};
 
 use crate::{
@@ -53,7 +53,7 @@ use crate::{
         stable_generated_name_hash, unique_generated_name,
     },
     std::value::type_has_static_layout,
-    types::effects::{Effect, PrimitiveEffect},
+    types::effects::{EffType, Effect, PrimitiveEffect},
     types::type_properties::concrete_type_is_trivial_copy,
     types::{
         r#type::Type, type_like::TypeLike, type_mapper::BitmapInstantiationMapper,
@@ -61,7 +61,7 @@ use crate::{
     },
 };
 
-use super::budget;
+use super::{budget, function_size};
 
 /// How one call site instantiates a generic callee: both halves of the instantiation, together.
 ///
@@ -95,6 +95,11 @@ pub(crate) struct Specializations {
     /// would make an inlining decision depend on whether that had happened yet.
     raw: Vec<Function>,
     cache: FxHashMap<SpecializationKey, LocalFunctionId>,
+    /// Keys whose raw bodies expose none of the payoffs specialization can currently realize.
+    ///
+    /// A rejected key can occur at many call sites. Remembering it keeps the admission scan linear
+    /// in the number of distinct candidates rather than in candidate call sites times body size.
+    rejected: FxHashSet<SpecializationKey>,
     /// Bodies produced by substituting a generic callee at a call site's instantiation, memoized
     /// for the duration of one module's optimization.
     ///
@@ -118,6 +123,7 @@ impl Specializations {
             created: Vec::new(),
             raw: Vec::new(),
             cache: FxHashMap::default(),
+            rejected: FxHashSet::default(),
             substituted: RefCell::new(FxHashMap::default()),
             first_index: function_count,
         }
@@ -166,9 +172,19 @@ impl Specializations {
         self.created[index].body = body;
     }
 
-    /// Whether a specialization for this key already exists, so asking for it costs no budget.
-    pub(crate) fn is_cached(&self, key: &SpecializationKey) -> bool {
-        self.cache.contains_key(key)
+    /// A specialization already admitted for `key`, so another call site needs no scan or budget.
+    pub(crate) fn cached(&self, key: &SpecializationKey) -> Option<LocalFunctionId> {
+        self.cache.get(key).copied()
+    }
+
+    /// Whether the admission scan already found no specialization payoff for `key`.
+    pub(crate) fn is_rejected(&self, key: &SpecializationKey) -> bool {
+        self.rejected.contains(key)
+    }
+
+    /// Records that `key` exposes no specialization payoff in its raw body.
+    pub(crate) fn reject(&mut self, key: SpecializationKey) {
+        self.rejected.insert(key);
     }
 
     /// The local id of the specialization for `key`, creating it if this is the first call site to
@@ -777,7 +793,6 @@ fn specialization_for(
         return None;
     }
     // A caller that still names its own quantifiers here would produce a specialization as generic
-    // as the original. Specializing the caller is what makes this concrete, on a later round.
     if instantiation.ty_args.iter().any(Type::is_variable) {
         return None;
     }
@@ -811,16 +826,22 @@ fn specialization_for(
             _ => None,
         })
         .collect::<Option<Vec<_>>>()?;
-    if !worth_specializing(body, &dictionaries) {
-        return None;
-    }
-
     let key = SpecializationKey {
         callee: *callee,
         instantiation: instantiation.as_ref().clone(),
         dictionaries,
     };
-    if !specializations.is_cached(&key) && specializations.len() >= budget::MAX_SPECIALIZATIONS {
+    if let Some(existing) = specializations.cached(&key) {
+        return Some(existing);
+    }
+    if specializations.is_rejected(&key) {
+        return None;
+    }
+    if specializations.len() >= budget::MAX_SPECIALIZATIONS {
+        return None;
+    }
+    if !worth_specializing(body, scheme, instantiation, &key.dictionaries, env) {
+        specializations.reject(key);
         return None;
     }
     // Cloned out of the module borrow: substitution interns, and the type universe's lock is not
@@ -830,30 +851,33 @@ fn specialization_for(
     Some(specializations.get_or_create(key, &scheme, &body, env))
 }
 
-/// Whether a specialized copy of this body could be better than the original, judged from the body
-/// alone.
+/// Whether substitution exposes a reason Ferlium keeps a specialized body.
 ///
-/// **It must have a dictionary parameter that the body actually reads.** A necessary condition, not
-/// a benefit estimate: what it proves is that the copy could differ from the original at all, since
-/// everything substitution buys is downstream of a dictionary read. It says nothing about how much,
-/// which is the cost model this pass still lacks.
+/// This is a linear preflight over the raw body, before cloning, verification or insertion into the
+/// specialization worklist. It deliberately answers only “can this buy anything we know how to
+/// realize?”, not “is the benefit worth this body size?” — useful specializations still need a
+/// growth policy, but bodies that expose no payoff should not be built at all.
 ///
-/// Necessary is weaker than it looks, because a read pays off three different ways and only the
-/// first is a devirtualization:
+/// A bound dictionary pays off in three local ways, each recognized at the operation that the
+/// existing specialization rewrites consume:
 ///
 /// - a `dict_entry` feeding a call becomes a constant, and folding resolves it to a known function;
 /// - a `Value::clone` or `Value::drop` through the dictionary becomes a `memcpy` or nothing, once
 ///   the concrete type is known to own nothing;
 /// - a layout witness goes, once the concrete type has a size the backend can see.
 ///
-/// Narrowing this to the first — requiring a call whose callee is not already statically known —
-/// looks right against the standard library, where it rejects `array_ensure_capacity` and
-/// `array_append` at two instantiations each, 274 of 381 specialized operations that resolve nothing
-/// between them. It is wrong: `swap` has no indirect call and specializing it still sheds every
-/// `clone`, `drop` and `dict_entry` in the body. Two tests in this module cover exactly that, and
-/// they are the reason the narrowing is not here. Pricing the other two payoffs needs a benefit
-/// measure that counts calls and dictionary reads removed, not indirect calls resolved.
-fn worth_specializing(body: &Function, dictionaries: &[TraitDictionaryId]) -> bool {
+/// There is also one interprocedural payoff: a small generic body cannot be inlined, while its
+/// concrete specialization can. A larger body can still propagate concrete types or evidence into
+/// one of its direct generic calls, making that callee eligible for specialization on a later
+/// round. These are detected separately: body size prices the first, while changed call metadata
+/// proves the second rather than treating arbitrary dictionary use as useful.
+fn worth_specializing<Ty: TypeLike>(
+    body: &Function,
+    scheme: &TypeScheme<Ty>,
+    instantiation: &Instantiation,
+    dictionaries: &[TraitDictionaryId],
+    env: ModuleEnv<'_>,
+) -> bool {
     if dictionaries.is_empty() {
         return false;
     }
@@ -869,8 +893,18 @@ fn worth_specializing(body: &Function, dictionaries: &[TraitDictionaryId]) -> bo
         // arise, and not one to guess at.
         return false;
     }
+    let bound: FxHashMap<_, _> = parameters
+        .into_iter()
+        .zip(dictionaries.iter().copied())
+        .collect();
+    let subst = instantiation.substitution(scheme);
+    let mut mapper = BitmapInstantiationMapper::new(&subst);
+    let mut bound_entries = FxHashSet::default();
+    let mut reads_bound_evidence = false;
 
-    let mut reads_dictionary = false;
+    // First find local rewrites and remember dictionary-entry results. Calls can occur in a block
+    // visited before their dominating definition in the function's storage order, so resolving the
+    // devirtualization class is a second linear pass rather than relying on traversal order.
     for block in body.blocks() {
         let block = body.block(block);
         let operations = block
@@ -881,16 +915,113 @@ fn worth_specializing(body: &Function, dictionaries: &[TraitDictionaryId]) -> bo
                 _ => None,
             });
         for operation in operations {
-            for operand in operation.operands.iter() {
-                if let mir::Value::Parameter(id) = operand
-                    && parameters.contains(id)
+            reads_bound_evidence |= operation.operands.iter().any(
+                |operand| matches!(operand, mir::Value::Parameter(id) if bound.contains_key(id)),
+            );
+            match &operation.kind {
+                OperationKind::DictEntry { .. }
+                    if operation.operands.first().is_some_and(|operand| {
+                        matches!(operand, mir::Value::Parameter(id) if bound.contains_key(id))
+                    }) =>
                 {
-                    reads_dictionary = true;
+                    if let Some(result) = operation.result_id() {
+                        bound_entries.insert(result);
+                    }
                 }
+                OperationKind::Call { ty, instantiation }
+                    if matches!(operation.operands.first(), Some(mir::Value::Function(_)))
+                        && instantiation.as_ref().is_some_and(|inner| {
+                            let visible_start = operation
+                                .operands
+                                .len()
+                                .checked_sub(ty.fn_ty.args.len() + 1);
+                            let binds_forwarded_evidence = visible_start.is_some_and(|start| {
+                                operation.operands.get(1..start).is_some_and(|evidence| {
+                                    evidence.iter().any(|operand| {
+                                        matches!(
+                                            operand,
+                                            mir::Value::Parameter(id) if bound.contains_key(id)
+                                        )
+                                    })
+                                })
+                            });
+                            let was_generic = inner.ty_args.iter().any(Type::is_variable)
+                                || inner.eff_args.iter().any(EffType::has_variables);
+                            let mut mapped = inner.as_ref().clone();
+                            substitute_in_instantiation(&mut mapped, &mut mapper);
+                            let becomes_concrete = was_generic
+                                && mapped.ty_args.iter().all(|ty| ty.is_constant())
+                                && mapped.eff_args.iter().all(|effect| !effect.has_variables());
+                            binds_forwarded_evidence || becomes_concrete
+                        }) =>
+                {
+                    return true;
+                }
+                OperationKind::Clone { ty } | OperationKind::Drop { ty }
+                    if ty.is_variable()
+                        && concrete_type_is_trivial_copy(ty.map(&mut mapper), &env) =>
+                {
+                    return true;
+                }
+                OperationKind::Alloca { ty }
+                    if operation.operands.len() == 1
+                        && matches!(
+                            operation.operands.first(),
+                            Some(mir::Value::Parameter(id)) if bound.contains_key(id)
+                        )
+                        && type_has_static_layout(ty.map(&mut mapper), operation.span, &env) =>
+                {
+                    return true;
+                }
+                OperationKind::Move
+                    if operation.operands.len() == 3
+                        && operation.operands.get(2).is_some_and(|witness| {
+                            let mir::Value::Parameter(parameter) = witness else {
+                                return false;
+                            };
+                            let Some(dictionary) = bound.get(parameter) else {
+                                return false;
+                            };
+                            witnessed_type(&mir::Value::Dictionary(*dictionary), env).is_some_and(
+                                |ty| type_has_static_layout(ty, operation.span, &env),
+                            )
+                        }) =>
+                {
+                    return true;
+                }
+                _ => {}
             }
         }
     }
-    reads_dictionary
+
+    if reads_bound_evidence && function_size(body) <= budget::INLINE_CALLEE_OPERATIONS {
+        return true;
+    }
+
+    if bound_entries.is_empty() {
+        return false;
+    }
+    for block in body.blocks() {
+        let block = body.block(block);
+        let operations = block
+            .operations()
+            .iter()
+            .chain(match &block.terminator().kind {
+                TerminatorKind::Invoke { operation, .. } => Some(operation),
+                _ => None,
+            });
+        for operation in operations {
+            if matches!(operation.kind, OperationKind::Call { .. })
+                && matches!(
+                    operation.operands.first(),
+                    Some(mir::Value::Register(id)) if bound_entries.contains(id)
+                )
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Rewrites a recorded instantiation, which is a list of types and effects like any other.
@@ -1188,6 +1319,125 @@ mod tests {
             .chain(collector.types.iter().copied())
             .flat_map(|ty| ty.inner_ty_vars())
             .collect()
+    }
+
+    #[test]
+    fn preflight_accepts_a_dictionary_entry_that_feeds_an_indirect_call() {
+        let mut session = CompilerSession::new();
+        let module = compile(
+            &mut session,
+            "fn twice_it(x) { x + x }\n\
+             fn use_it(n: int) -> int { twice_it(n) }",
+        );
+        let site = site(&session, module, "use_it", "twice_it");
+
+        assert!(worth_specializing(
+            &site.body,
+            &site.scheme,
+            &site.key.instantiation,
+            &site.key.dictionaries,
+            session.module_env(),
+        ));
+    }
+
+    #[test]
+    fn preflight_accepts_ownership_or_layout_simplification_without_an_indirect_call() {
+        let mut session = CompilerSession::new();
+        let module = compile(
+            &mut session,
+            "fn swap(a, i, j) { let temp = a[i]; a[i] = a[j]; a[j] = temp }\n\
+             fn swap_ints(a: [int], i: int, j: int) { let mut t = a; swap(t, i, j); t }",
+        );
+        let site = site(&session, module, "swap_ints", "swap");
+
+        assert!(worth_specializing(
+            &site.body,
+            &site.scheme,
+            &site.key.instantiation,
+            &site.key.dictionaries,
+            session.module_env(),
+        ));
+    }
+
+    #[test]
+    fn preflight_accepts_a_small_evidence_forwarder_that_specialization_makes_inlinable() {
+        let mut session = CompilerSession::new();
+        let module = compile(
+            &mut session,
+            "fn inner<T>(x: T) -> T where T: Value { x }\n\
+             fn outer<T>(x: T) -> T where T: Value { inner(x) }\n\
+             fn use_it(x: string) -> string { outer(x) }",
+        );
+        let site = site(&session, module, "use_it", "outer");
+        let dictionary_parameters: Vec<_> = site
+            .body
+            .parameters()
+            .iter()
+            .enumerate()
+            .filter(|(_, parameter)| matches!(parameter.kind, ParameterKind::Dictionary))
+            .map(|(index, _)| mir::ParameterId::from_index(index))
+            .collect();
+        assert!(
+            uses_any_parameter(&site.body, &dictionary_parameters),
+            "the body must really forward evidence, or the old admission rule would reject it too"
+        );
+        assert!(worth_specializing(
+            &site.body,
+            &site.scheme,
+            &site.key.instantiation,
+            &site.key.dictionaries,
+            session.module_env(),
+        ));
+    }
+
+    #[test]
+    fn preflight_accepts_a_large_forwarder_that_makes_an_inner_call_concrete() {
+        let mut session = CompilerSession::new();
+        let module = compile(
+            &mut session,
+            "fn inner<T>(x: T) -> T where T: Value { x }\n\
+             fn outer<T>(x: T) -> T where T: Value { inner(x) }\n\
+             fn use_it(x: string) -> string { outer(x) }",
+        );
+        let mut site = site(&session, module, "use_it", "outer");
+        let padding = budget::INLINE_CALLEE_OPERATIONS + 1 - function_size(&site.body);
+        let entry = mir::BlockId::from_index(0);
+        let span = site.body.block(entry).operations()[0].span;
+        let mut edit = FunctionEdit::new(site.body);
+        edit.block_mut(entry)
+            .operations
+            .extend((0..padding).map(|_| Operation::check_fuel(span)));
+        site.body = edit.finish(session.module_env());
+
+        assert!(function_size(&site.body) > budget::INLINE_CALLEE_OPERATIONS);
+        assert!(worth_specializing(
+            &site.body,
+            &site.scheme,
+            &site.key.instantiation,
+            &site.key.dictionaries,
+            session.module_env(),
+        ));
+    }
+
+    #[test]
+    fn preflight_rejects_a_body_with_no_remaining_specialization_exposure() {
+        let mut session = CompilerSession::new();
+        let module = compile(
+            &mut session,
+            "fn inner<T>(x: T) -> T where T: Value { x }\n\
+             fn outer<T>(x: T) -> T where T: Value { inner(x) }\n\
+             fn use_it(x: string) -> string { outer(x) }",
+        );
+        let site = site(&session, module, "use_it", "outer");
+        let specialized = site.specialize(session.module_env());
+
+        assert!(!worth_specializing(
+            &specialized,
+            &site.scheme,
+            &site.key.instantiation,
+            &site.key.dictionaries,
+            session.module_env(),
+        ));
     }
 
     /// Specializing a generic body at a concrete call site leaves no type variable anywhere in it —
