@@ -73,8 +73,9 @@ struct Census {
 }
 
 impl Census {
-    fn new(func: &Function) -> Self {
+    fn new(func: &Function, from_static: FunctionId) -> (Self, Vec<OperationSite>) {
         let mut census = Self::default();
+        let mut candidates = Vec::new();
         for block in func.blocks() {
             let basic_block = func.block(block);
             for (index, operation) in basic_block.operations().iter().enumerate() {
@@ -86,6 +87,9 @@ impl Census {
                     && let Some(result) = operation.result_id()
                 {
                     census.definitions.insert(result, Definition { ty });
+                }
+                if is_direct_call(operation, from_static) {
+                    candidates.push(site);
                 }
                 for (operand, value) in operation.operands.iter().enumerate() {
                     census.note(
@@ -107,7 +111,7 @@ impl Census {
                 );
             }
         }
-        census
+        (census, candidates)
     }
 
     fn note(&mut self, value: &mir::Value, site: UseSite) {
@@ -179,19 +183,13 @@ struct Forward {
 /// Forwards string accumulator ownership, returning `None` when the function has no candidate.
 pub(crate) fn forward_string_accumulation(func: &Function, env: ModuleEnv<'_>) -> Option<Function> {
     let functions = StringFunctions::resolve(env)?;
-    let census = Census::new(func);
+    // Candidate collection shares the definition/use walk, avoiding a second traversal of every
+    // operation on the overwhelmingly common no-match path.
+    let (census, candidates) = Census::new(func, functions.from_static);
     let mut forwards = Vec::new();
-    for block in func.blocks() {
-        for (index, operation) in func.block(block).operations().iter().enumerate() {
-            let site = OperationSite {
-                block,
-                index: OperationIndex::from_index(index),
-            };
-            if is_direct_call(operation, functions.from_static)
-                && let Some(forward) = plan_forward(func, &census, functions, site)
-            {
-                forwards.push(forward);
-            }
+    for site in candidates {
+        if let Some(forward) = plan_forward(func, &census, functions, site) {
+            forwards.push(forward);
         }
     }
     if forwards.is_empty() {

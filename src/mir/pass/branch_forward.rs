@@ -78,8 +78,6 @@ struct Forward {
 
 /// Bypasses boolean storage diamonds, returning `None` when the function has none.
 pub(crate) fn forward_boolean_branches(func: &Function, env: ModuleEnv<'_>) -> Option<Function> {
-    let incoming = incoming_predecessors(func);
-
     // Restrict the use census to local boolean storage. This takes one definition walk and one
     // operand walk; planning below only visits the uses and predecessors belonging to a candidate.
     let mut uses: FxHashMap<ValueId, Uses> = func
@@ -99,6 +97,14 @@ pub(crate) fn forward_boolean_branches(func: &Function, env: ModuleEnv<'_>) -> O
         return None;
     }
     let value_uses = census_uses(func, &mut uses);
+    if !uses.values().any(|summary| {
+        !summary.other && summary.comparisons.len() == 1 && summary.stores.len() >= 2
+    }) {
+        return None;
+    }
+    // Building the predecessor map is a separate CFG walk. Most functions have no boolean
+    // storage diamond, so defer it until the cheaper definition/use census found a viable shape.
+    let incoming = incoming_predecessors(func);
 
     let mut forwards = Vec::new();
     for join in func.blocks() {
