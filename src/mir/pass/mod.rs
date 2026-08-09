@@ -35,8 +35,6 @@
 
 pub mod budget;
 pub(crate) mod call_graph;
-#[cfg(test)]
-mod census;
 pub(crate) mod copy_forward;
 pub(crate) mod cse;
 pub(crate) mod dataflow;
