@@ -43,11 +43,12 @@ use crate::{
 pub(crate) fn remove_dead_storage(func: &Function, env: ModuleEnv<'_>) -> Option<Function> {
     let mut dead = dead_allocas(func);
     let dead_entries = unread_dict_entries(func);
-    if dead.allocas.is_empty() && dead_entries.is_empty() {
-        return None;
-    }
     for (block, index) in dead_entries {
         dead.operations.entry(block).or_default().insert(index);
+    }
+    remove_empty_local_stack_regions(func, &mut dead.operations);
+    if dead.operations.is_empty() {
+        return None;
     }
 
     let mut edit = FunctionEdit::new(func.clone());
@@ -67,6 +68,127 @@ pub(crate) fn remove_dead_storage(func: &Function, env: ModuleEnv<'_>) -> Option
     // keeps the pool an inventory of what the function actually uses.
     edit.prune_constants();
     Some(edit.finish(env))
+}
+
+/// Adds same-block stack regions that provably reclaim no storage to `removed`.
+///
+/// Inlining emits a `stack_save` before a copied body and a `stack_restore` at each exit. The
+/// straight-line case has one restore in the same block after block merging. Once DCE has removed
+/// every frame-growing operation between the two, both markers are no-ops.
+///
+/// This deliberately handles only properly nested, single-use regions within one basic block. A
+/// marker restored on several exits or across blocks needs CFG reasoning; leaving it alone is safe.
+/// The scan is linear in the function and handles nesting without revisiting an operation.
+fn remove_empty_local_stack_regions(
+    func: &Function,
+    removed: &mut FxHashMap<BlockId, FxHashSet<usize>>,
+) {
+    let mut restore_uses: FxHashMap<ValueId, usize> = FxHashMap::default();
+    for block in func.blocks() {
+        for operation in func.block(block).operations() {
+            if matches!(operation.kind, OperationKind::StackRestore)
+                && let Some(mir::Value::Register(marker)) = operation.operands.first()
+            {
+                *restore_uses.entry(*marker).or_default() += 1;
+            }
+        }
+    }
+
+    struct Region {
+        marker: ValueId,
+        save_index: usize,
+        grows_frame: bool,
+    }
+
+    for block in func.blocks() {
+        let already_removed = removed.get(&block).cloned().unwrap_or_default();
+        let mut regions: Vec<Region> = Vec::new();
+        let mut newly_removed = Vec::new();
+
+        for (index, operation) in func.block(block).operations().iter().enumerate() {
+            if already_removed.contains(&index) {
+                continue;
+            }
+            match &operation.kind {
+                OperationKind::StackSave => {
+                    let Some(marker) = operation.result_id() else {
+                        continue;
+                    };
+                    if restore_uses.get(&marker) == Some(&1) {
+                        regions.push(Region {
+                            marker,
+                            save_index: index,
+                            grows_frame: false,
+                        });
+                    }
+                }
+                OperationKind::StackRestore => {
+                    let Some(mir::Value::Register(marker)) = operation.operands.first() else {
+                        continue;
+                    };
+                    if let Some(region) = regions.pop_if(|region| region.marker == *marker) {
+                        if !region.grows_frame {
+                            newly_removed.push(region.save_index);
+                            newly_removed.push(index);
+                        }
+                    }
+                }
+                _ if may_leave_frame_storage(operation) => {
+                    if let Some(region) = regions.last_mut() {
+                        region.grows_frame = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if !newly_removed.is_empty() {
+            removed.entry(block).or_default().extend(newly_removed);
+        }
+    }
+}
+
+/// Whether executing an operation may leave a cell allocated in the current MIR frame.
+///
+/// This is intentionally conservative. Several interpreter operations materialize temporary places
+/// even though they are not spelled `alloca`; dictionary/subscript projection, semantic drop and a
+/// call carrying symbolic subscript evidence can do so. False positives merely retain a bracket.
+fn may_leave_frame_storage(operation: &mir::Operation) -> bool {
+    match &operation.kind {
+        OperationKind::Alloca { .. }
+        | OperationKind::AllocaPlace { .. }
+        | OperationKind::Project { .. }
+        | OperationKind::EndProject
+        | OperationKind::DictEntry { .. }
+        | OperationKind::SubscriptMember { .. }
+        | OperationKind::Drop { .. } => true,
+        // A call reclaims its own script frame, and closure calls bracket their materialized
+        // evidence and environment internally. The one caller-frame temporary is a symbolic
+        // subscript passed as script evidence; retaining every such call is conservative because a
+        // native call can marshal the same operand without allocating a cell.
+        OperationKind::Call { .. } => operation
+            .operands
+            .iter()
+            .any(|operand| matches!(operand, mir::Value::Subscript(_))),
+        OperationKind::CompareEqual
+        | OperationKind::Load
+        | OperationKind::Subfield { .. }
+        | OperationKind::BuildSubscript { .. }
+        | OperationKind::Variant { .. }
+        | OperationKind::ExtractTag
+        | OperationKind::Store
+        | OperationKind::Clear
+        | OperationKind::Memcpy
+        | OperationKind::Move
+        | OperationKind::StackSave
+        | OperationKind::StackRestore
+        | OperationKind::CheckCallDepth
+        | OperationKind::CheckFuel
+        | OperationKind::Clone { .. }
+        | OperationKind::BuildClosure { .. }
+        | OperationKind::CloneClosureEnv { .. }
+        | OperationKind::DropClosureEnv => false,
+    }
 }
 
 /// The `dict_entry` operations nothing reads any more.
@@ -126,7 +248,6 @@ fn unread_dict_entries(func: &Function) -> Vec<(BlockId, usize)> {
 
 /// The `alloca`s that can go, and the operations to remove with them.
 struct Dead {
-    allocas: FxHashSet<ValueId>,
     /// Operation indices to remove, per block.
     operations: FxHashMap<BlockId, FxHashSet<usize>>,
 }
@@ -201,27 +322,35 @@ fn dead_allocas(func: &Function) -> Dead {
         }
     }
 
-    Dead {
-        allocas: candidates,
-        operations,
-    }
+    Dead { operations }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::{CompilerSession, MirOptimization};
 
+    fn optimized(src: &str) -> String {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        session.emit_mir("dce", src)
+    }
+
+    fn body_of<'a>(module: &'a str, name: &str) -> &'a str {
+        module
+            .split(&format!("fn {name}"))
+            .nth(1)
+            .unwrap_or_else(|| panic!("module has no `{name}`:\n{module}"))
+            .split("\nfn ")
+            .next()
+            .unwrap()
+    }
+
     /// The gate example, all the way down: after folding and cleanup, nothing is left but the store
     /// of the result into the return place.
     #[test]
     fn folded_arithmetic_leaves_only_its_result() {
-        let mut session = CompilerSession::new();
-        session.set_mir_optimization(MirOptimization::Enabled);
-        let optimized = session.emit_mir("dce", "fn main() -> int { let x = 2 + 3; x * 7 }");
-        let main = optimized
-            .split("fn main")
-            .nth(1)
-            .expect("the module defines main");
+        let module = optimized("fn main() -> int { let x = 2 + 3; x * 7 }");
+        let main = body_of(&module, "main");
 
         assert!(
             !main.contains("alloca"),
@@ -237,20 +366,11 @@ mod tests {
     /// constant dictionary, which is what motivated the rule.
     #[test]
     fn a_dictionary_entry_nothing_reads_is_removed() {
-        let mut session = CompilerSession::new();
-        session.set_mir_optimization(MirOptimization::Enabled);
-        let optimized = session.emit_mir(
-            "dce",
+        let module = optimized(
             "fn twice_it(x) { x + x }\n\
              fn use_it(n: int) -> int { twice_it(n) }",
         );
-        let caller = optimized
-            .split("fn use_it")
-            .nth(1)
-            .expect("the module defines use_it")
-            .split("\nfn ")
-            .next()
-            .expect("use_it has a body");
+        let caller = body_of(&module, "use_it");
 
         assert!(
             caller.contains("call std::Num<std::int>::add"),
@@ -259,6 +379,68 @@ mod tests {
         assert!(
             !caller.contains("dict_entry"),
             "the entry it no longer reads must be gone:\n{caller}"
+        );
+    }
+
+    /// A straight-line inline of an allocation-free body receives a stack bracket from the
+    /// inliner, but final cleanup can see that the bracket has nothing to reclaim.
+    #[test]
+    fn an_empty_inline_stack_region_is_removed() {
+        let module = optimized(
+            "fn identity(x: int) -> int { x }\n\
+             fn use_it(n: int) -> int { identity(n) }",
+        );
+        let caller = body_of(&module, "use_it");
+
+        assert!(
+            !caller.contains("call dce::identity"),
+            "identity must be inlined for the test to exercise its stack region:\n{caller}"
+        );
+        assert!(
+            !caller.contains("stack_save") && !caller.contains("stack_restore"),
+            "an allocation-free inline region needs no stack bracket:\n{caller}"
+        );
+    }
+
+    /// A normal call owns and reclaims its own frame. It does not make an otherwise empty inline
+    /// region necessary merely because the copied body delegates its result to a native callee.
+    #[test]
+    fn a_call_inside_an_otherwise_empty_inline_region_needs_no_bracket() {
+        let module = optimized(
+            "fn twice(x: int) -> int { x + x }\n\
+             fn use_it(n: int) -> int { twice(n) }",
+        );
+        let caller = body_of(&module, "use_it");
+
+        assert!(
+            !caller.contains("call dce::twice") && caller.contains("call std::"),
+            "the wrapper must be inlined while its delegated call survives:\n{caller}"
+        );
+        assert!(
+            !caller.contains("stack_save") && !caller.contains("stack_restore"),
+            "a self-reclaiming call does not make the inline region nonempty:\n{caller}"
+        );
+    }
+
+    /// A local place in an inlined body belongs to the former callee frame. Its bracket must stay
+    /// so repeated execution reclaims that place at the point where the call used to return.
+    #[test]
+    fn a_nonempty_inline_stack_region_is_retained() {
+        let module = optimized(
+            "fn through_local(x: int) -> int { let y = x; y }\n\
+             fn use_it(n: int) -> int { through_local(n) }",
+        );
+        let caller = body_of(&module, "use_it");
+
+        assert!(
+            !caller.contains("call dce::through_local"),
+            "through_local must be inlined for the test to exercise its stack region:\n{caller}"
+        );
+        assert!(
+            caller.contains("alloca")
+                && caller.contains("stack_save")
+                && caller.contains("stack_restore"),
+            "a live local allocation must retain its stack bracket:\n{caller}"
         );
     }
 }

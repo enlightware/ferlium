@@ -121,15 +121,18 @@ impl MirInstructionKind {
             Self::Operation(
                 Op::StackSave | Op::StackRestore | Op::CheckCallDepth | Op::CheckFuel,
             ) => Cost::Scaffolding,
+            // `invoke` is conceptually both a fallible semantic operation and its success/error
+            // control transfer. The embedded operation is recorded separately in its own class,
+            // so this terminator event represents only the control-transfer half.
             Self::Terminator(
                 Term::Goto
                 | Term::CondBr
+                | Term::Invoke
                 | Term::Yield
                 | Term::Return
                 | Term::PropagateError
                 | Term::FailureDuringCleanup,
             ) => Cost::Scalar,
-            Self::Terminator(Term::Invoke) => Cost::Scaffolding,
             // Calls are refined into DirectCall or IndirectCall when recorded.
             Self::Operation(Op::Call) => Cost::Semantic,
         }
@@ -262,6 +265,7 @@ mod tests {
     use crate::{
         CompilerSession, ExecutionTarget, MirOptimization, Path, hir::value::Value,
         mir::operation::OperationKindDiscriminant as Op,
+        mir::terminator::TerminatorKindDiscriminant as Term,
     };
 
     use super::{MirInstructionCostClass as Cost, MirInstructionKind as Kind};
@@ -279,6 +283,7 @@ mod tests {
             Cost::Addressing
         );
         assert_eq!(Kind::Operation(Op::CompareEqual).cost_class(), Cost::Scalar);
+        assert_eq!(Kind::Terminator(Term::Invoke).cost_class(), Cost::Scalar);
         assert_eq!(
             Kind::Operation(Op::StackRestore).cost_class(),
             Cost::Scaffolding
