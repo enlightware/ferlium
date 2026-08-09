@@ -51,6 +51,7 @@ use crate::{
 use super::option::{none, option_type, some};
 
 pub(crate) const STRING_FROM_STATIC_FUNCTION_NAME: &str = "string_from_static";
+pub(crate) const STRING_PUSH_STR_FUNCTION_NAME: &str = "string_push_str";
 
 /// Immutable compiler representation of a source string literal.
 ///
@@ -121,6 +122,17 @@ impl String {
         Self::from_normalized(value.as_str())
     }
 
+    /// Appends `value`, preserving the string's NFC invariant and mutable value semantics.
+    ///
+    /// # Optimizer contract
+    ///
+    /// `mir::pass::string_accumulate` relies on pushing a string onto an empty string being
+    /// semantically equivalent to that string, and on later pushes preserving append order, value
+    /// semantics and normalization. It also relies on `string_from_static("")` producing that empty
+    /// string, on the concrete `Value<string>::to_string` registered below producing an equivalent
+    /// value, and on all three calls having no source-visible effects. The optimization does not
+    /// rely on this `Rc` representation, but a change to any of those contracts must review that
+    /// pass and `doc/mir-optimization.md`.
     pub fn push_str(&mut self, value: &Self) {
         let needs_normalization = value
             .0
@@ -729,7 +741,7 @@ pub fn add_to_module(to: &mut Module) {
     to.add_function(ustr("parse_float"), String::parse_float_descr());
     to.add_function(ustr("parse_bool"), String::parse_bool_descr());
     to.add_function(
-        ustr("string_push_str"),
+        ustr(STRING_PUSH_STR_FUNCTION_NAME),
         BinaryNativeFnMRN::description_with_default_ty(
             String::push_str,
             ["target", "suffix"],

@@ -2846,6 +2846,15 @@ fn string_formatting_in_loops() {
         session.run(r#"let mut s = ""; for i in 0..2 { s = f"{s}{i}" }; s"#),
         string("01")
     );
+    // Optimized MIR forwards `s` into the format builder. A pre-existing snapshot must retain the
+    // old value, and appending a combining mark must still perform the ordinary NFC normalization.
+    assert_val_eq!(
+        session.run(
+            "let mut s = \"e\"; let snapshot = s; let accent = \"\\u{0301}\"; \
+             for i in 0..1 { s = f\"{s}{accent}\" }; f\"{snapshot}|{s}\""
+        ),
+        string("e|é")
+    );
 }
 
 #[test]

@@ -45,6 +45,7 @@ pub(crate) mod inline;
 pub(crate) mod monomorphize;
 pub(crate) mod provenance;
 pub mod report;
+pub(crate) mod string_accumulate;
 
 pub(crate) use monomorphize::Specializations;
 
@@ -179,6 +180,13 @@ pub(crate) fn optimize_function(
     // retaining any stack restoration at the join. DCE below then removes the dead slot/stores.
     let source = current.as_ref().unwrap_or(function);
     if let Some(forwarded) = branch_forward::forward_boolean_branches(source, env) {
+        current = Some(forwarded);
+    }
+    // Formatting a self-prefixed assignment through an empty builder copies the complete growing
+    // prefix. Forward the old string's ownership into that builder while the exact std-semantic
+    // proof is visible; DCE below removes the now-unused rendering and assignment scaffolding.
+    let source = current.as_ref().unwrap_or(function);
+    if let Some(forwarded) = string_accumulate::forward_string_accumulation(source, env) {
         current = Some(forwarded);
     }
     // Cleanup runs once, after the rounds have settled, and on every body rather than only on one a

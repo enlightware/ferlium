@@ -41,6 +41,7 @@ for round in 0..MAX_ROUNDS:
 place CSE          // merge places which inlining exposes
 copy forward      // catch copies exposed after the last round
 branch forward    // bypass booleans stored in branch arms only to control a second branch
+string accumulate // forward an overwritten string into its self-prefixed format builder
 dce               // on every body, not only a changed one
 finish            // restores canonical form and re-verifies
 ```
@@ -327,6 +328,33 @@ per incoming predecessor and the final comparison; every predecessor must jump u
 the join; and the join may contain only `stack_restore`s before that comparison. Other operations,
 additional uses, unknown stores and self-edges all refuse the rewrite. Supporting integer values or
 variant tags would require evidence for a broader predicate-propagation analysis.
+
+## String accumulation forwarding
+
+`mir::pass::string_accumulate` removes the growing-prefix copy in a self-prefixed formatted-string
+assignment such as `out = f"{out}{suffix}"`. Lowering ordinarily constructs an empty string, renders
+the complete old `out` into it, finishes the formatted value in a temporary, drops `out`, and moves
+the temporary back. In a loop this copies the complete prefix on every iteration. The pass instead
+moves `out` into the builder, leaves the suffix construction in place, and moves the builder back at
+the original assignment commit point. Copy-on-write snapshots still detach on the next mutation.
+
+This is the optimizer's first rewrite that relies on the semantics of named standard-library
+operations rather than only on MIR structure. Its correctness contract is that
+`string_from_static("")` produces the empty string; the concrete `Value<string>::to_string`
+produces an equivalent string value; pushing that value onto an empty string is semantically the
+identity; and `string_push_str` preserves append order, value semantics and NFC normalization. All
+three operations have an empty source-effect row. The proof does **not** rely on strings being
+implemented with `Rc`; copy-on-write buffer reuse is the performance consequence, not part of the
+semantic equivalence. The corresponding maintenance warning lives beside `String::push_str` in
+`src/std/string.rs`.
+
+The matcher is deliberately exact. The accumulator, builder and assignment temporaries must be
+local string `alloca`s in one block; the old accumulator must be the first builder component and
+have no further use before replacement; every builder use must be a direct `string_push_str`; and
+the construction must end in the emitter's ordinary move/drop/drop/move assignment tail. Keeping
+the proof in one block also excludes a catchable source failure, which MIR would represent as an
+`invoke` terminator. A linear definition/use census identifies the uses, and final DCE removes the
+empty-builder, rendered-prefix and assignment scaffolding orphaned by the rewrite.
 
 ## Dead code elimination
 
