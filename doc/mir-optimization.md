@@ -329,6 +329,24 @@ Deliberately narrow, and intra-function only.
 Constants left unreferenced are pruned from the pool, explicitly, since that renumbers every
 `ConstantId`.
 
+## Dynamic profiling
+
+`mir::profile` counts every operation and terminator executed by the MIR reference interpreter. It
+provides totals, per-function counts and per-type counts where an operation carries a concrete type;
+calls are split into direct and indirect dispatch. Instruction identities reuse the Strum-generated
+discriminants of `OperationKind` and `TerminatorKind`, so the profiler does not maintain a second IR
+enumeration.
+
+`make profile-mir` compares raw and optimized MIR over the canonical runtime workloads without
+Valgrind; `WORKLOADS="fibonacci sieve"` selects a subset. The native profiler and Gungraun share
+workload compilation, inputs and typed result extraction through `benches/runtime_workloads.rs`.
+Gungraun therefore continues to measure the same execution boundary.
+
+The report orders instructions by broad cost shape — semantic/callee-dependent, size-dependent,
+fixed storage, addressing/evidence, scalar/control, then interpreter scaffolding — but assigns no
+weights. Native-call cost is callee-dependent and representation-copy cost is type-dependent, so a
+single synthetic MIR score would assert backend costs the interpreter cannot establish.
+
 ## Budgets
 
 All in `mir::pass::budget`, all per function except the last. A budget change is a user-visible
