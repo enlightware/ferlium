@@ -1,0 +1,79 @@
+// Iterator adapter pipelines.
+//
+// The other workloads predate the adapters and use none of them, so nothing in the corpus
+// exercises the shapes an adapter produces: a generic struct holding a function value, `next`
+// reading that value out of a field on every element, and a chain of such structs nested one
+// inside the other. Production code is expected to lean on these heavily.
+//
+// Both adapter forms are covered. The eager `[A]` impls in `core_impls_dependent.fer` build an
+// iterator and collect it back into an array; the lazy ones compose without materializing. Several
+// closures capture, so the per-element cost of copying a captured environment is visible.
+
+fn squares_of_evens(values) {
+    values |> filter(|x| rem(x, 2) == 0) |> map(|x| x * x)
+}
+
+// The closures capture `factor` and `offset`, so each element carries a captured environment
+// through `MapIterator::mapper` rather than a bare function.
+fn scaled(values, factor, offset) {
+    values |> map(|x| x * factor + offset)
+}
+
+fn weighted_sum(values, factor) {
+    values |> map(|x| x * factor) |> sum()
+}
+
+// Lazy composition consumed by a `for` loop: the adapter structs are driven element by element and
+// no intermediate array is built. `sum` and friends take the sequence by value and demand `Value`,
+// which the adapter structs do not implement, so a loop is the way to consume a lazy chain.
+fn lazy_chain_sum(n) {
+    let mut acc = 0;
+    for x in chain(0..n, 0..n) {
+        acc = acc + x
+    };
+    acc
+}
+
+fn paired_products(left, right) -> [int] {
+    zip(left, right) |> map(|pair| pair.0 * pair.1) |> collect()
+}
+
+fn indexed_offsets(values) -> [int] {
+    enumerate(values) |> map(|pair| pair.0 * pair.1) |> collect()
+}
+
+fn windowed(values, skip_count, take_count) -> [int] {
+    values |> iter() |> skip(skip_count) |> take(take_count) |> collect()
+}
+
+fn parsed_lengths(values) {
+    values |> filter_map(|x| if x > 0 { Some(x * 2) } else { None })
+}
+
+fn fold_max(values) {
+    fold(values, 0, |acc, x| if x > acc { x } else { acc })
+}
+
+// Entry point. Runs every adapter over an array built from `n`, so one integer controls the work.
+fn pipeline_total(n) {
+    let mut values = [];
+    for i in 0..n {
+        array_append(values, i)
+    };
+
+    let evens = squared_total(values);
+    let scaled_total = sum(scaled(values, 3, 1));
+    let weighted = weighted_sum(values, 2);
+    let lazy = lazy_chain_sum(n);
+    let products = sum(paired_products(values, values));
+    let indexed = sum(indexed_offsets(values));
+    let window = sum(windowed(values, 2, 8));
+    let filtered = sum(parsed_lengths(values));
+    let peak = fold_max(values);
+
+    evens + scaled_total + weighted + lazy + products + indexed + window + filtered + peak
+}
+
+fn squared_total(values) {
+    sum(squares_of_evens(values))
+}

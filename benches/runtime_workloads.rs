@@ -69,10 +69,11 @@ pub enum RuntimeWorkload {
     Calculator,
     LinalgTransform,
     LinalgGrid,
+    IterPipeline,
 }
 
 impl RuntimeWorkload {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Quicksort,
         Self::Fibonacci,
         Self::Sieve,
@@ -83,6 +84,7 @@ impl RuntimeWorkload {
         Self::Calculator,
         Self::LinalgTransform,
         Self::LinalgGrid,
+        Self::IterPipeline,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -97,6 +99,7 @@ impl RuntimeWorkload {
             Self::Calculator => "calculator",
             Self::LinalgTransform => "linalg_transform",
             Self::LinalgGrid => "linalg_grid",
+            Self::IterPipeline => "iter_pipeline",
         }
     }
 
@@ -155,6 +158,13 @@ impl RuntimeWorkload {
             Self::LinalgTransform => {
                 prepare_linalg(target, "transform_pipeline_mixed", RuntimeArguments::Int(6))
             }
+            Self::IterPipeline => prepare_single_module(
+                target,
+                "iter_pipeline",
+                include_str!("../tests/modules/iter_pipeline.fer"),
+                "pipeline_total",
+                RuntimeArguments::Int(16),
+            ),
             Self::LinalgGrid => {
                 prepare_linalg(target, "grid_simulation", RuntimeArguments::IntPair(8, 2))
             }
