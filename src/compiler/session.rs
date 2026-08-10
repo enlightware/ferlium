@@ -1276,7 +1276,8 @@ impl CompilerSession {
     /// declared it — so everything outside its MIR body comes from the function it was specialized
     /// from: whether it is script or native, its return convention, its parameter passing, its
     /// name. This one indirection is the whole price of storing specializations past the end of the
-    /// table, and it is why a specialized body keeps its original's signature.
+    /// table. It stays answerable because a specialization keeps its original's *visible* signature:
+    /// only the hidden evidence parameters are dropped, and no HIR record describes those.
     ///
     /// Takes the stage because a `FunctionId` past the HIR count only means anything in the
     /// optimized one; in the raw stage it is simply out of range.

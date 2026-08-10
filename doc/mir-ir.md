@@ -47,8 +47,10 @@ told apart without a flag.
 A specialization has no HIR entry, since nothing in the source declared it. Everything outside its
 MIR body — whether it is script or native, its return convention, its parameter passing, its name —
 is read from the function it was specialized from, through one indirection. That is why a
-specialization keeps its original's signature exactly: binding a dictionary parameter replaces the
-parameter's *uses* and leaves the parameter in place, so no metadata has to be duplicated.
+specialization keeps its original's *visible* signature exactly, so no metadata has to be
+duplicated. Its hidden evidence parameters are a different matter: binding a dictionary parameter
+replaces the parameter's uses, leaving it dead by construction, and the optimizer's final pass
+removes those parameters along with the operands every call passes them through.
 
 ## Values and roles
 

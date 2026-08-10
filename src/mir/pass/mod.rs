@@ -40,6 +40,7 @@ pub(crate) mod copy_forward;
 pub(crate) mod cse;
 pub(crate) mod dataflow;
 pub(crate) mod dce;
+pub(crate) mod dead_evidence;
 pub(crate) mod fold;
 pub(crate) mod inline;
 pub(crate) mod monomorphize;

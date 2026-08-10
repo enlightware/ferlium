@@ -23,11 +23,15 @@
 //! Substituting `forwarding<U>` at `U := int` rewrites its inner call's recorded `[U]` into
 //! `[int]`, so a call that was generic becomes concrete. See `doc/generic-instantiation.md`.
 //!
-//! The specialized signature is deliberately identical to the original's: binding a dictionary
-//! parameter replaces its *uses*, and leaves the now-unread parameter in place. That keeps every
-//! HIR-table lookup the interpreter makes on a call — `code.as_script()`, `return_convention()`,
-//! `parameter_passing` — answerable from the original's metadata. Dropping the dead parameters is a
-//! later refinement and DCE's territory.
+//! Binding a dictionary parameter replaces its *uses* and leaves the parameter itself in place, so
+//! **a specialization has no live evidence parameter by construction** — a property this file's
+//! tests assert. The dead parameters survive this phase and are removed from the finished module by
+//! [`dead_evidence`](super::dead_evidence), after every optimization decision has been taken
+//! against the signatures the optimizer has always seen.
+//!
+//! What the specialization keeps unchanged is its original's *visible* signature, which is what
+//! every HIR-table lookup the interpreter makes on a call — `code.as_script()`,
+//! `return_convention()`, `parameter_passing` — is answered from.
 //!
 //! Exercised only by its own tests until the specialization pass consumes it; remove the allow
 //! below then, as `const_eval.rs` did when folding started calling it.
@@ -394,7 +398,8 @@ fn simplify_after_substitution(edit: &mut FunctionEdit, env: ModuleEnv<'_>) {
 /// that carries an explicit instantiation is an ordinary call site, and
 /// [`specialize_call_sites`] resolves it through the cache like any other.
 ///
-/// The specialization keeps its original's signature, so the operands need no adjustment.
+/// The specialization still carries its original's signature at this point, so the operands need no
+/// adjustment; [`dead_evidence`](super::dead_evidence) narrows this call with every other.
 fn redirect_recursion(edit: &mut FunctionEdit, original: FunctionId, own: FunctionId) {
     let own = mir::Value::Function(own);
     for block_id in edit.blocks().collect::<Vec<_>>() {

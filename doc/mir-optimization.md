@@ -197,9 +197,17 @@ convention, parameter passing, name — comes from `Specialization::original` th
 `CompilerSession::hir_identity_of`. The interpreter's metadata lookups all go through
 `Interpreter::hir_function` for this reason.
 
-**The signature is deliberately identical to the original's.** Binding a dictionary parameter
-replaces its *uses* and leaves the parameter in place, so no metadata is duplicated. The parameters
-are then dead; removing them is interprocedural work not yet done.
+**The visible signature is identical to the original's.** Binding a dictionary parameter replaces
+its *uses* and leaves the parameter in place, so no metadata is duplicated — and no HIR record
+describes the hidden parameters, which is what lets them go.
+
+**Dead evidence is dropped from the finished module.** Because binding replaces every use, a
+specialization has no live evidence parameter by construction rather than by analysis. A final
+whole-module pass removes those parameters and the operands that pass them, running once after the
+specialization worklist has drained so that every optimization decision above it is taken against
+the signatures the optimizer has always seen. One module suffices: `specialize_call_sites` only ever
+writes a specialization into a `call` callee operand, self-calls are redirected within the same
+table, and every cross-module lookup reads the raw stage, which contains no specializations.
 
 The table is keyed by `(callee, instantiation, dictionaries)`, so two call sites that instantiate a
 function the same way share one body. Identities index the *owning* module's table, which is not in

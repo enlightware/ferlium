@@ -119,10 +119,46 @@ impl FunctionEdit {
         self.name = name;
     }
 
-    /// The parameters, for a pass that rewrites their types. Their count and kinds are part of the
-    /// function's calling convention and must not change under an edit.
+    /// The parameters, for a pass that rewrites their types. Their count and kinds are the
+    /// function's calling convention; changing those goes through [`Self::remove_parameters`],
+    /// which renumbers the operands that name them.
     pub(crate) fn parameters_mut(&mut self) -> &mut [Parameter] {
         &mut self.parameters
+    }
+
+    /// Removes the parameters `remove` selects, renumbering every remaining `Parameter` operand.
+    ///
+    /// **This narrows the function's calling convention**, so every call to it must lose the
+    /// matching operands in the same edit round — a `Parameter` is bound positionally, and a caller
+    /// that still passes a removed one would shift every argument after it. Nothing here can check
+    /// that: a signature is edited one function at a time and the callers are other functions.
+    ///
+    /// Panics if a removed parameter is still named by an operand, which is what makes "this
+    /// parameter is dead" a checked claim rather than the caller's assertion.
+    pub(crate) fn remove_parameters(&mut self, mut remove: impl FnMut(&Parameter) -> bool) {
+        let mut renumbered: Vec<Option<mir::ParameterId>> =
+            Vec::with_capacity(self.parameters.len());
+        let mut retained = Vec::with_capacity(self.parameters.len());
+        for parameter in std::mem::take(&mut self.parameters) {
+            if remove(&parameter) {
+                renumbered.push(None);
+            } else {
+                renumbered.push(Some(mir::ParameterId::from_index(retained.len())));
+                retained.push(parameter);
+            }
+        }
+        self.parameters = retained;
+        let name = self.name;
+        self.visit_operands_mut(|operand| {
+            if let mir::Value::Parameter(id) = operand {
+                *id = renumbered[id.as_index()].unwrap_or_else(|| {
+                    panic!(
+                        "MIR function `{name}`: removed parameter @p{} is still used",
+                        id.as_index()
+                    )
+                });
+            }
+        });
     }
 
     /// The constant pool, for a pass that rewrites the *types* of existing entries. Adding one goes

@@ -15,7 +15,7 @@ use crate::{
     mir::{
         self,
         pass::{
-            Specializations, optimize_function,
+            Specializations, dead_evidence, optimize_function,
             provenance::{AddressorSummaries, AddressorSummary},
         },
     },
@@ -112,8 +112,9 @@ impl ModuleArtifacts {
 /// It has no entry in the module's HIR function table — nothing in the source declared it — so
 /// everything the rest of the compiler reads through a `FunctionId` comes from `original` instead.
 /// That indirection is the whole cost of specialization's storage, and it is cheap precisely because
-/// a specialized body keeps its original's signature: only the *body* differs, so no metadata is
-/// duplicated.
+/// a specialized body keeps its original's *visible* signature, so no metadata is duplicated. Its
+/// hidden evidence parameters are dropped by
+/// [`dead_evidence`](crate::mir::pass::dead_evidence), which no HIR record describes.
 pub(crate) struct Specialization {
     /// The function this was specialized from, and the source of all its metadata.
     pub(crate) original: FunctionId,
@@ -219,7 +220,7 @@ impl MirArtifacts {
         let module_id = module.module_id();
         let mut specializations = Specializations::new(module_id, raw.functions.len());
 
-        let functions: Vec<Option<mir::Function>> = raw
+        let mut functions: Vec<Option<mir::Function>> = raw
             .functions
             .iter()
             .map(|function| {
@@ -243,9 +244,19 @@ impl MirArtifacts {
             next += 1;
         }
 
+        // Last, over the finished bodies. Every decision above was taken against the signatures the
+        // optimizer has always seen; this only narrows the calling convention of bodies nothing
+        // will consult again.
+        let specializations = dead_evidence::drop_dead_specialization_evidence(
+            &mut functions,
+            specializations.into_created(),
+            module_id,
+            env,
+        );
+
         Self {
             functions,
-            specializations: specializations.into_created(),
+            specializations,
             // Carried across unchanged: optimization preserves a proved root and repeatability.
             // A specialization may admit a more precise summary after substitution, but reusing
             // its original's conservative answer is sound and avoids per-stage recomputation.
