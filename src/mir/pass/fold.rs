@@ -68,13 +68,15 @@ struct InvokeFold {
     normal: BlockId,
 }
 
-/// An indirect call whose callee the analysis resolved, and the function to name directly instead.
+/// An indirect dispatch whose callee the analysis resolved, and the function to name directly
+/// instead. `operand` is the callee's index, which differs per operation kind.
 struct Devirtualization {
     site: Site,
+    operand: usize,
     callee: FunctionId,
 }
 
-/// Where a call sits in its block: an ordinary operation, or the `Invoke` terminator.
+/// Where a dispatch sits in its block: an ordinary operation, or the `Invoke` terminator.
 #[derive(Clone, Copy)]
 enum Site {
     Operation { block: BlockId, index: usize },
@@ -189,9 +191,9 @@ pub(crate) fn fold_function(
     // prune, in this pass's own edit: a separate open-and-verify cycle for it costs more
     // than the merge saves.
     // Naming a resolved callee directly. The operand shape is unchanged — the verifier accepts a
-    // function or a function place there — so this touches nothing but operand zero. The
-    // `dict_entry` that produced the place is left behind: dead now, but removing it needs a rule
-    // wider than `dce.rs` has.
+    // function or a function place in a callee position — so this touches nothing but that one
+    // operand. The `dict_entry` that produced the place is usually left unread by the rewrite, and
+    // `dce.rs` removes it.
     for devirtualized in devirtualizations {
         let callee = mir::Value::Function(devirtualized.callee);
         let block = edit.block_mut(devirtualized.site.block());
@@ -202,7 +204,7 @@ pub(crate) fn fold_function(
                 _ => unreachable!("planned against this block's invoke terminator"),
             },
         };
-        operation.operands[0] = callee;
+        operation.operands[devirtualized.operand] = callee;
     }
     edit.remove_unreachable_blocks();
     edit.merge_blocks_into_predecessors();
@@ -299,11 +301,11 @@ fn plan_folds_with(
                 continue;
             }
             if let Some(devirtualizations) = devirtualizations.as_mut()
-                && let OperationKind::Call { .. } = &operation.kind
-                && let Some(callee) = resolved_callee(operation, &state)
+                && let Some((operand, callee)) = resolved_callee(operation, &state)
             {
                 devirtualizations.push(Devirtualization {
                     site: Site::Operation { block, index },
+                    operand,
                     callee,
                 });
             }
@@ -330,11 +332,11 @@ fn plan_folds_with(
                         normal: *normal,
                     });
                 } else if let Some(devirtualizations) = devirtualizations.as_mut()
-                    && let OperationKind::Call { .. } = &operation.kind
-                    && let Some(callee) = resolved_callee(operation, &state)
+                    && let Some((operand, callee)) = resolved_callee(operation, &state)
                 {
                     devirtualizations.push(Devirtualization {
                         site: Site::Terminator { block },
+                        operand,
                         callee,
                     });
                 }
@@ -359,12 +361,27 @@ fn plan_folds_with(
     plan
 }
 
-/// The function an indirect call's callee place is known to hold, when naming it directly is safe.
+/// Where an operation carries its callee, for the three kinds that dispatch through one.
 ///
-/// Returns `None` for a call that is already direct, and for one whose callee the analysis cannot
-/// resolve. The payoff is that a direct call costs no place read and no dynamic dispatch, and is a
-/// candidate for folding and inlining on a later round; the population is calls through a
-/// `dict_entry`, which specialization and inlining put in front of the analysis.
+/// `drop` and `clone` name a `Value` method exactly as a call names a function — the interpreter
+/// resolves all three through the same contract, a constant reference or the place of a function
+/// value read by reference — so all three are devirtualizable at the same price.
+fn callee_operand_index(operation: &Operation) -> Option<usize> {
+    match operation.kind {
+        OperationKind::Call { .. } => Some(0),
+        OperationKind::Drop { .. } => Some(1),
+        OperationKind::Clone { .. } => Some(2),
+        _ => None,
+    }
+}
+
+/// The function an indirect dispatch's callee place is known to hold, when naming it directly is
+/// safe, paired with the operand index to write it into.
+///
+/// Returns `None` for a dispatch that is already direct, and for one whose callee the analysis
+/// cannot resolve. The payoff is that a direct call costs no place read and no dynamic dispatch,
+/// and is a candidate for folding and inlining on a later round; the population is dispatches
+/// through a `dict_entry`, which specialization and inlining put in front of the analysis.
 ///
 /// **Restricted to a callee read from a [`Root::DictEntry`]**, and the restriction is load-bearing
 /// rather than cautious. Any other place may hold a *closure* — a function together with its
@@ -372,8 +389,9 @@ fn plan_folds_with(
 /// dropping the captures. An earlier version without this restriction was caught by a test
 /// divergence, "expected native value, got function value". A dictionary entry holds a plain
 /// function by construction, which is what makes this rewrite information-preserving there.
-fn resolved_callee(operation: &Operation, state: &State) -> Option<FunctionId> {
-    let callee = operation.operands.first()?;
+fn resolved_callee(operation: &Operation, state: &State) -> Option<(usize, FunctionId)> {
+    let index = callee_operand_index(operation)?;
+    let callee = operation.operands.get(index)?;
     if matches!(callee, mir::Value::Function(_)) {
         return None;
     }
@@ -382,7 +400,7 @@ fn resolved_callee(operation: &Operation, state: &State) -> Option<FunctionId> {
         return None;
     }
     match state.place(&key) {
-        Fact::Known(Const::Function(id)) => Some(id),
+        Fact::Known(Const::Function(id)) => Some((index, id)),
         _ => None,
     }
 }
@@ -645,6 +663,33 @@ mod tests {
         assert!(
             !caller.contains("call %r"),
             "no indirect call may remain:\n{caller}"
+        );
+    }
+
+    /// `drop` and `clone` name their `Value` method the same way a call names a function, and are
+    /// devirtualized on the same evidence. They are the majority of the resolvable dispatches in
+    /// generic code: an iterator pipeline drops its `Option` once per element through a dictionary
+    /// entry that specialization has already made constant.
+    ///
+    /// Asserted over the whole module rather than one function because the sites are spread across
+    /// the specializations the pipeline creates, none of which is named in the source.
+    #[test]
+    fn a_drop_or_clone_through_a_resolved_dictionary_entry_becomes_direct() {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        let module = session.emit_mir("fold", "fn main() { [1, 2] |> map(|x| x * x); }");
+        let indirect: Vec<&str> = module
+            .lines()
+            .map(str::trim)
+            .filter(|line| {
+                (line.starts_with("drop ") || line.starts_with("clone "))
+                    && line.contains(" via %r")
+            })
+            .collect();
+        assert!(
+            indirect.is_empty(),
+            "every resolvable drop/clone callee must be named directly, found:\n{}",
+            indirect.join("\n")
         );
     }
 

@@ -111,10 +111,16 @@ its own poisoning domain, reading *raw* bodies. Natives are the main path, not a
 declaring neither `Read` nor `Write` is asserted pure and deterministic by its host, and the compiler
 may run it at compile time zero, one or many times.
 
-**Devirtualization** rides along with folding, using its analysis. An indirect call whose callee the
-analysis resolved is rewritten to name that callee directly — restricted to a callee read from a
+**Devirtualization** rides along with folding, using its analysis. An indirect dispatch whose callee
+the analysis resolved is rewritten to name that callee directly — restricted to a callee read from a
 `dict_entry`, because any other place may hold a *closure*, whose captured environment a bare
 function operand would silently drop.
+
+This covers `call`, `drop` and `clone`. All three name a callee under the same contract — a constant
+function reference, or the place of a function value read by reference and never consumed — and
+differ only in where that operand sits, so the operand index is selected by operation kind. The
+`Value` methods are the larger population: generic code drops through a dictionary entry far more
+often than it calls through one.
 
 ## Specialization
 
