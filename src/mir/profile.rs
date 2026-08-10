@@ -174,11 +174,27 @@ pub struct MirExecutionProfile {
     total: MirInstructionCounts,
     by_function: FxHashMap<FunctionKey, MirInstructionCounts>,
     by_type: FxHashMap<(MirInstructionKind, Type), u64>,
+    peak_cells: usize,
 }
 
 impl MirExecutionProfile {
     pub fn total(&self) -> &MirInstructionCounts {
         &self.total
+    }
+
+    /// The high-water mark of the interpreter's cell environment over the run.
+    ///
+    /// The one figure here that is not an event count, and it answers a question no event count
+    /// can: what a transform trades when it stops reclaiming storage early. `stack_restore` frees
+    /// cells before a frame ends, so removing one is invisible to every row above while moving
+    /// this one. Cells live across the whole call stack, so this is a peak over all live frames,
+    /// not a per-frame figure.
+    pub fn peak_cells(&self) -> usize {
+        self.peak_cells
+    }
+
+    pub(crate) fn record_cell_high_water(&mut self, cells: usize) {
+        self.peak_cells = self.peak_cells.max(cells);
     }
 
     pub fn functions(&self) -> impl Iterator<Item = (FunctionKey, &MirInstructionCounts)> + '_ {

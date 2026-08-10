@@ -98,21 +98,36 @@ fn print_comparison(name: &str, raw: &MirInstructionCounts, optimized: &MirInstr
     );
 }
 
+/// Peak cells is a high-water mark, so it is reported as a maximum and never summed: the corpus
+/// figure is the worst frame depth any one workload reached, not the total of ten runs.
+fn print_peak_cells(raw: usize, optimized: usize) {
+    let delta = i128::from(optimized as u64) - i128::from(raw as u64);
+    println!(
+        "  {:<30} {:>14} {:>14} {:>+14}",
+        "peak cells (max, not summed)", raw, optimized, delta
+    );
+}
+
 fn main() {
     let workloads = selected_workloads();
     let mut raw_total = MirInstructionCounts::default();
     let mut optimized_total = MirInstructionCounts::default();
+    let (mut raw_peak, mut optimized_peak) = (0, 0);
 
     for workload in &workloads {
         eprintln!("profiling {}...", workload.name());
         let raw = profile(*workload, BenchTarget::Mir);
         let optimized = profile(*workload, BenchTarget::OptimizedMir);
         print_comparison(workload.name(), raw.total(), optimized.total());
+        print_peak_cells(raw.peak_cells(), optimized.peak_cells());
         raw_total.merge(raw.total());
         optimized_total.merge(optimized.total());
+        raw_peak = raw_peak.max(raw.peak_cells());
+        optimized_peak = optimized_peak.max(optimized.peak_cells());
     }
 
     if workloads.len() > 1 {
         print_comparison("TOTAL", &raw_total, &optimized_total);
+        print_peak_cells(raw_peak, optimized_peak);
     }
 }

@@ -2097,6 +2097,11 @@ impl<'a> Interpreter<'a> {
         }
         let target = self.ctx.environment.len();
         self.ctx.environment.push(ValOrMut::Val(init));
+        // The only place a cell is pushed, so the high-water mark is exact without a check
+        // anywhere else. Reclamation lowers `len` again but never the recorded peak.
+        if let Some(profile) = &mut self.profile {
+            profile.record_cell_high_water(self.ctx.environment.len());
+        }
         Ok(Place {
             root: target,
             path: vec![],
