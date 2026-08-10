@@ -46,6 +46,7 @@ pub(crate) mod inline;
 pub(crate) mod monomorphize;
 pub(crate) mod provenance;
 pub mod report;
+pub(crate) mod stack_region;
 pub(crate) mod string_accumulate;
 
 pub(crate) use monomorphize::Specializations;
@@ -197,6 +198,14 @@ pub(crate) fn optimize_function(
     let source = current.as_ref().unwrap_or(function);
     if let Some(cleaned) = dce::remove_dead_storage(source, env) {
         current = Some(cleaned);
+    }
+    // Last, after DCE has emptied every bracket it can. What remains reclaims real storage and
+    // must stay: a bracket is where a live range ends, which a backend's stack-slot allocator
+    // needs. Only a marker duplicating one already held, and a restore to the frontier already
+    // current, are removed here — neither carries information the surviving marker does not.
+    let source = current.as_ref().unwrap_or(function);
+    if let Some(canonicalized) = stack_region::remove_redundant_stack_markers(source, env) {
+        current = Some(canonicalized);
     }
     // An unchanged function is still opened and closed, which re-verifies it and is the identity.
     match current {

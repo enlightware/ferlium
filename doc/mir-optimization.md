@@ -43,6 +43,7 @@ copy forward      // catch copies exposed after the last round
 branch forward    // bypass booleans stored in branch arms only to control a second branch
 string accumulate // forward an overwritten string into its self-prefixed format builder
 dce               // on every body, not only a changed one
+stack markers     // drop a mark duplicating one already held, and restores that pop nothing
 finish            // restores canonical form and re-verifies
 ```
 
@@ -393,6 +394,27 @@ Deliberately narrow, and intra-function only.
 
 Constants left unreferenced are pruned from the pool, explicitly, since that renumbers every
 `ConstantId`.
+
+## Redundant stack markers
+
+A stack marker is the interpreter's allocation frontier at the point it was taken, and only an
+`alloca` moves that frontier. `mir::pass::stack_region` runs last, over the finished body, and
+removes the two consequences: a `stack_save` taken where a live marker already holds the frontier
+records the same value, so it is replaced by that marker; and a `stack_restore` to a frontier
+already current reclaims nothing. Nesting is what creates them — inlining brackets every spliced
+body, and a body spliced directly inside another's bracket takes its mark at the same frontier.
+
+The analysis is a forward fixpoint over the set of markers known equal to the frontier, intersected
+at joins, cleared by anything that may leave frame storage. It shares that predicate with `dce` so
+the two cannot disagree about what grows a frame.
+
+**A bracket that reclaims real storage is never removed**, and the distinction is not caution. Such
+a bracket is where a live range ends, which is what a backend's stack-slot allocator needs to prove
+two slots may share a frame offset — the same information LLVM carries as `lifetime.start` and
+`lifetime.end`. Deleting one would buy two interpreter dispatches at the price of a larger native
+frame, trading a real cost in the backend for a saving that exists only in the boxed interpreter.
+What this pass removes is a *duplicate* mark and a restore that pops nothing, neither of which tells
+a backend anything the surviving marker does not; peak cell use is unchanged.
 
 ## Dynamic profiling
 

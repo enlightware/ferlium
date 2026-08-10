@@ -155,7 +155,7 @@ fn remove_empty_local_stack_regions(
 /// This is intentionally conservative. Several interpreter operations materialize temporary places
 /// even though they are not spelled `alloca`; dictionary/subscript projection, semantic drop and a
 /// call carrying symbolic subscript evidence can do so. False positives merely retain a bracket.
-fn may_leave_frame_storage(operation: &mir::Operation) -> bool {
+pub(super) fn may_leave_frame_storage(operation: &mir::Operation) -> bool {
     match &operation.kind {
         OperationKind::Alloca { .. }
         | OperationKind::AllocaPlace { .. }
