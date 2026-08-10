@@ -348,18 +348,18 @@ This is the optimizer's first rewrite that relies on the semantics of named stan
 operations rather than only on MIR structure. Its correctness contract is that
 `string_from_static("")` produces the empty string; the concrete `Value<string>::to_string`
 produces an equivalent string value; pushing that value onto an empty string is semantically the
-identity; and `string_push_str` preserves append order, value semantics and NFC normalization. All
-three operations have an empty source-effect row. The proof does **not** rely on strings being
-implemented with `Rc`; copy-on-write buffer reuse is the performance consequence, not part of the
-semantic equivalence. The corresponding maintenance warning lives beside `String::push_str` in
-`src/std/string.rs`.
+identity; and that both appenders, `string_push_str` and `string_push_static_str`, preserve append
+order, value semantics and NFC normalization. All of them have an empty source-effect row. The
+proof does **not** rely on strings being implemented with `Rc`; copy-on-write buffer reuse is the
+performance consequence, not part of the semantic equivalence. The corresponding maintenance
+warning lives beside `String::push_str` in `src/std/string.rs`.
 
 The matcher is deliberately exact. The accumulator, builder and assignment temporaries must be
 local string `alloca`s in one block; the old accumulator must be the first builder component and
-have no further use before replacement; every builder use must be a direct `string_push_str`; and
-the construction must end in the emitter's ordinary move/drop/drop/move assignment tail. Keeping
-the proof in one block also excludes a catchable source failure, which MIR would represent as an
-`invoke` terminator. A linear definition/use census identifies the uses, and final DCE removes the
+have no further use before replacement; every builder use must be a direct call to one of the two
+appenders; and the construction must end in the emitter's ordinary move/drop/drop/move assignment
+tail. Keeping the proof in one block also excludes a catchable source failure, which MIR would
+represent as an `invoke` terminator. A linear definition/use census identifies the uses, and final DCE removes the
 empty-builder, rendered-prefix and assignment scaffolding orphaned by the rewrite.
 
 ## Dead code elimination

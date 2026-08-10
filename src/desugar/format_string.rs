@@ -20,14 +20,23 @@ use crate::{
     ast::{DExpr as Expr, DExprKind as ExprKind},
     compiler::error::InternalCompilationError,
     hir::value::LiteralValue,
-    std::string::string_type,
+    std::string::{
+        STRING_PUSH_STATIC_STR_FUNCTION_NAME, STRING_PUSH_STR_FUNCTION_NAME, static_str_type,
+        string_type,
+    },
 };
 
-fn string_literal(string: &str, span: Location, arena: &mut DExprArena) -> DExprId {
+/// A literal segment, kept as constant data rather than as an owned `string`.
+///
+/// Materializing it would allocate and copy the text on every execution only to append and free it.
+/// The desugaring is the author of these segments, so no analysis is needed to know they are
+/// constant: they are slices of the source being desugared, and interpolations take the separate
+/// [`variable_to_string`] path regardless of what they evaluate to.
+fn static_str_literal(string: &str, span: Location, arena: &mut DExprArena) -> DExprId {
     arena.alloc(Expr::new(
         ExprKind::literal(
             LiteralValue::new_native(StaticStr::new(string)),
-            string_type(),
+            static_str_type(),
         ),
         span,
     ))
@@ -86,16 +95,13 @@ pub fn emit_format_string_ast(
     let mut exprs = vec![let_stmt];
     let start_pos = span.start_usize() + 2; // starting of input in source code
 
-    // Helper to extend that string with another one.
-    let mut extend_exprs_with = |expr_id: DExprId, arena: &mut DExprArena| {
+    // Helper to extend that string, through whichever appender suits the segment's representation.
+    let mut extend_exprs_with = |appender: &'static str,
+                                 expr_id: DExprId,
+                                 arena: &mut DExprArena| {
         let expr_span = arena[expr_id].span;
         let s_id = arena.alloc(Expr::single_identifier(ustr("@s"), span));
-        let kind = syn_static_apply_path(
-            ["std", "string_push_str"],
-            expr_span,
-            vec![s_id, expr_id],
-            arena,
-        );
+        let kind = syn_static_apply_path(["std", appender], expr_span, vec![s_id, expr_id], arena);
         let extend_id = arena.alloc(Expr::new(kind, expr_span));
         exprs.push(extend_id);
     };
@@ -115,8 +121,8 @@ pub fn emit_format_string_ast(
                 span.source_id(),
             );
             let string = &input[last_end..match_start];
-            let expr = string_literal(string, string_span, arena);
-            extend_exprs_with(expr, arena);
+            let expr = static_str_literal(string, string_span, arena);
+            extend_exprs_with(STRING_PUSH_STATIC_STR_FUNCTION_NAME, expr, arena);
         }
 
         // Push the variable name found within the braces.
@@ -127,7 +133,7 @@ pub fn emit_format_string_ast(
         );
         let var_name = &input[match_start + 1..match_end - 1];
         let expr = variable_to_string(var_name, var_span, span, locals, arena)?;
-        extend_exprs_with(expr, arena);
+        extend_exprs_with(STRING_PUSH_STR_FUNCTION_NAME, expr, arena);
 
         last_end = match_end;
     }
@@ -139,8 +145,8 @@ pub fn emit_format_string_ast(
             span.source_id(),
         );
         let string = &input[last_end..];
-        let expr = string_literal(string, string_span, arena);
-        extend_exprs_with(expr, arena);
+        let expr = static_str_literal(string, string_span, arena);
+        extend_exprs_with(STRING_PUSH_STATIC_STR_FUNCTION_NAME, expr, arena);
     }
 
     // Evaluate the mutable string and return it.
@@ -149,4 +155,39 @@ pub fn emit_format_string_ast(
     exprs.push(get_s);
 
     Ok(ExprKind::block(exprs))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{CompilerSession, MirOptimization};
+
+    fn raw_mir(src: &str) -> String {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Disabled);
+        session.emit_mir("format_string", src)
+    }
+
+    /// Literal segments must reach the builder as constant data. Materializing them would allocate,
+    /// copy and free a `string` per segment per execution, which no later pass can recover because
+    /// the appended value is indistinguishable from any other by then.
+    #[test]
+    fn literal_segments_are_appended_without_materializing_a_string() {
+        let body = raw_mir("fn greet(n: int) -> string { f\"item {n} of list\" }");
+
+        assert_eq!(
+            body.matches("call std::string_push_static_str").count(),
+            2,
+            "both literal segments must append from constant data:\n{body}"
+        );
+        assert_eq!(
+            body.matches("call std::string_push_str").count(),
+            1,
+            "only the interpolation must append a materialized string:\n{body}"
+        );
+        assert_eq!(
+            body.matches("call std::string_from_static").count(),
+            1,
+            "only the empty builder may still be materialized:\n{body}"
+        );
+    }
 }

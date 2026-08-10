@@ -52,6 +52,7 @@ use super::option::{none, option_type, some};
 
 pub(crate) const STRING_FROM_STATIC_FUNCTION_NAME: &str = "string_from_static";
 pub(crate) const STRING_PUSH_STR_FUNCTION_NAME: &str = "string_push_str";
+pub(crate) const STRING_PUSH_STATIC_STR_FUNCTION_NAME: &str = "string_push_static_str";
 
 /// Immutable compiler representation of a source string literal.
 ///
@@ -130,21 +131,44 @@ impl String {
     /// semantically equivalent to that string, and on later pushes preserving append order, value
     /// semantics and normalization. It also relies on `string_from_static("")` producing that empty
     /// string, on the concrete `Value<string>::to_string` registered below producing an equivalent
-    /// value, and on all three calls having no source-visible effects. The optimization does not
-    /// rely on this `Rc` representation, but a change to any of those contracts must review that
-    /// pass and `doc/mir-optimization.md`.
+    /// value, and on none of those calls having source-visible effects. [`Self::push_static_str`]
+    /// is a builder append of the same standing and carries the same obligations. The optimization
+    /// does not rely on this `Rc` representation, but a change to any of those contracts must
+    /// review that pass and `doc/mir-optimization.md`.
     pub fn push_str(&mut self, value: &Self) {
+        self.push_normalized(value.0.as_str());
+    }
+
+    /// Appends a string literal without materializing it as a [`String`] first.
+    ///
+    /// A `StaticStr` is NFC-normalized when it is interned, so it satisfies the same precondition
+    /// as the contents of a `String` and appending it must observe the same rules. The two entry
+    /// points therefore share one body: `push_str(&String::from_static(literal))` and
+    /// `push_static_str(literal)` are required to produce identical values, and
+    /// `mir::pass::string_accumulate` relies on that equality.
+    pub(crate) fn push_static_str(&mut self, value: &StaticStr) {
+        self.push_normalized(value.as_str());
+    }
+
+    /// Appends already-NFC text, restoring the invariant when the join breaks it.
+    ///
+    /// NFC is not closed under concatenation: text beginning with a combining mark composes with
+    /// whatever precedes it, so only that case needs to re-normalize the whole result.
+    fn push_normalized(&mut self, value: &str) {
+        debug_assert!(
+            unicode_normalization::is_nfc(value),
+            "`String::push_normalized` requires NFC-normalized text"
+        );
         let needs_normalization = value
-            .0
             .chars()
             .next()
             .map(unicode_normalization::char::is_combining_mark)
             .unwrap_or(false);
 
         if needs_normalization {
-            self.0 = Rc::new(self.0.chars().chain(value.0.chars()).nfc().collect());
+            self.0 = Rc::new(self.0.chars().chain(value.chars()).nfc().collect());
         } else {
-            Rc::make_mut(&mut self.0).push_str(value.0.as_str());
+            Rc::make_mut(&mut self.0).push_str(value);
         }
     }
 
@@ -746,6 +770,21 @@ pub fn add_to_module(to: &mut Module) {
             String::push_str,
             ["target", "suffix"],
             "Appends `suffix` to the end of `target`.",
+            no_effects(),
+        ),
+    );
+    // The f-string desugaring emits this for every literal segment, through ordinary path
+    // resolution, so it must be nameable from the module being compiled. Naming it is all a user
+    // can do with it: `StaticStr` has no source spelling, and a string literal is typed `string`,
+    // so no source expression can produce the second argument.
+    to.add_function(
+        ustr(STRING_PUSH_STATIC_STR_FUNCTION_NAME),
+        BinaryNativeFnMRN::description_with_in_ty(
+            String::push_static_str,
+            ["target", "literal"],
+            "Appends the compiler constant `literal` to the end of `target`.",
+            string_type(),
+            static_str_type(),
             no_effects(),
         ),
     );

@@ -742,6 +742,11 @@ impl TypeInference {
     /// Lower one source literal to HIR. Most literal representations already
     /// have their source type and become immediates directly. A string literal
     /// instead materializes an owned `string` from a `StaticStr` immediate.
+    ///
+    /// A literal that already asks for `StaticStr` keeps the immediate: it is destined for a
+    /// consumer that takes the constant data itself, such as the f-string desugaring's
+    /// `string_push_static_str`. The parser never produces one — it types string literals `string`
+    /// — so this reaches only compiler-generated literals.
     fn infer_literal_expr(
         &mut self,
         env: &mut TypingEnv,
@@ -751,7 +756,7 @@ impl TypeInference {
     ) -> Result<(NodeId, MutType), InternalCompilationError> {
         use hir::Node as N;
 
-        if value.as_primitive_ty::<StaticStr>().is_none() {
+        if value.as_primitive_ty::<StaticStr>().is_none() || source_ty == static_str_type() {
             let node = env.ir_arena.alloc(N::new(
                 hir::hir_syn::immediate(value),
                 source_ty,

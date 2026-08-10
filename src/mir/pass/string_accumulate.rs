@@ -16,14 +16,14 @@
 //!
 //! Unlike the structural MIR passes, this rewrite relies on contracts of concrete std operations:
 //! `Value<string>::to_string` returns the same string value, appending it to an empty string is
-//! semantically the identity, and `string_push_str` preserves value semantics and normalization.
-//! The corresponding contract is documented beside the implementation in `std::string` and in
-//! `doc/mir-optimization.md`.
+//! semantically the identity, and both appenders — `string_push_str` and `string_push_static_str`
+//! — preserve value semantics and normalization. The corresponding contract is documented beside
+//! the implementation in `std::string` and in `doc/mir-optimization.md`.
 //!
 //! The proof is deliberately local and linear. Every participating place is a local string
-//! `alloca`; all builder uses are direct `string_push_str` calls followed by the compiler's exact
-//! assignment tail; the old accumulator has no use between its first rendering and replacement;
-//! and every operation is in one block, excluding a source-fallible `invoke`. The whole-function
+//! `alloca`; all builder uses are direct calls to one of the two appenders, followed by the
+//! compiler's exact assignment tail; the old accumulator has no use between its first rendering
+//! and replacement; and every operation is in one block, excluding a source-fallible `invoke`. The whole-function
 //! definition/use census is built once, and each candidate walks only the uses of its fresh builder.
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -36,7 +36,8 @@ use crate::{
         STD_MODULE_ID,
         core_traits_names::VALUE_TRAIT_NAME,
         string::{
-            STRING_FROM_STATIC_FUNCTION_NAME, STRING_PUSH_STR_FUNCTION_NAME, StaticStr, string_type,
+            STRING_FROM_STATIC_FUNCTION_NAME, STRING_PUSH_STATIC_STR_FUNCTION_NAME,
+            STRING_PUSH_STR_FUNCTION_NAME, StaticStr, string_type,
         },
         value::{VALUE_DROP_METHOD_INDEX, VALUE_TO_STRING_METHOD_INDEX},
     },
@@ -136,6 +137,7 @@ impl Census {
 struct StringFunctions {
     from_static: FunctionId,
     push: FunctionId,
+    push_static: FunctionId,
     to_string: FunctionId,
     drop: FunctionId,
 }
@@ -154,6 +156,7 @@ impl StringFunctions {
         Some(Self {
             from_static: named(STRING_FROM_STATIC_FUNCTION_NAME)?,
             push: named(STRING_PUSH_STR_FUNCTION_NAME)?,
+            push_static: named(STRING_PUSH_STATIC_STR_FUNCTION_NAME)?,
             to_string: FunctionId::new(
                 STD_MODULE_ID,
                 implementation.methods[usize::from(VALUE_TO_STRING_METHOD_INDEX)],
@@ -380,8 +383,13 @@ fn plan_forward(
             return None;
         };
         let operation = &operations[site.index.as_index()];
+        // Both appenders qualify: the f-string desugaring emits `string_push_static_str` for its
+        // literal segments and `string_push_str` for its interpolations, so a single accumulation
+        // normally mixes them. Only the second operand — the suffix — differs, and this check reads
+        // the first, the builder.
         if site.block != initialize_builder.block
-            || !is_string_push_target(operation, functions.push, *builder)
+            || !(is_string_push_target(operation, functions.push, *builder)
+                || is_string_push_target(operation, functions.push_static, *builder))
         {
             return None;
         }
@@ -578,6 +586,27 @@ mod tests {
         assert!(
             !body.contains("call std::string_from_static"),
             "the empty builder should be replaced by an ownership move:\n{body}"
+        );
+    }
+
+    /// Literal segments append through `string_push_static_str` rather than `string_push_str`, so a
+    /// format string that mixes text and interpolations presents the builder with both appenders.
+    #[test]
+    fn forwards_across_a_literal_segment() {
+        let module = optimized(
+            "fn append(mut out: string, suffix: string) -> string { \
+             out = f\"{out}, {suffix}\"; out }",
+        );
+        let body = body_of(&module, "append");
+        assert_eq!(
+            count(body, "Value<std::string>::to_string"),
+            1,
+            "a literal between the interpolations must not block the forwarding:\n{body}"
+        );
+        assert_eq!(
+            count(body, "call std::string_push_static_str"),
+            1,
+            "the literal segment must still be appended:\n{body}"
         );
     }
 

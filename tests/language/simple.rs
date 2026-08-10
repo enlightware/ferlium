@@ -2859,6 +2859,20 @@ fn string_formatting_in_loops() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn string_formatting_normalizes_literal_segments() {
+    let mut session = TestSession::new();
+    // Literal segments are appended from compiler constant data rather than through a materialized
+    // `string`, so they must apply the same NFC rule: a segment opening on a combining mark
+    // composes with whatever the interpolation before it produced.
+    assert_val_eq!(
+        session.run("let e = \"e\"; f\"{e}\\u{0301}x\""),
+        string("éx")
+    );
+    assert_val_eq!(session.run("f\"\\u{0301}\""), string("\u{0301}"));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn to_string() {
     let mut session = TestSession::new();
     assert_val_eq!(session.run("to_string(true)"), string("true"));
