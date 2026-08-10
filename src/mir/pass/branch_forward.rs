@@ -18,15 +18,35 @@
 //! ```
 //!
 //! The second comparison and branch recover information the incoming edge already carries. This
-//! pass redirects each incoming edge to `yes` or `no`, retaining the join's `stack_restore`s on
-//! that edge. The join then becomes unreachable, and ordinary DCE removes the boolean allocation
-//! and stores.
+//! pass redirects each storing block to `yes` or `no`, retaining on that edge the `stack_restore`s
+//! it used to reach on the way. The join then becomes unreachable, and ordinary DCE removes the
+//! boolean allocation and stores.
+//!
+//! A store need not sit in an immediate predecessor of the join. A short-circuit `or` or `and` with
+//! three or more arms lowers to a *tree* of stores, whose deeper arms reach the join through a
+//! block that only restores the stack:
+//!
+//! ```text
+//! outer: condbr first, left, inner
+//! inner: condbr second, right, middle
+//! left:   store true  to flag; br join
+//! middle: store true  to flag; br forward
+//! right:  store false to flag; br forward
+//! forward: stack_restore marker; br join
+//! join:   equal = comp_eq flag true; condbr equal, yes, no
+//! ```
+//!
+//! So the search walks back from the join to the stores that reach it, through blocks that carry
+//! only edge cleanup, and replays that cleanup on each arm it redirects.
 //!
 //! The proof is intentionally local and linear. The flag must be a local boolean `alloca`; every
-//! use must be one known-boolean store in a predecessor or the one final comparison; every incoming
-//! edge must be an unconditional jump; and the join may contain only `stack_restore`s before the
-//! comparison. More general predicate propagation is a separate optimization with a larger
-//! dataflow proof.
+//! use must be one known-boolean store or the one final comparison; every block on a walked path
+//! must end in an unconditional jump; a store-free block on a path may contain only
+//! `stack_restore`s; the join may contain only `stack_restore`s before the comparison; and the
+//! stores found must be exactly those the use census saw, which is what proves no other definition
+//! reaches the join. Two paths may not meet at one block, since rewriting it would mean duplicating
+//! it. General predicate propagation — forwarding a boolean that is *computed* rather than stored
+//! as a literal — is a separate optimization with a larger dataflow proof.
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -34,6 +54,7 @@ use crate::{
     mir::{
         self, BlockId, Function, Operation, OperationKind,
         edit::FunctionEdit,
+        pass::budget::{FORWARD_BOOLEAN_BLOCKS, FORWARD_BOOLEAN_REPLAYED_OPERATIONS},
         terminator::{Terminator, TerminatorKind},
         value::ValueId,
     },
@@ -65,14 +86,15 @@ struct Uses {
     other: bool,
 }
 
+/// One store that reaches the join, and the edge cleanup it must run in place of the blocks the
+/// rewrite removes between it and the join.
 struct Arm {
-    predecessor: BlockId,
+    source: BlockId,
     target: BlockId,
+    replay: Vec<Operation>,
 }
 
 struct Forward {
-    join: BlockId,
-    prefix_len: usize,
     arms: Vec<Arm>,
 }
 
@@ -120,10 +142,9 @@ pub(crate) fn forward_boolean_branches(func: &Function, env: ModuleEnv<'_>) -> O
     // structural cleanup that renumbers blocks.
     let mut edit = FunctionEdit::new(func.clone());
     for forward in forwards {
-        let prefix = func.block(forward.join).operations()[..forward.prefix_len].to_vec();
         for arm in forward.arms {
-            let block = edit.block_mut(arm.predecessor);
-            block.operations.extend(prefix.iter().cloned());
+            let block = edit.block_mut(arm.source);
+            block.operations.extend(arm.replay);
             let span = block.terminator.span;
             block.terminator = Terminator::goto(span, arm.target);
         }
@@ -243,7 +264,6 @@ fn plan_join(
     if summary.other
         || summary.comparisons.as_slice() != [comparison_site]
         || summary.stores.len() < 2
-        || summary.stores.len() != incoming[join.as_index()].len()
         || !block.operations()[..comparison_index]
             .iter()
             .all(|operation| matches!(operation.kind, OperationKind::StackRestore))
@@ -251,43 +271,105 @@ fn plan_join(
         return None;
     }
 
-    // An incoming block must contribute exactly one edge and exactly one known store. Requiring
-    // distinct predecessors also rejects a `condbr` with both arms targeting this join.
-    let predecessors: FxHashSet<_> = incoming[join.as_index()].iter().copied().collect();
-    if predecessors.len() != incoming[join.as_index()].len() {
-        return None;
-    }
-    let mut arms = Vec::with_capacity(predecessors.len());
-    for predecessor in predecessors {
+    // The join's own cleanup runs after whatever the path already replayed, exactly as it did when
+    // control still passed through these blocks in order.
+    let join_prefix = &block.operations()[..comparison_index];
+    let arms = reaching_stores(func, join, summary, incoming)?
+        .into_iter()
+        .map(|reaching| {
+            let mut replay = reaching.replay;
+            replay.extend(join_prefix.iter().cloned());
+            Arm {
+                source: reaching.source,
+                target: if reaching.value == expected {
+                    then_target
+                } else {
+                    else_target
+                },
+                replay,
+            }
+        })
+        .collect();
+
+    Some(Forward { arms })
+}
+
+/// One store found by the backward walk, with the cleanup between it and the join.
+struct Reaching {
+    source: BlockId,
+    value: bool,
+    replay: Vec<Operation>,
+}
+
+/// The stores that reach `join`, walking back through blocks that only carry edge cleanup.
+///
+/// Returns `None` unless the stores found are exactly those the use census recorded for the flag:
+/// that equality is what proves the walk saw every definition reaching the join, and so that
+/// redirecting these blocks cannot drop one.
+fn reaching_stores(
+    func: &Function,
+    join: BlockId,
+    summary: &Uses,
+    incoming: &[Vec<BlockId>],
+) -> Option<Vec<Reaching>> {
+    let mut found: Vec<Reaching> = Vec::new();
+    let mut visited: FxHashSet<BlockId> = FxHashSet::default();
+    let mut pending: Vec<(BlockId, Vec<Operation>)> = incoming[join.as_index()]
+        .iter()
+        .map(|predecessor| (*predecessor, Vec::new()))
+        .collect();
+
+    while let Some((block, replay)) = pending.pop() {
+        // A repeat is either a cycle or two paths meeting, and both would need this block to be
+        // duplicated rather than redirected. A `condbr` with both arms on the join arrives here as
+        // the same predecessor twice.
+        if block == join || !visited.insert(block) || visited.len() > FORWARD_BOOLEAN_BLOCKS {
+            return None;
+        }
         if !matches!(
-            func.block(predecessor).terminator().kind,
-            TerminatorKind::Goto { target } if target == join
+            func.block(block).terminator().kind,
+            TerminatorKind::Goto { .. }
         ) {
             return None;
         }
-        let mut stores = summary
-            .stores
+
+        let mut stores = summary.stores.iter().filter(|store| store.block == block);
+        if let Some(store) = stores.next() {
+            if stores.next().is_some() {
+                return None;
+            }
+            found.push(Reaching {
+                source: block,
+                value: store.value,
+                replay,
+            });
+            continue;
+        }
+
+        // A store-free block on the path is only passed through if it does nothing an arm cannot
+        // replay. Its operations run before whatever the path below it already carries.
+        let operations = func.block(block).operations();
+        if !operations
             .iter()
-            .filter(|store| store.block == predecessor);
-        let store = stores.next()?;
-        if stores.next().is_some() {
+            .all(|operation| matches!(operation.kind, OperationKind::StackRestore))
+        {
             return None;
         }
-        arms.push(Arm {
-            predecessor,
-            target: if store.value == expected {
-                then_target
-            } else {
-                else_target
-            },
-        });
+        let predecessors = &incoming[block.as_index()];
+        if predecessors.is_empty() {
+            return None;
+        }
+        let mut carried = operations.to_vec();
+        carried.extend(replay);
+        if carried.len() > FORWARD_BOOLEAN_REPLAYED_OPERATIONS {
+            return None;
+        }
+        for predecessor in predecessors {
+            pending.push((*predecessor, carried.clone()));
+        }
     }
 
-    Some(Forward {
-        join,
-        prefix_len: comparison_index,
-        arms,
-    })
+    (found.len() == summary.stores.len()).then_some(found)
 }
 
 fn compared_boolean_flag(func: &Function, operation: &Operation) -> Option<(ValueId, bool)> {
@@ -357,6 +439,34 @@ mod tests {
         assert!(
             body.matches("stack_restore").count() >= 2,
             "both redirected paths must still restore the inlined frame:\n{body}"
+        );
+    }
+
+    /// A short-circuit `or` stores its flag from three arms, two of which reach the join through a
+    /// block that only restores the stack. The stores are still all constant, so the whole boolean
+    /// must disappear rather than only the arms that happen to sit next to the join.
+    #[test]
+    fn a_short_circuit_boolean_is_forwarded_through_its_join_path() {
+        let module = optimized("fn f(i: int, n: int) { if i < 0 or i >= n { 1 } else { 2 } }");
+        let body = body_of(&module, "f");
+
+        assert_eq!(
+            body.matches("condbr").count(),
+            2,
+            "only the two operand tests must remain, not the branch on the stored flag:\n{body}"
+        );
+        assert!(
+            !body.contains("alloca bool"),
+            "the flag holding the `or` result must be removed by DCE:\n{body}"
+        );
+        assert_eq!(
+            body.matches("comp_eq").count(),
+            2,
+            "each operand is compared once, and the flag not at all:\n{body}"
+        );
+        assert!(
+            body.matches("stack_restore").count() >= 3,
+            "every redirected arm must still restore the frames it passed:\n{body}"
         );
     }
 

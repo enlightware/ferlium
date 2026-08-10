@@ -11,15 +11,17 @@
 //! These bound compiler work, not program behaviour: exhausting one costs an optimization, never a
 //! result. They are deliberately generous and stable, because a user who annotates a hot path to
 //! make it foldable should not lose the speedup when an unrelated edit pushes the function across a
-//! threshold. Changing one of these is a user-visible change; the fold report cites them by name so
-//! a user can see which one they hit.
+//! threshold. Changing one of these is a user-visible change, and the fold report cites the
+//! inlining budgets by name so a user can see which one they hit.
 //!
-//! **Every budget here is per function.** There is deliberately no module- or session-wide budget:
-//! a global one would make whether a function is optimized depend on how much work unrelated
-//! functions consumed first, which is exactly the fragility above. Compile time therefore stays
-//! linear in function count with a predictable constant. The compile-time evaluation budgets — fuel,
-//! call depth, environment cells — live with the engine that spends them, in
-//! [`crate::mir::const_eval`].
+//! **Every budget here is spent within one unit of work, and none is session-wide.** Most are per
+//! function; the branch-forwarding pair is narrower still, bounding one rewrite candidate inside a
+//! function; and [`MAX_SPECIALIZATIONS`] is per module, because a specialization is shared between
+//! every call site that asks for it. A session-wide budget would make whether a function is
+//! optimized depend on how much work unrelated functions consumed first, which is exactly the
+//! fragility above. Compile time therefore stays linear in function count with a predictable
+//! constant. The compile-time evaluation budgets — fuel, call depth, environment cells — live with
+//! the engine that spends them, in [`crate::mir::const_eval`].
 
 /// How many fold/inline rounds a single function may go through.
 ///
@@ -48,6 +50,20 @@ pub const INLINE_CALLEE_OPERATIONS: usize = 32;
 /// it is public because a budget change is a user-visible change — the optimization report cites
 /// these by name.
 pub const INLINE_FUNCTION_GROWTH: usize = 128;
+
+/// How many blocks one boolean-branch forwarding may walk back through to find the stores reaching
+/// a join.
+///
+/// A short-circuit `or`/`and` puts its arms one or more store-free forwarding blocks above the
+/// join, so the search cannot stop at the immediate predecessors. It stays small because the region
+/// it crosses is the lowering of one source-level boolean expression, not a general slice.
+pub const FORWARD_BOOLEAN_BLOCKS: usize = 16;
+
+/// How many edge-cleanup operations that forwarding may replay onto one arm.
+///
+/// Every block the rewrite removes from a path carries its `stack_restore`s onto each arm that used
+/// to run them, so a long path duplicates code into several arms. This bounds that growth.
+pub const FORWARD_BOOLEAN_REPLAYED_OPERATIONS: usize = 8;
 
 /// How many specialized bodies one module's optimization may create.
 ///
