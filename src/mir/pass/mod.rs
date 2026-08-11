@@ -44,6 +44,7 @@ pub(crate) mod dead_evidence;
 pub(crate) mod fold;
 pub(crate) mod inline;
 pub(crate) mod monomorphize;
+pub(crate) mod peephole;
 pub(crate) mod provenance;
 pub mod report;
 pub(crate) mod stack_region;
@@ -183,6 +184,13 @@ pub(crate) fn optimize_function(
     let source = current.as_ref().unwrap_or(function);
     if let Some(forwarded) = branch_forward::forward_boolean_branches(source, env) {
         current = Some(forwarded);
+    }
+    // A predicate returned as a value often lowers to a tiny diamond whose arms only store opposite
+    // boolean constants to the same destination. Collapse that materialization before DCE cleans up
+    // any now-unused boolean storage and stranded blocks.
+    let source = current.as_ref().unwrap_or(function);
+    if let Some(materialized) = peephole::materialize_boolean_results(source, env) {
+        current = Some(materialized);
     }
     // Formatting a self-prefixed assignment through an empty builder copies the complete growing
     // prefix. Forward the old string's ownership into that builder while the exact std-semantic
