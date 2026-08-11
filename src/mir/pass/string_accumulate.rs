@@ -258,7 +258,7 @@ pub(crate) fn forward_string_accumulation(func: &Function, env: ModuleEnv<'_>) -
             true
         });
     }
-    Some(edit.finish(env))
+    Some(edit.finish_unverified())
 }
 
 fn plan_forward(

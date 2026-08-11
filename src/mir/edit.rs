@@ -14,9 +14,11 @@
 //! a pass reconstruct what it did not touch, and renumbers every result identity in the process.
 //!
 //! [`FunctionEdit`] is the editable form instead: it owns a decomposed function, exposes its blocks
-//! for mutation, and restores canonical form in [`finish`](FunctionEdit::finish), which re-verifies
-//! the result exactly where the builder does. In between, the function may be inconsistent — that
-//! is the point of having a separate type for it.
+//! for mutation, and restores canonical form when it is finished. [`finish`](FunctionEdit::finish)
+//! also verifies a body that crosses a trust boundary; the optimization pipeline uses
+//! [`finish_unverified`](FunctionEdit::finish_unverified) between its own passes and verifies every
+//! final artifact once before installation. In between, the function may be inconsistent — that is
+//! the point of having a separate type for it.
 //!
 //! **Identities are stable across an edit.** A [`ValueId`](mir::ValueId) survives editing, and new
 //! ones are allocated beyond the highest already in use, so an analysis keyed on value identity
@@ -29,8 +31,9 @@
 //! [`merge_blocks_into_predecessors`](FunctionEdit::merge_blocks_into_predecessors)) are explicit
 //! and run on request.
 //!
-//! The optimization hook opens and closes every body, including those no pass changed, which is what
-//! checks the identity property at corpus scale.
+//! The optimization hook verifies every final body, including those no pass changed, which checks
+//! the identity property at corpus scale without repeating whole-function verification after every
+//! internal rewrite.
 #![allow(dead_code)]
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -449,10 +452,25 @@ impl FunctionEdit {
         }
     }
 
-    /// Restores canonical form, verifying every MIR invariant in debug and test builds — the same
+    /// Restores canonical form and verifies every MIR invariant in debug and test builds — the same
     /// boundary check [`FunctionBuilder::finish`](crate::mir::builder::FunctionBuilder::finish)
     /// performs.
     pub(crate) fn finish(self, env: ModuleEnv<'_>) -> Function {
+        let function = self.finish_unverified();
+        #[cfg(any(debug_assertions, test))]
+        super::verify::verify_function(&function, env);
+        #[cfg(not(any(debug_assertions, test)))]
+        let _ = env;
+        function
+    }
+
+    /// Restores canonical form without verifying the result.
+    ///
+    /// This is only for transitions between trusted optimization passes. A body produced this way
+    /// must not be installed or executed before a later artifact boundary verifies it. Keeping the
+    /// unchecked operation explicit prevents an ordinary builder, emitter, or generated raw body
+    /// from accidentally bypassing verification.
+    pub(in crate::mir) fn finish_unverified(self) -> Function {
         assert!(
             !self.blocks.is_empty(),
             "an edited function has no entry block"
@@ -462,18 +480,13 @@ impl FunctionEdit {
             .into_iter()
             .map(|block| BasicBlock::new(block.operations, block.terminator))
             .collect();
-        let function = Function::new(
+        Function::new(
             self.name,
             self.result_convention,
             self.parameters,
             self.constants,
             blocks,
-        );
-        #[cfg(any(debug_assertions, test))]
-        super::verify::verify_function(&function, env);
-        #[cfg(not(any(debug_assertions, test)))]
-        let _ = env;
-        function
+        )
     }
 }
 

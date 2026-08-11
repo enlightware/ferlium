@@ -401,7 +401,7 @@ pub(crate) fn forward_redundant_storage(func: &Function, env: ModuleEnv<'_>) -> 
             keep
         });
     }
-    Some(edit.finish(env))
+    Some(edit.finish_unverified())
 }
 
 fn initialization_destination_index(operation: &Operation) -> Option<usize> {

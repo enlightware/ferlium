@@ -39,7 +39,7 @@ use crate::{
         self, Function, OperationKind, ParameterKind, edit::FunctionEdit,
         terminator::TerminatorKind,
     },
-    module::{ModuleEnv, ModuleId, id::Id},
+    module::{ModuleId, id::Id},
 };
 
 /// Removes every specialization's bound dictionary parameters, and the operands that pass them.
@@ -50,7 +50,6 @@ pub(crate) fn drop_dead_specialization_evidence(
     functions: &mut [Option<Function>],
     specializations: Vec<Specialization>,
     module: ModuleId,
-    env: ModuleEnv<'_>,
 ) -> Vec<Specialization> {
     let first_index = functions.len();
     let dropped: Vec<usize> = specializations
@@ -79,14 +78,14 @@ pub(crate) fn drop_dead_specialization_evidence(
     // here clones a function it is about to replace.
     for slot in functions.iter_mut() {
         if let Some(body) = slot.take() {
-            *slot = Some(rewrite(body, 0, &dropped_at, env));
+            *slot = Some(rewrite(body, 0, &dropped_at));
         }
     }
     specializations
         .into_iter()
         .zip(&dropped)
         .map(|(specialization, &own)| Specialization {
-            body: rewrite(specialization.body, own, &dropped_at, env),
+            body: rewrite(specialization.body, own, &dropped_at),
             ..specialization
         })
         .collect()
@@ -102,13 +101,13 @@ fn dictionary_parameters(body: &Function) -> usize {
 
 /// Narrows one body: its own signature by `own`, and every call it makes to a narrowed callee.
 ///
-/// Opening the body is what costs — closing an edit re-verifies the whole function — so a body with
-/// nothing to change is left alone rather than opened and closed for the identity.
+/// A body with nothing to change is left alone rather than decomposed and reconstructed for the
+/// identity. Rewritten bodies are verified with every other final artifact after this whole-module
+/// cleanup completes.
 fn rewrite(
     body: Function,
     own: usize,
     dropped_at: &impl Fn(&mir::Value) -> Option<usize>,
-    env: ModuleEnv<'_>,
 ) -> Function {
     if own == 0 && !calls_a_narrowed_callee(&body, dropped_at) {
         return body;
@@ -162,7 +161,7 @@ fn rewrite(
             operation.operands = operands.into_boxed_slice();
         }
     }
-    edit.finish(env)
+    edit.finish_unverified()
 }
 
 /// Whether any call in `body` names a callee whose signature this pass narrows.

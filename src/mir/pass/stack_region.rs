@@ -38,7 +38,7 @@ use crate::{
         self, BlockId, Function, OperationKind, edit::FunctionEdit, edit::successors,
         terminator::TerminatorKind, value::ValueId,
     },
-    module::{ModuleEnv, id::Id},
+    module::id::Id,
 };
 
 use super::dce::may_leave_frame_storage;
@@ -87,10 +87,7 @@ fn intersect(left: &Frontier, right: &Frontier) -> Frontier {
 
 /// Canonicalizes redundant stack markers and drops restores that reclaim nothing, returning a
 /// rewritten function if anything changed.
-pub(crate) fn remove_redundant_stack_markers(
-    func: &Function,
-    env: ModuleEnv<'_>,
-) -> Option<Function> {
+pub(crate) fn remove_redundant_stack_markers(func: &Function) -> Option<Function> {
     // A lone save-and-restore pair has nothing to be redundant against: the frontier is unknown at
     // the save, and the restore is the first to reach its own mark. Most bodies stop here without
     // the fixpoint running at all.
@@ -166,7 +163,7 @@ pub(crate) fn remove_redundant_stack_markers(
             keep
         });
     }
-    Some(edit.finish(env))
+    Some(edit.finish_unverified())
 }
 
 /// The marker a redundant save defers to: the lowest live one, which the ordering makes the first.

@@ -58,7 +58,7 @@ use crate::{
         terminator::{Terminator, TerminatorKind},
         value::ValueId,
     },
-    module::{ModuleEnv, id::Id},
+    module::id::Id,
     std::logic::bool_type,
 };
 
@@ -99,7 +99,7 @@ struct Forward {
 }
 
 /// Bypasses boolean storage diamonds, returning `None` when the function has none.
-pub(crate) fn forward_boolean_branches(func: &Function, env: ModuleEnv<'_>) -> Option<Function> {
+pub(crate) fn forward_boolean_branches(func: &Function) -> Option<Function> {
     // Restrict the use census to local boolean storage. This takes one definition walk and one
     // operand walk; planning below only visits the uses and predecessors belonging to a candidate.
     let mut uses: FxHashMap<ValueId, Uses> = func
@@ -151,7 +151,7 @@ pub(crate) fn forward_boolean_branches(func: &Function, env: ModuleEnv<'_>) -> O
     }
     edit.remove_unreachable_blocks();
     edit.merge_blocks_into_predecessors();
-    Some(edit.finish(env))
+    Some(edit.finish_unverified())
 }
 
 fn incoming_predecessors(func: &Function) -> Vec<Vec<BlockId>> {
@@ -522,6 +522,6 @@ mod tests {
         builder.set_terminator(no, Terminator::ret(span));
 
         let function = builder.finish(env);
-        assert!(super::forward_boolean_branches(&function, env).is_none());
+        assert!(super::forward_boolean_branches(&function).is_none());
     }
 }

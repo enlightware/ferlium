@@ -328,7 +328,7 @@ pub(crate) fn eliminate_common_calls(
     }
     edit.remove_unreachable_blocks();
     edit.merge_blocks_into_predecessors();
-    Some(edit.finish(env))
+    Some(edit.finish_unverified())
 }
 
 fn available_call_states(
@@ -610,10 +610,7 @@ struct Available {
 
 /// Replaces repeated address computations by their dominating first occurrence, returning a
 /// rewritten function if anything was merged.
-pub(crate) fn eliminate_common_subexpressions(
-    func: &Function,
-    env: ModuleEnv<'_>,
-) -> Option<Function> {
+pub(crate) fn eliminate_common_subexpressions(func: &Function) -> Option<Function> {
     let successors: Vec<Vec<usize>> = func
         .blocks()
         .map(|block| {
@@ -658,7 +655,7 @@ pub(crate) fn eliminate_common_subexpressions(
     });
     // A merged operation is usually the last reference to the field index it named.
     edit.prune_constants();
-    Some(edit.finish(env))
+    Some(edit.finish_unverified())
 }
 
 struct Numbering<'a> {

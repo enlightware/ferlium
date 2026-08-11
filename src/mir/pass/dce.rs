@@ -33,16 +33,13 @@
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::{
-    mir::{
-        self, BlockId, Function, OperationKind, edit::FunctionEdit, terminator::TerminatorKind,
-        value::ValueId,
-    },
-    module::ModuleEnv,
+use crate::mir::{
+    self, BlockId, Function, OperationKind, edit::FunctionEdit, terminator::TerminatorKind,
+    value::ValueId,
 };
 
 /// Removes dead storage scaffolding, returning a rewritten function if anything was removed.
-pub(crate) fn remove_dead_storage(func: &Function, env: ModuleEnv<'_>) -> Option<Function> {
+pub(crate) fn remove_dead_storage(func: &Function) -> Option<Function> {
     let mut dead = dead_allocas(func);
     let dead_places = unread_derived_places(func);
     for (block, index) in dead_places {
@@ -69,7 +66,7 @@ pub(crate) fn remove_dead_storage(func: &Function, env: ModuleEnv<'_>) -> Option
     // The constants those stores named are usually the last reference to them; dropping the entries
     // keeps the pool an inventory of what the function actually uses.
     edit.prune_constants();
-    Some(edit.finish(env))
+    Some(edit.finish_unverified())
 }
 
 /// Adds same-block stack regions that provably reclaim no storage to `removed`.

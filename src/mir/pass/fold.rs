@@ -194,7 +194,7 @@ pub(crate) fn fold_function(
     edit.remove_unreachable_blocks();
     edit.merge_blocks_into_predecessors();
     Some(Folded {
-        body: edit.finish(env),
+        body: edit.finish_unverified(),
         warrants_another_round,
     })
 }
@@ -216,7 +216,7 @@ pub(crate) fn devirtualize_known_callees(func: &Function, env: ModuleEnv<'_>) ->
 
     let mut edit = FunctionEdit::new(func.clone());
     apply_devirtualizations(&mut edit, devirtualizations);
-    Some(edit.finish(env))
+    Some(edit.finish_unverified())
 }
 
 /// Decides what to rewrite, without touching the function.

@@ -189,7 +189,7 @@ pub(crate) fn inline_function(
     // a value before the block defining it. Dominance is unaffected, but block order is what MIR's
     // consumers walk, so canonical order is restored before the function is closed.
     edit.reorder_blocks_in_reverse_postorder();
-    Some(edit.finish(env))
+    Some(edit.finish_unverified())
 }
 
 /// Chooses the call sites to inline.

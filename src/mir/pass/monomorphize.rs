@@ -772,7 +772,7 @@ pub(crate) fn specialize_call_sites(
         }
     }
 
-    changed.then(|| edit.finish(env))
+    changed.then(|| edit.finish_unverified())
 }
 
 /// The specialization this call site should be pointed at, creating it if needed.

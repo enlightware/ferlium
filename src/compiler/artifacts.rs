@@ -201,9 +201,10 @@ impl MirArtifacts {
 
     /// Runs the optimization passes over every body in `raw`.
     ///
-    /// Every body is opened for editing and closed again, whether or not a pass changed it: closing
-    /// re-verifies, so a body no pass touched still proves that editing preserves identities and is
-    /// genuinely the identity.
+    /// Passes restore canonical form between rewrites without repeating the global verifier. Once
+    /// whole-module cleanup is complete, every declared and specialized body is verified exactly
+    /// once before the artifact is installed. An untouched body participates in that final check
+    /// too, so editing still proves its identity at corpus scale.
     ///
     /// Takes the whole session because the folding passes const-evaluate through the MIR
     /// interpreter, which resolves callees, dictionaries, and native code through it.
@@ -251,8 +252,21 @@ impl MirArtifacts {
             &mut functions,
             specializations.into_created(),
             module_id,
-            env,
         );
+
+        // This is the trust boundary for optimized MIR. Intermediate pass results remain private
+        // to this construction, while everything the session can later execute is checked once in
+        // its final form. Raw specialization and substitution bodies are checked separately when
+        // created because other passes consume them before this point.
+        #[cfg(any(debug_assertions, test))]
+        {
+            for body in functions.iter().flatten() {
+                mir::verify::verify_function(body, env);
+            }
+            for specialization in &specializations {
+                mir::verify::verify_function(&specialization.body, env);
+            }
+        }
 
         Self {
             functions,

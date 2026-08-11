@@ -46,11 +46,12 @@ string accumulate // forward an overwritten string into its self-prefixed format
 devirtualize      // final dictionary-entry callees exposed too late for a fold round
 dce               // on every body, not only a changed one
 stack markers     // drop a mark duplicating one already held, and restores that pop nothing
-finish            // restores canonical form and re-verifies
+finish            // restores canonical form without exposing the intermediate body
 ```
 
 Then `MirArtifacts::optimize` drains the specializations those rounds requested as a worklist, since
-optimizing a specialization may request more.
+optimizing a specialization may request more. After whole-module dead-evidence cleanup, it verifies
+every final declared and specialized body exactly once before installing the optimized artifact.
 
 **Why the rounds.** Specialization makes a generic callee concrete, inlining copies it and binds its
 dictionary parameters to constants, folding resolves the callee's `dict_entry`s into known functions,
@@ -71,9 +72,11 @@ the outer loop. Work per function is a product of named constants.
 
 Four rules, each of which cost a measurement to establish. They apply to any new pass.
 
-1. **A pass that opens its own `FunctionEdit` pays for re-verification of the whole function, per
-   round.** Block merging as a driver step measured +3.9% of compile time; folded into the passes
-   that create the mergeable shapes, −6.6%.
+1. **Internal pass edits restore canonical form but do not cross a verification boundary.** The
+   optimizer owns every intermediate body, then verifies final artifacts once after whole-module
+   cleanup. Raw lowering, generated specialization/substitution inputs consumed by another pass,
+   and final optimized artifacts remain checked boundaries. Keep related canonical cleanup in the
+   pass that creates it to avoid another body decomposition and reconstruction.
 2. **A rewrite that cannot enable another rewrite must not grant a round.** `Folded` carries
    `warrants_another_round` for this. Devirtualization sets it false: the callees a dictionary entry
    resolves to are overwhelmingly natives, which cannot be inlined and only fold with known
@@ -487,8 +490,10 @@ one of them was found by reading generated MIR instead.
 
 ## Invariants
 
-- `verify_function` passes on every function a pass produces, under the same debug/test gating as
-  today. It is the primary safety net for every rewrite.
+- `verify_function` passes on raw lowering and generated optimizer inputs before another pass
+  consumes them, then on every final declared and specialized optimized body after whole-module
+  cleanup, under debug/test gating. Intermediate pass results never escape the optimizer. This is
+  the primary safety net for every rewrite without repeating whole-function dataflow at every pass.
 - Optimization never changes a program's observable result or its source-failure behaviour. It may
   change fuel and call-depth consumption, which are sandbox policy rather than source semantics.
 - **A rewrite must make progress.** A pass may not report having changed something when its rewrite

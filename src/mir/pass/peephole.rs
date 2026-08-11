@@ -16,7 +16,6 @@ use crate::{
         edit::FunctionEdit,
         terminator::{Terminator, TerminatorKind},
     },
-    module::ModuleEnv,
 };
 
 struct BoolStore {
@@ -45,7 +44,7 @@ struct BooleanMaterialization {
 ///
 /// The replacement stores `condition` directly when the true arm stores `true`, or stores
 /// `comp_eq condition false` for inverse polarity, then jumps to `join`.
-pub(crate) fn materialize_boolean_results(func: &Function, env: ModuleEnv<'_>) -> Option<Function> {
+pub(crate) fn materialize_boolean_results(func: &Function) -> Option<Function> {
     let rewrites: Vec<_> = func
         .blocks()
         .filter_map(|block| plan_boolean_materialization(func, block))
@@ -79,7 +78,7 @@ pub(crate) fn materialize_boolean_results(func: &Function, env: ModuleEnv<'_>) -
     }
     edit.remove_unreachable_blocks();
     edit.merge_blocks_into_predecessors();
-    Some(edit.finish(env))
+    Some(edit.finish_unverified())
 }
 
 fn plan_boolean_materialization(func: &Function, block: BlockId) -> Option<BooleanMaterialization> {
@@ -219,7 +218,7 @@ mod tests {
         let session = CompilerSession::new();
         let env = session.module_env();
         let source = boolean_materialization(true);
-        let optimized = super::materialize_boolean_results(&source, env)
+        let optimized = super::materialize_boolean_results(&source)
             .expect("the materialization diamond should be rewritten");
         let rendered = optimized.format_with(&env).to_string();
 
@@ -245,7 +244,7 @@ mod tests {
         let session = CompilerSession::new();
         let env = session.module_env();
         let source = boolean_materialization(false);
-        let optimized = super::materialize_boolean_results(&source, env)
+        let optimized = super::materialize_boolean_results(&source)
             .expect("the materialization diamond should be rewritten");
         let rendered = optimized.format_with(&env).to_string();
 
@@ -295,6 +294,6 @@ mod tests {
             .operands[0] = mir::Value::Parameter(crate::mir::ParameterId::from_index(0));
         let altered = altered.finish(env);
 
-        assert!(super::materialize_boolean_results(&altered, env).is_none());
+        assert!(super::materialize_boolean_results(&altered).is_none());
     }
 }

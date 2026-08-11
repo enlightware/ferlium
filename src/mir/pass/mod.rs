@@ -9,8 +9,10 @@
 //! The MIR optimization passes and the driver that runs them.
 //!
 //! A function is opened with [`FunctionEdit`](crate::mir::edit::FunctionEdit), rewritten in place,
-//! and closed again — which restores canonical form and re-verifies it. The driver alternates
-//! folding and inlining for a bounded number of rounds, because the two feed each other: inlining
+//! and closed again to restore canonical form. Internal pass transitions deliberately skip global
+//! verification; [`MirArtifacts`](crate::compiler::artifacts::MirArtifacts) verifies every final
+//! body once after the whole-module cleanup. The driver alternates folding and inlining for a
+//! bounded number of rounds, because the two feed each other: inlining
 //! binds a callee's dictionary parameters to constants, folding then resolves the callee's
 //! `dict_entry`s into known function places, and the calls that become direct are new candidates
 //! for both. Fold first within a round — it is cheap, it is what makes arguments known, and it
@@ -19,8 +21,8 @@
 //! Both passes **merge** jump-joined blocks before closing their own edit, because both leave them:
 //! inlining splits every call site's block whether or not the callee needed it, and folding turns a
 //! `condbr` on a known condition into a jump. Merging belongs inside each pass rather than as a
-//! round of its own — a separate open-and-verify cycle measured *more* expensive than the merge
-//! saves, since closing an edit re-verifies the whole function.
+//! round of its own — keeping canonical cleanup with the rewrite that creates it avoids another
+//! body decomposition and reconstruction.
 //!
 //! Optimization terminates on three independent bounds: the dataflow lattice is monotone within a
 //! run, inlining is bounded by its growth budget and the non-recursive restriction, and
@@ -54,7 +56,7 @@ pub(crate) use monomorphize::Specializations;
 
 use crate::{
     compiler::{CompilerSession, MirOptimization},
-    mir::{Function, edit::FunctionEdit},
+    mir::Function,
     module::{ModuleEnv, ModuleId},
 };
 
@@ -138,7 +140,7 @@ pub(crate) fn optimize_function(
         // inliner prices it against its growth budget, and two calls whose only difference was
         // which copy of an entry they named become one expression for the pass above.
         let source = current.as_ref().unwrap_or(function);
-        if let Some(merged) = cse::eliminate_common_subexpressions(source, env) {
+        if let Some(merged) = cse::eliminate_common_subexpressions(source) {
             current = Some(merged);
             changed = true;
         }
@@ -165,7 +167,7 @@ pub(crate) fn optimize_function(
     // one above sees the `dict_entry` reads a generic body starts with, most of which folding and
     // devirtualization have resolved by the time this one runs.
     let source = current.as_ref().unwrap_or(function);
-    if let Some(merged) = cse::eliminate_common_subexpressions(source, env) {
+    if let Some(merged) = cse::eliminate_common_subexpressions(source) {
         current = Some(merged);
     }
     // Folding, specialization and inlining can expose storage transfers after the last pre-inline
@@ -178,14 +180,14 @@ pub(crate) fn optimize_function(
     // compare that slot with `true` and branch again. Forward the known edge information while
     // retaining any stack restoration at the join. DCE below then removes the dead slot/stores.
     let source = current.as_ref().unwrap_or(function);
-    if let Some(forwarded) = branch_forward::forward_boolean_branches(source, env) {
+    if let Some(forwarded) = branch_forward::forward_boolean_branches(source) {
         current = Some(forwarded);
     }
     // A predicate returned as a value often lowers to a tiny diamond whose arms only store opposite
     // boolean constants to the same destination. Collapse that materialization before DCE cleans up
     // any now-unused boolean storage and stranded blocks.
     let source = current.as_ref().unwrap_or(function);
-    if let Some(materialized) = peephole::materialize_boolean_results(source, env) {
+    if let Some(materialized) = peephole::materialize_boolean_results(source) {
         current = Some(materialized);
     }
     // Formatting a self-prefixed assignment through an empty builder copies the complete growing
@@ -206,7 +208,7 @@ pub(crate) fn optimize_function(
     // semantic clones and drops into representation copies and nothing, leaving the dictionary
     // entries they read unread — so "nothing changed it, so nothing is dead" no longer holds.
     let source = current.as_ref().unwrap_or(function);
-    if let Some(cleaned) = dce::remove_dead_storage(source, env) {
+    if let Some(cleaned) = dce::remove_dead_storage(source) {
         current = Some(cleaned);
     }
     // Last, after DCE has emptied every bracket it can. What remains reclaims real storage and
@@ -214,13 +216,13 @@ pub(crate) fn optimize_function(
     // needs. Only a marker duplicating one already held, and a restore to the frontier already
     // current, are removed here — neither carries information the surviving marker does not.
     let source = current.as_ref().unwrap_or(function);
-    if let Some(canonicalized) = stack_region::remove_redundant_stack_markers(source, env) {
+    if let Some(canonicalized) = stack_region::remove_redundant_stack_markers(source) {
         current = Some(canonicalized);
     }
-    // An unchanged function is still opened and closed, which re-verifies it and is the identity.
+    // Final artifact verification covers unchanged functions too, so cloning is the identity here.
     match current {
         Some(rewritten) => rewritten,
-        None => FunctionEdit::new(function.clone()).finish(env),
+        None => function.clone(),
     }
 }
 

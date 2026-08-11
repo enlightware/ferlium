@@ -141,8 +141,9 @@ impl Function {
         &self.blocks[block.as_index()]
     }
 
-    /// Decomposes the function for editing. Canonical form is restored by
-    /// [`FunctionEdit::finish`](crate::mir::edit::FunctionEdit::finish), which re-verifies it.
+    /// Decomposes the function for editing. Canonical form is restored by either the checked
+    /// [`FunctionEdit::finish`](crate::mir::edit::FunctionEdit::finish) boundary or the optimizer's
+    /// internal unchecked finish before final artifact verification.
     pub(crate) fn into_parts(
         self,
     ) -> (
