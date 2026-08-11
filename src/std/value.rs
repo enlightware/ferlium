@@ -40,7 +40,7 @@ use crate::{
         hash::hasher_type,
         logic::bool_type,
         math::int_type,
-        string::string_type,
+        string::{static_str_type, string_type},
     },
     types::{
         effects::{EffType, PrimitiveEffect},
@@ -637,12 +637,27 @@ pub(crate) fn function_value_method_name(method_index: TraitMethodIndex) -> ustr
     ustr::Ustr::from(FUNCTION_VALUE_METHOD_NAMES[usize::from(method_index)])
 }
 
+#[derive(Clone, Copy)]
+enum TextPiece {
+    Static(NodeId),
+    String(NodeId),
+}
+
 fn alloc_synth_node(arena: &mut NodeArena, kind: hir::NodeKind, ty: Type) -> NodeId {
     arena.alloc(hir::Node::new(
         kind,
         ty,
         EffType::empty(),
         Location::new_synthesized(),
+    ))
+}
+
+fn static_str_node(arena: &mut NodeArena, value: &str, span: Location) -> NodeId {
+    arena.alloc(hir::Node::new(
+        hir::hir_syn::static_str(value),
+        static_str_type(),
+        EffType::empty(),
+        span,
     ))
 }
 
@@ -798,10 +813,10 @@ pub(crate) fn function_value_method_function(
         }
         VALUE_HASH_METHOD_INDEX => {
             let hasher_ty = hasher_type();
-            let hasher_write_string = solver.get_local_or_import_function(
+            let hasher_write_static_str = solver.get_local_or_import_function(
                 span,
                 &module::Path::single_str("std"),
-                crate::ustr("hasher_write_string"),
+                crate::ustr("hasher_write_static_str"),
             )?;
             let fn_ty = FnType::new(
                 vec![
@@ -828,14 +843,13 @@ pub(crate) fn function_value_method_function(
                 ),
             ];
             let state = alloc_synth_node(&mut arena, load_local(state_id), hasher_ty);
-            let marker =
-                materialize_static_string(&mut arena, &mut locals, solver, "<function>", span)?;
+            let marker = static_str_node(&mut arena, "<function>", span);
             let write = static_apply_generated_with_locals(
                 &mut arena,
                 &mut locals,
                 solver,
-                hasher_write_string,
-                [(state, hasher_ty), (marker, string_type())],
+                hasher_write_static_str,
+                [(state, hasher_ty), (marker, static_str_type())],
                 unit_ty,
                 span,
             )?;
@@ -900,15 +914,25 @@ fn derive_structural_text_body(
         &module::Path::single_str("std"),
         crate::ustr("string_push_str"),
     )?;
+    let string_push_static_str = ctx.get_local_or_import_function(
+        span,
+        &module::Path::single_str("std"),
+        crate::ustr("string_push_static_str"),
+    )?;
 
     macro_rules! string_lit {
         ($arena:expr, $locals:expr, $text:expr) => {
             materialize_static_string($arena, $locals, ctx.solver, $text, span)?
         };
     }
+    macro_rules! static_piece {
+        ($arena:expr, $text:expr) => {
+            TextPiece::Static(static_str_node($arena, $text, span))
+        };
+    }
     macro_rules! build_text {
         ($arena:expr, $locals:expr, $value:expr, $value_ty:expr) => {
-            value_method_call_node(
+            TextPiece::String(value_method_call_node(
                 ctx,
                 ValueMethod {
                     trait_id,
@@ -919,14 +943,14 @@ fn derive_structural_text_body(
                 $arena,
                 $locals,
                 vec![$value],
-            )
+            )?)
         };
     }
     let build_string_block = |arena: &mut NodeArena,
                               solver: &mut TraitSolver<'_>,
                               locals: &mut Vec<LocalDecl>,
                               initial: &str,
-                              mut pieces: Vec<NodeId>|
+                              mut pieces: Vec<TextPiece>|
      -> Result<NodeId, InternalCompilationError> {
         let initial_value = materialize_static_string(arena, locals, solver, initial, span)?;
         let next_local = locals.len();
@@ -942,15 +966,26 @@ fn derive_structural_text_body(
         statements.push(n(arena, store_rendered, Type::unit()));
         for piece in pieces.drain(..) {
             let target = n(arena, load_local(l_rendered_id), string_type());
-            let push = static_apply_generated_with_locals(
-                arena,
-                locals,
-                solver,
-                string_push_str,
-                [(target, string_type()), (piece, string_type())],
-                Type::unit(),
-                span,
-            )?;
+            let push = match piece {
+                TextPiece::Static(piece) => static_apply_generated_with_locals(
+                    arena,
+                    locals,
+                    solver,
+                    string_push_static_str,
+                    [(target, string_type()), (piece, static_str_type())],
+                    Type::unit(),
+                    span,
+                )?,
+                TextPiece::String(piece) => static_apply_generated_with_locals(
+                    arena,
+                    locals,
+                    solver,
+                    string_push_str,
+                    [(target, string_type()), (piece, string_type())],
+                    Type::unit(),
+                    span,
+                )?,
+            };
             statements.push(push);
         }
         let rendered = n(arena, take_local_value(l_rendered_id), string_type());
@@ -972,17 +1007,16 @@ fn derive_structural_text_body(
             let mut pieces = Vec::with_capacity(member_tys.len() * 2 + 1);
             for (index, member_ty) in member_tys.into_iter().enumerate() {
                 if index > 0 {
-                    pieces.push(string_lit!(arena, &mut locals, ", "));
+                    pieces.push(static_piece!(arena, ", "));
                 }
                 let member = n(
                     arena,
                     project(load_self, ProjectionIndex::from_index(index)),
                     member_ty,
                 );
-                let member_str = build_text!(arena, &mut locals, member, member_ty)?;
-                pieces.push(member_str);
+                pieces.push(build_text!(arena, &mut locals, member, member_ty));
             }
-            pieces.push(string_lit!(arena, &mut locals, ")"));
+            pieces.push(static_piece!(arena, ")"));
             Some((
                 build_string_block(arena, ctx.solver, &mut locals, "(", pieces)?,
                 locals,
@@ -996,19 +1030,18 @@ fn derive_structural_text_body(
             let mut pieces = Vec::with_capacity(fields.len() * 4 + 1);
             for (index, (name, member_ty)) in fields.into_iter().enumerate() {
                 if index > 0 {
-                    pieces.push(string_lit!(arena, &mut locals, ", "));
+                    pieces.push(static_piece!(arena, ", "));
                 }
-                pieces.push(string_lit!(arena, &mut locals, name.as_str()));
-                pieces.push(string_lit!(arena, &mut locals, ": "));
+                pieces.push(static_piece!(arena, name.as_str()));
+                pieces.push(static_piece!(arena, ": "));
                 let member = n(
                     arena,
                     project(load_self, ProjectionIndex::from_index(index)),
                     member_ty,
                 );
-                let member_str = build_text!(arena, &mut locals, member, member_ty)?;
-                pieces.push(member_str);
+                pieces.push(build_text!(arena, &mut locals, member, member_ty));
             }
-            pieces.push(string_lit!(arena, &mut locals, " }"));
+            pieces.push(static_piece!(arena, " }"));
             Some((
                 build_string_block(arena, ctx.solver, &mut locals, "{ ", pieces)?,
                 locals,
@@ -1028,7 +1061,7 @@ fn derive_structural_text_body(
                 } else {
                     let self_value = n(arena, load_local(l_self_id), ty);
                     let payload = variant_payload_project(arena, self_value, payload_ty);
-                    let payload_str = build_text!(arena, &mut locals, payload, payload_ty)?;
+                    let payload_str = build_text!(arena, &mut locals, payload, payload_ty);
                     if payload_ty.data().is_tuple() {
                         build_string_block(
                             arena,
@@ -1038,7 +1071,7 @@ fn derive_structural_text_body(
                             vec![payload_str],
                         )?
                     } else {
-                        let close = string_lit!(arena, &mut locals, ")");
+                        let close = static_piece!(arena, ")");
                         build_string_block(
                             arena,
                             ctx.solver,
@@ -1073,16 +1106,16 @@ fn derive_structural_text_body(
                     let mut pieces = Vec::with_capacity(member_tys.len() * 2 + 1);
                     for (index, member_ty) in member_tys.into_iter().enumerate() {
                         if index > 0 {
-                            pieces.push(string_lit!(arena, &mut locals, ", "));
+                            pieces.push(static_piece!(arena, ", "));
                         }
                         let member = n(
                             arena,
                             project(load_self, ProjectionIndex::from_index(index)),
                             member_ty,
                         );
-                        pieces.push(build_text!(arena, &mut locals, member, member_ty)?);
+                        pieces.push(build_text!(arena, &mut locals, member, member_ty));
                     }
-                    pieces.push(string_lit!(arena, &mut locals, ")"));
+                    pieces.push(static_piece!(arena, ")"));
                     build_string_block(
                         arena,
                         ctx.solver,
@@ -1097,18 +1130,18 @@ fn derive_structural_text_body(
                     let mut pieces = Vec::with_capacity(fields.len() * 4 + 1);
                     for (index, (name, member_ty)) in fields.into_iter().enumerate() {
                         if index > 0 {
-                            pieces.push(string_lit!(arena, &mut locals, ", "));
+                            pieces.push(static_piece!(arena, ", "));
                         }
-                        pieces.push(string_lit!(arena, &mut locals, name.as_str()));
-                        pieces.push(string_lit!(arena, &mut locals, ": "));
+                        pieces.push(static_piece!(arena, name.as_str()));
+                        pieces.push(static_piece!(arena, ": "));
                         let member = n(
                             arena,
                             project(load_self, ProjectionIndex::from_index(index)),
                             member_ty,
                         );
-                        pieces.push(build_text!(arena, &mut locals, member, member_ty)?);
+                        pieces.push(build_text!(arena, &mut locals, member, member_ty));
                     }
-                    pieces.push(string_lit!(arena, &mut locals, " }"));
+                    pieces.push(static_piece!(arena, " }"));
                     build_string_block(
                         arena,
                         ctx.solver,
@@ -1129,7 +1162,7 @@ fn derive_structural_text_body(
                         } else {
                             let self_value = n(arena, load_local(l_self_id), ty);
                             let payload = variant_payload_project(arena, self_value, payload_ty);
-                            let payload_str = build_text!(arena, &mut locals, payload, payload_ty)?;
+                            let payload_str = build_text!(arena, &mut locals, payload, payload_ty);
                             if payload_ty.data().is_tuple() {
                                 build_string_block(
                                     arena,
@@ -1139,7 +1172,7 @@ fn derive_structural_text_body(
                                     vec![payload_str],
                                 )?
                             } else {
-                                let close = string_lit!(arena, &mut locals, ")");
+                                let close = static_piece!(arena, ")");
                                 build_string_block(
                                     arena,
                                     ctx.solver,
@@ -1161,7 +1194,7 @@ fn derive_structural_text_body(
                 _ => {
                     drop(shape_data);
                     let load_self = n(arena, load_local(l_self_id), shape_ty);
-                    let payload_str = build_text!(arena, &mut locals, load_self, shape_ty)?;
+                    let payload_str = build_text!(arena, &mut locals, load_self, shape_ty);
                     build_string_block(
                         arena,
                         ctx.solver,
@@ -1473,10 +1506,10 @@ fn derive_value_hash_body(
 
     let unit_ty = Type::unit();
     let hasher_ty = hasher_type();
-    let hasher_write_string = ctx.get_local_or_import_function(
+    let hasher_write_static_str = ctx.get_local_or_import_function(
         span,
         &module::Path::single_str("std"),
-        crate::ustr("hasher_write_string"),
+        crate::ustr("hasher_write_static_str"),
     )?;
 
     let mut locals = vec![
@@ -1492,19 +1525,19 @@ fn derive_value_hash_body(
     let l_self_id = LocalDeclId::from_index(0);
     let l_state_id = LocalDeclId::from_index(1);
 
-    let build_write_string = |arena: &mut NodeArena,
-                              solver: &mut TraitSolver<'_>,
-                              locals: &mut Vec<LocalDecl>,
-                              value: &str|
+    let build_write_static_str = |arena: &mut NodeArena,
+                                  solver: &mut TraitSolver<'_>,
+                                  locals: &mut Vec<LocalDecl>,
+                                  value: &str|
      -> Result<NodeId, InternalCompilationError> {
         let state = n(arena, load_local(l_state_id), hasher_ty);
-        let value = materialize_static_string(arena, locals, solver, value, span)?;
+        let value = static_str_node(arena, value, span);
         static_apply_generated_with_locals(
             arena,
             locals,
             solver,
-            hasher_write_string,
-            [(state, hasher_ty), (value, string_type())],
+            hasher_write_static_str,
+            [(state, hasher_ty), (value, static_str_type())],
             unit_ty,
             span,
         )
@@ -1552,7 +1585,7 @@ fn derive_value_hash_body(
 
             for (tag, payload_ty) in $variants.into_iter() {
                 let tag_val = LiteralValue::new_native(ustr_to_isize(tag));
-                let mut statements = vec![build_write_string(
+                let mut statements = vec![build_write_static_str(
                     $arena,
                     ctx.solver,
                     &mut locals,
@@ -1630,7 +1663,7 @@ fn derive_value_hash_body(
         Function(_) => {
             drop(ty_data);
             let statements = vec![
-                build_write_string(arena, ctx.solver, &mut locals, "<function>")?,
+                build_write_static_str(arena, ctx.solver, &mut locals, "<function>")?,
                 n(arena, native(()), unit_ty),
             ];
             Some((n(arena, block(statements), unit_ty), locals))
@@ -1638,7 +1671,7 @@ fn derive_value_hash_body(
         Subscript(_) => {
             drop(ty_data);
             let statements = vec![
-                build_write_string(arena, ctx.solver, &mut locals, "<subscript>")?,
+                build_write_static_str(arena, ctx.solver, &mut locals, "<subscript>")?,
                 n(arena, native(()), unit_ty),
             ];
             Some((n(arena, block(statements), unit_ty), locals))

@@ -1211,33 +1211,27 @@ fn std::Value<(std::int, std::bool)>::to_string#impl:8f2e215f(%p0: @arg let (int
     %r0 = alloca string
     %r1 = alloca string
     %r2 = alloca string
-    %r3 = alloca string
-    %r4 = alloca string
-    %r5 = alloca StaticStr
-    store @c0 to %r5
-    call std::string_from_static(%r5, %r0)
-    %r6 = subfield @c2 from %p0
-    call std::Value<std::int>::to_string#impl:a5db1d9f(%r6, %r1)
-    %r7 = alloca ()
-    call std::string_push_str(%r0, %r1, %r7)
+    %r3 = alloca StaticStr
+    store @c0 to %r3
+    call std::string_from_static(%r3, %r0)
+    %r4 = subfield @c2 from %p0
+    call std::Value<std::int>::to_string#impl:a5db1d9f(%r4, %r1)
+    %r5 = alloca ()
+    call std::string_push_str(%r0, %r1, %r5)
     drop string %r1 via std::Value<std::string>::drop#impl:1d429675
-    %r8 = alloca StaticStr
-    store @c3 to %r8
-    call std::string_from_static(%r8, %r2)
+    %r6 = alloca StaticStr
+    store @c3 to %r6
+    %r7 = alloca ()
+    call std::string_push_static_str(%r0, %r6, %r7)
+    %r8 = subfield @c4 from %p0
+    call std::Value<std::bool>::to_string#impl:044f2674(%r8, %r2)
     %r9 = alloca ()
     call std::string_push_str(%r0, %r2, %r9)
     drop string %r2 via std::Value<std::string>::drop#impl:1d429675
-    %r10 = subfield @c4 from %p0
-    call std::Value<std::bool>::to_string#impl:044f2674(%r10, %r3)
+    %r10 = alloca StaticStr
+    store @c5 to %r10
     %r11 = alloca ()
-    call std::string_push_str(%r0, %r3, %r11)
-    drop string %r3 via std::Value<std::string>::drop#impl:1d429675
-    %r12 = alloca StaticStr
-    store @c5 to %r12
-    call std::string_from_static(%r12, %r4)
-    %r13 = alloca ()
-    call std::string_push_str(%r0, %r4, %r13)
-    drop string %r4 via std::Value<std::string>::drop#impl:1d429675
+    call std::string_push_static_str(%r0, %r10, %r11)
     move %r0 to %p1
     ret
 "#,
@@ -1669,21 +1663,18 @@ fn std::Value<(std::int,)>::to_string#impl:30b07f9c(%p0: @arg let (int,), %p1: @
   b0:
     %r0 = alloca string
     %r1 = alloca string
-    %r2 = alloca string
-    %r3 = alloca StaticStr
-    store @c0 to %r3
-    call std::string_from_static(%r3, %r0)
-    %r4 = subfield @c2 from %p0
-    call std::Value<std::int>::to_string#impl:a5db1d9f(%r4, %r1)
-    %r5 = alloca ()
-    call std::string_push_str(%r0, %r1, %r5)
+    %r2 = alloca StaticStr
+    store @c0 to %r2
+    call std::string_from_static(%r2, %r0)
+    %r3 = subfield @c2 from %p0
+    call std::Value<std::int>::to_string#impl:a5db1d9f(%r3, %r1)
+    %r4 = alloca ()
+    call std::string_push_str(%r0, %r1, %r4)
     drop string %r1 via std::Value<std::string>::drop#impl:1d429675
-    %r6 = alloca StaticStr
-    store @c3 to %r6
-    call std::string_from_static(%r6, %r2)
-    %r7 = alloca ()
-    call std::string_push_str(%r0, %r2, %r7)
-    drop string %r2 via std::Value<std::string>::drop#impl:1d429675
+    %r5 = alloca StaticStr
+    store @c3 to %r5
+    %r6 = alloca ()
+    call std::string_push_static_str(%r0, %r5, %r6)
     move %r0 to %p1
     ret
 "#,
@@ -1942,61 +1933,43 @@ fn std::Value<<test>::A>::to_string#impl:78412598(%p0: @arg let A, %p1: @ret str
     %r0 = alloca string
     %r1 = alloca string
     %r2 = alloca string
-    %r3 = alloca string
-    %r4 = alloca string
-    %r5 = alloca string
-    %r6 = alloca string
-    %r7 = alloca string
-    %r8 = alloca string
-    %r9 = alloca StaticStr
-    store @c0 to %r9
-    call std::string_from_static(%r9, %r0)
-    %r10 = alloca StaticStr
-    store @c2 to %r10
-    call std::string_from_static(%r10, %r1)
-    %r11 = alloca ()
-    call std::string_push_str(%r0, %r1, %r11)
+    %r3 = alloca StaticStr
+    store @c0 to %r3
+    call std::string_from_static(%r3, %r0)
+    %r4 = alloca StaticStr
+    store @c2 to %r4
+    %r5 = alloca ()
+    call std::string_push_static_str(%r0, %r4, %r5)
+    %r6 = alloca StaticStr
+    store @c3 to %r6
+    %r7 = alloca ()
+    call std::string_push_static_str(%r0, %r6, %r7)
+    %r8 = subfield @c4 from %p0
+    call std::Value<std::int>::to_string#impl:a5db1d9f(%r8, %r1)
+    %r9 = alloca ()
+    call std::string_push_str(%r0, %r1, %r9)
     drop string %r1 via std::Value<std::string>::drop#impl:1d429675
+    %r10 = alloca StaticStr
+    store @c5 to %r10
+    %r11 = alloca ()
+    call std::string_push_static_str(%r0, %r10, %r11)
     %r12 = alloca StaticStr
-    store @c3 to %r12
-    call std::string_from_static(%r12, %r2)
+    store @c6 to %r12
     %r13 = alloca ()
-    call std::string_push_str(%r0, %r2, %r13)
-    drop string %r2 via std::Value<std::string>::drop#impl:1d429675
-    %r14 = subfield @c4 from %p0
-    call std::Value<std::int>::to_string#impl:a5db1d9f(%r14, %r3)
+    call std::string_push_static_str(%r0, %r12, %r13)
+    %r14 = alloca StaticStr
+    store @c3 to %r14
     %r15 = alloca ()
-    call std::string_push_str(%r0, %r3, %r15)
-    drop string %r3 via std::Value<std::string>::drop#impl:1d429675
-    %r16 = alloca StaticStr
-    store @c5 to %r16
-    call std::string_from_static(%r16, %r4)
+    call std::string_push_static_str(%r0, %r14, %r15)
+    %r16 = subfield @c7 from %p0
+    call std::Value<std::int>::to_string#impl:a5db1d9f(%r16, %r2)
     %r17 = alloca ()
-    call std::string_push_str(%r0, %r4, %r17)
-    drop string %r4 via std::Value<std::string>::drop#impl:1d429675
+    call std::string_push_str(%r0, %r2, %r17)
+    drop string %r2 via std::Value<std::string>::drop#impl:1d429675
     %r18 = alloca StaticStr
-    store @c6 to %r18
-    call std::string_from_static(%r18, %r5)
+    store @c8 to %r18
     %r19 = alloca ()
-    call std::string_push_str(%r0, %r5, %r19)
-    drop string %r5 via std::Value<std::string>::drop#impl:1d429675
-    %r20 = alloca StaticStr
-    store @c3 to %r20
-    call std::string_from_static(%r20, %r6)
-    %r21 = alloca ()
-    call std::string_push_str(%r0, %r6, %r21)
-    drop string %r6 via std::Value<std::string>::drop#impl:1d429675
-    %r22 = subfield @c7 from %p0
-    call std::Value<std::int>::to_string#impl:a5db1d9f(%r22, %r7)
-    %r23 = alloca ()
-    call std::string_push_str(%r0, %r7, %r23)
-    drop string %r7 via std::Value<std::string>::drop#impl:1d429675
-    %r24 = alloca StaticStr
-    store @c8 to %r24
-    call std::string_from_static(%r24, %r8)
-    %r25 = alloca ()
-    call std::string_push_str(%r0, %r8, %r25)
-    drop string %r8 via std::Value<std::string>::drop#impl:1d429675
+    call std::string_push_static_str(%r0, %r18, %r19)
     move %r0 to %p1
     ret
 
@@ -2103,61 +2076,43 @@ fn std::Value<<test>::Wrapper>::to_string#impl:7f6f6750(%p0: @arg let Wrapper, %
     %r0 = alloca string
     %r1 = alloca string
     %r2 = alloca string
-    %r3 = alloca string
-    %r4 = alloca string
-    %r5 = alloca string
-    %r6 = alloca string
-    %r7 = alloca string
-    %r8 = alloca string
-    %r9 = alloca StaticStr
-    store @c0 to %r9
-    call std::string_from_static(%r9, %r0)
-    %r10 = alloca StaticStr
-    store @c2 to %r10
-    call std::string_from_static(%r10, %r1)
-    %r11 = alloca ()
-    call std::string_push_str(%r0, %r1, %r11)
+    %r3 = alloca StaticStr
+    store @c0 to %r3
+    call std::string_from_static(%r3, %r0)
+    %r4 = alloca StaticStr
+    store @c2 to %r4
+    %r5 = alloca ()
+    call std::string_push_static_str(%r0, %r4, %r5)
+    %r6 = alloca StaticStr
+    store @c3 to %r6
+    %r7 = alloca ()
+    call std::string_push_static_str(%r0, %r6, %r7)
+    %r8 = subfield @c4 from %p0
+    call <test>::std::Value<<test>::A>::to_string#impl:78412598(%r8, %r1)
+    %r9 = alloca ()
+    call std::string_push_str(%r0, %r1, %r9)
     drop string %r1 via std::Value<std::string>::drop#impl:1d429675
+    %r10 = alloca StaticStr
+    store @c5 to %r10
+    %r11 = alloca ()
+    call std::string_push_static_str(%r0, %r10, %r11)
     %r12 = alloca StaticStr
-    store @c3 to %r12
-    call std::string_from_static(%r12, %r2)
+    store @c6 to %r12
     %r13 = alloca ()
-    call std::string_push_str(%r0, %r2, %r13)
-    drop string %r2 via std::Value<std::string>::drop#impl:1d429675
-    %r14 = subfield @c4 from %p0
-    call <test>::std::Value<<test>::A>::to_string#impl:78412598(%r14, %r3)
+    call std::string_push_static_str(%r0, %r12, %r13)
+    %r14 = alloca StaticStr
+    store @c3 to %r14
     %r15 = alloca ()
-    call std::string_push_str(%r0, %r3, %r15)
-    drop string %r3 via std::Value<std::string>::drop#impl:1d429675
-    %r16 = alloca StaticStr
-    store @c5 to %r16
-    call std::string_from_static(%r16, %r4)
+    call std::string_push_static_str(%r0, %r14, %r15)
+    %r16 = subfield @c7 from %p0
+    call <test>::std::Value<<test>::A>::to_string#impl:78412598(%r16, %r2)
     %r17 = alloca ()
-    call std::string_push_str(%r0, %r4, %r17)
-    drop string %r4 via std::Value<std::string>::drop#impl:1d429675
+    call std::string_push_str(%r0, %r2, %r17)
+    drop string %r2 via std::Value<std::string>::drop#impl:1d429675
     %r18 = alloca StaticStr
-    store @c6 to %r18
-    call std::string_from_static(%r18, %r5)
+    store @c8 to %r18
     %r19 = alloca ()
-    call std::string_push_str(%r0, %r5, %r19)
-    drop string %r5 via std::Value<std::string>::drop#impl:1d429675
-    %r20 = alloca StaticStr
-    store @c3 to %r20
-    call std::string_from_static(%r20, %r6)
-    %r21 = alloca ()
-    call std::string_push_str(%r0, %r6, %r21)
-    drop string %r6 via std::Value<std::string>::drop#impl:1d429675
-    %r22 = subfield @c7 from %p0
-    call <test>::std::Value<<test>::A>::to_string#impl:78412598(%r22, %r7)
-    %r23 = alloca ()
-    call std::string_push_str(%r0, %r7, %r23)
-    drop string %r7 via std::Value<std::string>::drop#impl:1d429675
-    %r24 = alloca StaticStr
-    store @c8 to %r24
-    call std::string_from_static(%r24, %r8)
-    %r25 = alloca ()
-    call std::string_push_str(%r0, %r8, %r25)
-    drop string %r8 via std::Value<std::string>::drop#impl:1d429675
+    call std::string_push_static_str(%r0, %r18, %r19)
     move %r0 to %p1
     ret
 "#

@@ -19,7 +19,7 @@ use crate::{
     std::{
         core_traits_names::{CAST_TRAIT_NAME, INSPECT_TRAIT_NAME, VALUE_TRAIT_NAME},
         math::int_type,
-        string::String,
+        string::{StaticStr, String, static_str_type},
         value::{
             native_layout_associated_consts, native_value_clone_function,
             native_value_drop_function,
@@ -91,6 +91,10 @@ impl Hasher {
 
     pub fn write_string(&mut self, s: &String) {
         self.write_bytes(s.as_ref().as_bytes());
+    }
+
+    pub(crate) fn write_static_str(&mut self, s: &StaticStr) {
+        self.write_bytes(s.as_str().as_bytes());
     }
 
     pub fn write_hash(&mut self, h: &HashValue) {
@@ -329,6 +333,17 @@ pub fn add_to_module(to: &mut Module) {
             Hasher::write_string,
             ["hasher", "value"],
             "Write a string value into a hasher.",
+            no_effects(),
+        ),
+    );
+    to.add_function(
+        ustr("hasher_write_static_str"),
+        BinaryNativeFnMRN::description_with_in_ty(
+            Hasher::write_static_str,
+            ["hasher", "value"],
+            "Write a compiler constant string into a hasher.",
+            hasher_type(),
+            static_str_type(),
             no_effects(),
         ),
     );

@@ -382,53 +382,63 @@ fn generic_value_dictionary_for_function_type_is_compiler_provided() {
     );
 }
 
+fn mir_function<'a>(module: &'a str, header_fragment: &str) -> &'a str {
+    let start = module.find(header_fragment).unwrap_or_else(|| {
+        panic!("expected MIR function containing `{header_fragment}`:\n{module}")
+    });
+    let rest = &module[start..];
+    let end = rest.find("\nfn ").unwrap_or(rest.len());
+    &rest[..end]
+}
+
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn generated_value_to_string_materializes_string_pieces_as_cleanup_locals() {
+fn generated_value_to_string_appends_static_pieces_without_materializing_them() {
     let mut session = TestSession::new();
-    let module = session.compile_and_get_module(
+    let module = session.emit_mir(
         r#"
         struct Pair(int, int)
         to_string(Pair(1, 2))
         "#,
     );
+    let body = mir_function(&module, "fn std::Value<<test>::Pair>::to_string");
 
-    let mut saw_indirect_let_piece_local = false;
-    let mut saw_indirect_let_piece_immediate = false;
-    let mut saw_cleanup_block = false;
-    for (_, node) in module.hir_arena.iter() {
-        if let NodeKind::Block(block) = &node.kind
-            && !block.cleanup.is_empty()
-        {
-            saw_cleanup_block = true;
-        }
-        let NodeKind::StaticApply(app) = &node.kind else {
-            continue;
-        };
-        let Some(argument) = app.arguments.get(1) else {
-            continue;
-        };
-        if !matches!(argument.passing, ArgConvention::Let) {
-            continue;
-        }
-        match module.hir_arena[argument.value].kind {
-            NodeKind::LoadLocal(_) => saw_indirect_let_piece_local = true,
-            NodeKind::Immediate(_) => saw_indirect_let_piece_immediate = true,
-            _ => {}
-        }
-    }
+    assert_eq!(
+        body.matches("call std::string_from_static").count(),
+        1,
+        "only the initial builder string should be materialized:\n{body}"
+    );
+    assert_eq!(
+        body.matches("call std::string_push_static_str").count(),
+        2,
+        "tuple delimiter pieces should append as StaticStr:\n{body}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generated_value_hash_writes_static_markers_without_materializing_strings() {
+    let mut session = TestSession::new();
+    let module = session.emit_mir(
+        r#"
+        enum Flag { Off, On(int) }
+        let mut state = hasher_new();
+        hash(Flag::On(1), state)
+        "#,
+    );
+    let body = mir_function(&module, "fn std::Value<<test>::Flag>::hash");
 
     assert!(
-        saw_indirect_let_piece_local,
-        "generated indirect Let string pieces should be loaded from explicit temporaries"
+        body.contains("call std::hasher_write_static_str"),
+        "variant tags should be written as StaticStr:\n{body}"
     );
     assert!(
-        saw_cleanup_block,
-        "generated indirect Let string piece temporaries should use ordinary block cleanup"
+        !body.contains("call std::hasher_write_string"),
+        "generated hash markers should not materialize owned strings:\n{body}"
     );
     assert!(
-        !saw_indirect_let_piece_immediate,
-        "generated indirect Let string pieces should not remain immediate call arguments"
+        !body.contains("call std::string_from_static"),
+        "generated hash markers should not allocate strings:\n{body}"
     );
 }
 
