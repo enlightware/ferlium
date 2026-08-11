@@ -190,28 +190,33 @@ pub(crate) fn fold_function(
     // `condbr` also leaves its surviving target with a single predecessor, so merging follows the
     // prune, in this pass's own edit: a separate open-and-verify cycle for it costs more
     // than the merge saves.
-    // Naming a resolved callee directly. The operand shape is unchanged — the verifier accepts a
-    // function or a function place in a callee position — so this touches nothing but that one
-    // operand. The `dict_entry` that produced the place is usually left unread by the rewrite, and
-    // `dce.rs` removes it.
-    for devirtualized in devirtualizations {
-        let callee = mir::Value::Function(devirtualized.callee);
-        let block = edit.block_mut(devirtualized.site.block());
-        let operation = match devirtualized.site {
-            Site::Operation { index, .. } => &mut block.operations[index],
-            Site::Terminator { .. } => match &mut block.terminator.kind {
-                TerminatorKind::Invoke { operation, .. } => operation,
-                _ => unreachable!("planned against this block's invoke terminator"),
-            },
-        };
-        operation.operands[devirtualized.operand] = callee;
-    }
+    apply_devirtualizations(&mut edit, devirtualizations);
     edit.remove_unreachable_blocks();
     edit.merge_blocks_into_predecessors();
     Some(Folded {
         body: edit.finish(env),
         warrants_another_round,
     })
+}
+
+/// Names callees resolved through constant dictionary entries after the optimization rounds have
+/// settled.
+///
+/// Folding normally performs this rewrite while it already owns the dataflow analysis. Inlining can
+/// expose one last `dict_entry`/dispatch pair after the final round, however, and DCE can remove the
+/// entry only after this has made the dispatch direct.
+pub(crate) fn devirtualize_known_callees(func: &Function, env: ModuleEnv<'_>) -> Option<Function> {
+    if !may_have_devirtualization(func) {
+        return None;
+    }
+    let devirtualizations = plan_devirtualizations(func, env);
+    if devirtualizations.is_empty() {
+        return None;
+    }
+
+    let mut edit = FunctionEdit::new(func.clone());
+    apply_devirtualizations(&mut edit, devirtualizations);
+    Some(edit.finish(env))
 }
 
 /// Decides what to rewrite, without touching the function.
@@ -232,10 +237,9 @@ pub(crate) fn plan_folds(
 ///
 /// **Devirtualization rides along with folding rather than running as a pass of its own**, and the
 /// reason is entirely the dataflow analysis: resolving a callee needs exactly the analysis folding
-/// has already built, and that analysis *is* the cost. Run separately — even once at the end, even
-/// behind a syntactic pre-filter — it measured +18% of compile time, because nearly every function
-/// in a generic standard library has both a `dict_entry` and an indirect call, so the filter almost
-/// never fires and the analysis is paid twice. Riding along, it is free.
+/// has already built, and that analysis *is* the cost. Riding along is therefore the main path. The
+/// final devirtualization sweep below exists only for dictionary-entry callees exposed after the
+/// last fold round, behind a cheap syntactic pre-filter and before DCE removes the stranded entry.
 ///
 /// What it must not do is claim a *round*: see [`Folded::warrants_another_round`].
 fn plan_folds_and_devirtualizations(
@@ -254,6 +258,84 @@ fn plan_folds_and_devirtualizations(
         &mut Some(&mut devirtualizations),
     );
     (plan, devirtualizations)
+}
+
+fn plan_devirtualizations(func: &Function, env: ModuleEnv<'_>) -> Vec<Devirtualization> {
+    let analysis = dataflow::analyze(func, env);
+    let mut devirtualizations = Vec::new();
+    for block in func.blocks() {
+        let mut state = analysis.entry_state(block);
+        let basic_block = func.block(block);
+        for (index, operation) in basic_block.operations().iter().enumerate() {
+            if let Some((operand, callee)) = resolved_callee(operation, &state) {
+                devirtualizations.push(Devirtualization {
+                    site: Site::Operation { block, index },
+                    operand,
+                    callee,
+                });
+            }
+            analysis.step(func, env, operation, &mut state);
+        }
+        if let TerminatorKind::Invoke { operation, .. } = &basic_block.terminator().kind
+            && let Some((operand, callee)) = resolved_callee(operation, &state)
+        {
+            devirtualizations.push(Devirtualization {
+                site: Site::Terminator { block },
+                operand,
+                callee,
+            });
+        }
+    }
+    devirtualizations
+}
+
+fn may_have_devirtualization(func: &Function) -> bool {
+    let mut has_dict_entry = false;
+    let mut has_indirect_dispatch = false;
+    for block in func.blocks() {
+        let basic_block = func.block(block);
+        for operation in basic_block.operations() {
+            has_dict_entry |= matches!(operation.kind, OperationKind::DictEntry { .. });
+            has_indirect_dispatch |= dispatch_callee(operation).is_some_and(is_indirect_callee);
+            if has_dict_entry && has_indirect_dispatch {
+                return true;
+            }
+        }
+        if let TerminatorKind::Invoke { operation, .. } = &basic_block.terminator().kind {
+            has_indirect_dispatch |= dispatch_callee(operation).is_some_and(is_indirect_callee);
+            if has_dict_entry && has_indirect_dispatch {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn dispatch_callee(operation: &Operation) -> Option<&mir::Value> {
+    operation.operands.get(callee_operand_index(operation)?)
+}
+
+fn is_indirect_callee(callee: &mir::Value) -> bool {
+    !matches!(callee, mir::Value::Function(_))
+}
+
+// Naming a resolved callee directly. The operand shape is unchanged — the verifier accepts a
+// function or a function place in a callee position — so this touches nothing but that one operand.
+// The `dict_entry` that produced the place is usually left unread by the rewrite, and `dce.rs`
+// removes it.
+fn apply_devirtualizations(edit: &mut FunctionEdit, devirtualizations: Vec<Devirtualization>) {
+    for devirtualized in devirtualizations {
+        let callee = mir::Value::Function(devirtualized.callee);
+        let block = edit.block_mut(devirtualized.site.block());
+        let operation = match devirtualized.site {
+            Site::Operation { index, .. } => &mut block.operations[index],
+            Site::Terminator { .. } => match &mut block.terminator.kind {
+                TerminatorKind::Invoke { operation, .. } => operation,
+                _ => unreachable!("planned against this block's invoke terminator"),
+            },
+        };
+        operation.operands[devirtualized.operand] = callee;
+    }
 }
 
 fn plan_folds_with(
@@ -690,6 +772,33 @@ mod tests {
             indirect.is_empty(),
             "every resolvable drop/clone callee must be named directly, found:\n{}",
             indirect.join("\n")
+        );
+    }
+
+    #[test]
+    fn a_late_dictionary_entry_callee_is_devirtualized_after_the_rounds() {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        let module = session.emit_mir("fold", "[1, 2] |> concat([3, 4]) |> map(|x| x * x)");
+        let lines: Vec<_> = module.lines().map(str::trim).collect();
+        let late_indirect: Vec<_> = lines
+            .windows(2)
+            .filter_map(|pair| {
+                let [entry, call] = pair else {
+                    return None;
+                };
+                if entry.contains("= dict_entry ") && call.starts_with("call %r") {
+                    Some(format!("{entry}\n{call}"))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert!(
+            late_indirect.is_empty(),
+            "dictionary-entry callees should be direct after final devirtualization, found:\n{}",
+            late_indirect.join("\n\n")
         );
     }
 

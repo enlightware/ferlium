@@ -199,6 +199,12 @@ pub(crate) fn optimize_function(
     if let Some(forwarded) = string_accumulate::forward_string_accumulation(source, env) {
         current = Some(forwarded);
     }
+    // Inlining can expose a final dictionary-entry dispatch after the last fold round. Rewrite
+    // those callees before DCE, which then removes the now-unread entries.
+    let source = current.as_ref().unwrap_or(function);
+    if let Some(devirtualized) = fold::devirtualize_known_callees(source, env) {
+        current = Some(devirtualized);
+    }
     // Cleanup runs once, after the rounds have settled, and on every body rather than only on one a
     // pass changed. A specialization arrives already carrying dead code — substitution turns its
     // semantic clones and drops into representation copies and nothing, leaving the dictionary

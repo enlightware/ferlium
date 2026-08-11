@@ -41,7 +41,9 @@ for round in 0..MAX_ROUNDS:
 place CSE          // merge places which inlining exposes
 copy forward      // catch copies exposed after the last round
 branch forward    // bypass booleans stored in branch arms only to control a second branch
+peephole          // collapse small local CFG/value patterns
 string accumulate // forward an overwritten string into its self-prefixed format builder
+devirtualize      // final dictionary-entry callees exposed too late for a fold round
 dce               // on every body, not only a changed one
 stack markers     // drop a mark duplicating one already held, and restores that pop nothing
 finish            // restores canonical form and re-verifies
@@ -77,10 +79,9 @@ Four rules, each of which cost a measurement to establish. They apply to any new
    resolves to are overwhelmingly natives, which cannot be inlined and only fold with known
    arguments, so granting a round buys a full cycle that finds nothing — measured +19.2%.
 3. **Reuse an analysis rather than building a second one.** The dataflow analysis is the cost of most
-   rewrites. Devirtualization as a separate end-of-pipeline pass measured +24.0% because it must
-   build its own analysis for every function; riding along with folding, +3.8%. A syntactic
-   pre-filter does not save it — nearly every function in a generic standard library has both a
-   `dict_entry` and an indirect call.
+   rewrites. Devirtualization rides along with folding for this reason. A final devirtualization
+   sweep exists only for dictionary-entry callees exposed after the last fold round; it first runs a
+   cheap syntactic filter and then lets DCE remove the entries it strands.
 4. **Cleanup runs on every body**, not only on one a pass changed. A specialization arrives already
    carrying dead code, so "nothing changed it, so nothing is dead" does not hold.
 
@@ -122,6 +123,10 @@ function reference, or the place of a function value read by reference and never
 differ only in where that operand sits, so the operand index is selected by operation kind. The
 `Value` methods are the larger population: generic code drops through a dictionary entry far more
 often than it calls through one.
+
+Inlining can expose one last `dict_entry`/dispatch pair after the final fold round. A final
+devirtualization sweep catches only those known dictionary-entry callees before DCE, so the now
+unread entries are removed without reopening the fold/specialize/inline loop.
 
 ## Specialization
 
