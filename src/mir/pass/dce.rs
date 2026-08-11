@@ -494,7 +494,7 @@ mod tests {
     #[test]
     fn a_nonempty_inline_stack_region_is_retained() {
         let module = optimized(
-            "fn through_local(x: int) -> int { let y = x; y }\n\
+            "fn through_local(x: int) -> int { let mut y = x; y = y + 1; y }\n\
              fn use_it(n: int) -> int { through_local(n) }",
         );
         let caller = body_of(&module, "use_it");

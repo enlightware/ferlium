@@ -34,12 +34,12 @@ for round in 0..MAX_ROUNDS:
     fold          // constant folding, devirtualization; block merging inside its own edit
     specialize    // point generic calls at concrete copies
     call CSE      // merge repeated addressor and trivial value calls before copying their bodies
-    copy forward  // after specialization/call CSE changed the body; coalesce a redundant result slot
+    copy forward  // coalesce redundant trivial-copy storage exposed during the round
     place CSE     // merge repeated subfield and dictionary-entry places
     inline        // budget-limited; block merging inside its own edit
     stop if nothing warranted another round
 place CSE          // merge places which inlining exposes
-copy forward      // catch copies exposed after the last round
+copy forward      // catch trivial-copy storage exposed after the last round
 branch forward    // bypass booleans stored in branch arms only to control a second branch
 peephole          // collapse small local CFG/value patterns
 string accumulate // forward an overwritten string into its self-prefixed format builder
@@ -331,13 +331,22 @@ the candidate `memcpy`, and every other use is a direct immutable read. A projec
 argument, ownership transfer, independent write or other escaping use rejects the candidate.
 Allocating the source first proves it outlives the destination across any `stack_restore`.
 
+The same pass also retargets `memcpy source → temporary; move temporary → destination` to copy
+directly into the final destination. The two transfers must be adjacent, the temporary must be a
+local `alloca`, and its complete operand-use count must consist of exactly the memcpy destination
+and move source. The move and temporary allocation can then be removed without changing ownership:
+`memcpy` still preserves the original source, while the final destination receives the same
+`TrivialCopy` representation at the same program point.
+
 It runs after specialization or call CSE changes a round, before the inliner prices the body, and
 once more before final DCE. Structurally viable copies are selected before the whole-function use
-census, so unrelated allocations are not tracked. The ten-workload profile contains no dynamically
-executed forwardable site, so this pass is not a justification for widening the alias analysis: it
-is the bounded cleanup that completes value-call CSE when that source shape occurs. A focused
-interpreter profile does execute the shape: `(x - y) * (x - y)` falls from six MIR events to four,
-losing one executed result allocation as well as the repeated call.
+census, so unrelated allocations are not tracked. The original CSE result-slot shape has no
+dynamically executed site in the corpus; a focused interpreter profile does execute it:
+`(x - y) * (x - y)` falls from six MIR events to four, losing one executed result allocation as
+well as the repeated call. The staging rewrite is dynamic in shared collection specializations: on
+the eleven-workload profile it removed 10,457 moves and 10,475 allocations, reducing optimized MIR
+execution from 3,538,257 to 3,517,325 events (-0.59%). `iter_pipeline` alone fell from 612,506 to
+603,589 events (-1.46%).
 
 ## Boolean branch forwarding
 

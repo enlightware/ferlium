@@ -6,7 +6,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 
-//! Forwarding of redundant `TrivialCopy` result slots.
+//! Forwarding of redundant `TrivialCopy` storage.
 //!
 //! Value-call CSE cannot replace a repeated call's out-slot directly: expression equivalence says
 //! that the values are equal, not that two mutable places may be aliased. It therefore emits the
@@ -14,12 +14,17 @@
 //! proof and, when `%dst` has no independent identity, rewrites its reads to `%src` and removes the
 //! copy and destination allocation.
 //!
-//! The proof is deliberately narrow and linear. Both places must be local `alloca`s in the same
-//! block, with the source allocated first. Each must have exactly one whole-place write; the
-//! destination's must be the candidate `memcpy`. Every other use must be a direct immutable read.
-//! This excludes projections, mutable arguments, ownership transfers and other escaping uses, so
-//! there is no alias through which either place can change. Allocating the source first also proves
-//! it outlives the destination across every `stack_restore`.
+//! Lowering can also stage a `TrivialCopy` through a fresh local immediately before transferring it
+//! into its real destination: `memcpy %source to %temporary; move %temporary to %destination`. When
+//! the temporary has exactly those two uses, the memcpy can target the final destination directly
+//! and both the move and temporary allocation can be removed.
+//!
+//! The result-slot proof is deliberately narrow and linear. Both places must be local `alloca`s in
+//! the same block, with the source allocated first. Each must have exactly one whole-place write;
+//! the destination's must be the candidate `memcpy`. Every other use must be a direct immutable
+//! read. This excludes projections, mutable arguments, ownership transfers and other escaping uses,
+//! so there is no alias through which either place can change. Allocating the source first also
+//! proves it outlives the destination across every `stack_restore`.
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -58,20 +63,25 @@ struct Definition {
 
 #[derive(Default)]
 struct Uses {
+    references: usize,
     writes: usize,
     sole_write: Option<Site>,
     unsafe_use: bool,
 }
 
 impl Uses {
-    fn read(&mut self) {}
+    fn read(&mut self) {
+        self.references += 1;
+    }
 
     fn write(&mut self, site: Site) {
+        self.references += 1;
         self.writes += 1;
         self.sole_write = (self.writes == 1).then_some(site);
     }
 
     fn unsafe_use(&mut self) {
+        self.references += 1;
         self.unsafe_use = true;
     }
 
@@ -85,6 +95,13 @@ struct Copy {
     site: OperationSite,
     source: ValueId,
     destination: ValueId,
+}
+
+struct StagedMove {
+    copy_site: OperationSite,
+    move_site: OperationSite,
+    temporary: ValueId,
+    destination: mir::Value,
 }
 
 /// Rewrites provably redundant local copies, returning `None` when there are none.
@@ -115,6 +132,48 @@ pub(crate) fn forward_trivial_copies(func: &Function, env: ModuleEnv<'_>) -> Opt
             }
         }
     }
+    let mut staged_moves = Vec::new();
+    for block in func.blocks() {
+        let operations = func.block(block).operations();
+        for (index, pair) in operations.windows(2).enumerate() {
+            let [copy, moved] = pair else { unreachable!() };
+            let (
+                OperationKind::Memcpy,
+                [_, mir::Value::Register(temporary)],
+                OperationKind::Move,
+                [mir::Value::Register(move_source), destination],
+            ) = (
+                &copy.kind,
+                copy.operands.as_ref(),
+                &moved.kind,
+                moved.operands.as_ref(),
+            )
+            else {
+                continue;
+            };
+            let copy_site = OperationSite {
+                block,
+                index: OperationIndex::from_index(index),
+            };
+            if !definitions.contains_key(temporary) {
+                continue;
+            }
+            // The alloca may be in a dominating block. The existing move proves its destination is
+            // available at this exact point; the use census below is what removes any independent
+            // path-sensitive role for the temporary.
+            if temporary == move_source {
+                staged_moves.push(StagedMove {
+                    copy_site,
+                    move_site: OperationSite {
+                        block,
+                        index: OperationIndex::from_index(index + 1),
+                    },
+                    temporary: *temporary,
+                    destination: destination.clone(),
+                });
+            }
+        }
+    }
     // Keeping all three operations in one block makes allocation order a lifetime proof: the
     // earlier source cannot be popped while the later destination remains live.
     copies.retain(|copy| {
@@ -129,7 +188,7 @@ pub(crate) fn forward_trivial_copies(func: &Function, env: ModuleEnv<'_>) -> Opt
             && source.site.index.as_u32() < destination.site.index.as_u32()
             && destination.site.index.as_u32() < copy.site.index.as_u32()
     });
-    if copies.is_empty() {
+    if copies.is_empty() && staged_moves.is_empty() {
         return None;
     }
 
@@ -137,6 +196,7 @@ pub(crate) fn forward_trivial_copies(func: &Function, env: ModuleEnv<'_>) -> Opt
     let mut uses: FxHashMap<ValueId, Uses> = copies
         .iter()
         .flat_map(|copy| [copy.source, copy.destination])
+        .chain(staged_moves.iter().map(|staged| staged.temporary))
         .map(|id| (id, Uses::default()))
         .collect();
     for block in func.blocks() {
@@ -164,6 +224,24 @@ pub(crate) fn forward_trivial_copies(func: &Function, env: ModuleEnv<'_>) -> Opt
 
     let mut replacements: FxHashMap<ValueId, ValueId> = FxHashMap::default();
     let mut removed: FxHashMap<BlockId, FxHashSet<OperationIndex>> = FxHashMap::default();
+    let mut retargeted = Vec::new();
+    for staged in staged_moves {
+        let temporary_uses = &uses[&staged.temporary];
+        if temporary_uses.references != 2 || temporary_uses.unsafe_use {
+            continue;
+        }
+
+        retargeted.push((staged.copy_site, staged.destination));
+        removed
+            .entry(staged.move_site.block)
+            .or_default()
+            .insert(staged.move_site.index);
+        let definition = definitions[&staged.temporary];
+        removed
+            .entry(definition.site.block)
+            .or_default()
+            .insert(definition.site.index);
+    }
     for copy in copies {
         let destination_definition = definitions[&copy.destination];
         let source_uses = &uses[&copy.source];
@@ -191,11 +269,14 @@ pub(crate) fn forward_trivial_copies(func: &Function, env: ModuleEnv<'_>) -> Opt
             .or_default()
             .insert(destination_definition.site.index);
     }
-    if replacements.is_empty() {
+    if replacements.is_empty() && retargeted.is_empty() {
         return None;
     }
 
     let mut edit = FunctionEdit::new(func.clone());
+    for (site, destination) in retargeted {
+        edit.block_mut(site.block).operations[site.index.as_index()].operands[1] = destination;
+    }
     edit.visit_operands_mut(|operand| {
         if let mir::Value::Register(id) = operand
             && let Some(representative) = replacements.get(id)
@@ -409,6 +490,29 @@ mod tests {
         assert!(
             optimized.get(Kind::Operation(Op::Alloca)) < raw.get(Kind::Operation(Op::Alloca)),
             "copy forwarding must avoid executing the redundant result allocation"
+        );
+    }
+
+    #[test]
+    fn a_copy_immediately_moved_to_its_destination_skips_staging_storage() {
+        let module = optimized("[1] |> map(|x| x)");
+        let lines: Vec<_> = module.lines().map(str::trim).collect();
+        let staged = lines.windows(2).any(|pair| {
+            let Some((_, temporary)) = pair[0]
+                .strip_prefix("memcpy ")
+                .and_then(|copy| copy.split_once(" to "))
+            else {
+                return false;
+            };
+            pair[1]
+                .strip_prefix("move ")
+                .and_then(|moved| moved.split_once(" to "))
+                .is_some_and(|(source, _)| source == temporary)
+        });
+
+        assert!(
+            !staged,
+            "a trivial copy must target the final move destination directly:\n{module}"
         );
     }
 
