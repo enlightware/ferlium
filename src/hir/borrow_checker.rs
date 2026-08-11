@@ -235,6 +235,32 @@ pub(crate) fn let_arguments_overlapping_later_argument_writes(
         .collect()
 }
 
+/// Whether evaluating or passing any argument may modify the function place observed before them.
+///
+/// A first-class callee follows the same left-to-right rule as a leading `Let` argument: its value
+/// is selected before argument evaluation starts. If a later argument writes the same place, or is
+/// passed as an overlapping `MutableRef`, elaboration must snapshot the function value at that
+/// point rather than leave the call borrowing storage whose contents may change.
+pub(crate) fn callee_overlaps_argument_writes(
+    arena: &NodeArena,
+    callee: NodeId,
+    arguments: &[CallArgument],
+) -> bool {
+    if !node_is_place_reference(arena, callee) {
+        return false;
+    }
+    let Some(observed) = Path::try_from_node(arena, callee) else {
+        return false;
+    };
+
+    arguments.iter().any(|argument| {
+        evaluation_may_write_path(arena, argument.value, &observed)
+            || argument.passing == ArgConvention::MutableRef
+                && Path::try_from_node(arena, argument.value)
+                    .is_some_and(|written| do_paths_overlap(&written, &observed))
+    })
+}
+
 fn is_evidence_node(kind: &NodeKind) -> bool {
     matches!(
         kind,

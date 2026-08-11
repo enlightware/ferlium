@@ -108,6 +108,9 @@ pub fn hir_child_nodes(arena: &ENodeArena, node: ENodeId) -> Vec<ENodeId> {
         NodeKind::SubscriptApply(app) => std::iter::once(app.subscript)
             .chain(app.arguments.iter().map(|arg| arg.value))
             .collect(),
+        NodeKind::FunctionApply(app) => std::iter::once(app.function)
+            .chain(app.arguments.iter().map(|arg| arg.value))
+            .collect(),
         NodeKind::StaticApply(app) => app
             .extra_arguments
             .iter()

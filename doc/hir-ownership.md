@@ -214,6 +214,20 @@ This keeps the cleanup visible to eval and MIR lowering as ordinary HIR.
 Addressor-place calls use `Let` or `MutableRef` for their caller-rooted base.
 The returned place therefore cannot accidentally point into a consumed argument value whose lifetime ends with the call.
 
+### Function Callee Lifetime
+
+A first-class function expression is evaluated before its arguments. A direct local, projection,
+index, or addressor-place access chain remains a place and `FunctionApply` reads the function value
+through that place without consuming or cloning it. If evaluating or passing a later argument may
+write an overlapping path, elaboration snapshots the function value into an owned
+`$function_snapshot` local at the function expression's evaluation point; argument temporaries are
+created afterwards and therefore clean up before that snapshot.
+
+A `YieldedOnce` access chain cannot let its yielded place escape the suspended accessor. When such
+a chain is used as a callee, HIR materializes the function value inside the yielded body, resumes the
+accessor through its epilogue, and only then evaluates the call arguments. An `AddressorPlace` chain
+has no suspended frame and remains a borrowed place through the call.
+
 ### Semantic and Physical Argument Passing
 
 The semantic convention is derived at call construction/elaboration time and stored on call edges.

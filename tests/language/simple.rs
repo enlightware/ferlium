@@ -28,7 +28,7 @@ use ferlium::{
         array::{array_type_generic, int_array_type},
         math::{float_type, int_type},
     },
-    types::r#type::{Type, TypeVar, tuple_type},
+    types::r#type::{Type, TypeKind, TypeVar, tuple_type},
     types::{
         mutability::MutType,
         type_scheme::{ProjectionRequirementKind, PubTypeConstraint},
@@ -1911,6 +1911,87 @@ fn hir_read_access_chains_clone_only_the_final_value() {
             "{function_name} should keep intermediate arrays as places"
         );
     }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn hir_field_callee_is_borrowed_unless_an_argument_can_replace_it() {
+    fn contains_function_clone(arena: &ENodeArena, node: ENodeId) -> bool {
+        (matches!(arena[node].kind, NodeKind::CloneValue(_))
+            && matches!(&*arena[node].ty.data(), TypeKind::Function(_)))
+            || crate::harness::hir_child_nodes(arena, node)
+                .into_iter()
+                .any(|child| contains_function_clone(arena, child))
+    }
+
+    let source = indoc! { r#"
+        struct Holder { mapper: (int) -> int }
+
+        fn apply(holder: &mut Holder, value: int) -> int {
+            holder.mapper(value)
+        }
+
+        fn replace(holder: &mut Holder) -> int {
+            let replacement_offset = 10;
+            holder.mapper = |x| x + replacement_offset;
+            1
+        }
+
+        fn apply_while_replacing(holder: &mut Holder) -> int {
+            holder.mapper(replace(holder))
+        }
+
+        fn call_local_while_replacing() -> int {
+            let offset = 1;
+            let mut mapper = |x| x + offset;
+            mapper({
+                let replacement_offset = 10;
+                mapper = |x| x + replacement_offset;
+                1
+            })
+        }
+    "# };
+    let mut session = TestSession::new();
+    let module_id = session.compile(source).module_id;
+    let module = session.session().expect_fresh_module(module_id);
+
+    let apply = module
+        .get_function(ustr::ustr("apply"))
+        .expect("apply function should be compiled");
+    assert!(
+        !contains_function_clone(&module.hir_arena, apply.get_code_entry().unwrap()),
+        "a non-overlapping field callee should remain a borrowed place"
+    );
+
+    let replacing = module
+        .get_function(ustr::ustr("apply_while_replacing"))
+        .expect("replacing call should be compiled");
+    assert!(
+        contains_function_clone(&module.hir_arena, replacing.get_code_entry().unwrap()),
+        "a later argument that writes the callee place must snapshot the old function value"
+    );
+
+    let replacing_local = module
+        .get_function(ustr::ustr("call_local_while_replacing"))
+        .expect("local replacing call should be compiled");
+    assert!(
+        contains_function_clone(&module.hir_arena, replacing_local.get_code_entry().unwrap()),
+        "a later argument that writes a local callee must snapshot the old function value"
+    );
+
+    let execution_source = format!(
+        "{source}\n{}",
+        indoc! { r#"
+            let initial_offset = 1;
+            let mut holder = Holder { mapper: |x| x + initial_offset };
+            let borrowed = apply(holder, 40);
+            let snapshot = apply_while_replacing(holder);
+            let replacement = apply(holder, 1);
+            (borrowed, snapshot, replacement, call_local_while_replacing())
+        "# }
+    );
+    let mut execution = TestSession::new();
+    assert_val_eq!(execution.run(&execution_source), int_tuple!(41, 2, 11, 2));
 }
 
 #[test]

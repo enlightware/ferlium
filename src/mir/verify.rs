@@ -170,6 +170,13 @@ enum ValueRole {
 }
 
 impl ValueRole {
+    fn is_callee_operand(&self) -> bool {
+        matches!(
+            self,
+            Self::Function | Self::Place(_) | Self::Materialized(MirType::Pointer(_))
+        )
+    }
+
     fn is_place_operand(&self) -> bool {
         matches!(
             self,
@@ -958,10 +965,7 @@ impl<'a> Verifier<'a> {
                         )
                     });
                 assert!(
-                    matches!(
-                        self.role(&operands[0]),
-                        ValueRole::Function | ValueRole::Place(_)
-                    ),
+                    self.role(&operands[0]).is_callee_operand(),
                     "MIR function `{}` node {}: callee must be a function or function place",
                     self.func.name,
                     node
@@ -1035,10 +1039,7 @@ impl<'a> Verifier<'a> {
                         )
                     });
                 assert!(
-                    matches!(
-                        self.role(&operands[0]),
-                        ValueRole::Function | ValueRole::Place(_)
-                    ),
+                    self.role(&operands[0]).is_callee_operand(),
                     "MIR function `{}` node {}: callee must be a function or function place",
                     self.func.name,
                     node

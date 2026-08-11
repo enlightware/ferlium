@@ -2437,9 +2437,10 @@ fn eval_apply(
             eval_or_return!(eval_node_with_ctx(arena, app.function, ctx, locals));
         owned_function_value.as_function().unwrap().as_ref() as *const FunctionValue
     };
-    // SAFETY: the pointer either targets `owned_function_value`, kept alive in
-    // this stack frame, or environment storage that the borrow checker prevents
-    // from being mutably aliased by the call arguments.
+    // SAFETY: the pointer either targets `owned_function_value`, kept alive in this stack frame,
+    // or environment storage protected for the call lifetime. In the latter case HIR elaboration's
+    // `callee_overlaps_argument_writes` snapshots a callee that argument evaluation or an
+    // overlapping mutable-reference argument could invalidate.
     let function_value = unsafe { &*function_value };
     let args_ty = ctx.function_value_visible_argument_types(function_value);
     eval_resolved_runtime_call_with_args(

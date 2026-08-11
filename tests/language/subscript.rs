@@ -21,7 +21,10 @@ use ferlium::{
     module::{ShowModuleWithOptions, YieldProvenance, id::Id},
     parse_module_and_expr,
     std::{array::int_array_type, math::int_type},
-    types::effects::{PrimitiveEffect, effect},
+    types::{
+        effects::{PrimitiveEffect, effect},
+        r#type::TypeKind,
+    },
 };
 use indoc::indoc;
 use test_log::test;
@@ -2768,6 +2771,79 @@ fn named_subscript_read_chain_keeps_intermediate_array_as_place() {
         !contains_int_array_clone(&module.hir_arena, entry),
         "a mixed field/named-subscript/index read should clone only its final element"
     );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn addressor_subscript_callee_remains_a_borrowed_place() {
+    fn contains_function_clone(arena: &ENodeArena, node: ENodeId) -> bool {
+        (matches!(arena[node].kind, NodeKind::CloneValue(_))
+            && matches!(&*arena[node].ty.data(), TypeKind::Function(_)))
+            || crate::harness::hir_child_nodes(arena, node)
+                .into_iter()
+                .any(|child| contains_function_clone(arena, child))
+    }
+
+    let source = indoc! { r#"
+        #[private_repr]
+        struct Holder { mapper: (int) -> int }
+
+        subscript Holder.callable(self) -> (int) -> int {
+            ref mut { self.mapper }
+        }
+
+        fn apply(holder: &mut Holder, value: int) -> int {
+            holder.callable(value)
+        }
+    "# };
+    let mut session = experimental_session();
+    let module = session.compile_and_get_module(source);
+    let apply = module
+        .get_function(ustr("apply"))
+        .expect("apply function should be compiled");
+    assert!(
+        !contains_function_clone(&module.hir_arena, apply.get_code_entry().unwrap()),
+        "an addressor-place function callee should be borrowed directly"
+    );
+
+    let execution_source = format!(
+        "{source}\n{}",
+        "let mut holder = Holder { mapper: |x| x + 1 }; apply(holder, 41)"
+    );
+    assert_val_eq!(
+        run_experimental_subscript_source(&execution_source),
+        int(42)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn yielded_subscript_callee_finishes_before_argument_evaluation() {
+    let value = run_experimental_subscript_source(indoc! { r#"
+        struct Holder { mapper: (int) -> int }
+
+        subscript callable(holder: Holder, log: &mut int) -> (int) -> int {
+            ref {
+                log = log * 10 + 1;
+                let mapper = holder.mapper;
+                yield mapper;
+                log = log * 10 + 2
+            }
+        }
+
+        fn argument(log: &mut int) -> int {
+            log = log * 10 + 3;
+            41
+        }
+
+        let holder = Holder { mapper: |x| x + 1 };
+        let mut log = 0;
+        let result = (holder->[callable](log))(argument(log));
+        (result, log)
+    "# });
+
+    // The accessor prologue (1), epilogue (2), then call argument (3) must run in that order.
+    assert_val_eq!(value, expected_tuple([int(42), int(123)]));
 }
 
 #[test]

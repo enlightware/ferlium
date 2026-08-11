@@ -937,20 +937,70 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                 }))
             }
             FunctionApply(app) => {
-                let function = app.function;
+                let function_source = app.function;
                 let ty = app.ty.clone();
+                let snapshot_function = hir::borrow_checker::callee_overlaps_argument_writes(
+                    src,
+                    function_source,
+                    &app.arguments,
+                );
+
+                // The function expression is evaluated before every argument. Preserve that
+                // observation when a later argument may modify the same storage by cloning the
+                // function value into an owned call temporary at its source position. Allocate
+                // this temporary before argument temporaries so reverse cleanup order remains
+                // argument(s), then function.
+                let function_node = &src[function_source];
+                let mut function = self.elaborate_node(src, function_source)?;
+                let mut cleanup = Vec::new();
+                if snapshot_function {
+                    let clone = resolve_local_clone(
+                        &mut self.generated,
+                        self.ctx,
+                        function_node.ty,
+                        node_span,
+                    )?;
+                    let drop = resolve_local_drop(
+                        &mut self.generated,
+                        self.ctx,
+                        function_node.ty,
+                        node_span,
+                    )?
+                    .into_elaborated();
+                    function = self.alloc_elaborated_node(
+                        NodeKind::CloneValue(hir::CloneValue {
+                            source: function,
+                            clone,
+                        }),
+                        function_node.ty,
+                        function_node.effects.clone(),
+                        function_node.span,
+                    );
+                    let (materialized, local) = self.materialize_call_value(
+                        function,
+                        function_node.ty,
+                        &function_node.effects,
+                        function_node.span,
+                        node_span,
+                        ustr("$function_snapshot"),
+                        drop,
+                    );
+                    function = materialized;
+                    cleanup.push(local);
+                }
                 let arguments = self.elaborate_call_arguments(
                     src,
                     &app.arguments,
                     ty.returns_place(),
                     node_span,
                 )?;
+                cleanup.extend(arguments.cleanup);
                 let call = FunctionApply(b(hir::FunctionApplication {
-                    function: self.elaborate_node(src, function)?,
+                    function,
                     arguments: arguments.arguments,
                     ty,
                 }));
-                self.wrap_call_cleanup(call, arguments.cleanup, node_ty, node_effects, node_span)
+                self.wrap_call_cleanup(call, cleanup, node_ty, node_effects, node_span)
             }
             CloneClosureEnv(node) => {
                 let source = node.source;

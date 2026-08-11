@@ -279,6 +279,7 @@ type WithYieldedBodyBuilder<'a> = Box<
             &mut TypingEnv,
             NodeId,
             Type,
+            bool,
         ) -> Result<(NodeId, Type), InternalCompilationError>
         + 'a,
 >;
@@ -1311,9 +1312,18 @@ impl TypeInference {
                         return Ok((node_id, mut_ty));
                     }
                 }
-                // No, we emit code to evaluate function.
-                // Evaluate left-to-right: function first, then arguments.
-                let func_node_id = self.infer_expr_drop_mut(env, data.func)?;
+                // No, we emit code to evaluate the function value. An access-chain callee is a
+                // place consumer rather than an ordinary read: direct and addressor-place chains
+                // stay borrowed through the call, while a yielded-once chain materializes its
+                // function value before the suspended accessor resumes. In either case the
+                // complete function expression is evaluated before the arguments below.
+                let func_node_id = if Self::is_access_chain_expr(&env.ast_arena[data.func].kind) {
+                    let plan = self.access_chain_plan_for_expr(env, data.func);
+                    self.infer_access_chain_callee(env, plan.chain, sp(data.func))?
+                        .0
+                } else {
+                    self.infer_expr_drop_mut(env, data.func)?
+                };
                 let func_effects = env.ir_arena[func_node_id].effects.clone();
                 if env.ir_arena[func_node_id].ty == Type::never() {
                     let effects = self.make_dependent_effect([&func_effects]);
@@ -2085,7 +2095,7 @@ impl TypeInference {
                     chain,
                     mode,
                     expr_span,
-                    |_, _, place, place_ty| Ok((place, place_ty)),
+                    |_, _, place, place_ty, _inside_yielded| Ok((place, place_ty)),
                 )
                 .map(|(node, _)| node);
         }
@@ -3125,42 +3135,19 @@ impl TypeInference {
         env.cur_locals.truncate(env_size);
     }
 
-    fn infer_named_subscript_with_yielded_body_with_receiver(
-        &mut self,
-        env: &mut TypingEnv,
-        data: &ast::NamedSubscriptData<Desugared>,
-        mode: SubscriptMemberKind,
-        expr_span: Location,
-        receiver_override: Option<NamedSubscriptReceiverOverride>,
-        build_body: WithYieldedBodyBuilder<'_>,
-    ) -> Result<(NodeId, MutType), InternalCompilationError> {
-        let accessor = match self.infer_named_subscript_accessor_call(
-            env,
-            data,
-            mode,
-            expr_span,
-            receiver_override,
-        )? {
-            PreparedNamedSubscriptAccessor::Ready(call) => call,
-            PreparedNamedSubscriptAccessor::DivergedBeforeYield(node) => {
-                return Ok((node, MutType::constant()));
-            }
-        };
-        self.infer_prepared_accessor_with_body(env, accessor, mode, expr_span, build_body)
-    }
-
     fn infer_prepared_accessor_with_body(
         &mut self,
         env: &mut TypingEnv,
         accessor: NamedSubscriptCall,
         mode: SubscriptMemberKind,
+        inside_yielded: bool,
         expr_span: Location,
         build_body: WithYieldedBodyBuilder<'_>,
     ) -> Result<(NodeId, MutType), InternalCompilationError> {
         if accessor.provenance == YieldProvenance::AddressorPlace {
             let (env_size, binding) = self.push_yielded_binding(env, accessor.ty, expr_span);
             let place = self.yielded_binding_load(env, binding, accessor.ty, expr_span);
-            let (body, result_ty) = build_body(self, env, place, accessor.ty)?;
+            let (body, result_ty) = build_body(self, env, place, accessor.ty, inside_yielded)?;
             let body_effects = env.ir_arena[body].effects.clone();
             let effects = self.make_dependent_effect([&accessor.effects, &body_effects]);
             let result_mut = if matches!(mode, SubscriptMemberKind::Mut)
@@ -3183,7 +3170,7 @@ impl TypeInference {
         }
         let (env_size, binding) = self.push_yielded_binding(env, accessor.ty, expr_span);
         let place = self.yielded_binding_load(env, binding, accessor.ty, expr_span);
-        let (body, result_ty) = build_body(self, env, place, accessor.ty)?;
+        let (body, result_ty) = build_body(self, env, place, accessor.ty, true)?;
         let body_effects = env.ir_arena[body].effects.clone();
         let effects = self.make_dependent_effect([&accessor.effects, &body_effects]);
         Self::close_yielded_binding_scope(env, env_size, expr_span);
@@ -3227,6 +3214,7 @@ impl TypeInference {
         subscript_id: SubscriptId,
         field: UstrSpan,
         mode: SubscriptMemberKind,
+        inside_yielded: bool,
         expr_span: Location,
         receiver: NamedSubscriptReceiverOverride,
         build_body: WithYieldedBodyBuilder<'_>,
@@ -3244,7 +3232,14 @@ impl TypeInference {
                 return Ok((node, MutType::constant()));
             }
         };
-        self.infer_prepared_accessor_with_body(env, accessor, mode, expr_span, build_body)
+        self.infer_prepared_accessor_with_body(
+            env,
+            accessor,
+            mode,
+            inside_yielded,
+            expr_span,
+            build_body,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3402,6 +3397,7 @@ impl TypeInference {
             &mut TypingEnv,
             NodeId,
             Type,
+            bool,
         ) -> Result<(NodeId, Type), InternalCompilationError>,
     ) -> Result<(NodeId, MutType), InternalCompilationError> {
         let (root_node, root_mut) = self.infer_expr(env, place.root)?;
@@ -3414,6 +3410,7 @@ impl TypeInference {
             root_ty,
             root_mut,
             mode,
+            false,
             expr_span,
             Box::new(build_body),
         )
@@ -3429,6 +3426,7 @@ impl TypeInference {
         place_ty: Type,
         place_mut: MutType,
         mode: SubscriptMemberKind,
+        inside_yielded: bool,
         expr_span: Location,
         build_body: WithYieldedBodyBuilder<'a>,
     ) -> Result<(NodeId, MutType), InternalCompilationError> {
@@ -3441,7 +3439,7 @@ impl TypeInference {
                     expr_span,
                 );
             }
-            let (node, _ty) = build_body(self, env, place_node, place_ty)?;
+            let (node, _ty) = build_body(self, env, place_node, place_ty, inside_yielded)?;
             let mut_ty = if node == place_node {
                 place_mut
             } else {
@@ -3464,13 +3462,14 @@ impl TypeInference {
                         subscript_id,
                         *name,
                         mode,
+                        inside_yielded,
                         expr_span,
                         NamedSubscriptReceiverOverride {
                             node: place_node,
                             ty: place_ty,
                             mut_ty: place_mut,
                         },
-                        Box::new(move |this, env, place, place_ty| {
+                        Box::new(move |this, env, place, place_ty, inside_yielded| {
                             let (node, _) = this.infer_access_chain_steps_with_body(
                                 env,
                                 steps,
@@ -3479,6 +3478,7 @@ impl TypeInference {
                                 place_ty,
                                 MutType::mutable(),
                                 mode,
+                                inside_yielded,
                                 expr_span,
                                 build_body,
                             )?;
@@ -3518,8 +3518,9 @@ impl TypeInference {
                             provenance: YieldProvenance::YieldedOnce,
                         },
                         mode,
+                        inside_yielded,
                         expr_span,
-                        Box::new(move |this, env, place, place_ty| {
+                        Box::new(move |this, env, place, place_ty, inside_yielded| {
                             let (node, _) = this.infer_access_chain_steps_with_body(
                                 env,
                                 steps,
@@ -3528,6 +3529,7 @@ impl TypeInference {
                                 place_ty,
                                 MutType::mutable(),
                                 mode,
+                                inside_yielded,
                                 expr_span,
                                 build_body,
                             )?;
@@ -3543,6 +3545,7 @@ impl TypeInference {
                         next_ty,
                         next_mut,
                         mode,
+                        inside_yielded,
                         expr_span,
                         build_body,
                     )
@@ -3585,6 +3588,7 @@ impl TypeInference {
                     next_ty,
                     next_mut,
                     mode,
+                    inside_yielded,
                     expr_span,
                     build_body,
                 )
@@ -3605,12 +3609,13 @@ impl TypeInference {
                     next_ty,
                     next_mut,
                     mode,
+                    inside_yielded,
                     expr_span,
                     build_body,
                 )
             }
-            AccessChainStep::NamedSubscript { data } => self
-                .infer_named_subscript_with_yielded_body_with_receiver(
+            AccessChainStep::NamedSubscript { data } => {
+                let accessor = match self.infer_named_subscript_accessor_call(
                     env,
                     data,
                     mode,
@@ -3620,7 +3625,19 @@ impl TypeInference {
                         ty: place_ty,
                         mut_ty: place_mut,
                     }),
-                    Box::new(move |this, env, place, place_ty| {
+                )? {
+                    PreparedNamedSubscriptAccessor::Ready(call) => call,
+                    PreparedNamedSubscriptAccessor::DivergedBeforeYield(node) => {
+                        return Ok((node, MutType::constant()));
+                    }
+                };
+                self.infer_prepared_accessor_with_body(
+                    env,
+                    accessor,
+                    mode,
+                    inside_yielded,
+                    expr_span,
+                    Box::new(move |this, env, place, place_ty, inside_yielded| {
                         let (node, _) = this.infer_access_chain_steps_with_body(
                             env,
                             steps,
@@ -3632,12 +3649,14 @@ impl TypeInference {
                             // field/index/project steps can describe the consumer's final place.
                             MutType::mutable(),
                             mode,
+                            inside_yielded,
                             expr_span,
                             build_body,
                         )?;
                         Ok((node, env.ir_arena[node].ty))
                     }),
-                ),
+                )
+            }
         }
     }
 
@@ -3652,11 +3671,39 @@ impl TypeInference {
             place,
             SubscriptMemberKind::Ref,
             expr_span,
-            |this, env, place, place_ty| {
+            |this, env, place, place_ty, _inside_yielded| {
                 Ok((
                     this.materialize_owned_value(env, place, expr_span),
                     place_ty,
                 ))
+            },
+        )
+    }
+
+    /// Prepares an access-chain function expression for `FunctionApply`.
+    ///
+    /// A direct projection, index, or addressor-place result remains a place, so the call can read
+    /// the function value by reference. A yielded-once accessor cannot let its yielded place escape
+    /// the suspended frame; snapshot the final function value inside that frame, allowing the
+    /// accessor epilogue to run before the call starts evaluating its arguments.
+    fn infer_access_chain_callee(
+        &mut self,
+        env: &mut TypingEnv,
+        place: AccessChain,
+        expr_span: Location,
+    ) -> Result<(NodeId, MutType), InternalCompilationError> {
+        self.infer_access_chain_with_body(
+            env,
+            place,
+            SubscriptMemberKind::Ref,
+            expr_span,
+            |this, env, place, place_ty, inside_yielded| {
+                let callee = if inside_yielded {
+                    this.materialize_owned_value(env, place, expr_span)
+                } else {
+                    place
+                };
+                Ok((callee, place_ty))
             },
         )
     }
@@ -3674,7 +3721,7 @@ impl TypeInference {
             place,
             SubscriptMemberKind::Mut,
             expr_span,
-            |this, env, place, place_ty| {
+            |this, env, place, place_ty, _inside_yielded| {
                 Ok((
                     this.infer_assign_to_place(
                         env, place, place_ty, value, sign_span, expr_span, true,
@@ -3699,7 +3746,7 @@ impl TypeInference {
             place,
             SubscriptMemberKind::Mut,
             expr_span,
-            |this, env, place, place_ty| {
+            |this, env, place, place_ty, _inside_yielded| {
                 let value = this.infer_static_apply_with_lhs_place(
                     env, place, place_ty, op_path, sign_span, value, expr_span,
                 )?;
@@ -4107,7 +4154,8 @@ impl TypeInference {
                 move |this: &mut TypeInference,
                       env: &mut TypingEnv,
                       place: NodeId,
-                      place_ty: Type| {
+                      place_ty: Type,
+                      _inside_yielded: bool| {
                     let mut prepared_drivers = prepared_drivers;
                     prepared_drivers.push(PreparedDrivenArg {
                         index: driver_index,
@@ -5322,7 +5370,7 @@ impl TypeInference {
             chain,
             SubscriptMemberKind::Mut,
             expr_span,
-            |this, env, place, place_ty| {
+            |this, env, place, place_ty, _inside_yielded| {
                 Ok((
                     this.infer_assign_to_place(
                         env, place, place_ty, value, sign_span, expr_span, false,
@@ -5721,7 +5769,7 @@ impl TypeInference {
                 chain,
                 mode,
                 expr_span,
-                |_, _, place, place_ty| Ok((place, place_ty)),
+                |_, _, place, place_ty, _inside_yielded| Ok((place, place_ty)),
             )?;
             let node_ty = env.ir_arena[node_id].ty;
             self.add_sub_type_constraint(node_ty, expr_span, expected_ty, expected_span);
