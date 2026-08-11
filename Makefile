@@ -41,7 +41,7 @@ install-deps:
 	cargo install --version 0.18.2 gungraun-runner
 
 test-local:
-	RUST_LOG=ferlium=debug cargo nextest run
+	RUST_LOG=ferlium=debug cargo nextest run --no-fail-fast
 
 test-wasm:
 	CARGO_PROFILE_TEST_DEBUG=0 WASM_BINDGEN_USE_BROWSER=1 wasm-pack test --chrome --firefox --headless --test language --lib
