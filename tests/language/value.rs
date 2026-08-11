@@ -52,6 +52,10 @@ fn tracked_probe_value_impl() -> &'static str {
 }
 
 fn incrementing_clone_probe_value_impl() -> &'static str {
+    // Deliberately violates the `Value` ownership laws: `clone` changes the observable payload and
+    // `drop` records an observable event. This makes required ownership operations visible to
+    // tests, but must not constrain optimizations that replace a clone followed by the end of the
+    // source's lifetime with a move.
     r#"
     struct Probe(int)
 

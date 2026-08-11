@@ -2291,7 +2291,7 @@ pub fn value_trait() -> Trait {
     );
     Trait::new_with_self_input_type(
         "Value",
-        "A type that supports semantic equality, string conversion, hashing, and layout metadata.",
+        "A type supporting equality, string conversion, hashing, ownership, and layout. `clone` must return an independent, observationally equivalent value, while `drop` may only end ownership; therefore `clone(x); drop(x)` is equivalent to moving `x`.",
         [],
         [
             (
@@ -2323,7 +2323,7 @@ pub fn value_trait() -> Trait {
                 Def::new_infer_quantifiers(
                     clone_ty,
                     ["source"],
-                    "Compiler-owned method that returns an owned clone of `source`.",
+                    "Compiler-owned method that returns an independent, observationally equivalent owned clone of `source`.",
                 ),
             ),
             (
@@ -2331,7 +2331,7 @@ pub fn value_trait() -> Trait {
                 Def::new_infer_quantifiers(
                     drop_ty,
                     ["target"],
-                    "Compiler-owned method that drops `target` in place.",
+                    "Compiler-owned method that ends `target`'s ownership in place without an observable language-level effect.",
                 ),
             ),
         ],
