@@ -27,9 +27,10 @@ use crate::{
             ImplStubData, PendingModuleFunctions, PubTypeConstraintPtr,
             add_pending_function_anonymous, borrow_check_and_elaborate_dict, constraint_ptr,
             default_body_only_effects_in_function_descr, default_output_effects_in_functions,
-            function_and_associated_lambdas, insert_inst_data_for_function_and_lambdas,
-            instantiate_function_descr_in_place, is_compiler_provided_value_constraint,
-            log_dropped_constraints_module, refresh_debug_info_for_functions, set_pending_function,
+            first_unbound_type_in_constraints, function_and_associated_lambdas,
+            insert_inst_data_for_function_and_lambdas, instantiate_function_descr_in_place,
+            is_compiler_provided_value_constraint, log_dropped_constraints_module,
+            refresh_debug_info_for_functions, set_pending_function,
             substitute_and_canonicalize_functions,
         },
         function::CallableDefinition,
@@ -1543,6 +1544,15 @@ where
                 .filter(|c| !is_compiler_provided_value_constraint(c, module_env))
                 .collect();
             if !remaining_orphans.is_empty() {
+                if let Some((ty_var, ty, span)) =
+                    first_unbound_type_in_constraints(remaining_orphans.iter().copied())
+                {
+                    return Err(internal_compilation_error!(UnboundTypeVar {
+                        ty_var,
+                        ty,
+                        span
+                    }));
+                }
                 return Err(internal_compilation_error!(Internal {
                     error: format!(
                         "Orphan constraints found in module fn: {}",

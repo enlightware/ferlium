@@ -686,3 +686,22 @@ fn a_projection_and_its_end_project_leave_the_invoke_form_together() {
         int(4)
     );
 }
+
+// An ambiguous `collect()` inside a module function can leave body-local trait constraints after
+// defaulting. That is a source ambiguity, not an internal compiler error.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn body_local_ambiguous_collect_reports_unbound_type_variable() {
+    let mut session = TestSession::new();
+    session
+        .fail_compilation(indoc! { r#"
+            fn total(n) {
+                let mut values = [];
+                for i in 0..n {
+                    array_append(values, i)
+                };
+                sum(values |> map(|x| x)) + sum(values |> iter() |> collect())
+            }
+        "# })
+        .expect_unbound_ty_var();
+}

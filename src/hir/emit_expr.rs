@@ -24,7 +24,7 @@ use crate::{
         emit_hir::{
             PendingModuleFunctions, PubTypeConstraintPtr, add_pending_function_anonymous,
             borrow_check_and_elaborate_pending_function, constraint_ptr,
-            log_dropped_constraints_expr,
+            first_unbound_type_in_constraints, log_dropped_constraints_expr,
         },
         value_dispatch::elaborate_local_ownership_and_value_dispatches,
     },
@@ -37,13 +37,13 @@ use crate::{
     types::{
         effects::EffType,
         trait_solver::{TraitSolver, trait_solver_from_module},
-        r#type::{CallResultConvention, FnType, Type, TypeInstSubst, TypeVar},
+        r#type::{CallResultConvention, FnType, Type, TypeInstSubst},
         type_inference::{
             defaulting::DefaultingScope, expr::TypeInference, unify::UnifiedTypeInference,
         },
         type_like::TypeLike,
         type_mapper::BitmapInstantiationMapper,
-        type_scheme::{PubTypeConstraint, TypeScheme},
+        type_scheme::TypeScheme,
         typing_env::TypingEnv,
     },
 };
@@ -622,7 +622,7 @@ fn validate_safe_expr_type_scheme(
             span,
         }));
     }
-    if let Some((ty_var, ty, span)) = first_unbound_type_in_constraints(&ty.constraints) {
+    if let Some((ty_var, ty, span)) = first_unbound_type_in_constraints(ty.constraints.iter()) {
         return Err(internal_compilation_error!(UnboundTypeVar {
             ty_var,
             ty,
@@ -636,63 +636,4 @@ fn validate_safe_expr_type_scheme(
         }));
     }
     Ok(())
-}
-
-fn first_unbound_type_in_constraints(
-    constraints: &[PubTypeConstraint],
-) -> Option<(TypeVar, Type, Location)> {
-    fn in_type(ty: Type, span: Location) -> Option<(TypeVar, Type, Location)> {
-        ty.inner_ty_vars().first().map(|ty_var| (*ty_var, ty, span))
-    }
-
-    for constraint in constraints {
-        let span = constraint.use_site();
-        match constraint {
-            PubTypeConstraint::TupleAtIndexIs {
-                tuple_ty,
-                element_ty,
-                ..
-            } => {
-                if let Some(unbound) = in_type(*tuple_ty, span) {
-                    return Some(unbound);
-                }
-                if let Some(unbound) = in_type(*element_ty, span) {
-                    return Some(unbound);
-                }
-            }
-            PubTypeConstraint::ProjectionSubscriptIs { subscript_ty, .. } => {
-                if let Some(unbound) = subscript_ty
-                    .inner_ty_vars()
-                    .first()
-                    .map(|ty_var| (*ty_var, Type::subscript_type(subscript_ty.clone()), span))
-                {
-                    return Some(unbound);
-                }
-            }
-            PubTypeConstraint::TypeHasVariant {
-                variant_ty,
-                payload_ty,
-                ..
-            } => {
-                if let Some(unbound) = in_type(*variant_ty, span) {
-                    return Some(unbound);
-                }
-                if let Some(unbound) = in_type(*payload_ty, span) {
-                    return Some(unbound);
-                }
-            }
-            PubTypeConstraint::HaveTrait {
-                input_tys,
-                output_tys,
-                ..
-            } => {
-                for ty in input_tys.iter().chain(output_tys) {
-                    if let Some(unbound) = in_type(*ty, span) {
-                        return Some(unbound);
-                    }
-                }
-            }
-        }
-    }
-    None
 }
