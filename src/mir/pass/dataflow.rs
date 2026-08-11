@@ -549,7 +549,7 @@ fn value_operand_fact(operand: &mir::Value, func: &Function, state: &State) -> F
 /// the inline form silently disabled every field-sensitive answer this analysis can give: the
 /// transfer function fell back to an unknown value for *every* `subfield`, and the escape scan read
 /// the same `None` as "dynamic index" and escaped the base root.
-fn field_index(operand: &mir::Value, func: &Function) -> Option<usize> {
+pub(crate) fn field_index(operand: &mir::Value, func: &Function) -> Option<usize> {
     let literal = match operand {
         mir::Value::Pattern(literal) => literal,
         mir::Value::Constant(id) => &func.constant(*id).representation,

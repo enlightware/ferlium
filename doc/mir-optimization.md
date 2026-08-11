@@ -317,7 +317,7 @@ Dominance itself is `mir::dominance`, shared with the verifier, which dominates 
 than blocks because an invoked operation's result is anchored at the normal successor and must not
 reach the error one. It therefore takes bare successor lists rather than a `Function`.
 
-## Trivial-copy forwarding
+## Storage forwarding
 
 `mir::pass::copy_forward` is deliberately separate from call CSE. CSE proves that two computations
 produce equal values and safely replaces the duplicate with `memcpy first → second`; it does not
@@ -331,22 +331,29 @@ the candidate `memcpy`, and every other use is a direct immutable read. A projec
 argument, ownership transfer, independent write or other escaping use rejects the candidate.
 Allocating the source first proves it outlives the destination across any `stack_restore`.
 
-The same pass also retargets `memcpy source → temporary; move temporary → destination` to copy
-directly into the final destination. The two transfers must be adjacent, the temporary must be a
-local `alloca`, and its complete operand-use count must consist of exactly the memcpy destination
-and move source. The move and temporary allocation can then be removed without changing ownership:
-`memcpy` still preserves the original source, while the final destination receives the same
-`TrivialCopy` representation at the same program point.
+The same pass more generally retargets `producer → temporary; transfer temporary → destination` so
+the producer initializes the final destination directly. Producers are `store`, `memcpy`, `move`,
+`clone` and `call`; the final transfer may be `move` or, for a `TrivialCopy`, `memcpy`. The operations
+must be adjacent, the temporary must be a local `alloca`, and its complete operand-use count must
+consist of exactly the producer destination and transfer source. Contiguous transfer chains are
+collapsed in one traversal rather than requiring another optimization round.
 
-It runs after specialization or call CSE changes a round, before the inliner prices the body, and
-once more before final DCE. Structurally viable copies are selected before the whole-function use
-census, so unrelated allocations are not tracked. The original CSE result-slot shape has no
+Retargeting must not make a producer overwrite storage it also reads. A small place-identity model
+tracks allocation/parameter roots and constant `subfield` paths, proving different roots and sibling
+fields disjoint while rejecting opaque `project` provenance. Calls and clones receive one additional
+exception: a resolved native with a `TrivialCopy` result computes its owned HIR result before the MIR
+bridge stores it, so its result may safely reuse an input place. This permits arithmetic writeback
+such as `call add(%x, %y, %x)` without weakening the fresh-result contract for script calls.
+
+Its cheap structural scan runs each optimization round before the inliner prices the body, and once
+more before final DCE. The linear whole-function use census runs only when that scan finds a viable
+candidate, and tracks only participating allocations. The original CSE result-slot shape has no
 dynamically executed site in the corpus; a focused interpreter profile does execute it:
-`(x - y) * (x - y)` falls from six MIR events to four, losing one executed result allocation as
-well as the repeated call. The staging rewrite is dynamic in shared collection specializations: on
-the eleven-workload profile it removed 10,457 moves and 10,475 allocations, reducing optimized MIR
-execution from 3,538,257 to 3,517,325 events (-0.59%). `iter_pipeline` alone fell from 612,506 to
-603,589 events (-1.46%).
+`(x - y) * (x - y)` falls from six MIR events to four, losing one executed result allocation as well
+as the repeated call. General producer forwarding reduces optimized execution on the eleven-workload
+profile from 3,517,325 to 3,423,626 events (-2.66%), including moves from 59,248 to 18,155 and
+allocations from 812,240 to 767,872. `iter_pipeline` falls from 603,589 to 576,801 events (-4.44%),
+with moves from 14,039 to 645, allocations from 136,187 to 122,793, and peak cells from 59 to 58.
 
 ## Boolean branch forwarding
 

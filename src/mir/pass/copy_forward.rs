@@ -6,7 +6,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 
-//! Forwarding of redundant `TrivialCopy` storage.
+//! Forwarding of redundant local storage.
 //!
 //! Value-call CSE cannot replace a repeated call's out-slot directly: expression equivalence says
 //! that the values are equal, not that two mutable places may be aliased. It therefore emits the
@@ -14,10 +14,12 @@
 //! proof and, when `%dst` has no independent identity, rewrites its reads to `%src` and removes the
 //! copy and destination allocation.
 //!
-//! Lowering can also stage a `TrivialCopy` through a fresh local immediately before transferring it
-//! into its real destination: `memcpy %source to %temporary; move %temporary to %destination`. When
-//! the temporary has exactly those two uses, the memcpy can target the final destination directly
-//! and both the move and temporary allocation can be removed.
+//! Lowering can also initialize a fresh local immediately before transferring it into its real
+//! destination: `producer ... %temporary; move %temporary to %destination`. When the temporary has
+//! exactly those two uses, the producer can target the final destination directly and both the
+//! transfer and temporary allocation can be removed. Producers with an explicit destination are
+//! supported uniformly: `store`, `memcpy`, `move`, `clone` and `call`; the final transfer may be a
+//! `move` or a `memcpy`.
 //!
 //! The result-slot proof is deliberately narrow and linear. Both places must be local `alloca`s in
 //! the same block, with the source allocated first. Each must have exactly one whole-place write;
@@ -29,22 +31,24 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
+    containers::SVec2,
     hir::function::ArgConvention,
     mir::{
         self, BlockId, Function, Operation, OperationKind, edit::FunctionEdit,
         terminator::TerminatorKind, value::ValueId,
     },
     module::{ModuleEnv, id::Id},
+    types::type_properties::concrete_type_is_trivial_copy,
 };
 
-use super::dataflow::call_operands;
+use super::dataflow::{call_operands, field_index};
 
 crate::define_id_type!(
     /// A transient position in one block's operation vector, not a stable MIR identity.
     OperationIndex
 );
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct OperationSite {
     block: BlockId,
     index: OperationIndex,
@@ -97,15 +101,35 @@ struct Copy {
     destination: ValueId,
 }
 
-struct StagedMove {
-    copy_site: OperationSite,
-    move_site: OperationSite,
+struct ForwardedInitialization {
+    producer_site: OperationSite,
+    transfer_site: OperationSite,
     temporary: ValueId,
     destination: mir::Value,
 }
 
-/// Rewrites provably redundant local copies, returning `None` when there are none.
-pub(crate) fn forward_trivial_copies(func: &Function, env: ModuleEnv<'_>) -> Option<Function> {
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum PlaceRoot {
+    Constant(mir::value::ConstantId),
+    Parameter(mir::value::ParameterId),
+    Result(ValueId),
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct PlaceIdentity {
+    root: PlaceRoot,
+    fields: SVec2<usize>,
+}
+
+#[derive(Clone)]
+enum OperandStorage {
+    None,
+    Place(PlaceIdentity),
+    Unknown,
+}
+
+/// Rewrites provably redundant local storage, returning `None` when there is none.
+pub(crate) fn forward_redundant_storage(func: &Function, env: ModuleEnv<'_>) -> Option<Function> {
     let mut definitions = FxHashMap::default();
     let mut copies = Vec::new();
     for block in func.blocks() {
@@ -132,46 +156,46 @@ pub(crate) fn forward_trivial_copies(func: &Function, env: ModuleEnv<'_>) -> Opt
             }
         }
     }
-    let mut staged_moves = Vec::new();
+    let mut forwarded_initializations = Vec::new();
     for block in func.blocks() {
         let operations = func.block(block).operations();
         for (index, pair) in operations.windows(2).enumerate() {
-            let [copy, moved] = pair else { unreachable!() };
-            let (
-                OperationKind::Memcpy,
-                [_, mir::Value::Register(temporary)],
-                OperationKind::Move,
-                [mir::Value::Register(move_source), destination],
-            ) = (
-                &copy.kind,
-                copy.operands.as_ref(),
-                &moved.kind,
-                moved.operands.as_ref(),
-            )
+            let [producer, transfer] = pair else {
+                unreachable!()
+            };
+            if !matches!(transfer.kind, OperationKind::Move | OperationKind::Memcpy) {
+                continue;
+            }
+            let [mir::Value::Register(transfer_source), destination, ..] =
+                transfer.operands.as_ref()
             else {
                 continue;
             };
-            let copy_site = OperationSite {
+            let Some(destination_index) = initialization_destination_index(producer) else {
+                continue;
+            };
+            let mir::Value::Register(temporary) = &producer.operands[destination_index] else {
+                continue;
+            };
+            if temporary != transfer_source || !definitions.contains_key(temporary) {
+                continue;
+            }
+            let producer_site = OperationSite {
                 block,
                 index: OperationIndex::from_index(index),
             };
-            if !definitions.contains_key(temporary) {
-                continue;
-            }
-            // The alloca may be in a dominating block. The existing move proves its destination is
-            // available at this exact point; the use census below is what removes any independent
-            // path-sensitive role for the temporary.
-            if temporary == move_source {
-                staged_moves.push(StagedMove {
-                    copy_site,
-                    move_site: OperationSite {
-                        block,
-                        index: OperationIndex::from_index(index + 1),
-                    },
-                    temporary: *temporary,
-                    destination: destination.clone(),
-                });
-            }
+            // The alloca may be in a dominating block. The existing transfer proves its final
+            // destination is available at this exact point; the use census below is what removes
+            // any independent path-sensitive role for the temporary.
+            forwarded_initializations.push(ForwardedInitialization {
+                producer_site,
+                transfer_site: OperationSite {
+                    block,
+                    index: OperationIndex::from_index(index + 1),
+                },
+                temporary: *temporary,
+                destination: destination.clone(),
+            });
         }
     }
     // Keeping all three operations in one block makes allocation order a lifetime proof: the
@@ -188,15 +212,29 @@ pub(crate) fn forward_trivial_copies(func: &Function, env: ModuleEnv<'_>) -> Opt
             && source.site.index.as_u32() < destination.site.index.as_u32()
             && destination.site.index.as_u32() < copy.site.index.as_u32()
     });
-    if copies.is_empty() && staged_moves.is_empty() {
+    if copies.is_empty() && forwarded_initializations.is_empty() {
         return None;
     }
+    // Place identities are only needed by initialization retargeting. Avoid indexing every result
+    // in rounds whose structural scan found only the original CSE-copy forwarding candidates.
+    let operation_definitions: FxHashMap<_, _> = if forwarded_initializations.is_empty() {
+        FxHashMap::default()
+    } else {
+        func.blocks()
+            .flat_map(|block| func.block(block).operations())
+            .filter_map(|operation| operation.result_id().map(|result| (result, operation)))
+            .collect()
+    };
 
     // Only places participating in a structurally viable copy need a whole-function use census.
     let mut uses: FxHashMap<ValueId, Uses> = copies
         .iter()
         .flat_map(|copy| [copy.source, copy.destination])
-        .chain(staged_moves.iter().map(|staged| staged.temporary))
+        .chain(
+            forwarded_initializations
+                .iter()
+                .map(|forwarded| forwarded.temporary),
+        )
         .map(|id| (id, Uses::default()))
         .collect();
     for block in func.blocks() {
@@ -225,24 +263,92 @@ pub(crate) fn forward_trivial_copies(func: &Function, env: ModuleEnv<'_>) -> Opt
     let mut replacements: FxHashMap<ValueId, ValueId> = FxHashMap::default();
     let mut removed: FxHashMap<BlockId, FxHashSet<OperationIndex>> = FxHashMap::default();
     let mut retargeted = Vec::new();
-    for staged in staged_moves {
-        let temporary_uses = &uses[&staged.temporary];
-        if temporary_uses.references != 2 || temporary_uses.unsafe_use {
+    let forwarded_initializations: Vec<_> = forwarded_initializations
+        .into_iter()
+        .filter(|forwarded| {
+            let temporary_uses = &uses[&forwarded.temporary];
+            temporary_uses.references == 2 && !temporary_uses.unsafe_use
+        })
+        .collect();
+    let producer_to_forwarding: FxHashMap<_, _> = forwarded_initializations
+        .iter()
+        .enumerate()
+        .map(|(index, forwarded)| (forwarded.producer_site, index))
+        .collect();
+    let mut consumed = FxHashSet::default();
+    let mut blocked = FxHashSet::default();
+    let mut forwarded_temporaries = FxHashSet::default();
+    let mut storage_cache = FxHashMap::default();
+    for start in 0..forwarded_initializations.len() {
+        if consumed.contains(&start) || blocked.contains(&start) {
             continue;
         }
+        let first = &forwarded_initializations[start];
+        let producer = operation_at(func, first.producer_site);
+        let mut current = start;
+        let mut last_safe = None;
+        loop {
+            let forwarded = &forwarded_initializations[current];
+            if !can_retarget_initialization(
+                producer,
+                &forwarded.destination,
+                func,
+                &operation_definitions,
+                &mut storage_cache,
+                env,
+            ) {
+                break;
+            }
+            last_safe = Some(current);
+            let Some(next) = producer_to_forwarding
+                .get(&forwarded.transfer_site)
+                .copied()
+            else {
+                break;
+            };
+            current = next;
+        }
+        let Some(last_safe) = last_safe else {
+            continue;
+        };
 
-        retargeted.push((staged.copy_site, staged.destination));
-        removed
-            .entry(staged.move_site.block)
-            .or_default()
-            .insert(staged.move_site.index);
-        let definition = definitions[&staged.temporary];
-        removed
-            .entry(definition.site.block)
-            .or_default()
-            .insert(definition.site.index);
+        retargeted.push((
+            first.producer_site,
+            forwarded_initializations[last_safe].destination.clone(),
+        ));
+        let mut current = start;
+        loop {
+            let forwarded = &forwarded_initializations[current];
+            consumed.insert(current);
+            forwarded_temporaries.insert(forwarded.temporary);
+            removed
+                .entry(forwarded.transfer_site.block)
+                .or_default()
+                .insert(forwarded.transfer_site.index);
+            let definition = definitions[&forwarded.temporary];
+            removed
+                .entry(definition.site.block)
+                .or_default()
+                .insert(definition.site.index);
+            if current == last_safe {
+                if let Some(next) = producer_to_forwarding
+                    .get(&forwarded.transfer_site)
+                    .copied()
+                {
+                    // This producer operation is being removed as the transfer above. If the root
+                    // producer could not safely target the following destination, that following
+                    // candidate cannot be applied independently to the removed operation.
+                    blocked.insert(next);
+                }
+                break;
+            }
+            current = producer_to_forwarding[&forwarded.transfer_site];
+        }
     }
     for copy in copies {
+        if forwarded_temporaries.contains(&copy.destination) {
+            continue;
+        }
         let destination_definition = definitions[&copy.destination];
         let source_uses = &uses[&copy.source];
         let destination_uses = &uses[&copy.destination];
@@ -275,7 +381,10 @@ pub(crate) fn forward_trivial_copies(func: &Function, env: ModuleEnv<'_>) -> Opt
 
     let mut edit = FunctionEdit::new(func.clone());
     for (site, destination) in retargeted {
-        edit.block_mut(site.block).operations[site.index.as_index()].operands[1] = destination;
+        let producer = &mut edit.block_mut(site.block).operations[site.index.as_index()];
+        let destination_index = initialization_destination_index(producer)
+            .expect("a selected initialization producer must retain its destination");
+        producer.operands[destination_index] = destination;
     }
     edit.visit_operands_mut(|operand| {
         if let mir::Value::Register(id) = operand
@@ -293,6 +402,160 @@ pub(crate) fn forward_trivial_copies(func: &Function, env: ModuleEnv<'_>) -> Opt
         });
     }
     Some(edit.finish(env))
+}
+
+fn initialization_destination_index(operation: &Operation) -> Option<usize> {
+    match operation.kind {
+        OperationKind::Store
+        | OperationKind::Memcpy
+        | OperationKind::Move
+        | OperationKind::Clone { .. } => Some(1),
+        OperationKind::Call { .. } => operation.operands.len().checked_sub(1),
+        _ => None,
+    }
+}
+
+fn operation_at(func: &Function, site: OperationSite) -> &Operation {
+    &func.block(site.block).operations()[site.index.as_index()]
+}
+
+fn can_retarget_initialization(
+    producer: &Operation,
+    destination: &mir::Value,
+    func: &Function,
+    definitions: &FxHashMap<ValueId, &Operation>,
+    storage_cache: &mut FxHashMap<ValueId, OperandStorage>,
+    env: ModuleEnv<'_>,
+) -> bool {
+    let Some(destination_index) = initialization_destination_index(producer) else {
+        return false;
+    };
+    if matches!(
+        producer.kind,
+        OperationKind::Call { .. } | OperationKind::Clone { .. }
+    ) {
+        let callee_index = if matches!(producer.kind, OperationKind::Call { .. }) {
+            0
+        } else {
+            2
+        };
+        if initialization_is_trivial_copy(producer, env)
+            && resolved_callee_is_native(&producer.operands[callee_index], env)
+        {
+            // Native calls first compute an owned HIR result and only then store it through the MIR
+            // return place. Retargeting therefore cannot clobber an aliased input while it is read.
+            return true;
+        }
+    }
+
+    producer
+        .operands
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != destination_index)
+        .all(|(_, input)| {
+            operands_are_disjoint(input, destination, func, definitions, storage_cache)
+        })
+}
+
+fn initialization_is_trivial_copy(producer: &Operation, env: ModuleEnv<'_>) -> bool {
+    let ty = match &producer.kind {
+        OperationKind::Call { ty, .. } => ty.ret(),
+        OperationKind::Clone { ty } => *ty,
+        _ => return false,
+    };
+    concrete_type_is_trivial_copy(ty, &env)
+}
+
+fn resolved_callee_is_native(callee: &mir::Value, env: ModuleEnv<'_>) -> bool {
+    let mir::Value::Function(id) = callee else {
+        return false;
+    };
+    let module = if id.module == env.current.module_id() {
+        Some(env.current)
+    } else {
+        env.modules.get(id.module).and_then(|entry| entry.module())
+    };
+    module
+        .and_then(|module| module.get_function_by_id(id.function))
+        .is_some_and(|function| function.code.as_script().is_none())
+}
+
+fn operands_are_disjoint(
+    first: &mir::Value,
+    second: &mir::Value,
+    func: &Function,
+    definitions: &FxHashMap<ValueId, &Operation>,
+    storage_cache: &mut FxHashMap<ValueId, OperandStorage>,
+) -> bool {
+    match (
+        operand_storage(first, func, definitions, storage_cache),
+        operand_storage(second, func, definitions, storage_cache),
+    ) {
+        (OperandStorage::None, _) | (_, OperandStorage::None) => true,
+        (OperandStorage::Place(first), OperandStorage::Place(second)) => {
+            if first.root != second.root {
+                return true;
+            }
+            first
+                .fields
+                .iter()
+                .zip(&second.fields)
+                .any(|(first, second)| first != second)
+        }
+        (OperandStorage::Unknown, _) | (_, OperandStorage::Unknown) => false,
+    }
+}
+
+fn operand_storage(
+    operand: &mir::Value,
+    func: &Function,
+    definitions: &FxHashMap<ValueId, &Operation>,
+    cache: &mut FxHashMap<ValueId, OperandStorage>,
+) -> OperandStorage {
+    match operand {
+        mir::Value::Constant(id) => OperandStorage::Place(PlaceIdentity {
+            root: PlaceRoot::Constant(*id),
+            fields: SVec2::new(),
+        }),
+        mir::Value::Parameter(id) => OperandStorage::Place(PlaceIdentity {
+            root: PlaceRoot::Parameter(*id),
+            fields: SVec2::new(),
+        }),
+        mir::Value::Register(id) => {
+            if let Some(storage) = cache.get(id) {
+                return storage.clone();
+            }
+            let storage = match definitions.get(id).map(|operation| &operation.kind) {
+                Some(OperationKind::Subfield { .. }) => {
+                    let operation = definitions[id];
+                    match (
+                        operand_storage(&operation.operands[0], func, definitions, cache),
+                        field_index(&operation.operands[1], func),
+                    ) {
+                        (OperandStorage::Place(mut place), Some(field)) => {
+                            place.fields.push(field);
+                            OperandStorage::Place(place)
+                        }
+                        _ => OperandStorage::Unknown,
+                    }
+                }
+                // A projection exposes storage owned by one of its arguments, but its provenance
+                // is not encoded directly in this operation. Reject it rather than guess.
+                Some(OperationKind::Project { .. }) | None => OperandStorage::Unknown,
+                Some(_) => OperandStorage::Place(PlaceIdentity {
+                    root: PlaceRoot::Result(*id),
+                    fields: SVec2::new(),
+                }),
+            };
+            cache.insert(*id, storage.clone());
+            storage
+        }
+        mir::Value::Function(_)
+        | mir::Value::Dictionary(_)
+        | mir::Value::Subscript(_)
+        | mir::Value::Pattern(_) => OperandStorage::None,
+    }
 }
 
 fn note_operation(operation: &Operation, site: Site, uses: &mut FxHashMap<ValueId, Uses>) {
@@ -409,12 +672,18 @@ fn note_unsafe(operand: &mir::Value, uses: &mut FxHashMap<ValueId, Uses>) {
 #[cfg(test)]
 mod tests {
     use crate::{
-        CompilerSession, ExecutionTarget, MirOptimization, Path,
-        hir::value::Value,
+        CompilerSession, ExecutionTarget, Location, MirOptimization, Path,
+        format::FormatWith,
+        hir::{function::ArgConvention, value::Value},
         mir::{
+            self, Operation, ParameterKind,
+            builder::FunctionBuilder,
             operation::OperationKindDiscriminant as Op,
             profile::{MirInstructionCounts, MirInstructionKind as Kind},
+            terminator::Terminator,
         },
+        module::ModuleEnv,
+        std::{math::int_type, string::string_type},
     };
 
     fn optimized(src: &str) -> String {
@@ -458,6 +727,61 @@ mod tests {
             .unwrap();
         assert_eq!(result.into_primitive_ty::<isize>().unwrap(), 25);
         profile.total().clone()
+    }
+
+    fn forwarded_move_chain(env: ModuleEnv<'_>) -> crate::mir::Function {
+        let span = Location::new_synthesized();
+        let mut builder = FunctionBuilder::new("move_chain".into(), Default::default());
+        let result = builder.add_parameter(int_type(), ParameterKind::Return);
+        let block = builder.add_block();
+        let source = builder
+            .append_operation(block, Operation::alloca(span, int_type()))
+            .unwrap();
+        let first = builder
+            .append_operation(block, Operation::alloca(span, int_type()))
+            .unwrap();
+        let second = builder
+            .append_operation(block, Operation::alloca(span, int_type()))
+            .unwrap();
+        let constant = builder.add_constant(
+            int_type(),
+            crate::hir::value::LiteralValue::new_native(1isize),
+            &env,
+        );
+        builder.append_operation(
+            block,
+            Operation::store(span, mir::Value::Constant(constant), source.clone()),
+        );
+        builder.append_operation(block, Operation::move_value(span, source, first.clone()));
+        builder.append_operation(block, Operation::move_value(span, first, second.clone()));
+        builder.append_operation(
+            block,
+            Operation::move_value(span, second, mir::Value::Parameter(result)),
+        );
+        builder.set_terminator(block, Terminator::ret(span));
+        builder.finish(env)
+    }
+
+    fn staged_memcpy(env: ModuleEnv<'_>) -> crate::mir::Function {
+        let span = Location::new_synthesized();
+        let mut builder = FunctionBuilder::new("staged_memcpy".into(), Default::default());
+        let source =
+            builder.add_parameter(int_type(), ParameterKind::Parameter(ArgConvention::Let));
+        let result = builder.add_parameter(int_type(), ParameterKind::Return);
+        let block = builder.add_block();
+        let temporary = builder
+            .append_operation(block, Operation::alloca(span, int_type()))
+            .unwrap();
+        builder.append_operation(
+            block,
+            Operation::memcpy(span, mir::Value::Parameter(source), temporary.clone()),
+        );
+        builder.append_operation(
+            block,
+            Operation::memcpy(span, temporary, mir::Value::Parameter(result)),
+        );
+        builder.set_terminator(block, Terminator::ret(span));
+        builder.finish(env)
     }
 
     #[test]
@@ -517,6 +841,175 @@ mod tests {
     }
 
     #[test]
+    fn a_native_call_result_is_written_back_in_place() {
+        let module = optimized("fn increment(mut x: int) -> int { x = x + 1; x }");
+        let body = body_of(&module, "increment");
+        let add = body
+            .lines()
+            .find(|line| line.contains("Num<std::int>::add"))
+            .unwrap_or_else(|| panic!("increment has no add call:\n{body}"));
+        let arguments: Vec<_> = add
+            .split_once('(')
+            .unwrap()
+            .1
+            .trim_end_matches(')')
+            .split(", ")
+            .collect();
+
+        assert_eq!(
+            arguments.first(),
+            arguments.last(),
+            "native add must write directly to the left-hand side:\n{body}"
+        );
+    }
+
+    #[test]
+    fn a_stored_value_is_written_directly_to_its_assignment_destination() {
+        let module = optimized("fn replace(mut x: int) -> int { x = 1; x }");
+        let body = body_of(&module, "replace");
+
+        assert_eq!(body.matches("alloca int").count(), 1, "{body}");
+        assert!(
+            body.lines()
+                .any(|line| line.trim().starts_with("store @c0 to %r0")),
+            "the constant must be stored directly into the mutable local:\n{body}"
+        );
+    }
+
+    #[test]
+    fn a_chain_of_moves_is_collapsed_in_one_linear_sweep() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let source = forwarded_move_chain(env);
+        let forwarded = super::forward_redundant_storage(&source, env)
+            .expect("the move chain must be forwarded");
+        let body = forwarded.format_with(&env).to_string();
+
+        assert_eq!(body.matches("alloca int").count(), 0, "{body}");
+        assert_eq!(body.matches("move ").count(), 0, "{body}");
+        assert!(body.contains("store @c0 to %p0"), "{body}");
+    }
+
+    #[test]
+    fn a_memcpy_followed_by_a_final_memcpy_is_forwarded_once() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let source = staged_memcpy(env);
+        let forwarded = super::forward_redundant_storage(&source, env)
+            .expect("the staging memcpy must be forwarded");
+        let body = forwarded.format_with(&env).to_string();
+
+        assert_eq!(body.matches("alloca int").count(), 0, "{body}");
+        assert_eq!(body.matches("memcpy ").count(), 1, "{body}");
+        assert!(body.contains("memcpy %p0 to %p1"), "{body}");
+    }
+
+    #[test]
+    fn a_clone_is_forwarded_to_its_final_destination() {
+        let mut session = CompilerSession::new();
+        let module_id = session
+            .compile_for(
+                ExecutionTarget::Mir,
+                "fn copy(x: string) -> string { x }",
+                "copy_forward_clone",
+                Path::single_str("copy_forward_clone"),
+            )
+            .unwrap()
+            .module_id;
+        let module = session.expect_fresh_module(module_id);
+        let copy = module.get_local_function_id(crate::ustr("copy")).unwrap();
+        let raw = session
+            .mir_artifacts_for(module_id, MirOptimization::Disabled)
+            .unwrap()
+            .get(copy)
+            .unwrap();
+        let clone = raw
+            .blocks()
+            .flat_map(|block| raw.block(block).operations())
+            .find(|operation| matches!(operation.kind, mir::OperationKind::Clone { .. }))
+            .expect("copying a string must use Value::clone");
+        let callee = clone.operands[2].clone();
+        let env = session.modules().env_for(module);
+        let span = Location::new_synthesized();
+        let mut builder = FunctionBuilder::new("staged_clone".into(), Default::default());
+        let source =
+            builder.add_parameter(string_type(), ParameterKind::Parameter(ArgConvention::Let));
+        let result = builder.add_parameter(string_type(), ParameterKind::Return);
+        let block = builder.add_block();
+        let temporary = builder
+            .append_operation(block, Operation::alloca(span, string_type()))
+            .unwrap();
+        builder.append_operation(
+            block,
+            Operation::clone_value(
+                span,
+                mir::Value::Parameter(source),
+                temporary.clone(),
+                callee,
+                string_type(),
+            ),
+        );
+        builder.append_operation(
+            block,
+            Operation::move_value(span, temporary, mir::Value::Parameter(result)),
+        );
+        builder.set_terminator(block, Terminator::ret(span));
+        let staged = builder.finish(env);
+        let forwarded = super::forward_redundant_storage(&staged, env)
+            .expect("the staged clone must be forwarded");
+        let body = forwarded.format_with(&env).to_string();
+
+        assert_eq!(body.matches("alloca string").count(), 0, "{body}");
+        assert_eq!(body.matches("move ").count(), 0, "{body}");
+        assert!(body.contains("clone string %p0 to %p1"), "{body}");
+    }
+
+    #[test]
+    fn a_script_call_result_does_not_overwrite_its_aliased_argument() {
+        let module = optimized(
+            "fn recursive(x: int) -> int {\n\
+                 if x == 0 { 0 } else { recursive(x - 1) }\n\
+             }\n\
+             fn update(mut x: int) -> int { x = recursive(x); x }",
+        );
+        let body = body_of(&module, "update");
+        let lines: Vec<_> = body.lines().map(str::trim).collect();
+
+        assert!(
+            lines.windows(2).any(|pair| {
+                pair[0].contains("call copy_forward::recursive") && pair[1].starts_with("move ")
+            }),
+            "a script call must retain fresh result storage when its result aliases an input:\n{body}"
+        );
+    }
+
+    #[test]
+    fn a_script_call_can_write_to_a_sibling_field() {
+        let module = optimized(
+            "struct Pair { a: int, b: int }\n\
+             fn recursive(x: int) -> int {\n\
+                 if x == 0 { 0 } else { recursive(x - 1) }\n\
+             }\n\
+             fn update(mut pair: Pair) -> Pair {\n\
+                 pair.b = recursive(pair.a);\n\
+                 pair\n\
+             }",
+        );
+        let body = body_of(&module, "update");
+        let lines: Vec<_> = body.lines().map(str::trim).collect();
+        let call = lines
+            .iter()
+            .position(|line| line.contains("call copy_forward::recursive"))
+            .expect("update must retain its recursive call");
+
+        assert!(
+            !lines[call + 1].starts_with("move "),
+            "different constant fields of one root are disjoint:\n{body}"
+        );
+        assert_eq!(body.matches("alloca int").count(), 0, "{body}");
+    }
+
+    #[test]
     fn a_snapshot_is_not_forwarded_across_a_source_write() {
         let module = optimized(
             "fn preserve(mut source: int, replacement: int) -> int {\n\
@@ -544,8 +1037,28 @@ mod tests {
         );
         let body = body_of(&module, "change_copy");
 
+        let copied_local = body
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("memcpy %p0 to "))
+            .expect("the source snapshot must remain");
+        let add_arguments: Vec<Vec<_>> = body
+            .lines()
+            .filter(|line| line.contains("Num<std::int>::add"))
+            .map(|line| {
+                line.split_once('(')
+                    .unwrap()
+                    .1
+                    .trim_end_matches(')')
+                    .split(", ")
+                    .collect()
+            })
+            .collect();
         assert!(
-            body.contains("memcpy") && body.matches("alloca int").count() >= 2,
+            add_arguments
+                == [
+                    vec![copied_local, "%p1", copied_local],
+                    vec!["%p0", copied_local, "%p2"],
+                ],
             "an independently written copy must remain a distinct place:\n{body}"
         );
     }
