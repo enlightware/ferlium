@@ -412,10 +412,11 @@ fn redirect_recursion(edit: &mut FunctionEdit, original: FunctionId, own: Functi
                 _ => None,
             });
         for operation in operations {
-            if let OperationKind::Call {
-                instantiation: None,
-                ..
-            } = &operation.kind
+            if let OperationKind::Call { metadata, .. } = &operation.kind
+                && metadata
+                    .as_deref()
+                    .and_then(|metadata| metadata.instantiation.as_ref())
+                    .is_none()
                 && operation.operands[0] == mir::Value::Function(original)
             {
                 operation.operands[0] = own.clone();
@@ -690,12 +691,15 @@ fn substitute_in_operation(operation: &mut Operation, mapper: &mut impl TypeMapp
         | OperationKind::BuildClosure { ty, .. }
         | OperationKind::CloneClosureEnv { ty } => *ty = ty.map(mapper),
         OperationKind::AllocaPlace { pointing_to } => *pointing_to = pointing_to.map(mapper),
-        OperationKind::Call { ty, instantiation } => {
+        OperationKind::Call { ty, metadata } => {
             **ty = ty.map(mapper);
             // The instantiation this body's own calls record. Easy to miss because it is not a
             // type field, and the one that makes specialization cascade: an inner call recording
             // the container's quantifiers becomes concrete exactly when the container does.
-            if let Some(instantiation) = instantiation {
+            if let Some(instantiation) = metadata
+                .as_deref_mut()
+                .and_then(|metadata| metadata.instantiation.as_mut())
+            {
                 substitute_in_instantiation(instantiation, mapper);
             }
         }
@@ -764,8 +768,8 @@ pub(crate) fn specialize_call_sites(
                 });
                 // The specialization is not generic, so it has no quantifiers for an instantiation
                 // to be positional against. Leaving the old one would claim otherwise.
-                if let OperationKind::Call { instantiation, .. } = &mut operation.kind {
-                    *instantiation = None;
+                if let OperationKind::Call { metadata, .. } = &mut operation.kind {
+                    *metadata = None;
                 }
                 changed = true;
             }
@@ -782,13 +786,10 @@ fn specialization_for(
     session: &CompilerSession,
     specializations: &mut Specializations,
 ) -> Option<LocalFunctionId> {
-    let OperationKind::Call {
-        ty,
-        instantiation: Some(instantiation),
-    } = &operation.kind
-    else {
+    let OperationKind::Call { ty, metadata } = &operation.kind else {
         return None;
     };
+    let instantiation = metadata.as_deref()?.instantiation.as_ref()?;
     let mir::Value::Function(callee) = &operation.operands[0] else {
         return None;
     };
@@ -833,7 +834,7 @@ fn specialization_for(
         .collect::<Option<Vec<_>>>()?;
     let key = SpecializationKey {
         callee: *callee,
-        instantiation: instantiation.as_ref().clone(),
+        instantiation: instantiation.clone(),
         dictionaries,
     };
     if let Some(existing) = specializations.cached(&key) {
@@ -933,9 +934,12 @@ fn worth_specializing<Ty: TypeLike>(
                         bound_entries.insert(result);
                     }
                 }
-                OperationKind::Call { ty, instantiation }
+                OperationKind::Call { ty, metadata }
                     if matches!(operation.operands.first(), Some(mir::Value::Function(_)))
-                        && instantiation.as_ref().is_some_and(|inner| {
+                        && metadata
+                            .as_deref()
+                            .and_then(|metadata| metadata.instantiation.as_ref())
+                            .is_some_and(|inner| {
                             let visible_start = operation
                                 .operands
                                 .len()
@@ -952,7 +956,7 @@ fn worth_specializing<Ty: TypeLike>(
                             });
                             let was_generic = inner.ty_args.iter().any(Type::is_variable)
                                 || inner.eff_args.iter().any(EffType::has_variables);
-                            let mut mapped = inner.as_ref().clone();
+                            let mut mapped = inner.clone();
                             substitute_in_instantiation(&mut mapped, &mut mapper);
                             let becomes_concrete = was_generic
                                 && mapped.ty_args.iter().all(|ty| ty.is_constant())
@@ -1135,13 +1139,13 @@ mod tests {
             !callee_scheme.ty_quantifiers.is_empty(),
             "the forwarded method must be generic, or this test proves nothing"
         );
-        let OperationKind::Call {
-            instantiation: Some(instantiation),
-            ..
-        } = &call.kind
-        else {
+        let OperationKind::Call { metadata, .. } = &call.kind else {
             panic!("the thunk's generic call must record its instantiation")
         };
+        let instantiation = metadata
+            .as_deref()
+            .and_then(|metadata| metadata.instantiation.as_ref())
+            .expect("the thunk's generic call must record its instantiation");
         assert_eq!(
             instantiation.ty_args.len(),
             callee_scheme.ty_quantifiers.len()
@@ -1182,10 +1186,9 @@ mod tests {
                     })
             })
             .find_map(|operation| match &operation.kind {
-                OperationKind::Call {
-                    instantiation: Some(instantiation),
-                    ..
-                } => Some(instantiation),
+                OperationKind::Call { metadata, .. } => metadata
+                    .as_deref()
+                    .and_then(|metadata| metadata.instantiation.as_ref()),
                 _ => None,
             })
             .expect("the two-quantifier forwarding call must record its instantiation");
@@ -1236,7 +1239,7 @@ mod tests {
                     _ => None,
                 });
             for operation in operations {
-                let OperationKind::Call { ty, instantiation } = &operation.kind else {
+                let OperationKind::Call { ty, metadata } = &operation.kind else {
                     continue;
                 };
                 let Value::Function(callee) = &operation.operands[0] else {
@@ -1245,12 +1248,12 @@ mod tests {
                 if callee.module != module || callee.function != wanted {
                     continue;
                 }
-                let instantiation = instantiation
-                    .as_ref()
+                let instantiation = metadata
+                    .as_deref()
+                    .and_then(|metadata| metadata.instantiation.as_ref())
                     .unwrap_or_else(|| {
                         panic!("the call to {callee_name} must record its instantiation")
                     })
-                    .as_ref()
                     .clone();
                 // The operand layout the verifier assumes: callee, evidence, visible arguments,
                 // result place.
@@ -1719,10 +1722,12 @@ mod tests {
                         _ => None,
                     });
                 for operation in operations {
-                    let OperationKind::Call {
-                        ty,
-                        instantiation: Some(instantiation),
-                    } = &operation.kind
+                    let OperationKind::Call { ty, metadata } = &operation.kind else {
+                        continue;
+                    };
+                    let Some(instantiation) = metadata
+                        .as_deref()
+                        .and_then(|metadata| metadata.instantiation.as_ref())
                     else {
                         continue;
                     };
@@ -1759,7 +1764,7 @@ mod tests {
 
                     let key = SpecializationKey {
                         callee: *callee,
-                        instantiation: instantiation.as_ref().clone(),
+                        instantiation: instantiation.clone(),
                         dictionaries,
                     };
                     let own = FunctionId {
@@ -1857,10 +1862,10 @@ mod tests {
         let mut inner_calls = 0;
         for block_id in specialized.blocks() {
             for operation in specialized.block(block_id).operations() {
-                if let OperationKind::Call {
-                    instantiation: Some(instantiation),
-                    ..
-                } = &operation.kind
+                if let OperationKind::Call { metadata, .. } = &operation.kind
+                    && let Some(instantiation) = metadata
+                        .as_deref()
+                        .and_then(|metadata| metadata.instantiation.as_ref())
                 {
                     inner_calls += 1;
                     assert!(

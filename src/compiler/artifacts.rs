@@ -15,7 +15,7 @@ use crate::{
     mir::{
         self,
         pass::{
-            Specializations, dead_evidence, optimize_function,
+            Specializations, dead_evidence, optimize_function, owned_arguments,
             provenance::{AddressorSummaries, AddressorSummary},
         },
     },
@@ -107,13 +107,14 @@ impl ModuleArtifacts {
     }
 }
 
-/// A body the optimizer created by specializing another function at one instantiation.
+/// A private body the optimizer created from another function.
 ///
 /// It has no entry in the module's HIR function table — nothing in the source declared it — so
 /// everything the rest of the compiler reads through a `FunctionId` comes from `original` instead.
 /// That indirection is the whole cost of specialization's storage, and it is cheap precisely because
-/// a specialized body keeps its original's *visible* signature, so no metadata is duplicated. Its
-/// hidden evidence parameters are dropped by
+/// an ordinary monomorphization keeps its original's visible signature. The final ownership pass
+/// may instead narrow selected visible parameters to optimized-MIR-only ownership transfer; both
+/// forms still reuse the original's HIR metadata. Hidden evidence parameters are dropped by
 /// [`dead_evidence`](crate::mir::pass::dead_evidence), which no HIR record describes.
 pub(crate) struct Specialization {
     /// The function this was specialized from, and the source of all its metadata.
@@ -245,12 +246,23 @@ impl MirArtifacts {
             next += 1;
         }
 
+        // Forward a caller's final ownership into cached, optimized-MIR-only callee variants. This
+        // is whole-module and deliberately outside the per-function loop: it needs the completed
+        // specialization graph and changes calling conventions nothing earlier may consult.
+        let mut specializations = specializations.into_created();
+        owned_arguments::forward_owned_arguments(
+            &mut functions,
+            &mut specializations,
+            module_id,
+            env,
+        );
+
         // Last, over the finished bodies. Every decision above was taken against the signatures the
         // optimizer has always seen; this only narrows the calling convention of bodies nothing
         // will consult again.
         let specializations = dead_evidence::drop_dead_specialization_evidence(
             &mut functions,
-            specializations.into_created(),
+            specializations,
             module_id,
         );
 

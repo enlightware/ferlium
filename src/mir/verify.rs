@@ -456,6 +456,8 @@ enum FailureState {
 struct RootInfo {
     value: mir::Value,
     ty: Type,
+    /// Owned parameters enter live; local allocations enter unallocated.
+    initially_live: bool,
     /// Whether every ownership-relevant subplace of this root is represented precisely by
     /// `StorageState`. Opaque native/custom/variant interiors are still checked at individual
     /// operations, but cannot prove whole-frame absence at exit.
@@ -704,17 +706,33 @@ impl<'a> Verifier<'a> {
     }
 
     fn collect_value_information(&mut self) {
-        for (index, parameter) in self.func.parameters().iter().enumerate() {
+        for index in 0..self.func.parameters().len() {
+            let parameter = &self.func.parameters()[index];
+            let kind = parameter.kind;
+            let ty = parameter.ty;
             let value = mir::Value::Parameter(mir::ParameterId::from_index(index));
-            let role = match parameter.kind {
+            let role = match kind {
                 ParameterKind::Dictionary => ValueRole::Dictionary,
-                ParameterKind::Parameter(_) => ValueRole::Place(MirType::Lowered(parameter.ty)),
-                ParameterKind::Return if self.func.result_convention().returns_place() => {
-                    ValueRole::Place(MirType::Pointer(Box::new(MirType::Lowered(parameter.ty))))
+                ParameterKind::Parameter(_) | ParameterKind::Owned => {
+                    ValueRole::Place(MirType::Lowered(ty))
                 }
-                ParameterKind::Return => ValueRole::Place(MirType::Lowered(parameter.ty)),
+                ParameterKind::Return if self.func.result_convention().returns_place() => {
+                    ValueRole::Place(MirType::Pointer(Box::new(MirType::Lowered(ty))))
+                }
+                ParameterKind::Return => ValueRole::Place(MirType::Lowered(ty)),
             };
-            self.value_roles.insert(value, role);
+            self.value_roles.insert(value.clone(), role);
+            if matches!(kind, ParameterKind::Owned) {
+                let root = self.roots.len();
+                let exact = self.storage_paths_are_exact(ty, &mut Vec::new());
+                self.roots.push(RootInfo {
+                    value: value.clone(),
+                    ty,
+                    initially_live: true,
+                    exact,
+                });
+                self.root_index.insert(value, root);
+            }
         }
 
         for index in 0..self.node_order.len() {
@@ -745,6 +763,7 @@ impl<'a> Verifier<'a> {
                 self.roots.push(RootInfo {
                     value: value.clone(),
                     ty,
+                    initially_live: false,
                     exact,
                 });
                 self.root_index.insert(value.clone(), root);
@@ -952,8 +971,15 @@ impl<'a> Verifier<'a> {
             | OperationKind::StackSave
             | OperationKind::CheckCallDepth
             | OperationKind::CheckFuel => {}
-            OperationKind::Call { ty, instantiation } => {
-                self.verify_instantiation(node, &operands[0], ty, instantiation.as_deref());
+            OperationKind::Call { ty, metadata } => {
+                self.verify_instantiation(
+                    node,
+                    &operands[0],
+                    ty,
+                    metadata
+                        .as_deref()
+                        .and_then(|metadata| metadata.instantiation.as_ref()),
+                );
                 let visible_start = operands
                     .len()
                     .checked_sub(ty.fn_ty.args.len() + 1)
@@ -988,6 +1014,26 @@ impl<'a> Verifier<'a> {
                         &operands[index],
                         MirType::Lowered(argument.ty),
                     );
+                }
+                if let Some(metadata) = metadata {
+                    for argument in metadata.owned_arguments.iter_ones() {
+                        assert!(
+                            argument < ty.fn_ty.args.len(),
+                            "MIR function `{}` node {}: owned call argument {} is out of range",
+                            self.func.name,
+                            node,
+                            argument
+                        );
+                        assert!(
+                            !ty.fn_ty.args[argument]
+                                .mut_ty
+                                .as_resolved()
+                                .is_some_and(|mutability| mutability.is_mutable()),
+                            "MIR function `{}` node {}: a mutable-reference argument cannot transfer ownership",
+                            self.func.name,
+                            node
+                        );
+                    }
                 }
                 let result = operands.last().unwrap();
                 assert!(
@@ -1419,13 +1465,19 @@ impl<'a> Verifier<'a> {
     }
 
     fn verify_storage_ownership(&mut self) {
-        let initial_roots = self
+        let roots = self
             .roots
             .iter()
-            .map(|root| {
-                StorageState::shaped(root.ty, LeafState::UNALLOCATED, &self.env, &mut Vec::new())
-            })
-            .collect();
+            .map(|root| (root.ty, root.initially_live))
+            .collect::<Vec<_>>();
+        let mut initial_roots = Vec::with_capacity(roots.len());
+        for (ty, initially_live) in roots {
+            initial_roots.push(if initially_live {
+                self.live_state_for_type(ty)
+            } else {
+                StorageState::shaped(ty, LeafState::UNALLOCATED, &self.env, &mut Vec::new())
+            });
+        }
         let initial = AnalysisState {
             roots: initial_roots,
             markers: FxHashMap::default(),
@@ -1513,7 +1565,15 @@ impl<'a> Verifier<'a> {
                 OperationKind::Clone { .. } => {
                     self.initialize_call_result(node, &operands[1], &mut normal);
                 }
-                OperationKind::Call { .. } => {
+                OperationKind::Call { ty, metadata } => {
+                    if let Some(metadata) = metadata {
+                        let visible_start = operands.len() - (ty.fn_ty.args.len() + 1);
+                        for argument in metadata.owned_arguments.iter_ones() {
+                            let source = &operands[visible_start + argument];
+                            self.consume_place(source, &mut normal);
+                            self.consume_place(source, &mut unwind);
+                        }
+                    }
                     // Operation arity and role verification establish that every call ends in a
                     // result place, including calls returning unit.
                     let destination = operands
@@ -1755,7 +1815,7 @@ impl<'a> Verifier<'a> {
             .state;
         assert!(
             source_state.is_definitely_live(),
-            "MIR function `{}`: closure capture consumes storage that is not definitely initialized",
+            "MIR function `{}`: ownership transfer consumes storage that is not definitely initialized",
             self.func.name
         );
         state.roots[root].set_path_all(&path, LeafState::ABSENT);
@@ -1841,6 +1901,17 @@ impl<'a> Verifier<'a> {
             node
         );
         for (index, root) in state.roots.iter().enumerate() {
+            if self.roots[index].initially_live {
+                assert_eq!(
+                    root.state,
+                    LeafState::ABSENT,
+                    "MIR function `{}` node {}: frame exits without consuming owned parameter {}",
+                    self.func.name,
+                    node,
+                    self.roots[index].value
+                );
+                continue;
+            }
             if !self.roots[index].exact {
                 continue;
             }
@@ -1964,6 +2035,19 @@ impl<'a> Verifier<'a> {
     }
 
     fn local_place(&self, value: &mir::Value) -> LocalPlace {
+        if let mir::Value::Parameter(id) = value {
+            return if matches!(
+                self.func.parameters()[id.as_index()].kind,
+                ParameterKind::Owned
+            ) {
+                LocalPlace::Root {
+                    root: self.root_index[value],
+                    path: Some(vec![]),
+                }
+            } else {
+                LocalPlace::External
+            };
+        }
         let mir::Value::Register(value_id) = value else {
             return LocalPlace::External;
         };
@@ -2537,6 +2621,37 @@ mod tests {
         );
         append(&mut f, block, Operation::store(span, value, local.clone()));
         append(&mut f, block, Operation::clear(span, local));
+        terminate_return(&mut f, block, span);
+        verify(f);
+    }
+
+    #[test]
+    #[should_panic(expected = "frame exits without consuming owned parameter")]
+    fn rejects_an_unconsumed_owned_parameter() {
+        let span = Location::new_synthesized();
+        let mut f = FunctionBuilder::new("bad_owned_parameter".into(), Default::default());
+        f.add_parameter(int_type(), ParameterKind::Owned);
+        let block = f.add_block();
+        terminate_return(&mut f, block, span);
+        verify(f);
+    }
+
+    #[test]
+    fn an_owned_parameter_may_be_moved_to_the_return_slot() {
+        let span = Location::new_synthesized();
+        let mut f = FunctionBuilder::new("owned_parameter".into(), Default::default());
+        let source = f.add_parameter(int_type(), ParameterKind::Owned);
+        let destination = f.add_parameter(int_type(), ParameterKind::Return);
+        let block = f.add_block();
+        append(
+            &mut f,
+            block,
+            Operation::move_value(
+                span,
+                crate::mir::Value::Parameter(source),
+                crate::mir::Value::Parameter(destination),
+            ),
+        );
         terminate_return(&mut f, block, span);
         verify(f);
     }

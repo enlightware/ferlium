@@ -230,7 +230,7 @@ fn plan_inlinings(
             });
 
         for (site, operation) in candidates {
-            let OperationKind::Call { ty, instantiation } = &operation.kind else {
+            let OperationKind::Call { ty, metadata } = &operation.kind else {
                 continue;
             };
             let callee = match &operation.operands[0] {
@@ -280,7 +280,9 @@ fn plan_inlinings(
             let body = match concrete_body(
                 body,
                 callee,
-                instantiation.as_deref(),
+                metadata
+                    .as_deref()
+                    .and_then(|metadata| metadata.instantiation.as_ref()),
                 session,
                 specializations,
                 env,

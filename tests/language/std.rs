@@ -300,6 +300,9 @@ fn immutable_native_inputs_borrow_places_without_cloning() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn ferlium_function_inputs_follow_interpreter_calling_convention() {
     let mut session = TestSession::new();
+    // The clone counter deliberately violates the `Value` ownership law. Keep this calling-
+    // convention test on the borrowing backends, where the exact clone count is meaningful.
+    session.without_optimized_mode();
     assert_val_eq!(
         session.run(
             r#"
@@ -712,6 +715,10 @@ fn temporary_record_projection_let_uses_value_clone() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_append_and_concat_use_value_clone() {
     let mut session = TestSession::new();
+    // The test-only clone counter makes `clone(x); drop(x)` observably different from moving `x`,
+    // violating the `Value` ownership law. This test checks the borrowing implementations rather
+    // than optimizations that are entitled to rely on that law.
+    session.without_optimized_mode();
     assert_val_eq!(
         session.run(
             r#"

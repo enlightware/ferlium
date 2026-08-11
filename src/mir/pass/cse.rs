@@ -460,9 +460,15 @@ fn call_expression(
     summary_of: &dyn Fn(FunctionId) -> AddressorSummary,
     env: ModuleEnv<'_>,
 ) -> Option<(CallExpression, AvailableCall)> {
-    let OperationKind::Call { ty, instantiation } = &operation.kind else {
+    let OperationKind::Call { ty, metadata } = &operation.kind else {
         return None;
     };
+    if metadata
+        .as_deref()
+        .is_some_and(|metadata| !metadata.owned_arguments.is_empty())
+    {
+        return None;
+    }
     if !effects_allow_const_eval(ty.effects()) {
         return None;
     }
@@ -518,7 +524,9 @@ fn call_expression(
     Some((
         CallExpression {
             ty: ty.as_ref().clone(),
-            instantiation: instantiation.as_deref().cloned(),
+            instantiation: metadata
+                .as_deref()
+                .and_then(|metadata| metadata.instantiation.clone()),
             operands: operation.operands[..operation.operands.len() - 1]
                 .to_vec()
                 .into_boxed_slice(),

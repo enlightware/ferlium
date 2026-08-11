@@ -44,13 +44,12 @@ generic function with one call site's types substituted and its trait dictionari
 constants. The raw stage is always exactly the HIR table, which is also what lets the two stages be
 told apart without a flag.
 
-A specialization has no HIR entry, since nothing in the source declared it. Everything outside its
-MIR body — whether it is script or native, its return convention, its parameter passing, its name —
-is read from the function it was specialized from, through one indirection. That is why a
-specialization keeps its original's *visible* signature exactly, so no metadata has to be
-duplicated. Its hidden evidence parameters are a different matter: binding a dictionary parameter
-replaces the parameter's uses, leaving it dead by construction, and the optimizer's final pass
-removes those parameters along with the operands every call passes them through.
+A specialization has no HIR entry, since nothing in the source declared it. Whether it is script or
+native and its source return convention come from the function it was specialized from, through one
+indirection. An ordinary monomorphization keeps that original's visible signature. A later
+optimized-only variant may change selected parameters to ownership transfer, recorded directly in
+its MIR body and call sites. Hidden evidence parameters need no HIR metadata either: binding a
+dictionary replaces its uses, and the optimizer removes the now-dead parameters and call operands.
 
 ## Values and roles
 
@@ -91,13 +90,14 @@ Compile-time match patterns are not runtime constants. They may represent source
 Parameters appear in this order:
 
 1. `@extra`: dictionaries and other hidden evidence;
-2. `@arg`: runtime arguments tagged with HIR's `Let` or `MutableRef` convention; and
+2. `@arg`: runtime arguments tagged `let`, `&mut`, or optimized-MIR-only `owned`; and
 3. `@ret`: the caller-provided result storage, present unconditionally in current MIR, including
    for `()` results.
 
-Both argument conventions are represented as places in this MIR. `Let` is immutable, non-escaping
-access to the selected value; `MutableRef` is exclusive mutable access. Snapshotting, cloning,
-representation copying, and ownership transfer have already been made explicit before MIR lowering.
+All argument conventions are represented as places. `Let` is immutable non-escaping access,
+`MutableRef` is exclusive mutable access, and `owned` transfers the pointee into a private callee
+variant which must consume it on every exit. Lowering emits only the first two; the final
+whole-module ownership pass introduces `owned` after proving the caller's last use.
 
 `CallResultConvention` determines the result storage shape:
 
@@ -142,14 +142,19 @@ still needed without recovering the type from the dictionary behind the callee. 
 the same contract as a `call`'s: a constant function, or the place of a function value read by
 reference. A `clone` initializes its destination and gives it the drop obligation the copy creates.
 
-A `call` additionally carries **how it instantiated its callee**, when the callee is statically known
-and generic: the type and effect arguments its quantifiers stand for, positionally. They are carried
-down from HIR rather than recovered by matching the callee's generic signature against this call's
-concrete one — see [generic-instantiation.md](generic-instantiation.md). The operand is absent for an
-indirect call, for a non-generic callee, and at synthesized call sites where no generic application
-substitution is available; a consumer treats absence as "not known", which costs an optimization
-rather than correctness. Blanket-method forwarding thunks are not such a case: blanket matching
+A `call` additionally carries optional metadata: **how it instantiated its callee**, when statically
+known and generic: the type and effect arguments its quantifiers stand for, positionally. They are
+carried down from HIR rather than recovered by matching the callee's generic signature against this
+call's concrete one — see [generic-instantiation.md](generic-instantiation.md). The operand is absent
+for an indirect call, for a non-generic callee, and at synthesized call sites where no generic
+application substitution is available; a consumer treats absence as "not known", which costs an
+optimization rather than correctness. Blanket-method forwarding thunks are not such a case: blanket matching
 supplies their substitution, and their call records it.
+
+The same optional metadata records which visible operands transfer ownership. Rendered calls prefix
+those operands with `move`; the matching callee parameters render as `@arg owned`. The verifier
+consumes each caller place on both normal and source-error edges and requires every owned parameter
+to be absent at all callee exits.
 
 `Operation::verify` checks kind-local arity. The function verifier additionally checks operand
 roles, types where independently known, dominance, linear uses, source-failure flow, and storage

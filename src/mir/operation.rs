@@ -37,7 +37,7 @@ use ustr::Ustr;
 
 use crate::{
     Location, cached_primitive_ty,
-    containers::{B, b},
+    containers::{B, DenseBitSet, b},
     format::FormatWith,
     mir,
     module::{FunctionId, ModuleEnv},
@@ -230,7 +230,12 @@ impl Operation {
             operands: operands.into_boxed_slice(),
             kind: OperationKind::Call {
                 ty: b(ty),
-                instantiation: instantiation.map(b),
+                metadata: instantiation.map(|instantiation| {
+                    b(CallMetadata {
+                        instantiation: Some(instantiation),
+                        owned_arguments: DenseBitSet::empty(),
+                    })
+                }),
             },
         }
     }
@@ -676,6 +681,17 @@ pub struct Instantiation {
     pub eff_args: Vec<EffType>,
 }
 
+/// Optional metadata carried only by calls that need it.
+///
+/// Keeping this behind the existing optional box preserves the compact representation of the
+/// overwhelmingly common non-generic, borrowing call. Monomorphization uses `instantiation`; the
+/// final ownership-transfer pass uses `owned_arguments`, indexed by visible argument position.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct CallMetadata {
+    pub(crate) instantiation: Option<Instantiation>,
+    pub(crate) owned_arguments: DenseBitSet,
+}
+
 impl Instantiation {
     /// Builds the substitution taking the callee's quantifiers to what this call site instantiated
     /// them at, in the callee's own variable numbering.
@@ -724,13 +740,12 @@ pub enum OperationKind {
     Alloca { ty: Type },
     /// Stack storage for a pointer to a value of `pointing_to`.
     AllocaPlace { pointing_to: Type },
-    /// A statically or dynamically resolved function call with its instantiated call-site type,
-    /// and — when the callee is statically known and generic — how this call site instantiated it.
-    /// Both are boxed to keep every operation compact despite the variable-sized metadata; the
-    /// instantiation is additionally optional because most calls have none.
+    /// A statically or dynamically resolved function call with its instantiated call-site type.
+    /// Optional metadata records generic instantiation and optimized ownership transfer. Both are
+    /// boxed to keep every operation compact; most calls need no metadata at all.
     Call {
         ty: B<CallImplType>,
-        instantiation: Option<B<Instantiation>>,
+        metadata: Option<B<CallMetadata>>,
     },
     /// Enter a scoped subscript accessor and expose its yielded place.
     /// The call-site type is boxed for the same compactness reason as [`Self::Call`].
@@ -1014,13 +1029,20 @@ impl OperationKind {
             AllocaPlace { pointing_to } => {
                 write!(f, "alloca_place {}", pointing_to.format_with(env))
             }
-            Call { .. } => {
+            Call { ty, metadata } => {
                 write!(f, "call ")?;
-                fmt_callee_and_args(f, whole, env)
+                fmt_callee_and_args(
+                    f,
+                    whole,
+                    env,
+                    metadata
+                        .as_deref()
+                        .map(|metadata| (&metadata.owned_arguments, ty.fn_ty.args.len())),
+                )
             }
             Project { .. } => {
                 write!(f, "project ")?;
-                fmt_callee_and_args(f, whole, env)
+                fmt_callee_and_args(f, whole, env, None)
             }
             EndProject => write!(f, "end_project {}", whole.operands[0].format_with(env)),
             CompareEqual => write!(
@@ -1139,11 +1161,20 @@ fn fmt_callee_and_args(
     f: &mut fmt::Formatter<'_>,
     whole: &Operation,
     env: &ModuleEnv<'_>,
+    owned: Option<(&DenseBitSet, usize)>,
 ) -> fmt::Result {
     write!(f, "{}(", whole.operands[0].format_with(env))?;
+    let visible_start = owned.map(|(_, visible)| whole.operands.len() - visible - 1);
     for (i, operand) in whole.operands[1..].iter().enumerate() {
         if i != 0 {
             write!(f, ", ")?;
+        }
+        if let (Some((owned, _)), Some(visible_start)) = (owned, visible_start)
+            && i + 1 >= visible_start
+            && i + 1 < whole.operands.len() - 1
+            && owned.contains(i + 1 - visible_start)
+        {
+            write!(f, "move ")?;
         }
         write!(f, "{}", operand.format_with(env))?;
     }

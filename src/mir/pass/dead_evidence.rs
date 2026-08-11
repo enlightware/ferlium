@@ -20,9 +20,9 @@
 //! and this pass only narrows the calling convention of bodies nothing will look at again. One
 //! module is enough because the set of things that can name a specialization is closed within it:
 //!
-//! - [`specialize_call_sites`](super::monomorphize::specialize_call_sites) is the only writer of a
-//!   specialization into a callee operand, and it requires an `OperationKind::Call`, so a
-//!   specialization never reaches a `build_closure`, `clone` or `drop` function operand;
+//! - [`specialize_call_sites`](super::monomorphize::specialize_call_sites) and the final owned-ABI
+//!   variant pass write generated bodies only into `OperationKind::Call` callee operands, so one
+//!   never reaches a `build_closure`, `clone` or `drop` function operand;
 //! - [`redirect_recursion`](super::monomorphize) points a specialization's self-calls at itself,
 //!   inside the same module's table;
 //! - every cross-module lookup in the driver reads the *raw* stage, which is exactly the HIR

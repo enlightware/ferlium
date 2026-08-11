@@ -27,6 +27,9 @@ use crate::{
 pub enum ParameterKind {
     /// A source-visible runtime parameter and its semantic call convention.
     Parameter(ArgConvention),
+    /// An optimized-MIR-only visible parameter that takes ownership of the caller's value.
+    /// The callee must leave its incoming place moved out on every exit.
+    Owned,
     /// A pointer to a dictionary or other hidden evidence.
     Dictionary,
     /// The caller-allocated out-pointer through which the function returns its result.
@@ -173,6 +176,7 @@ impl FormatWith<ModuleEnv<'_>> for Function {
             let kind = match parameter.kind {
                 ParameterKind::Parameter(ArgConvention::Let) => "arg let",
                 ParameterKind::Parameter(ArgConvention::MutableRef) => "arg &mut",
+                ParameterKind::Owned => "arg owned",
                 ParameterKind::Dictionary => "extra",
                 ParameterKind::Return => "ret",
             };

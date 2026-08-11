@@ -77,3 +77,10 @@ pub const FORWARD_BOOLEAN_REPLAYED_OPERATIONS: usize = 8;
 /// ask first would make the cost depend on optimization order. It is deliberately generous; the
 /// standard library's whole specializable population is in the low hundreds.
 pub const MAX_SPECIALIZATIONS: usize = 512;
+
+/// How many ownership-taking ABI variants the final whole-module pass may add.
+///
+/// Variants are cached by `(callee, owned argument set)` and created only for masks observed at
+/// profitable call sites. The bound prevents independently useful masks of a very wide API from
+/// producing a combinatorial family.
+pub const MAX_OWNED_ARGUMENT_VARIANTS: usize = 256;

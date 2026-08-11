@@ -24,6 +24,9 @@ use ustr::ustr;
 use wasm_bindgen_test::*;
 
 fn tracked_probe_value_impl() -> &'static str {
+    // Deliberately violates the `Value` ownership laws: `drop` records an observable event, so
+    // replacing `clone(x); drop(x)` with a move changes the log. Tests using the log to count exact
+    // ownership operations must opt out of optimized MIR when that rewrite can apply.
     r#"
     struct Probe(int)
 
@@ -1435,6 +1438,9 @@ fn lexical_drop_runs_on_runtime_error() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn generic_value_drop_runs_on_runtime_error() {
     let mut session = TestSession::new();
+    // This asserts exact calls to the deliberately observable `Probe::drop`; ownership forwarding
+    // is entitled to replace the clone and caller drop with a move under the `Value` law.
+    session.without_optimized_mode();
     let source = format!(
         r#"
         {}

@@ -50,8 +50,9 @@ finish            // restores canonical form without exposing the intermediate b
 ```
 
 Then `MirArtifacts::optimize` drains the specializations those rounds requested as a worklist, since
-optimizing a specialization may request more. After whole-module dead-evidence cleanup, it verifies
-every final declared and specialized body exactly once before installing the optimized artifact.
+optimizing a specialization may request more. It then forwards provable last-use arguments into
+owned ABI variants, drops dead specialization evidence, and verifies every final declared and
+generated body exactly once before installing the optimized artifact.
 
 **Why the rounds.** Specialization makes a generic callee concrete, inlining copies it and binds its
 dictionary parameters to constants, folding resolves the callee's `dict_entry`s into known functions,
@@ -212,9 +213,11 @@ convention, parameter passing, name — comes from `Specialization::original` th
 `CompilerSession::hir_identity_of`. The interpreter's metadata lookups all go through
 `Interpreter::hir_function` for this reason.
 
-**The visible signature is identical to the original's.** Binding a dictionary parameter replaces
-its *uses* and leaves the parameter in place, so no metadata is duplicated — and no HIR record
-describes the hidden parameters, which is what lets them go.
+**An ordinary monomorphization's visible signature is identical to the original's.** Binding a
+dictionary parameter replaces its *uses* and leaves the parameter in place, so no metadata is
+duplicated — and no HIR record describes the hidden parameters, which is what lets them go. The
+later owned-argument pass may create an optimized-only ABI variant with selected visible parameters
+changed to ownership transfer.
 
 **Dead evidence is dropped from the finished module.** Because binding replaces every use, a
 specialization has no live evidence parameter by construction rather than by analysis. A final
@@ -223,6 +226,26 @@ specialization worklist has drained so that every optimization decision above it
 the signatures the optimizer has always seen. One module suffices: `specialize_call_sites` only ever
 writes a specialization into a `call` callee operand, self-calls are redirected within the same
 table, and every cross-module lookup reads the raw stage, which contains no specializations.
+
+## Owned argument forwarding
+
+`mir::pass::owned_arguments` removes the interprocedural `clone(x); ...; drop(x)` left when a
+borrowing `Let` parameter retains a caller temporary. The `Value` laws make this equivalent to
+moving `x`: the pass marks the call operand as owned, removes the caller drop, and creates a cached
+callee variant whose parameter is `@arg owned`. The parameter's sole, exit-dominating ownership sink
+must be either a static-layout `clone`, replaced by `move`, or a direct call to which ownership can
+be forwarded. The latter carries ownership through generated trait-method thunks into specialized
+bodies.
+
+Admission is conservative. The caller operand must be a whole local allocation, unaliased at the
+call, and used afterwards only by its terminal cleanup drop. A fallible call requires equivalent
+drops on its unique normal and error successors. The callee parameter must have exactly one use,
+and ordinary generic bodies with live dictionaries are not copied; their concrete specializations
+are. Variants are cached by `(callee, owned argument set)` and bounded independently.
+
+This pass runs once after the specialization worklist, outside the fold/inline loop, because it
+needs the completed local call graph and changes an optimized-only ABI. DCE and stack-marker cleanup
+run on its results before dead-evidence removal and final verification.
 
 The table is keyed by `(callee, instantiation, dictionaries)`, so two call sites that instantiate a
 function the same way share one body. Identities index the *owning* module's table, which is not in
@@ -469,10 +492,10 @@ change: the optimization report cites them by name.
 | `INLINE_CALLEE_OPERATIONS` | 32 | the largest callee inlining will copy |
 | `INLINE_FUNCTION_GROWTH` | 128 | growth beyond the size a function had *before* optimization |
 | `MAX_SPECIALIZATIONS` | 512 | specializations per module, against the cascade |
+| `MAX_OWNED_ARGUMENT_VARIANTS` | 256 | ownership-taking ABI variants per module |
 
-Budgets are per function and there is deliberately no global one: a module-wide budget would make
-whether one function is optimized depend on what unrelated functions consumed earlier. Growth is
-measured against the pre-optimization size, or each round would grant it afresh.
+Inlining budgets are per function; generated-variant budgets are per module to cap call-graph
+cascades. Growth is measured against the pre-optimization size, or each round would grant it afresh.
 
 ## The optimization report
 

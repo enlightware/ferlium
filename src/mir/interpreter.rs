@@ -1461,10 +1461,9 @@ impl<'a> Interpreter<'a> {
     }
 
     /// Asserts the storage-state contract at a script-call boundary (debug only; `doc/mir-ir.md`
-    /// §4.3): a `&mut`/`&`/trivial-copy argument points at a **live** value both before and after the
-    /// call; the return out-pointer is **fresh** (an uninitialized husk, or a unit cell that carries
-    /// nothing to drop) before the call and **fully initialized** when the callee returns normally.
-    /// Evidence (an interned dictionary) is not value storage and is skipped.
+    /// §4.3): a borrowed argument points at a **live** value both before and after the call; an
+    /// owned argument is live before and moved out after; the return out-pointer is **fresh** before
+    /// the call and **fully initialized** when the callee returns normally. Evidence is skipped.
     #[cfg(debug_assertions)]
     fn check_call_boundary(&self, boundary: &[(mir::ParameterKind, Place)], phase: CallPhase) {
         for (tag, place) in boundary {
@@ -1479,6 +1478,16 @@ impl<'a> Interpreter<'a> {
                     "MIR call boundary: an argument passed as {passing:?} is a husk {phase} the \
                      call; a `&mut`/`&`/trivial-copy argument must point at a live value",
                 ),
+                mir::ParameterKind::Owned => match phase {
+                    CallPhase::Before => assert!(
+                        !is_husk,
+                        "MIR call boundary: an owned argument is a husk before the call",
+                    ),
+                    CallPhase::After => assert!(
+                        is_husk,
+                        "MIR call boundary: an owned argument remains live after the call",
+                    ),
+                },
                 // The return out-pointer must be fully initialized when the callee returns normally.
                 // There is no dynamic precondition on `@ret` here: the caller-side MIR ownership
                 // analysis checks identifiable result storage, and opaque caller-owned storage is a
