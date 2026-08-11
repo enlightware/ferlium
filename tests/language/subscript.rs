@@ -20,7 +20,7 @@ use ferlium::{
     hir::{ENodeArena, ENodeId, NodeKind},
     module::{ShowModuleWithOptions, YieldProvenance, id::Id},
     parse_module_and_expr,
-    std::math::int_type,
+    std::{array::int_array_type, math::int_type},
     types::effects::{PrimitiveEffect, effect},
 };
 use indoc::indoc;
@@ -2732,6 +2732,41 @@ fn field_receiver_can_drive_yielded_subscript_and_index() {
     assert_val_eq!(
         value,
         expected_tuple([int(1), int(12), int(3), int(99), int(11)])
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn named_subscript_read_chain_keeps_intermediate_array_as_place() {
+    fn contains_int_array_clone(arena: &ENodeArena, node: ENodeId) -> bool {
+        (matches!(arena[node].kind, NodeKind::CloneValue(_)) && arena[node].ty == int_array_type())
+            || crate::harness::hir_child_nodes(arena, node)
+                .into_iter()
+                .any(|child| contains_int_array_clone(arena, child))
+    }
+
+    let mut session = experimental_session();
+    let module = session.compile_and_get_module(indoc! { r#"
+        subscript row(rows: &mut [[int]], index: int) -> [int] {
+            ref mut {
+                rows[index]
+            }
+        }
+
+        struct Table { rows: [[int]] }
+
+        fn read(table: &mut Table, row_index: int, column_index: int) -> int {
+            table.rows->[row](row_index)[column_index]
+        }
+    "# });
+    let read = module
+        .get_function(ustr("read"))
+        .expect("read function should be compiled");
+    let entry = read.get_code_entry().unwrap();
+
+    assert!(
+        !contains_int_array_clone(&module.hir_arena, entry),
+        "a mixed field/named-subscript/index read should clone only its final element"
     );
 }
 

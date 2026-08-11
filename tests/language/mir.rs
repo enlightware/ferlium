@@ -958,67 +958,23 @@ fn nested_place_call() {
         session.emit_mir("fn f(a: [[int]]) -> int { a[0][1] }"),
         r#"fn f(%p0: @arg let [[int]], %p1: @ret int):
   @c0: int = 0
-  @c1: () = ()
-  @c2: int = 1
+  @c1: int = 1
   b0:
-    %r0 = alloca [int]
-    %r1 = alloca int
-    %r2 = alloca int
-    store @c0 to %r2
-    %r3 = alloca_place [int]
-    invoke call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r2, %r3) -> b1 error b2
+    %r0 = alloca int
+    store @c0 to %r0
+    %r1 = alloca_place [int]
+    invoke call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r0, %r1) -> b1 error b2
   b1:
-    %r4 = load %r3
-    clone [int] %r4 to %r0 via <test>::std::Value<[std::int]>::clone#impl:94a041f9
-    %r5 = alloca int
-    store @c2 to %r5
-    %r6 = alloca_place int
-    invoke call std::array_index::ref_mut#subscript:cb69b6f4(%r0, %r5, %r6) -> b3 error b2
+    %r2 = load %r1
+    %r3 = alloca int
+    store @c1 to %r3
+    %r4 = alloca_place int
+    invoke call std::array_index::ref_mut#subscript:cb69b6f4(%r2, %r3, %r4) -> b3 error b2
   b2:
-    drop [int] %r0 via <test>::std::Value<[std::int]>::drop#impl:a4f41aeb
     propagate_error
   b3:
-    %r7 = load %r6
-    memcpy %r7 to %r1
-    move %r1 to %p1
-    drop [int] %r0 via <test>::std::Value<[std::int]>::drop#impl:a4f41aeb
-    ret
-
-fn std::Value<[std::int]>::ALIGN#impl:90f3bfea(%p0: @ret int):
-  @c0: int = 8
-  b0:
-    store @c0 to %p0
-    ret
-
-fn std::Value<[std::int]>::SIZE#impl:9ddb92fe(%p0: @ret int):
-  @c0: int = 48
-  b0:
-    store @c0 to %p0
-    ret
-
-fn std::Value<[std::int]>::clone#impl:94a041f9(%p0: @arg let [int], %p1: @ret [int]):
-  b0:
-    call std::Value<[A]>::clone#impl:5d7e5692(dict(<test>::std::Value<[std::int]>), dict(std::Value<std::int>), %p0, %p1)
-    ret
-
-fn std::Value<[std::int]>::drop#impl:a4f41aeb(%p0: @arg &mut [int], %p1: @ret ()):
-  b0:
-    call std::Value<[A]>::drop#impl:4499dda8(dict(<test>::std::Value<[std::int]>), dict(std::Value<std::int>), %p0, %p1)
-    ret
-
-fn std::Value<[std::int]>::eq#impl:7e1688d4(%p0: @arg let [int], %p1: @arg let [int], %p2: @ret bool):
-  b0:
-    call std::Value<[A]>::eq#impl:82e999e1(dict(<test>::std::Value<[std::int]>), dict(std::Value<std::int>), %p0, %p1, %p2)
-    ret
-
-fn std::Value<[std::int]>::hash#impl:0aca59c2(%p0: @arg let [int], %p1: @arg &mut hasher, %p2: @ret ()):
-  b0:
-    call std::Value<[A]>::hash#impl:2f76a94b(dict(<test>::std::Value<[std::int]>), dict(std::Value<std::int>), %p0, %p1, %p2)
-    ret
-
-fn std::Value<[std::int]>::to_string#impl:892a091b(%p0: @arg let [int], %p1: @ret string):
-  b0:
-    call std::Value<[A]>::to_string#impl:c74a3a78(dict(<test>::std::Value<[std::int]>), dict(std::Value<std::int>), %p0, %p1)
+    %r5 = load %r4
+    memcpy %r5 to %p1
     ret
 "#,
     );
@@ -1092,148 +1048,19 @@ fn projection_of_place_call() {
         session.emit_mir("fn f(a: [(int, bool)]) -> bool { a[0].1 }"),
         r#"fn f(%p0: @arg let [(int, bool)], %p1: @ret bool):
   @c0: int = 0
-  @c1: () = ()
-  @c2: int = 1
+  @c1: int = 1
   b0:
-    %r0 = alloca (int, bool)
-    %r1 = alloca bool
-    %r2 = alloca int
-    store @c0 to %r2
-    %r3 = alloca_place (int, bool)
-    invoke call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r2, %r3) -> b1 error b2
+    %r0 = alloca int
+    store @c0 to %r0
+    %r1 = alloca_place (int, bool)
+    invoke call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r0, %r1) -> b1 error b2
   b1:
-    %r4 = load %r3
-    memcpy %r4 to %r0
-    %r5 = subfield @c2 from %r0
-    memcpy %r5 to %r1
-    move %r1 to %p1
+    %r2 = load %r1
+    %r3 = subfield @c1 from %r2
+    memcpy %r3 to %p1
     ret
   b2:
     propagate_error
-
-fn std::Value<(std::int, std::bool)>::ALIGN#impl:9cca4d8c(%p0: @ret int):
-  @c0: int = 8
-  b0:
-    store @c0 to %p0
-    ret
-
-fn std::Value<(std::int, std::bool)>::SIZE#impl:1462ea00(%p0: @ret int):
-  @c0: int = 16
-  b0:
-    store @c0 to %p0
-    ret
-
-fn std::Value<(std::int, std::bool)>::clone#impl:c6a2252d(%p0: @arg let (int, bool), %p1: @ret (int, bool)):
-  @c0: int = 0
-  @c1: int = 1
-  b0:
-    %r0 = subfield @c0 from %p1
-    %r1 = subfield @c0 from %p0
-    call std::Value<std::int>::clone#impl:2d38cab9(%r1, %r0)
-    %r2 = subfield @c1 from %p1
-    %r3 = subfield @c1 from %p0
-    call std::Value<std::bool>::clone#impl:0e47e282(%r3, %r2)
-    ret
-
-fn std::Value<(std::int, std::bool)>::drop#impl:2f5156cf(%p0: @arg &mut (int, bool), %p1: @ret ()):
-  @c0: int = 0
-  @c1: int = 1
-  @c2: () = ()
-  b0:
-    %r0 = subfield @c0 from %p0
-    %r1 = alloca ()
-    call std::Value<std::int>::drop#impl:76f3f2ef(%r0, %r1)
-    %r2 = subfield @c1 from %p0
-    %r3 = alloca ()
-    call std::Value<std::bool>::drop#impl:17fb3d04(%r2, %r3)
-    store @c2 to %p1
-    ret
-
-fn std::Value<(std::int, std::bool)>::eq#impl:8240623e(%p0: @arg let (int, bool), %p1: @arg let (int, bool), %p2: @ret bool):
-  @c0: int = 0
-  @c1: int = 1
-  @c2: bool = true
-  @c3: bool = false
-  b0:
-    %r0 = subfield @c0 from %p0
-    %r1 = subfield @c0 from %p1
-    %r2 = alloca bool
-    call std::Value<std::int>::eq#impl:87044288(%r0, %r1, %r2)
-    br b1
-  b1:
-    %r3 = comp_eq %r2 true
-    condbr %r3, b2, b3
-  b2:
-    %r4 = subfield @c1 from %p0
-    %r5 = subfield @c1 from %p1
-    %r6 = alloca bool
-    call std::Value<std::bool>::eq#impl:fd9b066d(%r4, %r5, %r6)
-    br b5
-  b3:
-    store @c3 to %p2
-    br b4
-  b4:
-    ret
-  b5:
-    %r7 = comp_eq %r6 true
-    condbr %r7, b6, b7
-  b6:
-    store @c2 to %p2
-    br b8
-  b7:
-    store @c3 to %p2
-    br b8
-  b8:
-    br b4
-
-fn std::Value<(std::int, std::bool)>::hash#impl:d83c2054(%p0: @arg let (int, bool), %p1: @arg &mut hasher, %p2: @ret ()):
-  @c0: int = 0
-  @c1: int = 1
-  @c2: () = ()
-  b0:
-    %r0 = subfield @c0 from %p0
-    %r1 = alloca ()
-    call std::Value<std::int>::hash#impl:bdc2934a(%r0, %p1, %r1)
-    %r2 = subfield @c1 from %p0
-    %r3 = alloca ()
-    call std::Value<std::bool>::hash#impl:7e2c0813(%r2, %p1, %r3)
-    store @c2 to %p2
-    ret
-
-fn std::Value<(std::int, std::bool)>::to_string#impl:8f2e215f(%p0: @arg let (int, bool), %p1: @ret string):
-  @c0: StaticStr = "("
-  @c1: () = ()
-  @c2: int = 0
-  @c3: StaticStr = ", "
-  @c4: int = 1
-  @c5: StaticStr = ")"
-  b0:
-    %r0 = alloca string
-    %r1 = alloca string
-    %r2 = alloca string
-    %r3 = alloca StaticStr
-    store @c0 to %r3
-    call std::string_from_static(%r3, %r0)
-    %r4 = subfield @c2 from %p0
-    call std::Value<std::int>::to_string#impl:a5db1d9f(%r4, %r1)
-    %r5 = alloca ()
-    call std::string_push_str(%r0, %r1, %r5)
-    drop string %r1 via std::Value<std::string>::drop#impl:1d429675
-    %r6 = alloca StaticStr
-    store @c3 to %r6
-    %r7 = alloca ()
-    call std::string_push_static_str(%r0, %r6, %r7)
-    %r8 = subfield @c4 from %p0
-    call std::Value<std::bool>::to_string#impl:044f2674(%r8, %r2)
-    %r9 = alloca ()
-    call std::string_push_str(%r0, %r2, %r9)
-    drop string %r2 via std::Value<std::string>::drop#impl:1d429675
-    %r10 = alloca StaticStr
-    store @c5 to %r10
-    %r11 = alloca ()
-    call std::string_push_static_str(%r0, %r10, %r11)
-    move %r0 to %p1
-    ret
 "#,
     );
 }

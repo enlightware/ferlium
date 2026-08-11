@@ -25,7 +25,7 @@ use ferlium::{
     hir::value::Value,
     hir::{ENodeArena, ENodeId, NodeKind},
     std::{
-        array::array_type_generic,
+        array::{array_type_generic, int_array_type},
         math::{float_type, int_type},
     },
     types::r#type::{Type, TypeVar, tuple_type},
@@ -1871,6 +1871,44 @@ fn generic_record_projection_hir_uses_subscript_evidence() {
         assert!(
             contains_subscript_evidence_apply(&module.hir_arena, entry),
             "{function_name} should apply hidden subscript evidence"
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn hir_read_access_chains_clone_only_the_final_value() {
+    fn contains_int_array_clone(arena: &ENodeArena, node: ENodeId) -> bool {
+        matches!(arena[node].kind, NodeKind::CloneValue(_)) && arena[node].ty == int_array_type()
+            || crate::harness::hir_child_nodes(arena, node)
+                .into_iter()
+                .any(|child| contains_int_array_clone(arena, child))
+    }
+
+    let mut session = TestSession::new();
+    let module_id = session
+        .compile(indoc! { r#"
+            struct Holder { values: [int] }
+
+            fn field_then_index(holder: Holder, index: int) -> int {
+                holder.values[index]
+            }
+
+            fn index_then_index(values: [[int]], outer: int, inner: int) -> int {
+                values[outer][inner]
+            }
+        "# })
+        .module_id;
+    let module = session.session().expect_fresh_module(module_id);
+
+    for function_name in ["field_then_index", "index_then_index"] {
+        let function = module
+            .get_function(ustr::ustr(function_name))
+            .expect("access-chain function should be compiled");
+        let entry = function.get_code_entry().unwrap();
+        assert!(
+            !contains_int_array_clone(&module.hir_arena, entry),
+            "{function_name} should keep intermediate arrays as places"
         );
     }
 }

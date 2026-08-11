@@ -831,9 +831,7 @@ impl TypeInference {
         let sp = |id: DExprId| env.ast_arena[id].span;
         if Self::is_access_chain_expr(&expr.kind) {
             let plan = self.access_chain_plan_for_expr(env, expr_id);
-            if plan.contains_named_subscript {
-                return self.infer_access_chain_read(env, plan.chain, expr_span);
-            }
+            return self.infer_access_chain_read(env, plan.chain, expr_span);
         }
         let (node, ty, mut_ty, effects) = match &expr.kind {
             Literal(_, _) => unreachable!("literal expressions return before general inference"),
