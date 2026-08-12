@@ -44,6 +44,8 @@
 
 #![allow(dead_code)]
 
+use std::borrow::Cow;
+
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
@@ -86,10 +88,11 @@ impl Site {
 ///
 /// The body is carried rather than re-read at splice time: for a generic callee it is a *substituted*
 /// copy, and planning must check the same body the splice inserts.
-struct Inlining {
+struct Inlining<'a> {
     site: Site,
     callee: FunctionId,
-    body: Function,
+    /// Borrowed whenever the callee needed no substitution, which is every non-generic one.
+    body: Cow<'a, Function>,
 }
 
 /// Why one call site was not inlined.
@@ -200,14 +203,14 @@ pub(crate) fn inline_function(
 ///
 /// `refusals`, when present, collects why each call site was left alone — the optimization report
 /// runs this over an already-optimized body precisely so its answers cannot drift from the pass's.
-fn plan_inlinings(
+fn plan_inlinings<'a>(
     func: &Function,
     original_size: usize,
     env: ModuleEnv<'_>,
-    session: &CompilerSession,
-    specializations: Option<&Specializations>,
+    session: &'a CompilerSession,
+    specializations: Option<&'a Specializations>,
     refusals: &mut Option<&mut Vec<Refusal>>,
-) -> Vec<Inlining> {
+) -> Vec<Inlining<'a>> {
     let mut sites = Vec::new();
     let mut size = function_size(func);
     let cleanup = cleanup_blocks(func);
@@ -258,6 +261,8 @@ fn plan_inlinings(
                 refuse(NotInlinable::CalleeNotDirect);
                 continue;
             };
+            // Borrowed from the raw stage, and stays borrowed unless substitution replaces it: a
+            // refused callee then costs a lookup rather than a copy of its whole body.
             let Some(body) = callee_body(session, callee, specializations) else {
                 refuse(NotInlinable::NoBody);
                 continue;
@@ -265,7 +270,7 @@ fn plan_inlinings(
             // Substitution never grows a body, so the generic size bounds the concrete one. Asking
             // here keeps a callee that is too large either way from paying for a substitution whose
             // only use would be to refuse it.
-            if function_size(&body) > budget::INLINE_CALLEE_OPERATIONS {
+            if function_size(body) > budget::INLINE_CALLEE_OPERATIONS {
                 refuse(NotInlinable::CalleeTooLarge);
                 continue;
             }
@@ -273,7 +278,7 @@ fn plan_inlinings(
             // substitution does not change, and a body refused for its shape must not pay for a
             // substitution first. It must also not be handed to one — a scoped accessor's
             // `project`/`end_project` pair is exactly what substitution cannot keep consistent.
-            if let Err(reason) = check_inlinable(&body, site.has_error_successor(), in_cleanup) {
+            if let Err(reason) = check_inlinable(body, site.has_error_successor(), in_cleanup) {
                 refuse(reason);
                 continue;
             }
@@ -345,16 +350,18 @@ pub(crate) fn refusals_of(
 /// Left generic, and so refused, when the call records no instantiation, or one that still names the
 /// caller's own quantifiers. Specializing the caller is what makes such a site concrete on a later
 /// round.
-fn concrete_body(
-    body: Function,
+/// Owns its result only when substitution actually produced a new body; an already-concrete callee
+/// is borrowed straight from the raw stage and never copied.
+fn concrete_body<'a>(
+    body: &'a Function,
     callee: FunctionId,
     instantiation: Option<&Instantiation>,
     session: &CompilerSession,
     specializations: Option<&Specializations>,
     env: ModuleEnv<'_>,
-) -> Result<Function, NotInlinable> {
+) -> Result<Cow<'a, Function>, NotInlinable> {
     if body.parameters().iter().all(|p| p.ty.is_constant()) {
-        return Ok(body);
+        return Ok(Cow::Borrowed(body));
     }
     let Some(instantiation) = instantiation else {
         return Err(NotInlinable::Generic);
@@ -367,14 +374,14 @@ fn concrete_body(
         return Err(NotInlinable::Generic);
     };
     let scheme = &function.definition.ty_scheme;
-    Ok(match specializations {
+    Ok(Cow::Owned(match specializations {
         Some(specializations) => {
-            specializations.substituted_body(callee, instantiation, scheme, &body, env)
+            specializations.substituted_body(callee, instantiation, scheme, body, env)
         }
         // The optimization report runs after the table is consumed, and makes one pass, so it has
         // nothing to memoize into and nothing to gain from it.
-        None => monomorphize::substitute_body(&body, scheme, instantiation, env),
-    })
+        None => monomorphize::substitute_body(body, scheme, instantiation, env),
+    }))
 }
 
 /// The callee's body, read from the raw stage.
@@ -388,20 +395,19 @@ fn concrete_body(
 /// the worklist optimized it. Same rule, same reason. `specializations` is `None` for the
 /// optimization report, which runs after the table is consumed into the artifacts; a specialization
 /// then reports as having no body, which is a cosmetic gap in the report rather than a decision.
-fn callee_body(
-    session: &CompilerSession,
+fn callee_body<'a>(
+    session: &'a CompilerSession,
     callee: FunctionId,
-    specializations: Option<&Specializations>,
-) -> Option<Function> {
+    specializations: Option<&'a Specializations>,
+) -> Option<&'a Function> {
     if let Some(specializations) = specializations
         && specializations.is_specialization(callee)
     {
-        return specializations.raw_body(callee.function).cloned();
+        return specializations.raw_body(callee.function);
     }
     session
         .mir_artifacts_for(callee.module, MirOptimization::Disabled)?
         .get(callee.function)
-        .cloned()
 }
 
 /// The blocks a source failure is already in flight in — everything reachable from an error edge.
