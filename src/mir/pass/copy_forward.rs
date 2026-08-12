@@ -612,6 +612,14 @@ fn note_operation(operation: &Operation, site: Site, uses: &mut FxHashMap<ValueI
             unsafe_use(&operation.operands[0], uses);
             write(&operation.operands[1], uses);
         }
+        OperationKind::BuildArray { .. } => {
+            let (destination, elements) = operation
+                .operands
+                .split_last()
+                .expect("build_array has a trailing destination");
+            elements.iter().for_each(|operand| read(operand, uses));
+            write(destination, uses);
+        }
         OperationKind::Clear => write(&operation.operands[0], uses),
         OperationKind::Memcpy => {
             read(&operation.operands[0], uses);

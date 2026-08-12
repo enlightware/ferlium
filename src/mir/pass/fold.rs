@@ -12,15 +12,16 @@
 //!
 //! - the callee is a direct [`mir::Value::Function`] — an indirect call needs devirtualization first;
 //! - every visible argument arrives by [`ArgConvention::Let`], so nothing is written back;
-//! - every argument place holds a known literal, and every hidden evidence operand is a constant
-//!   dictionary;
+//! - every argument place holds a known literal or constructive array, and every hidden evidence
+//!   operand is a constant dictionary;
 //! - the call's effects and result convention permit compile-time evaluation ([`const_eval`]);
 //! - the evaluation succeeds, and its result can be expressed as MIR ([`reify`]).
 //!
-//! The rewrite is then local: `call f(a, b, ret)` becomes `store @cN to ret`. Both forms initialize
-//! the same slot and neither takes ownership of anything the caller held — argument conventions
-//! leave ownership with the caller — so the surrounding `alloca`/`store`/`drop` scaffolding stays
-//! correct while becoming dead. Removing it is a separate cleanup pass.
+//! The rewrite is then local: `call f(a, b, ret)` becomes either `store @cN to ret` or a
+//! `build_array` into `ret`. Both forms initialize the same slot and neither takes ownership of
+//! anything the caller held — argument conventions leave ownership with the caller — so the
+//! surrounding construction/drop scaffolding stays correct while becoming dead. Removing it is a
+//! separate cleanup pass.
 //!
 //! Folding runs against an immutable function and returns a rewritten one, so the analysis it reads
 //! is never stale with respect to the edits it makes. Within a block, a fold updates the local state
@@ -33,16 +34,16 @@ use rustc_hash::FxHashSet;
 
 use crate::{
     CompilerSession, Location,
-    hir::function::ArgConvention,
+    hir::{function::ArgConvention, value::LiteralValue},
     mir::{
         self, BlockId, Function, Operation, OperationKind,
         const_eval::{ConstArgument, ConstEvaluator, NotFoldable},
         edit::FunctionEdit,
         reify::{Reification, reify},
         terminator::{Terminator, TerminatorKind},
-        value::Constant,
     },
     module::{FunctionId, ModuleEnv, ModuleId},
+    std::array::{array_type, array_value_from_vec},
     types::r#type::{CallImplType, Type},
 };
 
@@ -55,14 +56,14 @@ struct Fold {
     index: usize,
     /// The place the folded call would have written its result into.
     destination: mir::Value,
-    constant: Constant,
+    result: Reification,
 }
 
 /// A source-fallible call the pass decided to replace, in its block's `Invoke` terminator.
 struct InvokeFold {
     block: BlockId,
     destination: mir::Value,
-    constant: Constant,
+    result: Reification,
     /// The successor the call would have taken on success — where control goes now that it cannot
     /// fail.
     normal: BlockId,
@@ -160,25 +161,21 @@ pub(crate) fn fold_function(
 
     let mut edit = FunctionEdit::new(func.clone());
     for fold in plan.calls {
-        let constant = edit.add_constant(fold.constant.ty, fold.constant.representation, &env);
         let span = edit.block(fold.block).operations[fold.index].span;
-        edit.block_mut(fold.block).replace_operation(
-            fold.index,
-            Operation::store(span, mir::Value::Constant(constant), fold.destination),
-        );
+        let replacement =
+            materialize_reification(&mut edit, span, fold.result, fold.destination, env);
+        edit.block_mut(fold.block)
+            .replace_operation(fold.index, replacement);
     }
     for invoke in plan.invokes {
-        let constant = edit.add_constant(invoke.constant.ty, invoke.constant.representation, &env);
         let span = edit.block(invoke.block).terminator.span;
         // The call becomes an ordinary store at the end of the block, and the terminator loses its
         // error edge: an evaluated call cannot fail. Appending keeps the indices the operation
         // folds above were planned against.
+        let replacement =
+            materialize_reification(&mut edit, span, invoke.result, invoke.destination, env);
         let block = edit.block_mut(invoke.block);
-        block.operations.push(Operation::store(
-            span,
-            mir::Value::Constant(constant),
-            invoke.destination,
-        ));
+        block.operations.push(replacement);
         block.terminator = Terminator::goto(span, invoke.normal);
     }
     for (block, target) in plan.branches {
@@ -197,6 +194,35 @@ pub(crate) fn fold_function(
         body: edit.finish_unverified(),
         warrants_another_round,
     })
+}
+
+/// Turns a compile-time result into the one MIR operation that initializes its destination.
+fn materialize_reification(
+    edit: &mut FunctionEdit,
+    span: Location,
+    reification: Reification,
+    destination: mir::Value,
+    env: ModuleEnv<'_>,
+) -> Operation {
+    match reification {
+        Reification::Constant(constant) => {
+            let id = edit.add_constant(constant.ty, constant.representation, &env);
+            Operation::store(span, mir::Value::Constant(id), destination)
+        }
+        Reification::Array {
+            element_ty,
+            elements,
+        } => {
+            let elements = elements.into_vec().into_iter().map(|representation| {
+                let id = edit.add_constant(element_ty, representation, &env);
+                mir::Value::Constant(id)
+            });
+            Operation::build_array(span, element_ty, elements, destination)
+        }
+        Reification::Operand(_) => {
+            unreachable!("call folding admits only destination-initializing reifications")
+        }
+    }
 }
 
 /// Names callees resolved through constant dictionary entries after the optimization rounds have
@@ -364,21 +390,18 @@ fn plan_folds_with(
         let basic_block = func.block(block);
         for (index, operation) in basic_block.operations().iter().enumerate() {
             if let OperationKind::Call { ty, .. } = &operation.kind
-                && let Some(constant) = fold_outcome(operation, ty, &state, &context, refusals)
+                && let Some(result) = fold_outcome(operation, ty, &state, &context, refusals)
                 && let Some(call) = dataflow::call_operands(&operation.operands, ty)
             {
                 let destination = call.result.clone();
                 if let Some(key) = state.place_of(&destination) {
-                    state.set_place_known(
-                        key,
-                        Fact::Known(Const::Literal(constant.representation.clone())),
-                    );
+                    state.set_place_known(key, fact_for_reification(&result));
                 }
                 plan.calls.push(Fold {
                     block,
                     index,
                     destination,
-                    constant,
+                    result,
                 });
                 continue;
             }
@@ -404,13 +427,13 @@ fn plan_folds_with(
                 operation, normal, ..
             } => {
                 if let OperationKind::Call { ty, .. } = &operation.kind
-                    && let Some(constant) = fold_outcome(operation, ty, &state, &context, refusals)
+                    && let Some(result) = fold_outcome(operation, ty, &state, &context, refusals)
                     && let Some(call) = dataflow::call_operands(&operation.operands, ty)
                 {
                     plan.invokes.push(InvokeFold {
                         block,
                         destination: call.result.clone(),
-                        constant,
+                        result,
                         normal: *normal,
                     });
                 } else if let Some(devirtualizations) = devirtualizations.as_mut()
@@ -494,7 +517,7 @@ fn fold_outcome(
     state: &State,
     context: &FoldContext<'_>,
     refusals: &mut Option<&mut Vec<Refusal>>,
-) -> Option<Constant> {
+) -> Option<Reification> {
     match try_fold_call(operation, ty, state, context) {
         Ok(constant) => Some(constant),
         Err(reason) => {
@@ -510,6 +533,22 @@ fn fold_outcome(
             }
             None
         }
+    }
+}
+
+fn fact_for_reification(reification: &Reification) -> Fact {
+    match reification {
+        Reification::Constant(constant) => {
+            Fact::Known(Const::Literal(constant.representation.clone()))
+        }
+        Reification::Array {
+            element_ty,
+            elements,
+        } => Fact::Known(Const::Array {
+            element_ty: *element_ty,
+            elements: elements.clone(),
+        }),
+        Reification::Operand(_) => Fact::Unknown,
     }
 }
 
@@ -624,7 +663,7 @@ fn try_fold_call(
     ty: &CallImplType,
     state: &State,
     context: &FoldContext<'_>,
-) -> Result<Constant, NotFoldable> {
+) -> Result<Reification, NotFoldable> {
     let Some(call) = dataflow::call_operands(&operation.operands, ty) else {
         return Err(NotFoldable::UnsupportedConvention);
     };
@@ -652,19 +691,31 @@ fn try_fold_call(
         if !matches!(convention, ArgConvention::Let) {
             return discard(arguments, NotFoldable::MutableArgument);
         }
-        let known = state
-            .place_of(operand)
-            .map(|key| state.place(&key))
-            .and_then(|fact| match fact {
-                Fact::Known(Const::Literal(literal)) => Some(literal),
-                _ => None,
-            });
+        let known = state.place_of(operand).map(|key| state.place(&key));
         match known {
-            Some(literal) if literal.has_representation_type_in(parameter.ty, &context.env) => {
+            Some(Fact::Known(Const::Literal(literal)))
+                if literal.has_representation_type_in(parameter.ty, &context.env) =>
+            {
                 arguments.push(ConstArgument::Value(literal.into_value()))
             }
-            Some(_) => return discard(arguments, NotFoldable::ArgumentNotLiteral),
-            None => {
+            Some(Fact::Known(Const::Array {
+                element_ty,
+                elements,
+            })) if parameter.ty == array_type(element_ty) => {
+                arguments.push(ConstArgument::Value(array_value_from_vec(
+                    elements
+                        .into_vec()
+                        .into_iter()
+                        .map(LiteralValue::into_value)
+                        .collect(),
+                )))
+            }
+            Some(Fact::Known(Const::Function(function))) if parameter.ty.is_function() => arguments
+                .push(ConstArgument::Value(crate::hir::value::Value::function(
+                    function,
+                ))),
+            Some(Fact::Known(_)) => return discard(arguments, NotFoldable::ArgumentNotLiteral),
+            _ => {
                 let reason = why_argument_unknown(operand, state, context);
                 return discard(arguments, reason);
             }
@@ -690,7 +741,7 @@ fn try_fold_call(
     let reified = reify(&value, ty.ret(), &context.env);
     value.discard_storage();
     match reified? {
-        Reification::Constant(constant) => Ok(constant),
+        result @ (Reification::Constant(_) | Reification::Array { .. }) => Ok(result),
         // A function operand needs no constant, but replacing a call with one is a different
         // rewrite than storing a literal; leave it to the devirtualization work.
         Reification::Operand(_) => Err(NotFoldable::NotReifiable),
@@ -698,7 +749,7 @@ fn try_fold_call(
 }
 
 /// Releases arguments prepared for a call that is not made after all.
-fn discard(arguments: Vec<ConstArgument>, reason: NotFoldable) -> Result<Constant, NotFoldable> {
+fn discard(arguments: Vec<ConstArgument>, reason: NotFoldable) -> Result<Reification, NotFoldable> {
     ConstArgument::discard_all(arguments);
     Err(reason)
 }

@@ -141,6 +141,84 @@ fn constant_arithmetic_folds_away() {
     );
 }
 
+/// Trivial array literals use the compiler-known array constructor. Resource-valued elements keep
+/// the generic in-place Buffer path, because constructing them from borrowed operands would need a
+/// semantic clone dictionary rather than a representation copy.
+#[test]
+fn array_literal_lowering_uses_build_array_only_for_trivial_elements() {
+    let ints = emit(
+        "trivial_array_literal",
+        "fn main() -> [int] { [1, 2] }",
+        MirOptimization::Disabled,
+    );
+    let ints = rendered_function(&ints, "main");
+    assert!(
+        ints.contains("build_array<int>"),
+        "an int array should use the explicit MIR constructor:\n{ints}"
+    );
+
+    let strings = emit(
+        "resource_array_literal",
+        "fn main() -> [string] { [\"a\", \"b\"] }",
+        MirOptimization::Disabled,
+    );
+    let strings = rendered_function(&strings, "main");
+    assert!(
+        !strings.contains("build_array<string>"),
+        "a string array must retain in-place element construction:\n{strings}"
+    );
+    assert!(
+        strings.contains("buffer_with_capacity"),
+        "the non-trivial fallback must still allocate the canonical array Buffer:\n{strings}"
+    );
+}
+
+/// Resource-valued reification turns the complete constant pipeline into one fresh array
+/// construction. In particular, no compile-time Buffer is put in the constant pool and none of
+/// the source/intermediate arrays survives merely to be dropped.
+#[test]
+fn constant_array_pipeline_reifies_to_one_build_array() {
+    let optimized = emit(
+        "constant_array_pipeline",
+        "fn main() -> [int] { [1, 2] |> concat([3, 4]) |> map(|x| x*x) }",
+        MirOptimization::Enabled,
+    );
+    let main = rendered_function(&optimized, "main");
+    assert_eq!(
+        main.matches("build_array<int>").count(),
+        1,
+        "the complete expression should become one runtime construction:\n{main}"
+    );
+    assert!(
+        main.contains("build_array<int> [@c0, @c1, @c2, @c3] to %p0"),
+        "the final array should be built directly into the return place:\n{main}"
+    );
+    for value in ["int = 1", "int = 4", "int = 9", "int = 16"] {
+        assert!(
+            main.contains(value),
+            "missing folded element `{value}`:\n{main}"
+        );
+    }
+    assert_eq!(
+        calls(main),
+        0,
+        "the constant pipeline must contain no calls:\n{main}"
+    );
+    assert!(
+        !main.contains("drop "),
+        "superseded arrays must be removed with their cleanup:\n{main}"
+    );
+}
+
+/// Extracts one rendered function, excluding later functions in the module dump.
+fn rendered_function<'a>(mir: &'a str, name: &str) -> &'a str {
+    let start = mir
+        .find(&format!("fn {name}("))
+        .unwrap_or_else(|| panic!("MIR does not contain function `{name}`"));
+    let rest = &mir[start..];
+    rest.find("\nfn ").map_or(rest, |end| &rest[..end])
+}
+
 /// Counts `call` operations in rendered MIR.
 fn calls(mir: &str) -> usize {
     mir.lines()

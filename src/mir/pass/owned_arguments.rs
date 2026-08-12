@@ -745,21 +745,25 @@ mod tests {
 
     #[test]
     fn map_pipeline_moves_last_use_array_and_mapper_through_the_thunk() {
-        let module = optimized("[1, 2] |> concat([3, 4]) |> map(|x| x*x)");
-        let entry = body_of(&module, "<expr>");
+        // A fully constant array pipeline now folds to `build_array` before this pass. Make the
+        // array depend on a parameter while still creating an owned local copy, so this test keeps
+        // exercising transfer of both the array and mapper rather than resource reification.
+        let module =
+            optimized("fn apply(xs: [int]) -> [int] { let mut ys = xs; ys |> map(|x| x*x) }");
+        let entry = body_of(&module, "apply");
         assert!(
-            entry.contains("#owned:[0,1](move %r2, move %r3, %p0)"),
+            entry.contains("#owned:[0,1](move %r0, move %r1, %p1)"),
             "the entry must transfer both dead arguments:\n{entry}"
         );
         let normal = entry
-            .split("#owned:[0,1](move %r2, move %r3, %p0)")
+            .split("#owned:[0,1](move %r0, move %r1, %p1)")
             .nth(1)
             .expect("the owned call was asserted above")
             .split("\nfn ")
             .next()
             .unwrap();
         assert!(
-            !normal.contains("drop (int) -> int %r3") && !normal.contains("drop [int] %r2"),
+            !normal.contains("drop (int) -> int %r1") && !normal.contains("drop [int] %r0"),
             "the transferred arguments must not retain drops after the call:\n{entry}"
         );
 

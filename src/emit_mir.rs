@@ -36,7 +36,7 @@ use crate::{
         core_traits_names::VALUE_TRAIT_NAME,
         value::{VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX, type_has_static_layout},
     },
-    types::{effects::no_effects, r#type::Type},
+    types::{effects::no_effects, r#type::Type, type_properties::concrete_type_is_trivial_copy},
 };
 
 /// Emits the textual representation of the Ferlium MIR of `module`.
@@ -943,11 +943,11 @@ impl<'a> Emitter<'a> {
     /// Lowers an array literal `[e0, e1, …]` into `destination`.
     ///
     /// Mirrors the interpreter's `array_value_from_vec` (`std::array_type`): an `array<A>` is the
-    /// record `{ capacity, data, len, start }` whose `data` is a heap `Buffer<A>`. Rather than add
-    /// dedicated array IR, the literal is desugared to the same std primitives the `.fer` array
-    /// methods use — `buffer_with_capacity` allocates the backing storage, and each element is
-    /// lowered in place into the slot place yielded by `buffer_slot` (no temporary, no copy). The
-    /// scalar header fields are then stored directly: `capacity = len = N`, `start = 0`.
+    /// record `{ capacity, data, len, start }` whose `data` is a heap `Buffer<A>`. For a statically
+    /// `TrivialCopy` element type, `build_array` keeps that construction explicit in MIR so
+    /// dataflow can retain the aggregate value. Other element types use the same std primitives the
+    /// `.fer` array methods use: `buffer_with_capacity` allocates the backing storage, and each
+    /// element is lowered in place into the slot yielded by `buffer_slot` (no temporary, no copy).
     fn lower_array_into(
         &mut self,
         node: &ENode,
@@ -974,6 +974,20 @@ impl<'a> Emitter<'a> {
             .cloned()
             .expect("an array literal must have a named array type");
         let element_ty = named.params[0];
+
+        // `build_array` reads each operand by representation copy. That needs no `Value<A>`
+        // dictionary exactly when A is statically `TrivialCopy`; for an unresolved or resource
+        // element type, retain the in-place path below. Each expression is lowered left-to-right
+        // to a place before the constructor runs, preserving source evaluation order.
+        if concrete_type_is_trivial_copy(element_ty, &self.env) {
+            let elements = ids
+                .iter()
+                .map(|id| self.lower_as_place(&self.hir_arena[*id]))
+                .collect::<Vec<_>>();
+            self.insert(Operation::build_array(span, element_ty, elements, dest));
+            return;
+        }
+
         let shape = named.instantiated_shape(&self.env);
         let fields = shape
             .data()

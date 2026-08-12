@@ -108,9 +108,9 @@ impl MirInstructionKind {
                 | Op::CloneClosureEnv
                 | Op::DropClosureEnv,
             ) => Cost::Semantic,
-            Self::Operation(Op::Memcpy | Op::Move | Op::BuildClosure | Op::Variant) => {
-                Cost::SizeDependent
-            }
+            Self::Operation(
+                Op::Memcpy | Op::Move | Op::BuildClosure | Op::Variant | Op::BuildArray,
+            ) => Cost::SizeDependent,
             Self::Operation(Op::Alloca | Op::AllocaPlace | Op::Load | Op::Store | Op::Clear) => {
                 Cost::Storage
             }

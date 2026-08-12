@@ -13,17 +13,14 @@
 //! value; reification answers "can that value be written down as MIR?", and produces the operand
 //! that replaces the call.
 //!
-//! It is deliberately restricted to values a MIR constant pool can already hold: a `TrivialCopy`
-//! native leaf, or a tuple of those (which is also how a record is represented at run time).
-//! `doc/mir-ir.md` pins `@cN` to that representation, so anything else — a `String`, a list, a
-//! variant, a closure — is refused here and left as a runtime call. Lifting that restriction is a
-//! separate piece of work: reifying a non-trivial value needs a way to express it as static data
-//! and rebuild it at run time.
+//! Immediate reification is deliberately restricted to values a MIR constant pool can hold: a
+//! `TrivialCopy` native leaf, or a tuple of those (which is also how a record is represented at run
+//! time). Arrays of such elements have a constructive form instead: immutable elements stay in the
+//! pool and `build_array` allocates fresh mutable storage at run time. Other resource values — a
+//! `String`, a list, a variant, or a closure — are refused and left as runtime calls.
 //!
 //! Refusal is always a normal outcome: it costs an optimization, never a program.
 //!
-//! Like the evaluator, this has no caller yet — the folding pass that consumes it is a later phase
-//! — so its items are exercised only by the tests below and by `const_eval`'s.
 #![allow(dead_code)]
 
 use crate::{
@@ -33,7 +30,8 @@ use crate::{
     },
     mir::{self, const_eval::NotFoldable, value::Constant},
     module::ModuleEnv,
-    types::r#type::Type,
+    std::array::{array_type_def, array_value_elements},
+    types::{r#type::Type, type_properties::concrete_type_is_trivial_copy},
 };
 
 /// How a reified compile-time value enters a MIR function.
@@ -46,6 +44,13 @@ pub(crate) enum Reification {
     /// An operand that needs no constant-pool entry, because MIR can already name the thing
     /// directly.
     Operand(mir::Value),
+    /// A fresh array construction from constant-pool-compatible elements. The elements are
+    /// immutable compile-time descriptions; executing `build_array` allocates independent mutable
+    /// array storage.
+    Array {
+        element_ty: Type,
+        elements: Box<[LiteralValue]>,
+    },
 }
 
 /// Expresses `value`, of instantiated type `ty`, as MIR — or explains why it cannot be.
@@ -70,6 +75,38 @@ pub(crate) fn reify(
             // the prototype machinery, not an operand.
             Err(NotFoldable::NotReifiable)
         };
+    }
+
+    // Arrays are mutable resources, so the pool cannot hold their runtime representation. Keep
+    // their logical elements instead and let `build_array` allocate fresh storage when executed.
+    // The first form intentionally requires statically TrivialCopy elements: otherwise reading an
+    // element into the recipe would need its semantic `Value::clone` dictionary.
+    let named = {
+        let data = ty.data();
+        data.as_named().cloned()
+    };
+    if let Some(named) = named
+        && named.def == array_type_def()
+    {
+        let element_ty = named.params[0];
+        if !concrete_type_is_trivial_copy(element_ty, env) {
+            return Err(NotFoldable::NotReifiable);
+        }
+        let elements = array_value_elements(value)
+            .ok_or(NotFoldable::NotReifiable)?
+            .into_iter()
+            .map(|element| {
+                let representation = freeze(element).ok_or(NotFoldable::NotReifiable)?;
+                representation
+                    .has_representation_type_in(element_ty, env)
+                    .then_some(representation)
+                    .ok_or(NotFoldable::NotReifiable)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(Reification::Array {
+            element_ty,
+            elements: elements.into_boxed_slice(),
+        });
     }
 
     let representation = freeze(value).ok_or(NotFoldable::NotReifiable)?;
@@ -122,6 +159,7 @@ mod tests {
         mir::{Operation, builder::FunctionBuilder, terminator::Terminator},
         module::{FunctionId, LocalFunctionId, LocalImplId, ModuleId, TraitDictionaryId, id::Id},
         std::{
+            array::{array_type, array_value_from_vec},
             math::{Float, float_type, int_type},
             string::{String as FerliumString, string_type},
         },
@@ -148,6 +186,7 @@ mod tests {
         let reified = match reify(&value, ty, &env) {
             Ok(Reification::Constant(constant)) => constant,
             Ok(Reification::Operand(operand)) => panic!("expected a constant, got {operand}"),
+            Ok(Reification::Array { .. }) => panic!("expected an immediate constant, got an array"),
             Err(reason) => panic!("{ty:?} must be reifiable, got {reason:?}"),
         };
         assert_eq!(reified.ty, ty);
@@ -219,6 +258,30 @@ mod tests {
             Type::record(vec![(ustr("a"), int_type()), (ustr("b"), int_type())]),
             &session,
         );
+    }
+
+    #[test]
+    fn an_array_of_trivial_elements_reifies_as_a_fresh_construction() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let value = array_value_from_vec(vec![Value::native(1isize), Value::native(4isize)]);
+        match reify(&value, array_type(int_type()), &env) {
+            Ok(Reification::Array {
+                element_ty,
+                elements,
+            }) => {
+                assert_eq!(element_ty, int_type());
+                assert_eq!(
+                    elements
+                        .iter()
+                        .map(|element| *element.as_primitive_ty::<isize>().unwrap())
+                        .collect::<Vec<_>>(),
+                    vec![1, 4]
+                );
+            }
+            other => panic!("an int array must reify as an array construction, got {other:?}"),
+        }
+        value.discard_storage();
     }
 
     /// A value whose type is not its representation is refused rather than mis-typed into the pool.

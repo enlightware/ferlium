@@ -424,6 +424,30 @@ impl Operation {
         }
     }
 
+    /// Creates a fresh array from representation-copyable element operands and initializes
+    /// `destination` with it.
+    ///
+    /// Every element operand is read non-consumingly, either as a materialized value or through a
+    /// place. Consequently `element_ty` must be statically `TrivialCopy`: building an array of
+    /// values with semantic clone/drop behaviour requires a `Value` dictionary and is deliberately
+    /// left to the existing in-place lowering. The trailing destination must name uninitialized
+    /// `[element_ty]` storage.
+    pub fn build_array<T: IntoIterator<Item = mir::Value>>(
+        span: Location,
+        element_ty: Type,
+        elements: T,
+        destination: mir::Value,
+    ) -> Self {
+        let mut operands: Vec<_> = elements.into_iter().collect();
+        operands.push(destination);
+        Operation {
+            result_id: None,
+            span,
+            operands: operands.into_boxed_slice(),
+            kind: OperationKind::BuildArray { element_ty },
+        }
+    }
+
     /// Creates an `extract_tag` operation, which reads the tag of the variant at the `variant`
     /// place and yields it as an `int` register (matching the HIR interpreter's tag encoding).
     pub fn extract_tag(span: Location, variant: mir::Value) -> Self {
@@ -786,6 +810,8 @@ pub enum OperationKind {
         /// `None` means operand 0 carries forwarded generic storage evidence.
         storage: Option<VariantPayloadStorage>,
     },
+    /// Construct a fresh array from `TrivialCopy` elements into a trailing destination place.
+    BuildArray { element_ty: Type },
     /// Read a variant tag as an integer.
     ExtractTag,
     /// Store a value into unoccupied place storage.
@@ -890,6 +916,7 @@ impl OperationKind {
             ExtractTag => OperationResult::Lowered(cached_primitive_ty!(isize)),
             StackSave => OperationResult::StackMarker,
             Call { .. }
+            | BuildArray { .. }
             | EndProject
             | Store
             | Clear
@@ -961,6 +988,10 @@ impl OperationKind {
                 whole.operands.len(),
                 usize::from(storage.is_none()),
                 "variant takes one evidence operand exactly when its storage mode is dynamic"
+            ),
+            BuildArray { .. } => assert!(
+                !whole.operands.is_empty(),
+                "build_array takes zero or more elements and a trailing destination place"
             ),
             ExtractTag => assert_eq!(
                 whole.operands.len(),
@@ -1103,6 +1134,20 @@ impl OperationKind {
                 Ok(())
             }
             Variant { tag, .. } => write!(f, "variant {tag}"),
+            BuildArray { element_ty } => {
+                write!(f, "build_array<{}> [", element_ty.format_with(env))?;
+                let (destination, elements) = whole
+                    .operands
+                    .split_last()
+                    .expect("build_array has a trailing destination");
+                for (index, element) in elements.iter().enumerate() {
+                    if index != 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", element.format_with(env))?;
+                }
+                write!(f, "] to {}", destination.format_with(env))
+            }
             ExtractTag => write!(f, "extract_tag {}", whole.operands[0].format_with(env)),
             Store => write!(
                 f,

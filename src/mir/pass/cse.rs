@@ -432,6 +432,16 @@ fn transfer(
             }
         }
         OperationKind::Store => forget_write(state, origins, &operation.operands[1]),
+        OperationKind::BuildArray { .. } => {
+            forget_write(
+                state,
+                origins,
+                operation
+                    .operands
+                    .last()
+                    .expect("build_array has a trailing destination"),
+            );
+        }
         OperationKind::Clear => forget_write(state, origins, &operation.operands[0]),
         OperationKind::Memcpy | OperationKind::Move | OperationKind::Clone { .. } => {
             if matches!(operation.kind, OperationKind::Move) {

@@ -38,7 +38,7 @@ use crate::{
         FunctionId, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleId, TraitDictionaryId,
         id::Id, trait_impl::TraitDictionaryEntry,
     },
-    std::buffer,
+    std::{array::array_value_from_vec, buffer},
     types::{
         r#trait::TraitDictionaryEntryIndex,
         r#type::{Type, TypeKind},
@@ -723,6 +723,9 @@ impl<'a> Interpreter<'a> {
                     Binding::Value(Value::variant_shell(*tag, storage)),
                 );
             }
+            OperationKind::BuildArray { .. } => {
+                self.exec_build_array(func, slots, &operation.operands)?;
+            }
             OperationKind::ExtractTag => {
                 self.exec_extract_tag(slots, &operation.operands, def.unwrap());
             }
@@ -949,6 +952,42 @@ impl<'a> Interpreter<'a> {
         };
         let place = self.place_operand(slots, &operands[1]);
         self.store(v, &place)
+    }
+
+    /// Builds a fresh array by representation-copying its statically `TrivialCopy` elements.
+    ///
+    /// The verifier establishes the property and the element types. Keeping the dynamic check in
+    /// the reference interpreter as well makes an invalid hand-built MIR body fail at the precise
+    /// operation rather than accidentally moving a resource out of an input place.
+    fn exec_build_array(
+        &mut self,
+        func: &mir::Function,
+        slots: &mut FxHashMap<mir::Value, Binding>,
+        operands: &[mir::Value],
+    ) -> Result<(), RuntimeError> {
+        let (destination, elements) = operands
+            .split_last()
+            .expect("build_array has a trailing destination");
+        let mut values = Vec::with_capacity(elements.len());
+        for operand in elements {
+            let value = match operand {
+                op @ (mir::Value::Register(_) | mir::Value::Parameter(_))
+                    if matches!(slots.get(op), Some(Binding::Place(_))) =>
+                {
+                    let place = self.place_operand(slots, op);
+                    read_copy(
+                        place
+                            .target_ref(&self.ctx)
+                            .expect("build_array element refers to an invalid place"),
+                    )
+                    .expect("build_array element is not structurally TrivialCopy")
+                }
+                op => self.value_operand(func, slots, op),
+            };
+            values.push(value);
+        }
+        let destination = self.place_operand(slots, destination);
+        self.store(array_value_from_vec(values), &destination)
     }
 
     /// Marks a place absent without running semantic drop. The overwritten state must already own

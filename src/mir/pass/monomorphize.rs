@@ -690,6 +690,7 @@ fn substitute_in_operation(operation: &mut Operation, mapper: &mut impl TypeMapp
         | OperationKind::Variant { ty, .. }
         | OperationKind::BuildClosure { ty, .. }
         | OperationKind::CloneClosureEnv { ty } => *ty = ty.map(mapper),
+        OperationKind::BuildArray { element_ty } => *element_ty = element_ty.map(mapper),
         OperationKind::AllocaPlace { pointing_to } => *pointing_to = pointing_to.map(mapper),
         OperationKind::Call { ty, metadata } => {
             **ty = ty.map(mapper);

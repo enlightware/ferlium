@@ -8,9 +8,10 @@
 //
 //! Removal of the storage scaffolding that folding leaves behind.
 //!
-//! Folding replaces `call f(a, b, ret)` with `store @cN to ret`, which leaves the arguments' own
-//! `alloca`s and stores in place: correct, since nothing reads them, but they still cost a cell and
-//! a write at run time and they bury the result in noise when the MIR is read.
+//! Folding replaces `call f(a, b, ret)` with `store @cN to ret` or a constructive operation such as
+//! `build_array`. That can leave the arguments' own construction and cleanup in place: correct,
+//! since nothing reads them, but they still cost storage and writes at run time and bury the result
+//! in noise when the MIR is read.
 //!
 //! This is **not** general dead-code elimination. Its storage rule removes an `alloca` only when
 //! *every* use of it is as the destination of a `store` whose value is a pool constant, and then
@@ -23,6 +24,9 @@
 //!
 //! Unread `dict_entry` and `subfield` place derivations are also removed. They neither own a value
 //! nor have side effects, and a linear use-count worklist handles nested `subfield` chains.
+//! A compiler-known `build_array` (or bare function store) used only by its matching drops is
+//! removed as one lifetime: deleting construction and cleanup together neither leaks nor drops
+//! uninitialized storage. This deliberately does not generalize to arbitrary resource producers.
 //! Constants left unreferenced by removed stores are dropped from the pool with them.
 //!
 //! Any surviving use of an allocation — a `load`, a `subfield`, a `drop`, a call argument, or a
@@ -40,7 +44,11 @@ use crate::mir::{
 
 /// Removes dead storage scaffolding, returning a rewritten function if anything was removed.
 pub(crate) fn remove_dead_storage(func: &Function) -> Option<Function> {
-    let mut dead = dead_allocas(func);
+    let constructed = dead_constructed_values(func);
+    let mut dead = dead_allocas(func, &constructed);
+    for (block, operations) in constructed {
+        dead.operations.entry(block).or_default().extend(operations);
+    }
     let dead_places = unread_derived_places(func);
     for (block, index) in dead_places {
         dead.operations.entry(block).or_default().insert(index);
@@ -174,6 +182,7 @@ pub(super) fn may_leave_frame_storage(operation: &mir::Operation) -> bool {
         | OperationKind::Subfield { .. }
         | OperationKind::BuildSubscript { .. }
         | OperationKind::Variant { .. }
+        | OperationKind::BuildArray { .. }
         | OperationKind::ExtractTag
         | OperationKind::Store
         | OperationKind::Clear
@@ -283,7 +292,7 @@ struct Dead {
     operations: FxHashMap<BlockId, FxHashSet<usize>>,
 }
 
-fn dead_allocas(func: &Function) -> Dead {
+fn dead_allocas(func: &Function, already_removed: &FxHashMap<BlockId, FxHashSet<usize>>) -> Dead {
     // Every `alloca` starts as a candidate; a use the rule does not allow removes it.
     let mut candidates: FxHashSet<ValueId> = FxHashSet::default();
     for block in func.blocks() {
@@ -307,6 +316,12 @@ fn dead_allocas(func: &Function) -> Dead {
     for block in func.blocks() {
         let basic_block = func.block(block);
         for (index, operation) in basic_block.operations().iter().enumerate() {
+            if already_removed
+                .get(&block)
+                .is_some_and(|removed| removed.contains(&index))
+            {
+                continue;
+            }
             let removable_store = matches!(operation.kind, OperationKind::Store)
                 && matches!(operation.operands[0], mir::Value::Constant(_));
             for (position, operand) in operation.operands.iter().enumerate() {
@@ -354,6 +369,101 @@ fn dead_allocas(func: &Function) -> Dead {
     }
 
     Dead { operations }
+}
+
+/// Resource constructions whose value is never observed before its mandatory cleanup.
+///
+/// Folding an array-valued call replaces it with `build_array`, leaving the known input arrays in
+/// the caller even though their only remaining operations are construction and drop. Removing only
+/// the drop would leak; removing only the construction would drop uninitialized storage. This
+/// census admits the pair as one lifetime and nothing broader. Bare function constants use the
+/// same rule: a symbolic function carries no closure environment, so its generated drop is empty.
+fn dead_constructed_values(func: &Function) -> FxHashMap<BlockId, FxHashSet<usize>> {
+    #[derive(Default)]
+    struct Candidate {
+        constructor: Option<(BlockId, usize)>,
+        drops: Vec<(BlockId, usize)>,
+        invalid: bool,
+    }
+
+    let mut candidates: FxHashMap<ValueId, Candidate> = FxHashMap::default();
+    for block in func.blocks() {
+        for operation in func.block(block).operations() {
+            if matches!(operation.kind, OperationKind::Alloca { .. })
+                && let Some(result) = operation.result_id()
+            {
+                candidates.insert(result, Candidate::default());
+            }
+        }
+    }
+
+    for block in func.blocks() {
+        for (index, operation) in func.block(block).operations().iter().enumerate() {
+            for (position, operand) in operation.operands.iter().enumerate() {
+                let mir::Value::Register(root) = operand else {
+                    continue;
+                };
+                let Some(candidate) = candidates.get_mut(root) else {
+                    continue;
+                };
+                let is_array_constructor =
+                    matches!(operation.kind, OperationKind::BuildArray { .. })
+                        && position + 1 == operation.operands.len();
+                let is_bare_function_constructor = matches!(operation.kind, OperationKind::Store)
+                    && position == 1
+                    && matches!(operation.operands[0], mir::Value::Function(_));
+                if is_array_constructor || is_bare_function_constructor {
+                    if candidate.constructor.replace((block, index)).is_some() {
+                        candidate.invalid = true;
+                    }
+                } else if matches!(operation.kind, OperationKind::Drop { .. }) && position == 0 {
+                    candidate.drops.push((block, index));
+                } else {
+                    candidate.invalid = true;
+                }
+            }
+        }
+        match &func.block(block).terminator().kind {
+            TerminatorKind::Invoke { operation, .. } => {
+                for operand in &operation.operands {
+                    if let mir::Value::Register(root) = operand
+                        && let Some(candidate) = candidates.get_mut(root)
+                    {
+                        candidate.invalid = true;
+                    }
+                }
+            }
+            TerminatorKind::CondBr { condition, .. }
+            | TerminatorKind::Yield {
+                place: condition, ..
+            } => {
+                if let mir::Value::Register(root) = condition
+                    && let Some(candidate) = candidates.get_mut(root)
+                {
+                    candidate.invalid = true;
+                }
+            }
+            TerminatorKind::Goto { .. }
+            | TerminatorKind::Return
+            | TerminatorKind::PropagateError
+            | TerminatorKind::FailureDuringCleanup => {}
+        }
+    }
+
+    let mut removed: FxHashMap<BlockId, FxHashSet<usize>> = FxHashMap::default();
+    for candidate in candidates.into_values() {
+        if candidate.invalid || candidate.drops.is_empty() {
+            continue;
+        }
+        let Some((block, constructor)) = candidate.constructor else {
+            continue;
+        };
+        removed.entry(block).or_default().insert(constructor);
+        for (block, drop) in candidate.drops {
+            removed.entry(block).or_default().insert(drop);
+        }
+    }
+    removed
 }
 
 #[cfg(test)]

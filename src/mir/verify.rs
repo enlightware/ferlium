@@ -24,11 +24,13 @@ use crate::{
         dominance::Dominance, operation::SourceFallibility, terminator::TerminatorKind,
     },
     module::{ModuleEnv, id::Id},
+    std::array::array_type,
     types::{
         effects::{Effect, PrimitiveEffect},
         trait_solver::TraitSolverProbe,
         r#type::{CallImplType, Type, TypeKind},
         type_like::TypeLike,
+        type_properties::concrete_type_is_trivial_copy,
     },
 };
 
@@ -971,6 +973,44 @@ impl<'a> Verifier<'a> {
                     evidence(0);
                 }
             }
+            OperationKind::BuildArray { element_ty } => {
+                assert!(
+                    concrete_type_is_trivial_copy(*element_ty, &self.env),
+                    "MIR function `{}` node {}: build_array element type must be statically TrivialCopy",
+                    self.func.name,
+                    node
+                );
+                let (destination, elements) = operands
+                    .split_last()
+                    .expect("build_array has a trailing destination");
+                let expected = MirType::Lowered(*element_ty);
+                for (index, element) in elements.iter().enumerate() {
+                    let actual = match self.role(element) {
+                        ValueRole::Place(ty) | ValueRole::Materialized(ty) => ty,
+                        role => panic!(
+                            "MIR function `{}` node {}: build_array element operand {} must be a value or place, got {role:?}",
+                            self.func.name, node, index
+                        ),
+                    };
+                    assert!(
+                        actual.representation_compatible(&expected, &self.env),
+                        "MIR function `{}` node {}: build_array element operand {} has representation {}, expected {}",
+                        self.func.name,
+                        node,
+                        index,
+                        actual.format(&self.env),
+                        expected.format(&self.env)
+                    );
+                }
+                let destination_index = operands.len() - 1;
+                place(destination_index);
+                self.verify_place_representation(
+                    node,
+                    destination_index,
+                    destination,
+                    MirType::Lowered(array_type(*element_ty)),
+                );
+            }
             OperationKind::AllocaPlace { .. }
             | OperationKind::StackSave
             | OperationKind::CheckCallDepth
@@ -1568,6 +1608,12 @@ impl<'a> Verifier<'a> {
                 // operation so its subject is legible.
                 OperationKind::Clone { .. } => {
                     self.initialize_call_result(node, &operands[1], &mut normal);
+                }
+                OperationKind::BuildArray { .. } => {
+                    let destination = operands
+                        .last()
+                        .expect("build_array has a trailing destination");
+                    self.initialize_call_result(node, destination, &mut normal);
                 }
                 OperationKind::Call { ty, metadata } => {
                     if let Some(metadata) = metadata {

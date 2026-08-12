@@ -64,13 +64,15 @@ MIR uses independent, function-local `ValueId`s rather than operation locations:
 Moving an operation therefore does not renumber unrelated values. A derived def-use map locates the
 operation that defines each `ValueId` when an analysis needs it.
 
-The constant pool is also the target of *reification* — expressing a value computed at compile time
+The constant pool is also an input to *reification* — expressing a value computed at compile time
 back as MIR (`src/mir/reify.rs`). Because `@cN` is pinned to a `TrivialCopy` representation, only a
-trivially-copyable leaf, or a tuple or record of those, can be reified; a compile-time `String`,
-list, variant, or closure has no constant form (including a `TrivialCopy` variant), and the computation that produced it is left as
-runtime code. Lifting that restriction requires either a frozen-prototype representation in the pool
-with an operation to clone one, or emitting the MIR that rebuilds the value from constants it can
-hold.
+trivially-copyable leaf, or a tuple or record of those, can be stored directly. An array whose
+elements have such representations can instead be reified as `build_array<A> [@c0, ...] to %dest`:
+the immutable elements remain constants and executing the operation allocates fresh mutable array
+storage. A compile-time `String`, list, variant, closure, or array with non-`TrivialCopy` elements
+still has no reified form (including a `TrivialCopy` variant), so its producing computation remains
+runtime code. Further resource types need either a frozen-prototype representation plus an operation
+to clone it, or dedicated MIR that rebuilds the value from constants the pool can hold.
 
 The verifier derives these roles from parameter kinds and operation results:
 
@@ -120,7 +122,7 @@ The operation kind fixes operand arity, roles, and result shape. The main groups
 | Group | Operations | Contract |
 |---|---|---|
 | storage | `alloca`, `alloca_place`, `load`, `store`, `clear`, `memcpy`, `move` | `store` never drops; `memcpy` requires a concrete `TrivialCopy` pointee; `move` leaves its source absent. Dynamic allocation/move carries a layout witness. |
-| aggregates | `subfield`, `variant`, `extract_tag` | Aggregate construction and ownership remain field-addressable. A variant operation first builds an uninitialized payload shell. |
+| aggregates | `subfield`, `variant`, `extract_tag`, `build_array` | Aggregate construction and ownership remain field-addressable. A variant operation first builds an uninitialized payload shell. `build_array` initializes fresh canonical array storage from borrowed `TrivialCopy` elements. |
 | evidence | `dict_entry`, `subscript_member`, `build_subscript` | Evidence remains symbolic and dictionary entries are function places. |
 | calls/projections | `call`, `project`, `end_project` | Proven source-infallible forms are ordinary operations. Potentially source-fallible forms occur only inside `invoke`. |
 | ownership | `clone`, `drop`, `build_closure`, `clone_closure_env`, `drop_closure_env` | Semantic ownership actions are explicit. `Value::clone` and `Value::drop` are source-infallible by contract. |
@@ -141,6 +143,13 @@ otherwise. `clone` and `drop` each carry the type they act on, so a pass that ch
 still needed without recovering the type from the dictionary behind the callee. Their callee follows
 the same contract as a `call`'s: a constant function, or the place of a function value read by
 reference. A `clone` initializes its destination and gives it the drop obligation the copy creates.
+
+`build_array<A> [e0, ...] to destination` representation-copies each borrowed element and
+initializes `destination: [A]` with a fresh logical array of exactly that length. `A` must be
+statically `TrivialCopy`; otherwise array literals retain their in-place lowering, which initializes
+each backing slot without an implicit clone. The operation is specified over Ferlium's canonical
+array type, not over its current `Buffer` implementation. The compiler-known array layout and the
+interpreter tuple representation are pinned together by a contract test in `std::array_type`.
 
 A `call` additionally carries optional metadata: **how it instantiated its callee**, when statically
 known and generic: the type and effect arguments its quantifiers stand for, positionally. They are

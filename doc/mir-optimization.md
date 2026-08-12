@@ -93,13 +93,16 @@ Four rules, each of which cost a measurement to establish. They apply to any new
 
 Runs a forward dataflow analysis to fixpoint and replaces calls it can evaluate at compile time.
 Lattice per register and per `(place root, field path)`: `Unknown | Known(Const) | Uninit`, where a
-root is an `alloca`, a parameter, or a `dict_entry`'s cell.
+root is an `alloca`, a parameter, or a `dict_entry`'s cell. `Const` includes scalar/tuple literals,
+symbolic functions, dictionaries and variant tags, plus a constructive array recipe of known
+`TrivialCopy` elements; the latter is not a mutable array stored in the constant pool.
 
 A call folds when the callee is statically known, every visible argument arrives by `Let`, every
-argument place holds a known literal, every evidence operand is a constant dictionary, the effects
-and result convention permit compile-time evaluation, and the result can be expressed as a MIR
-constant. `call f(a, b, ret)` becomes `store @cN to ret`; the surrounding scaffolding is left correct
-but dead for `dce`.
+argument place holds a known literal or constructive array, every evidence operand is a constant
+dictionary, the effects and result convention permit compile-time evaluation, and the result can be
+reified as MIR. `call f(a, b, ret)` becomes `store @cN to ret` for an immediate result, or
+`build_array` directly into `ret` for an array of `TrivialCopy` elements. The surrounding
+scaffolding is left correct but dead for `dce`.
 
 A `condbr` on a known condition becomes a jump. A source-fallible call whose evaluation *succeeds*
 becomes a store plus a jump to the normal successor, and its error edge dies; an evaluation that
@@ -173,8 +176,8 @@ same reason cross-module inlining is: a dependency's revision is immutable.
 ### What substitution covers
 
 Every parameter's type; the type fields of `Alloca`, `AllocaPlace`, `Call`, `Project`, `Subfield`,
-`DictEntry`, `SubscriptMember`, `BuildSubscript`, `Variant`, `BuildClosure`, `CloneClosureEnv`,
-`Clone` and `Drop`; the constant pool's types; effects wherever they appear; and **the instantiation
+`DictEntry`, `SubscriptMember`, `BuildSubscript`, `Variant`, `BuildArray`, `BuildClosure`,
+`CloneClosureEnv`, `Clone` and `Drop`; the constant pool's types; effects wherever they appear; and **the instantiation
 recorded on the body's own calls**, which is what makes the cascade work.
 
 Substitution interns types, and the type universe's lock is not reentrant: nothing may hold
@@ -435,6 +438,10 @@ Deliberately narrow, and intra-function only.
 - An unread `dict_entry` or `subfield` goes. Both derive places without side effects or owned
   results, so deleting one discharges no obligation. A linear use-count worklist handles nested
   `subfield` chains: removing an unread leaf can make its base derivation unread.
+- A `build_array` destination (or a bare function constant slot) used only by its cleanup is removed
+  together with every matching drop. Treating construction and cleanup as one dead lifetime avoids
+  both leaking a constructed resource and dropping uninitialized storage; arbitrary resource
+  producers remain outside this deliberately narrow rule.
 - A properly nested same-block `stack_save`/`stack_restore` pair with one restore goes when no
   surviving operation inside may leave current-frame storage allocated. The paired rule runs after
   the other removals, so storage cleanup can make a region empty first.

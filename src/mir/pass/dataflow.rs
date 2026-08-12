@@ -48,7 +48,7 @@ use crate::{
     },
     module::{FunctionId, ModuleEnv, TraitDictionaryEntry, TraitDictionaryId},
     types::r#trait::TraitDictionaryEntryIndex,
-    types::r#type::CallImplType,
+    types::r#type::{CallImplType, Type},
 };
 
 /// A root of addressable storage the analysis can track.
@@ -107,6 +107,11 @@ pub(crate) enum Const {
     Dictionary(TraitDictionaryId),
     /// A symbolic discriminant, kept independent of compilation-session numeric tag ids.
     VariantTag(Ustr),
+    /// A fresh array construction whose statically `TrivialCopy` elements are all known.
+    Array {
+        element_ty: Type,
+        elements: Box<[LiteralValue]>,
+    },
 }
 
 /// What is known about one storage slot, or about a materialized value.
@@ -372,6 +377,38 @@ fn transfer(
             let fact = value_operand_fact(&operation.operands[0], func, state);
             state.set_place(key, fact);
         }
+        OperationKind::BuildArray { element_ty } => {
+            let Some((destination, elements)) = operation.operands.split_last() else {
+                return;
+            };
+            let Some(key) = state.place_of(destination) else {
+                return;
+            };
+            if !tracked(&key) {
+                return;
+            }
+            let elements = elements
+                .iter()
+                .map(|operand| {
+                    let fact = match state.place_of(operand) {
+                        Some(key) if tracked(&key) => state.place(&key),
+                        Some(_) => Fact::Unknown,
+                        None => value_operand_fact(operand, func, state),
+                    };
+                    match fact {
+                        Fact::Known(Const::Literal(literal)) => Some(literal),
+                        _ => None,
+                    }
+                })
+                .collect::<Option<Vec<_>>>();
+            let fact = elements.map_or(Fact::Unknown, |elements| {
+                Fact::Known(Const::Array {
+                    element_ty: *element_ty,
+                    elements: elements.into_boxed_slice(),
+                })
+            });
+            state.set_place(key, fact);
+        }
         OperationKind::Clear => {
             if let Some(key) = state.place_of(&operation.operands[0])
                 && tracked(&key)
@@ -522,6 +559,13 @@ fn transfer(
                 state.set_place(key, Fact::Unknown);
             }
         }
+        OperationKind::Drop { .. } => {
+            if let Some(key) = state.place_of(&operation.operands[0])
+                && tracked(&key)
+            {
+                state.set_place(key, Fact::Uninit);
+            }
+        }
         _ => {
             // Not modelled: the escape scan has escaped every place this operation touches, so
             // there is nothing left to invalidate. A result register, if any, is an unknown value.
@@ -621,6 +665,31 @@ fn escaping_roots(func: &Function) -> (FxHashSet<Root>, FxHashMap<ValueId, Root>
         }
     }
 
+    // A `BuildArray` destination and a slot initialized with a bare function are compiler-known,
+    // self-contained values. Their later semantic drop ends the lifetime but does not make earlier
+    // contents escape, so keep precisely these roots trackable through that drop. The array plus
+    // mapper pair is the resource-valued fold consumer; applying the same relaxation to every
+    // dropped root was measured before one existed and added 25.6% analysis work for no folds.
+    let mut self_contained_roots = FxHashSet::default();
+    for block_id in func.blocks() {
+        for operation in func.block(block_id).operations() {
+            let destination = match operation.kind {
+                OperationKind::BuildArray { .. } => operation.operands.last(),
+                OperationKind::Store
+                    if matches!(operation.operands[0], mir::Value::Function(_)) =>
+                {
+                    operation.operands.get(1)
+                }
+                _ => None,
+            };
+            if let Some(destination) = destination
+                && let Some(root) = operand_root(destination, &register_roots)
+            {
+                self_contained_roots.insert(root);
+            }
+        }
+    }
+
     let mut escaped = FxHashSet::default();
     let escape_operand = |operand: &mir::Value, escaped: &mut FxHashSet<Root>| {
         if let Some(root) = operand_root(operand, &register_roots) {
@@ -640,6 +709,8 @@ fn escaping_roots(func: &Function) -> (FxHashSet<Root>, FxHashMap<ValueId, Root>
             | OperationKind::ExtractTag => {}
             // Optional storage evidence is read without escaping its place.
             OperationKind::Variant { .. } => {}
+            // Elements are borrowed and the trailing destination is modelled exactly.
+            OperationKind::BuildArray { .. } => {}
             // Its operand is evidence rather than storage, and its result is a place this analysis
             // roots itself.
             OperationKind::DictEntry { .. } => {}
@@ -681,6 +752,17 @@ fn escaping_roots(func: &Function) -> (FxHashSet<Root>, FxHashMap<ValueId, Root>
             // call's result place is, so neither escapes — exactly as when a clone was spelled as a
             // call. The callee is read by reference.
             OperationKind::Clone { .. } => {}
+            OperationKind::Drop { .. } => {
+                let target = &operation.operands[0];
+                if operand_root(target, &register_roots)
+                    .is_none_or(|root| !self_contained_roots.contains(&root))
+                {
+                    escape_operand(target, escaped);
+                }
+                for operand in operation.operands.iter().skip(1) {
+                    escape_operand(operand, escaped);
+                }
+            }
             // Everything else — projections, drops, closure building, comparisons — takes its
             // places outside what this analysis models.
             _ => {

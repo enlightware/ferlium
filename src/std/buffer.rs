@@ -87,7 +87,7 @@ impl Buffer {
     }
 }
 
-fn buffer_type(element_ty: Type) -> Type {
+pub(crate) fn buffer_type(element_ty: Type) -> Type {
     Type::native::<Buffer>([element_ty])
 }
 
