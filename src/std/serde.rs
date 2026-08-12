@@ -15,7 +15,7 @@ use crate::{
     cached_ty,
     compiler::error::InternalCompilationError,
     containers::{SVec2, b},
-    hir::value::{LiteralValue, ustr_to_isize},
+    hir::value::LiteralValue,
     hir::{self, CallArgument, NodeArena, NodeId},
     hir::{
         function::CallableDefinition,
@@ -314,7 +314,7 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
                         variant(ustr("Variant"), enum_record),
                         data_value_type(),
                     );
-                    let tag_value = LiteralValue::new_native(ustr_to_isize(tag));
+                    let tag_value = LiteralValue::new_variant_tag(tag);
                     Ok((tag_value, code))
                 })
                 .collect::<Result<Vec<_>, _>>()?;

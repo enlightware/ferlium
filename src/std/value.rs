@@ -9,7 +9,7 @@
 
 use std::mem;
 
-use ustr::ustr;
+use ustr::{Ustr, ustr};
 
 use crate::{
     FxHashSet, Location,
@@ -22,7 +22,7 @@ use crate::{
         function::{
             CallableDefinition, Function, PendingScriptFunction, UnaryNativeFnMN, UnaryNativeFnRN,
         },
-        value::{FunctionValue, LiteralValue, NativeValue, SubscriptValue, ustr_to_isize},
+        value::{FunctionValue, LiteralValue, NativeValue, SubscriptValue, VariantPayloadStorage},
         value_dispatch::{
             materialize_static_string, prepare_generated_call_arguments_with_locals,
             static_apply_generated_with_locals, wrap_generated_call_with_temp_cleanup,
@@ -154,7 +154,7 @@ impl ValueLayout {
     }
 
     fn variant(payloads: impl IntoIterator<Item = ValueLayout>) -> Self {
-        let tag = Self::native::<isize>();
+        let tag = Self::native::<u32>();
         let payload = Self::union(payloads);
         let align = tag.align.max(payload.align);
         let payload_offset = align_to(tag.size, payload.align);
@@ -176,6 +176,110 @@ pub(crate) trait TypeLayoutEnv {
     fn type_def(&self, id: TypeDefId) -> &TypeDef;
 }
 
+/// Whether following the representation-bearing fields of `start` can return to `target`.
+///
+/// Native, function, and subscript type arguments are not embedded fields of those values. Named
+/// types, conversely, are transparent wrappers around their instantiated structural shape.
+fn representation_reaches(
+    start: Type,
+    target: Type,
+    env: &impl TypeLayoutEnv,
+    seen: &mut FxHashSet<Type>,
+) -> bool {
+    if start == target {
+        return true;
+    }
+    if !seen.insert(start) {
+        return false;
+    }
+
+    let data = start.data().clone();
+    match data {
+        TypeKind::Tuple(fields) => fields
+            .into_iter()
+            .any(|field| representation_reaches(field, target, env, seen)),
+        TypeKind::Record(fields) | TypeKind::Variant(fields) => fields
+            .into_iter()
+            .any(|(_, field)| representation_reaches(field, target, env, seen)),
+        TypeKind::Named(named) => {
+            let shape = env
+                .type_def(named.def)
+                .instantiated_shape_with_effects(&named.params, &named.effect_params);
+            representation_reaches(shape, target, env, seen)
+        }
+        TypeKind::Variable(_)
+        | TypeKind::Native(_)
+        | TypeKind::Function(_)
+        | TypeKind::Subscript(_)
+        | TypeKind::Never => false,
+    }
+}
+
+/// Classify one embedded field occurrence. An edge inside a recursive representation component is
+/// indirect; every other field is inline.
+fn field_payload_storage(
+    owner: Type,
+    field: Type,
+    env: &impl TypeLayoutEnv,
+) -> VariantPayloadStorage {
+    VariantPayloadStorage::from_indirect(representation_reaches(
+        field,
+        owner,
+        env,
+        &mut FxHashSet::default(),
+    ))
+}
+
+/// Return the canonical storage mode of `tag`'s payload in `variant_ty`.
+///
+/// This is also the value carried as hidden evidence when `variant_ty` is an open generic type.
+pub(crate) fn variant_payload_storage_for_type(
+    variant_ty: Type,
+    tag: Ustr,
+    span: Location,
+    env: &impl TypeLayoutEnv,
+) -> Result<VariantPayloadStorage, InternalCompilationError> {
+    let mut structural_ty = variant_ty;
+    let mut seen = FxHashSet::default();
+    loop {
+        if !seen.insert(structural_ty) {
+            return Err(internal_compilation_error!(Internal {
+                error: format!("cannot resolve variant representation for type {variant_ty:?}"),
+                span,
+            }));
+        }
+        let data = structural_ty.data().clone();
+        match data {
+            TypeKind::Variant(cases) => {
+                let payload_ty = cases
+                    .into_iter()
+                    .find_map(|(case_tag, payload_ty)| (case_tag == tag).then_some(payload_ty))
+                    .ok_or_else(|| {
+                        internal_compilation_error!(Internal {
+                            error: format!("variant type {variant_ty:?} has no case .{tag}"),
+                            span,
+                        })
+                    })?;
+                if payload_ty == Type::unit() {
+                    return Ok(VariantPayloadStorage::Inline);
+                }
+                return Ok(field_payload_storage(structural_ty, payload_ty, env));
+            }
+            TypeKind::Named(named) => {
+                structural_ty = env
+                    .type_def(named.def)
+                    .instantiated_shape_with_effects(&named.params, &named.effect_params);
+            }
+            _ => {
+                return Err(internal_compilation_error!(Internal {
+                    error: format!("cannot resolve variant representation for type {variant_ty:?}"),
+                    span,
+                }));
+            }
+        }
+    }
+}
+
 impl TypeLayoutEnv for ModuleEnv<'_> {
     fn type_def(&self, id: TypeDefId) -> &TypeDef {
         ModuleEnv::type_def(self, id)
@@ -191,15 +295,17 @@ impl TypeLayoutEnv for TraitSolver<'_> {
 fn layout_for_value_type(
     ty: Type,
     span: Location,
-    active: &mut FxHashSet<Type>,
     env: &impl TypeLayoutEnv,
+    active: &mut FxHashSet<Type>,
 ) -> Result<ValueLayout, InternalCompilationError> {
     if !active.insert(ty) {
-        // Recursive occurrences are represented indirectly at runtime, so their
-        // inline layout is a value slot rather than another full copy.
-        return Ok(ValueLayout::native::<usize>());
+        return Err(internal_compilation_error!(Internal {
+            error: format!(
+                "uncut recursive edge while computing the canonical Value layout of {ty:?}"
+            ),
+            span,
+        }));
     }
-
     let ty_data = ty.data();
     use TypeKind::*;
     let layout = match &*ty_data {
@@ -211,7 +317,13 @@ fn layout_for_value_type(
             drop(ty_data);
             let fields = member_tys
                 .into_iter()
-                .map(|member_ty| layout_for_value_type(member_ty, span, active, env))
+                .map(|member_ty| {
+                    if field_payload_storage(ty, member_ty, env).is_indirect() {
+                        Ok(ValueLayout::native::<usize>())
+                    } else {
+                        layout_for_value_type(member_ty, span, env, active)
+                    }
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             active.remove(&ty);
             return Ok(ValueLayout::product(fields));
@@ -224,7 +336,13 @@ fn layout_for_value_type(
             drop(ty_data);
             let fields = field_tys
                 .into_iter()
-                .map(|field_ty| layout_for_value_type(field_ty, span, active, env))
+                .map(|field_ty| {
+                    if field_payload_storage(ty, field_ty, env).is_indirect() {
+                        Ok(ValueLayout::native::<usize>())
+                    } else {
+                        layout_for_value_type(field_ty, span, env, active)
+                    }
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             active.remove(&ty);
             return Ok(ValueLayout::product(fields));
@@ -237,7 +355,13 @@ fn layout_for_value_type(
             drop(ty_data);
             let payloads = payload_tys
                 .into_iter()
-                .map(|payload_ty| layout_for_value_type(payload_ty, span, active, env))
+                .map(|payload_ty| {
+                    if field_payload_storage(ty, payload_ty, env).is_indirect() {
+                        Ok(ValueLayout::native::<usize>())
+                    } else {
+                        layout_for_value_type(payload_ty, span, env, active)
+                    }
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             active.remove(&ty);
             return Ok(ValueLayout::variant(payloads));
@@ -248,7 +372,7 @@ fn layout_for_value_type(
             let shape_ty = env
                 .type_def(named.def)
                 .instantiated_shape_with_effects(&named.params, &named.effect_params);
-            let layout = layout_for_value_type(shape_ty, span, active, env)?;
+            let layout = layout_for_value_type(shape_ty, span, env, active)?;
             active.remove(&ty);
             return Ok(layout);
         }
@@ -274,7 +398,7 @@ pub(crate) fn value_layout_for_type(
     span: Location,
     env: &impl TypeLayoutEnv,
 ) -> Result<ResolvedValueLayout, InternalCompilationError> {
-    let layout = layout_for_value_type(ty, span, &mut FxHashSet::default(), env)?;
+    let layout = layout_for_value_type(ty, span, env, &mut FxHashSet::default())?;
     let size = u32::try_from(layout.size).map_err(|_| {
         internal_compilation_error!(Internal {
             error: format!("Value size {} does not fit in u32", layout.size),
@@ -295,7 +419,7 @@ pub(crate) fn value_layout_associated_const_values(
     span: Location,
     env: &impl TypeLayoutEnv,
 ) -> Result<[isize; 2], InternalCompilationError> {
-    layout_for_value_type(ty, span, &mut FxHashSet::default(), env)?.associated_const_values(span)
+    layout_for_value_type(ty, span, env, &mut FxHashSet::default())?.associated_const_values(span)
 }
 
 /// Returns whether `ty` has a statically known run-time layout: its size and alignment can be
@@ -312,7 +436,7 @@ pub(crate) fn value_layout_associated_const_values(
 /// Storage of a statically sized type may be allocated with a plain `alloca` and moved with direct
 /// `load`/`store`; everything else must go through its `Value` dictionary witness.
 pub(crate) fn type_has_static_layout(ty: Type, span: Location, env: &impl TypeLayoutEnv) -> bool {
-    layout_for_value_type(ty, span, &mut FxHashSet::default(), env).is_ok()
+    layout_for_value_type(ty, span, env, &mut FxHashSet::default()).is_ok()
 }
 
 /// Return whether all unresolved variables in `ty` appear only in function types.
@@ -1055,7 +1179,7 @@ fn derive_structural_text_body(
             let mut locals = locals;
             let mut alternatives = Vec::with_capacity(variants.len());
             for (tag, payload_ty) in variants {
-                let tag_val = LiteralValue::new_native(ustr_to_isize(tag));
+                let tag_val = LiteralValue::new_variant_tag(tag);
                 let rendered = if payload_ty == Type::unit() {
                     string_lit!(arena, &mut locals, tag.as_str())
                 } else {
@@ -1156,7 +1280,7 @@ fn derive_structural_text_body(
                     let self_tag = n(arena, extract_tag(load_self), int_type());
                     let mut alternatives = Vec::with_capacity(variants.len());
                     for (tag, payload_ty) in variants {
-                        let tag_val = LiteralValue::new_native(ustr_to_isize(tag));
+                        let tag_val = LiteralValue::new_variant_tag(tag);
                         let rendered = if payload_ty == Type::unit() {
                             string_lit!(arena, &mut locals, &format!("{}::{}", type_name, tag))
                         } else {
@@ -1369,7 +1493,7 @@ fn derive_value_eq_body(
         ($arena:expr, $variants:expr) => {{
             let mut alternatives: Vec<(LiteralValue, NodeId)> = Vec::new();
             for (tag, payload_ty) in $variants {
-                let tag_val = LiteralValue::new_native(ustr_to_isize(tag));
+                let tag_val = LiteralValue::new_variant_tag(tag);
                 let load_right_outer = n($arena, load_local(l_right_id), ty);
                 let right_tag = n($arena, extract_tag(load_right_outer), int_type());
                 let inner_body = if payload_ty == Type::unit() {
@@ -1584,7 +1708,7 @@ fn derive_value_hash_body(
             let mut alternatives = Vec::with_capacity($variants.len());
 
             for (tag, payload_ty) in $variants.into_iter() {
-                let tag_val = LiteralValue::new_native(ustr_to_isize(tag));
+                let tag_val = LiteralValue::new_variant_tag(tag);
                 let mut statements = vec![build_write_static_str(
                     $arena,
                     ctx.solver,
@@ -1735,7 +1859,7 @@ fn derive_value_clone_body(
             let source_tag = n($arena, extract_tag(source), int_type());
             let mut alternatives = Vec::with_capacity($variants.len());
             for (tag, payload_ty) in $variants {
-                let tag_val = LiteralValue::new_native(ustr_to_isize(tag));
+                let tag_val = LiteralValue::new_variant_tag(tag);
                 let branch = if payload_ty == Type::unit() {
                     let payload = n($arena, native(()), Type::unit());
                     n($arena, variant(tag, payload), ty)
@@ -1898,7 +2022,7 @@ fn derive_value_drop_body(
             let target_tag = n($arena, extract_tag(target), int_type());
             let mut alternatives = Vec::with_capacity($variants.len());
             for (tag, payload_ty) in $variants {
-                let tag_val = LiteralValue::new_native(ustr_to_isize(tag));
+                let tag_val = LiteralValue::new_variant_tag(tag);
                 let branch = if payload_ty == Type::unit() {
                     n($arena, native(()), Type::unit())
                 } else {
@@ -2373,4 +2497,28 @@ pub fn add_to_module(to: &mut Module) {
     let inspect_trait_id = to.add_trait(inspect_trait());
     let inspect_trait_id = TraitId::new(to.module_id(), inspect_trait_id);
     debug_assert_eq!(to.trait_def(inspect_trait_id).name, INSPECT_TRAIT_NAME);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::CompilerSession;
+
+    #[test]
+    fn variant_layout_uses_a_u32_tag_and_inline_payload_union() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let no_payload = Type::variant([(ustr("None"), Type::unit())]);
+        let bool_payload =
+            Type::variant([(ustr("None"), Type::unit()), (ustr("Some"), bool_type())]);
+
+        assert_eq!(
+            value_layout_for_type(no_payload, Location::new_synthesized(), &env).unwrap(),
+            ResolvedValueLayout { size: 4, align: 4 }
+        );
+        assert_eq!(
+            value_layout_for_type(bool_payload, Location::new_synthesized(), &env).unwrap(),
+            ResolvedValueLayout { size: 8, align: 4 }
+        );
+    }
 }

@@ -523,7 +523,7 @@ one of them was found by reading generated MIR instead.
   reproduces its own input: the driver loops until nothing changes, so a self-reproducing rewrite
   spins to the round cap reporting progress the whole way.
 - With optimization off, MIR is byte-identical to an unoptimized build.
-- **Host-dependent values must not be frozen into MIR.** A variant tag is an interned host pointer
-  (`ustr_to_isize`), so folding an `extract_tag` result into a constant would bake a process address
-  into the IR — harmless while MIR is built and run in one process, wrong the day it is cached,
-  serialized or cross-compiled.
+- **Session-dependent values must not be frozen into MIR.** Variant tags remain symbolic in cached
+  HIR/MIR and a backend resolves them through the session's `Ustr`/`u32` table. Folding an
+  `extract_tag` result into an ordinary integer constant would bake one session's compact ID into
+  portable IR.

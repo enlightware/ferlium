@@ -257,8 +257,10 @@ This does not affect their layout.
 
 ## Tag representation
 
-Tags are stored as `u32` referring to interned strings within one compilation session.
-Binary modules are not compatible across compilation sessions.
+Tags are stored as `u32`. The low 31 bits refer to an interned string within one compilation
+session; tag identity is global by name across variant types, as generic variant matching requires.
+The high bit is clear for an inline payload and set for an indirect payload. Semantic tag comparison
+masks that representation bit. Numeric discriminants are not stable across compilation sessions.
 
 ## Payload layout
 
@@ -269,19 +271,25 @@ For each case:
 
 ## Variant representation
 
-Payloads are boxed, to allow for recursive types.
+The payload is a union of the case payload representations. Every embedded field occurrence whose
+edge stays within the same recursive representation component is indirect; other fields are inline.
+Consequently non-recursive payloads do not acquire a box merely because they belong to a variant.
 
 ```
 struct Variant {
-    void* payload; // pointer to payload data
-    i32 tag;
+    u32 tag;
+    union {
+        T_a_or_pointer a;
+        T_b_or_pointer b;
+        // ...
+    } payload;
 }
 ```
 
-This leads to:
-
-* alignment = `max(4, align(void*))`
-* size = 8 (32 bit targets) or 16 (64 bit targets)
+The payload offset is `align_up(4, payload_alignment)`. The variant alignment is
+`max(align(u32), payload_alignment)`, and its size includes the final padding required by that
+alignment. A variant is `TrivialCopy` exactly when all its possible payloads are `TrivialCopy`;
+an indirect recursive edge owns storage and therefore prevents that classification.
 
 # Arrays
 

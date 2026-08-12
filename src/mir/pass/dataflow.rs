@@ -34,6 +34,7 @@
 #![allow(dead_code)]
 
 use rustc_hash::{FxHashMap, FxHashSet};
+use ustr::Ustr;
 
 use crate::{
     hir::{
@@ -104,6 +105,8 @@ pub(crate) enum Const {
     Function(FunctionId),
     /// A known trait dictionary.
     Dictionary(TraitDictionaryId),
+    /// A symbolic discriminant, kept independent of compilation-session numeric tag ids.
+    VariantTag(Ustr),
 }
 
 /// What is known about one storage slot, or about a materialized value.
@@ -386,6 +389,28 @@ fn transfer(
             };
             state.registers.insert(result, RegisterFact::Value(fact));
         }
+        OperationKind::Variant { tag, .. } => {
+            let Some(result) = operation.result_id() else {
+                return;
+            };
+            state.registers.insert(
+                result,
+                RegisterFact::Value(Fact::Known(Const::VariantTag(*tag))),
+            );
+        }
+        OperationKind::ExtractTag => {
+            let Some(result) = operation.result_id() else {
+                return;
+            };
+            let fact = match state.place_of(&operation.operands[0]) {
+                Some(key) if tracked(&key) => match state.place(&key) {
+                    Fact::Known(Const::VariantTag(tag)) => Fact::Known(Const::VariantTag(tag)),
+                    _ => Fact::Unknown,
+                },
+                _ => Fact::Unknown,
+            };
+            state.registers.insert(result, RegisterFact::Value(fact));
+        }
         OperationKind::Subfield { .. } => {
             let Some(result) = operation.result_id() else {
                 return;
@@ -435,6 +460,13 @@ fn transfer(
                 None => value_operand_fact(&operation.operands[0], func, state),
             };
             let fact = match (scrutinee.known(), &operation.operands[1]) {
+                (Some(Const::VariantTag(actual)), mir::Value::Pattern(pattern))
+                    if pattern.as_variant_tag().is_some() =>
+                {
+                    Fact::Known(Const::Literal(LiteralValue::new_native(
+                        pattern.as_variant_tag() == Some(actual),
+                    )))
+                }
                 (Some(Const::Literal(literal)), mir::Value::Pattern(pattern)) => {
                     // Compared exactly as the interpreter does, rather than by comparing literal
                     // trees: pattern matching has representation rules of its own (a `StaticStr`
@@ -602,7 +634,12 @@ fn escaping_roots(func: &Function) -> (FxHashSet<Root>, FxHashMap<ValueId, Root>
             OperationKind::Alloca { .. } => {}
             // `comp_eq` borrows its scrutinee for a literal snapshot and never moves it, so the
             // place stays tracked; its second operand is compile-time pattern data.
-            OperationKind::Load | OperationKind::Clear | OperationKind::CompareEqual => {}
+            OperationKind::Load
+            | OperationKind::Clear
+            | OperationKind::CompareEqual
+            | OperationKind::ExtractTag => {}
+            // Optional storage evidence is read without escaping its place.
+            OperationKind::Variant { .. } => {}
             // Its operand is evidence rather than storage, and its result is a place this analysis
             // roots itself.
             OperationKind::DictEntry { .. } => {}
@@ -720,9 +757,12 @@ mod tests {
     use crate::{
         CompilerSession, ExecutionTarget, Location,
         compiler::MirOptimization,
+        containers::b,
+        hir::value::VariantPayloadStorage,
         mir::{Operation, builder::FunctionBuilder, terminator::Terminator},
         module::Path,
         std::math::int_type,
+        types::r#type::Type,
         ustr,
     };
 
@@ -801,6 +841,60 @@ mod tests {
             panic!("`load` defines a register");
         };
         assert_eq!(state.register(loaded), Some(&RegisterFact::Value(expected)));
+    }
+
+    #[test]
+    fn a_constructed_variant_tag_compares_symbolically() {
+        let session = CompilerSession::new();
+        let span = Location::new_synthesized();
+        let env = session.module_env();
+        let tag = ustr("Some");
+        let variant_ty = Type::variant([(tag, Type::unit())]);
+
+        let mut builder = FunctionBuilder::new("known_variant_tag".into(), Default::default());
+        let block = builder.add_block();
+        let slot = builder
+            .append_operation(block, Operation::alloca(span, variant_ty))
+            .unwrap();
+        let shell = builder
+            .append_operation(
+                block,
+                Operation::variant(
+                    span,
+                    tag,
+                    variant_ty,
+                    Some(VariantPayloadStorage::Inline),
+                    None,
+                ),
+            )
+            .unwrap();
+        builder.append_operation(block, Operation::store(span, shell, slot.clone()));
+        let extracted = builder
+            .append_operation(block, Operation::extract_tag(span, slot))
+            .unwrap();
+        let equal = builder
+            .append_operation(
+                block,
+                Operation::compare_eq(
+                    span,
+                    extracted,
+                    mir::Value::Pattern(b(LiteralValue::new_variant_tag(tag))),
+                ),
+            )
+            .unwrap();
+        builder.set_terminator(block, Terminator::ret(span));
+        let func = builder.finish(env);
+
+        let state = entry_block_exit(&func, env);
+        let mir::Value::Register(equal) = equal else {
+            panic!("compare_eq defines a register")
+        };
+        assert_eq!(
+            state.register(equal),
+            Some(&RegisterFact::Value(Fact::Known(Const::Literal(
+                LiteralValue::new_native(true)
+            ))))
+        );
     }
 
     /// A `Let` argument place does not escape: the convention is immutable and non-escaping, and

@@ -8,11 +8,13 @@
 //
 use test_log::test;
 
-use crate::harness::{TestSession, int, string};
+use crate::harness::{RunMode, TestSession, bool_value, int, string};
 use ferlium::{
     compiler::error::{CompilationErrorImpl, SourceFailureKind},
     format::FormatWith,
-    hir::{self, ENodeArena, ENodeId, NodeKind, function::ArgConvention},
+    hir::{
+        self, ENodeArena, ENodeId, NodeKind, function::ArgConvention, value::VariantPayloadStorage,
+    },
     module::{
         LocalDeclId, LocalStorage, ResolvedLocalClone, ResolvedLocalDrop,
         ResolvedTakeLocalValueMode, ShowModuleWithOptions, id::Id,
@@ -1006,12 +1008,9 @@ fn payload_free_sum_types_need_no_drop() {
     );
 }
 
-/// The complement, and the reason the rule stops at payload-free cases: a case carrying anything
-/// owned keeps its drop, since whether that payload lives inline or behind a pointer is a layout
-/// decision no backend has made.
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn a_sum_type_with_a_payload_keeps_its_drop() {
+fn a_sum_type_with_a_trivial_payload_needs_no_drop() {
     let mut session = TestSession::new();
     let mir = session.session_mut().emit_mir(
         "tc",
@@ -1022,8 +1021,24 @@ fn a_sum_type_with_a_payload_keeps_its_drop() {
         .next()
         .expect("loop_sum is emitted first");
     assert!(
-        body.contains("drop") && body.contains("Value<None | Some (std::int)>::drop"),
-        "the iterator's Option<int> carries a payload and must keep its drop:\n{body}"
+        !body.contains("Value<None | Some (std::int)>::drop"),
+        "the iterator's inline Option<int> is representation-copyable:\n{body}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn a_sum_type_with_an_owned_payload_keeps_its_drop() {
+    let mut session = TestSession::new();
+    let mir = session.session_mut().emit_mir(
+        "owned_variant",
+        "enum MaybeText { None, Some(string) }\n\
+         fn discard() { let value = MaybeText::Some(\"owned\"); }",
+    );
+    assert!(
+        mir.contains("drop MaybeText")
+            && mir.contains("Value<owned_variant::MaybeText>::drop#impl"),
+        "an inline variant containing a managed payload keeps semantic drop:\n{mir}"
     );
 }
 
@@ -2393,7 +2408,7 @@ fn float_is_trivial_copy() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn variants_and_recursive_named_types_are_not_trivial_copy() {
+fn inline_variants_are_trivial_copy_but_recursive_named_types_are_not() {
     let mut session = TestSession::new();
     let module = session.compile_and_get_module(
         r#"
@@ -2416,15 +2431,24 @@ fn variants_and_recursive_named_types_are_not_trivial_copy() {
         (snapshot_maybe(maybe), snapshot_list(list))
         "#,
     );
-    for function_name in [ustr("snapshot_maybe"), ustr("snapshot_list")] {
-        let function = module.get_function(function_name).unwrap();
-        let copy = function
-            .locals
-            .iter()
-            .find(|local| local.name.0 == ustr("copy"))
-            .unwrap();
-        assert!(matches!(copy.clone, Some(ResolvedLocalClone::Static(_))));
-    }
+    assert!(module.hir_arena.iter().any(|(_, node)| matches!(
+        node.kind,
+        NodeKind::CloneValue(hir::CloneValue {
+            clone: ResolvedLocalClone::TrivialCopy,
+            ..
+        })
+    )));
+    let list_copy = module
+        .get_function(ustr("snapshot_list"))
+        .unwrap()
+        .locals
+        .iter()
+        .find(|local| local.name.0 == ustr("copy"))
+        .unwrap();
+    assert!(matches!(
+        list_copy.clone,
+        Some(ResolvedLocalClone::Static(_))
+    ));
     assert_eq!(
         module
             .get_function(ustr("identity_maybe"))
@@ -2440,6 +2464,106 @@ fn variants_and_recursive_named_types_are_not_trivial_copy() {
             .parameter_passing
             .as_slice(),
         &[ArgConvention::Let]
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn variant_values_retain_canonical_inline_or_indirect_payload_storage() {
+    let cases = [
+        (
+            "enum Maybe { None, Some(int) } Maybe::Some(1)",
+            VariantPayloadStorage::Inline,
+        ),
+        (
+            "enum Chain { None, Some(Chain) } Chain::Some(Chain::None)",
+            VariantPayloadStorage::Indirect,
+        ),
+        (
+            "fn build(n) { if n == 0 { Nil } else { Cons(build(n - 1)) } } build(1)",
+            VariantPayloadStorage::Indirect,
+        ),
+        (
+            "fn wrap(x) { Some(x) } wrap(1)",
+            VariantPayloadStorage::Inline,
+        ),
+        (
+            r#"parse_data_text("Wrapped(1)")"#,
+            VariantPayloadStorage::Indirect,
+        ),
+    ];
+
+    for mode in RunMode::ALL {
+        for (source, expected) in cases {
+            let mut session = TestSession::new();
+            session.run_modes([mode]);
+            let value = session.run(source);
+            assert_eq!(value.variant_payload_storage(), Some(expected), "{mode:?}");
+            value.discard_storage();
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn open_generic_variant_match_accepts_recursive_payload_storage() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(
+            r#"
+            enum Chain { None, Some(Chain) }
+            fn is_some(x) { match x { Some(value) => true, _ => false } }
+            is_some(Chain::Some(Chain::None))
+            "#,
+        ),
+        bool_value(true)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn recursive_generic_call_keeps_distinct_same_tag_storage_evidence() {
+    let source = r#"
+        fn inspect(n, left, right) {
+            if n == 0 {
+                match left {
+                    Some(number) => match right {
+                        Some(flag) => number == 1 and flag,
+                        _ => false,
+                    },
+                    _ => false,
+                }
+            } else {
+                inspect(n - 1, left, right)
+            }
+        }
+        inspect(1, Some(1), Some(true))
+    "#;
+    for mode in RunMode::ALL {
+        let mut session = TestSession::new();
+        session.run_modes([mode]);
+        assert_val_eq!(session.run(source), bool_value(true));
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn an_inline_trivial_variant_snapshot_is_independent() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(
+            r#"
+            enum Maybe { None, Some(int) }
+            let mut original = Maybe::Some(7);
+            let snapshot = original;
+            original = Maybe::None;
+            match snapshot {
+                Maybe::Some(value) => value,
+                Maybe::None => 0,
+            }
+            "#,
+        ),
+        int(7)
     );
 }
 

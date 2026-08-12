@@ -1563,6 +1563,9 @@ impl<'a> Emitter<'a> {
         match &node.kind {
             K::GetDictionary(_) | K::LoadDictionary(_) => self.lower_dictionary_operand(node),
             K::GetSubscript(_) | K::LoadSubscriptEvidence(_) => self.lower_subscript_operand(node),
+            K::LoadVariantPayloadStorageEvidence(n) => {
+                self.context.extra_parameters[&n.extra_parameter].clone()
+            }
             _ => self.lower_as_place(node),
         }
     }
@@ -2306,8 +2309,20 @@ impl<'a> Emitter<'a> {
                 // storage, which would require a `Value` layout witness for the payload type the
                 // enclosing function does not carry. Only the payload's leaves are stored, each
                 // through its own (available) witness.
+                let (storage, evidence) = match n
+                    .payload_storage
+                    .expect("elaborated variant must have payload-storage metadata")
+                {
+                    hir::VariantPayloadStorageSource::Static(storage) => (Some(storage), None),
+                    hir::VariantPayloadStorageSource::Evidence(extra_parameter) => (
+                        None,
+                        Some(self.context.extra_parameters[&extra_parameter].clone()),
+                    ),
+                };
                 let shell = self
-                    .insert(Operation::variant(node.span, n.tag, node.ty))
+                    .insert(Operation::variant(
+                        node.span, n.tag, node.ty, storage, evidence,
+                    ))
                     .unwrap();
                 self.store(node.span, shell, dest.clone());
                 // A case carrying nothing has no payload to write, and writing unit would force the
@@ -2339,6 +2354,13 @@ impl<'a> Emitter<'a> {
                 // Forwarded subscript evidence is likewise an incoming by-pointer extra parameter.
                 // When it is used as a first-class value rather than only as call metadata, copy
                 // that value into the requested destination.
+                if destination.is_some() {
+                    let p = self.context.extra_parameters[&n.extra_parameter].clone();
+                    self.memcpy_into_if_needed(node.span, p, destination);
+                }
+            }
+
+            K::LoadVariantPayloadStorageEvidence(n) => {
                 if destination.is_some() {
                     let p = self.context.extra_parameters[&n.extra_parameter].clone();
                     self.memcpy_into_if_needed(node.span, p, destination);

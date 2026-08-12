@@ -2048,6 +2048,14 @@ impl<'a> TraitSolver<'a> {
                 DictionaryReq::ProjectionSubscript { subscript_ty, .. } => {
                     ty_inf.substitute_in_subscript_type_in_place(subscript_ty);
                 }
+                DictionaryReq::VariantPayloadStorage {
+                    variant_ty,
+                    payload_ty,
+                    ..
+                } => {
+                    *variant_ty = ty_inf.substitute_in_type(*variant_ty);
+                    *payload_ty = ty_inf.substitute_in_type(*payload_ty);
+                }
                 DictionaryReq::TraitImpl {
                     input_tys,
                     output_tys,
@@ -2573,6 +2581,7 @@ impl<'a> TraitSolver<'a> {
             .iter()
             .filter_map(|resolved| match &resolved.req {
                 DictionaryReq::ProjectionSubscript { .. } => Some(resolved.req.clone()),
+                DictionaryReq::VariantPayloadStorage { .. } => Some(resolved.req.clone()),
                 DictionaryReq::TraitImpl {
                     trait_id,
                     input_tys,

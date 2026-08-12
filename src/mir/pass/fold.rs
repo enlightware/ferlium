@@ -646,7 +646,7 @@ fn try_fold_call(
             _ => return discard(arguments, NotFoldable::EvidenceNotKnown),
         }
     }
-    for (operand, convention) in &call.arguments {
+    for ((operand, convention), parameter) in call.arguments.iter().zip(&ty.fn_ty.args) {
         // Write-back of a `MutableRef` argument is out of scope: the callee's writes would have to
         // be reified too.
         if !matches!(convention, ArgConvention::Let) {
@@ -660,7 +660,10 @@ fn try_fold_call(
                 _ => None,
             });
         match known {
-            Some(literal) => arguments.push(ConstArgument::Value(literal.into_value())),
+            Some(literal) if literal.has_representation_type_in(parameter.ty, &context.env) => {
+                arguments.push(ConstArgument::Value(literal.into_value()))
+            }
+            Some(_) => return discard(arguments, NotFoldable::ArgumentNotLiteral),
             None => {
                 let reason = why_argument_unknown(operand, state, context);
                 return discard(arguments, reason);

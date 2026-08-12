@@ -16,9 +16,10 @@ use crate::{
     hir::hir_syn::{call_dictionary_function, get_dictionary, static_apply},
     hir::{
         dictionary::{
-            DictElaborationCtx, DictionariesReq, DictionaryReq, ExtraParameters,
+            DictElaborationCtx, DictionaryReq, ExtraParameters, LateFunctionInstData,
             find_projection_subscript_dict_index,
             find_projection_subscript_dict_index_for_receiver_ty, find_trait_impl_dict_index,
+            find_variant_payload_storage_index, instantiate_dictionary_requirements,
         },
         value_dispatch::{resolve_local_clone, resolve_local_drop},
     },
@@ -41,14 +42,18 @@ use crate::{
     hir::{
         self, ArgConvention, CallArgument, ENodeArena, ENodeId, Elaborated, Node, NodeArena,
         NodeKind, Project as HirProject, StaticApplication, UNodeArena, UNodeId, Unelaborated,
+        VariantPayloadStorageSource,
     },
     std::value::{
         is_function_surface_only_value_trait_application, is_value_trait_for_function_type,
-        value_layout_associated_const_values,
+        value_layout_associated_const_values, variant_payload_storage_for_type,
     },
-    types::effects::{EffType, no_effects},
+    types::effects::{EffType, Effect, EffectsInstSubst, no_effects},
     types::mutability::MutType,
-    types::r#type::{CallImplType, CallResultConvention, FnArgType, FnType, Type, TypeKind},
+    types::r#type::{
+        CallImplType, CallResultConvention, FnArgType, FnType, Type, TypeKind, TypeVar,
+    },
+    types::type_mapper::BitmapInstantiationMapper,
 };
 
 /// Build the use-site HIR expression for a generated `Value` dictionary.
@@ -251,6 +256,45 @@ fn extra_arg_kind_from_inst_data(
                     };
                     (node_kind, expected_node_ty)
                 }
+                VariantPayloadStorage {
+                    variant_ty,
+                    tag,
+                    ..
+                } => {
+                    let node_ty = Type::primitive::<bool>();
+                    if matches!(&*variant_ty.data(), TypeKind::Variable(_)) {
+                        let index = find_variant_payload_storage_index(
+                            ctx.dicts,
+                            *variant_ty,
+                            *tag,
+                        )
+                        .ok_or_else(|| {
+                            internal_compilation_error!(Internal {
+                                error: format!(
+                                    "variant payload-storage evidence {dict:?} not found in generic caller requirements {:?}",
+                                    ctx.dicts.requirements
+                                ),
+                                span,
+                            })
+                        })?;
+                        (
+                            K::LoadVariantPayloadStorageEvidence(
+                                hir::LoadVariantPayloadStorageEvidence {
+                                    extra_parameter: ExtraParameterId::from_index(index),
+                                },
+                            ),
+                            node_ty,
+                        )
+                    } else {
+                        let storage = variant_payload_storage_for_type(
+                            *variant_ty,
+                            *tag,
+                            span,
+                            ctx.trait_solver,
+                        )?;
+                        (K::Immediate(LiteralValue::new_native(storage.is_indirect())), node_ty)
+                    }
+                }
                 TraitImpl { trait_id, input_tys, output_tys, output_effs } => {
                     let (node_kind, ty) = trait_dictionary_node_kind(
                         arena,
@@ -273,35 +317,515 @@ fn extra_arg_kind_from_inst_data(
     )
 }
 
-fn extra_arg_kind_for_module_function(
-    inst_data: &DictionariesReq,
-    dicts: &ExtraParameters,
-    trait_solver: &TraitSolver<'_>,
-) -> Vec<(NodeKind, Type, FnArgType)> {
-    inst_data
+/// Instantiate requirements that were discovered only after a recursive module call was inferred.
+///
+/// Recursive type inference can finalize a mutually recursive type world after the call's
+/// preliminary `FnInstData` was recorded, so type identity is reconstructed from the final callee
+/// surface, the call-site type, `Repr` relationships, and constraint payload edges. A preliminary
+/// call may likewise predate final effect quantification: complete positional effect arguments are
+/// used when present, otherwise the function surface reconstructs the missing mapping.
+fn late_module_call_inst_data(
+    callee: &LateFunctionInstData,
+    call_ty: &FnType,
+    call_inst_data: &hir::FnInstData,
+    caller_requirements: &ExtraParameters,
+    span: Location,
+) -> Result<hir::FnInstData, InternalCompilationError> {
+    let error = |message: String| {
+        internal_compilation_error!(Internal {
+            error: message,
+            span,
+        })
+    };
+    let mut ty_subst = FxHashMap::default();
+    let mut eff_subst = if call_inst_data.eff_args.len() == callee.effect_quantifiers.len() {
+        callee
+            .effect_quantifiers
+            .iter()
+            .copied()
+            .zip(call_inst_data.eff_args.iter().cloned())
+            .collect::<EffectsInstSubst>()
+    } else {
+        // Finalization may add or remove effect quantifiers. In that case preliminary positions do
+        // not name the final universe and must not be replayed; reconstruct it below instead.
+        EffectsInstSubst::default()
+    };
+    if callee.fn_ty.args.len() != call_ty.args.len() {
+        return Err(error(format!(
+            "late-instantiated call has arity {}, but its final callee has arity {}",
+            call_ty.args.len(),
+            callee.fn_ty.args.len()
+        )));
+    }
+    let mut active = FxHashSet::default();
+    for (pattern, actual) in callee.fn_ty.args.iter().zip(&call_ty.args) {
+        if !bind_call_type_instantiation(pattern.ty, actual.ty, &mut ty_subst, &mut active) {
+            return Err(error(format!(
+                "late-instantiated call argument type {:?} does not match final callee type {:?}",
+                actual.ty, pattern.ty
+            )));
+        }
+        if !bind_type_effect_instantiation(
+            pattern.ty,
+            actual.ty,
+            &mut eff_subst,
+            &mut FxHashSet::default(),
+        ) {
+            return Err(error(format!(
+                "cannot reconstruct effects for late-instantiated call argument types {:?} and {:?}",
+                pattern.ty, actual.ty
+            )));
+        }
+    }
+    if !bind_call_type_instantiation(callee.fn_ty.ret, call_ty.ret, &mut ty_subst, &mut active) {
+        return Err(error(format!(
+            "late-instantiated call result type {:?} does not match final callee type {:?}",
+            call_ty.ret, callee.fn_ty.ret
+        )));
+    }
+    if !bind_type_effect_instantiation(
+        callee.fn_ty.ret,
+        call_ty.ret,
+        &mut eff_subst,
+        &mut FxHashSet::default(),
+    ) {
+        return Err(error(format!(
+            "cannot reconstruct nested effects for late-instantiated result types {:?} and {:?}",
+            callee.fn_ty.ret, call_ty.ret
+        )));
+    }
+    if !bind_effect_instantiation(&callee.fn_ty.effects, &call_ty.effects, &mut eff_subst) {
+        return Err(error(format!(
+            "cannot reconstruct late call effects {:?} as {:?} with substitution {eff_subst:?}",
+            callee.fn_ty.effects, call_ty.effects
+        )));
+    }
+    if !bind_representation_type_instantiation(
+        &callee.requirements,
+        caller_requirements,
+        &mut ty_subst,
+    ) {
+        return Err(error(
+            "late call maps one representation variable to two caller types".into(),
+        ));
+    }
+    bind_constraint_only_variant_types(
+        &callee.requirements.requirements,
+        caller_requirements,
+        &mut ty_subst,
+    )
+    .map_err(error)?;
+    // Functions and associated lambdas in one recursive group share the final normalized effect
+    // universe. A quantifier absent from both preliminary arguments and the function surface is
+    // therefore an unchanged caller quantifier, not an unknown positional argument.
+    for quantifier in &callee.effect_quantifiers {
+        eff_subst
+            .entry(*quantifier)
+            .or_insert_with(|| EffType::single_variable(*quantifier));
+    }
+    let subst = (ty_subst, eff_subst);
+    let mut mapper = BitmapInstantiationMapper::new(&subst);
+    let dicts_req =
+        instantiate_dictionary_requirements(&callee.requirements.requirements, &mut mapper);
+    Ok(hir::FnInstData::new(
+        dicts_req,
+        call_inst_data.ty_args.clone(),
+        call_inst_data.eff_args.clone(),
+    ))
+}
+
+/// Carry the function-surface substitution through `Repr` relationships. Variant constraints are
+/// stated on the representation variable, while a function argument can expose the user-facing
+/// variable; both sides' `repr_map`s connect those identities without consulting a case tag.
+fn bind_representation_type_instantiation(
+    callee: &ExtraParameters,
+    caller: &ExtraParameters,
+    subst: &mut FxHashMap<TypeVar, Type>,
+) -> bool {
+    for (surface_var, repr_var) in &callee.repr_map {
+        let Some(actual) = subst.get(surface_var).copied() else {
+            continue;
+        };
+        let TypeKind::Variable(actual_var) = actual.data().clone() else {
+            continue;
+        };
+        let actual_repr = *caller.repr_map.get(&actual_var).unwrap_or(&actual_var);
+        if let Some(previous) = subst.insert(*repr_var, Type::variable(actual_repr)) {
+            if previous != Type::variable(actual_repr) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Extend a late recursive-call substitution through variant constraints.
+///
+/// The function surface often maps only one node of a mutually recursive type world. A
+/// `TypeHasVariant` requirement retains both its enclosing type and payload type, so matching the
+/// same case requirement propagates that known mapping to the adjacent node. A small backtracking
+/// search finds the unique globally compatible assignment; choosing requirements greedily would
+/// not be confluent. A shared tag alone is never enough: two unrelated `.Some` requirements remain
+/// ambiguous and cause an internal error rather than exchanging evidence.
+fn bind_constraint_only_variant_types(
+    callee_requirements: &[DictionaryReq],
+    caller: &ExtraParameters,
+    subst: &mut FxHashMap<TypeVar, Type>,
+) -> Result<(), String> {
+    let requirements = callee_requirements
         .iter()
-        .map(|dict| {
-            // We find the index of the called function's requirement dict
-            // in our requirement dicts. As dictionary passing is done
-            // before type scheme simplification, they can be matched 1 to 1.
-            let index = dicts
-                .requirements
-                .iter()
-                .position(|d| d == dict)
-                .expect("Target dictionary not found in ours");
-            let ty = dict.to_dict_type(trait_solver);
-            let extra_parameter = ExtraParameterId::from_index(index);
-            let kind = match dict {
-                DictionaryReq::TraitImpl { .. } => {
-                    NodeKind::LoadDictionary(hir::LoadDictionary { extra_parameter })
-                }
-                DictionaryReq::ProjectionSubscript { .. } => {
-                    NodeKind::LoadSubscriptEvidence(hir::LoadSubscriptEvidence { extra_parameter })
-                }
+        .filter(|requirement| matches!(requirement, DictionaryReq::VariantPayloadStorage { .. }))
+        .collect::<Vec<_>>();
+    let mut remaining = (0..requirements.len()).collect::<Vec<_>>();
+    let mut solutions = Vec::new();
+    search_variant_requirement_substitutions(
+        &requirements,
+        caller,
+        &mut remaining,
+        subst.clone(),
+        &mut solutions,
+    );
+    if solutions.len() != 1 {
+        return Err(format!(
+            "late variant-storage requirements have {} globally compatible caller mappings; expected exactly one",
+            solutions.len()
+        ));
+    }
+    *subst = solutions.pop().unwrap();
+    Ok(())
+}
+
+fn search_variant_requirement_substitutions(
+    requirements: &[&DictionaryReq],
+    caller: &ExtraParameters,
+    remaining: &mut Vec<usize>,
+    subst: FxHashMap<TypeVar, Type>,
+    solutions: &mut Vec<FxHashMap<TypeVar, Type>>,
+) {
+    if solutions.len() > 1 {
+        return;
+    }
+    if remaining.is_empty() {
+        if !solutions.iter().any(|solution| solution == &subst) {
+            solutions.push(subst);
+        }
+        return;
+    }
+
+    // Branch first on the most constrained requirement. This does not affect correctness, but
+    // keeps mutually recursive worlds with repeatedly named cases from exploring needless paths.
+    let Some((position, trials)) = remaining
+        .iter()
+        .enumerate()
+        .map(|(position, index)| {
+            (
+                position,
+                compatible_variant_requirement_substitutions(requirements[*index], caller, &subst),
+            )
+        })
+        .min_by_key(|(_, trials)| trials.len())
+    else {
+        return;
+    };
+    if trials.is_empty() {
+        return;
+    }
+    let requirement = remaining.swap_remove(position);
+    for trial in trials {
+        search_variant_requirement_substitutions(requirements, caller, remaining, trial, solutions);
+        if solutions.len() > 1 {
+            break;
+        }
+    }
+    remaining.push(requirement);
+}
+
+fn compatible_variant_requirement_substitutions(
+    requirement: &DictionaryReq,
+    caller: &ExtraParameters,
+    subst: &FxHashMap<TypeVar, Type>,
+) -> Vec<FxHashMap<TypeVar, Type>> {
+    let DictionaryReq::VariantPayloadStorage {
+        variant_ty,
+        tag,
+        payload_ty,
+    } = requirement
+    else {
+        return Vec::new();
+    };
+    caller
+        .requirements
+        .iter()
+        .filter_map(|candidate| {
+            let DictionaryReq::VariantPayloadStorage {
+                variant_ty: candidate_variant_ty,
+                tag: candidate_tag,
+                payload_ty: candidate_payload_ty,
+            } = candidate
+            else {
+                return None;
             };
-            (kind, ty, FnArgType::new(ty, MutType::constant()))
+            if candidate_tag != tag {
+                return None;
+            }
+            let mut trial = subst.clone();
+            let mut active = FxHashSet::default();
+            if !bind_call_type_instantiation(
+                *variant_ty,
+                *candidate_variant_ty,
+                &mut trial,
+                &mut active,
+            ) {
+                return None;
+            }
+            if !bind_call_type_instantiation(
+                *payload_ty,
+                *candidate_payload_ty,
+                &mut trial,
+                &mut active,
+            ) {
+                return None;
+            }
+            Some(trial)
         })
         .collect()
+}
+
+/// Reconstruct effect-variable instantiation while walking corresponding type surfaces.
+fn bind_type_effect_instantiation(
+    pattern: Type,
+    actual: Type,
+    subst: &mut EffectsInstSubst,
+    active: &mut FxHashSet<(Type, Type)>,
+) -> bool {
+    if !active.insert((pattern, actual)) {
+        return true;
+    }
+    let pattern_kind = pattern.data().clone();
+    let actual_kind = actual.data().clone();
+    let matches = match (pattern_kind, actual_kind) {
+        (TypeKind::Variable(_), _) => true,
+        (TypeKind::Tuple(left), TypeKind::Tuple(right)) => {
+            left.len() == right.len()
+                && left
+                    .into_iter()
+                    .zip(right)
+                    .all(|(left, right)| bind_type_effect_instantiation(left, right, subst, active))
+        }
+        (TypeKind::Record(left), TypeKind::Record(right))
+        | (TypeKind::Variant(left), TypeKind::Variant(right)) => {
+            left.len() == right.len()
+                && left
+                    .into_iter()
+                    .zip(right)
+                    .all(|((left_name, left), (right_name, right))| {
+                        left_name == right_name
+                            && bind_type_effect_instantiation(left, right, subst, active)
+                    })
+        }
+        (TypeKind::Native(left), TypeKind::Native(right)) => {
+            left.bare_ty == right.bare_ty
+                && left.arguments.len() == right.arguments.len()
+                && left
+                    .arguments
+                    .into_iter()
+                    .zip(right.arguments)
+                    .all(|(left, right)| bind_type_effect_instantiation(left, right, subst, active))
+        }
+        (TypeKind::Named(left), TypeKind::Named(right)) => {
+            left.def == right.def
+                && left.params.len() == right.params.len()
+                && left.effect_params.len() == right.effect_params.len()
+                && left
+                    .params
+                    .into_iter()
+                    .zip(right.params)
+                    .all(|(left, right)| bind_type_effect_instantiation(left, right, subst, active))
+                && left
+                    .effect_params
+                    .iter()
+                    .zip(&right.effect_params)
+                    .all(|(left, right)| bind_effect_instantiation(left, right, subst))
+        }
+        (TypeKind::Function(left), TypeKind::Function(right)) => {
+            left.args.len() == right.args.len()
+                && left.args.iter().zip(&right.args).all(|(left, right)| {
+                    bind_type_effect_instantiation(left.ty, right.ty, subst, active)
+                })
+                && bind_type_effect_instantiation(left.ret, right.ret, subst, active)
+                && bind_effect_instantiation(&left.effects, &right.effects, subst)
+        }
+        (TypeKind::Subscript(left), TypeKind::Subscript(right)) => {
+            left.args.len() == right.args.len()
+                && left.args.iter().zip(&right.args).all(|(left, right)| {
+                    bind_type_effect_instantiation(left.ty, right.ty, subst, active)
+                })
+                && bind_type_effect_instantiation(left.ret, right.ret, subst, active)
+                && match (&left.ref_member, &right.ref_member) {
+                    (Some(left), Some(right)) => {
+                        bind_effect_instantiation(&left.effects, &right.effects, subst)
+                    }
+                    (None, None) => true,
+                    _ => false,
+                }
+                && match (&left.mut_member, &right.mut_member) {
+                    (Some(left), Some(right)) => {
+                        bind_effect_instantiation(&left.effects, &right.effects, subst)
+                    }
+                    (None, None) => true,
+                    _ => false,
+                }
+        }
+        (TypeKind::Never, TypeKind::Never) => true,
+        (left, right) => left == right,
+    };
+    active.remove(&(pattern, actual));
+    matches
+}
+
+/// Bind one effect-set pattern. A lone unmapped variable absorbs the effects not already accounted
+/// for by primitives and previously bound variables. Multiple missing variables are accepted only
+/// when their identities are already present on the actual side; otherwise the mapping is not
+/// unique.
+fn bind_effect_instantiation(
+    pattern: &EffType,
+    actual: &EffType,
+    subst: &mut EffectsInstSubst,
+) -> bool {
+    let missing = pattern
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Variable(var) => Some(var),
+            Effect::Primitive(_) => None,
+        })
+        .filter(|var| !subst.contains_key(var))
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return effect_set_is_contained_in(&pattern.instantiate(subst), actual);
+    }
+    let mut without_missing = subst.clone();
+    for var in &missing {
+        without_missing.insert(*var, EffType::empty());
+    }
+    let known = pattern.instantiate(&without_missing);
+    if known.iter().any(|effect| !actual.contains(effect)) {
+        return false;
+    }
+    let residual = actual
+        .iter()
+        .filter(|effect| !known.contains(*effect))
+        .collect::<EffType>();
+    if missing.len() > 1 {
+        if residual.is_empty() {
+            for var in missing {
+                subst.insert(var, EffType::empty());
+            }
+            return true;
+        }
+        for var in missing {
+            if !residual.contains(Effect::Variable(var)) {
+                return false;
+            }
+            subst.insert(var, EffType::single_variable(var));
+        }
+        return effect_set_is_contained_in(&pattern.instantiate(subst), actual);
+    }
+
+    let var = missing[0];
+    subst.insert(var, residual);
+    effect_set_is_contained_in(&pattern.instantiate(subst), actual)
+}
+
+fn effect_set_is_contained_in(required: &EffType, available: &EffType) -> bool {
+    required.iter().all(|effect| available.contains(effect))
+}
+
+/// Bind the variables in a final callee type to the corresponding call-site types.
+///
+/// Recursive module calls were inferred from a preliminary scheme, whose positional quantifier
+/// order need not match the final generalized scheme. The function surface is nevertheless the
+/// authoritative relationship between both schemes. Repeated pairs are accepted coinductively so
+/// recursive interned type graphs terminate without assigning identity by case tag.
+fn bind_call_type_instantiation(
+    pattern: Type,
+    actual: Type,
+    subst: &mut FxHashMap<TypeVar, Type>,
+    active: &mut FxHashSet<(Type, Type)>,
+) -> bool {
+    let pattern_kind = pattern.data().clone();
+    if let TypeKind::Variable(var) = &pattern_kind {
+        return match subst.get(var) {
+            Some(bound) => *bound == actual,
+            None => {
+                subst.insert(*var, actual);
+                true
+            }
+        };
+    }
+    if pattern == actual {
+        return true;
+    }
+    if !active.insert((pattern, actual)) {
+        return true;
+    }
+
+    let actual_kind = actual.data().clone();
+    let matches = match (pattern_kind, actual_kind) {
+        (TypeKind::Tuple(left), TypeKind::Tuple(right)) => {
+            left.len() == right.len()
+                && left
+                    .into_iter()
+                    .zip(right)
+                    .all(|(left, right)| bind_call_type_instantiation(left, right, subst, active))
+        }
+        (TypeKind::Record(left), TypeKind::Record(right))
+        | (TypeKind::Variant(left), TypeKind::Variant(right)) => {
+            left.len() == right.len()
+                && left
+                    .into_iter()
+                    .zip(right)
+                    .all(|((left_name, left), (right_name, right))| {
+                        left_name == right_name
+                            && bind_call_type_instantiation(left, right, subst, active)
+                    })
+        }
+        (TypeKind::Native(left), TypeKind::Native(right)) => {
+            left.bare_ty == right.bare_ty
+                && left.arguments.len() == right.arguments.len()
+                && left
+                    .arguments
+                    .into_iter()
+                    .zip(right.arguments)
+                    .all(|(left, right)| bind_call_type_instantiation(left, right, subst, active))
+        }
+        (TypeKind::Named(left), TypeKind::Named(right)) => {
+            left.def == right.def
+                && left.params.len() == right.params.len()
+                && left
+                    .params
+                    .into_iter()
+                    .zip(right.params)
+                    .all(|(left, right)| bind_call_type_instantiation(left, right, subst, active))
+        }
+        (TypeKind::Function(left), TypeKind::Function(right)) => {
+            left.args.len() == right.args.len()
+                && left.args.iter().zip(&right.args).all(|(left, right)| {
+                    bind_call_type_instantiation(left.ty, right.ty, subst, active)
+                })
+                && bind_call_type_instantiation(left.ret, right.ret, subst, active)
+        }
+        (TypeKind::Subscript(left), TypeKind::Subscript(right)) => {
+            left.args.len() == right.args.len()
+                && left.args.iter().zip(&right.args).all(|(left, right)| {
+                    bind_call_type_instantiation(left.ty, right.ty, subst, active)
+                })
+                && bind_call_type_instantiation(left.ret, right.ret, subst, active)
+        }
+        (TypeKind::Never, TypeKind::Never) => true,
+        _ => false,
+    };
+    active.remove(&(pattern, actual));
+    matches
 }
 
 /// Result of elaborating one unelaborated HIR root into the final HIR arena.
@@ -556,6 +1080,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
             GetDictionary(get_dict) => GetDictionary(get_dict),
             LoadDictionary(load) => LoadDictionary(load),
             LoadSubscriptEvidence(load) => LoadSubscriptEvidence(load),
+            LoadVariantPayloadStorageEvidence(load) => LoadVariantPayloadStorageEvidence(load),
             _ => {
                 return Err(internal_compilation_error!(Internal {
                     error: "unexpected synthetic HIR node requiring recursive elaboration"
@@ -1055,19 +1580,19 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                     self.elaborate_extra_args_from_inst_data(&inst_data, function_span)?
                         .0
                 } else if function.module == self.ctx.trait_solver.current_type_items.module.id
-                    && let Some(extra_arg_kinds) = self
+                    && let Some(requirements) = self
                         .ctx
                         .module_inst_data
                         .and_then(|inst_data| inst_data.get(&function.function))
-                        .map(|inst_data| {
-                            extra_arg_kind_for_module_function(
-                                &inst_data.requirements,
-                                self.ctx.dicts,
-                                self.ctx.trait_solver,
-                            )
-                        })
                 {
-                    self.elaborate_extra_arg_kinds(extra_arg_kinds, node_span)?
+                    let late_inst_data = late_module_call_inst_data(
+                        requirements,
+                        &ty.fn_ty,
+                        &inst_data,
+                        self.ctx.dicts,
+                        node_span,
+                    )?;
+                    self.elaborate_extra_args_from_inst_data(&late_inst_data, node_span)?
                         .0
                 } else {
                     Vec::new()
@@ -1238,20 +1763,23 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                 } else if get_fn.function.module
                     == self.ctx.trait_solver.current_type_items.module.id
                 {
-                    if let Some(extra_arg_kinds) = self
+                    if let Some(requirements) = self
                         .ctx
                         .module_inst_data
                         .and_then(|inst_data| inst_data.get(&get_fn.function.function))
-                        .filter(|inst_data| !inst_data.is_empty())
-                        .map(|inst_data| {
-                            extra_arg_kind_for_module_function(
-                                &inst_data.requirements,
-                                self.ctx.dicts,
-                                self.ctx.trait_solver,
-                            )
-                        })
+                        .filter(|inst_data| !inst_data.requirements.is_empty())
                     {
-                        self.elaborate_extra_arg_kinds(extra_arg_kinds, node_span)?
+                        let TypeKind::Function(call_ty) = node_ty.data().clone() else {
+                            panic!("get_function must have a function type")
+                        };
+                        let late_inst_data = late_module_call_inst_data(
+                            requirements,
+                            &call_ty,
+                            &get_fn.inst_data,
+                            self.ctx.dicts,
+                            node_span,
+                        )?;
+                        self.elaborate_extra_args_from_inst_data(&late_inst_data, node_span)?
                             .0
                     } else {
                         Vec::new()
@@ -1464,6 +1992,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
             GetDictionary(get_dict) => GetDictionary(*get_dict),
             LoadDictionary(load) => LoadDictionary(*load),
             LoadSubscriptEvidence(load) => LoadSubscriptEvidence(*load),
+            LoadVariantPayloadStorageEvidence(load) => LoadVariantPayloadStorageEvidence(*load),
             StoreLocal(store) => {
                 let value = store.value;
                 let id = store.id;
@@ -1643,10 +2172,37 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                     }
                 }
             }
-            Variant(variant) => Variant(hir::Variant {
-                tag: variant.tag,
-                payload: self.elaborate_node(src, variant.payload)?,
-            }),
+            Variant(variant) => {
+                let payload_storage = if matches!(&*node_ty.data(), TypeKind::Variable(_)) {
+                    let index = find_variant_payload_storage_index(
+                        self.ctx.dicts,
+                        node_ty,
+                        variant.tag,
+                    )
+                    .ok_or_else(|| {
+                        internal_compilation_error!(Internal {
+                            error: format!(
+                                "variant payload-storage evidence for type {node_ty:?} and case .{} not found for generic construction",
+                                variant.tag
+                            ),
+                            span: node_span,
+                        })
+                    })?;
+                    VariantPayloadStorageSource::Evidence(ExtraParameterId::from_index(index))
+                } else {
+                    VariantPayloadStorageSource::Static(variant_payload_storage_for_type(
+                        node_ty,
+                        variant.tag,
+                        node_span,
+                        self.ctx.trait_solver,
+                    )?)
+                };
+                Variant(hir::Variant {
+                    tag: variant.tag,
+                    payload: self.elaborate_node(src, variant.payload)?,
+                    payload_storage: Some(payload_storage),
+                })
+            }
             ExtractTag(node) => ExtractTag(self.elaborate_node(src, *node)?),
             Array(nodes) => Array(b(SVec2::from_vec(
                 self.elaborate_node_iter(src, nodes.iter().copied())?,
@@ -1732,11 +2288,211 @@ mod tests {
         },
         std::math::int_type,
         types::{
+            effects::{EffectVar, PrimitiveEffect},
             r#trait::{Trait, TraitAssociatedConst, TraitAssociatedConstIndex},
             trait_solver::{CurrentProjectionSubscriptTypes, TraitSolver},
             r#type::Type,
         },
     };
+
+    fn extra_parameters(requirements: Vec<DictionaryReq>) -> ExtraParameters {
+        ExtraParameters {
+            requirements,
+            repr_map: FxHashMap::default(),
+        }
+    }
+
+    #[test]
+    fn late_variant_storage_mapping_uses_the_unique_global_assignment() {
+        let callee_variant = TypeVar::new(0);
+        let callee_payload = TypeVar::new(1);
+        let matching_variant = TypeVar::new(2);
+        let matching_payload = TypeVar::new(3);
+        let decoy_variant = TypeVar::new(4);
+        let decoy_payload = TypeVar::new(5);
+        let callee_requirements = vec![
+            DictionaryReq::new_variant_payload_storage(
+                Type::variable(callee_variant),
+                ustr("Shared"),
+                Type::variable(callee_payload),
+            ),
+            DictionaryReq::new_variant_payload_storage(
+                Type::variable(callee_payload),
+                ustr("Marker"),
+                int_type(),
+            ),
+        ];
+        let caller = extra_parameters(vec![
+            DictionaryReq::new_variant_payload_storage(
+                Type::variable(matching_variant),
+                ustr("Shared"),
+                Type::variable(matching_payload),
+            ),
+            DictionaryReq::new_variant_payload_storage(
+                Type::variable(decoy_variant),
+                ustr("Shared"),
+                Type::variable(decoy_payload),
+            ),
+            DictionaryReq::new_variant_payload_storage(
+                Type::variable(matching_payload),
+                ustr("Marker"),
+                int_type(),
+            ),
+        ]);
+        let mut subst = FxHashMap::default();
+
+        bind_constraint_only_variant_types(&callee_requirements, &caller, &mut subst).unwrap();
+
+        assert_eq!(
+            subst.get(&callee_variant),
+            Some(&Type::variable(matching_variant))
+        );
+        assert_eq!(
+            subst.get(&callee_payload),
+            Some(&Type::variable(matching_payload))
+        );
+    }
+
+    #[test]
+    fn late_variant_storage_mapping_rejects_same_tag_ambiguity() {
+        let callee_left = TypeVar::new(0);
+        let callee_right = TypeVar::new(1);
+        let caller_left = TypeVar::new(2);
+        let caller_right = TypeVar::new(3);
+        let callee_requirements = vec![
+            DictionaryReq::new_variant_payload_storage(
+                Type::variable(callee_left),
+                ustr("Some"),
+                Type::unit(),
+            ),
+            DictionaryReq::new_variant_payload_storage(
+                Type::variable(callee_right),
+                ustr("Some"),
+                Type::unit(),
+            ),
+        ];
+        let caller = extra_parameters(vec![
+            DictionaryReq::new_variant_payload_storage(
+                Type::variable(caller_left),
+                ustr("Some"),
+                Type::unit(),
+            ),
+            DictionaryReq::new_variant_payload_storage(
+                Type::variable(caller_right),
+                ustr("Some"),
+                Type::unit(),
+            ),
+        ]);
+
+        assert!(
+            bind_constraint_only_variant_types(
+                &callee_requirements,
+                &caller,
+                &mut FxHashMap::default(),
+            )
+            .is_err()
+        );
+
+        let callee = LateFunctionInstData {
+            requirements: extra_parameters(callee_requirements),
+            fn_ty: FnType::new_by_val(Vec::<Type>::new(), Type::unit(), EffType::empty()),
+            effect_quantifiers: Vec::new(),
+        };
+        assert!(
+            late_module_call_inst_data(
+                &callee,
+                &callee.fn_ty,
+                &hir::FnInstData::none(),
+                &caller,
+                Location::new_synthesized(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn late_call_reconstructs_effect_quantifiers_added_or_removed_by_finalization() {
+        let effect = EffectVar::new(0);
+        let no_parameters = extra_parameters(Vec::new());
+        let span = Location::new_synthesized();
+
+        let added = LateFunctionInstData {
+            requirements: no_parameters.clone(),
+            fn_ty: FnType::new_by_val(
+                Vec::<Type>::new(),
+                Type::unit(),
+                EffType::single_variable(effect),
+            ),
+            effect_quantifiers: vec![effect],
+        };
+        assert!(
+            late_module_call_inst_data(
+                &added,
+                &added.fn_ty,
+                &hir::FnInstData::none(),
+                &no_parameters,
+                span,
+            )
+            .is_ok()
+        );
+
+        let removed = LateFunctionInstData {
+            requirements: no_parameters.clone(),
+            fn_ty: FnType::new_by_val(Vec::<Type>::new(), Type::unit(), EffType::empty()),
+            effect_quantifiers: Vec::new(),
+        };
+        let preliminary = hir::FnInstData::new(
+            Vec::new(),
+            Vec::new(),
+            vec![EffType::single_variable(effect)],
+        );
+        assert!(
+            late_module_call_inst_data(
+                &removed,
+                &removed.fn_ty,
+                &preliminary,
+                &no_parameters,
+                span,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn late_effect_mapping_accepts_call_site_effect_supersets() {
+        let callee_effect = EffectVar::new(0);
+        let caller_only_effect = EffectVar::new(1);
+        let pattern = EffType::multiple(&[
+            Effect::Primitive(PrimitiveEffect::Write),
+            Effect::Variable(callee_effect),
+        ]);
+        let actual = EffType::multiple(&[
+            Effect::Primitive(PrimitiveEffect::Write),
+            Effect::Variable(callee_effect),
+            Effect::Variable(caller_only_effect),
+        ]);
+        let mut subst =
+            EffectsInstSubst::from_iter([(callee_effect, EffType::single_variable(callee_effect))]);
+
+        assert!(bind_effect_instantiation(&pattern, &actual, &mut subst));
+    }
+
+    #[test]
+    fn late_effect_mapping_can_instantiate_multiple_variables_as_pure() {
+        let left = EffectVar::new(0);
+        let right = EffectVar::new(1);
+        let pattern = EffType::multiple(&[
+            Effect::Primitive(PrimitiveEffect::Fallible),
+            Effect::Variable(left),
+            Effect::Variable(right),
+        ]);
+        let actual = EffType::single_primitive(PrimitiveEffect::Fallible);
+        let mut subst = EffectsInstSubst::default();
+
+        assert!(bind_effect_instantiation(&pattern, &actual, &mut subst));
+        assert_eq!(subst.get(&left), Some(&EffType::empty()));
+        assert_eq!(subst.get(&right), Some(&EffType::empty()));
+    }
 
     fn layout_trait() -> Trait {
         Trait::new_with_self_input_type(

@@ -10,6 +10,7 @@
 use ::std::{cell::RefCell, fmt, rc::Rc, sync::LazyLock};
 use derive_new::new;
 use itertools::Itertools;
+use ustr::Ustr;
 
 use super::artifacts::{
     MirArtifacts, MirOptimization, ModuleArtifacts, ensure_mir_artifacts,
@@ -17,7 +18,7 @@ use super::artifacts::{
 };
 
 use crate::{
-    FxHashSet, Location, SourceId, SourceTable, ast, compilation_error,
+    FxHashMap, FxHashSet, Location, SourceId, SourceTable, ast, compilation_error,
     compiler::{
         diagnostics::ModuleDiagnostic,
         error::{CompilationError, InternalCompilationError, LocatedError},
@@ -467,6 +468,34 @@ pub struct CompilerSession {
     pub(crate) capabilities: CompilationCapabilities,
     /// Whether execution through this session runs optimized MIR.
     pub(crate) mir_optimization: MirOptimization,
+    /// Compact, session-local discriminants for symbolic variant tags.
+    ///
+    /// Compiled artifacts retain `Ustr` tags so the cached standard library can be shared between
+    /// sessions. A concrete backend interns those symbols here when it materializes a tag.
+    variant_tags: RefCell<VariantTags>,
+}
+
+#[derive(Debug, Default)]
+struct VariantTags {
+    names: Vec<Ustr>,
+    ids: FxHashMap<Ustr, u32>,
+}
+
+impl VariantTags {
+    fn intern(&mut self, tag: Ustr) -> u32 {
+        if let Some(id) = self.ids.get(&tag) {
+            return *id;
+        }
+        let id = u32::try_from(self.names.len()).expect("too many distinct variant tags");
+        assert_eq!(
+            id & crate::hir::value::VariantPayloadStorage::INDIRECT_TAG_BIT,
+            0,
+            "too many distinct variant tags for the 31-bit ABI identity space"
+        );
+        self.names.push(tag);
+        self.ids.insert(tag, id);
+        id
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -521,11 +550,22 @@ impl InitialSessionState {
             initial_source_table_size,
             capabilities: CompilationCapabilities::default(),
             mir_optimization: MirOptimization::default(),
+            variant_tags: RefCell::default(),
         }
     }
 }
 
 impl CompilerSession {
+    /// Resolve a symbolic variant tag to this compilation session's compact discriminant.
+    pub(crate) fn variant_tag_id(&self, tag: Ustr) -> u32 {
+        self.variant_tags.borrow_mut().intern(tag)
+    }
+
+    /// Resolve a compact discriminant back to its symbolic tag.
+    pub(crate) fn variant_tag_name(&self, id: u32) -> Option<Ustr> {
+        self.variant_tags.borrow().names.get(id as usize).copied()
+    }
+
     /// Create a new compilation session with an empty source table and the standard library loaded.
     pub fn new() -> Self {
         INITIAL_SESSION_STATE_CACHE.with(|cache| {
@@ -856,6 +896,7 @@ impl CompilerSession {
         // We only keep std, $empty_std_user, and $scratch and drop the rest.
         self.modules.truncate(FIRST_USER_MODULE_ID.as_index());
         self.source_table.truncate(self.initial_source_table_size);
+        *self.variant_tags.borrow_mut() = VariantTags::default();
     }
 
     /// Register a module without Ferlium source in this compilation session and return its id.
@@ -1417,6 +1458,22 @@ impl Default for CompilerSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn variant_tags_are_compact_bidirectional_and_session_local() {
+        let first = CompilerSession::new();
+        let second = CompilerSession::new();
+        let some = ustr::ustr("Some");
+        let none = ustr::ustr("None");
+
+        assert_eq!(first.variant_tag_id(some), 0);
+        assert_eq!(first.variant_tag_id(none), 1);
+        assert_eq!(first.variant_tag_id(some), 0);
+        assert_eq!(first.variant_tag_name(0), Some(some));
+        assert_eq!(first.variant_tag_name(1), Some(none));
+        assert_eq!(second.variant_tag_id(none), 0);
+        assert_eq!(second.variant_tag_name(1), None);
+    }
 
     #[test]
     fn cached_initial_state_shares_std_and_isolates_session_state() {

@@ -113,10 +113,6 @@ pub enum CompoundValueType {
     Record(B<SVec2<Ustr>>),
 }
 
-pub fn ustr_to_isize(tag: Ustr) -> isize {
-    tag.as_char_ptr() as isize
-}
-
 /// Hidden constraint evidence captured by first-class capabilities.
 ///
 /// Typeclass constraints are represented as dictionaries. Projection
@@ -125,6 +121,56 @@ pub fn ustr_to_isize(tag: Ustr) -> isize {
 pub enum HiddenEvidenceArgValue {
     TraitDictionary(TraitDictionaryId),
     Subscript(B<SubscriptValue>),
+    VariantPayloadStorage(VariantPayloadStorage),
+}
+
+/// Whether a variant case payload occurs directly in its union slot or through an owning pointer
+/// in the canonical Ferlium ABI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VariantPayloadStorage {
+    Inline,
+    Indirect,
+}
+
+impl VariantPayloadStorage {
+    /// The high bit of a concrete ABI tag distinguishes an owning indirect payload from an inline
+    /// union payload. The remaining 31 bits are the session-local symbolic tag identity.
+    pub(crate) const INDIRECT_TAG_BIT: u32 = 1 << 31;
+
+    pub(crate) fn is_indirect(self) -> bool {
+        matches!(self, Self::Indirect)
+    }
+
+    pub(crate) fn from_indirect(indirect: bool) -> Self {
+        if indirect {
+            Self::Indirect
+        } else {
+            Self::Inline
+        }
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn encode_tag_id(self, tag_id: u32) -> u32 {
+        assert_eq!(
+            tag_id & Self::INDIRECT_TAG_BIT,
+            0,
+            "variant tag identity exceeds the 31-bit ABI space"
+        );
+        tag_id
+            | if self.is_indirect() {
+                Self::INDIRECT_TAG_BIT
+            } else {
+                0
+            }
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn decode_tag(raw_tag: u32) -> (u32, Self) {
+        (
+            raw_tag & !Self::INDIRECT_TAG_BIT,
+            Self::from_indirect(raw_tag & Self::INDIRECT_TAG_BIT != 0),
+        )
+    }
 }
 
 /// Runtime representation of a first-class function.
@@ -221,9 +267,17 @@ pub enum Value {
     Uninit,
     /// A native value, a pointer to the underlying Rust value
     Native(ManuallyDrop<B<dyn NativeValue>>),
-    /// A variant: its tag inline, and its payload boxed only when it has one, so that a case
-    /// carrying nothing needs no allocation.
-    Variant(Ustr, Option<ManuallyDrop<B<Value>>>),
+    /// A variant with its canonical payload-storage mode.
+    ///
+    /// The interpreter always keeps a present payload in a Rust `Box<Value>` for ownership and
+    /// recursive-Rust-type reasons. `storage` instead describes the Ferlium ABI representation:
+    /// whether the case payload occurs inline or through an owning indirection. It remains present
+    /// while MIR builds an uninitialized shell and fills its payload in place.
+    Variant {
+        tag: Ustr,
+        storage: VariantPayloadStorage,
+        payload: Option<ManuallyDrop<B<Value>>>,
+    },
     /// A tuple of values, or the data of a record
     Tuple(ManuallyDrop<B<SVec2<Value>>>),
     /// A first-class function
@@ -257,13 +311,38 @@ impl Value {
         Self::raw_variant(tag, Self::tuple(values))
     }
 
+    /// Construct a non-recursive variant payload.
+    ///
+    /// Native bindings use this helper for their statically known non-recursive result types.
+    /// Compiler-evaluated variant nodes use [`Self::variant_with_storage`] instead.
     pub fn raw_variant(tag: Ustr, value: Value) -> Self {
-        Self::Variant(tag, Some(ManuallyDrop::new(b(value))))
+        Self::variant_with_storage(tag, VariantPayloadStorage::Inline, value)
+    }
+
+    pub fn variant_with_storage(tag: Ustr, storage: VariantPayloadStorage, value: Value) -> Self {
+        Self::Variant {
+            tag,
+            storage,
+            payload: Some(ManuallyDrop::new(b(value))),
+        }
     }
 
     /// A variant case carrying nothing, which allocates nothing.
     pub fn unit_variant(tag: Ustr) -> Self {
-        Self::Variant(tag, None)
+        Self::Variant {
+            tag,
+            storage: VariantPayloadStorage::Inline,
+            payload: None,
+        }
+    }
+
+    /// Construct the uninitialized shell used by MIR's in-place variant construction.
+    pub(crate) fn variant_shell(tag: Ustr, storage: VariantPayloadStorage) -> Self {
+        Self::Variant {
+            tag,
+            storage,
+            payload: None,
+        }
     }
 
     pub fn tuple(values: impl IntoSVec2<Value>) -> Self {
@@ -318,7 +397,15 @@ impl Value {
     /// This variant's tag, if it is one.
     pub fn variant_tag(&self) -> Option<Ustr> {
         match self {
-            Self::Variant(tag, _) => Some(*tag),
+            Self::Variant { tag, .. } => Some(*tag),
+            _ => None,
+        }
+    }
+
+    /// This variant's canonical Ferlium ABI payload-storage mode, if it is a variant.
+    pub fn variant_payload_storage(&self) -> Option<VariantPayloadStorage> {
+        match self {
+            Self::Variant { storage, .. } => Some(*storage),
             _ => None,
         }
     }
@@ -326,7 +413,7 @@ impl Value {
     /// This variant's payload, absent when the case carries nothing.
     pub fn variant_payload(&self) -> Option<&Value> {
         match self {
-            Self::Variant(_, payload) => payload.as_deref().map(|payload| &**payload),
+            Self::Variant { payload, .. } => payload.as_deref().map(|payload| &**payload),
             _ => None,
         }
     }
@@ -337,7 +424,7 @@ impl Value {
     /// MIR emitter does when it fills a freshly built variant shell.
     pub fn variant_payload_mut(&mut self) -> Option<&mut Value> {
         match self {
-            Self::Variant(_, payload) => {
+            Self::Variant { payload, .. } => {
                 let payload = payload.get_or_insert_with(|| ManuallyDrop::new(b(Value::Uninit)));
                 Some(&mut **payload)
             }
@@ -346,10 +433,15 @@ impl Value {
     }
 
     /// This variant's tag and payload, consuming it.
-    pub fn into_variant(self) -> Option<(Ustr, Option<Value>)> {
+    pub fn into_variant(self) -> Option<(Ustr, VariantPayloadStorage, Option<Value>)> {
         match self {
-            Self::Variant(tag, payload) => Some((
+            Self::Variant {
                 tag,
+                storage,
+                payload,
+            } => Some((
+                tag,
+                storage,
                 payload.map(|payload| *ManuallyDrop::into_inner(payload)),
             )),
             _ => None,
@@ -395,7 +487,7 @@ impl Value {
                 take_nth_discarding_rest(ManuallyDrop::into_inner(values), index)
             }
             // A payload-free case projects to unit, the value it conceptually holds.
-            Self::Variant(_, payload) if index == 0 => {
+            Self::Variant { payload, .. } if index == 0 => {
                 Some(payload.map_or_else(Value::unit, |payload| *ManuallyDrop::into_inner(payload)))
             }
             other => {
@@ -453,7 +545,7 @@ impl Value {
         match self {
             Self::Uninit => {}
             Self::Native(value) => drop(ManuallyDrop::into_inner(value)),
-            Self::Variant(_, payload) => {
+            Self::Variant { payload, .. } => {
                 if let Some(payload) = payload {
                     ManuallyDrop::into_inner(payload).discard_storage();
                 }
@@ -526,6 +618,9 @@ fn take_nth_discarding_rest(values: B<SVec2<Value>>, index: usize) -> Option<Val
 pub enum LiteralValue {
     Native(B<dyn LiteralNativeValue>),
     Tuple(B<SVec2<LiteralValue>>),
+    /// Symbolic variant tag retained in cached HIR/MIR pattern data. A backend resolves it through
+    /// the compilation session's compact tag table when materializing a discriminant.
+    VariantTag(Ustr),
 }
 
 /// A pattern literal and runtime value do not have compatible representations.
@@ -538,6 +633,10 @@ impl LiteralValue {
         Self::Native(b(value))
     }
 
+    pub(crate) fn new_variant_tag(tag: Ustr) -> Self {
+        Self::VariantTag(tag)
+    }
+
     pub fn new_tuple(values: impl Into<SVec2<LiteralValue>>) -> Self {
         Self::Tuple(b(values.into()))
     }
@@ -547,6 +646,7 @@ impl LiteralValue {
         match self {
             Native(value) => Value::native_box(value.into_native_value()),
             Tuple(args) => Value::tuple(args.into_iter().map(Self::into_value).collect::<Vec<_>>()),
+            VariantTag(tag) => panic!("symbolic variant tag .{tag} is pattern data, not a value"),
         }
     }
 
@@ -580,16 +680,17 @@ impl LiteralValue {
                     },
                 )
             }
-            (Self::Tuple(_), Value::Tuple(_)) | (Self::Native(_), _) | (Self::Tuple(_), _) => {
-                Err(IncompatibleLiteralShape)
-            }
+            (Self::Tuple(_), Value::Tuple(_))
+            | (Self::Native(_), _)
+            | (Self::Tuple(_), _)
+            | (Self::VariantTag(_), _) => Err(IncompatibleLiteralShape),
         }
     }
 
     pub(crate) fn native_type(&self) -> Option<Type> {
         match self {
             Self::Native(value) => Some(value.native_type()),
-            Self::Tuple(_) => None,
+            Self::Tuple(_) | Self::VariantTag(_) => None,
         }
     }
 
@@ -659,13 +760,14 @@ impl LiteralValue {
                 active.remove(&ty);
                 result
             }
+            Self::VariantTag(_) => false,
         }
     }
 
     pub fn as_primitive_ty<T: 'static>(&self) -> Option<&T> {
         match self {
             Self::Native(value) => LiteralNativeValue::as_any(value.as_ref()).downcast_ref::<T>(),
-            Self::Tuple(_) => None,
+            Self::Tuple(_) | Self::VariantTag(_) => None,
         }
     }
 }
@@ -680,6 +782,7 @@ impl Display for LiteralValue {
                 write_with_separator(tuple.iter(), ", ", f)?;
                 write!(f, ")")
             }
+            VariantTag(tag) => write!(f, ".{tag}"),
         }
     }
 }
@@ -726,6 +829,17 @@ mod tests {
     }
 
     #[test]
+    fn variant_payload_storage_uses_the_tag_high_bit() {
+        let id = 17;
+        assert_eq!(VariantPayloadStorage::Inline.encode_tag_id(id), id);
+        let raw = VariantPayloadStorage::Indirect.encode_tag_id(id);
+        assert_eq!(
+            VariantPayloadStorage::decode_tag(raw),
+            (id, VariantPayloadStorage::Indirect)
+        );
+    }
+
+    #[test]
     #[cfg(not(miri))]
     fn rust_drop_does_not_own_value_payload_lifetime() {
         reset_rust_drop_count();
@@ -753,7 +867,7 @@ mod tests {
     #[test]
     fn a_payload_free_variant_allocates_nothing() {
         let value = Value::unit_variant(ustr::ustr("Less"));
-        assert!(matches!(value, Value::Variant(_, None)));
+        assert!(matches!(value, Value::Variant { payload: None, .. }));
         assert!(value.variant_payload().is_none());
     }
 

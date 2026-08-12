@@ -14,10 +14,10 @@ use crate::{
     format::FormatWith,
     module::{LocalFunctionId, ModuleEnv, PendingGeneratedStructuralProjectionSubscripts, TraitId},
     types::{
-        effects::EffType,
+        effects::{EffType, EffectVar},
         mutability::MutType,
         trait_solver::TraitSolver,
-        r#type::{SubscriptType, Type, TypeVar},
+        r#type::{FnType, SubscriptType, Type, TypeVar},
         type_like::{TypeLike, instantiate_effect_types_in_place, instantiate_types_in_place},
         type_mapper::TypeMapper,
         type_scheme::ProjectionRequirementKind,
@@ -32,6 +32,14 @@ pub enum DictionaryReq {
         requirement: ProjectionRequirementKind,
         field: Ustr,
         subscript_ty: SubscriptType,
+    },
+    /// Runtime layout evidence for constructing an open generic variant case.
+    VariantPayloadStorage {
+        variant_ty: Type,
+        tag: Ustr,
+        /// Compile-time identity metadata for late recursive-call elaboration. The runtime
+        /// evidence remains one boolean determined by `variant_ty` and `tag`.
+        payload_ty: Type,
     },
     TraitImpl {
         trait_id: TraitId,
@@ -69,6 +77,14 @@ impl DictionaryReq {
         }
     }
 
+    pub fn new_variant_payload_storage(variant_ty: Type, tag: Ustr, payload_ty: Type) -> Self {
+        Self::VariantPayloadStorage {
+            variant_ty,
+            tag,
+            payload_ty,
+        }
+    }
+
     /// Instantiate self with a caller-supplied mapper.
     pub(crate) fn instantiate<M: TypeMapper>(&self, mapper: &mut M) -> DictionaryReq {
         let mut req = self.clone();
@@ -82,6 +98,14 @@ impl DictionaryReq {
         match self {
             ProjectionSubscript { subscript_ty, .. } => {
                 *subscript_ty = subscript_ty.map(mapper);
+            }
+            VariantPayloadStorage {
+                variant_ty,
+                payload_ty,
+                ..
+            } => {
+                *variant_ty = variant_ty.map(mapper);
+                *payload_ty = payload_ty.map(mapper);
             }
             TraitImpl {
                 input_tys,
@@ -101,6 +125,7 @@ impl DictionaryReq {
             DictionaryReq::ProjectionSubscript { subscript_ty, .. } => {
                 Type::subscript_type(subscript_ty.clone())
             }
+            DictionaryReq::VariantPayloadStorage { .. } => Type::primitive::<bool>(),
             DictionaryReq::TraitImpl {
                 trait_id,
                 input_tys,
@@ -119,6 +144,7 @@ impl DictionaryReq {
             DictionaryReq::ProjectionSubscript { subscript_ty, .. } => {
                 Type::subscript_type(subscript_ty.clone())
             }
+            DictionaryReq::VariantPayloadStorage { .. } => Type::primitive::<bool>(),
             DictionaryReq::TraitImpl {
                 trait_id,
                 input_tys,
@@ -161,6 +187,18 @@ impl PartialEq for DictionaryReq {
                     ..
                 },
             ) => tr1 == tr2 && in1 == in2,
+            (
+                VariantPayloadStorage {
+                    variant_ty: variant_ty1,
+                    tag: tag1,
+                    ..
+                },
+                VariantPayloadStorage {
+                    variant_ty: variant_ty2,
+                    tag: tag2,
+                    ..
+                },
+            ) => variant_ty1 == variant_ty2 && tag1 == tag2,
             _ => false,
         }
     }
@@ -186,6 +224,13 @@ impl FormatWith<ModuleEnv<'_>> for DictionaryReq {
                 subscript_ty.receiver_ty().format_with(env),
                 field,
                 Type::subscript_type(subscript_ty.clone()).format_with(env)
+            ),
+            VariantPayloadStorage {
+                variant_ty, tag, ..
+            } => write!(
+                f,
+                "{} variant {tag} payload storage",
+                variant_ty.format_with(env)
             ),
             TraitImpl {
                 trait_id,
@@ -261,6 +306,24 @@ pub fn find_projection_subscript_dict_index_for_receiver_ty(
     })
 }
 
+pub fn find_variant_payload_storage_index(
+    dicts: &ExtraParameters,
+    variant_ty: Type,
+    tag: Ustr,
+) -> Option<usize> {
+    dicts.requirements.iter().position(|dict| {
+        matches!(
+            dict,
+            DictionaryReq::VariantPayloadStorage {
+                variant_ty: requirement_variant_ty,
+                tag: requirement_tag,
+                ..
+            } if *requirement_variant_ty == variant_ty
+                && *requirement_tag == tag
+        )
+    })
+}
+
 pub fn find_trait_impl_dict_index(
     dicts: &ExtraParameters,
     trait_id: TraitId,
@@ -333,11 +396,20 @@ pub(crate) fn instantiate_dictionary_requirements<M: TypeMapper>(
     dicts.iter().map(|dict| dict.instantiate(mapper)).collect()
 }
 
-/// The dictionaries for the current module.
-/// This is a map from function pointers to the dictionaries required by the function.
-/// This is necessary as recursive functions in the current modules could not get their
-/// dictionary requirements during type inference as they were not known yet.
-pub type ModuleInstData = FxHashMap<LocalFunctionId, ExtraParameters>;
+/// Final generic information needed to elaborate calls inferred before a recursive callee's
+/// constraints were known.
+#[derive(Clone, Debug)]
+pub struct LateFunctionInstData {
+    pub requirements: ExtraParameters,
+    pub fn_ty: FnType,
+    /// Final normalized effect quantifiers. Preliminary recursive calls do not always record them,
+    /// so late elaboration can reconstruct their instantiation from the function surface.
+    pub effect_quantifiers: Vec<EffectVar>,
+}
+
+/// Recursive functions in the current module can be called before their final requirements are
+/// known. Elaboration replays those requirements against the final callee type and call-site type.
+pub type ModuleInstData = FxHashMap<LocalFunctionId, LateFunctionInstData>;
 
 /// Shared context for dictionary and value-dispatch elaboration.
 pub struct DictElaborationCtx<'d, 'sr, 'sm> {

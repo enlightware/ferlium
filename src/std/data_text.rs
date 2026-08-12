@@ -10,19 +10,28 @@
 use ustr::ustr;
 
 use crate::{
+    Location,
     compiler::error::SourceFailureKind,
+    eval::{EvalControlFlowResult, EvalCtx, RuntimeError, ValOrMutArgs, cont},
     hir::{
-        function::{UnaryNativeFnRFV, UnaryNativeFnRN},
-        value::Value,
+        function::{
+            ArgConvention, CallableDefinition, ContextNativeFn, UnaryNativeFnRN, extract_native_ref,
+        },
+        value::{Value, VariantPayloadStorage},
     },
-    module::{Module, Visibility},
+    module::{Module, ModuleFunction, Visibility},
     std::{
         array::array_value_from_vec,
         data_value::data_value_type,
         math::{float_value, int_value},
         string::{String as Str, string_type, string_value},
+        value::variant_payload_storage_for_type,
     },
-    types::effects::{PrimitiveEffect, effect, no_effects},
+    types::{
+        effects::{PrimitiveEffect, effect, no_effects},
+        r#type::FnType,
+        type_scheme::TypeScheme,
+    },
 };
 
 fn data_variant(tag: &str, value: Value) -> Value {
@@ -45,9 +54,9 @@ fn data_map_entry(key: Value, value: Value) -> Value {
     Value::tuple([key, value])
 }
 
-fn data_variant_value(name: &str, payload: Value) -> Value {
+fn data_variant_value(name: &str, payload: Value, storage: VariantPayloadStorage) -> Value {
     let record = Value::tuple([string_value(name), payload]);
-    Value::raw_variant(ustr("Variant"), record)
+    Value::variant_with_storage(ustr("Variant"), storage, record)
 }
 
 fn escape_string(value: &str) -> String {
@@ -81,11 +90,16 @@ fn escape_data_text_string(input: &Str) -> Str {
 struct Parser<'a> {
     input: &'a str,
     pos: usize,
+    variant_case_storage: VariantPayloadStorage,
 }
 
 impl<'a> Parser<'a> {
-    fn new(input: &'a str) -> Self {
-        Self { input, pos: 0 }
+    fn new(input: &'a str, variant_case_storage: VariantPayloadStorage) -> Self {
+        Self {
+            input,
+            pos: 0,
+            variant_case_storage,
+        }
     }
 
     fn parse(mut self) -> Result<Value, SourceFailureKind> {
@@ -271,7 +285,11 @@ impl<'a> Parser<'a> {
                 if self.consume_char('(') {
                     self.skip_ws_and_comments()?;
                     if self.consume_char(')') {
-                        return Ok(data_variant_value(&ident, data_unit_variant("Unit")));
+                        return Ok(data_variant_value(
+                            &ident,
+                            data_unit_variant("Unit"),
+                            self.variant_case_storage,
+                        ));
                     }
                     let mut args = Vec::new();
                     loop {
@@ -292,9 +310,17 @@ impl<'a> Parser<'a> {
                     } else {
                         data_array_variant("Tuple", args)
                     };
-                    Ok(data_variant_value(&ident, payload))
+                    Ok(data_variant_value(
+                        &ident,
+                        payload,
+                        self.variant_case_storage,
+                    ))
                 } else {
-                    Ok(data_variant_value(&ident, data_unit_variant("Unit")))
+                    Ok(data_variant_value(
+                        &ident,
+                        data_unit_variant("Unit"),
+                        self.variant_case_storage,
+                    ))
                 }
             }
         }
@@ -432,8 +458,44 @@ fn is_identifier_continue(ch: char) -> bool {
     ch == '_' || ch.is_ascii_alphanumeric()
 }
 
-fn parse_data_text(input: &Str) -> Result<Value, SourceFailureKind> {
-    Parser::new(input.as_ref()).parse()
+fn parse_data_text(mut args: ValOrMutArgs, ctx: &mut EvalCtx<'_>) -> EvalControlFlowResult {
+    let storage = variant_payload_storage_for_type(
+        data_value_type(),
+        ustr("Variant"),
+        Location::new_synthesized(),
+        &ctx.compiler_session().module_env(),
+    )
+    .expect("the closed DataValue.Variant case must have a canonical layout");
+    let input_arg = args.next().expect("parse_data_text takes one argument");
+    let input = extract_native_ref::<Str>(&input_arg, ctx).map_err(RuntimeError::new_native)?;
+    cont(
+        Parser::new(input.as_ref(), storage)
+            .parse()
+            .map_err(RuntimeError::new_native)?,
+    )
+}
+
+fn parse_data_text_function() -> ModuleFunction {
+    let ty = FnType::new_by_val(
+        [string_type()],
+        data_value_type(),
+        effect(PrimitiveEffect::Fallible),
+    );
+    ModuleFunction::new(
+        CallableDefinition::new(
+            TypeScheme::new_infer_quantifiers(ty),
+            vec![ustr("text")],
+            Some(String::from("Parses Ferlium data text into a data value.")),
+        ),
+        Box::new(ContextNativeFn::new(
+            "parse_data_text",
+            &[],
+            &[ArgConvention::Let],
+            parse_data_text,
+        )),
+        None,
+        Vec::new(),
+    )
 }
 
 pub fn add_to_module(to: &mut Module) {
@@ -449,15 +511,5 @@ pub fn add_to_module(to: &mut Module) {
         ),
         Visibility::Module,
     );
-    to.add_function(
-        ustr("parse_data_text"),
-        UnaryNativeFnRFV::description_with_ty(
-            parse_data_text,
-            ["text"],
-            "Parses Ferlium data text into a data value.",
-            string_type(),
-            data_value_type(),
-            effect(PrimitiveEffect::Fallible),
-        ),
-    );
+    to.add_function(ustr("parse_data_text"), parse_data_text_function());
 }

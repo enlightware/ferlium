@@ -270,6 +270,14 @@ impl UnifiedTypeInference {
                 DictionaryReq::ProjectionSubscript { subscript_ty, .. } => {
                     self.substitute_in_subscript_type_in_place(subscript_ty);
                 }
+                DictionaryReq::VariantPayloadStorage {
+                    variant_ty,
+                    payload_ty,
+                    ..
+                } => {
+                    *variant_ty = self.substitute_in_type(*variant_ty);
+                    *payload_ty = self.substitute_in_type(*payload_ty);
+                }
                 DictionaryReq::TraitImpl {
                     input_tys,
                     output_tys,

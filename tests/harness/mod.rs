@@ -130,7 +130,7 @@ fn value_shape(value: &Value) -> &'static str {
     match value {
         Value::Uninit => "uninitialized value",
         Value::Native(_) => "native value",
-        Value::Variant(..) => "variant value",
+        Value::Variant { .. } => "variant value",
         Value::Tuple(_) => "tuple value",
         Value::Function(_) => "function value",
         Value::Subscript(_) => "subscript value",
@@ -306,7 +306,14 @@ pub(crate) fn compare_values(actual: &Value, expected: &Value, path: &str) -> Re
             value_shape(actual)
         )),
         (Value::Native(_), Value::Native(_)) => compare_native_values(actual, expected, path),
-        (Value::Variant(actual_tag, _), Value::Variant(expected_tag, _)) => {
+        (
+            Value::Variant {
+                tag: actual_tag, ..
+            },
+            Value::Variant {
+                tag: expected_tag, ..
+            },
+        ) => {
             if actual_tag != expected_tag {
                 return Err(format!(
                     "{path}: expected variant tag {expected_tag}, got {actual_tag}"

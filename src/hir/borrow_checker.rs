@@ -267,6 +267,7 @@ fn is_evidence_node(kind: &NodeKind) -> bool {
         NodeKind::GetDictionary(_)
             | NodeKind::LoadDictionary(_)
             | NodeKind::LoadSubscriptEvidence(_)
+            | NodeKind::LoadVariantPayloadStorageEvidence(_)
     )
 }
 
@@ -444,6 +445,7 @@ fn is_enode_evidence(kind: &NodeKind<Elaborated>) -> bool {
         NodeKind::GetDictionary(_)
             | NodeKind::LoadDictionary(_)
             | NodeKind::LoadSubscriptEvidence(_)
+            | NodeKind::LoadVariantPayloadStorageEvidence(_)
     )
 }
 
@@ -638,6 +640,7 @@ fn literal_value_compatible_with_type(
                 active.remove(&ty);
                 result
             }
+            LiteralValue::VariantTag(_) => pattern && ty == crate::std::math::int_type(),
         }
     }
 
@@ -809,6 +812,7 @@ fn elaborated_child_node_ids(kind: &NodeKind<Elaborated>) -> SVec4<ENodeId> {
         | GetDictionary(_)
         | LoadDictionary(_)
         | LoadSubscriptEvidence(_)
+        | LoadVariantPayloadStorageEvidence(_)
         | TakeLocalValue(_)
         | LoadLocal(_)
         | CheckCallDepth

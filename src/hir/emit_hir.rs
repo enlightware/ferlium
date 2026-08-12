@@ -57,7 +57,7 @@ use crate::{
     format::FormatWith,
     hir::{self, UNodeArena},
     hir::{
-        dictionary::{DictElaborationCtx, ExtraParameters},
+        dictionary::{DictElaborationCtx, ExtraParameters, LateFunctionInstData, ModuleInstData},
         elaboration::elaborate_generated_functions,
         emit_functions::{
             EmitFunctionInput, EmitFunctionKind, EmitTraitCtx, SubscriptMemberAttachment,
@@ -124,17 +124,33 @@ fn validate_name_uniqueness(source: &ast::PModule) -> Result<(), InternalCompila
 }
 
 pub(super) fn insert_inst_data_for_function_and_lambdas(
-    module_inst_data: &mut FxHashMap<LocalFunctionId, ExtraParameters>,
+    module_inst_data: &mut ModuleInstData,
     associated_lambdas: &FxHashMap<LocalFunctionId, Vec<LocalFunctionId>>,
+    module: &Module,
     id: LocalFunctionId,
     dicts: ExtraParameters,
 ) {
-    if let Some(lambda_ids) = associated_lambdas.get(&id) {
-        for lambda_id in lambda_ids {
-            module_inst_data.insert(*lambda_id, dicts.clone());
-        }
+    for function_id in function_and_associated_lambdas(&id, associated_lambdas) {
+        let definition = &module
+            .get_function_by_id(function_id)
+            .expect("function receiving late instantiation data must exist")
+            .definition;
+        let mut effect_quantifiers = definition
+            .ty_scheme
+            .eff_quantifiers
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        effect_quantifiers.sort();
+        module_inst_data.insert(
+            function_id,
+            LateFunctionInstData {
+                requirements: dicts.clone(),
+                fn_ty: definition.ty_scheme.ty.clone(),
+                effect_quantifiers,
+            },
+        );
     }
-    module_inst_data.insert(id, dicts);
 }
 
 pub(super) fn function_and_associated_lambdas<'a>(
@@ -291,6 +307,14 @@ fn fill_fn_inst_data_effect_vars(inst_data: &hir::FnInstData, vars: &mut FxHashS
         match req {
             hir::dictionary::DictionaryReq::ProjectionSubscript { subscript_ty, .. } => {
                 subscript_ty.fill_with_inner_effect_vars(vars);
+            }
+            hir::dictionary::DictionaryReq::VariantPayloadStorage {
+                variant_ty,
+                payload_ty,
+                ..
+            } => {
+                variant_ty.fill_with_inner_effect_vars(vars);
+                payload_ty.fill_with_inner_effect_vars(vars);
             }
             hir::dictionary::DictionaryReq::TraitImpl {
                 input_tys,
@@ -454,7 +478,7 @@ pub(super) fn borrow_check_and_elaborate_dict(
     pending_functions: &mut PendingModuleFunctions,
     associated_lambdas: &FxHashMap<LocalFunctionId, Vec<LocalFunctionId>>,
     dicts: &ExtraParameters,
-    module_inst_data: &FxHashMap<LocalFunctionId, ExtraParameters>,
+    module_inst_data: &ModuleInstData,
     id: &LocalFunctionId,
     warnings: &mut Vec<CompilationWarning>,
 ) -> Result<(), InternalCompilationError> {

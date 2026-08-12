@@ -39,6 +39,7 @@ use crate::{
     Location, cached_primitive_ty,
     containers::{B, DenseBitSet, b},
     format::FormatWith,
+    hir::value::VariantPayloadStorage,
     mir,
     module::{FunctionId, ModuleEnv},
     types::{
@@ -403,12 +404,23 @@ impl Operation {
     /// in place through a projection of that destination (variant payload index `0`), so the
     /// payload aggregate — which may be generic and thus have no `Value` layout witness — is never
     /// materialized into a temporary.
-    pub fn variant(span: Location, tag: Ustr, t: Type) -> Self {
+    pub fn variant(
+        span: Location,
+        tag: Ustr,
+        t: Type,
+        storage: Option<VariantPayloadStorage>,
+        evidence: Option<mir::Value>,
+    ) -> Self {
+        assert_eq!(storage.is_none(), evidence.is_some());
         Operation {
             result_id: None,
             span,
-            operands: Box::new([]),
-            kind: OperationKind::Variant { tag, ty: t },
+            operands: evidence.into_iter().collect(),
+            kind: OperationKind::Variant {
+                tag,
+                ty: t,
+                storage,
+            },
         }
     }
 
@@ -768,7 +780,12 @@ pub enum OperationKind {
     /// Bundle a symbolic subscript with its captured evidence.
     BuildSubscript { ty: Type },
     /// Construct a tagged variant shell whose payload is initialized separately.
-    Variant { tag: Ustr, ty: Type },
+    Variant {
+        tag: Ustr,
+        ty: Type,
+        /// `None` means operand 0 carries forwarded generic storage evidence.
+        storage: Option<VariantPayloadStorage>,
+    },
     /// Read a variant tag as an integer.
     ExtractTag,
     /// Store a value into unoccupied place storage.
@@ -940,9 +957,10 @@ impl OperationKind {
                 !whole.operands.is_empty(),
                 "build_subscript takes the symbolic subscript operand plus its evidence captures"
             ),
-            Variant { .. } => assert!(
-                whole.operands.is_empty(),
-                "variant builds an uninitialized shell and takes no operands"
+            Variant { storage, .. } => assert_eq!(
+                whole.operands.len(),
+                usize::from(storage.is_none()),
+                "variant takes one evidence operand exactly when its storage mode is dynamic"
             ),
             ExtractTag => assert_eq!(
                 whole.operands.len(),

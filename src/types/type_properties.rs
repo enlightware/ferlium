@@ -45,10 +45,8 @@ pub(crate) fn trivial_copy_impl_key(trait_id: TraitId, ty: Type) -> ConcreteTrai
 /// property structurally, while named types do so only when they have no explicit custom `Value`
 /// impl overriding ownership behaviour.
 ///
-/// A sum type qualifies only when no case carries a payload, as Rust's fieldless enums are `Copy`:
-/// such a value owns nothing under any layout. Whether a *payload* is stored inline or behind a
-/// pointer is a layout decision no backend has made yet, and a boxed one would have to be released
-/// by `Value::drop` itself.
+/// A non-recursive sum qualifies when every possible inline payload qualifies. A recursive
+/// occurrence is indirect and owns its allocation, so the recursion check below rejects it.
 pub(crate) fn concrete_type_is_trivial_copy(ty: Type, env: &impl TypePropertyEnv) -> bool {
     if !ty.is_constant() {
         return false;
@@ -82,11 +80,11 @@ fn is_trivial_copy(ty: Type, active: &mut FxHashSet<Type>, env: &impl TypeProper
                 is_trivial_copy(shape_ty, active, env)
             }
         }
-        // A unit payload is "no payload": it carries nothing under any layout, which is what lets
-        // `Continue(())` qualify alongside a bare `Break`.
+        // Non-recursive variant payloads are stored inline. The tag and union are representation-
+        // copyable exactly when every possible payload is representation-copyable.
         TypeKind::Variant(cases) => cases
             .into_iter()
-            .all(|(_, payload_ty)| payload_ty == Type::unit()),
+            .all(|(_, payload_ty)| is_trivial_copy(payload_ty, active, env)),
         TypeKind::Native(_)
         | TypeKind::Function(_)
         | TypeKind::Subscript(_)
@@ -116,7 +114,8 @@ mod tests {
             (string_type(), false),
             (Type::tuple([int_type(), int_type()]), true),
             (Type::tuple([int_type(), string_type()]), false),
-            (Type::variant([(ustr::ustr("Some"), int_type())]), false),
+            (Type::variant([(ustr::ustr("Some"), int_type())]), true),
+            (Type::variant([(ustr::ustr("Some"), string_type())]), false),
         ] {
             assert_eq!(concrete_type_is_trivial_copy(ty, &env), expected, "{ty:?}");
         }

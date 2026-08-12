@@ -385,7 +385,7 @@ impl TypeInference {
                 .zip(exprs)
                 .map(
                     |((tag, inner_tys, variant_inner_ty), (expr, bind_var_names))| {
-                        let tag_value = LiteralValue::new_native(tag.as_char_ptr() as isize);
+                        let tag_value = LiteralValue::new_variant_tag(*tag);
 
                         // Prepare the environment for the alternative by adapting the type of the variant value
                         let alt_start_env_size = env.cur_locals.len();

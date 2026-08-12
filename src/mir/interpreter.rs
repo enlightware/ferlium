@@ -30,7 +30,7 @@ use crate::{
         function::{ArgConvention, copy_boxed_trivial_copy_native},
         value::{
             FunctionValue, HiddenEvidenceArgValue, LiteralValue, SubscriptValue, Value,
-            ustr_to_isize,
+            VariantPayloadStorage,
         },
     },
     mir::{self, BlockId, Operation, OperationKind, terminator::TerminatorKind},
@@ -700,17 +700,27 @@ impl<'a> Interpreter<'a> {
             OperationKind::CompareEqual => {
                 self.exec_compare_equal(func, slots, &operation.operands, def.unwrap());
             }
-            OperationKind::Variant { tag, .. } => {
+            OperationKind::Variant { tag, storage, .. } => {
                 // Build a tagged variant shell with an uninitialized payload. The constructing site
                 // stores it into the variant's destination and then fills the payload in place
                 // through a projection of that destination, so the payload aggregate is never
                 // materialized into a temporary. A flat `Uninit` payload grows into the right
                 // aggregate skeleton on the first field store (see `grow_value_to_path`); a unit
                 // payload is written explicitly by the emitter.
+                let storage = storage.unwrap_or_else(|| {
+                    let evidence = self.place_operand(slots, &operation.operands[0]);
+                    VariantPayloadStorage::from_indirect(
+                        *evidence
+                            .target_ref(&self.ctx)
+                            .expect("invalid variant payload-storage evidence place")
+                            .as_primitive_ty::<bool>()
+                            .expect("variant payload-storage evidence must be bool"),
+                    )
+                });
                 Self::bind(
                     slots,
                     def.unwrap(),
-                    Binding::Value(Value::Variant(*tag, None)),
+                    Binding::Value(Value::variant_shell(*tag, storage)),
                 );
             }
             OperationKind::ExtractTag => {
@@ -893,12 +903,7 @@ impl<'a> Interpreter<'a> {
     ) {
         let mut subscript = self.subscript_operand(slots, &operands[0]);
         for op in &operands[1..] {
-            let arg = match self.try_dict_operand(slots, op) {
-                Some(id) => HiddenEvidenceArgValue::TraitDictionary(id),
-                None => HiddenEvidenceArgValue::Subscript(crate::containers::b(
-                    self.subscript_operand(slots, op),
-                )),
-            };
+            let arg = self.hidden_evidence_operand(slots, op);
             subscript.hidden_args.push(arg);
         }
         Self::bind(
@@ -1011,6 +1016,14 @@ impl<'a> Interpreter<'a> {
         def: mir::Value,
     ) {
         let pattern = self.pattern_literal_operand(&operands[1]);
+        if let Some(&tag) = pattern.as_variant_tag() {
+            let expected = self.ctx.compiler_session().variant_tag_id(tag) as isize;
+            let equal = self.with_runtime_value(func, slots, &operands[0], |scrutinee| {
+                scrutinee.as_primitive_ty::<isize>() == Some(&expected)
+            });
+            Self::bind(slots, def, Binding::Value(Value::native(equal)));
+            return;
+        }
         let equal = self.with_runtime_value(func, slots, &operands[0], |scrutinee| {
             pattern
                 .try_matches_runtime_value(scrutinee)
@@ -1036,11 +1049,12 @@ impl<'a> Interpreter<'a> {
         let tag = value
             .variant_tag()
             .expect("extract_tag of a non-variant value");
-        Self::bind(
-            slots,
-            def,
-            Binding::Value(Value::native(ustr_to_isize(tag))),
+        let tag_id = self.ctx.compiler_session().variant_tag_id(tag);
+        debug_assert_eq!(
+            self.ctx.compiler_session().variant_tag_name(tag_id),
+            Some(tag)
         );
+        Self::bind(slots, def, Binding::Value(Value::native(tag_id as isize)));
     }
 
     /// Executes an `end_project` operation: resumes the accessor's slide to completion and
@@ -1277,6 +1291,9 @@ impl<'a> Interpreter<'a> {
                                 span,
                             )?)
                         }
+                        HiddenEvidenceArgValue::VariantPayloadStorage(storage) => Binding::Place(
+                            self.alloc_cell(Value::native(storage.is_indirect()), span)?,
+                        ),
                     });
                 }
                 (
@@ -1531,7 +1548,10 @@ impl<'a> Interpreter<'a> {
         for &i in &path {
             target = match target {
                 Value::Tuple(t) => t.get(i as usize)?,
-                Value::Variant(_, Some(payload)) if i == 0 => payload,
+                Value::Variant {
+                    payload: Some(payload),
+                    ..
+                } if i == 0 => payload,
                 Value::Native(p) => p
                     .as_ref()
                     .as_any()
@@ -1781,6 +1801,10 @@ impl<'a> Interpreter<'a> {
                         self.alloc_cell(Value::subscript_value(subscript.as_ref().clone()), span)?;
                     leading.push(Binding::Place(place));
                 }
+                HiddenEvidenceArgValue::VariantPayloadStorage(storage) => {
+                    let place = self.alloc_cell(Value::native(storage.is_indirect()), span)?;
+                    leading.push(Binding::Place(place));
+                }
             }
         }
 
@@ -1890,18 +1914,7 @@ impl<'a> Interpreter<'a> {
         // Hidden dictionary/evidence captures → interned `HiddenEvidenceArgValue`s.
         let mut hidden_args: Vec<HiddenEvidenceArgValue> = Vec::with_capacity(hidden_ops.len());
         for op in hidden_ops {
-            let arg = match self.try_dict_operand(slots, op) {
-                Some(id) => HiddenEvidenceArgValue::TraitDictionary(id),
-                None => {
-                    // Subscript evidence: a symbolic constant, or a first-class subscript value
-                    // carried by a place, read non-consumingly (the place is borrowed evidence,
-                    // not owned by the closure).
-                    HiddenEvidenceArgValue::Subscript(crate::containers::b(
-                        self.subscript_operand(slots, op),
-                    ))
-                }
-            };
-            hidden_args.push(arg);
+            hidden_args.push(self.hidden_evidence_operand(slots, op));
         }
 
         // Value captures → the owned environment tuple.
@@ -2279,6 +2292,39 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    /// Read hidden evidence captured by a closure or first-class subscript without consuming its
+    /// backing place.
+    fn hidden_evidence_operand(
+        &self,
+        slots: &FxHashMap<mir::Value, Binding>,
+        op: &mir::Value,
+    ) -> HiddenEvidenceArgValue {
+        if let Some(id) = self.try_dict_operand(slots, op) {
+            return HiddenEvidenceArgValue::TraitDictionary(id);
+        }
+        if let mir::Value::Subscript(id) = op {
+            return HiddenEvidenceArgValue::Subscript(crate::containers::b(SubscriptValue::bare(
+                *id,
+            )));
+        }
+        let place = self.place_operand(slots, op);
+        let value = place
+            .target_ref(&self.ctx)
+            .expect("hidden evidence operand refers to an invalid place");
+        if let Some(indirect) = value.as_primitive_ty::<bool>() {
+            return HiddenEvidenceArgValue::VariantPayloadStorage(
+                VariantPayloadStorage::from_indirect(*indirect),
+            );
+        }
+        HiddenEvidenceArgValue::Subscript(crate::containers::b(
+            value
+                .as_subscript()
+                .expect("hidden evidence must be a dictionary, subscript, or variant storage mode")
+                .as_ref()
+                .clone(),
+        ))
+    }
+
     /// Resolves a symbolic dictionary operand to its interned `TraitDictionaryId`, panicking if the
     /// operand is not a dictionary.
     fn dict_operand(
@@ -2467,9 +2513,9 @@ impl<'a> Interpreter<'a> {
 /// Returns a representation copy of `v` iff the boxed interpreter representation may be duplicated
 /// by MIR `memcpy`.
 ///
-/// Native opt-in leaves and tuple-backed tuples/records/named structs are copied recursively.
+/// Native opt-in leaves, tuple-backed tuples/records/named structs, and inline variants are copied recursively.
 /// Internal place pointers and bare function values are also representation-copyable even though
-/// their types do not derive the language-level `TrivialCopy` trait. Strings, arrays, variants,
+/// their types do not derive the language-level `TrivialCopy` trait. Strings, arrays,
 /// captured functions, and every other owned representation return `None` and must be moved or
 /// cloned explicitly. This intentionally depends on representation shape rather than byte size.
 fn read_copy(v: &Value) -> Option<Value> {
@@ -2483,14 +2529,14 @@ fn read_copy(v: &Value) -> Option<Value> {
         let copied = fields.iter().map(read_copy).collect::<Option<Vec<_>>>()?;
         return Some(Value::tuple(copied));
     }
-    // A payload-free sum type is trivially copyable — the tag is all there is. Only such variants
-    // are classified so, hence the payload here is unit or, in a shell the constructing site has
-    // not filled yet, uninitialized; both copy as themselves.
+    // The boxed interpreter reconstructs an inline trivial variant recursively, allocating a
+    // fresh host box for its payload rather than aliasing interpreter storage.
     if let Some(tag) = v.variant_tag() {
+        let storage = v.variant_payload_storage().unwrap();
         return Some(match v.variant_payload() {
-            None => Value::unit_variant(tag),
-            Some(Value::Uninit) => Value::raw_variant(tag, Value::uninit()),
-            Some(payload) => Value::raw_variant(tag, read_copy(payload)?),
+            None => Value::variant_shell(tag, storage),
+            Some(Value::Uninit) => Value::variant_with_storage(tag, storage, Value::uninit()),
+            Some(payload) => Value::variant_with_storage(tag, storage, read_copy(payload)?),
         });
     }
     // A function value with no captured environment is trivially copyable: the emitter bare-`load`s
@@ -2551,7 +2597,7 @@ fn grow_value_to_path(value: &mut Value, path: &[isize]) {
                 grow_value_to_path(slot, rest);
             }
         }
-        Value::Variant(..) if first == 0 => {
+        Value::Variant { .. } if first == 0 => {
             grow_value_to_path(value.variant_payload_mut().unwrap(), rest);
         }
         _ => {}

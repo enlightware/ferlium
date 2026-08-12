@@ -1065,6 +1065,16 @@ pub(crate) fn extra_parameters_from_constraints(
                 *field,
                 subscript_ty.clone(),
             )),
+            TypeHasVariant {
+                variant_ty,
+                tag,
+                payload_ty,
+                ..
+            } => Some(DictionaryReq::new_variant_payload_storage(
+                *variant_ty,
+                *tag,
+                *payload_ty,
+            )),
             HaveTrait {
                 trait_id,
                 input_tys,

@@ -9,7 +9,6 @@
 use std::{collections::VecDeque, mem};
 
 use enum_as_inner::EnumAsInner;
-use ustr::Ustr;
 
 use crate::module::id::Id;
 use crate::std::array::array_value_from_vec;
@@ -23,7 +22,6 @@ use crate::{
     hir::function::{ArgConvention, copy_boxed_trivial_copy_native},
     hir::value::{
         FunctionValue, HiddenEvidenceArgValue, NativeValue, NativeValueType, SubscriptValue, Value,
-        ustr_to_isize,
     },
     module::{
         ELocalDecl as LocalDecl, ExtraParameterId, FunctionId, LocalDebugVisibility, LocalDeclId,
@@ -179,6 +177,9 @@ fn evidence_arg_to_val_or_mut(arg: HiddenEvidenceArgValue) -> ValOrMut {
         HiddenEvidenceArgValue::TraitDictionary(dictionary) => ValOrMut::Dictionary(dictionary),
         HiddenEvidenceArgValue::Subscript(subscript) => {
             ValOrMut::Val(Value::subscript_value(*subscript))
+        }
+        HiddenEvidenceArgValue::VariantPayloadStorage(storage) => {
+            ValOrMut::Val(Value::native(storage.is_indirect()))
         }
     }
 }
@@ -1055,7 +1056,7 @@ impl Place {
             target = match target {
                 Tuple(tuple) => tuple.get_mut(index as usize).unwrap(),
                 // A payload-free case has no slot until something writes one.
-                Variant(..) if index == 0 => target.variant_payload_mut().unwrap(),
+                Variant { .. } if index == 0 => target.variant_payload_mut().unwrap(),
                 Native(primitive) => {
                     let buffer = primitive
                         .as_mut()
@@ -1071,7 +1072,7 @@ impl Place {
                     }
                 }
                 Uninit => panic!("cannot access a field of an uninitialized value"),
-                Variant(..) => panic!("Cannot access a variant payload with a non-zero index"),
+                Variant { .. } => panic!("Cannot access a variant payload with a non-zero index"),
                 _ => panic!(
                     "Cannot access a non-compound value while following mutable place path: index {}, full place {:?}",
                     index, self
@@ -1109,7 +1110,10 @@ impl Place {
             use Value::*;
             target = match target {
                 Tuple(tuple) => tuple.get(index as usize).unwrap(),
-                Variant(_, Some(payload)) if index == 0 => payload,
+                Variant {
+                    payload: Some(payload),
+                    ..
+                } if index == 0 => payload,
                 Native(primitive) => {
                     let buffer = NativeValue::as_any(primitive.as_ref())
                         .downcast_ref::<buffer::Buffer>()
@@ -1123,7 +1127,7 @@ impl Place {
                     }
                 }
                 Uninit => panic!("cannot read a field of an uninitialized value"),
-                Variant(..) => panic!("Cannot access a variant payload with a non-zero index"),
+                Variant { .. } => panic!("Cannot access a variant payload with a non-zero index"),
                 other => panic!(
                     "Cannot access a non-compound value while following place path: target {:?}, index {}, full place {:?}",
                     other, index, self
@@ -1696,6 +1700,13 @@ pub(crate) fn eval_node_with_ctx(
         LoadSubscriptEvidence(node) => cont(Value::subscript_value(
             subscript_from_extra_parameter(ctx, node.extra_parameter),
         )),
+        LoadVariantPayloadStorageEvidence(node) => {
+            let storage = match extra_parameter_value(ctx, node.extra_parameter) {
+                HiddenEvidenceArgValue::VariantPayloadStorage(storage) => storage,
+                _ => panic!("variant payload-storage evidence has the wrong runtime shape"),
+            };
+            cont(Value::native(storage.is_indirect()))
+        }
         GetDictionaryFunction(node) => eval_get_dictionary_function(arena, node, ctx),
         CallDictionaryFunction(node) => {
             eval_call_dictionary_function(arena, node, arena[node_id].span, ctx, locals)
@@ -1712,7 +1723,7 @@ pub(crate) fn eval_node_with_ctx(
         Tuple(nodes) | Record(nodes) => eval_tuple(arena, nodes, ctx, locals),
         Project(node) => eval_project(arena, node_id, node.value, node.index, ctx, locals),
         FieldAccess(_) => panic!("field access should not be executed after elaboration"),
-        Variant(node) => eval_variant(arena, node.tag, node.payload, ctx, locals),
+        Variant(node) => eval_variant(arena, node, ctx, locals),
         ExtractTag(node) => eval_extract_tag(arena, *node, ctx, locals),
         Array(nodes) => eval_array(arena, nodes, ctx, locals),
         Case(case) => eval_case(arena, case, ctx, locals),
@@ -1796,14 +1807,31 @@ fn eval_hidden_evidence_arg_node(
             subscript_from_extra_parameter(ctx, load.extra_parameter),
         ))));
     }
+    if let NodeKind::LoadVariantPayloadStorageEvidence(load) = &arena[node].kind {
+        return Ok(ControlFlow::Continue(
+            match extra_parameter_value(ctx, load.extra_parameter) {
+                HiddenEvidenceArgValue::VariantPayloadStorage(storage) => {
+                    HiddenEvidenceArgValue::VariantPayloadStorage(storage)
+                }
+                _ => panic!("variant payload-storage evidence has the wrong runtime shape"),
+            },
+        ));
+    }
     if let Some(dictionary) = try_dictionary_metadata_node(arena, node, ctx) {
         return Ok(ControlFlow::Continue(
             HiddenEvidenceArgValue::TraitDictionary(dictionary),
         ));
     }
     let value = eval_or_return!(eval_node_with_ctx(arena, node, ctx, locals));
+    if let Some(indirect) = value.as_primitive_ty::<bool>() {
+        return Ok(ControlFlow::Continue(
+            HiddenEvidenceArgValue::VariantPayloadStorage(
+                crate::hir::value::VariantPayloadStorage::from_indirect(*indirect),
+            ),
+        ));
+    }
     let Some(subscript) = value.into_subscript() else {
-        panic!("expected hidden evidence to be a trait dictionary or subscript");
+        panic!("expected hidden evidence to be a trait dictionary, subscript, or variant storage");
     };
     Ok(ControlFlow::Continue(HiddenEvidenceArgValue::Subscript(
         subscript,
@@ -1850,6 +1878,9 @@ fn try_dictionary_metadata_node(
             HiddenEvidenceArgValue::Subscript(_) => {
                 panic!("expected dictionary extra parameter")
             }
+            HiddenEvidenceArgValue::VariantPayloadStorage(_) => {
+                panic!("expected dictionary extra parameter")
+            }
         },
         _ => None,
     }
@@ -1880,10 +1911,12 @@ fn dictionary_from_extra_parameter(
 ) -> TraitDictionaryId {
     match extra_parameter_value(ctx, extra_parameter) {
         HiddenEvidenceArgValue::TraitDictionary(dictionary) => dictionary,
-        HiddenEvidenceArgValue::Subscript(_) => panic!(
-            "expected extra parameter {} to contain trait dictionary metadata",
-            extra_parameter.as_index()
-        ),
+        HiddenEvidenceArgValue::Subscript(_) | HiddenEvidenceArgValue::VariantPayloadStorage(_) => {
+            panic!(
+                "expected extra parameter {} to contain trait dictionary metadata",
+                extra_parameter.as_index()
+            )
+        }
     }
 }
 
@@ -1893,7 +1926,8 @@ fn subscript_from_extra_parameter(
 ) -> SubscriptValue {
     match extra_parameter_value(ctx, extra_parameter) {
         HiddenEvidenceArgValue::Subscript(subscript) => *subscript,
-        HiddenEvidenceArgValue::TraitDictionary(_) => panic!(
+        HiddenEvidenceArgValue::TraitDictionary(_)
+        | HiddenEvidenceArgValue::VariantPayloadStorage(_) => panic!(
             "expected extra parameter {} to contain subscript evidence",
             extra_parameter.as_index()
         ),
@@ -2874,20 +2908,22 @@ fn eval_take_local_value(
 /// `Value::clone`; an unsupported value indicates that HIR or the structural
 /// classifier incorrectly selected `ResolvedLocalClone::TrivialCopy`.
 ///
-/// A variant is rebuilt from its tag and a copy of its payload — unit in practice, since only
-/// payload-free sum types are classified trivially copyable, but written generally so the copier
-/// cannot fall behind the classifier.
+/// A variant is rebuilt from its tag and a recursive representation copy of its inline payload.
+/// The fresh host box is only an interpreter implementation detail.
 fn copy_boxed_trivial_copy_representation(value: &Value) -> Option<Value> {
     if let Some(value) = copy_boxed_trivial_copy_native(value) {
         return Some(value);
     }
     if let Some(tag) = value.variant_tag() {
+        let storage = value.variant_payload_storage().unwrap();
         return Some(match value.variant_payload() {
-            None => Value::unit_variant(tag),
-            Some(Value::Uninit) => Value::raw_variant(tag, Value::uninit()),
-            Some(payload) => {
-                Value::raw_variant(tag, copy_boxed_trivial_copy_representation(payload)?)
-            }
+            None => Value::variant_shell(tag, storage),
+            Some(Value::Uninit) => Value::variant_with_storage(tag, storage, Value::uninit()),
+            Some(payload) => Value::variant_with_storage(
+                tag,
+                storage,
+                copy_boxed_trivial_copy_representation(payload)?,
+            ),
         });
     }
     let values = value.as_tuple()?;
@@ -3662,13 +3698,24 @@ fn place_resolution_depends_on_addressor_place(arena: &ENodeArena, node_id: ENod
 #[inline(never)]
 fn eval_variant(
     arena: &ENodeArena,
-    tag: Ustr,
-    payload: ENodeId,
+    variant: &hir::Variant<Elaborated>,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
-    let value = eval_or_return!(eval_node_with_ctx(arena, payload, ctx, locals));
-    cont(Value::raw_variant(tag, value))
+    let storage = match variant
+        .payload_storage
+        .expect("elaborated variant must have payload-storage metadata")
+    {
+        hir::VariantPayloadStorageSource::Static(storage) => storage,
+        hir::VariantPayloadStorageSource::Evidence(extra_parameter) => {
+            match extra_parameter_value(ctx, extra_parameter) {
+                HiddenEvidenceArgValue::VariantPayloadStorage(storage) => storage,
+                _ => panic!("variant payload-storage evidence has the wrong runtime shape"),
+            }
+        }
+    };
+    let value = eval_or_return!(eval_node_with_ctx(arena, variant.payload, ctx, locals));
+    cont(Value::variant_with_storage(variant.tag, storage, value))
 }
 
 #[inline(never)]
@@ -3683,14 +3730,18 @@ fn eval_extract_tag(
             .target_ref(ctx)
             .map_err(|err| RuntimeError::new(err, Some(arena[node].span)))?;
         let tag = value.variant_tag().expect("extract_tag of a non-variant");
-        return cont(Value::native(ustr_to_isize(tag)));
+        return cont(Value::native(
+            ctx.compiler_session().variant_tag_id(tag) as isize
+        ));
     }
     let value = eval_or_return!(eval_node_with_ctx(arena, node, ctx, locals));
-    let (tag, payload) = value.into_variant().expect("extract_tag of a non-variant");
+    let (tag, _storage, payload) = value.into_variant().expect("extract_tag of a non-variant");
     if let Some(payload) = payload {
         payload.discard_storage();
     }
-    cont(Value::native(ustr_to_isize(tag)))
+    cont(Value::native(
+        ctx.compiler_session().variant_tag_id(tag) as isize
+    ))
 }
 
 #[inline(never)]
@@ -3716,18 +3767,29 @@ fn eval_case(
         let value = place
             .target_ref(ctx)
             .map_err(|err| RuntimeError::new(err, Some(arena[case.value].span)))?;
-        select_case_alternative(case, value)
+        select_case_alternative(case, value, ctx)
     } else {
         let value = eval_or_return!(eval_node_with_ctx(arena, case.value, ctx, locals));
-        let selected = select_case_alternative(case, &value);
+        let selected = select_case_alternative(case, &value, ctx);
         value.discard_storage();
         selected
     };
     eval_node_with_ctx(arena, selected, ctx, locals)
 }
 
-fn select_case_alternative(case: &hir::Case<Elaborated>, value: &Value) -> ENodeId {
+fn select_case_alternative(
+    case: &hir::Case<Elaborated>,
+    value: &Value,
+    ctx: &EvalCtx<'_>,
+) -> ENodeId {
     for (alternative, node) in &case.alternatives {
+        if let Some(&tag) = alternative.as_variant_tag() {
+            let expected = ctx.compiler_session().variant_tag_id(tag) as isize;
+            if value.as_primitive_ty::<isize>() == Some(&expected) {
+                return *node;
+            }
+            continue;
+        }
         match alternative.try_matches_runtime_value(value) {
             Ok(true) => return *node,
             Ok(false) => {}

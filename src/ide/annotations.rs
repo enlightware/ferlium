@@ -531,7 +531,7 @@ fn node_variable_type_annotations<Env>(
             // There is no GetTraitDictionary left in the final IR.
         }
         GetDictionary(_) => {}
-        LoadDictionary(_) | LoadSubscriptEvidence(_) => {}
+        LoadDictionary(_) | LoadSubscriptEvidence(_) | LoadVariantPayloadStorageEvidence(_) => {}
         GetDictionaryFunction(node) => {
             variable_type_annotations(arena, node.dictionary, result, locals, env);
         }

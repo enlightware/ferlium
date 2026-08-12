@@ -73,6 +73,9 @@ fn materialize_associated_const_literal(
             };
             Ok(arena.alloc(Node::new(kind, ty, EffType::empty(), span)))
         }
+        LiteralValue::VariantTag(tag) => {
+            panic!("symbolic variant tag .{tag} cannot be an associated constant")
+        }
     }
 }
 

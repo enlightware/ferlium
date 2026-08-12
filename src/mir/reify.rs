@@ -107,7 +107,7 @@ fn freeze(value: &Value) -> Option<LiteralValue> {
         }
         // `Uninit` never reaches MIR, a subscript is evidence rather than data, and a function
         // value is handled by `reify` before it gets here.
-        Value::Uninit | Value::Variant(..) | Value::Subscript(_) | Value::Function(_) => None,
+        Value::Uninit | Value::Variant { .. } | Value::Subscript(_) | Value::Function(_) => None,
     }
 }
 

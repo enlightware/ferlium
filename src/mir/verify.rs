@@ -966,8 +966,12 @@ impl<'a> Verifier<'a> {
                     evidence(0);
                 }
             }
+            OperationKind::Variant { storage, .. } => {
+                if storage.is_none() {
+                    evidence(0);
+                }
+            }
             OperationKind::AllocaPlace { .. }
-            | OperationKind::Variant { .. }
             | OperationKind::StackSave
             | OperationKind::CheckCallDepth
             | OperationKind::CheckFuel => {}
@@ -1966,7 +1970,8 @@ impl<'a> Verifier<'a> {
                 let node = self.value_definition[value_id];
                 let operation = self.operation(node).unwrap();
                 match &operation.kind {
-                    OperationKind::Variant { .. } | OperationKind::CloneClosureEnv { .. } => true,
+                    OperationKind::Variant { ty, .. } => !self.is_trivial_copy(*ty),
+                    OperationKind::CloneClosureEnv { .. } => true,
                     OperationKind::BuildClosure {
                         num_hidden_dicts,
                         has_env_dict,
@@ -2167,9 +2172,38 @@ mod tests {
     }
 
     /// A variant that owns something, so these tests have a drop obligation to violate. The payload
-    /// is load-bearing: a payload-free sum type is trivially copyable and has no obligation.
+    /// is load-bearing: a sum type with only trivial inline payloads has no drop obligation.
     fn managed_variant_ty() -> Type {
         Type::variant([(ustr::ustr("A"), string_type())])
+    }
+
+    #[test]
+    #[should_panic(expected = "operand 0 must be evidence")]
+    fn rejects_materialized_variant_storage_operand() {
+        let span = Location::new_synthesized();
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let mut f = FunctionBuilder::new("bad_variant_evidence".into(), Default::default());
+        let storage = f.add_constant(
+            crate::std::logic::bool_type(),
+            LiteralValue::new_native(false),
+            &env,
+        );
+        let variant_ty = Type::variant([(ustr::ustr("A"), Type::unit())]);
+        let block = f.add_block();
+        append(
+            &mut f,
+            block,
+            Operation::variant(
+                span,
+                ustr::ustr("A"),
+                variant_ty,
+                None,
+                Some(Value::Constant(storage)),
+            ),
+        );
+        terminate_return(&mut f, block, span);
+        f.finish(env);
     }
 
     #[test]
@@ -2187,13 +2221,25 @@ mod tests {
         let first = append_result(
             &mut f,
             block,
-            Operation::variant(span, ustr::ustr("A"), variant_ty),
+            Operation::variant(
+                span,
+                ustr::ustr("A"),
+                variant_ty,
+                Some(crate::hir::value::VariantPayloadStorage::Inline),
+                None,
+            ),
         );
         append(&mut f, block, Operation::store(span, first, local.clone()));
         let second = append_result(
             &mut f,
             block,
-            Operation::variant(span, ustr::ustr("A"), variant_ty),
+            Operation::variant(
+                span,
+                ustr::ustr("A"),
+                variant_ty,
+                Some(crate::hir::value::VariantPayloadStorage::Inline),
+                None,
+            ),
         );
         append(&mut f, block, Operation::store(span, second, local));
         append(
@@ -2238,7 +2284,13 @@ mod tests {
         let value = append_result(
             &mut f,
             defining,
-            Operation::variant(span, ustr::ustr("A"), variant_ty),
+            Operation::variant(
+                span,
+                ustr::ustr("A"),
+                variant_ty,
+                Some(crate::hir::value::VariantPayloadStorage::Inline),
+                None,
+            ),
         );
         f.set_terminator(defining, Terminator::goto(span, using));
         append(&mut f, using, Operation::store(span, value, local));
@@ -2525,7 +2577,13 @@ mod tests {
         append(
             &mut f,
             block,
-            Operation::variant(span, ustr::ustr("A"), managed_variant_ty()),
+            Operation::variant(
+                span,
+                ustr::ustr("A"),
+                managed_variant_ty(),
+                Some(crate::hir::value::VariantPayloadStorage::Inline),
+                None,
+            ),
         );
         terminate_return(&mut f, block, span);
         verify(f);
@@ -2545,7 +2603,13 @@ mod tests {
         let value = append_result(
             &mut f,
             block,
-            Operation::variant(span, ustr::ustr("A"), variant_ty),
+            Operation::variant(
+                span,
+                ustr::ustr("A"),
+                variant_ty,
+                Some(crate::hir::value::VariantPayloadStorage::Inline),
+                None,
+            ),
         );
         append(&mut f, block, Operation::store(span, value, local));
         append(&mut f, block, Operation::stack_restore(span, marker));
@@ -2617,7 +2681,13 @@ mod tests {
         let value = append_result(
             &mut f,
             block,
-            Operation::variant(span, ustr::ustr("A"), variant_ty),
+            Operation::variant(
+                span,
+                ustr::ustr("A"),
+                variant_ty,
+                Some(crate::hir::value::VariantPayloadStorage::Inline),
+                None,
+            ),
         );
         append(&mut f, block, Operation::store(span, value, local.clone()));
         append(&mut f, block, Operation::clear(span, local));

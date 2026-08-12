@@ -1457,6 +1457,7 @@ where
             insert_inst_data_for_function_and_lambdas(
                 &mut module_inst_data,
                 &associated_lambdas,
+                output,
                 *id,
                 dicts.clone(),
             );
@@ -1820,12 +1821,13 @@ where
             insert_inst_data_for_function_and_lambdas(
                 &mut module_inst_data,
                 &associated_lambdas,
+                output,
                 *id,
                 dicts,
             );
         }
         for id in local_fns.iter() {
-            let dicts = module_inst_data.get(id).unwrap();
+            let dicts = &module_inst_data.get(id).unwrap().requirements;
             borrow_check_and_elaborate_dict(
                 output,
                 others,

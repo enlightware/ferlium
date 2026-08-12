@@ -53,7 +53,7 @@ use ustr::Ustr;
 use crate::{
     containers::{B, SVec2, SVec4},
     hir::dictionary::DictionariesReq,
-    hir::value::LiteralValue,
+    hir::value::{LiteralValue, VariantPayloadStorage},
     module::ModuleEnv,
     types::effects::EffType,
     types::never::Never,
@@ -310,6 +310,7 @@ fn is_evidence_node<P: HirPhase>(kind: &NodeKind<P>) -> bool {
         NodeKind::GetDictionary(_)
             | NodeKind::LoadDictionary(_)
             | NodeKind::LoadSubscriptEvidence(_)
+            | NodeKind::LoadVariantPayloadStorageEvidence(_)
     )
 }
 
@@ -402,10 +403,28 @@ pub struct BuildSubscriptValue<P: HirPhase = Unelaborated> {
 }
 
 /// Build a variant value with a tag and payload.
-#[derive(Debug, Clone, Copy, new)]
+#[derive(Debug, Clone, Copy)]
 pub struct Variant<P: HirPhase = Unelaborated> {
     pub tag: Ustr,
     pub payload: NodeId<P>,
+    pub payload_storage: Option<VariantPayloadStorageSource>,
+}
+
+impl Variant<Unelaborated> {
+    pub fn new(tag: Ustr, payload: NodeId<Unelaborated>) -> Self {
+        Self {
+            tag,
+            payload,
+            payload_storage: None,
+        }
+    }
+}
+
+/// Where an elaborated variant construction obtains its canonical payload-storage mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VariantPayloadStorageSource {
+    Static(VariantPayloadStorage),
+    Evidence(ExtraParameterId),
 }
 
 // Value access payloads.
@@ -691,6 +710,12 @@ pub struct LoadSubscriptEvidence {
     pub extra_parameter: ExtraParameterId,
 }
 
+/// Load a variant case's payload-storage mode from a function hidden argument.
+#[derive(Debug, Clone, Copy)]
+pub struct LoadVariantPayloadStorageEvidence {
+    pub extra_parameter: ExtraParameterId,
+}
+
 /// Look up a method function value from a trait dictionary.
 #[derive(Debug, Clone, Copy)]
 pub struct GetDictionaryFunction<P: HirPhase = Unelaborated> {
@@ -759,7 +784,7 @@ pub enum NodeKind<P: HirPhase = Unelaborated> {
     Project(Project<P>),
     /// Access a record-like value at a statically known field.
     FieldAccess(P::FieldAccess),
-    /// Extract the tag of a variant as an isize, by casting the pointer to the string.
+    /// Extract the semantic tag identity of a variant as an `isize`.
     ExtractTag(NodeId<P>),
 
     // Local storage and ownership.
@@ -811,6 +836,8 @@ pub enum NodeKind<P: HirPhase = Unelaborated> {
     LoadDictionary(LoadDictionary),
     /// Load a first-class subscript capability from a function hidden argument.
     LoadSubscriptEvidence(LoadSubscriptEvidence),
+    /// Load a variant payload-storage mode from a function hidden argument.
+    LoadVariantPayloadStorageEvidence(LoadVariantPayloadStorageEvidence),
     /// Look up a method function value from a trait dictionary.
     GetDictionaryFunction(GetDictionaryFunction<P>),
     /// Call a function entry through a trait dictionary.
@@ -858,6 +885,7 @@ impl NodeKind {
             | GetDictionary(_)
             | LoadDictionary(_)
             | LoadSubscriptEvidence(_)
+            | LoadVariantPayloadStorageEvidence(_)
             | TakeLocalValue(_)
             | LoadLocal(_)
             | CheckCallDepth
@@ -1368,6 +1396,13 @@ impl<P: HirPhase> Node<P> {
                     load.extra_parameter.as_index()
                 )?;
             }
+            LoadVariantPayloadStorageEvidence(load) => {
+                writeln!(
+                    f,
+                    "{indent_str}load variant payload-storage extra parameter {}",
+                    load.extra_parameter.as_index()
+                )?;
+            }
             GetDictionaryFunction(get_method) => {
                 writeln!(
                     f,
@@ -1682,7 +1717,8 @@ impl<P: HirPhase> Node<P> {
             GetDictionary(_) => {
                 // GetDictionary nodes don't contain child expressions with types
             }
-            LoadDictionary(_) | LoadSubscriptEvidence(_) => {}
+            LoadDictionary(_) | LoadSubscriptEvidence(_) | LoadVariantPayloadStorageEvidence(_) => {
+            }
             GetDictionaryFunction(node) => {
                 if let Some(ty) = type_at(arena, node.dictionary, pos) {
                     return Some(ty);
@@ -1888,7 +1924,8 @@ impl Node {
             GetDictionary(_) => {
                 // no need to look into the dictionary's type as it is already in this node's type
             }
-            LoadDictionary(_) | LoadSubscriptEvidence(_) => {}
+            LoadDictionary(_) | LoadSubscriptEvidence(_) | LoadVariantPayloadStorageEvidence(_) => {
+            }
             GetDictionaryFunction(node) => {
                 unbound_ty_vars(arena, node.dictionary, result, ignore);
             }

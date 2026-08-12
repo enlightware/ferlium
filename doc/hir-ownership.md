@@ -268,6 +268,6 @@ At runtime their getters carry generic layout metadata like any other associated
 
 ## Non-Contracts of the Boxed Interpreter
 
-The current boxed interpreter still has helper paths such as boxed native `TrivialCopy` copying and interpreter-only `ValOrMut::Ref` call arguments for borrowing existing boxed storage.
+The current boxed interpreter still has helper paths such as boxed native `TrivialCopy` copying and interpreter-only `ValOrMut::Ref` call arguments for borrowing existing boxed storage. It also physically over-boxes variant payloads, while each `Value::Variant` separately records whether the canonical payload representation is inline or indirect; representation-copying a trivial variant preserves that mode but allocates a fresh interpreter box, and raw interpreter-storage reclamation remains separate from semantic `Value::drop`.
 These are interpreter implementation details, not language or MIR contracts.
 MIR lowers `CloneValue` with `TrivialCopy` mode as a storage copy and lowers clone/drop through the explicit dispatch described above.
