@@ -452,7 +452,7 @@ impl Drop for CallArgsStorageGuard {
 pub type Function = Box<dyn Callable>;
 
 /// The semantic access convention of a call argument.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ArgConvention {
     /// Give the callee exclusive mutable access to the argument place.
     MutableRef,

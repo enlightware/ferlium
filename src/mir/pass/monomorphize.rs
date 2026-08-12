@@ -37,7 +37,10 @@
 //! below then, as `const_eval.rs` did when folding started calling it.
 #![allow(dead_code)]
 
-use std::cell::RefCell;
+use std::{
+    cell::RefCell,
+    hash::{Hash, Hasher},
+};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use ustr::{Ustr, ustr};
@@ -50,7 +53,7 @@ use crate::{
         self, Function, Instantiation, Operation, OperationKind, ParameterKind,
         edit::FunctionEdit,
         operation::SourceFallibility,
-        terminator::{Terminator, TerminatorKind},
+        terminator::{Terminator, TerminatorKind, TerminatorKindDiscriminant},
     },
     module::{
         FunctionId, LocalFunctionId, ModuleEnv, ModuleId, TraitDictionaryId, id::Id,
@@ -67,6 +70,148 @@ use crate::{
 
 use super::{budget, function_size};
 
+// Sharing one residual body between the keys that produce it.
+//
+// Specialization keys are finer than the bodies they produce. Type arguments, effect arguments and
+// evidence all enter the key, but only what survives substitution enters the *body*: effects are
+// erased from MIR unless they changed a control-flow form, and a dictionary appears only where it
+// was used. Two call sites that instantiate a generic callee differently can therefore ask for
+// residual MIR that is the same function, and `iter_pipeline` is full of them — ten copies of
+// `MapIterator::next` separated by nothing but caller-local effect variables.
+//
+// Comparing the residual body itself is what keeps a distinction exactly when it makes a
+// difference. It needs no rule about which parts of a key may be ignored, and it cannot be wrong
+// about one: a distinction that reaches the MIR keeps the copies apart by construction.
+//
+// Everything a caller can observe takes part — the calling convention, the parameters, the constant
+// pool and the code — and only two things do not:
+//
+// - the generated *name*, which is derived from the key and so differs whenever the key does;
+// - the body's own *function id*, which a recursive specialization names in its self-calls.
+//
+// Both are properties of which copy this is rather than of what it computes, which is precisely
+// what must not distinguish two copies. The original takes part because a specialization's HIR
+// metadata is answered through `Specialization::original` rather than held by the copy: two
+// originals with identical residual MIR can still declare different parameter passing or return
+// conventions, so bodies are shared within one original and never across two.
+//
+// Neither function below copies or rewrites anything: both walk the bodies as they stand and
+// substitute a self-reference as they go, `structure_digest` while hashing one and
+// `structurally_identical` while comparing two.
+
+/// The identity a self-reference is normalized to.
+///
+/// Far past any dense function table: `LocalFunctionId` is a `u32` index into one, and `u32::MAX`
+/// itself is reserved as `Option`'s niche.
+const SELF_REFERENCE: LocalFunctionId = LocalFunctionId::new(u32::MAX - 1);
+
+/// Hashes what makes `body` — a specialization of `original` whose own id is `own` — the function it
+/// is, rather than the copy it is.
+///
+/// Everything is hashed through its derived implementation except the operands, which are the one
+/// place a self-reference can appear: [`redirect_recursion`] writes `own` into call callee operands
+/// and nowhere else. So only calls are decomposed, and a block's other terminator forms hash whole.
+///
+/// This is a filter and never the decision — [`structurally_identical`] decides — so an imprecise
+/// hash costs a sharing rather than merging two bodies that differ.
+fn structure_digest(body: &Function, original: FunctionId, own: FunctionId) -> u64 {
+    let mut state = rustc_hash::FxHasher::default();
+    original.hash(&mut state);
+    body.result_convention().hash(&mut state);
+    body.parameters().hash(&mut state);
+    body.constants().hash(&mut state);
+    // Lengths are hashed alongside the sequences they precede, as a derived slice hash would do:
+    // without them two bodies whose operations merely start alike collide, and a collision here
+    // costs a sharing.
+    body.blocks().count().hash(&mut state);
+    for block_id in body.blocks() {
+        let block = body.block(block_id);
+        block.operations().len().hash(&mut state);
+        for operation in block.operations() {
+            hash_operation(operation, own, &mut state);
+        }
+        let terminator = block.terminator();
+        terminator.span.hash(&mut state);
+        TerminatorKindDiscriminant::from(&terminator.kind).hash(&mut state);
+        match &terminator.kind {
+            TerminatorKind::Invoke {
+                operation,
+                normal,
+                error,
+            } => {
+                hash_operation(operation, own, &mut state);
+                normal.hash(&mut state);
+                error.hash(&mut state);
+            }
+            // Derived, because no other form carries a function operand to normalize: a condition
+            // is a boolean and a yielded place is a place. One that later did would hash its raw
+            // operand and fail to recognize a sharing, never invent one.
+            kind => kind.hash(&mut state),
+        }
+    }
+    state.finish()
+}
+
+/// Hashes one operation with any reference to `own` normalized away.
+fn hash_operation(operation: &Operation, own: FunctionId, state: &mut impl Hasher) {
+    operation.result_id().hash(state);
+    operation.span.hash(state);
+    operation.kind.hash(state);
+    operation.operands.len().hash(state);
+    for operand in &operation.operands {
+        normalize_self_reference(operand, own).hash(state);
+    }
+}
+
+/// `operand` with a reference to the enclosing body's own id `own` replaced by [`SELF_REFERENCE`].
+fn normalize_self_reference(operand: &mir::Value, own: FunctionId) -> mir::Value {
+    match operand {
+        mir::Value::Function(id) if *id == own => mir::Value::Function(FunctionId {
+            module: own.module,
+            function: SELF_REFERENCE,
+        }),
+        operand => operand.clone(),
+    }
+}
+
+/// Whether the specialization `body`, which names itself `own`, is the function `existing` already
+/// created under the identity `existing_own`.
+///
+/// Each names itself by its own id, so the operands are compared through
+/// [`normalize_self_reference`] and everything else by the derived equality — including the code,
+/// which [`Operation::eq_by_operands`] destructures exhaustively so that a field added to MIR later
+/// cannot silently drop out of a decision that two bodies are interchangeable.
+///
+/// The name is the one part excluded, because `existing` was renamed when it was created and `body`
+/// has not been renamed yet.
+fn structurally_identical(
+    body: &Function,
+    own: FunctionId,
+    existing: &Function,
+    existing_own: FunctionId,
+) -> bool {
+    let operand_eq = |operand: &mir::Value, other: &mir::Value| {
+        normalize_self_reference(operand, own) == normalize_self_reference(other, existing_own)
+    };
+    body.result_convention() == existing.result_convention()
+        && body.parameters() == existing.parameters()
+        && body.constants() == existing.constants()
+        && body.blocks().count() == existing.blocks().count()
+        && body.blocks().zip(existing.blocks()).all(|(own, other)| {
+            let own = body.block(own);
+            let other = existing.block(other);
+            own.operations().len() == other.operations().len()
+                && own
+                    .operations()
+                    .iter()
+                    .zip(other.operations())
+                    .all(|(operation, other)| operation.eq_by_operands(other, &operand_eq))
+                && own
+                    .terminator()
+                    .eq_by_operands(other.terminator(), &operand_eq)
+        })
+}
+
 /// How one call site instantiates a generic callee: both halves of the instantiation, together.
 ///
 /// This is the specialization cache's key, and pairing the two here is the same discipline
@@ -80,11 +225,16 @@ pub(crate) struct SpecializationKey {
     pub(crate) dictionaries: Vec<TraitDictionaryId>,
 }
 
-/// The specializations one module's optimization has created, and the cache that keeps them shared.
+/// The specializations one module's optimization has created, and the caches that keep them shared.
 ///
 /// Two call sites that instantiate a generic function the same way get the same body rather than a
 /// copy each. Without that, a generic function called `n` times would be copied `n` times, which is
 /// how naive specialization explodes.
+///
+/// Sharing is decided twice, because a key is finer than the body it produces. The key cache
+/// answers a repeated call site outright; [`BodyStructure`] then catches a *new* key whose residual
+/// MIR turns out to be a function already created — the copies that keying alone cannot see,
+/// because recognizing them means substituting first.
 #[derive(Default)]
 pub(crate) struct Specializations {
     /// The module whose optimized artifacts will hold these, which is not in general the module a
@@ -99,6 +249,13 @@ pub(crate) struct Specializations {
     /// would make an inlining decision depend on whether that had happened yet.
     raw: Vec<Function>,
     cache: FxHashMap<SpecializationKey, LocalFunctionId>,
+    /// Digests of the residual bodies already created, so that keys whose distinctions vanish under
+    /// substitution share one copy.
+    ///
+    /// Indexed by digest rather than by the structure itself so that the table stores no second
+    /// copy of every specialized body — the bodies are already in `raw`, which is what a candidate
+    /// is confirmed against. See [`BodyStructure`].
+    structures: FxHashMap<u64, LocalFunctionId>,
     /// Keys whose raw bodies expose none of the payoffs specialization can currently realize.
     ///
     /// A rejected key can occur at many call sites. Remembering it keeps the admission scan linear
@@ -127,6 +284,7 @@ impl Specializations {
             created: Vec::new(),
             raw: Vec::new(),
             cache: FxHashMap::default(),
+            structures: FxHashMap::default(),
             rejected: FxHashSet::default(),
             substituted: RefCell::new(FxHashMap::default()),
             first_index: function_count,
@@ -192,7 +350,13 @@ impl Specializations {
     }
 
     /// The local id of the specialization for `key`, creating it if this is the first call site to
-    /// ask for it.
+    /// ask for a body like the one it produces.
+    ///
+    /// Two lookups, because a key is finer than the body it produces. The key cache answers a call
+    /// site that has been seen before without substituting anything; the structural digest answers a
+    /// *new* key whose residual MIR turns out to be one already created, which needs the body built
+    /// to be recognized. Both map to the retained copy, so every later call site takes the cheap
+    /// path.
     pub(crate) fn get_or_create<Ty: TypeLike>(
         &mut self,
         key: SpecializationKey,
@@ -203,15 +367,27 @@ impl Specializations {
         if let Some(existing) = self.cache.get(&key) {
             return *existing;
         }
-        let name = self.name_for(&key, body, env);
         // Allocated before the body is built, because a recursive callee has to be able to name
-        // itself: see `redirect_recursion`.
+        // itself: see `redirect_recursion`. Nothing consumes it until the body proves to be new, so
+        // a duplicate leaves the id to whichever specialization is created next.
         let id = LocalFunctionId::from_index(self.first_index + self.created.len());
         let own = FunctionId {
             module: self.module,
             function: id,
         };
-        let mut specialized = FunctionEdit::new(specialize(body, scheme, &key, own, env));
+        let specialized = specialize(body, scheme, &key, own, env);
+
+        let digest = structure_digest(&specialized, key.callee, own);
+        if let Some(existing) = self.identical_to(&specialized, key.callee, own, digest) {
+            self.cache.insert(key, existing);
+            return existing;
+        }
+
+        // Named only now that there is a copy to name. `name_for` scans every name created so far
+        // to keep generated names unique, which is work a duplicate should not pay for — and a name
+        // it never uses would push the next specialization's own name onto a `-1` suffix.
+        let name = self.name_for(&key, body, env);
+        let mut specialized = FunctionEdit::new(specialized);
         // The body carries its original's name until renamed, which would print two functions under
         // one header in a MIR dump.
         specialized.set_name(name);
@@ -222,8 +398,38 @@ impl Specializations {
             name,
             body: specialized,
         });
+        self.structures.insert(digest, id);
         self.cache.insert(key, id);
         id
+    }
+
+    /// The specialization already created that `specialized` duplicates, if there is one.
+    ///
+    /// The digest selects at most one candidate and the bodies then decide, which is why a candidate
+    /// that fails to match is simply not shared with: the entry it occupies stays put, costing the
+    /// colliding pair their sharing and nothing else.
+    ///
+    /// Compared against the *raw* stage, the body as created — `created` is rewritten in place as
+    /// the worklist reaches each entry, so comparing against it would make sharing depend on how far
+    /// optimization had got.
+    fn identical_to(
+        &self,
+        specialized: &Function,
+        original: FunctionId,
+        own: FunctionId,
+        digest: u64,
+    ) -> Option<LocalFunctionId> {
+        let candidate = *self.structures.get(&digest)?;
+        let index = candidate.as_index().checked_sub(self.first_index)?;
+        if self.created.get(index)?.original != original {
+            return None;
+        }
+        let candidate_own = FunctionId {
+            module: self.module,
+            function: candidate,
+        };
+        structurally_identical(specialized, own, self.raw.get(index)?, candidate_own)
+            .then_some(candidate)
     }
 
     /// `body` substituted at `instantiation`, computed once per distinct pair.
@@ -1635,6 +1841,55 @@ mod tests {
         assert!(
             !specialized.contains("buffer_clone_value_into"),
             "the element copy must not go back through the opaque native:\n{specialized}"
+        );
+    }
+
+    /// Call sites separated only by distinctions that substitution erases share one body.
+    ///
+    /// Each closure passed to `map` contributes its own effect variable, so two pipelines over the
+    /// same element types instantiate `MapIterator::next` at two different keys. A function's own
+    /// effect row is not part of a MIR body, so both keys produce the same residual function, and
+    /// keying alone would keep a copy per closure — four of them here, since `collect` drives a
+    /// second pair of instantiations.
+    ///
+    /// The other half of the assertion is what stops this from being satisfied by merging too much:
+    /// the `Map::map` thunks *do* differ, each carrying its own closure, and must stay apart.
+    #[test]
+    fn call_sites_separated_only_by_erased_effects_share_one_specialization() {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        let module_id = compile(
+            &mut session,
+            "fn doubled(v: [int]) -> [int] { v |> map(|x| x * 2) |> collect() }\n\
+             fn negated(v: [int]) -> [int] { v |> map(|x| 0 - x) |> collect() }",
+        );
+        session.prepare_execution_target(ExecutionTarget::Mir, module_id);
+        let specializations = session
+            .mir_artifacts_for(module_id, MirOptimization::Enabled)
+            .expect("optimized artifacts were just prepared")
+            .specializations()
+            .iter()
+            .map(|specialization| specialization.name)
+            .collect::<Vec<_>>();
+
+        let nexts = specializations
+            .iter()
+            .filter(|name| name.contains("MapIterator") && name.contains("::next#"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            nexts.len(),
+            1,
+            "the two pipelines must share one specialized `next`, but got:\n{nexts:#?}"
+        );
+
+        let mappers = specializations
+            .iter()
+            .filter(|name| name.contains("::map#"))
+            .count();
+        assert!(
+            mappers > 1,
+            "each pipeline's `map` carries its own closure and must keep its own body, but {mappers} \
+             survived in:\n{specializations:#?}"
         );
     }
 

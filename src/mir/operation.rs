@@ -53,7 +53,7 @@ use crate::{
 };
 
 /// A non-terminating operation in Ferlium MIR.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Operation {
     /// The function-local identity assigned to this operation's result, if it has one.
     ///
@@ -93,6 +93,37 @@ impl Operation {
     /// The type of the operation's result.
     pub fn result(&self) -> OperationResult {
         self.kind.result(self)
+    }
+
+    /// Whether two operations are the same, with operands compared by `operand_eq` rather than
+    /// directly.
+    ///
+    /// For a consumer that must treat some operands as equal despite differing — specialization
+    /// hash-consing, where two copies of one function name *themselves* by different ids. Everything
+    /// else is compared with the derived equality.
+    ///
+    /// Destructured exhaustively on purpose: a field added to an operation later stops this
+    /// compiling rather than silently dropping out of a comparison whose answer decides that two
+    /// bodies are interchangeable.
+    pub(crate) fn eq_by_operands(
+        &self,
+        other: &Self,
+        operand_eq: &impl Fn(&mir::Value, &mir::Value) -> bool,
+    ) -> bool {
+        let Self {
+            result_id,
+            span,
+            operands,
+            kind,
+        } = self;
+        *result_id == other.result_id
+            && *span == other.span
+            && *kind == other.kind
+            && operands.len() == other.operands.len()
+            && operands
+                .iter()
+                .zip(other.operands.iter())
+                .all(|(own, other)| operand_eq(own, other))
     }
 
     /// Rebuilds an operation from its parts, without a result identity.
@@ -722,7 +753,7 @@ pub struct Instantiation {
 /// Keeping this behind the existing optional box preserves the compact representation of the
 /// overwhelmingly common non-generic, borrowing call. Monomorphization uses `instantiation`; the
 /// final ownership-transfer pass uses `owned_arguments`, indexed by visible argument position.
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
 pub struct CallMetadata {
     pub(crate) instantiation: Option<Instantiation>,
     pub(crate) owned_arguments: DenseBitSet,
@@ -765,7 +796,7 @@ impl Instantiation {
 ///
 /// Operands stay in [`Operation::operands`] so generic MIR traversals can inspect and rewrite
 /// them uniformly. This enum contains only metadata whose shape is specific to an operation.
-#[derive(Clone, strum::EnumDiscriminants)]
+#[derive(Clone, PartialEq, Eq, Hash, strum::EnumDiscriminants)]
 #[strum_discriminants(
     name(OperationKindDiscriminant),
     derive(Hash, PartialOrd, Ord, strum::Display),

@@ -23,7 +23,7 @@ use crate::{
 };
 
 /// The origin of a MIR function parameter.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum ParameterKind {
     /// A source-visible runtime parameter and its semantic call convention.
     Parameter(ArgConvention),
@@ -37,7 +37,7 @@ pub enum ParameterKind {
 }
 
 /// A parameter in a MIR function signature.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Parameter {
     pub ty: Type,
     pub kind: ParameterKind,
@@ -53,7 +53,7 @@ crate::define_id_type!(
 /// Canonical blocks always contain zero or more non-terminating operations followed by exactly one
 /// terminator. Forward declarations and temporarily unterminated blocks exist only in
 /// [`FunctionBuilder`](crate::mir::builder::FunctionBuilder).
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct BasicBlock {
     operations: Vec<Operation>,
     terminator: Terminator,

@@ -18,7 +18,7 @@ use crate::{
 };
 
 /// The single control-flow exit of a MIR basic block.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Terminator {
     /// The source region associated with the transfer.
     pub span: Location,
@@ -95,6 +95,42 @@ impl Terminator {
         }
     }
 
+    /// Whether two terminators are the same, with the operands of an invoked operation compared by
+    /// `operand_eq` rather than directly. See [`Operation::eq_by_operands`].
+    ///
+    /// Only [`TerminatorKind::Invoke`] can carry an operand naming a function, so every other form
+    /// is compared by the derived equality — complete by construction, and a form that later gained
+    /// one would compare its operand directly and refuse a match rather than invent one.
+    pub(crate) fn eq_by_operands(
+        &self,
+        other: &Self,
+        operand_eq: &impl Fn(&mir::Value, &mir::Value) -> bool,
+    ) -> bool {
+        let Self { span, kind } = self;
+        if *span != other.span {
+            return false;
+        }
+        match (kind, &other.kind) {
+            (
+                TerminatorKind::Invoke {
+                    operation,
+                    normal,
+                    error,
+                },
+                TerminatorKind::Invoke {
+                    operation: other_operation,
+                    normal: other_normal,
+                    error: other_error,
+                },
+            ) => {
+                normal == other_normal
+                    && error == other_error
+                    && operation.eq_by_operands(other_operation, operand_eq)
+            }
+            (kind, other) => kind == other,
+        }
+    }
+
     /// Visits every value operand used directly by this terminator, including operands of an
     /// invoked operation.
     pub fn operands(&self) -> &[mir::Value] {
@@ -111,7 +147,7 @@ impl Terminator {
 }
 
 /// Control-flow forms of canonical MIR.
-#[derive(Clone, strum::EnumDiscriminants)]
+#[derive(Clone, PartialEq, Eq, Hash, strum::EnumDiscriminants)]
 #[strum_discriminants(
     name(TerminatorKindDiscriminant),
     derive(Hash, PartialOrd, Ord, strum::Display),
