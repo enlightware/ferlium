@@ -41,9 +41,22 @@ fn array_physical_index<A>(array: [A], index: int) -> int {
 	array_wrap_index(array.capacity, array.start + resolved)
 }
 
-fn array_physical_index_unchecked<A>(array: [A], index: int) -> int {
-	let resolved = array_signed_index_to_offset(index, array.len);
-	array_wrap_index(array.capacity, array.start + resolved)
+/// Returns the physical slot for a logical offset already proved to be in the array.
+///
+/// Internal precondition: `0 <= offset < array.len`.
+fn array_physical_offset_unchecked<A>(array: [A], offset: int) -> int {
+	array_wrap_index(array.capacity, array.start + offset)
+}
+
+/// Projects the element at a logical offset already proved to be in the array.
+///
+/// Internal precondition: `0 <= offset < array.len`.
+subscript array_offset_unchecked<A>(array: [A], offset: int) -> A {
+	ref mut {
+		return effects_unsafe {
+			array.data->[buffer_slot](array_wrap_index(array.capacity, array.start + offset))
+		};
+	}
 }
 
 subscript array_index<A>(array: [A], index: int) -> A {
@@ -83,7 +96,7 @@ fn array_ensure_capacity<A>(array: &mut [A], len: int)
 	let mut i = 0;
 	loop {
 		if i < array.len {
-			buffer_move_into(array.data, array_physical_index_unchecked(array, i), new_data, i);
+			buffer_move_into(array.data, array_physical_offset_unchecked(array, i), new_data, i);
 			i += 1;
 		} else {
 			break;

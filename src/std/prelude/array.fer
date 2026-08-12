@@ -12,7 +12,7 @@ impl<A> Value for [A] where A: Value {
 			if i >= l {
 				return true;
 			};
-			if not eq(effects_unsafe { left[i] }, effects_unsafe { right[i] }) {
+			if not eq(left->[array_offset_unchecked](i), right->[array_offset_unchecked](i)) {
 				return false;
 			};
 			i += 1;
@@ -31,7 +31,7 @@ impl<A> Value for [A] where A: Value {
 			if i > 0 {
 				string_push_str(rendered, ", ");
 			};
-			string_push_str(rendered, to_string(effects_unsafe { value[i] }));
+			string_push_str(rendered, to_string(value->[array_offset_unchecked](i)));
 			i += 1;
 		}
 	}
@@ -45,7 +45,7 @@ impl<A> Value for [A] where A: Value {
 			if i >= l {
 				return ();
 			};
-			hash(effects_unsafe { value[i] }, state);
+			hash(value->[array_offset_unchecked](i), state);
 			i += 1;
 		}
 	}
@@ -61,7 +61,7 @@ impl<A> Value for [A] where A: Value {
 			};
 			builtin::init_place(
 				target.data->[buffer_slot](target.len),
-				source.data->[buffer_slot](array_physical_index_unchecked(source, i)),
+				source.data->[buffer_slot](array_physical_offset_unchecked(source, i)),
 			);
 			target.len += 1;
 			i += 1;
@@ -79,7 +79,7 @@ impl<A> Value for [A] where A: Value {
 			// Moving the element out and letting the temporary die is the drop: it goes through
 			// the ordinary drop machinery, which MIR sees, rather than through a native holding a
 			// runtime dictionary, which it does not. `buffer_take` never took a dictionary.
-			buffer_take(target.data, array_physical_index_unchecked(target, index));
+			buffer_take(target.data, array_physical_offset_unchecked(target, index));
 			target.len -= 1;
 		}
 	}
@@ -97,7 +97,7 @@ impl<A> Inspect for [A] where A: Inspect {
 			if i > 0 {
 				string_push_str(rendered, ", ");
 			};
-			string_push_str(rendered, inspect(value[i]));
+			string_push_str(rendered, inspect(value->[array_offset_unchecked](i)));
 			i += 1;
 		}
 	}
@@ -112,7 +112,7 @@ where
 	if l <= 0 {
 		None
 	} else {
-		Some(array[l - 1])
+		Some(array->[array_offset_unchecked](l - 1))
 	}
 }
 
@@ -125,7 +125,7 @@ where
 	if l <= 0 {
 		None
 	} else {
-		Some(array[0])
+		Some(array->[array_offset_unchecked](0))
 	}
 }
 
@@ -166,7 +166,7 @@ where
 	if len <= 0 {
 		None
 	} else {
-		let index = array_physical_index_unchecked(array, len - 1);
+		let index = array_physical_offset_unchecked(array, len - 1);
 		array.len -= 1;
 		Some(buffer_take(array.data, index))
 	}
@@ -220,7 +220,7 @@ where
 			if i < end {
 				builtin::init_place(
 					result.data->[buffer_slot](result.len),
-					array.data->[buffer_slot](array_physical_index_unchecked(array, i)),
+					array.data->[buffer_slot](array_physical_offset_unchecked(array, i)),
 				);
 				result.len += 1;
 				i += 1;
@@ -242,7 +242,7 @@ impl Concat {
 			if i < left_len {
 				builtin::init_place(
 					result.data->[buffer_slot](result.len),
-					left.data->[buffer_slot](array_physical_index_unchecked(left, i)),
+					left.data->[buffer_slot](array_physical_offset_unchecked(left, i)),
 				);
 				result.len += 1;
 				i += 1;
@@ -255,7 +255,7 @@ impl Concat {
 			if i < right_len {
 				builtin::init_place(
 					result.data->[buffer_slot](result.len),
-					right.data->[buffer_slot](array_physical_index_unchecked(right, i)),
+					right.data->[buffer_slot](array_physical_offset_unchecked(right, i)),
 				);
 				result.len += 1;
 				i += 1;
@@ -285,7 +285,7 @@ where
 		if a.index < array_len(a.array) {
 			let index = a.index;
 			a.index += 1;
-			Some(effects_unsafe { a.array[index] })
+			Some(a.array->[array_offset_unchecked](index))
 		} else {
 			None
 		}
