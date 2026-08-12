@@ -1102,7 +1102,7 @@ impl OperationKind {
                 }
                 Ok(())
             }
-            Variant { tag, .. } => write!(f, "variant .{tag}"),
+            Variant { tag, .. } => write!(f, "variant {tag}"),
             ExtractTag => write!(f, "extract_tag {}", whole.operands[0].format_with(env)),
             Store => write!(
                 f,
@@ -1204,6 +1204,11 @@ mod tests {
     use std::mem::size_of;
 
     use super::{Operation, OperationKind};
+    use crate::{
+        CompilerSession, Location, format::FormatWith, hir::value::VariantPayloadStorage,
+        types::r#type::Type,
+    };
+    use ustr::ustr;
 
     #[test]
     #[cfg(any(target_pointer_width = "32", target_pointer_width = "64"))]
@@ -1220,5 +1225,21 @@ mod tests {
                 48
             }
         );
+    }
+
+    #[test]
+    fn variant_operation_renders_its_tag_without_a_prefix() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let tag = ustr("Some");
+        let operation = Operation::variant(
+            Location::new_synthesized(),
+            tag,
+            Type::variant([(tag, Type::unit())]),
+            Some(VariantPayloadStorage::Inline),
+            None,
+        );
+
+        assert_eq!(operation.format_with(&env).to_string(), "variant Some");
     }
 }

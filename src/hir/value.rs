@@ -782,7 +782,7 @@ impl Display for LiteralValue {
                 write_with_separator(tuple.iter(), ", ", f)?;
                 write!(f, ")")
             }
-            VariantTag(tag) => write!(f, ".{tag}"),
+            VariantTag(tag) => tag.fmt(f),
         }
     }
 }
@@ -836,6 +836,14 @@ mod tests {
         assert_eq!(
             VariantPayloadStorage::decode_tag(raw),
             (id, VariantPayloadStorage::Indirect)
+        );
+    }
+
+    #[test]
+    fn symbolic_variant_tags_render_without_a_prefix() {
+        assert_eq!(
+            LiteralValue::new_variant_tag(ustr("Some")).to_string(),
+            "Some"
         );
     }
 
