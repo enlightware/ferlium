@@ -51,6 +51,7 @@ pub(crate) mod owned_arguments;
 pub(crate) mod peephole;
 pub(crate) mod provenance;
 pub(crate) mod prune_specializations;
+pub(crate) mod relations;
 pub mod report;
 pub(crate) mod share_specializations;
 pub(crate) mod site;

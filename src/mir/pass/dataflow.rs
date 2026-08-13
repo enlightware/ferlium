@@ -72,14 +72,14 @@ pub(crate) struct PlaceKey {
 }
 
 impl PlaceKey {
-    fn root(root: Root) -> Self {
+    pub(crate) fn root(root: Root) -> Self {
         Self {
             root,
             path: Vec::new(),
         }
     }
 
-    fn field(&self, index: usize) -> Self {
+    pub(crate) fn field(&self, index: usize) -> Self {
         let mut path = self.path.clone();
         path.push(index);
         Self {
@@ -89,7 +89,7 @@ impl PlaceKey {
     }
 
     /// Whether `self` is `other` or lies inside it.
-    fn is_within(&self, other: &PlaceKey) -> bool {
+    pub(crate) fn is_within(&self, other: &PlaceKey) -> bool {
         self.root == other.root
             && self.path.len() >= other.path.len()
             && self.path[..other.path.len()] == other.path[..]
@@ -282,7 +282,7 @@ impl Analysis {
 
 /// Runs the analysis to fixpoint over `func`.
 pub(crate) fn analyze(func: &Function, env: ModuleEnv<'_>) -> Analysis {
-    let (escaped, register_roots) = escaping_roots(func);
+    let (escaped, register_roots) = escaping_roots(func, &|_| false);
 
     let mut entry_states: FxHashMap<BlockId, State> = FxHashMap::default();
     entry_states.insert(func.entry(), State::default());
@@ -325,7 +325,7 @@ pub(crate) fn analyze(func: &Function, env: ModuleEnv<'_>) -> Analysis {
     }
 }
 
-fn successors(kind: &TerminatorKind) -> Vec<BlockId> {
+pub(crate) fn successors(kind: &TerminatorKind) -> Vec<BlockId> {
     match kind {
         TerminatorKind::Goto { target } => vec![*target],
         TerminatorKind::CondBr {
@@ -642,7 +642,17 @@ pub(crate) fn field_index(operand: &mir::Value, func: &Function) -> Option<usize
 /// of a place escapes its root. A root also escapes if it is reached other than through an `alloca`
 /// result or a parameter — an operand this scan cannot resolve to a root escapes nothing precisely
 /// because nothing was tracked for it in the first place.
-fn escaping_roots(func: &Function) -> (FxHashSet<Root>, FxHashMap<ValueId, Root>) {
+///
+/// `mutations_modelled` names the calls whose writes through a `MutableRef` argument the *caller's*
+/// transfer function describes, so that the argument's place stays tracked instead of escaping.
+/// Answering true is a claim about the callee on two counts — its writes are accounted for, and it
+/// captures no pointer it was given — and folding makes it for nothing, because knowing which slots
+/// a callee wrote does not make their new contents known. [`relations`](super::relations) makes it
+/// for the std functions whose semantics the optimizer resolves.
+pub(crate) fn escaping_roots(
+    func: &Function,
+    mutations_modelled: &dyn Fn(&Operation) -> bool,
+) -> (FxHashSet<Root>, FxHashMap<ValueId, Root>) {
     // Registers that name a root, discovered structurally rather than by dataflow: an `alloca`
     // defines one, and a `subfield` of a rooted place stays in the same root.
     let mut register_roots: FxHashMap<ValueId, Root> = FxHashMap::default();
@@ -737,7 +747,9 @@ fn escaping_roots(func: &Function) -> (FxHashSet<Root>, FxHashMap<ValueId, Root>
                 // callee may write through — a `MutableRef` argument — escapes.
                 Some(call) => {
                     for (operand, convention) in &call.arguments {
-                        if matches!(convention, ArgConvention::MutableRef) {
+                        if matches!(convention, ArgConvention::MutableRef)
+                            && !mutations_modelled(operation)
+                        {
                             escape_operand(operand, escaped);
                         }
                     }
