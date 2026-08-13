@@ -104,6 +104,7 @@ pub(crate) fn optimize_function(
 ) -> Function {
     let original_size = function_size(function);
     let mut current: Option<Function> = None;
+    let mut rounds_exhausted = true;
     for _round in 0..budget::MAX_ROUNDS {
         // Fold first: it is cheap, it is what makes arguments known, and it shrinks a function
         // before the inliner measures it against its growth budget. Inlining then hands the next
@@ -178,23 +179,22 @@ pub(crate) fn optimize_function(
             changed = true;
         }
         if !changed {
+            rounds_exhausted = false;
             break;
         }
     }
-    // The same pass runs a second time, for the redundancy inlining itself created: a spliced
-    // accessor brings its `subfield` chain to every call site, and a raw body contains no such
-    // chain at all. The two placements catch different classes rather than repeating work — the
-    // one above sees the `dict_entry` reads a generic body starts with, most of which folding and
-    // devirtualization have resolved by the time this one runs.
-    let source = current.as_ref().unwrap_or(function);
-    if let Some(merged) = cse::eliminate_common_subexpressions(source) {
-        current = Some(merged);
-    }
-    // Folding, specialization and inlining can expose storage transfers after the last pre-inline
-    // placement. Forward them before DCE, which removes scaffolding orphaned by the rewrite.
-    let source = current.as_ref().unwrap_or(function);
-    if let Some(forwarded) = copy_forward::forward_redundant_storage(source, env) {
-        current = Some(forwarded);
+    if rounds_exhausted {
+        // The last changing round may have exposed place computations and storage transfers after
+        // their pre-inline placements. When a no-change round ended the loop, those placements have
+        // already seen the settled body, so repeating them would deliver no additional work.
+        let source = current.as_ref().unwrap_or(function);
+        if let Some(merged) = cse::eliminate_common_subexpressions(source) {
+            current = Some(merged);
+        }
+        let source = current.as_ref().unwrap_or(function);
+        if let Some(forwarded) = copy_forward::forward_redundant_storage(source, env) {
+            current = Some(forwarded);
+        }
     }
     // Inlined predicates often materialize `true`/`false` in two arms only for the caller to
     // compare that slot with `true` and branch again. Forward the known edge information while
@@ -217,11 +217,14 @@ pub(crate) fn optimize_function(
     if let Some(forwarded) = string_accumulate::forward_string_accumulation(source, env) {
         current = Some(forwarded);
     }
-    // Inlining can expose a final dictionary-entry dispatch after the last fold round. Rewrite
-    // those callees before DCE, which then removes the now-unread entries.
-    let source = current.as_ref().unwrap_or(function);
-    if let Some(devirtualized) = fold::devirtualize_known_callees(source, env) {
-        current = Some(devirtualized);
+    if rounds_exhausted {
+        // Inlining in the last permitted round can expose a dictionary-entry dispatch after the
+        // last fold placement. A converged round has already devirtualized the settled body; the
+        // post-round branch, peephole and string rewrites above cannot expose a dictionary callee.
+        let source = current.as_ref().unwrap_or(function);
+        if let Some(devirtualized) = fold::devirtualize_known_callees(source, env) {
+            current = Some(devirtualized);
+        }
     }
     // After devirtualization, which is what makes a subscript's checks direct calls the analysis can
     // resolve at all, and before DCE, which removes the cleanup blocks a removed check strands.

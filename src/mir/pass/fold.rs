@@ -225,12 +225,13 @@ fn materialize_reification(
     }
 }
 
-/// Names callees resolved through constant dictionary entries after the optimization rounds have
-/// settled.
+/// Names callees resolved through constant dictionary entries after the optimization round budget
+/// was exhausted.
 ///
 /// Folding normally performs this rewrite while it already owns the dataflow analysis. Inlining can
-/// expose one last `dict_entry`/dispatch pair after the final round, however, and DCE can remove the
-/// entry only after this has made the dispatch direct.
+/// expose one last `dict_entry`/dispatch pair in the last permitted round, however, and DCE can
+/// remove the entry only after this has made the dispatch direct. The driver does not call this
+/// after genuine convergence: the final no-change fold already saw the settled body.
 pub(crate) fn devirtualize_known_callees(func: &Function, env: ModuleEnv<'_>) -> Option<Function> {
     if !may_have_devirtualization(func) {
         return None;
@@ -264,8 +265,9 @@ pub(crate) fn plan_folds(
 /// **Devirtualization rides along with folding rather than running as a pass of its own**, and the
 /// reason is entirely the dataflow analysis: resolving a callee needs exactly the analysis folding
 /// has already built, and that analysis *is* the cost. Riding along is therefore the main path. The
-/// final devirtualization sweep below exists only for dictionary-entry callees exposed after the
-/// last fold round, behind a cheap syntactic pre-filter and before DCE removes the stranded entry.
+/// final devirtualization sweep below exists only for dictionary-entry callees exposed in an
+/// exhausted last round, behind a cheap syntactic pre-filter and before DCE removes the stranded
+/// entry.
 ///
 /// What it must not do is claim a *round*: see [`Folded::warrants_another_round`].
 fn plan_folds_and_devirtualizations(
@@ -830,7 +832,7 @@ mod tests {
     }
 
     #[test]
-    fn a_late_dictionary_entry_callee_is_devirtualized_after_the_rounds() {
+    fn a_late_dictionary_entry_callee_is_devirtualized_after_round_exhaustion() {
         let mut session = CompilerSession::new();
         session.set_mir_optimization(MirOptimization::Enabled);
         let module = session.emit_mir("fold", "[1, 2] |> concat([3, 4]) |> map(|x| x * x)");
