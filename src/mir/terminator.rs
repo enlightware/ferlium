@@ -144,6 +144,11 @@ impl Terminator {
             | TerminatorKind::FailureDuringCleanup => &[],
         }
     }
+
+    /// Basic blocks this terminator may transfer control to.
+    pub(crate) fn successors(&self) -> impl Iterator<Item = mir::BlockId> {
+        self.kind.successors()
+    }
 }
 
 /// Control-flow forms of canonical MIR.
@@ -178,6 +183,24 @@ pub enum TerminatorKind {
     PropagateError,
     /// Poison execution after a cleanup action raised while another source failure was in flight.
     FailureDuringCleanup,
+}
+
+impl TerminatorKind {
+    /// Basic blocks this terminator form may transfer control to.
+    pub(crate) fn successors(&self) -> impl Iterator<Item = mir::BlockId> {
+        let targets = match self {
+            Self::Goto { target } => [Some(*target), None],
+            Self::CondBr {
+                then_target,
+                else_target,
+                ..
+            } => [Some(*then_target), Some(*else_target)],
+            Self::Invoke { normal, error, .. } => [Some(*normal), Some(*error)],
+            Self::Yield { resume, .. } => [Some(*resume), None],
+            Self::Return | Self::PropagateError | Self::FailureDuringCleanup => [None, None],
+        };
+        targets.into_iter().flatten()
+    }
 }
 
 impl FormatWith<ModuleEnv<'_>> for Terminator {

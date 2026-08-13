@@ -43,26 +43,7 @@ impl Dominance {
             }
         }
 
-        // Compute reverse postorder without recursion so capacity is independent of the host
-        // thread's call-stack size.
-        let mut visited = vec![false; node_count];
-        let mut postorder = Vec::new();
-        let mut stack = vec![(entry, 0)];
-        visited[entry] = true;
-        while let Some((node, next_successor)) = stack.last_mut() {
-            if let Some(&successor) = successors[*node].get(*next_successor) {
-                *next_successor += 1;
-                if !visited[successor] {
-                    visited[successor] = true;
-                    stack.push((successor, 0));
-                }
-            } else {
-                postorder.push(*node);
-                stack.pop();
-            }
-        }
-        postorder.reverse();
-        let reverse_postorder = postorder;
+        let reverse_postorder = crate::graph::reverse_postorder(successors, entry);
         let mut reverse_postorder_index = vec![Self::UNREACHABLE; node_count];
         for (index, &node) in reverse_postorder.iter().enumerate() {
             reverse_postorder_index[node] = index;

@@ -35,8 +35,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     mir::{
-        self, BlockId, Function, OperationKind, edit::FunctionEdit, edit::successors,
-        terminator::TerminatorKind, value::ValueId,
+        self, BlockId, Function, OperationKind, edit::FunctionEdit, terminator::TerminatorKind,
+        value::ValueId,
     },
     module::id::Id,
 };
@@ -205,7 +205,7 @@ fn analyze(func: &Function) -> FxHashMap<BlockId, Frontier> {
             if let TerminatorKind::Invoke { operation, .. } = &basic_block.terminator().kind {
                 step(operation, &mut state);
             }
-            for successor in successors(basic_block.terminator()) {
+            for successor in basic_block.terminator().successors() {
                 let updated = match entry_states.get(&successor) {
                     Some(existing) => intersect(existing, &state),
                     None => state.clone(),

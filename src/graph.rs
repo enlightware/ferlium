@@ -33,6 +33,32 @@ fn position_of<I: TryInto<usize, Error: std::fmt::Debug>>(index: I) -> usize {
         .expect("a graph index must be usable as a position")
 }
 
+/// Reachable nodes in reverse postorder from `entry`.
+///
+/// Iterative rather than recursive so compiler graph size is independent of the host thread's
+/// call-stack capacity. A node always precedes its forward descendants except where a cycle makes
+/// that impossible, which is the useful visitation order for forward dataflow.
+pub(crate) fn reverse_postorder(successors: &[Vec<usize>], entry: usize) -> Vec<usize> {
+    let mut visited = vec![false; successors.len()];
+    let mut postorder = Vec::with_capacity(successors.len());
+    let mut stack = vec![(entry, 0)];
+    visited[entry] = true;
+    while let Some((node, next_successor)) = stack.last_mut() {
+        if let Some(&successor) = successors[*node].get(*next_successor) {
+            *next_successor += 1;
+            if !visited[successor] {
+                visited[successor] = true;
+                stack.push((successor, 0));
+            }
+        } else {
+            postorder.push(*node);
+            stack.pop();
+        }
+    }
+    postorder.reverse();
+    postorder
+}
+
 #[allow(dead_code)]
 pub(crate) fn find_disjoint_subgraphs<N: Node>(graph: &[N]) -> Vec<Vec<N::Index>> {
     let mut visited = vec![false; graph.len()]; // Track visited nodes
@@ -298,6 +324,12 @@ mod tests {
     }
 
     use TestNode as N;
+
+    #[test]
+    fn reverse_postorder_ignores_unreachable_nodes_and_puts_back_edges_last() {
+        let successors = vec![vec![1], vec![2, 3], vec![1], vec![], vec![0]];
+        assert_eq!(reverse_postorder(&successors, 0), vec![0, 1, 3, 2]);
+    }
 
     // ---- find_cycle_from ----
 

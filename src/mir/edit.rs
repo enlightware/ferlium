@@ -245,7 +245,7 @@ impl FunctionEdit {
             if !reachable.insert(block) {
                 continue;
             }
-            worklist.extend(successors(&self.block(block).terminator));
+            worklist.extend(self.block(block).terminator.successors());
         }
         if reachable.len() == self.blocks.len() {
             return;
@@ -290,12 +290,11 @@ impl FunctionEdit {
         let mut stack = vec![(self.entry(), 0usize)];
         visited.insert(self.entry());
         while let Some((block, next)) = stack.pop() {
-            let successors = successors(&self.block(block).terminator);
-            match successors.get(next) {
+            match self.block(block).terminator.successors().nth(next) {
                 Some(successor) => {
                     stack.push((block, next + 1));
-                    if visited.insert(*successor) {
-                        stack.push((*successor, 0));
+                    if visited.insert(successor) {
+                        stack.push((successor, 0));
                     }
                 }
                 None => order.push(block),
@@ -384,7 +383,7 @@ impl FunctionEdit {
         // twice, which correctly disqualifies that target.
         let mut incoming: FxHashMap<BlockId, usize> = FxHashMap::default();
         for block in self.blocks() {
-            for target in successors(&self.block(block).terminator) {
+            for target in self.block(block).terminator.successors() {
                 *incoming.entry(target).or_default() += 1;
             }
         }
@@ -552,22 +551,6 @@ fn visit_terminator_operands_mut(
         | TerminatorKind::Return
         | TerminatorKind::PropagateError
         | TerminatorKind::FailureDuringCleanup => {}
-    }
-}
-
-pub(crate) fn successors(terminator: &Terminator) -> Vec<BlockId> {
-    match &terminator.kind {
-        TerminatorKind::Goto { target } => vec![*target],
-        TerminatorKind::CondBr {
-            then_target,
-            else_target,
-            ..
-        } => vec![*then_target, *else_target],
-        TerminatorKind::Invoke { normal, error, .. } => vec![*normal, *error],
-        TerminatorKind::Yield { resume, .. } => vec![*resume],
-        TerminatorKind::Return
-        | TerminatorKind::PropagateError
-        | TerminatorKind::FailureDuringCleanup => Vec::new(),
     }
 }
 

@@ -33,6 +33,8 @@
 //! only by the tests below.
 #![allow(dead_code)]
 
+use std::{cmp::Reverse, collections::BinaryHeap};
+
 use rustc_hash::{FxHashMap, FxHashSet};
 use ustr::Ustr;
 
@@ -46,7 +48,9 @@ use crate::{
         terminator::TerminatorKind,
         value::{ParameterId, ValueId},
     },
-    module::{FunctionId, ModuleEnv, ProjectionIndex, TraitDictionaryEntry, TraitDictionaryId},
+    module::{
+        FunctionId, ModuleEnv, ProjectionIndex, TraitDictionaryEntry, TraitDictionaryId, id::Id,
+    },
     types::r#trait::TraitDictionaryEntryIndex,
     types::r#type::{CallImplType, Type},
 };
@@ -241,7 +245,7 @@ impl State {
 
 /// The result of analysing a function: the state on entry to each block.
 pub(crate) struct Analysis {
-    entry_states: FxHashMap<BlockId, State>,
+    entry_states: Vec<Option<State>>,
     escaped: FxHashSet<Root>,
     /// Which root each register names, discovered structurally by [`escaping_roots`].
     ///
@@ -265,7 +269,11 @@ impl Analysis {
 
     /// The state on entry to `block`.
     pub(crate) fn entry_state(&self, block: BlockId) -> State {
-        self.entry_states.get(&block).cloned().unwrap_or_default()
+        self.entry_states
+            .get(block.as_index())
+            .and_then(Option::as_ref)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Applies one operation's transfer function to `state`.
@@ -289,36 +297,75 @@ impl Analysis {
 pub(crate) fn analyze(func: &Function, env: ModuleEnv<'_>) -> Analysis {
     let (escaped, register_roots) = escaping_roots(func, &|_| false);
 
-    let mut entry_states: FxHashMap<BlockId, State> = FxHashMap::default();
-    entry_states.insert(func.entry(), State::default());
+    let block_count = func.blocks().count();
+    // The consumer replays operations from each settled entry. A one-block function's only entry
+    // is always the empty function-entry state, even when its terminator loops back to itself: the
+    // external entry contributes Unknown and therefore absorbs every back-edge fact at the join.
+    // There is no successor state for the solver to discover, so avoid duplicating that replay.
+    if block_count == 1 {
+        return Analysis {
+            entry_states: vec![Some(State::default())],
+            escaped,
+            register_roots,
+        };
+    }
+    let successor_lists: Vec<Vec<usize>> = func
+        .blocks()
+        .map(|block| {
+            func.block(block)
+                .terminator()
+                .successors()
+                .map(|successor| successor.as_index())
+                .collect()
+        })
+        .collect();
 
-    // Blocks are visited in index order until nothing changes. Bodies are small and the lattice is
-    // finite in the facts it can hold, so this settles quickly; a worklist can come later if a
-    // profile asks for one.
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for block_id in func.blocks() {
-            let Some(entry) = entry_states.get(&block_id).cloned() else {
-                continue;
+    // Forward dataflow converges fastest when definitions precede their uses and loop back edges
+    // come last. Block ids are only construction order after edits, so derive the priority from the
+    // actual CFG rather than relying on their current numbering.
+    let entry = func.entry().as_index();
+    let mut reverse_postorder = vec![usize::MAX; block_count];
+    for (priority, block) in crate::graph::reverse_postorder(&successor_lists, entry)
+        .into_iter()
+        .enumerate()
+    {
+        reverse_postorder[block] = priority;
+    }
+
+    let mut entry_states = vec![None; block_count];
+    entry_states[entry] = Some(State::default());
+    let mut queued = vec![false; block_count];
+    queued[entry] = true;
+    let mut worklist = BinaryHeap::from([Reverse((reverse_postorder[entry], entry))]);
+
+    // Only a changed entry can change a block's exit. Priority keeps forward edges ahead of loop
+    // back edges; `queued` coalesces several changed predecessors into one transfer.
+    while let Some(Reverse((_, block_index))) = worklist.pop() {
+        queued[block_index] = false;
+        let block_id = BlockId::from_index(block_index);
+        let mut state = entry_states[block_index]
+            .clone()
+            .expect("only a reachable block is queued");
+        let block = func.block(block_id);
+        for operation in block.operations() {
+            transfer(operation, func, env, &escaped, &mut state);
+        }
+        if let TerminatorKind::Invoke { operation, .. } = &block.terminator().kind {
+            transfer(operation, func, env, &escaped, &mut state);
+        }
+        for successor in block.terminator().successors() {
+            let successor = successor.as_index();
+            let updated = match &entry_states[successor] {
+                Some(existing) => existing.join(&state),
+                None => state.clone(),
             };
-            let mut state = entry;
-            let block = func.block(block_id);
-            for operation in block.operations() {
-                transfer(operation, func, env, &escaped, &mut state);
+            if entry_states[successor].as_ref() == Some(&updated) {
+                continue;
             }
-            if let TerminatorKind::Invoke { operation, .. } = &block.terminator().kind {
-                transfer(operation, func, env, &escaped, &mut state);
-            }
-            for successor in successors(&block.terminator().kind) {
-                let updated = match entry_states.get(&successor) {
-                    Some(existing) => existing.join(&state),
-                    None => state.clone(),
-                };
-                if entry_states.get(&successor) != Some(&updated) {
-                    entry_states.insert(successor, updated);
-                    changed = true;
-                }
+            entry_states[successor] = Some(updated);
+            if !queued[successor] {
+                queued[successor] = true;
+                worklist.push(Reverse((reverse_postorder[successor], successor)));
             }
         }
     }
@@ -327,22 +374,6 @@ pub(crate) fn analyze(func: &Function, env: ModuleEnv<'_>) -> Analysis {
         entry_states,
         escaped,
         register_roots,
-    }
-}
-
-pub(crate) fn successors(kind: &TerminatorKind) -> Vec<BlockId> {
-    match kind {
-        TerminatorKind::Goto { target } => vec![*target],
-        TerminatorKind::CondBr {
-            then_target,
-            else_target,
-            ..
-        } => vec![*then_target, *else_target],
-        TerminatorKind::Invoke { normal, error, .. } => vec![*normal, *error],
-        TerminatorKind::Yield { resume, .. } => vec![*resume],
-        TerminatorKind::Return
-        | TerminatorKind::PropagateError
-        | TerminatorKind::FailureDuringCleanup => Vec::new(),
     }
 }
 
@@ -1162,5 +1193,51 @@ mod tests {
             Fact::Unknown
         );
         assert_eq!(Fact::Uninit.join(&Fact::Uninit), Fact::Uninit);
+    }
+
+    /// A back edge can invalidate the fact first propagated from the entry. The worklist must then
+    /// revisit the header and its successors rather than treating their first states as settled.
+    #[test]
+    fn a_loop_back_edge_revisits_changed_entries() {
+        let session = CompilerSession::new();
+        let span = Location::new_synthesized();
+        let env = session.module_env();
+
+        let mut builder = FunctionBuilder::new("loop_join".into(), Default::default());
+        let entry = builder.add_block();
+        let header = builder.add_block();
+        let body = builder.add_block();
+        let exit = builder.add_block();
+        let slot = builder
+            .append_operation(entry, Operation::alloca(span, int_type()))
+            .unwrap();
+        let one = builder.add_constant(int_type(), LiteralValue::new_native(1isize), &env);
+        let two = builder.add_constant(int_type(), LiteralValue::new_native(2isize), &env);
+        let condition = builder.add_constant(
+            crate::std::logic::bool_type(),
+            LiteralValue::new_native(true),
+            &env,
+        );
+        builder.append_operation(
+            entry,
+            Operation::store(span, mir::Value::Constant(one), slot.clone()),
+        );
+        builder.set_terminator(entry, Terminator::goto(span, header));
+        builder.set_terminator(
+            header,
+            Terminator::cond_br(span, mir::Value::Constant(condition), body, exit),
+        );
+        builder.append_operation(
+            body,
+            Operation::store(span, mir::Value::Constant(two), slot.clone()),
+        );
+        builder.set_terminator(body, Terminator::goto(span, header));
+        builder.set_terminator(exit, Terminator::ret(span));
+        let func = builder.finish(env);
+
+        let analysis = analyze(&func, env);
+        let state = analysis.entry_state(header);
+        let key = state.place_of(&slot).expect("the alloca names a place");
+        assert_eq!(state.place(&key), Fact::Unknown);
     }
 }

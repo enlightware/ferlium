@@ -53,7 +53,7 @@ use crate::{
     compiler::MirOptimization,
     mir::{
         self, BlockId, Function, Instantiation, Operation, OperationKind,
-        edit::{FunctionEdit, successors},
+        edit::FunctionEdit,
         terminator::{Terminator, TerminatorKind},
     },
     module::{FunctionId, ModuleEnv, ModuleId, id::Id},
@@ -433,7 +433,7 @@ fn cleanup_blocks(func: &Function) -> FxHashSet<BlockId> {
         if !cleanup.insert(block) {
             continue;
         }
-        worklist.extend(successors(func.block(block).terminator()));
+        worklist.extend(func.block(block).terminator().successors());
     }
     cleanup
 }

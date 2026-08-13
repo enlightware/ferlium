@@ -70,7 +70,7 @@ use crate::{
         self, BlockId, Function, Operation, OperationKind,
         const_eval::effects_allow_const_eval,
         dominance::Dominance,
-        edit::{FunctionEdit, successors},
+        edit::FunctionEdit,
         operation::Instantiation,
         terminator::{Terminator, TerminatorKind},
         value::ValueId,
@@ -429,7 +429,7 @@ fn available_call_states(
                     changed |= join_available(&mut entries, *error, &AvailableCalls::default());
                 }
                 _ => {
-                    for successor in successors(block.terminator()) {
+                    for successor in block.terminator().successors() {
                         changed |= join_available(&mut entries, successor, &state);
                     }
                 }
@@ -698,8 +698,9 @@ pub(crate) fn eliminate_common_subexpressions(func: &Function) -> Option<Functio
     let successors: Vec<Vec<usize>> = func
         .blocks()
         .map(|block| {
-            successors(func.block(block).terminator())
-                .into_iter()
+            func.block(block)
+                .terminator()
+                .successors()
                 .map(|target| target.as_index())
                 .collect()
         })

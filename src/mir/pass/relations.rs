@@ -64,7 +64,7 @@ use crate::{
 };
 
 use super::{
-    dataflow::{Root, call_operands, escaping_roots, field_index, successors},
+    dataflow::{Root, call_operands, escaping_roots, field_index},
     known_callee::{KnownCallee, KnownCallees, Layouts, RangeLayout},
     site::{OperationIndex, OperationSite},
 };
@@ -965,7 +965,7 @@ fn run(context: &Context<'_>, mut interner: Interner) -> Run {
     let mut predecessors: Vec<Vec<BlockId>> = vec![Vec::new(); block_count];
     let mut successor_lists: Vec<Vec<usize>> = vec![Vec::new(); block_count];
     for block in func.blocks() {
-        for successor in successors(&func.block(block).terminator().kind) {
+        for successor in func.block(block).terminator().successors() {
             predecessors[successor.as_index()].push(block);
             successor_lists[block.as_index()].push(successor.as_index());
         }
@@ -974,25 +974,11 @@ fn run(context: &Context<'_>, mut interner: Interner) -> Run {
     // Forward dataflow converges fastest when definitions are visited before their uses and loop
     // back edges last. Block ids are only construction order after edits, so derive reverse
     // postorder from the actual CFG and use it as worklist priority.
-    let mut visited = vec![false; block_count];
-    let mut postorder = Vec::with_capacity(block_count);
-    let mut stack = vec![(func.entry().as_index(), 0)];
-    visited[func.entry().as_index()] = true;
-    while let Some((block, next_successor)) = stack.last_mut() {
-        if let Some(&successor) = successor_lists[*block].get(*next_successor) {
-            *next_successor += 1;
-            if !visited[successor] {
-                visited[successor] = true;
-                stack.push((successor, 0));
-            }
-        } else {
-            postorder.push(*block);
-            stack.pop();
-        }
-    }
-    postorder.reverse();
     let mut reverse_postorder = vec![usize::MAX; block_count];
-    for (index, block) in postorder.into_iter().enumerate() {
+    for (index, block) in crate::graph::reverse_postorder(&successor_lists, func.entry().as_index())
+        .into_iter()
+        .enumerate()
+    {
         reverse_postorder[block] = index;
     }
 
@@ -1075,7 +1061,7 @@ fn run(context: &Context<'_>, mut interner: Interner) -> Run {
             continue;
         }
         exit_states.insert(block_id, state);
-        for successor in successors(&block.terminator().kind) {
+        for successor in block.terminator().successors() {
             if !queued[successor.as_index()] {
                 queued[successor.as_index()] = true;
                 worklist.push(Reverse((
@@ -1208,8 +1194,9 @@ fn recognize(
     let successor_lists: Vec<Vec<usize>> = func
         .blocks()
         .map(|block| {
-            successors(&func.block(block).terminator().kind)
-                .into_iter()
+            func.block(block)
+                .terminator()
+                .successors()
                 .map(|target| target.as_index())
                 .collect()
         })
