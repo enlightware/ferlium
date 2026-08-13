@@ -73,6 +73,13 @@ use super::{
 /// arithmetic reaching this width is not the arithmetic bounds-check elimination is about.
 const MAX_TERMS: usize = 4;
 
+/// The most comparisons a state may carry.
+///
+/// The same kind of bound as [`MAX_TERMS`], for the same reason: this set is compared on every edge
+/// the fixpoint walks, and a body of nested conditions would otherwise make each comparison cost
+/// the depth it sits at.
+const MAX_KNOWN: usize = 8;
+
 /// Which definition put the current contents in a place.
 ///
 /// Program points, so that re-walking a block during the fixpoint produces the same symbols it
@@ -140,7 +147,7 @@ impl Symbols {
 /// arithmetic, so a form is an exact statement about the machine integers rather than an
 /// approximation of mathematical ones. A consumer reasoning about magnitudes must account for that
 /// itself.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub(crate) struct Affine {
     pub constant: Int,
     /// Sorted by symbol, never holding a zero coefficient, never longer than [`MAX_TERMS`].
@@ -224,7 +231,7 @@ impl Affine {
 }
 
 /// How two quantities compare.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub(crate) enum Comparison {
     Less,
     LessOrEqual,
@@ -236,7 +243,7 @@ pub(crate) enum Comparison {
 ///
 /// Every relation is normalized to `difference ⋈ 0` so that `i < len` and `i - len < 0` are one
 /// fact rather than two spellings a consumer would have to reconcile.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub(crate) struct Predicate {
     pub difference: Affine,
     pub comparison: Comparison,
@@ -249,6 +256,64 @@ impl Predicate {
             difference: left.sub(right)?,
             comparison,
         })
+    }
+
+    /// The predicate that holds exactly when this one does not.
+    ///
+    /// Expressed by flipping the difference rather than by widening [`Comparison`] with the mirror
+    /// of every relation: `¬(d < 0)` is `-d ≤ 0`. Keeping one direction is what lets two spellings
+    /// of a fact compare equal, which the fixpoint depends on.
+    pub(crate) fn negated(&self) -> Self {
+        match self.comparison {
+            Comparison::Less => Self {
+                difference: self.difference.scale(-1),
+                comparison: Comparison::LessOrEqual,
+            },
+            Comparison::LessOrEqual => Self {
+                difference: self.difference.scale(-1),
+                comparison: Comparison::Less,
+            },
+            Comparison::Equal => Self {
+                difference: self.difference.clone(),
+                comparison: Comparison::NotEqual,
+            },
+            Comparison::NotEqual => Self {
+                difference: self.difference.clone(),
+                comparison: Comparison::Equal,
+            },
+        }
+    }
+
+    /// Whether this holds outright, from its own constant.
+    fn is_certain(&self) -> Option<bool> {
+        let constant = self.difference.as_constant()?;
+        Some(match self.comparison {
+            Comparison::Less => constant < 0,
+            Comparison::LessOrEqual => constant <= 0,
+            Comparison::Equal => constant == 0,
+            Comparison::NotEqual => constant != 0,
+        })
+    }
+
+    /// Whether holding `self` means `goal` holds too.
+    ///
+    /// **Deliberately syntactic beyond the constant case.** The obvious strengthening — `d < 0` and
+    /// `goal - d` a non-positive constant, therefore `goal < 0` — is *unsound* on Ferlium's `int`,
+    /// which wraps: a difference near the bottom of the range plus a negative offset comes back
+    /// round as a positive number. Admitting it needs a proof that neither side overflows, which
+    /// nothing here has. Normalized affine forms make the syntactic test stronger than it sounds:
+    /// two comparisons written over different slots reduce to the same difference whenever their
+    /// values do.
+    fn entails(&self, goal: &Predicate) -> bool {
+        if self.difference != goal.difference {
+            return false;
+        }
+        match (self.comparison, goal.comparison) {
+            (a, b) if a == b => true,
+            // `<` is the stronger of each pair.
+            (Comparison::Less, Comparison::LessOrEqual | Comparison::NotEqual) => true,
+            _ => false,
+        }
     }
 }
 
@@ -284,6 +349,9 @@ pub(crate) struct State {
     /// still a quantity: it can be named, and two uses of it are the same value.
     facts: FxHashMap<SymbolId, Fact>,
     registers: FxHashMap<ValueId, Binding>,
+    /// Comparisons that hold at this point, sorted and deduplicated so that two states holding the
+    /// same set compare equal — which is what the fixpoint tests.
+    known: Vec<Predicate>,
 }
 
 impl State {
@@ -295,6 +363,29 @@ impl State {
 
     pub(crate) fn fact(&self, symbol: SymbolId) -> Option<&Fact> {
         self.facts.get(&symbol)
+    }
+
+    /// The comparisons known to hold here.
+    pub(crate) fn known(&self) -> &[Predicate] {
+        &self.known
+    }
+
+    /// Whether `goal` follows from what is known here.
+    pub(crate) fn implies(&self, goal: &Predicate) -> bool {
+        goal.is_certain()
+            .unwrap_or_else(|| self.known.iter().any(|fact| fact.entails(goal)))
+    }
+
+    /// Records a comparison that holds from here on.
+    ///
+    /// Bounded: a chain of nested conditions would otherwise carry every guard it passed under into
+    /// every block below, and the set is a state the fixpoint compares on every edge. Sorted order
+    /// makes which ones survive a property of the facts rather than of the walk.
+    fn assume(&mut self, predicate: Predicate) {
+        if let Err(index) = self.known.binary_search(&predicate) {
+            self.known.insert(index, predicate);
+            self.known.truncate(MAX_KNOWN);
+        }
     }
 
     /// The slot an operand names, if it names one.
@@ -352,10 +443,17 @@ impl State {
                 registers.insert(*id, binding.clone());
             }
         }
+        let known = self
+            .known
+            .iter()
+            .filter(|predicate| other.known.contains(predicate))
+            .cloned()
+            .collect();
         State {
             current,
             facts,
             registers,
+            known,
         }
     }
 }
@@ -493,6 +591,7 @@ pub(crate) fn analyze(
                 );
             }
             for successor in successors(&block.terminator().kind) {
+                let state = refine(&state, &block.terminator().kind, successor, &mut symbols);
                 let updated = match entry_states.get(&successor) {
                     Some(existing) => rejoin(existing, &state, successor),
                     None => state.clone(),
@@ -545,6 +644,60 @@ pub(crate) fn analyze(
         exit_states,
         symbols,
         escaped,
+    }
+}
+
+/// The state reaching one successor, which is not in general the state the block left off in.
+///
+/// A `condbr` is the only place a comparison the analysis already understands turns into something
+/// it can assume: the arm is taken exactly when the condition holds, so the taken edge carries the
+/// predicate and the other carries its negation. This is the whole reason the comparison idiom is
+/// reassembled into a [`Predicate`] earlier — a boolean nobody can read says nothing about either
+/// arm.
+///
+/// A `condbr` whose two arms are the same block refines neither: the block is reached whichever way
+/// the condition went.
+fn refine(
+    state: &State,
+    terminator: &TerminatorKind,
+    successor: BlockId,
+    symbols: &mut Symbols,
+) -> State {
+    let TerminatorKind::CondBr {
+        condition,
+        then_target,
+        else_target,
+    } = terminator
+    else {
+        return state.clone();
+    };
+    if then_target == else_target {
+        return state.clone();
+    }
+    let Some(Fact::Truth(predicate)) = condition_fact(state, condition, symbols) else {
+        return state.clone();
+    };
+    let mut refined = state.clone();
+    refined.assume(if successor == *then_target {
+        predicate
+    } else {
+        predicate.negated()
+    });
+    refined
+}
+
+/// What is known about the value a terminator branches on.
+fn condition_fact(state: &State, condition: &mir::Value, symbols: &mut Symbols) -> Option<Fact> {
+    match condition {
+        mir::Value::Register(id) => {
+            let symbol = symbols.intern(Symbol::Register(*id));
+            state.fact(symbol).cloned()
+        }
+        _ => {
+            let place = state.place_of(condition)?;
+            let symbol = state.symbol_of(&place, symbols);
+            state.fact(symbol).cloned()
+        }
     }
 }
 
@@ -1023,6 +1176,93 @@ mod tests {
                 );
             },
         );
+    }
+
+    /// Every predicate any block is entered under.
+    fn assumptions(function: &Function, analysis: &Analysis) -> Vec<Predicate> {
+        function
+            .blocks()
+            .filter_map(|block| analysis.entry_state(block))
+            .flat_map(|state| state.known().to_vec())
+            .collect()
+    }
+
+    /// A guard is the only place the analysis learns anything it did not compute: the arm is
+    /// reached exactly when the condition held, so both arms must carry opposite facts.
+    #[test]
+    fn both_arms_of_a_guard_are_entered_under_opposite_facts() {
+        with_analysis(
+            "fn smaller(a: int, b: int) -> int { if a < b { a } else { b } }",
+            "smaller",
+            |function, analysis| {
+                let assumed = assumptions(function, analysis);
+                let taken: Vec<_> = assumed
+                    .iter()
+                    .filter(|predicate| predicate.comparison == Comparison::Less)
+                    .collect();
+                assert!(
+                    !taken.is_empty(),
+                    "the taken arm must be entered knowing `a - b < 0`, got {assumed:?}"
+                );
+                assert!(
+                    taken
+                        .iter()
+                        .any(|predicate| assumed.contains(&predicate.negated())),
+                    "the other arm must be entered knowing the negation, got {assumed:?}"
+                );
+            },
+        );
+    }
+
+    /// The negation has to be expressible in the one direction predicates are normalized to, or a
+    /// guard would refine only the arm it was written for.
+    #[test]
+    fn negating_a_predicate_flips_the_difference_rather_than_the_relation() {
+        let difference = Affine {
+            constant: 3,
+            terms: vec![(SymbolId(0), 1)],
+        };
+        let less = Predicate {
+            difference: difference.clone(),
+            comparison: Comparison::Less,
+        };
+        let negated = less.negated();
+        assert_eq!(negated.comparison, Comparison::LessOrEqual);
+        assert_eq!(negated.difference, difference.scale(-1));
+        assert_eq!(
+            negated.negated(),
+            less,
+            "negation must be its own inverse, or an arm reached twice would drift"
+        );
+    }
+
+    /// A goal decided by its own constant needs nothing assumed, and one that is not must not be
+    /// waved through by an unrelated fact.
+    #[test]
+    fn entailment_refuses_what_it_cannot_show() {
+        let mut state = State::default();
+        let below = |constant| Predicate {
+            difference: Affine::constant(constant),
+            comparison: Comparison::Less,
+        };
+        assert!(state.implies(&below(-1)), "`-1 < 0` holds on its own");
+        assert!(!state.implies(&below(0)), "`0 < 0` does not");
+
+        let goal = Predicate {
+            difference: Affine::symbol(SymbolId(0)),
+            comparison: Comparison::Less,
+        };
+        assert!(!state.implies(&goal), "nothing is known about the symbol");
+        state.assume(Predicate {
+            difference: Affine::symbol(SymbolId(1)),
+            comparison: Comparison::Less,
+        });
+        assert!(
+            !state.implies(&goal),
+            "a fact about another symbol must not decide this one"
+        );
+        state.assume(goal.clone());
+        assert!(state.implies(&goal));
     }
 
     /// Bounding the width of a form is what keeps every operation on one linear.
