@@ -37,7 +37,7 @@ use crate::{
         self, BlockId, Function, Operation, OperationKind, edit::FunctionEdit,
         terminator::TerminatorKind, value::ValueId,
     },
-    module::{ModuleEnv, id::Id},
+    module::{ModuleEnv, ProjectionIndex, id::Id},
     types::type_properties::concrete_type_is_trivial_copy,
 };
 
@@ -109,7 +109,7 @@ enum PlaceRoot {
 #[derive(Clone, PartialEq, Eq)]
 struct PlaceIdentity {
     root: PlaceRoot,
-    fields: SVec2<usize>,
+    fields: SVec2<ProjectionIndex>,
 }
 
 #[derive(Clone)]

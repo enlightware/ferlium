@@ -40,7 +40,10 @@ use ustr::ustr;
 
 use crate::{
     Modules,
-    module::{FunctionId, LocalFunctionId, Module, TypeDefId, trait_impl::ConcreteTraitImplKey},
+    module::{
+        FunctionId, LocalFunctionId, Module, ProjectionIndex, TypeDefId, id::Id,
+        trait_impl::ConcreteTraitImplKey,
+    },
     std::{
         STD_MODULE_ID,
         core_traits_names::{ITERATOR_TRAIT_NAME, NUM_TRAIT_NAME, ORD_TRAIT_NAME},
@@ -113,13 +116,13 @@ pub(crate) enum KnownCallee {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RangeLayout {
     /// The iterator's cursor.
-    pub(crate) next: usize,
+    pub(crate) next: ProjectionIndex,
     /// The iterator's range.
-    pub(crate) range: usize,
+    pub(crate) range: ProjectionIndex,
     /// The range's inclusive lower bound.
-    pub(crate) start: usize,
+    pub(crate) start: ProjectionIndex,
     /// The range's upper bound, exclusive for `Range` and inclusive for `RangeInclusive`.
-    pub(crate) end: usize,
+    pub(crate) end: ProjectionIndex,
 }
 
 /// The std field positions the optimizer reads.
@@ -127,7 +130,7 @@ pub(crate) struct RangeLayout {
 pub(crate) struct Layouts {
     /// `array`'s element count, which is the only array field with a semantic the optimizer uses:
     /// it is never negative, and no MIR operation says so.
-    pub(crate) array_len: usize,
+    pub(crate) array_len: ProjectionIndex,
     pub(crate) range: RangeLayout,
     pub(crate) range_inclusive: RangeLayout,
 }
@@ -281,7 +284,7 @@ impl Resolver<'_> {
     }
 
     /// The position of a field in a std product type.
-    fn field(&self, type_name: &str, field: &str) -> usize {
+    fn field(&self, type_name: &str, field: &str) -> ProjectionIndex {
         let def = self.std_module.type_def(self.type_def(type_name));
         // The parameters only have to be well-formed: a field's *position* does not depend on what
         // the type is instantiated at.
@@ -290,10 +293,11 @@ impl Resolver<'_> {
         let TypeKind::Record(fields) = &*guard else {
             panic!("std type `{type_name}` is not a record");
         };
-        fields
+        let position = fields
             .iter()
             .position(|(name, _)| name.as_str() == field)
-            .unwrap_or_else(|| panic!("std type `{type_name}` has no field `{field}`"))
+            .unwrap_or_else(|| panic!("std type `{type_name}` has no field `{field}`"));
+        ProjectionIndex::from_index(position)
     }
 
     /// The field positions of an iterator and the range it walks.
@@ -413,14 +417,14 @@ mod tests {
         let table = known_callees(&session);
         let range = table.layouts().range;
         assert_ne!(
-            (range.start, range.end),
+            (range.start.as_index(), range.end.as_index()),
             (0, 1),
             "`Range {{ start, end }}` is laid out by name, so `end` comes first"
         );
         assert_ne!(range.start, range.end);
         assert_ne!(range.next, range.range);
         assert!(
-            table.layouts().array_len < 4,
+            table.layouts().array_len.as_index() < 4,
             "`array` has four fields, so `len` is one of them"
         );
     }

@@ -46,7 +46,7 @@ use crate::{
         terminator::TerminatorKind,
         value::{ParameterId, ValueId},
     },
-    module::{FunctionId, ModuleEnv, TraitDictionaryEntry, TraitDictionaryId},
+    module::{FunctionId, ModuleEnv, ProjectionIndex, TraitDictionaryEntry, TraitDictionaryId},
     types::r#trait::TraitDictionaryEntryIndex,
     types::r#type::{CallImplType, Type},
 };
@@ -65,10 +65,15 @@ pub(crate) enum Root {
 }
 
 /// A storage slot: a root plus the field path reaching it.
+///
+/// A path entry is the position of a field in the aggregate above it, which is what a `subfield`
+/// selects. It is a [`ProjectionIndex`] rather than a bare integer because that is what it is:
+/// lowering builds the `subfield`'s index operand from one, and reading it back as an untyped
+/// number loses that.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub(crate) struct PlaceKey {
     pub root: Root,
-    pub path: Vec<usize>,
+    pub path: Vec<ProjectionIndex>,
 }
 
 impl PlaceKey {
@@ -79,7 +84,7 @@ impl PlaceKey {
         }
     }
 
-    pub(crate) fn field(&self, index: usize) -> Self {
+    pub(crate) fn field(&self, index: ProjectionIndex) -> Self {
         let mut path = self.path.clone();
         path.push(index);
         Self {
@@ -625,7 +630,7 @@ fn value_operand_fact(operand: &mir::Value, func: &Function, state: &State) -> F
 /// the inline form silently disabled every field-sensitive answer this analysis can give: the
 /// transfer function fell back to an unknown value for *every* `subfield`, and the escape scan read
 /// the same `None` as "dynamic index" and escaped the base root.
-pub(crate) fn field_index(operand: &mir::Value, func: &Function) -> Option<usize> {
+pub(crate) fn field_index(operand: &mir::Value, func: &Function) -> Option<ProjectionIndex> {
     let literal = match operand {
         mir::Value::Pattern(literal) => literal,
         mir::Value::Constant(id) => &func.constant(*id).representation,
@@ -633,7 +638,8 @@ pub(crate) fn field_index(operand: &mir::Value, func: &Function) -> Option<usize
     };
     literal
         .as_primitive_ty::<isize>()
-        .and_then(|index| usize::try_from(*index).ok())
+        .and_then(|index| u32::try_from(*index).ok())
+        .and_then(|index| ProjectionIndex::try_from(index as usize).ok())
 }
 
 /// Roots that reach a context the analysis does not model, and are therefore never tracked.
