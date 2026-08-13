@@ -45,7 +45,7 @@ use crate::{
         terminator::{Terminator, TerminatorKind},
         value::{Constant, ConstantId},
     },
-    module::{ModuleEnv, id::Id},
+    module::{FunctionId, ModuleEnv, id::Id},
     types::r#type::{CallResultConvention, Type},
 };
 
@@ -449,6 +449,28 @@ impl FunctionEdit {
                 operation.operands.iter_mut().for_each(&mut visit);
             }
             visit_terminator_operands_mut(&mut block.terminator, &mut visit);
+        }
+    }
+
+    /// Visits every function the body names, wherever it names it.
+    ///
+    /// Both halves are needed and neither subsumes the other: a callee arrives as an operand, while
+    /// `build_closure` carries its function in the operation *kind*. Renumbering a module's
+    /// function table has to reach both.
+    pub(crate) fn visit_function_ids_mut(&mut self, mut visit: impl FnMut(&mut FunctionId)) {
+        let visit = &mut visit;
+        self.visit_operands_mut(|operand| {
+            if let mir::Value::Function(id) = operand {
+                visit(id);
+            }
+        });
+        for block in &mut self.blocks {
+            for operation in &mut block.operations {
+                operation.kind.visit_function_ids_mut(&mut *visit);
+            }
+            if let TerminatorKind::Invoke { operation, .. } = &mut block.terminator.kind {
+                operation.kind.visit_function_ids_mut(&mut *visit);
+            }
         }
     }
 

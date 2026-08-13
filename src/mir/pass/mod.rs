@@ -50,6 +50,7 @@ pub(crate) mod owned_arguments;
 pub(crate) mod peephole;
 pub(crate) mod provenance;
 pub mod report;
+pub(crate) mod share_specializations;
 pub(crate) mod stack_region;
 pub(crate) mod string_accumulate;
 

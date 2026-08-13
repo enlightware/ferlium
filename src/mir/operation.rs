@@ -882,6 +882,48 @@ pub enum OperationKind {
     DropClosureEnv,
 }
 
+impl OperationKind {
+    /// Visits every function this kind names *itself*, rather than through an operand.
+    ///
+    /// A call names its callee in operand 0 as a [`mir::Value::Function`], which any operand walk
+    /// reaches; `build_closure` is the one kind holding a [`FunctionId`] where no operand walk can
+    /// see it. Whole-module renumbering has to reach both, and a reference it misses is a dangling
+    /// id rather than a missed opportunity, so this match is exhaustive on purpose: a kind that
+    /// later carries a function stops this compiling instead of being silently skipped.
+    pub(crate) fn visit_function_ids_mut(&mut self, mut visit: impl FnMut(&mut FunctionId)) {
+        use OperationKind::*;
+        match self {
+            BuildClosure { function, .. } => visit(function),
+            Alloca { .. }
+            | AllocaPlace { .. }
+            | Call { .. }
+            | Project { .. }
+            | EndProject
+            | CompareEqual
+            | Load
+            | Subfield { .. }
+            | DictEntry { .. }
+            | SubscriptMember { .. }
+            | BuildSubscript { .. }
+            | Variant { .. }
+            | BuildArray { .. }
+            | ExtractTag
+            | Store
+            | Clear
+            | Memcpy
+            | Move
+            | StackSave
+            | StackRestore
+            | CheckCallDepth
+            | CheckFuel
+            | Clone { .. }
+            | Drop { .. }
+            | CloneClosureEnv { .. }
+            | DropClosureEnv => {}
+        }
+    }
+}
+
 impl FormatWith<ModuleEnv<'_>> for Operation {
     fn fmt_with(&self, f: &mut fmt::Formatter<'_>, env: &ModuleEnv<'_>) -> fmt::Result {
         self.kind.fmt_within(f, self, env)

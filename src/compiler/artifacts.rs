@@ -17,6 +17,7 @@ use crate::{
         pass::{
             Specializations, dead_evidence, optimize_function, owned_arguments,
             provenance::{AddressorSummaries, AddressorSummary},
+            share_specializations,
         },
     },
     module::{FunctionId, LocalFunctionId, Module, ModuleEnv, ModuleId, id::Id},
@@ -246,10 +247,19 @@ impl MirArtifacts {
             next += 1;
         }
 
+        // Share the copies that became identical only under optimization. Creation-time sharing
+        // reaches every group that is identical as substituted; this reaches the ones that started
+        // distinct and converged, which needs the finished bodies to be recognized at all. Before
+        // the owned-ABI variants below, so those are derived from the deduplicated set.
+        let mut specializations = share_specializations::share_identical_specialization_bodies(
+            &mut functions,
+            specializations.into_created(),
+            module_id,
+        );
+
         // Forward a caller's final ownership into cached, optimized-MIR-only callee variants. This
         // is whole-module and deliberately outside the per-function loop: it needs the completed
         // specialization graph and changes calling conventions nothing earlier may consult.
-        let mut specializations = specializations.into_created();
         owned_arguments::forward_owned_arguments(
             &mut functions,
             &mut specializations,

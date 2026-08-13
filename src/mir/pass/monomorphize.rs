@@ -105,16 +105,46 @@ use super::{budget, function_size};
 /// itself is reserved as `Option`'s niche.
 const SELF_REFERENCE: LocalFunctionId = LocalFunctionId::new(u32::MAX - 1);
 
-/// Hashes what makes `body` — a specialization of `original` whose own id is `own` — the function it
-/// is, rather than the copy it is.
+/// How a body's function references are read while deciding what body it is.
+///
+/// A copy names *itself* by its own id, which is the one thing that must not distinguish it from
+/// another copy, so `own` maps to [`SELF_REFERENCE`]. Sharing bodies after they are optimized adds
+/// the only other reason to canonicalize — a reference to a copy already merged away has to read as
+/// the copy it was merged into — so [`share_specializations`](super::share_specializations)
+/// composes that mapping with this one.
+pub(super) fn self_reference(own: FunctionId) -> impl Fn(FunctionId) -> FunctionId {
+    move |id| {
+        if id == own {
+            FunctionId {
+                module: own.module,
+                function: SELF_REFERENCE,
+            }
+        } else {
+            id
+        }
+    }
+}
+
+/// Hashes what makes `body` — a specialization of `original` — the function it is, rather than the
+/// copy it is.
 ///
 /// Everything is hashed through its derived implementation except the operands, which are the one
-/// place a self-reference can appear: [`redirect_recursion`] writes `own` into call callee operands
-/// and nowhere else. So only calls are decomposed, and a block's other terminator forms hash whole.
+/// place `canonical` has anything to say: [`redirect_recursion`] writes a self-reference into call
+/// callee operands and nowhere else. So only calls are decomposed, and a block's other terminator
+/// forms hash whole.
+///
+/// A function named by an operation *kind* rather than an operand — `build_closure` alone — is
+/// hashed raw, so two copies naming two merged-away callees there simply fail to be recognized.
+/// That is the safe direction, and today an unreachable one: nothing ever writes a specialization
+/// into a `build_closure`.
 ///
 /// This is a filter and never the decision — [`structurally_identical`] decides — so an imprecise
 /// hash costs a sharing rather than merging two bodies that differ.
-fn structure_digest(body: &Function, original: FunctionId, own: FunctionId) -> u64 {
+pub(super) fn structure_digest(
+    body: &Function,
+    original: FunctionId,
+    canonical: &impl Fn(FunctionId) -> FunctionId,
+) -> u64 {
     let mut state = rustc_hash::FxHasher::default();
     original.hash(&mut state);
     body.result_convention().hash(&mut state);
@@ -128,7 +158,7 @@ fn structure_digest(body: &Function, original: FunctionId, own: FunctionId) -> u
         let block = body.block(block_id);
         block.operations().len().hash(&mut state);
         for operation in block.operations() {
-            hash_operation(operation, own, &mut state);
+            hash_operation(operation, canonical, &mut state);
         }
         let terminator = block.terminator();
         terminator.span.hash(&mut state);
@@ -139,7 +169,7 @@ fn structure_digest(body: &Function, original: FunctionId, own: FunctionId) -> u
                 normal,
                 error,
             } => {
-                hash_operation(operation, own, &mut state);
+                hash_operation(operation, canonical, &mut state);
                 normal.hash(&mut state);
                 error.hash(&mut state);
             }
@@ -152,46 +182,50 @@ fn structure_digest(body: &Function, original: FunctionId, own: FunctionId) -> u
     state.finish()
 }
 
-/// Hashes one operation with any reference to `own` normalized away.
-fn hash_operation(operation: &Operation, own: FunctionId, state: &mut impl Hasher) {
+/// Hashes one operation with its function references read through `canonical`.
+fn hash_operation(
+    operation: &Operation,
+    canonical: &impl Fn(FunctionId) -> FunctionId,
+    state: &mut impl Hasher,
+) {
     operation.result_id().hash(state);
     operation.span.hash(state);
     operation.kind.hash(state);
     operation.operands.len().hash(state);
     for operand in &operation.operands {
-        normalize_self_reference(operand, own).hash(state);
+        normalize_function(operand, canonical).hash(state);
     }
 }
 
-/// `operand` with a reference to the enclosing body's own id `own` replaced by [`SELF_REFERENCE`].
-fn normalize_self_reference(operand: &mir::Value, own: FunctionId) -> mir::Value {
+/// `operand` with any function it names read through `canonical`.
+fn normalize_function(
+    operand: &mir::Value,
+    canonical: &impl Fn(FunctionId) -> FunctionId,
+) -> mir::Value {
     match operand {
-        mir::Value::Function(id) if *id == own => mir::Value::Function(FunctionId {
-            module: own.module,
-            function: SELF_REFERENCE,
-        }),
+        mir::Value::Function(id) => mir::Value::Function(canonical(*id)),
         operand => operand.clone(),
     }
 }
 
-/// Whether the specialization `body`, which names itself `own`, is the function `existing` already
-/// created under the identity `existing_own`.
+/// Whether `body`, read through `canonical`, is the same function as `existing` read through
+/// `existing_canonical`.
 ///
-/// Each names itself by its own id, so the operands are compared through
-/// [`normalize_self_reference`] and everything else by the derived equality — including the code,
-/// which [`Operation::eq_by_operands`] destructures exhaustively so that a field added to MIR later
+/// The two mappings are separate because each body names itself by its own id. Everything outside
+/// the operands is compared by the derived equality — including the code, which
+/// [`Operation::eq_by_operands`] destructures exhaustively so that a field added to MIR later
 /// cannot silently drop out of a decision that two bodies are interchangeable.
 ///
-/// The name is the one part excluded, because `existing` was renamed when it was created and `body`
-/// has not been renamed yet.
-fn structurally_identical(
+/// The name is excluded, because two copies of one function are generated under different names by
+/// construction: that is exactly what the name records.
+pub(super) fn structurally_identical(
     body: &Function,
-    own: FunctionId,
+    canonical: &impl Fn(FunctionId) -> FunctionId,
     existing: &Function,
-    existing_own: FunctionId,
+    existing_canonical: &impl Fn(FunctionId) -> FunctionId,
 ) -> bool {
     let operand_eq = |operand: &mir::Value, other: &mir::Value| {
-        normalize_self_reference(operand, own) == normalize_self_reference(other, existing_own)
+        normalize_function(operand, canonical) == normalize_function(other, existing_canonical)
     };
     body.result_convention() == existing.result_convention()
         && body.parameters() == existing.parameters()
@@ -377,7 +411,7 @@ impl Specializations {
         };
         let specialized = specialize(body, scheme, &key, own, env);
 
-        let digest = structure_digest(&specialized, key.callee, own);
+        let digest = structure_digest(&specialized, key.callee, &self_reference(own));
         if let Some(existing) = self.identical_to(&specialized, key.callee, own, digest) {
             self.cache.insert(key, existing);
             return existing;
@@ -428,8 +462,13 @@ impl Specializations {
             module: self.module,
             function: candidate,
         };
-        structurally_identical(specialized, own, self.raw.get(index)?, candidate_own)
-            .then_some(candidate)
+        structurally_identical(
+            specialized,
+            &self_reference(own),
+            self.raw.get(index)?,
+            &self_reference(candidate_own),
+        )
+        .then_some(candidate)
     }
 
     /// `body` substituted at `instantiation`, computed once per distinct pair.

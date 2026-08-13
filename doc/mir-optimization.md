@@ -50,9 +50,10 @@ finish            // restores canonical form without exposing the intermediate b
 ```
 
 Then `MirArtifacts::optimize` drains the specializations those rounds requested as a worklist, since
-optimizing a specialization may request more. It then forwards provable last-use arguments into
-owned ABI variants, drops dead specialization evidence, and verifies every final declared and
-generated body exactly once before installing the optimized artifact.
+optimizing a specialization may request more. It then shares the specialized bodies that became
+identical under optimization, forwards provable last-use arguments into owned ABI variants, drops
+dead specialization evidence, and verifies every final declared and generated body exactly once
+before installing the optimized artifact.
 
 **Why the rounds.** Specialization makes a generic callee concrete, inlining copies it and binds its
 dictionary parameters to constants, folding resolves the callee's `dict_entry`s into known functions,
@@ -253,6 +254,34 @@ run on its results before dead-evidence removal and final verification.
 The table is keyed by `(callee, instantiation, dictionaries)`, so two call sites that instantiate a
 function the same way share one body. Identities index the *owning* module's table, which is not in
 general the callee's module.
+
+**Sharing is decided three times, because a key is finer than the body it produces.** Type, effect
+and evidence arguments all enter the key, but only what survives substitution enters the body:
+effects are erased unless they changed a control-flow form, and a dictionary appears only where it
+was used.
+
+1. The key cache answers a repeated call site outright, without substituting anything.
+2. A structural identity over the residual body catches a *new* key whose MIR turns out to be a
+   function already created — which needs the body built to be recognized at all.
+3. `share_specializations` catches the copies that were created distinct and *converged*, once
+   folding and inlining resolved what separated them. It runs over the finished module, after the
+   worklist drains and before the owned-ABI variants below, so those are built from the deduplicated
+   set.
+
+The identity is the same throughout: the original plus the result convention, parameters, constants
+and code, with the generated name and the body's own id — the two properties of *which copy this
+is* — normalized away. A digest selects candidates and a derived comparison decides, so a collision
+costs a sharing and can never merge two bodies that differ. Bodies are shared within one original
+and never across two, because a specialization's metadata is answered through
+`Specialization::original`: two originals with identical MIR can still declare different parameter
+passing or return conventions.
+
+Merging finished bodies adds two obligations creation-time sharing does not have. The grouping
+repeats until a round merges nothing, since two bodies that call two copies of one callee are equal
+exactly when those copies merge. And merging is composed with the compaction of the table into a
+single rewrite, so no id is ever held across a renumbering. That rewrite reaches a function wherever
+a body names one, including `build_closure`, which carries its function in the operation kind where
+no operand walk sees it.
 
 **Naming follows the `#impl:` convention**: a readable local name, a `#spec:` marker, and a
 discriminator — `twice_it#spec:[int]`. The readable part is the callee's *local* name because every
