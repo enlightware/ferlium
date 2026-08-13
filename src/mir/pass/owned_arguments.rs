@@ -33,12 +33,7 @@ use crate::{
     std::value::type_has_static_layout,
 };
 
-use super::{budget, dce, stack_region};
-
-crate::define_id_type!(
-    /// A transient position in one block's operation vector, not a stable MIR identity.
-    OperationIndex
-);
+use super::{budget, dce, site::OperationIndex, stack_region};
 
 #[derive(Clone)]
 struct SourceBody {

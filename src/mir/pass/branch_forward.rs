@@ -62,16 +62,7 @@ use crate::{
     std::logic::bool_type,
 };
 
-crate::define_id_type!(
-    /// A transient position in one block's operation vector, not a stable MIR identity.
-    OperationIndex
-);
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct OperationSite {
-    block: BlockId,
-    index: OperationIndex,
-}
+use super::site::{OperationIndex, OperationSite};
 
 #[derive(Clone, Copy)]
 struct Store {

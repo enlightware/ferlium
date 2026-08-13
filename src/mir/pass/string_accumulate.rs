@@ -44,16 +44,7 @@ use crate::{
     types::r#type::Type,
 };
 
-crate::define_id_type!(
-    /// A transient position in one block's operation vector, not a stable MIR identity.
-    OperationIndex
-);
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-struct OperationSite {
-    block: BlockId,
-    index: OperationIndex,
-}
+use super::site::{OperationIndex, OperationSite};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum UseSite {
