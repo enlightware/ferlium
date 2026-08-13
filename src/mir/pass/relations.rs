@@ -53,16 +53,17 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::{
     hir::function::ArgConvention,
     mir::{
-        self, BlockId, Function, Operation, OperationKind, terminator::TerminatorKind,
-        value::ValueId,
+        self, BlockId, Function, Operation, OperationKind, dominance::Dominance,
+        terminator::TerminatorKind, value::ValueId,
     },
     module::{FunctionId, id::Id},
     std::math::Int,
+    types::r#type::Type,
 };
 
 use super::{
     dataflow::{PlaceKey, Root, call_operands, escaping_roots, field_index, successors},
-    known_callee::{KnownCallee, KnownCallees},
+    known_callee::{KnownCallee, KnownCallees, RangeLayout},
     site::{OperationIndex, OperationSite},
 };
 
@@ -114,7 +115,7 @@ pub(crate) struct SymbolId(u32);
 ///
 /// Lives beside the flow states rather than inside them: interning is monotone and shared, while a
 /// state is cloned at every join.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct Symbols {
     ids: FxHashMap<Symbol, SymbolId>,
     names: Vec<Symbol>,
@@ -328,6 +329,21 @@ pub(crate) enum Fact {
     Ordering { left: Affine, right: Affine },
     /// The symbol is a boolean, true exactly when this holds.
     Truth(Predicate),
+    /// The symbol is a boolean whose truth *implies* these, without the converse.
+    ///
+    /// Separate from [`Truth`](Self::Truth) because one direction is all a yielded option gives:
+    /// the payload is in range when the option is `Some`, and nothing follows from it being `None`.
+    Implies(Vec<Predicate>),
+    /// The symbol is an `Option` a range iterator yielded.
+    ///
+    /// `value` is the iterator's cursor before the step, which is what the payload holds;
+    /// `present_when` is what that value satisfies when the option is `Some`. Attached to the option
+    /// itself rather than to the payload slot, because where the payload sits inside an `Option` is
+    /// a layout detail — a read looks *up* from its own place to find this.
+    Yield {
+        value: SymbolId,
+        present_when: Vec<Predicate>,
+    },
 }
 
 /// What a register denotes.
@@ -400,6 +416,37 @@ impl State {
         }
     }
 
+    /// The affine form of a place's contents.
+    ///
+    /// A place with nothing known is still one value, and naming it is what relates its two uses.
+    /// Before falling back to that, the ancestors are consulted: a range iterator's yield is
+    /// recorded on the `Option` as a whole, so reading the payload — however deep inside the option
+    /// it sits — has to find it.
+    pub(crate) fn place_affine(&self, place: &PlaceKey, symbols: &mut Symbols) -> Affine {
+        let symbol = self.symbol_of(place, symbols);
+        if let Some(Fact::Value(affine)) = self.fact(symbol) {
+            return affine.clone();
+        }
+        let mut ancestor = place.clone();
+        while !ancestor.path.is_empty() {
+            ancestor.path.pop();
+            let above = self.symbol_of(&ancestor, symbols);
+            if let Some(Fact::Yield { value, .. }) = self.fact(above) {
+                return Affine::symbol(*value);
+            }
+        }
+        Affine::symbol(symbol)
+    }
+
+    /// Every tracked place inside `place`, with the path below it.
+    fn within(&self, place: &PlaceKey) -> Vec<PlaceKey> {
+        self.current
+            .keys()
+            .filter(|tracked| *tracked != place && tracked.is_within(place))
+            .cloned()
+            .collect()
+    }
+
     /// Rebinds `place` to a definition, and forgets what was known about the slots inside it.
     ///
     /// The superseded symbol keeps its fact: it names a value that existed, and a fact about the
@@ -458,12 +505,51 @@ impl State {
     }
 }
 
+/// The type of storage each root holds, as the body declares it.
+///
+/// A [`PlaceKey`] carries no type — it is a root and a path of field positions — so recognizing that
+/// a slot is an array's length, or a range iterator, means going back to where the storage was
+/// declared.
+struct RootTypes {
+    allocas: FxHashMap<ValueId, Type>,
+    parameters: Vec<Type>,
+}
+
+impl RootTypes {
+    fn new(func: &Function) -> Self {
+        let mut allocas = FxHashMap::default();
+        for block in func.blocks() {
+            for operation in func.block(block).operations() {
+                if let OperationKind::Alloca { ty } = &operation.kind
+                    && let Some(result) = operation.result_id()
+                {
+                    allocas.insert(result, *ty);
+                }
+            }
+        }
+        Self {
+            allocas,
+            parameters: func.parameters().iter().map(|p| p.ty).collect(),
+        }
+    }
+
+    fn of(&self, root: Root) -> Option<Type> {
+        match root {
+            Root::Alloca(id) => self.allocas.get(&id).copied(),
+            Root::Parameter(id) => self.parameters.get(id.as_index()).copied(),
+            Root::DictEntry(_) => None,
+        }
+    }
+}
+
 /// The result of analysing a function.
 pub(crate) struct Analysis {
     entry_states: FxHashMap<BlockId, State>,
     exit_states: FxHashMap<BlockId, State>,
     symbols: Symbols,
     escaped: FxHashSet<Root>,
+    types: RootTypes,
+    inductions: FxHashMap<Root, Induction>,
 }
 
 impl Analysis {
@@ -489,28 +575,26 @@ impl Analysis {
         known: &KnownCallees,
         original_of: &dyn Fn(FunctionId) -> Option<FunctionId>,
         block: BlockId,
-        mut visit: impl FnMut(&Operation, DefSite, &State, &Symbols),
+        mut visit: impl FnMut(&Operation, DefSite, &State, &mut Symbols),
     ) {
-        let semantics = Semantics { known, original_of };
+        let context = Context {
+            func,
+            semantics: Semantics { known, original_of },
+            escaped: self.escaped.clone(),
+            types: RootTypes::new(func),
+            inductions: self.inductions.clone(),
+        };
         let Some(mut state) = self.entry_states.get(&block).cloned() else {
             return;
         };
         for (index, operation) in func.block(block).operations().iter().enumerate() {
             let def = site(block, index);
-            visit(operation, def, &state, &self.symbols);
-            transfer(
-                operation,
-                def,
-                func,
-                &semantics,
-                &self.escaped,
-                &mut self.symbols,
-                &mut state,
-            );
+            visit(operation, def, &state, &mut self.symbols);
+            transfer(operation, def, &context, &mut self.symbols, &mut state);
         }
         if let TerminatorKind::Invoke { operation, .. } = &func.block(block).terminator().kind {
             let def = site(block, func.block(block).operations().len());
-            visit(operation, def, &state, &self.symbols);
+            visit(operation, def, &state, &mut self.symbols);
         }
     }
 
@@ -521,6 +605,24 @@ impl Analysis {
     pub(crate) fn is_escaped(&self, root: &Root) -> bool {
         self.escaped.contains(root)
     }
+}
+
+/// A range loop whose induction [`recognize`] proved.
+#[derive(Clone, Copy, Debug)]
+struct Induction {
+    layout: RangeLayout,
+    /// Whether the upper bound is part of the range.
+    inclusive: bool,
+}
+
+/// Everything one analysis run reads and never changes.
+struct Context<'a> {
+    func: &'a Function,
+    semantics: Semantics<'a>,
+    escaped: FxHashSet<Root>,
+    types: RootTypes,
+    /// The iterator storage whose cursor is known to start at zero and only ever step forward.
+    inductions: FxHashMap<Root, Induction>,
 }
 
 /// Resolves a call's callee to the semantics the optimizer knows for it.
@@ -544,7 +646,39 @@ impl Semantics<'_> {
     }
 }
 
+/// Whether a body has anything for this analysis to say.
+///
+/// A single linear scan, and the answer is no for most functions: the analysis costs two walks to a
+/// fixpoint, and a consumer that runs it on every body in every round would pay that for the many
+/// that contain no checked subscript at all. Cheap enough to run before deciding, which is the point
+/// — the same shape as the final devirtualization sweep's syntactic filter.
+pub(crate) fn worth_analyzing(
+    func: &Function,
+    known: &KnownCallees,
+    original_of: &dyn Fn(FunctionId) -> Option<FunctionId>,
+) -> bool {
+    let semantics = Semantics { known, original_of };
+    let candidate = |operation: &Operation| {
+        matches!(
+            semantics.of(operation),
+            Some(KnownCallee::ArrayResolveIndex)
+        )
+    };
+    func.blocks().any(|block| {
+        func.block(block).operations().iter().any(candidate)
+            || matches!(
+                &func.block(block).terminator().kind,
+                TerminatorKind::Invoke { operation, .. } if candidate(operation)
+            )
+    })
+}
+
 /// Runs the analysis to fixpoint over `func`.
+///
+/// **Two passes, not one.** The first assumes no induction; the second re-runs with the loops the
+/// first let [`recognize`] confirm. The order is forced: recognizing a cursor that starts at zero
+/// means reading what the construction stored, which is a dataflow fact. Bodies with no range loop
+/// pay for one pass, which the pre-filter a consumer applies should have excluded anyway.
 pub(crate) fn analyze(
     func: &Function,
     known: &KnownCallees,
@@ -552,29 +686,126 @@ pub(crate) fn analyze(
 ) -> Analysis {
     let semantics = Semantics { known, original_of };
     // A known callee writes only through the arguments it declares and captures none of them, so
-    // its mutable argument stays tracked and `transfer` accounts for the write.
-    let (escaped, _) = escaping_roots(func, &|operation| semantics.of(operation).is_some());
+    // its mutable argument stays tracked and `transfer` accounts for the write. A `drop` likewise:
+    // it ends a value's life rather than writing another one, and forgetting the place is exactly
+    // what the transfer function does. Folding cannot say either, which is why it escapes both —
+    // and why an array read only for its length would otherwise be untracked from its own drop.
+    let (escaped, register_roots) = escaping_roots(func, &|operation| {
+        matches!(operation.kind, OperationKind::Drop { .. }) || semantics.of(operation).is_some()
+    });
+
+    let mut context = Context {
+        func,
+        semantics,
+        escaped,
+        types: RootTypes::new(func),
+        inductions: FxHashMap::default(),
+    };
+    let first = run(&context);
+    context.inductions = recognize(&context, &register_roots, &first);
+    let settled = if context.inductions.is_empty() {
+        first
+    } else {
+        run(&context)
+    };
+
+    let Context {
+        escaped,
+        types,
+        inductions,
+        ..
+    } = context;
+    Analysis {
+        entry_states: settled.entry_states,
+        exit_states: settled.exit_states,
+        symbols: settled.symbols,
+        escaped,
+        types,
+        inductions,
+    }
+}
+
+/// One run of the fixpoint.
+struct Run {
+    entry_states: FxHashMap<BlockId, State>,
+    exit_states: FxHashMap<BlockId, State>,
+    symbols: Symbols,
+}
+
+/// The rounds one run may take before it is abandoned.
+///
+/// Generous: bodies are small and each round is one walk. It exists because the state is not
+/// provably monotone — bounding [`MAX_KNOWN`] means a smaller input can keep a *different* eight
+/// predicates, so two rounds could in principle alternate. Rather than reason about that, a run
+/// that has not settled by here reports nothing at all, which is always sound.
+const MAX_ROUNDS: usize = 64;
+
+/// Walks the body until the entry states stop moving.
+///
+/// Each round recomputes every block's entry from its predecessors' *current* exits, rather than
+/// folding each edge into an accumulated entry as it is walked. The difference matters at a loop
+/// header: the back edge's first visit carries facts about the cursor as the construction defined
+/// it, and its second about the cursor as the join defines it. Intersecting those two across
+/// rounds throws away both, and with them every bound the loop was analysed for.
+fn run(context: &Context<'_>) -> Run {
+    let func = context.func;
+    let block_count = func.blocks().count();
+    let mut predecessors: Vec<Vec<BlockId>> = vec![Vec::new(); block_count];
+    for block in func.blocks() {
+        for successor in successors(&func.block(block).terminator().kind) {
+            predecessors[successor.as_index()].push(block);
+        }
+    }
 
     let mut symbols = Symbols::default();
     let mut entry_states: FxHashMap<BlockId, State> = FxHashMap::default();
+    let mut exit_states: FxHashMap<BlockId, State> = FxHashMap::default();
     entry_states.insert(func.entry(), State::default());
 
-    let mut changed = true;
-    while changed {
-        changed = false;
+    for round in 0.. {
+        if round == MAX_ROUNDS {
+            return Run {
+                entry_states: FxHashMap::default(),
+                exit_states: FxHashMap::default(),
+                symbols,
+            };
+        }
+        let mut changed = false;
         for block_id in func.blocks() {
-            let Some(entry) = entry_states.get(&block_id).cloned() else {
+            // The entry block's state is not a join of anything; every other block's is the join of
+            // what each predecessor sends down the edge into it.
+            let entry = if block_id == func.entry() {
+                Some(State::default())
+            } else {
+                let mut joined: Option<State> = None;
+                for predecessor in &predecessors[block_id.as_index()] {
+                    let Some(exit) = exit_states.get(predecessor) else {
+                        continue;
+                    };
+                    let terminator = &func.block(*predecessor).terminator().kind;
+                    let edge = refine(exit, terminator, block_id, &mut symbols);
+                    joined = Some(match joined {
+                        Some(existing) => rejoin(&existing, &edge, block_id),
+                        None => edge,
+                    });
+                }
+                joined
+            };
+            let Some(entry) = entry else {
                 continue;
             };
+            if entry_states.get(&block_id) != Some(&entry) {
+                changed = true;
+            }
+            entry_states.insert(block_id, entry.clone());
+
             let mut state = entry;
             let block = func.block(block_id);
             for (index, operation) in block.operations().iter().enumerate() {
                 transfer(
                     operation,
                     site(block_id, index),
-                    func,
-                    &semantics,
-                    &escaped,
+                    context,
                     &mut symbols,
                     &mut state,
                 );
@@ -583,67 +814,220 @@ pub(crate) fn analyze(
                 transfer(
                     operation,
                     site(block_id, block.operations().len()),
-                    func,
-                    &semantics,
-                    &escaped,
+                    context,
                     &mut symbols,
                     &mut state,
                 );
             }
-            for successor in successors(&block.terminator().kind) {
-                let state = refine(&state, &block.terminator().kind, successor, &mut symbols);
-                let updated = match entry_states.get(&successor) {
-                    Some(existing) => rejoin(existing, &state, successor),
-                    None => state.clone(),
-                };
-                if entry_states.get(&successor) != Some(&updated) {
-                    entry_states.insert(successor, updated);
-                    changed = true;
-                }
+            if exit_states.get(&block_id) != Some(&state) {
+                changed = true;
             }
+            exit_states.insert(block_id, state);
+        }
+        if !changed {
+            break;
         }
     }
 
-    // One last walk to record where each block leaves off. The fixpoint only ever propagates entry
-    // states, and every consumer asks about a point inside a block.
-    let mut exit_states = FxHashMap::default();
-    for block_id in func.blocks() {
-        let Some(mut state) = entry_states.get(&block_id).cloned() else {
-            continue;
-        };
-        let block = func.block(block_id);
-        for (index, operation) in block.operations().iter().enumerate() {
-            let def = site(block_id, index);
-            transfer(
-                operation,
-                def,
-                func,
-                &semantics,
-                &escaped,
-                &mut symbols,
-                &mut state,
-            );
-        }
-        if let TerminatorKind::Invoke { operation, .. } = &block.terminator().kind {
-            let def = site(block_id, block.operations().len());
-            transfer(
-                operation,
-                def,
-                func,
-                &semantics,
-                &escaped,
-                &mut symbols,
-                &mut state,
-            );
-        }
-        exit_states.insert(block_id, state);
-    }
-
-    Analysis {
+    Run {
         entry_states,
         exit_states,
         symbols,
-        escaped,
+    }
+}
+
+/// The iterator storage whose cursor provably starts at zero and only ever steps forward.
+///
+/// This is the *zero-based, unit-step* form and nothing more general. What it has to establish is
+/// the loop invariant `0 <= cursor`, which no per-edge fact can give: the cursor is a different
+/// value on every iteration, and joining the entry value with the stepped one loses the relation
+/// that both are non-negative. Recognizing the shape of the whole loop is what replaces that
+/// inference, and it is why the plan calls for this before any interval or scalar-evolution
+/// machinery.
+///
+/// A root qualifies when all of the following hold, each of which is a way the invariant could
+/// otherwise be broken:
+///
+/// - it is `alloca` storage for a range iterator, and does not escape;
+/// - every write into it other than a step is in **one** block — the construction;
+/// - that block dominates every step, so the construction always precedes them;
+/// - that block is not reachable from any step, so it is outside the loop and cannot re-run;
+/// - after it, both the cursor and the range's lower bound are the constant zero.
+///
+/// The single-block restriction is what the desugared `for` produces and is deliberately not
+/// generalized: a construction spread over blocks would need each one checked against the rest.
+fn recognize(
+    context: &Context<'_>,
+    register_roots: &FxHashMap<ValueId, Root>,
+    run: &Run,
+) -> FxHashMap<Root, Induction> {
+    let func = context.func;
+    let candidates: Vec<(Root, RangeLayout, bool)> = func
+        .blocks()
+        .flat_map(|block| func.block(block).operations())
+        .filter_map(|operation| {
+            let OperationKind::Alloca { ty } = &operation.kind else {
+                return None;
+            };
+            let root = Root::Alloca(operation.result_id()?);
+            if context.escaped.contains(&root) {
+                return None;
+            }
+            let (kind, layout) = context.semantics.known.range_iterator(*ty)?;
+            Some((root, layout, kind == KnownCallee::RangeInclusiveNext))
+        })
+        .collect();
+    if candidates.is_empty() {
+        return FxHashMap::default();
+    }
+
+    let successor_lists: Vec<Vec<usize>> = func
+        .blocks()
+        .map(|block| {
+            successors(&func.block(block).terminator().kind)
+                .into_iter()
+                .map(|target| target.as_index())
+                .collect()
+        })
+        .collect();
+    let dominance = Dominance::of(&successor_lists, func.entry().as_index());
+
+    let mut recognized = FxHashMap::default();
+    for (root, layout, inclusive) in candidates {
+        let Some(construction) =
+            construction_block(context, register_roots, root, &dominance, &successor_lists)
+        else {
+            continue;
+        };
+        let Some(state) = run.exit_states.get(&construction) else {
+            continue;
+        };
+        // A copy, because reading a place has to be able to name one the run never did.
+        let mut symbols = run.symbols.clone();
+        let cursor = PlaceKey::root(root).field(layout.next);
+        let lower = PlaceKey::root(root).field(layout.range).field(layout.start);
+        let zero = |place: &PlaceKey, symbols: &mut Symbols| {
+            state.place_affine(place, symbols).as_constant() == Some(0)
+        };
+        if zero(&cursor, &mut symbols) && zero(&lower, &mut symbols) {
+            recognized.insert(root, Induction { layout, inclusive });
+        }
+    }
+    recognized
+}
+
+/// The one block that writes an iterator outside its steps, if the shape [`recognize`] requires
+/// holds.
+fn construction_block(
+    context: &Context<'_>,
+    register_roots: &FxHashMap<ValueId, Root>,
+    root: Root,
+    dominance: &Dominance,
+    successor_lists: &[Vec<usize>],
+) -> Option<BlockId> {
+    let func = context.func;
+    let mut construction: Option<BlockId> = None;
+    let mut steps = Vec::new();
+    for block in func.blocks() {
+        let mut scan = |operation: &Operation| -> bool {
+            let writes = writes_into(operation, root, register_roots);
+            if !writes {
+                return true;
+            }
+            if context.semantics.of(operation).is_some_and(|known| {
+                matches!(
+                    known,
+                    KnownCallee::RangeNext | KnownCallee::RangeInclusiveNext
+                )
+            }) {
+                steps.push(block);
+                return true;
+            }
+            match construction {
+                Some(existing) if existing != block => false,
+                _ => {
+                    construction = Some(block);
+                    true
+                }
+            }
+        };
+        for operation in func.block(block).operations() {
+            if !scan(operation) {
+                return None;
+            }
+        }
+        if let TerminatorKind::Invoke { operation, .. } = &func.block(block).terminator().kind
+            && !scan(operation)
+        {
+            return None;
+        }
+    }
+
+    let construction = construction?;
+    if steps.is_empty() {
+        return None;
+    }
+    let reaches_construction = reachable_from(successor_lists, &steps);
+    steps
+        .iter()
+        .all(|step| dominance.dominates(construction.as_index(), step.as_index()))
+        .then_some(())?;
+    (!reaches_construction.contains(&construction.as_index())).then_some(construction)
+}
+
+/// The blocks reachable from any of `from`, following its own edges.
+fn reachable_from(successor_lists: &[Vec<usize>], from: &[BlockId]) -> FxHashSet<usize> {
+    let mut seen = FxHashSet::default();
+    let mut worklist: Vec<usize> = from.iter().map(|block| block.as_index()).collect();
+    while let Some(block) = worklist.pop() {
+        for successor in &successor_lists[block] {
+            if seen.insert(*successor) {
+                worklist.push(*successor);
+            }
+        }
+    }
+    seen
+}
+
+/// Whether an operation writes anywhere inside `root`.
+///
+/// Conservative in the direction that matters: an operation whose effect on the root this cannot
+/// classify counts as a write, so an unrecognized mutation disqualifies the loop rather than being
+/// silently tolerated.
+fn writes_into(
+    operation: &Operation,
+    root: Root,
+    register_roots: &FxHashMap<ValueId, Root>,
+) -> bool {
+    let rooted = |operand: &mir::Value| match operand {
+        mir::Value::Register(id) => register_roots.get(id) == Some(&root),
+        mir::Value::Parameter(id) => root == Root::Parameter(*id),
+        _ => false,
+    };
+    match &operation.kind {
+        OperationKind::Alloca { .. } | OperationKind::AllocaPlace { .. } => false,
+        // Reads: the place is borrowed and left as it was.
+        OperationKind::Load
+        | OperationKind::CompareEqual
+        | OperationKind::ExtractTag
+        | OperationKind::Subfield { .. }
+        | OperationKind::DictEntry { .. } => false,
+        OperationKind::Store => rooted(&operation.operands[1]),
+        OperationKind::Memcpy | OperationKind::Move => {
+            rooted(&operation.operands[1]) || operation.operands.iter().skip(2).any(rooted)
+        }
+        OperationKind::Clear | OperationKind::Drop { .. } => rooted(&operation.operands[0]),
+        OperationKind::Clone { .. } => rooted(&operation.operands[1]),
+        OperationKind::Call { ty, .. } => match call_operands(&operation.operands, ty) {
+            Some(call) => {
+                rooted(call.result)
+                    || call.arguments.iter().any(|(operand, convention)| {
+                        matches!(convention, ArgConvention::MutableRef) && rooted(operand)
+                    })
+            }
+            None => operation.operands.iter().any(rooted),
+        },
+        _ => operation.operands.iter().any(rooted),
     }
 }
 
@@ -674,15 +1058,20 @@ fn refine(
     if then_target == else_target {
         return state.clone();
     }
-    let Some(Fact::Truth(predicate)) = condition_fact(state, condition, symbols) else {
-        return state.clone();
-    };
     let mut refined = state.clone();
-    refined.assume(if successor == *then_target {
-        predicate
-    } else {
-        predicate.negated()
-    });
+    match condition_fact(state, condition, symbols) {
+        Some(Fact::Truth(predicate)) => refined.assume(if successor == *then_target {
+            predicate
+        } else {
+            predicate.negated()
+        }),
+        Some(Fact::Implies(predicates)) if successor == *then_target => {
+            for predicate in predicates {
+                refined.assume(predicate);
+            }
+        }
+        _ => return state.clone(),
+    }
     refined
 }
 
@@ -730,12 +1119,17 @@ fn rejoin(existing: &State, incoming: &State, block: BlockId) -> State {
 fn transfer(
     operation: &Operation,
     def: DefSite,
-    func: &Function,
-    semantics: &Semantics<'_>,
-    escaped: &FxHashSet<Root>,
+    context: &Context<'_>,
     symbols: &mut Symbols,
     state: &mut State,
 ) {
+    let Context {
+        func,
+        semantics,
+        escaped,
+        types,
+        inductions,
+    } = context;
     let tracked = |place: &PlaceKey| !escaped.contains(&place.root);
     match &operation.kind {
         // `alloca_place` is deliberately absent: the escape scan does not register its result as a
@@ -778,7 +1172,7 @@ fn transfer(
                     state
                         .fact(symbol)
                         .cloned()
-                        .unwrap_or(Fact::Value(Affine::symbol(symbol)))
+                        .unwrap_or_else(|| Fact::Value(state.place_affine(&place, symbols)))
                 });
             let symbol = symbols.intern(Symbol::Register(result));
             match fact {
@@ -798,7 +1192,28 @@ fn transfer(
                 state.place_of(&operation.operands[0]),
                 field_index(&operation.operands[1], func),
             ) {
-                (Some(base), Some(index)) if tracked(&base) => Binding::Place(base.field(index)),
+                (Some(base), Some(index)) if tracked(&base) => {
+                    // An array's length is never negative, and no MIR operation says so. Without it
+                    // a `for i in 0..len(a)` loop cannot even be shown to count *upwards*, because
+                    // a range whose end is below its start counts down.
+                    let field = base.field(index);
+                    if base.path.is_empty()
+                        && index == semantics.known.layouts().array_len
+                        && types
+                            .of(base.root)
+                            .is_some_and(|ty| semantics.known.is_array(ty))
+                    {
+                        let length = state.place_affine(&field, symbols);
+                        if let Some(predicate) = Predicate::between(
+                            &Affine::constant(0),
+                            Comparison::LessOrEqual,
+                            &length,
+                        ) {
+                            state.assume(predicate);
+                        }
+                    }
+                    Binding::Place(field)
+                }
                 _ => Binding::Value,
             };
             state.registers.insert(result, binding);
@@ -813,7 +1228,37 @@ fn transfer(
                     .unwrap_or(Fact::Value(Affine::symbol(symbol)))
             });
             if let Some(destination) = state.place_of(&operation.operands[1]).filter(&tracked) {
-                state.define(destination, def, symbols, fact);
+                // The fields travel too, and separately from the whole: a struct's own fact says
+                // nothing about its fields, and a range is built field by field and then copied
+                // into its iterator in one go. Losing the fields there loses the loop's bounds.
+                let fields: Vec<_> = source
+                    .as_ref()
+                    .map(|place| {
+                        state
+                            .within(place)
+                            .into_iter()
+                            .map(|inner| {
+                                let path = inner.path[place.path.len()..].to_vec();
+                                let symbol = state.symbol_of(&inner, symbols);
+                                let fact = state
+                                    .fact(symbol)
+                                    .cloned()
+                                    .unwrap_or(Fact::Value(Affine::symbol(symbol)));
+                                (path, fact)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                state.define(destination.clone(), def, symbols, fact);
+                // Shallowest first: defining a place forgets the slots inside it, so a deeper field
+                // written before its parent would be wiped by the parent's own definition.
+                let mut fields = fields;
+                fields.sort_by_key(|(path, _)| path.len());
+                for (path, fact) in fields {
+                    let mut inner = destination.clone();
+                    inner.path.extend(path);
+                    state.define(inner, def, symbols, Some(fact));
+                }
             }
             // A move leaves its source holding nothing nameable; a memcpy preserves it.
             if matches!(operation.kind, OperationKind::Move)
@@ -838,7 +1283,7 @@ fn transfer(
                 .filter(&tracked)
                 .map(|place| state.symbol_of(&place, symbols))
                 .and_then(|symbol| state.fact(symbol).cloned())
-                .filter(|fact| matches!(fact, Fact::Ordering { .. }));
+                .filter(|fact| matches!(fact, Fact::Ordering { .. } | Fact::Yield { .. }));
             let symbol = symbols.intern(Symbol::Register(result));
             match fact {
                 Some(fact) => {
@@ -873,14 +1318,38 @@ fn transfer(
             // Whatever a callee may write through is no longer the value it was, whether or not the
             // callee's meaning is known: knowing what a call computes says nothing about the slots
             // it wrote on the way.
+            // The cursor's symbol has to be taken before the step redefines it: the value the
+            // option yields is what the iterator held on the way *in*.
+            let cursor = known
+                .filter(|known| {
+                    matches!(
+                        known,
+                        KnownCallee::RangeNext | KnownCallee::RangeInclusiveNext
+                    )
+                })
+                .and_then(|_| iterator_place(&call.arguments, state))
+                .filter(|place| inductions.contains_key(&place.root))
+                .map(|place| {
+                    let induction = inductions[&place.root];
+                    state.symbol_of(&place.field(induction.layout.next), symbols)
+                });
             for (operand, convention) in &call.arguments {
                 if matches!(convention, ArgConvention::MutableRef)
                     && let Some(place) = state.place_of(operand).filter(&tracked)
                 {
-                    state.define(place, def, symbols, None);
+                    // A range step writes the cursor and nothing else, so forgetting the whole
+                    // iterator would throw away the very bounds the loop is being read for. This is
+                    // the precision a resolved callee buys: an unknown one still loses everything.
+                    match stepped_cursor(known, &place, types, semantics) {
+                        Some(cursor) => state.define(cursor, def, symbols, None),
+                        None => state.define(place, def, symbols, None),
+                    }
                 }
             }
             let fact = known.and_then(|known| result_fact(known, &call.arguments, symbols, state));
+            let fact = fact.or_else(|| {
+                yield_fact(known?, &call.arguments, inductions, cursor, symbols, state)
+            });
             if let Some(place) = state.place_of(call.result).filter(&tracked) {
                 state.define(place, def, symbols, fact);
             }
@@ -945,18 +1414,96 @@ fn result_fact(
     }
 }
 
+/// The cursor a range step writes, for a call that is one.
+///
+/// `None` for every other call, including one on an iterator whose induction was not recognized:
+/// the layout is what makes the narrower write expressible, and it comes from the iterator's type
+/// rather than from the loop's shape.
+fn stepped_cursor(
+    known: Option<KnownCallee>,
+    place: &PlaceKey,
+    types: &RootTypes,
+    semantics: &Semantics<'_>,
+) -> Option<PlaceKey> {
+    if !matches!(
+        known?,
+        KnownCallee::RangeNext | KnownCallee::RangeInclusiveNext
+    ) || !place.path.is_empty()
+    {
+        return None;
+    }
+    let (_, layout) = semantics.known.range_iterator(types.of(place.root)?)?;
+    Some(place.field(layout.next))
+}
+
+/// The iterator a range step is walking.
+fn iterator_place(arguments: &[(&mir::Value, ArgConvention)], state: &State) -> Option<PlaceKey> {
+    let (operand, _) = arguments
+        .iter()
+        .find(|(_, convention)| matches!(convention, ArgConvention::MutableRef))?;
+    state.place_of(operand)
+}
+
+/// What a step of a recognized range loop leaves in its result slot.
+///
+/// The two bounds come from different places and only one of them is a per-call fact. `cursor < end`
+/// is what a step *tests* before yielding, so it holds on the `Some` path — but only ascending,
+/// since a range whose end is below its start counts down and yields while `cursor > end` instead.
+/// `0 <= cursor` is the loop invariant, and it is [`recognize`] rather than this that established
+/// it.
+fn yield_fact(
+    known: KnownCallee,
+    arguments: &[(&mir::Value, ArgConvention)],
+    inductions: &FxHashMap<Root, Induction>,
+    cursor: Option<SymbolId>,
+    symbols: &mut Symbols,
+    state: &State,
+) -> Option<Fact> {
+    if !matches!(
+        known,
+        KnownCallee::RangeNext | KnownCallee::RangeInclusiveNext
+    ) {
+        return None;
+    }
+    let cursor = cursor?;
+    let iterator = iterator_place(arguments, state)?;
+    let induction = inductions.get(&iterator.root)?;
+    let end = state.place_affine(
+        &iterator
+            .field(induction.layout.range)
+            .field(induction.layout.end),
+        symbols,
+    );
+    // Ascending, which for a zero-based range is the end being non-negative. Without it the
+    // iterator counts down and every bound below is the wrong way round.
+    let ascending = Predicate::between(&Affine::constant(0), Comparison::LessOrEqual, &end)?;
+    if !state.implies(&ascending) {
+        return None;
+    }
+    let value = Affine::symbol(cursor);
+    let above_zero = Predicate::between(&Affine::constant(0), Comparison::LessOrEqual, &value)?;
+    let below_end = Predicate::between(
+        &value,
+        if induction.inclusive {
+            Comparison::LessOrEqual
+        } else {
+            Comparison::Less
+        },
+        &end,
+    )?;
+    Some(Fact::Yield {
+        value: cursor,
+        present_when: vec![above_zero, below_end],
+    })
+}
+
 /// The affine form of a value read through a call argument.
 ///
 /// An argument is always a place: MIR has no immediate operands at a call, so a literal reaches one
 /// through a slot it was stored into, and that store is where its form was recorded.
 fn argument_affine(operand: &mir::Value, symbols: &mut Symbols, state: &State) -> Option<Affine> {
     let place = state.place_of(operand)?;
-    let symbol = state.symbol_of(&place, symbols);
-    match state.fact(symbol) {
-        Some(Fact::Value(affine)) => Some(affine.clone()),
-        // An unknown slot is still one value, and naming it is what relates its two uses.
-        _ => Some(Affine::symbol(symbol)),
-    }
+    Some(state.place_affine(&place, symbols))
 }
 
 /// The fact for an operand used as a materialized value.
@@ -996,19 +1543,27 @@ fn comparison_fact(
         Some(_) => None,
         None => value_fact(&operation.operands[0], func, symbols, state),
     }?;
-    let Fact::Ordering { left, right } = scrutinee else {
-        return None;
-    };
     let mir::Value::Pattern(pattern) = &operation.operands[1] else {
         return None;
     };
-    let predicate = match pattern.as_variant_tag()?.as_str() {
-        "Less" => Predicate::between(&left, Comparison::Less, &right)?,
-        "Greater" => Predicate::between(&right, Comparison::Less, &left)?,
-        "Equal" => Predicate::between(&left, Comparison::Equal, &right)?,
-        _ => return None,
-    };
-    Some(Fact::Truth(predicate))
+    let tag = pattern.as_variant_tag()?;
+    match scrutinee {
+        Fact::Ordering { left, right } => {
+            let predicate = match tag.as_str() {
+                "Less" => Predicate::between(&left, Comparison::Less, &right)?,
+                "Greater" => Predicate::between(&right, Comparison::Less, &left)?,
+                "Equal" => Predicate::between(&left, Comparison::Equal, &right)?,
+                _ => return None,
+            };
+            Some(Fact::Truth(predicate))
+        }
+        // One direction only: the payload is in range when the option is `Some`, and a `None`
+        // says nothing about a value that is not there.
+        Fact::Yield { present_when, .. } if tag.as_str() == "Some" => {
+            Some(Fact::Implies(present_when))
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -1025,7 +1580,11 @@ mod tests {
     /// has no direct callee and none of the arithmetic below is visible at all; folding and
     /// devirtualization are what make it so. Every fixture takes its inputs as parameters, so
     /// nothing folds away and what remains to observe is the relation.
-    fn with_analysis(src: &str, name: &str, check: impl FnOnce(&Function, &Analysis)) {
+    fn with_analysis(
+        src: &str,
+        name: &str,
+        check: impl FnOnce(&Function, &mut Analysis, &KnownCallees),
+    ) {
         let mut session = CompilerSession::new();
         session.set_mir_optimization(MirOptimization::Enabled);
         let module_id: ModuleId = session
@@ -1043,8 +1602,8 @@ mod tests {
             .flatten()
             .find(|body| body.name.as_str() == name)
             .expect("the function was declared");
-        let analysis = analyze(function, &known, &|_| None);
-        check(function, &analysis);
+        let mut analysis = analyze(function, &known, &|_| None);
+        check(function, &mut analysis, &known);
     }
 
     /// Every fact the final state holds, so that a test can look for one without knowing which
@@ -1064,7 +1623,7 @@ mod tests {
         with_analysis(
             "fn step(i: int) -> int { i + 1 }",
             "step",
-            |function, analysis| {
+            |function, analysis, _| {
                 let increments = facts(function, analysis)
                     .into_iter()
                     .filter(|fact| match fact {
@@ -1087,7 +1646,7 @@ mod tests {
         with_analysis(
             "fn below(i: int, n: int) -> bool { i < n }",
             "below",
-            |function, analysis| {
+            |function, analysis, _| {
                 let predicates: Vec<_> = facts(function, analysis)
                     .into_iter()
                     .filter_map(|fact| match fact {
@@ -1113,7 +1672,7 @@ mod tests {
         with_analysis(
             "fn twice(a: int) -> int { let mut x = a; x = x + 1; x = x + 1; x }",
             "twice",
-            |function, analysis| {
+            |function, analysis, _| {
                 let mut symbols = Symbols::default();
                 let mut seen = FxHashSet::default();
                 for block in function.blocks() {
@@ -1140,7 +1699,7 @@ mod tests {
         with_analysis(
             "fn total(mut a: [int]) -> int { let mut t = 0; for i in 0..len(a) { t = t + i }; t }",
             "total",
-            |function, analysis| {
+            |function, analysis, _| {
                 let (folding_escapes, _) = escaping_roots(function, &|_| false);
                 let ours = folding_escapes
                     .iter()
@@ -1163,7 +1722,7 @@ mod tests {
         with_analysis(
             "fn total(mut a: [int]) -> int { let mut t = 0; for i in 0..len(a) { t = t + i }; t }",
             "total",
-            |function, analysis| {
+            |function, analysis, _| {
                 assert!(
                     function.blocks().count() > 3,
                     "the fixture must actually contain a loop"
@@ -1194,7 +1753,7 @@ mod tests {
         with_analysis(
             "fn smaller(a: int, b: int) -> int { if a < b { a } else { b } }",
             "smaller",
-            |function, analysis| {
+            |function, analysis, _| {
                 let assumed = assumptions(function, analysis);
                 let taken: Vec<_> = assumed
                     .iter()
@@ -1263,6 +1822,84 @@ mod tests {
         );
         state.assume(goal.clone());
         assert!(state.implies(&goal));
+    }
+
+    const LOOP: &str =
+        "fn total(mut a: [int]) -> int { let mut t = 0; for i in 0..len(a) { t = t + a[i] }; t }";
+
+    /// The whole point of steps 1 through 3, stated where step 4 will ask it: at the bounds check
+    /// itself, both halves of its precondition follow from what is known.
+    ///
+    /// Asked through `implies` against the check's own arguments rather than by matching predicate
+    /// shapes, because that is the question the rewrite asks and the only one worth passing.
+    #[test]
+    fn a_zero_based_range_loop_proves_its_own_bounds_check() {
+        with_analysis(LOOP, "total", |function, analysis, known| {
+            let mut checks = 0;
+            for block in function.blocks() {
+                analysis.replay(
+                    function,
+                    known,
+                    &|_| None,
+                    block,
+                    |operation, _, state, symbols| {
+                        let OperationKind::Call { ty, .. } = &operation.kind else {
+                            return;
+                        };
+                        if !matches!(
+                            Semantics {
+                                known,
+                                original_of: &|_| None
+                            }
+                            .of(operation),
+                            Some(KnownCallee::ArrayResolveIndex)
+                        ) {
+                            return;
+                        }
+                        let call =
+                            call_operands(&operation.operands, ty).expect("a call has operands");
+                        let index = argument_affine(call.arguments[0].0, symbols, state)
+                            .expect("the index is a place");
+                        let length = argument_affine(call.arguments[1].0, symbols, state)
+                            .expect("the length is a place");
+                        let zero = Affine::constant(0);
+                        assert!(
+                            state.implies(
+                                &Predicate::between(&zero, Comparison::LessOrEqual, &index)
+                                    .unwrap()
+                            ),
+                            "the index must be known non-negative"
+                        );
+                        assert!(
+                            state.implies(
+                                &Predicate::between(&index, Comparison::Less, &length).unwrap()
+                            ),
+                            "the index must be known below the length"
+                        );
+                        checks += 1;
+                    },
+                );
+            }
+            assert_eq!(
+                checks, 1,
+                "the loop must still contain exactly one bounds check"
+            );
+        });
+    }
+
+    /// The analysis is two walks to a fixpoint, so a consumer has to be able to skip it.
+    #[test]
+    fn a_body_with_no_bounds_check_is_filtered_out() {
+        with_analysis(LOOP, "total", |function, _, known| {
+            assert!(worth_analyzing(function, known, &|_| None));
+        });
+        with_analysis(
+            "fn step(i: int) -> int { i + 1 }",
+            "step",
+            |function, _, known| {
+                assert!(!worth_analyzing(function, known, &|_| None));
+            },
+        );
     }
 
     /// Bounding the width of a form is what keeps every operation on one linear.

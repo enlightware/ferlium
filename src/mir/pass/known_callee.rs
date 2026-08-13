@@ -40,14 +40,23 @@ use ustr::ustr;
 
 use crate::{
     Modules,
-    module::{FunctionId, LocalFunctionId, Module, trait_impl::ConcreteTraitImplKey},
+    module::{FunctionId, LocalFunctionId, Module, TypeDefId, trait_impl::ConcreteTraitImplKey},
     std::{
         STD_MODULE_ID,
         core_traits_names::{ITERATOR_TRAIT_NAME, NUM_TRAIT_NAME, ORD_TRAIT_NAME},
         math::int_type,
     },
-    types::r#type::Type,
+    types::r#type::{Type, TypeKind},
 };
+
+/// The definition a named type refers to, if it is one.
+fn named_def(ty: Type) -> Option<TypeDefId> {
+    let guard = ty.data();
+    match &*guard {
+        TypeKind::Named(named) => Some(named.def),
+        _ => None,
+    }
+}
 
 /// What a call to a known std function computes.
 ///
@@ -96,12 +105,45 @@ pub(crate) enum KnownCallee {
     RangeInclusiveNext,
 }
 
+/// The fields of a std type the optimizer reads positionally.
+///
+/// Resolved rather than assumed: MIR names a field by index, and the index is **not** the
+/// declaration order — records are laid out by name, so `Range { start, end }` is `end` at 0 and
+/// `start` at 1. Writing the numbers down by hand would work until someone renamed a field.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RangeLayout {
+    /// The iterator's cursor.
+    pub(crate) next: usize,
+    /// The iterator's range.
+    pub(crate) range: usize,
+    /// The range's inclusive lower bound.
+    pub(crate) start: usize,
+    /// The range's upper bound, exclusive for `Range` and inclusive for `RangeInclusive`.
+    pub(crate) end: usize,
+}
+
+/// The std field positions the optimizer reads.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Layouts {
+    /// `array`'s element count, which is the only array field with a semantic the optimizer uses:
+    /// it is never negative, and no MIR operation says so.
+    pub(crate) array_len: usize,
+    pub(crate) range: RangeLayout,
+    pub(crate) range_inclusive: RangeLayout,
+}
+
 /// The known std callees, keyed by identity.
 ///
 /// Built once against a session's std module. Nothing here depends on the module being optimized,
 /// so one table serves every module of a session.
 pub(crate) struct KnownCallees {
     by_id: FxHashMap<FunctionId, KnownCallee>,
+    layouts: Layouts,
+    /// The type definitions a place has to be an instance of for a field position above to mean
+    /// anything.
+    array: TypeDefId,
+    range_iterator: TypeDefId,
+    range_inclusive_iterator: TypeDefId,
 }
 
 impl KnownCallees {
@@ -162,6 +204,38 @@ impl KnownCallees {
         ];
         Self {
             by_id: entries.into_iter().collect(),
+            layouts: Layouts {
+                array_len: resolver.field("array", "len"),
+                range: resolver.range_layout("RangeIterator", "Range"),
+                range_inclusive: resolver.range_layout("RangeInclusiveIterator", "RangeInclusive"),
+            },
+            array: resolver.type_def("array"),
+            range_iterator: resolver.type_def("RangeIterator"),
+            range_inclusive_iterator: resolver.type_def("RangeInclusiveIterator"),
+        }
+    }
+
+    pub(crate) fn layouts(&self) -> &Layouts {
+        &self.layouts
+    }
+
+    /// Whether `ty` is the std array type, at any element type.
+    pub(crate) fn is_array(&self, ty: Type) -> bool {
+        named_def(ty) == Some(self.array)
+    }
+
+    /// The range iterator `ty` is, if it is one.
+    pub(crate) fn range_iterator(&self, ty: Type) -> Option<(KnownCallee, RangeLayout)> {
+        let def = named_def(ty)?;
+        if def == self.range_iterator {
+            Some((KnownCallee::RangeNext, self.layouts.range))
+        } else if def == self.range_inclusive_iterator {
+            Some((
+                KnownCallee::RangeInclusiveNext,
+                self.layouts.range_inclusive,
+            ))
+        } else {
+            None
         }
     }
 
@@ -198,14 +272,43 @@ impl Resolver<'_> {
         FunctionId::new(STD_MODULE_ID, local)
     }
 
+    /// The definition of a std type, named the way source names it.
+    fn type_def(&self, name: &str) -> TypeDefId {
+        let name = ustr(name);
+        self.std_module
+            .get_type_def_id(name)
+            .unwrap_or_else(|| panic!("std declares no type `{name}`"))
+    }
+
+    /// The position of a field in a std product type.
+    fn field(&self, type_name: &str, field: &str) -> usize {
+        let def = self.std_module.type_def(self.type_def(type_name));
+        // The parameters only have to be well-formed: a field's *position* does not depend on what
+        // the type is instantiated at.
+        let shape = def.instantiated_shape(&vec![int_type(); def.param_count()]);
+        let guard = shape.data();
+        let TypeKind::Record(fields) = &*guard else {
+            panic!("std type `{type_name}` is not a record");
+        };
+        fields
+            .iter()
+            .position(|(name, _)| name.as_str() == field)
+            .unwrap_or_else(|| panic!("std type `{type_name}` has no field `{field}`"))
+    }
+
+    /// The field positions of an iterator and the range it walks.
+    fn range_layout(&self, iterator: &str, range: &str) -> RangeLayout {
+        RangeLayout {
+            next: self.field(iterator, "next"),
+            range: self.field(iterator, "range"),
+            start: self.field(range, "start"),
+            end: self.field(range, "end"),
+        }
+    }
+
     /// A std type with no type arguments, named the way source names it.
     fn named_type(&self, name: &str) -> Type {
-        let name = ustr(name);
-        let def = self
-            .std_module
-            .get_type_def_id(name)
-            .unwrap_or_else(|| panic!("std declares no type `{name}`"));
-        Type::named(def, [])
+        Type::named(self.type_def(name), [])
     }
 
     /// The method of std's concrete implementation of `trait_name` for `input_ty`.
@@ -298,6 +401,27 @@ mod tests {
             table.resolve(specialized, |_| Some(known)),
             Some(semantics),
             "canonicalizing to a known original must yield that original's semantics"
+        );
+    }
+
+    /// Field positions must come from the type, never from the declaration. Records are laid out
+    /// by name, so the two disagree for every std type read here — a hand-written table would have
+    /// been wrong on the day it was written.
+    #[test]
+    fn field_positions_are_resolved_rather_than_assumed() {
+        let session = CompilerSession::new();
+        let table = known_callees(&session);
+        let range = table.layouts().range;
+        assert_ne!(
+            (range.start, range.end),
+            (0, 1),
+            "`Range {{ start, end }}` is laid out by name, so `end` comes first"
+        );
+        assert_ne!(range.start, range.end);
+        assert_ne!(range.next, range.range);
+        assert!(
+            table.layouts().array_len < 4,
+            "`array` has four fields, so `len` is one of them"
         );
     }
 

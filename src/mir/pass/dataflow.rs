@@ -643,12 +643,13 @@ pub(crate) fn field_index(operand: &mir::Value, func: &Function) -> Option<usize
 /// result or a parameter — an operand this scan cannot resolve to a root escapes nothing precisely
 /// because nothing was tracked for it in the first place.
 ///
-/// `mutations_modelled` names the calls whose writes through a `MutableRef` argument the *caller's*
-/// transfer function describes, so that the argument's place stays tracked instead of escaping.
-/// Answering true is a claim about the callee on two counts — its writes are accounted for, and it
-/// captures no pointer it was given — and folding makes it for nothing, because knowing which slots
-/// a callee wrote does not make their new contents known. [`relations`](super::relations) makes it
-/// for the std functions whose semantics the optimizer resolves.
+/// `mutations_modelled` names the operations whose writes through a place the *caller's* transfer
+/// function describes, so that the place stays tracked instead of escaping. Answering true is a
+/// claim about the callee on two counts — its writes are accounted for, and it captures no pointer
+/// it was given — and folding makes it for nothing, because knowing which slots a callee wrote does
+/// not make their new contents known. [`relations`](super::relations) makes it for the std
+/// functions whose semantics the optimizer resolves, and for `drop`, which ends a value's life
+/// without writing another one anywhere the caller cannot see.
 pub(crate) fn escaping_roots(
     func: &Function,
     mutations_modelled: &dyn Fn(&Operation) -> bool,
@@ -766,8 +767,9 @@ pub(crate) fn escaping_roots(
             OperationKind::Clone { .. } => {}
             OperationKind::Drop { .. } => {
                 let target = &operation.operands[0];
-                if operand_root(target, &register_roots)
-                    .is_none_or(|root| !self_contained_roots.contains(&root))
+                if !mutations_modelled(operation)
+                    && operand_root(target, &register_roots)
+                        .is_none_or(|root| !self_contained_roots.contains(&root))
                 {
                     escape_operand(target, escaped);
                 }
