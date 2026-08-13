@@ -35,9 +35,9 @@ use crate::{
 
 use super::{budget, dce, site::OperationIndex, stack_region};
 
-#[derive(Clone)]
-struct SourceBody {
-    body: Function,
+#[derive(Clone, Copy)]
+struct SourceBody<'a> {
+    body: &'a Function,
     original: FunctionId,
     is_specialization: bool,
 }
@@ -62,18 +62,19 @@ enum Site {
 struct VariantFactory<'a> {
     module: ModuleId,
     first_index: usize,
-    sources: &'a [Option<SourceBody>],
-    specializations: &'a mut Vec<Specialization>,
+    sources: &'a [Option<SourceBody<'a>>],
+    existing_specializations: &'a [Specialization],
+    generated_specializations: Vec<Specialization>,
     env: ModuleEnv<'a>,
     cache: FxHashMap<VariantKey, Option<LocalFunctionId>>,
     active: FxHashSet<VariantKey>,
-    generated: usize,
 }
 
 /// Rewrites last-use direct calls and appends the owned-ABI variants they require.
 ///
 /// `functions` and the initial prefix of `specializations` are already fully optimized. Variants
-/// are derived from that stable snapshot; appending one cannot change a later admission decision.
+/// are derived from that stable snapshot; generated bodies are accumulated separately, so one
+/// cannot change a later admission decision.
 pub(crate) fn forward_owned_arguments(
     functions: &mut [Option<Function>],
     specializations: &mut Vec<Specialization>,
@@ -82,74 +83,88 @@ pub(crate) fn forward_owned_arguments(
 ) {
     let first_index = functions.len();
     let initial_specializations = specializations.len();
-    let mut sources = functions
-        .iter()
-        .enumerate()
-        .map(|(index, body)| {
-            body.as_ref().map(|body| SourceBody {
-                body: body.clone(),
-                original: FunctionId {
-                    module,
-                    function: LocalFunctionId::from_index(index),
-                },
-                is_specialization: false,
+    // Keep the source population stable while variants recursively request other variants. New
+    // bodies accumulate separately, so the table can borrow the existing bodies instead of deeply
+    // cloning every one before finding out whether any caller changes.
+    let (mut rewritten, generated_specializations) = {
+        let mut sources = functions
+            .iter()
+            .enumerate()
+            .map(|(index, body)| {
+                body.as_ref().map(|body| SourceBody {
+                    body,
+                    original: FunctionId {
+                        module,
+                        function: LocalFunctionId::from_index(index),
+                    },
+                    is_specialization: false,
+                })
             })
-        })
-        .collect::<Vec<_>>();
-    sources.extend(specializations.iter().map(|specialization| {
-        Some(SourceBody {
-            body: specialization.body.clone(),
-            original: specialization.original,
-            is_specialization: true,
-        })
-    }));
+            .collect::<Vec<_>>();
+        sources.extend(specializations.iter().map(|specialization| {
+            Some(SourceBody {
+                body: &specialization.body,
+                original: specialization.original,
+                is_specialization: true,
+            })
+        }));
 
-    let mut rewritten = Vec::with_capacity(sources.len());
-    {
         let mut factory = VariantFactory {
             module,
             first_index,
             sources: &sources,
-            specializations,
+            existing_specializations: specializations,
+            generated_specializations: Vec::new(),
             env,
             cache: FxHashMap::default(),
             active: FxHashSet::default(),
-            generated: 0,
         };
-        for source in &sources {
-            rewritten.push(source.as_ref().map(|source| {
-                rewrite_caller(&source.body, &mut factory).unwrap_or_else(|| source.body.clone())
-            }));
-        }
-    }
+        let rewritten = sources
+            .iter()
+            .map(|source| {
+                source
+                    .as_ref()
+                    .and_then(|source| rewrite_caller(source.body, &mut factory))
+            })
+            .collect::<Vec<_>>();
+        (rewritten, factory.generated_specializations)
+    };
 
     for (slot, body) in functions.iter_mut().zip(rewritten.drain(..first_index)) {
-        *slot = body;
+        if let Some(body) = body {
+            *slot = Some(body);
+        }
     }
     for (specialization, body) in specializations[..initial_specializations]
         .iter_mut()
         .zip(rewritten)
     {
-        specialization.body = body.expect("a specialization always has a MIR body");
+        if let Some(body) = body {
+            specialization.body = body;
+        }
     }
+    specializations.extend(generated_specializations);
 
     // Removing a clone strands its dispatch place/evidence; removing the caller's drop can do the
     // same. Cleanup every body once so variants and their callers finish in the same canonical form.
     for body in functions.iter_mut().flatten() {
-        *body = cleanup(body.clone());
+        if let Some(cleaned) = cleanup(body) {
+            *body = cleaned;
+        }
     }
     for specialization in specializations {
-        specialization.body = cleanup(specialization.body.clone());
+        if let Some(cleaned) = cleanup(&specialization.body) {
+            specialization.body = cleaned;
+        }
     }
 
-    fn cleanup(mut body: Function) -> Function {
-        if let Some(cleaned) = dce::remove_dead_storage(&body) {
-            body = cleaned;
+    fn cleanup(body: &Function) -> Option<Function> {
+        let mut current = dce::remove_dead_storage(body);
+        let source = current.as_ref().unwrap_or(body);
+        if let Some(cleaned) = stack_region::remove_redundant_stack_markers(source) {
+            current = Some(cleaned);
         }
-        if let Some(cleaned) = stack_region::remove_redundant_stack_markers(&body) {
-            body = cleaned;
-        }
-        body
+        current
     }
 }
 
@@ -165,7 +180,8 @@ impl VariantFactory<'_> {
                 function,
             });
         }
-        if self.generated >= budget::MAX_OWNED_ARGUMENT_VARIANTS || !self.active.insert(key.clone())
+        if self.generated_specializations.len() >= budget::MAX_OWNED_ARGUMENT_VARIANTS
+            || !self.active.insert(key.clone())
         {
             return None;
         }
@@ -174,7 +190,7 @@ impl VariantFactory<'_> {
             .sources
             .get(callee.function.as_index())
             .and_then(Option::as_ref)
-            .cloned();
+            .copied();
         let rewritten = source.and_then(|source| {
             // An ordinary generic body can still read its dictionaries. Specializations have had
             // them bound already; ordinary dictionary-free functions and generated thunks are safe.
@@ -187,7 +203,7 @@ impl VariantFactory<'_> {
             {
                 return None;
             }
-            self.rewrite_variant(&source.body, &key.arguments)
+            self.rewrite_variant(source.body, &key.arguments)
                 .map(|body| (source.original, body))
         });
         self.active.remove(&key);
@@ -199,21 +215,25 @@ impl VariantFactory<'_> {
         let suffix = key.arguments.iter_ones().join(",");
         let base = ustr(&format!("{}#owned:[{suffix}]", body.name));
         let name = unique_generated_name(base, |candidate| {
-            self.specializations
+            self.existing_specializations
                 .iter()
+                .chain(&self.generated_specializations)
                 .any(|specialization| specialization.name == candidate)
         });
         let mut edit = FunctionEdit::new(body);
         edit.set_name(name);
         body = edit.finish_unverified();
 
-        let id = LocalFunctionId::from_index(self.first_index + self.specializations.len());
-        self.specializations.push(Specialization {
+        let id = LocalFunctionId::from_index(
+            self.first_index
+                + self.existing_specializations.len()
+                + self.generated_specializations.len(),
+        );
+        self.generated_specializations.push(Specialization {
             original,
             name,
             body,
         });
-        self.generated += 1;
         self.cache.insert(key, Some(id));
         Some(FunctionId {
             module: self.module,
