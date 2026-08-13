@@ -60,7 +60,9 @@
 //!   `subscript_member` is place-producing like `dict_entry` but is left out until its redundancy
 //!   is measured rather than assumed.
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use std::hash::{Hash, Hasher};
+
+use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 
 use crate::{
     hir::function::ArgConvention,
@@ -263,6 +265,9 @@ pub(crate) fn eliminate_common_calls(
     env: ModuleEnv<'_>,
     summary_of: &dyn Fn(FunctionId) -> AddressorSummary,
 ) -> Option<Function> {
+    if !has_duplicate_call_fingerprint(func) {
+        return None;
+    }
     let origins = PlaceOrigins::of(func, summary_of);
     let entry_states = available_call_states(func, env, &origins, summary_of);
     let mut replacements = Vec::new();
@@ -329,6 +334,67 @@ pub(crate) fn eliminate_common_calls(
     edit.remove_unreachable_blocks();
     edit.merge_blocks_into_predecessors();
     Some(edit.finish_unverified())
+}
+
+/// Whether two calls may have the same [`CallExpression`].
+///
+/// This is only a filter for the substantially more expensive provenance and available-expression
+/// analyses. It hashes exactly the identity those analyses compare, but deliberately performs only
+/// their cheap, provenance-independent eligibility checks. A hash collision therefore admits extra
+/// analysis and can never suppress a rewrite; without a repeated hash, no expression can repeat.
+fn has_duplicate_call_fingerprint(func: &Function) -> bool {
+    let mut seen = FxHashSet::default();
+    for block_id in func.blocks() {
+        let block = func.block(block_id);
+        for operation in block
+            .operations()
+            .iter()
+            .chain(match &block.terminator().kind {
+                TerminatorKind::Invoke { operation, .. } => Some(operation),
+                _ => None,
+            })
+        {
+            let Some(fingerprint) = call_fingerprint(operation) else {
+                continue;
+            };
+            if !seen.insert(fingerprint) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn call_fingerprint(operation: &Operation) -> Option<u64> {
+    let OperationKind::Call { ty, metadata } = &operation.kind else {
+        return None;
+    };
+    if metadata
+        .as_deref()
+        .is_some_and(|metadata| !metadata.owned_arguments.is_empty())
+        || !effects_allow_const_eval(ty.effects())
+    {
+        return None;
+    }
+    if !matches!(
+        ty.result_convention,
+        CallResultConvention::ADDRESSOR_PLACE | CallResultConvention::Value
+    ) {
+        return None;
+    }
+
+    let (_, expression_operands) = operation.operands.split_last()?;
+    if !matches!(expression_operands.first(), Some(mir::Value::Function(_))) {
+        return None;
+    }
+    let mut state = FxHasher::default();
+    ty.hash(&mut state);
+    metadata
+        .as_deref()
+        .and_then(|metadata| metadata.instantiation.as_ref())
+        .hash(&mut state);
+    expression_operands.hash(&mut state);
+    Some(state.finish())
 }
 
 fn available_call_states(
@@ -796,7 +862,8 @@ enum Enter {
 
 #[cfg(test)]
 mod tests {
-    use crate::{CompilerSession, MirOptimization};
+    use super::has_duplicate_call_fingerprint;
+    use crate::{CompilerSession, ExecutionTarget, MirOptimization, module::Path, ustr};
 
     fn optimized(src: &str) -> String {
         let mut session = CompilerSession::new();
@@ -825,6 +892,47 @@ mod tests {
         body.lines()
             .filter(|line| line.contains("call ") && line.contains(callee_fragment))
             .count()
+    }
+
+    fn raw_body(src: &str, name: &str) -> crate::mir::Function {
+        let mut session = CompilerSession::new();
+        let module_id = session
+            .compile_for(
+                ExecutionTarget::Mir,
+                src,
+                "cse_fingerprint",
+                Path::single_str("cse_fingerprint"),
+            )
+            .expect("test source must compile")
+            .module_id;
+        let function = session
+            .expect_fresh_module(module_id)
+            .get_local_function_id(ustr(name))
+            .unwrap_or_else(|| panic!("module has no `{name}`"));
+        session
+            .mir_artifacts_for(module_id, MirOptimization::Disabled)
+            .expect("MIR must be prepared")
+            .get(function)
+            .expect("function must have a MIR body")
+            .clone()
+    }
+
+    #[test]
+    fn distinct_candidates_do_not_request_call_cse_analysis() {
+        let body = raw_body(
+            "fn distinct(x: int, y: int) -> int { (x - y) * (y - x) }",
+            "distinct",
+        );
+        assert!(!has_duplicate_call_fingerprint(&body));
+    }
+
+    #[test]
+    fn calls_with_distinct_result_slots_have_the_same_fingerprint() {
+        let body = raw_body(
+            "fn repeated(x: int, y: int) -> int { (x - y) * (x - y) }",
+            "repeated",
+        );
+        assert!(has_duplicate_call_fingerprint(&body));
     }
 
     #[test]
