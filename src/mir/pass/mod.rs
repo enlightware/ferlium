@@ -35,6 +35,7 @@
 //! the caller's pool. This is not whole-program optimization: nothing outside the module being
 //! optimized is modified.
 
+pub(crate) mod bounds_check;
 pub(crate) mod branch_forward;
 pub mod budget;
 pub(crate) mod call_graph;
@@ -69,6 +70,16 @@ use crate::{
 
 use self::provenance::AddressorSummary;
 
+/// Aggregate facts about rewrites whose results cannot be reconstructed from final MIR.
+///
+/// Most of the optimization report is derived after the fact. A removed operation is different:
+/// once cleanup has collected the call and its error path, the artifact contains no reliable way
+/// to distinguish that rewrite from folding or inlining. Keep only those irrecoverable counts here.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct OptimizationStats {
+    pub(crate) bounds_checks_removed: usize,
+}
+
 /// The number of operations in a function — the unit the inlining budgets are counted in.
 fn function_size(func: &Function) -> usize {
     func.blocks()
@@ -88,6 +99,8 @@ pub(crate) fn optimize_function(
     session: &CompilerSession,
     module_id: ModuleId,
     specializations: &mut Specializations,
+    known: &known_callee::KnownCallees,
+    stats: &mut OptimizationStats,
 ) -> Function {
     let original_size = function_size(function);
     let mut current: Option<Function> = None;
@@ -209,6 +222,17 @@ pub(crate) fn optimize_function(
     let source = current.as_ref().unwrap_or(function);
     if let Some(devirtualized) = fold::devirtualize_known_callees(source, env) {
         current = Some(devirtualized);
+    }
+    // After devirtualization, which is what makes a subscript's checks direct calls the analysis can
+    // resolve at all, and before DCE, which removes the cleanup blocks a removed check strands.
+    let source = current.as_ref().unwrap_or(function);
+    if let Some((rewritten, removed)) =
+        bounds_check::eliminate_bounds_checks(source, known, &|callee| {
+            specializations.original(callee)
+        })
+    {
+        stats.bounds_checks_removed += removed;
+        current = Some(rewritten);
     }
     // Cleanup runs once, after the rounds have settled, and on every body rather than only on one a
     // pass changed. A specialization arrives already carrying dead code — substitution turns its

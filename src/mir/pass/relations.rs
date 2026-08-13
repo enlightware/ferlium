@@ -48,7 +48,7 @@
 //! by the tests below until those land.
 #![allow(dead_code)]
 
-use std::borrow::Cow;
+use std::{borrow::Cow, cmp::Reverse, collections::BinaryHeap};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -65,7 +65,7 @@ use crate::{
 
 use super::{
     dataflow::{Root, call_operands, escaping_roots, field_index, successors},
-    known_callee::{KnownCallee, KnownCallees, RangeLayout},
+    known_callee::{KnownCallee, KnownCallees, Layouts, RangeLayout},
     site::{OperationIndex, OperationSite},
 };
 
@@ -97,6 +97,16 @@ pub(crate) enum DefSite {
     Operation(OperationSite),
     /// The merge of predecessors that disagreed about which definition supplies the place.
     Join(BlockId),
+}
+
+impl DefSite {
+    /// Where in its block the operation sits, for a site that names one.
+    pub(crate) fn operation_index(&self) -> Option<OperationIndex> {
+        match self {
+            DefSite::Operation(site) => Some(site.index),
+            _ => None,
+        }
+    }
 }
 
 /// A storage slot's dense identity.
@@ -253,6 +263,11 @@ impl Symbols {
 pub(crate) struct Interner {
     places: Places,
     symbols: Symbols,
+    /// Place-producing registers are SSA identities, not flow facts. Once an `alloca` or
+    /// `subfield` defines one, every path on which the register may legally be used names the same
+    /// place. Keeping that structural map here avoids cloning, joining and comparing it in every
+    /// block state.
+    register_places: FxHashMap<ValueId, PlaceId>,
 }
 
 impl Interner {
@@ -266,6 +281,23 @@ impl Interner {
 
     fn symbol(&mut self, symbol: Symbol) -> SymbolId {
         self.symbols.intern(symbol)
+    }
+
+    fn bind_register_place(&mut self, register: ValueId, place: PlaceId) -> bool {
+        match self.register_places.insert(register, place) {
+            Some(existing) => {
+                assert_eq!(
+                    existing, place,
+                    "an SSA register cannot denote two different places"
+                );
+                false
+            }
+            None => true,
+        }
+    }
+
+    fn register_place(&self, register: ValueId) -> Option<PlaceId> {
+        self.register_places.get(&register).copied()
     }
 
     pub(crate) fn places(&self) -> &Places {
@@ -441,13 +473,21 @@ impl Predicate {
     /// two comparisons written over different slots reduce to the same difference whenever their
     /// values do.
     fn entails(&self, goal: &Predicate) -> bool {
-        if self.difference != goal.difference {
+        let Some(offset) = goal
+            .difference
+            .sub(&self.difference)
+            .and_then(|difference| difference.as_constant())
+        else {
             return false;
-        }
-        match (self.comparison, goal.comparison) {
-            (a, b) if a == b => true,
+        };
+        match (self.comparison, goal.comparison, offset) {
+            (a, b, 0) if a == b => true,
             // `<` is the stronger of each pair.
-            (Comparison::Less, Comparison::LessOrEqual | Comparison::NotEqual) => true,
+            (Comparison::Less, Comparison::LessOrEqual | Comparison::NotEqual, 0) => true,
+            // The strictness step, which is the one offset the wrapping caveat above does not
+            // forbid: on integers `d < 0` puts `d` at or below `-1`, so `d + 1` is at or below zero
+            // and cannot have come back round to reach it. `x < y` and `x + 1 <= y` are one fact.
+            (Comparison::Less, Comparison::LessOrEqual, 1) => true,
             _ => false,
         }
     }
@@ -481,15 +521,6 @@ pub(crate) enum Fact {
     },
 }
 
-/// What a register denotes.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Binding {
-    /// The register is a pointer to this slot.
-    Place(PlaceId),
-    /// The register holds a materialized value.
-    Value,
-}
-
 /// The relational state at one program point.
 #[derive(Clone, PartialEq, Eq, Default, Debug)]
 pub(crate) struct State {
@@ -503,7 +534,6 @@ pub(crate) struct State {
     /// What is known about a symbol. A symbol absent from here is an unknown quantity, which is
     /// still a quantity: it can be named, and two uses of it are the same value.
     facts: FxHashMap<SymbolId, Fact>,
-    registers: FxHashMap<ValueId, Binding>,
     /// Comparisons that hold at this point, sorted and deduplicated so that two states holding the
     /// same set compare equal — which is what the fixpoint tests.
     known: Vec<Predicate>,
@@ -551,10 +581,24 @@ impl State {
     /// every block below, and the set is a state the fixpoint compares on every edge. Sorted order
     /// makes which ones survive a property of the facts rather than of the walk.
     fn assume(&mut self, predicate: Predicate) {
+        // One that holds outright is already answered by `implies`, and the room it would take is
+        // room a fact about a symbol needs. A check on a constant index states one of these.
+        if predicate.is_certain() == Some(true) {
+            return;
+        }
         if let Err(index) = self.known.binary_search(&predicate) {
             self.known.insert(index, predicate);
             self.known.truncate(MAX_KNOWN);
         }
+    }
+
+    /// The form of a value read through a call argument, for a consumer asking about one operand.
+    pub(crate) fn argument_affine(
+        &self,
+        operand: &mir::Value,
+        interner: &mut Interner,
+    ) -> Option<Affine> {
+        argument_affine(operand, interner, self)
     }
 
     /// The slot an operand names, if it names one.
@@ -564,10 +608,7 @@ impl State {
         interner: &mut Interner,
     ) -> Option<PlaceId> {
         match operand {
-            mir::Value::Register(id) => match self.registers.get(id)? {
-                Binding::Place(place) => Some(*place),
-                Binding::Value => None,
-            },
+            mir::Value::Register(id) => interner.register_place(*id),
             mir::Value::Parameter(id) => Some(interner.place_root(Root::Parameter(*id))),
             _ => None,
         }
@@ -631,39 +672,32 @@ impl State {
         self.set_fact(symbol, fact);
     }
 
-    fn join(&self, other: &State) -> State {
-        let mut current = FxHashMap::default();
-        for (place, symbol) in &self.current {
-            // A place the two edges disagree about, or that only one of them tracks, takes a join
-            // symbol: its contents are one of several values and no fact about any of them holds.
-            if other.current.get(place) == Some(symbol) {
-                current.insert(*place, *symbol);
-            }
-        }
+    fn common_facts_and_predicates(
+        &self,
+        other: &State,
+    ) -> (FxHashMap<SymbolId, Fact>, Vec<Predicate>) {
         let mut facts = FxHashMap::default();
         for (symbol, fact) in &self.facts {
             if other.facts.get(symbol) == Some(fact) {
                 facts.insert(*symbol, fact.clone());
             }
         }
-        let mut registers = FxHashMap::default();
-        for (id, binding) in &self.registers {
-            if other.registers.get(id) == Some(binding) {
-                registers.insert(*id, *binding);
+        // Both inputs are sorted. Intersect them as such instead of doing up to eight linear
+        // `contains` scans for every join.
+        let mut known = Vec::with_capacity(self.known.len().min(other.known.len()));
+        let (mut ours, mut theirs) = (0, 0);
+        while ours < self.known.len() && theirs < other.known.len() {
+            match self.known[ours].cmp(&other.known[theirs]) {
+                std::cmp::Ordering::Less => ours += 1,
+                std::cmp::Ordering::Greater => theirs += 1,
+                std::cmp::Ordering::Equal => {
+                    known.push(self.known[ours].clone());
+                    ours += 1;
+                    theirs += 1;
+                }
             }
         }
-        let known = self
-            .known
-            .iter()
-            .filter(|predicate| other.known.contains(predicate))
-            .cloned()
-            .collect();
-        State {
-            current,
-            facts,
-            registers,
-            known,
-        }
+        (facts, known)
     }
 }
 
@@ -777,6 +811,9 @@ struct Induction {
     layout: RangeLayout,
     /// Whether the upper bound is part of the range.
     inclusive: bool,
+    /// The cursor's non-negative constant start, retained to state the `start <= end` obligation
+    /// that distinguishes an ascending range from a descending one.
+    start: Int,
 }
 
 /// Everything one analysis run reads and never changes.
@@ -785,7 +822,8 @@ struct Context<'a> {
     semantics: Semantics<'a>,
     escaped: &'a FxHashSet<Root>,
     types: &'a RootTypes,
-    /// The iterator storage whose cursor is known to start at zero and only ever step forward.
+    /// Iterator storage whose cursor starts at a non-negative constant. A yielded value receives
+    /// ascending bounds only where the flow state separately proves `start <= end`.
     inductions: &'a FxHashMap<Root, Induction>,
 }
 
@@ -837,12 +875,23 @@ pub(crate) fn worth_analyzing(
     })
 }
 
+/// The semantics the optimizer knows for an operation's callee, for a consumer that has to ask the
+/// same question the analysis does and must ask it the same way.
+pub(crate) fn resolved_callee(
+    operation: &Operation,
+    known: &KnownCallees,
+    original_of: &dyn Fn(FunctionId) -> Option<FunctionId>,
+) -> Option<KnownCallee> {
+    Semantics { known, original_of }.of(operation)
+}
+
 /// Runs the analysis to fixpoint over `func`.
 ///
-/// **Two passes, not one.** The first assumes no induction; the second re-runs with the loops the
-/// first let [`recognize`] confirm. The order is forced: recognizing a cursor that starts at zero
-/// means reading what the construction stored, which is a dataflow fact. Bodies with no range loop
-/// pay for one pass, which the pre-filter a consumer applies should have excluded anyway.
+/// Induction recognition is a bounded local interpretation of each iterator's construction block,
+/// performed before the one whole-function fixed point. It deliberately refuses an initializer
+/// whose value has to be discovered through another block; falling back to a checked access is
+/// cheaper and safer than running the complete relational analysis once merely to inspect two
+/// constants and then running it all over again.
 pub(crate) fn analyze(
     func: &Function,
     known: &KnownCallees,
@@ -867,23 +916,16 @@ pub(crate) fn analyze(
         types: &types,
         inductions: &no_inductions,
     };
-    let mut first = run(&context);
-    let inductions = {
-        let Run {
-            exit_states,
-            interner,
-            ..
-        } = &mut first;
-        recognize(&context, &register_roots, exit_states, interner)
-    };
-    let settled = if inductions.is_empty() {
-        first
-    } else {
-        run(&Context {
+    let mut interner = Interner::default();
+    seed_register_places(func, &escaped, &mut interner);
+    let inductions = recognize(&context, &register_roots, &mut interner);
+    let settled = run(
+        &Context {
             inductions: &inductions,
             ..context
-        })
-    };
+        },
+        interner,
+    );
 
     Analysis {
         entry_states: settled.entry_states,
@@ -917,17 +959,43 @@ const MAX_ROUNDS: usize = 64;
 /// header: the back edge's first visit carries facts about the cursor as the construction defined
 /// it, and its second about the cursor as the join defines it. Intersecting those two across
 /// rounds throws away both, and with them every bound the loop was analysed for.
-fn run(context: &Context<'_>) -> Run {
+fn run(context: &Context<'_>, mut interner: Interner) -> Run {
     let func = context.func;
     let block_count = func.blocks().count();
     let mut predecessors: Vec<Vec<BlockId>> = vec![Vec::new(); block_count];
+    let mut successor_lists: Vec<Vec<usize>> = vec![Vec::new(); block_count];
     for block in func.blocks() {
         for successor in successors(&func.block(block).terminator().kind) {
             predecessors[successor.as_index()].push(block);
+            successor_lists[block.as_index()].push(successor.as_index());
         }
     }
 
-    let mut interner = Interner::default();
+    // Forward dataflow converges fastest when definitions are visited before their uses and loop
+    // back edges last. Block ids are only construction order after edits, so derive reverse
+    // postorder from the actual CFG and use it as worklist priority.
+    let mut visited = vec![false; block_count];
+    let mut postorder = Vec::with_capacity(block_count);
+    let mut stack = vec![(func.entry().as_index(), 0)];
+    visited[func.entry().as_index()] = true;
+    while let Some((block, next_successor)) = stack.last_mut() {
+        if let Some(&successor) = successor_lists[*block].get(*next_successor) {
+            *next_successor += 1;
+            if !visited[successor] {
+                visited[successor] = true;
+                stack.push((successor, 0));
+            }
+        } else {
+            postorder.push(*block);
+            stack.pop();
+        }
+    }
+    postorder.reverse();
+    let mut reverse_postorder = vec![usize::MAX; block_count];
+    for (index, block) in postorder.into_iter().enumerate() {
+        reverse_postorder[block] = index;
+    }
+
     let mut entry_states: FxHashMap<BlockId, State> = FxHashMap::default();
     let mut exit_states: FxHashMap<BlockId, State> = FxHashMap::default();
 
@@ -935,12 +1003,17 @@ fn run(context: &Context<'_>) -> Run {
     // moved if a predecessor's exit did, so sweeping recomputes states that cannot have changed and
     // clones each of them to do it.
     let mut queued = vec![false; block_count];
-    let mut worklist = vec![func.entry()];
+    let mut worklist = BinaryHeap::new();
+    worklist.push(Reverse((
+        reverse_postorder[func.entry().as_index()],
+        func.entry().as_index(),
+    )));
     queued[func.entry().as_index()] = true;
     let mut steps = 0usize;
     let budget = MAX_ROUNDS * block_count.max(1);
 
-    while let Some(block_id) = worklist.pop() {
+    while let Some(Reverse((_, block))) = worklist.pop() {
+        let block_id = BlockId::from_index(block);
         queued[block_id.as_index()] = false;
         steps += 1;
         if steps > budget {
@@ -962,7 +1035,7 @@ fn run(context: &Context<'_>) -> Run {
                     continue;
                 };
                 let terminator = &func.block(*predecessor).terminator().kind;
-                let edge = refine(exit, terminator, block_id, &mut interner);
+                let edge = refine(exit, terminator, block_id, context, &mut interner);
                 joined = Some(match joined {
                     Some(existing) => rejoin(&existing, &edge, block_id, &mut interner),
                     None => edge.into_owned(),
@@ -1005,7 +1078,10 @@ fn run(context: &Context<'_>) -> Run {
         for successor in successors(&block.terminator().kind) {
             if !queued[successor.as_index()] {
                 queued[successor.as_index()] = true;
-                worklist.push(successor);
+                worklist.push(Reverse((
+                    reverse_postorder[successor.as_index()],
+                    successor.as_index(),
+                )));
             }
         }
     }
@@ -1017,14 +1093,76 @@ fn run(context: &Context<'_>) -> Run {
     }
 }
 
-/// The iterator storage whose cursor provably starts at zero and only ever steps forward.
+/// Seeds the structural register-to-place map shared by local recognition and the fixed point.
 ///
-/// This is the *zero-based, unit-step* form and nothing more general. What it has to establish is
-/// the loop invariant `0 <= cursor`, which no per-edge fact can give: the cursor is a different
-/// value on every iteration, and joining the entry value with the stepped one loses the relation
-/// that both are non-negative. Recognizing the shape of the whole loop is what replaces that
-/// inference, and it is why the plan calls for this before any interval or scalar-evolution
-/// machinery.
+/// MIR registers are SSA. An `alloca` result always names its root and a `subfield` result always
+/// names the same child of its base, independently of which flow state reaches a use. Resolve those
+/// identities once rather than rediscovering and carrying them through every state. The small fixed
+/// point only accommodates block order not being dominance order; each successful round binds at
+/// least one of the finite register set.
+fn seed_register_places(func: &Function, escaped: &FxHashSet<Root>, interner: &mut Interner) {
+    for block in func.blocks() {
+        for operation in func.block(block).operations() {
+            let OperationKind::Alloca { .. } = operation.kind else {
+                continue;
+            };
+            let Some(register) = operation.result_id() else {
+                continue;
+            };
+            let root = Root::Alloca(register);
+            if !escaped.contains(&root) {
+                let place = interner.place_root(root);
+                interner.bind_register_place(register, place);
+            }
+        }
+    }
+
+    loop {
+        let mut changed = false;
+        for block in func.blocks() {
+            for operation in func.block(block).operations() {
+                let OperationKind::Subfield { .. } = operation.kind else {
+                    continue;
+                };
+                let Some(register) = operation.result_id() else {
+                    continue;
+                };
+                if interner.register_place(register).is_some() {
+                    continue;
+                }
+                let base = match &operation.operands[0] {
+                    mir::Value::Register(register) => interner.register_place(*register),
+                    mir::Value::Parameter(parameter) => {
+                        Some(interner.place_root(Root::Parameter(*parameter)))
+                    }
+                    _ => None,
+                };
+                let (Some(base), Some(field)) = (base, field_index(&operation.operands[1], func))
+                else {
+                    continue;
+                };
+                if escaped.contains(&interner.places().root_of(base)) {
+                    continue;
+                }
+                let place = interner.place_field(base, field);
+                changed |= interner.bind_register_place(register, place);
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
+/// Iterator storage whose cursor provably starts at a non-negative constant and changes by one.
+///
+/// This is the *constant-start, unit-step* form and nothing more general. What recognition
+/// establishes is the loop invariant `0 <= cursor` for the ascending case, which no per-edge fact
+/// can give: the cursor is a different value on every iteration, and joining the entry value with
+/// the stepped one loses the relation that both are non-negative. The separate `start <= end`
+/// proof selects that ascending case in [`yield_fact`]. Recognizing the shape of the whole loop is
+/// what replaces that inference, and it is why the plan calls for this before any interval or
+/// scalar-evolution machinery.
 ///
 /// A root qualifies when all of the following hold, each of which is a way the invariant could
 /// otherwise be broken:
@@ -1033,14 +1171,18 @@ fn run(context: &Context<'_>) -> Run {
 /// - every write into it other than a step is in **one** block — the construction;
 /// - that block dominates every step, so the construction always precedes them;
 /// - that block is not reachable from any step, so it is outside the loop and cannot re-run;
-/// - after it, both the cursor and the range's lower bound are the constant zero.
+/// - after it, the cursor and the range's lower bound are the same non-negative constant.
+///
+/// The start is kept rather than just checked because proving the range ascending requires
+/// `start <= end`: `1..n` counts down when `n` is zero, exactly as `0..n` does when `n` is
+/// negative. Recognition proves the cursor starts non-negative; [`yield_fact`] separately asks the
+/// flow state for that ordering before attaching ascending bounds to a yielded cursor.
 ///
 /// The single-block restriction is what the desugared `for` produces and is deliberately not
 /// generalized: a construction spread over blocks would need each one checked against the rest.
 fn recognize(
     context: &Context<'_>,
     register_roots: &FxHashMap<ValueId, Root>,
-    exit_states: &FxHashMap<BlockId, State>,
     interner: &mut Interner,
 ) -> FxHashMap<Root, Induction> {
     let func = context.func;
@@ -1081,18 +1223,49 @@ fn recognize(
         else {
             continue;
         };
-        let Some(state) = exit_states.get(&construction) else {
-            continue;
-        };
+        // The shape above proves this one block contains every non-step write to the iterator. A
+        // local interpretation is consequently sufficient to inspect its initializer when the
+        // values are constructed there. Values arriving through predecessors remain unknown and
+        // conservatively refuse recognition.
+        let mut state = State::default();
+        let block = func.block(construction);
+        for (index, operation) in block.operations().iter().enumerate() {
+            transfer(
+                operation,
+                site(construction, index),
+                context,
+                interner,
+                &mut state,
+            );
+        }
+        if let TerminatorKind::Invoke { operation, .. } = &block.terminator().kind {
+            transfer(
+                operation,
+                site(construction, block.operations().len()),
+                context,
+                interner,
+                &mut state,
+            );
+        }
         let iterator = interner.place_root(root);
         let cursor = interner.place_field(iterator, layout.next);
         let range = interner.place_field(iterator, layout.range);
         let lower = interner.place_field(range, layout.start);
-        let zero = |place, interner: &mut Interner| {
-            state.place_affine(place, interner).as_constant() == Some(0)
+        let constant =
+            |place, interner: &mut Interner| state.place_affine(place, interner).as_constant();
+        let (Some(cursor), Some(lower)) = (constant(cursor, interner), constant(lower, interner))
+        else {
+            continue;
         };
-        if zero(cursor, interner) && zero(lower, interner) {
-            recognized.insert(root, Induction { layout, inclusive });
+        if cursor == lower && cursor >= 0 {
+            recognized.insert(
+                root,
+                Induction {
+                    layout,
+                    inclusive,
+                    start: cursor,
+                },
+            );
         }
     }
     recognized
@@ -1215,40 +1388,52 @@ fn writes_into(
 
 /// The state reaching one successor, which is not in general the state the block left off in.
 ///
-/// A `condbr` is the only place a comparison the analysis already understands turns into something
-/// it can assume: the arm is taken exactly when the condition holds, so the taken edge carries the
-/// predicate and the other carries its negation. This is the whole reason the comparison idiom is
-/// reassembled into a [`Predicate`] earlier — a boolean nobody can read says nothing about either
-/// arm.
+/// Two terminators say something their block did not.
 ///
-/// A `condbr` whose two arms are the same block refines neither: the block is reached whichever way
-/// the condition went.
+/// A `condbr` arm is taken exactly when the condition holds, so the taken edge carries the predicate
+/// and the other carries its negation. This is the whole reason the comparison idiom is reassembled
+/// into a [`Predicate`] earlier — a boolean nobody can read says nothing about either arm. A `condbr`
+/// whose two arms are the same block refines neither: the block is reached whichever way the
+/// condition went.
+///
+/// An `invoke` of a bounds check refines its normal edge with what returning proved, which is
+/// [`resolved_index_bounds`].
 fn refine<'a>(
     state: &'a State,
     terminator: &TerminatorKind,
     successor: BlockId,
+    context: &Context<'_>,
     interner: &mut Interner,
 ) -> Cow<'a, State> {
-    let TerminatorKind::CondBr {
-        condition,
-        then_target,
-        else_target,
-    } = terminator
-    else {
-        return Cow::Borrowed(state);
-    };
-    if then_target == else_target {
-        return Cow::Borrowed(state);
-    }
     // Borrowed on every path that adds nothing, which is most edges: a state is several maps, and
     // cloning one per edge per visit was pure waste.
-    let assumed = match condition_fact(state, condition, interner) {
-        Some(Fact::Truth(predicate)) => vec![if successor == *then_target {
-            predicate
-        } else {
-            predicate.negated()
-        }],
-        Some(Fact::Implies(predicates)) if successor == *then_target => predicates,
+    let assumed = match terminator {
+        TerminatorKind::CondBr {
+            condition,
+            then_target,
+            else_target,
+        } => {
+            if then_target == else_target {
+                return Cow::Borrowed(state);
+            }
+            match condition_fact(state, condition, interner) {
+                Some(Fact::Truth(predicate)) => vec![if successor == *then_target {
+                    predicate
+                } else {
+                    predicate.negated()
+                }],
+                Some(Fact::Implies(predicates)) if successor == *then_target => predicates,
+                _ => return Cow::Borrowed(state),
+            }
+        }
+        TerminatorKind::Invoke {
+            operation, normal, ..
+        } if successor == *normal => {
+            match resolved_index_bounds(state, operation, context, interner) {
+                Some(predicates) => predicates,
+                None => return Cow::Borrowed(state),
+            }
+        }
         _ => return Cow::Borrowed(state),
     };
     let mut refined = state.clone();
@@ -1256,6 +1441,45 @@ fn refine<'a>(
         refined.assume(predicate);
     }
     Cow::Owned(refined)
+}
+
+/// What a bounds check proves by returning at all, for the edge along which it returned.
+///
+/// `array_resolve_index(index, len)` panics unless the offset it hands back lies in `0..len`, so the
+/// normal edge carries exactly that. It is the one obligation an element access has, which is what
+/// makes an access that survives worth as much to the accesses after it as a guard the source wrote.
+///
+/// Which value the bound is *about* is the whole subtlety. The callee rewrites a negative index into
+/// `len + index` and leaves every other one alone, so when the index is already known non-negative
+/// the offset is the index itself and the bound lands on the expression the caller wrote — where a
+/// later loop over the same array can use it. Otherwise it lands on the offset, a value only the
+/// check names, and says nothing about the index that produced it.
+fn resolved_index_bounds(
+    state: &State,
+    operation: &Operation,
+    context: &Context<'_>,
+    interner: &mut Interner,
+) -> Option<Vec<Predicate>> {
+    if context.semantics.of(operation)? != KnownCallee::ArrayResolveIndex {
+        return None;
+    }
+    let OperationKind::Call { ty, .. } = &operation.kind else {
+        return None;
+    };
+    let call = call_operands(&operation.operands, ty)?;
+    let index = argument_affine(call.arguments.first()?.0, interner, state)?;
+    let len = argument_affine(call.arguments.get(1)?.0, interner, state)?;
+    let zero = Affine::constant(0);
+    let offset = if state.implies(&Predicate::between(&zero, Comparison::LessOrEqual, &index)?) {
+        index
+    } else {
+        let place = tracked_place(state, call.result, context.escaped, interner)?;
+        state.place_affine(place, interner)
+    };
+    Some(vec![
+        Predicate::between(&zero, Comparison::LessOrEqual, &offset)?,
+        Predicate::between(&offset, Comparison::Less, &len)?,
+    ])
 }
 
 /// What is known about the value a terminator branches on.
@@ -1287,19 +1511,30 @@ fn site(block: BlockId, index: usize) -> DefSite {
 /// The join site has to be named, or a place written differently on two paths would keep whichever
 /// predecessor was walked last and facts from one arm would leak into the other.
 fn rejoin(existing: &State, incoming: &State, block: BlockId, interner: &mut Interner) -> State {
-    let mut joined = existing.join(incoming);
-    let disagreed: Vec<PlaceId> = existing
-        .current
-        .keys()
-        .chain(incoming.current.keys())
-        .filter(|place| !joined.current.contains_key(*place))
-        .copied()
-        .collect();
-    for place in disagreed {
-        let symbol = interner.symbol(Symbol::Stored(place, DefSite::Join(block)));
-        joined.current.insert(place, symbol);
+    let mut current = FxHashMap::default();
+    for (place, symbol) in &existing.current {
+        let symbol = match incoming.current.get(place) {
+            Some(incoming) if incoming == symbol => *symbol,
+            _ => interner.symbol(Symbol::Stored(*place, DefSite::Join(block))),
+        };
+        current.insert(*place, symbol);
     }
-    joined
+    // A place present only on the incoming edge disagrees just as one present only on the existing
+    // edge does. Visit it once; chaining both key sets made every place present on both sides take
+    // the disagreement path twice.
+    for place in incoming.current.keys() {
+        if existing.current.contains_key(place) {
+            continue;
+        }
+        let symbol = interner.symbol(Symbol::Stored(*place, DefSite::Join(block)));
+        current.insert(*place, symbol);
+    }
+    let (facts, known) = existing.common_facts_and_predicates(incoming);
+    State {
+        current,
+        facts,
+        known,
+    }
 }
 
 /// The slot an operand names, when the escape scan left it trackable.
@@ -1343,7 +1578,7 @@ fn transfer(
                 return;
             }
             let place = interner.place_root(root);
-            state.registers.insert(result, Binding::Place(place));
+            interner.bind_register_place(result, place);
             state.define(place, def, interner, None);
         }
         OperationKind::Store => {
@@ -1358,7 +1593,6 @@ fn transfer(
             let Some(result) = operation.result_id() else {
                 return;
             };
-            state.registers.insert(result, Binding::Value);
             let fact =
                 tracked_place(state, &operation.operands[0], escaped, interner).map(|place| {
                     let symbol = state.symbol_of(place, interner);
@@ -1376,35 +1610,29 @@ fn transfer(
             let Some(result) = operation.result_id() else {
                 return;
             };
-            let binding = match (
+            if let (Some(base), Some(index)) = (
                 tracked_place(state, &operation.operands[0], escaped, interner),
                 field_index(&operation.operands[1], func),
             ) {
-                (Some(base), Some(index)) => {
-                    // An array's length is never negative, and no MIR operation says so. Without it
-                    // a `for i in 0..len(a)` loop cannot even be shown to count *upwards*, because
-                    // a range whose end is below its start counts down.
-                    let field = interner.place_field(base, index);
-                    if interner.places().is_root(base)
-                        && index == semantics.known.layouts().array_len
-                        && types
-                            .of(interner.places().root_of(base))
-                            .is_some_and(|ty| semantics.known.is_array(ty))
+                // An array's length is never negative, and no MIR operation says so. Without it a
+                // `for i in 0..len(a)` loop cannot even be shown to count *upwards*, because a
+                // range whose end is below its start counts down.
+                let field = interner.place_field(base, index);
+                if interner.places().is_root(base)
+                    && index == semantics.known.layouts().array_len
+                    && types
+                        .of(interner.places().root_of(base))
+                        .is_some_and(|ty| semantics.known.is_array(ty))
+                {
+                    let length = state.place_affine(field, interner);
+                    if let Some(predicate) =
+                        Predicate::between(&Affine::constant(0), Comparison::LessOrEqual, &length)
                     {
-                        let length = state.place_affine(field, interner);
-                        if let Some(predicate) = Predicate::between(
-                            &Affine::constant(0),
-                            Comparison::LessOrEqual,
-                            &length,
-                        ) {
-                            state.assume(predicate);
-                        }
+                        state.assume(predicate);
                     }
-                    Binding::Place(field)
                 }
-                _ => Binding::Value,
-            };
-            state.registers.insert(result, binding);
+                interner.bind_register_place(result, field);
+            }
         }
         OperationKind::Memcpy | OperationKind::Move => {
             let source = tracked_place(state, &operation.operands[0], escaped, interner);
@@ -1466,7 +1694,6 @@ fn transfer(
             let Some(result) = operation.result_id() else {
                 return;
             };
-            state.registers.insert(result, Binding::Value);
             // An `Ordering` has no payload, so its tag *is* the comparison it stands for.
             let fact = tracked_place(state, &operation.operands[0], escaped, interner)
                 .map(|place| state.symbol_of(place, interner))
@@ -1479,7 +1706,6 @@ fn transfer(
             let Some(result) = operation.result_id() else {
                 return;
             };
-            state.registers.insert(result, Binding::Value);
             let fact = comparison_fact(operation, func, escaped, interner, state);
             let symbol = interner.symbol(Symbol::Register(result));
             state.set_fact(symbol, fact);
@@ -1521,7 +1747,16 @@ fn transfer(
                     }
                 }
             }
-            let fact = known.and_then(|known| result_fact(known, &call.arguments, interner, state));
+            let fact = known.and_then(|known| {
+                result_fact(
+                    known,
+                    &call.arguments,
+                    escaped,
+                    semantics.known.layouts(),
+                    interner,
+                    state,
+                )
+            });
             let fact = fact.or_else(|| {
                 yield_fact(known?, &call.arguments, inductions, cursor, interner, state)
             });
@@ -1538,7 +1773,6 @@ fn transfer(
             // Not modelled: the escape scan has escaped every place this operation touches, so
             // there is nothing left to invalidate. A result register holds an unnamed value.
             if let Some(result) = operation.result_id() {
-                state.registers.insert(result, Binding::Value);
                 let symbol = interner.symbol(Symbol::Register(result));
                 state.set_fact(symbol, None);
             }
@@ -1550,6 +1784,8 @@ fn transfer(
 fn result_fact(
     known: KnownCallee,
     arguments: &[(&mir::Value, ArgConvention)],
+    escaped: &FxHashSet<Root>,
+    layouts: &Layouts,
     interner: &mut Interner,
     state: &State,
 ) -> Option<Fact> {
@@ -1578,11 +1814,19 @@ fn result_fact(
             left: affine(0, interner)?,
             right: affine(1, interner)?,
         }),
-        // Each of these computes something this representation cannot yet state: a field read, a
-        // guarded selection, a wrap, a step whose direction is itself a comparison. The result is
-        // still a nameable value, which is what the fresh symbol gives it.
-        KnownCallee::ArrayLen
-        | KnownCallee::ArrayResolveIndex
+        // `array_len` *is* the field read, and saying so is what lets a bound and a check agree.
+        // They reach the length by different routes — a specialized body reads `a.len` directly to
+        // build a range and calls `array_len` inside the loop for the same quantity — and an opaque
+        // result makes those two unrelated symbols, which is every bound the loop was analysed for.
+        KnownCallee::ArrayLen => {
+            let array = tracked_place(state, operand(0)?, escaped, interner)?;
+            let len = interner.place_field(array, layouts.array_len);
+            Some(Fact::Value(state.place_affine(len, interner)))
+        }
+        // Each of these computes something this representation cannot yet state: a guarded
+        // selection, a wrap, a step whose direction is itself a comparison. The result is still a
+        // nameable value, which is what the fresh symbol gives it.
+        KnownCallee::ArrayResolveIndex
         | KnownCallee::ArrayWrapIndex
         | KnownCallee::RangeNext
         | KnownCallee::RangeInclusiveNext => None,
@@ -1652,9 +1896,13 @@ fn yield_fact(
     let range = interner.place_field(iterator, induction.layout.range);
     let upper = interner.place_field(range, induction.layout.end);
     let end = state.place_affine(upper, interner);
-    // Ascending, which for a zero-based range is the end being non-negative. Without it the
-    // iterator counts down and every bound below is the wrong way round.
-    let ascending = Predicate::between(&Affine::constant(0), Comparison::LessOrEqual, &end)?;
+    // Ascending, which is the end being at or above the start. Without it the iterator counts down
+    // and every bound below is the wrong way round.
+    let ascending = Predicate::between(
+        &Affine::constant(induction.start),
+        Comparison::LessOrEqual,
+        &end,
+    )?;
     if !state.implies(&ascending) {
         return None;
     }
@@ -2005,8 +2253,23 @@ mod tests {
     /// An index nothing bounds, so its check survives every pass.
     const UNPROVABLE: &str = "fn get(mut a: [int], i: int) -> int { a[i] }";
 
-    /// A range loop whose index this cannot bound: the end is not the length the check consults.
-    const LOOP_WITH_UNPROVABLE_INDEX: &str = "fn total(mut a: [int], n: int) -> int { let mut t = 0; for i in 0..n { t = t + a[i] }; t }";
+    /// The shape `dot` is written in: an accumulator seeded from the first element, then a loop over
+    /// the rest. The seed's successful check proves `0 < len`, hence the `1 <= len` ordering the
+    /// range needs to count upwards.
+    const LOOP_FROM_ONE: &str = "fn total(mut a: [int]) -> int { let mut t = a[0]; for i in 1..len(a) { t = t + a[i] }; t }";
+
+    /// Whether any block is entered holding a bound on a yielded cursor from both sides, which is
+    /// what a range loop has to establish for its body's check to be removable.
+    fn bounds_its_cursor(function: &Function, analysis: &Analysis) -> bool {
+        function.blocks().any(|block| {
+            analysis.exit_state(block).is_some_and(|state| {
+                state
+                    .facts
+                    .values()
+                    .any(|fact| matches!(fact, Fact::Yield { present_when, .. } if present_when.len() == 2))
+            })
+        })
+    }
 
     /// The whole point of steps 1 through 3: a step of a zero-based range loop yields a value the
     /// analysis can bound from both sides, and the loop body is entered knowing both bounds.
@@ -2061,6 +2324,79 @@ mod tests {
             |function, _, known| {
                 assert!(!worth_analyzing(function, known, &|_| None));
             },
+        );
+    }
+
+    /// A check reaching its normal edge is a guard the source did not write, and the length is the
+    /// half of it that outlives the access: `a[0]` returning is the only thing in `dot` that says
+    /// the array is not empty.
+    #[test]
+    fn a_check_that_returned_bounds_the_length_it_consulted() {
+        with_analysis(
+            "fn first(mut a: [int]) -> int { a[0] }",
+            "first",
+            |function, analysis, _| {
+                let bounded = function.blocks().any(|block| {
+                    analysis.entry_state(block).is_some_and(|state| {
+                        state.known().iter().any(|predicate| {
+                            predicate.comparison == Comparison::Less
+                                && predicate.difference.constant == 0
+                                && predicate.difference.terms().len() == 1
+                                && predicate.difference.terms()[0].1 == -1
+                        })
+                    })
+                });
+                assert!(
+                    bounded,
+                    "returning from `a[0]` must leave `0 - len < 0` known below it"
+                );
+            },
+        );
+    }
+
+    /// Steps 3b and this one together: the start need only be a non-negative constant. The seed's
+    /// successful check proves `0 < len`, which entails the `1 <= len` ascending obligation.
+    #[test]
+    fn a_loop_from_one_is_bounded_by_the_check_that_preceded_it() {
+        with_analysis(LOOP_FROM_ONE, "total", |function, analysis, _| {
+            assert!(
+                bounds_its_cursor(function, analysis),
+                "`1..len(a)` after `a[0]` must bound its cursor from both sides"
+            );
+        });
+        // The same loop without the seed: nothing says `n` is above the start, so the range may
+        // count down and neither bound holds.
+        with_analysis(
+            "fn total(mut a: [int], n: int) -> int { let mut t = 0; for i in 1..n { t = t + a[i] }; t }",
+            "total",
+            |function, analysis, _| {
+                assert!(
+                    !bounds_its_cursor(function, analysis),
+                    "a range from one to an unknown end must not be assumed ascending"
+                );
+            },
+        );
+    }
+
+    /// On integers `x < y` and `x + 1 <= y` are one fact, and the check that returned states the
+    /// first where a range from one asks for the second.
+    #[test]
+    fn a_strict_bound_entails_the_step_above_it() {
+        let len = Affine::symbol(SymbolId(0));
+        let zero = Affine::constant(0);
+        let strict = Predicate::between(&zero, Comparison::Less, &len).unwrap();
+        let stepped =
+            Predicate::between(&Affine::constant(1), Comparison::LessOrEqual, &len).unwrap();
+        assert!(strict.entails(&stepped), "`0 < len` must give `1 <= len`");
+        assert!(
+            !stepped.entails(&strict),
+            "the weaker bound must not give back the strict one"
+        );
+        assert!(
+            !strict.entails(
+                &Predicate::between(&Affine::constant(2), Comparison::LessOrEqual, &len).unwrap()
+            ),
+            "only the one step is sound; two would be the strengthening this refuses"
         );
     }
 

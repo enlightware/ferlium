@@ -44,6 +44,7 @@ branch forward    // bypass booleans stored in branch arms only to control a sec
 peephole          // collapse small local CFG/value patterns
 string accumulate // forward an overwritten string into its self-prefixed format builder
 devirtualize      // final dictionary-entry callees exposed too late for a fold round
+bounds checks     // prove post-inline array indices in range and remove their failure edges
 dce               // on every body, not only a changed one
 stack markers     // drop a mark duplicating one already held, and restores that pop nothing
 finish            // restores canonical form without exposing the intermediate body
@@ -476,6 +477,28 @@ tail. Keeping the proof in one block also excludes a catchable source failure, w
 represent as an `invoke` terminator. A linear definition/use census identifies the uses, and final DCE removes the
 empty-builder, rendered-prefix and assignment scaffolding orphaned by the rewrite.
 
+## Bounds-check elimination
+
+`mir::pass::bounds_check` removes a post-inline `array_resolve_index(index, len)` when relational
+analysis proves `0 <= index < len`. In that case the resolved offset is exactly `index`, so the call
+becomes a representation copy. If it was an `invoke`, its failure edge is unreachable and becomes a
+jump to the normal successor; the pass removes the stranded blocks and DCE collects the panic
+storage and cleanup.
+
+The proof is a forward value-version analysis over affine integer forms and predicates. Direct,
+known standard-library calls supply their documented arithmetic, comparison, range and array-length
+semantics. A successful checked access refines its normal edge. A canonical range loop supplies a
+non-negative constant-start induction fact, and bounds are attached to its yielded cursor only where
+the flow state also proves `start <= end`. Place contents receive fresh symbols after writes and
+distinct incoming values receive join symbols, so a predicate cannot silently survive mutation.
+Registers that name places are structural SSA facts kept outside the flow state.
+
+Only functions containing a relevant known call are admitted. Induction recognition locally
+interprets a loop's construction block, then one reverse-postorder-prioritized fixed point computes
+the proof; replay performs the rewrite. Refusing a proof retains the original check. The pass runs
+after the final devirtualization because inlining exposes `array_resolve_index`, and immediately
+before DCE because removing its error edge strands cleanup.
+
 ## Dead code elimination
 
 Deliberately narrow, and intra-function only.
@@ -555,17 +578,19 @@ cascades. Growth is measured against the pre-optimization size, or each round wo
 
 ## The optimization report
 
-`CompilerSession::optimization_report`, surfaced as `--optimization-report` in the REPL. **Derived,
-not instrumented**: nothing is recorded during optimization: on request the report re-classifies each
-remaining call site with each pass's own predicate, so its answers cannot drift from what the passes
-decide, and a session that never asks pays nothing.
+`CompilerSession::optimization_report`, surfaced as `--optimization-report` in the REPL. It is
+**almost entirely derived rather than instrumented**: on request the report re-classifies each
+remaining call site with each pass's own predicate, so those answers cannot drift from what the
+passes decide. A tiny artifact aggregate records rewrites such as removed bounds checks, because a
+deleted operation cannot be reconstructed from final MIR.
 
 It counts call sites before and after rather than "folds", which stopped being derivable once
 inlining could duplicate calls.
 
-Its blind spot is worth knowing: it classifies **call sites**. A dead `dict_entry`, a redundant
-clone, a layout witness that substitution made unnecessary — none of these is a call site, and every
-one of them was found by reading generated MIR instead.
+Its blind spot is worth knowing: refusal reasons classify **call sites**. A dead `dict_entry`, a
+redundant clone, a layout witness that substitution made unnecessary — none of these is a call site,
+and every one of them was found by reading generated MIR instead. A pass needs an explicit aggregate
+if its most useful result would otherwise disappear without a count.
 
 ## Invariants
 

@@ -17,10 +17,11 @@
 //! And it reports what folded as well as what did not, because the ratio is the point — a list of
 //! refusals alone cannot distinguish "not folded" from "not a call site".
 //!
-//! **Nothing is instrumented to produce it.** The report is *derived*, on request, from the two
-//! artifact stages a module already keeps: their call sites are counted, and each call that remains
-//! is re-classified by each pass's own predicate — so the answers cannot drift from what the passes
-//! actually decided. A session that never asks pays nothing.
+//! **Almost nothing is instrumented to produce it.** The report is derived, on request, from the
+//! two artifact stages a module already keeps: their call sites are counted, and each call that
+//! remains is re-classified by each pass's own predicate. A small aggregate is recorded for
+//! rewrites such as bounds-check elimination whose deleted operation cannot be reconstructed from
+//! final MIR. A session that never asks still pays no per-site reporting cost.
 //!
 //! **Each pass speaks for itself.** A site both passes declined carries a remark from each, because
 //! "why was this not evaluated away?" and "why was the callee not copied in?" have different
@@ -32,7 +33,7 @@ use ustr::Ustr;
 
 use crate::{
     Location, MirOptimization,
-    compiler::{CompilerSession, Specialization},
+    compiler::{CompilerSession, MirArtifacts, Specialization},
     format::FormatWith,
     mir::{
         self, Function, Operation, OperationKind, const_eval::NotFoldable,
@@ -182,6 +183,8 @@ pub struct OptimizationReport {
     /// Call sites that remain. Counted rather than derived from the remarks: a site that neither
     /// pass could take carries one remark from each.
     pub call_sites_after: usize,
+    /// Checks the range analysis proved redundant and rewrote while optimizing this module.
+    pub bounds_checks_removed: usize,
     pub remarks: Vec<Remark>,
     /// Every body the optimizer specialized, in the order it created them.
     ///
@@ -219,17 +222,15 @@ impl OptimizationReport {
 pub(crate) fn build(
     session: &CompilerSession,
     module_id: ModuleId,
-    raw: &[Option<Function>],
-    optimized: &[Option<Function>],
-    specializations: &[Specialization],
-    pruned_specializations: usize,
+    raw: &MirArtifacts,
+    optimized: &MirArtifacts,
     env: ModuleEnv<'_>,
 ) -> OptimizationReport {
     let mut call_sites_before = 0usize;
     let mut call_sites_after = 0usize;
     let mut remarks = Vec::new();
 
-    for (raw_body, optimized_body) in raw.iter().zip(optimized) {
+    for (raw_body, optimized_body) in raw.bodies().iter().zip(optimized.bodies()) {
         let (Some(raw_body), Some(optimized_body)) = (raw_body, optimized_body) else {
             continue;
         };
@@ -277,12 +278,14 @@ pub(crate) fn build(
     OptimizationReport {
         call_sites_before,
         call_sites_after,
+        bounds_checks_removed: optimized.optimization_stats().bounds_checks_removed,
         remarks,
-        specializations: specializations
+        specializations: optimized
+            .specializations()
             .iter()
             .map(|specialization| specialization_remark(session, specialization))
             .collect(),
-        pruned_specializations,
+        pruned_specializations: optimized.pruned_specializations(),
     }
 }
 
@@ -386,6 +389,13 @@ impl FormatWith<ModuleEnv<'_>> for OptimizationReport {
             "{} call sites before optimization, {} after",
             self.call_sites_before, self.call_sites_after
         )?;
+        if self.bounds_checks_removed > 0 {
+            writeln!(
+                f,
+                "  {} bounds checks proved redundant and removed",
+                self.bounds_checks_removed
+            )?;
+        }
         if !self.specializations.is_empty() {
             let operations: usize = self.specializations.iter().map(|s| s.size).sum();
             let inert = self
@@ -598,6 +608,21 @@ mod tests {
         assert!(report.call_sites_before > 0);
         assert!(
             rendered.contains("call sites before optimization"),
+            "{rendered}"
+        );
+    }
+
+    /// A removed check is absent from final MIR, so its count has to survive in the optimized
+    /// artifact rather than being reconstructed when the report is requested.
+    #[test]
+    fn bounds_check_elimination_is_reported() {
+        let (report, rendered) = report_for(
+            "fn total(mut a: [int]) -> int { let mut t = 0; \
+             for i in 0..len(a) { t = t + a[i] }; t }",
+        );
+        assert!(report.bounds_checks_removed > 0, "{rendered}");
+        assert!(
+            rendered.contains("bounds checks proved redundant and removed"),
             "{rendered}"
         );
     }

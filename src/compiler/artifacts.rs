@@ -15,7 +15,8 @@ use crate::{
     mir::{
         self,
         pass::{
-            Specializations, dead_evidence, optimize_function, owned_arguments,
+            OptimizationStats, Specializations, dead_evidence, known_callee, optimize_function,
+            owned_arguments,
             provenance::{AddressorSummaries, AddressorSummary},
             prune_specializations, share_specializations,
         },
@@ -144,6 +145,8 @@ pub(crate) struct MirArtifacts {
     /// between the bodies specialization was priced on and the bodies that survived it. Always zero
     /// in the raw stage, which specializes nothing.
     pruned_specializations: usize,
+    /// Rewrite counts that final MIR cannot reconstruct because cleanup removed the evidence.
+    optimization_stats: OptimizationStats,
     /// The cached provenance and repeatability of every addressor.
     ///
     /// Derived once, from the *raw* bodies, and carried into the optimized stage unchanged:
@@ -185,6 +188,7 @@ impl MirArtifacts {
             functions,
             specializations: Vec::new(),
             pruned_specializations: 0,
+            optimization_stats: OptimizationStats::default(),
             addressor_summaries,
         }
     }
@@ -229,13 +233,25 @@ impl MirArtifacts {
         let env = ModuleEnv::new(module, modules);
         let module_id = module.module_id();
         let mut specializations = Specializations::new(module_id, raw.functions.len());
+        // Resolved once per module: it walks std's trait and function tables to key its entries by
+        // identity, which is the same answer for every body below.
+        let known = known_callee::KnownCallees::new(modules);
+        let mut optimization_stats = OptimizationStats::default();
 
         let mut functions: Vec<Option<mir::Function>> = raw
             .functions
             .iter()
             .map(|function| {
                 function.as_ref().map(|function| {
-                    optimize_function(function, env, session, module_id, &mut specializations)
+                    optimize_function(
+                        function,
+                        env,
+                        session,
+                        module_id,
+                        &mut specializations,
+                        &known,
+                        &mut optimization_stats,
+                    )
                 })
             })
             .collect();
@@ -249,7 +265,15 @@ impl MirArtifacts {
                 .body(id)
                 .expect("a specialization just created has a body")
                 .clone();
-            let optimized = optimize_function(&body, env, session, module_id, &mut specializations);
+            let optimized = optimize_function(
+                &body,
+                env,
+                session,
+                module_id,
+                &mut specializations,
+                &known,
+                &mut optimization_stats,
+            );
             specializations.set_body(id, optimized);
             next += 1;
         }
@@ -312,6 +336,7 @@ impl MirArtifacts {
             functions,
             specializations,
             pruned_specializations,
+            optimization_stats,
             // Carried across unchanged: optimization preserves a proved root and repeatability.
             // A specialization may admit a more precise summary after substitution, but reusing
             // its original's conservative answer is sound and avoids per-stage recomputation.
@@ -346,6 +371,10 @@ impl MirArtifacts {
     /// How many specializations were built and then dropped as unreachable.
     pub(crate) fn pruned_specializations(&self) -> usize {
         self.pruned_specializations
+    }
+
+    pub(crate) fn optimization_stats(&self) -> OptimizationStats {
+        self.optimization_stats
     }
 
     pub(crate) fn specializations(&self) -> &[Specialization] {

@@ -1330,9 +1330,10 @@ impl CompilerSession {
 
     /// What optimizing `module_id` achieved, and what it declined to do.
     ///
-    /// Opt-in and derived: nothing is recorded during optimization to produce this, so a session
-    /// that never asks pays nothing. Asking costs one analysis pass over the module's optimized
-    /// bodies, plus preparing both artifact stages if they are not built yet.
+    /// Opt-in and almost entirely derived from the artifact stages. Passes retain only aggregate
+    /// counts for rewrites whose deleted operations cannot be reconstructed from final MIR. Asking
+    /// otherwise costs one analysis pass over the module's optimized bodies, plus preparing both
+    /// artifact stages if they are not built yet.
     ///
     /// This is what lets a user check whether making a hot path concrete had the intended effect,
     /// and what tells us which refusal dominates — the number that sizes inlining against
@@ -1348,15 +1349,7 @@ impl CompilerSession {
             .expect("optimized MIR must be prepared");
         let module = self.expect_fresh_module(module_id);
         let env = ModuleEnv::new(module, self.raw_modules());
-        crate::mir::pass::report::build(
-            self,
-            module_id,
-            raw.bodies(),
-            optimized.bodies(),
-            optimized.specializations(),
-            optimized.pruned_specializations(),
-            env,
-        )
+        crate::mir::pass::report::build(self, module_id, raw, optimized, env)
     }
 
     /// Returns the entry for module_id, or panic if not found.
