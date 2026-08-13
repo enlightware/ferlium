@@ -23,6 +23,12 @@ use runtime_workloads::{BenchTarget, PreparedRuntimeWorkload, RuntimeWorkload};
 
 // --- User-code corpus ---
 
+/// The modules the user-code compile benchmark builds.
+///
+/// `linalg` and `iter_pipeline` are here for the optimizer rather than for the front end: the other
+/// seven are concrete script code that specializes barely at all, while these two carry the generic
+/// bodies, the specialization table and the closure-carrying adapter structs the passes actually
+/// spend themselves on.
 const USER_CODE_CORPUS: &[(&str, &str)] = &[
     ("sudoku", include_str!("../tests/modules/sudoku.fer")),
     (
@@ -37,8 +43,17 @@ const USER_CODE_CORPUS: &[(&str, &str)] = &[
         "rle_encode",
         include_str!("../tests/modules/rle_encode.fer"),
     ),
+    ("linalg", include_str!("../tests/modules/linalg.fer")),
+    (
+        "iter_pipeline",
+        include_str!("../tests/modules/iter_pipeline.fer"),
+    ),
 ];
 
+/// Compiles every corpus module and builds its execution target.
+///
+/// The `prepare_execution_target` call is what runs the optimizer; without it the `Mir` and
+/// `OptimizedMir` variants differ by a session flag with nothing to act on. No-op for `Hir`.
 fn compile_user_code_corpus(session: &mut CompilerSession, target: ExecutionTarget) {
     for (name, src) in USER_CODE_CORPUS {
         let file = format!("{name}.fer");
@@ -46,6 +61,7 @@ fn compile_user_code_corpus(session: &mut CompilerSession, target: ExecutionTarg
             .compile_for(target, src, &file, Path::single_str(name))
             .unwrap()
             .module_id;
+        session.prepare_execution_target(target, module_id);
         black_box(module_id);
     }
 }
@@ -61,6 +77,8 @@ fn bench_session() -> CompilerSession {
 
 fn bench_session_for_target(target: BenchTarget) -> (CompilerSession, ExecutionTarget) {
     let mut session = target.session();
+    // Allow subscript access, used by `linalg`.
+    session.set_allow_experimental(true);
     if target.target() == ExecutionTarget::Mir {
         let std_id = session.std_module().module_id();
         session.prepare_execution_target(target.target(), std_id);
@@ -134,10 +152,9 @@ fn bench_std_mir_build(mut session: CompilerSession) -> BenchOutput<()> {
     }
 }
 
-// The cost of the optimization passes, over every body of the standard library. Optimization is
-// driven by `prepare_execution_target`, not by compiling, so this is where its compile-time cost
-// shows up — the user-code compile benchmarks never enter it. Read against `bench_std_mir_build`,
-// which does the same work with the passes off. (Gungraun's macro rejects doc comments here.)
+// The cost of the optimization passes, over every body of the standard library. Read against
+// `bench_std_mir_build`, which does the same work with the passes off. (Gungraun's macro rejects
+// doc comments here.)
 #[library_benchmark(setup = bench_session, teardown = teardown_benchmark)]
 fn bench_std_mir_optimize(mut session: CompilerSession) -> BenchOutput<()> {
     session.set_mir_optimization(MirOptimization::Enabled);
@@ -157,6 +174,8 @@ fn bench_cached_std_mir_session_load(_: ()) -> BenchOutput<()> {
     }
 }
 
+// Read `Mir` against `OptimizedMir` for the optimizer's cost over user code, which the std-only
+// pair above cannot give. (Gungraun's macro rejects doc comments here.)
 #[library_benchmark(teardown = teardown_benchmark)]
 #[benches::target(iter = BenchTarget::ALL, setup = bench_session_for_target)]
 fn bench_user_code_compile_without_std_startup(
