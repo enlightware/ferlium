@@ -922,6 +922,45 @@ impl OperationKind {
             | DropClosureEnv => {}
         }
     }
+
+    /// The function this kind names *itself*, if it names one.
+    ///
+    /// The read-only twin of [`visit_function_ids_mut`](Self::visit_function_ids_mut), for the
+    /// callers that only want to know which functions a body reaches and must not pay a body clone
+    /// to ask. Exhaustive for the same reason, and the two must agree: a kind that starts carrying a
+    /// function stops both compiling.
+    pub(crate) fn function_id(&self) -> Option<FunctionId> {
+        use OperationKind::*;
+        match self {
+            BuildClosure { function, .. } => Some(*function),
+            Alloca { .. }
+            | AllocaPlace { .. }
+            | Call { .. }
+            | Project { .. }
+            | EndProject
+            | CompareEqual
+            | Load
+            | Subfield { .. }
+            | DictEntry { .. }
+            | SubscriptMember { .. }
+            | BuildSubscript { .. }
+            | Variant { .. }
+            | BuildArray { .. }
+            | ExtractTag
+            | Store
+            | Clear
+            | Memcpy
+            | Move
+            | StackSave
+            | StackRestore
+            | CheckCallDepth
+            | CheckFuel
+            | Clone { .. }
+            | Drop { .. }
+            | CloneClosureEnv { .. }
+            | DropClosureEnv => None,
+        }
+    }
 }
 
 impl FormatWith<ModuleEnv<'_>> for Operation {

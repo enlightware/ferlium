@@ -17,7 +17,7 @@ use crate::{
         pass::{
             Specializations, dead_evidence, optimize_function, owned_arguments,
             provenance::{AddressorSummaries, AddressorSummary},
-            share_specializations,
+            prune_specializations, share_specializations,
         },
     },
     module::{FunctionId, LocalFunctionId, Module, ModuleEnv, ModuleId, id::Id},
@@ -138,6 +138,12 @@ pub(crate) struct Specialization {
 pub(crate) struct MirArtifacts {
     functions: Vec<Option<mir::Function>>,
     specializations: Vec<Specialization>,
+    /// Specializations the optimizer built and then found nothing calling.
+    ///
+    /// Kept because it is the one thing the finished artifact cannot be asked: the difference
+    /// between the bodies specialization was priced on and the bodies that survived it. Always zero
+    /// in the raw stage, which specializes nothing.
+    pruned_specializations: usize,
     /// The cached provenance and repeatability of every addressor.
     ///
     /// Derived once, from the *raw* bodies, and carried into the optimized stage unchanged:
@@ -178,6 +184,7 @@ impl MirArtifacts {
         Self {
             functions,
             specializations: Vec::new(),
+            pruned_specializations: 0,
             addressor_summaries,
         }
     }
@@ -267,6 +274,17 @@ impl MirArtifacts {
             env,
         );
 
+        // Drop the copies nothing calls any more. After the owned-ABI variants above rather than
+        // beside the sharing below them: redirecting a call to a variant is itself one of the ways a
+        // specialization is orphaned, so pruning earlier would miss that population. Sharing has the
+        // opposite constraint, which is why the two are separate passes.
+        let (specializations, pruned_specializations) =
+            prune_specializations::drop_unreachable_specializations(
+                &mut functions,
+                specializations,
+                module_id,
+            );
+
         // Last, over the finished bodies. Every decision above was taken against the signatures the
         // optimizer has always seen; this only narrows the calling convention of bodies nothing
         // will consult again.
@@ -293,6 +311,7 @@ impl MirArtifacts {
         Self {
             functions,
             specializations,
+            pruned_specializations,
             // Carried across unchanged: optimization preserves a proved root and repeatability.
             // A specialization may admit a more precise summary after substitution, but reusing
             // its original's conservative answer is sound and avoids per-stage recomputation.
@@ -324,6 +343,11 @@ impl MirArtifacts {
     }
 
     /// Every specialized body, in the order the optimizer created them.
+    /// How many specializations were built and then dropped as unreachable.
+    pub(crate) fn pruned_specializations(&self) -> usize {
+        self.pruned_specializations
+    }
+
     pub(crate) fn specializations(&self) -> &[Specialization] {
         &self.specializations
     }

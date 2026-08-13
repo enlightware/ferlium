@@ -188,6 +188,13 @@ pub struct OptimizationReport {
     /// These are counted in neither figure above, which pair the two stages and so cover only what
     /// the source declared. A specialization exists in the optimized stage alone.
     pub specializations: Vec<SpecializationRemark>,
+    /// Specializations built and then dropped because nothing called them.
+    ///
+    /// Reported separately because the list above cannot carry them: pricing a body against its
+    /// payoff needs the body, and these are gone. It is still the number that says how much of what
+    /// specialization built was thrown away — a caller inlined the copy it asked for, or was itself
+    /// specialized, or had its call redirected to an owned-ABI variant.
+    pub pruned_specializations: usize,
 }
 
 impl OptimizationReport {
@@ -215,6 +222,7 @@ pub(crate) fn build(
     raw: &[Option<Function>],
     optimized: &[Option<Function>],
     specializations: &[Specialization],
+    pruned_specializations: usize,
     env: ModuleEnv<'_>,
 ) -> OptimizationReport {
     let mut call_sites_before = 0usize;
@@ -274,6 +282,7 @@ pub(crate) fn build(
             .iter()
             .map(|specialization| specialization_remark(session, specialization))
             .collect(),
+        pruned_specializations,
     }
 }
 
@@ -389,6 +398,13 @@ impl FormatWith<ModuleEnv<'_>> for OptimizationReport {
                 "  {} specializations, {operations} operations, {inert} buying nothing",
                 self.specializations.len()
             )?;
+            if self.pruned_specializations > 0 {
+                writeln!(
+                    f,
+                    "  {} more were built and dropped as unreachable",
+                    self.pruned_specializations
+                )?;
+            }
             // Costliest per unit of payoff first: a cost model has to reject from this end, so this
             // is the order in which to read the list.
             let mut ranked: Vec<&SpecializationRemark> = self.specializations.iter().collect();
@@ -592,8 +608,12 @@ mod tests {
     /// temporary statically sized.
     #[test]
     fn specialization_payoff_counts_removed_layout_witnesses() {
+        // The unreachable recursive tail keeps the copy in the table: the inliner refuses a
+        // recursive callee, where a callee inlined into its only caller would be pruned as
+        // unreachable and have no remark left to price.
         let (report, rendered) = report_for(
-            "fn swap(a, i, j) { let temp = a[i]; a[i] = a[j]; a[j] = temp }\n\
+            "fn swap(a, i, j) { let temp = a[i]; a[i] = a[j]; a[j] = temp; \
+             if i > 100 { swap(a, i - 1, j) } }\n\
              fn swap_ints(a: [int], i: int, j: int) { let mut t = a; swap(t, i, j); t }",
         );
         let specialization = report

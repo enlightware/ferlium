@@ -885,10 +885,14 @@ mod tests {
         );
     }
 
+    /// The unreachable recursive tail is what keeps the specialization observable: the inliner
+    /// refuses a recursive callee, so the copy survives into the emitted module instead of being
+    /// spliced into its only caller and then pruned as unreachable. It adds no subscript of its own.
     #[test]
     fn repeated_subscripts_are_merged_before_inlining_swap() {
         let body = body_of(
-            "fn swap(a, i, j) { let temp = a[i]; a[i] = a[j]; a[j] = temp }\n\
+            "fn swap(a, i, j) { let temp = a[i]; a[i] = a[j]; a[j] = temp; \
+             if i > 100 { swap(a, i - 1, j) } }\n\
              fn use_it(mut a: [int]) -> [int] { swap(a, 0, 1); a }",
             "swap#spec:[int]",
         );

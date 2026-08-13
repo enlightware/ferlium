@@ -1354,6 +1354,7 @@ impl CompilerSession {
             raw.bodies(),
             optimized.bodies(),
             optimized.specializations(),
+            optimized.pruned_specializations(),
             env,
         )
     }

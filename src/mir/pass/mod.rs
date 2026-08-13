@@ -49,8 +49,10 @@ pub(crate) mod monomorphize;
 pub(crate) mod owned_arguments;
 pub(crate) mod peephole;
 pub(crate) mod provenance;
+pub(crate) mod prune_specializations;
 pub mod report;
 pub(crate) mod share_specializations;
+pub(crate) mod specialization_table;
 pub(crate) mod stack_region;
 pub(crate) mod string_accumulate;
 

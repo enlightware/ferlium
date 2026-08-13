@@ -1788,8 +1788,9 @@ mod tests {
              direct call on the concrete impl:\n{caller}"
         );
         assert!(
-            module.contains("fn twice_it#spec:[int]"),
-            "and the specialization it came from must be named after its instantiation:\n{module}"
+            !module.contains("fn twice_it#spec:[int]"),
+            "and having been inlined into its only caller, the copy must not survive the \
+             module: `prune_specializations` drops what nothing calls:\n{module}"
         );
     }
 
@@ -1971,10 +1972,14 @@ mod tests {
         let mut session = CompilerSession::new();
         session.set_mir_optimization(MirOptimization::Enabled);
         // Compiling at all is the assertion: every specialized body goes through `verify_function`,
-        // which is what rejected this before `demote_infallible_invokes` existed.
+        // which is what rejected this before `demote_infallible_invokes` existed. The arms are
+        // padded past `INLINE_CALLEE_OPERATIONS` so the copy survives into the final artifact and is
+        // verified in its own right — inlined into its only caller, it would be pruned as
+        // unreachable and only the splice would be checked.
         let module = session.emit_mir(
             "spec",
-            "fn ho(f, x) { match f(x) { 1 => 10, _ => 20 } }\n\
+            "fn ho(f, x) { match f(x) { 1 => 10, 2 => 20, 3 => 30, 4 => 40, 5 => 50, \
+             6 => 60, 7 => 70, 8 => 80, _ => 90 } }\n\
              fn use_it(n: int) -> int { ho(|z| z, n) }",
         );
         assert!(

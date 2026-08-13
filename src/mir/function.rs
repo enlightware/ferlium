@@ -18,7 +18,7 @@ use crate::{
         terminator::{Terminator, TerminatorKind},
         value::{Constant, ConstantId},
     },
-    module::{ModuleEnv, id::Id},
+    module::{FunctionId, ModuleEnv, id::Id},
     types::r#type::{CallResultConvention, Type},
 };
 
@@ -142,6 +142,51 @@ impl Function {
 
     pub fn block(&self, block: BlockId) -> &BasicBlock {
         &self.blocks[block.as_index()]
+    }
+
+    /// Visits every function this body names, wherever it names it.
+    ///
+    /// The read-only counterpart of
+    /// [`FunctionEdit::visit_function_ids_mut`](crate::mir::edit::FunctionEdit::visit_function_ids_mut),
+    /// and it must reach exactly the same places: a caller deciding which functions are reachable
+    /// and a caller renumbering them have to agree, or a body is kept alive by a reference the
+    /// rewrite cannot find, or worse, dropped despite one it could. Both halves are needed and
+    /// neither subsumes the other — a callee arrives as an operand, while `build_closure` carries
+    /// its function in the operation kind.
+    pub(crate) fn visit_function_ids(&self, mut visit: impl FnMut(FunctionId)) {
+        let mut visit_operand = |operand: &mir::Value| {
+            if let mir::Value::Function(id) = operand {
+                visit(*id);
+            }
+        };
+        for block in &self.blocks {
+            for operation in &block.operations {
+                operation.operands.iter().for_each(&mut visit_operand);
+            }
+            match &block.terminator.kind {
+                TerminatorKind::Invoke { operation, .. } => {
+                    operation.operands.iter().for_each(&mut visit_operand)
+                }
+                TerminatorKind::CondBr { condition, .. } => visit_operand(condition),
+                TerminatorKind::Yield { place, .. } => visit_operand(place),
+                TerminatorKind::Goto { .. }
+                | TerminatorKind::Return
+                | TerminatorKind::PropagateError
+                | TerminatorKind::FailureDuringCleanup => {}
+            }
+        }
+        for block in &self.blocks {
+            for operation in &block.operations {
+                if let Some(id) = operation.kind.function_id() {
+                    visit(id);
+                }
+            }
+            if let TerminatorKind::Invoke { operation, .. } = &block.terminator.kind
+                && let Some(id) = operation.kind.function_id()
+            {
+                visit(id);
+            }
+        }
     }
 
     /// Decomposes the function for editing. Canonical form is restored by either the checked

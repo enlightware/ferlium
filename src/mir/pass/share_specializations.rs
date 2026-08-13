@@ -21,33 +21,28 @@
 //! again. It runs *before* the owned-ABI variants are built, so those are derived from the
 //! deduplicated set rather than duplicated along with it.
 //!
-//! Two things make this more than a grouping:
+//! One thing makes this more than a grouping: **the identity has to be read through the merges
+//! already decided.** Two bodies that each call a different copy of one callee are equal exactly
+//! when those copies merge, and the comparison reads raw operand ids. So the grouping repeats until
+//! a round merges nothing — one extra round in the common case, and what closes the mutually
+//! recursive one.
 //!
-//! - **The identity has to be read through the merges already decided.** Two bodies that each call
-//!   a different copy of one callee are equal exactly when those copies merge, and the comparison
-//!   reads raw operand ids. So the grouping repeats until a round merges nothing — one extra round
-//!   in the common case, and what closes the mutually recursive one.
-//! - **Compaction moves every later specialization**, so no id may be held across it. Merging and
-//!   renumbering are therefore composed into one map and applied in a single rewrite; there is no
-//!   intermediate module state in which some ids have moved and others have not.
-//!
-//! The rewrite reaches a function wherever a body names one, which is not only call callee
-//! operands: `build_closure` carries a [`FunctionId`] in the operation kind, where no operand walk
-//! sees it. Nothing writes a specialization there today — the specializer and the owned-ABI pass
-//! both write only into call callees — but the distinction between "misses a sharing" and "leaves a
-//! dangling id" is what makes that worth reaching anyway, and
-//! [`OperationKind::visit_function_ids_mut`](crate::mir::OperationKind::visit_function_ids_mut) is
-//! exhaustive so a later kind cannot quietly acquire one.
+//! Renumbering the table afterwards belongs to
+//! [`specialization_table`](super::specialization_table), which this shares with
+//! [`prune_specializations`](super::prune_specializations).
 
 use rustc_hash::FxHashMap;
 
 use crate::{
     compiler::Specialization,
-    mir::{Function, edit::FunctionEdit},
-    module::{FunctionId, LocalFunctionId, ModuleId, id::Id},
+    mir::Function,
+    module::{FunctionId, ModuleId},
 };
 
-use super::monomorphize::{self_reference, structurally_identical, structure_digest};
+use super::{
+    monomorphize::{self_reference, structurally_identical, structure_digest},
+    specialization_table::{self, SpecializationTable},
+};
 
 /// Merges every specialization whose optimized body duplicates another's, and compacts the table.
 ///
@@ -58,56 +53,23 @@ pub(crate) fn share_identical_specialization_bodies(
     specializations: Vec<Specialization>,
     module: ModuleId,
 ) -> Vec<Specialization> {
-    let first_index = functions.len();
+    let table = SpecializationTable::new(module, functions);
     if specializations.len() < 2 {
         return specializations;
     }
     debug_assert!(
-        specializations.iter().all(|specialization| {
-            specialization.original.module != module
-                || specialization.original.function.as_index() < first_index
-        }),
+        specializations
+            .iter()
+            .all(|specialization| table.index_of(specialization.original).is_none()),
         "a specialization of a specialization would need its original remapped too"
     );
 
-    let merged = group(&specializations, module, first_index);
-    if merged
-        .iter()
-        .enumerate()
-        .all(|(index, &into)| index == into)
-    {
-        return specializations;
-    }
-
-    // Merging and renumbering in one map: a body is rewritten once, from ids that all still mean
-    // what they meant before this pass, to ids that all mean what they will mean after it.
-    let mut compacted = vec![usize::MAX; merged.len()];
-    let mut retained = 0;
-    for (index, slot) in compacted.iter_mut().enumerate() {
-        if resolve(&merged, index) == index {
-            *slot = retained;
-            retained += 1;
-        }
-    }
-    let remap = |id: FunctionId| match specialization_index(id, module, first_index) {
-        Some(index) => function_id(module, first_index, compacted[resolve(&merged, index)]),
-        None => id,
-    };
-
-    for slot in functions.iter_mut() {
-        if let Some(body) = slot.take() {
-            *slot = Some(rewrite(body, &remap));
-        }
-    }
-    specializations
-        .into_iter()
-        .enumerate()
-        .filter(|(index, _)| resolve(&merged, *index) == *index)
-        .map(|(_, specialization)| Specialization {
-            body: rewrite(specialization.body, &remap),
-            ..specialization
-        })
-        .collect()
+    // Chains are resolved here rather than in the rewrite, which cannot tell an entry merged into
+    // another from one kept as it is.
+    let merged = group(&specializations, table);
+    specialization_table::rewrite(functions, specializations, table, |index| {
+        Some(resolve(&merged, index))
+    })
 }
 
 /// For each specialization, the one it is merged into — itself when it survives.
@@ -116,7 +78,7 @@ pub(crate) fn share_identical_specialization_bodies(
 /// specialization depends on the merges already decided. Each round that changes anything strictly
 /// reduces the surviving set, so this terminates in at most one round per specialization and in
 /// practice in two: one that merges and one that confirms.
-fn group(specializations: &[Specialization], module: ModuleId, first_index: usize) -> Vec<usize> {
+fn group(specializations: &[Specialization], table: SpecializationTable) -> Vec<usize> {
     let mut merged: Vec<usize> = (0..specializations.len()).collect();
     loop {
         // Digest to at most one bucket of candidates, then let the bodies decide, so a collision
@@ -131,7 +93,7 @@ fn group(specializations: &[Specialization], module: ModuleId, first_index: usiz
             let digest = structure_digest(
                 &specialization.body,
                 specialization.original,
-                &canonical(&merged, module, first_index, index),
+                &canonical(&merged, table, index),
             );
             let bucket = buckets.entry(digest).or_default();
             let survivor = bucket.iter().copied().find(|&other| {
@@ -141,9 +103,9 @@ fn group(specializations: &[Specialization], module: ModuleId, first_index: usiz
                 specializations[other].original == specialization.original
                     && structurally_identical(
                         &specialization.body,
-                        &canonical(&merged, module, first_index, index),
+                        &canonical(&merged, table, index),
                         &specializations[other].body,
-                        &canonical(&merged, module, first_index, other),
+                        &canonical(&merged, table, other),
                     )
             });
             match survivor {
@@ -167,14 +129,13 @@ fn group(specializations: &[Specialization], module: ModuleId, first_index: usiz
 /// survivor maps to itself under the first so the order between them does not matter.
 fn canonical(
     merged: &[usize],
-    module: ModuleId,
-    first_index: usize,
+    table: SpecializationTable,
     own: usize,
 ) -> impl Fn(FunctionId) -> FunctionId {
-    let normalize_self = self_reference(function_id(module, first_index, own));
+    let normalize_self = self_reference(table.id_of(own));
     move |id| {
-        let surviving = match specialization_index(id, module, first_index) {
-            Some(index) => function_id(module, first_index, resolve(merged, index)),
+        let surviving = match table.index_of(id) {
+            Some(index) => table.id_of(resolve(merged, index)),
             None => id,
         };
         normalize_self(surviving)
@@ -187,34 +148,6 @@ fn resolve(merged: &[usize], mut index: usize) -> usize {
         index = merged[index];
     }
     index
-}
-
-/// Which specialization of this module `id` names, if it names one.
-///
-/// The module check is what makes a bare local index meaningful: another module's ordinary function
-/// can hold the same one.
-fn specialization_index(id: FunctionId, module: ModuleId, first_index: usize) -> Option<usize> {
-    (id.module == module)
-        .then(|| id.function.as_index().checked_sub(first_index))
-        .flatten()
-}
-
-fn function_id(module: ModuleId, first_index: usize, index: usize) -> FunctionId {
-    FunctionId {
-        module,
-        function: LocalFunctionId::from_index(first_index + index),
-    }
-}
-
-/// Points every function reference in `body` at what it is called after this pass.
-///
-/// Applied to every body rather than only those that hold a moved reference: compaction moves
-/// nearly all of them, and the walk is what decides whether one is held. Rewritten bodies are
-/// verified with every other final artifact once this whole-module cleanup completes.
-fn rewrite(body: Function, remap: &impl Fn(FunctionId) -> FunctionId) -> Function {
-    let mut edit = FunctionEdit::new(body);
-    edit.visit_function_ids_mut(|id| *id = remap(*id));
-    edit.finish_unverified()
 }
 
 #[cfg(test)]
@@ -242,9 +175,9 @@ mod tests {
             .mir_artifacts_for(module_id, MirOptimization::Enabled)
             .expect("optimized artifacts were just built");
 
-        let first_index = optimized.bodies().len();
+        let table = SpecializationTable::new(module_id, optimized.bodies());
         let specializations = optimized.specializations();
-        let id_of = |index: usize| function_id(module_id, first_index, index);
+        let id_of = |index: usize| table.id_of(index);
 
         // Without a repeated original nothing is ever compared, and the assertion below would hold
         // of a module this pass could not possibly help.

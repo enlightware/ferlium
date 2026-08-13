@@ -52,8 +52,8 @@ finish            // restores canonical form without exposing the intermediate b
 Then `MirArtifacts::optimize` drains the specializations those rounds requested as a worklist, since
 optimizing a specialization may request more. It then shares the specialized bodies that became
 identical under optimization, forwards provable last-use arguments into owned ABI variants, drops
-dead specialization evidence, and verifies every final declared and generated body exactly once
-before installing the optimized artifact.
+the specializations nothing calls, drops dead specialization evidence, and verifies every final
+declared and generated body exactly once before installing the optimized artifact.
 
 **Why the rounds.** Specialization makes a generic callee concrete, inlining copies it and binds its
 dictionary parameters to constants, folding resolves the callee's `dict_entry`s into known functions,
@@ -276,12 +276,32 @@ and never across two, because a specialization's metadata is answered through
 `Specialization::original`: two originals with identical MIR can still declare different parameter
 passing or return conventions.
 
-Merging finished bodies adds two obligations creation-time sharing does not have. The grouping
-repeats until a round merges nothing, since two bodies that call two copies of one callee are equal
-exactly when those copies merge. And merging is composed with the compaction of the table into a
-single rewrite, so no id is ever held across a renumbering. That rewrite reaches a function wherever
-a body names one, including `build_closure`, which carries its function in the operation kind where
-no operand walk sees it.
+Merging finished bodies adds an obligation creation-time sharing does not have: the grouping repeats
+until a round merges nothing, since two bodies that call two copies of one callee are equal exactly
+when those copies merge.
+
+**A specialization nothing calls is then dropped.** The optimizer keeps working on the site it made
+a copy for, and may inline that copy, specialize the caller so the reference moves to a copy of it,
+or redirect the call to an owned-ABI variant — each leaves a finished body nothing names. Unlike a
+declared body, a specialization needs no root analysis to be shown unreachable: `specialize_call_sites`
+only ever writes one into a call callee operand, self-calls are redirected inside the same table,
+every cross-module lookup reads the raw stage, which holds no specializations, and dictionaries name
+impls rather than functions. So the declared bodies are the roots in full, and one transitive closure
+answers it — transitive because a dropped body may be the only thing naming its own callees, and
+without a fixpoint because liveness only shrinks. `MirArtifacts::pruned_specializations` records how
+many were dropped, which the optimization report states: once the bodies are gone, nothing else can
+say how much of what specialization built was thrown away.
+
+Pruning runs **after** the owned-ABI variants and sharing **before** them, which is why they are two
+passes rather than one. Sharing must precede them so the variants derive from the deduplicated set;
+pruning must follow, or every body orphaned by a redirect to a variant survives.
+
+Both compose their decision with the compaction of the table into a single rewrite, in
+`specialization_table`, so no id is ever held across a renumbering. That rewrite reaches a function
+wherever a body names one, including `build_closure`, which carries its function in the operation
+kind where no operand walk sees it; `Function::visit_function_ids` is its read-only twin, and the two
+must agree — a reference only one of them reaches is either a body kept alive by nothing or a live
+reference the rewrite fails to renumber.
 
 **Naming follows the `#impl:` convention**: a readable local name, a `#spec:` marker, and a
 discriminator — `twice_it#spec:[int]`. The readable part is the callee's *local* name because every
