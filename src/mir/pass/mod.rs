@@ -45,6 +45,7 @@ pub(crate) mod dce;
 pub(crate) mod dead_evidence;
 pub(crate) mod fold;
 pub(crate) mod inline;
+pub(crate) mod known_callee;
 pub(crate) mod monomorphize;
 pub(crate) mod owned_arguments;
 pub(crate) mod peephole;
