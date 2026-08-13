@@ -703,9 +703,8 @@ impl State {
 
 /// The type of storage each root holds, as the body declares it.
 ///
-/// A [`PlaceKey`] carries no type — it is a root and a path of field positions — so recognizing that
-/// a slot is an array's length, or a range iterator, means going back to where the storage was
-/// declared.
+/// An interned place carries no type — only a root and field positions — so recognizing that a slot
+/// is an array's length, or a range iterator, means going back to where the storage was declared.
 struct RootTypes {
     allocas: FxHashMap<ValueId, Type>,
     parameters: Vec<Type>,

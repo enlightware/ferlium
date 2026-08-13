@@ -396,8 +396,8 @@ fn plan_folds_with(
                 && let Some(call) = dataflow::call_operands(&operation.operands, ty)
             {
                 let destination = call.result.clone();
-                if let Some(key) = analysis.tracked_place_of(&destination) {
-                    state.set_place_known(key, fact_for_reification(&result));
+                if let Some(place) = analysis.tracked_place_of(&destination) {
+                    analysis.set_place_known(&mut state, place, fact_for_reification(&result));
                 }
                 plan.calls.push(Fold {
                     block,
@@ -506,11 +506,11 @@ fn resolved_callee(
     if matches!(callee, mir::Value::Function(_)) {
         return None;
     }
-    let key = analysis.place_of(callee)?;
-    if !matches!(key.root, Root::DictEntry(_)) {
+    let place = analysis.place_of(callee)?;
+    if !matches!(analysis.root_of_place(place), Root::DictEntry(_)) {
         return None;
     }
-    match state.place(&key) {
+    match state.place(place) {
         Fact::Known(Const::Function(id)) => Some((index, id)),
         _ => None,
     }
@@ -568,18 +568,19 @@ fn why_argument_unknown(
     state: &State,
     context: &FoldContext<'_>,
 ) -> NotFoldable {
-    let Some(key) = context.analysis.place_of(operand) else {
+    let Some(place) = context.analysis.place_of(operand) else {
         return why_operand_names_no_place(operand, state, &context.analysis);
     };
-    if context.analysis.is_escaped(key.root) {
+    let root = context.analysis.root_of_place(place);
+    if context.analysis.is_escaped(root) {
         return NotFoldable::ArgumentStorageEscaped;
     }
-    match state.place(&key) {
+    match state.place(place) {
         // Known, but not in a form compile-time evaluation accepts.
         Fact::Known(_) => NotFoldable::ArgumentNotLiteral,
         // An uninitialized slot is not an analysis gap; it is a slot with nothing in it.
         Fact::Uninit => NotFoldable::ArgumentStorageNotModelled,
-        Fact::Unknown => match key.root {
+        Fact::Unknown => match root {
             Root::Parameter(_) => NotFoldable::ArgumentIsParameter,
             Root::DictEntry(_) => NotFoldable::ArgumentNotLiteral,
             Root::Alloca(id) if context.call_destinations.contains(&id) => {
@@ -676,7 +677,7 @@ fn try_fold_call(
         operand => match context
             .analysis
             .place_of(operand)
-            .map(|key| state.place(&key))
+            .map(|place| state.place(place))
         {
             Some(Fact::Known(Const::Function(id))) => id,
             _ => return Err(NotFoldable::CalleeNotDirect),
@@ -700,7 +701,7 @@ fn try_fold_call(
         let known = context
             .analysis
             .tracked_place_of(operand)
-            .map(|key| state.place(&key));
+            .map(|place| state.place(place));
         match known {
             Some(Fact::Known(Const::Literal(literal)))
                 if literal.has_representation_type_in(parameter.ty, &context.env) =>

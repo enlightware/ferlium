@@ -14,9 +14,9 @@
 //!
 //! The model has two layers, because MIR is storage-explicit:
 //!
-//! - **Places.** A [`Root`] is an `alloca` result or a parameter; a [`PlaceKey`] is a root plus a
-//!   field path. Facts are attached to place keys, so `store 5 to %r1.0` is known independently of
-//!   `%r1.1`.
+//! - **Places.** A [`Root`] is an `alloca` result or a parameter. Root and field paths are interned
+//!   as compact [`PlaceId`]s, so `store 5 to %r1.0` is known independently of `%r1.1` without
+//!   cloning or hashing projection vectors in every flow state.
 //! - **Registers.** Immutable register-to-place bindings (`alloca`, `subfield`) live once in the
 //!   [`Analysis`]; only flow-dependent materialized values (`load`) live in each [`State`].
 //!
@@ -67,66 +67,93 @@ pub(crate) enum Root {
     DictEntry(ValueId),
 }
 
-/// A storage slot: a root plus the field path reaching it.
-///
-/// A path entry is the position of a field in the aggregate above it, which is what a `subfield`
-/// selects. It is a [`ProjectionIndex`] rather than a bare integer because that is what it is:
-/// lowering builds the `subfield`'s index operand from one, and reading it back as an untyped
-/// number loses that.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub(crate) struct PlaceKey {
-    pub root: Root,
-    pub path: Vec<ProjectionIndex>,
-}
+crate::define_id_type!(
+    /// An interned storage path within one dataflow analysis.
+    PlaceId
+);
 
-impl PlaceKey {
-    pub(crate) fn root(root: Root) -> Self {
-        Self {
-            root,
-            path: Vec::new(),
-        }
-    }
-
-    pub(crate) fn field(&self, index: ProjectionIndex) -> Self {
-        let mut path = self.path.clone();
-        path.push(index);
-        Self {
-            root: self.root,
-            path,
-        }
-    }
-
-    /// Whether `self` is `other` or lies inside it.
-    pub(crate) fn is_within(&self, other: &PlaceKey) -> bool {
-        self.root == other.root
-            && self.path.len() >= other.path.len()
-            && self.path[..other.path.len()] == other.path[..]
-    }
+struct Place {
+    root: Root,
+    children: Vec<PlaceId>,
 }
 
 /// Immutable register-to-storage structure.
 ///
 /// A dynamic `subfield` still has a known root, which escape analysis and diagnostics need, but no
-/// exact [`PlaceKey`] the folding analysis may safely read.
+/// exact [`PlaceId`] the folding analysis may safely read.
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum PlaceBinding {
-    Exact(PlaceKey),
+    Exact(PlaceId),
     Root(Root),
 }
 
 #[derive(Default)]
 pub(crate) struct PlaceBindings {
     registers: FxHashMap<ValueId, PlaceBinding>,
+    parameters: Vec<PlaceId>,
+    places: Vec<Place>,
+}
+
+struct PlaceBuilder {
+    bindings: PlaceBindings,
+    roots: FxHashMap<Root, PlaceId>,
+    fields: FxHashMap<(PlaceId, ProjectionIndex), PlaceId>,
+}
+
+impl PlaceBuilder {
+    fn new(func: &Function) -> Self {
+        let mut builder = Self {
+            bindings: PlaceBindings::default(),
+            roots: FxHashMap::default(),
+            fields: FxHashMap::default(),
+        };
+        for index in 0..func.parameters().len() {
+            let parameter = builder.intern_root(Root::Parameter(ParameterId::from_index(index)));
+            builder.bindings.parameters.push(parameter);
+        }
+        builder
+    }
+
+    fn intern_root(&mut self, root: Root) -> PlaceId {
+        if let Some(place) = self.roots.get(&root) {
+            return *place;
+        }
+        let place = PlaceId::from_index(self.bindings.places.len());
+        self.bindings.places.push(Place {
+            root,
+            children: Vec::new(),
+        });
+        self.roots.insert(root, place);
+        place
+    }
+
+    fn intern_field(&mut self, parent: PlaceId, index: ProjectionIndex) -> PlaceId {
+        if let Some(place) = self.fields.get(&(parent, index)) {
+            return *place;
+        }
+        let place = PlaceId::from_index(self.bindings.places.len());
+        self.bindings.places.push(Place {
+            root: self.bindings.places[parent.as_index()].root,
+            children: Vec::new(),
+        });
+        self.bindings.places[parent.as_index()].children.push(place);
+        self.fields.insert((parent, index), place);
+        place
+    }
+
+    fn finish(self) -> PlaceBindings {
+        self.bindings
+    }
 }
 
 impl PlaceBindings {
-    fn place_of(&self, operand: &mir::Value) -> Option<PlaceKey> {
+    fn place_of(&self, operand: &mir::Value) -> Option<PlaceId> {
         match operand {
             mir::Value::Register(id) => match self.registers.get(id)? {
-                PlaceBinding::Exact(key) => Some(key.clone()),
+                PlaceBinding::Exact(place) => Some(*place),
                 PlaceBinding::Root(_) => None,
             },
-            mir::Value::Parameter(id) => Some(PlaceKey::root(Root::Parameter(*id))),
+            mir::Value::Parameter(id) => self.parameters.get(id.as_index()).copied(),
             _ => None,
         }
     }
@@ -141,9 +168,17 @@ impl PlaceBindings {
 
     pub(crate) fn root_of_register(&self, id: ValueId) -> Option<Root> {
         match self.registers.get(&id)? {
-            PlaceBinding::Exact(key) => Some(key.root),
+            PlaceBinding::Exact(place) => Some(self.root_of_place(*place)),
             PlaceBinding::Root(root) => Some(*root),
         }
+    }
+
+    fn root_of_place(&self, place: PlaceId) -> Root {
+        self.places[place.as_index()].root
+    }
+
+    fn children(&self, place: PlaceId) -> &[PlaceId] {
+        &self.places[place.as_index()].children
     }
 }
 
@@ -200,7 +235,7 @@ impl Fact {
 /// The analysis state at one program point.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub(crate) struct State {
-    places: FxHashMap<PlaceKey, Fact>,
+    places: FxHashMap<PlaceId, Fact>,
     /// Flow-dependent facts for registers that hold materialized values. Registers that name
     /// places are structural and live once in [`Analysis::register_places`].
     registers: FxHashMap<ValueId, Fact>,
@@ -208,31 +243,32 @@ pub(crate) struct State {
 
 impl State {
     /// The fact for a slot. Absent means `Unknown`: an untracked slot is one nothing is known about.
-    pub(crate) fn place(&self, key: &PlaceKey) -> Fact {
-        self.places.get(key).cloned().unwrap_or_default()
+    pub(crate) fn place(&self, place: PlaceId) -> Fact {
+        self.places.get(&place).cloned().unwrap_or_default()
     }
 
     pub(crate) fn register(&self, id: ValueId) -> Option<&Fact> {
         self.registers.get(&id)
     }
 
-    /// Records a fact the folding pass established by rewriting an operation.
-    pub(crate) fn set_place_known(&mut self, key: PlaceKey, fact: Fact) {
-        self.set_place(key, fact);
-    }
-
-    fn set_place(&mut self, key: PlaceKey, fact: Fact) {
+    fn set_place(&mut self, place: PlaceId, fact: Fact, bindings: &PlaceBindings) {
         // Writing a slot says nothing about the slots inside it, which the write replaced.
-        self.forget_within(&key);
-        self.places.insert(key, fact);
+        self.forget_within(place, bindings);
+        self.places.insert(place, fact);
     }
 
-    fn forget_within(&mut self, key: &PlaceKey) {
-        self.places.retain(|tracked, _| !tracked.is_within(key));
-    }
-
-    fn forget_root(&mut self, root: Root) {
-        self.places.retain(|tracked, _| tracked.root != root);
+    fn forget_within(&mut self, place: PlaceId, bindings: &PlaceBindings) {
+        fn remove_subtree(
+            facts: &mut FxHashMap<PlaceId, Fact>,
+            bindings: &PlaceBindings,
+            place: PlaceId,
+        ) {
+            facts.remove(&place);
+            for child in bindings.children(place) {
+                remove_subtree(facts, bindings, *child);
+            }
+        }
+        remove_subtree(&mut self.places, bindings, place);
     }
 
     fn join(&self, other: &State) -> State {
@@ -243,7 +279,7 @@ impl State {
             if let Some(theirs) = other.places.get(key) {
                 let joined = fact.join(theirs);
                 if joined != Fact::Unknown {
-                    places.insert(key.clone(), joined);
+                    places.insert(*key, joined);
                 }
             }
         }
@@ -278,7 +314,7 @@ impl Analysis {
     }
 
     /// The slot an operand names, independent of flow state.
-    pub(crate) fn place_of(&self, operand: &mir::Value) -> Option<PlaceKey> {
+    pub(crate) fn place_of(&self, operand: &mir::Value) -> Option<PlaceId> {
         self.register_places.place_of(operand)
     }
 
@@ -287,9 +323,22 @@ impl Analysis {
     /// Structural bindings deliberately include escaped places so diagnostics can explain why a
     /// fact is unavailable. Consumers must use this narrower lookup before reading or injecting a
     /// fact: an escaped place can be mutated by an operation the transfer function does not model.
-    pub(crate) fn tracked_place_of(&self, operand: &mir::Value) -> Option<PlaceKey> {
-        let key = self.place_of(operand)?;
-        (!self.is_escaped(key.root)).then_some(key)
+    pub(crate) fn tracked_place_of(&self, operand: &mir::Value) -> Option<PlaceId> {
+        let place = self.place_of(operand)?;
+        (!self.is_escaped(self.root_of_place(place))).then_some(place)
+    }
+
+    pub(crate) fn root_of_place(&self, place: PlaceId) -> Root {
+        self.register_places.root_of_place(place)
+    }
+
+    /// Records a fact the folding pass established by rewriting an operation.
+    pub(crate) fn set_place_known(&self, state: &mut State, place: PlaceId, fact: Fact) {
+        debug_assert!(
+            !self.is_escaped(self.root_of_place(place)),
+            "folding must not inject facts for escaped places"
+        );
+        state.set_place(place, fact, &self.register_places);
     }
     /// The state on entry to `block`.
     pub(crate) fn entry_state(&self, block: BlockId) -> State {
@@ -421,7 +470,7 @@ fn transfer(
     state: &mut State,
 ) {
     let place_of = |operand| register_places.place_of(operand);
-    let tracked = |key: &PlaceKey| !escaped.contains(&key.root);
+    let tracked = |place| !escaped.contains(&register_places.root_of_place(place));
     match &operation.kind {
         OperationKind::Alloca { .. } => {
             let Some(result) = operation.result_id() else {
@@ -431,35 +480,36 @@ fn transfer(
             if escaped.contains(&root) {
                 return;
             }
-            let key = PlaceKey::root(root);
-            state.forget_root(root);
-            state.places.insert(key, Fact::Uninit);
+            let place = place_of(&mir::Value::Register(result))
+                .expect("the structural scan interns every alloca");
+            state.forget_within(place, register_places);
+            state.places.insert(place, Fact::Uninit);
         }
         OperationKind::Store => {
-            let Some(key) = place_of(&operation.operands[1]) else {
+            let Some(place) = place_of(&operation.operands[1]) else {
                 return;
             };
-            if !tracked(&key) {
+            if !tracked(place) {
                 return;
             }
             let fact = value_operand_fact(&operation.operands[0], func, state);
-            state.set_place(key, fact);
+            state.set_place(place, fact, register_places);
         }
         OperationKind::BuildArray { element_ty } => {
             let Some((destination, elements)) = operation.operands.split_last() else {
                 return;
             };
-            let Some(key) = place_of(destination) else {
+            let Some(place) = place_of(destination) else {
                 return;
             };
-            if !tracked(&key) {
+            if !tracked(place) {
                 return;
             }
             let elements = elements
                 .iter()
                 .map(|operand| {
                     let fact = match place_of(operand) {
-                        Some(key) if tracked(&key) => state.place(&key),
+                        Some(place) if tracked(place) => state.place(place),
                         Some(_) => Fact::Unknown,
                         None => value_operand_fact(operand, func, state),
                     };
@@ -475,13 +525,13 @@ fn transfer(
                     elements: elements.into_boxed_slice(),
                 })
             });
-            state.set_place(key, fact);
+            state.set_place(place, fact, register_places);
         }
         OperationKind::Clear => {
-            if let Some(key) = place_of(&operation.operands[0])
-                && tracked(&key)
+            if let Some(place) = place_of(&operation.operands[0])
+                && tracked(place)
             {
-                state.set_place(key, Fact::Uninit);
+                state.set_place(place, Fact::Uninit, register_places);
             }
         }
         OperationKind::Load => {
@@ -489,7 +539,7 @@ fn transfer(
                 return;
             };
             let fact = match place_of(&operation.operands[0]) {
-                Some(key) if tracked(&key) => state.place(&key),
+                Some(place) if tracked(place) => state.place(place),
                 _ => Fact::Unknown,
             };
             state.registers.insert(result, fact);
@@ -507,7 +557,7 @@ fn transfer(
                 return;
             };
             let fact = match place_of(&operation.operands[0]) {
-                Some(key) if tracked(&key) => match state.place(&key) {
+                Some(place) if tracked(place) => match state.place(place) {
                     Fact::Known(Const::VariantTag(tag)) => Fact::Known(Const::VariantTag(tag)),
                     _ => Fact::Unknown,
                 },
@@ -521,20 +571,20 @@ fn transfer(
             let source = place_of(&operation.operands[0]);
             let destination = place_of(&operation.operands[1]);
             let fact = match &source {
-                Some(key) if tracked(key) => state.place(key),
+                Some(place) if tracked(*place) => state.place(*place),
                 _ => Fact::Unknown,
             };
-            if let Some(key) = destination
-                && tracked(&key)
+            if let Some(place) = destination
+                && tracked(place)
             {
-                state.set_place(key, fact);
+                state.set_place(place, fact, register_places);
             }
             // A move leaves its source moved-out; a memcpy preserves it.
             if matches!(operation.kind, OperationKind::Move)
-                && let Some(key) = source
-                && tracked(&key)
+                && let Some(place) = source
+                && tracked(place)
             {
-                state.set_place(key, Fact::Uninit);
+                state.set_place(place, Fact::Uninit, register_places);
             }
         }
         OperationKind::CompareEqual => {
@@ -544,7 +594,7 @@ fn transfer(
             // Operands are `[scrutinee, pattern]`, the scrutinee read non-consumingly — as a value,
             // or as the pointee of a place.
             let scrutinee = match place_of(&operation.operands[0]) {
-                Some(key) if tracked(&key) => state.place(&key),
+                Some(place) if tracked(place) => state.place(place),
                 Some(_) => Fact::Unknown,
                 None => value_operand_fact(&operation.operands[0], func, state),
             };
@@ -585,36 +635,37 @@ fn transfer(
                     .unwrap_or_default(),
                 _ => Fact::Unknown,
             };
-            let key = PlaceKey::root(Root::DictEntry(result));
-            state.forget_root(key.root);
-            state.places.insert(key, fact);
+            let place = place_of(&mir::Value::Register(result))
+                .expect("the structural scan interns every dictionary entry");
+            state.forget_within(place, register_places);
+            state.places.insert(place, fact);
         }
         OperationKind::Call { ty, .. } => {
             // The callee writes its result through the trailing out-pointer, so whatever was known
             // about that slot no longer holds. The folding pass is what replaces a call with a
             // store of a known constant; until it does, the result is unknown.
             if let Some(call) = call_operands(&operation.operands, ty)
-                && let Some(key) = place_of(call.result)
-                && tracked(&key)
+                && let Some(place) = place_of(call.result)
+                && tracked(place)
             {
-                state.set_place(key, Fact::Unknown);
+                state.set_place(place, Fact::Unknown, register_places);
             }
         }
         // A clone writes its destination through the callee, so that slot is unknown afterwards —
         // the same reasoning as a call's result place, which is what a clone was until it became an
         // operation of its own.
         OperationKind::Clone { .. } => {
-            if let Some(key) = place_of(&operation.operands[1])
-                && tracked(&key)
+            if let Some(place) = place_of(&operation.operands[1])
+                && tracked(place)
             {
-                state.set_place(key, Fact::Unknown);
+                state.set_place(place, Fact::Unknown, register_places);
             }
         }
         OperationKind::Drop { .. } => {
-            if let Some(key) = place_of(&operation.operands[0])
-                && tracked(&key)
+            if let Some(place) = place_of(&operation.operands[0])
+                && tracked(place)
             {
-                state.set_place(key, Fact::Uninit);
+                state.set_place(place, Fact::Uninit, register_places);
             }
         }
         _ => {
@@ -703,38 +754,43 @@ pub(crate) fn escaping_roots(
 ) -> (FxHashSet<Root>, PlaceBindings) {
     // Register-to-place bindings are immutable MIR structure. Discover the complete paths once so
     // neither escape analysis nor the flow solver has to reconstruct and copy them.
-    let mut register_places = PlaceBindings::default();
+    let mut place_builder = PlaceBuilder::new(func);
     for block_id in func.blocks() {
         for operation in func.block(block_id).operations() {
             match (&operation.kind, operation.result_id()) {
                 (OperationKind::Alloca { .. }, Some(result)) => {
-                    register_places.registers.insert(
-                        result,
-                        PlaceBinding::Exact(PlaceKey::root(Root::Alloca(result))),
-                    );
+                    let place = place_builder.intern_root(Root::Alloca(result));
+                    place_builder
+                        .bindings
+                        .registers
+                        .insert(result, PlaceBinding::Exact(place));
                 }
                 (OperationKind::DictEntry { .. }, Some(result)) => {
-                    register_places.registers.insert(
-                        result,
-                        PlaceBinding::Exact(PlaceKey::root(Root::DictEntry(result))),
-                    );
+                    let place = place_builder.intern_root(Root::DictEntry(result));
+                    place_builder
+                        .bindings
+                        .registers
+                        .insert(result, PlaceBinding::Exact(place));
                 }
                 (OperationKind::Subfield { .. }, Some(result)) => {
-                    if let Some(root) = register_places.root_of(&operation.operands[0]) {
+                    if let Some(root) = place_builder.bindings.root_of(&operation.operands[0]) {
                         let binding = match (
-                            register_places.place_of(&operation.operands[0]),
+                            place_builder.bindings.place_of(&operation.operands[0]),
                             field_index(&operation.operands[1], func),
                         ) {
-                            (Some(base), Some(index)) => PlaceBinding::Exact(base.field(index)),
+                            (Some(base), Some(index)) => {
+                                PlaceBinding::Exact(place_builder.intern_field(base, index))
+                            }
                             _ => PlaceBinding::Root(root),
                         };
-                        register_places.registers.insert(result, binding);
+                        place_builder.bindings.registers.insert(result, binding);
                     }
                 }
                 _ => {}
             }
         }
     }
+    let register_places = place_builder.finish();
 
     // A `BuildArray` destination and a slot initialized with a bare function are compiler-known,
     // self-contained values. Their later semantic drop ends the lifetime but does not make earlier
@@ -984,7 +1040,7 @@ mod tests {
         let (analysis, state) = entry_block_exit(&func, env);
         let key = analysis.place_of(&slot).expect("the alloca names a place");
         let expected = Fact::Known(Const::Literal(LiteralValue::new_native(5isize)));
-        assert_eq!(state.place(&key), expected);
+        assert_eq!(state.place(key), expected);
         let mir::Value::Register(slot) = slot else {
             panic!("`alloca` defines a register");
         };
@@ -1129,7 +1185,14 @@ mod tests {
         let key = analysis
             .place_of(&mir::Value::Register(field))
             .expect("the structural scan resolves the subfield");
-        assert!(!key.path.is_empty());
+        assert!(
+            analysis
+                .register_places
+                .places
+                .iter()
+                .any(|place| place.children.contains(&key)),
+            "the subfield must be interned below its base place"
+        );
 
         let mut state = analysis.entry_state(block);
         for operation in func.block(block).operations() {
@@ -1172,7 +1235,7 @@ mod tests {
 
         let (analysis, state) = entry_block_exit(&func, env);
         let source_key = analysis.place_of(&source).expect("a tracked source place");
-        assert_eq!(state.place(&source_key), Fact::Uninit);
+        assert_eq!(state.place(source_key), Fact::Uninit);
     }
 
     /// An entry of a *constant* dictionary is a known function — the fact devirtualization reads.
@@ -1225,9 +1288,9 @@ mod tests {
         let (analysis, state) = entry_block_exit(&func, env);
         let key = analysis.place_of(&entry).expect("the entry names a place");
         assert!(
-            matches!(state.place(&key), Fact::Known(Const::Function(_))),
+            matches!(state.place(key), Fact::Known(Const::Function(_))),
             "an entry of a constant dictionary must resolve: {:?}",
-            state.place(&key)
+            state.place(key)
         );
     }
 
@@ -1243,6 +1306,39 @@ mod tests {
             Fact::Unknown
         );
         assert_eq!(Fact::Uninit.join(&Fact::Uninit), Fact::Uninit);
+    }
+
+    #[test]
+    fn interned_places_share_paths_and_invalidate_only_the_written_subtree() {
+        let mut builder = PlaceBuilder {
+            bindings: PlaceBindings::default(),
+            roots: FxHashMap::default(),
+            fields: FxHashMap::default(),
+        };
+        let root = builder.intern_root(Root::Alloca(ValueId::from_index(0)));
+        let field = builder.intern_field(root, ProjectionIndex::from_index(0));
+        let same_field = builder.intern_field(root, ProjectionIndex::from_index(0));
+        let nested = builder.intern_field(field, ProjectionIndex::from_index(0));
+        let sibling = builder.intern_field(root, ProjectionIndex::from_index(1));
+        assert_eq!(field, same_field, "identical paths must share one place id");
+        let bindings = builder.finish();
+
+        let known = |value| Fact::Known(Const::Literal(LiteralValue::new_native(value)));
+        let mut state = State::default();
+        state.places.insert(root, known(1isize));
+        state.places.insert(field, known(2isize));
+        state.places.insert(nested, known(3isize));
+        state.places.insert(sibling, known(4isize));
+
+        state.set_place(field, Fact::Uninit, &bindings);
+        assert_eq!(state.place(root), known(1isize));
+        assert_eq!(state.place(field), Fact::Uninit);
+        assert!(!state.places.contains_key(&nested));
+        assert_eq!(state.place(sibling), known(4isize));
+
+        state.set_place(root, known(5isize), &bindings);
+        assert_eq!(state.places.len(), 1);
+        assert_eq!(state.place(root), known(5isize));
     }
 
     /// A back edge can invalidate the fact first propagated from the entry. The worklist must then
@@ -1288,6 +1384,6 @@ mod tests {
         let analysis = analyze(&func, env);
         let state = analysis.entry_state(header);
         let key = analysis.place_of(&slot).expect("the alloca names a place");
-        assert_eq!(state.place(&key), Fact::Unknown);
+        assert_eq!(state.place(key), Fact::Unknown);
     }
 }
