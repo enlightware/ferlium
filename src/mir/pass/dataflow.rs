@@ -17,9 +17,8 @@
 //! - **Places.** A [`Root`] is an `alloca` result or a parameter; a [`PlaceKey`] is a root plus a
 //!   field path. Facts are attached to place keys, so `store 5 to %r1.0` is known independently of
 //!   `%r1.1`.
-//! - **Registers.** A register either *names* a place (`alloca`, `subfield`) or holds a
-//!   materialized value (`load`). [`RegisterFact`] distinguishes the two, so an operand can be
-//!   followed to the storage it refers to.
+//! - **Registers.** Immutable register-to-place bindings (`alloca`, `subfield`) live once in the
+//!   [`Analysis`]; only flow-dependent materialized values (`load`) live in each [`State`].
 //!
 //! **Escape is computed once, flow-insensitively, before the dataflow runs.** A root whose place
 //! reaches any context this analysis does not model — a call argument, a `store` of the pointer
@@ -105,6 +104,49 @@ impl PlaceKey {
     }
 }
 
+/// Immutable register-to-storage structure.
+///
+/// A dynamic `subfield` still has a known root, which escape analysis and diagnostics need, but no
+/// exact [`PlaceKey`] the folding analysis may safely read.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum PlaceBinding {
+    Exact(PlaceKey),
+    Root(Root),
+}
+
+#[derive(Default)]
+pub(crate) struct PlaceBindings {
+    registers: FxHashMap<ValueId, PlaceBinding>,
+}
+
+impl PlaceBindings {
+    fn place_of(&self, operand: &mir::Value) -> Option<PlaceKey> {
+        match operand {
+            mir::Value::Register(id) => match self.registers.get(id)? {
+                PlaceBinding::Exact(key) => Some(key.clone()),
+                PlaceBinding::Root(_) => None,
+            },
+            mir::Value::Parameter(id) => Some(PlaceKey::root(Root::Parameter(*id))),
+            _ => None,
+        }
+    }
+
+    fn root_of(&self, operand: &mir::Value) -> Option<Root> {
+        match operand {
+            mir::Value::Register(id) => self.root_of_register(*id),
+            mir::Value::Parameter(id) => Some(Root::Parameter(*id)),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn root_of_register(&self, id: ValueId) -> Option<Root> {
+        match self.registers.get(&id)? {
+            PlaceBinding::Exact(key) => Some(key.root),
+            PlaceBinding::Root(root) => Some(*root),
+        }
+    }
+}
+
 /// A compile-time constant the analysis can carry.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum Const {
@@ -155,20 +197,13 @@ impl Fact {
     }
 }
 
-/// What a register denotes.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub(crate) enum RegisterFact {
-    /// The register is a pointer to this storage slot.
-    Place(PlaceKey),
-    /// The register holds a materialized value.
-    Value(Fact),
-}
-
 /// The analysis state at one program point.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub(crate) struct State {
     places: FxHashMap<PlaceKey, Fact>,
-    registers: FxHashMap<ValueId, RegisterFact>,
+    /// Flow-dependent facts for registers that hold materialized values. Registers that name
+    /// places are structural and live once in [`Analysis::register_places`].
+    registers: FxHashMap<ValueId, Fact>,
 }
 
 impl State {
@@ -177,20 +212,8 @@ impl State {
         self.places.get(key).cloned().unwrap_or_default()
     }
 
-    pub(crate) fn register(&self, id: ValueId) -> Option<&RegisterFact> {
+    pub(crate) fn register(&self, id: ValueId) -> Option<&Fact> {
         self.registers.get(&id)
-    }
-
-    /// The slot an operand names, if it names one this analysis tracks.
-    pub(crate) fn place_of(&self, operand: &mir::Value) -> Option<PlaceKey> {
-        match operand {
-            mir::Value::Register(id) => match self.registers.get(id)? {
-                RegisterFact::Place(key) => Some(key.clone()),
-                RegisterFact::Value(_) => None,
-            },
-            mir::Value::Parameter(id) => Some(PlaceKey::root(Root::Parameter(*id))),
-            _ => None,
-        }
     }
 
     /// Records a fact the folding pass established by rewriting an operation.
@@ -227,16 +250,7 @@ impl State {
         let mut registers = FxHashMap::default();
         for (id, fact) in &self.registers {
             if let Some(theirs) = other.registers.get(id) {
-                let joined = match (fact, theirs) {
-                    (RegisterFact::Place(ours), RegisterFact::Place(theirs)) if ours == theirs => {
-                        RegisterFact::Place(ours.clone())
-                    }
-                    (RegisterFact::Value(ours), RegisterFact::Value(theirs)) => {
-                        RegisterFact::Value(ours.join(theirs))
-                    }
-                    _ => RegisterFact::Value(Fact::Unknown),
-                };
-                registers.insert(*id, joined);
+                registers.insert(*id, fact.join(theirs));
             }
         }
         State { places, registers }
@@ -247,13 +261,9 @@ impl State {
 pub(crate) struct Analysis {
     entry_states: Vec<Option<State>>,
     escaped: FxHashSet<Root>,
-    /// Which root each register names, discovered structurally by [`escaping_roots`].
-    ///
-    /// The dataflow does not need this — it rediscovers the binding as it goes — but the
-    /// optimization report does: when a register has no binding in a `State`, this is what says
-    /// whether that is because its root escaped or because nothing ever named a root for it. The
-    /// two have different remedies, so the report must tell them apart.
-    register_roots: FxHashMap<ValueId, Root>,
+    /// Immutable structural bindings, discovered once before the fixpoint rather than copied into
+    /// every flow state.
+    register_places: PlaceBindings,
 }
 
 impl Analysis {
@@ -264,9 +274,23 @@ impl Analysis {
 
     /// The root a register names, if this function's structure gives it one.
     pub(crate) fn root_of_register(&self, id: ValueId) -> Option<Root> {
-        self.register_roots.get(&id).copied()
+        self.register_places.root_of_register(id)
     }
 
+    /// The slot an operand names, independent of flow state.
+    pub(crate) fn place_of(&self, operand: &mir::Value) -> Option<PlaceKey> {
+        self.register_places.place_of(operand)
+    }
+
+    /// The slot an operand names when its contents remain within the analysis model.
+    ///
+    /// Structural bindings deliberately include escaped places so diagnostics can explain why a
+    /// fact is unavailable. Consumers must use this narrower lookup before reading or injecting a
+    /// fact: an escaped place can be mutated by an operation the transfer function does not model.
+    pub(crate) fn tracked_place_of(&self, operand: &mir::Value) -> Option<PlaceKey> {
+        let key = self.place_of(operand)?;
+        (!self.is_escaped(key.root)).then_some(key)
+    }
     /// The state on entry to `block`.
     pub(crate) fn entry_state(&self, block: BlockId) -> State {
         self.entry_states
@@ -289,13 +313,20 @@ impl Analysis {
         operation: &Operation,
         state: &mut State,
     ) {
-        transfer(operation, func, env, &self.escaped, state);
+        transfer(
+            operation,
+            func,
+            env,
+            &self.escaped,
+            &self.register_places,
+            state,
+        );
     }
 }
 
 /// Runs the analysis to fixpoint over `func`.
 pub(crate) fn analyze(func: &Function, env: ModuleEnv<'_>) -> Analysis {
-    let (escaped, register_roots) = escaping_roots(func, &|_| false);
+    let (escaped, register_places) = escaping_roots(func, &|_| false);
 
     let block_count = func.blocks().count();
     // The consumer replays operations from each settled entry. A one-block function's only entry
@@ -306,7 +337,7 @@ pub(crate) fn analyze(func: &Function, env: ModuleEnv<'_>) -> Analysis {
         return Analysis {
             entry_states: vec![Some(State::default())],
             escaped,
-            register_roots,
+            register_places,
         };
     }
     let successor_lists: Vec<Vec<usize>> = func
@@ -348,10 +379,10 @@ pub(crate) fn analyze(func: &Function, env: ModuleEnv<'_>) -> Analysis {
             .expect("only a reachable block is queued");
         let block = func.block(block_id);
         for operation in block.operations() {
-            transfer(operation, func, env, &escaped, &mut state);
+            transfer(operation, func, env, &escaped, &register_places, &mut state);
         }
         if let TerminatorKind::Invoke { operation, .. } = &block.terminator().kind {
-            transfer(operation, func, env, &escaped, &mut state);
+            transfer(operation, func, env, &escaped, &register_places, &mut state);
         }
         for successor in block.terminator().successors() {
             let successor = successor.as_index();
@@ -373,7 +404,7 @@ pub(crate) fn analyze(func: &Function, env: ModuleEnv<'_>) -> Analysis {
     Analysis {
         entry_states,
         escaped,
-        register_roots,
+        register_places,
     }
 }
 
@@ -386,8 +417,10 @@ fn transfer(
     func: &Function,
     env: ModuleEnv<'_>,
     escaped: &FxHashSet<Root>,
+    register_places: &PlaceBindings,
     state: &mut State,
 ) {
+    let place_of = |operand| register_places.place_of(operand);
     let tracked = |key: &PlaceKey| !escaped.contains(&key.root);
     match &operation.kind {
         OperationKind::Alloca { .. } => {
@@ -400,11 +433,10 @@ fn transfer(
             }
             let key = PlaceKey::root(root);
             state.forget_root(root);
-            state.places.insert(key.clone(), Fact::Uninit);
-            state.registers.insert(result, RegisterFact::Place(key));
+            state.places.insert(key, Fact::Uninit);
         }
         OperationKind::Store => {
-            let Some(key) = state.place_of(&operation.operands[1]) else {
+            let Some(key) = place_of(&operation.operands[1]) else {
                 return;
             };
             if !tracked(&key) {
@@ -417,7 +449,7 @@ fn transfer(
             let Some((destination, elements)) = operation.operands.split_last() else {
                 return;
             };
-            let Some(key) = state.place_of(destination) else {
+            let Some(key) = place_of(destination) else {
                 return;
             };
             if !tracked(&key) {
@@ -426,7 +458,7 @@ fn transfer(
             let elements = elements
                 .iter()
                 .map(|operand| {
-                    let fact = match state.place_of(operand) {
+                    let fact = match place_of(operand) {
                         Some(key) if tracked(&key) => state.place(&key),
                         Some(_) => Fact::Unknown,
                         None => value_operand_fact(operand, func, state),
@@ -446,7 +478,7 @@ fn transfer(
             state.set_place(key, fact);
         }
         OperationKind::Clear => {
-            if let Some(key) = state.place_of(&operation.operands[0])
+            if let Some(key) = place_of(&operation.operands[0])
                 && tracked(&key)
             {
                 state.set_place(key, Fact::Uninit);
@@ -456,54 +488,38 @@ fn transfer(
             let Some(result) = operation.result_id() else {
                 return;
             };
-            let fact = match state.place_of(&operation.operands[0]) {
+            let fact = match place_of(&operation.operands[0]) {
                 Some(key) if tracked(&key) => state.place(&key),
                 _ => Fact::Unknown,
             };
-            state.registers.insert(result, RegisterFact::Value(fact));
+            state.registers.insert(result, fact);
         }
         OperationKind::Variant { tag, .. } => {
             let Some(result) = operation.result_id() else {
                 return;
             };
-            state.registers.insert(
-                result,
-                RegisterFact::Value(Fact::Known(Const::VariantTag(*tag))),
-            );
+            state
+                .registers
+                .insert(result, Fact::Known(Const::VariantTag(*tag)));
         }
         OperationKind::ExtractTag => {
             let Some(result) = operation.result_id() else {
                 return;
             };
-            let fact = match state.place_of(&operation.operands[0]) {
+            let fact = match place_of(&operation.operands[0]) {
                 Some(key) if tracked(&key) => match state.place(&key) {
                     Fact::Known(Const::VariantTag(tag)) => Fact::Known(Const::VariantTag(tag)),
                     _ => Fact::Unknown,
                 },
                 _ => Fact::Unknown,
             };
-            state.registers.insert(result, RegisterFact::Value(fact));
+            state.registers.insert(result, fact);
         }
-        OperationKind::Subfield { .. } => {
-            let Some(result) = operation.result_id() else {
-                return;
-            };
-            // The field index is a literal `int` operand; a non-constant index means an unknown
-            // slot, which the escape scan has already accounted for by escaping the root.
-            let binding = match (
-                state.place_of(&operation.operands[0]),
-                field_index(&operation.operands[1], func),
-            ) {
-                (Some(base), Some(index)) if tracked(&base) => {
-                    RegisterFact::Place(base.field(index))
-                }
-                _ => RegisterFact::Value(Fact::Unknown),
-            };
-            state.registers.insert(result, binding);
-        }
+        // A subfield's immutable register-to-place binding was discovered before the fixpoint.
+        OperationKind::Subfield { .. } => {}
         OperationKind::Memcpy | OperationKind::Move => {
-            let source = state.place_of(&operation.operands[0]);
-            let destination = state.place_of(&operation.operands[1]);
+            let source = place_of(&operation.operands[0]);
+            let destination = place_of(&operation.operands[1]);
             let fact = match &source {
                 Some(key) if tracked(key) => state.place(key),
                 _ => Fact::Unknown,
@@ -527,7 +543,7 @@ fn transfer(
             };
             // Operands are `[scrutinee, pattern]`, the scrutinee read non-consumingly — as a value,
             // or as the pointee of a place.
-            let scrutinee = match state.place_of(&operation.operands[0]) {
+            let scrutinee = match place_of(&operation.operands[0]) {
                 Some(key) if tracked(&key) => state.place(&key),
                 Some(_) => Fact::Unknown,
                 None => value_operand_fact(&operation.operands[0], func, state),
@@ -554,7 +570,7 @@ fn transfer(
                 }
                 _ => Fact::Unknown,
             };
-            state.registers.insert(result, RegisterFact::Value(fact));
+            state.registers.insert(result, fact);
         }
         OperationKind::DictEntry { entry_index, .. } => {
             let Some(result) = operation.result_id() else {
@@ -571,15 +587,14 @@ fn transfer(
             };
             let key = PlaceKey::root(Root::DictEntry(result));
             state.forget_root(key.root);
-            state.places.insert(key.clone(), fact);
-            state.registers.insert(result, RegisterFact::Place(key));
+            state.places.insert(key, fact);
         }
         OperationKind::Call { ty, .. } => {
             // The callee writes its result through the trailing out-pointer, so whatever was known
             // about that slot no longer holds. The folding pass is what replaces a call with a
             // store of a known constant; until it does, the result is unknown.
             if let Some(call) = call_operands(&operation.operands, ty)
-                && let Some(key) = state.place_of(call.result)
+                && let Some(key) = place_of(call.result)
                 && tracked(&key)
             {
                 state.set_place(key, Fact::Unknown);
@@ -589,14 +604,14 @@ fn transfer(
         // the same reasoning as a call's result place, which is what a clone was until it became an
         // operation of its own.
         OperationKind::Clone { .. } => {
-            if let Some(key) = state.place_of(&operation.operands[1])
+            if let Some(key) = place_of(&operation.operands[1])
                 && tracked(&key)
             {
                 state.set_place(key, Fact::Unknown);
             }
         }
         OperationKind::Drop { .. } => {
-            if let Some(key) = state.place_of(&operation.operands[0])
+            if let Some(key) = place_of(&operation.operands[0])
                 && tracked(&key)
             {
                 state.set_place(key, Fact::Uninit);
@@ -606,9 +621,7 @@ fn transfer(
             // Not modelled: the escape scan has escaped every place this operation touches, so
             // there is nothing left to invalidate. A result register, if any, is an unknown value.
             if let Some(result) = operation.result_id() {
-                state
-                    .registers
-                    .insert(result, RegisterFact::Value(Fact::Unknown));
+                state.registers.insert(result, Fact::Unknown);
             }
         }
     }
@@ -635,10 +648,7 @@ fn dictionary_entry(
 /// The fact for an operand used as a materialized value.
 fn value_operand_fact(operand: &mir::Value, func: &Function, state: &State) -> Fact {
     match operand {
-        mir::Value::Register(id) => match state.registers.get(id) {
-            Some(RegisterFact::Value(fact)) => fact.clone(),
-            _ => Fact::Unknown,
-        },
+        mir::Value::Register(id) => state.registers.get(id).cloned().unwrap_or_default(),
         // A pool constant is the base case of the whole analysis: `let x = 5` lowers to a store of
         // one, and everything folding knows grows from there.
         mir::Value::Constant(id) => {
@@ -690,22 +700,35 @@ pub(crate) fn field_index(operand: &mir::Value, func: &Function) -> Option<Proje
 pub(crate) fn escaping_roots(
     func: &Function,
     mutations_modelled: &dyn Fn(&Operation) -> bool,
-) -> (FxHashSet<Root>, FxHashMap<ValueId, Root>) {
-    // Registers that name a root, discovered structurally rather than by dataflow: an `alloca`
-    // defines one, and a `subfield` of a rooted place stays in the same root.
-    let mut register_roots: FxHashMap<ValueId, Root> = FxHashMap::default();
+) -> (FxHashSet<Root>, PlaceBindings) {
+    // Register-to-place bindings are immutable MIR structure. Discover the complete paths once so
+    // neither escape analysis nor the flow solver has to reconstruct and copy them.
+    let mut register_places = PlaceBindings::default();
     for block_id in func.blocks() {
         for operation in func.block(block_id).operations() {
             match (&operation.kind, operation.result_id()) {
                 (OperationKind::Alloca { .. }, Some(result)) => {
-                    register_roots.insert(result, Root::Alloca(result));
+                    register_places.registers.insert(
+                        result,
+                        PlaceBinding::Exact(PlaceKey::root(Root::Alloca(result))),
+                    );
                 }
                 (OperationKind::DictEntry { .. }, Some(result)) => {
-                    register_roots.insert(result, Root::DictEntry(result));
+                    register_places.registers.insert(
+                        result,
+                        PlaceBinding::Exact(PlaceKey::root(Root::DictEntry(result))),
+                    );
                 }
                 (OperationKind::Subfield { .. }, Some(result)) => {
-                    if let Some(root) = operand_root(&operation.operands[0], &register_roots) {
-                        register_roots.insert(result, root);
+                    if let Some(root) = register_places.root_of(&operation.operands[0]) {
+                        let binding = match (
+                            register_places.place_of(&operation.operands[0]),
+                            field_index(&operation.operands[1], func),
+                        ) {
+                            (Some(base), Some(index)) => PlaceBinding::Exact(base.field(index)),
+                            _ => PlaceBinding::Root(root),
+                        };
+                        register_places.registers.insert(result, binding);
                     }
                 }
                 _ => {}
@@ -731,7 +754,7 @@ pub(crate) fn escaping_roots(
                 _ => None,
             };
             if let Some(destination) = destination
-                && let Some(root) = operand_root(destination, &register_roots)
+                && let Some(root) = register_places.root_of(destination)
             {
                 self_contained_roots.insert(root);
             }
@@ -740,7 +763,7 @@ pub(crate) fn escaping_roots(
 
     let mut escaped = FxHashSet::default();
     let escape_operand = |operand: &mir::Value, escaped: &mut FxHashSet<Root>| {
-        if let Some(root) = operand_root(operand, &register_roots) {
+        if let Some(root) = register_places.root_of(operand) {
             escaped.insert(root);
         }
     };
@@ -805,7 +828,8 @@ pub(crate) fn escaping_roots(
             OperationKind::Drop { .. } => {
                 let target = &operation.operands[0];
                 if !mutations_modelled(operation)
-                    && operand_root(target, &register_roots)
+                    && register_places
+                        .root_of(target)
                         .is_none_or(|root| !self_contained_roots.contains(&root))
                 {
                     escape_operand(target, escaped);
@@ -841,7 +865,7 @@ pub(crate) fn escaping_roots(
             | TerminatorKind::FailureDuringCleanup => {}
         }
     }
-    (escaped, register_roots)
+    (escaped, register_places)
 }
 
 /// How a `call` operation uses each of its operands.
@@ -874,14 +898,6 @@ pub(crate) fn call_operands<'a>(
             .collect(),
         result: operands.last()?,
     })
-}
-
-fn operand_root(operand: &mir::Value, roots: &FxHashMap<ValueId, Root>) -> Option<Root> {
-    match operand {
-        mir::Value::Register(id) => roots.get(id).copied(),
-        mir::Value::Parameter(id) => Some(Root::Parameter(*id)),
-        _ => None,
-    }
 }
 
 #[cfg(test)]
@@ -932,13 +948,13 @@ mod tests {
     }
 
     /// Every fact the analysis holds at the end of the entry block, for a single-block function.
-    fn entry_block_exit(func: &Function, env: ModuleEnv<'_>) -> State {
+    fn entry_block_exit(func: &Function, env: ModuleEnv<'_>) -> (Analysis, State) {
         let analysis = analyze(func, env);
         let mut state = analysis.entry_state(func.entry());
         for operation in func.block(func.entry()).operations() {
             analysis.step(func, env, operation, &mut state);
         }
-        state
+        (analysis, state)
     }
 
     /// A literal stored into a local is known; the place holding a call result is not, because
@@ -965,15 +981,23 @@ mod tests {
         builder.set_terminator(block, Terminator::ret(span));
         let func = builder.finish(env);
 
-        let state = entry_block_exit(&func, env);
-        let key = state.place_of(&slot).expect("the alloca names a place");
+        let (analysis, state) = entry_block_exit(&func, env);
+        let key = analysis.place_of(&slot).expect("the alloca names a place");
         let expected = Fact::Known(Const::Literal(LiteralValue::new_native(5isize)));
         assert_eq!(state.place(&key), expected);
+        let mir::Value::Register(slot) = slot else {
+            panic!("`alloca` defines a register");
+        };
+        assert_eq!(
+            state.register(slot),
+            None,
+            "structural place bindings must not be copied into flow states"
+        );
         // And loading it carries the same fact into a register.
         let mir::Value::Register(loaded) = loaded else {
             panic!("`load` defines a register");
         };
-        assert_eq!(state.register(loaded), Some(&RegisterFact::Value(expected)));
+        assert_eq!(state.register(loaded), Some(&expected));
     }
 
     #[test]
@@ -1018,15 +1042,13 @@ mod tests {
         builder.set_terminator(block, Terminator::ret(span));
         let func = builder.finish(env);
 
-        let state = entry_block_exit(&func, env);
+        let (_, state) = entry_block_exit(&func, env);
         let mir::Value::Register(equal) = equal else {
             panic!("compare_eq defines a register")
         };
         assert_eq!(
             state.register(equal),
-            Some(&RegisterFact::Value(Fact::Known(Const::Literal(
-                LiteralValue::new_native(true)
-            ))))
+            Some(&Fact::Known(Const::Literal(LiteralValue::new_native(true))))
         );
     }
 
@@ -1090,6 +1112,34 @@ mod tests {
             escaped, 0,
             "a constant field index is not a dynamic one, so nothing may escape"
         );
+
+        let (block, field) = func
+            .blocks()
+            .find_map(|block| {
+                func.block(block)
+                    .operations()
+                    .iter()
+                    .find_map(|operation| match operation.kind {
+                        OperationKind::Subfield { .. } => operation.result_id(),
+                        _ => None,
+                    })
+                    .map(|field| (block, field))
+            })
+            .expect("field access must contain a subfield");
+        let key = analysis
+            .place_of(&mir::Value::Register(field))
+            .expect("the structural scan resolves the subfield");
+        assert!(!key.path.is_empty());
+
+        let mut state = analysis.entry_state(block);
+        for operation in func.block(block).operations() {
+            analysis.step(func, session.module_env(), operation, &mut state);
+        }
+        assert_eq!(
+            state.register(field),
+            None,
+            "subfield bindings must not be copied into flow states"
+        );
     }
 
     /// A move leaves its source moved-out, which the folding pass must not mistake for a value.
@@ -1120,8 +1170,8 @@ mod tests {
         builder.set_terminator(block, Terminator::ret(span));
         let func = builder.finish(env);
 
-        let state = entry_block_exit(&func, env);
-        let source_key = state.place_of(&source).expect("a tracked source place");
+        let (analysis, state) = entry_block_exit(&func, env);
+        let source_key = analysis.place_of(&source).expect("a tracked source place");
         assert_eq!(state.place(&source_key), Fact::Uninit);
     }
 
@@ -1172,8 +1222,8 @@ mod tests {
         builder.set_terminator(block, Terminator::ret(span));
         let func = builder.finish(env);
 
-        let state = entry_block_exit(&func, env);
-        let key = state.place_of(&entry).expect("the entry names a place");
+        let (analysis, state) = entry_block_exit(&func, env);
+        let key = analysis.place_of(&entry).expect("the entry names a place");
         assert!(
             matches!(state.place(&key), Fact::Known(Const::Function(_))),
             "an entry of a constant dictionary must resolve: {:?}",
@@ -1237,7 +1287,7 @@ mod tests {
 
         let analysis = analyze(&func, env);
         let state = analysis.entry_state(header);
-        let key = state.place_of(&slot).expect("the alloca names a place");
+        let key = analysis.place_of(&slot).expect("the alloca names a place");
         assert_eq!(state.place(&key), Fact::Unknown);
     }
 }

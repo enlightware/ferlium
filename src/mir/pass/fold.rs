@@ -47,7 +47,7 @@ use crate::{
     types::r#type::{CallImplType, Type},
 };
 
-use super::dataflow::{self, Analysis, Const, Fact, RegisterFact, Root, State};
+use super::dataflow::{self, Analysis, Const, Fact, Root, State};
 
 /// A call site the pass decided to replace, and what to replace it with.
 struct Fold {
@@ -295,7 +295,7 @@ fn plan_devirtualizations(func: &Function, env: ModuleEnv<'_>) -> Vec<Devirtuali
         let mut state = analysis.entry_state(block);
         let basic_block = func.block(block);
         for (index, operation) in basic_block.operations().iter().enumerate() {
-            if let Some((operand, callee)) = resolved_callee(operation, &state) {
+            if let Some((operand, callee)) = resolved_callee(operation, &state, &analysis) {
                 devirtualizations.push(Devirtualization {
                     site: Site::Operation { block, index },
                     operand,
@@ -305,7 +305,7 @@ fn plan_devirtualizations(func: &Function, env: ModuleEnv<'_>) -> Vec<Devirtuali
             analysis.step(func, env, operation, &mut state);
         }
         if let TerminatorKind::Invoke { operation, .. } = &basic_block.terminator().kind
-            && let Some((operand, callee)) = resolved_callee(operation, &state)
+            && let Some((operand, callee)) = resolved_callee(operation, &state, &analysis)
         {
             devirtualizations.push(Devirtualization {
                 site: Site::Terminator { block },
@@ -396,7 +396,7 @@ fn plan_folds_with(
                 && let Some(call) = dataflow::call_operands(&operation.operands, ty)
             {
                 let destination = call.result.clone();
-                if let Some(key) = state.place_of(&destination) {
+                if let Some(key) = analysis.tracked_place_of(&destination) {
                     state.set_place_known(key, fact_for_reification(&result));
                 }
                 plan.calls.push(Fold {
@@ -408,7 +408,7 @@ fn plan_folds_with(
                 continue;
             }
             if let Some(devirtualizations) = devirtualizations.as_mut()
-                && let Some((operand, callee)) = resolved_callee(operation, &state)
+                && let Some((operand, callee)) = resolved_callee(operation, &state, analysis)
             {
                 devirtualizations.push(Devirtualization {
                     site: Site::Operation { block, index },
@@ -439,7 +439,7 @@ fn plan_folds_with(
                         normal: *normal,
                     });
                 } else if let Some(devirtualizations) = devirtualizations.as_mut()
-                    && let Some((operand, callee)) = resolved_callee(operation, &state)
+                    && let Some((operand, callee)) = resolved_callee(operation, &state, analysis)
                 {
                     devirtualizations.push(Devirtualization {
                         site: Site::Terminator { block },
@@ -496,13 +496,17 @@ fn callee_operand_index(operation: &Operation) -> Option<usize> {
 /// dropping the captures. An earlier version without this restriction was caught by a test
 /// divergence, "expected native value, got function value". A dictionary entry holds a plain
 /// function by construction, which is what makes this rewrite information-preserving there.
-fn resolved_callee(operation: &Operation, state: &State) -> Option<(usize, FunctionId)> {
+fn resolved_callee(
+    operation: &Operation,
+    state: &State,
+    analysis: &Analysis,
+) -> Option<(usize, FunctionId)> {
     let index = callee_operand_index(operation)?;
     let callee = operation.operands.get(index)?;
     if matches!(callee, mir::Value::Function(_)) {
         return None;
     }
-    let key = state.place_of(callee)?;
+    let key = analysis.place_of(callee)?;
     if !matches!(key.root, Root::DictEntry(_)) {
         return None;
     }
@@ -564,9 +568,12 @@ fn why_argument_unknown(
     state: &State,
     context: &FoldContext<'_>,
 ) -> NotFoldable {
-    let Some(key) = state.place_of(operand) else {
+    let Some(key) = context.analysis.place_of(operand) else {
         return why_operand_names_no_place(operand, state, &context.analysis);
     };
+    if context.analysis.is_escaped(key.root) {
+        return NotFoldable::ArgumentStorageEscaped;
+    }
     match state.place(&key) {
         // Known, but not in a form compile-time evaluation accepts.
         Fact::Known(_) => NotFoldable::ArgumentNotLiteral,
@@ -585,10 +592,8 @@ fn why_argument_unknown(
 
 /// Why an operand names no slot the analysis tracks — the three causes have three remedies.
 ///
-/// A register with no binding in the state is the interesting case, and the state alone cannot
-/// explain it: the transfer function declines to bind an escaped root, so "escaped" and "never had
-/// a root" look identical from here. The structural map the escape scan already built is what tells
-/// them apart, which is why [`Analysis::root_of_register`] exists.
+/// Structural place bindings are checked before reaching here, so a register here holds a
+/// materialized value or names no modelled storage.
 fn why_operand_names_no_place(
     operand: &mir::Value,
     state: &State,
@@ -601,11 +606,8 @@ fn why_operand_names_no_place(
         // Bound, but to a value rather than a slot. Folding reads arguments only through places,
         // so a *known* value here is a gap rather than a missing analysis — worth separating,
         // because the two have completely different costs to close.
-        Some(RegisterFact::Value(Fact::Known(Const::Literal(_)))) => {
-            NotFoldable::ArgumentValueKnownButUnread
-        }
-        Some(RegisterFact::Value(_)) => NotFoldable::ArgumentIsUnknownValue,
-        Some(RegisterFact::Place(_)) => NotFoldable::ArgumentStorageNotModelled,
+        Some(Fact::Known(Const::Literal(_))) => NotFoldable::ArgumentValueKnownButUnread,
+        Some(_) => NotFoldable::ArgumentIsUnknownValue,
         None => match analysis.root_of_register(*id) {
             Some(root) if analysis.is_escaped(root) => NotFoldable::ArgumentStorageEscaped,
             _ => NotFoldable::ArgumentStorageNotModelled,
@@ -651,9 +653,7 @@ fn known_condition(condition: &mir::Value, state: &State) -> Option<bool> {
         return None;
     };
     match state.register(*id)? {
-        RegisterFact::Value(Fact::Known(Const::Literal(literal))) => {
-            literal.as_primitive_ty::<bool>().copied()
-        }
+        Fact::Known(Const::Literal(literal)) => literal.as_primitive_ty::<bool>().copied(),
         _ => None,
     }
 }
@@ -673,7 +673,11 @@ fn try_fold_call(
     // — which is what an entry of a constant dictionary resolves to.
     let callee = match call.callee {
         mir::Value::Function(id) => *id,
-        operand => match state.place_of(operand).map(|key| state.place(&key)) {
+        operand => match context
+            .analysis
+            .place_of(operand)
+            .map(|key| state.place(&key))
+        {
             Some(Fact::Known(Const::Function(id))) => id,
             _ => return Err(NotFoldable::CalleeNotDirect),
         },
@@ -693,7 +697,10 @@ fn try_fold_call(
         if !matches!(convention, ArgConvention::Let) {
             return discard(arguments, NotFoldable::MutableArgument);
         }
-        let known = state.place_of(operand).map(|key| state.place(&key));
+        let known = context
+            .analysis
+            .tracked_place_of(operand)
+            .map(|key| state.place(&key));
         match known {
             Some(Fact::Known(Const::Literal(literal)))
                 if literal.has_representation_type_in(parameter.ty, &context.env) =>
@@ -876,6 +883,50 @@ mod tests {
             "the addition must fold through the fields:\n{main}"
         );
         assert!(main.contains("= 42"), "and yield the sum:\n{main}");
+    }
+
+    /// The structural place map retains escaped roots for diagnostics, but folding must never
+    /// inject a constant into one. A scoped projection can mutate its arguments while it is open
+    /// and again when `end_project` resumes its epilogue, so their initial constants are stale.
+    #[test]
+    fn an_escaped_structural_place_does_not_retain_a_folded_constant() {
+        let mut session = CompilerSession::new();
+        session.set_allow_experimental(true);
+        session.set_mir_optimization(MirOptimization::Enabled);
+        let module = session.emit_mir(
+            "fold",
+            "subscript cell(slot: &mut int, log: &mut int) -> int {\n\
+                 mut {\n\
+                     log = log + 1;\n\
+                     let mut local = slot;\n\
+                     yield local;\n\
+                     slot = local;\n\
+                     log = log * 10\n\
+                 }\n\
+             }\n\
+             fn main() -> int {\n\
+                 let cell_slot = cell;\n\
+                 let mut slot = 5;\n\
+                 let mut log = 0;\n\
+                 slot->[cell_slot](log) += 7;\n\
+                 slot + log\n\
+             }",
+        );
+        let main = module
+            .split("fn main")
+            .nth(1)
+            .expect("the module defines main")
+            .split("\nfn ")
+            .next()
+            .expect("main has a body");
+        assert!(
+            main.contains("end_project"),
+            "the scoped call must remain:\n{main}"
+        );
+        assert!(
+            main.contains("call std::Num<std::int>::add"),
+            "the final addition must read the values mutated by the projection:\n{main}"
+        );
     }
 
     /// A branch whose condition is known becomes a jump, and the arm not taken disappears — with

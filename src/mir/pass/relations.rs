@@ -64,7 +64,7 @@ use crate::{
 };
 
 use super::{
-    dataflow::{Root, call_operands, escaping_roots, field_index},
+    dataflow::{PlaceBindings, Root, call_operands, escaping_roots, field_index},
     known_callee::{KnownCallee, KnownCallees, Layouts, RangeLayout},
     site::{OperationIndex, OperationSite},
 };
@@ -903,7 +903,7 @@ pub(crate) fn analyze(
     // it ends a value's life rather than writing another one, and forgetting the place is exactly
     // what the transfer function does. Folding cannot say either, which is why it escapes both —
     // and why an array read only for its length would otherwise be untracked from its own drop.
-    let (escaped, register_roots) = escaping_roots(func, &|operation| {
+    let (escaped, register_places) = escaping_roots(func, &|operation| {
         matches!(operation.kind, OperationKind::Drop { .. }) || semantics.of(operation).is_some()
     });
 
@@ -918,7 +918,7 @@ pub(crate) fn analyze(
     };
     let mut interner = Interner::default();
     seed_register_places(func, &escaped, &mut interner);
-    let inductions = recognize(&context, &register_roots, &mut interner);
+    let inductions = recognize(&context, &register_places, &mut interner);
     let settled = run(
         &Context {
             inductions: &inductions,
@@ -1168,7 +1168,7 @@ fn seed_register_places(func: &Function, escaped: &FxHashSet<Root>, interner: &m
 /// generalized: a construction spread over blocks would need each one checked against the rest.
 fn recognize(
     context: &Context<'_>,
-    register_roots: &FxHashMap<ValueId, Root>,
+    register_places: &PlaceBindings,
     interner: &mut Interner,
 ) -> FxHashMap<Root, Induction> {
     let func = context.func;
@@ -1206,7 +1206,7 @@ fn recognize(
     let mut recognized = FxHashMap::default();
     for (root, layout, inclusive) in candidates {
         let Some(construction) =
-            construction_block(context, register_roots, root, &dominance, &successor_lists)
+            construction_block(context, register_places, root, &dominance, &successor_lists)
         else {
             continue;
         };
@@ -1262,7 +1262,7 @@ fn recognize(
 /// holds.
 fn construction_block(
     context: &Context<'_>,
-    register_roots: &FxHashMap<ValueId, Root>,
+    register_places: &PlaceBindings,
     root: Root,
     dominance: &Dominance,
     successor_lists: &[Vec<usize>],
@@ -1272,7 +1272,7 @@ fn construction_block(
     let mut steps = Vec::new();
     for block in func.blocks() {
         let mut scan = |operation: &Operation| -> bool {
-            let writes = writes_into(operation, root, register_roots);
+            let writes = writes_into(operation, root, register_places);
             if !writes {
                 return true;
             }
@@ -1336,13 +1336,9 @@ fn reachable_from(successor_lists: &[Vec<usize>], from: &[BlockId]) -> FxHashSet
 /// Conservative in the direction that matters: an operation whose effect on the root this cannot
 /// classify counts as a write, so an unrecognized mutation disqualifies the loop rather than being
 /// silently tolerated.
-fn writes_into(
-    operation: &Operation,
-    root: Root,
-    register_roots: &FxHashMap<ValueId, Root>,
-) -> bool {
+fn writes_into(operation: &Operation, root: Root, register_places: &PlaceBindings) -> bool {
     let rooted = |operand: &mir::Value| match operand {
-        mir::Value::Register(id) => register_roots.get(id) == Some(&root),
+        mir::Value::Register(id) => register_places.root_of_register(*id) == Some(root),
         mir::Value::Parameter(id) => root == Root::Parameter(*id),
         _ => false,
     };
