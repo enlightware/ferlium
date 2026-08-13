@@ -115,13 +115,16 @@ impl Plan {
 
 /// Everything a call site is judged against, gathered once per function.
 ///
-/// The evaluator and the environment answer "what does this return?"; the analysis and the
-/// destination set answer "and if not, why not?" — the latter two exist only to classify refusals,
-/// which is why they are computed once here rather than per call site.
+/// The evaluator, environment, and dataflow analysis decide whether a call folds. Refusal-only
+/// provenance is absent from normal optimization and constructed only for an optimization report.
 struct FoldContext<'a> {
     evaluator: ConstEvaluator<'a>,
     env: ModuleEnv<'a>,
     analysis: Analysis,
+    refusal: Option<RefusalContext>,
+}
+
+struct RefusalContext {
     /// The `alloca`s a call writes its result into. See [`call_destinations`].
     call_destinations: FxHashSet<mir::ValueId>,
 }
@@ -374,13 +377,16 @@ fn plan_folds_with(
     refusals: &mut Option<&mut Vec<Refusal>>,
     devirtualizations: &mut Option<&mut Vec<Devirtualization>>,
 ) -> Plan {
-    // Computed once for the whole function: classifying a refusal is then a set lookup rather than
-    // a scan, so the report's detail costs the optimizer nothing per call site.
+    // A report pays one scan for detailed classification; normal optimization carries none of this
+    // provenance and does not classify unknown arguments it will not report.
+    let refusal = refusals.is_some().then(|| RefusalContext {
+        call_destinations: call_destinations(func),
+    });
     let context = FoldContext {
         evaluator: ConstEvaluator::new(module_id, session),
         env,
         analysis: dataflow::analyze(func, env),
-        call_destinations: call_destinations(func),
+        refusal,
     };
     let analysis = &context.analysis;
     let mut plan = Plan::default();
@@ -566,13 +572,14 @@ fn fact_for_reification(reification: &Reification) -> Fact {
 fn why_argument_unknown(
     operand: &mir::Value,
     state: &State,
-    context: &FoldContext<'_>,
+    analysis: &Analysis,
+    refusal: &RefusalContext,
 ) -> NotFoldable {
-    let Some(place) = context.analysis.place_of(operand) else {
-        return why_operand_names_no_place(operand, state, &context.analysis);
+    let Some(place) = analysis.place_of(operand) else {
+        return why_operand_names_no_place(operand, state, analysis);
     };
-    let root = context.analysis.root_of_place(place);
-    if context.analysis.is_escaped(root) {
+    let root = analysis.root_of_place(place);
+    if analysis.is_escaped(root) {
         return NotFoldable::ArgumentStorageEscaped;
     }
     match state.place(place) {
@@ -583,7 +590,7 @@ fn why_argument_unknown(
         Fact::Unknown => match root {
             Root::Parameter(_) => NotFoldable::ArgumentIsParameter,
             Root::DictEntry(_) => NotFoldable::ArgumentNotLiteral,
-            Root::Alloca(id) if context.call_destinations.contains(&id) => {
+            Root::Alloca(id) if refusal.call_destinations.contains(&id) => {
                 NotFoldable::ArgumentFromCall
             }
             Root::Alloca(_) => NotFoldable::ArgumentFromOperation,
@@ -726,7 +733,14 @@ fn try_fold_call(
                 ))),
             Some(Fact::Known(_)) => return discard(arguments, NotFoldable::ArgumentNotLiteral),
             _ => {
-                let reason = why_argument_unknown(operand, state, context);
+                // The reason is irrelevant to the rewrite. Detailed provenance is computed only
+                // when a report will consume it; the broad fallback is never externally observed.
+                let reason = context
+                    .refusal
+                    .as_ref()
+                    .map_or(NotFoldable::ArgumentStorageNotModelled, |refusal| {
+                        why_argument_unknown(operand, state, &context.analysis, refusal)
+                    });
                 return discard(arguments, reason);
             }
         }
