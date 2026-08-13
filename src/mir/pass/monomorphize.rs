@@ -68,7 +68,10 @@ use crate::{
     },
 };
 
-use super::{budget, function_size};
+use super::{
+    budget, function_size,
+    site::{OperationIndex, OperationSite},
+};
 
 // Sharing one residual body between the keys that produce it.
 //
@@ -994,35 +997,71 @@ pub(crate) fn specialize_call_sites(
     module_id: ModuleId,
     specializations: &mut Specializations,
 ) -> Option<Function> {
-    let mut edit = FunctionEdit::new(func.clone());
-    let mut changed = false;
-
-    for block_id in edit.blocks().collect::<Vec<_>>() {
-        let block = edit.block_mut(block_id);
-        let operations = block
-            .operations
-            .iter_mut()
-            .chain(match &mut block.terminator.kind {
-                TerminatorKind::Invoke { operation, .. } => Some(operation),
-                _ => None,
-            });
-        for operation in operations {
+    // Deciding a specialization mutates the cache and consumes the shared budget, so it cannot be
+    // repeated after discovering that this body changes. Record the decisions while the body is
+    // still borrowed, then pay for an editable copy only when there is something to apply.
+    let mut rewrites = Vec::new();
+    for block_id in func.blocks() {
+        let block = func.block(block_id);
+        for (index, operation) in block.operations().iter().enumerate() {
             if let Some(id) = specialization_for(operation, env, session, specializations) {
-                operation.operands[0] = mir::Value::Function(FunctionId {
-                    module: module_id,
-                    function: id,
-                });
-                // The specialization is not generic, so it has no quantifiers for an instantiation
-                // to be positional against. Leaving the old one would claim otherwise.
-                if let OperationKind::Call { metadata, .. } = &mut operation.kind {
-                    *metadata = None;
-                }
-                changed = true;
+                rewrites.push((
+                    OperationSite {
+                        block: block_id,
+                        index: OperationIndex::from_index(index),
+                    },
+                    id,
+                ));
             }
         }
+        if let TerminatorKind::Invoke { operation, .. } = &block.terminator().kind
+            && let Some(id) = specialization_for(operation, env, session, specializations)
+        {
+            rewrites.push((
+                OperationSite {
+                    block: block_id,
+                    index: OperationIndex::from_index(block.operations().len()),
+                },
+                id,
+            ));
+        }
+    }
+    if rewrites.is_empty() {
+        return None;
     }
 
-    changed.then(|| edit.finish_unverified())
+    let mut edit = FunctionEdit::new(func.clone());
+    for (site, id) in rewrites {
+        let operation = operation_at_mut(&mut edit, site);
+        operation.operands[0] = mir::Value::Function(FunctionId {
+            module: module_id,
+            function: id,
+        });
+        // The specialization is not generic, so it has no quantifiers for an instantiation to be
+        // positional against. Leaving the old one would claim otherwise.
+        if let OperationKind::Call { metadata, .. } = &mut operation.kind {
+            *metadata = None;
+        }
+    }
+    Some(edit.finish_unverified())
+}
+
+/// The operation recorded at `site`, where the one-past-the-end index names an invoke terminator.
+fn operation_at_mut(edit: &mut FunctionEdit, site: OperationSite) -> &mut Operation {
+    let block = edit.block_mut(site.block);
+    let index = site.index.as_index();
+    if index < block.operations.len() {
+        return &mut block.operations[index];
+    }
+    assert_eq!(
+        index,
+        block.operations.len(),
+        "a specialization site must name an operation or invoke terminator"
+    );
+    match &mut block.terminator.kind {
+        TerminatorKind::Invoke { operation, .. } => operation,
+        _ => unreachable!("a one-past-the-end specialization site must name an invoke"),
+    }
 }
 
 /// The specialization this call site should be pointed at, creating it if needed.
