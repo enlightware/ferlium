@@ -270,13 +270,26 @@ pub fn transform_pipeline_mixed(steps: int) -> int {
 
 /// A dense `n` by `n` product followed by Jacobi smoothing sweeps, the shape grid simulation has:
 /// the outer structure is negligible and the innermost loop is run n^3 and n^2 times.
+///
+/// Each sweep is followed by a power-iteration step, which is what puts the vector half of this
+/// library on the measured path at a real size: `matrix_vector_mul` is n^2, and the `dot`,
+/// `norm_squared` and elementwise operations around it are n. Without it the whole vector family is
+/// reached only by the 3-dimensional pipeline above, where every loop runs twice.
 pub fn grid_simulation(n: int, sweeps: int) -> float {
 	let a = matrix_to_float(matrix_from_fn(n, n, sample_int));
 	let mut field = matrix_mul(a, transpose(a));
+	let mut estimate = vector_from_fn(n, |i| 1.0 + (i as float) * 0.5);
+	let mut energy = 0.0;
 	for _sweep in 0..sweeps {
-		field = smooth(field)
+		field = smooth(field);
+		let mut next = matrix_vector_mul(field, estimate);
+		energy = energy + dot(next, estimate) + norm_squared(estimate);
+		// Halved rather than normalized: a norm needs a square root and a Rayleigh quotient needs a
+		// division, and neither stays within the dyadic rationals the three backends agree on
+		// exactly.
+		estimate = vector_scale(vector_sub(next, estimate), 0.5);
 	};
-	trace(field)
+	trace(field) + energy
 }
 
 /// One Jacobi sweep: each interior cell becomes the average of its four neighbours, with the
