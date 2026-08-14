@@ -39,10 +39,10 @@ use crate::{
         self, Function, Operation, OperationKind, const_eval::NotFoldable,
         terminator::TerminatorKind,
     },
-    module::{FunctionId, ModuleEnv, ModuleId},
+    module::{FunctionId, ModuleEnv, ModuleId, id::Id},
 };
 
-use super::{fold, inline, inline::NotInlinable};
+use super::{fold, inline, inline::NotInlinable, known_callee::KnownCallees};
 
 /// The pass a remark came from.
 ///
@@ -229,6 +229,17 @@ pub(crate) fn build(
     let mut call_sites_before = 0usize;
     let mut call_sites_after = 0usize;
     let mut remarks = Vec::new();
+    let known_callees = KnownCallees::new(session.raw_modules());
+    let original_of = |callee: FunctionId| {
+        if callee.module != module_id {
+            return None;
+        }
+        let index = callee.function.as_index().checked_sub(raw.len())?;
+        optimized
+            .specializations()
+            .get(index)
+            .map(|specialization| specialization.original)
+    };
 
     for (raw_body, optimized_body) in raw.bodies().iter().zip(optimized.bodies()) {
         let (Some(raw_body), Some(optimized_body)) = (raw_body, optimized_body) else {
@@ -254,6 +265,7 @@ pub(crate) fn build(
             env,
             session,
             module_id,
+            fold::KnownCallSemantics::new(&known_callees, &original_of),
             &mut Some(&mut refusals),
         );
         remarks.extend(refusals.into_iter().map(|refusal| Remark {

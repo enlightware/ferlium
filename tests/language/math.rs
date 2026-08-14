@@ -45,6 +45,20 @@ fn num() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn integer_arithmetic_wraps_at_the_target_width() {
+    let mut session = TestSession::new();
+    let min = "let bits = count_zeros(0); let min: int = bit(bits - 1);";
+    assert_val_eq!(
+        session.run(&format!("{min} let max = bit_not(min); max + 1")),
+        int(isize::MIN)
+    );
+    assert_val_eq!(session.run(&format!("{min} min - 1")), int(isize::MAX));
+    assert_val_eq!(session.run(&format!("{min} min * -1")), int(isize::MIN));
+    assert_val_eq!(session.run(&format!("{min} -min")), int(isize::MIN));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn int_div() {
     let mut session = TestSession::new();
     assert_val_eq!(session.run("idiv(7, 2)"), int(3));

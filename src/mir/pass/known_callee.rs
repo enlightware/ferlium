@@ -8,12 +8,13 @@
 //
 //! The std functions whose value semantics the optimizer is allowed to reason about symbolically.
 //!
-//! Ferlium keeps integer arithmetic, integer comparison and array indexing as ordinary calls into
-//! std; MIR has no arithmetic operations of its own. Constant folding copes with that by *running*
-//! a call ([`const_eval`](crate::mir::const_eval)), which needs every argument known. Range
-//! reasoning needs the opposite: the meaning of a call whose arguments are **not** known, so that
-//! `i + 1` relates to `i` and `i < len` refines a branch. This table is where that meaning is
-//! attached to a callee, and it is the only place in the optimizer that hard-codes std identities.
+//! Ferlium keeps numeric arithmetic, comparison and array indexing as ordinary calls into std; MIR
+//! has no arithmetic operations of its own. Constant folding copes with that by *running* a call
+//! ([`const_eval`](crate::mir::const_eval)), which needs every argument known. Symbolic consumers
+//! need the opposite: the meaning of a call whose arguments are **not** all known, so that `i + 1`
+//! relates to `i`, `x * 1.0` becomes `x`, and `i < len` refines a branch. This table is where that
+//! meaning is attached to a callee, and it is the only place in the optimizer that hard-codes std
+//! identities.
 //!
 //! **Identity, not shape.** A callee qualifies by being the very function std declares — resolved
 //! once through the trait tables and the module's function names — never by matching a name, a
@@ -22,7 +23,9 @@
 //!
 //! **Identity does not grant general purity.** Every entry names what a call computes; whether a
 //! call may be moved, merged or removed remains a question for its inferred effects, which a
-//! consumer must check for itself. A consumer may also use an entry's narrower std contract — range
+//! consumer must check for itself. The explicit `total and speculatable` classification below is a
+//! second, stronger contract used for dead calls; it is never inferred from purity, since a pure
+//! script function may diverge. A consumer may also use an entry's narrower std contract — range
 //! reasoning knows that computing either array addressor does not mutate its receiver — but that
 //! does not make arbitrary known calls pure or suppress their declared effects.
 //!
@@ -33,8 +36,8 @@
 //! original needs no accompanying type check. An entry whose meaning depended on the instantiation
 //! could not be admitted without one, and none is.
 //!
-//! The consumers are the range-reasoning passes; the items here are exercised by the tests below
-//! until those land.
+//! Consumers currently include partial call simplification, dead-call elimination and integer
+//! range reasoning.
 #![allow(dead_code)]
 
 use rustc_hash::FxHashMap;
@@ -49,7 +52,7 @@ use crate::{
     std::{
         STD_MODULE_ID,
         core_traits_names::{ITERATOR_TRAIT_NAME, NUM_TRAIT_NAME, ORD_TRAIT_NAME},
-        math::int_type,
+        math::{float_type, int_type},
     },
     types::{
         effects::EffType,
@@ -87,6 +90,18 @@ pub(crate) enum KnownCallee {
     /// This is the whole of integer comparison in MIR: a source-level `<` lowers to this call plus
     /// an `extract_tag` and a `comp_eq` against one tag.
     IntCmp,
+    /// `Num<float>::add(left, right)` — finite, saturating `left + right`.
+    FloatAdd,
+    /// `Num<float>::sub(left, right)` — finite, saturating `left - right`.
+    FloatSub,
+    /// `Num<float>::mul(left, right)` — finite, saturating `left * right`.
+    FloatMul,
+    /// `Num<float>::neg(value)` — `-value`.
+    FloatNeg,
+    /// `Ord<float>::cmp(left, right)` — `Less`, `Equal` or `Greater`.
+    ///
+    /// Ferlium floats are finite and ordered, rather than IEEE values admitting NaN and infinity.
+    FloatCmp,
     /// `array_len(array)` — the array's element count, which is its `len` field.
     ArrayLen,
     /// `array_resolve_index(index, len)` — `index` when `0 <= index < len`, `len + index` when
@@ -117,6 +132,30 @@ pub(crate) enum KnownCallee {
     /// `Iterator<RangeInclusiveIterator>::next(iterator)` — as [`RangeNext`](Self::RangeNext), with
     /// an inclusive bound.
     RangeInclusiveNext,
+}
+
+impl KnownCallee {
+    /// Whether this exact std callable is total, deterministic and safe to execute speculatively.
+    ///
+    /// This is deliberately stronger than an empty effect row. A pure script function may diverge,
+    /// so purity alone never permits dead-call removal or motion out of a zero-trip loop. These
+    /// entries name concrete native numeric operations whose implementations always terminate and
+    /// do not fail for values inhabiting their Ferlium types.
+    pub(crate) fn is_total_and_speculatable(self) -> bool {
+        matches!(
+            self,
+            Self::IntAdd
+                | Self::IntSub
+                | Self::IntMul
+                | Self::IntNeg
+                | Self::IntCmp
+                | Self::FloatAdd
+                | Self::FloatSub
+                | Self::FloatMul
+                | Self::FloatNeg
+                | Self::FloatCmp
+        )
+    }
 }
 
 /// The fields of a std type the optimizer reads positionally.
@@ -202,6 +241,26 @@ impl KnownCallees {
             (
                 resolver.method(ORD_TRAIT_NAME, int_type(), "cmp"),
                 KnownCallee::IntCmp,
+            ),
+            (
+                resolver.method(NUM_TRAIT_NAME, float_type(), "add"),
+                KnownCallee::FloatAdd,
+            ),
+            (
+                resolver.method(NUM_TRAIT_NAME, float_type(), "sub"),
+                KnownCallee::FloatSub,
+            ),
+            (
+                resolver.method(NUM_TRAIT_NAME, float_type(), "mul"),
+                KnownCallee::FloatMul,
+            ),
+            (
+                resolver.method(NUM_TRAIT_NAME, float_type(), "neg"),
+                KnownCallee::FloatNeg,
+            ),
+            (
+                resolver.method(ORD_TRAIT_NAME, float_type(), "cmp"),
+                KnownCallee::FloatCmp,
             ),
             (resolver.function("array_len"), KnownCallee::ArrayLen),
             (
@@ -461,7 +520,7 @@ mod tests {
         let session = CompilerSession::new();
         assert_eq!(
             known_callees(&session).by_id.len(),
-            12,
+            17,
             "two known callees resolved to the same function id"
         );
     }

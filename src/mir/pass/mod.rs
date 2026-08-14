@@ -123,7 +123,15 @@ pub(crate) fn optimize_function(
         // round a body whose parameters have become the caller's places.
         let mut changed = false;
         let source = current.as_ref().unwrap_or(function);
-        if let Some(folded) = fold::fold_function(source, env, session, module_id) {
+        if let Some(folded) = fold::fold_function(
+            source,
+            env,
+            session,
+            module_id,
+            fold::KnownCallSemantics::new(&context.known_callees, &|callee| {
+                specializations.original(callee)
+            }),
+        ) {
             current = Some(folded.body);
             // A rewrite that cannot enable another one must not buy a round; see `Folded`.
             changed |= folded.warrants_another_round;
@@ -250,6 +258,16 @@ pub(crate) fn optimize_function(
     {
         stats.bounds_checks_removed += removed;
         current = Some(rewritten);
+    }
+    // Purity does not imply termination, so general dead-call elimination would be unsound. The
+    // semantic table names the concrete native numeric operations that are additionally total and
+    // speculatable; remove an unused result chain under that stronger contract, then let ordinary
+    // DCE collect its now-unread result and argument cells.
+    let source = current.as_ref().unwrap_or(function);
+    if let Some(cleaned) = dce::remove_dead_known_calls(source, &context.known_callees, &|callee| {
+        specializations.original(callee)
+    }) {
+        current = Some(cleaned);
     }
     // Cleanup runs once, after the rounds have settled, and on every body rather than only on one a
     // pass changed. A specialization arrives already carrying dead code — substitution turns its

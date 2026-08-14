@@ -6,14 +6,17 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-//! Removal of the storage scaffolding that folding leaves behind.
+//! Removal of dead known-total calls and the storage scaffolding that folding leaves behind.
 //!
 //! Folding replaces `call f(a, b, ret)` with `store @cN to ret` or a constructive operation such as
 //! `build_array`. That can leave the arguments' own construction and cleanup in place: correct,
 //! since nothing reads them, but they still cost storage and writes at run time and bury the result
 //! in noise when the MIR is read.
 //!
-//! This is **not** general dead-code elimination. Its storage rule removes an `alloca` only when
+//! This is **not** general dead-code elimination. Before storage cleanup, a backward use-count
+//! worklist removes unused chains of concrete numeric calls explicitly classified as total and
+//! speculatable. An empty effect row is not sufficient: an arbitrary pure function may diverge.
+//! The storage rule then removes an `alloca` only when
 //! *every* use of it is as the destination of a `store` whose value is a pool constant, and then
 //! removes those stores with it. Two properties make that safe without any ownership analysis:
 //!
@@ -41,6 +44,145 @@ use crate::mir::{
     self, BlockId, Function, OperationKind, edit::FunctionEdit, terminator::TerminatorKind,
     value::ValueId,
 };
+use crate::{module::FunctionId, types::r#type::CallResultConvention};
+
+use super::{dataflow, known_callee::KnownCallees};
+
+/// Removes unused calls covered by an explicit total/speculatable std contract.
+///
+/// An empty effect row is intentionally insufficient: a pure script call may diverge, and deleting
+/// it would change behaviour. [`KnownCallees`] grants the stronger property only to concrete native
+/// numeric operations. Their result must be a local whole-place `alloca` with no surviving read.
+/// A backwards use-count worklist removes chains in one pass: deleting a dead consumer can make the
+/// total call that produced one of its arguments dead in turn.
+pub(crate) fn remove_dead_known_calls(
+    func: &Function,
+    known: &KnownCallees,
+    original_of: &dyn Fn(FunctionId) -> Option<FunctionId>,
+) -> Option<Function> {
+    #[derive(Clone, Copy)]
+    struct Candidate {
+        block: BlockId,
+        operation: usize,
+    }
+
+    let mut allocas = FxHashSet::default();
+    let mut candidates: FxHashMap<ValueId, Candidate> = FxHashMap::default();
+    for block in func.blocks() {
+        for (index, operation) in func.block(block).operations().iter().enumerate() {
+            if matches!(operation.kind, OperationKind::Alloca { .. })
+                && let Some(result) = operation.result_id()
+            {
+                allocas.insert(result);
+            }
+            let OperationKind::Call { ty, .. } = &operation.kind else {
+                continue;
+            };
+            if !ty.effects().is_empty() || ty.result_convention != CallResultConvention::Value {
+                continue;
+            }
+            let Some(call) = dataflow::call_operands(&operation.operands, ty) else {
+                continue;
+            };
+            let mir::Value::Function(callee) = call.callee else {
+                continue;
+            };
+            if !known
+                .resolve(*callee, original_of)
+                .is_some_and(|callee| callee.is_total_and_speculatable())
+            {
+                continue;
+            }
+            let mir::Value::Register(result) = call.result else {
+                continue;
+            };
+            candidates.insert(
+                *result,
+                Candidate {
+                    block,
+                    operation: index,
+                },
+            );
+        }
+    }
+    candidates.retain(|result, _| allocas.contains(result));
+    if candidates.is_empty() {
+        return None;
+    }
+
+    // The use census is the more expensive part and serves only the backwards chain walk. Most
+    // bodies contain no eligible call, so do not pay for it until the semantic scan above found
+    // one whose result is local storage.
+    let mut uses: FxHashMap<ValueId, usize> = FxHashMap::default();
+    let mut count_operands = |operands: &[mir::Value]| {
+        for operand in operands {
+            if let mir::Value::Register(id) = operand {
+                *uses.entry(*id).or_default() += 1;
+            }
+        }
+    };
+    for block in func.blocks() {
+        let basic_block = func.block(block);
+        for operation in basic_block.operations() {
+            count_operands(&operation.operands);
+        }
+        match &basic_block.terminator().kind {
+            TerminatorKind::Invoke { operation, .. } => count_operands(&operation.operands),
+            TerminatorKind::CondBr { condition, .. } => {
+                count_operands(std::slice::from_ref(condition))
+            }
+            TerminatorKind::Yield { place, .. } => count_operands(std::slice::from_ref(place)),
+            TerminatorKind::Goto { .. }
+            | TerminatorKind::Return
+            | TerminatorKind::PropagateError
+            | TerminatorKind::FailureDuringCleanup => {}
+        }
+    }
+
+    let mut pending: Vec<ValueId> = candidates
+        .keys()
+        .copied()
+        .filter(|result| uses.get(result) == Some(&1))
+        .collect();
+    let mut removed_results = FxHashSet::default();
+    let mut removed: FxHashMap<BlockId, FxHashSet<usize>> = FxHashMap::default();
+    while let Some(result) = pending.pop() {
+        if !removed_results.insert(result) || uses.get(&result) != Some(&1) {
+            continue;
+        }
+        let candidate = candidates[&result];
+        removed
+            .entry(candidate.block)
+            .or_default()
+            .insert(candidate.operation);
+        for operand in &func.block(candidate.block).operations()[candidate.operation].operands {
+            let mir::Value::Register(operand) = operand else {
+                continue;
+            };
+            let count = uses
+                .get_mut(operand)
+                .expect("every register operand was counted");
+            *count -= 1;
+            if *count == 1 && candidates.contains_key(operand) {
+                pending.push(*operand);
+            }
+        }
+    }
+    if removed.is_empty() {
+        return None;
+    }
+
+    let mut edit = FunctionEdit::new(func.clone());
+    for (block, indices) in removed {
+        let mut index = 0usize;
+        edit.block_mut(block).operations.retain(|_| {
+            let keep = !indices.contains(&index);
+            index += 1;
+            keep
+        });
+    }
+    Some(edit.finish_unverified())
+}
 
 /// Removes dead storage scaffolding, returning a rewritten function if anything was removed.
 pub(crate) fn remove_dead_storage(func: &Function) -> Option<Function> {
@@ -589,6 +731,45 @@ mod tests {
                 && caller.contains("stack_save")
                 && caller.contains("stack_restore"),
             "a live local allocation must retain its stack bracket:\n{caller}"
+        );
+    }
+
+    #[test]
+    fn unused_total_integer_and_float_call_chains_are_removed() {
+        let module = optimized(
+            "fn discard_int(x: int) -> int {\n\
+                 let first = x + 1; let second = first * 2; x\n\
+             }\n\
+             fn discard_float(x: float) -> float {\n\
+                 let first = x + 1.5; let second = first * 2.5; x\n\
+             }",
+        );
+        for name in ["discard_int", "discard_float"] {
+            let body = body_of(&module, name);
+            assert!(
+                !body.contains("call "),
+                "the dead total call chain and its scaffolding must disappear from {name}:\n{body}"
+            );
+            assert!(
+                !body.contains("alloca"),
+                "ordinary DCE must collect the dead calls' cells in {name}:\n{body}"
+            );
+        }
+    }
+
+    /// An empty effect row says nothing about termination. The recursive call is pure, but removing
+    /// it would turn a diverging function into one that returns, so only the explicitly classified
+    /// native numeric calls above may use the dead-call rule.
+    #[test]
+    fn an_unused_arbitrary_pure_call_is_retained() {
+        let module = optimized(
+            "fn diverges(x: int) -> int { diverges(x) }\n\
+             fn retain(x: int) -> int { let unused = diverges(x); x }",
+        );
+        let body = body_of(&module, "retain");
+        assert!(
+            body.contains("call dce::diverges"),
+            "purity alone must not delete a possibly diverging call:\n{body}"
         );
     }
 }

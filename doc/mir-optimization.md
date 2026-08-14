@@ -31,7 +31,7 @@ Per function (`mir::pass::optimize_function`):
 
 ```text
 for round in 0..MAX_ROUNDS:
-    fold          // constant folding, devirtualization; block merging inside its own edit
+    fold          // constant/semantic folding, devirtualization; block merging in its own edit
     specialize    // point generic calls at concrete copies
     call CSE      // merge repeated addressor and trivial value calls before copying their bodies
     copy forward  // coalesce redundant trivial-copy storage exposed during the round
@@ -45,6 +45,7 @@ peephole          // collapse small local CFG/value patterns
 string accumulate // forward an overwritten string into its self-prefixed format builder
 devirtualize      // final dictionary-entry callees exposed too late for a fold round
 bounds checks     // prove array indices in range and remove checked access/failure edges
+dead known calls  // remove unused chains of explicitly total/speculatable numeric calls
 dce               // on every body, not only a changed one
 stack markers     // drop a mark duplicating one already held, and restores that pop nothing
 finish            // restores canonical form without exposing the intermediate body
@@ -105,6 +106,14 @@ dictionary, the effects and result convention permit compile-time evaluation, an
 reified as MIR. `call f(a, b, ret)` becomes `store @cN to ret` for an immediate result, or
 `build_array` directly into `ret` for an array of `TrivialCopy` elements. The surrounding
 scaffolding is left correct but dead for `dce`.
+
+The same pass also simplifies a call from a documented std contract when only the relevant
+arguments are known. Callees are recognized by resolved `FunctionId`, including through
+specialization, rather than by name or body shape. For `int`, it applies the wrapping-sound
+identities `0 + x`, `x + 0`, `x - 0`, `x - x`, `0 * x`, `x * 0`, `1 * x`, `x * 1`, and reflexive
+comparison. For `float`, Ferlium values are finite but retain observable signed zero, so the safe
+set is narrower: `x - +0.0`, `x - x`, `1.0 * x`, `x * 1.0`, and reflexive comparison. In
+particular, neither `x + 0.0` nor `x * 0.0` is rewritten for an unknown float.
 
 A `condbr` on a known condition becomes a jump. A source-fallible call whose evaluation *succeeds*
 becomes a store plus a jump to the normal successor, and its error edge dies; an evaluation that
@@ -514,6 +523,10 @@ whole `array_index`, and immediately before DCE because removing either error ed
 
 Deliberately narrow, and intra-function only.
 
+- An unused result chain of concrete `int` or `float` calls goes when the known-callee table
+  explicitly classifies every call as total, deterministic and speculatable, and its inferred
+  effects are empty. Purity alone is insufficient: a pure user function may diverge, and removing
+  its unused call would make a formerly non-terminating program return.
 - An `alloca` goes only when *every* use of it is the destination of a `store` whose value is a pool
   constant, together with those stores. Safe with no ownership analysis: a constant is trivially
   copyable, so no drop obligation is discarded, and the value operand is not a register, so no owned

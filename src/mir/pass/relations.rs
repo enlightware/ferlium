@@ -1912,7 +1912,14 @@ fn result_fact(
         | KnownCallee::ArrayOffsetUnchecked
         | KnownCallee::ArrayWrapIndex
         | KnownCallee::RangeNext
-        | KnownCallee::RangeInclusiveNext => None,
+        | KnownCallee::RangeInclusiveNext
+        // This domain deliberately carries affine integers only. Float semantics are resolved for
+        // other consumers, but admitting them here would make wrapping/order proofs ill-typed.
+        | KnownCallee::FloatAdd
+        | KnownCallee::FloatSub
+        | KnownCallee::FloatMul
+        | KnownCallee::FloatNeg
+        | KnownCallee::FloatCmp => None,
     }
 }
 

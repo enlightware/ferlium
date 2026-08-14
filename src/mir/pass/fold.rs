@@ -6,7 +6,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-//! Constant folding of calls: run a call at compile time and store its result instead.
+//! Constant and semantic folding of calls.
 //!
 //! A call folds when all of the following hold. Each is a refusal reason the fold report will name.
 //!
@@ -16,6 +16,11 @@
 //!   operand is a constant dictionary;
 //! - the call's effects and result convention permit compile-time evaluation ([`const_eval`]);
 //! - the evaluation succeeds, and its result can be expressed as MIR ([`reify`]).
+//!
+//! A second path needs only the callee identity and the arguments mentioned by a documented
+//! identity. It simplifies concrete integer and float std calls such as `x * 1`, `x - 0` and
+//! `cmp(x, x)` even when `x` is unknown. Float identities are representation-preserving: signed
+//! zero deliberately excludes `x + 0.0` and `x * 0.0`.
 //!
 //! The rewrite is then local: `call f(a, b, ret)` becomes either `store @cN to ret` or a
 //! `build_array` into `ret`. Both forms initialize the same slot and neither takes ownership of
@@ -31,10 +36,14 @@
 #![allow(dead_code)]
 
 use rustc_hash::FxHashSet;
+use ustr::ustr;
 
 use crate::{
     CompilerSession, Location,
-    hir::{function::ArgConvention, value::LiteralValue},
+    hir::{
+        function::ArgConvention,
+        value::{LiteralValue, VariantPayloadStorage},
+    },
     mir::{
         self, BlockId, Function, Operation, OperationKind,
         const_eval::{ConstArgument, ConstEvaluator, NotFoldable},
@@ -43,11 +52,52 @@ use crate::{
         terminator::{Terminator, TerminatorKind},
     },
     module::{FunctionId, ModuleEnv, ModuleId},
-    std::array::{array_type, array_value_from_vec},
-    types::r#type::{CallImplType, Type},
+    std::{
+        array::{array_type, array_value_from_vec},
+        math::Float,
+        ordering::{ORDERING_EQUAL, ordering_type},
+    },
+    types::r#type::{CallImplType, CallResultConvention, Type},
 };
 
-use super::dataflow::{self, Analysis, Const, Fact, Root, State};
+use super::{
+    dataflow::{self, Analysis, Const, Fact, Root, State},
+    known_callee::{KnownCallee, KnownCallees},
+};
+
+/// A call result the optimizer can materialize without knowing every argument.
+#[derive(Debug)]
+enum CallRewrite {
+    /// Ordinary full constant evaluation.
+    Reification(Reification),
+    /// A known identity says the result is one of the call's input places.
+    Copy(mir::Value),
+    /// A reflexive comparison returns the payload-free `Equal` case.
+    EqualOrdering,
+}
+
+/// The two inputs needed to recognize a known call, kept together at folding entry points.
+#[derive(Clone, Copy)]
+pub(crate) struct KnownCallSemantics<'a> {
+    callees: &'a KnownCallees,
+    original_of: &'a dyn Fn(FunctionId) -> Option<FunctionId>,
+}
+
+impl<'a> KnownCallSemantics<'a> {
+    pub(crate) fn new(
+        callees: &'a KnownCallees,
+        original_of: &'a dyn Fn(FunctionId) -> Option<FunctionId>,
+    ) -> Self {
+        Self {
+            callees,
+            original_of,
+        }
+    }
+
+    fn resolve(self, callee: FunctionId) -> Option<KnownCallee> {
+        self.callees.resolve(callee, self.original_of)
+    }
+}
 
 /// A call site the pass decided to replace, and what to replace it with.
 struct Fold {
@@ -56,7 +106,7 @@ struct Fold {
     index: usize,
     /// The place the folded call would have written its result into.
     destination: mir::Value,
-    result: Reification,
+    result: CallRewrite,
 }
 
 /// A source-fallible call the pass decided to replace, in its block's `Invoke` terminator.
@@ -121,6 +171,7 @@ struct FoldContext<'a> {
     evaluator: ConstEvaluator<'a>,
     env: ModuleEnv<'a>,
     analysis: Analysis,
+    known_calls: KnownCallSemantics<'a>,
     refusal: Option<RefusalContext>,
 }
 
@@ -155,20 +206,25 @@ pub(crate) fn fold_function(
     env: ModuleEnv<'_>,
     session: &CompilerSession,
     module_id: ModuleId,
+    known_calls: KnownCallSemantics<'_>,
 ) -> Option<Folded> {
-    let (plan, devirtualizations) = plan_folds_and_devirtualizations(func, env, session, module_id);
+    let (plan, devirtualizations) =
+        plan_folds_and_devirtualizations(func, env, session, module_id, known_calls);
     if plan.is_empty() && devirtualizations.is_empty() {
         return None;
     }
     let warrants_another_round = !plan.is_empty();
 
     let mut edit = FunctionEdit::new(func.clone());
-    for fold in plan.calls {
+    // A reflexive comparison expands one call into `variant Equal; store`, so apply sites in
+    // reverse order and splice without invalidating a later index planned in the same block.
+    for fold in plan.calls.into_iter().rev() {
         let span = edit.block(fold.block).operations[fold.index].span;
-        let replacement =
-            materialize_reification(&mut edit, span, fold.result, fold.destination, env);
+        let replacements =
+            materialize_call_rewrite(&mut edit, span, fold.result, fold.destination, env);
         edit.block_mut(fold.block)
-            .replace_operation(fold.index, replacement);
+            .operations
+            .splice(fold.index..=fold.index, replacements);
     }
     for invoke in plan.invokes {
         let span = edit.block(invoke.block).terminator.span;
@@ -197,6 +253,43 @@ pub(crate) fn fold_function(
         body: edit.finish_unverified(),
         warrants_another_round,
     })
+}
+
+/// Turns either full evaluation or a partial known-call identity into MIR operations.
+fn materialize_call_rewrite(
+    edit: &mut FunctionEdit,
+    span: Location,
+    rewrite: CallRewrite,
+    destination: mir::Value,
+    env: ModuleEnv<'_>,
+) -> Vec<Operation> {
+    match rewrite {
+        CallRewrite::Reification(reification) => {
+            vec![materialize_reification(
+                edit,
+                span,
+                reification,
+                destination,
+                env,
+            )]
+        }
+        CallRewrite::Copy(source) => vec![Operation::memcpy(span, source, destination)],
+        CallRewrite::EqualOrdering => {
+            let mut variant = Operation::variant(
+                span,
+                ustr(ORDERING_EQUAL),
+                ordering_type(),
+                Some(VariantPayloadStorage::Inline),
+                None,
+            );
+            let value = edit.new_value();
+            variant.assign_result_id(Some(value));
+            vec![
+                variant,
+                Operation::store(span, mir::Value::Register(value), destination),
+            ]
+        }
+    }
 }
 
 /// Turns a compile-time result into the one MIR operation that initializes its destination.
@@ -258,9 +351,18 @@ pub(crate) fn plan_folds(
     env: ModuleEnv<'_>,
     session: &CompilerSession,
     module_id: ModuleId,
+    known_calls: KnownCallSemantics<'_>,
     refusals: &mut Option<&mut Vec<Refusal>>,
 ) -> Plan {
-    plan_folds_with(func, env, session, module_id, refusals, &mut None)
+    plan_folds_with(
+        func,
+        env,
+        session,
+        module_id,
+        known_calls,
+        refusals,
+        &mut None,
+    )
 }
 
 /// Plans folds and devirtualizations in one walk.
@@ -278,6 +380,7 @@ fn plan_folds_and_devirtualizations(
     env: ModuleEnv<'_>,
     session: &CompilerSession,
     module_id: ModuleId,
+    known_calls: KnownCallSemantics<'_>,
 ) -> (Plan, Vec<Devirtualization>) {
     let mut devirtualizations = Vec::new();
     let plan = plan_folds_with(
@@ -285,6 +388,7 @@ fn plan_folds_and_devirtualizations(
         env,
         session,
         module_id,
+        known_calls,
         &mut None,
         &mut Some(&mut devirtualizations),
     );
@@ -374,6 +478,7 @@ fn plan_folds_with(
     env: ModuleEnv<'_>,
     session: &CompilerSession,
     module_id: ModuleId,
+    known_calls: KnownCallSemantics<'_>,
     refusals: &mut Option<&mut Vec<Refusal>>,
     devirtualizations: &mut Option<&mut Vec<Devirtualization>>,
 ) -> Plan {
@@ -386,6 +491,7 @@ fn plan_folds_with(
         evaluator: ConstEvaluator::new(module_id, session),
         env,
         analysis: dataflow::analyze(func, env),
+        known_calls,
         refusal,
     };
     let analysis = &context.analysis;
@@ -398,12 +504,17 @@ fn plan_folds_with(
         let basic_block = func.block(block);
         for (index, operation) in basic_block.operations().iter().enumerate() {
             if let OperationKind::Call { ty, .. } = &operation.kind
-                && let Some(result) = fold_outcome(operation, ty, &state, &context, refusals)
                 && let Some(call) = dataflow::call_operands(&operation.operands, ty)
+                && let Some(result) =
+                    partial_call_outcome(operation, ty, &state, &context).or_else(|| {
+                        fold_outcome(operation, ty, &state, &context, refusals)
+                            .map(CallRewrite::Reification)
+                    })
             {
                 let destination = call.result.clone();
                 if let Some(place) = analysis.tracked_place_of(&destination) {
-                    analysis.set_place_known(&mut state, place, fact_for_reification(&result));
+                    let fact = fact_for_call_rewrite(&result, &state, analysis);
+                    analysis.set_place_known(&mut state, place, fact);
                 }
                 plan.calls.push(Fold {
                     block,
@@ -472,6 +583,134 @@ fn plan_folds_with(
         }
     }
     plan
+}
+
+fn fact_for_call_rewrite(rewrite: &CallRewrite, state: &State, analysis: &Analysis) -> Fact {
+    match rewrite {
+        CallRewrite::Reification(reification) => fact_for_reification(reification),
+        CallRewrite::Copy(source) => analysis
+            .tracked_place_of(source)
+            .map(|place| state.place(place))
+            .unwrap_or_default(),
+        CallRewrite::EqualOrdering => Fact::Known(Const::VariantTag(ustr(ORDERING_EQUAL))),
+    }
+}
+
+/// Applies identities whose result is known even though one or more arguments are not.
+///
+/// The callee identity is the contract. Effects and convention are checked independently so adding
+/// an identity to [`KnownCallees`] never silently grants permission to discard an effect or scoped
+/// result. Float rules intentionally differ from integer rules: Ferlium excludes NaN and infinity,
+/// but retains signed zero, so `x + 0` and `x * 0` are not representation-preserving float
+/// identities while `x - +0`, `x * 1`, `x - x` and reflexive comparison are sound.
+fn partial_call_outcome(
+    operation: &Operation,
+    ty: &CallImplType,
+    state: &State,
+    context: &FoldContext<'_>,
+) -> Option<CallRewrite> {
+    if !ty.effects().is_empty() || ty.result_convention != CallResultConvention::Value {
+        return None;
+    }
+    let call = dataflow::call_operands(&operation.operands, ty)?;
+    if call
+        .arguments
+        .iter()
+        .any(|(_, convention)| !matches!(convention, ArgConvention::Let))
+    {
+        return None;
+    }
+    let callee = match call.callee {
+        mir::Value::Function(callee) => *callee,
+        operand => match context
+            .analysis
+            .place_of(operand)
+            .map(|place| state.place(place))
+        {
+            Some(Fact::Known(Const::Function(callee))) => callee,
+            _ => return None,
+        },
+    };
+    let known = context.known_calls.resolve(callee)?;
+    let argument = |index: usize| call.arguments.get(index).map(|(operand, _)| *operand);
+    let literal = |index: usize| -> Option<LiteralValue> {
+        let place = context.analysis.tracked_place_of(argument(index)?)?;
+        match state.place(place) {
+            Fact::Known(Const::Literal(literal)) => Some(literal),
+            _ => None,
+        }
+    };
+    let same_argument = |left: usize, right: usize| {
+        let (Some(left), Some(right)) = (argument(left), argument(right)) else {
+            return false;
+        };
+        left == right
+            || context
+                .analysis
+                .place_of(left)
+                .is_some_and(|left_place| context.analysis.place_of(right) == Some(left_place))
+    };
+    let copy = |index| argument(index).cloned().map(CallRewrite::Copy);
+    let int_is = |index, expected| {
+        literal(index).and_then(|literal| literal.as_primitive_ty::<isize>().copied())
+            == Some(expected)
+    };
+    let float_is = |index, expected: f64| {
+        literal(index)
+            .and_then(|literal| literal.as_primitive_ty::<Float>().copied())
+            .is_some_and(|value| value.into_inner().to_bits() == expected.to_bits())
+    };
+    let zero = || {
+        let representation = match known {
+            KnownCallee::IntSub | KnownCallee::IntMul => LiteralValue::new_native(0isize),
+            KnownCallee::FloatSub | KnownCallee::FloatMul => {
+                LiteralValue::new_native(Float::new(0.0).expect("zero is a finite float"))
+            }
+            _ => return None,
+        };
+        Some(CallRewrite::Reification(Reification::Constant(
+            mir::value::Constant {
+                ty: ty.ret(),
+                representation,
+            },
+        )))
+    };
+
+    match known {
+        KnownCallee::IntAdd if int_is(0, 0) => copy(1),
+        KnownCallee::IntAdd if int_is(1, 0) => copy(0),
+        KnownCallee::IntSub if same_argument(0, 1) => zero(),
+        KnownCallee::IntSub if int_is(1, 0) => copy(0),
+        KnownCallee::IntMul if int_is(0, 0) || int_is(1, 0) => zero(),
+        KnownCallee::IntMul if int_is(0, 1) => copy(1),
+        KnownCallee::IntMul if int_is(1, 1) => copy(0),
+        KnownCallee::IntCmp if same_argument(0, 1) => Some(CallRewrite::EqualOrdering),
+
+        // `+0.0` is not an identity for `-0.0`, and multiplying an unknown negative value by
+        // `+0.0` produces `-0.0`. Both signs are observable through formatting and hashing.
+        KnownCallee::FloatSub if same_argument(0, 1) => zero(),
+        KnownCallee::FloatSub if float_is(1, 0.0) => copy(0),
+        KnownCallee::FloatMul if float_is(0, 1.0) => copy(1),
+        KnownCallee::FloatMul if float_is(1, 1.0) => copy(0),
+        KnownCallee::FloatCmp if same_argument(0, 1) => Some(CallRewrite::EqualOrdering),
+        KnownCallee::IntAdd
+        | KnownCallee::IntSub
+        | KnownCallee::IntMul
+        | KnownCallee::IntNeg
+        | KnownCallee::IntCmp
+        | KnownCallee::FloatAdd
+        | KnownCallee::FloatSub
+        | KnownCallee::FloatMul
+        | KnownCallee::FloatNeg
+        | KnownCallee::FloatCmp
+        | KnownCallee::ArrayLen
+        | KnownCallee::ArrayResolveIndex
+        | KnownCallee::ArrayIndex
+        | KnownCallee::ArrayOffsetUnchecked
+        | KnownCallee::ArrayWrapIndex
+        | KnownCallee::RangeNext
+        | KnownCallee::RangeInclusiveNext => None,
+    }
 }
 
 /// Where an operation carries its callee, for the three kinds that dispatch through one.
@@ -782,6 +1021,16 @@ fn discard(arguments: Vec<ConstArgument>, reason: NotFoldable) -> Result<Reifica
 mod tests {
     use crate::{CompilerSession, MirOptimization};
 
+    fn optimized_function<'a>(module: &'a str, name: &str) -> &'a str {
+        module
+            .split(&format!("fn {name}"))
+            .nth(1)
+            .unwrap_or_else(|| panic!("module has no `{name}`:\n{module}"))
+            .split("\nfn ")
+            .next()
+            .expect("a function has a body")
+    }
+
     fn optimized_main(src: &str) -> String {
         let mut session = CompilerSession::new();
         session.set_mir_optimization(MirOptimization::Enabled);
@@ -1000,5 +1249,59 @@ mod tests {
             main.contains("store @c") && main.contains("to %p0"),
             "the result must be stored into the return place:\n{main}"
         );
+    }
+
+    #[test]
+    fn partially_known_integer_identities_are_simplified() {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        let module = session.emit_mir(
+            "fold",
+            "fn identities(x: int) {\n\
+                 { add_left: 0 + x, add_right: x + 0, sub_zero: x - 0,\n\
+                   sub_self: x - x, mul_left_zero: 0 * x, mul_right_zero: x * 0,\n\
+                   mul_left_one: 1 * x, mul_right_one: x * 1, reflexive: x < x }\n\
+             }",
+        );
+        let body = optimized_function(&module, "identities");
+        assert!(
+            !body.contains("call std::Num<std::int>") && !body.contains("call std::Ord<std::int>"),
+            "all documented integer identities must become copies or constants:\n{body}"
+        );
+    }
+
+    #[test]
+    fn sound_partially_known_float_identities_are_simplified() {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        let module = session.emit_mir(
+            "fold",
+            "fn identities(x: float) {\n\
+                 { sub_zero: x - 0.0, sub_self: x - x,\n\
+                   mul_left_one: 1.0 * x, mul_right_one: x * 1.0, reflexive: x < x }\n\
+             }",
+        );
+        let body = optimized_function(&module, "identities");
+        assert!(
+            !body.contains("call std::Num<std::float>")
+                && !body.contains("call std::Ord<std::float>"),
+            "the signed-zero-safe float identities must become copies or constants:\n{body}"
+        );
+    }
+
+    /// Signed zero is a Ferlium float value and is observable through formatting and hashing.
+    /// Consequently the familiar real-number identities below are not valid representation-level
+    /// rewrites for an unknown float.
+    #[test]
+    fn float_signed_zero_prevents_unsound_add_and_multiply_by_zero_rewrites() {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        let module = session.emit_mir(
+            "fold",
+            "fn retain(x: float) { { add: x + 0.0, mul: x * 0.0 } }",
+        );
+        let body = optimized_function(&module, "retain");
+        assert!(body.contains("call std::Num<std::float>::add"), "{body}");
+        assert!(body.contains("call std::Num<std::float>::mul"), "{body}");
     }
 }
