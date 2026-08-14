@@ -36,6 +36,8 @@
 //! internal rewrite.
 #![allow(dead_code)]
 
+use std::collections::VecDeque;
+
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
@@ -355,14 +357,31 @@ impl FunctionEdit {
     /// [`remove_unreachable_blocks`](Self::remove_unreachable_blocks), which is also what renumbers.
     /// Like the other structural operations this moves every [`BlockId`], so it is explicit.
     pub(crate) fn merge_blocks_into_predecessors(&mut self) {
+        // Incoming *edges*, not distinct predecessors: a `condbr` whose arms share a target counts
+        // twice, which correctly disqualifies that target.
+        let mut incoming = vec![0usize; self.blocks.len()];
+        for block in self.blocks() {
+            for target in self.block(block).terminator.successors() {
+                incoming[target.as_index()] += 1;
+            }
+        }
+        let mut pending: VecDeque<BlockId> = self
+            .blocks()
+            .filter(|&predecessor| self.mergeable_successor(predecessor, &incoming).is_some())
+            .collect();
         let mut merged_any = false;
-        // A merge can expose another — a chain of jumps collapses one link at a time — so this runs
-        // to fixpoint. It terminates because each merge empties one block for good.
-        while let Some((predecessor, successor)) = self.next_mergeable_pair() {
+        // A merge can expose another — a chain of jumps collapses one link at a time — so the
+        // predecessor is reconsidered with the terminator it inherits. A queued predecessor may
+        // meanwhile have been emptied by an earlier merge, hence the recheck here.
+        while let Some(predecessor) = pending.pop_front() {
+            let Some(successor) = self.mergeable_successor(predecessor, &incoming) else {
+                continue;
+            };
             let operations = std::mem::take(&mut self.blocks[successor.as_index()].operations);
             let span = self.blocks[successor.as_index()].terminator.span;
-            // Leave the emptied block terminal, so it stops contributing edges to the predecessor
-            // counts the next iteration computes.
+            // Leave the emptied block terminal. The predecessor's old edge to the successor
+            // disappears, while every outgoing edge of the successor is transferred one-for-one
+            // to the predecessor, so no other incoming count changes.
             let terminator = std::mem::replace(
                 &mut self.blocks[successor.as_index()].terminator,
                 Terminator::ret(span),
@@ -370,6 +389,9 @@ impl FunctionEdit {
             let block = &mut self.blocks[predecessor.as_index()];
             block.operations.extend(operations);
             block.terminator = terminator;
+            debug_assert_eq!(incoming[successor.as_index()], 1);
+            incoming[successor.as_index()] = 0;
+            pending.push_back(predecessor);
             merged_any = true;
         }
         if merged_any {
@@ -377,27 +399,17 @@ impl FunctionEdit {
         }
     }
 
-    /// The next `(predecessor, successor)` pair the above may collapse, if any.
-    fn next_mergeable_pair(&self) -> Option<(BlockId, BlockId)> {
-        // Incoming *edges*, not distinct predecessors: a `condbr` whose arms share a target counts
-        // twice, which correctly disqualifies that target.
-        let mut incoming: FxHashMap<BlockId, usize> = FxHashMap::default();
-        for block in self.blocks() {
-            for target in self.block(block).terminator.successors() {
-                *incoming.entry(target).or_default() += 1;
-            }
+    /// The successor `predecessor` may collapse into itself under the maintained edge counts.
+    fn mergeable_successor(&self, predecessor: BlockId, incoming: &[usize]) -> Option<BlockId> {
+        let TerminatorKind::Goto { target } = self.block(predecessor).terminator.kind else {
+            return None;
+        };
+        // The entry block keeps its identity as the function's start, and a self-loop is not a
+        // merge.
+        if target == self.entry() || target == predecessor {
+            return None;
         }
-        self.blocks().find_map(|predecessor| {
-            let TerminatorKind::Goto { target } = self.block(predecessor).terminator.kind else {
-                return None;
-            };
-            // The entry block keeps its identity as the function's start, and a self-loop is not a
-            // merge.
-            if target == self.entry() || target == predecessor {
-                return None;
-            }
-            (incoming.get(&target).copied() == Some(1)).then_some((predecessor, target))
-        })
+        (incoming[target.as_index()] == 1).then_some(target)
     }
 
     /// Drops constants no operand names any more, renumbering the rest.
@@ -672,6 +684,36 @@ mod tests {
         );
         let finished = edit.finish(env);
         assert_eq!(finished.blocks().count(), 2);
+    }
+
+    /// Every link in a jump chain is initially queued. Merging the first link empties a block whose
+    /// own queued entry then becomes stale, while exposing the next link on the original
+    /// predecessor. The worklist must tolerate the former and still discover the latter.
+    #[test]
+    fn merging_a_jump_chain_handles_stale_and_new_candidates() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        let mut builder = FunctionBuilder::new("jump_chain".into(), Default::default());
+        let first = builder.add_block();
+        let second = builder.add_block();
+        let third = builder.add_block();
+        let fourth = builder.add_block();
+        builder.set_terminator(first, Terminator::goto(span, second));
+        builder.set_terminator(second, Terminator::goto(span, third));
+        builder.set_terminator(third, Terminator::goto(span, fourth));
+        builder.set_terminator(fourth, Terminator::ret(span));
+        let source = builder.finish(env);
+
+        let mut edit = FunctionEdit::new(source);
+        edit.merge_blocks_into_predecessors();
+        let finished = edit.finish(env);
+
+        assert_eq!(finished.blocks().count(), 1);
+        assert!(matches!(
+            finished.block(finished.entry()).terminator().kind,
+            TerminatorKind::Return
+        ));
     }
 
     #[test]
