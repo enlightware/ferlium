@@ -30,7 +30,13 @@
 //! `TrivialCopy`. Its cached result depends on the contents of every argument root and on the first
 //! result slot remaining live. Any write to one of those roots invalidates it. Restricting the
 //! result to `TrivialCopy` makes the replacement an ordinary `memcpy`; owned results would require
-//! explicit clone/drop accounting.
+//! explicit clone/drop accounting. Lowering must materialize a literal passed by value into a cell;
+//! the call pass records call sites and constant stores together, then runs the detailed proof only
+//! when a cheap over-approximation can find a duplicate. It identifies cells initialized once from
+//! the same pooled constant and used only as `Let` call arguments, and gives them the same
+//! expression-key operand. The cells themselves stay distinct, so this changes neither their
+//! lifetime nor their address identity; replacing the repeated call makes the later one dead for
+//! ordinary storage DCE.
 //!
 //! **Dominator-based value numbering.** Each operation is keyed by its kind, its type metadata and
 //! the *canonical* identity of each operand, so comparing two arbitrarily deep expressions is one
@@ -73,7 +79,7 @@ use crate::{
         edit::FunctionEdit,
         operation::Instantiation,
         terminator::{Terminator, TerminatorKind},
-        value::ValueId,
+        value::{ConstantId, ValueId},
     },
     module::{FunctionId, ModuleEnv, id::Id},
     types::{
@@ -84,9 +90,33 @@ use crate::{
 };
 
 use super::{
-    dataflow::{Root, call_operands},
+    dataflow::{CallOperands, Root, call_operands},
     provenance::{AddressorSummary, ResultProvenance},
 };
+
+/// An operand in a call-expression identity.
+///
+/// MIR calls take places even for by-value arguments. A fresh cell initialized once from a literal
+/// and used only through `Let` arguments is observationally the literal value, not the cell's
+/// address; keying it by the pooled constant lets two independently lowered occurrences compare
+/// equal without rewriting either place.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum CallOperand {
+    Mir(mir::Value),
+    ImmutableConstant(ConstantId),
+}
+
+impl CallOperand {
+    fn of(value: &mir::Value, constant_cells: &ImmutableConstantCells) -> Self {
+        match value {
+            mir::Value::Register(id) => constant_cells
+                .get(id)
+                .copied()
+                .map_or_else(|| Self::Mir(value.clone()), Self::ImmutableConstant),
+            _ => Self::Mir(value.clone()),
+        }
+    }
+}
 
 /// A call identity without its out-parameter. The out-parameter is only where the result is stored,
 /// not an input to the computation.
@@ -94,7 +124,244 @@ use super::{
 struct CallExpression {
     ty: CallImplType,
     instantiation: Option<Instantiation>,
-    operands: Box<[mir::Value]>,
+    operands: Box<[CallOperand]>,
+}
+
+type ImmutableConstantCells = FxHashMap<ValueId, ConstantId>;
+
+#[derive(Default)]
+struct ConstantCellCandidate {
+    initialization: Option<ConstantId>,
+    allocated: bool,
+    read: bool,
+    invalid: bool,
+}
+
+struct CallCseScan {
+    constant_cells: ImmutableConstantCells,
+    has_duplicate_calls: bool,
+}
+
+/// Collects the call sites and literal-cell facts needed by call CSE.
+///
+/// The proof is intentionally narrow: the cell must be a local static `alloca`, have exactly one
+/// constant store, and every other use must be a visible `Let` call argument. `Let` is the
+/// language-level by-value convention, so the callee can observe only the pointee's value and
+/// cannot retain or mutate the cell. A second store, a return out-pointer, a reference argument, a
+/// projection, or any ownership operation rejects the cell. The first walk records calls and
+/// stores; the detailed use walk is gated by an over-approximate fingerprint check.
+fn scan_call_cse_inputs(func: &Function, env: ModuleEnv<'_>) -> CallCseScan {
+    let mut constant_stores = Vec::new();
+    let mut seen_constants = FxHashSet::default();
+    let mut repeated_constants = FxHashSet::default();
+    let mut calls = Vec::new();
+
+    for block in func.blocks() {
+        let basic_block = func.block(block);
+        for operation in basic_block.operations() {
+            note_constant_store(
+                operation,
+                &mut constant_stores,
+                &mut seen_constants,
+                &mut repeated_constants,
+            );
+            if matches!(operation.kind, OperationKind::Call { .. }) {
+                calls.push(operation);
+            }
+        }
+        if let TerminatorKind::Invoke { operation, .. } = &basic_block.terminator().kind {
+            note_constant_store(
+                operation,
+                &mut constant_stores,
+                &mut seen_constants,
+                &mut repeated_constants,
+            );
+            if matches!(operation.kind, OperationKind::Call { .. }) {
+                calls.push(operation);
+            }
+        }
+    }
+
+    if repeated_constants.is_empty() {
+        return CallCseScan {
+            constant_cells: ImmutableConstantCells::default(),
+            has_duplicate_calls: has_duplicate_call_fingerprints(&calls, &Default::default()),
+        };
+    }
+
+    // Treat every constant store as a possible literal cell only for this cheap filter. The exact
+    // use proof below remains mandatory before any rewrite, so an unsafe store can create extra
+    // analysis work but cannot make CSE unsound. If even this over-approximation has no duplicate,
+    // no proven subset can have one either.
+    let provisional_constant_cells = constant_stores.iter().copied().collect();
+    if !has_duplicate_call_fingerprints(&calls, &provisional_constant_cells) {
+        return CallCseScan {
+            constant_cells: ImmutableConstantCells::default(),
+            has_duplicate_calls: false,
+        };
+    }
+
+    let mut candidates = constant_stores
+        .into_iter()
+        .filter(|(_, constant)| repeated_constants.contains(constant))
+        .map(|(destination, _)| (destination, ConstantCellCandidate::default()))
+        .collect::<FxHashMap<_, _>>();
+    for block in func.blocks() {
+        let basic_block = func.block(block);
+        for operation in basic_block.operations() {
+            note_constant_cell_operation(&mut candidates, operation, env);
+        }
+        match &basic_block.terminator().kind {
+            TerminatorKind::Invoke { operation, .. } => {
+                note_constant_cell_operation(&mut candidates, operation, env)
+            }
+            _ => {
+                for operand in basic_block.terminator().operands() {
+                    if let mir::Value::Register(id) = operand
+                        && let Some(candidate) = candidates.get_mut(id)
+                    {
+                        candidate.invalid = true;
+                    }
+                }
+            }
+        }
+    }
+
+    let constant_cells = candidates
+        .into_iter()
+        .filter_map(|(id, candidate)| {
+            (candidate.allocated && !candidate.invalid && candidate.read)
+                .then_some(candidate.initialization)
+                .flatten()
+                .map(|constant| (id, constant))
+        })
+        .collect();
+    let has_duplicate_calls = has_duplicate_call_fingerprints(&calls, &constant_cells);
+    CallCseScan {
+        constant_cells,
+        has_duplicate_calls,
+    }
+}
+
+fn note_constant_store(
+    operation: &Operation,
+    stores: &mut Vec<(ValueId, ConstantId)>,
+    seen: &mut FxHashSet<ConstantId>,
+    repeated: &mut FxHashSet<ConstantId>,
+) {
+    let Some((destination, constant)) = constant_store(operation) else {
+        return;
+    };
+    stores.push((destination, constant));
+    if !seen.insert(constant) {
+        repeated.insert(constant);
+    }
+}
+
+fn constant_store(operation: &Operation) -> Option<(ValueId, ConstantId)> {
+    if !matches!(operation.kind, OperationKind::Store) {
+        return None;
+    }
+    let [
+        mir::Value::Constant(constant),
+        mir::Value::Register(destination),
+    ] = operation.operands.as_ref()
+    else {
+        return None;
+    };
+    Some((*destination, *constant))
+}
+
+fn note_constant_cell_operation(
+    candidates: &mut FxHashMap<ValueId, ConstantCellCandidate>,
+    operation: &Operation,
+    env: ModuleEnv<'_>,
+) {
+    let constant_store = constant_store(operation);
+    let mut call = None;
+    let mut call_is_known = false;
+    if matches!(operation.kind, OperationKind::Alloca { .. })
+        && let Some(result) = operation.result_id()
+        && let Some(candidate) = candidates.get_mut(&result)
+    {
+        candidate.allocated = true;
+    }
+    if let Some((destination, constant)) = constant_store {
+        if let Some(candidate) = candidates.get_mut(&destination) {
+            if candidate.initialization.replace(constant).is_some() {
+                candidate.invalid = true;
+            }
+        }
+    }
+    for (position, operand) in operation.operands.iter().enumerate() {
+        let mir::Value::Register(id) = operand else {
+            continue;
+        };
+        if constant_store.is_some() && position == 1 {
+            continue;
+        }
+        if let Some(candidate) = candidates.get_mut(id) {
+            if !call_is_known {
+                call = call_operands_for_cse(operation, env);
+                call_is_known = true;
+            }
+            if is_let_call_argument(call.as_ref(), operation, position) {
+                candidate.read = true;
+            } else {
+                candidate.invalid = true;
+            }
+        }
+    }
+}
+
+fn is_let_call_argument(
+    call: Option<&CallOperands<'_>>,
+    operation: &Operation,
+    position: usize,
+) -> bool {
+    let Some(call) = call else {
+        return false;
+    };
+    call.arguments.iter().any(|(argument, convention)| {
+        *convention == ArgConvention::Let && std::ptr::eq(*argument, &operation.operands[position])
+    })
+}
+
+/// Reads visible argument conventions from the callee definition when it is available.
+///
+/// `CallImplType` normally carries the same mutability, but compiler-generated HIR can construct a
+/// concrete call type from its operand types before consulting the target definition. The module
+/// function's `parameter_passing` is the runtime/source contract and is therefore authoritative for
+/// CSE's immutability and invalidation decisions. Optimized-only callees have no module-table entry;
+/// their retained call type is the conservative fallback.
+fn call_operands_for_cse<'a>(
+    operation: &'a Operation,
+    env: ModuleEnv<'_>,
+) -> Option<CallOperands<'a>> {
+    let OperationKind::Call { ty, .. } = &operation.kind else {
+        return None;
+    };
+    let mut call = call_operands(&operation.operands, ty)?;
+    let mir::Value::Function(callee) = call.callee else {
+        return Some(call);
+    };
+    let Some(parameter_passing) = env
+        .module_by_id(callee.module)
+        .and_then(|module| module.get_function_by_id(callee.function))
+        .map(|function| function.parameter_passing.as_slice())
+    else {
+        return Some(call);
+    };
+    if parameter_passing.len() != call.arguments.len() {
+        return None;
+    }
+    call.arguments = call
+        .arguments
+        .into_iter()
+        .zip(parameter_passing)
+        .map(|((argument, _), convention)| (argument, *convention))
+        .collect();
+    Some(call)
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -265,11 +532,13 @@ pub(crate) fn eliminate_common_calls(
     env: ModuleEnv<'_>,
     summary_of: &dyn Fn(FunctionId) -> AddressorSummary,
 ) -> Option<Function> {
-    if !has_duplicate_call_fingerprint(func) {
+    let scan = scan_call_cse_inputs(func, env);
+    if !scan.has_duplicate_calls {
         return None;
     }
+    let constant_cells = &scan.constant_cells;
     let origins = PlaceOrigins::of(func, summary_of);
-    let entry_states = available_call_states(func, env, &origins, summary_of);
+    let entry_states = available_call_states(func, env, &origins, constant_cells, summary_of);
     let mut replacements = Vec::new();
 
     for block_id in func.blocks() {
@@ -278,9 +547,14 @@ pub(crate) fn eliminate_common_calls(
         };
         let block = func.block(block_id);
         for (index, operation) in block.operations().iter().enumerate() {
-            if let Some((source, destination)) =
-                transfer(operation, env, &origins, summary_of, &mut state)
-            {
+            if let Some((source, destination)) = transfer(
+                operation,
+                env,
+                &origins,
+                constant_cells,
+                summary_of,
+                &mut state,
+            ) {
                 replacements.push(CallReplacement {
                     site: ReplacementSite::Operation {
                         block: block_id,
@@ -295,8 +569,14 @@ pub(crate) fn eliminate_common_calls(
         if let TerminatorKind::Invoke {
             operation, normal, ..
         } = &block.terminator().kind
-            && let Some((source, destination)) =
-                transfer(operation, env, &origins, summary_of, &mut state)
+            && let Some((source, destination)) = transfer(
+                operation,
+                env,
+                &origins,
+                constant_cells,
+                summary_of,
+                &mut state,
+            )
         {
             replacements.push(CallReplacement {
                 site: ReplacementSite::Invoke {
@@ -336,14 +616,34 @@ pub(crate) fn eliminate_common_calls(
     Some(edit.finish_unverified())
 }
 
-/// Whether two calls may have the same [`CallExpression`].
+/// Whether two recorded calls may have the same [`CallExpression`].
 ///
 /// This is only a filter for the substantially more expensive provenance and available-expression
 /// analyses. It hashes exactly the identity those analyses compare, but deliberately performs only
 /// their cheap, provenance-independent eligibility checks. A hash collision therefore admits extra
 /// analysis and can never suppress a rewrite; without a repeated hash, no expression can repeat.
-fn has_duplicate_call_fingerprint(func: &Function) -> bool {
+fn has_duplicate_call_fingerprints(
+    calls: &[&Operation],
+    constant_cells: &ImmutableConstantCells,
+) -> bool {
     let mut seen = FxHashSet::default();
+    for &operation in calls {
+        let Some(fingerprint) = call_fingerprint(operation, constant_cells) else {
+            continue;
+        };
+        if !seen.insert(fingerprint) {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+fn has_duplicate_call_fingerprint(
+    func: &Function,
+    constant_cells: &ImmutableConstantCells,
+) -> bool {
+    let mut calls = Vec::new();
     for block_id in func.blocks() {
         let block = func.block(block_id);
         for operation in block
@@ -354,18 +654,15 @@ fn has_duplicate_call_fingerprint(func: &Function) -> bool {
                 _ => None,
             })
         {
-            let Some(fingerprint) = call_fingerprint(operation) else {
-                continue;
-            };
-            if !seen.insert(fingerprint) {
-                return true;
+            if matches!(operation.kind, OperationKind::Call { .. }) {
+                calls.push(operation);
             }
         }
     }
-    false
+    has_duplicate_call_fingerprints(&calls, constant_cells)
 }
 
-fn call_fingerprint(operation: &Operation) -> Option<u64> {
+fn call_fingerprint(operation: &Operation, constant_cells: &ImmutableConstantCells) -> Option<u64> {
     let OperationKind::Call { ty, metadata } = &operation.kind else {
         return None;
     };
@@ -393,7 +690,16 @@ fn call_fingerprint(operation: &Operation) -> Option<u64> {
         .as_deref()
         .and_then(|metadata| metadata.instantiation.as_ref())
         .hash(&mut state);
-    expression_operands.hash(&mut state);
+    if ty.result_convention == CallResultConvention::Value && !constant_cells.is_empty() {
+        for operand in expression_operands {
+            CallOperand::of(operand, constant_cells).hash(&mut state);
+        }
+    } else {
+        // An addressor returns the identity of a place rooted in one of its arguments. Two distinct
+        // literal cells have equal contents but are not the same returned place. This is also the
+        // common value-call path when the census found nothing to canonicalize.
+        expression_operands.hash(&mut state);
+    }
     Some(state.finish())
 }
 
@@ -401,6 +707,7 @@ fn available_call_states(
     func: &Function,
     env: ModuleEnv<'_>,
     origins: &PlaceOrigins,
+    constant_cells: &ImmutableConstantCells,
     summary_of: &dyn Fn(FunctionId) -> AddressorSummary,
 ) -> FxHashMap<BlockId, AvailableCalls> {
     let mut entries = FxHashMap::default();
@@ -414,7 +721,14 @@ fn available_call_states(
             };
             let block = func.block(block_id);
             for operation in block.operations() {
-                transfer(operation, env, origins, summary_of, &mut state);
+                transfer(
+                    operation,
+                    env,
+                    origins,
+                    constant_cells,
+                    summary_of,
+                    &mut state,
+                );
             }
             match &block.terminator().kind {
                 TerminatorKind::Invoke {
@@ -422,7 +736,14 @@ fn available_call_states(
                     normal,
                     error,
                 } => {
-                    transfer(operation, env, origins, summary_of, &mut state);
+                    transfer(
+                        operation,
+                        env,
+                        origins,
+                        constant_cells,
+                        summary_of,
+                        &mut state,
+                    );
                     changed |= join_available(&mut entries, *normal, &state);
                     // No call result is available on failure. Empty is deliberately more
                     // conservative than preserving expressions from before the invoke.
@@ -462,10 +783,13 @@ fn transfer(
     operation: &Operation,
     env: ModuleEnv<'_>,
     origins: &PlaceOrigins,
+    constant_cells: &ImmutableConstantCells,
     summary_of: &dyn Fn(FunctionId) -> AddressorSummary,
     state: &mut AvailableCalls,
 ) -> Option<(mir::Value, mir::Value)> {
-    if let Some((expression, available)) = call_expression(operation, origins, summary_of, env) {
+    if let Some((expression, available)) =
+        call_expression(operation, origins, constant_cells, summary_of, env)
+    {
         // Every call writes its out-slot. This can invalidate another value expression whose input
         // or cached result occupies the same root, and overwrites an addressor pointer cached in
         // exactly that slot.
@@ -479,8 +803,8 @@ fn transfer(
     }
 
     match &operation.kind {
-        OperationKind::Call { ty, .. } => {
-            let Some(call) = call_operands(&operation.operands, ty) else {
+        OperationKind::Call { .. } => {
+            let Some(call) = call_operands_for_cse(operation, env) else {
                 state.clear();
                 return None;
             };
@@ -533,6 +857,7 @@ fn transfer(
 fn call_expression(
     operation: &Operation,
     origins: &PlaceOrigins,
+    constant_cells: &ImmutableConstantCells,
     summary_of: &dyn Fn(FunctionId) -> AddressorSummary,
     env: ModuleEnv<'_>,
 ) -> Option<(CallExpression, AvailableCall)> {
@@ -548,7 +873,7 @@ fn call_expression(
     if !effects_allow_const_eval(ty.effects()) {
         return None;
     }
-    let call = call_operands(&operation.operands, ty)?;
+    let call = call_operands_for_cse(operation, env)?;
     let mir::Value::Function(callee) = call.callee else {
         return None;
     };
@@ -604,7 +929,13 @@ fn call_expression(
                 .as_deref()
                 .and_then(|metadata| metadata.instantiation.clone()),
             operands: operation.operands[..operation.operands.len() - 1]
-                .to_vec()
+                .iter()
+                .map(|operand| match ty.result_convention {
+                    CallResultConvention::Value => CallOperand::of(operand, constant_cells),
+                    // Preserve address identity for place-returning computations.
+                    _ => CallOperand::Mir(operand.clone()),
+                })
+                .collect::<Vec<_>>()
                 .into_boxed_slice(),
         },
         available,
@@ -949,7 +1280,7 @@ mod tests {
             "fn distinct(x: int, y: int) -> int { (x - y) * (y - x) }",
             "distinct",
         );
-        assert!(!has_duplicate_call_fingerprint(&body));
+        assert!(!has_duplicate_call_fingerprint(&body, &Default::default()));
     }
 
     #[test]
@@ -958,7 +1289,7 @@ mod tests {
             "fn repeated(x: int, y: int) -> int { (x - y) * (x - y) }",
             "repeated",
         );
-        assert!(has_duplicate_call_fingerprint(&body));
+        assert!(has_duplicate_call_fingerprint(&body, &Default::default()));
     }
 
     #[test]
@@ -1004,6 +1335,55 @@ mod tests {
             calls(&body, "Num<std::float>::sub"),
             1,
             "the repeated subtraction should be copied from its first result:\n{body}"
+        );
+    }
+
+    #[test]
+    fn repeated_integer_call_with_literal_operand_is_computed_once() {
+        let body = body_of(
+            "fn repeated_literal_int(x: int) -> int { (x - 1) * (x - 1) }",
+            "repeated_literal_int",
+        );
+        assert_eq!(
+            calls(&body, "Num<std::int>::sub"),
+            1,
+            "the two immutable cells holding 1 denote the same call input:\n{body}"
+        );
+        assert_eq!(
+            body.matches("store @c0").count(),
+            1,
+            "DCE should remove the duplicate literal cell:\n{body}"
+        );
+    }
+
+    #[test]
+    fn repeated_float_call_with_literal_operand_is_computed_once() {
+        let body = body_of(
+            "fn repeated_literal_float(x: float) -> float { (x - 1.0) * (x - 1.0) }",
+            "repeated_literal_float",
+        );
+        assert_eq!(
+            calls(&body, "Num<std::float>::sub"),
+            1,
+            "the two immutable cells holding 1.0 denote the same call input:\n{body}"
+        );
+    }
+
+    #[test]
+    fn a_reassigned_constant_cell_is_not_canonicalized() {
+        let body = body_of(
+            "fn reassigned(x: int) -> int {\n\
+                 let mut y = 1;\n\
+                 let before = x - y;\n\
+                 y = 2;\n\
+                 before * (x - y)\n\
+             }",
+            "reassigned",
+        );
+        assert_eq!(
+            calls(&body, "Num<std::int>::sub"),
+            2,
+            "a second store makes the cell's value flow-dependent:\n{body}"
         );
     }
 

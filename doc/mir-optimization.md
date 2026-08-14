@@ -361,7 +361,20 @@ visible argument uses `Let`, and its concrete result implements `TrivialCopy`. I
 then representation-copyable into every duplicate out-slot. The cached value depends on the
 contents of all its argument roots and on its first result slot remaining initialized, so a write
 to any of those roots invalidates it. Non-copy results remain excluded: reusing one would require
-semantic cloning plus ownership and drop accounting.
+semantic cloning plus ownership and drop accounting. When the callee still has a module-table
+definition, its declared parameter-passing conventions are authoritative; this prevents incomplete
+generated-call metadata from hiding a mutable argument. Optimizer-created callees fall back to the
+conventions retained in their call type.
+
+Although MIR passes call arguments indirectly, independently lowered literal occurrences still
+denote the same value. The call pass's first input walk records eligible call sites and constant
+stores together. Only when an over-approximate fingerprint can repeat does it run the conservative
+use proof, which accepts local `alloca` cells with exactly one constant store whose other uses are
+exclusively visible `Let` arguments. Those operands are keyed by the typed constant rather than by
+the fresh cell. The cells themselves are not merged: call CSE removes the duplicate computation and
+ordinary storage DCE then removes the unread materialization. A second store or any reference,
+projection, ownership, result-slot or control-flow use rejects the equivalence. Addressor calls
+never use it because equal pointees do not make two places identical.
 
 Availability is a forward CFG intersection. An `invoke` generates a result only on its normal edge,
 so replacing a later identical invoke also removes an error edge that the earlier successful call
