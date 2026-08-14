@@ -30,7 +30,7 @@ use crate::{
         coherence::check_trait_impl,
         effects::{EffType, EffectVar},
         r#trait::TraitMethodIndex,
-        trait_solver::{TraitSolver, trait_solver_from_module},
+        trait_solver::{TraitSolver, alpha_canonicalize_types, trait_solver_from_module},
         r#type::{Type, TypeDef, TypeKind, TypeVar},
         type_constraints::named_type_constraints_in_types,
         type_like::TypeLike,
@@ -70,6 +70,11 @@ pub(crate) fn generic_value_methods_for_type(
     span: Location,
     arena: &mut NodeArena,
 ) -> Result<Vec<LocalFunctionId>, InternalCompilationError> {
+    // These methods quantify every unresolved variable, so caller-local variable identities do not
+    // distinguish their code or interface. Generate and look them up at one alpha-canonical type;
+    // the use-site dictionary retains the caller's actual type.
+    let canonical_input_tys = alpha_canonicalize_types(input_tys);
+    let input_tys = canonical_input_tys.as_slice();
     let Some(code_entries) =
         derive_generic_value_code_entries(trait_id, input_tys, span, arena, solver)?
     else {

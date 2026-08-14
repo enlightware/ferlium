@@ -284,6 +284,14 @@ impl TypeMapper for AlphaCanonicalTypeMapper {
     }
 }
 
+/// Rename variables by deterministic first occurrence, preserving the structure and concrete parts
+/// of the types. This is an identity only for compiler-generated artifacts whose variables remain
+/// quantified; it must not replace semantic type identity in ordinary trait lookup.
+pub(crate) fn alpha_canonicalize_types(types: &[Type]) -> Vec<Type> {
+    let mut mapper = AlphaCanonicalTypeMapper::default();
+    types.iter().map(|ty| ty.map(&mut mapper)).collect()
+}
+
 pub(crate) fn current_function_map(def_table: &DefTable) -> FxHashMap<Ustr, LocalFunctionId> {
     def_table
         .iter()
@@ -764,6 +772,8 @@ struct ResolvedRuntimeRequirement {
 pub(crate) struct DerivedImplSnapshot {
     concrete_key_to_id: FxHashMap<ConcreteTraitImplKey, LocalImplId>,
     blanket_key_to_id: BlanketImpls,
+    generated_value_key_to_id: FxHashMap<Vec<Type>, LocalImplId>,
+    unconstrained_application_key_to_id: FxHashMap<ConcreteTraitImplKey, LocalImplId>,
     impl_data_len: usize,
     new_function_len: usize,
 }
@@ -2147,6 +2157,11 @@ impl<'a> TraitSolver<'a> {
         DerivedImplSnapshot {
             concrete_key_to_id: self.impls.concrete_key_to_id.clone(),
             blanket_key_to_id: self.impls.blanket_key_to_id.clone(),
+            generated_value_key_to_id: self.impls.generated_value_key_to_id.clone(),
+            unconstrained_application_key_to_id: self
+                .impls
+                .unconstrained_application_key_to_id
+                .clone(),
             impl_data_len: self.impls.data.len(),
             new_function_len: self.fn_collector.new_elements.len(),
         }
@@ -2155,6 +2170,9 @@ impl<'a> TraitSolver<'a> {
     pub(crate) fn rollback_derived_impl_state(&mut self, snapshot: DerivedImplSnapshot) {
         self.impls.concrete_key_to_id = snapshot.concrete_key_to_id;
         self.impls.blanket_key_to_id = snapshot.blanket_key_to_id;
+        self.impls.generated_value_key_to_id = snapshot.generated_value_key_to_id;
+        self.impls.unconstrained_application_key_to_id =
+            snapshot.unconstrained_application_key_to_id;
         self.impls.data.truncate(snapshot.impl_data_len);
         self.fn_collector
             .new_elements
@@ -2490,16 +2508,17 @@ impl<'a> TraitSolver<'a> {
         span: Location,
         methods: Vec<LocalFunctionId>,
     ) -> Result<(TraitImplId, Type), InternalCompilationError> {
+        let canonical_input_tys = alpha_canonicalize_types(input_tys);
         let (method_tys, associated_const_tys, dictionary_ty_for_use) = {
             let trait_def = self.trait_def(trait_id);
             assert_eq!(methods.len(), trait_def.methods.len());
-            let definitions = trait_def.instantiate_for_tys(input_tys, &[], &[]);
+            let definitions = trait_def.instantiate_for_tys(&canonical_input_tys, &[], &[]);
             let method_tys = definitions
                 .into_iter()
                 .map(|definition| Type::function_type(definition.ty_scheme.ty))
                 .collect::<Vec<_>>();
             let associated_const_tys =
-                trait_def.instantiate_associated_const_tys_for_tys(input_tys, &[], &[]);
+                trait_def.instantiate_associated_const_tys_for_tys(&canonical_input_tys, &[], &[]);
             let dictionary_ty_for_use = trait_def.get_dictionary_type_for_tys(input_tys, &[], &[]);
             (method_tys, associated_const_tys, dictionary_ty_for_use)
         };
@@ -2512,6 +2531,17 @@ impl<'a> TraitSolver<'a> {
                 ));
             }
         }
+        if let Some(local_impl_id) = self
+            .impls
+            .generated_value_key_to_id
+            .get(&canonical_input_tys)
+            .copied()
+        {
+            return Ok((
+                TraitImplId::new(self.current_type_items.module.id, local_impl_id),
+                dictionary_ty_for_use,
+            ));
+        }
         let associated_const_values =
             value_layout_associated_const_values(input_tys[0], span, self)?;
         let associated_const_values = associated_const_values
@@ -2519,7 +2549,7 @@ impl<'a> TraitSolver<'a> {
             .map(LiteralValue::new_native)
             .collect::<Vec<_>>();
         let associated_const_names =
-            self.impl_associated_const_names(trait_id, input_tys, &[], &[], 0, 0, &[]);
+            self.impl_associated_const_names(trait_id, &canonical_input_tys, &[], &[], 0, 0, &[]);
         let associated_const_getters = TraitImpls::bundle_pending_trivial_associated_const_getters(
             &associated_const_values,
             &associated_const_tys,
@@ -2543,7 +2573,11 @@ impl<'a> TraitSolver<'a> {
             let key = ConcreteTraitImplKey::new(trait_id, input_tys.to_vec());
             self.impls.add_concrete_struct(key, imp)
         } else {
-            self.impls.add_anonymous_dictionary_struct(imp)
+            let impl_id = self.impls.add_anonymous_dictionary_struct(imp);
+            self.impls
+                .generated_value_key_to_id
+                .insert(canonical_input_tys, impl_id);
+            impl_id
         };
         Ok((
             TraitImplId::new(self.current_type_items.module.id, impl_id),
@@ -2762,6 +2796,21 @@ impl<'a> TraitSolver<'a> {
                 fn_span,
             ) {
                 return Ok(imp);
+            }
+        }
+        if requested_output_tys.is_none() && requested_output_effs.is_none() {
+            let canonical_key =
+                ConcreteTraitImplKey::new(trait_id, alpha_canonicalize_types(input_tys));
+            if let Some(local_impl_id) = self
+                .impls
+                .unconstrained_application_key_to_id
+                .get(&canonical_key)
+                .copied()
+            {
+                return Ok(TraitImplId::new(
+                    self.current_type_items.module.id,
+                    local_impl_id,
+                ));
             }
         }
         if self.solving_stack.contains(&key) {
@@ -3147,7 +3196,17 @@ impl<'a> TraitSolver<'a> {
                         // materialized dictionary defaulted them, caching this
                         // impl would make that default leak into later
                         // applications with different output-effect bindings.
-                        self.impls.add_anonymous_dictionary_struct(imp)
+                        let local_impl_id = self.impls.add_anonymous_dictionary_struct(imp);
+                        if requested_output_tys.is_none() && requested_output_effs.is_none() {
+                            let canonical_key = ConcreteTraitImplKey::new(
+                                trait_id,
+                                alpha_canonicalize_types(input_tys),
+                            );
+                            self.impls
+                                .unconstrained_application_key_to_id
+                                .insert(canonical_key, local_impl_id);
+                        }
+                        local_impl_id
                     } else {
                         let key = ConcreteTraitImplKey::new(trait_id, input_tys.to_vec());
                         self.impls.add_concrete_struct(key, imp)

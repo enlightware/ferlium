@@ -408,6 +408,16 @@ pub struct TraitImpls {
     pub(crate) concrete_key_to_id: ConcreteImpls,
     #[new(default)]
     pub(crate) blanket_key_to_id: BlanketImpls,
+    /// Compiler-provided `Value` dictionaries for open function-surface types, keyed modulo the
+    /// identities of their quantified variables. Kept separate from selectable trait impls so
+    /// alpha-canonicalization cannot change ordinary semantic trait lookup.
+    #[new(default)]
+    pub(crate) generated_value_key_to_id: FxHashMap<Vec<Type>, LocalImplId>,
+    /// Materialized blanket applications whose outputs were not constrained by the caller, keyed
+    /// separately from selectable concrete impls because their output variables were defaulted
+    /// only for this generated dictionary.
+    #[new(default)]
+    pub(crate) unconstrained_application_key_to_id: FxHashMap<ConcreteTraitImplKey, LocalImplId>,
     #[new(default)]
     pub(crate) data: Vec<TraitImpl>,
 }

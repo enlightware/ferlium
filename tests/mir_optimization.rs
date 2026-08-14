@@ -210,6 +210,70 @@ fn constant_array_pipeline_reifies_to_one_build_array() {
     );
 }
 
+/// Inference reaches the iterator pipeline through several caller-local effect variables. The
+/// variables' numeric identities do not distinguish generated code, while distinct primitive and
+/// variable-sharing shapes remain separate because they can change a forwarding thunk's call form.
+#[test]
+fn alpha_equivalent_effect_rows_share_generated_trait_artifacts() {
+    let raw = emit(
+        "effect_instantiation_sharing",
+        "fn main() -> [int] { [1, 2] |> concat([3, 4]) |> map(|x| x*x) }",
+        MirOptimization::Disabled,
+    );
+    let headers = raw
+        .lines()
+        .filter(|line| line.starts_with("fn "))
+        .collect::<Vec<_>>();
+    let value = headers
+        .iter()
+        .filter(|line| line.contains("Value<std::MapIterator"))
+        .copied()
+        .collect::<Vec<_>>();
+    let iterator = headers
+        .iter()
+        .filter(|line| line.contains("Iterator<std::MapIterator"))
+        .copied()
+        .collect::<Vec<_>>();
+    let from_iterator = headers
+        .iter()
+        .filter(|line| line.contains("FromIterator<") && line.contains("std::MapIterator"))
+        .copied()
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        value.len(),
+        21,
+        "expected three seven-entry Value families:\n{value:#?}"
+    );
+    assert_eq!(
+        iterator.len(),
+        3,
+        "expected one thunk per effect-row shape:\n{iterator:#?}"
+    );
+    assert_eq!(
+        from_iterator.len(),
+        3,
+        "expected one thunk per effect-row shape:\n{from_iterator:#?}"
+    );
+    assert!(
+        value.iter().any(|line| line.contains("(fallible, e₀)")),
+        "the fallible family must remain distinct:\n{value:#?}"
+    );
+    assert!(
+        value.iter().all(|line| !line.contains("e₂")),
+        "canonical families must number their own variables from zero:\n{value:#?}"
+    );
+    assert!(
+        value
+            .iter()
+            .chain(iterator.iter())
+            .chain(from_iterator.iter())
+            .all(|line| !line.contains("-1(")),
+        "an alpha-equivalent repeat must reuse the original artifact, not acquire a collision \
+         suffix:\nvalue={value:#?}\niterator={iterator:#?}\nfrom_iterator={from_iterator:#?}"
+    );
+}
+
 /// Extracts one rendered function, excluding later functions in the module dump.
 fn rendered_function<'a>(mir: &'a str, name: &str) -> &'a str {
     let start = mir

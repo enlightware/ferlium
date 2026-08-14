@@ -82,3 +82,27 @@ what `TypeScheme`'s `Hash` impl already uses, so there is one canonical order ra
 A thunk that forwards to a function at that function's own signature records the *identity*
 instantiation — every quantifier standing for itself — rather than an empty list, so that the
 argument lists are always as long as the quantifier lists.
+
+## Sharing compiler-generated open dictionaries
+
+Some runtime dictionaries are generated while their input type still contains variables. The
+important example is `Value` for a structure whose unresolved parts occur only under function
+fields: those parts affect the semantic function type, but structural `Value` code treats the
+function value as opaque. Blanket trait applications can likewise be materialized with output
+effect variables that the unconstrained query later defaults.
+
+Caller-local variable identities do not distinguish such generated code. Before using an open
+input as a generated-artifact cache key, the compiler alpha-canonicalizes type, mutability and effect
+variables in deterministic first-occurrence order. Concrete types and primitive effects remain in
+the key, as does the equality pattern between repeated variables. Thus two independently numbered
+open rows share an artifact, while a row containing `fallible` remains distinct from one without it.
+
+This canonicalization is deliberately confined to generated artifacts. It does not alter the
+caller's semantic type or ordinary trait-impl lookup. A reused dictionary expression is typed with
+the caller's actual input; its stored methods remain generic over the canonical variables.
+
+Materialized blanket applications whose output effects depend on the application use a separate
+cache from concrete trait implementations. The concrete cache is keyed only by input types, so
+putting a defaulted output there could leak that default into a later query with explicit output
+bindings. Only queries with no requested outputs share through the unconstrained-application cache;
+queries carrying output bindings continue to materialize independently.
