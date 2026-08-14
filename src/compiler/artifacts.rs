@@ -15,8 +15,8 @@ use crate::{
     mir::{
         self,
         pass::{
-            OptimizationStats, Specializations, dead_evidence, known_callee, optimize_function,
-            owned_arguments,
+            OptimizationContext, OptimizationStats, Specializations, dead_evidence,
+            optimize_function, owned_arguments,
             provenance::{AddressorSummaries, AddressorSummary},
             prune_specializations, share_specializations,
         },
@@ -233,9 +233,9 @@ impl MirArtifacts {
         let env = ModuleEnv::new(module, modules);
         let module_id = module.module_id();
         let mut specializations = Specializations::new(module_id, raw.functions.len());
-        // Resolved once per module: it walks std's trait and function tables to key its entries by
+        // Resolved once per module: these walk std's trait and function tables to key operations by
         // identity, which is the same answer for every body below.
-        let known = known_callee::KnownCallees::new(modules);
+        let context = OptimizationContext::new(modules, env);
         let mut optimization_stats = OptimizationStats::default();
 
         let mut functions: Vec<Option<mir::Function>> = raw
@@ -249,7 +249,7 @@ impl MirArtifacts {
                         session,
                         module_id,
                         &mut specializations,
-                        &known,
+                        &context,
                         &mut optimization_stats,
                     )
                 })
@@ -271,7 +271,7 @@ impl MirArtifacts {
                 session,
                 module_id,
                 &mut specializations,
-                &known,
+                &context,
                 &mut optimization_stats,
             );
             specializations.set_body(id, optimized);

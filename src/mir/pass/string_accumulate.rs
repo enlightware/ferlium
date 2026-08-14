@@ -65,9 +65,8 @@ struct Census {
 }
 
 impl Census {
-    fn new(func: &Function, from_static: FunctionId) -> (Self, Vec<OperationSite>) {
+    fn new(func: &Function) -> Self {
         let mut census = Self::default();
-        let mut candidates = Vec::new();
         for block in func.blocks() {
             let basic_block = func.block(block);
             for (index, operation) in basic_block.operations().iter().enumerate() {
@@ -79,9 +78,6 @@ impl Census {
                     && let Some(result) = operation.result_id()
                 {
                     census.definitions.insert(result, Definition { ty });
-                }
-                if is_direct_call(operation, from_static) {
-                    candidates.push(site);
                 }
                 for (operand, value) in operation.operands.iter().enumerate() {
                     census.note(
@@ -103,7 +99,7 @@ impl Census {
                 );
             }
         }
-        (census, candidates)
+        census
     }
 
     fn note(&mut self, value: &mir::Value, site: UseSite) {
@@ -125,7 +121,7 @@ impl Census {
 }
 
 #[derive(Clone, Copy)]
-struct StringFunctions {
+pub(crate) struct StringFunctions {
     from_static: FunctionId,
     push: FunctionId,
     push_static: FunctionId,
@@ -134,20 +130,28 @@ struct StringFunctions {
 }
 
 impl StringFunctions {
-    fn resolve(env: ModuleEnv<'_>) -> Option<Self> {
-        let module = env.module_by_id(STD_MODULE_ID)?;
+    pub(crate) fn resolve(env: ModuleEnv<'_>) -> Self {
+        let module = env
+            .module_by_id(STD_MODULE_ID)
+            .expect("the std module is registered before any module is optimized");
         let named = |name| {
-            module
-                .get_local_function_id(ustr(name))
-                .map(|function| FunctionId::new(STD_MODULE_ID, function))
+            let function = module.get_local_function_id(ustr(name)).unwrap_or_else(|| {
+                panic!("std function `{name}` required by the optimizer is missing")
+            });
+            FunctionId::new(STD_MODULE_ID, function)
         };
         let value_trait = env.expect_std_trait_id(VALUE_TRAIT_NAME);
         let key = ConcreteTraitImplKey::new(value_trait, vec![string_type()]);
-        let implementation = module.get_impl_data(*module.get_concrete_impl_by_key(&key)?)?;
-        Some(Self {
-            from_static: named(STRING_FROM_STATIC_FUNCTION_NAME)?,
-            push: named(STRING_PUSH_STR_FUNCTION_NAME)?,
-            push_static: named(STRING_PUSH_STATIC_STR_FUNCTION_NAME)?,
+        let implementation_id = *module
+            .get_concrete_impl_by_key(&key)
+            .expect("std implements Value<string>");
+        let implementation = module
+            .get_impl_data(implementation_id)
+            .expect("the Value<string> implementation has data");
+        Self {
+            from_static: named(STRING_FROM_STATIC_FUNCTION_NAME),
+            push: named(STRING_PUSH_STR_FUNCTION_NAME),
+            push_static: named(STRING_PUSH_STATIC_STR_FUNCTION_NAME),
             to_string: FunctionId::new(
                 STD_MODULE_ID,
                 implementation.methods[usize::from(VALUE_TO_STRING_METHOD_INDEX)],
@@ -156,8 +160,28 @@ impl StringFunctions {
                 STD_MODULE_ID,
                 implementation.methods[usize::from(VALUE_DROP_METHOD_INDEX)],
             ),
-        })
+        }
     }
+}
+
+/// Calls which can begin the exact empty-builder sequence this pass recognizes.
+///
+/// This intentionally inspects neither operands in general nor terminators. A direct call to the
+/// concrete, infallible `string_from_static` function is necessary for every rewrite, and finding
+/// none lets the overwhelmingly common body avoid the full definition/use census.
+fn candidate_initializations(func: &Function, from_static: FunctionId) -> Vec<OperationSite> {
+    let mut candidates = Vec::new();
+    for block in func.blocks() {
+        for (index, operation) in func.block(block).operations().iter().enumerate() {
+            if is_direct_call(operation, from_static) {
+                candidates.push(OperationSite {
+                    block,
+                    index: OperationIndex::from_index(index),
+                });
+            }
+        }
+    }
+    candidates
 }
 
 struct Forward {
@@ -175,11 +199,15 @@ struct Forward {
 }
 
 /// Forwards string accumulator ownership, returning `None` when the function has no candidate.
-pub(crate) fn forward_string_accumulation(func: &Function, env: ModuleEnv<'_>) -> Option<Function> {
-    let functions = StringFunctions::resolve(env)?;
-    // Candidate collection shares the definition/use walk, avoiding a second traversal of every
-    // operation on the overwhelmingly common no-match path.
-    let (census, candidates) = Census::new(func, functions.from_static);
+pub(crate) fn forward_string_accumulation(
+    func: &Function,
+    functions: StringFunctions,
+) -> Option<Function> {
+    let candidates = candidate_initializations(func, functions.from_static);
+    if candidates.is_empty() {
+        return None;
+    }
+    let census = Census::new(func);
     let mut forwards = Vec::new();
     for site in candidates {
         if let Some(forward) = plan_forward(func, &census, functions, site) {

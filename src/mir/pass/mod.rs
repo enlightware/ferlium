@@ -63,7 +63,7 @@ pub(crate) mod string_accumulate;
 pub(crate) use monomorphize::Specializations;
 
 use crate::{
-    compiler::{CompilerSession, MirOptimization},
+    compiler::{CompilerSession, MirOptimization, Modules},
     mir::Function,
     module::{ModuleEnv, ModuleId},
 };
@@ -78,6 +78,25 @@ use self::provenance::AddressorSummary;
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct OptimizationStats {
     pub(crate) bounds_checks_removed: usize,
+}
+
+/// Standard-library identities resolved once for every body optimized in one module.
+///
+/// [`known_callee::KnownCallees`] remains the shared semantic model used by dataflow analyses;
+/// pass-specific identity bundles live beside it rather than broadening that model with operations
+/// only one exact rewrite understands.
+pub(crate) struct OptimizationContext {
+    known_callees: known_callee::KnownCallees,
+    string_functions: string_accumulate::StringFunctions,
+}
+
+impl OptimizationContext {
+    pub(crate) fn new(modules: &Modules, env: ModuleEnv<'_>) -> Self {
+        Self {
+            known_callees: known_callee::KnownCallees::new(modules),
+            string_functions: string_accumulate::StringFunctions::resolve(env),
+        }
+    }
 }
 
 /// The number of operations in a function — the unit the inlining budgets are counted in.
@@ -99,7 +118,7 @@ pub(crate) fn optimize_function(
     session: &CompilerSession,
     module_id: ModuleId,
     specializations: &mut Specializations,
-    known: &known_callee::KnownCallees,
+    context: &OptimizationContext,
     stats: &mut OptimizationStats,
 ) -> Function {
     let original_size = function_size(function);
@@ -214,7 +233,9 @@ pub(crate) fn optimize_function(
     // prefix. Forward the old string's ownership into that builder while the exact std-semantic
     // proof is visible; DCE below removes the now-unused rendering and assignment scaffolding.
     let source = current.as_ref().unwrap_or(function);
-    if let Some(forwarded) = string_accumulate::forward_string_accumulation(source, env) {
+    if let Some(forwarded) =
+        string_accumulate::forward_string_accumulation(source, context.string_functions)
+    {
         current = Some(forwarded);
     }
     if rounds_exhausted {
@@ -230,7 +251,7 @@ pub(crate) fn optimize_function(
     // resolve at all, and before DCE, which removes the cleanup blocks a removed check strands.
     let source = current.as_ref().unwrap_or(function);
     if let Some((rewritten, removed)) =
-        bounds_check::eliminate_bounds_checks(source, known, &|callee| {
+        bounds_check::eliminate_bounds_checks(source, &context.known_callees, &|callee| {
             specializations.original(callee)
         })
     {
