@@ -69,7 +69,7 @@ use crate::{
 };
 
 use super::{
-    budget, function_size,
+    budget,
     site::{OperationIndex, OperationSite},
 };
 
@@ -1288,7 +1288,7 @@ fn worth_specializing<Ty: TypeLike>(
         }
     }
 
-    if reads_bound_evidence && function_size(body) <= budget::INLINE_CALLEE_OPERATIONS {
+    if reads_bound_evidence && body.operation_count() <= budget::INLINE_CALLEE_OPERATIONS {
         return true;
     }
 
@@ -1693,7 +1693,7 @@ mod tests {
              fn use_it(x: string) -> string { outer(x) }",
         );
         let mut site = site(&session, module, "use_it", "outer");
-        let padding = budget::INLINE_CALLEE_OPERATIONS + 1 - function_size(&site.body);
+        let padding = budget::INLINE_CALLEE_OPERATIONS + 1 - site.body.operation_count();
         let entry = mir::BlockId::from_index(0);
         let span = site.body.block(entry).operations()[0].span;
         let mut edit = FunctionEdit::new(site.body);
@@ -1702,7 +1702,7 @@ mod tests {
             .extend((0..padding).map(|_| Operation::check_fuel(span)));
         site.body = edit.finish(session.module_env());
 
-        assert!(function_size(&site.body) > budget::INLINE_CALLEE_OPERATIONS);
+        assert!(site.body.operation_count() > budget::INLINE_CALLEE_OPERATIONS);
         assert!(worth_specializing(
             &site.body,
             &site.scheme,

@@ -99,13 +99,6 @@ impl OptimizationContext {
     }
 }
 
-/// The number of operations in a function — the unit the inlining budgets are counted in.
-fn function_size(func: &Function) -> usize {
-    func.blocks()
-        .map(|block| func.block(block).operations().len())
-        .sum()
-}
-
 /// Optimizes one function, returning the body to install.
 ///
 /// Each round rewrites an immutable function into a new one, so a pass never reads an analysis that
@@ -121,7 +114,7 @@ pub(crate) fn optimize_function(
     context: &OptimizationContext,
     stats: &mut OptimizationStats,
 ) -> Function {
-    let original_size = function_size(function);
+    let original_size = function.operation_count();
     let mut current: Option<Function> = None;
     let mut rounds_exhausted = true;
     for _round in 0..budget::MAX_ROUNDS {

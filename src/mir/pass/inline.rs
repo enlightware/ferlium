@@ -60,7 +60,7 @@ use crate::{
     types::{r#type::Type, type_like::TypeLike},
 };
 
-use super::{Specializations, budget, function_size, monomorphize};
+use super::{Specializations, budget, monomorphize};
 
 /// Where the call to inline sits in the caller.
 #[derive(Clone, Copy)]
@@ -212,7 +212,7 @@ fn plan_inlinings<'a>(
     refusals: &mut Option<&mut Vec<Refusal>>,
 ) -> Vec<Inlining<'a>> {
     let mut sites = Vec::new();
-    let mut size = function_size(func);
+    let mut size = func.operation_count();
     let cleanup = cleanup_blocks(func);
 
     for block in func.blocks() {
@@ -270,7 +270,7 @@ fn plan_inlinings<'a>(
             // Substitution never grows a body, so the generic size bounds the concrete one. Asking
             // here keeps a callee that is too large either way from paying for a substitution whose
             // only use would be to refuse it.
-            if function_size(body) > budget::INLINE_CALLEE_OPERATIONS {
+            if body.operation_count() > budget::INLINE_CALLEE_OPERATIONS {
                 refuse(NotInlinable::CalleeTooLarge);
                 continue;
             }
@@ -298,7 +298,7 @@ fn plan_inlinings<'a>(
                     continue;
                 }
             };
-            let callee_size = function_size(&body);
+            let callee_size = body.operation_count();
             // The call goes; the callee's operations arrive, plus a `stack_save` and one
             // `stack_restore` per exit — bounded by the block count.
             let cost = callee_size + body.blocks().count() + 1;
@@ -328,7 +328,7 @@ pub(crate) fn refusals_of(
     // round would inline this site, not what the budget was when optimization started.
     plan_inlinings(
         func,
-        function_size(func),
+        func.operation_count(),
         env,
         session,
         None,

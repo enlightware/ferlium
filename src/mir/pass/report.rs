@@ -315,9 +315,9 @@ fn specialization_remark(
     SpecializationRemark {
         name: specialization.name,
         original: specialization.original,
-        original_size: raw.as_ref().map_or(0, super::function_size),
-        original_optimized_size: optimized.as_ref().map(super::function_size),
-        size: super::function_size(&specialization.body),
+        original_size: raw.as_ref().map_or(0, |body| body.operation_count()),
+        original_optimized_size: optimized.as_ref().map(|body| body.operation_count()),
+        size: specialization.body.operation_count(),
         indirect_before: baseline.map_or(0, indirect_calls),
         indirect_after: indirect_calls(&specialization.body),
         calls_before: baseline.map_or(0, call_sites),

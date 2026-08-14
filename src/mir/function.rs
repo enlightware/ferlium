@@ -132,6 +132,14 @@ impl Function {
         (0..self.blocks.len()).map(BlockId::from_index)
     }
 
+    /// The number of non-terminating operations in this function.
+    pub fn operation_count(&self) -> usize {
+        self.blocks
+            .iter()
+            .map(|block| block.operations().len())
+            .sum()
+    }
+
     pub fn entry(&self) -> BlockId {
         assert!(
             !self.blocks.is_empty(),
