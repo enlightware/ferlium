@@ -11,8 +11,10 @@
 //! `array_resolve_index(index, len)` maps a logical index onto an offset and panics when it is out
 //! of range. Its whole behaviour is a case split: it returns `index` when `0 <= index < len`,
 //! `len + index` when `-len <= index < 0`, and panics otherwise. So proving the first case turns the
-//! call into a copy — and, because the panic is the only reason it can fail, turns a fallible
-//! `invoke` into straight-line code whose error edge dies with it.
+//! call into a copy. When the higher-level `array_index(array, index)` accessor survived inlining,
+//! the same proof retargets it to the internal `array_offset_unchecked` accessor. In either shape,
+//! the panic is the only reason the call can fail, so its `invoke` becomes straight-line code and
+//! its error edge dies with it.
 //!
 //! What goes away is more than one call. The error edge strands its cleanup block, the panic
 //! message's `alloca`s become dead, and `dce` collects all of it. That is the same population the
@@ -23,14 +25,15 @@
 //! here — and rewrites only on yes. A refusal is silent and costs a check that was going to run
 //! anyway.
 //!
-//! **After the rounds, not inside them.** The checked call only becomes visible once `array_index`
-//! has been inlined and decomposed; before that the same check is a subscript the caller names
-//! whole. Rewriting the earlier shape would be better — the panic path would never be copied into
-//! the caller at all, so the inliner would never spend growth budget on it — but it means rebuilding
-//! a call's type at a different effect row, and this placement needs no surgery to be correct.
+//! **After the rounds, not inside them.** This keeps the relational fixed point to one run per
+//! candidate body. It cannot save growth already spent copying a checked accessor, but it handles
+//! both outcomes of the inliner: a decomposed `array_resolve_index`, and a whole `array_index` call
+//! rejected for size or genericity. Moving the analysis into the rounds is a separate compile-time
+//! tradeoff, not required for the check-removal semantics.
 
 use crate::{
     Location,
+    containers::b,
     mir::{
         self, BlockId, Function, Operation, OperationKind,
         edit::FunctionEdit,
@@ -52,10 +55,35 @@ struct Proved {
     /// Where the check sits: an operation index, or the block's terminator.
     operation: Option<OperationIndex>,
     span: Location,
-    index: mir::Value,
-    destination: mir::Value,
+    replacement: Replacement,
     /// The successor a fallible check would have taken on success.
     normal: Option<BlockId>,
+}
+
+/// What an eliminated check becomes.
+enum Replacement {
+    /// `array_resolve_index` in its non-negative case is the identity function.
+    ResolvedIndex {
+        index: mir::Value,
+        destination: mir::Value,
+    },
+    /// A checked array addressor whose precondition is proved becomes the corresponding unchecked
+    /// addressor, preserving its arguments, out-place and generic instantiation.
+    UncheckedArrayIndex(Operation),
+}
+
+/// Retargets a checked array addressor call to the internal unchecked offset addressor.
+fn unchecked_array_index(operation: &Operation, known: &KnownCallees) -> Operation {
+    let mut replacement = operation.clone();
+    let (callee, effects) = known.array_offset_unchecked();
+    replacement.operands[0] = mir::Value::Function(callee);
+    let OperationKind::Call { ty, .. } = &mut replacement.kind else {
+        unreachable!("an array-index candidate is a call")
+    };
+    let mut rewritten_ty = (**ty).clone();
+    rewritten_ty.fn_ty.effects = effects.clone();
+    *ty = b(rewritten_ty);
+    replacement
 }
 
 /// Replaces every bounds check whose index is provably in range with a copy.
@@ -81,28 +109,51 @@ pub(crate) fn eliminate_bounds_checks(
             known,
             original_of,
             block,
-            |operation, def, state, interner| {
+            |operation, def, state, interner, context| {
                 let OperationKind::Call { ty, .. } = &operation.kind else {
                     return;
                 };
-                if relations::resolved_callee(operation, known, original_of)
-                    != Some(KnownCallee::ArrayResolveIndex)
-                {
-                    return;
-                }
+                let callee = relations::resolved_callee(operation, known, original_of);
                 let Some(call) = call_operands(&operation.operands, ty) else {
                     return;
                 };
                 if call.arguments.len() != 2 {
                     return;
                 }
-                let index = call.arguments[0].0;
-                let length = call.arguments[1].0;
-                let Some(index_form) = state.argument_affine(index, interner) else {
-                    return;
-                };
-                let Some(length_form) = state.argument_affine(length, interner) else {
-                    return;
+                let (index_form, length_form, replacement) = match callee {
+                    Some(KnownCallee::ArrayResolveIndex) => {
+                        let index = call.arguments[0].0;
+                        let length = call.arguments[1].0;
+                        let Some(index_form) = state.argument_affine(index, interner) else {
+                            return;
+                        };
+                        let Some(length_form) = state.argument_affine(length, interner) else {
+                            return;
+                        };
+                        (
+                            index_form,
+                            length_form,
+                            Replacement::ResolvedIndex {
+                                index: index.clone(),
+                                destination: call.result.clone(),
+                            },
+                        )
+                    }
+                    Some(KnownCallee::ArrayIndex) => {
+                        let Some((index, length)) =
+                            context.array_index_forms(operation, state, interner)
+                        else {
+                            return;
+                        };
+                        (
+                            index,
+                            length,
+                            Replacement::UncheckedArrayIndex(unchecked_array_index(
+                                operation, known,
+                            )),
+                        )
+                    }
+                    _ => return,
                 };
                 let zero = Affine::constant(0);
                 let in_range = Predicate::between(&zero, Comparison::LessOrEqual, &index_form)
@@ -119,8 +170,7 @@ pub(crate) fn eliminate_bounds_checks(
                     block,
                     operation: at,
                     span: operation.span,
-                    index: index.clone(),
-                    destination: call.result.clone(),
+                    replacement,
                     normal: None,
                 });
             },
@@ -144,18 +194,23 @@ pub(crate) fn eliminate_bounds_checks(
     let removed = proved.len();
     let mut edit = FunctionEdit::new(func.clone());
     for check in proved {
-        let copy = Operation::memcpy(check.span, check.index, check.destination);
+        let replacement = match check.replacement {
+            Replacement::ResolvedIndex { index, destination } => {
+                Operation::memcpy(check.span, index, destination)
+            }
+            Replacement::UncheckedArrayIndex(call) => call,
+        };
         match check.operation {
             Some(index) => {
                 edit.block_mut(check.block)
-                    .replace_operation(index.as_index(), copy);
+                    .replace_operation(index.as_index(), replacement);
             }
             None => {
                 // Appending keeps the operation indices any other rewrite in this block was planned
                 // against, and the terminator loses the error edge a check that cannot fail no
                 // longer has.
                 let block = edit.block_mut(check.block);
-                block.operations.push(copy);
+                block.operations.push(replacement);
                 block.terminator = Terminator::goto(
                     check.span,
                     check.normal.expect("a terminator check has a normal edge"),
@@ -226,6 +281,50 @@ mod tests {
             body.matches("array_resolve_index").count(),
             1,
             "the seed remains checked, but the loop access must use what it proved:\n{body}"
+        );
+    }
+
+    /// Generic element storage keeps the accessor itself uninlined. Both branch accesses returning
+    /// establish the upper bound at their join; the explicit guard establishes non-negativity, so
+    /// the final checked signed access can use the internal unchecked-offset accessor.
+    #[test]
+    fn a_proved_uninlined_array_index_becomes_unchecked() {
+        let module = optimized(
+            "fn get_after_either<A>(a: [A], i: int, c: bool) -> A {\n\
+                 if i < 0 {\n\
+                     a[0]\n\
+                 } else {\n\
+                     if c { a[i] } else { a[i] };\n\
+                     a[i]\n\
+                 }\n\
+             }",
+        );
+        let body = body_of(&module, "get_after_either");
+        assert!(
+            body.contains("call std::array_offset_unchecked"),
+            "the proved whole accessor must be retargeted and demoted from invoke:\n{body}"
+        );
+    }
+
+    /// Successful signed indexing does not mean the source index was an offset: a negative index
+    /// may have succeeded after normalization. Without an independent non-negativity proof the
+    /// unchecked-offset accessor would interpret it incorrectly.
+    #[test]
+    fn a_repeated_possibly_negative_array_index_stays_checked() {
+        let module = optimized(
+            "fn get_after_either<A>(a: [A], i: int, c: bool) -> A {\n\
+                 if c { a[i] } else { a[i] };\n\
+                 a[i]\n\
+             }",
+        );
+        let body = body_of(&module, "get_after_either");
+        assert!(
+            !body.contains("array_offset_unchecked"),
+            "a possibly-negative signed index is not an unchecked offset:\n{body}"
+        );
+        assert!(
+            body.contains("array_index"),
+            "the final signed check must remain:\n{body}"
         );
     }
 

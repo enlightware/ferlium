@@ -20,16 +20,18 @@
 //! signature or a body. A user function called `add` is a different `FunctionId` and gets no
 //! semantics from here.
 //!
-//! **Purity is not asserted here.** Every entry names what a call *computes*; whether a call may be
-//! moved, merged or removed remains a question for its inferred effects, which a consumer must
-//! check for itself. Nothing in this table overrides them.
+//! **Identity does not grant general purity.** Every entry names what a call computes; whether a
+//! call may be moved, merged or removed remains a question for its inferred effects, which a
+//! consumer must check for itself. A consumer may also use an entry's narrower std contract — range
+//! reasoning knows that computing either array addressor does not mutate its receiver — but that
+//! does not make arbitrary known calls pure or suppress their declared effects.
 //!
 //! **A specialization resolves to its original.** Optimization preserves semantics, so a
 //! specialized copy of a known callee is still that callee. Every entry below is additionally
-//! *instantiation-independent* — `array_len` reads the same field at every element type, and the
-//! rest are concrete already — which is why canonicalizing to the original needs no accompanying
-//! type check. An entry whose meaning depended on the instantiation could not be admitted without
-//! one, and none is.
+//! *instantiation-independent* — array length and indexing have the same meaning at every element
+//! type, and the arithmetic entries are concrete already — which is why canonicalizing to the
+//! original needs no accompanying type check. An entry whose meaning depended on the instantiation
+//! could not be admitted without one, and none is.
 //!
 //! The consumers are the range-reasoning passes; the items here are exercised by the tests below
 //! until those land.
@@ -49,7 +51,10 @@ use crate::{
         core_traits_names::{ITERATOR_TRAIT_NAME, NUM_TRAIT_NAME, ORD_TRAIT_NAME},
         math::int_type,
     },
-    types::r#type::{Type, TypeKind},
+    types::{
+        effects::EffType,
+        r#type::{Type, TypeKind},
+    },
 };
 
 /// The definition a named type refers to, if it is one.
@@ -90,6 +95,12 @@ pub(crate) enum KnownCallee {
     /// The panic is why this is fallible, and removing it once the index is proved in range is the
     /// point of proving it.
     ArrayResolveIndex,
+    /// The mutable member of `array_index(array, index)` — projects the element selected by a
+    /// signed index, or panics when that index is out of range.
+    ArrayIndex,
+    /// The mutable member of `array_offset_unchecked(array, offset)` — projects the element at an
+    /// offset whose `0 <= offset < len(array)` precondition the caller has established.
+    ArrayOffsetUnchecked,
     /// `array_wrap_index(capacity, index)` — `index - capacity` when `index >= capacity`, and
     /// `index` otherwise.
     ///
@@ -141,6 +152,8 @@ pub(crate) struct Layouts {
 /// so one table serves every module of a session.
 pub(crate) struct KnownCallees {
     by_id: FxHashMap<FunctionId, KnownCallee>,
+    array_offset_unchecked: FunctionId,
+    array_offset_unchecked_effects: EffType,
     layouts: Layouts,
     /// The type definitions a place has to be an instance of for a field position above to mean
     /// anything.
@@ -166,6 +179,9 @@ impl KnownCallees {
         };
         let range_iterator = resolver.named_type("RangeIterator");
         let range_inclusive_iterator = resolver.named_type("RangeInclusiveIterator");
+        let array_index = resolver.subscript_mut_member("array_index");
+        let array_offset_unchecked = resolver.subscript_mut_member("array_offset_unchecked");
+        resolver.assert_retargetable(array_index, array_offset_unchecked);
         let entries = [
             (
                 resolver.method(NUM_TRAIT_NAME, int_type(), "add"),
@@ -192,6 +208,8 @@ impl KnownCallees {
                 resolver.function("array_resolve_index"),
                 KnownCallee::ArrayResolveIndex,
             ),
+            (array_index, KnownCallee::ArrayIndex),
+            (array_offset_unchecked, KnownCallee::ArrayOffsetUnchecked),
             (
                 resolver.function("array_wrap_index"),
                 KnownCallee::ArrayWrapIndex,
@@ -207,6 +225,8 @@ impl KnownCallees {
         ];
         Self {
             by_id: entries.into_iter().collect(),
+            array_offset_unchecked,
+            array_offset_unchecked_effects: resolver.effects(array_offset_unchecked),
             layouts: Layouts {
                 array_len: resolver.field("array", "len"),
                 range: resolver.range_layout("RangeIterator", "Range"),
@@ -220,6 +240,14 @@ impl KnownCallees {
 
     pub(crate) fn layouts(&self) -> &Layouts {
         &self.layouts
+    }
+
+    /// The unchecked array accessor and the effects its call-site type must carry.
+    pub(crate) fn array_offset_unchecked(&self) -> (FunctionId, &EffType) {
+        (
+            self.array_offset_unchecked,
+            &self.array_offset_unchecked_effects,
+        )
     }
 
     /// Whether `ty` is the std array type, at any element type.
@@ -273,6 +301,61 @@ impl Resolver<'_> {
             .get_local_function_id(name)
             .unwrap_or_else(|| panic!("std declares no function `{name}`"));
         FunctionId::new(STD_MODULE_ID, local)
+    }
+
+    /// The shared mutable member implementation of a std addressor subscript.
+    fn subscript_mut_member(&self, name: &str) -> FunctionId {
+        let name = ustr(name);
+        let member = self
+            .std_module
+            .get_subscript(name)
+            .unwrap_or_else(|| panic!("std declares no subscript `{name}`"))
+            .mut_member
+            .as_ref()
+            .unwrap_or_else(|| panic!("std subscript `{name}` has no mutable member"));
+        FunctionId::new(STD_MODULE_ID, member.function)
+    }
+
+    /// The declared effects of a resolved std callable.
+    fn effects(&self, function: FunctionId) -> EffType {
+        self.std_module
+            .get_function_by_id(function.function)
+            .expect("a resolved std function has a definition")
+            .definition
+            .ty_scheme
+            .ty
+            .effects
+            .clone()
+    }
+
+    /// Checks the ABI assumption used when bounds elimination retargets one call to another.
+    ///
+    /// The effect row is deliberately the one difference: removing the proved panic makes the
+    /// replacement infallible. Quantifiers and constraints must stay positional because the call's
+    /// recorded generic instantiation is preserved unchanged.
+    fn assert_retargetable(&self, checked: FunctionId, unchecked: FunctionId) {
+        let checked = self
+            .std_module
+            .get_function_by_id(checked.function)
+            .expect("a resolved std function has a definition");
+        let unchecked = self
+            .std_module
+            .get_function_by_id(unchecked.function)
+            .expect("a resolved std function has a definition");
+        let mut expected = checked.definition.ty_scheme.clone();
+        expected.ty.effects = unchecked.definition.ty_scheme.ty.effects.clone();
+        assert_eq!(
+            expected, unchecked.definition.ty_scheme,
+            "checked and unchecked array addressors must differ only in effects"
+        );
+        assert_eq!(
+            checked.definition.result_convention, unchecked.definition.result_convention,
+            "checked and unchecked array addressors must use one result convention"
+        );
+        assert_eq!(
+            checked.parameter_passing, unchecked.parameter_passing,
+            "checked and unchecked array addressors must pass visible arguments identically"
+        );
     }
 
     /// The definition of a std type, named the way source names it.
@@ -356,7 +439,7 @@ mod tests {
         let session = CompilerSession::new();
         assert_eq!(
             known_callees(&session).by_id.len(),
-            10,
+            12,
             "two known callees resolved to the same function id"
         );
     }

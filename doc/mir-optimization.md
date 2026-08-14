@@ -44,7 +44,7 @@ branch forward    // bypass booleans stored in branch arms only to control a sec
 peephole          // collapse small local CFG/value patterns
 string accumulate // forward an overwritten string into its self-prefixed format builder
 devirtualize      // final dictionary-entry callees exposed too late for a fold round
-bounds checks     // prove post-inline array indices in range and remove their failure edges
+bounds checks     // prove array indices in range and remove checked access/failure edges
 dce               // on every body, not only a changed one
 stack markers     // drop a mark duplicating one already held, and restores that pop nothing
 finish            // restores canonical form without exposing the intermediate body
@@ -479,25 +479,31 @@ empty-builder, rendered-prefix and assignment scaffolding orphaned by the rewrit
 
 ## Bounds-check elimination
 
-`mir::pass::bounds_check` removes a post-inline `array_resolve_index(index, len)` when relational
-analysis proves `0 <= index < len`. In that case the resolved offset is exactly `index`, so the call
-becomes a representation copy. If it was an `invoke`, its failure edge is unreachable and becomes a
-jump to the normal successor; the pass removes the stranded blocks and DCE collects the panic
-storage and cleanup.
+`mir::pass::bounds_check` removes either checked shape left after the optimization rounds when
+relational analysis proves `0 <= index < len`. A post-inline
+`array_resolve_index(index, len)` becomes a representation copy because its resolved offset is
+exactly `index`. A whole `array_index(array, index)` that the inliner left generic or oversized is
+retargeted to std's internal `array_offset_unchecked`; its arguments, out-place and generic
+instantiation are unchanged, while its call-site effect row comes from the unchecked callee. If
+either call was an `invoke`, its failure edge is unreachable and becomes a jump to the normal
+successor; the pass removes stranded blocks and DCE collects dead panic storage and cleanup.
 
 The proof is a forward value-version analysis over affine integer forms and predicates. Direct,
 known standard-library calls supply their documented arithmetic, comparison, range and array-length
-semantics. A successful checked access refines its normal edge. A canonical range loop supplies a
-non-negative constant-start induction fact, and bounds are attached to its yielded cursor only where
-the flow state also proves `start <= end`. Place contents receive fresh symbols after writes and
-distinct incoming values receive join symbols, so a predicate cannot silently survive mutation.
-Registers that name places are structural SSA facts kept outside the flow state.
+semantics. A successful checked access refines its normal edge. For a whole signed `array_index`,
+that refinement applies to the source index only when it was already known non-negative: a negative
+index may instead have succeeded after normalization and is not a valid unchecked offset. A
+canonical range loop supplies a non-negative constant-start induction fact, and bounds are attached
+to its yielded cursor only where the flow state also proves `start <= end`. Place contents receive
+fresh symbols after writes and distinct incoming values receive join symbols, so a predicate cannot
+silently survive mutation. Registers that name places are structural SSA facts kept outside the
+flow state.
 
 Only functions containing a relevant known call are admitted. Induction recognition locally
 interprets a loop's construction block, then one reverse-postorder-prioritized fixed point computes
 the proof; replay performs the rewrite. Refusing a proof retains the original check. The pass runs
-after the final devirtualization because inlining exposes `array_resolve_index`, and immediately
-before DCE because removing its error edge strands cleanup.
+after the final devirtualization because inlining may expose `array_resolve_index` and may leave a
+whole `array_index`, and immediately before DCE because removing either error edge strands cleanup.
 
 ## Dead code elimination
 

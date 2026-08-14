@@ -770,7 +770,7 @@ impl Analysis {
         known: &KnownCallees,
         original_of: &dyn Fn(FunctionId) -> Option<FunctionId>,
         block: BlockId,
-        mut visit: impl FnMut(&Operation, DefSite, &State, &mut Interner),
+        mut visit: impl FnMut(&Operation, DefSite, &State, &mut Interner, &Context<'_>),
     ) {
         // Borrowed, never rebuilt: this is called once per block, and re-deriving the root types
         // each time would rescan the whole body per block.
@@ -786,12 +786,12 @@ impl Analysis {
         };
         for (index, operation) in func.block(block).operations().iter().enumerate() {
             let def = site(block, index);
-            visit(operation, def, &state, &mut self.interner);
+            visit(operation, def, &state, &mut self.interner, &context);
             transfer(operation, def, &context, &mut self.interner, &mut state);
         }
         if let TerminatorKind::Invoke { operation, .. } = &func.block(block).terminator().kind {
             let def = site(block, func.block(block).operations().len());
-            visit(operation, def, &state, &mut self.interner);
+            visit(operation, def, &state, &mut self.interner, &context);
         }
     }
 
@@ -816,7 +816,7 @@ struct Induction {
 }
 
 /// Everything one analysis run reads and never changes.
-struct Context<'a> {
+pub(crate) struct Context<'a> {
     func: &'a Function,
     semantics: Semantics<'a>,
     escaped: &'a FxHashSet<Root>,
@@ -824,6 +824,43 @@ struct Context<'a> {
     /// Iterator storage whose cursor starts at a non-negative constant. A yielded value receives
     /// ascending bounds only where the flow state separately proves `start <= end`.
     inductions: &'a FxHashMap<Root, Induction>,
+}
+
+impl Context<'_> {
+    /// The signed index and array length named by a checked `array_index` call.
+    ///
+    /// Escaped arrays are refused: an opaque mutation could have changed their length without the
+    /// relational state seeing a new definition. The callee identity supplies the array type, but
+    /// checking the root type as well keeps the positional `len` field meaning explicit.
+    pub(crate) fn array_index_forms(
+        &self,
+        operation: &Operation,
+        state: &State,
+        interner: &mut Interner,
+    ) -> Option<(Affine, Affine)> {
+        if self.semantics.of(operation)? != KnownCallee::ArrayIndex {
+            return None;
+        }
+        let OperationKind::Call { ty, .. } = &operation.kind else {
+            return None;
+        };
+        let call = call_operands(&operation.operands, ty)?;
+        if call.arguments.len() != 2 {
+            return None;
+        }
+        let array = tracked_place(state, call.arguments[0].0, self.escaped, interner)?;
+        let root = interner.places().root_of(array);
+        if !self
+            .types
+            .of(root)
+            .is_some_and(|ty| self.semantics.known.is_array(ty))
+        {
+            return None;
+        }
+        let index = state.argument_affine(call.arguments[1].0, interner)?;
+        let len = interner.place_field(array, self.semantics.known.layouts().array_len);
+        Some((index, state.place_affine(len, interner)))
+    }
 }
 
 /// Resolves a call's callee to the semantics the optimizer knows for it.
@@ -862,7 +899,7 @@ pub(crate) fn worth_analyzing(
     let candidate = |operation: &Operation| {
         matches!(
             semantics.of(operation),
-            Some(KnownCallee::ArrayResolveIndex)
+            Some(KnownCallee::ArrayResolveIndex | KnownCallee::ArrayIndex)
         )
     };
     func.blocks().any(|block| {
@@ -1410,12 +1447,21 @@ fn refine<'a>(
         }
         TerminatorKind::Invoke {
             operation, normal, ..
-        } if successor == *normal => {
-            match resolved_index_bounds(state, operation, context, interner) {
-                Some(predicates) => predicates,
-                None => return Cow::Borrowed(state),
+        } if successor == *normal => match context.semantics.of(operation) {
+            Some(KnownCallee::ArrayResolveIndex) => {
+                match resolved_index_bounds(state, operation, context, interner) {
+                    Some(predicates) => predicates,
+                    None => return Cow::Borrowed(state),
+                }
             }
-        }
+            Some(KnownCallee::ArrayIndex) => {
+                match checked_array_index_bounds(state, operation, context, interner) {
+                    Some(predicates) => predicates,
+                    None => return Cow::Borrowed(state),
+                }
+            }
+            _ => return Cow::Borrowed(state),
+        },
         _ => return Cow::Borrowed(state),
     };
     let mut refined = state.clone();
@@ -1461,6 +1507,30 @@ fn resolved_index_bounds(
     Some(vec![
         Predicate::between(&zero, Comparison::LessOrEqual, &offset)?,
         Predicate::between(&offset, Comparison::Less, &len)?,
+    ])
+}
+
+/// What a successful checked array access proves about its original index.
+///
+/// A negative index is legal and is normalized inside the accessor, so success alone cannot put
+/// the source index in `0..len`. When the incoming state independently proves non-negativity,
+/// however, the successful normal edge proves the remaining upper bound and makes a later checked
+/// access usable as an unchecked offset.
+fn checked_array_index_bounds(
+    state: &State,
+    operation: &Operation,
+    context: &Context<'_>,
+    interner: &mut Interner,
+) -> Option<Vec<Predicate>> {
+    let (index, len) = context.array_index_forms(operation, state, interner)?;
+    let zero = Affine::constant(0);
+    let nonnegative = Predicate::between(&zero, Comparison::LessOrEqual, &index)?;
+    if !state.implies(&nonnegative) {
+        return None;
+    }
+    Some(vec![
+        nonnegative,
+        Predicate::between(&index, Comparison::Less, &len)?,
     ])
 }
 
@@ -1723,9 +1793,16 @@ fn transfer(
                     // A range step writes the cursor and nothing else, so forgetting the whole
                     // iterator would throw away the very bounds the loop is being read for. This is
                     // the precision a resolved callee buys: an unknown one still loses everything.
-                    match stepped_cursor(known, place, types, semantics, interner) {
-                        Some(cursor) => state.define(cursor, def, interner, None),
-                        None => state.define(place, def, interner, None),
+                    match known {
+                        // These addressors receive a mutable receiver so the place they return can
+                        // be written through; computing that place does not itself mutate the
+                        // array. Forgetting the receiver here would discard its length immediately
+                        // before the successful-access edge tries to record the bound it proved.
+                        Some(KnownCallee::ArrayIndex | KnownCallee::ArrayOffsetUnchecked) => {}
+                        _ => match stepped_cursor(known, place, types, semantics, interner) {
+                            Some(cursor) => state.define(cursor, def, interner, None),
+                            None => state.define(place, def, interner, None),
+                        },
                     }
                 }
             }
@@ -1809,6 +1886,8 @@ fn result_fact(
         // selection, a wrap, a step whose direction is itself a comparison. The result is still a
         // nameable value, which is what the fresh symbol gives it.
         KnownCallee::ArrayResolveIndex
+        | KnownCallee::ArrayIndex
+        | KnownCallee::ArrayOffsetUnchecked
         | KnownCallee::ArrayWrapIndex
         | KnownCallee::RangeNext
         | KnownCallee::RangeInclusiveNext => None,
