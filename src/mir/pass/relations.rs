@@ -1641,6 +1641,28 @@ fn transfer(
             let fact = value_fact(&operation.operands[0], func, interner, state);
             state.define(place, def, interner, fact);
         }
+        OperationKind::BuildArray { .. } => {
+            let Some((destination, elements)) = operation.operands.split_last() else {
+                return;
+            };
+            let Some(array) = tracked_place(state, destination, escaped, interner) else {
+                return;
+            };
+            // `build_array` initializes the complete high-level array value. Define the whole
+            // destination first, because doing so forgets every fact about its old fields, then
+            // state the one representation fact the operation determines independently of its
+            // element values. Copies and moves already carry named fields with the whole value.
+            state.define(array, def, interner, None);
+            let len = interner.place_field(array, semantics.known.layouts().array_len);
+            let count = Int::try_from(elements.len())
+                .expect("a MIR operation has fewer elements than int can represent");
+            state.define(
+                len,
+                def,
+                interner,
+                Some(Fact::Value(Affine::constant(count))),
+            );
+        }
         OperationKind::Load => {
             let Some(result) = operation.result_id() else {
                 return;

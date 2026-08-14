@@ -490,14 +490,16 @@ successor; the pass removes stranded blocks and DCE collects dead panic storage 
 
 The proof is a forward value-version analysis over affine integer forms and predicates. Direct,
 known standard-library calls supply their documented arithmetic, comparison, range and array-length
-semantics. A successful checked access refines its normal edge. For a whole signed `array_index`,
-that refinement applies to the source index only when it was already known non-negative: a negative
-index may instead have succeeded after normalization and is not a valid unchecked offset. A
-canonical range loop supplies a non-negative constant-start induction fact, and bounds are attached
-to its yielded cursor only where the flow state also proves `start <= end`. Place contents receive
-fresh symbols after writes and distinct incoming values receive join symbols, so a predicate cannot
-silently survive mutation. Registers that name places are structural SSA facts kept outside the
-flow state.
+semantics. `BuildArray` defines its destination's `len` field as its literal operand count even when
+the element values are unknown; a constant access or matching constant-bounded loop can therefore
+use the local shape fact. A successful checked access refines its normal edge. For a whole signed
+`array_index`, that refinement applies to the source index only when it was already known
+non-negative: a negative index may instead have succeeded after normalization and is not a valid
+unchecked offset. A canonical range loop supplies a non-negative constant-start induction fact, and
+bounds are attached to its yielded cursor only where the flow state also proves `start <= end`.
+Place contents receive fresh symbols after writes and distinct incoming values receive join symbols,
+so a predicate cannot silently survive mutation. Registers that name places are structural SSA
+facts kept outside the flow state.
 
 Only functions containing a relevant known call are admitted. Induction recognition locally
 interprets a loop's construction block, then one reverse-postorder-prioritized fixed point computes

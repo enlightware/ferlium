@@ -267,6 +267,54 @@ mod tests {
         );
     }
 
+    /// Element values need not be known for the constructor to establish the array's length. This
+    /// deliberately uses parameters so constant-array folding cannot prove the access instead.
+    #[test]
+    fn a_build_array_proves_its_literal_length() {
+        let module =
+            optimized("fn third(x: int, y: int, z: int) -> int { let a = [x, y, z]; a[2] }");
+        let body = body_of(&module, "third");
+        assert!(
+            !body.contains("array_resolve_index") && !body.contains("array_index"),
+            "the constructor's literal length must prove the access in range:\n{body}"
+        );
+        assert!(
+            body.contains("buffer_slot"),
+            "only the bounds check, not the element access, should disappear:\n{body}"
+        );
+    }
+
+    /// The same local fact supplies the upper bound for every yielded index in a literal-sized
+    /// range. Unknown elements keep this a relations test rather than a whole-array fold.
+    #[test]
+    fn a_literal_sized_loop_over_build_array_loses_its_bounds_check() {
+        let module = optimized(
+            "fn total(x: int, y: int, z: int) -> int {\n\
+                 let a = [x, y, z];\n\
+                 let mut t = 0;\n\
+                 for i in 0..3 { t = t + a[i] };\n\
+                 t\n\
+             }",
+        );
+        let body = body_of(&module, "total");
+        assert!(
+            !body.contains("array_resolve_index") && !body.contains("array_index"),
+            "the literal-sized loop must use the constructed length:\n{body}"
+        );
+    }
+
+    /// Knowing an exact length must not turn a false bound into a proof.
+    #[test]
+    fn an_out_of_range_build_array_access_stays_checked() {
+        let module =
+            optimized("fn fourth(x: int, y: int, z: int) -> int { let a = [x, y, z]; a[3] }");
+        let body = body_of(&module, "fourth");
+        assert!(
+            body.contains("array_resolve_index") || body.contains("array_index"),
+            "an access at the constructed length must remain checked:\n{body}"
+        );
+    }
+
     /// A successful seed access proves the array non-empty: `0 < len` entails the `1 <= len`
     /// ordering needed for a range starting at one to count upwards. This covers the non-zero
     /// induction initializer and the normal-edge fact together at the rewriting boundary rather
