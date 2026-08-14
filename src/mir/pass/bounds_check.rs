@@ -11,19 +11,20 @@
 //! `array_resolve_index(index, len)` maps a logical index onto an offset and panics when it is out
 //! of range. Its whole behaviour is a case split: it returns `index` when `0 <= index < len`,
 //! `len + index` when `-len <= index < 0`, and panics otherwise. So proving the first case turns the
-//! call into a copy. When the higher-level `array_index(array, index)` accessor survived inlining,
-//! the same proof retargets it to the internal `array_offset_unchecked` accessor. In either shape,
-//! the panic is the only reason the call can fail, so its `invoke` becomes straight-line code and
-//! its error edge dies with it.
+//! call into a copy, while proving the second turns it into the ordinary wrapping integer addition.
+//! When the higher-level `array_index(array, index)` accessor survived inlining, either proof
+//! retargets it to the internal `array_offset_unchecked` accessor, materializing `len + index` first
+//! in the negative case. In either shape, the panic is the only reason the call can fail, so its
+//! `invoke` becomes straight-line code and its error edge dies with it.
 //!
 //! What goes away is more than one call. The error edge strands its cleanup block, the panic
 //! message's `alloca`s become dead, and `dce` collects all of it. That is the same population the
 //! plan's cold-path `alloca` item was about.
 //!
 //! **The proof comes from [`relations`](super::relations), and nothing here weakens it.** This pass
-//! asks one question at each call site — do `0 <= index` and `index < len` follow from what is known
-//! here — and rewrites only on yes. A refusal is silent and costs a check that was going to run
-//! anyway.
+//! asks whether either `0 <= index < len` or `index < 0` and `0 <= len + index < len` follows from
+//! what is known at each call site, and rewrites only on yes. A refusal is silent and costs a check
+//! that was going to run anyway.
 //!
 //! **After the rounds, not inside them.** This keeps the relational fixed point to one run per
 //! candidate body. It cannot save growth already spent copying a checked accessor, but it handles
@@ -34,13 +35,15 @@
 use crate::{
     Location,
     containers::b,
+    hir::value::LiteralValue,
     mir::{
         self, BlockId, Function, Operation, OperationKind,
         edit::FunctionEdit,
         pass::site::OperationIndex,
         terminator::{Terminator, TerminatorKind},
     },
-    module::{FunctionId, id::Id},
+    module::{FunctionId, ModuleEnv, id::Id},
+    std::math::int_type,
 };
 
 use super::{
@@ -62,18 +65,36 @@ struct Proved {
 
 /// What an eliminated check becomes.
 enum Replacement {
-    /// `array_resolve_index` in its non-negative case is the identity function.
+    /// `array_resolve_index` becomes either the identity or the negative-index normalization.
     ResolvedIndex {
         index: mir::Value,
+        length: mir::Value,
         destination: mir::Value,
+        normalization: Normalization,
     },
     /// A checked array addressor whose precondition is proved becomes the corresponding unchecked
-    /// addressor, preserving its arguments, out-place and generic instantiation.
-    UncheckedArrayIndex(Operation),
+    /// addressor. A negative source index first needs its normalized logical offset.
+    UncheckedArrayIndex {
+        operation: Operation,
+        array: mir::Value,
+        index: mir::Value,
+        normalization: Normalization,
+    },
+}
+
+/// Which branch of signed-index resolution the analysis proved.
+#[derive(Clone, Copy)]
+enum Normalization {
+    NonNegative,
+    Negative,
 }
 
 /// Retargets a checked array addressor call to the internal unchecked offset addressor.
-fn unchecked_array_index(operation: &Operation, known: &KnownCallees) -> Operation {
+fn unchecked_array_index(
+    operation: &Operation,
+    known: &KnownCallees,
+    offset: Option<mir::Value>,
+) -> Operation {
     let mut replacement = operation.clone();
     let (callee, effects) = known.array_offset_unchecked();
     replacement.operands[0] = mir::Value::Function(callee);
@@ -83,7 +104,31 @@ fn unchecked_array_index(operation: &Operation, known: &KnownCallees) -> Operati
     let mut rewritten_ty = (**ty).clone();
     rewritten_ty.fn_ty.effects = effects.clone();
     *ty = b(rewritten_ty);
+    if let Some(offset) = offset {
+        let OperationKind::Call { ty, .. } = &replacement.kind else {
+            unreachable!()
+        };
+        let visible_start = replacement.operands.len() - (ty.fn_ty.args.len() + 1);
+        replacement.operands[visible_start + 1] = offset;
+    }
     replacement
+}
+
+/// Materializes the wrapping integer addition whose affine result the analysis proved in range.
+fn add_offset(
+    span: Location,
+    known: &KnownCallees,
+    length: mir::Value,
+    index: mir::Value,
+    destination: mir::Value,
+) -> Operation {
+    let (callee, ty) = known.int_add();
+    Operation::call(
+        span,
+        mir::Value::Function(callee),
+        [length, index, destination],
+        ty.clone(),
+    )
 }
 
 /// Replaces every bounds check whose index is provably in range with a copy.
@@ -91,6 +136,7 @@ fn unchecked_array_index(operation: &Operation, known: &KnownCallees) -> Operati
 /// Returns the rewritten body and how many checks it removed, or `None` when it removed none.
 pub(crate) fn eliminate_bounds_checks(
     func: &Function,
+    env: ModuleEnv<'_>,
     known: &KnownCallees,
     original_of: &dyn Fn(FunctionId) -> Option<FunctionId>,
 ) -> Option<(Function, usize)> {
@@ -135,7 +181,9 @@ pub(crate) fn eliminate_bounds_checks(
                             length_form,
                             Replacement::ResolvedIndex {
                                 index: index.clone(),
+                                length: length.clone(),
                                 destination: call.result.clone(),
+                                normalization: Normalization::NonNegative,
                             },
                         )
                     }
@@ -148,21 +196,60 @@ pub(crate) fn eliminate_bounds_checks(
                         (
                             index,
                             length,
-                            Replacement::UncheckedArrayIndex(unchecked_array_index(
-                                operation, known,
-                            )),
+                            Replacement::UncheckedArrayIndex {
+                                operation: operation.clone(),
+                                array: call.arguments[0].0.clone(),
+                                index: call.arguments[1].0.clone(),
+                                normalization: Normalization::NonNegative,
+                            },
                         )
                     }
                     _ => return,
                 };
                 let zero = Affine::constant(0);
-                let in_range = Predicate::between(&zero, Comparison::LessOrEqual, &index_form)
+                let nonnegative = Predicate::between(&zero, Comparison::LessOrEqual, &index_form)
                     .is_some_and(|goal| state.implies(&goal))
                     && Predicate::between(&index_form, Comparison::Less, &length_form)
                         .is_some_and(|goal| state.implies(&goal));
-                if !in_range {
+                let negative = length_form.add(&index_form).is_some_and(|offset| {
+                    Predicate::between(&index_form, Comparison::Less, &zero)
+                        .is_some_and(|goal| state.implies(&goal))
+                        && Predicate::between(&zero, Comparison::LessOrEqual, &offset)
+                            .is_some_and(|goal| state.implies(&goal))
+                        && Predicate::between(&offset, Comparison::Less, &length_form)
+                            .is_some_and(|goal| state.implies(&goal))
+                });
+                let normalization = if nonnegative {
+                    Normalization::NonNegative
+                } else if negative {
+                    Normalization::Negative
+                } else {
                     return;
-                }
+                };
+                let replacement = match replacement {
+                    Replacement::ResolvedIndex {
+                        index,
+                        length,
+                        destination,
+                        ..
+                    } => Replacement::ResolvedIndex {
+                        index,
+                        length,
+                        destination,
+                        normalization,
+                    },
+                    Replacement::UncheckedArrayIndex {
+                        operation,
+                        array,
+                        index,
+                        ..
+                    } => Replacement::UncheckedArrayIndex {
+                        operation,
+                        array,
+                        index,
+                        normalization,
+                    },
+                };
                 let at = def
                     .operation_index()
                     .filter(|index| *index != terminator_index);
@@ -193,24 +280,88 @@ pub(crate) fn eliminate_bounds_checks(
 
     let removed = proved.len();
     let mut edit = FunctionEdit::new(func.clone());
+    // Replacing one check can insert several operations, so process each block from the back to
+    // keep the operation indices recorded by replay valid. A terminator is ordered after every
+    // ordinary operation; appending its replacement does not move any of them.
+    proved.sort_by(|left, right| {
+        left.block
+            .as_index()
+            .cmp(&right.block.as_index())
+            .then_with(|| {
+                right
+                    .operation
+                    .map_or(usize::MAX, |index| index.as_index())
+                    .cmp(&left.operation.map_or(usize::MAX, |index| index.as_index()))
+            })
+    });
     for check in proved {
-        let replacement = match check.replacement {
-            Replacement::ResolvedIndex { index, destination } => {
-                Operation::memcpy(check.span, index, destination)
-            }
-            Replacement::UncheckedArrayIndex(call) => call,
+        let replacements = match check.replacement {
+            Replacement::ResolvedIndex {
+                index,
+                length,
+                destination,
+                normalization,
+            } => vec![match normalization {
+                Normalization::NonNegative => Operation::memcpy(check.span, index, destination),
+                Normalization::Negative => {
+                    add_offset(check.span, known, length, index, destination)
+                }
+            }],
+            Replacement::UncheckedArrayIndex {
+                operation,
+                array,
+                index,
+                normalization,
+            } => match normalization {
+                Normalization::NonNegative => {
+                    vec![unchecked_array_index(&operation, known, None)]
+                }
+                Normalization::Negative => {
+                    let field = edit.add_constant(
+                        int_type(),
+                        LiteralValue::new_native(known.layouts().array_len.as_index() as isize),
+                        &env,
+                    );
+                    let length_id = edit.new_value();
+                    let mut length_operation = Operation::subfield(
+                        check.span,
+                        array,
+                        mir::Value::Constant(field),
+                        int_type(),
+                    );
+                    length_operation.assign_result_id(Some(length_id));
+
+                    let offset_id = edit.new_value();
+                    let mut offset = Operation::alloca(check.span, int_type());
+                    offset.assign_result_id(Some(offset_id));
+                    let offset_place = mir::Value::Register(offset_id);
+                    vec![
+                        length_operation,
+                        offset,
+                        add_offset(
+                            check.span,
+                            known,
+                            mir::Value::Register(length_id),
+                            index,
+                            offset_place.clone(),
+                        ),
+                        unchecked_array_index(&operation, known, Some(offset_place)),
+                    ]
+                }
+            },
         };
         match check.operation {
             Some(index) => {
                 edit.block_mut(check.block)
-                    .replace_operation(index.as_index(), replacement);
+                    .operations
+                    .splice(index.as_index()..=index.as_index(), replacements);
             }
             None => {
                 // Appending keeps the operation indices any other rewrite in this block was planned
                 // against, and the terminator loses the error edge a check that cannot fail no
                 // longer has.
                 let block = edit.block_mut(check.block);
-                block.operations.push(replacement);
+                block.operations.extend(replacements);
                 block.terminator = Terminator::goto(
                     check.span,
                     check.normal.expect("a terminator check has a normal edge"),
@@ -354,6 +505,76 @@ mod tests {
         );
     }
 
+    /// The other branch of signed indexing: once guards prove `i < 0` and `0 <= len + i < len`,
+    /// the checked resolver becomes exactly the ordinary wrapping addition `len + i`. The source
+    /// writes the lower-bound guard explicitly so this tests the rewrite rather than asking the
+    /// deliberately syntactic relation domain for an extra overflow lemma.
+    #[test]
+    fn a_proved_negative_index_is_normalized_without_a_check() {
+        let module = optimized(
+            "fn from_end(a: [int], i: int) -> int {\n\
+                 if i < 0 {\n\
+                     if len(a) + i >= 0 { a[i] } else { panic(\"bad index\") }\n\
+                 } else {\n\
+                     panic(\"not a negative index\")\n\
+                 }\n\
+             }",
+        );
+        let body = body_of(&module, "from_end");
+        assert!(
+            !body.contains("array_resolve_index") && !body.contains("array_index"),
+            "the proved negative access must contain no checked indexing call:\n{body}"
+        );
+        assert!(
+            body.matches("Num<std::int>::add").count() >= 2,
+            "one addition tests the guard and another materializes the normalized offset:\n{body}"
+        );
+    }
+
+    /// The whole-accessor rewrite needs one extra step: read the array's length, materialize
+    /// `len + i`, then retarget the checked addressor to `array_offset_unchecked`. The unrelated
+    /// accesses deliberately spend the fixed inline-growth budget so the final accessor remains
+    /// whole; their checks are not the subject of this assertion.
+    #[test]
+    fn a_proved_whole_negative_array_index_becomes_unchecked() {
+        let module = optimized(
+            "fn from_end_after_work(work: [int], x: int, y: int, z: int, i: int) -> int {\n\
+                 let a = [x, y, z];\n\
+                 if i < 0 {\n\
+                     if 3 + i >= 0 {\n\
+                         work[0]; work[1]; work[2]; work[3];\n\
+                         work[4]; work[5]; work[6]; work[7];\n\
+                         a[i]\n\
+                     } else { panic(\"bad index\") }\n\
+                 } else {\n\
+                     panic(\"not a negative index\")\n\
+                 }\n\
+             }",
+        );
+        let body = body_of(&module, "from_end_after_work");
+        assert_eq!(
+            body.matches("call std::array_offset_unchecked").count(),
+            1,
+            "the final whole accessor must use its proved normalized offset:\n{body}"
+        );
+    }
+
+    /// Negativity alone establishes which normalization branch applies, but not that the result
+    /// lies at or above zero. The missing `-len <= i` half must retain the source failure.
+    #[test]
+    fn a_negative_index_without_a_lower_bound_stays_checked() {
+        let module = optimized(
+            "fn from_end(a: [int], i: int) -> int {\n\
+                 if i < 0 { a[i] } else { panic(\"not a negative index\") }\n\
+             }",
+        );
+        let body = body_of(&module, "from_end");
+        assert!(
+            body.contains("array_resolve_index") || body.contains("array_index"),
+            "a negative index with no lower bound can still be out of range:\n{body}"
+        );
+    }
+
     /// Successful signed indexing does not mean the source index was an offset: a negative index
     /// may have succeeded after normalization. Without an independent non-negativity proof the
     /// unchecked-offset accessor would interpret it incorrectly.
@@ -388,17 +609,19 @@ mod tests {
         );
     }
 
-    /// A negative index is legal in Ferlium — it counts from the end — so a loop that produces one
-    /// must keep its check even though the index is bounded from above.
+    /// This reverse index is semantically in range, but deriving `-i - 1 < 0` from `0 <= i` needs a
+    /// wrapping-safe entailment lemma the deliberately syntactic relation domain does not have.
+    /// Refusing it is conservative; the negative rewrite above applies once both normalized bounds
+    /// are actually proved.
     #[test]
-    fn a_negative_index_keeps_its_check() {
+    fn an_unproved_reverse_loop_index_keeps_its_check() {
         let module = optimized(
             "fn total(mut a: [int]) -> int { let mut t = 0; for i in 0..len(a) { t = t + a[-i - 1] }; t }",
         );
         let body = body_of(&module, "total");
         assert!(
             body.contains("array_resolve_index") || body.contains("array_index"),
-            "an index that may be negative must still be resolved:\n{body}"
+            "a semantically valid but unproved negative index must still be resolved:\n{body}"
         );
     }
 }

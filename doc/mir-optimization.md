@@ -480,23 +480,26 @@ empty-builder, rendered-prefix and assignment scaffolding orphaned by the rewrit
 ## Bounds-check elimination
 
 `mir::pass::bounds_check` removes either checked shape left after the optimization rounds when
-relational analysis proves `0 <= index < len`. A post-inline
-`array_resolve_index(index, len)` becomes a representation copy because its resolved offset is
-exactly `index`. A whole `array_index(array, index)` that the inliner left generic or oversized is
-retargeted to std's internal `array_offset_unchecked`; its arguments, out-place and generic
-instantiation are unchanged, while its call-site effect row comes from the unchecked callee. If
-either call was an `invoke`, its failure edge is unreachable and becomes a jump to the normal
-successor; the pass removes stranded blocks and DCE collects dead panic storage and cleanup.
+relational analysis proves the resolved offset lies in `0..len`. A post-inline
+`array_resolve_index(index, len)` becomes a representation copy when that offset is exactly `index`,
+or the ordinary `Num<int>::add(len, index)` call when a proved negative index resolves to
+`len + index`. A whole `array_index(array, index)` that the inliner left generic or oversized is
+retargeted to std's internal `array_offset_unchecked`; the negative case first reads the array length
+and materializes that normalized offset. The out-place and generic instantiation are unchanged,
+while the call-site effect row comes from the unchecked callee. If either checked call was an
+`invoke`, its failure edge is unreachable and becomes a jump to the normal successor; the pass
+removes stranded blocks and DCE collects dead panic storage and cleanup.
 
 The proof is a forward value-version analysis over affine integer forms and predicates. Direct,
 known standard-library calls supply their documented arithmetic, comparison, range and array-length
 semantics. `BuildArray` defines its destination's `len` field as its literal operand count even when
 the element values are unknown; a constant access or matching constant-bounded loop can therefore
 use the local shape fact. A successful checked access refines its normal edge. For a whole signed
-`array_index`, that refinement applies to the source index only when it was already known
-non-negative: a negative index may instead have succeeded after normalization and is not a valid
-unchecked offset. A canonical range loop supplies a non-negative constant-start induction fact, and
-bounds are attached to its yielded cursor only where the flow state also proves `start <= end`.
+`array_index`, a non-negative source index can be used directly only when `0 <= index < len` is
+proved. A negative source index instead requires the actual wrapped form `len + index` to be proved
+in that range; the emitted addition is the same known std operation the affine analysis modeled.
+A canonical range loop supplies a non-negative constant-start induction fact, and bounds are
+attached to its yielded cursor only where the flow state also proves `start <= end`.
 Place contents receive fresh symbols after writes and distinct incoming values receive join symbols,
 so a predicate cannot silently survive mutation. Registers that name places are structural SSA
 facts kept outside the flow state.

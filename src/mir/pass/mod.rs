@@ -244,7 +244,7 @@ pub(crate) fn optimize_function(
     // resolve at all, and before DCE, which removes the cleanup blocks a removed check strands.
     let source = current.as_ref().unwrap_or(function);
     if let Some((rewritten, removed)) =
-        bounds_check::eliminate_bounds_checks(source, &context.known_callees, &|callee| {
+        bounds_check::eliminate_bounds_checks(source, env, &context.known_callees, &|callee| {
             specializations.original(callee)
         })
     {

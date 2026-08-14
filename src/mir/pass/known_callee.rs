@@ -53,7 +53,7 @@ use crate::{
     },
     types::{
         effects::EffType,
-        r#type::{Type, TypeKind},
+        r#type::{CallImplType, Type, TypeKind},
     },
 };
 
@@ -152,6 +152,8 @@ pub(crate) struct Layouts {
 /// so one table serves every module of a session.
 pub(crate) struct KnownCallees {
     by_id: FxHashMap<FunctionId, KnownCallee>,
+    int_add: FunctionId,
+    int_add_ty: CallImplType,
     array_offset_unchecked: FunctionId,
     array_offset_unchecked_effects: EffType,
     layouts: Layouts,
@@ -179,14 +181,12 @@ impl KnownCallees {
         };
         let range_iterator = resolver.named_type("RangeIterator");
         let range_inclusive_iterator = resolver.named_type("RangeInclusiveIterator");
+        let int_add = resolver.method(NUM_TRAIT_NAME, int_type(), "add");
         let array_index = resolver.subscript_mut_member("array_index");
         let array_offset_unchecked = resolver.subscript_mut_member("array_offset_unchecked");
         resolver.assert_retargetable(array_index, array_offset_unchecked);
         let entries = [
-            (
-                resolver.method(NUM_TRAIT_NAME, int_type(), "add"),
-                KnownCallee::IntAdd,
-            ),
+            (int_add, KnownCallee::IntAdd),
             (
                 resolver.method(NUM_TRAIT_NAME, int_type(), "sub"),
                 KnownCallee::IntSub,
@@ -225,6 +225,8 @@ impl KnownCallees {
         ];
         Self {
             by_id: entries.into_iter().collect(),
+            int_add,
+            int_add_ty: resolver.call_impl_type(int_add),
             array_offset_unchecked,
             array_offset_unchecked_effects: resolver.effects(array_offset_unchecked),
             layouts: Layouts {
@@ -240,6 +242,13 @@ impl KnownCallees {
 
     pub(crate) fn layouts(&self) -> &Layouts {
         &self.layouts
+    }
+
+    /// The concrete integer addition used to materialize an affine offset proved by the range
+    /// analysis. Keeping its complete call type here makes the rewrite use the same ordinary std
+    /// operation whose wrapping semantics [`KnownCallee::IntAdd`] describes.
+    pub(crate) fn int_add(&self) -> (FunctionId, &CallImplType) {
+        (self.int_add, &self.int_add_ty)
     }
 
     /// The unchecked array accessor and the effects its call-site type must carry.
@@ -326,6 +335,19 @@ impl Resolver<'_> {
             .ty
             .effects
             .clone()
+    }
+
+    /// The selected callable type recorded on a direct MIR call.
+    fn call_impl_type(&self, function: FunctionId) -> CallImplType {
+        let definition = &self
+            .std_module
+            .get_function_by_id(function.function)
+            .expect("a resolved std function has a definition")
+            .definition;
+        CallImplType::new(
+            definition.ty_scheme.ty.clone(),
+            definition.result_convention,
+        )
     }
 
     /// Checks the ABI assumption used when bounds elimination retargets one call to another.
