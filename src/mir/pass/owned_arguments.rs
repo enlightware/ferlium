@@ -65,6 +65,8 @@ struct VariantFactory<'a> {
     sources: &'a [Option<SourceBody<'a>>],
     existing_specializations: &'a [Specialization],
     generated_specializations: Vec<Specialization>,
+    /// Fixed from `sources` before generation starts, so output cannot fund more output.
+    limit: usize,
     env: ModuleEnv<'a>,
     cache: FxHashMap<VariantKey, Option<LocalFunctionId>>,
     active: FxHashSet<VariantKey>,
@@ -108,6 +110,7 @@ pub(crate) fn forward_owned_arguments(
                 is_specialization: true,
             })
         }));
+        let limit = budget::owned_argument_variant_limit(sources.iter().flatten().count());
 
         let mut factory = VariantFactory {
             module,
@@ -115,6 +118,7 @@ pub(crate) fn forward_owned_arguments(
             sources: &sources,
             existing_specializations: specializations,
             generated_specializations: Vec::new(),
+            limit,
             env,
             cache: FxHashMap::default(),
             active: FxHashSet::default(),
@@ -180,9 +184,7 @@ impl VariantFactory<'_> {
                 function,
             });
         }
-        if self.generated_specializations.len() >= budget::MAX_OWNED_ARGUMENT_VARIANTS
-            || !self.active.insert(key.clone())
-        {
+        if self.generated_specializations.len() >= self.limit || !self.active.insert(key.clone()) {
             return None;
         }
 

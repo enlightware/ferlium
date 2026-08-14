@@ -570,19 +570,24 @@ single synthetic MIR score would assert backend costs the interpreter cannot est
 
 ## Budgets
 
-All in `mir::pass::budget`, all per function except the last. A budget change is a user-visible
-change: the optimization report cites them by name.
+All in `mir::pass::budget`. A budget change is a user-visible change: the optimization report cites
+the inlining limits by name.
 
-| constant | value | bounds |
+| budget | value | bounds |
 |---|---:|---|
 | `MAX_ROUNDS` | 4 | the driver's outer loop |
 | `INLINE_CALLEE_OPERATIONS` | 32 | the largest callee inlining will copy |
 | `INLINE_FUNCTION_GROWTH` | 128 | growth beyond the size a function had *before* optimization |
-| `MAX_SPECIALIZATIONS` | 512 | specializations per module, against the cascade |
-| `MAX_OWNED_ARGUMENT_VARIANTS` | 256 | ownership-taking ABI variants per module |
+| `specialization_limit` | `max(512, 4 × declared MIR bodies)` | specializations per module, against the cascade |
+| `owned_argument_variant_limit` | `max(256, 2 × stable source bodies)` | ownership-taking ABI variants per module |
 
 Inlining budgets are per function; generated-variant budgets are per module to cap call-graph
-cascades. Growth is measured against the pre-optimization size, or each round would grant it afresh.
+cascades. The specialization population is measured before optimization; the owned-variant source
+population is the declared bodies plus completed specializations entering that final pass. Neither
+kind of generated output enlarges its own allowance. For each generated-variant budget, the fixed
+number is a minimum total allowance and the scaled number replaces it once larger; the two are not
+added together. Growth is measured against the pre-optimization size, or each round would grant it
+afresh.
 
 ## The optimization report
 

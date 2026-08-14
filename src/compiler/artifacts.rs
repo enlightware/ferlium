@@ -226,13 +226,16 @@ impl MirArtifacts {
     /// callee, which is itself a body needing optimization — that is the whole point, since binding
     /// its dictionaries is what lets folding resolve them. So the declared functions are optimized
     /// first, then the specializations they requested are drained as a worklist, which may request
-    /// more. [`MAX_SPECIALIZATIONS`](crate::mir::pass::budget::MAX_SPECIALIZATIONS) bounds the
-    /// total, so a chain of generic callees cannot expand without end.
+    /// more. [`specialization_limit`](crate::mir::pass::budget::specialization_limit) bounds the
+    /// total relative to the declared MIR-body population, so a chain of generic callees cannot
+    /// expand without end.
     pub(crate) fn optimize(raw: &MirArtifacts, module: &Module, session: &CompilerSession) -> Self {
         let modules = session.raw_modules();
         let env = ModuleEnv::new(module, modules);
         let module_id = module.module_id();
-        let mut specializations = Specializations::new(module_id, raw.functions.len());
+        let declared_body_count = raw.functions.iter().flatten().count();
+        let mut specializations =
+            Specializations::new(module_id, raw.functions.len(), declared_body_count);
         // Resolved once per module: these walk std's trait and function tables to key operations by
         // identity, which is the same answer for every body below.
         let context = OptimizationContext::new(modules, env);

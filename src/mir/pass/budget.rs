@@ -16,12 +16,15 @@
 //!
 //! **Every budget here is spent within one unit of work, and none is session-wide.** Most are per
 //! function; the branch-forwarding pair is narrower still, bounding one rewrite candidate inside a
-//! function; and [`MAX_SPECIALIZATIONS`] is per module, because a specialization is shared between
+//! function; and [`specialization_limit`] is per module, because a specialization is shared between
 //! every call site that asks for it. A session-wide budget would make whether a function is
 //! optimized depend on how much work unrelated functions consumed first, which is exactly the
-//! fragility above. Compile time therefore stays linear in function count with a predictable
-//! constant. The compile-time evaluation budgets — fuel, call depth, environment cells — live with
-//! the engine that spends them, in [`crate::mir::const_eval`].
+//! fragility above. Module-wide generation limits use either a floor or a linearly scaled allowance
+//! over the stable input population, whichever is larger; the floor is not added to the scaled
+//! allowance, and generated output never enlarges its own budget. Compile time therefore stays
+//! linear in input size with a predictable constant. The compile-time evaluation budgets —
+//! fuel, call depth, environment cells — live with the engine that spends them, in
+//! [`crate::mir::const_eval`].
 
 /// How many fold/inline rounds a single function may go through.
 ///
@@ -65,22 +68,78 @@ pub const FORWARD_BOOLEAN_BLOCKS: usize = 16;
 /// to run them, so a long path duplicates code into several arms. This bounds that growth.
 pub const FORWARD_BOOLEAN_REPLAYED_OPERATIONS: usize = 8;
 
-/// How many specialized bodies one module's optimization may create.
+/// Minimum number of specialized bodies one module's optimization may create.
 ///
 /// Specialization cascades by design: monomorphizing a caller makes the dictionaries it forwards
 /// constant, which brings its own generic calls into reach, which may specialize further. The cache
 /// bounds the *breadth* — one body per distinct instantiation rather than per call site — but not
-/// the depth, so this bounds the total.
+/// the depth, so [`specialization_limit`] bounds the total.
 ///
 /// Per module rather than per function, unlike the inlining budgets, because a specialization is
 /// shared between every call site that asks for it: charging it to whichever function happened to
-/// ask first would make the cost depend on optimization order. It is deliberately generous; the
-/// standard library's whole specializable population is in the low hundreds.
-pub const MAX_SPECIALIZATIONS: usize = 512;
+/// ask first would make the cost depend on optimization order. The floor is deliberately generous
+/// for a small entry module which instantiates a deep generic graph imported from dependencies.
+pub const MIN_SPECIALIZATIONS: usize = 512;
+
+/// Additional specialization allowance per declared script body.
+pub const SPECIALIZATIONS_PER_BODY: usize = 4;
+
+/// How many specialized bodies one module's optimization may create.
+///
+/// Based only on declared MIR bodies, before optimization creates any output. This keeps generated
+/// code linear in stable input size rather than allowing a cascade to fund itself.
+pub const fn specialization_limit(declared_bodies: usize) -> usize {
+    let scaled = declared_bodies.saturating_mul(SPECIALIZATIONS_PER_BODY);
+    if scaled > MIN_SPECIALIZATIONS {
+        scaled
+    } else {
+        MIN_SPECIALIZATIONS
+    }
+}
+
+/// Minimum number of ownership-taking ABI variants the final whole-module pass may add.
+///
+/// Variants are cached by `(callee, owned argument set)` and created only for masks observed at
+/// profitable call sites. The floor preserves small modules with a wide imported API.
+pub const MIN_OWNED_ARGUMENT_VARIANTS: usize = 256;
+
+/// Additional owned-ABI variant allowance per stable source body.
+pub const OWNED_ARGUMENT_VARIANTS_PER_BODY: usize = 2;
 
 /// How many ownership-taking ABI variants the final whole-module pass may add.
 ///
-/// Variants are cached by `(callee, owned argument set)` and created only for masks observed at
-/// profitable call sites. The bound prevents independently useful masks of a very wide API from
-/// producing a combinatorial family.
-pub const MAX_OWNED_ARGUMENT_VARIANTS: usize = 256;
+/// The source population is fixed before generation begins. Variants accumulated while the pass
+/// runs are deliberately absent, preventing a combinatorial family from funding itself.
+pub const fn owned_argument_variant_limit(source_bodies: usize) -> usize {
+    let scaled = source_bodies.saturating_mul(OWNED_ARGUMENT_VARIANTS_PER_BODY);
+    if scaled > MIN_OWNED_ARGUMENT_VARIANTS {
+        scaled
+    } else {
+        MIN_OWNED_ARGUMENT_VARIANTS
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn module_generation_budgets_have_a_floor_and_scale_linearly() {
+        assert_eq!(specialization_limit(0), MIN_SPECIALIZATIONS);
+        assert_eq!(specialization_limit(128), MIN_SPECIALIZATIONS);
+        assert_eq!(specialization_limit(129), 516);
+
+        assert_eq!(owned_argument_variant_limit(0), MIN_OWNED_ARGUMENT_VARIANTS);
+        assert_eq!(
+            owned_argument_variant_limit(128),
+            MIN_OWNED_ARGUMENT_VARIANTS
+        );
+        assert_eq!(owned_argument_variant_limit(129), 258);
+    }
+
+    #[test]
+    fn module_generation_budgets_do_not_overflow() {
+        assert_eq!(specialization_limit(usize::MAX), usize::MAX);
+        assert_eq!(owned_argument_variant_limit(usize::MAX), usize::MAX);
+    }
+}

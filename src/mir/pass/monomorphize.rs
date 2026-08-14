@@ -311,11 +311,14 @@ pub(crate) struct Specializations {
     substituted: RefCell<FxHashMap<(FunctionId, Instantiation), Function>>,
     /// Where the module's HIR-declared functions end; specializations are numbered from here.
     first_index: usize,
+    /// Fixed from the module's declared MIR-body population before any output is generated.
+    limit: usize,
 }
 
 impl Specializations {
-    /// Starts an empty table for `module`, whose HIR function table has `function_count` entries.
-    pub(crate) fn new(module: ModuleId, function_count: usize) -> Self {
+    /// Starts an empty table for `module`, whose HIR function table has `function_count` entries
+    /// and `declared_body_count` script bodies.
+    pub(crate) fn new(module: ModuleId, function_count: usize, declared_body_count: usize) -> Self {
         Self {
             module,
             created: Vec::new(),
@@ -325,6 +328,7 @@ impl Specializations {
             rejected: FxHashSet::default(),
             substituted: RefCell::new(FxHashMap::default()),
             first_index: function_count,
+            limit: budget::specialization_limit(declared_body_count),
         }
     }
 
@@ -334,6 +338,11 @@ impl Specializations {
 
     pub(crate) fn len(&self) -> usize {
         self.created.len()
+    }
+
+    /// Whether this module has consumed its input-relative specialization allowance.
+    pub(crate) fn is_full(&self) -> bool {
+        self.created.len() >= self.limit
     }
 
     /// Whether `id` names a specialization this table created.
@@ -1128,7 +1137,7 @@ fn specialization_for(
     if specializations.is_rejected(&key) {
         return None;
     }
-    if specializations.len() >= budget::MAX_SPECIALIZATIONS {
+    if specializations.is_full() {
         return None;
     }
     if !worth_specializing(body, scheme, instantiation, &key.dictionaries, env) {
