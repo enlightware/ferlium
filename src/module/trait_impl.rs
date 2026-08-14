@@ -866,7 +866,7 @@ impl TraitImpls {
             .map(|(index, function)| {
                 let id = fn_collector.next_id();
                 let fn_ty = Type::function_type(function.definition.ty_scheme.ty.clone());
-                fn_collector.push(namer(index), function);
+                fn_collector.push_with_visibility(namer(index), function, Visibility::Module);
                 (id, fn_ty)
             })
             .multiunzip();
@@ -909,9 +909,10 @@ impl TraitImpls {
             .enumerate()
             .map(|(index, (value, ty))| {
                 let id = fn_collector.next_id();
-                fn_collector.push(
+                fn_collector.push_with_visibility(
                     namer(index),
                     pending_trivial_associated_const_getter(value, ty),
+                    Visibility::Module,
                 );
                 id
             })

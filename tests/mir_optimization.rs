@@ -210,11 +210,11 @@ fn constant_array_pipeline_reifies_to_one_build_array() {
     );
 }
 
-/// Inference reaches the iterator pipeline through several caller-local effect variables. The
-/// variables' numeric identities do not distinguish generated code, while distinct primitive and
-/// variable-sharing shapes remain separate because they can change a forwarding thunk's call form.
+/// Inference reaches the iterator pipeline through several provisional caller-local effect rows,
+/// but only the final elaborated application may retain runtime artifacts. Its remaining open
+/// effect variables are alpha-canonicalized within the single generated family.
 #[test]
-fn alpha_equivalent_effect_rows_share_generated_trait_artifacts() {
+fn final_effect_rows_only_materialize_one_iterator_artifact_family() {
     let raw = emit(
         "effect_instantiation_sharing",
         "fn main() -> [int] { [1, 2] |> concat([3, 4]) |> map(|x| x*x) }",
@@ -242,22 +242,18 @@ fn alpha_equivalent_effect_rows_share_generated_trait_artifacts() {
 
     assert_eq!(
         value.len(),
-        21,
-        "expected three seven-entry Value families:\n{value:#?}"
+        7,
+        "expected one seven-entry Value family:\n{value:#?}"
     );
     assert_eq!(
         iterator.len(),
-        3,
-        "expected one thunk per effect-row shape:\n{iterator:#?}"
+        1,
+        "expected one thunk for the final effect row:\n{iterator:#?}"
     );
     assert_eq!(
         from_iterator.len(),
-        3,
-        "expected one thunk per effect-row shape:\n{from_iterator:#?}"
-    );
-    assert!(
-        value.iter().any(|line| line.contains("(fallible, e₀)")),
-        "the fallible family must remain distinct:\n{value:#?}"
+        1,
+        "expected one thunk for the final effect row:\n{from_iterator:#?}"
     );
     assert!(
         value.iter().all(|line| !line.contains("e₂")),
@@ -269,8 +265,56 @@ fn alpha_equivalent_effect_rows_share_generated_trait_artifacts() {
             .chain(iterator.iter())
             .chain(from_iterator.iter())
             .all(|line| !line.contains("-1(")),
-        "an alpha-equivalent repeat must reuse the original artifact, not acquire a collision \
-         suffix:\nvalue={value:#?}\niterator={iterator:#?}\nfrom_iterator={from_iterator:#?}"
+        "the retained artifacts must not acquire a collision suffix:\nvalue={value:#?}\n\
+         iterator={iterator:#?}\nfrom_iterator={from_iterator:#?}"
+    );
+}
+
+/// Trait-output inference may consider an effectful application before defaulting establishes the
+/// mapper's final pure effect. Those provisional queries must not leave a second generated
+/// dictionary family in the module: runtime dictionaries are materialized only from final HIR.
+#[test]
+fn provisional_effect_queries_do_not_materialize_trait_artifacts() {
+    let src = "map([1, 2, 3], |x| x + 2)";
+    let raw = emit(
+        "delayed_trait_materialization",
+        src,
+        MirOptimization::Disabled,
+    );
+    let map_thunks = raw
+        .lines()
+        .filter(|line| {
+            line.starts_with("fn std::Map<[std::int], std::int>::map#impl:")
+                && line.contains("-thunk(")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        map_thunks.len(),
+        1,
+        "only the final pure map application may materialize a dictionary method:\n{map_thunks:#?}"
+    );
+    assert!(
+        !map_thunks[0].contains("! fallible"),
+        "the retained map thunk must use the lambda's final pure effect:\n{}",
+        map_thunks[0]
+    );
+
+    let optimized = emit(
+        "delayed_trait_materialization",
+        src,
+        MirOptimization::Enabled,
+    );
+    let map_specializations = optimized
+        .lines()
+        .filter(|line| {
+            line.starts_with("fn Map<[A], B>::map#impl:") && line.contains("#spec:[int, int]")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        map_specializations.len(),
+        1,
+        "an orphaned provisional thunk must not request another map specialization:\n\
+         {map_specializations:#?}"
     );
 }
 

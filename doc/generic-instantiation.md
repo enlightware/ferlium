@@ -101,8 +101,18 @@ This canonicalization is deliberately confined to generated artifacts. It does n
 caller's semantic type or ordinary trait-impl lookup. A reused dictionary expression is typed with
 the caller's actual input; its stored methods remain generic over the canonical variables.
 
+Trait-output resolution during inference and defaulting is not a runtime-artifact retention point.
+Such a query uses the ordinary trait-selection rules in a scratch HIR arena, copies the associated
+type and effect outputs, then rolls back any dictionaries, methods, getters, or cache entries that
+selection provisionally generated. The final HIR elaboration of a dictionary or method reference
+performs the materializing query. Consequently, effect rows considered and later rejected or
+defaulted during inference cannot leave orphaned module functions that the MIR optimizer would
+treat as roots.
+
 Materialized blanket applications whose output effects depend on the application use a separate
 cache from concrete trait implementations. The concrete cache is keyed only by input types, so
 putting a defaulted output there could leak that default into a later query with explicit output
-bindings. Only queries with no requested outputs share through the unconstrained-application cache;
-queries carrying output bindings continue to materialize independently.
+bindings. Inference-only output queries populate neither cache. When final HIR actually requires a
+runtime dictionary, applications with no requested outputs can share through the
+unconstrained-application cache; materializations carrying explicit output bindings remain
+independent.

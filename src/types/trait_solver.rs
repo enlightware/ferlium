@@ -32,7 +32,7 @@ use crate::{
         DefKind, DefTable, FunctionId, LocalDecl, LocalDeclId, LocalFunctionId, LocalImplId,
         Module, ModuleEnv, ModuleFunction, ModuleId, PendingFunctionBody, PendingFunctionCollector,
         PendingModuleFunction, ProjectionKey, QualifiedNameEnv, ResolvedValueLayout,
-        TraitDictionary, TraitId, TraitImpl, TraitImplId, TraitImpls, TypeDefId,
+        TraitDictionary, TraitId, TraitImpl, TraitImplId, TraitImpls, TypeDefId, Visibility,
         build_dictionary_value, id::Id, unique_generated_name,
     },
     std::{
@@ -2218,7 +2218,8 @@ impl<'a> TraitSolver<'a> {
                     &[],
                 )
                 .into();
-            self.fn_collector.reserve(name);
+            self.fn_collector
+                .reserve_with_visibility(name, Visibility::Module);
             methods.push(id);
             tys.push(ty);
         }
@@ -3146,7 +3147,11 @@ impl<'a> TraitSolver<'a> {
                                 )
                             ));
                             let id = self.fn_collector.next_id();
-                            self.fn_collector.push(name, function);
+                            self.fn_collector.push_with_visibility(
+                                name,
+                                function,
+                                Visibility::Module,
+                            );
                             id
                         };
 
@@ -3416,11 +3421,11 @@ impl<'a> TraitSolver<'a> {
         trait_id: TraitId,
         input_tys: &[Type],
         fn_span: Location,
-        arena: &mut NodeArena,
+        _arena: &mut NodeArena,
     ) -> Result<(Vec<Type>, Vec<EffType>), InternalCompilationError> {
-        let impl_id = self.solve_impl(trait_id, input_tys, fn_span, arena)?;
-        let impl_data = self.get_impl_data_by_id(impl_id);
-        Ok((impl_data.output_tys.clone(), impl_data.output_effs.clone()))
+        self.solve_application_outputs_without_materializing(
+            trait_id, input_tys, None, None, fn_span,
+        )
     }
 
     /// Solve a full trait application.
@@ -3436,18 +3441,55 @@ impl<'a> TraitSolver<'a> {
         requested_output_tys: &[Type],
         requested_output_effs: &[EffType],
         fn_span: Location,
-        arena: &mut NodeArena,
+        _arena: &mut NodeArena,
     ) -> Result<(Vec<Type>, Vec<EffType>), InternalCompilationError> {
-        let impl_id = self.solve_impl_application(
+        self.solve_application_outputs_without_materializing(
             trait_id,
             input_tys,
             Some(requested_output_tys),
             Some(requested_output_effs),
             fn_span,
-            arena,
-        )?;
-        let impl_data = self.get_impl_data_by_id(impl_id);
-        Ok((impl_data.output_tys.clone(), impl_data.output_effs.clone()))
+        )
+    }
+
+    /// Resolve a trait application's associated outputs without committing its runtime artifacts.
+    ///
+    /// Type inference and defaulting ask whether an application exists and what outputs it
+    /// determines while types and effects are still provisional. The materializing solver remains
+    /// the single source of trait-selection semantics, but everything it derives for this query is
+    /// transactional: method bodies, associated-const getters, dictionaries, and their cache keys
+    /// are rolled back after the outputs have been copied. Final HIR elaboration calls
+    /// [`solve_impl`](Self::solve_impl) and is therefore the only phase that retains those runtime
+    /// artifacts.
+    ///
+    /// A scratch HIR arena is deliberate. Some trait derivers synthesize a body while determining
+    /// whether they apply; a query must not leave those unused nodes in the expression being
+    /// inferred either.
+    fn solve_application_outputs_without_materializing(
+        &mut self,
+        trait_id: TraitId,
+        input_tys: &[Type],
+        requested_output_tys: Option<&[Type]>,
+        requested_output_effs: Option<&[EffType]>,
+        fn_span: Location,
+    ) -> Result<(Vec<Type>, Vec<EffType>), InternalCompilationError> {
+        let snapshot = self.snapshot_derived_impl_state();
+        let mut scratch_arena = NodeArena::default();
+        let result = self
+            .solve_impl_application(
+                trait_id,
+                input_tys,
+                requested_output_tys,
+                requested_output_effs,
+                fn_span,
+                &mut scratch_arena,
+            )
+            .map(|impl_id| {
+                let imp = self.get_impl_data_by_id(impl_id);
+                (imp.output_tys.clone(), imp.output_effs.clone())
+            });
+        self.rollback_derived_impl_state(snapshot);
+        result
     }
 
     pub fn solve_associated_const(

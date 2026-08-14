@@ -468,6 +468,34 @@ fn generated_function_value_methods_and_lambdas_are_private() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generated_trait_artifacts_are_private() {
+    let mut session = TestSession::new();
+    let module_id = compile_module(
+        &mut session,
+        "base",
+        "pub fn mapped(values: [int]) -> [int] { map(values, |x| x + 1) }",
+    );
+    let module = session.session().expect_fresh_module(module_id);
+    let generated = module
+        .own_symbols()
+        .filter(|name| name.as_str().contains("MapIterator"))
+        .collect::<Vec<_>>();
+    assert!(
+        !generated.is_empty(),
+        "the map application should generate iterator dictionary artifacts"
+    );
+    for &name in &generated {
+        assert_eq!(
+            module.symbol_visibility(name),
+            Some(Visibility::Module),
+            "generated trait artifact `{name}` must stay inside its module"
+        );
+        assert!(!module.public_symbols().any(|public| public == name));
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn generated_trait_method_names_use_qualified_type_names() {
     let mut session = TestSession::new();
     let module_id = compile_module(

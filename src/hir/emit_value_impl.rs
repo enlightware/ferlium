@@ -128,7 +128,9 @@ pub(crate) fn generic_value_methods_for_type(
         let function =
             PendingModuleFunction::from_body(definition, body, runtime_arg_count, None, locals);
         let id = solver.fn_collector.next_id();
-        solver.fn_collector.push(name, function);
+        solver
+            .fn_collector
+            .push_with_visibility(name, function, Visibility::Module);
         methods.push(id);
     }
     Ok(methods)

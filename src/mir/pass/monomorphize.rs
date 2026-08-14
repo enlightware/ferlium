@@ -1940,8 +1940,10 @@ mod tests {
     /// keying alone would keep a copy per closure — four of them here, since `collect` drives a
     /// second pair of instantiations.
     ///
-    /// The other half of the assertion is what stops this from being satisfied by merging too much:
-    /// the `Map::map` thunks *do* differ, each carrying its own closure, and must stay apart.
+    /// Trait-output inference used to retain one `Map::map` thunk per provisional effect row. Those
+    /// thunks then requested duplicate specializations even though the closure value is an ordinary
+    /// argument and does not belong to the specialized body. Delayed HIR materialization leaves one
+    /// final thunk, so the two pipelines must also share one `Map::map` specialization.
     #[test]
     fn call_sites_separated_only_by_erased_effects_share_one_specialization() {
         let mut session = CompilerSession::new();
@@ -1974,10 +1976,10 @@ mod tests {
             .iter()
             .filter(|name| name.contains("::map#"))
             .count();
-        assert!(
-            mappers > 1,
-            "each pipeline's `map` carries its own closure and must keep its own body, but {mappers} \
-             survived in:\n{specializations:#?}"
+        assert_eq!(
+            mappers, 1,
+            "the two pipelines must share one specialized `map`, but got {mappers} in:\n\
+             {specializations:#?}"
         );
     }
 
