@@ -577,7 +577,10 @@ enumeration.
 `make profile-mir` compares raw and optimized MIR over the canonical runtime workloads without
 Valgrind; `WORKLOADS="fibonacci sieve"` selects a subset. The native profiler and Gungraun share
 workload compilation, inputs and typed result extraction through `benches/runtime_workloads.rs`.
-Gungraun therefore continues to measure the same execution boundary.
+Gungraun therefore continues to measure the same execution boundary. Each row includes its signed
+delta and percentage change; a count introduced from a zero baseline is marked `new`. Peak cells is
+a high-water mark within one run, while the corpus summary sums the workloads' paired peaks to make
+their improvements additive; that sum is a comparison score, not simultaneous memory use.
 
 The report orders instructions by broad cost shape — semantic/callee-dependent, size-dependent,
 fixed storage, addressing/evidence, scalar/control, then interpreter scaffolding — but assigns no

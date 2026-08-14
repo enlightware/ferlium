@@ -64,11 +64,50 @@ fn kinds_in(
         .collect()
 }
 
+fn formatted_delta(before: u64, after: u64) -> String {
+    let delta = i128::from(after) - i128::from(before);
+    if delta == 0 {
+        "0".to_owned()
+    } else {
+        format!("{delta:+}")
+    }
+}
+
+fn formatted_percentage(before: u64, after: u64) -> String {
+    if before == 0 {
+        return if after == 0 {
+            "0.00%".to_owned()
+        } else {
+            "new".to_owned()
+        };
+    }
+    let percentage = (after as f64 / before as f64 - 1.0) * 100.0;
+    if percentage == 0.0 {
+        "0.00%".to_owned()
+    } else if percentage.abs() < 0.01 {
+        if percentage.is_sign_positive() {
+            "+<0.01%".to_owned()
+        } else {
+            "-<0.01%".to_owned()
+        }
+    } else {
+        format!("{percentage:+.2}%")
+    }
+}
+
+fn print_row(label: &str, before: u64, after: u64) {
+    println!(
+        "  {label:<30} {before:>14} {after:>14} {:>14} {:>10}",
+        formatted_delta(before, after),
+        formatted_percentage(before, after),
+    );
+}
+
 fn print_comparison(name: &str, raw: &MirInstructionCounts, optimized: &MirInstructionCounts) {
     println!("\n{name}");
     println!(
-        "{:<32} {:>14} {:>14} {:>14}",
-        "instruction", "raw", "optimized", "delta"
+        "{:<32} {:>14} {:>14} {:>14} {:>10}",
+        "instruction", "raw", "optimized", "delta", "change"
     );
     for class in MirInstructionCostClass::ALL {
         let kinds = kinds_in(raw, optimized, class);
@@ -79,55 +118,70 @@ fn print_comparison(name: &str, raw: &MirInstructionCounts, optimized: &MirInstr
         for kind in kinds {
             let before = raw.get(kind);
             let after = optimized.get(kind);
-            let delta = i128::from(after) - i128::from(before);
-            println!(
-                "  {:<30} {:>14} {:>14} {:>+14}",
-                kind.label(),
-                before,
-                after,
-                delta
-            );
+            print_row(&kind.label(), before, after);
         }
     }
     let before = raw.total();
     let after = optimized.total();
-    let delta = i128::from(after) - i128::from(before);
-    println!(
-        "  {:<30} {:>14} {:>14} {:>+14}",
-        "TOTAL", before, after, delta
-    );
+    print_row("TOTAL", before, after);
 }
 
-/// Peak cells is a high-water mark, so it is reported as a maximum and never summed: the corpus
-/// figure is the worst frame depth any one workload reached, not the total of ten runs.
-fn print_peak_cells(raw: usize, optimized: usize) {
-    let delta = i128::from(optimized as u64) - i128::from(raw as u64);
-    println!(
-        "  {:<30} {:>14} {:>14} {:>+14}",
-        "peak cells (max, not summed)", raw, optimized, delta
-    );
+/// Peak cells is a high-water mark within one workload. At corpus level we sum those paired peaks
+/// as a comparison score; it is deliberately not a claim about simultaneous memory use.
+fn print_peak_cells(label: &str, raw: usize, optimized: usize) {
+    print_row(label, raw as u64, optimized as u64);
 }
 
 fn main() {
     let workloads = selected_workloads();
     let mut raw_total = MirInstructionCounts::default();
     let mut optimized_total = MirInstructionCounts::default();
-    let (mut raw_peak, mut optimized_peak) = (0, 0);
+    let (mut raw_peak_sum, mut optimized_peak_sum) = (0, 0);
 
     for workload in &workloads {
         eprintln!("profiling {}...", workload.name());
         let raw = profile(*workload, BenchTarget::Mir);
         let optimized = profile(*workload, BenchTarget::OptimizedMir);
         print_comparison(workload.name(), raw.total(), optimized.total());
-        print_peak_cells(raw.peak_cells(), optimized.peak_cells());
+        print_peak_cells("peak cells", raw.peak_cells(), optimized.peak_cells());
         raw_total.merge(raw.total());
         optimized_total.merge(optimized.total());
-        raw_peak = raw_peak.max(raw.peak_cells());
-        optimized_peak = optimized_peak.max(optimized.peak_cells());
+        raw_peak_sum += raw.peak_cells();
+        optimized_peak_sum += optimized.peak_cells();
     }
 
     if workloads.len() > 1 {
         print_comparison("TOTAL", &raw_total, &optimized_total);
-        print_peak_cells(raw_peak, optimized_peak);
+        print_peak_cells(
+            "peak cells (workload sum)",
+            raw_peak_sum,
+            optimized_peak_sum,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{formatted_delta, formatted_percentage};
+
+    #[test]
+    fn zero_change_has_no_positive_sign() {
+        assert_eq!(formatted_delta(10, 10), "0");
+        assert_eq!(formatted_percentage(10, 10), "0.00%");
+    }
+
+    #[test]
+    fn nonzero_changes_keep_their_direction() {
+        assert_eq!(formatted_delta(10, 12), "+2");
+        assert_eq!(formatted_delta(10, 8), "-2");
+        assert_eq!(formatted_percentage(10, 12), "+20.00%");
+        assert_eq!(formatted_percentage(10, 8), "-20.00%");
+        assert_eq!(formatted_percentage(100_000, 100_001), "+<0.01%");
+        assert_eq!(formatted_percentage(100_000, 99_999), "-<0.01%");
+    }
+
+    #[test]
+    fn a_new_nonzero_row_has_no_finite_percentage() {
+        assert_eq!(formatted_percentage(0, 1), "new");
     }
 }
