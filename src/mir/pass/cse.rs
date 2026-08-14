@@ -695,6 +695,9 @@ struct Available {
 /// Replaces repeated address computations by their dominating first occurrence, returning a
 /// rewritten function if anything was merged.
 pub(crate) fn eliminate_common_subexpressions(func: &Function) -> Option<Function> {
+    if !has_multiple_numberable_computations(func) {
+        return None;
+    }
     let successors: Vec<Vec<usize>> = func
         .blocks()
         .map(|block| {
@@ -741,6 +744,28 @@ pub(crate) fn eliminate_common_subexpressions(func: &Function) -> Option<Functio
     // A merged operation is usually the last reference to the field index it named.
     edit.prune_constants();
     Some(edit.finish_unverified())
+}
+
+/// Whether dominance-based value numbering could possibly find a repeated computation.
+///
+/// This counts rather than comparing raw expressions: numbering may merge an operand first and
+/// thereby make two later expressions equal even when their original register operands differed.
+/// With fewer than two operations it understands, however, no rewrite is possible. Rejecting that
+/// overwhelmingly common case before allocating the successor graph avoids paying for dominance
+/// merely to discover an empty merge set.
+fn has_multiple_numberable_computations(func: &Function) -> bool {
+    let mut count = 0;
+    for block in func.blocks() {
+        for operation in func.block(block).operations() {
+            if Computation::of(&operation.kind).is_some() {
+                count += 1;
+                if count == 2 {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 struct Numbering<'a> {
@@ -863,7 +888,7 @@ enum Enter {
 
 #[cfg(test)]
 mod tests {
-    use super::has_duplicate_call_fingerprint;
+    use super::{has_duplicate_call_fingerprint, has_multiple_numberable_computations};
     use crate::{CompilerSession, ExecutionTarget, MirOptimization, module::Path, ustr};
 
     fn optimized(src: &str) -> String {
@@ -934,6 +959,26 @@ mod tests {
             "repeated",
         );
         assert!(has_duplicate_call_fingerprint(&body));
+    }
+
+    #[test]
+    fn place_cse_requests_dominance_only_for_multiple_computations() {
+        let none = raw_body("fn none(x: int) -> int { x }", "none");
+        assert!(!has_multiple_numberable_computations(&none));
+
+        let one = raw_body(
+            "struct Pair { a: int, b: int }\nfn one(p: Pair) -> int { p.a }",
+            "one",
+        );
+        assert!(!has_multiple_numberable_computations(&one));
+
+        // The gate is deliberately conservative: distinct computations still request dominance,
+        // which is the later analysis's job to distinguish.
+        let multiple = raw_body(
+            "struct Pair { a: int, b: int }\nfn multiple(p: Pair) -> int { p.a + p.b }",
+            "multiple",
+        );
+        assert!(has_multiple_numberable_computations(&multiple));
     }
 
     #[test]
