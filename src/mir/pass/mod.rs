@@ -44,6 +44,7 @@ pub(crate) mod cse;
 pub(crate) mod dataflow;
 pub(crate) mod dce;
 pub(crate) mod dead_evidence;
+pub(crate) mod dead_store;
 pub(crate) mod fold;
 pub(crate) mod inline;
 pub(crate) mod known_callee;
@@ -267,6 +268,13 @@ pub(crate) fn optimize_function(
     if let Some(cleaned) = dce::remove_dead_known_calls(source, &context.known_callees, &|callee| {
         specializations.original(callee)
     }) {
+        current = Some(cleaned);
+    }
+    // A local `TrivialCopy` cell often receives an initializer only for every branch to replace it
+    // before its first read. Backward exact-place liveness removes that initializer; ordinary DCE
+    // below then sees any allocation or literal which became wholly unread.
+    let source = current.as_ref().unwrap_or(function);
+    if let Some(cleaned) = dead_store::remove_overwritten_trivial_copy_stores(source, env) {
         current = Some(cleaned);
     }
     // Cleanup runs once, after the rounds have settled, and on every body rather than only on one a

@@ -46,6 +46,7 @@ string accumulate // forward an overwritten string into its self-prefixed format
 devirtualize      // final dictionary-entry callees exposed too late for a fold round
 bounds checks     // prove array indices in range and remove checked access/failure edges
 dead known calls  // remove unused chains of explicitly total/speculatable numeric calls
+dead stores       // remove unread initialization overwritten on every following path
 dce               // on every body, not only a changed one
 stack markers     // drop a mark duplicating one already held, and restores that pop nothing
 finish            // restores canonical form without exposing the intermediate body
@@ -71,6 +72,26 @@ worklist optimized it; that copy is its raw stage.
 **Termination** rests on three independent bounds: the dataflow lattice is monotone within a run,
 inlining is bounded by its growth budget and the non-recursive restriction, and `MAX_ROUNDS` bounds
 the outer loop. Work per function is a product of named constants.
+
+## Overwritten `TrivialCopy` stores
+
+After all value-changing rewrites, a backward CFG liveness pass removes a `store` to a local
+concrete-`TrivialCopy` `alloca` when every path replaces that exact whole place before a read. It
+recognizes direct `store`, `memcpy`, and infallible caller-provided call-result places as writes, and direct
+loads or representation transfers as reads. This removes the initialization in `let mut y = 0; if
+b { y = x } else { y = x + 1 }; y` while retaining it if one branch reads `y` first.
+
+The proof intentionally stops at exact roots: subfields, a candidate passed as a call argument,
+and ownership transfers *into* the candidate reject the local. It runs immediately before ordinary
+storage DCE, which can then remove any allocation or literal made wholly unread.
+Stores that consume a freshly constructed owned value are retained, even when their destination is
+`TrivialCopy`, because removing them would orphan that value's required consuming use.
+
+A source-fallible call is an `invoke` terminator, so its result place is deliberately outside this
+first pass; the error edge and cleanup would need their own proof. DS has its own strict operand-role
+scan rather than reusing the broader escape analysis: that analysis admits `Let` call arguments,
+while DS permits only direct reads and whole-place writes of the local root. Any unmodelled use
+rejects the candidate, so a future MIR operation cannot silently broaden the rewrite.
 
 ## Placement rules
 

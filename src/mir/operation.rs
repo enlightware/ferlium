@@ -95,6 +95,27 @@ impl Operation {
         self.kind.result(self)
     }
 
+    /// Whether this operation's result is an owned value which must be consumed exactly once.
+    ///
+    /// Most result registers merely denote a place or a `TrivialCopy` representation. Constructors
+    /// that transfer ownership into a `store` are different: removing that store must retain the
+    /// producer or arrange another consuming use.
+    pub fn result_requires_consuming_use(&self) -> bool {
+        match &self.kind {
+            OperationKind::Variant { .. } | OperationKind::CloneClosureEnv { .. } => true,
+            OperationKind::BuildClosure {
+                num_hidden_dicts,
+                has_env_dict,
+                ..
+            } => {
+                let captures =
+                    self.operands.len() - *num_hidden_dicts as usize - usize::from(*has_env_dict);
+                captures != 0
+            }
+            _ => false,
+        }
+    }
+
     /// Whether two operations are the same, with operands compared by `operand_eq` rather than
     /// directly.
     ///

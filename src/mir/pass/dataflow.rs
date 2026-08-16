@@ -937,12 +937,26 @@ pub(crate) struct CallOperands<'a> {
     pub result: &'a mir::Value,
 }
 
+/// Returns the caller-provided result-place operand's index.
+///
+/// This is the allocation-free part of [`call_operands`]. Consumers that only classify the result
+/// place should use it rather than constructing visible argument/convention pairs.
+pub(crate) fn call_result_operand_index(
+    operands: &[mir::Value],
+    ty: &CallImplType,
+) -> Option<usize> {
+    let visible = ty.fn_ty.args.len();
+    // callee + extras + args + ret
+    let extras = operands.len().checked_sub(visible + 2)?;
+    Some(1 + extras + visible)
+}
+
 pub(crate) fn call_operands<'a>(
     operands: &'a [mir::Value],
     ty: &CallImplType,
 ) -> Option<CallOperands<'a>> {
     let visible = ty.fn_ty.args.len();
-    // callee + extras + args + ret
+    let result_index = call_result_operand_index(operands, ty)?;
     let extras = operands.len().checked_sub(visible + 2)?;
     let conventions = arg_conventions_for_args(&ty.fn_ty.args);
     Some(CallOperands {
@@ -952,7 +966,7 @@ pub(crate) fn call_operands<'a>(
             .iter()
             .zip(conventions)
             .collect(),
-        result: operands.last()?,
+        result: &operands[result_index],
     })
 }
 

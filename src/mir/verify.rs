@@ -1489,23 +1489,8 @@ impl<'a> Verifier<'a> {
     }
 
     fn register_needs_consuming_use(&self, node: NodeId) -> bool {
-        let Some(operation) = self.operation(node) else {
-            return false;
-        };
-        match &operation.kind {
-            OperationKind::Variant { .. } | OperationKind::CloneClosureEnv { .. } => true,
-            OperationKind::BuildClosure {
-                num_hidden_dicts,
-                has_env_dict,
-                ..
-            } => {
-                let captures = operation.operands.len()
-                    - *num_hidden_dicts as usize
-                    - usize::from(*has_env_dict);
-                captures != 0
-            }
-            _ => false,
-        }
+        self.operation(node)
+            .is_some_and(Operation::result_requires_consuming_use)
     }
 
     fn verify_storage_ownership(&mut self) {
