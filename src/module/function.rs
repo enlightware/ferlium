@@ -468,6 +468,12 @@ impl PendingFunctionBody {
 }
 
 /// A local function inside a module after HIR elaboration.
+///
+/// # Native function contract
+///
+/// A native [`Function`] must terminate for every valid input. Native functions have no MIR body,
+/// so the optimizer cannot prove this property and relies on the embedder's guarantee when it
+/// speculates an otherwise pure native call.
 #[derive(Debug, Clone)]
 pub struct ModuleFunction {
     pub definition: CallableDefinition,

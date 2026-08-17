@@ -119,6 +119,8 @@ pub(crate) enum NotInlinable {
     Generic,
     /// The callee is recursive, which its call-depth guard is the local evidence of.
     Recursive,
+    /// The source function explicitly forbids inlining.
+    InlineNever,
     /// The callee contains a scoped accessor, which the caller's frame does not stand in for.
     UnsupportedShape,
     /// The site is inside a cleanup path and the callee has error flow of its own, so copying it
@@ -142,6 +144,7 @@ impl NotInlinable {
             Self::UnsupportedConvention => "result convention is not supported",
             Self::Generic => "callee is generic",
             Self::Recursive => "callee is recursive",
+            Self::InlineNever => "callee is marked #[inline(never)]",
             Self::UnsupportedShape => "callee contains a scoped accessor",
             Self::InCleanupPath => "call site is on a cleanup path",
             Self::CalleeTooLarge => "callee is over the size budget",
@@ -271,6 +274,10 @@ fn plan_inlinings<'a>(
                 refuse(NotInlinable::CalleeNotDirect);
                 continue;
             };
+            if callee_is_inline_never(session, callee, specializations) {
+                refuse(NotInlinable::InlineNever);
+                continue;
+            }
             // Borrowed from the raw stage, and stays borrowed unless substitution replaces it: a
             // refused callee then costs a lookup rather than a copy of its whole body.
             let Some(body) = callee_body(session, callee, specializations) else {
@@ -325,6 +332,26 @@ fn plan_inlinings<'a>(
         }
     }
     sites
+}
+
+/// Whether the source function behind `callee` explicitly forbids inlining.
+///
+/// An in-progress specialization is resolved through its construction table. The post-optimization
+/// report instead resolves through the installed optimized artifacts. Ordinary functions take the
+/// identity path in both cases.
+fn callee_is_inline_never(
+    session: &CompilerSession,
+    callee: FunctionId,
+    specializations: Option<&Specializations>,
+) -> bool {
+    let original = match specializations {
+        Some(specializations) => specializations.original(callee).unwrap_or(callee),
+        None => session.hir_identity_of(callee, MirOptimization::Enabled),
+    };
+    session
+        .expect_fresh_module(original.module)
+        .get_function_by_id(original.function)
+        .is_some_and(|function| function.definition.is_inline_never())
 }
 
 /// Classifies every call site of `func` that inlining left alone, for the optimization report.
@@ -765,6 +792,20 @@ mod tests {
         assert!(
             main.contains("= 42"),
             "the result must be constant:\n{main}"
+        );
+    }
+
+    #[test]
+    fn inline_never_keeps_the_call() {
+        let module = optimized(
+            "#[inline(never)]\n\
+             fn add_one(x: int) -> int { x + 1 }\n\
+             fn use_it(x: int) -> int { add_one(x) }",
+        );
+        let caller = body_of(&module, "use_it");
+        assert!(
+            caller.contains("call inline::add_one"),
+            "#[inline(never)] must keep the direct call:\n{caller}"
         );
     }
 

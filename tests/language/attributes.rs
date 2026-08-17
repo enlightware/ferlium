@@ -189,6 +189,56 @@ fn function_attributes_are_preserved_in_hir_metadata() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn inline_attribute_rejects_unsupported_arguments() {
+    let mut session = TestSession::new();
+    match session
+        .fail_compilation(indoc! { r#"
+            #[inline(always)]
+            fn f() {}
+        "# })
+        .into_inner()
+    {
+        CompilationErrorImpl::InvalidAttribute {
+            attribute_name,
+            target,
+            kind,
+            ..
+        } => {
+            assert_eq!(attribute_name, ustr("inline"));
+            assert_eq!(target, AttributeTarget::Function { name: ustr("f") });
+            assert_eq!(kind, InvalidAttributeKind::UnsupportedArguments);
+        }
+        other => panic!("expected invalid attribute error, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn inline_attribute_requires_an_argument() {
+    let mut session = TestSession::new();
+    match session
+        .fail_compilation(indoc! { r#"
+            #[inline]
+            fn f() {}
+        "# })
+        .into_inner()
+    {
+        CompilationErrorImpl::InvalidAttribute {
+            attribute_name,
+            target,
+            kind,
+            ..
+        } => {
+            assert_eq!(attribute_name, ustr("inline"));
+            assert_eq!(target, AttributeTarget::Function { name: ustr("f") });
+            assert_eq!(kind, InvalidAttributeKind::MissingArguments);
+        }
+        other => panic!("expected invalid attribute error, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn private_repr_attribute_rejects_arguments() {
     let mut session = TestSession::new();
     match session

@@ -409,6 +409,8 @@ impl AttributeTarget {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InvalidAttributeKind {
     HasArguments,
+    MissingArguments,
+    UnsupportedArguments,
     Duplicate,
 }
 
@@ -418,6 +420,12 @@ impl InvalidAttributeKind {
         match self {
             Self::HasArguments => {
                 format!("Attribute `#[{attribute_name}]` does not accept arguments on {target}")
+            }
+            Self::MissingArguments => {
+                format!("Attribute `#[{attribute_name}]` requires arguments on {target}")
+            }
+            Self::UnsupportedArguments => {
+                format!("Attribute `#[{attribute_name}]` has unsupported arguments on {target}")
             }
             Self::Duplicate => {
                 format!("{target} declares `#[{attribute_name}]` more than once")

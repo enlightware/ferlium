@@ -45,6 +45,7 @@ peephole          // collapse small local CFG/value patterns
 string accumulate // forward an overwritten string into its self-prefixed format builder
 devirtualize      // final dictionary-entry callees exposed too late for a fold round
 bounds checks     // prove array indices in range and remove checked access/failure edges
+LICM              // hoist invariant pure direct calls with passive inputs and copyable results
 dead known calls  // remove unused chains of explicitly total/speculatable numeric calls
 dead stores       // remove unread initialization overwritten on every following path
 dce               // on every body, not only a changed one
@@ -361,9 +362,11 @@ caller's frame.
 
 Refused when: the callee is not statically known, has no body, uses an unsupported result convention,
 is **generic** — meaning any parameter type is not constant — is recursive (its `check_call_depth` is
-the local evidence), contains a scoped accessor, or is over budget. Also when the call site is on a
-cleanup path and the callee has error flow of its own, since copying it there would shift its failure
-states by one level.
+the local evidence), carries `#[inline(never)]`, contains a scoped accessor, or is over budget. Also
+when the call site is on a cleanup path and the callee has error flow of its own, since copying it
+there would shift its failure states by one level. The annotation remains on the source HIR
+definition; the inliner resolves a MIR callee identity back to that definition, and specializations
+inherit the policy of their original function.
 
 A dictionary parameter is *not* itself a reason to refuse: splicing binds `@extra` parameters like
 any other, and a genuinely generic body is already refused for its non-constant parameter types. What
@@ -560,6 +563,43 @@ interprets a loop's construction block, then one reverse-postorder-prioritized f
 the proof; replay performs the rewrite. Refusing a proof retains the original check. The pass runs
 after the final devirtualization because inlining may expose `array_resolve_index` and may leave a
 whole `array_index`, and immediately before DCE because removing either error edge strands cleanup.
+
+## Loop-invariant pure calls
+
+`mir::pass::licm` moves an invariant direct call from a natural loop into its unique unconditional
+preheader. The call must have an empty effect row, excluding source-level failure, reads and writes.
+Motion into a path on which the source call might not execute additionally requires a proof that the
+callee returns: purity alone does not make a call safe to move out of a zero-trip loop. This
+termination proof is generic callee metadata rather than an arithmetic or function-name condition
+owned by LICM.
+
+`mir::pass::will_return` derives that metadata once from raw MIR and caches it with the module's
+artifacts. Its initial proof is intentionally small: a script body is proved only when its reachable
+CFG is acyclic and every operation it may invoke names another proved callee. Recursive components,
+indirect calls and dynamically resumed or cloned code remain unknown; native functions are proved
+by the host-function termination contract. A proof remains true across semantics-preserving MIR
+rewrites. Optimization may make an unknown body newly provable, but retaining the conservative raw
+answer merely declines an optimization and avoids invalidation inside the per-function pipeline.
+
+The initial proof is deliberately conservative. Every visible argument must use the `Let`
+convention, its place definition must dominate the preheader, and its storage root must not be
+written anywhere in the loop. The call must use the value-result convention, have no owned
+arguments, and write a concrete `TrivialCopy` value to a whole static local allocation. That result
+allocation has no other writer and none of its uses may escape the loop. These conditions are
+generic over all direct callees satisfying the effect contract; they are implementation limits that
+can be relaxed independently if a concrete workload justifies it.
+
+The existing call is relocated rather than copied, and a loop-local result allocation moves with
+it, so the pass never grows MIR. Stack regions constrain the insertion point: the moved allocation
+and call are placed before any outside-loop `stack_save` whose marker is restored in the loop. If
+that marker predates the preheader, there is no safe point and the candidate is retained. This keeps
+the result alive across every iteration.
+
+Natural loops are recovered from dominance backedges and processed from inner to outer. After one
+successful move the analysis is rebuilt, allowing the same computation to move through nested
+preheaders without maintaining incrementally edited dominance state. An allocation-free
+descending-edge scan rejects acyclic bodies before the call census allocates its operand views; the
+census then rejects bodies with no eligible call before CFG or dominance construction.
 
 ## Dead code elimination
 

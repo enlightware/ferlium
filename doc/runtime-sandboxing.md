@@ -28,6 +28,36 @@ propagate through enclosing cleanup scopes. Escalation happens only if another s
 already in flight. A sandbox violation always takes the sandbox path, including when it interrupts
 source-failure cleanup; it may retain the interrupted source failure for diagnostics.
 
+## Optimization, progress and poisoning
+
+Compiler correctness is defined independently of a particular host resource budget. Optimization
+must preserve whether a source execution returns, raises a source failure, or does not terminate;
+it may not speculate a computation which may not return onto a path where the source program would
+not execute it. In particular, an empty effect row does not by itself make a call safe to move out
+of a zero-trip loop.
+
+The exact consumption of fuel, call depth, interpreter capacity and other host resources is not a
+source-language observation. Optimization may move checks and change their frequency, so a run
+close to a configured limit may encounter or avoid a sandbox violation after optimization. This
+freedom does not license introducing semantically unbounded work onto an otherwise terminating
+path.
+
+Every directed CFG cycle in untrusted MIR must cross a fuel check. Equivalently, cutting the CFG at
+fuel checks must leave an acyclic graph. This is stronger than requiring one check in every
+syntactically recognized natural loop: it also covers irreducible cycles and cycles created or
+reshaped by optimization. Passes may move or duplicate checks only while preserving this invariant.
+Recursive execution is bounded separately by call-depth checks.
+
+A detected violation must be reported as a sandbox violation, poison only the affected execution
+domain, preserve memory safety and isolation, and use bounded host-controlled reclamation and
+capability revocation. Optimization may not change ordinary returned values, source failures or
+declared `read`/`write` effects under the pretext of sandbox freedom.
+
+Native host functions callable by Ferlium must terminate for every valid input: native execution
+contains no MIR cycle on which the runtime could insert a fuel check. Trusted Ferlium functions
+which suppress fuel checks have the same obligation. Such functions may still raise a declared
+source failure, but they must not loop or block indefinitely.
+
 ## Compile-time execution of native code
 
 The optimizer may execute Ferlium code *at compile time* to fold a call into its result. Which

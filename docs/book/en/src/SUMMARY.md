@@ -40,6 +40,7 @@
 - [Effects](./effects.md)
 - [Evaluation and Mutable State](./evaluation-and-mutable-state.md)
 
-# Experimental
+# Advanced
 
+- [Compiler Controls](./compiler-controls.md)
 - [Experimental Features](./experimental.md)

@@ -70,7 +70,7 @@ use crate::{
 use indexmap::IndexMap;
 use itertools::Itertools;
 use log::log_enabled;
-use ustr::{Ustr, ustr};
+use ustr::Ustr;
 
 use crate::hir::elaboration::elaborate_generated_functions;
 use crate::types::effects::{EffType, Effect, EffectVar, EffectsInstSubst};
@@ -218,41 +218,79 @@ fn validate_function_attributes(
     is_std_module: bool,
 ) -> Result<FunctionAttributes, InternalCompilationError> {
     let mut no_fuel_check = false;
-    let known_attributes = [ustr("no_fuel_check")];
+    let mut inline = false;
     for attribute in attributes {
         let attr_name = attribute.path.0;
-        if !known_attributes.contains(&attr_name) {
-            continue;
+        match attr_name.as_str() {
+            "no_fuel_check" => {
+                if !is_std_module {
+                    return Err(
+                        InternalCompilationError::new_unsafe_feature_use_not_allowed(
+                            UnsafeFeature::FunctionAttribute(attr_name),
+                            attribute.span,
+                        ),
+                    );
+                }
+                if !attribute.items.is_empty() {
+                    return Err(internal_compilation_error!(InvalidAttribute {
+                        attribute_name: attr_name,
+                        target: AttributeTarget::Function {
+                            name: function_name,
+                        },
+                        kind: InvalidAttributeKind::HasArguments,
+                        span: attribute.span,
+                    }));
+                }
+                if no_fuel_check {
+                    return Err(internal_compilation_error!(InvalidAttribute {
+                        attribute_name: attr_name,
+                        target: AttributeTarget::Function {
+                            name: function_name,
+                        },
+                        kind: InvalidAttributeKind::Duplicate,
+                        span: attribute.span,
+                    }));
+                }
+                no_fuel_check = true;
+            }
+            "inline" => {
+                if inline {
+                    return Err(internal_compilation_error!(InvalidAttribute {
+                        attribute_name: attr_name,
+                        target: AttributeTarget::Function {
+                            name: function_name,
+                        },
+                        kind: InvalidAttributeKind::Duplicate,
+                        span: attribute.span,
+                    }));
+                }
+                if attribute.items.is_empty() {
+                    return Err(internal_compilation_error!(InvalidAttribute {
+                        attribute_name: attr_name,
+                        target: AttributeTarget::Function {
+                            name: function_name,
+                        },
+                        kind: InvalidAttributeKind::MissingArguments,
+                        span: attribute.span,
+                    }));
+                }
+                if !matches!(
+                    attribute.items.as_slice(),
+                    [ast::MetaItem::Flag(value)] if value.0 == "never"
+                ) {
+                    return Err(internal_compilation_error!(InvalidAttribute {
+                        attribute_name: attr_name,
+                        target: AttributeTarget::Function {
+                            name: function_name,
+                        },
+                        kind: InvalidAttributeKind::UnsupportedArguments,
+                        span: attribute.span,
+                    }));
+                }
+                inline = true;
+            }
+            _ => continue,
         }
-        if !is_std_module {
-            return Err(
-                InternalCompilationError::new_unsafe_feature_use_not_allowed(
-                    UnsafeFeature::FunctionAttribute(attr_name),
-                    attribute.span,
-                ),
-            );
-        }
-        if !attribute.items.is_empty() {
-            return Err(internal_compilation_error!(InvalidAttribute {
-                attribute_name: attr_name,
-                target: AttributeTarget::Function {
-                    name: function_name,
-                },
-                kind: InvalidAttributeKind::HasArguments,
-                span: attribute.span,
-            }));
-        }
-        if no_fuel_check {
-            return Err(internal_compilation_error!(InvalidAttribute {
-                attribute_name: attr_name,
-                target: AttributeTarget::Function {
-                    name: function_name,
-                },
-                kind: InvalidAttributeKind::Duplicate,
-                span: attribute.span,
-            }));
-        }
-        no_fuel_check = true;
     }
     Ok(FunctionAttributes { no_fuel_check })
 }

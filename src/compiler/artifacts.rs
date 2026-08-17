@@ -19,6 +19,7 @@ use crate::{
             optimize_function, owned_arguments,
             provenance::{AddressorSummaries, AddressorSummary},
             prune_specializations, share_specializations,
+            will_return::{WillReturn, WillReturnSummaries},
         },
     },
     module::{FunctionId, LocalFunctionId, Module, ModuleEnv, ModuleId, id::Id},
@@ -154,6 +155,12 @@ pub(crate) struct MirArtifacts {
     /// rather than recomputed because a consumer's callee is often in another module, and a
     /// dependency's summaries have to be readable the way its bodies already are.
     addressor_summaries: AddressorSummaries,
+    /// Conservative proofs that raw functions terminate for every valid invocation.
+    ///
+    /// Like addressor provenance, a proof is semantic and survives optimization unchanged. An
+    /// optimized body may make an unknown function newly provable, but retaining `Unknown` only
+    /// declines an optimization.
+    will_return_summaries: WillReturnSummaries,
 }
 
 impl MirArtifacts {
@@ -184,12 +191,23 @@ impl MirArtifacts {
         };
         let addressor_summaries =
             AddressorSummaries::of_module(&functions, module.module_id(), env, &external);
+        let external_will_return = |callee: FunctionId| {
+            modules
+                .get(callee.module)
+                .and_then(|entry| entry.raw_mir())
+                .map_or(WillReturn::Unknown, |artifacts| {
+                    artifacts.will_return(callee.module, callee.function)
+                })
+        };
+        let will_return_summaries =
+            WillReturnSummaries::of_module(&functions, module.module_id(), &external_will_return);
         Self {
             functions,
             specializations: Vec::new(),
             pruned_specializations: 0,
             optimization_stats: OptimizationStats::default(),
             addressor_summaries,
+            will_return_summaries,
         }
     }
 
@@ -209,6 +227,17 @@ impl MirArtifacts {
                 .summary(specialization.original.function),
             Some(_) => AddressorSummary::UNKNOWN,
             None => self.addressor_summaries.summary(id),
+        }
+    }
+
+    /// Whether the raw body proves that every valid invocation of `id` completes.
+    pub(crate) fn will_return(&self, module: ModuleId, id: LocalFunctionId) -> WillReturn {
+        match self.specialization(id) {
+            Some(specialization) if specialization.original.module == module => self
+                .will_return_summaries
+                .summary(specialization.original.function),
+            Some(_) => WillReturn::Unknown,
+            None => self.will_return_summaries.summary(id),
         }
     }
 
@@ -344,6 +373,7 @@ impl MirArtifacts {
             // A specialization may admit a more precise summary after substitution, but reusing
             // its original's conservative answer is sound and avoids per-stage recomputation.
             addressor_summaries: raw.addressor_summaries.clone(),
+            will_return_summaries: raw.will_return_summaries.clone(),
         }
     }
 

@@ -21,7 +21,7 @@ use ferlium_macros::declare_native_fn_aliases;
 
 use crate::{
     Location,
-    ast::{Attribute, UstrSpan},
+    ast::{Attribute, MetaItem, UstrSpan},
     compiler::error::SourceFailureKind,
     eval::{
         ControlFlow, EvalControlFlowResult, EvalCtx, PlaceResult, RuntimeError, ValOrMut,
@@ -94,6 +94,21 @@ pub struct CallableDefinition {
 }
 
 impl CallableDefinition {
+    /// Whether this source function carries the optimizer-control attribute `#[inline(never)]`.
+    ///
+    /// The syntax is validated while functions are emitted. Keeping the query on the retained HIR
+    /// definition lets MIR passes resolve it through a callee `FunctionId` without copying source
+    /// annotations into every MIR body.
+    pub(crate) fn is_inline_never(&self) -> bool {
+        self.attributes.iter().any(|attribute| {
+            attribute.path.0 == "inline"
+                && matches!(
+                    attribute.items.as_slice(),
+                    [MetaItem::Flag(value)] if value.0 == "never"
+                )
+        })
+    }
+
     pub fn new(ty_scheme: TypeScheme<FnType>, arg_names: Vec<Ustr>, doc: Option<String>) -> Self {
         Self {
             ty_scheme,

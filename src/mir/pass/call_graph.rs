@@ -60,12 +60,16 @@ pub(crate) struct CallGraph {
 impl CallGraph {
     /// Builds the graph of `functions`, keeping only edges that stay inside `module`.
     ///
-    /// **An edge for every function-valued operand, not only a call's callee.** `clone`, `drop` and
-    /// `build_closure` each name a function too, and at a different operand position; scanning for
-    /// the value rather than the position cannot miss one as those kinds grow. It over-approximates
-    /// — a function merely *mentioned* gets an edge — and that is the safe direction here: a
-    /// spurious edge can only merge more functions into one component, which makes a summary more
-    /// conservative, never less.
+    /// **An edge for every function-valued operand, not only a call's callee.** `clone` and `drop`
+    /// name functions at different operand positions, so scanning for the value rather than the
+    /// position cannot miss one as those kinds grow. It over-approximates — a function merely
+    /// *mentioned* gets an edge — and that is the safe direction here: a spurious edge can only
+    /// merge more functions into one component, which makes a summary more conservative, never
+    /// less.
+    ///
+    /// `build_closure` stores its target in the operation kind rather than an operand and therefore
+    /// contributes no edge here. Constructing a closure does not invoke that target; a consumer
+    /// concerned with a later indirect call must reject that call independently.
     ///
     /// A call with no statically known callee contributes no edge, which is why this graph alone
     /// cannot answer reachability. A consumer needing that has to add its own conservatism.

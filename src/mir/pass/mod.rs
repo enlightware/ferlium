@@ -48,6 +48,7 @@ pub(crate) mod dead_store;
 pub(crate) mod fold;
 pub(crate) mod inline;
 pub(crate) mod known_callee;
+pub(crate) mod licm;
 pub(crate) mod monomorphize;
 pub(crate) mod owned_arguments;
 pub(crate) mod peephole;
@@ -61,6 +62,7 @@ pub(crate) mod specialization_table;
 pub(crate) mod stack_region;
 pub(crate) mod string_accumulate;
 pub(crate) mod tail_merge;
+pub(crate) mod will_return;
 
 pub(crate) use monomorphize::Specializations;
 
@@ -295,6 +297,24 @@ pub(crate) fn optimize_function(
     {
         stats.bounds_checks_removed += removed;
         current = Some(rewritten);
+    }
+    // Move terminating pure direct calls with invariant passive inputs and `TrivialCopy` value
+    // storage into a natural loop's unique preheader. Empty effects exclude source-visible failure
+    // and mutation; the raw-MIR summary separately proves that speculation preserves termination.
+    // The pass adds no operation while moving the call and any loop-local allocation.
+    let source = current.as_ref().unwrap_or(function);
+    let will_return = |callee| {
+        let original = specializations.original(callee).unwrap_or(callee);
+        session
+            .mir_artifacts_for(original.module, MirOptimization::Disabled)
+            .is_some_and(|artifacts| {
+                artifacts
+                    .will_return(original.module, original.function)
+                    .is_proven()
+            })
+    };
+    if let Some(hoisted) = licm::hoist_loop_invariant_calls(source, env, &will_return) {
+        current = Some(hoisted);
     }
     // Purity does not imply termination, so general dead-call elimination would be unsound. The
     // semantic table names the concrete native numeric operations that are additionally total and
