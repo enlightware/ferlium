@@ -1476,12 +1476,13 @@ mod tests {
     }
 
     /// The same scoping rule as for field addresses: neither arm dominates the other, so neither
-    /// may name the other's cell.
+    /// may name the other's cell. The live boolean result keeps the complete tails distinct, so
+    /// the later tail-merging pass cannot erase the shape this test is about.
     #[test]
     fn a_dictionary_entry_is_not_shared_between_branch_arms() {
         let body = body_of(
-            "fn arms(x, c: bool) { if c { let a = x; a } else { let b = x; b } }\n\
-             fn use_it(v: int, c: bool) -> int { arms(v, c) }",
+            "fn arms(x, c: bool) { if c { (x, true) } else { (x, false) } }\n\
+             fn use_it(v: int, c: bool) -> (int, bool) { arms(v, c) }",
             "arms",
         );
         assert_eq!(
@@ -1505,11 +1506,12 @@ mod tests {
 
     /// The scope must be undone on the way back up the dominator tree: neither arm dominates the
     /// other, so neither may reuse the other's address. Merging them would not merely be
-    /// unprofitable — the verifier rejects a use its definition does not dominate.
+    /// unprofitable — the verifier rejects a use its definition does not dominate. The extra
+    /// arithmetic keeps the tails distinct from the later tail-merging pass.
     #[test]
     fn a_field_address_is_not_shared_between_branch_arms() {
         let body = body_of(
-            "fn arms(p: Pair, c: bool) -> int { if c { p.a } else { p.a } }",
+            "fn arms(p: Pair, c: bool) -> int { if c { p.a } else { p.a + 1 } }",
             "arms",
         );
         assert_eq!(

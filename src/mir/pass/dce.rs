@@ -16,14 +16,15 @@
 //! This is **not** general dead-code elimination. Before storage cleanup, a backward use-count
 //! worklist removes unused chains of concrete numeric calls explicitly classified as total and
 //! speculatable. An empty effect row is not sufficient: an arbitrary pure function may diverge.
-//! The storage rule then removes an `alloca` only when
-//! *every* use of it is as the destination of a `store` whose value is a pool constant, and then
-//! removes those stores with it. Two properties make that safe without any ownership analysis:
+//! The ordinary storage rule removes an `alloca` only when every use of it is as the destination of
+//! a constant `store`. The cleanup entered after tail merging additionally admits a non-owning
+//! operation result. Two properties make those stores safe without a whole ownership analysis:
 //!
-//! - a constant is trivially copyable, so storing one creates no drop obligation and deleting the
-//!   store discards nothing that must be dropped;
-//! - the value operand is not a register, so no owned register loses its single consuming use —
-//!   which the verifier would reject, and which is the trap any wider rule falls into first.
+//! - a constant is trivially copyable, so storing one creates no drop obligation;
+//! - an admitted register's defining operation explicitly says its result requires no consuming
+//!   use, excluding variants and owning closure construction. Deleting the store therefore cannot
+//!   orphan a resource — which the verifier would reject, and which is the trap any wider rule
+//!   falls into first.
 //!
 //! Unread `dict_entry` and `subfield` place derivations are also removed. They neither own a value
 //! nor have side effects, and a linear use-count worklist handles nested `subfield` chains.
@@ -32,9 +33,9 @@
 //! uninitialized storage. This deliberately does not generalize to arbitrary resource producers.
 //! Constants left unreferenced by removed stores are dropped from the pool with them.
 //!
-//! Any surviving use of an allocation — a `load`, a `subfield`, a `drop`, a call argument, or a
-//! store of a register — disqualifies that allocation. Widening the storage rule means proving the
-//! drop obligation is discharged, and should happen only against the whole corpus.
+//! Any surviving use of an allocation — a `load`, a `subfield`, a `drop`, a call argument, or an
+//! unadmitted register store — disqualifies that allocation. Widening the storage rule means proving
+//! the drop obligation is discharged, and should happen only against the whole corpus.
 
 #![allow(dead_code)]
 
@@ -44,9 +45,130 @@ use crate::mir::{
     self, BlockId, Function, OperationKind, edit::FunctionEdit, terminator::TerminatorKind,
     value::ValueId,
 };
-use crate::{module::FunctionId, types::r#type::CallResultConvention};
+use crate::{
+    module::{FunctionId, id::Id},
+    types::r#type::CallResultConvention,
+};
 
-use super::{dataflow, known_callee::KnownCallees};
+use super::{dataflow, known_callee::KnownCallees, site::OperationIndex};
+
+#[derive(Clone, Copy)]
+struct DeadResultCandidate {
+    block: BlockId,
+    operation: OperationIndex,
+}
+
+/// Removes candidate operations once their result has only `dead_at` remaining uses.
+///
+/// A direct result-producing operation is dead at zero uses. A value-returning call writes through
+/// an alloca operand, so its one self-use is the dead state. In either case, removing one candidate
+/// decrements its operands and can expose another candidate in the same backwards walk.
+fn remove_dead_results(
+    func: &Function,
+    candidates: FxHashMap<ValueId, DeadResultCandidate>,
+    dead_at: usize,
+) -> Option<Function> {
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let mut uses = FxHashMap::<ValueId, usize>::default();
+    let mut count_operands = |operands: &[mir::Value]| {
+        for operand in operands {
+            if let mir::Value::Register(id) = operand {
+                *uses.entry(*id).or_default() += 1;
+            }
+        }
+    };
+    for block in func.blocks() {
+        let basic_block = func.block(block);
+        for operation in basic_block.operations() {
+            count_operands(&operation.operands);
+        }
+        count_operands(basic_block.terminator().operands());
+    }
+
+    let remaining_uses =
+        |uses: &FxHashMap<ValueId, usize>, result: &ValueId| uses.get(result).copied().unwrap_or(0);
+    let mut pending: Vec<_> = candidates
+        .keys()
+        .copied()
+        .filter(|result| remaining_uses(&uses, result) == dead_at)
+        .collect();
+    let mut removed_results = FxHashSet::default();
+    let mut removed = FxHashMap::<BlockId, FxHashSet<OperationIndex>>::default();
+    while let Some(result) = pending.pop() {
+        if !removed_results.insert(result) || remaining_uses(&uses, &result) != dead_at {
+            continue;
+        }
+        let candidate = candidates[&result];
+        removed
+            .entry(candidate.block)
+            .or_default()
+            .insert(candidate.operation);
+        for operand in
+            &func.block(candidate.block).operations()[candidate.operation.as_index()].operands
+        {
+            let mir::Value::Register(operand) = operand else {
+                continue;
+            };
+            let count = uses
+                .get_mut(operand)
+                .expect("every register operand was counted");
+            *count -= 1;
+            if *count == 0 {
+                uses.remove(operand);
+            }
+            if remaining_uses(&uses, operand) == dead_at && candidates.contains_key(operand) {
+                pending.push(*operand);
+            }
+        }
+    }
+    if removed.is_empty() {
+        return None;
+    }
+
+    let mut edit = FunctionEdit::new(func.clone());
+    for (block, indices) in removed {
+        let mut index = 0usize;
+        edit.block_mut(block).operations.retain(|_| {
+            let keep = !indices.contains(&OperationIndex::from_index(index));
+            index += 1;
+            keep
+        });
+    }
+    Some(edit.finish_unverified())
+}
+
+/// Removes unread results of representation-only operations.
+///
+/// This is the narrow non-call half needed after tail merging makes a predicate dead. Calls require
+/// the stronger total/speculatable contract below; stores and allocations are handled as complete
+/// local-storage lifetimes by [`remove_dead_storage`]. A backwards use-count worklist removes a
+/// chain in one scan without pretending that arbitrary effect-free operations are speculatable.
+pub(crate) fn remove_dead_trivial_results(func: &Function) -> Option<Function> {
+    let mut candidates = FxHashMap::<ValueId, DeadResultCandidate>::default();
+    for block in func.blocks() {
+        let basic_block = func.block(block);
+        for (index, operation) in basic_block.operations().iter().enumerate() {
+            if matches!(
+                operation.kind,
+                OperationKind::CompareEqual | OperationKind::Load | OperationKind::ExtractTag
+            ) && let Some(result) = operation.result_id()
+            {
+                debug_assert!(!operation.result_requires_consuming_use());
+                candidates.insert(
+                    result,
+                    DeadResultCandidate {
+                        block,
+                        operation: OperationIndex::from_index(index),
+                    },
+                );
+            }
+        }
+    }
+    remove_dead_results(func, candidates, 0)
+}
 
 /// Removes unused calls covered by an explicit total/speculatable std contract.
 ///
@@ -60,14 +182,8 @@ pub(crate) fn remove_dead_known_calls(
     known: &KnownCallees,
     original_of: &dyn Fn(FunctionId) -> Option<FunctionId>,
 ) -> Option<Function> {
-    #[derive(Clone, Copy)]
-    struct Candidate {
-        block: BlockId,
-        operation: usize,
-    }
-
     let mut allocas = FxHashSet::default();
-    let mut candidates: FxHashMap<ValueId, Candidate> = FxHashMap::default();
+    let mut candidates = FxHashMap::<ValueId, DeadResultCandidate>::default();
     for block in func.blocks() {
         for (index, operation) in func.block(block).operations().iter().enumerate() {
             if matches!(operation.kind, OperationKind::Alloca { .. })
@@ -98,95 +214,38 @@ pub(crate) fn remove_dead_known_calls(
             };
             candidates.insert(
                 *result,
-                Candidate {
+                DeadResultCandidate {
                     block,
-                    operation: index,
+                    operation: OperationIndex::from_index(index),
                 },
             );
         }
     }
     candidates.retain(|result, _| allocas.contains(result));
-    if candidates.is_empty() {
-        return None;
-    }
-
-    // The use census is the more expensive part and serves only the backwards chain walk. Most
-    // bodies contain no eligible call, so do not pay for it until the semantic scan above found
-    // one whose result is local storage.
-    let mut uses: FxHashMap<ValueId, usize> = FxHashMap::default();
-    let mut count_operands = |operands: &[mir::Value]| {
-        for operand in operands {
-            if let mir::Value::Register(id) = operand {
-                *uses.entry(*id).or_default() += 1;
-            }
-        }
-    };
-    for block in func.blocks() {
-        let basic_block = func.block(block);
-        for operation in basic_block.operations() {
-            count_operands(&operation.operands);
-        }
-        match &basic_block.terminator().kind {
-            TerminatorKind::Invoke { operation, .. } => count_operands(&operation.operands),
-            TerminatorKind::CondBr { condition, .. } => {
-                count_operands(std::slice::from_ref(condition))
-            }
-            TerminatorKind::Yield { place, .. } => count_operands(std::slice::from_ref(place)),
-            TerminatorKind::Goto { .. }
-            | TerminatorKind::Return
-            | TerminatorKind::PropagateError
-            | TerminatorKind::FailureDuringCleanup => {}
-        }
-    }
-
-    let mut pending: Vec<ValueId> = candidates
-        .keys()
-        .copied()
-        .filter(|result| uses.get(result) == Some(&1))
-        .collect();
-    let mut removed_results = FxHashSet::default();
-    let mut removed: FxHashMap<BlockId, FxHashSet<usize>> = FxHashMap::default();
-    while let Some(result) = pending.pop() {
-        if !removed_results.insert(result) || uses.get(&result) != Some(&1) {
-            continue;
-        }
-        let candidate = candidates[&result];
-        removed
-            .entry(candidate.block)
-            .or_default()
-            .insert(candidate.operation);
-        for operand in &func.block(candidate.block).operations()[candidate.operation].operands {
-            let mir::Value::Register(operand) = operand else {
-                continue;
-            };
-            let count = uses
-                .get_mut(operand)
-                .expect("every register operand was counted");
-            *count -= 1;
-            if *count == 1 && candidates.contains_key(operand) {
-                pending.push(*operand);
-            }
-        }
-    }
-    if removed.is_empty() {
-        return None;
-    }
-
-    let mut edit = FunctionEdit::new(func.clone());
-    for (block, indices) in removed {
-        let mut index = 0usize;
-        edit.block_mut(block).operations.retain(|_| {
-            let keep = !indices.contains(&index);
-            index += 1;
-            keep
-        });
-    }
-    Some(edit.finish_unverified())
+    // The shared use census is the more expensive part and starts only after the semantic scan
+    // above found an eligible call whose result is local storage.
+    remove_dead_results(func, candidates, 1)
 }
 
 /// Removes dead storage scaffolding, returning a rewritten function if anything was removed.
 pub(crate) fn remove_dead_storage(func: &Function) -> Option<Function> {
-    let mut census = DceCensus::of(func);
+    remove_dead_storage_impl(func, false)
+}
+
+/// The storage cleanup used only after tail merging made a representation chain dead.
+///
+/// Unlike ordinary DCE, this admits stores of results whose defining operation declares that the
+/// result needs no consuming use. Keeping the extra producer census behind this entry point means
+/// every unchanged function retains the cheaper constant-only scan.
+pub(crate) fn remove_dead_storage_after_tail_merge(func: &Function) -> Option<Function> {
+    remove_dead_storage_impl(func, true)
+}
+
+fn remove_dead_storage_impl(
+    func: &Function,
+    admit_non_consuming_register_stores: bool,
+) -> Option<Function> {
+    let mut census = DceCensus::of(func, admit_non_consuming_register_stores);
     let constructed = census.dead_constructed_values();
     let mut dead = census.dead_allocas();
     for (block, operations) in constructed {
@@ -203,13 +262,13 @@ pub(crate) fn remove_dead_storage(func: &Function) -> Option<Function> {
 
     let mut edit = FunctionEdit::new(func.clone());
     for block in func.blocks() {
-        let removed: &FxHashSet<usize> = match dead.operations.get(&block) {
+        let removed: &FxHashSet<OperationIndex> = match dead.operations.get(&block) {
             Some(indices) => indices,
             None => continue,
         };
         let mut index = 0;
         edit.block_mut(block).operations.retain(|_| {
-            let keep = !removed.contains(&index);
+            let keep = !removed.contains(&OperationIndex::from_index(index));
             index += 1;
             keep
         });
@@ -232,11 +291,11 @@ pub(crate) fn remove_dead_storage(func: &Function) -> Option<Function> {
 fn remove_empty_local_stack_regions(
     func: &Function,
     restore_uses: &FxHashMap<ValueId, usize>,
-    removed: &mut FxHashMap<BlockId, FxHashSet<usize>>,
+    removed: &mut FxHashMap<BlockId, FxHashSet<OperationIndex>>,
 ) {
     struct Region {
         marker: ValueId,
-        save_index: usize,
+        save_index: OperationIndex,
         grows_frame: bool,
     }
 
@@ -246,6 +305,7 @@ fn remove_empty_local_stack_regions(
         let mut newly_removed = Vec::new();
 
         for (index, operation) in func.block(block).operations().iter().enumerate() {
+            let index = OperationIndex::from_index(index);
             if already_removed.contains(&index) {
                 continue;
             }
@@ -340,25 +400,26 @@ pub(super) fn may_leave_frame_storage(operation: &mir::Operation) -> bool {
 /// places and stack-marker restores.
 struct DceCensus {
     allocations: FxHashMap<ValueId, AllocationUses>,
-    derived_definitions: FxHashMap<ValueId, (BlockId, usize)>,
+    derived_definitions: FxHashMap<ValueId, (BlockId, OperationIndex)>,
     derived_uses: FxHashMap<ValueId, usize>,
     restore_uses: FxHashMap<ValueId, usize>,
+    non_consuming_results: FxHashSet<ValueId>,
 }
 
 /// The operations selected for removal, grouped by block.
 struct Dead {
-    operations: FxHashMap<BlockId, FxHashSet<usize>>,
+    operations: FxHashMap<BlockId, FxHashSet<OperationIndex>>,
 }
 
 #[derive(Default)]
 struct AllocationUses {
-    definition: (BlockId, usize),
-    constant_stores: Vec<(BlockId, usize)>,
-    constant_only_invalid: bool,
+    definition: (BlockId, OperationIndex),
+    removable_stores: Vec<(BlockId, OperationIndex)>,
+    storage_only_invalid: bool,
     /// The constructor/drop uses are allowed only if the complete lifetime is removable.
     has_deferred_construction_use: bool,
-    constructor: Option<(BlockId, usize)>,
-    drops: Vec<(BlockId, usize)>,
+    constructor: Option<(BlockId, OperationIndex)>,
+    drops: Vec<(BlockId, OperationIndex)>,
     invalid_construction: bool,
 }
 
@@ -369,19 +430,24 @@ impl AllocationUses {
 }
 
 impl DceCensus {
-    fn of(func: &Function) -> DceCensus {
+    fn of(func: &Function, census_non_consuming_results: bool) -> DceCensus {
         let mut census = DceCensus {
             allocations: FxHashMap::default(),
             derived_definitions: FxHashMap::default(),
             derived_uses: FxHashMap::default(),
             restore_uses: FxHashMap::default(),
+            non_consuming_results: FxHashSet::default(),
         };
 
         for block in func.blocks() {
             for (index, operation) in func.block(block).operations().iter().enumerate() {
+                let index = OperationIndex::from_index(index);
                 let Some(result) = operation.result_id() else {
                     continue;
                 };
+                if census_non_consuming_results && !operation.result_requires_consuming_use() {
+                    census.non_consuming_results.insert(result);
+                }
                 if matches!(operation.kind, OperationKind::Alloca { .. }) {
                     census.allocations.insert(
                         result,
@@ -402,6 +468,7 @@ impl DceCensus {
         for block in func.blocks() {
             let basic_block = func.block(block);
             for (index, operation) in basic_block.operations().iter().enumerate() {
+                let index = OperationIndex::from_index(index);
                 if matches!(operation.kind, OperationKind::StackRestore)
                     && let Some(mir::Value::Register(marker)) = operation.operands.first()
                 {
@@ -420,7 +487,7 @@ impl DceCensus {
     fn note_operation_use(
         &mut self,
         block: BlockId,
-        index: usize,
+        index: OperationIndex,
         operation: &mir::Operation,
         position: usize,
         operand: &mir::Value,
@@ -431,15 +498,18 @@ impl DceCensus {
         if self.derived_definitions.contains_key(id) {
             *self.derived_uses.entry(*id).or_default() += 1;
         }
+        let removable_store = matches!(operation.kind, OperationKind::Store)
+            && position == 1
+            && match operation.operands[0] {
+                mir::Value::Constant(_) => true,
+                mir::Value::Register(result) => self.non_consuming_results.contains(&result),
+                _ => false,
+            };
         let Some(allocation) = self.allocations.get_mut(id) else {
             return;
         };
-
-        let removable_constant_store = matches!(operation.kind, OperationKind::Store)
-            && position == 1
-            && matches!(operation.operands[0], mir::Value::Constant(_));
-        if removable_constant_store {
-            allocation.constant_stores.push((block, index));
+        if removable_store {
+            allocation.removable_stores.push((block, index));
         }
 
         let is_array_constructor = matches!(operation.kind, OperationKind::BuildArray { .. })
@@ -449,11 +519,11 @@ impl DceCensus {
             && matches!(operation.operands[0], mir::Value::Function(_));
         let is_drop = matches!(operation.kind, OperationKind::Drop { .. }) && position == 0;
         let is_construction_use = is_array_constructor || is_bare_function_constructor || is_drop;
-        if !removable_constant_store {
+        if !removable_store {
             if is_construction_use {
                 allocation.has_deferred_construction_use = true;
             } else {
-                allocation.constant_only_invalid = true;
+                allocation.storage_only_invalid = true;
             }
         }
 
@@ -477,7 +547,7 @@ impl DceCensus {
                 *self.derived_uses.entry(*id).or_default() += 1;
             }
             if let Some(allocation) = self.allocations.get_mut(id) {
-                allocation.constant_only_invalid = true;
+                allocation.storage_only_invalid = true;
                 allocation.invalid_construction = true;
             }
         };
@@ -494,8 +564,8 @@ impl DceCensus {
         }
     }
 
-    fn dead_constructed_values(&self) -> FxHashMap<BlockId, FxHashSet<usize>> {
-        let mut removed: FxHashMap<BlockId, FxHashSet<usize>> = FxHashMap::default();
+    fn dead_constructed_values(&self) -> FxHashMap<BlockId, FxHashSet<OperationIndex>> {
+        let mut removed = FxHashMap::<BlockId, FxHashSet<OperationIndex>>::default();
         for candidate in self.allocations.values() {
             if !candidate.has_removable_construction() {
                 continue;
@@ -512,11 +582,11 @@ impl DceCensus {
     }
 
     fn dead_allocas(&self) -> Dead {
-        let mut operations: FxHashMap<BlockId, FxHashSet<usize>> = FxHashMap::default();
+        let mut operations = FxHashMap::<BlockId, FxHashSet<OperationIndex>>::default();
         for candidate in self.allocations.values() {
             // Constructor/drop uses cease to disqualify the alloca only when that complete resource
             // lifetime is itself selected for removal.
-            if candidate.constant_only_invalid
+            if candidate.storage_only_invalid
                 || (candidate.has_deferred_construction_use
                     && !candidate.has_removable_construction())
             {
@@ -524,7 +594,7 @@ impl DceCensus {
             }
             let (block, index) = candidate.definition;
             operations.entry(block).or_default().insert(index);
-            for (block, index) in &candidate.constant_stores {
+            for (block, index) in &candidate.removable_stores {
                 operations.entry(*block).or_default().insert(*index);
             }
         }
@@ -544,7 +614,7 @@ impl DceCensus {
     ///
     /// `subfield`s can form chains, so use counts are retired through a worklist: deleting an
     /// unread leaf may make its base derivation unread too.
-    fn unread_derived_places(&mut self, func: &Function) -> Vec<(BlockId, usize)> {
+    fn unread_derived_places(&mut self, func: &Function) -> Vec<(BlockId, OperationIndex)> {
         if self.derived_definitions.is_empty() {
             return Vec::new();
         }
@@ -562,7 +632,7 @@ impl DceCensus {
                 continue;
             }
             let (block, index) = self.derived_definitions[&result];
-            for operand in &func.block(block).operations()[index].operands {
+            for operand in &func.block(block).operations()[index.as_index()].operands {
                 let mir::Value::Register(operand) = operand else {
                     continue;
                 };

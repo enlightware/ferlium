@@ -71,6 +71,21 @@ pub struct Operation {
 }
 
 impl Operation {
+    /// Returns the parts which determine an operation's run-time behavior.
+    ///
+    /// The exhaustive destructure is intentional: an added field must be classified here rather
+    /// than silently omitted by optimizations which compare operations while deliberately ignoring
+    /// their function-local result identity and source span.
+    pub(crate) fn kind_and_operands(&self) -> (&OperationKind, &[mir::Value]) {
+        let Self {
+            result_id: _,
+            span: _,
+            operands,
+            kind,
+        } = self;
+        (kind, operands)
+    }
+
     /// Returns the stable identity assigned to this operation's result, if any.
     pub fn result_id(&self) -> Option<mir::ValueId> {
         self.result_id

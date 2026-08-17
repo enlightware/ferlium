@@ -60,6 +60,7 @@ pub(crate) mod site;
 pub(crate) mod specialization_table;
 pub(crate) mod stack_region;
 pub(crate) mod string_accumulate;
+pub(crate) mod tail_merge;
 
 pub(crate) use monomorphize::Specializations;
 
@@ -96,6 +97,41 @@ impl OptimizationContext {
         Self {
             known_callees: known_callee::KnownCallees::new(modules),
             string_functions: string_accumulate::StringFunctions::resolve(env),
+        }
+    }
+}
+
+/// Collects the predicate and representation scaffolding made dead by tail merging.
+///
+/// These passes form one conceptual cleanup even though they alternate to a fixed point: removing
+/// a trivial representation result can expose a known-total call, whose removal can in turn make
+/// its result storage dead. Every successful step removes at least one operation, so the loop is
+/// bounded by the merged body's operation count.
+fn cleanup_after_tail_merge(
+    mut current: Function,
+    context: &OptimizationContext,
+    specializations: &Specializations,
+) -> Function {
+    loop {
+        let mut cleaned_any = false;
+        if let Some(cleaned) = dce::remove_dead_trivial_results(&current) {
+            current = cleaned;
+            cleaned_any = true;
+        }
+        if let Some(cleaned) =
+            dce::remove_dead_known_calls(&current, &context.known_callees, &|callee| {
+                specializations.original(callee)
+            })
+        {
+            current = cleaned;
+            cleaned_any = true;
+        }
+        if let Some(cleaned) = dce::remove_dead_storage_after_tail_merge(&current) {
+            current = cleaned;
+            cleaned_any = true;
+        }
+        if !cleaned_any {
+            return current;
         }
     }
 }
@@ -284,6 +320,15 @@ pub(crate) fn optimize_function(
     let source = current.as_ref().unwrap_or(function);
     if let Some(cleaned) = dce::remove_dead_storage(source) {
         current = Some(cleaned);
+    }
+    // Cleanup can make mutually exclusive branch arms alpha-equivalent by removing lowering
+    // scaffolding that differed between them. Merge complete equivalent blocks without moving
+    // their operations, then collapse a conditional whose two edges now agree. Only after a merge,
+    // revisit known-total calls and storage so the newly dead predicate is collected; unchanged
+    // bodies pay no second cleanup pass.
+    let source = current.as_ref().unwrap_or(function);
+    if let Some(merged) = tail_merge::merge_equivalent_tails(source) {
+        current = Some(cleanup_after_tail_merge(merged, context, specializations));
     }
     // Last, after DCE has emptied every bracket it can. What remains reclaims real storage and
     // must stay: a bracket is where a live range ends, which a backend's stack-slot allocator

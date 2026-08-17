@@ -48,6 +48,8 @@ bounds checks     // prove array indices in range and remove checked access/fail
 dead known calls  // remove unused chains of explicitly total/speculatable numeric calls
 dead stores       // remove unread initialization overwritten on every following path
 dce               // on every body, not only a changed one
+tail merge        // hash-cons alpha-equivalent branch tails and collapse equal-target branches
+dead known + dce  // only after a tail merge, collect its newly dead predicate
 stack markers     // drop a mark duplicating one already held, and restores that pop nothing
 finish            // restores canonical form without exposing the intermediate body
 ```
@@ -561,10 +563,12 @@ Deliberately narrow, and intra-function only.
   explicitly classifies every call as total, deterministic and speculatable, and its inferred
   effects are empty. Purity alone is insufficient: a pure user function may diverge, and removing
   its unused call would make a formerly non-terminating program return.
-- An `alloca` goes only when *every* use of it is the destination of a `store` whose value is a pool
-  constant, together with those stores. Safe with no ownership analysis: a constant is trivially
-  copyable, so no drop obligation is discarded, and the value operand is not a register, so no owned
-  register loses its single consuming use — the trap a wider rule hits first.
+- An `alloca` goes only when *every* use of it is the destination of a pool-constant `store`,
+  together with those stores. The post-tail-merge cleanup also admits a register whose defining
+  operation requires no consuming use. Constants are trivially copyable; the explicit result
+  contract excludes variants and owning closure construction. Thus no owned register loses its
+  consuming use — the trap a wider rule hits first. The extra producer census is paid only after a
+  tail actually merged.
 - An unread `dict_entry` or `subfield` goes. Both derive places without side effects or owned
   results, so deleting one discharges no obligation. A linear use-count worklist handles nested
   `subfield` chains: removing an unread leaf can make its base derivation unread.
@@ -578,6 +582,35 @@ Deliberately narrow, and intra-function only.
 
 Constants left unreferenced are pruned from the pool, explicitly, since that renumbers every
 `ConstantId`.
+
+## Tail merging
+
+`mir::pass::tail_merge` hash-conses complete alpha-equivalent basic blocks after ordinary DCE has
+removed dead lowering scaffolding. Operation kinds, operands from outside the block and exact
+successors must agree. Results defined within the block are compared by definition order rather
+than by their function-wide `ValueId`, and source spans do not participate. The representative's
+span remains, as when any other optimization keeps one of two redundant computations.
+
+The table owns only a 64-bit canonical fingerprint and a block id. A matching fingerprint is
+collision-checked by a borrowed alpha comparison before any edge is redirected; operation metadata
+and operand lists are never cloned into keys. One local-result scratch map is reused while
+fingerprinting blocks, and the editable body is opened only after a duplicate or equal-target
+branch was found.
+
+Blocks are visited backwards so already-equivalent forward successors share a representative in
+their predecessors' keys; this merges multi-block acyclic tails without graph isomorphism or code
+motion. Backedges remain conservative. Source-fallible `invoke` blocks are excluded because an
+invoked result begins its valid scope only on the normal edge and would require subgraph-level
+renaming. Unreachable blocks are excluded too: they have no useful dominance relationship with a
+reachable candidate and therefore cannot safely serve as its representative.
+
+Every edge to a duplicate is redirected to the representative. A `condbr` whose targets thereby
+become equal becomes a `goto`, after which unreachable-block and single-predecessor cleanup remove
+the duplicate structure. This can make the predicate dead. Only when a tail was actually merged,
+the driver therefore runs a small cleanup fixed point: unread `comp_eq`, `load`, and `extract_tag`
+results; explicitly total/speculatable calls; and their local storage lifetimes. Arbitrary pure
+calls remain because they may diverge. Unchanged bodies pay neither that fixed point nor a second
+storage-DCE scan.
 
 ## Redundant stack markers
 
