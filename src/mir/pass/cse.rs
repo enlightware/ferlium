@@ -92,6 +92,7 @@ use crate::{
 use super::{
     dataflow::{CallOperands, Root, call_operands},
     provenance::{AddressorSummary, ResultProvenance},
+    site::OperationIndex,
 };
 
 /// An operand in a call-expression identity.
@@ -509,8 +510,14 @@ impl PlaceOrigins {
 
 #[derive(Clone)]
 enum ReplacementSite {
-    Operation { block: BlockId, index: usize },
-    Invoke { block: BlockId, normal: BlockId },
+    Operation {
+        block: BlockId,
+        index: OperationIndex,
+    },
+    Invoke {
+        block: BlockId,
+        normal: BlockId,
+    },
 }
 
 #[derive(Clone)]
@@ -558,7 +565,7 @@ pub(crate) fn eliminate_common_calls(
                 replacements.push(CallReplacement {
                     site: ReplacementSite::Operation {
                         block: block_id,
-                        index,
+                        index: OperationIndex::from_index(index),
                     },
                     source,
                     destination,
@@ -602,7 +609,8 @@ pub(crate) fn eliminate_common_calls(
         );
         match replacement.site {
             ReplacementSite::Operation { block, index } => {
-                edit.block_mut(block).replace_operation(index, copy);
+                edit.block_mut(block)
+                    .replace_operation(index.as_index(), copy);
             }
             ReplacementSite::Invoke { block, normal } => {
                 let block = edit.block_mut(block);
@@ -1060,7 +1068,7 @@ pub(crate) fn eliminate_common_subexpressions(func: &Function) -> Option<Functio
     for (block, indices) in &removed {
         let mut index = 0;
         edit.block_mut(*block).operations.retain(|_| {
-            let keep = !indices.contains(&index);
+            let keep = !indices.contains(&OperationIndex::from_index(index));
             index += 1;
             keep
         });
@@ -1107,7 +1115,7 @@ struct Numbering<'a> {
     /// The result each merged operation is replaced by. A representative is never itself merged —
     /// an expression is looked up under already-canonical operands — so this needs no chasing.
     merged: FxHashMap<ValueId, ValueId>,
-    removed: FxHashMap<BlockId, FxHashSet<usize>>,
+    removed: FxHashMap<BlockId, FxHashSet<OperationIndex>>,
 }
 
 impl Numbering<'_> {
@@ -1184,7 +1192,10 @@ impl Numbering<'_> {
                 // this a guard rather than a restriction.
                 Some(&available) if available.block.as_index() <= block.as_index() => {
                     self.merged.insert(result, available.result);
-                    self.removed.entry(block).or_default().insert(index);
+                    self.removed
+                        .entry(block)
+                        .or_default()
+                        .insert(OperationIndex::from_index(index));
                 }
                 _ => {
                     let key = expression.clone();

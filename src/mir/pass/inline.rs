@@ -60,13 +60,16 @@ use crate::{
     types::{r#type::Type, type_like::TypeLike},
 };
 
-use super::{Specializations, budget, monomorphize};
+use super::{Specializations, budget, monomorphize, site::OperationIndex};
 
 /// Where the call to inline sits in the caller.
 #[derive(Clone, Copy)]
 enum Site {
     /// An ordinary `call` operation, at `index` in `block`.
-    Operation { block: BlockId, index: usize },
+    Operation {
+        block: BlockId,
+        index: OperationIndex,
+    },
     /// The `invoke` terminator of `block`: a call to a source-fallible callee.
     Terminator { block: BlockId },
 }
@@ -224,17 +227,24 @@ fn plan_inlinings<'a>(
             .operations()
             .iter()
             .enumerate()
-            .map(|(index, operation)| (Site::Operation { block, index }, operation))
+            .map(|(index, operation)| (Some(index), operation))
             .chain(match &basic.terminator().kind {
-                TerminatorKind::Invoke { operation, .. } => {
-                    Some((Site::Terminator { block }, operation))
-                }
+                TerminatorKind::Invoke { operation, .. } => Some((None, operation)),
                 _ => None,
             });
 
-        for (site, operation) in candidates {
+        for (operation_index, operation) in candidates {
             let OperationKind::Call { ty, metadata } = &operation.kind else {
                 continue;
+            };
+            // Keep the enumerator as an ephemeral `usize`; only an actual call site retained by
+            // the planner becomes a typed block-operation coordinate.
+            let site = match operation_index {
+                Some(index) => Site::Operation {
+                    block,
+                    index: OperationIndex::from_index(index),
+                },
+                None => Site::Terminator { block },
             };
             let callee = match &operation.operands[0] {
                 mir::Value::Function(callee) => Some(*callee),
@@ -511,7 +521,7 @@ fn inline_at(edit: &mut FunctionEdit, body: &Function, site: Site, env: ModuleEn
     let (call, normal, error) = match site {
         Site::Operation { block, index } => {
             let caller = edit.block_mut(block);
-            let mut tail = caller.operations.split_off(index);
+            let mut tail = caller.operations.split_off(index.as_index());
             let call = tail.remove(0);
             let terminator = caller.terminator.clone();
             // What followed the call becomes the continuation the callee's `return`s jump to.

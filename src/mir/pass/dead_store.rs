@@ -22,7 +22,7 @@ use crate::{
     types::type_properties::concrete_type_is_trivial_copy,
 };
 
-use super::dataflow;
+use super::{dataflow, site::OperationIndex};
 
 /// Removes stores to a local whole place that every following path overwrites before reading.
 pub(crate) fn remove_overwritten_trivial_copy_stores(
@@ -117,7 +117,7 @@ pub(crate) fn remove_overwritten_trivial_copy_stores(
         pending.extend(predecessors[block.as_index()].iter().copied());
     }
 
-    let mut removed: FxHashMap<BlockId, FxHashSet<usize>> = FxHashMap::default();
+    let mut removed = FxHashMap::<BlockId, FxHashSet<OperationIndex>>::default();
     for block in func.blocks() {
         let mut live = FxHashSet::default();
         for successor in func.block(block).terminator().successors() {
@@ -140,7 +140,7 @@ pub(crate) fn remove_overwritten_trivial_copy_stores(
     for (block, indices) in removed {
         let mut index = 0;
         edit.block_mut(block).operations.retain(|_| {
-            let keep = !indices.contains(&index);
+            let keep = !indices.contains(&OperationIndex::from_index(index));
             index += 1;
             keep
         });
@@ -155,7 +155,7 @@ fn transfer_block(
     candidates: &FxHashSet<mir::ValueId>,
     consuming_results: &FxHashSet<mir::ValueId>,
     live: &mut FxHashSet<mir::ValueId>,
-    mut removed: Option<&mut FxHashMap<BlockId, FxHashSet<usize>>>,
+    mut removed: Option<&mut FxHashMap<BlockId, FxHashSet<OperationIndex>>>,
 ) {
     for (index, operation) in func.block(block).operations().iter().enumerate().rev() {
         if let Some(write_index) = whole_place_write_index(operation)
@@ -167,7 +167,10 @@ fn transfer_block(
                 && !live.contains(root)
             {
                 if let Some(removed) = &mut removed {
-                    removed.entry(block).or_default().insert(index);
+                    removed
+                        .entry(block)
+                        .or_default()
+                        .insert(OperationIndex::from_index(index));
                 }
             }
             live.remove(root);

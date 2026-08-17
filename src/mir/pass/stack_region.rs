@@ -41,7 +41,7 @@ use crate::{
     module::id::Id,
 };
 
-use super::dce::may_leave_frame_storage;
+use super::{dce::may_leave_frame_storage, site::OperationIndex};
 
 /// The markers known to equal the current allocation frontier, ordered by index.
 ///
@@ -113,13 +113,14 @@ pub(crate) fn remove_redundant_stack_markers(func: &Function) -> Option<Function
     // and both are immutable afterwards, so it holds at every use. Dominance holds too: a marker in
     // the state arrived on every path to this point, so its definition dominates this one's.
     let mut substitution: FxHashMap<ValueId, ValueId> = FxHashMap::default();
-    let mut dead: FxHashMap<BlockId, FxHashSet<usize>> = FxHashMap::default();
+    let mut dead = FxHashMap::<BlockId, FxHashSet<OperationIndex>>::default();
     for block in func.blocks() {
         let Some(state) = entry_states.get(&block) else {
             continue;
         };
         let mut state = state.clone();
         for (index, operation) in func.block(block).operations().iter().enumerate() {
+            let index = OperationIndex::from_index(index);
             match &operation.kind {
                 OperationKind::StackSave => {
                     if let (Some(marker), Some(held)) =
@@ -158,7 +159,7 @@ pub(crate) fn remove_redundant_stack_markers(func: &Function) -> Option<Function
     for (block, indices) in &dead {
         let mut index = 0;
         edit.block_mut(*block).operations.retain(|_| {
-            let keep = !indices.contains(&index);
+            let keep = !indices.contains(&OperationIndex::from_index(index));
             index += 1;
             keep
         });

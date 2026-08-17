@@ -51,7 +51,7 @@ use crate::{
         reify::{Reification, reify},
         terminator::{Terminator, TerminatorKind},
     },
-    module::{FunctionId, ModuleEnv, ModuleId},
+    module::{FunctionId, ModuleEnv, ModuleId, id::Id},
     std::{
         array::{array_type, array_value_from_vec},
         math::Float,
@@ -63,6 +63,7 @@ use crate::{
 use super::{
     dataflow::{self, Analysis, Const, Fact, Root, State},
     known_callee::{KnownCallee, KnownCallees},
+    site::OperationIndex,
 };
 
 /// A call result the optimizer can materialize without knowing every argument.
@@ -103,7 +104,7 @@ impl<'a> KnownCallSemantics<'a> {
 struct Fold {
     block: BlockId,
     /// Index of the operation within its block.
-    index: usize,
+    index: OperationIndex,
     /// The place the folded call would have written its result into.
     destination: mir::Value,
     result: CallRewrite,
@@ -130,8 +131,13 @@ struct Devirtualization {
 /// Where a dispatch sits in its block: an ordinary operation, or the `Invoke` terminator.
 #[derive(Clone, Copy)]
 enum Site {
-    Operation { block: BlockId, index: usize },
-    Terminator { block: BlockId },
+    Operation {
+        block: BlockId,
+        index: OperationIndex,
+    },
+    Terminator {
+        block: BlockId,
+    },
 }
 
 impl Site {
@@ -219,12 +225,13 @@ pub(crate) fn fold_function(
     // A reflexive comparison expands one call into `variant Equal; store`, so apply sites in
     // reverse order and splice without invalidating a later index planned in the same block.
     for fold in plan.calls.into_iter().rev() {
-        let span = edit.block(fold.block).operations[fold.index].span;
+        let index = fold.index.as_index();
+        let span = edit.block(fold.block).operations[index].span;
         let replacements =
             materialize_call_rewrite(&mut edit, span, fold.result, fold.destination, env);
         edit.block_mut(fold.block)
             .operations
-            .splice(fold.index..=fold.index, replacements);
+            .splice(index..=index, replacements);
     }
     for invoke in plan.invokes {
         let span = edit.block(invoke.block).terminator.span;
@@ -404,7 +411,10 @@ fn plan_devirtualizations(func: &Function, env: ModuleEnv<'_>) -> Vec<Devirtuali
         for (index, operation) in basic_block.operations().iter().enumerate() {
             if let Some((operand, callee)) = resolved_callee(operation, &state, &analysis) {
                 devirtualizations.push(Devirtualization {
-                    site: Site::Operation { block, index },
+                    site: Site::Operation {
+                        block,
+                        index: OperationIndex::from_index(index),
+                    },
                     operand,
                     callee,
                 });
@@ -463,7 +473,7 @@ fn apply_devirtualizations(edit: &mut FunctionEdit, devirtualizations: Vec<Devir
         let callee = mir::Value::Function(devirtualized.callee);
         let block = edit.block_mut(devirtualized.site.block());
         let operation = match devirtualized.site {
-            Site::Operation { index, .. } => &mut block.operations[index],
+            Site::Operation { index, .. } => &mut block.operations[index.as_index()],
             Site::Terminator { .. } => match &mut block.terminator.kind {
                 TerminatorKind::Invoke { operation, .. } => operation,
                 _ => unreachable!("planned against this block's invoke terminator"),
@@ -518,7 +528,7 @@ fn plan_folds_with(
                 }
                 plan.calls.push(Fold {
                     block,
-                    index,
+                    index: OperationIndex::from_index(index),
                     destination,
                     result,
                 });
@@ -528,7 +538,10 @@ fn plan_folds_with(
                 && let Some((operand, callee)) = resolved_callee(operation, &state, analysis)
             {
                 devirtualizations.push(Devirtualization {
-                    site: Site::Operation { block, index },
+                    site: Site::Operation {
+                        block,
+                        index: OperationIndex::from_index(index),
+                    },
                     operand,
                     callee,
                 });
