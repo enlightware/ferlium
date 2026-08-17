@@ -28,14 +28,17 @@
 //!
 //! Unread `dict_entry` and `subfield` place derivations are also removed. They neither own a value
 //! nor have side effects, and a linear use-count worklist handles nested `subfield` chains.
-//! A compiler-known `build_array` (or bare function store) used only by its matching drops is
-//! removed as one lifetime: deleting construction and cleanup together neither leaks nor drops
-//! uninitialized storage. This deliberately does not generalize to arbitrary resource producers.
+//! A compiler-known `build_array`, bare function store, or semantic `clone` used only by its
+//! matching drops is removed as one lifetime: deleting construction and cleanup together neither
+//! leaks nor drops uninitialized storage. An exact same-block clone/drop pair is also removed when
+//! the allocation has no observing or alias-producing use, even if later lifetimes reuse its cell.
+//! This deliberately does not generalize to arbitrary resource producers.
 //! Constants left unreferenced by removed stores are dropped from the pool with them.
 //!
-//! Any surviving use of an allocation — a `load`, a `subfield`, a `drop`, a call argument, or an
-//! unadmitted register store — disqualifies that allocation. Widening the storage rule means proving
-//! the drop obligation is discharged, and should happen only against the whole corpus.
+//! Any surviving use of an allocation — a `load`, a `subfield`, a call argument, or an unadmitted
+//! register store — disqualifies that allocation. A drop is admitted only as part of one of the
+//! complete lifetimes above. Widening the storage rule means proving the drop obligation is
+//! discharged, and should happen only against the whole corpus.
 
 #![allow(dead_code)]
 
@@ -47,7 +50,7 @@ use crate::mir::{
 };
 use crate::{
     module::{FunctionId, id::Id},
-    types::r#type::CallResultConvention,
+    types::r#type::{CallResultConvention, Type},
 };
 
 use super::{dataflow, known_callee::KnownCallees, site::OperationIndex};
@@ -247,11 +250,12 @@ fn remove_dead_storage_impl(
 ) -> Option<Function> {
     let mut census = DceCensus::of(func, admit_non_consuming_register_stores);
     let constructed = census.dead_constructed_values();
+    let clone_pairs = census.dead_same_block_clone_drop_pairs();
     let mut dead = census.dead_allocas();
-    for (block, operations) in constructed {
+    for (block, operations) in constructed.into_iter().chain(clone_pairs) {
         dead.operations.entry(block).or_default().extend(operations);
     }
-    let dead_places = census.unread_derived_places(func);
+    let dead_places = census.unread_derived_places(func, &dead.operations);
     for (block, index) in dead_places {
         dead.operations.entry(block).or_default().insert(index);
     }
@@ -404,6 +408,7 @@ struct DceCensus {
     derived_uses: FxHashMap<ValueId, usize>,
     restore_uses: FxHashMap<ValueId, usize>,
     non_consuming_results: FxHashSet<ValueId>,
+    same_block_clone_drop_pairs: Vec<CloneDropPair>,
 }
 
 /// The operations selected for removal, grouped by block.
@@ -421,6 +426,16 @@ struct AllocationUses {
     constructor: Option<(BlockId, OperationIndex)>,
     drops: Vec<(BlockId, OperationIndex)>,
     invalid_construction: bool,
+    /// Whether some use prevents exact same-block clone/drop lifetime cancellation.
+    invalid_clone_pair_use: bool,
+}
+
+#[derive(Clone, Copy)]
+struct CloneDropPair {
+    allocation: ValueId,
+    block: BlockId,
+    clone: OperationIndex,
+    drop: OperationIndex,
 }
 
 impl AllocationUses {
@@ -437,11 +452,14 @@ impl DceCensus {
             derived_uses: FxHashMap::default(),
             restore_uses: FxHashMap::default(),
             non_consuming_results: FxHashSet::default(),
+            same_block_clone_drop_pairs: Vec::new(),
         };
+        let mut has_clone = false;
 
         for block in func.blocks() {
             for (index, operation) in func.block(block).operations().iter().enumerate() {
                 let index = OperationIndex::from_index(index);
+                has_clone |= matches!(operation.kind, OperationKind::Clone { .. });
                 let Some(result) = operation.result_id() else {
                     continue;
                 };
@@ -467,21 +485,104 @@ impl DceCensus {
 
         for block in func.blocks() {
             let basic_block = func.block(block);
+            let mut pending_clones = FxHashMap::<ValueId, (OperationIndex, Type)>::default();
             for (index, operation) in basic_block.operations().iter().enumerate() {
                 let index = OperationIndex::from_index(index);
+                if has_clone {
+                    census.note_same_block_clone_drop_pair(
+                        block,
+                        index,
+                        operation,
+                        &mut pending_clones,
+                    );
+                }
                 if matches!(operation.kind, OperationKind::StackRestore)
                     && let Some(mir::Value::Register(marker)) = operation.operands.first()
                 {
                     *census.restore_uses.entry(*marker).or_default() += 1;
                 }
                 for (position, operand) in operation.operands.iter().enumerate() {
-                    census.note_operation_use(block, index, operation, position, operand);
+                    census
+                        .note_operation_use(block, index, operation, position, operand, has_clone);
                 }
             }
             census.note_terminator_uses(&basic_block.terminator().kind);
         }
 
         census
+    }
+
+    /// Records an exact local clone lifetime which starts and ends in this block without any
+    /// intervening use of its destination.
+    ///
+    /// Candidates are filtered after the complete use census: an allocation which is ever read,
+    /// projected or passed to a call may have an alias not named by the root at the candidate site.
+    /// Whole-place initialization and cleanup roles are safe because they cannot expose such an
+    /// alias. Keeping the ordered part block-local avoids a CFG fixed point; the complete-lifetime
+    /// rule below independently handles clone/drop cleanup split across successor blocks.
+    fn note_same_block_clone_drop_pair(
+        &mut self,
+        block: BlockId,
+        index: OperationIndex,
+        operation: &mir::Operation,
+        pending: &mut FxHashMap<ValueId, (OperationIndex, Type)>,
+    ) {
+        let remove_pending_operands = |pending: &mut FxHashMap<ValueId, _>| {
+            if pending.is_empty() {
+                return;
+            }
+            for operand in &operation.operands {
+                if let mir::Value::Register(id) = operand {
+                    pending.remove(id);
+                }
+            }
+        };
+
+        match &operation.kind {
+            OperationKind::Clone { ty }
+                if let Some(mir::Value::Register(destination)) = operation.operands.get(1)
+                    && self.allocations.contains_key(destination)
+                    && operation
+                        .operands
+                        .iter()
+                        .enumerate()
+                        .all(|(position, operand)| {
+                            position == 1
+                                || !matches!(operand, mir::Value::Register(id) if id == destination)
+                        }) =>
+            {
+                remove_pending_operands(pending);
+                pending.insert(*destination, (index, *ty));
+            }
+            OperationKind::Drop { ty }
+                if let Some(mir::Value::Register(target)) = operation.operands.first()
+                    && operation
+                        .operands
+                        .iter()
+                        .enumerate()
+                        .all(|(position, operand)| {
+                            position == 0
+                                || !matches!(operand, mir::Value::Register(id) if id == target)
+                        }) =>
+            {
+                let matched = pending
+                    .get(target)
+                    .copied()
+                    .filter(|(_, clone_ty)| clone_ty == ty);
+                remove_pending_operands(pending);
+                if let Some((clone, _)) = matched {
+                    self.same_block_clone_drop_pairs.push(CloneDropPair {
+                        allocation: *target,
+                        block,
+                        clone,
+                        drop: index,
+                    });
+                }
+            }
+            _ => {
+                remove_pending_operands(pending);
+            }
+        }
     }
 
     fn note_operation_use(
@@ -491,6 +592,7 @@ impl DceCensus {
         operation: &mir::Operation,
         position: usize,
         operand: &mir::Value,
+        track_clone_pairs: bool,
     ) {
         let mir::Value::Register(id) = operand else {
             return;
@@ -517,8 +619,11 @@ impl DceCensus {
         let is_bare_function_constructor = matches!(operation.kind, OperationKind::Store)
             && position == 1
             && matches!(operation.operands[0], mir::Value::Function(_));
+        let is_clone_constructor =
+            matches!(operation.kind, OperationKind::Clone { .. }) && position == 1;
         let is_drop = matches!(operation.kind, OperationKind::Drop { .. }) && position == 0;
-        let is_construction_use = is_array_constructor || is_bare_function_constructor || is_drop;
+        let is_construction_use =
+            is_array_constructor || is_bare_function_constructor || is_clone_constructor || is_drop;
         if !removable_store {
             if is_construction_use {
                 allocation.has_deferred_construction_use = true;
@@ -527,7 +632,7 @@ impl DceCensus {
             }
         }
 
-        if is_array_constructor || is_bare_function_constructor {
+        if is_array_constructor || is_bare_function_constructor || is_clone_constructor {
             if allocation.constructor.replace((block, index)).is_some() {
                 allocation.invalid_construction = true;
             }
@@ -535,6 +640,10 @@ impl DceCensus {
             allocation.drops.push((block, index));
         } else {
             allocation.invalid_construction = true;
+        }
+
+        if track_clone_pairs && !is_exact_clone_lifetime_role(operation, position) {
+            allocation.invalid_clone_pair_use = true;
         }
     }
 
@@ -549,6 +658,7 @@ impl DceCensus {
             if let Some(allocation) = self.allocations.get_mut(id) {
                 allocation.storage_only_invalid = true;
                 allocation.invalid_construction = true;
+                allocation.invalid_clone_pair_use = true;
             }
         };
         match terminator {
@@ -577,6 +687,18 @@ impl DceCensus {
             for (block, drop) in &candidate.drops {
                 removed.entry(*block).or_default().insert(*drop);
             }
+        }
+        removed
+    }
+
+    fn dead_same_block_clone_drop_pairs(&self) -> FxHashMap<BlockId, FxHashSet<OperationIndex>> {
+        let mut removed = FxHashMap::<BlockId, FxHashSet<OperationIndex>>::default();
+        for pair in &self.same_block_clone_drop_pairs {
+            if self.allocations[&pair.allocation].invalid_clone_pair_use {
+                continue;
+            }
+            removed.entry(pair.block).or_default().insert(pair.clone);
+            removed.entry(pair.block).or_default().insert(pair.drop);
         }
         removed
     }
@@ -614,12 +736,36 @@ impl DceCensus {
     ///
     /// `subfield`s can form chains, so use counts are retired through a worklist: deleting an
     /// unread leaf may make its base derivation unread too.
-    fn unread_derived_places(&mut self, func: &Function) -> Vec<(BlockId, OperationIndex)> {
+    fn unread_derived_places(
+        &mut self,
+        func: &Function,
+        removed_operations: &FxHashMap<BlockId, FxHashSet<OperationIndex>>,
+    ) -> Vec<(BlockId, OperationIndex)> {
         if self.derived_definitions.is_empty() {
             return Vec::new();
         }
 
         let mut uses = std::mem::take(&mut self.derived_uses);
+        // A removed clone/drop lifetime can strand its dictionary-derived dispatch places. Retire
+        // those uses before starting the existing derived-place worklist, avoiding a second DCE
+        // traversal merely to collect the callees the lifetime removal made unread.
+        for (block, indices) in removed_operations {
+            for index in indices {
+                for operand in &func.block(*block).operations()[index.as_index()].operands {
+                    let mir::Value::Register(id) = operand else {
+                        continue;
+                    };
+                    if self.derived_definitions.contains_key(id)
+                        && let Some(count) = uses.get_mut(id)
+                    {
+                        *count -= 1;
+                        if *count == 0 {
+                            uses.remove(id);
+                        }
+                    }
+                }
+            }
+        }
         let mut pending: Vec<ValueId> = self
             .derived_definitions
             .keys()
@@ -649,6 +795,24 @@ impl DceCensus {
             .into_iter()
             .map(|result| self.derived_definitions[&result])
             .collect()
+    }
+}
+
+/// Whether this operand role can neither observe an initialized lifetime nor retain an alias to it.
+///
+/// The same-block rule removes only a clone and the drop ending that particular lifetime. Other
+/// whole-place writes and drops may belong to later lifetimes in the same allocation and therefore
+/// remain. Any read, projection, call argument, or unmodelled role rejects every pair for the root.
+fn is_exact_clone_lifetime_role(operation: &mir::Operation, position: usize) -> bool {
+    match &operation.kind {
+        OperationKind::Clone { .. } => position == 1,
+        OperationKind::Drop { .. } | OperationKind::Clear => position == 0,
+        OperationKind::Store | OperationKind::Memcpy | OperationKind::Move => position == 1,
+        OperationKind::BuildArray { .. } => position + 1 == operation.operands.len(),
+        OperationKind::Call { ty, .. } => {
+            dataflow::call_result_operand_index(&operation.operands, ty) == Some(position)
+        }
+        _ => false,
     }
 }
 
@@ -739,6 +903,76 @@ mod tests {
         assert_eq!(
             optimized_subfields, 0,
             "both unread payload projections must be gone:\n{body}"
+        );
+    }
+
+    #[test]
+    fn an_unused_managed_clone_lifetime_is_removed() {
+        let source = "fn discard(x: [int]) { let mut copy = x; () }";
+        let raw_module = raw(source);
+        let raw_body = body_of(&raw_module, "discard");
+        assert!(
+            raw_body.contains("clone [int]") && raw_body.contains("drop [int]"),
+            "the test needs the managed clone lifetime emitted by lowering:\n{raw_body}"
+        );
+
+        let module = optimized(source);
+        let body = body_of(&module, "discard");
+        assert!(
+            !body.contains("clone ") && !body.contains("drop ") && !body.contains("alloca"),
+            "the unused clone, its drop and its storage must be removed together:\n{body}"
+        );
+    }
+
+    #[test]
+    fn a_dead_managed_clone_before_an_overwrite_is_removed() {
+        let source = "fn overwrite(x: [int]) { let mut copy = x; copy = []; () }";
+        let raw_module = raw(source);
+        let raw_body = body_of(&raw_module, "overwrite");
+        assert!(
+            raw_body.contains("clone [int]") && raw_body.matches("drop [int]").count() == 2,
+            "the test needs one cloned and one replacement lifetime:\n{raw_body}"
+        );
+
+        let module = optimized(source);
+        let body = body_of(&module, "overwrite");
+        assert!(
+            !body.contains("clone [int]") && body.matches("drop [int]").count() == 1,
+            "only the replacement lifetime and its drop must remain:\n{body}"
+        );
+    }
+
+    #[test]
+    fn a_read_managed_clone_lifetime_is_retained() {
+        let source = "fn first(x: [int]) -> int { let mut copy = x; copy[0] }";
+        let module = optimized(source);
+        let body = body_of(&module, "first");
+        assert!(
+            body.contains("clone [int]") && body.contains("drop [int]"),
+            "an observed clone is not a dead ownership lifetime:\n{body}"
+        );
+    }
+
+    #[test]
+    fn a_dead_generic_clone_drops_its_dispatch_places() {
+        let source = "fn discard<T>(x: T) where T: Value { let mut copy = x; () }";
+        let raw_module = raw(source);
+        let raw_body = body_of(&raw_module, "discard");
+        assert!(
+            raw_body.contains("clone ")
+                && raw_body.contains("drop ")
+                && raw_body.contains("dict_entry"),
+            "the test needs dictionary-dispatched ownership operations:\n{raw_body}"
+        );
+
+        let module = optimized(source);
+        let body = body_of(&module, "discard");
+        assert!(
+            !body.contains("clone ")
+                && !body.contains("drop ")
+                && !body.contains("dict_entry")
+                && !body.contains("alloca"),
+            "removing the lifetime must also collect its dispatch places:\n{body}"
         );
     }
 

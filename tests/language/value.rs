@@ -798,6 +798,9 @@ fn break_clones_owned_outer_local_when_loop_does_not_exit_its_scope() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn generic_mut_let_drop_uses_value_dictionary() {
     let mut session = TestSession::new();
+    // This asserts exact calls to the deliberately observable `Probe::drop`; dead-lifetime
+    // elimination is entitled to remove `owned`'s clone and drop under the `Value` law.
+    session.without_optimized_mode();
     let source = format!(
         r#"
         {}

@@ -89,6 +89,12 @@ storage DCE, which can then remove any allocation or literal made wholly unread.
 Stores that consume a freshly constructed owned value are retained, even when their destination is
 `TrivialCopy`, because removing them would orphan that value's required consuming use.
 
+Managed storage remains outside this store-liveness proof, but final DCE handles the ownership-safe
+subset separately. A semantic clone whose destination is never observed is removed together with
+the drops ending that cloned lifetime. This includes a complete dead local lifetime across cleanup
+edges and an exact same-block clone/drop pair before the cell is reused. The latter rejects any
+read, projection, call argument or other alias-producing use of the local root.
+
 A source-fallible call is an `invoke` terminator, so its result place is deliberately outside this
 first pass; the error edge and cleanup would need their own proof. DS has its own strict operand-role
 scan rather than reusing the broader escape analysis: that analysis admits `Let` call arguments,
@@ -576,6 +582,11 @@ Deliberately narrow, and intra-function only.
   together with every matching drop. Treating construction and cleanup as one dead lifetime avoids
   both leaking a constructed resource and dropping uninitialized storage; arbitrary resource
   producers remain outside this deliberately narrow rule.
+- A semantic `clone` destination used only by its matching cleanup is removed by the same complete
+  lifetime rule. An exact local clone/drop pair within one block may also go when no operation can
+  observe or retain an alias to that allocation, even if a later lifetime reuses the cell. This is
+  justified by the `Value` law that cloning and then ending ownership of the unused clone has no
+  observable language-level effect; it does not grant general pure-call DCE.
 - A properly nested same-block `stack_save`/`stack_restore` pair with one restore goes when no
   surviving operation inside may leave current-frame storage allocated. The paired rule runs after
   the other removals, so storage cleanup can make a region empty first.
