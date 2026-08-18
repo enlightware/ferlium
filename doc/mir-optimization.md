@@ -49,8 +49,8 @@ LICM              // hoist invariant pure direct calls with passive inputs and c
 dead proven calls // remove unused chains of known-total numeric or proved-returning script calls
 dead stores       // remove unread initialization overwritten on every following path
 dce               // on every body, not only a changed one
-tail merge        // hash-cons alpha-equivalent branch tails and collapse equal-target branches
-dead proven + dce // only after a tail merge, collect its newly dead predicate
+tail merge        // hash-cons equivalent tails, collapse equal edges, and fold empty exits
+dead proven + dce // after tail sharing/equal-edge folding, collect its newly dead predicate
 stack markers     // drop a mark duplicating one already held, and restores that pop nothing
 finish            // restores canonical form without exposing the intermediate body
 ```
@@ -640,17 +640,18 @@ Constants left unreferenced are pruned from the pool, explicitly, since that ren
 
 ## Tail merging
 
-`mir::pass::tail_merge` hash-conses complete alpha-equivalent basic blocks after ordinary DCE has
-removed dead lowering scaffolding. Operation kinds, operands from outside the block and exact
-successors must agree. Results defined within the block are compared by definition order rather
-than by their function-wide `ValueId`, and source spans do not participate. The representative's
-span remains, as when any other optimization keeps one of two redundant computations.
+`mir::pass::tail_merge` simplifies shared control-flow tails after ordinary DCE has removed dead
+lowering scaffolding. Its main rule hash-conses complete alpha-equivalent basic blocks. Operation
+kinds, operands from outside the block and exact successors must agree. Results defined within the
+block are compared by definition order rather than by their function-wide `ValueId`, and source
+spans do not participate. The representative's span remains, as when any other optimization keeps
+one of two redundant computations.
 
 The table owns only a 64-bit canonical fingerprint and a block id. A matching fingerprint is
 collision-checked by a borrowed alpha comparison before any edge is redirected; operation metadata
 and operand lists are never cloned into keys. One local-result scratch map is reused while
-fingerprinting blocks, and the editable body is opened only after a duplicate or equal-target
-branch was found.
+fingerprinting blocks, and the editable body is opened only after a duplicate, equal-target branch,
+or foldable empty exit was found.
 
 Blocks are visited backwards so already-equivalent forward successors share a representative in
 their predecessors' keys; this merges multi-block acyclic tails without graph isomorphism or code
@@ -661,11 +662,16 @@ reachable candidate and therefore cannot safely serve as its representative.
 
 Every edge to a duplicate is redirected to the representative. A `condbr` whose targets thereby
 become equal becomes a `goto`, after which unreachable-block and single-predecessor cleanup remove
-the duplicate structure. This can make the predicate dead. Only when a tail was actually merged,
-the driver therefore runs a small cleanup fixed point: unread `comp_eq`, `load`, and `extract_tag`
-results; explicitly total/speculatable calls; and their local storage lifetimes. Arbitrary pure
-calls remain because they may diverge. Unchanged bodies pay neither that fixed point nor a second
-storage-DCE scan.
+the duplicate structure. Independently, a `goto` to an empty block ending in `ret`,
+`propagate_error`, or `failure_during_cleanup` is replaced by that operand-free terminal transfer.
+This folds a shared exit into all of its predecessors without copying operations; exits carrying an
+operand or successor are not duplicated.
+
+Merging a tail or collapsing a branch can make its predicate dead. Only in that case does the
+driver run a small cleanup fixed point: unread `comp_eq`, `load`, and `extract_tag` results;
+explicitly total/speculatable calls; and their local storage lifetimes. Folding only an empty exit
+cannot make a value dead and does not buy that cleanup. Unchanged bodies pay neither the fixed point
+nor a second storage-DCE scan.
 
 ## Redundant stack markers
 

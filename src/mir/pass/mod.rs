@@ -351,18 +351,16 @@ pub(crate) fn optimize_function(
     }
     // Cleanup can make mutually exclusive branch arms alpha-equivalent by removing lowering
     // scaffolding that differed between them. Merge complete equivalent blocks without moving
-    // their operations, then collapse a conditional whose two edges now agree. Only after a merge,
-    // revisit proven-total calls and storage so the newly dead predicate is collected; unchanged
-    // bodies pay no second cleanup pass.
+    // their operations, collapse a conditional whose two edges now agree, and fold shared empty
+    // exits into their predecessors. Only the first two can make computations dead; revisit
+    // proven-total calls and storage for those, while an exit-only rewrite pays no second cleanup.
     let source = current.as_ref().unwrap_or(function);
-    if let Some(merged) = tail_merge::merge_equivalent_tails(source) {
-        current = Some(cleanup_after_tail_merge(
-            merged,
-            env,
-            context,
-            specializations,
-            &will_return,
-        ));
+    if let Some(simplified) = tail_merge::simplify_tails(source) {
+        current = Some(if simplified.exposed_dead_code {
+            cleanup_after_tail_merge(simplified.body, env, context, specializations, &will_return)
+        } else {
+            simplified.body
+        });
     }
     // Last, after DCE has emptied every bracket it can. What remains reclaims real storage and
     // must stay: a bracket is where a live range ends, which a backend's stack-slot allocator

@@ -4,7 +4,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 
-//! Merging of alpha-equivalent basic-block tails.
+//! Simplification of shared basic-block tails.
 //!
 //! Lowering keeps the source's control-flow shape. Consequently two arms which compute the same
 //! thing still become two blocks, and ordinary CSE cannot see across their mutually exclusive
@@ -19,6 +19,11 @@
 //! Source-fallible `invoke` tails are excluded for now. An invoked operation may define a value
 //! whose valid scope begins only on its normal edge, so merging it needs a subgraph-level renaming
 //! proof rather than this block-local one.
+//!
+//! A shared empty exit is the limiting case in the other direction: every predecessor can carry
+//! its operand-free terminal transfer directly. Folding those `goto`s removes a block and a
+//! run-time transfer without duplicating an operation. It deliberately applies only to `return`,
+//! error propagation and cleanup failure, not to arbitrary empty blocks with successors.
 
 use std::hash::{Hash, Hasher};
 
@@ -244,8 +249,51 @@ fn reachable_blocks(function: &Function) -> DenseBitSet {
     reachable
 }
 
-/// Merges complete alpha-equivalent blocks and simplifies branches whose two edges then coincide.
-pub(crate) fn merge_equivalent_tails(function: &Function) -> Option<Function> {
+/// The result of simplifying tails, including whether the rewrite can have made values dead.
+pub(crate) struct SimplifiedTails {
+    pub(crate) body: Function,
+    pub(crate) exposed_dead_code: bool,
+}
+
+fn is_operand_free_terminal(kind: &TerminatorKind) -> bool {
+    matches!(
+        kind,
+        TerminatorKind::Return
+            | TerminatorKind::PropagateError
+            | TerminatorKind::FailureDuringCleanup
+    )
+}
+
+fn is_empty_terminal_block(function: &Function, block: BlockId) -> bool {
+    let block = function.block(block);
+    block.operations().is_empty() && is_operand_free_terminal(&block.terminator().kind)
+}
+
+fn fold_empty_terminal_successors(edit: &mut FunctionEdit) {
+    // Ordinary acyclic successors follow their predecessors in canonical block order. Visiting
+    // backwards propagates a terminal through an empty jump chain in this one scan.
+    let mut blocks: Vec<_> = edit.blocks().collect();
+    blocks.reverse();
+    for block in blocks {
+        let target = match edit.block(block).terminator.kind {
+            TerminatorKind::Goto { target } => target,
+            _ => continue,
+        };
+        let terminal = {
+            let target = edit.block(target);
+            if target.operations.is_empty() && is_operand_free_terminal(&target.terminator.kind) {
+                target.terminator.clone()
+            } else {
+                continue;
+            }
+        };
+        edit.block_mut(block).terminator = terminal;
+    }
+}
+
+/// Merges complete alpha-equivalent blocks, collapses equal-target branches and folds shared empty
+/// exit blocks into their predecessors.
+pub(crate) fn simplify_tails(function: &Function) -> Option<SimplifiedTails> {
     if function.blocks().count() < 2 {
         return None;
     }
@@ -266,7 +314,15 @@ pub(crate) fn merge_equivalent_tails(function: &Function) -> Option<Function> {
         .filter(|block| reachable.contains(block.as_index()))
         .collect();
     blocks.reverse();
+    let mut has_empty_terminal_successor = match function.block(function.entry()).terminator().kind
+    {
+        TerminatorKind::Goto { target } => is_empty_terminal_block(function, target),
+        _ => false,
+    };
     for block in blocks {
+        if let TerminatorKind::Goto { target } = function.block(block).terminator().kind {
+            has_empty_terminal_successor |= is_empty_terminal_block(function, target);
+        }
         let Some(fingerprint) =
             block_fingerprint(function, block, &replacement, &mut local_results)
         else {
@@ -298,7 +354,8 @@ pub(crate) fn merge_equivalent_tails(function: &Function) -> Option<Function> {
                 } if then_target == else_target
             )
         });
-    if replacement.is_empty() && !has_equal_target_branch {
+    let exposed_dead_code = !replacement.is_empty() || has_equal_target_branch;
+    if !exposed_dead_code && !has_empty_terminal_successor {
         return None;
     }
 
@@ -348,10 +405,14 @@ pub(crate) fn merge_equivalent_tails(function: &Function) -> Option<Function> {
         }
     }
 
+    fold_empty_terminal_successors(&mut edit);
     edit.remove_unreachable_blocks();
     edit.merge_blocks_into_predecessors();
     edit.prune_constants();
-    Some(edit.finish_unverified())
+    Some(SimplifiedTails {
+        body: edit.finish_unverified(),
+        exposed_dead_code,
+    })
 }
 
 #[cfg(test)]
@@ -359,11 +420,15 @@ mod tests {
     use crate::{
         CompilerSession, Location, MirOptimization,
         hir::value::LiteralValue,
-        mir::{Operation, ParameterKind, builder::FunctionBuilder, terminator::Terminator},
+        mir::{
+            Operation, ParameterKind,
+            builder::FunctionBuilder,
+            terminator::{Terminator, TerminatorKind},
+        },
         std::{logic::bool_type, math::int_type},
     };
 
-    use super::merge_equivalent_tails;
+    use super::simplify_tails;
 
     fn optimized_body(src: &str) -> String {
         let mut session = CompilerSession::new();
@@ -475,7 +540,7 @@ mod tests {
         let session = CompilerSession::new();
         let function = builder.finish(session.module_env());
         assert!(
-            merge_equivalent_tails(&function).is_none(),
+            simplify_tails(&function).is_none(),
             "the only equivalent candidate is unreachable"
         );
     }
@@ -496,7 +561,82 @@ mod tests {
         builder.set_terminator(exit, Terminator::ret(span));
 
         let function = builder.finish(env);
-        let merged = merge_equivalent_tails(&function).expect("the equal branch targets simplify");
-        assert!(merged.constants().is_empty());
+        let merged = simplify_tails(&function).expect("the equal branch targets simplify");
+        assert!(merged.body.constants().is_empty());
+    }
+
+    #[test]
+    fn a_shared_empty_return_is_folded_into_its_predecessors() {
+        let span = Location::new_synthesized();
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let mut builder = FunctionBuilder::new("fold_return".into(), Default::default());
+        let ret = builder.add_parameter(int_type(), ParameterKind::Return);
+        let condition = builder.add_constant(bool_type(), LiteralValue::new_native(true), &env);
+        let one = builder.add_constant(int_type(), LiteralValue::new_native(1_isize), &env);
+        let two = builder.add_constant(int_type(), LiteralValue::new_native(2_isize), &env);
+        let entry = builder.add_block();
+        let left = builder.add_block();
+        let right = builder.add_block();
+        let shared = builder.add_block();
+        let exit = builder.add_block();
+        builder.set_terminator(
+            entry,
+            Terminator::cond_br(span, crate::mir::Value::Constant(condition), left, right),
+        );
+        builder.append_operation(
+            left,
+            Operation::store(
+                span,
+                crate::mir::Value::Constant(one),
+                crate::mir::Value::Parameter(ret),
+            ),
+        );
+        builder.set_terminator(left, Terminator::goto(span, shared));
+        builder.append_operation(
+            right,
+            Operation::store(
+                span,
+                crate::mir::Value::Constant(two),
+                crate::mir::Value::Parameter(ret),
+            ),
+        );
+        builder.set_terminator(right, Terminator::goto(span, shared));
+        builder.set_terminator(shared, Terminator::goto(span, exit));
+        builder.set_terminator(exit, Terminator::ret(span));
+
+        let function = builder.finish(env);
+        let simplified = simplify_tails(&function).expect("the shared return must fold");
+        assert!(!simplified.exposed_dead_code);
+        assert_eq!(simplified.body.blocks().count(), 3);
+        assert!(matches!(
+            simplified.body.block(left).terminator().kind,
+            TerminatorKind::Return
+        ));
+        assert!(matches!(
+            simplified.body.block(right).terminator().kind,
+            TerminatorKind::Return
+        ));
+    }
+
+    #[test]
+    fn an_entry_jump_to_an_empty_return_is_folded() {
+        let span = Location::new_synthesized();
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let mut builder = FunctionBuilder::new("fold_entry_return".into(), Default::default());
+        let entry = builder.add_block();
+        let exit = builder.add_block();
+        builder.set_terminator(entry, Terminator::goto(span, exit));
+        builder.set_terminator(exit, Terminator::ret(span));
+
+        let function = builder.finish(env);
+        let simplified = simplify_tails(&function).expect("the entry return must fold");
+        assert!(!simplified.exposed_dead_code);
+        assert_eq!(simplified.body.blocks().count(), 1);
+        assert!(matches!(
+            simplified.body.block(entry).terminator().kind,
+            TerminatorKind::Return
+        ));
     }
 }
