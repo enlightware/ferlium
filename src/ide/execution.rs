@@ -14,6 +14,23 @@ use wasm_bindgen::prelude::*;
 
 use super::diagnostics::ErrorData;
 
+/// A best-effort link from a range in rendered compiler-artifact text to a source range.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
+#[derive(Clone)]
+pub struct TextSourceMapEntry {
+    pub from: u32,
+    pub to: u32,
+    pub source_from: u32,
+    pub source_to: u32,
+}
+
+/// A rendered compiler artifact and the source links associated with it.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
+pub struct IrText {
+    pub text: String,
+    pub source_map: Vec<TextSourceMapEntry>,
+}
+
 /// The content of an execution error in the IDE
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
 #[derive(Debug, Clone, new)]

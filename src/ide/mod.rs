@@ -16,5 +16,5 @@ mod signatures;
 pub use annotations::AnnotationData;
 pub use compiler::Compiler;
 pub use diagnostics::{CompilationReport, ErrorData};
-pub use execution::{ExecutionErrorData, ExecutionResult};
+pub use execution::{ExecutionErrorData, ExecutionResult, IrText, TextSourceMapEntry};
 pub use signatures::FunctionSignature;

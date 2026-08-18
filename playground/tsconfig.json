@@ -7,6 +7,10 @@
     "types": ["node"],
 
     "moduleResolution": "bundler",
+    "baseUrl": ".",
+    "paths": {
+      "script-api": ["script-api/pkg/script_api.d.ts"]
+    },
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
     "verbatimModuleSyntax": true,

@@ -6,11 +6,12 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use std::fmt;
+use std::fmt::{self, Write};
 
 use ustr::Ustr;
 
 use crate::{
+    Location,
     format::FormatWith,
     hir::function::ArgConvention,
     mir::{
@@ -95,6 +96,19 @@ pub struct Function {
     blocks: Vec<BasicBlock>,
 }
 
+/// One source-linked range in the textual rendering of a MIR function.
+pub(crate) struct RenderedSourceMapEntry {
+    pub(crate) from: usize,
+    pub(crate) to: usize,
+    pub(crate) span: Location,
+}
+
+/// A rendered MIR function with best-effort source links for its operations and terminators.
+pub(crate) struct RenderedFunction {
+    pub(crate) text: String,
+    pub(crate) source_map: Vec<RenderedSourceMapEntry>,
+}
+
 impl Function {
     pub(crate) fn new(
         name: Ustr,
@@ -150,6 +164,87 @@ impl Function {
 
     pub fn block(&self, block: BlockId) -> &BasicBlock {
         &self.blocks[block.as_index()]
+    }
+
+    /// Renders this function and records the spans of each non-synthesized operation and
+    /// terminator. Textual MIR consumers without source links use this same renderer through
+    /// [`FormatWith`], keeping the two forms byte-identical.
+    pub(crate) fn render_with_source_map(&self, env: &ModuleEnv<'_>) -> RenderedFunction {
+        let mut text = String::new();
+        let mut source_map = Vec::new();
+        let result = (|| -> fmt::Result {
+            write!(text, "fn {}(", self.name)?;
+            for (index, parameter) in self.parameters.iter().enumerate() {
+                if index != 0 {
+                    write!(text, ", ")?;
+                }
+                let kind = match parameter.kind {
+                    ParameterKind::Parameter(ArgConvention::Let) => "arg let",
+                    ParameterKind::Parameter(ArgConvention::MutableRef) => "arg &mut",
+                    ParameterKind::Owned => "arg owned",
+                    ParameterKind::Dictionary => "extra",
+                    ParameterKind::Return => "ret",
+                };
+                write!(
+                    text,
+                    "{}: @{} {}",
+                    mir::Value::Parameter(mir::ParameterId::from_index(index)),
+                    kind,
+                    parameter.ty.format_with(env)
+                )?;
+            }
+            write!(text, "):")?;
+
+            for (index, constant) in self.constants.iter().enumerate() {
+                write!(
+                    text,
+                    "\n  @c{}: {} = {}",
+                    index,
+                    constant.ty.format_with(env),
+                    constant.representation
+                )?;
+            }
+
+            if !self.blocks.is_empty() {
+                writeln!(text)?;
+                for block_id in self.blocks() {
+                    writeln!(text, "  b{}:", block_id.as_u32())?;
+                    let block = self.block(block_id);
+                    for operation in block.operations() {
+                        let from = text.len();
+                        write!(text, "    ")?;
+                        if let Some(result) = operation.result_id() {
+                            write!(text, "{} = ", mir::Value::Register(result))?;
+                        }
+                        writeln!(text, "{}", operation.format_with(env))?;
+                        push_rendered_source_map_entry(
+                            &mut source_map,
+                            from,
+                            text.len() - 1,
+                            operation.span,
+                        );
+                    }
+                    let terminator = block.terminator();
+                    let from = text.len();
+                    write!(text, "    ")?;
+                    if let TerminatorKind::Invoke { operation, .. } = &terminator.kind
+                        && let Some(result) = operation.result_id()
+                    {
+                        write!(text, "{} = ", mir::Value::Register(result))?;
+                    }
+                    writeln!(text, "{}", terminator.format_with(env))?;
+                    push_rendered_source_map_entry(
+                        &mut source_map,
+                        from,
+                        text.len() - 1,
+                        terminator.span,
+                    );
+                }
+            }
+            Ok(())
+        })();
+        result.expect("writing to a string cannot fail");
+        RenderedFunction { text, source_map }
     }
 
     /// Visits every function this body names, wherever it names it.
@@ -221,59 +316,17 @@ impl Function {
 
 impl FormatWith<ModuleEnv<'_>> for Function {
     fn fmt_with(&self, f: &mut fmt::Formatter<'_>, env: &ModuleEnv<'_>) -> fmt::Result {
-        write!(f, "fn {}(", self.name)?;
-        for (i, parameter) in self.parameters.iter().enumerate() {
-            if i != 0 {
-                write!(f, ", ")?;
-            }
-            let kind = match parameter.kind {
-                ParameterKind::Parameter(ArgConvention::Let) => "arg let",
-                ParameterKind::Parameter(ArgConvention::MutableRef) => "arg &mut",
-                ParameterKind::Owned => "arg owned",
-                ParameterKind::Dictionary => "extra",
-                ParameterKind::Return => "ret",
-            };
-            write!(
-                f,
-                "{}: @{} {}",
-                mir::Value::Parameter(mir::ParameterId::from_index(i)),
-                kind,
-                parameter.ty.format_with(env)
-            )?;
-        }
-        write!(f, "):")?;
+        f.write_str(&self.render_with_source_map(env).text)
+    }
+}
 
-        for (index, constant) in self.constants.iter().enumerate() {
-            write!(
-                f,
-                "\n  @c{}: {} = {}",
-                index,
-                constant.ty.format_with(env),
-                constant.representation
-            )?;
-        }
-
-        if !self.blocks.is_empty() {
-            writeln!(f)?;
-            for block_id in self.blocks() {
-                writeln!(f, "  b{}:", block_id.as_u32())?;
-                let block = self.block(block_id);
-                for operation in block.operations() {
-                    write!(f, "    ")?;
-                    if let Some(result) = operation.result_id() {
-                        write!(f, "{} = ", mir::Value::Register(result))?;
-                    }
-                    writeln!(f, "{}", operation.format_with(env))?;
-                }
-                write!(f, "    ")?;
-                if let TerminatorKind::Invoke { operation, .. } = &block.terminator().kind
-                    && let Some(result) = operation.result_id()
-                {
-                    write!(f, "{} = ", mir::Value::Register(result))?;
-                }
-                writeln!(f, "{}", block.terminator().format_with(env))?;
-            }
-        }
-        Ok(())
+fn push_rendered_source_map_entry(
+    source_map: &mut Vec<RenderedSourceMapEntry>,
+    from: usize,
+    to: usize,
+    span: Location,
+) {
+    if !span.is_synthesized() {
+        source_map.push(RenderedSourceMapEntry { from, to, span });
     }
 }

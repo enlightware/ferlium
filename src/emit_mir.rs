@@ -6,6 +6,8 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
+use std::fmt::Write;
+
 use crate::FxHashMap;
 use ustr::Ustr;
 
@@ -39,19 +41,31 @@ use crate::{
     types::{effects::no_effects, r#type::Type, type_properties::concrete_type_is_trivial_copy},
 };
 
-/// Emits the textual representation of the Ferlium MIR of `module`.
+/// A textual MIR dump together with best-effort links from rendered MIR ranges back to source.
 ///
-/// Every lowerable local function of `module` is emitted, including the (anonymous) member
-/// functions of its subscripts. A `YieldedOnce` subscript member is emitted standalone as a
-/// suspendable function (its `yield` exposes the yielded place to the driving `project`). Only
-/// bodiless (native) functions are skipped.
+/// The textual form intentionally remains suitable for tests and debugging. The source map is
+/// separate metadata for IDE consumers; synthesized operations have no entry.
+pub(crate) struct MirText {
+    pub(crate) text: String,
+    pub(crate) source_map: Vec<TextSourceMapEntry>,
+}
+
+/// A source link for one range of a rendered compiler artifact.
 ///
-/// Intended for testing and debugging.
-pub(crate) fn emit_mir(
+/// The offsets are `usize` while formatting because they index a Rust `String`; web-facing
+/// consumers convert them to `u32` at their API boundary.
+pub(crate) struct TextSourceMapEntry {
+    pub(crate) from: usize,
+    pub(crate) to: usize,
+    pub(crate) span: Location,
+}
+
+/// Emits textual MIR and records the source span of each rendered operation and terminator.
+pub(crate) fn emit_mir_with_source_map(
     module: &Module,
     others: &Modules,
     artifacts: &crate::compiler::MirArtifacts,
-) -> String {
+) -> MirText {
     let mut functions: Vec<(Ustr, LocalFunctionId)> = (0..module.function_count())
         .map(LocalFunctionId::from_index)
         .filter_map(|id| {
@@ -65,24 +79,58 @@ pub(crate) fn emit_mir(
         .collect();
     functions.sort_by_key(|(name, id)| (*name, id.as_index()));
     let env = ModuleEnv::new(module, others);
-    let declared = functions.into_iter().map(|(_, f)| {
+    let mut output = String::new();
+    let mut source_map = Vec::new();
+    for (_, f) in functions {
         let lowered = artifacts
             .get(f)
             .expect("every script function must have a MIR artifact");
-        format!("{}", lowered.format_with(&env))
-    });
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        append_rendered_function(lowered, &env, &mut output, &mut source_map);
+    }
     // Specialized bodies have no entry in the function table above — nothing in the source declared
     // them — so they are appended in creation order, each under the generated name saying which
     // original and which instantiation it came from. Without this a dump would show call sites
     // reaching bodies it never printed.
-    let specialized = artifacts.specializations().iter().map(|specialization| {
-        format!(
-            "// specialization of {}\n{}",
-            mir::Value::Function(specialization.original).format_with(&env),
-            specialization.body.format_with(&env)
+    for specialization in artifacts.specializations() {
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        writeln!(
+            output,
+            "// specialization of {}",
+            mir::Value::Function(specialization.original).format_with(&env)
         )
-    });
-    declared.chain(specialized).collect::<Vec<_>>().join("\n")
+        .expect("writing to a string cannot fail");
+        append_rendered_function(&specialization.body, &env, &mut output, &mut source_map);
+    }
+    MirText {
+        text: output,
+        source_map,
+    }
+}
+
+fn append_rendered_function(
+    function: &mir::Function,
+    env: &ModuleEnv<'_>,
+    output: &mut String,
+    source_map: &mut Vec<TextSourceMapEntry>,
+) {
+    let rendered = function.render_with_source_map(env);
+    let offset = output.len();
+    output.push_str(&rendered.text);
+    source_map.extend(
+        rendered
+            .source_map
+            .into_iter()
+            .map(|entry| TextSourceMapEntry {
+                from: offset + entry.from,
+                to: offset + entry.to,
+                span: entry.span,
+            }),
+    );
 }
 
 /// The MIR blocks involved in the lowering of a case in a match expression.

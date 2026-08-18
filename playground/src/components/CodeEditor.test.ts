@@ -14,6 +14,22 @@ const compiler = vi.hoisted(() => ({
 	getAnnotations: vi.fn(() => []),
 	getLightAnnotations: vi.fn(() => []),
 	runExpr: vi.fn(),
+	runExprMir: vi.fn((optimized: boolean) => {
+		void optimized;
+		return undefined;
+	}),
+	mirText: vi.fn((optimized: boolean) => {
+		void optimized;
+		return {
+			text: "",
+			source_map: [] as Array<{
+				from: number,
+				to: number,
+				source_from: number,
+				source_to: number,
+			}>,
+		};
+	}),
 }));
 
 vi.mock("../compiler-api", () => ({
@@ -34,6 +50,12 @@ vi.mock("../compiler-api", () => ({
 		}
 		run_expr() {
 			return compiler.runExpr();
+		}
+		run_expr_mir(optimized: boolean) {
+			return compiler.runExprMir(optimized);
+		}
+		mir_text(optimized: boolean) {
+			return compiler.mirText(optimized);
 		}
 	},
 }));
@@ -70,6 +92,8 @@ describe("CodeEditor", () => {
 		compiler.getAnnotations.mockClear();
 		compiler.getLightAnnotations.mockClear();
 		compiler.runExpr.mockReset();
+		compiler.runExprMir.mockReset();
+		compiler.mirText.mockClear();
 	});
 
 	afterEach(() => {
@@ -171,5 +195,27 @@ describe("CodeEditor", () => {
 		});
 		expect(mounted.find(".cm-lintRange-warning").exists()).toBe(false);
 		expect(mounted.emitted("setRunAvailability")?.at(-1)).toEqual([false]);
+	});
+
+	it("refreshes MIR as source changes when the MIR interpreter is selected", async () => {
+		const source = "40 + 2";
+		compiler.compile.mockReturnValue({ succeeded: true, diagnostics: [] });
+		const mir = {
+			text: "fn @expr():\n  b0:\n    ret",
+			source_map: [{ from: 20, to: 23, source_from: 0, source_to: 6 }],
+		};
+		compiler.mirText.mockReturnValue(mir);
+
+		const mounted = mount(CodeEditor, {
+			attachTo: document.body,
+			props: { annotationMode: "none", executionMode: "mir" },
+		});
+		wrapper = mounted;
+		editor(mounted).setText(source);
+
+		await vi.waitFor(() => {
+			expect(compiler.mirText).toHaveBeenCalledWith(false);
+		});
+		expect(mounted.emitted("irChanged")?.at(-1)).toEqual([mir]);
 	});
 });

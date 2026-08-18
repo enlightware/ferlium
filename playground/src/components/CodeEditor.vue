@@ -2,6 +2,7 @@
 
 import { ref, onMounted, watch } from "vue";
 import { DiagnosticSeverity, PlaygroundCompiler as Compiler, ErrorData } from "../compiler-api";
+import type { IrText, SourceRange } from "../types";
 
 import { EditorView, keymap, ViewUpdate, scrollPastEnd } from "@codemirror/view";
 import { indentWithTab } from "@codemirror/commands";
@@ -20,14 +21,20 @@ const compiler = new Compiler();
 compiler.set_allow_experimental(true);
 
 type AnnotationMode = "none" | "light" | "full";
+type ExecutionMode = "hir" | "mir" | "optimized-mir";
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
 	annotationMode: AnnotationMode,
-}>();
+	executionMode?: ExecutionMode,
+}>(), {
+	executionMode: "hir",
+});
 
 const emit = defineEmits<{
 	runCode: [],
 	setRunAvailability: [status: boolean],
+	irChanged: [ir: IrText | undefined],
+	sourceSelection: [range: SourceRange],
 }>();
 
 const myKeymap = keymap.of([
@@ -89,6 +96,10 @@ function fillDiagnostics(diagnosticData: ErrorData[]) {
 function processUpdate(update: ViewUpdate) {
 	const text = update.state.doc.toString();
 	const view = update.view;
+	if (update.selectionSet) {
+		const selection = update.state.selection.main;
+		emit("sourceSelection", { from: selection.from, to: selection.to });
+	}
 	if (update.docChanged) {
 		const report = compiler.compile(text);
 		fillDiagnostics(report.diagnostics);
@@ -96,10 +107,12 @@ function processUpdate(update: ViewUpdate) {
 			annotationsAvailable = false;
 			setAnnotations(view, []);
 			emit("setRunAvailability", false);
+			emit("irChanged", undefined);
 		} else {
 			annotationsAvailable = true;
 			refreshAnnotations();
 			emit("setRunAvailability", true);
+			refreshIr();
 		}
 	}
 }
@@ -125,7 +138,21 @@ function refreshAnnotations() {
 	}
 }
 
+function refreshIr() {
+	if (!annotationsAvailable || props.executionMode === "hir") {
+		emit("irChanged", undefined);
+		return;
+	}
+	try {
+		const ir = compiler.mir_text(props.executionMode === "optimized-mir") as IrText;
+		emit("irChanged", ir.text === "" ? undefined : ir);
+	} catch {
+		emit("irChanged", undefined);
+	}
+}
+
 watch(() => props.annotationMode, refreshAnnotations);
+watch(() => props.executionMode, refreshIr);
 
 const setText = (newText: string) => {
 	if (view.value) {
@@ -134,9 +161,11 @@ const setText = (newText: string) => {
 	}
 };
 
-const runCode = () => {
+const runCode = (executionMode: ExecutionMode = props.executionMode) => {
 	try {
-		const result = compiler.run_expr();
+		const result = executionMode === "hir"
+			? compiler.run_expr()
+			: compiler.run_expr_mir(executionMode === "optimized-mir");
 		const errorData = result?.error_data();
 		if (errorData !== undefined && view.value) {
 			fillDiagnostics([errorData]);
@@ -150,9 +179,17 @@ const runCode = () => {
 	}
 }
 
+const selectRange = (range: SourceRange) => {
+	view.value?.dispatch({
+		selection: { anchor: range.from, head: range.to },
+		scrollIntoView: true,
+	});
+};
+
 defineExpose({
 	setText,
 	runCode,
+	selectRange,
 });
 
 
@@ -172,6 +209,7 @@ onMounted(() => {
 <style scoped>
 div {
 	flex-grow: 1;
+	min-height: 0;
 	overflow-y: auto;
 }
 </style>

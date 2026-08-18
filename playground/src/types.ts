@@ -33,3 +33,29 @@ export function defined<T>(value: T | undefined, message: string | null = null):
 	}
 	return value;
 }
+
+export interface SourceRange {
+	from: number;
+	to: number;
+}
+
+export interface IrText {
+	text: string;
+	source_map: Array<SourceMapEntry>;
+}
+
+export interface SourceMapEntry extends SourceRange {
+	source_from: number;
+	source_to: number;
+}
+
+/** Whether two editor ranges intersect, treating a cursor as a point in the other range. */
+export function rangesOverlap(left: SourceRange, right: SourceRange): boolean {
+	if (left.from === left.to) {
+		return right.from <= left.from && left.from <= right.to;
+	}
+	if (right.from === right.to) {
+		return left.from <= right.from && right.from <= left.to;
+	}
+	return left.from < right.to && right.from < left.to;
+}

@@ -1140,13 +1140,21 @@ impl CompilerSession {
 
     /// Emits the MIR form of the already-compiled module `module_id`.
     pub fn emit_mir_module(&mut self, module_id: ModuleId) -> String {
+        self.emit_mir_module_with_source_map(module_id).text
+    }
+
+    /// Emits the MIR form of an already-compiled module with source-link metadata for IDEs.
+    pub(crate) fn emit_mir_module_with_source_map(
+        &mut self,
+        module_id: ModuleId,
+    ) -> emit_mir::MirText {
         self.prepare_execution_target(ExecutionTarget::Mir, module_id);
         let entry = self.expect_module_entry(module_id);
         let module = entry.module().unwrap();
         let artifacts = entry
             .mir(self.mir_optimization)
             .expect("MIR preparation must install complete artifacts");
-        emit_mir::emit_mir(module, self.raw_modules(), artifacts)
+        emit_mir::emit_mir_with_source_map(module, self.raw_modules(), artifacts)
     }
 
     /// Lowers `src` to MIR and interprets its `fn main` entry, returning a textual rendering of the

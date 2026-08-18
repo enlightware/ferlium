@@ -11,9 +11,8 @@ use std::sync::LazyLock;
 
 use crate::{
     CompilationError, CompilationOutput, CompilerSession, DiagnosticSeverity, FxHashMap, FxHashSet,
-    ModuleEnv, Path, SourceId, call_fn,
-    eval::EvalCtx,
-    execution::{DEFAULT_INTERACTIVE_FUEL_LIMIT, ReferenceInterpreterLimits},
+    MirOptimization, ModuleEnv, Path, SourceId, call_fn,
+    execution::{DEFAULT_INTERACTIVE_FUEL_LIMIT, ExecutionTarget, ReferenceInterpreterLimits},
     format::FormatWith,
     hir::value::{NativeValue, Value},
     module::Uses,
@@ -31,7 +30,7 @@ use super::{
     annotations::{AnnotationData, display_annotations},
     char_index_lookup::CharIndexLookup,
     diagnostics::{CompilationReport, ErrorData, compilation_error_to_data},
-    execution::{ExecutionErrorData, ExecutionResult},
+    execution::{ExecutionErrorData, ExecutionResult, IrText, TextSourceMapEntry},
     signatures::{FunctionSignature, remove_effects},
 };
 
@@ -182,6 +181,71 @@ impl Compiler {
     }
 
     pub fn run_expr(&mut self) -> Option<ExecutionResult> {
+        self.run_expr_with_target(ExecutionTarget::Hir, MirOptimization::Disabled)
+    }
+
+    /// Runs the current expression through the raw or optimized MIR interpreter.
+    pub fn run_expr_mir(&mut self, optimized: bool) -> Option<ExecutionResult> {
+        self.run_expr_with_target(
+            ExecutionTarget::Mir,
+            if optimized {
+                MirOptimization::Enabled
+            } else {
+                MirOptimization::Disabled
+            },
+        )
+    }
+
+    /// Returns the MIR for the current successfully compiled source, with source-link metadata.
+    pub fn mir_text(&mut self, optimized: bool) -> IrText {
+        let module_id = self.user_module.module_id;
+        let Some(module_info) = self.session.modules().info(module_id) else {
+            return empty_ir_text();
+        };
+        if module_info.is_stale() || !module_info.has_compiled_module() {
+            return empty_ir_text();
+        }
+        let Some((source_id, _)) = self
+            .session
+            .source_table()
+            .get_latest_source_by_name(SRC_NAME)
+        else {
+            return empty_ir_text();
+        };
+        self.session.set_mir_optimization(if optimized {
+            MirOptimization::Enabled
+        } else {
+            MirOptimization::Disabled
+        });
+        let text = self.session.emit_mir_module_with_source_map(module_id);
+        let lookup = self.char_index_lookup(source_id);
+        IrText {
+            text: text.text,
+            source_map: text
+                .source_map
+                .into_iter()
+                .filter(|entry| entry.span.source_id() == source_id)
+                .map(|entry| TextSourceMapEntry {
+                    from: u32::try_from(entry.from)
+                        .expect("playground MIR text cannot exceed 4 GiB"),
+                    to: u32::try_from(entry.to).expect("playground MIR text cannot exceed 4 GiB"),
+                    source_from: u32::try_from(
+                        lookup.byte_to_char_position(entry.span.start_usize()),
+                    )
+                    .expect("playground source cannot exceed 4 GiB"),
+                    source_to: u32::try_from(lookup.byte_to_char_position(entry.span.end_usize()))
+                        .expect("playground source cannot exceed 4 GiB"),
+                })
+                .collect(),
+        }
+    }
+
+    fn run_expr_with_target(
+        &mut self,
+        target: ExecutionTarget,
+        optimization: MirOptimization,
+    ) -> Option<ExecutionResult> {
+        self.session.set_mir_optimization(optimization);
         self.user_module.expr.as_ref().map(|expr| {
             let module_id = self.user_module.module_id;
             let is_stale = self.session.modules().info(module_id).unwrap().is_stale();
@@ -203,15 +267,14 @@ impl Compiler {
                 let ty = function.definition.ty_scheme.ty.ret;
                 let limits = ReferenceInterpreterLimits::default()
                     .with_fuel_limit(self.execution_fuel_limit);
-                let mut ctx = EvalCtx::with_limits(module_id, &self.session, limits);
                 (
-                    crate::eval::eval_function_with_ctx(module_id, *expr, vec![], &mut ctx),
+                    self.session
+                        .run_entry_with_limits(target, module_id, *expr, vec![], limits),
                     ty,
                 )
             };
             match value {
                 Ok(value) => {
-                    let value = value.into_value();
                     let rendered = match self.session.value_to_inspect_text_with_fuel(
                         module_id,
                         value,
@@ -382,6 +445,13 @@ impl Compiler {
     }
 }
 
+fn empty_ir_text() -> IrText {
+    IrText {
+        text: String::new(),
+        source_map: Vec::new(),
+    }
+}
+
 /// The compiler to be used in the web IDE, non-wasm-available part
 impl Compiler {
     pub fn new_with_session_and_uses(mut session: CompilerSession, uses: Uses) -> Self {
@@ -527,6 +597,46 @@ mod tests {
             .run_expr()
             .expect("replacement expression should exist");
         assert_eq!(recovery.html_message(), "42: int");
+    }
+
+    #[test]
+    fn mir_execution_modes_and_text_source_maps_are_available() {
+        let source = "40 + 2";
+        let mut compiler = build(source);
+
+        let raw_result = compiler
+            .run_expr_mir(false)
+            .expect("expression should exist");
+        assert_eq!(raw_result.html_message(), "42: int");
+        let raw_mir = compiler.mir_text(false);
+        assert!(raw_mir.text.contains("b0:"), "{}", raw_mir.text);
+        assert!(raw_mir.source_map.iter().all(|entry| {
+            entry.from < entry.to
+                && entry.to as usize <= raw_mir.text.len()
+                && entry.source_from <= entry.source_to
+                && entry.source_to as usize <= source.len()
+        }));
+        assert!(
+            !raw_mir.source_map.is_empty(),
+            "source operations should be linked to the MIR text"
+        );
+
+        let optimized_result = compiler
+            .run_expr_mir(true)
+            .expect("expression should exist");
+        assert_eq!(optimized_result.html_message(), "42: int");
+        let optimized_mir = compiler.mir_text(true);
+        assert!(optimized_mir.text.contains("b0:"), "{}", optimized_mir.text);
+    }
+
+    #[test]
+    fn mir_text_is_empty_after_a_failed_compilation() {
+        let mut compiler = build("40 + 2");
+        assert!(compiler.compile("fn broken() -> bool { 1 }").is_some());
+
+        let mir = compiler.mir_text(false);
+        assert!(mir.text.is_empty());
+        assert!(mir.source_map.is_empty());
     }
 
     #[test]

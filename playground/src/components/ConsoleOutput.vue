@@ -71,6 +71,9 @@ div :deep(.warning) {
 div :deep(.error) {
 	color: #ff9898;
 }
+div :deep(.duration) {
+	color: #aaa;
+}
 
 .highlight {
 	animation: highlightAnimation 0.5s ease;

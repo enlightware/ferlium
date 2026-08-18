@@ -17,7 +17,9 @@ use ferlium::{
 };
 
 pub use ferlium::ide::ExecutionResult;
-pub use ferlium::ide::{AnnotationData, CompilationReport, ErrorData, ExecutionErrorData};
+pub use ferlium::ide::{
+    AnnotationData, CompilationReport, ErrorData, ExecutionErrorData, IrText, TextSourceMapEntry,
+};
 
 #[wasm_bindgen]
 pub struct PlaygroundCompiler {
@@ -51,6 +53,14 @@ impl PlaygroundCompiler {
 
     pub fn run_expr(&mut self) -> Option<ExecutionResult> {
         self.inner.run_expr()
+    }
+
+    pub fn run_expr_mir(&mut self, optimized: bool) -> Option<ExecutionResult> {
+        self.inner.run_expr_mir(optimized)
+    }
+
+    pub fn mir_text(&mut self, optimized: bool) -> IrText {
+        self.inner.mir_text(optimized)
     }
 
     pub fn get_annotations(&mut self) -> Vec<AnnotationData> {
