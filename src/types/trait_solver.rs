@@ -90,6 +90,22 @@ pub struct TraitSolver<'a> {
     private_impl_scope: Vec<ModuleId>,
     /// Additional module whose private impls are visible to a privileged scratch expression.
     privileged_impl_module: Option<ModuleId>,
+    /// Successful fully-concrete, unconstrained output probes made during inference or defaulting.
+    ///
+    /// This is deliberately per-solver. A [`TraitSolverProbe`] can hide private implementations
+    /// from its source solver, so it must not inherit answers from this cache.
+    unmaterialized_output_cache: FxHashMap<TraitId, Vec<TraitOutputCacheEntry>>,
+}
+
+/// The trait selection context that can affect a probe's semantic answer.
+#[derive(Debug, Clone)]
+struct TraitOutputCacheEntry {
+    input_tys: Vec<Type>,
+    /// Only the top imported-blanket module exposes private implementations.
+    private_impl_module: Option<ModuleId>,
+    privileged_impl_module: Option<ModuleId>,
+    output_tys: Vec<Type>,
+    output_effs: Vec<EffType>,
 }
 
 impl<'a> TraitSolver<'a> {
@@ -117,6 +133,7 @@ impl<'a> TraitSolver<'a> {
             active_improvements: FxHashSet::default(),
             private_impl_scope: Vec::new(),
             privileged_impl_module: None,
+            unmaterialized_output_cache: FxHashMap::default(),
         }
     }
 
@@ -3452,6 +3469,69 @@ impl<'a> TraitSolver<'a> {
         )
     }
 
+    /// Return a cached answer for a fully concrete, unconstrained output query.
+    ///
+    /// The cache contains only semantic outputs, never an implementation identity or generated
+    /// artifact. Private visibility is part of the key.
+    fn cached_unmaterialized_outputs(
+        &self,
+        trait_id: TraitId,
+        input_tys: &[Type],
+    ) -> Option<&TraitOutputCacheEntry> {
+        if !input_tys.iter().all(|ty| ty.is_constant()) {
+            return None;
+        }
+        let private_impl_module = self.private_impl_scope.last().copied();
+        self.unmaterialized_output_cache
+            .get(&trait_id)?
+            .iter()
+            .find(|entry| {
+                entry.input_tys == input_tys
+                    && entry.private_impl_module == private_impl_module
+                    && entry.privileged_impl_module == self.privileged_impl_module
+            })
+    }
+
+    fn outputs_are_cacheable(output_tys: &[Type], output_effs: &[EffType]) -> bool {
+        output_tys.iter().all(|ty| ty.is_constant())
+            && output_effs.iter().all(|eff| !eff.has_variables())
+    }
+
+    fn cache_unmaterialized_outputs(
+        &mut self,
+        trait_id: TraitId,
+        input_tys: &[Type],
+        output_tys: &[Type],
+        output_effs: &[EffType],
+    ) {
+        if !input_tys.iter().all(|ty| ty.is_constant())
+            || !Self::outputs_are_cacheable(output_tys, output_effs)
+        {
+            return;
+        }
+        let private_impl_module = self.private_impl_scope.last().copied();
+        let entries = self
+            .unmaterialized_output_cache
+            .entry(trait_id)
+            .or_default();
+        if let Some(entry) = entries.iter().find(|entry| {
+            entry.input_tys == input_tys
+                && entry.private_impl_module == private_impl_module
+                && entry.privileged_impl_module == self.privileged_impl_module
+        }) {
+            debug_assert_eq!(entry.output_tys, output_tys);
+            debug_assert_eq!(entry.output_effs, output_effs);
+            return;
+        }
+        entries.push(TraitOutputCacheEntry {
+            input_tys: input_tys.to_vec(),
+            private_impl_module,
+            privileged_impl_module: self.privileged_impl_module,
+            output_tys: output_tys.to_vec(),
+            output_effs: output_effs.to_vec(),
+        });
+    }
+
     /// Resolve a trait application's associated outputs without committing its runtime artifacts.
     ///
     /// Type inference and defaulting ask whether an application exists and what outputs it
@@ -3465,6 +3545,9 @@ impl<'a> TraitSolver<'a> {
     /// A scratch HIR arena is deliberate. Some trait derivers synthesize a body while determining
     /// whether they apply; a query must not leave those unused nodes in the expression being
     /// inferred either.
+    ///
+    /// Fully concrete, unconstrained queries can reuse their associated outputs within this
+    /// solver. Constrained output applications can select different answers and are never cached.
     fn solve_application_outputs_without_materializing(
         &mut self,
         trait_id: TraitId,
@@ -3473,6 +3556,14 @@ impl<'a> TraitSolver<'a> {
         requested_output_effs: Option<&[EffType]>,
         fn_span: Location,
     ) -> Result<(Vec<Type>, Vec<EffType>), InternalCompilationError> {
+        let unconstrained_output_query =
+            requested_output_tys.is_none() && requested_output_effs.is_none();
+        if unconstrained_output_query
+            && let Some(cached) = self.cached_unmaterialized_outputs(trait_id, input_tys)
+        {
+            return Ok((cached.output_tys.clone(), cached.output_effs.clone()));
+        }
+
         let snapshot = self.snapshot_derived_impl_state();
         let mut scratch_arena = NodeArena::default();
         let result = self
@@ -3489,6 +3580,9 @@ impl<'a> TraitSolver<'a> {
                 (imp.output_tys.clone(), imp.output_effs.clone())
             });
         self.rollback_derived_impl_state(snapshot);
+        if unconstrained_output_query && let Ok((output_tys, output_effs)) = &result {
+            self.cache_unmaterialized_outputs(trait_id, input_tys, output_tys, output_effs);
+        }
         result
     }
 
@@ -3751,5 +3845,112 @@ impl TypePropertyEnv for TraitSolver<'_> {
 
     fn type_def(&self, id: TypeDefId) -> &TypeDef {
         TraitSolver::type_def(self, id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        CompilerSession,
+        hir::function::{Function, UnaryNativeFnNN},
+        module::{BlanketTraitImplSubKey, Path},
+        std::math::int_type,
+        types::effects::{PrimitiveEffect, effect},
+    };
+
+    #[test]
+    fn unmaterialized_output_cache_does_not_reuse_constrained_effects() {
+        let session = CompilerSession::new();
+        let modules = session.raw_modules();
+        let module_id = modules.next_id();
+        let mut module = Module::new(module_id, Path::single_str("$trait_solver_test"));
+        let trait_id = TraitId::new(
+            module_id,
+            module.add_trait(
+                Trait::new_with_self_input_type(
+                    "UnconstrainedEffect",
+                    "Test trait with an application-selected associated effect.",
+                    ["Output"],
+                    [(
+                        "run",
+                        CallableDefinition::new_infer_quantifiers(
+                            crate::types::r#type::FnType::new_by_val(
+                                [Type::variable_id(0)],
+                                Type::variable_id(1),
+                                EffType::single_variable_id(0),
+                            ),
+                            ["value"],
+                            "Returns its value.",
+                        ),
+                    )],
+                )
+                .with_output_effects(["E"]),
+            ),
+        );
+        module.add_blanket_impl_with_effects_no_locals(
+            trait_id,
+            BlanketTraitImplSubKey {
+                input_tys: vec![int_type()],
+                ty_var_count: 0,
+                eff_var_count: 1,
+                constraints: vec![],
+            },
+            [int_type()],
+            [EffType::single_variable_id(0)],
+            [],
+            [Box::new(UnaryNativeFnNN::new(|value: isize| value)) as Function],
+        );
+
+        let current_functions = current_function_map(&module.def_table);
+        let function_count = module.functions.len();
+        let current_type_items = CurrentTypeItems::new(
+            module::ModuleIdentity {
+                id: module_id,
+                path: &module.path,
+            },
+            &module.type_aliases,
+            module.type_defs.as_slice(),
+            module.traits.as_slice(),
+            &module.projection_subscripts,
+        );
+        let mut deps = FxHashSet::default();
+        let mut solver = TraitSolver::new(
+            current_type_items,
+            &mut module.impls,
+            current_functions,
+            &mut deps,
+            CurrentProjectionSubscriptTypes::empty(),
+            PendingFunctionCollector::new(function_count),
+            modules,
+        );
+        let mut arena = NodeArena::default();
+        let read = effect(PrimitiveEffect::Read);
+
+        let (_, output_effs) = solver
+            .solve_application_outputs(
+                trait_id,
+                &[int_type()],
+                &[int_type()],
+                std::slice::from_ref(&read),
+                Location::new_synthesized(),
+                &mut arena,
+            )
+            .unwrap();
+        assert_eq!(output_effs, vec![read]);
+
+        let (_, output_effs) = solver
+            .solve_outputs(
+                trait_id,
+                &[int_type()],
+                Location::new_synthesized(),
+                &mut arena,
+            )
+            .unwrap();
+        assert_eq!(output_effs, vec![EffType::empty()]);
+        let cached = solver
+            .cached_unmaterialized_outputs(trait_id, &[int_type()])
+            .expect("the unconstrained query must populate the output cache");
+        assert_eq!(cached.output_effs, vec![EffType::empty()]);
     }
 }
