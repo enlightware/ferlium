@@ -205,10 +205,6 @@ fn serde_deserialize() {
         session.run("(deserialize(serialize( { b: true, a: 1 } )): {a: int, b: bool})"),
         tuple!(int(1), bool(true))
     );
-    assert_val_eq!(
-        session.run("(deserialize(serialize( { b: true, a: 1 } )): {a: int, b: bool})"),
-        tuple!(int(1), bool(true))
-    );
 
     // named types, by default de-serialize as their inner type
     assert_val_eq!(
