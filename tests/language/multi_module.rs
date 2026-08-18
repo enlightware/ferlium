@@ -965,6 +965,35 @@ fn cascade_recompile_direct_dep() {
     assert_val_eq!(session.run("user::result()"), int(1));
 }
 
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn successful_dependency_recompile_rebuilds_direct_dependent() {
+    let mut session = TestSession::new();
+
+    let base_id = compile_module(&mut session, "base", "pub fn val() -> int { 1 }");
+    let user_id = compile_module(
+        &mut session,
+        "user",
+        "pub fn result() -> int { base::val() }",
+    );
+    let initial_user_revision = module_compilation_revision(session.session(), user_id).unwrap();
+
+    session
+        .try_compile_module("base", "pub fn val() -> int { 2 }")
+        .expect("updating base should succeed");
+
+    assert_fresh(&session, base_id, "base after update");
+    assert_fresh(&session, user_id, "user after cascade recompile");
+    assert!(
+        module_compilation_revision(session.session(), user_id)
+            .unwrap()
+            .as_index()
+            > initial_user_revision.as_index(),
+        "the dependent should be recompiled against the new base revision"
+    );
+    assert_val_eq!(session.run("user::result()"), int(2));
+}
+
 /// Cascade recompilation propagates transitively through a linear chain
 /// A → B → C: fixing A must ultimately make C fresh too.
 #[test]

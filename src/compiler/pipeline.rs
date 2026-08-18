@@ -129,6 +129,13 @@ pub(crate) fn compile_with_source_id(
     let src_info = ModuleSrcInfo::new(source_id, source_version, uses.clone());
     let mut warnings = Vec::<CompilationWarning>::new();
 
+    // A successful recompilation can change any exported definition while retaining the same
+    // module id. Mark existing consumers stale now so that success rebuilds them against the new
+    // revision and failure cannot leave them appearing fresh against the restored old revision.
+    if old_revision.is_some() {
+        mark_stale_transitively(modules, module_id);
+    }
+
     // Closure called on every compilation failure, to restore the old module and mark dependencies.
     let process_compilation_failed =
         |modules: &mut Modules,

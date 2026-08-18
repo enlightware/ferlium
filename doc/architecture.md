@@ -45,6 +45,9 @@ Future backend work may lower MIR to WebAssembly, bytecode, JIT, or native code.
 Every compilation attempt stores severity-tagged source diagnostics on its module entry. Errors make
 the attempt fail; warnings remain available through `ModuleInfo::diagnostics` on a successful
 module. IDE compilation reports both and keep execution enabled when only warnings are present.
+Replacing a compiled module revision marks its transitive consumers stale. A successful replacement
+cascade-recompiles source-backed consumers against the new revision; a failed replacement leaves
+them stale rather than allowing code compiled against different revisions to execute together.
 
 HIR and MIR interpretation share `ExecutionLimits`; their boxed reference implementations add an
 environment-cell guard. Runtime failure and poisoning semantics are specified in
