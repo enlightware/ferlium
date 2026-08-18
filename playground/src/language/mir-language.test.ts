@@ -65,4 +65,25 @@ describe("MIR language highlighting", () => {
 			token === "std::map#spec:[(int) -> int]" && classes === "tok-variableName"
 		))).toHaveLength(2);
 	});
+
+	it("highlights a referenced callee as a single name", () => {
+		const source = [
+			"    drop string %r1 via std::Value<std::string>::drop#impl:1d429675",
+			"    clone Probe %p0 to %p1 via <test>::std::Value<<test>::Probe>::clone#impl:a879cee3",
+			"    invoke drop () -> int %r1 via <test>::$_ferlium_function_value_drop -> b1 error b2",
+			"    drop A %r0 via %r4",
+			"    %r4 = build_closure <test>::$lambda$1(%r3, dict(<test>::std::Value<(std::int,)>))",
+		].join("\n");
+
+		const tokens = highlightedTokens(source);
+		expect(tokens).toEqual(expect.arrayContaining([
+			["via", "tok-keyword"],
+			["std::Value<std::string>::drop#impl:1d429675", "tok-variableName"],
+			["<test>::std::Value<<test>::Probe>::clone#impl:a879cee3", "tok-variableName"],
+			["<test>::$_ferlium_function_value_drop", "tok-variableName"],
+			["%r4", "tok-variableName"],
+			["b1", "tok-labelName"],
+			["<test>::$lambda$1", "tok-variableName"],
+		]));
+	});
 });

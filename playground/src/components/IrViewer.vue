@@ -7,7 +7,8 @@ import { rangesOverlap, type IrText, type SourceMapEntry, type SourceRange } fro
 import { mirLanguageExtension } from "../language/mir-language";
 
 const props = defineProps<{
-	ir: IrText,
+	/** The rendered IR, or `undefined` when the current source has none to show. */
+	ir?: IrText,
 	title: string,
 	sourceSelection?: SourceRange,
 }>();
@@ -43,6 +44,14 @@ function sourceRange(entry: SourceMapEntry): SourceRange {
 	return { from: entry.source_from, to: entry.source_to };
 }
 
+function irText(): string {
+	return props.ir?.text ?? "";
+}
+
+function sourceMap(): Array<SourceMapEntry> {
+	return props.ir?.source_map ?? [];
+}
+
 function refreshHighlights() {
 	if (!view.value) {
 		return;
@@ -50,7 +59,7 @@ function refreshHighlights() {
 	const selection = props.sourceSelection;
 	const decorations = selection === undefined
 		? []
-		: props.ir.source_map
+		: sourceMap()
 			.filter(entry => rangesOverlap(selection, sourceRange(entry)))
 			.map(entry => Decoration.mark({ class: "cm-source-linked" }).range(entry.from, entry.to));
 	view.value.dispatch({ effects: setHighlights.of(Decoration.set(decorations, true)) });
@@ -61,7 +70,7 @@ function replaceText() {
 		return;
 	}
 	const current = view.value.state.doc;
-	view.value.dispatch({ changes: { from: 0, to: current.length, insert: props.ir.text } });
+	view.value.dispatch({ changes: { from: 0, to: current.length, insert: irText() } });
 	refreshHighlights();
 }
 
@@ -70,7 +79,7 @@ function processUpdate(update: ViewUpdate) {
 		return;
 	}
 	const selection = update.state.selection.main;
-	const entry = props.ir.source_map.find(entry => rangesOverlap(selection, entry));
+	const entry = sourceMap().find(entry => rangesOverlap(selection, entry));
 	if (entry !== undefined) {
 		emit("sourceSelected", sourceRange(entry));
 	}
@@ -81,7 +90,7 @@ watch(() => props.sourceSelection, refreshHighlights, { deep: true });
 
 onMounted(() => {
 	view.value = new EditorView({
-		doc: props.ir.text,
+		doc: irText(),
 		extensions: [
 			basicSetup,
 			mirLanguageExtension(),

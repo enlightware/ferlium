@@ -28,10 +28,19 @@ type MirTokenizerState = {
 	nextTokenIsFunctionName: boolean;
 };
 
+/**
+ * Advance the stream over one callable name, which can carry `::` path segments, `<...>` type
+ * arguments, `[...]` specialization arguments and `#tag:hash` suffixes, all of which may contain
+ * spaces, parentheses and `->` arrows.
+ *
+ * A name is followed either by its argument list (`call`, `fn`, `build_closure`) or, where the
+ * callee is only referenced (`drop ... via <callee>`), by a space or the end of the line.
+ */
 function skipCallableName(stream: { string: string; pos: number }): boolean {
+	const start = stream.pos;
 	let squareDepth = 0;
 	let angleDepth = 0;
-	for (let position = stream.pos; position < stream.string.length; position += 1) {
+	for (let position = start; position < stream.string.length; position += 1) {
 		const character = stream.string[position];
 		if (character === "[") {
 			squareDepth += 1;
@@ -41,12 +50,17 @@ function skipCallableName(stream: { string: string; pos: number }): boolean {
 			angleDepth += 1;
 		} else if (character === ">" && stream.string[position - 1] !== "-") {
 			angleDepth = Math.max(0, angleDepth - 1);
-		} else if (character === "(" && squareDepth === 0 && angleDepth === 0) {
+		} else if (
+			squareDepth === 0
+			&& angleDepth === 0
+			&& (character === "(" || character === " " || character === "\t" || character === ",")
+		) {
 			stream.pos = position;
-			return true;
+			return position > start;
 		}
 	}
-	return false;
+	stream.pos = stream.string.length;
+	return stream.pos > start;
 }
 
 /**
@@ -115,12 +129,17 @@ export const mirLanguage = StreamLanguage.define({
 			return "controlKeyword";
 		}
 		if (operationKeywords.has(text)) {
-			if (text === "call") {
+			if (text === "call" || text === "build_closure") {
 				state.nextTokenIsFunctionName = true;
 			}
 			return "keyword";
 		}
 		if (contextualKeywords.has(text)) {
+			// `via` introduces the callee of a drop or clone, which is a bare name with no argument
+			// list of its own.
+			if (text === "via") {
+				state.nextTokenIsFunctionName = true;
+			}
 			return "modifier";
 		}
 		if (text === "true" || text === "false") {

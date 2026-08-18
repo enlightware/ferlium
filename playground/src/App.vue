@@ -32,13 +32,15 @@ type ExecutionMode = typeof executionModes[number]["value"];
 const executionMode = ref<ExecutionMode>("hir");
 const ir = ref<IrText>();
 const sourceSelection = ref<SourceRange>();
-const irTitle = computed(() => {
-	switch (executionMode.value) {
-		case "mir": return "MIR";
-		case "optimized-mir": return "Optimized MIR";
-		case "hir": return "IR";
-	}
-});
+const irTitles: Record<ExecutionMode, string> = {
+	"hir": "IR",
+	"mir": "MIR",
+	"optimized-mir": "Optimized MIR",
+};
+const irTitle = computed(() => irTitles[executionMode.value]);
+// The pane follows the selected execution mode, not the availability of its content: a transiently
+// broken source while typing must not make the layout jump.
+const isIrVisible = computed(() => executionMode.value !== "hir");
 const workbench = ref<HTMLElement>();
 const sourcePaneWidth = ref(50);
 const sourcePaneStyle = computed(() => ({ "--source-pane-width": `${sourcePaneWidth.value}%` }));
@@ -175,7 +177,7 @@ onMounted(() => {
 	<div
 		ref="workbench"
 		class="workbench"
-		:class="{ 'with-ir': ir !== undefined }"
+		:class="{ 'with-ir': isIrVisible }"
 	>
 		<div
 			class="source-pane"
@@ -192,13 +194,13 @@ onMounted(() => {
 			/>
 		</div>
 		<div
-			v-if="ir !== undefined"
+			v-if="isIrVisible"
 			class="resize-handle"
 			title="Drag to resize source and IR panes"
 			@pointerdown="startResize"
 		/>
 		<IrViewer
-			v-if="ir !== undefined"
+			v-if="isIrVisible"
 			:ir="ir"
 			:title="irTitle"
 			:source-selection="sourceSelection"
@@ -268,8 +270,9 @@ onMounted(() => {
 		flex-direction: column;
 	}
 
-	.source-pane {
-		min-height: 0;
+	/* Splitting is vertical here and the handle is hidden, so the source keeps a fixed half of the
+	   workbench; without the IR pane it keeps the full width of the base rule. */
+	.workbench.with-ir .source-pane {
 		flex: 0 0 50%;
 	}
 
