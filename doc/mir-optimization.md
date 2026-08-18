@@ -46,11 +46,11 @@ string accumulate // forward an overwritten string into its self-prefixed format
 devirtualize      // final dictionary-entry callees exposed too late for a fold round
 bounds checks     // prove array indices in range and remove checked access/failure edges
 LICM              // hoist invariant pure direct calls with passive inputs and copyable results
-dead known calls  // remove unused chains of explicitly total/speculatable numeric calls
+dead proven calls // remove unused chains of known-total numeric or proved-returning script calls
 dead stores       // remove unread initialization overwritten on every following path
 dce               // on every body, not only a changed one
 tail merge        // hash-cons alpha-equivalent branch tails and collapse equal-target branches
-dead known + dce  // only after a tail merge, collect its newly dead predicate
+dead proven + dce // only after a tail merge, collect its newly dead predicate
 stack markers     // drop a mark duplicating one already held, and restores that pop nothing
 finish            // restores canonical form without exposing the intermediate body
 ```
@@ -607,8 +607,12 @@ Deliberately narrow, and intra-function only.
 
 - An unused result chain of concrete `int` or `float` calls goes when the known-callee table
   explicitly classifies every call as total, deterministic and speculatable, and its inferred
-  effects are empty. Purity alone is insufficient: a pure user function may diverge, and removing
-  its unused call would make a formerly non-terminating program return.
+  effects are empty. Another direct call may use the same worklist only when it names a
+  module-table script body whose raw MIR proves it returns, has no hidden evidence inputs, and
+  every authoritative visible input convention is `Let`; its concrete result must also be
+  `TrivialCopy`. These restrictions exclude mutation through an argument and a managed result's
+  ownership lifetime. Purity alone is insufficient: a pure user function may diverge, and
+  removing its unused call would make a formerly non-terminating program return.
 - An `alloca` goes only when *every* use of it is the destination of a pool-constant `store`,
   together with those stores. The post-tail-merge cleanup also admits a register whose defining
   operation requires no consuming use. Constants are trivially copyable; the explicit result

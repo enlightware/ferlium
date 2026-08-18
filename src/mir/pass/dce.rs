@@ -6,7 +6,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-//! Removal of dead known-total calls and the storage scaffolding that folding leaves behind.
+//! Removal of dead proven-total calls and the storage scaffolding that folding leaves behind.
 //!
 //! Folding replaces `call f(a, b, ret)` with `store @cN to ret` or a constructive operation such as
 //! `build_array`. That can leave the arguments' own construction and cleanup in place: correct,
@@ -15,7 +15,8 @@
 //!
 //! This is **not** general dead-code elimination. Before storage cleanup, a backward use-count
 //! worklist removes unused chains of concrete numeric calls explicitly classified as total and
-//! speculatable. An empty effect row is not sufficient: an arbitrary pure function may diverge.
+//! speculatable, plus direct script calls whose raw-MIR summary proves they return. An empty effect
+//! row is not sufficient: an arbitrary pure function may diverge.
 //! The ordinary storage rule removes an `alloca` only when every use of it is as the destination of
 //! a constant `store`. The cleanup entered after tail merging additionally admits a non-owning
 //! operation result. Two properties make those stores safe without a whole ownership analysis:
@@ -49,8 +50,12 @@ use crate::mir::{
     value::ValueId,
 };
 use crate::{
-    module::{FunctionId, id::Id},
-    types::r#type::{CallResultConvention, Type},
+    hir::function::ArgConvention,
+    module::{FunctionId, ModuleEnv, id::Id},
+    types::{
+        r#type::{CallResultConvention, Type},
+        type_properties::concrete_type_is_trivial_copy,
+    },
 };
 
 use super::{dataflow, known_callee::KnownCallees, site::OperationIndex};
@@ -173,20 +178,27 @@ pub(crate) fn remove_dead_trivial_results(func: &Function) -> Option<Function> {
     remove_dead_results(func, candidates, 0)
 }
 
-/// Removes unused calls covered by an explicit total/speculatable std contract.
+/// Removes unused calls known to return without source-visible effects.
 ///
 /// An empty effect row is intentionally insufficient: a pure script call may diverge, and deleting
-/// it would change behaviour. [`KnownCallees`] grants the stronger property only to concrete native
-/// numeric operations. Their result must be a local whole-place `alloca` with no surviving read.
-/// A backwards use-count worklist removes chains in one pass: deleting a dead consumer can make the
-/// total call that produced one of its arguments dead in turn.
-pub(crate) fn remove_dead_known_calls(
+/// it would change behaviour. A concrete native numeric operation uses [`KnownCallees`]' explicit
+/// total/speculatable contract. Any other direct callee must be a module-table script body with a
+/// raw-MIR `will_return` proof. Its authoritative parameter conventions must all be passive `Let`,
+/// it may have no hidden evidence inputs, and its concrete result must be `TrivialCopy`; together
+/// these conditions exclude mutation through an argument and a managed result's ownership
+/// lifetime. Its result must be a local whole-place `alloca` with no surviving read. A backwards
+/// use-count worklist removes chains in one pass: deleting a dead consumer can make the total call
+/// that produced one of its arguments dead in turn.
+pub(crate) fn remove_dead_proven_calls(
     func: &Function,
+    env: ModuleEnv<'_>,
     known: &KnownCallees,
     original_of: &dyn Fn(FunctionId) -> Option<FunctionId>,
+    will_return: &dyn Fn(FunctionId) -> bool,
 ) -> Option<Function> {
     let mut allocas = FxHashSet::default();
     let mut candidates = FxHashMap::<ValueId, DeadResultCandidate>::default();
+    let mut trivial_copy = FxHashMap::default();
     for block in func.blocks() {
         for (index, operation) in func.block(block).operations().iter().enumerate() {
             if matches!(operation.kind, OperationKind::Alloca { .. })
@@ -194,22 +206,59 @@ pub(crate) fn remove_dead_known_calls(
             {
                 allocas.insert(result);
             }
-            let OperationKind::Call { ty, .. } = &operation.kind else {
+            let OperationKind::Call { ty, metadata } = &operation.kind else {
                 continue;
             };
             if !ty.effects().is_empty() || ty.result_convention != CallResultConvention::Value {
                 continue;
             }
-            let Some(call) = dataflow::call_operands(&operation.operands, ty) else {
+            let Some(mut call) = dataflow::call_operands(&operation.operands, ty) else {
                 continue;
             };
-            let mir::Value::Function(callee) = call.callee else {
+            let mir::Value::Function(callee) = *call.callee else {
                 continue;
             };
-            if !known
-                .resolve(*callee, original_of)
-                .is_some_and(|callee| callee.is_total_and_speculatable())
-            {
+            let known_total = known
+                .resolve(callee, original_of)
+                .is_some_and(|callee| callee.is_total_and_speculatable());
+            if !known_total {
+                let Some(function) = env
+                    .module_by_id(callee.module)
+                    .and_then(|module| module.get_function_by_id(callee.function))
+                else {
+                    continue;
+                };
+                if function.code.as_script().is_none()
+                    || function.parameter_passing.len() != call.arguments.len()
+                {
+                    continue;
+                }
+                call.arguments = call
+                    .arguments
+                    .into_iter()
+                    .zip(&function.parameter_passing)
+                    .map(|((argument, _), convention)| (argument, *convention))
+                    .collect();
+            }
+            let eligible = known_total
+                || (!metadata
+                    .as_deref()
+                    // Vacuous in today's pipeline because whole-module owned-argument forwarding
+                    // runs after per-function DCE. Retain the guard so a future reordering cannot
+                    // delete an ownership transfer and its callee-side cleanup.
+                    .is_some_and(|metadata| !metadata.owned_arguments.is_empty())
+                    // Hidden evidence can carry semantic callbacks (for example `Value::drop`),
+                    // whose effects are not represented in the direct call type.
+                    && call.extras.is_empty()
+                    && call
+                        .arguments
+                        .iter()
+                        .all(|(_, convention)| *convention == ArgConvention::Let)
+                    && *trivial_copy
+                        .entry(ty.ret())
+                        .or_insert_with(|| concrete_type_is_trivial_copy(ty.ret(), &env))
+                    && will_return(callee));
+            if !eligible {
                 continue;
             }
             let mir::Value::Register(result) = call.result else {
@@ -1061,6 +1110,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn an_unused_proven_returning_script_call_is_removed() {
+        let module = optimized(
+            "#[inline(never)]\n\
+             fn increment(x: int) -> int { x + 1 }\n\
+             fn discard(x: int) -> int { let unused = increment(x); x }",
+        );
+        let caller = body_of(&module, "discard");
+        assert!(
+            !caller.contains("call dce::increment"),
+            "the unused terminating script call must disappear:\n{caller}"
+        );
+    }
+
     /// An empty effect row says nothing about termination. The recursive call is pure, but removing
     /// it would turn a diverging function into one that returns, so only the explicitly classified
     /// native numeric calls above may use the dead-call rule.
@@ -1074,6 +1137,34 @@ mod tests {
         assert!(
             body.contains("call dce::diverges"),
             "purity alone must not delete a possibly diverging call:\n{body}"
+        );
+    }
+
+    #[test]
+    fn an_unused_mutating_script_call_is_retained() {
+        let module = optimized(
+            "#[inline(never)]\n\
+             fn overwrite(x: &mut int) -> int { x = 1; 0 }\n\
+             fn retain() -> int { let mut x = 0; let unused = overwrite(x); x }",
+        );
+        let caller = body_of(&module, "retain");
+        assert!(
+            caller.contains("call dce::overwrite"),
+            "a call with a mutable argument must retain its effect:\n{caller}"
+        );
+    }
+
+    #[test]
+    fn an_unused_managed_script_result_is_retained() {
+        let module = optimized(
+            "#[inline(never)]\n\
+             fn preserve(x: string) -> string { x }\n\
+             fn retain(x: string) -> string { let unused = preserve(x); x }",
+        );
+        let caller = body_of(&module, "retain");
+        assert!(
+            caller.contains("call dce::preserve"),
+            "a managed result must retain its ownership lifetime:\n{caller}"
         );
     }
 }

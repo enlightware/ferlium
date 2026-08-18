@@ -385,7 +385,7 @@ mod tests {
         );
         assert!(
             !body.contains("Ord<std::int>::cmp#impl"),
-            "known-total DCE must collect the dead predicate:\n{body}"
+            "proven-call DCE must collect the dead predicate:\n{body}"
         );
     }
 

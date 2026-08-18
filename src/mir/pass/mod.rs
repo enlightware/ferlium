@@ -69,7 +69,7 @@ pub(crate) use monomorphize::Specializations;
 use crate::{
     compiler::{CompilerSession, MirOptimization, Modules},
     mir::Function,
-    module::{ModuleEnv, ModuleId},
+    module::{FunctionId, ModuleEnv, ModuleId},
 };
 
 use self::provenance::AddressorSummary;
@@ -106,13 +106,15 @@ impl OptimizationContext {
 /// Collects the predicate and representation scaffolding made dead by tail merging.
 ///
 /// These passes form one conceptual cleanup even though they alternate to a fixed point: removing
-/// a trivial representation result can expose a known-total call, whose removal can in turn make
+/// a trivial representation result can expose a proven-total call, whose removal can in turn make
 /// its result storage dead. Every successful step removes at least one operation, so the loop is
 /// bounded by the merged body's operation count.
 fn cleanup_after_tail_merge(
     mut current: Function,
+    env: ModuleEnv<'_>,
     context: &OptimizationContext,
     specializations: &Specializations,
+    will_return: &impl Fn(FunctionId) -> bool,
 ) -> Function {
     loop {
         let mut cleaned_any = false;
@@ -120,11 +122,13 @@ fn cleanup_after_tail_merge(
             current = cleaned;
             cleaned_any = true;
         }
-        if let Some(cleaned) =
-            dce::remove_dead_known_calls(&current, &context.known_callees, &|callee| {
-                specializations.original(callee)
-            })
-        {
+        if let Some(cleaned) = dce::remove_dead_proven_calls(
+            &current,
+            env,
+            &context.known_callees,
+            &|callee| specializations.original(callee),
+            will_return,
+        ) {
             current = cleaned;
             cleaned_any = true;
         }
@@ -316,14 +320,18 @@ pub(crate) fn optimize_function(
     if let Some(hoisted) = licm::hoist_loop_invariant_calls(source, env, &will_return) {
         current = Some(hoisted);
     }
-    // Purity does not imply termination, so general dead-call elimination would be unsound. The
-    // semantic table names the concrete native numeric operations that are additionally total and
-    // speculatable; remove an unused result chain under that stronger contract, then let ordinary
-    // DCE collect its now-unread result and argument cells.
+    // Purity does not imply termination, so general dead-call elimination would be unsound. Remove
+    // an unused direct call only under either the known native total/speculatable contract or a
+    // module-table script body's raw-MIR return proof plus passive-input and copy-result
+    // restrictions; ordinary DCE then collects its unread result and argument cells.
     let source = current.as_ref().unwrap_or(function);
-    if let Some(cleaned) = dce::remove_dead_known_calls(source, &context.known_callees, &|callee| {
-        specializations.original(callee)
-    }) {
+    if let Some(cleaned) = dce::remove_dead_proven_calls(
+        source,
+        env,
+        &context.known_callees,
+        &|callee| specializations.original(callee),
+        &will_return,
+    ) {
         current = Some(cleaned);
     }
     // A local `TrivialCopy` cell often receives an initializer only for every branch to replace it
@@ -344,11 +352,17 @@ pub(crate) fn optimize_function(
     // Cleanup can make mutually exclusive branch arms alpha-equivalent by removing lowering
     // scaffolding that differed between them. Merge complete equivalent blocks without moving
     // their operations, then collapse a conditional whose two edges now agree. Only after a merge,
-    // revisit known-total calls and storage so the newly dead predicate is collected; unchanged
+    // revisit proven-total calls and storage so the newly dead predicate is collected; unchanged
     // bodies pay no second cleanup pass.
     let source = current.as_ref().unwrap_or(function);
     if let Some(merged) = tail_merge::merge_equivalent_tails(source) {
-        current = Some(cleanup_after_tail_merge(merged, context, specializations));
+        current = Some(cleanup_after_tail_merge(
+            merged,
+            env,
+            context,
+            specializations,
+            &will_return,
+        ));
     }
     // Last, after DCE has emptied every bracket it can. What remains reclaims real storage and
     // must stay: a bracket is where a live range ends, which a backend's stack-slot allocator
