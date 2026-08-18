@@ -4,6 +4,7 @@ import { Decoration, EditorView, type DecorationSet, type ViewUpdate } from "@co
 import { StateEffect, StateField } from "@codemirror/state";
 import { basicSetup } from "codemirror";
 import { rangesOverlap, type IrText, type SourceMapEntry, type SourceRange } from "../types";
+import { mirLanguageExtension } from "../language/mir-language";
 
 const props = defineProps<{
 	ir: IrText,
@@ -83,6 +84,7 @@ onMounted(() => {
 		doc: props.ir.text,
 		extensions: [
 			basicSetup,
+			mirLanguageExtension(),
 			EditorView.editable.of(false),
 			highlights,
 			EditorView.updateListener.of(processUpdate),
