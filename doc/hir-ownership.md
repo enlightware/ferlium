@@ -173,6 +173,12 @@ In particular, semantic drop cleanup does not add source-level fallibility.
 normal caller-allocated return convention to write that result directly into its
 final destination slot.
 
+The defining module supplies the compiler-generated `Value` implementation for a named type. When
+the type and `Value` are publicly nameable, that implementation is selectable by other modules;
+its generated method bodies remain private to the defining module. Consequently a public type with
+a private representation shares one canonical ownership implementation without exposing that
+representation or permitting a consumer to define a competing implementation.
+
 For `Dictionary(id)`, `id` indexes the function's extra dictionary/evidence parameter list.
 The dictionary entry is selected with `VALUE_TRAIT.dictionary_method_index(...)`.
 Extra dictionary/evidence parameters do not have matching `LocalDecl`s and do not affect source-level local slots.

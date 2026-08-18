@@ -246,7 +246,7 @@ pub struct TraitImpl {
     /// The type of the runtime dictionary.
     /// If the implementation is a blanket one, the key contains the rest of the type scheme.
     pub dictionary_ty: Type,
-    /// Visibility, hand-written implementations are public, derived ones are private.
+    /// Whether modules other than the owner may select this implementation.
     pub public: bool,
     /// Location of the source implementation when it comes from Ferlium code.
     pub source_span: Option<Location>,

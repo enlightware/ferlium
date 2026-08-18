@@ -30,6 +30,7 @@ use ferlium::{
 
 use ferlium::std::array::array_type;
 use ferlium::std::buffer::Buffer;
+use ferlium::std::data_value::{data_value_type, data_value_type_def};
 use ferlium::std::logic::bool_type;
 use ferlium::std::math::{Int, float_type, int_type};
 use ferlium::std::string::string_type;
@@ -139,6 +140,28 @@ fn assert_std_value_layout<T>(module: &Module, ty: Type) {
         ty,
         std::mem::size_of::<T>() as isize,
         std::mem::align_of::<T>() as isize,
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn public_data_value_has_a_public_owner_generated_value_impl() {
+    let session = TestSession::new();
+    let module = session.session().std_module();
+    let value_trait_id = module
+        .get_trait_id_str(VALUE_TRAIT_NAME)
+        .expect("std Value trait should be registered");
+    let key = ConcreteTraitImplKey::new(value_trait_id, vec![data_value_type()]);
+    let impl_id = *module
+        .get_concrete_impl_by_key(&key)
+        .expect("DataValue should have an owner-generated Value implementation");
+
+    let type_name = module.type_def_name(data_value_type_def());
+    assert!(
+        module.get_impl_data(impl_id).unwrap().public,
+        "the implementation of a public named type should be reusable by consumers; \
+         DataValue visibility is {:?}",
+        module.symbol_visibility(type_name)
     );
 }
 

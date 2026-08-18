@@ -2307,6 +2307,7 @@ impl<'a> TraitSolver<'a> {
 
     fn blanket_method_inst_data(
         generic_definition: &CallableDefinition,
+        concrete_definition: &CallableDefinition,
         blanket_ty_var_count: u32,
         blanket_instantiation: &InstSubst,
         runtime_requirements: Vec<DictionaryReq>,
@@ -2332,13 +2333,14 @@ impl<'a> TraitSolver<'a> {
                     })
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let close_effect_rows = concrete_definition.ty_scheme.ty.is_constant();
         let eff_args = generic_definition
             .ty_scheme
             .eff_quantifiers
             .iter()
             .sorted()
             .map(|quantifier| {
-                blanket_instantiation
+                let effect = blanket_instantiation
                     .1
                     .get(quantifier)
                     .cloned()
@@ -2349,7 +2351,16 @@ impl<'a> TraitSolver<'a> {
                             ),
                             span: fn_span,
                         })
-                    })
+                    })?;
+                // Open-row matching may retain an unconstrained tail. A fully concrete target
+                // signature proves that tail is pure; an effect-polymorphic target must retain it.
+                // This includes quantifiers occurring only in impl constraints: after constraint
+                // solving reaches a ground method, no caller-provided binding can remain.
+                Ok(if close_effect_rows {
+                    EffType::multiple_primitive(&effect.inner_non_vars())
+                } else {
+                    effect
+                })
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(FnInstData::new(runtime_requirements, ty_args, eff_args))
@@ -3124,6 +3135,7 @@ impl<'a> TraitSolver<'a> {
                             };
                             let inst_data = Self::blanket_method_inst_data(
                                 &generic_def,
+                                &def,
                                 imp_ty_var_count,
                                 &blanket_instantiation,
                                 if has_projection_requirement {
@@ -3331,6 +3343,7 @@ impl<'a> TraitSolver<'a> {
                         };
                         let inst_data = Self::blanket_method_inst_data(
                             &generic_def,
+                            &def,
                             imp_ty_var_count,
                             &blanket_instantiation,
                             if has_projection_requirement {

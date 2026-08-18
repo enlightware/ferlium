@@ -249,6 +249,10 @@ fn value_impl_for_type_def_already_exists(
 
 /// Emit compiler-generated `Value` impls for local named ADTs that do not have
 /// an overlapping explicit local `Value` impl.
+///
+/// The owning module exports the implementation when it exports the named type. Its generated
+/// methods remain module-private implementation details; making the implementation visible lets
+/// consumers reuse the owner's canonical ownership behavior without exposing the representation.
 pub(super) fn emit_auto_value_impls(
     output: &mut Module,
     solver_arena: &mut NodeArena,
@@ -292,6 +296,7 @@ pub(super) fn emit_auto_value_impls(
                 .map(|index| EffType::single_variable(EffectVar::new(index as u32)))
                 .collect::<Vec<_>>(),
         );
+        let public = output.is_trait_impl_exportable(value_trait_id, &[input_ty], &[], others);
         let constraints = {
             let env = ModuleEnv::new(output, others);
             auto_value_constraints(type_def, input_ty, &env)
@@ -313,7 +318,7 @@ pub(super) fn emit_auto_value_impls(
             output,
             others,
             value_trait_id,
-            false,
+            value_trait_id.module == output.module_id(),
             &[input_ty],
             &[],
             &[],
@@ -376,6 +381,9 @@ pub(super) fn emit_auto_value_impls(
             let method_index = TraitMethodIndex::from_index(method_index);
             let mut definition = definition;
             definition.ty_scheme.ty_quantifiers = quantifiers.clone();
+            // Keep each generated method's effect quantifiers aligned with the impl header's
+            // `eff_var_count`: effects occurring only in constraints do not belong to either.
+            definition.ty_scheme.eff_quantifiers = definition.ty_scheme.ty.input_effect_vars();
             definition.ty_scheme.constraints = constraints.clone();
             let runtime_arg_count = definition.arg_names.len();
             let function =
@@ -446,7 +454,7 @@ pub(super) fn emit_auto_value_impls(
             associated_const_values,
             associated_const_getters,
             associated_const_tys,
-            false,
+            public,
             Some(type_def_span),
         );
     }

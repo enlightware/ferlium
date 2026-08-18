@@ -17,7 +17,7 @@ use ferlium::{
     },
     format::FormatWith,
     hir::value::Value,
-    module::{ModuleId, Visibility, id::Id},
+    module::{ConcreteTraitImplKey, ModuleId, Visibility, id::Id},
     types::r#type::Type,
 };
 use indoc::indoc;
@@ -147,8 +147,8 @@ fn private_enum_variant_constructor_is_hidden_across_modules_by_default() {
     );
 }
 
-fn private_repr_struct_module_src() -> &'static str {
-    indoc! { r#"
+fn private_repr_struct_module_src(with_marker: bool) -> String {
+    let source = indoc! { r#"
         pub trait ToInt<Self> {
             fn to_int(value: Self) -> int;
         }
@@ -171,7 +171,46 @@ fn private_repr_struct_module_src() -> &'static str {
                 value.value
             }
         }
-    "# }
+    "# };
+    if with_marker {
+        source
+            .replacen("value: int,", "value: int,\n    marker: string,", 1)
+            .replacen(
+                "Secret { value }",
+                "Secret { value, marker: \"secret\" }",
+                1,
+            )
+    } else {
+        source.to_owned()
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn private_named_type_keeps_owner_generated_value_impl_private() {
+    let mut session = TestSession::new();
+    let base_id = compile_module(&mut session, "base", "struct Hidden(int)");
+
+    let value_trait_id = session
+        .session()
+        .std_module()
+        .get_trait_id_str("Value")
+        .expect("std Value trait should be registered");
+    let base = session.session().expect_fresh_module(base_id);
+    let hidden = Type::named(
+        base.get_type_def_id(ustr("Hidden"))
+            .expect("Hidden type should be registered"),
+        [],
+    );
+    let key = ConcreteTraitImplKey::new(value_trait_id, vec![hidden]);
+    let impl_id = *base
+        .get_concrete_impl_by_key(&key)
+        .expect("Hidden should have an owner-generated Value implementation");
+
+    assert!(
+        !base.get_impl_data(impl_id).unwrap().public,
+        "a private named type's generated Value implementation must stay private"
+    );
 }
 
 #[test]
@@ -179,22 +218,107 @@ fn private_repr_struct_module_src() -> &'static str {
 fn private_repr_type_can_be_named_and_used_through_public_trait_impls() {
     let mut session = TestSession::new();
 
-    compile_module(&mut session, "base", private_repr_struct_module_src());
-    compile_module(
+    let base_id = compile_module(&mut session, "base", &private_repr_struct_module_src(false));
+    let user_id = compile_module(
         &mut session,
         "user",
         indoc! { r#"
-            pub fn roundtrip(value: base::Secret) -> base::Secret {
-                value
+            pub fn duplicate(value: base::Secret) -> (base::Secret, base::Secret) {
+                (value, value)
             }
 
             pub fn result() -> int {
-                base::ToInt::to_int(roundtrip(base::make(5)))
+                let pair = duplicate(base::make(5));
+                base::ToInt::to_int(pair.0) + base::ToInt::to_int(pair.1)
             }
         "# },
     );
 
-    assert_val_eq!(session.run("user::result()"), int(5));
+    let base = session.session().expect_fresh_module(base_id);
+    assert!(
+        base.iter_named_functions()
+            .any(|(name, _)| name.as_str().contains("Value<base::Secret>")),
+        "the owner should contain the generated Value implementation"
+    );
+    let user = session.session().expect_fresh_module(user_id);
+    assert_eq!(
+        user.function_count(),
+        2,
+        "the consumer should reuse the public owner's Value implementation"
+    );
+    assert!(
+        user.iter_named_functions()
+            .all(|(name, _)| !name.as_str().contains("Value<base::Secret>")),
+        "the consumer should not regenerate Value methods for the foreign named type"
+    );
+    assert_val_eq!(session.run("user::result()"), int(10));
+
+    // The generated implementation belongs to the published base revision. Changing the hidden
+    // representation must rebuild both that implementation and consumers which reference it.
+    session
+        .try_compile_module("base", &private_repr_struct_module_src(true))
+        .expect("changing the owner's private representation should recompile its consumers");
+    assert_fresh(&session, base_id, "base after representation change");
+    assert_fresh(&session, user_id, "user after representation change");
+    let user = session.session().expect_fresh_module(user_id);
+    assert!(
+        user.iter_named_functions()
+            .all(|(name, _)| !name.as_str().contains("Value<base::Secret>")),
+        "the recompiled consumer should still reuse the owner's Value implementation"
+    );
+    assert_val_eq!(session.run("user::result()"), int(10));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn public_generic_value_impl_can_use_a_private_representation() {
+    let mut session = TestSession::new();
+
+    compile_module(
+        &mut session,
+        "base",
+        indoc! { r#"
+            struct Cell<T>(T)
+
+            #[private_repr]
+            pub struct Wrapper<T>(Cell<T>)
+
+            pub fn make(value: int) -> Wrapper<int> {
+                Wrapper(Cell(value))
+            }
+
+            pub fn value(wrapper: Wrapper<int>) -> int {
+                wrapper.0.0
+            }
+        "# },
+    );
+    compile_module(
+        &mut session,
+        "user",
+        indoc! { r#"
+            pub fn duplicate(
+                value: base::Wrapper<int>,
+            ) -> (base::Wrapper<int>, base::Wrapper<int>) {
+                (value, value)
+            }
+
+            pub fn result() -> int {
+                let pair = duplicate(base::make(9));
+                base::value(pair.0) + base::value(pair.1)
+            }
+        "# },
+    );
+
+    assert_val_eq!(session.run("user::result()"), int(18));
+    assert!(
+        session
+            .try_compile_module(
+                "repr_user",
+                "pub fn unwrap(value: base::Wrapper<int>) -> int { value.0.0 }",
+            )
+            .is_err(),
+        "reusing the owner's Value implementation must not expose its representation"
+    );
 }
 
 #[test]
@@ -202,7 +326,7 @@ fn private_repr_type_can_be_named_and_used_through_public_trait_impls() {
 fn private_repr_struct_can_be_constructed_and_projected_in_defining_module() {
     let mut session = TestSession::new();
 
-    compile_module(&mut session, "base", private_repr_struct_module_src());
+    compile_module(&mut session, "base", &private_repr_struct_module_src(false));
 
     assert_val_eq!(session.run("base::value(base::make(7))"), int(7));
 }
@@ -212,7 +336,7 @@ fn private_repr_struct_can_be_constructed_and_projected_in_defining_module() {
 fn private_repr_struct_constructor_is_hidden_across_modules() {
     let mut session = TestSession::new();
 
-    compile_module(&mut session, "base", private_repr_struct_module_src());
+    compile_module(&mut session, "base", &private_repr_struct_module_src(false));
     assert!(
         session
             .try_compile_module(
@@ -229,7 +353,7 @@ fn private_repr_struct_constructor_is_hidden_across_modules() {
 fn private_repr_struct_fields_are_hidden_across_modules() {
     let mut session = TestSession::new();
 
-    compile_module(&mut session, "base", private_repr_struct_module_src());
+    compile_module(&mut session, "base", &private_repr_struct_module_src(false));
     assert!(
         session
             .try_compile_module(
