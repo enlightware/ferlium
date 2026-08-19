@@ -28,7 +28,9 @@ use ustr::Ustr;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
-/// An annotation data struct to be used in IDEs
+/// An annotation to display at an absolute source position.
+///
+/// `pos` uses the [`PositionEncoding`](super::PositionEncoding) configured on the IDE compiler.
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
 pub struct AnnotationData {
     pub pos: usize,

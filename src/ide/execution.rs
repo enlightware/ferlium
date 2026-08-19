@@ -15,6 +15,9 @@ use wasm_bindgen::prelude::*;
 use super::diagnostics::ErrorData;
 
 /// A best-effort link from a range in rendered compiler-artifact text to a source range.
+///
+/// All four positions use the [`PositionEncoding`](super::PositionEncoding) configured on the IDE
+/// compiler.
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
 #[derive(Clone)]
 pub struct TextSourceMapEntry {

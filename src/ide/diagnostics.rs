@@ -24,7 +24,10 @@ use itertools::Itertools;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
-/// An error-data structure to be used in IDEs
+/// A diagnostic over an absolute source range.
+///
+/// `from` and `to` use the [`PositionEncoding`](super::PositionEncoding) configured on the IDE
+/// compiler.
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
 #[derive(Debug, Clone)]
 pub struct ErrorData {

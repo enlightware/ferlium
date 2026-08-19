@@ -8,6 +8,7 @@
 //
 use wasm_bindgen::prelude::*;
 
+use ferlium::ide::PositionEncoding;
 use ferlium::{
     hir::function::UnaryNativeFnRN,
     module::{Module, ModuleId, UseData, Uses},
@@ -42,9 +43,10 @@ impl PlaygroundCompiler {
             Location::new_synthesized(),
         ));
 
-        Self {
-            inner: ferlium::Compiler::new_with_session_and_uses(session, uses),
-        }
+        let mut inner = ferlium::Compiler::new_with_session_and_uses(session, uses);
+        // CodeMirror addresses JavaScript strings in UTF-16 code units.
+        inner.set_position_encoding(PositionEncoding::Utf16CodeUnit);
+        Self { inner }
     }
 
     pub fn compile(&mut self, src: &str) -> CompilationReport {

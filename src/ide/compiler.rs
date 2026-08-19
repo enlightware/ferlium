@@ -28,26 +28,27 @@ use wasm_bindgen::prelude::*;
 
 use super::{
     annotations::{AnnotationData, display_annotations},
-    char_index_lookup::CharIndexLookup,
     diagnostics::{CompilationReport, ErrorData, compilation_error_to_data},
     execution::{ExecutionErrorData, ExecutionResult, IrText, TextSourceMapEntry},
+    position_index_lookup::{PositionEncoding, PositionIndexLookup},
     signatures::{FunctionSignature, remove_effects},
 };
 
-/// The compiler to be used in the web IDE
+/// Compiler services for IDE integrations.
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 pub struct Compiler {
     session: CompilerSession,
     user_module: CompilationOutput,
     uses: Uses,
-    char_index_lookup: FxHashMap<SourceId, CharIndexLookup>,
+    position_encoding: PositionEncoding,
+    position_index_lookup: FxHashMap<SourceId, PositionIndexLookup>,
     execution_fuel_limit: Option<usize>,
 }
 
 const SRC_NAME: &str = "<ide>";
 const MODULE_NAME: &str = "ide";
 
-/// The compiler to be used in the web IDE, wasm-available part
+/// IDE operations that are also available through WebAssembly.
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 impl Compiler {
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen(constructor))]
@@ -57,6 +58,15 @@ impl Compiler {
 
     pub fn set_allow_experimental(&mut self, allow: bool) {
         self.session.set_allow_experimental(allow);
+    }
+
+    /// Selects the encoding used for every absolute source and rendered-text position returned by
+    /// this compiler. The default is [`PositionEncoding::UnicodeScalar`].
+    pub fn set_position_encoding(&mut self, encoding: PositionEncoding) {
+        if self.position_encoding != encoding {
+            self.position_encoding = encoding;
+            self.position_index_lookup.clear();
+        }
     }
 
     fn compile_internal(&mut self, src: &str) -> Result<(), CompilationError> {
@@ -122,13 +132,7 @@ impl Compiler {
         }
         let diagnostics = diagnostics
             .into_iter()
-            .map(|data| {
-                let source_id = data.source_id;
-                data.map(|pos| {
-                    self.char_index_lookup(source_id)
-                        .byte_to_char_position(pos as usize) as u32
-                })
-            })
+            .map(|data| self.encode_error_data_positions(data))
             .collect();
         CompilationReport {
             succeeded,
@@ -218,7 +222,8 @@ impl Compiler {
             MirOptimization::Disabled
         });
         let text = self.session.emit_mir_module_with_source_map(module_id);
-        let lookup = self.char_index_lookup(source_id);
+        let mir_lookup = PositionIndexLookup::new(&text.text, self.position_encoding);
+        let source_lookup = self.position_index_lookup(source_id);
         IrText {
             text: text.text,
             source_map: text
@@ -226,15 +231,18 @@ impl Compiler {
                 .into_iter()
                 .filter(|entry| entry.span.source_id() == source_id)
                 .map(|entry| TextSourceMapEntry {
-                    from: u32::try_from(entry.from)
+                    from: u32::try_from(mir_lookup.byte_to_position(entry.from))
                         .expect("playground MIR text cannot exceed 4 GiB"),
-                    to: u32::try_from(entry.to).expect("playground MIR text cannot exceed 4 GiB"),
+                    to: u32::try_from(mir_lookup.byte_to_position(entry.to))
+                        .expect("playground MIR text cannot exceed 4 GiB"),
                     source_from: u32::try_from(
-                        lookup.byte_to_char_position(entry.span.start_usize()),
+                        source_lookup.byte_to_position(entry.span.start_usize()),
                     )
                     .expect("playground source cannot exceed 4 GiB"),
-                    source_to: u32::try_from(lookup.byte_to_char_position(entry.span.end_usize()))
-                        .expect("playground source cannot exceed 4 GiB"),
+                    source_to: u32::try_from(
+                        source_lookup.byte_to_position(entry.span.end_usize()),
+                    )
+                    .expect("playground source cannot exceed 4 GiB"),
                 })
                 .collect(),
         }
@@ -246,7 +254,8 @@ impl Compiler {
         optimization: MirOptimization,
     ) -> Option<ExecutionResult> {
         self.session.set_mir_optimization(optimization);
-        self.user_module.expr.as_ref().map(|expr| {
+        let expr = self.user_module.expr?;
+        Some((|| {
             let module_id = self.user_module.module_id;
             let is_stale = self.session.modules().info(module_id).unwrap().is_stale();
             if is_stale {
@@ -263,13 +272,13 @@ impl Compiler {
             }
             let (value, ty) = {
                 let module = self.session.expect_fresh_module(module_id);
-                let function = module.get_function_by_id(*expr).unwrap();
+                let function = module.get_function_by_id(expr).unwrap();
                 let ty = function.definition.ty_scheme.ty.ret;
                 let limits = ReferenceInterpreterLimits::default()
                     .with_fuel_limit(self.execution_fuel_limit);
                 (
                     self.session
-                        .run_entry_with_limits(target, module_id, *expr, vec![], limits),
+                        .run_entry_with_limits(target, module_id, expr, vec![], limits),
                     ty,
                 )
             };
@@ -309,17 +318,19 @@ impl Compiler {
                         .get_latest_source_by_name(SRC_NAME)
                         .unwrap()
                         .0;
+                    let data = error.top_most_location_in(source_id).map(|loc| {
+                        ErrorData::from_location(loc, self.session.source_table(), summary.clone())
+                    });
+                    let data = data.map(|data| self.encode_error_data_positions(data));
                     let data = ExecutionErrorData {
                         summary: summary.clone(),
                         complete,
-                        data: error.top_most_location_in(source_id).map(|loc| {
-                            ErrorData::from_location(loc, self.session.source_table(), summary)
-                        }),
+                        data,
                     };
                     ExecutionResult::error(data)
                 }
             }
-        })
+        })())
     }
 
     pub fn get_annotations(&mut self) -> Vec<AnnotationData> {
@@ -353,7 +364,7 @@ impl Compiler {
             .into_iter()
             .map(|(pos, hint)| {
                 AnnotationData::new(
-                    self.char_index_lookup(source_id).byte_to_char_position(pos),
+                    self.position_index_lookup(source_id).byte_to_position(pos),
                     hint,
                 )
             })
@@ -462,19 +473,35 @@ impl Compiler {
             session,
             user_module,
             uses,
-            char_index_lookup: FxHashMap::default(),
+            position_encoding: PositionEncoding::default(),
+            position_index_lookup: FxHashMap::default(),
             execution_fuel_limit: Some(DEFAULT_INTERACTIVE_FUEL_LIMIT),
         }
     }
 
-    fn char_index_lookup(&mut self, source_id: SourceId) -> &mut CharIndexLookup {
-        self.char_index_lookup.entry(source_id).or_insert_with(|| {
-            CharIndexLookup::new(
-                self.session
-                    .source_table()
-                    .get_source_text(source_id)
-                    .unwrap(),
+    fn position_index_lookup(&mut self, source_id: SourceId) -> &mut PositionIndexLookup {
+        let encoding = self.position_encoding;
+        self.position_index_lookup
+            .entry(source_id)
+            .or_insert_with(|| {
+                PositionIndexLookup::new(
+                    self.session
+                        .source_table()
+                        .get_source_text(source_id)
+                        .unwrap(),
+                    encoding,
+                )
+            })
+    }
+
+    fn encode_error_data_positions(&mut self, data: ErrorData) -> ErrorData {
+        let source_id = data.source_id;
+        data.map(|position| {
+            u32::try_from(
+                self.position_index_lookup(source_id)
+                    .byte_to_position(position as usize),
             )
+            .expect("playground source cannot exceed 4 GiB")
         })
     }
 
@@ -627,6 +654,52 @@ mod tests {
         assert_eq!(optimized_result.html_message(), "42: int");
         let optimized_mir = compiler.mir_text(true);
         assert!(optimized_mir.text.contains("b0:"), "{}", optimized_mir.text);
+    }
+
+    #[test]
+    fn utf16_positions_cover_every_ide_output() {
+        let mut compiler = Compiler::new();
+        compiler.set_position_encoding(PositionEncoding::Utf16CodeUnit);
+
+        let diagnostic_source = "\"😀\" + 1";
+        let report = compiler.compile_report(diagnostic_source);
+        let diagnostic = report
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.file == SRC_NAME)
+            .expect("the invalid addition should have a source diagnostic");
+        assert_eq!((diagnostic.from, diagnostic.to), (7, 8));
+
+        let annotation_source = "let a = \"😀\"; let b = 1; b";
+        assert!(compiler.compile(annotation_source).is_none());
+        let annotation_positions = compiler
+            .get_light_annotations()
+            .into_iter()
+            .map(|annotation| annotation.pos)
+            .collect::<Vec<_>>();
+        assert_eq!(annotation_positions, [5, 19, 26]);
+
+        let runtime_source = "\"😀\"; [1][9]";
+        assert!(compiler.compile(runtime_source).is_none());
+        let runtime_error = compiler
+            .run_expr()
+            .expect("expression should exist")
+            .error_data()
+            .expect("out-of-bounds access should have a source diagnostic");
+        assert_eq!((runtime_error.from, runtime_error.to), (6, 12));
+
+        let mir_source = "\"😀é\"";
+        assert!(compiler.compile(mir_source).is_none());
+        let mir = compiler.mir_text(false);
+        let mir_utf16_len = mir.text.encode_utf16().count();
+        let source_utf16_len = mir_source.encode_utf16().count();
+        assert!(!mir.source_map.is_empty());
+        assert!(mir.source_map.iter().all(|entry| {
+            entry.from < entry.to
+                && entry.to as usize <= mir_utf16_len
+                && entry.source_from <= entry.source_to
+                && entry.source_to as usize <= source_utf16_len
+        }));
     }
 
     #[test]
