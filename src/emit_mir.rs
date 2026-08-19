@@ -1509,22 +1509,35 @@ impl<'a> Emitter<'a> {
     /// Lowers a `Case` scrutinee to an operand `comp_eq` reads *non-consumingly*, and reports
     /// whether that operand is a place.
     ///
-    /// An immediate stays a typed opaque constant; everything else is taken as its **place** (a
-    /// borrow), never loaded/moved. This mirrors the HIR interpreter's `eval_case`, which reads the
+    /// An immediate stays a typed opaque constant and a variant scrutinee stays the `int`
+    /// `extract_tag` produces; everything else is taken as its **place** (a borrow), never
+    /// loaded/moved. The place form mirrors the HIR interpreter's `eval_case`, which reads the
     /// scrutinee through `target_ref` and compares its `to_literal_value()`: the place stays live for
     /// the remaining alternatives and for the arm body (so a non-trivial scrutinee — string/tuple —
     /// is not consumed), and a bare-generic scrutinee needs no static-layout assertion because it is
-    /// only borrowed and snapshotted, not loaded as a register. (A variant scrutinee arrives as the
-    /// `int` `extract_tag`, materialized into a place here.)
+    /// only borrowed and snapshotted, not loaded as a register.
+    ///
+    /// A tag needs none of that. `comp_eq` reads a place *or* a materialized value, and the tag is
+    /// already the latter — an `isize` the operation computes rather than a view onto the variant,
+    /// which stays live through its own place regardless. Taking it as a place would allocate a slot
+    /// and store the register into it only for each head to read it straight back.
     ///
     /// The place flag is what lets a boolean alternative head read the scrutinee instead of
-    /// comparing it; see the `Case` lowering.
+    /// comparing it; see the `Case` lowering. Neither non-place form can qualify: a tag is an `int`,
+    /// so its heads compare against variant-tag patterns, never against a boolean.
     fn lower_case_scrutinee(&mut self, node: &ENode) -> (mir::Value, bool) {
         use hir::NodeKind as K;
-        if let K::Immediate(value) = &node.kind {
-            return (self.immediate_constant(node.ty, value.clone()), false);
+        match &node.kind {
+            K::Immediate(value) => (self.immediate_constant(node.ty, value.clone()), false),
+            K::ExtractTag(n) => {
+                let place = self.lower_as_place(&self.hir_arena[*n]);
+                let tag = self
+                    .insert(Operation::extract_tag(node.span, place))
+                    .unwrap();
+                (tag, false)
+            }
+            _ => (self.lower_as_place(node), true),
         }
-        (self.lower_as_place(node), true)
     }
 
     /// Lowers compile-time pattern data to an operand for `comp_eq`. Pattern values deliberately do
@@ -1802,10 +1815,10 @@ impl<'a> Emitter<'a> {
                 // whole value against each whole pattern (`comp_eq` does `LiteralValue` equality,
                 // non-consuming). The scrutinee is taken as a borrowable place — never loaded/moved —
                 // so a string/tuple stays live across alternatives and into the arm body; an
-                // immediate scrutinee stays a primitive constant. Variant matches arrive here as a
-                // match on the (int) `extract_tag` of the scrutinee, so no variant-specific path is
-                // needed. (We do *not* decompose composite patterns: the HIR compares the whole tuple
-                // structurally, so the MIR does the same.)
+                // immediate scrutinee stays a primitive constant, and a variant one stays the `int`
+                // its `extract_tag` produces, so no variant-specific path is needed. (We do *not*
+                // decompose composite patterns: the HIR compares the whole tuple structurally, so
+                // the MIR does the same.)
                 let (scrutinee, scrutinee_is_place) =
                     self.lower_case_scrutinee(&self.hir_arena[n.value]);
 

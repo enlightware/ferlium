@@ -395,6 +395,40 @@ fn match_case_functions() {
     );
 }
 
+/// A variant scrutinee is the `int` `extract_tag` produces, and `comp_eq` reads that register
+/// directly: no slot is allocated to hold a value each head would only read straight back.
+#[test]
+fn variant_match_compares_the_tag_register() {
+    let mut session = TestSession::new();
+
+    assert_eq_sans_flake!(
+        session.emit_mir(
+            "fn a0(x: None | Some (int)) -> int { match x { None => 0, Some(v) => v } }"
+        ),
+        r#"fn a0(%p0: @arg let Option<int>, %p1: @ret int):
+  @c0: int = 0
+  b0:
+    %r0 = extract_tag %p0
+    br b1
+  b1:
+    %r1 = comp_eq %r0 None
+    condbr %r1, b2, b3
+  b2:
+    %r2 = alloca int
+    store @c0 to %r2
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r2, %p1)
+    br b4
+  b3:
+    %r3 = subfield @c0 from %p0
+    %r4 = subfield @c0 from %r3
+    memcpy %r4 to %p1
+    br b4
+  b4:
+    ret
+"#
+    );
+}
+
 #[test]
 fn user_function_call() {
     let mut sessions = TestSession::new();
