@@ -123,6 +123,16 @@ struct InvokeFold {
     normal: BlockId,
 }
 
+/// A `build_array` whose element slots the analysis can replace with the constants they hold, and
+/// which of them — as operand index and the constant's representation.
+struct ArrayElements {
+    block: BlockId,
+    /// Index of the operation within its block.
+    index: OperationIndex,
+    element_ty: Type,
+    known: Vec<(usize, LiteralValue)>,
+}
+
 /// An indirect dispatch whose callee the analysis resolved, and the function to name directly
 /// instead. `operand` is the callee's index, which differs per operation kind.
 struct Devirtualization {
@@ -158,6 +168,8 @@ pub(crate) struct Plan {
     invokes: Vec<InvokeFold>,
     /// Conditional branches whose condition is known, and the successor they always take.
     branches: Vec<(BlockId, BlockId)>,
+    /// `build_array` element slots to replace with the constants they hold.
+    arrays: Vec<ArrayElements>,
     /// Whether anything planned here can enable a further rewrite. See
     /// [`Folded::warrants_another_round`].
     warrants_another_round: bool,
@@ -171,7 +183,10 @@ impl Plan {
     }
 
     fn is_empty(&self) -> bool {
-        self.calls.is_empty() && self.invokes.is_empty() && self.branches.is_empty()
+        self.calls.is_empty()
+            && self.invokes.is_empty()
+            && self.branches.is_empty()
+            && self.arrays.is_empty()
     }
 }
 
@@ -240,6 +255,9 @@ pub(crate) fn fold_function(
     // splice one call into two operations and shift every later index of its block. Both were
     // planned against the same body, and no operation is in both plans.
     apply_devirtualizations(&mut edit, devirtualizations);
+    // For the same reason: naming a constant replaces one element operand and leaves every index
+    // where it was.
+    apply_array_elements(&mut edit, plan.arrays, env);
     // A reflexive comparison expands one call into `variant Equal; store`, so apply sites in
     // reverse order and splice without invalidating a later index planned in the same block.
     for fold in plan.calls.into_iter().rev() {
@@ -277,6 +295,47 @@ pub(crate) fn fold_function(
         body: edit.finish_unverified(),
         warrants_another_round,
     })
+}
+
+/// Names the constants a `build_array`'s element slots hold instead of reading them back out.
+///
+/// An element operand may be a materialized value as readily as a place — verification admits
+/// either, and the reification path already emits the constant form. What reaches here is the
+/// lowering of a source array literal, which stores each element into a fresh slot only for the
+/// construction to read it straight back; naming the constants leaves those slots unread, and DCE
+/// removes them.
+///
+/// This buys no round. The array's own fact is derived from these same element facts, so the
+/// substitution hands the next round's analysis nothing it did not already have.
+fn known_array_elements(
+    operation: &Operation,
+    state: &State,
+    analysis: &Analysis,
+) -> Vec<(usize, LiteralValue)> {
+    let Some((_, elements)) = operation.operands.split_last() else {
+        return Vec::new();
+    };
+    elements
+        .iter()
+        .enumerate()
+        .filter_map(|(index, operand)| {
+            let place = analysis.tracked_place_of(operand)?;
+            match state.place(place) {
+                Fact::Known(Const::Literal(literal)) => Some((index, literal)),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+fn apply_array_elements(edit: &mut FunctionEdit, arrays: Vec<ArrayElements>, env: ModuleEnv<'_>) {
+    for array in arrays {
+        for (operand, representation) in array.known {
+            let constant = edit.add_constant(array.element_ty, representation, &env);
+            edit.block_mut(array.block).operations[array.index.as_index()].operands[operand] =
+                mir::Value::Constant(constant);
+        }
+    }
 }
 
 /// Turns either full evaluation or a partial known-call identity into MIR operations.
@@ -577,6 +636,17 @@ fn plan_folds_with(
                     operand,
                     callee,
                 });
+            }
+            if let OperationKind::BuildArray { element_ty } = &operation.kind {
+                let known = known_array_elements(operation, &state, analysis);
+                if !known.is_empty() {
+                    plan.arrays.push(ArrayElements {
+                        block,
+                        index: OperationIndex::from_index(index),
+                        element_ty: *element_ty,
+                        known,
+                    });
+                }
             }
             analysis.step(func, env, operation, &mut state);
         }
@@ -1134,6 +1204,29 @@ mod tests {
             .nth(1)
             .expect("the module defines main")
             .to_string()
+    }
+
+    /// An array literal stores each element into a fresh slot only for the construction to read it
+    /// straight back. Every slot whose contents the analysis knows is replaced by the constant
+    /// itself, and DCE then removes the slot. The middle element is deliberately unknown: it must
+    /// keep its slot, which is what shows the substitution is per-operand rather than all-or-nothing.
+    #[test]
+    fn known_array_element_slots_become_constants() {
+        let body = optimized_main("fn main(n: int) -> [int] { [1, n, 3] }");
+        assert!(
+            body.contains("build_array<int> [@c0, %r2, @c1] to %p1"),
+            "the known elements must be named directly:\n{body}"
+        );
+        assert_eq!(
+            body.matches("store ").count(),
+            0,
+            "no element literal should be stored into a slot first:\n{body}"
+        );
+        assert_eq!(
+            body.matches("alloca").count(),
+            1,
+            "only the unknown element keeps a slot:\n{body}"
+        );
     }
 
     /// An indirect call whose callee the analysis resolved is rewritten to name that callee

@@ -20,17 +20,19 @@
 //! whose valid scope begins only on its normal edge, so merging it needs a subgraph-level renaming
 //! proof rather than this block-local one.
 //!
-//! A shared empty exit is the limiting case in the other direction: every predecessor can carry
-//! its operand-free terminal transfer directly. Folding those `goto`s removes a block and a
-//! run-time transfer without duplicating an operation. It deliberately applies only to `return`,
-//! error propagation and cleanup failure, not to arbitrary empty blocks with successors.
+//! An empty block is the limiting case in the other direction: it holds nothing to execute, so its
+//! terminator can be folded into its predecessors without duplicating an operation. How far that
+//! goes depends on the terminator. A `goto` is folded into *every* predecessor edge, whatever its
+//! kind, because an edge can name any block. An operand-free terminal — `return`, error propagation
+//! or cleanup failure — can only replace a predecessor's own `goto`: a conditional or invoke edge
+//! must name a block, and has nowhere to put a terminal instead.
 
 use std::hash::{Hash, Hasher};
 
 use rustc_hash::{FxHashMap, FxHasher};
 
 use crate::{
-    containers::DenseBitSet,
+    containers::{DenseBitSet, SVec2},
     mir::{self, BlockId, Function, edit::FunctionEdit, terminator::TerminatorKind},
     module::id::Id,
 };
@@ -269,6 +271,93 @@ fn is_empty_terminal_block(function: &Function, block: BlockId) -> bool {
     block.operations().is_empty() && is_operand_free_terminal(&block.terminator().kind)
 }
 
+fn is_empty_forwarding_block(function: &Function, block: BlockId) -> bool {
+    let candidate = function.block(block);
+    candidate.operations().is_empty()
+        && matches!(candidate.terminator().kind, TerminatorKind::Goto { target } if target != block)
+}
+
+/// Where an edge to `target` actually arrives: an empty block whose terminator is a jump executes
+/// nothing, so the edge carries straight on through it.
+///
+/// `limit` is the function's block count, which bounds any acyclic chain and so doubles as the
+/// cycle guard. A cycle of empty jumps is unreachable code shaped like an infinite loop; exhausting
+/// the bound leaves the edge exactly where it was rather than picking an arbitrary block in it.
+fn forwarded_target(edit: &FunctionEdit, target: BlockId, limit: usize) -> BlockId {
+    let mut current = target;
+    for _ in 0..limit {
+        let block = edit.block(current);
+        if !block.operations.is_empty() {
+            return current;
+        }
+        match block.terminator.kind {
+            TerminatorKind::Goto { target } if target != current => current = target,
+            _ => return current,
+        }
+    }
+    target
+}
+
+/// Folds the jump of every empty forwarding block into the edges reaching it, and collapses a
+/// conditional whose two edges land on the same block. Answers whether a conditional collapsed,
+/// which is what can leave its condition unread.
+///
+/// This applies to every predecessor edge kind, unlike the terminal folding below: an edge names a
+/// block, and forwarding only changes *which* block it names.
+fn fold_empty_forwarding_blocks(edit: &mut FunctionEdit) -> bool {
+    let blocks: Vec<_> = edit.blocks().collect();
+    let limit = blocks.len();
+    let mut collapsed = false;
+    for block in blocks {
+        // Resolving both edges before taking the mutable borrow keeps the walk reading a body no
+        // rewrite has touched. Chains resolve completely, so the order blocks are visited in
+        // cannot change the outcome.
+        let successors: SVec2<_> = edit.block(block).terminator.successors().collect();
+        let forwarded: SVec2<_> = successors
+            .iter()
+            .map(|&target| forwarded_target(edit, target, limit))
+            .collect();
+        if forwarded == successors {
+            continue;
+        }
+        let mut forwarded = forwarded.into_iter();
+        let mut next = || forwarded.next().expect("one target per successor");
+        let terminator = &mut edit.block_mut(block).terminator.kind;
+        match terminator {
+            TerminatorKind::Goto { target } => *target = next(),
+            TerminatorKind::CondBr {
+                then_target,
+                else_target,
+                ..
+            } => {
+                *then_target = next();
+                *else_target = next();
+            }
+            TerminatorKind::Invoke { normal, error, .. } => {
+                *normal = next();
+                *error = next();
+            }
+            TerminatorKind::Yield { resume, .. } => *resume = next(),
+            TerminatorKind::Return
+            | TerminatorKind::PropagateError
+            | TerminatorKind::FailureDuringCleanup => {}
+        }
+        if let TerminatorKind::CondBr {
+            then_target,
+            else_target,
+            ..
+        } = *terminator
+            && then_target == else_target
+        {
+            *terminator = TerminatorKind::Goto {
+                target: then_target,
+            };
+            collapsed = true;
+        }
+    }
+    collapsed
+}
+
 fn fold_empty_terminal_successors(edit: &mut FunctionEdit) {
     // Ordinary acyclic successors follow their predecessors in canonical block order. Visiting
     // backwards propagates a terminal through an empty jump chain in this one scan.
@@ -354,8 +443,13 @@ pub(crate) fn simplify_tails(function: &Function) -> Option<SimplifiedTails> {
                 } if then_target == else_target
             )
         });
-    let exposed_dead_code = !replacement.is_empty() || has_equal_target_branch;
-    if !exposed_dead_code && !has_empty_terminal_successor {
+    let has_empty_forwarding_block = function
+        .blocks()
+        .skip(1)
+        .filter(|block| reachable.contains(block.as_index()))
+        .any(|block| is_empty_forwarding_block(function, block));
+    let mut exposed_dead_code = !replacement.is_empty() || has_equal_target_branch;
+    if !exposed_dead_code && !has_empty_terminal_successor && !has_empty_forwarding_block {
         return None;
     }
 
@@ -405,6 +499,9 @@ pub(crate) fn simplify_tails(function: &Function) -> Option<SimplifiedTails> {
         }
     }
 
+    // Before the terminal folding, which reads a `goto` chain one link at a time: bypassing the
+    // empty links first hands it the block that actually terminates.
+    exposed_dead_code |= fold_empty_forwarding_blocks(&mut edit);
     fold_empty_terminal_successors(&mut edit);
     edit.remove_unreachable_blocks();
     edit.merge_blocks_into_predecessors();
@@ -563,6 +660,59 @@ mod tests {
         let function = builder.finish(env);
         let merged = simplify_tails(&function).expect("the equal branch targets simplify");
         assert!(merged.body.constants().is_empty());
+    }
+
+    /// A conditional edge cannot carry a terminal, but it can carry a jump: an empty block which
+    /// only jumps onwards is bypassed by every predecessor edge, whatever its kind.
+    #[test]
+    fn an_empty_forwarding_block_is_bypassed_by_a_conditional_edge() {
+        let span = Location::new_synthesized();
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let mut builder = FunctionBuilder::new("empty_forwarding".into(), Default::default());
+        let condition = builder.add_constant(bool_type(), LiteralValue::new_native(true), &env);
+        let entry = builder.add_block();
+        let arm = builder.add_block();
+        let forwarding = builder.add_block();
+        let join = builder.add_block();
+
+        builder.set_terminator(
+            entry,
+            Terminator::cond_br(
+                span,
+                crate::mir::Value::Constant(condition),
+                arm,
+                forwarding,
+            ),
+        );
+        // An operation in each of the two surviving blocks keeps them out of the reach of every
+        // other rewrite here: they are neither equivalent to one another nor empty.
+        builder
+            .append_operation(arm, Operation::alloca(span, int_type()))
+            .unwrap();
+        builder.set_terminator(arm, Terminator::goto(span, join));
+        builder.set_terminator(forwarding, Terminator::goto(span, join));
+        builder
+            .append_operation(join, Operation::alloca(span, int_type()))
+            .unwrap();
+        builder.set_terminator(join, Terminator::ret(span));
+
+        let function = builder.finish(env);
+        let simplified = simplify_tails(&function).expect("the empty block can be bypassed");
+        let body = simplified.body;
+        assert_eq!(
+            body.blocks().count(),
+            3,
+            "the block holding nothing but a jump must be gone"
+        );
+        assert!(
+            body.blocks().all(|block| {
+                let block = body.block(block);
+                !block.operations().is_empty()
+                    || !matches!(block.terminator().kind, TerminatorKind::Goto { .. })
+            }),
+            "no empty forwarding block may remain"
+        );
     }
 
     #[test]

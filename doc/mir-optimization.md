@@ -50,9 +50,9 @@ LICM              // hoist invariant pure direct calls with passive inputs and c
 dead proven calls // remove unused chains of known-total numeric or proved-returning script calls
 dead stores       // remove unread initialization overwritten on every following path
 dce               // on every body, not only a changed one
-tail merge        // hash-cons equivalent tails, collapse equal edges, and fold empty exits
-dead proven + dce // after tail sharing/equal-edge folding, collect its newly dead predicate
 stack markers     // drop a mark duplicating one already held, and restores that pop nothing
+tail merge        // hash-cons equivalent tails, collapse equal edges, and fold empty blocks
+dead proven + dce // after tail sharing/equal-edge folding, collect its newly dead predicate
 finish            // restores canonical form without exposing the intermediate body
 ```
 
@@ -145,6 +145,15 @@ known and folds outright — but a specialization at `int` of a generic body can
 call becomes that comparison — which is also what puts the value where the later passes can read
 it, a call being opaque to all of them. Both step aside for a *known* argument: evaluating the call
 outright yields a constant, which beats copying the cell that held it or comparing it at run time.
+
+The pass also names the constants a `build_array`'s element slots hold, rather than reading them
+back out. An element operand may be a materialized value as readily as a place — verification admits
+either, and the reification above already emits the constant form — but the lowering of a source
+array literal stores each element into a fresh slot only for the construction to read it straight
+back. Substitution is per operand, so a literal beside an unknown element still becomes a constant
+while the unknown one keeps its slot, and `dce` collects whatever became unread. This buys no round:
+the array's own fact is derived from these same element facts, so the next round's analysis learns
+nothing from the rewrite.
 
 The same pass also simplifies a call from a documented std contract when only the relevant
 arguments are known. Callees are recognized by resolved `FunctionId`, including through
@@ -715,10 +724,17 @@ reachable candidate and therefore cannot safely serve as its representative.
 
 Every edge to a duplicate is redirected to the representative. A `condbr` whose targets thereby
 become equal becomes a `goto`, after which unreachable-block and single-predecessor cleanup remove
-the duplicate structure. Independently, a `goto` to an empty block ending in `ret`,
-`propagate_error`, or `failure_during_cleanup` is replaced by that operand-free terminal transfer.
-This folds a shared exit into all of its predecessors without copying operations; exits carrying an
-operand or successor are not duplicated.
+the duplicate structure.
+
+Independently, an empty block holds nothing to execute, so its terminator folds into the edges
+reaching it — without copying an operation, since there is none. How far that goes depends on the
+terminator, and the asymmetry is the IR's, not a choice. A `goto` is folded into *every* predecessor
+edge whatever its kind, because an edge names a block and forwarding only changes which one; chains
+of them resolve in a single scan, with the block count bounding the walk so a cycle of empty jumps
+is left alone. An operand-free terminal — `ret`, `propagate_error` or `failure_during_cleanup` — can
+only replace a predecessor's own `goto`: a `condbr` or `invoke` edge must name a block and has
+nowhere to put a terminal instead. That is why an `invoke`'s continuation survives as a block even
+when it does nothing but return.
 
 Merging a tail or collapsing a branch can make its predicate dead. Only in that case does the
 driver run a small cleanup fixed point: unread `comp_eq`, `load`, and `extract_tag` results;
@@ -729,8 +745,8 @@ nor a second storage-DCE scan.
 ## Redundant stack markers
 
 A stack marker is the interpreter's allocation frontier at the point it was taken, and only an
-`alloca` moves that frontier. `mir::pass::stack_region` runs last, over the finished body, and
-removes the two consequences: a `stack_save` taken where a live marker already holds the frontier
+`alloca` moves that frontier. `mir::pass::stack_region` runs over the settled body, after DCE has
+emptied every bracket it can, and removes the two consequences: a `stack_save` taken where a live marker already holds the frontier
 records the same value, so it is replaced by that marker; and a `stack_restore` to a frontier
 already current reclaims nothing. Nesting is what creates them — inlining brackets every spliced
 body, and a body spliced directly inside another's bracket takes its mark at the same frontier.
@@ -738,6 +754,12 @@ body, and a body spliced directly inside another's bracket takes its mark at the
 The analysis is a forward fixpoint over the set of markers known equal to the frontier, intersected
 at joins, cleared by anything that may leave frame storage. It shares that predicate with `dce` so
 the two cannot disagree about what grows a frame.
+
+It runs *before* tail merging, and the order matters in one direction only: canonicalization
+**creates** the alpha-equivalence tail merging looks for. Two mutually exclusive arms which restore
+duplicate markers of the same frontier are the same block only once both name the surviving marker;
+merging first compares them while they still differ by a register name and concludes, wrongly, that
+they are distinct.
 
 **A bracket that reclaims real storage is never removed**, and the distinction is not caution. Such
 a bracket is where a live range ends, which is what a backend's stack-slot allocator needs to prove

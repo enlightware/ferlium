@@ -368,6 +368,19 @@ pub(crate) fn optimize_function(
     if let Some(cleaned) = dce::remove_dead_storage(source) {
         current = Some(cleaned);
     }
+    // After DCE has emptied every bracket it can, and *before* tail merging. What remains reclaims
+    // real storage and must stay: a bracket is where a live range ends, which a backend's stack-slot
+    // allocator needs. Only a marker duplicating one already held, and a restore to the frontier
+    // already current, are removed here — neither carries information the surviving marker does not.
+    //
+    // Ordering with tail merging runs this way because canonicalization *creates* alpha-equivalence
+    // rather than consuming it: two arms which restore duplicate markers of the same frontier are
+    // the same block only once both name the surviving marker. Merging first would compare them
+    // while they still differ by a register name and conclude, wrongly, that they are distinct.
+    let source = current.as_ref().unwrap_or(function);
+    if let Some(canonicalized) = stack_region::remove_redundant_stack_markers(source) {
+        current = Some(canonicalized);
+    }
     // Cleanup can make mutually exclusive branch arms alpha-equivalent by removing lowering
     // scaffolding that differed between them. Merge complete equivalent blocks without moving
     // their operations, collapse a conditional whose two edges now agree, and fold shared empty
@@ -386,14 +399,6 @@ pub(crate) fn optimize_function(
         } else {
             simplified.body
         });
-    }
-    // Last, after DCE has emptied every bracket it can. What remains reclaims real storage and
-    // must stay: a bracket is where a live range ends, which a backend's stack-slot allocator
-    // needs. Only a marker duplicating one already held, and a restore to the frontier already
-    // current, are removed here — neither carries information the surviving marker does not.
-    let source = current.as_ref().unwrap_or(function);
-    if let Some(canonicalized) = stack_region::remove_redundant_stack_markers(source) {
-        current = Some(canonicalized);
     }
     // Final artifact verification covers unchanged functions too, so cloning is the identity here.
     match current {
@@ -417,6 +422,30 @@ mod tests {
             .split(&format!("fn {name}"))
             .nth(1)
             .unwrap_or_else(|| panic!("module has no `{name}`:\n{module}"))
+    }
+
+    /// Stack-marker canonicalization runs before tail merging because it *creates* the equivalence
+    /// tail merging looks for. Both arms which skip the body restore a marker of the same frontier,
+    /// but they restore *duplicate* markers, and are the same block only once both name the
+    /// surviving one. Merging first compares them while they still differ by a register name.
+    #[test]
+    fn arms_restoring_duplicate_stack_markers_are_merged() {
+        let module =
+            optimized("fn f(a: int, b: int) -> int { if a >= 0 and a < b { 1 } else { 2 } }");
+        let body = body_of(&module, "f")
+            .split("\nfn ")
+            .next()
+            .expect("a function has a body");
+        assert!(
+            !body.contains("\n    br "),
+            "the two arms which skip the body must become one block, leaving nothing that merely \
+             jumps:\n{body}"
+        );
+        assert_eq!(
+            body.matches("\n  b").count(),
+            4,
+            "entry, the second comparison, and one block per outcome:\n{body}"
+        );
     }
 
     /// Splicing a straight-line callee splits the call site's block and joins the pieces with
