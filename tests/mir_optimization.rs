@@ -141,6 +141,84 @@ fn constant_arithmetic_folds_away() {
     );
 }
 
+/// Compiler-generated `Value` ownership glue must make the same `TrivialCopy` decision as
+/// ordinary ownership elaboration. `Some(())` stores its constructor argument as `((),)`, but both
+/// that zero-sized tuple and the enclosing tagged union are representation-copyable: cloning the
+/// union copies only its tag, and dropping it has no semantic work.
+#[test]
+fn generated_trivial_value_glue_uses_representation_operations() {
+    let raw = emit(
+        "trivial_generated_value_glue",
+        "fn show(x) { match x { None => \"no\", Some(x) => f\"{x}\", _ => \"?\" } }\n\
+         show(Other)",
+        MirOptimization::Disabled,
+    );
+
+    for ty in ["(std::(),)", "None | Other | Some (std::())"] {
+        let clone = rendered_function_with_prefix(&raw, &format!("std::Value<{ty}>::clone#impl:"));
+        assert!(
+            clone.contains("memcpy %p0 to %p1"),
+            "generated clone for `{ty}` must copy the whole representation:\n{clone}"
+        );
+        assert_eq!(
+            calls(clone),
+            0,
+            "trivial clone must call no Value method:\n{clone}"
+        );
+        assert!(
+            !clone.contains("extract_tag"),
+            "trivial variant clone must not walk its cases:\n{clone}"
+        );
+
+        let drop = rendered_function_with_prefix(&raw, &format!("std::Value<{ty}>::drop#impl:"));
+        assert_eq!(
+            calls(drop),
+            0,
+            "trivial drop must call no Value method:\n{drop}"
+        );
+        assert!(
+            !drop.contains("extract_tag"),
+            "trivial variant drop must not walk its cases:\n{drop}"
+        );
+    }
+}
+
+/// A managed aggregate cannot use the whole-value fast path, but its concrete trivial members
+/// still need representation copies and no drops. This prevents unit/int/native clone calls from
+/// reappearing whenever one sibling owns a resource.
+#[test]
+fn generated_mixed_value_glue_skips_trivial_members() {
+    let raw = emit(
+        "mixed_generated_value_glue",
+        "(1, \"a\") == (1, \"b\")",
+        MirOptimization::Disabled,
+    );
+    let clone =
+        rendered_function_with_prefix(&raw, "std::Value<(std::int, std::string)>::clone#impl:");
+    assert!(clone.contains(
+        "%r0: *int = subfield @c0 from %p1\n    %r1: *int = subfield @c0 from %p0\n    memcpy %r1 to %r0"
+    ), "the int member must be copied directly:\n{clone}");
+    assert!(
+        clone.contains("Value<std::string>::clone"),
+        "the managed member must retain semantic clone:\n{clone}"
+    );
+    assert!(
+        !clone.contains("Value<std::int>::clone"),
+        "the trivial member must not call semantic clone:\n{clone}"
+    );
+
+    let drop =
+        rendered_function_with_prefix(&raw, "std::Value<(std::int, std::string)>::drop#impl:");
+    assert!(
+        drop.contains("Value<std::string>::drop"),
+        "the managed member must retain semantic drop:\n{drop}"
+    );
+    assert!(
+        !drop.contains("Value<std::int>::drop"),
+        "the trivial member must not call semantic drop:\n{drop}"
+    );
+}
+
 /// Trivial array literals use the compiler-known array constructor. Resource-valued elements keep
 /// the generic in-place Buffer path, because constructing them from borrowed operands would need a
 /// semantic clone dictionary rather than a representation copy.
@@ -320,9 +398,15 @@ fn provisional_effect_queries_do_not_materialize_trait_artifacts() {
 
 /// Extracts one rendered function, excluding later functions in the module dump.
 fn rendered_function<'a>(mir: &'a str, name: &str) -> &'a str {
+    rendered_function_with_prefix(mir, &format!("{name}("))
+}
+
+/// Extracts one rendered function whose generated name begins with `prefix`. Generated impl names
+/// end in a content hash, so callers intentionally identify only the stable semantic prefix.
+fn rendered_function_with_prefix<'a>(mir: &'a str, prefix: &str) -> &'a str {
     let start = mir
-        .find(&format!("fn {name}("))
-        .unwrap_or_else(|| panic!("MIR does not contain function `{name}`"));
+        .find(&format!("fn {prefix}"))
+        .unwrap_or_else(|| panic!("MIR does not contain function beginning `{prefix}`"));
     let rest = &mir[start..];
     rest.find("\nfn ").map_or(rest, |end| &rest[..end])
 }

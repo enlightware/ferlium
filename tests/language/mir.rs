@@ -1463,7 +1463,7 @@ fn symbolic_subscripts_render_fully_qualified_names() {
 #[test]
 fn value_capturing_closure() {
     // A value-capturing closure (no hidden dictionary evidence): the captured `b` is snapshotted
-    // into a temporary (`memcpy %r0 to %r5`), bundled into the closure value by `build_closure`, the
+    // into a temporary (`memcpy %r0 to %r3`), bundled into the closure value by `build_closure`, the
     // closure is called by borrowing its place (`call %r1`, no intervening load — so it survives
     // repeated calls and is dropped once), and dropped at scope exit through the generated
     // `Value::drop` for the closure type (whose body lowers `drop_closure_env`). The lambda body
@@ -1513,21 +1513,14 @@ fn std::Value<(std::int,)>::SIZE#impl:ad9d7fe7(%p0: @ret int):
     ret
 
 fn std::Value<(std::int,)>::clone#impl:7414fc52(%p0: @arg let (int,), %p1: @ret (int,)):
-  @c0: int = 0
   b0:
-    %r0: *int = subfield @c0 from %p1
-    %r1: *int = subfield @c0 from %p0
-    call std::Value<std::int>::clone#impl:2d38cab9(%r1, %r0)
+    memcpy %p0 to %p1
     ret
 
 fn std::Value<(std::int,)>::drop#impl:d5ec4f8c(%p0: @arg &mut (int,), %p1: @ret ()):
-  @c0: int = 0
-  @c1: () = ()
+  @c0: () = ()
   b0:
-    %r0: *int = subfield @c0 from %p0
-    %r1: *() = alloca ()
-    call std::Value<std::int>::drop#impl:76f3f2ef(%r0, %r1)
-    store @c1 to %p1
+    store @c0 to %p1
     ret
 
 fn std::Value<(std::int,)>::eq#impl:b00d2abd(%p0: @arg let (int,), %p1: @arg let (int,), %p2: @ret bool):
@@ -1750,29 +1743,14 @@ fn std::Value<<test>::A>::SIZE#impl:b6651763(%p0: @ret int):
     ret
 
 fn std::Value<<test>::A>::clone#impl:3b26fee6(%p0: @arg let A, %p1: @ret A):
-  @c0: int = 0
-  @c1: int = 1
   b0:
-    %r0: *int = subfield @c0 from %p1
-    %r1: *int = subfield @c0 from %p0
-    call std::Value<std::int>::clone#impl:2d38cab9(%r1, %r0)
-    %r2: *int = subfield @c1 from %p1
-    %r3: *int = subfield @c1 from %p0
-    call std::Value<std::int>::clone#impl:2d38cab9(%r3, %r2)
+    memcpy %p0 to %p1
     ret
 
 fn std::Value<<test>::A>::drop#impl:e48f46c8(%p0: @arg &mut A, %p1: @ret ()):
-  @c0: int = 0
-  @c1: int = 1
-  @c2: () = ()
+  @c0: () = ()
   b0:
-    %r0: *int = subfield @c0 from %p0
-    %r1: *() = alloca ()
-    call std::Value<std::int>::drop#impl:76f3f2ef(%r0, %r1)
-    %r2: *int = subfield @c1 from %p0
-    %r3: *() = alloca ()
-    call std::Value<std::int>::drop#impl:76f3f2ef(%r2, %r3)
-    store @c2 to %p1
+    store @c0 to %p1
     ret
 
 fn std::Value<<test>::A>::eq#impl:601557a9(%p0: @arg let A, %p1: @arg let A, %p2: @ret bool):
@@ -1893,29 +1871,14 @@ fn std::Value<<test>::Wrapper>::SIZE#impl:21b54a2b(%p0: @ret int):
     ret
 
 fn std::Value<<test>::Wrapper>::clone#impl:e02c4c62(%p0: @arg let Wrapper, %p1: @ret Wrapper):
-  @c0: int = 0
-  @c1: int = 1
   b0:
-    %r0: *A = subfield @c0 from %p1
-    %r1: *A = subfield @c0 from %p0
-    call <test>::std::Value<<test>::A>::clone#impl:3b26fee6(%r1, %r0)
-    %r2: *A = subfield @c1 from %p1
-    %r3: *A = subfield @c1 from %p0
-    call <test>::std::Value<<test>::A>::clone#impl:3b26fee6(%r3, %r2)
+    memcpy %p0 to %p1
     ret
 
 fn std::Value<<test>::Wrapper>::drop#impl:c2860560(%p0: @arg &mut Wrapper, %p1: @ret ()):
-  @c0: int = 0
-  @c1: int = 1
-  @c2: () = ()
+  @c0: () = ()
   b0:
-    %r0: *A = subfield @c0 from %p0
-    %r1: *() = alloca ()
-    call <test>::std::Value<<test>::A>::drop#impl:e48f46c8(%r0, %r1)
-    %r2: *A = subfield @c1 from %p0
-    %r3: *() = alloca ()
-    call <test>::std::Value<<test>::A>::drop#impl:e48f46c8(%r2, %r3)
-    store @c2 to %p1
+    store @c0 to %p1
     ret
 
 fn std::Value<<test>::Wrapper>::eq#impl:d6883255(%p0: @arg let Wrapper, %p1: @arg let Wrapper, %p2: @ret bool):

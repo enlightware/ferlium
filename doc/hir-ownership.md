@@ -178,6 +178,9 @@ the type and `Value` are publicly nameable, that implementation is selectable by
 its generated method bodies remain private to the defining module. Consequently a public type with
 a private representation shares one canonical ownership implementation without exposing that
 representation or permitting a consumer to define a competing implementation.
+Generated clone and drop bodies use the same concrete `TrivialCopy` predicate as ordinary ownership
+elaboration: a qualifying value is cloned by copying its whole representation and needs no semantic
+drop, while generic or managed structure retains member-wise `Value` dispatch.
 
 For `Dictionary(id)`, `id` indexes the function's extra dictionary/evidence parameter list.
 The dictionary entry is selected with `VALUE_TRAIT.dictionary_method_index(...)`.

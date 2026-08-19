@@ -567,6 +567,10 @@ struct ValueBodyCtx<'s, 'm> {
     emit_generic_trait_calls: bool,
 }
 
+fn is_trivial_copy(ctx: &ValueBodyCtx<'_, '_>, ty: Type) -> bool {
+    ctx.solver.concrete_type_is_trivial_copy(ty)
+}
+
 impl<'s, 'm> ValueBodyCtx<'s, 'm> {
     fn concrete(solver: &'s mut TraitSolver<'m>) -> Self {
         Self {
@@ -1826,6 +1830,16 @@ fn derive_value_clone_body(
     let source_id = LocalDeclId::from_index(0);
     let mut locals = vec![local("source", ty)];
     let build_assign_whole = |arena: &mut NodeArena| n(arena, load_local(source_id), ty);
+
+    // A generated structural `Value` impl has no custom ownership behaviour of its own. If its
+    // complete concrete representation is `TrivialCopy`, cloning the representation is therefore
+    // the complete implementation. Besides being cheaper than walking the shape, this keeps a
+    // zero-sized payload such as the `((),)` of `Some(())` from turning into ordinary calls to the
+    // native unit clone which MIR's ownership simplification cannot recognize as a `clone`.
+    if is_trivial_copy(ctx, ty) {
+        return Ok(Some((build_assign_whole(arena), locals)));
+    }
+
     macro_rules! build_product_clone {
         ($arena:expr, $member_tys:expr) => {{
             let member_tys = $member_tys;
@@ -1837,18 +1851,23 @@ fn derive_value_clone_body(
                     project(source, ProjectionIndex::from_index(index)),
                     member_ty,
                 );
-                cloned_members.push(value_method_call_node(
-                    ctx,
-                    ValueMethod {
-                        trait_id,
-                        input_ty: member_ty,
-                        method_index: VALUE_CLONE_METHOD_INDEX,
-                    },
-                    Location::new_synthesized(),
-                    $arena,
-                    &mut locals,
-                    vec![source_member],
-                )?);
+                let member_is_trivial = is_trivial_copy(ctx, member_ty);
+                cloned_members.push(if member_is_trivial {
+                    source_member
+                } else {
+                    value_method_call_node(
+                        ctx,
+                        ValueMethod {
+                            trait_id,
+                            input_ty: member_ty,
+                            method_index: VALUE_CLONE_METHOD_INDEX,
+                        },
+                        Location::new_synthesized(),
+                        $arena,
+                        &mut locals,
+                        vec![source_member],
+                    )?
+                });
             }
             n($arena, tuple(cloned_members), ty)
         }};
@@ -1866,18 +1885,23 @@ fn derive_value_clone_body(
                 } else {
                     let source = n($arena, load_local(source_id), ty);
                     let source_payload = variant_payload_project($arena, source, payload_ty);
-                    let cloned_payload = value_method_call_node(
-                        ctx,
-                        ValueMethod {
-                            trait_id,
-                            input_ty: payload_ty,
-                            method_index: VALUE_CLONE_METHOD_INDEX,
-                        },
-                        Location::new_synthesized(),
-                        $arena,
-                        &mut locals,
-                        vec![source_payload],
-                    )?;
+                    let payload_is_trivial = is_trivial_copy(ctx, payload_ty);
+                    let cloned_payload = if payload_is_trivial {
+                        source_payload
+                    } else {
+                        value_method_call_node(
+                            ctx,
+                            ValueMethod {
+                                trait_id,
+                                input_ty: payload_ty,
+                                method_index: VALUE_CLONE_METHOD_INDEX,
+                            },
+                            Location::new_synthesized(),
+                            $arena,
+                            &mut locals,
+                            vec![source_payload],
+                        )?
+                    };
                     let payload = variant_payload_storage_node($arena, cloned_payload, payload_ty);
                     n($arena, variant(tag, payload), ty)
                 };
@@ -1945,12 +1969,11 @@ fn derive_value_clone_body(
                 _ => {
                     drop(shape_data);
                     if shape_ty == Type::unit() {
-                        // An empty aggregate holds no data, so cloning it constructs a fresh empty
-                        // value rather than copying storage. It is typed as `unit` rather than as
-                        // the named type because an immediate must be trivially copyable, which a
-                        // generic named type is not — while its representation is exactly unit.
-                        // Copying the whole value instead would lower to a `memcpy` of that named
-                        // type: invalid MIR for a legal program.
+                        // A concrete generated named type with this empty representation already
+                        // returned through the `TrivialCopy` fast path. Here the named type can be
+                        // generic, so construct its unit representation rather than copying the
+                        // named value whole: the verifier cannot prove a generic named type
+                        // representation-copyable, and such a `memcpy` would be invalid MIR.
                         n(arena, native(()), Type::unit())
                     } else {
                         build_assign_whole(arena)
@@ -1989,10 +2012,22 @@ fn derive_value_drop_body(
         Location::new_synthesized(),
     )];
     let build_unit = |arena: &mut NodeArena| n(arena, native(()), Type::unit());
+
+    // Match ordinary ownership elaboration: a concrete `TrivialCopy` value has no semantic drop,
+    // even when its structural shape contains fields for which a native `Value::drop` function
+    // exists. Zero size alone is deliberately not enough here; a zero-sized named type with a
+    // custom `Value` impl must still run that impl.
+    if is_trivial_copy(ctx, ty) {
+        return Ok((build_unit(arena), locals));
+    }
+
     macro_rules! build_product_drop {
         ($arena:expr, $member_tys:expr) => {{
             let mut statements = Vec::with_capacity($member_tys.len() + 1);
             for (index, member_ty) in $member_tys.into_iter().enumerate() {
+                if is_trivial_copy(ctx, member_ty) {
+                    continue;
+                }
                 let target = n($arena, load_local(target_id), ty);
                 let target_member = n(
                     $arena,
@@ -2023,7 +2058,8 @@ fn derive_value_drop_body(
             let mut alternatives = Vec::with_capacity($variants.len());
             for (tag, payload_ty) in $variants {
                 let tag_val = LiteralValue::new_variant_tag(tag);
-                let branch = if payload_ty == Type::unit() {
+                let payload_is_trivial = is_trivial_copy(ctx, payload_ty);
+                let branch = if payload_is_trivial {
                     n($arena, native(()), Type::unit())
                 } else {
                     let target = n($arena, load_local(target_id), ty);
