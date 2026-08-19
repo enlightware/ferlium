@@ -16,8 +16,9 @@
 //! Immediate reification is deliberately restricted to values a MIR constant pool can hold: a
 //! `TrivialCopy` native leaf, or a tuple of those (which is also how a record is represented at run
 //! time). Arrays of such elements have a constructive form instead: immutable elements stay in the
-//! pool and `build_array` allocates fresh mutable storage at run time. Other resource values — a
-//! `String`, a list, a variant, or a closure — are refused and left as runtime calls.
+//! pool and `build_array` allocates fresh mutable storage at run time. A captureless function has a
+//! bare MIR operand; other resource values — a `String`, a list, a variant, or a capturing closure
+//! — are refused and left as runtime calls.
 //!
 //! Refusal is always a normal outcome: it costs an optimization, never a program.
 //!
@@ -28,8 +29,8 @@ use crate::{
         function::literal_of_trivial_copy_native,
         value::{LiteralValue, Value},
     },
-    mir::{self, const_eval::NotFoldable, value::Constant},
-    module::ModuleEnv,
+    mir::{const_eval::NotFoldable, value::Constant},
+    module::{FunctionId, ModuleEnv},
     std::array::{array_type_def, array_value_elements},
     types::{r#type::Type, type_properties::concrete_type_is_trivial_copy},
 };
@@ -41,9 +42,10 @@ pub(crate) enum Reification {
     /// [`FunctionBuilder::add_constant`](crate::mir::builder::FunctionBuilder::add_constant) and
     /// stores the resulting `@cN` operand into the destination place.
     Constant(Constant),
-    /// An operand that needs no constant-pool entry, because MIR can already name the thing
-    /// directly.
-    Operand(mir::Value),
+    /// A captureless function that needs no constant-pool entry because MIR can name it directly.
+    /// Captured functions are deliberately excluded: naming only their function would lose the
+    /// closure environment.
+    BareFunction(FunctionId),
     /// A fresh array construction from constant-pool-compatible elements. The elements are
     /// immutable compile-time descriptions; executing `build_array` allocates independent mutable
     /// array storage.
@@ -64,12 +66,10 @@ pub(crate) fn reify(
     env: &ModuleEnv<'_>,
 ) -> Result<Reification, NotFoldable> {
     // A function value MIR can name directly needs no constant: `Value::Function` is an operand.
-    // This is what will let the folding pass turn an inlined `dict_entry` into a direct call.
+    // This lets folding materialize a captureless function returned by an evaluated call.
     if let Value::Function(function) = value {
         return if function.hidden_args.is_empty() && function.closure_env_len == 0 {
-            Ok(Reification::Operand(mir::Value::Function(
-                function.function,
-            )))
+            Ok(Reification::BareFunction(function.function))
         } else {
             // Captured evidence and captured environments are values in their own right: they need
             // the prototype machinery, not an operand.
@@ -156,7 +156,7 @@ mod tests {
         eval::PlaceResult,
         format::FormatWith,
         hir::value::{FunctionValue, HiddenEvidenceArgValue},
-        mir::{Operation, builder::FunctionBuilder, terminator::Terminator},
+        mir::{self, Operation, builder::FunctionBuilder, terminator::Terminator},
         module::{FunctionId, LocalFunctionId, LocalImplId, ModuleId, TraitDictionaryId, id::Id},
         std::{
             array::{array_type, array_value_from_vec},
@@ -185,7 +185,9 @@ mod tests {
         let env = session.module_env();
         let reified = match reify(&value, ty, &env) {
             Ok(Reification::Constant(constant)) => constant,
-            Ok(Reification::Operand(operand)) => panic!("expected a constant, got {operand}"),
+            Ok(Reification::BareFunction(function)) => {
+                panic!("expected a constant, got bare function {function:?}")
+            }
             Ok(Reification::Array { .. }) => panic!("expected an immediate constant, got an array"),
             Err(reason) => panic!("{ty:?} must be reifiable, got {reason:?}"),
         };
@@ -377,7 +379,7 @@ mod tests {
 
     /// A bare function value needs no constant pool entry.
     #[test]
-    fn a_bare_function_reifies_as_an_operand() {
+    fn a_bare_function_reifies_without_a_constant() {
         let session = CompilerSession::new();
         let env = session.module_env();
         let id = FunctionId {
@@ -386,8 +388,8 @@ mod tests {
         };
         let value = Value::function(id);
         match reify(&value, int_type(), &env) {
-            Ok(Reification::Operand(mir::Value::Function(reified))) => assert_eq!(reified, id),
-            other => panic!("a bare function must reify as a function operand, got {other:?}"),
+            Ok(Reification::BareFunction(reified)) => assert_eq!(reified, id),
+            other => panic!("a bare function must reify without a constant, got {other:?}"),
         }
         value.discard_storage();
     }

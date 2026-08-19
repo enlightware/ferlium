@@ -22,11 +22,11 @@
 //! `cmp(x, x)` even when `x` is unknown. Float identities are representation-preserving: signed
 //! zero deliberately excludes `x + 0.0` and `x * 0.0`.
 //!
-//! The rewrite is then local: `call f(a, b, ret)` becomes either `store @cN to ret` or a
-//! `build_array` into `ret`. Both forms initialize the same slot and neither takes ownership of
-//! anything the caller held — argument conventions leave ownership with the caller — so the
-//! surrounding construction/drop scaffolding stays correct while becoming dead. Removing it is a
-//! separate cleanup pass.
+//! The rewrite is then local: `call f(a, b, ret)` becomes a store of a constant or captureless
+//! function, or a `build_array` into `ret`. All forms initialize the same slot and none takes
+//! ownership of anything the caller held — argument conventions leave ownership with the caller —
+//! so the surrounding construction/drop scaffolding stays correct while becoming dead. Removing
+//! it is a separate cleanup pass.
 //!
 //! Folding runs against an immutable function and returns a rewritten one, so the analysis it reads
 //! is never stale with respect to the edits it makes. Within a block, a fold updates the local state
@@ -411,8 +411,8 @@ fn materialize_reification(
             });
             Operation::build_array(span, element_ty, elements, destination)
         }
-        Reification::Operand(_) => {
-            unreachable!("call folding admits only destination-initializing reifications")
+        Reification::BareFunction(function) => {
+            Operation::store(span, mir::Value::Function(function), destination)
         }
     }
 }
@@ -706,16 +706,17 @@ fn plan_folds_with(
 
 /// Whether a rewrite leaves behind a value the next round's analysis can reason about.
 ///
-/// Deliberately answers without building the fact: a fact carries a cloned literal or array
-/// recipe, and this is asked about every planned fold rather than only those writing a place the
-/// analysis tracks.
+/// Deliberately answers without building the fact: literal and array facts require cloning their
+/// representation, and this is asked about every planned fold rather than only those writing a
+/// place the analysis tracks.
 fn yields_known_value(rewrite: &CallRewrite, state: &State, analysis: &Analysis) -> bool {
     match rewrite {
-        CallRewrite::Reification(Reification::Constant(_) | Reification::Array { .. })
+        CallRewrite::Reification(
+            Reification::Constant(_) | Reification::BareFunction(_) | Reification::Array { .. },
+        )
         | CallRewrite::EqualOrdering => true,
-        // An operand reification names a place rather than a value, and both of the rewrites below
-        // reproduce an argument the analysis already did not know.
-        CallRewrite::Reification(Reification::Operand(_)) | CallRewrite::Negate(_) => false,
+        // Negation reproduces an argument the analysis already did not know.
+        CallRewrite::Negate(_) => false,
         CallRewrite::Copy(source) => analysis
             .tracked_place_of(source)
             .is_some_and(|place| state.place_is_known(place)),
@@ -963,7 +964,7 @@ fn fact_for_reification(reification: &Reification) -> Fact {
             element_ty: *element_ty,
             elements: elements.clone(),
         }),
-        Reification::Operand(_) => Fact::Unknown,
+        Reification::BareFunction(function) => Fact::Known(Const::Function(*function)),
     }
 }
 
@@ -1167,12 +1168,7 @@ fn try_fold_call(
     )?;
     let reified = reify(&value, ty.ret(), &context.env);
     value.discard_storage();
-    match reified? {
-        result @ (Reification::Constant(_) | Reification::Array { .. }) => Ok(result),
-        // A function operand needs no constant, but replacing a call with one is a different
-        // rewrite than storing a literal; leave it to the devirtualization work.
-        Reification::Operand(_) => Err(NotFoldable::NotReifiable),
-    }
+    reified
 }
 
 /// Releases arguments prepared for a call that is not made after all.
@@ -1436,6 +1432,32 @@ mod tests {
             main.contains("store @c") && main.contains("to %p0"),
             "the result must be stored into the return place:\n{main}"
         );
+    }
+
+    /// A captureless function returned by a folded call is a bare MIR function operand. Keeping it
+    /// known lets the same fold walk evaluate the immediately following call; the generic
+    /// identity's clone/drop scaffolding then becomes dead together with both function slots.
+    #[test]
+    fn a_folded_bare_function_result_stays_known() {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        let module = session.emit_mir(
+            "fold",
+            "fn id(x) { x }\n\
+             id(|x, y| (y, x))(1, 1.3)",
+        );
+        let expression = optimized_function(&module, "<expr>");
+
+        assert!(
+            expression.contains("= (1.3, 1)"),
+            "the call through the folded function must itself fold:\n{expression}"
+        );
+        for spelling in ["alloca", "clone ", "drop ", "call "] {
+            assert!(
+                !expression.contains(spelling),
+                "the bare function's runtime lifetime must be gone:\n{expression}"
+            );
+        }
     }
 
     #[test]

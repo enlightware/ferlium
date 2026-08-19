@@ -132,11 +132,13 @@ symbolic functions, dictionaries and variant tags, plus a constructive array rec
 `TrivialCopy` elements; the latter is not a mutable array stored in the constant pool.
 
 A call folds when the callee is statically known, every visible argument arrives by `Let`, every
-argument place holds a known literal or constructive array, every evidence operand is a constant
-dictionary, the effects and result convention permit compile-time evaluation, and the result can be
-reified as MIR. `call f(a, b, ret)` becomes `store @cN to ret` for an immediate result, or
-`build_array` directly into `ret` for an array of `TrivialCopy` elements. The surrounding
-scaffolding is left correct but dead for `dce`.
+argument place holds a known literal, captureless function or constructive array, every evidence
+operand is a constant dictionary, the effects and result convention permit compile-time evaluation,
+and the result can be reified as MIR. `call f(a, b, ret)` becomes `store @cN to ret` for an immediate
+result, `store function to ret` for a captureless function, or `build_array` directly into `ret` for
+an array of `TrivialCopy` elements. A capturing closure cannot be named by a bare function operand
+without losing its environment and remains a runtime call. The surrounding scaffolding is left
+correct but dead for `dce`.
 
 Two entries need no known argument at all. `Num<int>::from_int` is the conversion every integer
 literal is desugared into, and at `int` it converts nothing, so the call becomes a copy of its
