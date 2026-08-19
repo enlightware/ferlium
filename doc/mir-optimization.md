@@ -42,6 +42,7 @@ place CSE          // merge places which inlining exposes
 copy forward      // catch trivial-copy storage exposed after the last round
 branch forward    // bypass booleans stored in branch arms only to control a second branch
 peephole          // collapse small local CFG/value patterns
+negation          // test a boolean where it is computed, inverting the branch when negated
 string accumulate // forward an overwritten string into its self-prefixed format builder
 devirtualize      // final dictionary-entry callees exposed too late for a fold round
 bounds checks     // prove array indices in range and remove checked access/failure edges
@@ -136,6 +137,14 @@ dictionary, the effects and result convention permit compile-time evaluation, an
 reified as MIR. `call f(a, b, ret)` becomes `store @cN to ret` for an immediate result, or
 `build_array` directly into `ret` for an array of `TrivialCopy` elements. The surrounding
 scaffolding is left correct but dead for `dce`.
+
+Two entries need no known argument at all. `Num<int>::from_int` is the conversion every integer
+literal is desugared into, and at `int` it converts nothing, so the call becomes a copy of its
+argument. That case is rarer than it sounds — std leaves no such call, since a literal argument is
+known and folds outright — but a specialization at `int` of a generic body can. `not` has no MIR operation of its own, but `comp_eq value false` is exactly it, so the
+call becomes that comparison — which is also what puts the value where the later passes can read
+it, a call being opaque to all of them. Both step aside for a *known* argument: evaluating the call
+outright yields a constant, which beats copying the cell that held it or comparing it at run time.
 
 The same pass also simplifies a call from a documented std contract when only the relevant
 arguments are known. Callees are recognized by resolved `FunctionId`, including through
@@ -510,6 +519,44 @@ join; and the join may contain only `stack_restore`s before that read. Other ope
 uses, unknown stores and self-edges all refuse the rewrite. Supporting integer values or variant
 tags would require evidence for a broader predicate-propagation analysis.
 
+## Boolean condition forwarding
+
+`mir::pass::negation` tests a boolean where it is computed rather than where lowering last stored
+it. Folding a `not` leaves `comp_eq value false`, and a predicate reaching a branch commonly
+travels through a local cell first, so a negated condition arrives as a comparison, a store, a cell
+and a load in front of the `condbr` that wanted the original.
+
+The pass walks a boolean back to the register that computes it, counting the negations on the way,
+and rewrites the consumer to name that register: a `condbr` swaps its targets when the count is
+odd, and a `comp_eq` against a boolean flips the literal it tests. It removes nothing itself — the
+chain becomes unread, and the dead-representation cleanup shared with tail merging collects the
+cell, its store, its load and any comparison left over. `if not a { .. }` falls from five
+operations to two, and `if not (x < y) { .. }` loses the negation entirely: the branch tests the
+ordering comparison with its arms swapped.
+
+**Cost.** The pass is skipped outright unless the body contains a comparison — every negation is
+one, so a body without one has nothing to forward, while a body with a branch would otherwise pay
+for a definition map, a use census and a dominator tree to discover that. The census and the
+dominator tree are built only on the first walk that reaches a cell, so a condition the branch can
+already test directly asks for neither. Measured on std: 24 negations rewritten, optimized std MIR
+from 15,322 to 15,245 operations, for +1.7% of MIR optimization instructions. The gating is most of
+what makes that number small — running the analysis on every body cost +2.9%. The eleven runtime
+workloads move within their own ±0.7% run-to-run spread, since none of them negates in a hot loop.
+
+Two rules carry the proof. **A register is immutable**, so stepping from a comparison to its
+scrutinee needs no reasoning about what happens in between. **A cell is not**, so a cell may be
+stepped through only when it is a local `alloca` whose single write is one `store` of a register,
+whose every other use is a direct read, and whose write dominates the read being resolved; any
+other use, including a call argument or a terminator operand, disqualifies it entirely. A literal
+flag is not this pass's shape but `branch_forward`'s, proved there against the arms that store it.
+
+Every value the walk reaches is a boolean by construction — a walk starts at a `condbr` condition or
+at a scrutinee compared against a boolean pattern — which is what makes flipping a comparison's
+literal sound without asking a type question. The walk keeps the last *materialized* value it
+passed, since a condition must be one; it therefore stops short of a negation whose operand is a
+place, such as the `not` of a short-circuit `and`, which would need its own proof that the place is
+unwritten between the two sites.
+
 ## String accumulation forwarding
 
 `mir::pass::string_accumulate` removes the growing-prefix copy in a self-prefixed formatted-string
@@ -611,8 +658,8 @@ census then rejects bodies with no eligible call before CFG or dominance constru
 
 Deliberately narrow, and intra-function only.
 
-- An unused result chain of concrete `int` or `float` calls goes when the known-callee table
-  explicitly classifies every call as total, deterministic and speculatable, and its inferred
+- An unused result chain of concrete `int`, `float` or `bool` calls goes when the known-callee
+  table explicitly classifies every call as total, deterministic and speculatable, and its inferred
   effects are empty. Another direct call may use the same worklist only when it names a
   module-table script body whose raw MIR proves it returns, has no hidden evidence inputs, and
   every authoritative visible input convention is `Let`; its concrete result must also be
@@ -620,11 +667,11 @@ Deliberately narrow, and intra-function only.
   ownership lifetime. Purity alone is insufficient: a pure user function may diverge, and
   removing its unused call would make a formerly non-terminating program return.
 - An `alloca` goes only when *every* use of it is the destination of a pool-constant `store`,
-  together with those stores. The post-tail-merge cleanup also admits a register whose defining
-  operation requires no consuming use. Constants are trivially copyable; the explicit result
+  together with those stores. The wider cleanup, entered after tail merging or condition
+  forwarding, also admits a register whose defining operation requires no consuming use. Constants are trivially copyable; the explicit result
   contract excludes variants and owning closure construction. Thus no owned register loses its
-  consuming use — the trap a wider rule hits first. The extra producer census is paid only after a
-  tail actually merged.
+  consuming use — the trap a wider rule hits first. The extra producer census is paid only when one
+  of those rewrites actually fired.
 - An unread `dict_entry` or `subfield` goes. Both derive places without side effects or owned
   results, so deleting one discharges no obligation. A linear use-count worklist handles nested
   `subfield` chains: removing an unread leaf can make its base derivation unread.

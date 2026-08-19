@@ -50,6 +50,7 @@ pub(crate) mod inline;
 pub(crate) mod known_callee;
 pub(crate) mod licm;
 pub(crate) mod monomorphize;
+pub(crate) mod negation;
 pub(crate) mod owned_arguments;
 pub(crate) mod peephole;
 pub(crate) mod provenance;
@@ -103,13 +104,14 @@ impl OptimizationContext {
     }
 }
 
-/// Collects the predicate and representation scaffolding made dead by tail merging.
+/// Collects the predicate and representation scaffolding a rewrite made dead.
 ///
-/// These passes form one conceptual cleanup even though they alternate to a fixed point: removing
-/// a trivial representation result can expose a proven-total call, whose removal can in turn make
-/// its result storage dead. Every successful step removes at least one operation, so the loop is
-/// bounded by the merged body's operation count.
-fn cleanup_after_tail_merge(
+/// Tail merging and condition forwarding both leave it: a boolean nothing tests any more, and the
+/// cell, store and load that carried it. These passes form one conceptual cleanup even though they
+/// alternate to a fixed point: removing a trivial representation result can expose a proven-total
+/// call, whose removal can in turn make its result storage dead. Every successful step removes at
+/// least one operation, so the loop is bounded by the rewritten body's operation count.
+fn cleanup_dead_representation_chains(
     mut current: Function,
     env: ModuleEnv<'_>,
     context: &OptimizationContext,
@@ -132,7 +134,7 @@ fn cleanup_after_tail_merge(
             current = cleaned;
             cleaned_any = true;
         }
-        if let Some(cleaned) = dce::remove_dead_storage_after_tail_merge(&current) {
+        if let Some(cleaned) = dce::remove_dead_nonconsuming_storage(&current) {
             current = cleaned;
             cleaned_any = true;
         }
@@ -259,6 +261,19 @@ pub(crate) fn optimize_function(
             current = Some(forwarded);
         }
     }
+    // Whether a callee is proved to return, which the cleanups below and loop-invariant motion
+    // all ask. The rounds have settled, so the specialization table this reads is final.
+    let will_return = |callee| {
+        let original = specializations.original(callee).unwrap_or(callee);
+        session
+            .mir_artifacts_for(original.module, MirOptimization::Disabled)
+            .is_some_and(|artifacts| {
+                artifacts
+                    .will_return(original.module, original.function)
+                    .is_proven()
+            })
+    };
+
     // Inlined predicates often materialize `true`/`false` in two arms only for the caller to
     // compare that slot with `true` and branch again. Forward the known edge information while
     // retaining any stack restoration at the join. DCE below then removes the dead slot/stores.
@@ -272,6 +287,20 @@ pub(crate) fn optimize_function(
     let source = current.as_ref().unwrap_or(function);
     if let Some(materialized) = peephole::materialize_boolean_results(source) {
         current = Some(materialized);
+    }
+    // Both of the rewrites above leave a boolean where its consumer already had one: a `not` call
+    // folded into a comparison, and a materialized predicate stored to be tested again. Forward
+    // each condition to the register that computes it, inverting the branch when the path
+    // negates; DCE below collects the cells, stores and comparisons that become unread.
+    let source = current.as_ref().unwrap_or(function);
+    if let Some(forwarded) = negation::forward_boolean_negations(source) {
+        current = Some(cleanup_dead_representation_chains(
+            forwarded,
+            env,
+            context,
+            specializations,
+            &will_return,
+        ));
     }
     // Formatting a self-prefixed assignment through an empty builder copies the complete growing
     // prefix. Forward the old string's ownership into that builder while the exact std-semantic
@@ -307,16 +336,6 @@ pub(crate) fn optimize_function(
     // and mutation; the raw-MIR summary separately proves that speculation preserves termination.
     // The pass adds no operation while moving the call and any loop-local allocation.
     let source = current.as_ref().unwrap_or(function);
-    let will_return = |callee| {
-        let original = specializations.original(callee).unwrap_or(callee);
-        session
-            .mir_artifacts_for(original.module, MirOptimization::Disabled)
-            .is_some_and(|artifacts| {
-                artifacts
-                    .will_return(original.module, original.function)
-                    .is_proven()
-            })
-    };
     if let Some(hoisted) = licm::hoist_loop_invariant_calls(source, env, &will_return) {
         current = Some(hoisted);
     }
@@ -357,7 +376,13 @@ pub(crate) fn optimize_function(
     let source = current.as_ref().unwrap_or(function);
     if let Some(simplified) = tail_merge::simplify_tails(source) {
         current = Some(if simplified.exposed_dead_code {
-            cleanup_after_tail_merge(simplified.body, env, context, specializations, &will_return)
+            cleanup_dead_representation_chains(
+                simplified.body,
+                env,
+                context,
+                specializations,
+                &will_return,
+            )
         } else {
             simplified.body
         });

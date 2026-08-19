@@ -85,6 +85,12 @@ pub(crate) enum KnownCallee {
     IntMul,
     /// `Num<int>::neg(value)` — `-value`.
     IntNeg,
+    /// `Num<int>::from_int(value)` — `value` itself.
+    ///
+    /// Every integer literal is desugared into this conversion, so the identity is on the path of
+    /// all integer source. It folds away with the literal it wraps; what reaches here is the call
+    /// whose argument is *not* known, which a specialization at `int` leaves behind.
+    IntFromInt,
     /// `Ord<int>::cmp(left, right)` — `Less`, `Equal` or `Greater`.
     ///
     /// This is the whole of integer comparison in MIR: a source-level `<` lowers to this call plus
@@ -102,6 +108,11 @@ pub(crate) enum KnownCallee {
     ///
     /// Ferlium floats are finite and ordered, rather than IEEE values admitting NaN and infinity.
     FloatCmp,
+    /// `not(value)` — the logical negation of a boolean.
+    ///
+    /// MIR has no negation of its own, but `comp_eq value false` computes exactly this, which is
+    /// what makes the call removable rather than merely understood.
+    BoolNot,
     /// `array_len(array)` — the array's element count, which is its `len` field.
     ArrayLen,
     /// `array_resolve_index(index, len)` — `index` when `0 <= index < len`, `len + index` when
@@ -139,8 +150,8 @@ impl KnownCallee {
     ///
     /// This is deliberately stronger than an empty effect row. A pure script function may diverge,
     /// so purity alone never permits dead-call removal or motion out of a zero-trip loop. These
-    /// entries name concrete native numeric operations whose implementations always terminate and
-    /// do not fail for values inhabiting their Ferlium types.
+    /// entries name concrete native operations whose implementations always terminate and do not
+    /// fail for values inhabiting their Ferlium types.
     pub(crate) fn is_total_and_speculatable(self) -> bool {
         matches!(
             self,
@@ -148,12 +159,14 @@ impl KnownCallee {
                 | Self::IntSub
                 | Self::IntMul
                 | Self::IntNeg
+                | Self::IntFromInt
                 | Self::IntCmp
                 | Self::FloatAdd
                 | Self::FloatSub
                 | Self::FloatMul
                 | Self::FloatNeg
                 | Self::FloatCmp
+                | Self::BoolNot
         )
     }
 }
@@ -239,6 +252,10 @@ impl KnownCallees {
                 KnownCallee::IntNeg,
             ),
             (
+                resolver.method(NUM_TRAIT_NAME, int_type(), "from_int"),
+                KnownCallee::IntFromInt,
+            ),
+            (
                 resolver.method(ORD_TRAIT_NAME, int_type(), "cmp"),
                 KnownCallee::IntCmp,
             ),
@@ -262,6 +279,7 @@ impl KnownCallees {
                 resolver.method(ORD_TRAIT_NAME, float_type(), "cmp"),
                 KnownCallee::FloatCmp,
             ),
+            (resolver.function("not"), KnownCallee::BoolNot),
             (resolver.function("array_len"), KnownCallee::ArrayLen),
             (
                 resolver.function("array_resolve_index"),
@@ -520,7 +538,7 @@ mod tests {
         let session = CompilerSession::new();
         assert_eq!(
             known_callees(&session).by_id.len(),
-            17,
+            19,
             "two known callees resolved to the same function id"
         );
     }

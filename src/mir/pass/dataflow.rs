@@ -247,6 +247,16 @@ impl State {
         self.places.get(&place).cloned().unwrap_or_default()
     }
 
+    /// Whether a slot's contents are known, without materializing the fact.
+    ///
+    /// A fact carries a cloned literal or array recipe, which is wasted when the question is only
+    /// whether there is one. Asked at every call site of the most common calls in a body.
+    pub(crate) fn place_is_known(&self, place: PlaceId) -> bool {
+        self.places
+            .get(&place)
+            .is_some_and(|fact| fact.known().is_some())
+    }
+
     pub(crate) fn register(&self, id: ValueId) -> Option<&Fact> {
         self.registers.get(&id)
     }

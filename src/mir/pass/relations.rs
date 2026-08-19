@@ -1891,6 +1891,9 @@ fn result_fact(
             left.mul(&right).map(Fact::Value)
         }
         KnownCallee::IntNeg => Some(Fact::Value(affine(0, interner)?.scale(-1))),
+        // The conversion every integer literal is desugared into, and at `int` it converts nothing:
+        // the result is the argument, so it must not become an unrelated symbol.
+        KnownCallee::IntFromInt => Some(Fact::Value(affine(0, interner)?)),
         KnownCallee::IntCmp => Some(Fact::Ordering {
             left: affine(0, interner)?,
             right: affine(1, interner)?,
@@ -1913,8 +1916,10 @@ fn result_fact(
         | KnownCallee::ArrayWrapIndex
         | KnownCallee::RangeNext
         | KnownCallee::RangeInclusiveNext
-        // This domain deliberately carries affine integers only. Float semantics are resolved for
-        // other consumers, but admitting them here would make wrapping/order proofs ill-typed.
+        // This domain deliberately carries affine integers only. Boolean and float semantics are
+        // resolved for other consumers, but admitting them here would make wrapping/order proofs
+        // ill-typed.
+        | KnownCallee::BoolNot
         | KnownCallee::FloatAdd
         | KnownCallee::FloatSub
         | KnownCallee::FloatMul

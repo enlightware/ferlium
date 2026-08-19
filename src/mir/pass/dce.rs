@@ -18,8 +18,8 @@
 //! speculatable, plus direct script calls whose raw-MIR summary proves they return. An empty effect
 //! row is not sufficient: an arbitrary pure function may diverge.
 //! The ordinary storage rule removes an `alloca` only when every use of it is as the destination of
-//! a constant `store`. The cleanup entered after tail merging additionally admits a non-owning
-//! operation result. Two properties make those stores safe without a whole ownership analysis:
+//! a constant `store`. The wider cleanup additionally admits a non-owning operation result. Two
+//! properties make those stores safe without a whole ownership analysis:
 //!
 //! - a constant is trivially copyable, so storing one creates no drop obligation;
 //! - an admitted register's defining operation explicitly says its result requires no consuming
@@ -284,12 +284,14 @@ pub(crate) fn remove_dead_storage(func: &Function) -> Option<Function> {
     remove_dead_storage_impl(func, false)
 }
 
-/// The storage cleanup used only after tail merging made a representation chain dead.
+/// The storage cleanup for a cell a rewrite left holding a computed value nothing reads.
 ///
 /// Unlike ordinary DCE, this admits stores of results whose defining operation declares that the
-/// result needs no consuming use. Keeping the extra producer census behind this entry point means
-/// every unchanged function retains the cheaper constant-only scan.
-pub(crate) fn remove_dead_storage_after_tail_merge(func: &Function) -> Option<Function> {
+/// result needs no consuming use. Keeping the extra producer census behind its own entry point
+/// means every unchanged function retains the cheaper constant-only scan. Tail merging and
+/// [`negation`](super::negation) both strand such a cell: the first by making a predicate dead,
+/// the second by forwarding a condition past the cell it was stored in.
+pub(crate) fn remove_dead_nonconsuming_storage(func: &Function) -> Option<Function> {
     remove_dead_storage_impl(func, true)
 }
 

@@ -40,6 +40,7 @@ use ustr::ustr;
 
 use crate::{
     CompilerSession, Location,
+    containers::b,
     hir::{
         function::ArgConvention,
         value::{LiteralValue, VariantPayloadStorage},
@@ -75,6 +76,8 @@ enum CallRewrite {
     Copy(mir::Value),
     /// A reflexive comparison returns the payload-free `Equal` case.
     EqualOrdering,
+    /// A boolean negation, expressed as the comparison MIR already has.
+    Negate(mir::Value),
 }
 
 /// The two inputs needed to recognize a known call, kept together at folding entry points.
@@ -155,6 +158,9 @@ pub(crate) struct Plan {
     invokes: Vec<InvokeFold>,
     /// Conditional branches whose condition is known, and the successor they always take.
     branches: Vec<(BlockId, BlockId)>,
+    /// Whether anything planned here can enable a further rewrite. See
+    /// [`Folded::warrants_another_round`].
+    warrants_another_round: bool,
 }
 
 impl Plan {
@@ -198,11 +204,19 @@ pub(crate) struct Folded {
     pub body: Function,
     /// Whether this rewrite may enable further folding or inlining, and so warrants another round.
     ///
-    /// Folds and decided branches do; **devirtualization does not**. Naming a callee directly is
-    /// progress, but the callees a dictionary entry resolves to are overwhelmingly natives, which
-    /// cannot be inlined and only fold with known arguments — so granting a round for one buys a
-    /// full fold-specialize-inline cycle that almost never finds anything. Measured, that was
-    /// +19.2% of compile time for half a percent of run time.
+    /// A round is expensive — a full fold-specialize-CSE-inline cycle — so one is bought only by a
+    /// rewrite that hands the *next* round something it did not have. A fold that produces a
+    /// constant does, and so does a decided branch, which deletes an arm.
+    ///
+    /// **A rewrite whose result stays unknown does not.** Replacing a call with a copy of an
+    /// unknown argument, or with a comparison of one, is a smaller body computing the same unknown
+    /// value: the next round's analysis learns nothing from it. Measured on std, granting rounds
+    /// for those cost 0.14% of MIR optimization time and changed no optimized body.
+    ///
+    /// **Devirtualization does not either.** Naming a callee directly is progress, but the callees
+    /// a dictionary entry resolves to are overwhelmingly natives, which cannot be inlined and only
+    /// fold with known arguments — so granting a round for one buys a cycle that almost never
+    /// finds anything. Measured, that was +19.2% of compile time for half a percent of run time.
     pub warrants_another_round: bool,
 }
 
@@ -219,7 +233,7 @@ pub(crate) fn fold_function(
     if plan.is_empty() && devirtualizations.is_empty() {
         return None;
     }
-    let warrants_another_round = !plan.is_empty();
+    let warrants_another_round = plan.warrants_another_round;
 
     let mut edit = FunctionEdit::new(func.clone());
     // Devirtualization first: it only rewrites a callee operand in place, while a fold below may
@@ -284,6 +298,19 @@ fn materialize_call_rewrite(
             )]
         }
         CallRewrite::Copy(source) => vec![Operation::memcpy(span, source, destination)],
+        CallRewrite::Negate(source) => {
+            let mut comparison = Operation::compare_eq(
+                span,
+                source,
+                mir::Value::Pattern(b(LiteralValue::new_native(false))),
+            );
+            let value = edit.new_value();
+            comparison.assign_result_id(Some(value));
+            vec![
+                comparison,
+                Operation::store(span, mir::Value::Register(value), destination),
+            ]
+        }
         CallRewrite::EqualOrdering => {
             let mut variant = Operation::variant(
                 span,
@@ -525,6 +552,8 @@ fn plan_folds_with(
                     })
             {
                 let destination = call.result.clone();
+                // Only a rewrite that produced a value the next round can reason about buys one.
+                plan.warrants_another_round |= yields_known_value(&result, &state, analysis);
                 if let Some(place) = analysis.tracked_place_of(&destination) {
                     let fact = fact_for_call_rewrite(&result, &state, analysis);
                     analysis.set_place_known(&mut state, place, fact);
@@ -565,6 +594,8 @@ fn plan_folds_with(
                     && let Some(result) = fold_outcome(operation, ty, &state, &context, refusals)
                     && let Some(call) = dataflow::call_operands(&operation.operands, ty)
                 {
+                    // An evaluated fallible call yields a constant and removes an error edge.
+                    plan.warrants_another_round = true;
                     plan.invokes.push(InvokeFold {
                         block,
                         destination: call.result.clone(),
@@ -587,6 +618,8 @@ fn plan_folds_with(
                 else_target,
             } => {
                 if let Some(taken) = known_condition(condition, &state) {
+                    // Deciding a branch deletes an arm, which is new for every later pass.
+                    plan.warrants_another_round = true;
                     plan.branches
                         .push((block, if taken { *then_target } else { *else_target }));
                 }
@@ -601,6 +634,24 @@ fn plan_folds_with(
     plan
 }
 
+/// Whether a rewrite leaves behind a value the next round's analysis can reason about.
+///
+/// Deliberately answers without building the fact: a fact carries a cloned literal or array
+/// recipe, and this is asked about every planned fold rather than only those writing a place the
+/// analysis tracks.
+fn yields_known_value(rewrite: &CallRewrite, state: &State, analysis: &Analysis) -> bool {
+    match rewrite {
+        CallRewrite::Reification(Reification::Constant(_) | Reification::Array { .. })
+        | CallRewrite::EqualOrdering => true,
+        // An operand reification names a place rather than a value, and both of the rewrites below
+        // reproduce an argument the analysis already did not know.
+        CallRewrite::Reification(Reification::Operand(_)) | CallRewrite::Negate(_) => false,
+        CallRewrite::Copy(source) => analysis
+            .tracked_place_of(source)
+            .is_some_and(|place| state.place_is_known(place)),
+    }
+}
+
 fn fact_for_call_rewrite(rewrite: &CallRewrite, state: &State, analysis: &Analysis) -> Fact {
     match rewrite {
         CallRewrite::Reification(reification) => fact_for_reification(reification),
@@ -609,14 +660,21 @@ fn fact_for_call_rewrite(rewrite: &CallRewrite, state: &State, analysis: &Analys
             .map(|place| state.place(place))
             .unwrap_or_default(),
         CallRewrite::EqualOrdering => Fact::Known(Const::VariantTag(ustr(ORDERING_EQUAL))),
+        // Only an unknown argument reaches the negation rewrite; a known one folds outright.
+        CallRewrite::Negate(_) => Fact::Unknown,
     }
 }
 
-/// Applies identities whose result is known even though one or more arguments are not.
+/// Applies known-callee rewrites that need less than the whole of the arguments.
+///
+/// Most are identities: the result is one of the inputs, or a constant, even though an argument is
+/// unknown. [`BoolNot`](KnownCallee::BoolNot) is the exception, and is here for the same reason —
+/// its meaning is a MIR operation rather than a call, so naming the callee is all it takes to stop
+/// calling it.
 ///
 /// The callee identity is the contract. Effects and convention are checked independently so adding
-/// an identity to [`KnownCallees`] never silently grants permission to discard an effect or scoped
-/// result. Float rules intentionally differ from integer rules: Ferlium excludes NaN and infinity,
+/// an entry from [`KnownCallees`] here never silently grants permission to discard an effect or
+/// scoped result. Float rules intentionally differ from integer rules: Ferlium excludes NaN and infinity,
 /// but retains signed zero, so `x + 0` and `x * 0` are not representation-preserving float
 /// identities while `x - +0`, `x * 1`, `x - x` and reflexive comparison are sound.
 fn partial_call_outcome(
@@ -655,6 +713,17 @@ fn partial_call_outcome(
             Fact::Known(Const::Literal(literal)) => Some(literal),
             _ => None,
         }
+    };
+    // Deliberately not `literal(index).is_some()`: reading a fact clones what it holds, and the
+    // callees below that ask only whether an argument is known are the most common calls in a body.
+    let is_known = |index: usize| {
+        context
+            .analysis
+            .tracked_place_of(match argument(index) {
+                Some(argument) => argument,
+                None => return false,
+            })
+            .is_some_and(|place| state.place_is_known(place))
     };
     let same_argument = |left: usize, right: usize| {
         let (Some(left), Some(right)) = (argument(left), argument(right)) else {
@@ -701,6 +770,13 @@ fn partial_call_outcome(
         KnownCallee::IntMul if int_is(0, 1) => copy(1),
         KnownCallee::IntMul if int_is(1, 1) => copy(0),
         KnownCallee::IntCmp if same_argument(0, 1) => Some(CallRewrite::EqualOrdering),
+        // The two rewrites below name their whole argument rather than a literal one, so both step
+        // aside for a *known* argument: evaluating the call outright produces a constant, which is
+        // better than copying the cell that held it or comparing it at run time.
+        KnownCallee::IntFromInt if !is_known(0) => copy(0),
+        // Negation is not an identity but a rewrite: the call becomes the one comparison MIR uses
+        // to test a boolean, which every later pass reads.
+        KnownCallee::BoolNot if !is_known(0) => argument(0).cloned().map(CallRewrite::Negate),
 
         // `+0.0` is not an identity for `-0.0`, and multiplying an unknown negative value by
         // `+0.0` produces `-0.0`. Both signs are observable through formatting and hashing.
@@ -713,12 +789,14 @@ fn partial_call_outcome(
         | KnownCallee::IntSub
         | KnownCallee::IntMul
         | KnownCallee::IntNeg
+        | KnownCallee::IntFromInt
         | KnownCallee::IntCmp
         | KnownCallee::FloatAdd
         | KnownCallee::FloatSub
         | KnownCallee::FloatMul
         | KnownCallee::FloatNeg
         | KnownCallee::FloatCmp
+        | KnownCallee::BoolNot
         | KnownCallee::ArrayLen
         | KnownCallee::ArrayResolveIndex
         | KnownCallee::ArrayIndex
@@ -1283,6 +1361,53 @@ mod tests {
         assert!(
             !body.contains("call std::Num<std::int>") && !body.contains("call std::Ord<std::int>"),
             "all documented integer identities must become copies or constants:\n{body}"
+        );
+    }
+
+    /// The conversion every integer literal is desugared into is the identity at `int`. A literal
+    /// argument folds outright, so what this must show is the call whose argument is unknown —
+    /// which is what a generic body specialized at `int` leaves.
+    #[test]
+    fn an_integer_conversion_of_an_unknown_value_is_elided() {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        let module = session.emit_mir(
+            "fold",
+            "fn convert(n) { from_int(n) }\n\
+             fn use_it(x: int) -> int { convert(x) }",
+        );
+        let body = optimized_function(&module, "use_it");
+        assert!(
+            !body.contains("from_int"),
+            "converting an int to an int must become a copy:\n{body}"
+        );
+        assert!(body.contains("memcpy %p0 to %p1"), "{body}");
+    }
+
+    /// `not` has no MIR operation of its own, but `comp_eq value false` is exactly it, so naming
+    /// the callee is enough to stop calling it.
+    #[test]
+    fn a_logical_negation_becomes_a_comparison() {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        let module = session.emit_mir("fold", "fn negate(a: bool) -> bool { not a }");
+        let body = optimized_function(&module, "negate");
+        assert!(
+            !body.contains("call std::not"),
+            "the negation call must become a comparison:\n{body}"
+        );
+        assert!(body.contains("comp_eq %p0 false"), "{body}");
+    }
+
+    /// A *known* argument must reach full evaluation instead: a constant beats both a copy of the
+    /// cell that held it and a comparison performed at run time.
+    #[test]
+    fn a_known_argument_folds_rather_than_being_rewritten() {
+        let main = optimized_main("fn main() -> bool { not (from_int(1) == 1) }");
+        assert!(!main.contains("comp_eq"), "{main}");
+        assert!(
+            main.contains("store @c") && main.contains("to %p0"),
+            "the whole expression must fold to a constant:\n{main}"
         );
     }
 
