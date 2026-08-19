@@ -356,10 +356,14 @@ impl MirArtifacts {
         // created because other passes consume them before this point.
         #[cfg(any(debug_assertions, test))]
         {
+            // Operand roles first for each body, so a malformed body names the offending operand
+            // slot before the heavier analysis trips over the consequences.
             for body in functions.iter().flatten() {
+                mir::role::check_function_operand_roles(body);
                 mir::verify::verify_function(body, env);
             }
             for specialization in &specializations {
+                mir::role::check_function_operand_roles(&specialization.body);
                 mir::verify::verify_function(&specialization.body, env);
             }
         }

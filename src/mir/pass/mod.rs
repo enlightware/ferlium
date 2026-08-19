@@ -58,7 +58,7 @@ pub(crate) mod prune_specializations;
 pub(crate) mod relations;
 pub mod report;
 pub(crate) mod share_specializations;
-pub(crate) mod site;
+pub(crate) use crate::mir::site;
 pub(crate) mod specialization_table;
 pub(crate) mod stack_region;
 pub(crate) mod string_accumulate;

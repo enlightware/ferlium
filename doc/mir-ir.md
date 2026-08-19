@@ -74,7 +74,10 @@ still has no reified form (including a `TrivialCopy` variant), so its producing 
 runtime code. Further resource types need either a frozen-prototype representation plus an operation
 to clone it, or dedicated MIR that rebuilds the value from constants the pool can hold.
 
-The verifier derives these roles from parameter kinds and operation results:
+A `ValueId` does not say which of these it is. An operand slot may accept more than one role —
+`comp_eq` reads a place *or* a materialized value — and keeping the operand array uniform is what
+lets alpha-equivalence, hash-consing and operand substitution stay generic across passes. The role
+is instead a property of the *defining* operation, derived by `src/mir/role.rs`:
 
 | Role | Meaning |
 |---|---|
@@ -83,6 +86,26 @@ The verifier derives these roles from parameter kinds and operation results:
 | evidence | A dictionary or subscript used for generic dispatch. |
 | stack marker | A saved allocation frontier consumed by `stack_restore`. |
 | open projection | A yielded place plus the accessor contract whose slide must be ended exactly once. |
+
+Almost every operation fixes its result's role by itself. `load` is the exception, reading its role
+from its operand, so the derivation is a table rather than a function per operation. Lowering fills
+that table as it appends; a finished body is re-derived on demand, since block order is not a
+definition order.
+
+Role checking, like the rest of verification (`src/mir/verify.rs`), is debug-and-test only. Lowering
+checks each operand slot as the operation is inserted, naming the block and index while the emitting
+frame is still on the stack. Each finished body is then checked as a whole at the artifact boundary,
+which needs no `ModuleEnv`, no trait solving and no dataflow, so it runs before the heavier analyses
+trip over the consequences; it also covers passes, which rewrite a block's operations directly.
+
+Every register definition renders the role it takes: `*T` for a place, `T` for a materialized value,
+and `dict`, `subscript`, `fn`, `pattern`, `stack` or `open *T` for the rest. This is what
+distinguishes an `alloca` slot from an `alloca_place` one:
+
+```
+%r0: **int = alloca_place int
+%r1: *int = load %r0
+```
 
 Compile-time match patterns are not runtime constants. They may represent source literals such as
 `string` whose runtime value is owned even though its HIR immediate representation is `StaticStr`.

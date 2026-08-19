@@ -673,8 +673,16 @@ mod tests {
             .rsplit_once(", ")
             .map(|(_, result)| result)
             .unwrap_or_else(|| panic!("call has no result operand: {line}"));
+        // A definition renders as `%rN: <role> = alloca ...`, so the role annotation sits between
+        // the register and its operation.
         let alloca = body
-            .find(&format!("{result} = alloca"))
+            .find(&format!("{result}: "))
+            .filter(|start| body[*start..].starts_with(&format!("{result}: *")))
+            .filter(|start| {
+                body[*start..]
+                    .split_once(" = ")
+                    .is_some_and(|(_, rest)| rest.starts_with("alloca"))
+            })
             .unwrap_or_else(|| panic!("call result {result} has no allocation:\n{body}"));
         (call, alloca)
     }

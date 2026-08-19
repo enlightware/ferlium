@@ -16,6 +16,7 @@ use crate::{
     hir::function::ArgConvention,
     mir::{
         self, Operation,
+        role::ValueRoles,
         terminator::{Terminator, TerminatorKind},
         value::{Constant, ConstantId},
     },
@@ -172,6 +173,18 @@ impl Function {
     pub(crate) fn render_with_source_map(&self, env: &ModuleEnv<'_>) -> RenderedFunction {
         let mut text = String::new();
         let mut source_map = Vec::new();
+        // Every definition states the role it takes. Derived per rendering,
+        // which is a debugging path, so nothing pays for it otherwise.
+        let roles = ValueRoles::derive(self);
+        let annotate = |text: &mut String, result: mir::ValueId| -> fmt::Result {
+            let value = mir::Value::Register(result);
+            match roles.get(&value, self.constants()) {
+                Some(role) => write!(text, "{value}: {} = ", role.annotation(env)),
+                // A role the derivation could not resolve means a malformed body, which is
+                // exactly when a rendering is most needed: name the register and move on.
+                None => write!(text, "{value} = "),
+            }
+        };
         let result = (|| -> fmt::Result {
             write!(text, "fn {}(", self.name)?;
             for (index, parameter) in self.parameters.iter().enumerate() {
@@ -214,7 +227,7 @@ impl Function {
                         let from = text.len();
                         write!(text, "    ")?;
                         if let Some(result) = operation.result_id() {
-                            write!(text, "{} = ", mir::Value::Register(result))?;
+                            annotate(&mut text, result)?;
                         }
                         writeln!(text, "{}", operation.format_with(env))?;
                         push_rendered_source_map_entry(
@@ -230,7 +243,7 @@ impl Function {
                     if let TerminatorKind::Invoke { operation, .. } = &terminator.kind
                         && let Some(result) = operation.result_id()
                     {
-                        write!(text, "{} = ", mir::Value::Register(result))?;
+                        annotate(&mut text, result)?;
                     }
                     writeln!(text, "{}", terminator.format_with(env))?;
                     push_rendered_source_map_entry(

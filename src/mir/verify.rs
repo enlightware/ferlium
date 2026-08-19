@@ -13,7 +13,7 @@
 //! per function and checks them before execution. A later backend may lower the same abstract state
 //! to concrete drop flags without exposing those flags to optimization-oriented MIR.
 
-use std::collections::VecDeque;
+use std::{collections::VecDeque, fmt};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -21,7 +21,10 @@ use crate::{
     format::FormatWith,
     mir::{
         self, BlockId, Function, Operation, OperationKind, OperationResult, ParameterKind,
-        dominance::Dominance, operation::SourceFallibility, terminator::TerminatorKind,
+        dominance::Dominance,
+        operation::SourceFallibility,
+        role::{self, MirType, ValueRole, ValueRoles},
+        terminator::TerminatorKind,
     },
     module::{ModuleEnv, id::Id},
     std::array::array_type,
@@ -61,20 +64,9 @@ fn cloned_type_kind(ty: Type) -> TypeKind {
     kind
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum MirType {
-    Lowered(Type),
-    Pointer(Box<MirType>),
-}
-
+/// Representation compatibility is verification-only: it needs a [`ModuleEnv`] to walk the type
+/// graph, so it stays here rather than in [`role`](crate::mir::role), which lowering also uses.
 impl MirType {
-    fn format(&self, env: &ModuleEnv<'_>) -> String {
-        match self {
-            Self::Lowered(ty) => ty.format_with(env).to_string(),
-            Self::Pointer(pointee) => format!("*{}", pointee.format(env)),
-        }
-    }
-
     fn representation_compatible(&self, other: &Self, env: &ModuleEnv<'_>) -> bool {
         match (self, other) {
             (Self::Lowered(left), Self::Lowered(right)) => {
@@ -84,13 +76,6 @@ impl MirType {
                 left.representation_compatible(right, env)
             }
             _ => false,
-        }
-    }
-
-    fn is_fully_concrete(&self) -> bool {
-        match self {
-            Self::Lowered(ty) => ty.is_constant(),
-            Self::Pointer(pointee) => pointee.is_fully_concrete(),
         }
     }
 }
@@ -153,49 +138,6 @@ fn lowered_representations_compatible(
     };
     active.remove(&(left, right));
     result
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum ValueRole {
-    Materialized(MirType),
-    Place(MirType),
-    Dictionary,
-    Subscript,
-    Function,
-    Pattern,
-    StackMarker,
-    /// A yielded place paired with the accessor contract whose slide must be ended exactly once.
-    OpenProjection {
-        yielded: Type,
-        accessor: CallImplType,
-    },
-}
-
-impl ValueRole {
-    fn is_callee_operand(&self) -> bool {
-        matches!(
-            self,
-            Self::Function | Self::Place(_) | Self::Materialized(MirType::Pointer(_))
-        )
-    }
-
-    fn is_place_operand(&self) -> bool {
-        matches!(
-            self,
-            Self::Place(_) | Self::Materialized(MirType::Pointer(_)) | Self::OpenProjection { .. }
-        )
-    }
-
-    fn is_materialized(&self) -> bool {
-        matches!(
-            self,
-            Self::Materialized(_) | Self::Function | Self::Subscript
-        )
-    }
-
-    fn is_evidence(&self) -> bool {
-        matches!(self, Self::Dictionary | Self::Subscript | Self::Place(_))
-    }
 }
 
 /// The possible ownership states of one storage leaf at a program point.
@@ -468,6 +410,15 @@ struct RootInfo {
 
 type NodeId = usize;
 
+/// Renders a node index the way verification diagnostics name it.
+struct NodeAt(NodeId);
+
+impl fmt::Display for NodeAt {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "node {}", self.0)
+    }
+}
+
 #[derive(Clone, Copy)]
 enum NodeLocation {
     Operation { block: BlockId, index: usize },
@@ -484,7 +435,7 @@ struct Verifier<'a> {
     node_block: FxHashMap<NodeId, BlockId>,
     block_first: FxHashMap<BlockId, NodeId>,
     value_definition: FxHashMap<mir::ValueId, NodeId>,
-    value_roles: FxHashMap<mir::Value, ValueRole>,
+    roles: ValueRoles,
     roots: Vec<RootInfo>,
     root_index: FxHashMap<mir::Value, usize>,
     trivial_copy: FxHashMap<Type, bool>,
@@ -502,7 +453,7 @@ impl<'a> Verifier<'a> {
             node_block: FxHashMap::default(),
             block_first: FxHashMap::default(),
             value_definition: FxHashMap::default(),
-            value_roles: FxHashMap::default(),
+            roles: ValueRoles::default(),
             roots: vec![],
             root_index: FxHashMap::default(),
             trivial_copy: FxHashMap::default(),
@@ -708,37 +659,26 @@ impl<'a> Verifier<'a> {
     }
 
     fn collect_value_information(&mut self) {
+        self.roles = ValueRoles::derive(self.func);
+
         for index in 0..self.func.parameters().len() {
             let parameter = &self.func.parameters()[index];
-            let kind = parameter.kind;
+            if !matches!(parameter.kind, ParameterKind::Owned) {
+                continue;
+            }
             let ty = parameter.ty;
             let value = mir::Value::Parameter(mir::ParameterId::from_index(index));
-            let role = match kind {
-                ParameterKind::Dictionary => ValueRole::Dictionary,
-                ParameterKind::Parameter(_) | ParameterKind::Owned => {
-                    ValueRole::Place(MirType::Lowered(ty))
-                }
-                ParameterKind::Return if self.func.result_convention().returns_place() => {
-                    ValueRole::Place(MirType::Pointer(Box::new(MirType::Lowered(ty))))
-                }
-                ParameterKind::Return => ValueRole::Place(MirType::Lowered(ty)),
-            };
-            self.value_roles.insert(value.clone(), role);
-            if matches!(kind, ParameterKind::Owned) {
-                let root = self.roots.len();
-                let exact = self.storage_paths_are_exact(ty, &mut Vec::new());
-                self.roots.push(RootInfo {
-                    value: value.clone(),
-                    ty,
-                    initially_live: true,
-                    exact,
-                });
-                self.root_index.insert(value, root);
-            }
+            let root = self.roots.len();
+            let exact = self.storage_paths_are_exact(ty, &mut Vec::new());
+            self.roots.push(RootInfo {
+                value: value.clone(),
+                ty,
+                initially_live: true,
+                exact,
+            });
+            self.root_index.insert(value, root);
         }
 
-        // Definitions and allocation roots first: neither reads another value's role, so this walk
-        // is free to follow block order.
         for index in 0..self.node_order.len() {
             let node = self.node_order[index];
             let Some(value) = self.definition(node) else {
@@ -764,157 +704,16 @@ impl<'a> Verifier<'a> {
                 self.root_index.insert(value, root);
             }
         }
-
-        // Roles second, resolving each operand's role on demand. A `Pointee` or `Same` result takes
-        // its role from an operand, and MIR does not require a definition to sit in a lower-numbered
-        // block than its uses, so block order is not a definition order here.
-        let mut resolving = vec![];
-        for index in 0..self.node_order.len() {
-            let node = self.node_order[index];
-            let Some(mir::Value::Register(value_id)) = self.definition(node) else {
-                continue;
-            };
-            self.ensure_value_role(value_id, &mut resolving);
-        }
-    }
-
-    /// Resolves the role of `value_id`, and of every value its result reads, into `value_roles`.
-    ///
-    /// `resolving` carries the chain of values currently being resolved, so that a result cycle
-    /// fails with a diagnostic instead of overflowing the stack.
-    fn ensure_value_role(&mut self, value_id: mir::ValueId, resolving: &mut Vec<mir::ValueId>) {
-        let value = mir::Value::Register(value_id);
-        if self.value_roles.contains_key(&value) {
-            return;
-        }
-        assert!(
-            !resolving.contains(&value_id),
-            "MIR function `{}`: value {value_id} takes its role from itself",
-            self.func.name
-        );
-        let node = *self.value_definition.get(&value_id).unwrap_or_else(|| {
-            panic!(
-                "MIR function `{}`: undefined operand {value}",
-                self.func.name
-            )
-        });
-        let operation = self.operation(node).unwrap();
-        let role = if let OperationKind::Project { yielded, ty } = &operation.kind {
-            ValueRole::OpenProjection {
-                yielded: *yielded,
-                accessor: (**ty).clone(),
-            }
-        } else {
-            let result = operation.result();
-            if let Some(dependency) = Self::result_dependency(&result) {
-                resolving.push(value_id);
-                self.ensure_value_role(dependency, resolving);
-                resolving.pop();
-            }
-            self.resolve_result(result)
-        };
-        self.value_roles.insert(value, role);
-    }
-
-    /// The register whose role `result` reads, if any. A result nests one child per level and ends
-    /// in at most one `Same`, so there is never more than one.
-    fn result_dependency(result: &OperationResult) -> Option<mir::ValueId> {
-        match result {
-            OperationResult::Same(mir::Value::Register(value_id)) => Some(*value_id),
-            OperationResult::Pointee(inner) | OperationResult::Pointer(inner) => {
-                Self::result_dependency(inner)
-            }
-            _ => None,
-        }
-    }
-
-    fn resolve_result(&self, result: OperationResult) -> ValueRole {
-        match result {
-            OperationResult::Lowered(ty) => ValueRole::Materialized(MirType::Lowered(ty)),
-            OperationResult::Pointer(pointee) => {
-                ValueRole::Place(self.resolve_result_type(*pointee))
-            }
-            OperationResult::Pointee(pointer) => match self.resolve_result(*pointer) {
-                ValueRole::Place(ty) => ValueRole::Materialized(ty),
-                ValueRole::OpenProjection { yielded, .. } => {
-                    ValueRole::Materialized(MirType::Lowered(yielded))
-                }
-                other => panic!(
-                    "MIR function `{}`: `Pointee` result refers to non-place role {other:?}",
-                    self.func.name
-                ),
-            },
-            OperationResult::Same(value) => self.role(&value),
-            OperationResult::StackMarker => ValueRole::StackMarker,
-            OperationResult::Nothing => {
-                panic!(
-                    "MIR function `{}`: result-less node was defined",
-                    self.func.name
-                )
-            }
-        }
-    }
-
-    fn resolve_result_type(&self, result: OperationResult) -> MirType {
-        match result {
-            OperationResult::Lowered(ty) => MirType::Lowered(ty),
-            OperationResult::Pointer(inner) => {
-                MirType::Pointer(Box::new(self.resolve_result_type(*inner)))
-            }
-            OperationResult::Same(value) => match self.role(&value) {
-                ValueRole::Materialized(ty) | ValueRole::Place(ty) => ty.clone(),
-                ValueRole::OpenProjection { yielded, .. } => MirType::Lowered(yielded),
-                other => panic!(
-                    "MIR function `{}`: type requested for non-typed role {other:?}",
-                    self.func.name
-                ),
-            },
-            OperationResult::Pointee(pointer) => match self.resolve_result(*pointer) {
-                ValueRole::Place(ty) => ty,
-                ValueRole::OpenProjection { yielded, .. } => MirType::Lowered(yielded),
-                other => panic!(
-                    "MIR function `{}`: pointee type requested from {other:?}",
-                    self.func.name
-                ),
-            },
-            OperationResult::StackMarker | OperationResult::Nothing => panic!(
-                "MIR function `{}`: non-value result used as a value type",
-                self.func.name
-            ),
-        }
     }
 
     fn role(&self, value: &mir::Value) -> ValueRole {
-        match value {
-            mir::Value::Constant(id) => {
-                ValueRole::Materialized(MirType::Lowered(self.func.constant(*id).ty))
-            }
-            mir::Value::Dictionary(_) => ValueRole::Dictionary,
-            mir::Value::Subscript(_) => ValueRole::Subscript,
-            mir::Value::Function(_) => ValueRole::Function,
-            mir::Value::Pattern(_) => ValueRole::Pattern,
-            mir::Value::Parameter(_) | mir::Value::Register(_) => self
-                .value_roles
-                .get(value)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "MIR function `{}`: undefined operand {value}",
-                        self.func.name
-                    )
-                })
-                .clone(),
-        }
+        self.roles
+            .expect(self.func.name, value, self.func.constants())
+            .into_owned()
     }
 
     fn materialized_type(&self, value: &mir::Value) -> Option<MirType> {
-        match value {
-            mir::Value::Constant(id) => Some(MirType::Lowered(self.func.constant(*id).ty)),
-            _ => match self.role(value) {
-                ValueRole::Materialized(ty) => Some(ty),
-                ValueRole::Function | ValueRole::Subscript => None,
-                _ => None,
-            },
-        }
+        self.role(value).materialized_type().cloned()
     }
 
     fn verify_operand_roles_and_dominance(&self) {
@@ -960,52 +759,26 @@ impl<'a> Verifier<'a> {
         }
     }
 
+    /// Verifies the parts of an operation's operand contract that need a [`ModuleEnv`].
+    ///
+    /// The role half — which slot must hold a place, a value, or evidence — lives in
+    /// [`role::check_operand_roles`], which lowering also runs at insertion in every build. What
+    /// remains here is representation compatibility and the metadata cross-checks, which need the
+    /// type graph.
     fn verify_node_roles(&self, node: NodeId) {
-        let operands = self.operands(node);
-        let place = |index: usize| {
-            assert!(
-                self.role(&operands[index]).is_place_operand(),
-                "MIR function `{}` node {}: operand {} must be a place, got {:?}",
-                self.func.name,
-                node,
-                index,
-                self.role(&operands[index])
-            );
-        };
-        let value = |index: usize| {
-            assert!(
-                self.materialized_type(&operands[index]).is_some()
-                    || self.role(&operands[index]).is_materialized(),
-                "MIR function `{}` node {}: operand {} must be a materialized value, got {:?}",
-                self.func.name,
-                node,
-                index,
-                self.role(&operands[index])
-            );
-        };
-        let evidence = |index: usize| {
-            assert!(
-                self.role(&operands[index]).is_evidence(),
-                "MIR function `{}` node {}: operand {} must be evidence, got {:?}",
-                self.func.name,
-                node,
-                index,
-                self.role(&operands[index])
-            );
-        };
-
+        let constants = self.func.constants();
+        let at = NodeAt(node);
         let Some(whole) = self.operation(node) else {
-            match self.terminator(node).unwrap() {
-                TerminatorKind::CondBr { .. } => value(0),
-                TerminatorKind::Yield { .. } => place(0),
-                TerminatorKind::Goto { .. }
-                | TerminatorKind::Return
-                | TerminatorKind::PropagateError
-                | TerminatorKind::FailureDuringCleanup => {}
-                TerminatorKind::Invoke { .. } => unreachable!("invoke exposes its operation"),
-            }
+            role::check_terminator_operand_roles(
+                &self.roles,
+                self.func.name,
+                &at,
+                self.terminator(node).unwrap(),
+                constants,
+            );
             return;
         };
+        role::check_operand_roles(&self.roles, self.func.name, &at, whole, constants);
 
         let invoked = matches!(self.terminator(node), Some(TerminatorKind::Invoke { .. }));
         assert_eq!(
@@ -1016,17 +789,8 @@ impl<'a> Verifier<'a> {
             node
         );
 
+        let operands = self.operands(node);
         match &whole.kind {
-            OperationKind::Alloca { .. } => {
-                if !operands.is_empty() {
-                    evidence(0);
-                }
-            }
-            OperationKind::Variant { storage, .. } => {
-                if storage.is_none() {
-                    evidence(0);
-                }
-            }
             OperationKind::BuildArray { element_ty } => {
                 assert!(
                     concrete_type_is_trivial_copy(*element_ty, &self.env),
@@ -1039,13 +803,10 @@ impl<'a> Verifier<'a> {
                     .expect("build_array has a trailing destination");
                 let expected = MirType::Lowered(*element_ty);
                 for (index, element) in elements.iter().enumerate() {
-                    let actual = match self.role(element) {
-                        ValueRole::Place(ty) | ValueRole::Materialized(ty) => ty,
-                        role => panic!(
-                            "MIR function `{}` node {}: build_array element operand {} must be a value or place, got {role:?}",
-                            self.func.name, node, index
-                        ),
-                    };
+                    let role = self.role(element);
+                    let actual = role
+                        .inner_type()
+                        .expect("build_array element roles were checked above");
                     assert!(
                         actual.representation_compatible(&expected, &self.env),
                         "MIR function `{}` node {}: build_array element operand {} has representation {}, expected {}",
@@ -1056,19 +817,13 @@ impl<'a> Verifier<'a> {
                         expected.format(&self.env)
                     );
                 }
-                let destination_index = operands.len() - 1;
-                place(destination_index);
                 self.verify_place_representation(
                     node,
-                    destination_index,
+                    operands.len() - 1,
                     destination,
                     MirType::Lowered(array_type(*element_ty)),
                 );
             }
-            OperationKind::AllocaPlace { .. }
-            | OperationKind::StackSave
-            | OperationKind::CheckCallDepth
-            | OperationKind::CheckFuel => {}
             OperationKind::Call { ty, metadata } => {
                 self.verify_instantiation(
                     node,
@@ -1078,34 +833,9 @@ impl<'a> Verifier<'a> {
                         .as_deref()
                         .and_then(|metadata| metadata.instantiation.as_ref()),
                 );
-                let visible_start = operands
-                    .len()
-                    .checked_sub(ty.fn_ty.args.len() + 1)
-                    .filter(|start| *start >= 1)
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "MIR function `{}` node {}: call has too few operands for its call-site type",
-                            self.func.name, node
-                        )
-                    });
-                assert!(
-                    self.role(&operands[0]).is_callee_operand(),
-                    "MIR function `{}` node {}: callee must be a function or function place",
-                    self.func.name,
-                    node
-                );
-                for index in 1..visible_start {
-                    evidence(index);
-                }
+                let visible_start = operands.len() - ty.fn_ty.args.len() - 1;
                 for (offset, argument) in ty.fn_ty.args.iter().enumerate() {
                     let index = visible_start + offset;
-                    assert!(
-                        self.role(&operands[index]).is_place_operand(),
-                        "MIR function `{}` node {}: visible call operand {} must be a place",
-                        self.func.name,
-                        node,
-                        index
-                    );
                     self.verify_place_representation(
                         node,
                         index,
@@ -1133,21 +863,18 @@ impl<'a> Verifier<'a> {
                         );
                     }
                 }
-                let result = operands.last().unwrap();
-                assert!(
-                    self.role(result).is_place_operand(),
-                    "MIR function `{}` node {}: the trailing call result operand must be a \
-                     place",
-                    self.func.name,
-                    node
-                );
                 if ty.fn_ty.ret != Type::never() {
                     let expected = if ty.result_convention.returns_place() {
-                        MirType::Pointer(Box::new(MirType::Lowered(ty.fn_ty.ret)))
+                        MirType::pointer_to(MirType::Lowered(ty.fn_ty.ret))
                     } else {
                         MirType::Lowered(ty.fn_ty.ret)
                     };
-                    self.verify_place_representation(node, operands.len() - 1, result, expected);
+                    self.verify_place_representation(
+                        node,
+                        operands.len() - 1,
+                        operands.last().unwrap(),
+                        expected,
+                    );
                 }
             }
             OperationKind::Project { yielded, ty } => {
@@ -1172,28 +899,9 @@ impl<'a> Verifier<'a> {
                         ty.fn_ty.ret.format_with(&self.env)
                     );
                 }
-                let visible_start = operands
-                    .len()
-                    .checked_sub(ty.fn_ty.args.len())
-                    .filter(|start| *start >= 1)
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "MIR function `{}` node {}: project has too few operands for its call-site type",
-                            self.func.name, node
-                        )
-                    });
-                assert!(
-                    self.role(&operands[0]).is_callee_operand(),
-                    "MIR function `{}` node {}: callee must be a function or function place",
-                    self.func.name,
-                    node
-                );
-                for index in 1..visible_start {
-                    evidence(index);
-                }
+                let visible_start = operands.len() - ty.fn_ty.args.len();
                 for (offset, argument) in ty.fn_ty.args.iter().enumerate() {
                     let index = visible_start + offset;
-                    place(index);
                     self.verify_place_representation(
                         node,
                         index,
@@ -1202,55 +910,7 @@ impl<'a> Verifier<'a> {
                     );
                 }
             }
-            OperationKind::EndProject => {
-                assert!(
-                    matches!(self.role(&operands[0]), ValueRole::OpenProjection { .. }),
-                    "MIR function `{}` node {}: end_project requires an open projection",
-                    self.func.name,
-                    node
-                );
-            }
-            OperationKind::ExtractTag
-            | OperationKind::Clear
-            | OperationKind::DropClosureEnv
-            | OperationKind::CloneClosureEnv { .. } => place(0),
-            OperationKind::CompareEqual => {
-                assert!(
-                    self.role(&operands[0]).is_place_operand()
-                        || self.materialized_type(&operands[0]).is_some(),
-                    "MIR function `{}` node {}: comparison scrutinee must be a place or value",
-                    self.func.name,
-                    node
-                );
-                assert!(
-                    matches!(self.role(&operands[1]), ValueRole::Pattern),
-                    "MIR function `{}` node {}: comparison pattern must be compile-time data",
-                    self.func.name,
-                    node
-                );
-            }
-            OperationKind::Load => place(0),
-            OperationKind::Subfield { .. } => {
-                place(0);
-                value(1);
-            }
-            OperationKind::DictEntry { .. } => evidence(0),
-            OperationKind::SubscriptMember { .. } => evidence(0),
-            OperationKind::BuildSubscript { .. } => {
-                for index in 0..operands.len() {
-                    evidence(index);
-                }
-            }
             OperationKind::Store => {
-                assert!(
-                    self.materialized_type(&operands[0]).is_some()
-                        || self.role(&operands[0]).is_place_operand()
-                        || self.role(&operands[0]).is_materialized(),
-                    "MIR function `{}` node {}: stored operand must be a value or place pointer",
-                    self.func.name,
-                    node
-                );
-                place(1);
                 if let (Some(value_ty), Some(destination_ty)) = (
                     self.materialized_type(&operands[0]),
                     self.place_pointee_type(&operands[1]),
@@ -1268,8 +928,6 @@ impl<'a> Verifier<'a> {
                 }
             }
             OperationKind::Memcpy | OperationKind::Move => {
-                place(0);
-                place(1);
                 if let (Some(source_ty), Some(destination_ty)) = (
                     self.place_pointee_type(&operands[0]),
                     self.place_pointee_type(&operands[1]),
@@ -1290,57 +948,8 @@ impl<'a> Verifier<'a> {
                         self.func.format_with(&self.env)
                     );
                 }
-                if operands.len() == 3 {
-                    evidence(2);
-                }
             }
-            OperationKind::StackRestore => assert!(
-                matches!(self.role(&operands[0]), ValueRole::StackMarker),
-                "MIR function `{}` node {}: stack_restore needs a stack marker",
-                self.func.name,
-                node
-            ),
-            OperationKind::Drop { .. } => {
-                place(0);
-                assert!(
-                    matches!(
-                        self.role(&operands[1]),
-                        ValueRole::Function | ValueRole::Place(_)
-                    ),
-                    "MIR function `{}` node {}: drop callee must be a function or function place",
-                    self.func.name,
-                    node
-                );
-            }
-            OperationKind::Clone { .. } => {
-                place(0);
-                place(1);
-                assert!(
-                    matches!(
-                        self.role(&operands[2]),
-                        ValueRole::Function | ValueRole::Place(_)
-                    ),
-                    "MIR function `{}` node {}: clone callee must be a function or function place",
-                    self.func.name,
-                    node
-                );
-            }
-            OperationKind::BuildClosure {
-                num_hidden_dicts,
-                has_env_dict,
-                ..
-            } => {
-                for index in 0..*num_hidden_dicts as usize {
-                    evidence(index);
-                }
-                let captures_end = operands.len() - usize::from(*has_env_dict);
-                for index in *num_hidden_dicts as usize..captures_end {
-                    place(index);
-                }
-                if *has_env_dict {
-                    evidence(operands.len() - 1);
-                }
-            }
+            _ => {}
         }
     }
 
@@ -1399,12 +1008,7 @@ impl<'a> Verifier<'a> {
     }
 
     fn place_pointee_type(&self, value: &mir::Value) -> Option<MirType> {
-        match self.role(value) {
-            ValueRole::Place(ty) => Some(ty),
-            ValueRole::Materialized(MirType::Pointer(ty)) => Some(*ty),
-            ValueRole::OpenProjection { yielded, .. } => Some(MirType::Lowered(yielded)),
-            _ => None,
-        }
+        self.role(value).place_pointee_type()
     }
 
     /// Checks that a call's recorded instantiation actually explains its call-site type.

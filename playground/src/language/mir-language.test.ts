@@ -66,6 +66,36 @@ describe("MIR language highlighting", () => {
 		))).toHaveLength(2);
 	});
 
+	it("highlights role annotations as types, not as MIR keywords", () => {
+		const source = [
+			"    %r0: *int = alloca int",
+			"    %r1: **int = alloca_place int",
+			"    %r2: *int = load %r1",
+			"    %r3: stack = stack_save",
+			"    %r4: open *string = project <test>::cell::ref_mut#subscript:f3d0ec43(%p0)",
+			"    %r5: (int) -> int = build_closure <test>::$lambda$1(%r3)",
+		].join("\n");
+
+		const tokens = highlightedTokens(source);
+		expect(tokens).toEqual(expect.arrayContaining([
+			["%r0", "tok-variableName"],
+			["*", "tok-punctuation"],
+			["int", "tok-typeName"],
+			["alloca", "tok-keyword"],
+			["alloca_place", "tok-keyword"],
+			["load", "tok-keyword"],
+			// A pseudo-type, and the qualifier of a yielded place: neither is a variable.
+			["stack", "tok-typeName"],
+			["open", "tok-keyword"],
+			["string", "tok-typeName"],
+		]));
+		// `build_closure` still takes the callee that follows it, and the annotation before the
+		// `=` must not have consumed that state.
+		expect(tokens).toEqual(expect.arrayContaining([
+			["<test>::$lambda$1", "tok-variableName"],
+		]));
+	});
+
 	it("highlights a referenced callee as a single name", () => {
 		const source = [
 			"    drop string %r1 via std::Value<std::string>::drop#impl:1d429675",

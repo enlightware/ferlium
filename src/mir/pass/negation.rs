@@ -476,17 +476,20 @@ mod tests {
             .to_string()
     }
 
-    /// The register a rendered `%rN = <operation>` line defines.
+    /// The register a rendered `%rN: <role> = <operation>` line defines.
     fn register_defining(body: &str, operation: &str) -> String {
         let line = body
             .lines()
             .find(|line| line.trim_start().starts_with('%') && line.contains(operation))
             .unwrap_or_else(|| panic!("no operation `{operation}` in:\n{body}"));
-        line.trim_start()
+        let name = line
+            .trim_start()
             .split(' ')
             .next()
-            .expect("a definition names its register")
-            .to_string()
+            .expect("a definition names its register");
+        // A definition renders as `%rN: <role> = ...`, so the register name ends at the colon
+        // introducing its role annotation.
+        name.trim_end_matches(':').to_string()
     }
 
     /// The constant a block stores, as the pool renders its value.

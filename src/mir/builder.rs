@@ -22,6 +22,12 @@ use crate::{
     types::r#type::{CallResultConvention, Type},
 };
 
+#[cfg(any(debug_assertions, test))]
+use crate::mir::{
+    role::{self, ValueRoles},
+    site::{OperationIndex, OperationSite},
+};
+
 /// A temporarily unterminated block used only while lowering.
 struct PendingBlock {
     operations: Vec<Operation>,
@@ -39,6 +45,12 @@ pub(crate) struct FunctionBuilder {
     constants: Vec<Constant>,
     blocks: Vec<PendingBlock>,
     next_value_index: usize,
+    /// The role of every value defined so far, maintained as operations are appended.
+    ///
+    /// Transient, and debug-and-test only: its sole consumer is the per-insertion operand check,
+    /// which reports the exact block and index while the emitting frame is still on the stack.
+    #[cfg(any(debug_assertions, test))]
+    roles: ValueRoles,
 }
 
 impl FunctionBuilder {
@@ -50,12 +62,18 @@ impl FunctionBuilder {
             constants: Vec::new(),
             blocks: Vec::new(),
             next_value_index: 0,
+            #[cfg(any(debug_assertions, test))]
+            roles: ValueRoles::default(),
         }
     }
 
     pub(crate) fn add_parameter(&mut self, ty: Type, tag: ParameterKind) -> mir::ParameterId {
         let id = mir::ParameterId::from_index(self.parameters.len());
-        self.parameters.push(Parameter { ty, kind: tag });
+        let parameter = Parameter { ty, kind: tag };
+        #[cfg(any(debug_assertions, test))]
+        self.roles
+            .push_parameter(&parameter, self.result_convention);
+        self.parameters.push(parameter);
         id
     }
 
@@ -110,6 +128,14 @@ impl FunctionBuilder {
             SourceFallibility::Fallible,
             "source-fallible operation must be wrapped by an invoke terminator"
         );
+        #[cfg(any(debug_assertions, test))]
+        role::check_operand_roles(
+            &self.roles,
+            self.name,
+            &self.insertion_site(block),
+            &operation,
+            &self.constants,
+        );
         let result = self.assign_result(&mut operation);
         self.blocks[block.as_index()].operations.push(operation);
         result
@@ -125,6 +151,14 @@ impl FunctionBuilder {
             !self.block_is_terminated(block),
             "block already has a terminator"
         );
+        #[cfg(any(debug_assertions, test))]
+        role::check_terminator_operand_roles(
+            &self.roles,
+            self.name,
+            &self.insertion_site(block),
+            &terminator.kind,
+            &self.constants,
+        );
         let result = match &mut terminator.kind {
             TerminatorKind::Invoke { operation, .. } => self.assign_result(operation),
             _ => None,
@@ -133,13 +167,32 @@ impl FunctionBuilder {
         result
     }
 
+    /// Where the next operation appended to `block` will sit; a terminator takes the index one
+    /// past the last operation, as [`OperationSite`] defines.
+    #[cfg(any(debug_assertions, test))]
+    fn insertion_site(&self, block: BlockId) -> OperationSite {
+        OperationSite {
+            block,
+            index: OperationIndex::from_index(self.blocks[block.as_index()].operations.len()),
+        }
+    }
+
     fn assign_result(&mut self, operation: &mut Operation) -> Option<mir::Value> {
-        let result_id = (operation.result() != OperationResult::Nothing).then(|| {
+        let result = operation.result();
+        let result_id = (result != OperationResult::Nothing).then(|| {
             let id = mir::ValueId::from_index(self.next_value_index);
             self.next_value_index += 1;
             id
         });
         operation.assign_result_id(result_id);
+        #[cfg(any(debug_assertions, test))]
+        if let Some(result_id) = result_id {
+            // Resolving the role here is what requires an operand to be defined before the
+            // operation reading it is appended. Blocks may be filled in any order, but a value is
+            // always handed back from the append that created it, so a use cannot precede it.
+            self.roles
+                .define(self.name, result_id, operation, result, &self.constants);
+        }
         result_id.map(mir::Value::Register)
     }
 

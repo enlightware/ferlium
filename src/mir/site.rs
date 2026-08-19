@@ -10,9 +10,11 @@
 //!
 //! Almost every pass has to name a position it plans to rewrite, and a position is not an identity:
 //! MIR operations carry none, so a pass records where one *is* and must not hold that across an
-//! edit that shifts it.
+//! edit that shifts it. Construction-time diagnostics name an insertion point the same way.
 
-use crate::mir::BlockId;
+use std::fmt;
+
+use crate::{mir::BlockId, module::id::Id};
 
 crate::define_id_type!(
     /// A transient position in one block's operation vector, not a stable MIR identity.
@@ -27,4 +29,15 @@ crate::define_id_type!(
 pub(crate) struct OperationSite {
     pub(crate) block: BlockId,
     pub(crate) index: OperationIndex,
+}
+
+impl fmt::Display for OperationSite {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "block b{} operation {}",
+            self.block.as_u32(),
+            self.index.as_index()
+        )
+    }
 }

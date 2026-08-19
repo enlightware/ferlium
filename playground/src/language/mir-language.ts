@@ -26,6 +26,10 @@ const primitiveTypes = new Set(["bool", "char", "float", "int", "never", "string
 
 type MirTokenizerState = {
 	nextTokenIsFunctionName: boolean;
+	/// Set between a defining `%rN` and its `=`, where the text is a role annotation rather than
+	/// MIR syntax. `%r0: fn = ...` must not put the tokenizer into function-name mode, and a role
+	/// word like `stack` names a pseudo-type, not a variable.
+	inRoleAnnotation: boolean;
 };
 
 /**
@@ -73,10 +77,11 @@ function skipCallableName(stream: { string: string; pos: number }): boolean {
 export const mirLanguage = StreamLanguage.define({
 	name: "Ferlium MIR",
 	startState(): MirTokenizerState {
-		return { nextTokenIsFunctionName: false };
+		return { nextTokenIsFunctionName: false, inRoleAnnotation: false };
 	},
 	blankLine(state) {
 		state.nextTokenIsFunctionName = false;
+		state.inRoleAnnotation = false;
 	},
 	token(stream, state) {
 		if (stream.eatSpace()) {
@@ -101,6 +106,11 @@ export const mirLanguage = StreamLanguage.define({
 		if (stream.match(/@(?:arg|extra|ret)\b/)) {
 			return "modifier";
 		}
+		const register = stream.match(/%r[0-9]+(?=:)/);
+		if (Array.isArray(register)) {
+			state.inRoleAnnotation = true;
+			return "variableName";
+		}
 		if (stream.match(/%[pr][0-9]+/) || stream.match(/@c[0-9]+/)) {
 			return "variableName";
 		}
@@ -110,7 +120,13 @@ export const mirLanguage = StreamLanguage.define({
 		if (stream.match(/-?[0-9]+(?:\.[0-9]+)?/)) {
 			return "number";
 		}
-		if (stream.match(/->|::|[()[\]{},:=<>]/)) {
+		if (stream.match("=")) {
+			state.inRoleAnnotation = false;
+			return "punctuation";
+		}
+		// `*` only ever appears in a role annotation, where it is the pointer marker of `*int` or
+		// the double indirection of an `alloca_place` slot's `**int`.
+		if (stream.match(/->|::|[*()[\]{},:<>]/)) {
 			return "punctuation";
 		}
 		const word = stream.match(/[A-Za-z_][A-Za-z0-9_]*/);
@@ -119,6 +135,11 @@ export const mirLanguage = StreamLanguage.define({
 			return null;
 		}
 		const text = word[0];
+		if (state.inRoleAnnotation) {
+			// `open` qualifies the yielded place of a `project`; everything else in this position
+			// is a type name or a pseudo-type such as `stack`.
+			return text === "open" ? "modifier" : "typeName";
+		}
 		if (definitionKeywords.has(text)) {
 			if (text === "fn") {
 				state.nextTokenIsFunctionName = true;
