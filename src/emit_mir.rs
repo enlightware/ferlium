@@ -1506,7 +1506,8 @@ impl<'a> Emitter<'a> {
         self.context.locals.insert(n.binding, place);
     }
 
-    /// Lowers a `Case` scrutinee to an operand `comp_eq` reads *non-consumingly*.
+    /// Lowers a `Case` scrutinee to an operand `comp_eq` reads *non-consumingly*, and reports
+    /// whether that operand is a place.
     ///
     /// An immediate stays a typed opaque constant; everything else is taken as its **place** (a
     /// borrow), never loaded/moved. This mirrors the HIR interpreter's `eval_case`, which reads the
@@ -1515,12 +1516,15 @@ impl<'a> Emitter<'a> {
     /// is not consumed), and a bare-generic scrutinee needs no static-layout assertion because it is
     /// only borrowed and snapshotted, not loaded as a register. (A variant scrutinee arrives as the
     /// `int` `extract_tag`, materialized into a place here.)
-    fn lower_case_scrutinee(&mut self, node: &ENode) -> mir::Value {
+    ///
+    /// The place flag is what lets a boolean alternative head read the scrutinee instead of
+    /// comparing it; see the `Case` lowering.
+    fn lower_case_scrutinee(&mut self, node: &ENode) -> (mir::Value, bool) {
         use hir::NodeKind as K;
         if let K::Immediate(value) = &node.kind {
-            return self.immediate_constant(node.ty, value.clone());
+            return (self.immediate_constant(node.ty, value.clone()), false);
         }
-        self.lower_as_place(node)
+        (self.lower_as_place(node), true)
     }
 
     /// Lowers compile-time pattern data to an operand for `comp_eq`. Pattern values deliberately do
@@ -1792,8 +1796,6 @@ impl<'a> Emitter<'a> {
             }
 
             K::Case(n) => {
-                let blocks = self.create_case_blocks(n);
-
                 // Mirror the HIR interpreter's `eval_case`: read the scrutinee once and compare its
                 // whole value against each whole pattern (`comp_eq` does `LiteralValue` equality,
                 // non-consuming). The scrutinee is taken as a borrowable place — never loaded/moved —
@@ -1802,7 +1804,15 @@ impl<'a> Emitter<'a> {
                 // match on the (int) `extract_tag` of the scrutinee, so no variant-specific path is
                 // needed. (We do *not* decompose composite patterns: the HIR compares the whole tuple
                 // structurally, so the MIR does the same.)
-                let scrutinee = self.lower_case_scrutinee(&self.hir_arena[n.value]);
+                //
+                // Lowered before the case's own blocks are created, so that a source-fallible
+                // scrutinee's `invoke` successors keep block numbers below the heads that read it.
+                // A head's `load` takes its result type *from* the scrutinee's place, and the
+                // verifier resolves those roles in block order.
+                let (scrutinee, scrutinee_is_place) =
+                    self.lower_case_scrutinee(&self.hir_arena[n.value]);
+
+                let blocks = self.create_case_blocks(n);
 
                 // With no alternatives (e.g. a single irrefutable arm), there are no condition
                 // heads to test, so branch straight to the default block.
@@ -1823,11 +1833,43 @@ impl<'a> Emitter<'a> {
                     // against this alternative's whole pattern and branch to its body on a match or to
                     // `next` otherwise.
                     self.context.point = InsertionPoint::End(blocks.heads[i]);
-                    let pattern = self.lower_case_pattern(c);
-                    let eq = self
-                        .insert(Operation::compare_eq(node.span, scrutinee.clone(), pattern))
-                        .unwrap();
-                    self.terminate(Terminator::cond_br(node.span, eq, blocks.bodies[i], next));
+                    let body = blocks.bodies[i];
+                    // `if`, and a `match` on a `bool`, both arrive here, and their head would compare
+                    // a boolean against a boolean pattern — a test whose answer is the scrutinee
+                    // itself. Read the slot instead and let the branch carry the polarity. `condbr`
+                    // takes a materialized value, so the read remains; the comparison does not.
+                    // Only a place-form scrutinee qualifies: an immediate one is already a constant,
+                    // which the comparison folds against and `load` cannot take. A `false` pattern
+                    // matches when the loaded value is *false*, which is the `condbr`'s else edge.
+                    let (condition, then_target, else_target) = match c.as_primitive_ty::<bool>() {
+                        Some(&expects_true) if scrutinee_is_place => {
+                            let loaded = self
+                                .insert(Operation::load(node.span, scrutinee.clone()))
+                                .unwrap();
+                            if expects_true {
+                                (loaded, body, next)
+                            } else {
+                                (loaded, next, body)
+                            }
+                        }
+                        _ => {
+                            let pattern = self.lower_case_pattern(c);
+                            let eq = self
+                                .insert(Operation::compare_eq(
+                                    node.span,
+                                    scrutinee.clone(),
+                                    pattern,
+                                ))
+                                .unwrap();
+                            (eq, body, next)
+                        }
+                    };
+                    self.terminate(Terminator::cond_br(
+                        node.span,
+                        condition,
+                        then_target,
+                        else_target,
+                    ));
 
                     // Lower the body of the alternative into the destination. A `break`/`continue`/
                     // `return` arm terminates its own block, so it needs no branch to the tail.

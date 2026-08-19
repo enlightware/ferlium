@@ -491,18 +491,24 @@ with moves from 14,039 to 645, allocations from 136,187 to 122,793, and peak cel
 ## Boolean branch forwarding
 
 `mir::pass::branch_forward` removes a boolean storage round-trip created when one control-flow
-diamond materializes `true` or `false` and its join immediately compares that slot with a boolean
-literal to control a second `condbr`. Each incoming edge already determines the second branch, so
-the pass redirects it to that successor. Any `stack_restore`s preceding the comparison are copied
-onto every redirected edge; the now-unreachable join disappears, and final DCE removes the local
-boolean allocation and its constant stores.
+diamond materializes `true` or `false` and its join immediately reads that slot to control a second
+`condbr`. Each incoming edge already determines the second branch, so the pass redirects it to that
+successor. Any `stack_restore`s preceding the read are copied onto every redirected edge; the
+now-unreachable join disappears, and final DCE removes the local boolean allocation and its
+constant stores.
+
+Both forms of that read are recognized. A boolean alternative head lowers to `load`, and that is
+the shape the pass sees in practice; a `comp_eq` against a boolean literal is the older shape, kept
+accepted because it is equally provable and costs one match arm. Each names the slot and carries a
+polarity: a `load` takes the *then* edge when the arm stored `true`, a `comp_eq` when the arm
+stored the pattern it compares against.
 
 The proof is a linear use and predecessor census and deliberately narrower than general jump
 threading. The slot must be a local boolean `alloca`; its only uses must be one known-boolean store
-per incoming predecessor and the final comparison; every predecessor must jump unconditionally to
-the join; and the join may contain only `stack_restore`s before that comparison. Other operations,
-additional uses, unknown stores and self-edges all refuse the rewrite. Supporting integer values or
-variant tags would require evidence for a broader predicate-propagation analysis.
+per incoming predecessor and the final read; every predecessor must jump unconditionally to the
+join; and the join may contain only `stack_restore`s before that read. Other operations, additional
+uses, unknown stores and self-edges all refuse the rewrite. Supporting integer values or variant
+tags would require evidence for a broader predicate-propagation analysis.
 
 ## String accumulation forwarding
 

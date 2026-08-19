@@ -656,7 +656,7 @@ fn factorial() {
     call std::gt(dict(std::Ord<std::int>), %p0, %r1, %r2)
     br b1
   b1:
-    %r3 = comp_eq %r2 true
+    %r3 = load %r2
     condbr %r3, b2, b3
   b2:
     %r4 = alloca int
@@ -817,7 +817,7 @@ fn array_index_read() {
   b2:
     propagate_error
   b3:
-    %r4 = comp_eq %r0 true
+    %r4 = load %r0
     condbr %r4, b4, b5
   b4:
     %r5 = alloca int
@@ -1077,7 +1077,7 @@ fn place_call_value_in_branches() {
   b0:
     br b1
   b1:
-    %r0 = comp_eq %p1 true
+    %r0 = load %p1
     condbr %r0, b2, b3
   b2:
     %r1 = alloca int
@@ -1461,7 +1461,7 @@ fn std::Value<(std::int,)>::eq#impl:b00d2abd(%p0: @arg let (int,), %p1: @arg let
     call std::Value<std::int>::eq#impl:87044288(%r0, %r1, %r2)
     br b1
   b1:
-    %r3 = comp_eq %r2 true
+    %r3 = load %r2
     condbr %r3, b2, b3
   b2:
     store @c1 to %p2
@@ -1707,7 +1707,7 @@ fn std::Value<<test>::A>::eq#impl:601557a9(%p0: @arg let A, %p1: @arg let A, %p2
     call std::Value<std::int>::eq#impl:87044288(%r0, %r1, %r2)
     br b1
   b1:
-    %r3 = comp_eq %r2 true
+    %r3 = load %r2
     condbr %r3, b2, b3
   b2:
     %r4 = subfield @c1 from %p0
@@ -1721,7 +1721,7 @@ fn std::Value<<test>::A>::eq#impl:601557a9(%p0: @arg let A, %p1: @arg let A, %p2
   b4:
     ret
   b5:
-    %r7 = comp_eq %r6 true
+    %r7 = load %r6
     condbr %r7, b6, b7
   b6:
     store @c2 to %p2
@@ -1850,7 +1850,7 @@ fn std::Value<<test>::Wrapper>::eq#impl:d6883255(%p0: @arg let Wrapper, %p1: @ar
     call <test>::std::Value<<test>::A>::eq#impl:601557a9(%r0, %r1, %r2)
     br b1
   b1:
-    %r3 = comp_eq %r2 true
+    %r3 = load %r2
     condbr %r3, b2, b3
   b2:
     %r4 = subfield @c1 from %p0
@@ -1864,7 +1864,7 @@ fn std::Value<<test>::Wrapper>::eq#impl:d6883255(%p0: @arg let Wrapper, %p1: @ar
   b4:
     ret
   b5:
-    %r7 = comp_eq %r6 true
+    %r7 = load %r6
     condbr %r7, b6, b7
   b6:
     store @c2 to %p2
@@ -2193,7 +2193,7 @@ fn reassign_in_branches() {
     store @c0 to %r0
     br b1
   b1:
-    %r2 = comp_eq %p0 true
+    %r2 = load %p0
     condbr %r2, b2, b3
   b2:
     %r3 = alloca int

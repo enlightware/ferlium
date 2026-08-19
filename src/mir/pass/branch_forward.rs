@@ -14,13 +14,19 @@
 //! condbr predicate, left, right
 //! left:  store true  to flag; br join
 //! right: store false to flag; br join
-//! join:  stack_restore marker; equal = comp_eq flag true; condbr equal, yes, no
+//! join:  stack_restore marker; equal = load flag; condbr equal, yes, no
 //! ```
 //!
-//! The second comparison and branch recover information the incoming edge already carries. This
-//! pass redirects each storing block to `yes` or `no`, retaining on that edge the `stack_restore`s
-//! it used to reach on the way. The join then becomes unreachable, and ordinary DCE removes the
+//! The second read and branch recover information the incoming edge already carries. This pass
+//! redirects each storing block to `yes` or `no`, retaining on that edge the `stack_restore`s it
+//! used to reach on the way. The join then becomes unreachable, and ordinary DCE removes the
 //! boolean allocation and stores.
+//!
+//! Both forms of that read are recognized. A boolean alternative head lowers to `load flag`, and
+//! that is what this pass now sees in practice; a `comp_eq flag <bool>` is the older shape, kept
+//! accepted because it is equally provable and costs one match arm. Each names the flag and
+//! carries a polarity: a `load` takes the *then* edge when the arm stored `true`, a `comp_eq` when
+//! the arm stored the pattern it compares against.
 //!
 //! A store need not sit in an immediate predecessor of the join. A short-circuit `or` or `and` with
 //! three or more arms lowers to a *tree* of stores, whose deeper arms reach the join through a
@@ -33,16 +39,16 @@
 //! middle: store true  to flag; br forward
 //! right:  store false to flag; br forward
 //! forward: stack_restore marker; br join
-//! join:   equal = comp_eq flag true; condbr equal, yes, no
+//! join:   equal = load flag; condbr equal, yes, no
 //! ```
 //!
 //! So the search walks back from the join to the stores that reach it, through blocks that carry
 //! only edge cleanup, and replays that cleanup on each arm it redirects.
 //!
 //! The proof is intentionally local and linear. The flag must be a local boolean `alloca`; every
-//! use must be one known-boolean store or the one final comparison; every block on a walked path
+//! use must be one known-boolean store or the one final read; every block on a walked path
 //! must end in an unconditional jump; a store-free block on a path may contain only
-//! `stack_restore`s; the join may contain only `stack_restore`s before the comparison; and the
+//! `stack_restore`s; the join may contain only `stack_restore`s before the read; and the
 //! stores found must be exactly those the use census saw, which is what proves no other definition
 //! reaches the join. Two paths may not meet at one block, since rewriting it would mean duplicating
 //! it. General predicate propagation — forwarding a boolean that is *computed* rather than stored
@@ -73,7 +79,7 @@ struct Store {
 #[derive(Default)]
 struct Uses {
     stores: Vec<Store>,
-    comparisons: Vec<OperationSite>,
+    reads: Vec<OperationSite>,
     other: bool,
 }
 
@@ -110,9 +116,10 @@ pub(crate) fn forward_boolean_branches(func: &Function) -> Option<Function> {
         return None;
     }
     let value_uses = census_uses(func, &mut uses);
-    if !uses.values().any(|summary| {
-        !summary.other && summary.comparisons.len() == 1 && summary.stores.len() >= 2
-    }) {
+    if !uses
+        .values()
+        .any(|summary| !summary.other && summary.reads.len() == 1 && summary.stores.len() >= 2)
+    {
         return None;
     }
     // Building the predecessor map is a separate CFG walk. Most functions have no boolean
@@ -198,7 +205,7 @@ fn census_uses(func: &Function, uses: &mut FxHashMap<ValueId, Uses>) -> FxHashMa
                             summary.other = true;
                         }
                     }
-                    OperationKind::CompareEqual => summary.comparisons.push(site),
+                    OperationKind::CompareEqual | OperationKind::Load => summary.reads.push(site),
                     _ => summary.other = true,
                 }
             }
@@ -223,12 +230,15 @@ fn plan_join(
     value_uses: &FxHashMap<ValueId, usize>,
 ) -> Option<Forward> {
     let block = func.block(join);
-    let (comparison_index, comparison) =
-        block.operations().len().checked_sub(1).and_then(|index| {
-            let operation = &block.operations()[index];
-            matches!(operation.kind, OperationKind::CompareEqual).then_some((index, operation))
-        })?;
-    let result = comparison.result_id()?;
+    let (read_index, read) = block.operations().len().checked_sub(1).and_then(|index| {
+        let operation = &block.operations()[index];
+        matches!(
+            operation.kind,
+            OperationKind::CompareEqual | OperationKind::Load
+        )
+        .then_some((index, operation))
+    })?;
+    let result = read.result_id()?;
     let TerminatorKind::CondBr {
         condition: mir::Value::Register(condition),
         then_target,
@@ -246,16 +256,16 @@ fn plan_join(
         return None;
     }
 
-    let (flag, expected) = compared_boolean_flag(func, comparison)?;
+    let (flag, expected) = read_boolean_flag(func, read)?;
     let summary = uses.get(&flag)?;
-    let comparison_site = OperationSite {
+    let read_site = OperationSite {
         block: join,
-        index: OperationIndex::from_index(comparison_index),
+        index: OperationIndex::from_index(read_index),
     };
     if summary.other
-        || summary.comparisons.as_slice() != [comparison_site]
+        || summary.reads.as_slice() != [read_site]
         || summary.stores.len() < 2
-        || !block.operations()[..comparison_index]
+        || !block.operations()[..read_index]
             .iter()
             .all(|operation| matches!(operation.kind, OperationKind::StackRestore))
     {
@@ -264,7 +274,7 @@ fn plan_join(
 
     // The join's own cleanup runs after whatever the path already replayed, exactly as it did when
     // control still passed through these blocks in order.
-    let join_prefix = &block.operations()[..comparison_index];
+    let join_prefix = &block.operations()[..read_index];
     let arms = reaching_stores(func, join, summary, incoming)?
         .into_iter()
         .map(|reaching| {
@@ -363,7 +373,18 @@ fn reaching_stores(
     (found.len() == summary.stores.len()).then_some(found)
 }
 
-fn compared_boolean_flag(func: &Function, operation: &Operation) -> Option<(ValueId, bool)> {
+/// The flag `operation` reads, and the stored value that sends control to the `condbr`'s *then*
+/// target.
+///
+/// A `load` yields the flag itself, so `true` takes the then edge. A `comp_eq` yields the pattern
+/// it compares against, so the arm storing that pattern is the one that takes it.
+fn read_boolean_flag(func: &Function, operation: &Operation) -> Option<(ValueId, bool)> {
+    if matches!(operation.kind, OperationKind::Load) {
+        let [mir::Value::Register(flag)] = operation.operands.as_ref() else {
+            return None;
+        };
+        return Some((*flag, true));
+    }
     let [left, right] = operation.operands.as_ref() else {
         return None;
     };
@@ -390,7 +411,7 @@ mod tests {
         CompilerSession, Location, MirOptimization,
         containers::b,
         hir::value::LiteralValue,
-        mir::{Operation, Value, builder::FunctionBuilder, terminator::Terminator},
+        mir::{Operation, OperationKind, Value, builder::FunctionBuilder, terminator::Terminator},
         types::r#type::Type,
     };
 
@@ -458,6 +479,89 @@ mod tests {
         assert!(
             body.matches("stack_restore").count() >= 3,
             "every redirected arm must still restore the frames it passed:\n{body}"
+        );
+    }
+
+    /// A boolean alternative head lowers to `load`, so nothing in the emitter produces the
+    /// comparison form of the join any more. Build it directly to keep the retained arm honest:
+    /// the rewrite must still fire, and the pattern's polarity must pick the right successor —
+    /// against `false`, the arm storing `false` is the one that takes the *then* edge.
+    #[test]
+    fn a_comparison_form_join_is_still_forwarded() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        let bool_ty = Type::primitive::<bool>();
+        let mut builder = FunctionBuilder::new("comparison_join".into(), Default::default());
+        let true_value = builder.add_constant(bool_ty, LiteralValue::new_native(true), &env);
+        let false_value = builder.add_constant(bool_ty, LiteralValue::new_native(false), &env);
+        let entry = builder.add_block();
+        let left = builder.add_block();
+        let right = builder.add_block();
+        let join = builder.add_block();
+        let yes = builder.add_block();
+        let no = builder.add_block();
+
+        let flag = builder
+            .append_operation(entry, Operation::alloca(span, bool_ty))
+            .unwrap();
+        builder.set_terminator(
+            entry,
+            Terminator::cond_br(span, Value::Constant(true_value), left, right),
+        );
+        builder.append_operation(
+            left,
+            Operation::store(span, Value::Constant(true_value), flag.clone()),
+        );
+        builder.set_terminator(left, Terminator::goto(span, join));
+        builder.append_operation(
+            right,
+            Operation::store(span, Value::Constant(false_value), flag.clone()),
+        );
+        builder.set_terminator(right, Terminator::goto(span, join));
+        let comparison = builder
+            .append_operation(
+                join,
+                Operation::compare_eq(
+                    span,
+                    flag,
+                    Value::Pattern(b(LiteralValue::new_native(false))),
+                ),
+            )
+            .unwrap();
+        builder.set_terminator(join, Terminator::cond_br(span, comparison, yes, no));
+        // Distinguishable markers, so the assertions can tell the two successors apart after the
+        // rewrite has merged them into the arms that now jump straight to them.
+        builder.append_operation(yes, Operation::check_fuel(span));
+        builder.set_terminator(yes, Terminator::ret(span));
+        builder.append_operation(no, Operation::check_call_depth(span));
+        builder.set_terminator(no, Terminator::ret(span));
+
+        let forwarded = super::forward_boolean_branches(&builder.finish(env))
+            .expect("the comparison form must still be forwarded");
+        let stored_with = |value: bool, marker: &OperationKind| {
+            forwarded.blocks().any(|block| {
+                let operations = forwarded.block(block).operations();
+                operations.iter().any(|operation| {
+                    matches!(operation.kind, OperationKind::Store)
+                        && super::bool_value(&forwarded, &operation.operands[0]) == Some(value)
+                }) && operations.iter().any(|operation| &operation.kind == marker)
+            })
+        };
+        assert!(
+            !forwarded
+                .blocks()
+                .flat_map(|block| forwarded.block(block).operations())
+                .any(|operation| matches!(operation.kind, OperationKind::CompareEqual)),
+            "the join's comparison must be gone"
+        );
+        assert!(
+            stored_with(false, &OperationKind::CheckFuel),
+            "the arm storing the compared pattern must take the then edge"
+        );
+        assert!(
+            stored_with(true, &OperationKind::CheckCallDepth),
+            "the arm storing the other value must take the else edge"
         );
     }
 
