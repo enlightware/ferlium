@@ -1796,6 +1796,8 @@ impl<'a> Emitter<'a> {
             }
 
             K::Case(n) => {
+                let blocks = self.create_case_blocks(n);
+
                 // Mirror the HIR interpreter's `eval_case`: read the scrutinee once and compare its
                 // whole value against each whole pattern (`comp_eq` does `LiteralValue` equality,
                 // non-consuming). The scrutinee is taken as a borrowable place — never loaded/moved —
@@ -1804,15 +1806,8 @@ impl<'a> Emitter<'a> {
                 // match on the (int) `extract_tag` of the scrutinee, so no variant-specific path is
                 // needed. (We do *not* decompose composite patterns: the HIR compares the whole tuple
                 // structurally, so the MIR does the same.)
-                //
-                // Lowered before the case's own blocks are created, so that a source-fallible
-                // scrutinee's `invoke` successors keep block numbers below the heads that read it.
-                // A head's `load` takes its result type *from* the scrutinee's place, and the
-                // verifier resolves those roles in block order.
                 let (scrutinee, scrutinee_is_place) =
                     self.lower_case_scrutinee(&self.hir_arena[n.value]);
-
-                let blocks = self.create_case_blocks(n);
 
                 // With no alternatives (e.g. a single irrefutable arm), there are no condition
                 // heads to test, so branch straight to the default block.

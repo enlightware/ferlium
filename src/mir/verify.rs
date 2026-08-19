@@ -737,6 +737,8 @@ impl<'a> Verifier<'a> {
             }
         }
 
+        // Definitions and allocation roots first: neither reads another value's role, so this walk
+        // is free to follow block order.
         for index in 0..self.node_order.len() {
             let node = self.node_order[index];
             let Some(value) = self.definition(node) else {
@@ -750,16 +752,7 @@ impl<'a> Verifier<'a> {
                 "MIR function `{}`: value {value_id} has more than one definition",
                 self.func.name
             );
-            let value = mir::Value::Register(value_id);
-            let operation = self.operation(node).unwrap();
-            let role = match &operation.kind {
-                OperationKind::Project { yielded, ty } => ValueRole::OpenProjection {
-                    yielded: *yielded,
-                    accessor: (**ty).clone(),
-                },
-                _ => self.resolve_result(operation.result()),
-            };
-            if let OperationKind::Alloca { ty } = operation.kind {
+            if let OperationKind::Alloca { ty } = self.operation(node).unwrap().kind {
                 let root = self.roots.len();
                 let exact = self.storage_paths_are_exact(ty, &mut Vec::new());
                 self.roots.push(RootInfo {
@@ -768,9 +761,70 @@ impl<'a> Verifier<'a> {
                     initially_live: false,
                     exact,
                 });
-                self.root_index.insert(value.clone(), root);
+                self.root_index.insert(value, root);
             }
-            self.value_roles.insert(value, role);
+        }
+
+        // Roles second, resolving each operand's role on demand. A `Pointee` or `Same` result takes
+        // its role from an operand, and MIR does not require a definition to sit in a lower-numbered
+        // block than its uses, so block order is not a definition order here.
+        let mut resolving = vec![];
+        for index in 0..self.node_order.len() {
+            let node = self.node_order[index];
+            let Some(mir::Value::Register(value_id)) = self.definition(node) else {
+                continue;
+            };
+            self.ensure_value_role(value_id, &mut resolving);
+        }
+    }
+
+    /// Resolves the role of `value_id`, and of every value its result reads, into `value_roles`.
+    ///
+    /// `resolving` carries the chain of values currently being resolved, so that a result cycle
+    /// fails with a diagnostic instead of overflowing the stack.
+    fn ensure_value_role(&mut self, value_id: mir::ValueId, resolving: &mut Vec<mir::ValueId>) {
+        let value = mir::Value::Register(value_id);
+        if self.value_roles.contains_key(&value) {
+            return;
+        }
+        assert!(
+            !resolving.contains(&value_id),
+            "MIR function `{}`: value {value_id} takes its role from itself",
+            self.func.name
+        );
+        let node = *self.value_definition.get(&value_id).unwrap_or_else(|| {
+            panic!(
+                "MIR function `{}`: undefined operand {value}",
+                self.func.name
+            )
+        });
+        let operation = self.operation(node).unwrap();
+        let role = if let OperationKind::Project { yielded, ty } = &operation.kind {
+            ValueRole::OpenProjection {
+                yielded: *yielded,
+                accessor: (**ty).clone(),
+            }
+        } else {
+            let result = operation.result();
+            if let Some(dependency) = Self::result_dependency(&result) {
+                resolving.push(value_id);
+                self.ensure_value_role(dependency, resolving);
+                resolving.pop();
+            }
+            self.resolve_result(result)
+        };
+        self.value_roles.insert(value, role);
+    }
+
+    /// The register whose role `result` reads, if any. A result nests one child per level and ends
+    /// in at most one `Same`, so there is never more than one.
+    fn result_dependency(result: &OperationResult) -> Option<mir::ValueId> {
+        match result {
+            OperationResult::Same(mir::Value::Register(value_id)) => Some(*value_id),
+            OperationResult::Pointee(inner) | OperationResult::Pointer(inner) => {
+                Self::result_dependency(inner)
+            }
+            _ => None,
         }
     }
 
@@ -2409,6 +2463,42 @@ mod tests {
             Operation::store(span, loaded, crate::mir::Value::Parameter(ret)),
         );
         terminate_return(&mut f, exit, span);
+
+        verify(f);
+    }
+
+    /// Block order is not a definition order: a place may be defined in a higher-numbered block
+    /// than the `load` reading it, as long as it dominates that read. The verifier takes a `load`'s
+    /// result role from its operand, so it must resolve that role on demand rather than assume the
+    /// walk has already reached the definition.
+    #[test]
+    fn accepts_a_load_whose_place_is_defined_in_a_later_block() {
+        let span = Location::new_synthesized();
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let mut f = FunctionBuilder::new("late_place_definition".into(), Default::default());
+        let value = f.add_constant(int_type(), LiteralValue::new_native(42isize), &env);
+        let ret = f.add_parameter(int_type(), ParameterKind::Return);
+        let entry = f.add_block();
+        // Added before the block that defines the place it reads, so that it holds the lower index.
+        let using = f.add_block();
+        let defining = f.add_block();
+
+        f.set_terminator(entry, Terminator::goto(span, defining));
+        let local = append_result(&mut f, defining, Operation::alloca(span, int_type()));
+        append(
+            &mut f,
+            defining,
+            Operation::store(span, Value::Constant(value), local.clone()),
+        );
+        f.set_terminator(defining, Terminator::goto(span, using));
+        let loaded = append_result(&mut f, using, Operation::load(span, local));
+        append(
+            &mut f,
+            using,
+            Operation::store(span, loaded, Value::Parameter(ret)),
+        );
+        terminate_return(&mut f, using, span);
 
         verify(f);
     }

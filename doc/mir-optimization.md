@@ -767,6 +767,12 @@ if its most useful result would otherwise disappear without a count.
   consumes them, then on every final declared and specialized optimized body after whole-module
   cleanup, under debug/test gating. Intermediate pass results never escape the optimizer. This is
   the primary safety net for every rewrite without repeating whole-function dataflow at every pass.
+- **Block order is not a definition order.** A value may be defined in a higher-numbered block than
+  its uses; the only requirement is dominance, which is a property of the CFG rather than of block
+  numbering. `emit_mir` produces such bodies already — a `Case` whose scrutinee is itself
+  source-fallible numbers its `invoke` successors above the alternative heads that read it. The
+  verifier therefore resolves a `Pointee`/`Same` result role on demand from `value_definition`
+  instead of assuming its walk has already reached the operand's definition.
 - Optimization never changes a program's observable result or its source-failure behaviour. It may
   change fuel and call-depth consumption, which are sandbox policy rather than source semantics.
 - **A rewrite must make progress.** A pass may not report having changed something when its rewrite
