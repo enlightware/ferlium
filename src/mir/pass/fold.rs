@@ -222,6 +222,10 @@ pub(crate) fn fold_function(
     let warrants_another_round = !plan.is_empty();
 
     let mut edit = FunctionEdit::new(func.clone());
+    // Devirtualization first: it only rewrites a callee operand in place, while a fold below may
+    // splice one call into two operations and shift every later index of its block. Both were
+    // planned against the same body, and no operation is in both plans.
+    apply_devirtualizations(&mut edit, devirtualizations);
     // A reflexive comparison expands one call into `variant Equal; store`, so apply sites in
     // reverse order and splice without invalidating a later index planned in the same block.
     for fold in plan.calls.into_iter().rev() {
@@ -253,7 +257,6 @@ pub(crate) fn fold_function(
     // `condbr` also leaves its surviving target with a single predecessor, so merging follows the
     // prune, in this pass's own edit: a separate open-and-verify cycle for it costs more
     // than the merge saves.
-    apply_devirtualizations(&mut edit, devirtualizations);
     edit.remove_unreachable_blocks();
     edit.merge_blocks_into_predecessors();
     Some(Folded {
