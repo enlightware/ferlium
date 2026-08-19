@@ -54,7 +54,7 @@ use crate::{
         value::{Constant, ConstantId},
     },
     module::{ModuleEnv, id::Id},
-    types::r#type::{CallImplType, CallResultConvention, Type},
+    types::r#type::{CallImplType, CallResultConvention, Type, TypeKind},
 };
 
 /// A type as MIR sees it: a lowered Ferlium type, or a pointer to one.
@@ -72,7 +72,18 @@ impl MirType {
     pub(crate) fn format(&self, env: &ModuleEnv<'_>) -> String {
         match self {
             Self::Lowered(ty) => ty.format_with(env).to_string(),
-            Self::Pointer(pointee) => format!("*{}", pointee.format(env)),
+            Self::Pointer(pointee) => pointee.format_as_pointer_pointee(env),
+        }
+    }
+
+    /// Formats `self` behind a pointer sigil, preserving the boundary between the MIR pointer and
+    /// a lowered type whose own syntax has lower precedence.
+    fn format_as_pointer_pointee(&self, env: &ModuleEnv<'_>) -> String {
+        match self {
+            Self::Lowered(ty) if lowered_type_needs_pointer_parentheses(*ty, env) => {
+                format!("*({})", ty.format_with(env))
+            }
+            _ => format!("*{}", self.format(env)),
         }
     }
 
@@ -110,17 +121,29 @@ impl ValueRole {
     pub(crate) fn annotation(&self, env: &ModuleEnv<'_>) -> String {
         match self {
             Self::Materialized(ty) => ty.format(env),
-            Self::Place(ty) => format!("*{}", ty.format(env)),
+            Self::Place(ty) => ty.format_as_pointer_pointee(env),
             Self::Dictionary => "dict".to_string(),
             Self::Subscript => "subscript".to_string(),
             Self::Function => "fn".to_string(),
             Self::Pattern => "pattern".to_string(),
             Self::StackMarker => "stack".to_string(),
             Self::OpenProjection { yielded, .. } => {
-                format!("open *{}", yielded.format_with(env))
+                let yielded = MirType::Lowered(*yielded).format_as_pointer_pointee(env);
+                format!("open {yielded}")
             }
         }
     }
+}
+
+/// Whether a lowered type needs grouping when it follows MIR's prefix `*` pointer sigil.
+fn lowered_type_needs_pointer_parentheses(ty: Type, env: &ModuleEnv<'_>) -> bool {
+    if env.type_alias_name(ty).is_some() {
+        return false;
+    }
+    matches!(
+        &*ty.data(),
+        TypeKind::Variant(_) | TypeKind::Function(_) | TypeKind::Subscript(_)
+    )
 }
 
 /// The predicates the operand checks are written in terms of. Debug-and-test only, with the checks

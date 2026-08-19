@@ -61,6 +61,10 @@ MIR uses independent, function-local `ValueId`s rather than operation locations:
 - `bN` is a block target; and
 - function, dictionary, subscript, and pattern operands remain symbolic.
 
+Text dumps render function and subscript operands with their module-qualified names. Definition
+annotations use `*T` for a pointer to `T`; function, variant, and first-class subscript pointees are
+grouped to preserve the pointer boundary, for example `*((A) -> B)` and `*(Left A | Right B)`.
+
 Moving an operation therefore does not renumber unrelated values. A derived def-use map locates the
 operation that defines each `ValueId` when an analysis needs it.
 

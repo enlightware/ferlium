@@ -68,6 +68,33 @@ function skipCallableName(stream: { string: string; pos: number }): boolean {
 }
 
 /**
+ * Advance over an identifier with a balanced parenthesized payload as one opaque name. MIR uses
+ * this shape for symbolic operands such as dictionaries and subscripts. Their readable identities
+ * may contain types, but that type-shaped text is part of the name rather than a type annotation
+ * at the use site. Keeping the rule structural also covers future symbolic operand kinds.
+ */
+function skipOpaqueParenthesizedName(stream: { string: string; pos: number }): boolean {
+	const prefix = /^[A-Za-z_][A-Za-z0-9_]*\(/.exec(stream.string.slice(stream.pos))?.[0];
+	if (prefix === undefined) {
+		return false;
+	}
+	let depth = 1;
+	for (let position = stream.pos + prefix.length; position < stream.string.length; position += 1) {
+		const character = stream.string[position];
+		if (character === "(") {
+			depth += 1;
+		} else if (character === ")") {
+			depth -= 1;
+			if (depth === 0) {
+				stream.pos = position + 1;
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+/**
  * A deliberately small tokenizer for rendered MIR.
  *
  * MIR is an inspection view, so this favors clear, stable token classes over a full grammar. The
@@ -119,6 +146,9 @@ export const mirLanguage = StreamLanguage.define({
 		}
 		if (stream.match(/-?[0-9]+(?:\.[0-9]+)?/)) {
 			return "number";
+		}
+		if (skipOpaqueParenthesizedName(stream)) {
+			return "variableName";
 		}
 		if (stream.match("=")) {
 			state.inRoleAnnotation = false;

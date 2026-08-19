@@ -927,6 +927,16 @@ impl Module {
             .and_then(|(_, name)| *name)
     }
 
+    /// Get the projection key backed by a local subscript ID.
+    pub fn get_projection_key_by_subscript_id(
+        &self,
+        id: LocalSubscriptId,
+    ) -> Option<ProjectionKey> {
+        self.projection_subscripts
+            .iter()
+            .find_map(|(key, entry)| (entry.subscript == id).then_some(*key))
+    }
+
     /// Get a local function by ID
     pub fn get_function_by_id(&self, id: LocalFunctionId) -> Option<&ModuleFunction> {
         self.functions.get(id.as_index())

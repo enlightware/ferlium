@@ -1384,13 +1384,13 @@ fn generic_apply() {
   @c1: () = ()
   b0:
     %r0: *A = alloca A using %p1
-    %r1: *(A, A) -> A = dict_entry 2 from %p0
-    %r2: *(int) -> A = dict_entry 6 from %p0
+    %r1: *((A, A) -> A) = dict_entry 2 from %p0
+    %r2: *((int) -> A) = dict_entry 6 from %p0
     %r3: *int = alloca int
     store @c0 to %r3
     call %r2(%r3, %r0)
     call %r1(%p2, %r0, %p3)
-    %r4: *(&mut A) -> () = dict_entry 4 from %p1
+    %r4: *((&mut A) -> ()) = dict_entry 4 from %p1
     drop A %r0 via %r4
     ret
 "#,
@@ -1411,6 +1411,53 @@ fn dynamic_apply() {
     propagate_error
 "#,
     );
+}
+
+#[test]
+fn pointer_annotations_parenthesize_non_atomic_lowered_types() {
+    let mut session = TestSession::new();
+    session.allow_experimental();
+    let out = session.emit_mir(
+        r#"
+        subscript cell(slot: &mut int) -> int { ref mut { slot } }
+        fn variants(x: Left(int) | Right(bool)) {
+            let y = if true { x } else { x };
+            ()
+        }
+        fn subscripts() {
+            let accessor = cell;
+            ()
+        }
+        fn closures() {
+            let closure = || 1;
+            ()
+        }
+        "#,
+    );
+
+    assert!(out.contains("*(Left (int) | Right (bool)) = alloca Left (int) | Right (bool)"));
+    assert!(out.contains(
+        "*(subscript (&mut int) -> int { ref place; mut place }) = alloca subscript (&mut int) -> int { ref place; mut place }"
+    ));
+    assert!(out.contains("*(() -> int) = alloca () -> int"));
+}
+
+#[test]
+fn symbolic_subscripts_render_fully_qualified_names() {
+    let mut session = TestSession::new();
+    session.allow_experimental();
+    let out = session.emit_mir(
+        r#"
+        subscript cell(slot: &mut int) -> int { ref mut { slot } }
+        fn use_named(accessor) { let mut slot = 1; slot->[accessor] }
+        fn use_projection(value) { value.x }
+        (use_named(cell), use_projection({ x: 1 }))
+        "#,
+    );
+
+    assert!(out.contains("subscript(<test>::cell)"));
+    assert!(out.contains("subscript(<test>::{ x: std::int }.x)"));
+    assert!(!out.contains("subscript(m"));
 }
 
 #[test]
@@ -1441,7 +1488,7 @@ fn capture(%p0: @ret int):
   @c1: () = ()
   b0:
     %r0: *int = alloca int
-    %r1: *() -> int = alloca () -> int
+    %r1: *(() -> int) = alloca () -> int
     %r2: *int = alloca int
     store @c0 to %r2
     call std::Num<std::int>::from_int#impl:25eabc6b(%r2, %r0)
@@ -1554,7 +1601,7 @@ fn generic_two_same_type_params() {
         session.emit_mir("fn f(x, y) { x + y }"),
         r#"fn f(%p0: @extra ((A, A) -> A, (A, A) -> A, (A, A) -> A, (A) -> A, (A) -> A, (A) -> A, (int) -> A), %p1: @arg let A, %p2: @arg let A, %p3: @ret A):
   b0:
-    %r0: *(A, A) -> A = dict_entry 0 from %p0
+    %r0: *((A, A) -> A) = dict_entry 0 from %p0
     call %r0(%p1, %p2, %p3)
     ret
 "#,
@@ -1592,11 +1639,11 @@ fn generic_multiple_ops_reuse_witness() {
   @c0: () = ()
   b0:
     %r0: *A = alloca A using %p1
-    %r1: *(A, A) -> A = dict_entry 0 from %p0
-    %r2: *(A, A) -> A = dict_entry 2 from %p0
+    %r1: *((A, A) -> A) = dict_entry 0 from %p0
+    %r2: *((A, A) -> A) = dict_entry 2 from %p0
     call %r2(%p2, %p2, %r0)
     call %r1(%r0, %p2, %p3)
-    %r3: *(&mut A) -> () = dict_entry 4 from %p1
+    %r3: *((&mut A) -> ()) = dict_entry 4 from %p1
     drop A %r0 via %r3
     ret
 "#,
@@ -1612,7 +1659,7 @@ fn generic_comparison() {
         session.emit_mir("fn f(x, y) { x == y }"),
         r#"fn f(%p0: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A) -> A, (&mut A) -> (), () -> int, () -> int), %p1: @arg let A, %p2: @arg let A, %p3: @ret bool):
   b0:
-    %r0: *(A, A) -> bool = dict_entry 0 from %p0
+    %r0: *((A, A) -> bool) = dict_entry 0 from %p0
     call %r0(%p1, %p2, %p3)
     ret
 "#,
@@ -2073,7 +2120,7 @@ fn clone_value_generic_return() {
         session.emit_mir("fn f<T>(x: T) -> T { x }"),
         r#"fn f(%p0: @extra ((A, A) -> bool, (A) -> string, (A, &mut hasher) -> (), (A) -> A, (&mut A) -> (), () -> int, () -> int), %p1: @arg let A, %p2: @ret A):
   b0:
-    %r0: *(A) -> A = dict_entry 3 from %p0
+    %r0: *((A) -> A) = dict_entry 3 from %p0
     clone A %p1 to %p2 via %r0
     ret
 "#,
@@ -2095,11 +2142,11 @@ fn clone_value_generic_branch() {
     %r0: bool = comp_eq @c0 true
     condbr %r0, b2, b3
   b2:
-    %r1: *(A) -> A = dict_entry 3 from %p0
+    %r1: *((A) -> A) = dict_entry 3 from %p0
     clone A %p1 to %p2 via %r1
     br b4
   b3:
-    %r2: *(A) -> A = dict_entry 3 from %p0
+    %r2: *((A) -> A) = dict_entry 3 from %p0
     clone A %p1 to %p2 via %r2
     br b4
   b4:
@@ -2120,12 +2167,12 @@ fn store_local_generic_clone_dictionary() {
   @c0: () = ()
   b0:
     %r0: *A = alloca A using %p0
-    %r1: *(A) -> A = dict_entry 3 from %p0
+    %r1: *((A) -> A) = dict_entry 3 from %p0
     clone A %p1 to %r0 via %r1
     %r2: *() = alloca ()
     call <test>::g(%r0, %r2)
     store @c0 to %p2
-    %r3: *(&mut A) -> () = dict_entry 4 from %p0
+    %r3: *((&mut A) -> ()) = dict_entry 4 from %p0
     drop A %r0 via %r3
     ret
 
@@ -2315,9 +2362,9 @@ fn reassign_generic() {
   @c0: () = ()
   b0:
     %r0: *A = alloca A using %p0
-    %r1: *(A) -> A = dict_entry 3 from %p0
+    %r1: *((A) -> A) = dict_entry 3 from %p0
     clone A %p2 to %r0 via %r1
-    %r2: *(&mut A) -> () = dict_entry 4 from %p0
+    %r2: *((&mut A) -> ()) = dict_entry 4 from %p0
     drop A %p1 via %r2
     move %r0 to %p1 using %p0
     store @c0 to %p3

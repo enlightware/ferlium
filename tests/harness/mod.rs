@@ -512,11 +512,11 @@ macro_rules! assert_val_eq {
     }};
 }
 
-/// Normalizes the *module id* of a MIR dictionary operand `dict(m<number>:i<number>)` — and
-/// likewise a subscript operand `subscript(m<number>:s<number>)` — to `dict(m<...>:i<number>)`:
-/// the module id is assigned by module load order (so it shifts as the std prelude grows), whereas
-/// the trailing impl/subscript id is an index within a fixed module and stays deterministic, so it
-/// is preserved.
+/// Normalizes the *module id* of a MIR dictionary operand `dict(m<number>:i<number>)` — and of the
+/// raw `subscript(m<number>:s<number>)` fallback used when a malformed/unavailable subscript cannot
+/// be named — to `dict(m<...>:i<number>)`: the module id is assigned by module load order (so it
+/// shifts as the std prelude grows), whereas the trailing impl/subscript id is an index within a
+/// fixed module and stays deterministic, so it is preserved.
 ///
 /// Trait-impl method names used to embed non-deterministic interned ids (e.g. `Num<0-6>`); these
 /// are now fully-qualified type names plus a deterministic `#impl:<hash>` head hash (see

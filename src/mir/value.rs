@@ -128,6 +128,28 @@ impl FormatWith<ModuleEnv<'_>> for Value {
                     .unwrap_or_else(|| format!("#{}", id.module));
                 write!(f, "{module_name}::{function}")
             }
+            Value::Subscript(id) => {
+                let Some(module) = env.module_by_id(id.module) else {
+                    return fmt::Display::fmt(self, f);
+                };
+                let qualified_names = QualifiedNameEnv::new_from_module(module, env.modules);
+                let readable_name = module
+                    .get_subscript_name_by_id(id.subscript)
+                    .map(|name| name.to_string())
+                    .or_else(|| {
+                        module
+                            .get_projection_key_by_subscript_id(id.subscript)
+                            .map(|key| qualified_names.qualified_projection_subscript_name(key))
+                    });
+                match readable_name {
+                    Some(name) => write!(
+                        f,
+                        "subscript({})",
+                        qualified_names.fully_qualified_subscript_name(id.module, &name)
+                    ),
+                    None => fmt::Display::fmt(self, f),
+                }
+            }
             _ => fmt::Display::fmt(self, f),
         }
     }

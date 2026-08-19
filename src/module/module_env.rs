@@ -436,6 +436,15 @@ impl<'m> QualifiedNameEnv<'m> {
         format!("{receiver}.{}", key.field)
     }
 
+    /// Qualifies a readable subscript name with the module that owns its symbolic MIR identity.
+    pub(crate) fn fully_qualified_subscript_name(
+        &self,
+        module_id: ModuleId,
+        readable_name: &str,
+    ) -> String {
+        format!("{}::{readable_name}", self.format_module_prefix(module_id))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn disambiguated_impl_method_name(
         &self,

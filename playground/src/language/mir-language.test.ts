@@ -116,4 +116,17 @@ describe("MIR language highlighting", () => {
 			["<test>::$lambda$1", "tok-variableName"],
 		]));
 	});
+
+	it("highlights symbolic evidence operands as single names", () => {
+		const subscript = "subscript(ide::{ x: std::int, y: std::int }.y)";
+		const dictionary = "dict(std::Num<std::int>)";
+		const nestedDictionary = "dict(std::Value<(std::int) -> std::int>)";
+		const source = `    call ide::l2(${subscript}, ${dictionary}, ${nestedDictionary}, %r0)`;
+
+		const tokens = highlightedTokens(source);
+		expect(tokens).toContainEqual([subscript, "tok-variableName"]);
+		expect(tokens).toContainEqual([dictionary, "tok-variableName"]);
+		expect(tokens).toContainEqual([nestedDictionary, "tok-variableName"]);
+		expect(tokens).not.toContainEqual(["int", "tok-typeName"]);
+	});
 });
