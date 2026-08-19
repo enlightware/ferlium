@@ -517,6 +517,14 @@ impl Operation {
 
     /// Creates an `extract_tag` operation, which reads the tag of the variant at the `variant`
     /// place and yields it as an `int` register (matching the HIR interpreter's tag encoding).
+    ///
+    /// The result is the *semantic* tag — the session-local interned identity a `VariantTag` pattern
+    /// compares against — not the raw ABI field. The canonical layout stores a `u32` whose high bit
+    /// records indirect payload storage (see `doc/abi.md`), so a backend reading that field owes the
+    /// mask and the widening to `int`. The reference interpreter keeps the tag symbolically and
+    /// interns it here, so the two never diverge; a concrete backend must arrange that itself. The
+    /// identity always fits 31 bits, which `CompilerSession::variant_tag_id` asserts, so the widened
+    /// value is non-negative on a 32-bit target too.
     pub fn extract_tag(span: Location, variant: mir::Value) -> Self {
         Operation {
             result_id: None,
