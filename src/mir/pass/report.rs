@@ -230,6 +230,9 @@ pub(crate) fn build(
     let mut call_sites_after = 0usize;
     let mut remarks = Vec::new();
     let known_callees = KnownCallees::new(session.raw_modules());
+    let string_functions = super::string_accumulate::StringFunctions::resolve(env);
+    let string_materializer =
+        fold::StringMaterializer::resolve(env, string_functions.static_constructor());
     let original_of = |callee: FunctionId| {
         if callee.module != module_id {
             return None;
@@ -262,9 +265,13 @@ pub(crate) fn build(
         let mut refusals = Vec::new();
         let plan = fold::plan_folds(
             optimized_body,
-            env,
+            fold::FoldResources::new(
+                raw_body.operation_count(),
+                env,
+                module_id,
+                &string_materializer,
+            ),
             session,
-            module_id,
             fold::KnownCallSemantics::new(&known_callees, &original_of),
             &mut Some(&mut refusals),
         );

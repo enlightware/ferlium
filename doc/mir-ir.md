@@ -73,10 +73,13 @@ back as MIR (`src/mir/reify.rs`). Because `@cN` is pinned to a `TrivialCopy` rep
 trivially-copyable leaf, or a tuple or record of those, can be stored directly. An array whose
 elements have such representations can instead be reified as `build_array<A> [@c0, ...] to %dest`:
 the immutable elements remain constants and executing the operation allocates fresh mutable array
-storage. A compile-time `String`, list, variant, closure, or array with non-`TrivialCopy` elements
-still has no reified form (including a `TrivialCopy` variant), so its producing computation remains
-runtime code. Further resource types need either a frozen-prototype representation plus an operation
-to clone it, or dedicated MIR that rebuilds the value from constants the pool can hold.
+storage. A compile-time `string` similarly reifies constructively: its normalized contents enter the
+pool as a `StaticStr`, and `string_from_static` creates a fresh owned string in the destination at
+run time. The text is bounded by the optimizer's per-result reification budget. A list, variant,
+closure, or array with non-`TrivialCopy` elements still has no reified form (including a
+`TrivialCopy` variant), so its producing computation remains runtime code. Further resource types
+need either a frozen-prototype representation plus an operation to clone it, or dedicated MIR that
+rebuilds the value from constants the pool can hold.
 
 A `ValueId` does not say which of these it is. An operand slot may accept more than one role —
 `comp_eq` reads a place *or* a materialized value — and keeping the operand array uniform is what

@@ -23,10 +23,10 @@
 //! zero deliberately excludes `x + 0.0` and `x * 0.0`.
 //!
 //! The rewrite is then local: `call f(a, b, ret)` becomes a store of a constant or captureless
-//! function, or a `build_array` into `ret`. All forms initialize the same slot and none takes
-//! ownership of anything the caller held — argument conventions leave ownership with the caller —
-//! so the surrounding construction/drop scaffolding stays correct while becoming dead. Removing
-//! it is a separate cleanup pass.
+//! function, a `build_array`, or a bounded `StaticStr` plus `string_from_static` construction into
+//! `ret`. All forms initialize the same slot and none takes ownership of anything the caller held —
+//! argument conventions leave ownership with the caller — so the surrounding construction/drop
+//! scaffolding stays correct while becoming dead. Removing it is a separate cleanup pass.
 //!
 //! Folding runs against an immutable function and returns a rewritten one, so the analysis it reads
 //! is never stale with respect to the edits it makes. Within a block, a fold updates the local state
@@ -57,6 +57,7 @@ use crate::{
         array::{array_type, array_value_from_vec},
         math::Float,
         ordering::{ORDERING_EQUAL, ordering_type},
+        string::{static_str_type, string_type},
     },
     types::r#type::{CallImplType, CallResultConvention, Type},
 };
@@ -199,7 +200,70 @@ struct FoldContext<'a> {
     env: ModuleEnv<'a>,
     analysis: Analysis,
     known_calls: KnownCallSemantics<'a>,
+    string_from_static: FunctionId,
     refusal: Option<RefusalContext>,
+}
+
+/// The declared std constructor used by constructive string reification.
+///
+/// Keeping its call type beside its identity makes synthesized calls follow the declaration rather
+/// than duplicating that declaration in the optimizer.
+#[derive(Clone)]
+pub(crate) struct StringMaterializer {
+    function: FunctionId,
+    ty: CallImplType,
+}
+
+impl StringMaterializer {
+    pub(crate) fn resolve(env: ModuleEnv<'_>, function_id: FunctionId) -> Self {
+        let module = env
+            .module_by_id(function_id.module)
+            .expect("the std module is registered before MIR optimization");
+        let function = module
+            .get_function_by_id(function_id.function)
+            .expect("std::string_from_static has a callable definition");
+        let fn_ty = function.definition.ty_scheme.ty.clone();
+        debug_assert!(function.definition.ty_scheme.ty_quantifiers.is_empty());
+        debug_assert!(function.definition.ty_scheme.eff_quantifiers.is_empty());
+        debug_assert!(function.definition.ty_scheme.constraints.is_empty());
+        debug_assert_eq!(function.parameter_passing.as_slice(), [ArgConvention::Let]);
+        debug_assert_eq!(fn_ty.args.len(), 1);
+        debug_assert_eq!(fn_ty.args[0].ty, static_str_type());
+        debug_assert_eq!(fn_ty.ret, string_type());
+        debug_assert_eq!(
+            function.definition.result_convention,
+            CallResultConvention::Value
+        );
+        Self {
+            function: function_id,
+            ty: CallImplType::new(fn_ty, function.definition.result_convention),
+        }
+    }
+}
+
+/// Module-local inputs shared by fold planning and materialization.
+#[derive(Clone, Copy)]
+pub(crate) struct FoldResources<'m, 's> {
+    original_size: usize,
+    env: ModuleEnv<'m>,
+    module_id: ModuleId,
+    string_materializer: &'s StringMaterializer,
+}
+
+impl<'m, 's> FoldResources<'m, 's> {
+    pub(crate) fn new(
+        original_size: usize,
+        env: ModuleEnv<'m>,
+        module_id: ModuleId,
+        string_materializer: &'s StringMaterializer,
+    ) -> Self {
+        Self {
+            original_size,
+            env,
+            module_id,
+            string_materializer,
+        }
+    }
 }
 
 struct RefusalContext {
@@ -238,13 +302,16 @@ pub(crate) struct Folded {
 /// Folds what can be folded in `func`, returning a rewritten function if anything was.
 pub(crate) fn fold_function(
     func: &Function,
+    original_size: usize,
     env: ModuleEnv<'_>,
     session: &CompilerSession,
     module_id: ModuleId,
     known_calls: KnownCallSemantics<'_>,
+    string_materializer: &StringMaterializer,
 ) -> Option<Folded> {
+    let resources = FoldResources::new(original_size, env, module_id, string_materializer);
     let (plan, devirtualizations) =
-        plan_folds_and_devirtualizations(func, env, session, module_id, known_calls);
+        plan_folds_and_devirtualizations(func, resources, session, known_calls);
     if plan.is_empty() && devirtualizations.is_empty() {
         return None;
     }
@@ -263,8 +330,14 @@ pub(crate) fn fold_function(
     for fold in plan.calls.into_iter().rev() {
         let index = fold.index.as_index();
         let span = edit.block(fold.block).operations[index].span;
-        let replacements =
-            materialize_call_rewrite(&mut edit, span, fold.result, fold.destination, env);
+        let replacements = materialize_call_rewrite(
+            &mut edit,
+            span,
+            fold.result,
+            fold.destination,
+            env,
+            string_materializer,
+        );
         edit.block_mut(fold.block)
             .operations
             .splice(index..=index, replacements);
@@ -274,10 +347,16 @@ pub(crate) fn fold_function(
         // The call becomes an ordinary store at the end of the block, and the terminator loses its
         // error edge: an evaluated call cannot fail. Appending keeps the indices the operation
         // folds above were planned against.
-        let replacement =
-            materialize_reification(&mut edit, span, invoke.result, invoke.destination, env);
+        let replacements = materialize_reification(
+            &mut edit,
+            span,
+            invoke.result,
+            invoke.destination,
+            env,
+            string_materializer,
+        );
         let block = edit.block_mut(invoke.block);
-        block.operations.push(replacement);
+        block.operations.extend(replacements);
         block.terminator = Terminator::goto(span, invoke.normal);
     }
     for (block, target) in plan.branches {
@@ -345,17 +424,17 @@ fn materialize_call_rewrite(
     rewrite: CallRewrite,
     destination: mir::Value,
     env: ModuleEnv<'_>,
+    string_materializer: &StringMaterializer,
 ) -> Vec<Operation> {
     match rewrite {
-        CallRewrite::Reification(reification) => {
-            vec![materialize_reification(
-                edit,
-                span,
-                reification,
-                destination,
-                env,
-            )]
-        }
+        CallRewrite::Reification(reification) => materialize_reification(
+            edit,
+            span,
+            reification,
+            destination,
+            env,
+            string_materializer,
+        ),
         CallRewrite::Copy(source) => vec![Operation::memcpy(span, source, destination)],
         CallRewrite::Negate(source) => {
             let mut comparison = Operation::compare_eq(
@@ -388,18 +467,23 @@ fn materialize_call_rewrite(
     }
 }
 
-/// Turns a compile-time result into the one MIR operation that initializes its destination.
+/// Turns a compile-time result into the MIR operations that initialize its destination.
 fn materialize_reification(
     edit: &mut FunctionEdit,
     span: Location,
     reification: Reification,
     destination: mir::Value,
     env: ModuleEnv<'_>,
-) -> Operation {
+    string_materializer: &StringMaterializer,
+) -> Vec<Operation> {
     match reification {
         Reification::Constant(constant) => {
             let id = edit.add_constant(constant.ty, constant.representation, &env);
-            Operation::store(span, mir::Value::Constant(id), destination)
+            vec![Operation::store(
+                span,
+                mir::Value::Constant(id),
+                destination,
+            )]
         }
         Reification::Array {
             element_ty,
@@ -409,12 +493,74 @@ fn materialize_reification(
                 let id = edit.add_constant(element_ty, representation, &env);
                 mir::Value::Constant(id)
             });
-            Operation::build_array(span, element_ty, elements, destination)
+            vec![Operation::build_array(
+                span,
+                element_ty,
+                elements,
+                destination,
+            )]
         }
         Reification::BareFunction(function) => {
-            Operation::store(span, mir::Value::Function(function), destination)
+            vec![Operation::store(
+                span,
+                mir::Value::Function(function),
+                destination,
+            )]
+        }
+        Reification::String(text) => {
+            let constant =
+                edit.add_constant(static_str_type(), LiteralValue::new_native(text), &env);
+            let text_place = edit.new_value();
+            let mut alloca = Operation::alloca(span, static_str_type());
+            alloca.assign_result_id(Some(text_place));
+            vec![
+                alloca,
+                Operation::store(
+                    span,
+                    mir::Value::Constant(constant),
+                    mir::Value::Register(text_place),
+                ),
+                Operation::call(
+                    span,
+                    mir::Value::Function(string_materializer.function),
+                    [mir::Value::Register(text_place), destination],
+                    string_materializer.ty.clone(),
+                ),
+            ]
         }
     }
+}
+
+fn reification_operation_count(reification: &Reification) -> usize {
+    match reification {
+        Reification::Constant(_) | Reification::Array { .. } | Reification::BareFunction(_) => 1,
+        Reification::String(_) => 3,
+    }
+}
+
+fn call_rewrite_operation_count(rewrite: &CallRewrite) -> usize {
+    match rewrite {
+        CallRewrite::Reification(reification) => reification_operation_count(reification),
+        CallRewrite::Copy(_) => 1,
+        CallRewrite::EqualOrdering | CallRewrite::Negate(_) => 2,
+    }
+}
+
+/// Reserves the structural growth of one planned rewrite against the same whole-function budget
+/// used by inlining. Cleanup may later make the rewrite net-shrinking, but relying on that would
+/// make the documented bound empirical rather than guaranteed by construction.
+fn reserve_growth(
+    planned_size: &mut usize,
+    removed: usize,
+    added: usize,
+    original_size: usize,
+) -> bool {
+    let next = planned_size.saturating_sub(removed).saturating_add(added);
+    if next > original_size + super::budget::INLINE_FUNCTION_GROWTH {
+        return false;
+    }
+    *planned_size = next;
+    true
 }
 
 /// Names callees resolved through constant dictionary entries after the optimization round budget
@@ -444,21 +590,12 @@ pub(crate) fn devirtualize_known_callees(func: &Function, env: ModuleEnv<'_>) ->
 /// runs this over an already-optimized body precisely so its answers cannot drift from the pass's.
 pub(crate) fn plan_folds(
     func: &Function,
-    env: ModuleEnv<'_>,
+    resources: FoldResources<'_, '_>,
     session: &CompilerSession,
-    module_id: ModuleId,
     known_calls: KnownCallSemantics<'_>,
     refusals: &mut Option<&mut Vec<Refusal>>,
 ) -> Plan {
-    plan_folds_with(
-        func,
-        env,
-        session,
-        module_id,
-        known_calls,
-        refusals,
-        &mut None,
-    )
+    plan_folds_with(func, resources, session, known_calls, refusals, &mut None)
 }
 
 /// Plans folds and devirtualizations in one walk.
@@ -473,17 +610,15 @@ pub(crate) fn plan_folds(
 /// What it must not do is claim a *round*: see [`Folded::warrants_another_round`].
 fn plan_folds_and_devirtualizations(
     func: &Function,
-    env: ModuleEnv<'_>,
+    resources: FoldResources<'_, '_>,
     session: &CompilerSession,
-    module_id: ModuleId,
     known_calls: KnownCallSemantics<'_>,
 ) -> (Plan, Vec<Devirtualization>) {
     let mut devirtualizations = Vec::new();
     let plan = plan_folds_with(
         func,
-        env,
+        resources,
         session,
-        module_id,
         known_calls,
         &mut None,
         &mut Some(&mut devirtualizations),
@@ -574,13 +709,18 @@ fn apply_devirtualizations(edit: &mut FunctionEdit, devirtualizations: Vec<Devir
 
 fn plan_folds_with(
     func: &Function,
-    env: ModuleEnv<'_>,
+    resources: FoldResources<'_, '_>,
     session: &CompilerSession,
-    module_id: ModuleId,
     known_calls: KnownCallSemantics<'_>,
     refusals: &mut Option<&mut Vec<Refusal>>,
     devirtualizations: &mut Option<&mut Vec<Devirtualization>>,
 ) -> Plan {
+    let FoldResources {
+        original_size,
+        env,
+        module_id,
+        string_materializer,
+    } = resources;
     // A report pays one scan for detailed classification; normal optimization carries none of this
     // provenance and does not classify unknown arguments it will not report.
     let refusal = refusals.is_some().then(|| RefusalContext {
@@ -591,10 +731,12 @@ fn plan_folds_with(
         env,
         analysis: dataflow::analyze(func, env),
         known_calls,
+        string_from_static: string_materializer.function,
         refusal,
     };
     let analysis = &context.analysis;
     let mut plan = Plan::default();
+    let mut planned_size = func.operation_count();
 
     for block in func.blocks() {
         // Stepping from the block's entry state, rather than only reading it, lets a fold teach the
@@ -610,20 +752,33 @@ fn plan_folds_with(
                             .map(CallRewrite::Reification)
                     })
             {
-                let destination = call.result.clone();
-                // Only a rewrite that produced a value the next round can reason about buys one.
-                plan.warrants_another_round |= yields_known_value(&result, &state, analysis);
-                if let Some(place) = analysis.tracked_place_of(&destination) {
-                    let fact = fact_for_call_rewrite(&result, &state, analysis);
-                    analysis.set_place_known(&mut state, place, fact);
+                if reserve_growth(
+                    &mut planned_size,
+                    1,
+                    call_rewrite_operation_count(&result),
+                    original_size,
+                ) {
+                    let destination = call.result.clone();
+                    // Only a rewrite that produced a value the next round can reason about buys
+                    // one.
+                    plan.warrants_another_round |= yields_known_value(&result, &state, analysis);
+                    if let Some(place) = analysis.tracked_place_of(&destination) {
+                        let fact = fact_for_call_rewrite(&result, &state, analysis);
+                        analysis.set_place_known(&mut state, place, fact);
+                    }
+                    plan.calls.push(Fold {
+                        block,
+                        index: OperationIndex::from_index(index),
+                        destination,
+                        result,
+                    });
+                    continue;
                 }
-                plan.calls.push(Fold {
-                    block,
-                    index: OperationIndex::from_index(index),
-                    destination,
-                    result,
-                });
-                continue;
+                record_refusal(
+                    operation,
+                    NotFoldable::FunctionGrowthBudgetExceeded,
+                    refusals,
+                );
             }
             if let Some(devirtualizations) = devirtualizations.as_mut()
                 && let Some((operand, callee)) = resolved_callee(operation, &state, analysis)
@@ -664,15 +819,29 @@ fn plan_folds_with(
                     && let Some(result) = fold_outcome(operation, ty, &state, &context, refusals)
                     && let Some(call) = dataflow::call_operands(&operation.operands, ty)
                 {
-                    // An evaluated fallible call yields a constant and removes an error edge.
-                    plan.warrants_another_round = true;
-                    plan.invokes.push(InvokeFold {
-                        block,
-                        destination: call.result.clone(),
-                        result,
-                        normal: *normal,
-                    });
-                } else if let Some(devirtualizations) = devirtualizations.as_mut()
+                    if reserve_growth(
+                        &mut planned_size,
+                        0,
+                        reification_operation_count(&result),
+                        original_size,
+                    ) {
+                        // An evaluated fallible call yields a constant and removes an error edge.
+                        plan.warrants_another_round = true;
+                        plan.invokes.push(InvokeFold {
+                            block,
+                            destination: call.result.clone(),
+                            result,
+                            normal: *normal,
+                        });
+                        continue;
+                    }
+                    record_refusal(
+                        operation,
+                        NotFoldable::FunctionGrowthBudgetExceeded,
+                        refusals,
+                    );
+                }
+                if let Some(devirtualizations) = devirtualizations.as_mut()
                     && let Some((operand, callee)) = resolved_callee(operation, &state, analysis)
                 {
                     devirtualizations.push(Devirtualization {
@@ -715,6 +884,9 @@ fn yields_known_value(rewrite: &CallRewrite, state: &State, analysis: &Analysis)
             Reification::Constant(_) | Reification::BareFunction(_) | Reification::Array { .. },
         )
         | CallRewrite::EqualOrdering => true,
+        // A constructed string is deliberately unknown to the literal dataflow. Its constructor
+        // is terminal, and the final string pass can fuse it directly into a static append.
+        CallRewrite::Reification(Reification::String(_)) => false,
         // Negation reproduces an argument the analysis already did not know.
         CallRewrite::Negate(_) => false,
         CallRewrite::Copy(source) => analysis
@@ -937,18 +1109,26 @@ fn fold_outcome(
     match try_fold_call(operation, ty, state, context) {
         Ok(constant) => Some(constant),
         Err(reason) => {
-            if let Some(refusals) = refusals {
-                refusals.push(Refusal {
-                    site: operation.span,
-                    callee: match &operation.operands[0] {
-                        mir::Value::Function(id) => Some(*id),
-                        _ => None,
-                    },
-                    reason,
-                });
-            }
+            record_refusal(operation, reason, refusals);
             None
         }
+    }
+}
+
+fn record_refusal(
+    operation: &Operation,
+    reason: NotFoldable,
+    refusals: &mut Option<&mut Vec<Refusal>>,
+) {
+    if let Some(refusals) = refusals {
+        refusals.push(Refusal {
+            site: operation.span,
+            callee: match &operation.operands[0] {
+                mir::Value::Function(id) => Some(*id),
+                _ => None,
+            },
+            reason,
+        });
     }
 }
 
@@ -965,6 +1145,8 @@ fn fact_for_reification(reification: &Reification) -> Fact {
             elements: elements.clone(),
         }),
         Reification::BareFunction(function) => Fact::Known(Const::Function(*function)),
+        // Owned strings are not constants: the recipe constructs a fresh value at run time.
+        Reification::String(_) => Fact::Unknown,
     }
 }
 
@@ -1095,6 +1277,13 @@ fn try_fold_call(
         },
     };
 
+    // Constructive string reification ends in this call. Evaluating it would produce the same
+    // `StaticStr` plus `string_from_static` sequence again, so it is the fixed point rather than a
+    // fold candidate.
+    if callee == context.string_from_static {
+        return Err(NotFoldable::ConstructiveMaterializer);
+    }
+
     let mut arguments = Vec::with_capacity(call.extras.len() + call.arguments.len());
     for extra in call.extras {
         match extra {
@@ -1108,6 +1297,13 @@ fn try_fold_call(
         // be reified too.
         if !matches!(convention, ArgConvention::Let) {
             return discard(arguments, NotFoldable::MutableArgument);
+        }
+        // Unit has exactly one initialized value. A projection from an otherwise unknown
+        // parameter therefore carries all the information compile-time evaluation needs, even
+        // though the place dataflow quite correctly knows nothing about its containing aggregate.
+        if parameter.ty == Type::unit() {
+            arguments.push(ConstArgument::Value(crate::hir::value::Value::unit()));
+            continue;
         }
         let known = context
             .analysis
@@ -1180,6 +1376,30 @@ fn discard(arguments: Vec<ConstArgument>, reason: NotFoldable) -> Result<Reifica
 #[cfg(test)]
 mod tests {
     use crate::{CompilerSession, MirOptimization};
+
+    #[test]
+    fn constructive_folds_reserve_the_whole_function_growth_budget() {
+        let original_size = 10;
+        let mut planned_size = original_size;
+        for _ in 0..64 {
+            assert!(super::reserve_growth(
+                &mut planned_size,
+                1,
+                3,
+                original_size
+            ));
+        }
+        assert_eq!(
+            planned_size,
+            original_size + super::super::budget::INLINE_FUNCTION_GROWTH
+        );
+        assert!(!super::reserve_growth(
+            &mut planned_size,
+            1,
+            3,
+            original_size
+        ));
+    }
 
     fn optimized_function<'a>(module: &'a str, name: &str) -> &'a str {
         module

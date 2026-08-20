@@ -6,7 +6,12 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 
-//! Ownership forwarding for self-prefixed string accumulation.
+//! Local ownership and construction rewrites for string builders.
+//!
+//! An owned string literal or compile-time result materializes as `StaticStr` plus
+//! `string_from_static`, since the constant pool cannot own mutable-semantics resources. When that
+//! fresh string is immediately appended and dropped, this module retargets the append to
+//! `string_push_static_str` and removes the unnecessary materialization.
 //!
 //! Formatting `out = f"{out}{suffix}"` lowers through an empty builder: render `out` into a
 //! temporary string, append that complete snapshot to the builder, append the suffix, then replace
@@ -30,6 +35,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use ustr::ustr;
 
 use crate::{
+    containers::b,
     mir::{self, BlockId, Function, Operation, OperationKind, edit::FunctionEdit, value::ValueId},
     module::{ConcreteTraitImplKey, FunctionId, ModuleEnv, id::Id},
     std::{
@@ -162,6 +168,10 @@ impl StringFunctions {
             ),
         }
     }
+
+    pub(crate) fn static_constructor(self) -> FunctionId {
+        self.from_static
+    }
 }
 
 /// Calls which can begin the exact empty-builder sequence this pass recognizes.
@@ -182,6 +192,131 @@ fn candidate_initializations(func: &Function, from_static: FunctionId) -> Vec<Op
         }
     }
     candidates
+}
+
+#[derive(Clone, Copy)]
+struct StaticAppend {
+    materialization: OperationSite,
+    push: OperationSite,
+    drop: OperationSite,
+    text: ValueId,
+}
+
+/// Fuses a constructively reified string which is immediately appended and discarded.
+///
+/// The result place must be a fresh local with exactly three uses: the materializing call writes
+/// it, `string_push_str` reads it, and its concrete `Value<string>::drop` ends it. Keeping all three
+/// in one block makes replacing the sequence independent of control-flow and cleanup reasoning.
+pub(crate) fn fuse_static_string_appends(
+    func: &Function,
+    functions: StringFunctions,
+) -> Option<Function> {
+    let candidates = candidate_initializations(func, functions.from_static);
+    if candidates.is_empty() {
+        return None;
+    }
+    let census = Census::new(func);
+    let fusions: Vec<StaticAppend> = candidates
+        .into_iter()
+        .filter_map(|site| plan_static_append(func, &census, functions, site))
+        .collect();
+    if fusions.is_empty() {
+        return None;
+    }
+
+    let mut replacements = FxHashMap::default();
+    let mut removals: FxHashMap<BlockId, FxHashSet<OperationIndex>> = FxHashMap::default();
+    for fusion in fusions {
+        let mut push =
+            func.block(fusion.push.block).operations()[fusion.push.index.as_index()].clone();
+        push.operands[0] = mir::Value::Function(functions.push_static);
+        push.operands[2] = mir::Value::Register(fusion.text);
+        let OperationKind::Call { ty, metadata } = &mut push.kind else {
+            unreachable!("a planned string append is a call")
+        };
+        // Ownership forwarding runs after this pass. A masked call could carry callee-specific
+        // argument metadata which retargeting must not preserve.
+        debug_assert!(metadata.is_none());
+        let mut rewritten_ty = (**ty).clone();
+        debug_assert_eq!(rewritten_ty.fn_ty.args.len(), 2);
+        debug_assert_eq!(rewritten_ty.fn_ty.args[0].ty, string_type());
+        debug_assert_eq!(rewritten_ty.fn_ty.args[1].ty, string_type());
+        debug_assert_eq!(rewritten_ty.fn_ty.ret, Type::unit());
+        rewritten_ty.fn_ty.args[1].ty = crate::std::string::static_str_type();
+        *ty = b(rewritten_ty);
+        replacements.insert(fusion.push, push);
+        removals
+            .entry(fusion.materialization.block)
+            .or_default()
+            .insert(fusion.materialization.index);
+        removals
+            .entry(fusion.drop.block)
+            .or_default()
+            .insert(fusion.drop.index);
+    }
+
+    Some(apply_site_edits(func, replacements, &removals))
+}
+
+fn plan_static_append(
+    func: &Function,
+    census: &Census,
+    functions: StringFunctions,
+    materialization: OperationSite,
+) -> Option<StaticAppend> {
+    let operation =
+        &func.block(materialization.block).operations()[materialization.index.as_index()];
+    let [
+        mir::Value::Function(_),
+        mir::Value::Register(text),
+        mir::Value::Register(rendered),
+    ] = operation.operands.as_ref()
+    else {
+        return None;
+    };
+    if !census.is_local_alloca(*text, crate::std::string::static_str_type())
+        || !census.is_local_alloca(*rendered, string_type())
+        || static_initialization(func, census, *text, materialization).is_none()
+    {
+        return None;
+    }
+
+    let uses = census.uses.get(rendered)?;
+    if uses.len() != 3 || !uses.contains(&operation_use(materialization, 2)) {
+        return None;
+    }
+    let mut push = None;
+    let mut drop = None;
+    for use_site in uses {
+        let UseSite::Operation { site, operand } = *use_site else {
+            return None;
+        };
+        let candidate = &func.block(site.block).operations()[site.index.as_index()];
+        if operand == 2
+            && is_direct_call(candidate, functions.push)
+            && candidate.operands.get(2) == Some(&mir::Value::Register(*rendered))
+        {
+            push = Some(site);
+        } else if operand == 0 && is_string_drop(candidate, functions.drop, *rendered) {
+            drop = Some(site);
+        } else if site != materialization || operand != 2 {
+            return None;
+        }
+    }
+    let (push, drop) = (push?, drop?);
+    if push.block != materialization.block
+        || drop.block != materialization.block
+        || materialization.index.as_index() >= push.index.as_index()
+        || push.index.as_index() >= drop.index.as_index()
+    {
+        return None;
+    }
+    Some(StaticAppend {
+        materialization,
+        push,
+        drop,
+        text: *text,
+    })
 }
 
 struct Forward {
@@ -256,28 +391,37 @@ pub(crate) fn forward_string_accumulation(
         ]);
     }
 
+    Some(apply_site_edits(func, replacements, &removals))
+}
+
+/// Applies replacements and removals planned against the same immutable operation indices.
+fn apply_site_edits(
+    func: &Function,
+    mut replacements: FxHashMap<OperationSite, Operation>,
+    removals: &FxHashMap<BlockId, FxHashSet<OperationIndex>>,
+) -> Function {
     let mut edit = FunctionEdit::new(func.clone());
     for block in func.blocks() {
         let mut index = 0;
         edit.block_mut(block).operations.retain_mut(|operation| {
-            let operation_index = OperationIndex::from_index(index);
+            let site = OperationSite {
+                block,
+                index: OperationIndex::from_index(index),
+            };
             index += 1;
             if removals
                 .get(&block)
-                .is_some_and(|indices| indices.contains(&operation_index))
+                .is_some_and(|indices| indices.contains(&site.index))
             {
                 return false;
             }
-            if let Some(replacement) = replacements.remove(&OperationSite {
-                block,
-                index: operation_index,
-            }) {
+            if let Some(replacement) = replacements.remove(&site) {
                 *operation = replacement;
             }
             true
         });
     }
-    Some(edit.finish_unverified())
+    edit.finish_unverified()
 }
 
 fn plan_forward(
@@ -493,9 +637,20 @@ fn is_empty_static_initialization(
     place: ValueId,
     materialization: OperationSite,
 ) -> bool {
-    let Some(uses) = census.uses.get(&place) else {
-        return false;
-    };
+    static_initialization(func, census, place, materialization)
+        .is_some_and(|value| value.as_str().is_empty())
+}
+
+/// Returns the immutable text stored into `place` when that initialization and the materializing
+/// call are its only uses. Besides identifying the constructive recipe, the exact-use proof rules
+/// out a reassignment between construction and a later rewrite which reuses the place.
+fn static_initialization(
+    func: &Function,
+    census: &Census,
+    place: ValueId,
+    materialization: OperationSite,
+) -> Option<StaticStr> {
+    let uses = census.uses.get(&place)?;
     let [
         UseSite::Operation {
             site: store,
@@ -504,26 +659,26 @@ fn is_empty_static_initialization(
         materialization_use,
     ] = uses.as_slice()
     else {
-        return false;
+        return None;
     };
     if *materialization_use != operation_use(materialization, 1)
         || store.block != materialization.block
         || store.index.as_index() >= materialization.index.as_index()
     {
-        return false;
+        return None;
     }
     let operation = &func.block(store.block).operations()[store.index.as_index()];
     let [mir::Value::Constant(id), mir::Value::Register(destination)] = operation.operands.as_ref()
     else {
-        return false;
+        return None;
     };
-    matches!(operation.kind, OperationKind::Store)
-        && *destination == place
-        && func
-            .constant(*id)
-            .representation
-            .as_primitive_ty::<StaticStr>()
-            .is_some_and(|value| value.as_str().is_empty())
+    if !matches!(operation.kind, OperationKind::Store) || *destination != place {
+        return None;
+    }
+    func.constant(*id)
+        .representation
+        .as_primitive_ty::<StaticStr>()
+        .copied()
 }
 
 fn is_direct_call(operation: &Operation, callee: FunctionId) -> bool {
@@ -583,6 +738,53 @@ mod tests {
 
     fn count(body: &str, needle: &str) -> usize {
         body.matches(needle).count()
+    }
+
+    #[test]
+    fn fuses_a_literal_string_used_only_as_an_append() {
+        let module = optimized(
+            "fn append(mut out: string) -> string { string_push_str(out, \"abc\"); out }",
+        );
+        let body = body_of(&module, "append");
+        assert!(
+            body.contains("call std::string_push_static_str"),
+            "the literal should append directly from its StaticStr:\n{body}"
+        );
+        assert!(
+            !body.contains("call std::string_from_static")
+                && !body.contains("call std::string_push_str"),
+            "the owned literal temporary should disappear:\n{body}"
+        );
+    }
+
+    #[test]
+    fn keeps_an_appended_literal_which_also_escapes() {
+        let module = optimized(
+            "fn append(mut out: string) -> (string, string) { \
+             let suffix = \"abc\"; string_push_str(out, suffix); (out, suffix) }",
+        );
+        let body = body_of(&module, "append");
+        assert!(
+            body.contains("call std::string_from_static")
+                && body.contains("call std::string_push_str")
+                && !body.contains("call std::string_push_static_str"),
+            "an escaping owned string must retain its materialization and ordinary append:\n{body}"
+        );
+    }
+
+    #[test]
+    fn keeps_a_literal_append_in_another_block() {
+        let module = optimized(
+            "fn append(mut out: string, enabled: bool) -> string { \
+             let suffix = \"abc\"; if enabled { string_push_str(out, suffix); }; out }",
+        );
+        let body = body_of(&module, "append");
+        assert!(
+            body.contains("call std::string_from_static")
+                && body.contains("call std::string_push_str")
+                && !body.contains("call std::string_push_static_str"),
+            "cross-block construction and append must not be fused:\n{body}"
+        );
     }
 
     #[test]

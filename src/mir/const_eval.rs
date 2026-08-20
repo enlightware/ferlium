@@ -125,12 +125,21 @@ pub(crate) enum NotFoldable {
     RoundsExhausted,
     /// The call was evaluated, but its result cannot be expressed as MIR. Raised by
     /// [`reify`](crate::mir::reify::reify) rather than by the evaluator: today the constant pool
-    /// holds only trivially-copyable representations, so a folded `String`, list, variant, or
-    /// closure has nowhere to go.
+    /// holds only trivially-copyable representations, so a folded list, variant, or closure has
+    /// nowhere to go. Strings and arrays have dedicated constructive forms.
     ///
     /// Worth reporting separately from the engine-level refusals: how often it occurs is what
     /// decides whether that phase is worth doing.
     NotReifiable,
+    /// The result has a constructive MIR form, but its immutable recipe would exceed the
+    /// compile-time size budget. Currently used for strings embedded as `StaticStr` data.
+    ReificationBudgetExceeded,
+    /// Evaluating the call would reproduce the same constructive operation already present in
+    /// MIR. Folding it would make no progress and could otherwise repeat on every optimization
+    /// round.
+    ConstructiveMaterializer,
+    /// Materializing the result would exceed the caller's whole-function MIR growth budget.
+    FunctionGrowthBudgetExceeded,
 }
 
 impl NotFoldable {
@@ -159,6 +168,9 @@ impl NotFoldable {
             Self::UnitResult => "call produces no value",
             Self::RoundsExhausted => "optimization rounds exhausted",
             Self::NotReifiable => "result cannot be expressed as a constant",
+            Self::ReificationBudgetExceeded => "result exceeds the reification size budget",
+            Self::ConstructiveMaterializer => "call materializes a constructive result",
+            Self::FunctionGrowthBudgetExceeded => "function growth budget exhausted",
         }
     }
 }
@@ -623,11 +635,11 @@ mod tests {
         result.discard_storage();
     }
 
-    /// The same call site shape with a heap result: it evaluates, and reification is what refuses.
-    /// Reifying non-trivial values is what would lift this.
+    /// A heap result evaluates into an owned value, then reifies as immutable text plus a fresh
+    /// run-time construction rather than entering the constant pool itself.
     #[test]
-    fn a_folded_string_result_is_not_reifiable() {
-        use crate::mir::reify::is_reifiable;
+    fn a_folded_string_result_reifies_constructively() {
+        use crate::mir::reify::{Reification, reify};
 
         let mut session = CompilerSession::new();
         let module = compile(
@@ -657,7 +669,10 @@ mod tests {
         let env = session
             .modules()
             .env_for(session.expect_fresh_module(module));
-        assert!(!is_reifiable(&result, concat.ty.ret(), &env));
+        match reify(&result, concat.ty.ret(), &env) {
+            Ok(Reification::String(text)) => assert_eq!(text.as_str(), "abcd"),
+            other => panic!("a known string must reify constructively, got {other:?}"),
+        }
         result.discard_storage();
     }
 

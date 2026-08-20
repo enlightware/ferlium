@@ -43,7 +43,7 @@ copy forward      // catch trivial-copy storage exposed after the last round
 branch forward    // bypass booleans stored in branch arms only to control a second branch
 peephole          // collapse small local CFG/value patterns
 negation          // test a boolean where it is computed, inverting the branch when negated
-string accumulate // forward an overwritten string into its self-prefixed format builder
+string rewrites   // fuse static construction into appends; forward self-prefixed builders
 devirtualize      // final dictionary-entry callees exposed too late for a fold round
 bounds checks     // prove array indices in range and remove checked access/failure edges
 LICM              // hoist invariant pure direct calls with passive inputs and copyable results
@@ -136,9 +136,15 @@ argument place holds a known literal, captureless function or constructive array
 operand is a constant dictionary, the effects and result convention permit compile-time evaluation,
 and the result can be reified as MIR. `call f(a, b, ret)` becomes `store @cN to ret` for an immediate
 result, `store function to ret` for a captureless function, or `build_array` directly into `ret` for
-an array of `TrivialCopy` elements. A capturing closure cannot be named by a bare function operand
-without losing its environment and remains a runtime call. The surrounding scaffolding is left
-correct but dead for `dce`.
+an array of `TrivialCopy` elements. An owned string becomes a bounded `StaticStr` constant plus the
+terminal `string_from_static` call that constructs a fresh value in `ret`; that constructor is not
+itself folded back into the same recipe. A capturing closure cannot be named by a bare function
+operand without losing its environment and remains a runtime call. The surrounding scaffolding is
+left correct but dead for `dce`.
+
+Unit arguments are the one case that needs no place fact: every initialized value of type `()` is
+the same literal. This lets a native call such as `Value<()>::to_string` fold even when its operand
+is a field projected from an otherwise unknown aggregate parameter.
 
 Two entries need no known argument at all. `Num<int>::from_int` is the conversion every integer
 literal is desugared into, and at `int` it converts nothing, so the call becomes a copy of its
@@ -568,7 +574,16 @@ passed, since a condition must be one; it therefore stops short of a negation wh
 place, such as the `not` of a short-circuit `and`, which would need its own proof that the place is
 unwritten between the two sites.
 
-## String accumulation forwarding
+## String construction and accumulation rewrites
+
+A constructively reified string initially has the general-purpose shape
+`string_from_static(text, temporary)`, followed by whatever consumes the owned result. When its
+only consumer appends it to a builder and then drops it, `mir::pass::string_accumulate` retargets
+`string_push_str(builder, temporary)` to `string_push_static_str(builder, text)` and removes both
+the construction and drop. The proof requires fresh local `StaticStr` and `string` storage, exactly
+those three uses of the owned temporary, and one block in construction-before-append-before-drop
+order. If the temporary escapes or participates in control flow, the pass declines the rewrite and
+leaves its fresh-string semantics explicit.
 
 `mir::pass::string_accumulate` removes the growing-prefix copy in a self-prefixed formatted-string
 assignment such as `out = f"{out}{suffix}"`. Lowering ordinarily constructs an empty string, renders
@@ -805,11 +820,14 @@ the inlining limits by name.
 | `MAX_ROUNDS` | 4 | the driver's outer loop |
 | `INLINE_CALLEE_OPERATIONS` | 32 | the largest callee inlining will copy |
 | `INLINE_FUNCTION_GROWTH` | 128 | growth beyond the size a function had *before* optimization |
+| `REIFIED_STRING_BYTES` | 64 KiB | immutable text embedded by one constructive string result |
 | `specialization_limit` | `max(512, 4 × declared MIR bodies)` | specializations per module, against the cascade |
 | `owned_argument_variant_limit` | `max(256, 2 × stable source bodies)` | ownership-taking ABI variants per module |
 
 Inlining budgets are per function; generated-variant budgets are per module to cap call-graph
-cascades. The specialization population is measured before optimization; the owned-variant source
+cascades. Constructive folds reserve their added setup operations against
+`INLINE_FUNCTION_GROWTH` before being planned, so the bound covers folding as well as inlining. The
+specialization population is measured before optimization; the owned-variant source
 population is the declared bodies plus completed specializations entering that final pass. Neither
 kind of generated output enlarges its own allowance. For each generated-variant budget, the fixed
 number is a minimum total allowance and the scaled number replaces it once larger; the two are not

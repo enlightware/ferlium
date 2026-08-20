@@ -54,6 +54,14 @@ pub const INLINE_CALLEE_OPERATIONS: usize = 32;
 /// these by name.
 pub const INLINE_FUNCTION_GROWTH: usize = 128;
 
+/// Largest owned string result one compile-time evaluation may embed as a constructive recipe.
+///
+/// A string is not stored in the constant pool: reification interns its immutable text as a
+/// `StaticStr` and emits a run-time `string_from_static` construction. Bounding the text still
+/// matters because interning makes it process-lifetime compiler data and because generated MIR
+/// should not hide an arbitrarily large result behind one folded call.
+pub const REIFIED_STRING_BYTES: usize = 64 * 1024;
+
 /// How many blocks one boolean-branch forwarding may walk back through to find the stores reaching
 /// a join.
 ///

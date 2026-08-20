@@ -93,13 +93,19 @@ pub(crate) struct OptimizationStats {
 pub(crate) struct OptimizationContext {
     known_callees: known_callee::KnownCallees,
     string_functions: string_accumulate::StringFunctions,
+    string_materializer: fold::StringMaterializer,
 }
 
 impl OptimizationContext {
     pub(crate) fn new(modules: &Modules, env: ModuleEnv<'_>) -> Self {
+        let string_functions = string_accumulate::StringFunctions::resolve(env);
         Self {
             known_callees: known_callee::KnownCallees::new(modules),
-            string_functions: string_accumulate::StringFunctions::resolve(env),
+            string_functions,
+            string_materializer: fold::StringMaterializer::resolve(
+                env,
+                string_functions.static_constructor(),
+            ),
         }
     }
 }
@@ -163,19 +169,22 @@ pub(crate) fn optimize_function(
     let mut current: Option<Function> = None;
     let mut rounds_exhausted = true;
     for _round in 0..budget::MAX_ROUNDS {
-        // Fold first: it is cheap, it is what makes arguments known, and it shrinks a function
-        // before the inliner measures it against its growth budget. Inlining then hands the next
-        // round a body whose parameters have become the caller's places.
+        // Fold first: it is cheap and it is what makes arguments known. Most folds shrink before
+        // the inliner measures the body; constructive folds reserve their setup against the same
+        // whole-function growth budget. Inlining then hands the next round a body whose parameters
+        // have become the caller's places.
         let mut changed = false;
         let source = current.as_ref().unwrap_or(function);
         if let Some(folded) = fold::fold_function(
             source,
+            original_size,
             env,
             session,
             module_id,
             fold::KnownCallSemantics::new(&context.known_callees, &|callee| {
                 specializations.original(callee)
             }),
+            &context.string_materializer,
         ) {
             current = Some(folded.body);
             // A rewrite that cannot enable another one must not buy a round; see `Folded`.
@@ -301,6 +310,15 @@ pub(crate) fn optimize_function(
             specializations,
             &will_return,
         ));
+    }
+    // A constructively reified string is `StaticStr` plus `string_from_static`. If its only purpose
+    // is an append, use the static appender directly and leave no owned temporary to construct or
+    // drop. This runs before accumulator forwarding so that pass sees the final mix of appenders.
+    let source = current.as_ref().unwrap_or(function);
+    if let Some(fused) =
+        string_accumulate::fuse_static_string_appends(source, context.string_functions)
+    {
+        current = Some(fused);
     }
     // Formatting a self-prefixed assignment through an empty builder copies the complete growing
     // prefix. Forward the old string's ownership into that builder while the exact std-semantic

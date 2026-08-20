@@ -66,7 +66,16 @@ pub(crate) struct StaticStr(Ustr);
 impl StaticStr {
     pub(crate) fn new(s: &str) -> Self {
         let normalized = s.nfc().collect::<std::string::String>();
-        Self(ustr(&normalized))
+        Self::from_normalized(&normalized)
+    }
+
+    /// Interns text which is already NFC-normalized.
+    pub(crate) fn from_normalized(s: &str) -> Self {
+        debug_assert!(
+            unicode_normalization::is_nfc(s),
+            "`StaticStr::from_normalized` requires NFC-normalized text"
+        );
+        Self(ustr(s))
     }
 
     pub(crate) fn as_str(self) -> &'static str {

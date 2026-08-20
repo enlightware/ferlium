@@ -15,10 +15,11 @@
 //!
 //! Immediate reification is deliberately restricted to values a MIR constant pool can hold: a
 //! `TrivialCopy` native leaf, or a tuple of those (which is also how a record is represented at run
-//! time). Arrays of such elements have a constructive form instead: immutable elements stay in the
-//! pool and `build_array` allocates fresh mutable storage at run time. A captureless function has a
-//! bare MIR operand; other resource values — a `String`, a list, a variant, or a capturing closure
-//! — are refused and left as runtime calls.
+//! time). Resource values need constructive forms instead. Arrays keep immutable elements in the
+//! pool and use `build_array`; strings keep immutable text as a `StaticStr` and call
+//! `string_from_static`. Both allocate fresh mutable storage at run time. A captureless function
+//! has a bare MIR operand; other resource values — a list, variant, or capturing closure — are
+//! refused and left as runtime calls.
 //!
 //! Refusal is always a normal outcome: it costs an optimization, never a program.
 //!
@@ -29,9 +30,12 @@ use crate::{
         function::literal_of_trivial_copy_native,
         value::{LiteralValue, Value},
     },
-    mir::{const_eval::NotFoldable, value::Constant},
+    mir::{const_eval::NotFoldable, pass::budget, value::Constant},
     module::{FunctionId, ModuleEnv},
-    std::array::{array_type_def, array_value_elements},
+    std::{
+        array::{array_type_def, array_value_elements},
+        string::{StaticStr, String as FerliumString, string_type},
+    },
     types::{r#type::Type, type_properties::concrete_type_is_trivial_copy},
 };
 
@@ -53,6 +57,8 @@ pub(crate) enum Reification {
         element_ty: Type,
         elements: Box<[LiteralValue]>,
     },
+    /// A fresh owned string materialized from immutable compiler text at run time.
+    String(StaticStr),
 }
 
 /// Expresses `value`, of instantiated type `ty`, as MIR — or explains why it cannot be.
@@ -75,6 +81,23 @@ pub(crate) fn reify(
             // the prototype machinery, not an operand.
             Err(NotFoldable::NotReifiable)
         };
+    }
+
+    // Like an array, a string is a mutable-semantics resource and cannot live in the constant
+    // pool. Its normalized contents can: `StaticStr` is an immutable process-lifetime handle, and
+    // `string_from_static` reconstructs a fresh owned value at every execution.
+    if ty == string_type() {
+        let string = value
+            .as_primitive_ty::<FerliumString>()
+            .ok_or(NotFoldable::NotReifiable)?;
+        if string.as_ref().len() > budget::REIFIED_STRING_BYTES {
+            return Err(NotFoldable::ReificationBudgetExceeded);
+        }
+        // Ferlium strings are NFC by invariant, so avoid normalizing and allocating the evaluated
+        // result again merely to intern its immutable recipe.
+        return Ok(Reification::String(StaticStr::from_normalized(
+            string.as_ref(),
+        )));
     }
 
     // Arrays are mutable resources, so the pool cannot hold their runtime representation. Keep
@@ -189,6 +212,7 @@ mod tests {
                 panic!("expected a constant, got bare function {function:?}")
             }
             Ok(Reification::Array { .. }) => panic!("expected an immediate constant, got an array"),
+            Ok(Reification::String(_)) => panic!("expected an immediate constant, got a string"),
             Err(reason) => panic!("{ty:?} must be reifiable, got {reason:?}"),
         };
         assert_eq!(reified.ty, ty);
@@ -286,6 +310,33 @@ mod tests {
         value.discard_storage();
     }
 
+    #[test]
+    fn a_string_reifies_as_a_fresh_construction() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let value = Value::native(FerliumString::from("hello".to_string()));
+        match reify(&value, string_type(), &env) {
+            Ok(Reification::String(text)) => assert_eq!(text.as_str(), "hello"),
+            other => panic!("a string must reify as a string construction, got {other:?}"),
+        }
+        assert!(is_reifiable(&value, string_type(), &env));
+        value.discard_storage();
+    }
+
+    #[test]
+    fn an_oversized_string_exceeds_the_reification_budget() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let value = Value::native(FerliumString::from(
+            "x".repeat(budget::REIFIED_STRING_BYTES + 1),
+        ));
+        assert_eq!(
+            reify(&value, string_type(), &env).err(),
+            Some(NotFoldable::ReificationBudgetExceeded)
+        );
+        value.discard_storage();
+    }
+
     /// A value whose type is not its representation is refused rather than mis-typed into the pool.
     #[test]
     fn a_mismatched_representation_is_refused() {
@@ -306,11 +357,6 @@ mod tests {
         let env = session.module_env();
 
         let mut refused: Vec<(&str, Value, Type)> = vec![
-            (
-                "string",
-                Value::native(FerliumString::from("ab".to_string())),
-                string_type(),
-            ),
             (
                 "variant",
                 Value::tuple_variant(crate::ustr("Some"), vec![Value::native(1isize)]),

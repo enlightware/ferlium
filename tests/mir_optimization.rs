@@ -84,9 +84,9 @@ fn emit(name: &str, src: &str, optimization: MirOptimization) -> String {
 
 /// Optimization respects its growth budget.
 ///
-/// Folding only removes operations, but inlining copies a callee's body into its caller, so
-/// "optimization never adds anything" stopped being true — what remains true, and is what the
-/// stability requirement rests on, is that a function grows by at most
+/// Inlining copies a callee's body into its caller, and constructive rewrites can introduce a few
+/// setup operations, so "optimization never adds anything" is not true. What remains true, and is
+/// what the stability requirement rests on, is that a function grows by at most
 /// `INLINE_FUNCTION_GROWTH` operations over the whole of optimization, not per round or per site.
 ///
 /// A panic here means a pass produced a function the verifier rejects — which is the real point of
@@ -138,6 +138,60 @@ fn constant_arithmetic_folds_away() {
     assert!(
         main.contains("to %p0"),
         "the folded result must reach the return place:\n{main}"
+    );
+}
+
+/// An owned string cannot enter the constant pool, but its immutable contents can. Folding a
+/// formatter therefore leaves the terminal `StaticStr` -> fresh `string` construction rather than
+/// the formatter call itself.
+#[test]
+fn a_constant_string_result_reifies_constructively() {
+    let optimized = emit(
+        "constructive_string_reification",
+        "fn main() -> string { to_string(42) }",
+        MirOptimization::Enabled,
+    );
+    let main = rendered_function_with_prefix(&optimized, "main");
+    assert!(
+        !main.contains("Value<std::int>::to_string"),
+        "the known formatter call must be evaluated:
+{main}"
+    );
+    assert!(
+        main.contains("StaticStr = \"42\"") && main.contains("call std::string_from_static"),
+        "the folded string must be reconstructed from immutable text:
+{main}"
+    );
+}
+
+/// Keep the derivator generic: its raw tuple formatter calls `Value<()>::to_string`, while the
+/// optimizer knows every unit-typed argument, constructively reifies the result, and fuses the
+/// temporary string into the builder's static append.
+#[test]
+fn a_reified_unit_formatter_fuses_into_a_static_append() {
+    let src = "fn show(x) { match x { None => \"no\", Some(x) => f\"{x}\", _ => \"?\" } }\n\
+               show(Other)";
+    let raw = emit("reified_unit_formatter", src, MirOptimization::Disabled);
+    assert!(
+        raw.contains("call std::Value<std::()>::to_string"),
+        "the test must exercise the generic derivator rather than a unit special case:
+{raw}"
+    );
+
+    let optimized = emit("reified_unit_formatter", src, MirOptimization::Enabled);
+    assert!(
+        !optimized.contains("call std::Value<std::()>::to_string"),
+        "unit formatting must fold in every generated implementation:
+{optimized}"
+    );
+    let tuple =
+        rendered_function_with_prefix(&optimized, "std::Value<(std::(),)>::to_string#impl:");
+    assert!(
+        tuple.contains("StaticStr = \"()\"")
+            && tuple.contains("call std::string_push_static_str")
+            && !tuple.contains("call std::string_push_str"),
+        "the reified unit string must append without an owned temporary:
+{tuple}"
     );
 }
 
