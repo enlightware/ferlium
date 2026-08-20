@@ -337,6 +337,16 @@ pub(crate) fn forward_redundant_storage(func: &Function, env: ModuleEnv<'_>) -> 
         }
     }
     for copy in copies {
+        // Initialization forwarding may already have consumed this transfer and retargeted its
+        // producer to the copy's destination. Its operands describe the old function at that
+        // point, so applying the ordinary destination-to-source replacement too would undo the
+        // retargeting after the source allocation has been removed.
+        if removed
+            .get(&copy.site.block)
+            .is_some_and(|indices| indices.contains(&copy.site.index))
+        {
+            continue;
+        }
         if forwarded_temporaries.contains(&copy.destination) {
             continue;
         }
@@ -901,6 +911,56 @@ mod tests {
         assert_eq!(body.matches("alloca int").count(), 0, "{body}");
         assert_eq!(body.matches("memcpy ").count(), 1, "{body}");
         assert!(body.contains("memcpy %p0 to %p1"), "{body}");
+    }
+
+    #[test]
+    fn an_initialization_copy_is_not_forwarded_twice() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        let mut builder = FunctionBuilder::new("initialization_copy".into(), Default::default());
+        let result = builder.add_parameter(int_type(), ParameterKind::Return);
+        let block = builder.add_block();
+        let temporary = builder
+            .append_operation(block, Operation::alloca(span, int_type()))
+            .unwrap();
+        let destination = builder
+            .append_operation(block, Operation::alloca(span, int_type()))
+            .unwrap();
+        let initialized = builder.add_constant(
+            int_type(),
+            crate::hir::value::LiteralValue::new_native(1isize),
+            &env,
+        );
+        let returned = builder.add_constant(
+            int_type(),
+            crate::hir::value::LiteralValue::new_native(0isize),
+            &env,
+        );
+        builder.append_operation(
+            block,
+            Operation::store(span, mir::Value::Constant(initialized), temporary.clone()),
+        );
+        builder.append_operation(block, Operation::memcpy(span, temporary, destination));
+        builder.append_operation(
+            block,
+            Operation::store(
+                span,
+                mir::Value::Constant(returned),
+                mir::Value::Parameter(result),
+            ),
+        );
+        builder.set_terminator(block, Terminator::ret(span));
+        let source = builder.finish(env);
+
+        let forwarded = super::forward_redundant_storage(&source, env)
+            .expect("the initialization must target its destination directly");
+        mir::role::check_function_operand_roles(&forwarded);
+        mir::verify::verify_function(&forwarded, env);
+        let body = forwarded.format_with(&env).to_string();
+
+        assert_eq!(body.matches("alloca int").count(), 1, "{body}");
+        assert!(!body.contains("memcpy"), "{body}");
     }
 
     #[test]
