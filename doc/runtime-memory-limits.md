@@ -13,9 +13,10 @@ complete failure policy.
 
 ## Browser Wasm boundary
 
-The intended browser integration places compiled Ferlium and Rust engine code in one Wasm instance
-and linear memory. Exhausting the Wasm memory maximum may abort the whole instance, so Ferlium must
-enforce a lower runtime quota and reserve host headroom:
+The intended browser integration places compiled Ferlium and Rust engine code in several Wasm
+instances that share one linear memory. The Rust runtime supplies the memory, and generated
+Ferlium modules import it. Exhausting the shared Wasm memory maximum may abort the runtime
+generation, so Ferlium must enforce a lower runtime quota and reserve host headroom:
 
 ```text
 Wasm linear-memory maximum
