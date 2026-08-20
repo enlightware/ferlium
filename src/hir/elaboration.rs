@@ -2203,7 +2203,6 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                     payload_storage: Some(payload_storage),
                 })
             }
-            ExtractTag(node) => ExtractTag(self.elaborate_node(src, *node)?),
             Array(nodes) => Array(b(SVec2::from_vec(
                 self.elaborate_node_iter(src, nodes.iter().copied())?,
             ))),

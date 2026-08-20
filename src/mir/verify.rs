@@ -762,9 +762,9 @@ impl<'a> Verifier<'a> {
     /// Verifies the parts of an operation's operand contract that need a [`ModuleEnv`].
     ///
     /// The role half — which slot must hold a place, a value, or evidence — lives in
-    /// [`role::check_operand_roles`], which lowering also runs at insertion in every build. What
-    /// remains here is representation compatibility and the metadata cross-checks, which need the
-    /// type graph.
+    /// [`role::check_operand_roles`], which lowering also runs at insertion in debug and test
+    /// builds. What remains here is representation compatibility and the metadata cross-checks,
+    /// which need the type graph.
     fn verify_node_roles(&self, node: NodeId) {
         let constants = self.func.constants();
         let at = NodeAt(node);

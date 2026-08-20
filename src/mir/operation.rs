@@ -12,7 +12,7 @@
 //!
 //! Each operation carries a flat `operands: Box<[mir::Value]>` whose length and per-position meaning
 //! are fixed by the operation kind (documented on each `Operation::*` constructor below and
-//! checked by [`Operation::verify`]). An operand falls into one of four *roles*. A
+//! checked by [`Operation::verify`]). An operand falls into one of several *roles*. A
 //! `Register`/`Parameter` does not encode its role, so the per-function MIR verifier derives it from
 //! signatures and defining operations before execution:
 //!
@@ -20,6 +20,8 @@
 //!   incoming by-pointer parameter). Consumed by `load`, `store`, `subfield`, `drop`, etc.
 //! - **value** — a materialized register or constant (the result of a `load`/`comp_eq`, or a literal
 //!   constant). An owned materialized value has *exactly one* consuming use.
+//! - **variant tag** — an opaque semantic tag produced by `extract_tag`, comparable only with
+//!   symbolic variant-tag pattern data.
 //! - **dictionary** — a symbolic trait dictionary (evidence), consumed by `dict_entry`/`call` and
 //!   never materialized as a value.
 //! - **stack marker** — an immutable saved stack top produced by `stack_save`, used only by
@@ -353,10 +355,10 @@ impl Operation {
     /// Creates a `compare_eq` operation comparing operands `0` (`v1`) and `1` (`v2`) for structural
     /// equality, yielding a `bool` register.
     ///
-    /// Both operands are read **non-consumingly** as literal snapshots (a place is borrowed, never
-    /// moved), so this is the comparison of a lowered `match`: the scrutinee stays live for the
-    /// remaining alternatives and the arm body. Each operand must have a literal form (a scalar
-    /// constant, or a place/register whose pointee is a scalar or composite literal).
+    /// Both operands are read **non-consumingly**, so this is the comparison of a lowered `match`:
+    /// the scrutinee stays live for the remaining alternatives and the arm body. An ordinary
+    /// pattern reads a literal snapshot of a scalar or composite Ferlium value. A symbolic
+    /// `VariantTag` pattern instead requires the opaque tag result of `extract_tag`.
     pub fn compare_eq(span: Location, v1: mir::Value, v2: mir::Value) -> Self {
         Operation {
             result_id: None,
@@ -515,16 +517,15 @@ impl Operation {
         }
     }
 
-    /// Creates an `extract_tag` operation, which reads the tag of the variant at the `variant`
-    /// place and yields it as an `int` register (matching the HIR interpreter's tag encoding).
+    /// Creates an `extract_tag` operation, which reads the semantic tag of the variant at the
+    /// `variant` place and yields it as an opaque MIR `tag` value.
     ///
     /// The result is the *semantic* tag — the session-local interned identity a `VariantTag` pattern
     /// compares against — not the raw ABI field. The canonical layout stores a `u32` whose high bit
     /// records indirect payload storage (see `doc/abi.md`), so a backend reading that field owes the
-    /// mask and the widening to `int`. The reference interpreter keeps the tag symbolically and
-    /// interns it here, so the two never diverge; a concrete backend must arrange that itself. The
-    /// identity always fits 31 bits, which `CompilerSession::variant_tag_id` asserts, so the widened
-    /// value is non-negative on a 32-bit target too.
+    /// mask. The reference interpreter keeps the tag symbolically. A concrete backend resolves the
+    /// symbol through the compilation session's tag table only when lowering this opaque value to
+    /// the ABI's 31-bit numeric identity.
     pub fn extract_tag(span: Location, variant: mir::Value) -> Self {
         Operation {
             result_id: None,
@@ -887,7 +888,7 @@ pub enum OperationKind {
     },
     /// Construct a fresh array from `TrivialCopy` elements into a trailing destination place.
     BuildArray { element_ty: Type },
-    /// Read a variant tag as an integer.
+    /// Read a variant's semantic tag as an opaque MIR value.
     ExtractTag,
     /// Store a value into unoccupied place storage.
     Store,
@@ -1028,6 +1029,10 @@ pub enum OperationResult {
     /// A pointer to a type.
     Pointer(Box<OperationResult>),
 
+    /// An opaque semantic variant-tag identity. It is compiler-internal, equality-comparable only,
+    /// and has no Ferlium-expressible type.
+    VariantTag,
+
     /// A backend-internal marker for a saved top of the stack (the result of `stack_save`). It is
     /// not a Ferlium-expressible type; it is only consumed by a matching `stack_restore`.
     StackMarker,
@@ -1069,7 +1074,7 @@ impl OperationKind {
             | Variant { ty, .. }
             | BuildClosure { ty, .. }
             | CloneClosureEnv { ty } => OperationResult::Lowered(*ty),
-            ExtractTag => OperationResult::Lowered(cached_primitive_ty!(isize)),
+            ExtractTag => OperationResult::VariantTag,
             StackSave => OperationResult::StackMarker,
             Call { .. }
             | BuildArray { .. }

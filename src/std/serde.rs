@@ -320,10 +320,9 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
                 .collect::<Result<Vec<_>, _>>()?;
             // build the match node
             let load_node = n(arena, load_local(l_self_id), ty);
-            let extract_tag_node = n(arena, extract_tag(load_node), int_type());
             let root = n(
                 arena,
-                case_from_complete_alternatives(extract_tag_node, alternatives),
+                case_from_complete_alternatives(load_node, alternatives),
                 data_value_type(),
             );
             Some(root)

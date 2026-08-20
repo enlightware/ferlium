@@ -871,4 +871,4 @@ if its most useful result would otherwise disappear without a count.
 - **Session-dependent values must not be frozen into MIR.** Variant tags remain symbolic in cached
   HIR/MIR and a backend resolves them through the session's `Ustr`/`u32` table. Folding an
   `extract_tag` result into an ordinary integer constant would bake one session's compact ID into
-  portable IR.
+  portable IR; its opaque MIR role prevents that representation-confused rewrite.

@@ -395,8 +395,8 @@ fn match_case_functions() {
     );
 }
 
-/// A variant scrutinee is the `int` `extract_tag` produces, and `comp_eq` reads that register
-/// directly: no slot is allocated to hold a value each head would only read straight back.
+/// A variant scrutinee becomes the opaque `tag` that `extract_tag` produces, and `comp_eq` reads
+/// that register directly: no slot is allocated to hold a value each head would only read back.
 #[test]
 fn variant_match_compares_the_tag_register() {
     let mut session = TestSession::new();
@@ -407,7 +407,7 @@ fn variant_match_compares_the_tag_register() {
         r#"fn a0(%p0: @arg let Option<int>, %p1: @ret int):
   @c0: int = 0
   b0:
-    %r0: int = extract_tag %p0
+    %r0: tag = extract_tag %p0
     br b1
   b1:
     %r1: bool = comp_eq %r0 None

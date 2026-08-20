@@ -1,7 +1,7 @@
 /// Current on-disk schema number. It is independent of cache staleness fingerprints: changing a
 /// DTO or its encoding increments this number, while changing std/compiler inputs changes one of
 /// the fingerprints below.
-pub(crate) const STD_SNAPSHOT_FORMAT_VERSION: u32 = 1;
+pub(crate) const STD_SNAPSHOT_FORMAT_VERSION: u32 = 2;
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -595,7 +595,6 @@ fn node_variable_type_annotations<Env>(
             .for_each(|&node| variable_type_annotations(arena, node, result, locals, env)),
         FieldAccess(_) => {}
         Variant(variant) => variable_type_annotations(arena, variant.payload, result, locals, env),
-        ExtractTag(node) => variable_type_annotations(arena, *node, result, locals, env),
         Array(nodes) => nodes
             .iter()
             .for_each(|&node| variable_type_annotations(arena, node, result, locals, env)),

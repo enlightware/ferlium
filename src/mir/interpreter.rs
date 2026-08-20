@@ -17,6 +17,7 @@
 use std::collections::VecDeque;
 
 use rustc_hash::FxHashMap;
+use ustr::Ustr;
 
 use crate::{
     CompilerSession, Location,
@@ -63,6 +64,9 @@ pub struct FunctionKey {
 enum Binding {
     Value(Value),
     Place(Place),
+    /// An opaque semantic variant tag. The interpreter keeps its symbolic identity and never
+    /// materializes the ABI's session-local numeric encoding.
+    VariantTag(Ustr),
     /// A symbolic trait dictionary (an interned id), the binding of a `Dictionary` constant or a
     /// forwarded dictionary `@extra` parameter. Dispatched through the interned id; never
     /// materialized into a tuple.
@@ -1056,10 +1060,12 @@ impl<'a> Interpreter<'a> {
     ) {
         let pattern = self.pattern_literal_operand(&operands[1]);
         if let Some(&tag) = pattern.as_variant_tag() {
-            let expected = self.ctx.compiler_session().variant_tag_id(tag) as isize;
-            let equal = self.with_runtime_value(func, slots, &operands[0], |scrutinee| {
-                scrutinee.as_primitive_ty::<isize>() == Some(&expected)
-            });
+            let actual = match slots.get(&operands[0]) {
+                Some(Binding::VariantTag(actual)) => *actual,
+                Some(_) => panic!("variant-tag comparison expected an opaque tag binding"),
+                None => panic!("unbound variant-tag operand {}", operands[0]),
+            };
+            let equal = actual == tag;
             Self::bind(slots, def, Binding::Value(Value::native(equal)));
             return;
         }
@@ -1071,9 +1077,8 @@ impl<'a> Interpreter<'a> {
         Self::bind(slots, def, Binding::Value(Value::native(equal)));
     }
 
-    /// Executes an `extract_tag` operation: reads the variant's tag without consuming it (the
-    /// payload stays live for the match arms), encoded as the same `int` the HIR interpreter
-    /// produces.
+    /// Executes an `extract_tag` operation: reads the variant's semantic tag without consuming it
+    /// (the payload stays live for the match arms) and retains its symbolic identity.
     #[inline(never)]
     fn exec_extract_tag(
         &mut self,
@@ -1088,12 +1093,7 @@ impl<'a> Interpreter<'a> {
         let tag = value
             .variant_tag()
             .expect("extract_tag of a non-variant value");
-        let tag_id = self.ctx.compiler_session().variant_tag_id(tag);
-        debug_assert_eq!(
-            self.ctx.compiler_session().variant_tag_name(tag_id),
-            Some(tag)
-        );
-        Self::bind(slots, def, Binding::Value(Value::native(tag_id as isize)));
+        Self::bind(slots, def, Binding::VariantTag(tag));
     }
 
     /// Executes an `end_project` operation: resumes the accessor's slide to completion and
@@ -1742,7 +1742,10 @@ impl<'a> Interpreter<'a> {
             args.push(match binding {
                 Binding::Dictionary(id) => ValOrMut::Dictionary(id),
                 Binding::Place(place) => ValOrMut::Mut(place),
-                Binding::Value(_) | Binding::StackMarker(_) | Binding::Projected { .. } => {
+                Binding::Value(_)
+                | Binding::VariantTag(_)
+                | Binding::StackMarker(_)
+                | Binding::Projected { .. } => {
                     panic!("a native function closure contains invalid hidden evidence")
                 }
             });
@@ -2213,7 +2216,10 @@ impl<'a> Interpreter<'a> {
                          was not executed"
                     )
                 }
-                Binding::Place(_) | Binding::Dictionary(_) | Binding::StackMarker(_) => {}
+                Binding::Place(_)
+                | Binding::VariantTag(_)
+                | Binding::Dictionary(_)
+                | Binding::StackMarker(_) => {}
             }
         }
     }
@@ -2230,7 +2236,10 @@ impl<'a> Interpreter<'a> {
             match binding {
                 Binding::Value(value) => value.discard_storage(),
                 Binding::Projected { frame, .. } => suspended.push(*frame),
-                Binding::Place(_) | Binding::Dictionary(_) | Binding::StackMarker(_) => {}
+                Binding::Place(_)
+                | Binding::VariantTag(_)
+                | Binding::Dictionary(_)
+                | Binding::StackMarker(_) => {}
             }
         }
 
@@ -2396,6 +2405,9 @@ impl<'a> Interpreter<'a> {
                 Some(Binding::Dictionary(_)) => {
                     panic!("expected a place but {v} is bound to a symbolic dictionary")
                 }
+                Some(Binding::VariantTag(_)) => {
+                    panic!("expected a place but {v} is bound to an opaque variant tag")
+                }
                 None => panic!("unbound place operand {v}"),
             },
             other => panic!("operand {other:?} is not a place"),
@@ -2436,6 +2448,9 @@ impl<'a> Interpreter<'a> {
                 }
                 Some(Binding::Dictionary(_)) => {
                     panic!("expected a value but {v} is bound to a symbolic dictionary")
+                }
+                Some(Binding::VariantTag(_)) => {
+                    panic!("expected a value but {v} is bound to an opaque variant tag")
                 }
                 None => panic!("unbound value operand {v}"),
             },
@@ -2494,6 +2509,9 @@ impl<'a> Interpreter<'a> {
                 }
                 Some(Binding::Dictionary(_)) => {
                     panic!("expected a value but {operand} is bound to a symbolic dictionary")
+                }
+                Some(Binding::VariantTag(_)) => {
+                    panic!("expected a value but {operand} is bound to an opaque variant tag")
                 }
                 None => panic!("unbound value operand {operand}"),
             },

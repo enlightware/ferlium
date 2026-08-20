@@ -82,14 +82,16 @@ need either a frozen-prototype representation plus an operation to clone it, or 
 rebuilds the value from constants the pool can hold.
 
 A `ValueId` does not say which of these it is. An operand slot may accept more than one role —
-`comp_eq` reads a place *or* a materialized value — and keeping the operand array uniform is what
-lets alpha-equivalence, hash-consing and operand substitution stay generic across passes. The role
-is instead a property of the *defining* operation, derived by `src/mir/role.rs`:
+`comp_eq` reads a place, a materialized Ferlium value, or an opaque tag — and keeping the operand
+array uniform is what lets alpha-equivalence, hash-consing and operand substitution stay generic
+across passes. The role is instead a property of the *defining* operation, derived by
+`src/mir/role.rs`:
 
 | Role | Meaning |
 |---|---|
 | place | Pointer to addressable storage. |
 | materialized value | A value available without dereferencing a place. Owned materialized values have exactly one consuming use on each feasible path. |
+| variant tag | An opaque semantic tag identity, comparable only with symbolic variant-tag pattern data. |
 | evidence | A dictionary or subscript used for generic dispatch. |
 | stack marker | A saved allocation frontier consumed by `stack_restore`. |
 | open projection | A yielded place plus the accessor contract whose slide must be ended exactly once. |
@@ -116,6 +118,13 @@ distinguishes an `alloca` slot from an `alloca_place` one:
 
 Compile-time match patterns are not runtime constants. They may represent source literals such as
 `string` whose runtime value is owned even though its HIR immediate representation is `StaticStr`.
+
+Variant tags are not Ferlium integers. HIR cases branch directly on a variant value; MIR lowering
+introduces `extract_tag` only at the storage/CFG boundary, yielding an opaque `tag` register. The
+reference interpreter retains its symbolic name. A machine backend resolves that name to the
+session-local 31-bit identity and masks the payload-storage bit when reading the ABI's raw `u32`
+field. A tag cannot be stored in Ferlium storage, passed through a Ferlium call, used as a branch
+condition, or consumed by arithmetic.
 
 ## Function boundaries
 
@@ -152,7 +161,7 @@ The operation kind fixes operand arity, roles, and result shape. The main groups
 | Group | Operations | Contract |
 |---|---|---|
 | storage | `alloca`, `alloca_place`, `load`, `store`, `clear`, `memcpy`, `move` | `store` never drops; `memcpy` requires a concrete `TrivialCopy` pointee; `move` leaves its source absent. Dynamic allocation/move carries a layout witness. |
-| aggregates | `subfield`, `variant`, `extract_tag`, `build_array` | Aggregate construction and ownership remain field-addressable. A variant operation first builds an uninitialized payload shell. `build_array` initializes fresh canonical array storage from borrowed `TrivialCopy` elements. |
+| aggregates | `subfield`, `variant`, `extract_tag`, `build_array` | Aggregate construction and ownership remain field-addressable. A variant operation first builds an uninitialized payload shell. `extract_tag` yields an opaque semantic tag, not the raw ABI word. `build_array` initializes fresh canonical array storage from borrowed `TrivialCopy` elements. |
 | evidence | `dict_entry`, `subscript_member`, `build_subscript` | Evidence remains symbolic and dictionary entries are function places. |
 | calls/projections | `call`, `project`, `end_project` | Proven source-infallible forms are ordinary operations. Potentially source-fallible forms occur only inside `invoke`. |
 | ownership | `clone`, `drop`, `build_closure`, `clone_closure_env`, `drop_closure_env` | Semantic ownership actions are explicit. `Value::clone` and `Value::drop` are source-infallible by contract. |

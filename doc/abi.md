@@ -261,6 +261,8 @@ Tags are stored as `u32`. The low 31 bits refer to an interned string within one
 session; tag identity is global by name across variant types, as generic variant matching requires.
 The high bit is clear for an inline payload and set for an indirect payload. Semantic tag comparison
 masks that representation bit. Numeric discriminants are not stable across compilation sessions.
+Compiler IR keeps the semantic identity opaque and symbolic; materializing the 31-bit number and
+packing or masking the storage bit are physical ABI-lowering operations.
 
 ## Payload layout
 

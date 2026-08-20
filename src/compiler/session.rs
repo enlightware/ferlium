@@ -475,6 +475,10 @@ pub struct CompilerSession {
     variant_tags: RefCell<VariantTags>,
 }
 
+// Reserved for physical ABI lowering. Both reference interpreters deliberately retain symbolic
+// tags, so this table is otherwise exercised only by its contract test until a machine backend uses
+// it (see `doc/abi.md` § "Tag representation").
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Default)]
 struct VariantTags {
     names: Vec<Ustr>,
@@ -569,11 +573,13 @@ impl InitialSessionState {
 
 impl CompilerSession {
     /// Resolve a symbolic variant tag to this compilation session's compact discriminant.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn variant_tag_id(&self, tag: Ustr) -> u32 {
         self.variant_tags.borrow_mut().intern(tag)
     }
 
     /// Resolve a compact discriminant back to its symbolic tag.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn variant_tag_name(&self, id: u32) -> Option<Ustr> {
         self.variant_tags.borrow().names.get(id as usize).copied()
     }

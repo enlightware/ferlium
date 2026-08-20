@@ -134,10 +134,6 @@ pub fn project(tuple: NodeId, index: ProjectionIndex) -> NodeKind {
     K::Project(Project::new(tuple, index))
 }
 
-pub fn extract_tag(variant: NodeId) -> NodeKind {
-    K::ExtractTag(variant)
-}
-
 pub fn variant(tag: Ustr, payload: NodeId) -> NodeKind {
     K::Variant(Variant::new(tag, payload))
 }

@@ -111,7 +111,6 @@ enum SnapshotNodeKind {
         value: SnapshotNodeId,
         index: ProjectionIndex,
     },
-    ExtractTag(SnapshotNodeId),
     LoadLocal(LocalDeclId),
     StoreLocal {
         value: SnapshotNodeId,
@@ -543,7 +542,6 @@ impl SnapshotNodeKind {
                 index: value.index,
             },
             NodeKind::FieldAccess(value) => match *value {},
-            NodeKind::ExtractTag(value) => Self::ExtractTag(node_id(*value)),
             NodeKind::LoadLocal(value) => Self::LoadLocal(value.id),
             NodeKind::StoreLocal(value) => Self::StoreLocal {
                 value: node_id(value.value),
@@ -709,7 +707,6 @@ impl SnapshotNodeKind {
             Self::Project { value, index } => {
                 NodeKind::Project(hir::Project::new(id(*value)?, *index))
             }
-            Self::ExtractTag(value) => NodeKind::ExtractTag(id(*value)?),
             Self::LoadLocal(local) => NodeKind::LoadLocal(hir::LoadLocal { id: *local }),
             Self::StoreLocal { value, id: local } => NodeKind::StoreLocal(hir::StoreLocal {
                 value: id(*value)?,

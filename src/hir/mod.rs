@@ -785,8 +785,6 @@ pub enum NodeKind<P: HirPhase = Unelaborated> {
     Project(Project<P>),
     /// Access a record-like value at a statically known field.
     FieldAccess(P::FieldAccess),
-    /// Extract the semantic tag identity of a variant as an `isize`.
-    ExtractTag(NodeId<P>),
 
     // Local storage and ownership.
     /// Load a local as a place or borrowed value.
@@ -935,7 +933,7 @@ impl NodeKind {
             }
             TraitMethodApply(app) => app.arguments.iter().map(|arg| arg.value).collect(),
             StoreLocal(store) => smallvec![store.value],
-            Return(node) | Yield(node) | ExtractTag(node) => smallvec![*node],
+            Return(node) | Yield(node) => smallvec![*node],
             WithYielded(node) => smallvec![node.accessor, node.body],
             WithPlace(node) => smallvec![node.place, node.body],
             Loop(node) => smallvec![node.body],
@@ -1576,10 +1574,6 @@ impl<P: HirPhase> Node<P> {
                 writeln!(f, "{indent_str}variant with tag: {}", node.tag)?;
                 format_ind(arena, node.payload, f, locals, env, spacing, indent + 1)?;
             }
-            ExtractTag(node) => {
-                writeln!(f, "{indent_str}extract tag of")?;
-                format_ind(arena, *node, f, locals, env, spacing, indent + 1)?;
-            }
             Array(nodes) => {
                 writeln!(f, "{indent_str}build array [")?;
                 for &node in nodes.iter() {
@@ -1812,11 +1806,6 @@ impl<P: HirPhase> Node<P> {
                     return Some(ty);
                 }
             }
-            ExtractTag(node) => {
-                if let Some(ty) = type_at(arena, *node, pos) {
-                    return Some(ty);
-                }
-            }
             Array(nodes) => {
                 for &node in nodes.iter() {
                     if let Some(ty) = type_at(arena, node, pos) {
@@ -1966,7 +1955,6 @@ impl Node {
                 .for_each(|&node| unbound_ty_vars(arena, node, result, ignore)),
             FieldAccess(node) => unbound_ty_vars(arena, node.value, result, ignore),
             Variant(node) => unbound_ty_vars(arena, node.payload, result, ignore),
-            ExtractTag(node) => unbound_ty_vars(arena, *node, result, ignore),
             Array(nodes) => nodes
                 .iter()
                 .for_each(|&node| unbound_ty_vars(arena, node, result, ignore)),

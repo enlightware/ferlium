@@ -1724,7 +1724,6 @@ pub(crate) fn eval_node_with_ctx(
         Project(node) => eval_project(arena, node_id, node.value, node.index, ctx, locals),
         FieldAccess(_) => panic!("field access should not be executed after elaboration"),
         Variant(node) => eval_variant(arena, node, ctx, locals),
-        ExtractTag(node) => eval_extract_tag(arena, *node, ctx, locals),
         Array(nodes) => eval_array(arena, nodes, ctx, locals),
         Case(case) => eval_case(arena, case, ctx, locals),
         Loop(node) => eval_loop(arena, node.label, node.body, ctx, locals),
@@ -3719,32 +3718,6 @@ fn eval_variant(
 }
 
 #[inline(never)]
-fn eval_extract_tag(
-    arena: &ENodeArena,
-    node: ENodeId,
-    ctx: &mut EvalCtx,
-    locals: &[LocalDecl],
-) -> EvalControlFlowResult {
-    if let Some(place) = eval_or_return!(try_eval_node_as_place(arena, node, ctx, locals)) {
-        let value = place
-            .target_ref(ctx)
-            .map_err(|err| RuntimeError::new(err, Some(arena[node].span)))?;
-        let tag = value.variant_tag().expect("extract_tag of a non-variant");
-        return cont(Value::native(
-            ctx.compiler_session().variant_tag_id(tag) as isize
-        ));
-    }
-    let value = eval_or_return!(eval_node_with_ctx(arena, node, ctx, locals));
-    let (tag, _storage, payload) = value.into_variant().expect("extract_tag of a non-variant");
-    if let Some(payload) = payload {
-        payload.discard_storage();
-    }
-    cont(Value::native(
-        ctx.compiler_session().variant_tag_id(tag) as isize
-    ))
-}
-
-#[inline(never)]
 fn eval_array(
     arena: &ENodeArena,
     nodes: &[ENodeId],
@@ -3767,25 +3740,21 @@ fn eval_case(
         let value = place
             .target_ref(ctx)
             .map_err(|err| RuntimeError::new(err, Some(arena[case.value].span)))?;
-        select_case_alternative(case, value, ctx)
+        select_case_alternative(case, value)
     } else {
         let value = eval_or_return!(eval_node_with_ctx(arena, case.value, ctx, locals));
-        let selected = select_case_alternative(case, &value, ctx);
+        let selected = select_case_alternative(case, &value);
         value.discard_storage();
         selected
     };
     eval_node_with_ctx(arena, selected, ctx, locals)
 }
 
-fn select_case_alternative(
-    case: &hir::Case<Elaborated>,
-    value: &Value,
-    ctx: &EvalCtx<'_>,
-) -> ENodeId {
+fn select_case_alternative(case: &hir::Case<Elaborated>, value: &Value) -> ENodeId {
+    let variant_tag = value.variant_tag();
     for (alternative, node) in &case.alternatives {
         if let Some(&tag) = alternative.as_variant_tag() {
-            let expected = ctx.compiler_session().variant_tag_id(tag) as isize;
-            if value.as_primitive_ty::<isize>() == Some(&expected) {
+            if variant_tag == Some(tag) {
                 return *node;
             }
             continue;

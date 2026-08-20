@@ -6,12 +6,13 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-//! What a MIR value *is*: a place, a materialized value, or compile-time evidence.
+//! What a MIR value *is*: a place, a materialized Ferlium value, an opaque tag, or compile-time
+//! evidence.
 //!
 //! [`mir::Value::Register`] deliberately does not encode this — an operand slot may accept more
-//! than one role (`comp_eq` reads a place *or* a value), and a uniform flat operand array is what
-//! keeps alpha-equivalence, hash-consing and operand substitution generic across passes. The role
-//! is instead a property of the *defining* operation, recovered here.
+//! than one role (`comp_eq` reads a place, a Ferlium value, or an opaque tag), and a uniform flat
+//! operand array is what keeps alpha-equivalence, hash-consing and operand substitution generic
+//! across passes. The role is instead a property of the *defining* operation, recovered here.
 //!
 //! Almost every [`OperationResult`] is self-contained. The exception is `Load`, whose result is
 //! `Pointee(Same(operands[0]))`: it reads one operand's role. That single step is why this module
@@ -103,6 +104,8 @@ impl MirType {
 pub(crate) enum ValueRole {
     Materialized(MirType),
     Place(MirType),
+    /// An opaque semantic variant tag, not a Ferlium value or raw ABI tag word.
+    VariantTag,
     Dictionary,
     Subscript,
     Function,
@@ -122,6 +125,7 @@ impl ValueRole {
         match self {
             Self::Materialized(ty) => ty.format(env),
             Self::Place(ty) => ty.format_as_pointer_pointee(env),
+            Self::VariantTag => "tag".to_string(),
             Self::Dictionary => "dict".to_string(),
             Self::Subscript => "subscript".to_string(),
             Self::Function => "fn".to_string(),
@@ -387,6 +391,7 @@ impl ValueRoles {
                 other => panic!("`Pointee` result refers to non-place role {other:?}"),
             },
             OperationResult::Same(value) => self.get(&value, constants)?.into_owned(),
+            OperationResult::VariantTag => ValueRole::VariantTag,
             OperationResult::StackMarker => ValueRole::StackMarker,
             OperationResult::Nothing => panic!("result-less operation was given a result id"),
         })
@@ -412,7 +417,9 @@ impl ValueRoles {
                 ValueRole::OpenProjection { yielded, .. } => MirType::Lowered(yielded),
                 other => panic!("pointee type requested from {other:?}"),
             },
-            OperationResult::StackMarker | OperationResult::Nothing => {
+            OperationResult::VariantTag
+            | OperationResult::StackMarker
+            | OperationResult::Nothing => {
                 panic!("non-value result used as a value type")
             }
         })
@@ -613,17 +620,29 @@ pub(crate) fn check_operand_roles(
         | OperationKind::CloneClosureEnv { .. } => place(0),
         OperationKind::CompareEqual => {
             let scrutinee = role(0);
-            assert!(
-                scrutinee.is_place_operand() || scrutinee.materialized_type().is_some(),
-                "MIR function `{func_name}` {at}: comparison scrutinee must be a place or value, \
-                 got {scrutinee:?}"
-            );
             let pattern = role(1);
             assert!(
                 matches!(*pattern, ValueRole::Pattern),
                 "MIR function `{func_name}` {at}: comparison pattern must be compile-time data, \
                  got {pattern:?}"
             );
+            let variant_pattern = match &operands[1] {
+                mir::Value::Pattern(pattern) => pattern.as_variant_tag().is_some(),
+                _ => false,
+            };
+            if variant_pattern {
+                assert!(
+                    matches!(*scrutinee, ValueRole::VariantTag),
+                    "MIR function `{func_name}` {at}: a variant-tag pattern requires an opaque tag \
+                     scrutinee, got {scrutinee:?}"
+                );
+            } else {
+                assert!(
+                    scrutinee.is_place_operand() || scrutinee.materialized_type().is_some(),
+                    "MIR function `{func_name}` {at}: comparison scrutinee must be a place or \
+                     Ferlium value, got {scrutinee:?}"
+                );
+            }
         }
         OperationKind::Load => place(0),
         OperationKind::Subfield { .. } => {
@@ -739,8 +758,8 @@ pub(crate) fn check_terminator_operand_roles(
 ///
 /// The role half of verification over a finished body. Unlike
 /// [`verify_function`](crate::mir::verify::verify_function) this needs no [`ModuleEnv`], no trait
-/// solving and no dataflow — one walk over the operations — so it can run in every build, which is
-/// the only enforcement a release build gets.
+/// solving and no dataflow — one walk over the operations — so it runs before the heavier checks in
+/// debug and test builds.
 ///
 /// Editing has no single insertion point to check at:
 /// [`block_mut`](crate::mir::edit::FunctionEdit::block_mut) hands a pass raw access to a block's
@@ -768,5 +787,38 @@ pub(crate) fn check_function_operand_roles(func: &Function) {
             &func.block(block).terminator().kind,
             constants,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ustr::ustr;
+
+    use crate::{
+        Location,
+        mir::{Operation, builder::FunctionBuilder},
+        std::math::int_type,
+        types::r#type::Type,
+    };
+
+    #[test]
+    #[should_panic(expected = "stored operand must be a value or place pointer, got VariantTag")]
+    fn opaque_variant_tag_cannot_be_stored_as_a_ferlium_integer() {
+        let span = Location::new_synthesized();
+        let tag = ustr("Some");
+        let variant_ty = Type::variant([(tag, Type::unit())]);
+        let mut builder = FunctionBuilder::new("bad_tag_store".into(), Default::default());
+        let block = builder.add_block();
+        let variant = builder
+            .append_operation(block, Operation::alloca(span, variant_ty))
+            .unwrap();
+        let extracted = builder
+            .append_operation(block, Operation::extract_tag(span, variant))
+            .unwrap();
+        let integer = builder
+            .append_operation(block, Operation::alloca(span, int_type()))
+            .unwrap();
+
+        builder.append_operation(block, Operation::store(span, extracted, integer));
     }
 }

@@ -548,6 +548,20 @@ pub fn check_elaborated_literal_invariants(
         }
         if let NodeKind::Case(case) = &node.kind {
             let scrutinee_ty = arena[case.value].ty;
+            if let Some((first, _)) = case.alternatives.first() {
+                let variant_tags = first.as_variant_tag().is_some();
+                if case
+                    .alternatives
+                    .iter()
+                    .any(|(value, _)| value.as_variant_tag().is_some() != variant_tags)
+                {
+                    return Err(internal_compilation_error!(Internal {
+                        error: "case alternatives mix variant-tag and ordinary literal patterns"
+                            .to_string(),
+                        span: node.span,
+                    }));
+                }
+            }
             for (value, _) in &case.alternatives {
                 if !literal_value_compatible_with_type(value, scrutinee_ty, solver, true) {
                     let env = solver.qualified_name_env();
@@ -640,7 +654,15 @@ fn literal_value_compatible_with_type(
                 active.remove(&ty);
                 result
             }
-            LiteralValue::VariantTag(_) => pattern && ty == crate::std::math::int_type(),
+            LiteralValue::VariantTag(tag) => {
+                pattern
+                    && match kind {
+                        TypeKind::Variant(variants) => {
+                            variants.iter().any(|(candidate, _)| candidate == tag)
+                        }
+                        _ => false,
+                    }
+            }
         }
     }
 
@@ -848,7 +870,7 @@ fn elaborated_child_node_ids(kind: &NodeKind<Elaborated>) -> SVec4<ENodeId> {
         CloneValue(operation) => smallvec![operation.source],
         GetDictionaryFunction(operation) => smallvec![operation.dictionary],
         StoreLocal(store) => smallvec![store.value],
-        Return(value) | Yield(value) | ExtractTag(value) => smallvec![*value],
+        Return(value) | Yield(value) => smallvec![*value],
         WithYielded(with) => smallvec![with.accessor, with.body],
         WithPlace(with) => smallvec![with.place, with.body],
         Block(block) => block.body.iter().copied().collect(),

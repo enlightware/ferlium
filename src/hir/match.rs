@@ -29,7 +29,6 @@ use crate::{
     containers::{SVec2, b},
     hir::value::LiteralValue,
     hir::{self, FieldAccess, LoadLocal, NodeId, NodeKind, Project, StoreLocal},
-    std::math::int_type,
     types::effects::{EffType, no_effects},
     types::mutability::MutType,
     types::r#type::Type,
@@ -358,7 +357,9 @@ impl TypeInference {
             ));
             env.cur_locals.push(l_match_condition);
 
-            // Code to load the variant local and extract the tag.
+            // Match the materialized variant directly. `VariantTag` alternatives are symbolic
+            // pattern metadata; MIR lowering introduces its opaque semantic tag value at the
+            // storage/CFG boundary.
 
             let load_variant_node = N::new(
                 K::LoadLocal(LoadLocal {
@@ -369,12 +370,6 @@ impl TypeInference {
                 sp(cond_expr),
             );
             let load_variant_id = env.ir_arena.alloc(load_variant_node.clone());
-            let extract_tag_id = env.ir_arena.alloc(N::new(
-                K::ExtractTag(load_variant_id),
-                int_type(),
-                no_effects(),
-                sp(cond_expr),
-            ));
 
             // Variant branches should share a fresh result type, like literal matches do.
             // Otherwise a leading `never` branch can lock the whole match to `never`
@@ -581,7 +576,7 @@ impl TypeInference {
                 return_ty
             };
             let case = K::Case(b(hir::Case {
-                value: extract_tag_id,
+                value: load_variant_id,
                 alternatives,
                 default,
             }));

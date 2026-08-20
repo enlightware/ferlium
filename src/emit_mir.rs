@@ -1509,32 +1509,35 @@ impl<'a> Emitter<'a> {
     /// Lowers a `Case` scrutinee to an operand `comp_eq` reads *non-consumingly*, and reports
     /// whether that operand is a place.
     ///
-    /// An immediate stays a typed opaque constant and a variant scrutinee stays the `int`
-    /// `extract_tag` produces; everything else is taken as its **place** (a borrow), never
-    /// loaded/moved. The place form mirrors the HIR interpreter's `eval_case`, which reads the
-    /// scrutinee through `target_ref` and compares its `to_literal_value()`: the place stays live for
-    /// the remaining alternatives and for the arm body (so a non-trivial scrutinee — string/tuple —
-    /// is not consumed), and a bare-generic scrutinee needs no static-layout assertion because it is
-    /// only borrowed and snapshotted, not loaded as a register.
+    /// An immediate stays a typed opaque constant. A variant-tag case reads its variant through a
+    /// place once and produces an opaque semantic tag. Everything else is taken as its **place** (a
+    /// borrow), never loaded/moved. The place form mirrors the HIR interpreter's `eval_case`, which
+    /// reads the scrutinee through `target_ref`: the place stays live for the remaining alternatives
+    /// and for the arm body (so a non-trivial scrutinee — string/tuple — is not consumed), and a
+    /// bare-generic scrutinee needs no static-layout assertion because it is only borrowed.
     ///
-    /// A tag needs none of that. `comp_eq` reads a place *or* a materialized value, and the tag is
-    /// already the latter — an `isize` the operation computes rather than a view onto the variant,
-    /// which stays live through its own place regardless. Taking it as a place would allocate a slot
-    /// and store the register into it only for each head to read it straight back.
+    /// A tag needs none of that. `comp_eq` reads the opaque value that `extract_tag` computes while
+    /// the variant itself stays live through its place. Taking the tag as a place would allocate a
+    /// slot and store the register into it only for each head to read it straight back.
     ///
     /// The place flag is what lets a boolean alternative head read the scrutinee instead of
-    /// comparing it; see the `Case` lowering. Neither non-place form can qualify: a tag is an `int`,
-    /// so its heads compare against variant-tag patterns, never against a boolean.
-    fn lower_case_scrutinee(&mut self, node: &ENode) -> (mir::Value, bool) {
-        use hir::NodeKind as K;
+    /// comparing it; see the `Case` lowering. An opaque tag's heads are variant-tag patterns, never
+    /// booleans.
+    fn lower_case_scrutinee(
+        &mut self,
+        node: &ENode,
+        compare_variant_tags: bool,
+    ) -> (mir::Value, bool) {
+        if compare_variant_tags {
+            let place = self.lower_as_place(node);
+            let tag = self
+                .insert(Operation::extract_tag(node.span, place))
+                .unwrap();
+            return (tag, false);
+        }
         match &node.kind {
-            K::Immediate(value) => (self.immediate_constant(node.ty, value.clone()), false),
-            K::ExtractTag(n) => {
-                let place = self.lower_as_place(&self.hir_arena[*n]);
-                let tag = self
-                    .insert(Operation::extract_tag(node.span, place))
-                    .unwrap();
-                (tag, false)
+            hir::NodeKind::Immediate(value) => {
+                (self.immediate_constant(node.ty, value.clone()), false)
             }
             _ => (self.lower_as_place(node), true),
         }
@@ -1815,12 +1818,22 @@ impl<'a> Emitter<'a> {
                 // whole value against each whole pattern (`comp_eq` does `LiteralValue` equality,
                 // non-consuming). The scrutinee is taken as a borrowable place — never loaded/moved —
                 // so a string/tuple stays live across alternatives and into the arm body; an
-                // immediate scrutinee stays a primitive constant, and a variant one stays the `int`
-                // its `extract_tag` produces, so no variant-specific path is needed. (We do *not*
-                // decompose composite patterns: the HIR compares the whole tuple structurally, so
-                // the MIR does the same.)
+                // immediate scrutinee stays a primitive constant. Variant patterns compare an
+                // opaque tag extracted here, rather than exposing a numeric discriminant in HIR.
+                // (We do *not* decompose composite patterns: the HIR compares the whole tuple
+                // structurally, so the MIR does the same.)
+                let compare_variant_tags = n
+                    .alternatives
+                    .first()
+                    .is_some_and(|(pattern, _)| pattern.as_variant_tag().is_some());
+                debug_assert!(
+                    n.alternatives
+                        .iter()
+                        .all(|(pattern, _)| pattern.as_variant_tag().is_some()
+                            == compare_variant_tags)
+                );
                 let (scrutinee, scrutinee_is_place) =
-                    self.lower_case_scrutinee(&self.hir_arena[n.value]);
+                    self.lower_case_scrutinee(&self.hir_arena[n.value], compare_variant_tags);
 
                 // With no alternatives (e.g. a single irrefutable arm), there are no condition
                 // heads to test, so branch straight to the default block.
@@ -2393,17 +2406,6 @@ impl<'a> Emitter<'a> {
                 self.emit_unwind_drops(node.span, frame.scope_depth);
                 self.insert(Operation::stack_restore(node.span, frame.marker));
                 self.terminate(Terminator::goto(node.span, frame.head));
-            }
-
-            K::ExtractTag(n) => {
-                // Read the variant's tag as an `int`. The operand (typically a `LoadLocal` of the
-                // scrutinee) is lowered as the variant's place; `extract_tag` reads its tag without
-                // consuming the variant, so the payload remains accessible to the match arms.
-                let place = self.lower_as_place(&self.hir_arena[*n]);
-                let tag = self
-                    .insert(Operation::extract_tag(node.span, place))
-                    .unwrap();
-                self.store_into_if_needed(node.span, tag, destination);
             }
 
             K::Variant(n) => {

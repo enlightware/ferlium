@@ -39,7 +39,6 @@ use crate::{
         core_traits_names::{INSPECT_TRAIT_NAME, VALUE_TRAIT_NAME},
         hash::hasher_type,
         logic::bool_type,
-        math::int_type,
         string::{static_str_type, string_type},
     },
     types::{
@@ -1179,7 +1178,6 @@ fn derive_structural_text_body(
             let variants = variants.clone();
             drop(ty_data);
             let self_value = n(arena, load_local(l_self_id), ty);
-            let self_tag = n(arena, extract_tag(self_value), int_type());
             let mut locals = locals;
             let mut alternatives = Vec::with_capacity(variants.len());
             for (tag, payload_ty) in variants {
@@ -1213,7 +1211,11 @@ fn derive_structural_text_body(
             }
             let default = string_lit!(arena, &mut locals, "");
             Some((
-                n(arena, case(self_tag, alternatives, default), string_type()),
+                n(
+                    arena,
+                    case(self_value, alternatives, default),
+                    string_type(),
+                ),
                 locals,
             ))
         }
@@ -1281,7 +1283,6 @@ fn derive_structural_text_body(
                 Variant(variants) => {
                     let variants = variants.clone();
                     drop(shape_data);
-                    let self_tag = n(arena, extract_tag(load_self), int_type());
                     let mut alternatives = Vec::with_capacity(variants.len());
                     for (tag, payload_ty) in variants {
                         let tag_val = LiteralValue::new_variant_tag(tag);
@@ -1313,7 +1314,7 @@ fn derive_structural_text_body(
                         alternatives.push((tag_val, rendered));
                     }
                     let default = string_lit!(arena, &mut locals, "");
-                    n(arena, case(self_tag, alternatives, default), string_type())
+                    n(arena, case(load_self, alternatives, default), string_type())
                 }
                 Never => {
                     drop(shape_data);
@@ -1499,7 +1500,6 @@ fn derive_value_eq_body(
             for (tag, payload_ty) in $variants {
                 let tag_val = LiteralValue::new_variant_tag(tag);
                 let load_right_outer = n($arena, load_local(l_right_id), ty);
-                let right_tag = n($arena, extract_tag(load_right_outer), int_type());
                 let inner_body = if payload_ty == Type::unit() {
                     n($arena, native(true), bool_ty)
                 } else {
@@ -1523,15 +1523,22 @@ fn derive_value_eq_body(
                 let false_imm = n($arena, native(false), bool_ty);
                 let inner_case = n(
                     $arena,
-                    case(right_tag, vec![(tag_val.clone(), inner_body)], false_imm),
+                    case(
+                        load_right_outer,
+                        vec![(tag_val.clone(), inner_body)],
+                        false_imm,
+                    ),
                     bool_ty,
                 );
                 alternatives.push((tag_val, inner_case));
             }
             let load_left_outer = n($arena, load_local(l_left_id), ty);
-            let left_tag = n($arena, extract_tag(load_left_outer), int_type());
             let false_default = n($arena, native(false), bool_ty);
-            n($arena, case(left_tag, alternatives, false_default), bool_ty)
+            n(
+                $arena,
+                case(load_left_outer, alternatives, false_default),
+                bool_ty,
+            )
         }};
     }
 
@@ -1708,7 +1715,6 @@ fn derive_value_hash_body(
     macro_rules! build_variant_hash {
         ($arena:expr, $variants:expr) => {{
             let self_value = n($arena, load_local(l_self_id), ty);
-            let self_tag = n($arena, extract_tag(self_value), int_type());
             let mut alternatives = Vec::with_capacity($variants.len());
 
             for (tag, payload_ty) in $variants.into_iter() {
@@ -1730,7 +1736,7 @@ fn derive_value_hash_body(
             }
 
             let default = n($arena, native(()), unit_ty);
-            n($arena, case(self_tag, alternatives, default), unit_ty)
+            n($arena, case(self_value, alternatives, default), unit_ty)
         }};
     }
 
@@ -1875,7 +1881,6 @@ fn derive_value_clone_body(
     macro_rules! build_variant_clone {
         ($arena:expr, $variants:expr) => {{
             let source = n($arena, load_local(source_id), ty);
-            let source_tag = n($arena, extract_tag(source), int_type());
             let mut alternatives = Vec::with_capacity($variants.len());
             for (tag, payload_ty) in $variants {
                 let tag_val = LiteralValue::new_variant_tag(tag);
@@ -1908,7 +1913,7 @@ fn derive_value_clone_body(
                 alternatives.push((tag_val, branch));
             }
             let default = n($arena, hir::NodeKind::Uninit, ty);
-            n($arena, case(source_tag, alternatives, default), ty)
+            n($arena, case(source, alternatives, default), ty)
         }};
     }
 
@@ -2054,7 +2059,6 @@ fn derive_value_drop_body(
     macro_rules! build_variant_drop {
         ($arena:expr, $variants:expr) => {{
             let target = n($arena, load_local(target_id), ty);
-            let target_tag = n($arena, extract_tag(target), int_type());
             let mut alternatives = Vec::with_capacity($variants.len());
             for (tag, payload_ty) in $variants {
                 let tag_val = LiteralValue::new_variant_tag(tag);
@@ -2080,11 +2084,7 @@ fn derive_value_drop_body(
                 alternatives.push((tag_val, branch));
             }
             let default = n($arena, native(()), Type::unit());
-            n(
-                $arena,
-                case(target_tag, alternatives, default),
-                Type::unit(),
-            )
+            n($arena, case(target, alternatives, default), Type::unit())
         }};
     }
 
