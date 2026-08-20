@@ -77,6 +77,7 @@ macro_rules! cached_ty {
 }
 
 /// A generic variable for a type
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, new)]
 pub struct TypeVar {
     /// The name of this type variable, its identity in the context considered
@@ -501,6 +502,7 @@ where
 }
 
 /// How a subscript member exposes its projected place.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum SubscriptResultConvention {
     /// A scoped, callee-rooted yielded place. It must be consumed through a
@@ -535,6 +537,7 @@ impl SubscriptResultConvention {
 /// reference types. The return value still has type `ret`; the convention only
 /// controls whether and how the immediate call result may be consumed as a
 /// place before being materialized.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub enum CallResultConvention {
     #[default]

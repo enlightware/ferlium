@@ -14,6 +14,7 @@ use enum_as_inner::EnumAsInner;
 use crate::format::type_variable_index_to_string_greek;
 
 /// A mutability value, newtype because we must implement EqUnifyValue for it
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MutVal(bool);
 impl MutVal {
@@ -55,6 +56,7 @@ impl Display for MutVal {
 }
 
 /// A generic variable for mutability
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, new)]
 pub struct MutVar {
     /// The name of this mutability variable, its identity in the context considered
@@ -80,6 +82,7 @@ pub trait FormatInFnArg {
 }
 
 /// A mutability type, can be a variable or a resolved value.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, EnumAsInner)]
 pub enum MutType {
     Variable(MutVar),

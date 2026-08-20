@@ -30,7 +30,7 @@ pub mod math;
 pub mod mem;
 pub mod option;
 pub mod ordering;
-mod prelude;
+pub(crate) mod prelude;
 mod product_value_deriver;
 pub mod serde;
 pub mod string;
@@ -39,6 +39,39 @@ pub mod value;
 pub(crate) static STD_MODULE_ID: ModuleId = ModuleId::new(0);
 
 pub fn std_module(source_table: &mut SourceTable) -> Module {
+    build_std(&mut CompilingStdSourceLoader { source_table })
+}
+
+/// Supplies the three Ferlium-source checkpoints interleaved with native std registration.
+///
+/// The ordinary implementation compiles the embedded sources. A compiled-std snapshot loader
+/// restores the corresponding semantic deltas instead, while the surrounding Rust registrations
+/// still run in their original order and reconstruct process-local native objects.
+pub(crate) trait StdSourceLoader {
+    fn declare_traits(&mut self, module: Module) -> Module;
+    fn add_core(&mut self, module: Module) -> Module;
+    fn add_serialization(&mut self, module: Module) -> Module;
+}
+
+struct CompilingStdSourceLoader<'a> {
+    source_table: &'a mut SourceTable,
+}
+
+impl StdSourceLoader for CompilingStdSourceLoader<'_> {
+    fn declare_traits(&mut self, module: Module) -> Module {
+        prelude::declare_traits(module, self.source_table, STD_MODULE_ID)
+    }
+
+    fn add_core(&mut self, module: Module) -> Module {
+        prelude::add_ferlium_core(module, self.source_table, STD_MODULE_ID)
+    }
+
+    fn add_serialization(&mut self, module: Module) -> Module {
+        prelude::add_ferlium_serialization_prelude(module, self.source_table, STD_MODULE_ID)
+    }
+}
+
+pub(crate) fn build_std(loader: &mut impl StdSourceLoader) -> Module {
     let mut module = Module::new(STD_MODULE_ID, module::Path::single_str("std"));
     // Built-in or derivable
     value::add_to_module(&mut module);
@@ -48,18 +81,18 @@ pub fn std_module(source_table: &mut SourceTable) -> Module {
     hash::add_to_module(&mut module);
     empty::add_to_module(&mut module);
     flow::add_to_module(&mut module);
-    module = prelude::declare_traits(module, source_table, STD_MODULE_ID);
+    module = loader.declare_traits(module);
     // mem::add_to_module(&mut module);
     logic::add_to_module(&mut module);
     math::add_to_module(&mut module);
     buffer::add_to_module(&mut module);
     string::add_to_module(&mut module);
-    module = prelude::add_ferlium_core(module, source_table, STD_MODULE_ID);
+    module = loader.add_core(module);
     data_value::set_data_value_type_def(data_value::find_data_value_type_def(&module));
     serde::add_to_module(&mut module);
     json::add_to_module(&mut module);
     data_text::add_to_module(&mut module);
-    prelude::add_ferlium_serialization_prelude(module, source_table, STD_MODULE_ID)
+    loader.add_serialization(module)
 }
 
 pub fn new_module_using_std(module_id: ModuleId, path: module::Path) -> Module {

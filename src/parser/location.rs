@@ -13,6 +13,7 @@ use crate::{define_id_type, format::FormatWith, module::id::Id};
 
 /// A range of bytes in the user's input.
 /// It only contains the start and end byte offsets, not the actual input string.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct Span {
     pub start: u32,
@@ -57,6 +58,7 @@ impl Span {
 }
 
 /// A location in the user's input, containing a span and a source ID.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct Location {
     span: Span,
@@ -176,6 +178,7 @@ impl Location {
 }
 
 /// A location that can be instantiated at a use site.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstantiableLocation {
     pub def_site: Location,
@@ -363,6 +366,12 @@ impl SourceTable {
             }
         }
         None
+    }
+
+    #[cfg(feature = "std-snapshot")]
+    #[allow(dead_code)]
+    pub(crate) fn entries(&self) -> impl ExactSizeIterator<Item = &SourceEntry> {
+        self.sources.iter()
     }
 
     /// Get the line and column (unicode scalar value) of a byte position in a given source.

@@ -47,6 +47,7 @@ use crate::{
 };
 
 /// Which projection implementations may satisfy projection evidence.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ProjectionRequirementKind {
     /// Only compiler-known structural record-field projection is acceptable.

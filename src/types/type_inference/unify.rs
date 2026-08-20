@@ -95,6 +95,15 @@ impl ConstraintPassAggregation<'_> {
     }
 }
 
+fn deduplicate_constraints_in_place(constraints: &mut Vec<PubTypeConstraint>) {
+    let mut seen = FxHashSet::default();
+    constraints.retain(|constraint| seen.insert(constraint.clone()));
+}
+
+fn constraints_equal_as_sets(left: &[PubTypeConstraint], right: &[PubTypeConstraint]) -> bool {
+    left.iter().collect::<FxHashSet<_>>() == right.iter().collect::<FxHashSet<_>>()
+}
+
 impl UnifiedTypeInference {
     pub fn new_with_ty_vars(count: u32) -> Self {
         let mut unified_ty_inf = Self::default();
@@ -196,7 +205,10 @@ impl UnifiedTypeInference {
             mut_unification_table,
             effects,
         };
-        let mut remaining_constraints = FxHashSet::default();
+        // Keep source/inference order stable. Constraint equality deliberately ignores spans, so
+        // iterating a hash set here made the diagnostic span and dictionary order depend on the
+        // process-local identities assigned by the type interner.
+        let mut remaining_constraints = Vec::new();
 
         // First, resolve mutability constraints.
         for constraint in mut_constraints {
@@ -285,7 +297,9 @@ impl UnifiedTypeInference {
                     unified_ty_inf.unify_sub_type(current, current_span, expected, expected_span)?
                 }
                 Pub(cst) => {
-                    remaining_constraints.insert(cst);
+                    if !remaining_constraints.contains(&cst) {
+                        remaining_constraints.push(cst);
+                    }
                 }
             }
         }
@@ -332,9 +346,8 @@ impl UnifiedTypeInference {
 
         // Then, solve other constraints.
         if !remaining_constraints.is_empty() {
-            let mut constraints = remaining_constraints.into_iter().collect::<Vec<_>>();
-            unified_ty_inf.substitute_in_constraints_in_place(&mut constraints);
-            remaining_constraints = constraints.into_iter().collect();
+            unified_ty_inf.substitute_in_constraints_in_place(&mut remaining_constraints);
+            deduplicate_constraints_in_place(&mut remaining_constraints);
 
             loop {
                 // Loop as long as we make progress.
@@ -358,10 +371,11 @@ impl UnifiedTypeInference {
                     arena,
                 )?;
                 unified_ty_inf.substitute_in_constraints_in_place(&mut new_constraints);
-                remaining_constraints = new_constraints.into_iter().collect();
+                deduplicate_constraints_in_place(&mut new_constraints);
+                remaining_constraints = new_constraints;
 
                 // Break if no progress was made
-                if remaining_constraints == old_remaining_constraints {
+                if constraints_equal_as_sets(&remaining_constraints, &old_remaining_constraints) {
                     break;
                 }
             }
@@ -375,7 +389,7 @@ impl UnifiedTypeInference {
         unified_ty_inf.effects.expand_pending_dependencies()?;
 
         // FIXME: think whether we should have an intermediate struct without the remaining_constraints in it.
-        unified_ty_inf.remaining_ty_constraints = remaining_constraints.into_iter().collect();
+        unified_ty_inf.remaining_ty_constraints = remaining_constraints;
         Ok(unified_ty_inf)
     }
 
@@ -1210,8 +1224,12 @@ impl UnifiedTypeInference {
     ) -> Result<Vec<PubTypeConstraint>, InternalCompilationError> {
         let mut new_constraints = Vec::with_capacity(constraints.len());
         let mut ordered_constraints = constraints.iter().copied().enumerate().collect::<Vec<_>>();
-        ordered_constraints
-            .sort_by_key(|(_, constraint)| constraint_solve_priority(constraint, trait_solver));
+        ordered_constraints.sort_by_key(|(_, constraint)| {
+            (
+                constraint_solve_priority(constraint, trait_solver),
+                constraint_solve_specificity(constraint),
+            )
+        });
         for (constraint_index, constraint) in ordered_constraints {
             let unified_constraint = self.unify_pub_constraint(
                 constraint,
@@ -1970,5 +1988,22 @@ fn constraint_solve_priority(constraint: &PubTypeConstraint, trait_solver: &Trai
             90
         }
         PubTypeConstraint::HaveTrait { .. } => 50,
+    }
+}
+
+/// Prefer shaped trait inputs over bare variables at the same solver priority. A structural
+/// requirement can decompose into obligations for its members (for example `Value<(A,)>` needs
+/// `Value<A>`), while solving the bare obligation first cannot make the structural one progress.
+/// This is semantic ordering and deliberately does not inspect interned type identities.
+fn constraint_solve_specificity(constraint: &PubTypeConstraint) -> u8 {
+    match constraint {
+        PubTypeConstraint::HaveTrait { input_tys, .. }
+            if input_tys
+                .iter()
+                .any(|ty| !matches!(&*ty.data(), TypeKind::Variable(_))) =>
+        {
+            0
+        }
+        _ => 1,
     }
 }

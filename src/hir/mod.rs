@@ -421,6 +421,7 @@ impl Variant<Unelaborated> {
 }
 
 /// Where an elaborated variant construction obtains its canonical payload-storage mode.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VariantPayloadStorageSource {
     Static(VariantPayloadStorage),

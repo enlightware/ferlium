@@ -11,7 +11,7 @@ use ustr::{Ustr, ustr};
 
 use crate::{
     FxHashMap, Modules,
-    hir::function::{CallableDefinition, StructuralFieldAddressor},
+    hir::function::CallableDefinition,
     module::{
         LocalSubscriptId, Module, ModuleFunction, ProjectionOrigin, QualifiedNameEnv,
         SubscriptDefinition, SubscriptId, SubscriptMember, SubscriptMemberFunctionKind,
@@ -176,11 +176,8 @@ impl Module {
                 YieldProvenance::AddressorPlace,
             )
         };
-        let function = self.add_function_anonymous(ModuleFunction::new(
-            definition,
-            Box::new(StructuralFieldAddressor::new(spec.index)),
-            None,
-            Vec::new(),
+        let function = self.add_function_anonymous(ModuleFunction::new_structural_field_addressor(
+            definition, spec.index,
         ));
         self.name_function_with_visibility(function, function_name.into(), Visibility::Module);
         let member = SubscriptMember {

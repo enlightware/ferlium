@@ -70,6 +70,7 @@ define_id_type!(
 );
 
 /// If the trait method is from code, this struct contains the spans of the method.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone)]
 pub struct TraitMethodSpans {
     pub name: Location,
@@ -79,6 +80,7 @@ pub struct TraitMethodSpans {
 }
 
 /// If the trait is from code, this struct contains the spans of the trait definition.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone)]
 pub struct TraitSpans {
     pub name: Location,
@@ -110,6 +112,7 @@ impl TraitAssociatedConst {
 }
 
 /// A trait, equivalent to a multi-parameter type class in Haskell, with output types.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraitImplPolicy {
     UserImplementable,

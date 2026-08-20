@@ -467,6 +467,7 @@ impl Drop for CallArgsStorageGuard {
 pub type Function = Box<dyn Callable>;
 
 /// The semantic access convention of a call argument.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ArgConvention {
     /// Give the callee exclusive mutable access to the argument place.

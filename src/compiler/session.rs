@@ -39,7 +39,7 @@ use crate::{
         id::{Id, NamedIndexed},
     },
     parser::{self, describe_parse_error},
-    std::{self as ferlium_std, STD_MODULE_ID, new_module_using_std, value::value_layout_for_type},
+    std::{STD_MODULE_ID, new_module_using_std, value::value_layout_for_type},
     types::r#type::Type,
 };
 
@@ -511,8 +511,20 @@ struct InitialSessionState {
 
 impl InitialSessionState {
     fn build() -> Self {
-        let mut source_table = SourceTable::default();
-        let std_module = ferlium_std::std_module(&mut source_table);
+        #[cfg(all(
+            feature = "std-cache",
+            not(all(target_arch = "wasm32", target_os = "unknown"))
+        ))]
+        let (source_table, std_module) = crate::compiler::snapshot::load_or_build_std();
+        #[cfg(any(
+            not(feature = "std-cache"),
+            all(target_arch = "wasm32", target_os = "unknown")
+        ))]
+        let (source_table, std_module) = {
+            let mut source_table = SourceTable::default();
+            let std_module = crate::std::std_module(&mut source_table);
+            (source_table, std_module)
+        };
         Self {
             source_table,
             std_revision: Rc::new(ModuleRevision::new(std_module)),
@@ -1460,6 +1472,26 @@ impl Default for CompilerSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::module::function::CallableOrigin;
+
+    #[test]
+    fn every_published_std_callable_has_snapshot_provenance() {
+        let session = CompilerSession::new();
+        for (index, function) in session.std_module().functions.iter().enumerate() {
+            match function.origin {
+                CallableOrigin::Script | CallableOrigin::StructuralFieldAddressor { .. } => {}
+                CallableOrigin::Native {
+                    canonical_name: Some(_),
+                } => {}
+                CallableOrigin::Native {
+                    canonical_name: None,
+                } => panic!("std function {index} has no canonical native name"),
+                CallableOrigin::Transient => {
+                    panic!("std function {index} retained a transient body")
+                }
+            }
+        }
+    }
 
     #[test]
     fn variant_tags_are_compact_bidirectional_and_session_local() {

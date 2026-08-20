@@ -11,6 +11,7 @@
 
 use std::collections::BTreeSet;
 use std::env;
+use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
@@ -248,7 +249,11 @@ fn hash_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     let digest = hasher.finalize();
-    format!("{:x}", digest)
+    let mut hash = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(hash, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    hash
 }
 
 fn parse_code_info(info: &str) -> Option<(String, Vec<String>)> {

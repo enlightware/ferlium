@@ -88,6 +88,7 @@ define_id_type!(
 );
 
 /// An identifier for a trait implementation
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, new)]
 pub struct TraitImplId {
     /// Module owning the implementation.
@@ -321,6 +322,7 @@ impl FunctionCollector {
 
     pub fn push(&mut self, name: Ustr, mut function: ModuleFunction) {
         let name = self.unique_generated_name(name);
+        function.assign_canonical_name(name);
         function.assign_local_slots();
         self.new_elements.push((name, function));
     }

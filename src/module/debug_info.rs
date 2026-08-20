@@ -19,6 +19,7 @@ use crate::{
 };
 
 /// Whether a local came from user source or compiler-generated lowering.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalDebugOrigin {
     User,
@@ -26,18 +27,21 @@ pub enum LocalDebugOrigin {
 }
 
 /// Source or lowered-code range where a debug entry is available.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DebugLocationRangeKey {
     Source(Location),
 }
 
 /// Runtime storage location for a local debug entry.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DebugStorage {
     LocalFrameSlot(LocalFrameSlot),
 }
 
 /// A range where a local debug entry has a particular storage location.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DebugLocationRange {
     pub range: DebugLocationRangeKey,

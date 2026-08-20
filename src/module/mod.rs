@@ -141,6 +141,7 @@ define_id_type!(
 );
 
 /// A fully-qualified reference to a subscript bundle.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, new)]
 pub struct SubscriptId {
     /// Module owning the subscript.
@@ -150,6 +151,7 @@ pub struct SubscriptId {
 }
 
 /// Provenance class for a subscript member's place-producing function.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum YieldProvenance {
     /// The member yields a caller-scoped place through a yielded-once accessor body.
@@ -159,7 +161,8 @@ pub enum YieldProvenance {
 }
 
 /// Callable implementation and metadata for one access mode of a subscript.
-#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubscriptMember {
     pub function: LocalFunctionId,
     pub provenance: YieldProvenance,
@@ -226,7 +229,7 @@ pub struct SubscriptSignature {
 
 /// Signature state for a subscript bundle during module emission.
 #[derive(Debug, Clone)]
-enum SubscriptSignatureState {
+pub(crate) enum SubscriptSignatureState {
     /// Source-predeclared bundle whose member SCC has not emitted its real signature yet.
     Pending,
     /// Fully inferred shared bundle signature.
@@ -293,12 +296,13 @@ impl SubscriptSignature {
 /// capabilities are represented by the distinct `SubscriptType`.
 #[derive(Debug, Clone)]
 pub struct SubscriptDefinition {
-    signature: SubscriptSignatureState,
+    pub(crate) signature: SubscriptSignatureState,
     pub ref_member: Option<SubscriptMember>,
     pub mut_member: Option<SubscriptMember>,
 }
 
 /// Registered projection implementation backed by a subscript bundle.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProjectionEntry {
     pub subscript: LocalSubscriptId,
@@ -307,6 +311,7 @@ pub struct ProjectionEntry {
 }
 
 /// Origin of a registered projection implementation.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectionOrigin {
     /// Projection was declared explicitly in source.
@@ -393,6 +398,7 @@ fn subscript_result_convention(provenance: YieldProvenance) -> SubscriptResultCo
 pub type DefId = (ModuleId, LocalDefId);
 
 /// Item visibility
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Visibility {
     #[default]
@@ -412,6 +418,7 @@ define_id_type!(
 );
 
 /// A fully-qualified reference to a type definition.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, new)]
 pub struct TypeDefId {
     pub module: ModuleId,
@@ -441,6 +448,7 @@ define_id_type!(
 );
 
 /// A fully-qualified reference to a trait definition.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, new)]
 pub struct TraitId {
     pub module: ModuleId,
@@ -465,6 +473,7 @@ impl FormatWith<ModuleEnv<'_>> for TraitId {
 }
 
 /// All possible kinds of definitions within a module
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumAsInner)]
 pub enum DefKind {
     Function(LocalFunctionId),
@@ -477,6 +486,7 @@ pub enum DefKind {
 }
 
 /// A symbol definition along with its visibility
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, new)]
 pub struct Def {
     pub kind: DefKind,
@@ -496,7 +506,7 @@ pub type DefTable = NamedIndexed<Ustr, LocalDefId, Def>;
 pub(crate) struct TypeDefSlots(Vec<TypeDefSlot>);
 
 impl TypeDefSlots {
-    fn push(&mut self, slot: TypeDefSlot) {
+    pub(crate) fn push(&mut self, slot: TypeDefSlot) {
         self.0.push(slot);
     }
 
@@ -691,9 +701,10 @@ impl Module {
     pub fn add_function_with_visibility(
         &mut self,
         name: Ustr,
-        function: ModuleFunction,
+        mut function: ModuleFunction,
         visibility: Visibility,
     ) -> LocalFunctionId {
+        function.assign_canonical_name(name);
         let id = LocalFunctionId::from_index(self.functions.len());
         self.functions.push(function);
         self.def_table
@@ -834,6 +845,7 @@ impl Module {
     ) {
         let new_name =
             unique_generated_name(new_name, |name| self.def_table.get_by_name(&name).is_some());
+        self.functions[id.as_index()].assign_canonical_name(new_name);
         self.def_table
             .insert(new_name, Def::new(DefKind::Function(id), visibility));
     }
@@ -846,8 +858,9 @@ impl Module {
                 .new_elements
                 .into_iter()
                 .enumerate()
-                .map(|(i, (name, function))| {
+                .map(|(i, (name, mut function))| {
                     let local_id = LocalFunctionId::from_index(start_id + i);
+                    function.assign_canonical_name(name);
                     self.def_table
                         .insert(name, Def::public(DefKind::Function(local_id)));
                     function

@@ -54,6 +54,7 @@ define_id_type!(
 );
 
 /// An identifier for a function
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, new)]
 pub struct FunctionId {
     /// Module owning the function.
@@ -240,6 +241,7 @@ pub struct DeferredLocalStorage {
     pub binding_mutable: bool,
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LocalAssignmentMode {
     #[default]
@@ -353,7 +355,8 @@ impl TakeLocalValueModeMetadata for ResolvedTakeLocalValueMode {
 }
 
 /// How an elaborated local should be taken when an owned result is required.
-#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolvedTakeLocalValueMode {
     /// Move out of an owned local.
     MoveOwned,
@@ -362,7 +365,8 @@ pub enum ResolvedTakeLocalValueMode {
 }
 
 /// Resolved implementation for a local clone/copy operation.
-#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolvedLocalClone {
     /// Copy a concrete `TrivialCopy` value.
     TrivialCopy,
@@ -407,6 +411,7 @@ impl PendingLocalDrop {
 }
 
 /// Resolved implementation for a local drop operation.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolvedLocalDrop {
     /// No semantic `Value::drop` is needed.
@@ -478,6 +483,8 @@ impl PendingFunctionBody {
 pub struct ModuleFunction {
     pub definition: CallableDefinition,
     pub code: Function,
+    /// Stable description of how this function's executable body is reconstructed.
+    pub(crate) origin: CallableOrigin,
     /// High-level argument passing requirements for each visible parameter.
     ///
     /// HIR bodies set this during elaboration with the trait solver. Native/interpreter-only
@@ -487,6 +494,15 @@ pub struct ModuleFunction {
     /// Local variable declarations for the function body, including arguments and any variables declared within the function.
     pub locals: Vec<ELocalDecl>,
     pub debug_info: FunctionDebugInfo,
+}
+
+/// Persistence provenance for a finalized module function body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CallableOrigin {
+    Script,
+    Native { canonical_name: Option<Ustr> },
+    StructuralFieldAddressor { field_index: usize },
+    Transient,
 }
 
 /// A module function after HIR elaboration.
@@ -695,6 +711,7 @@ impl ModuleFunction {
         Self {
             definition,
             code,
+            origin: CallableOrigin::Script,
             parameter_passing,
             spans,
             locals,
@@ -717,6 +734,9 @@ impl ModuleFunction {
         Self {
             definition,
             code,
+            origin: CallableOrigin::Native {
+                canonical_name: None,
+            },
             parameter_passing,
             spans,
             locals,
@@ -739,6 +759,9 @@ impl ModuleFunction {
         Self {
             definition,
             code,
+            origin: CallableOrigin::Native {
+                canonical_name: None,
+            },
             parameter_passing,
             spans,
             locals,
@@ -754,12 +777,35 @@ impl ModuleFunction {
         Self {
             definition,
             code: b(crate::hir::function::VoidFunction),
+            origin: CallableOrigin::Transient,
             // Placeholders are transient module slots installed before their
             // pending function body is elaborated and replaced.
             parameter_passing: Vec::new(),
             spans,
             locals: Vec::new(),
             debug_info: FunctionDebugInfo::default(),
+        }
+    }
+
+    /// Construct a compiler-generated structural field addressor.
+    pub(crate) fn new_structural_field_addressor(
+        definition: CallableDefinition,
+        field_index: usize,
+    ) -> Self {
+        let code = b(crate::hir::function::StructuralFieldAddressor::new(
+            field_index,
+        )) as Function;
+        let mut function = Self::new(definition, code, None, Vec::new());
+        function.origin = CallableOrigin::StructuralFieldAddressor { field_index };
+        function
+    }
+
+    /// Assign the canonical semantic name used to rebind a native body after snapshot loading.
+    pub(crate) fn assign_canonical_name(&mut self, name: Ustr) {
+        if let CallableOrigin::Native { canonical_name } = &mut self.origin
+            && canonical_name.is_none()
+        {
+            *canonical_name = Some(name);
         }
     }
 

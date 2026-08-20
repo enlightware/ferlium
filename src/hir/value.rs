@@ -126,6 +126,7 @@ pub enum HiddenEvidenceArgValue {
 
 /// Whether a variant case payload occurs directly in its union slot or through an owning pointer
 /// in the canonical Ferlium ABI.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VariantPayloadStorage {
     Inline,

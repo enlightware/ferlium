@@ -13,6 +13,15 @@ pub mod error;
 pub(crate) mod lints;
 mod pipeline;
 mod session;
+#[cfg(feature = "std-snapshot")]
+#[cfg_attr(
+    any(
+        not(feature = "std-cache"),
+        all(target_arch = "wasm32", target_os = "unknown")
+    ),
+    allow(dead_code)
+)]
+pub(crate) mod snapshot;
 
 pub use artifacts::MirOptimization;
 /// Re-exported for tests that read a module's MIR without going through a compilation.

@@ -20,6 +20,7 @@ use enum_as_inner::EnumAsInner;
 use crate::format::{type_variable_subscript, write_with_separator};
 
 /// An effect describing the non-pure behavior of a function
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PrimitiveEffect {
     Read,
@@ -39,6 +40,7 @@ impl Display for PrimitiveEffect {
 }
 
 /// A generic variable for effects
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, new)]
 pub struct EffectVar {
     /// The name of this effect variable, its identity in the context considered
@@ -60,6 +62,7 @@ impl Display for EffectVar {
 pub type EffectVarKey = EffectVar;
 
 /// An effect, can be a primitive effect or a variable effect
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, EnumAsInner)]
 pub enum Effect {
     Primitive(PrimitiveEffect),

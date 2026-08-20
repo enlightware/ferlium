@@ -14,18 +14,21 @@ rust-version = "1.92"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-default = []
+default = ["std-cache"]
 serde = ["dep:serde", "nonmax/serde"]
+std-snapshot = ["serde", "dep:postcard"]
+std-cache = ["std-snapshot", "dep:directories", "dep:sha2"]
 
 [build-dependencies]
 lalrpop = "0.23.1"
+sha2 = "0.11"
 
 [dev-dependencies]
 serde_test = "1.0.177"
 test-log = "0.2.16"
 pulldown-cmark = "0.13"
 directories = "6"
-sha2 = "0.10"
+sha2 = "0.11"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 rustyline = "17.0.0"
@@ -64,7 +67,12 @@ json-event-parser = "0.2.2"
 rustc-hash = "2.1.1"
 la-arena = "0.3.1"
 serde = { version = "1.0", features = ["derive"], optional = true }
+postcard = { version = "1.1.3", features = ["alloc"], optional = true }
 ferlium_macros = { path = "ferlium_macros" }
+
+[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
+directories = { version = "6", optional = true }
+sha2 = { version = "0.11", optional = true }
 
 [target.'cfg(target_pointer_width = "32")'.dependencies]
 ferlium_macros = { path = "ferlium_macros", features = ["ferlium_abi_32"] }

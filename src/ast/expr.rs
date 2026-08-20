@@ -102,6 +102,7 @@ pub type RecordField<P> = (UstrSpan, ExprId<P>);
 /// A collection of record fields in an expression
 pub type RecordFields<P> = Vec<RecordField<P>>;
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnnamedArg {
     All,

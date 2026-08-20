@@ -130,7 +130,7 @@ pub fn hasher_type() -> Type {
 
 /// Accumulator for unordered collections.
 #[derive(Debug, Clone, Copy)]
-struct UnorderedHasher {
+pub(crate) struct UnorderedHasher {
     sum: u64,
     xor: u64,
     count: u64,
