@@ -53,6 +53,7 @@ impl<A> Value for [A] where A: Value {
 	#[no_fuel_check]
 	fn clone(source: [A]) -> [A] {
 		let len = array_len(source);
+		let element_size = Value::<A>::SIZE;
 		let mut target = array_with_capacity(len);
 		let mut i = 0;
 		loop {
@@ -60,8 +61,8 @@ impl<A> Value for [A] where A: Value {
 				return target;
 			};
 			builtin::init_place(
-				target.data->[buffer_slot](target.len),
-				source.data->[buffer_slot](array_physical_offset_unchecked(source, i)),
+				target.data->[buffer_slot](target.len, element_size),
+				source.data->[buffer_slot](array_physical_offset_unchecked(source, i), element_size),
 			);
 			target.len += 1;
 			i += 1;
@@ -70,6 +71,7 @@ impl<A> Value for [A] where A: Value {
 
 	#[no_fuel_check]
 	fn drop(target: &mut [A]) {
+		let element_size = Value::<A>::SIZE;
 		loop {
 			let len = array_len(target);
 			if len <= 0 {
@@ -79,7 +81,11 @@ impl<A> Value for [A] where A: Value {
 			// Moving the element out and letting the temporary die is the drop: it goes through
 			// the ordinary drop machinery, which MIR sees, rather than through a native holding a
 			// runtime dictionary, which it does not. `buffer_take` never took a dictionary.
-			buffer_take(target.data, array_physical_offset_unchecked(target, index));
+			buffer_take(
+				target.data,
+				array_physical_offset_unchecked(target, index),
+				element_size,
+			);
 			target.len -= 1;
 		}
 	}
@@ -136,7 +142,7 @@ where
 {
 	array_ensure_capacity(array, array.len + 1);
 	let index = array_wrap_index(array.capacity, array.start + array.len);
-	builtin::init_place(array.data->[buffer_slot](index), value);
+	builtin::init_place(array.data->[buffer_slot](index, Value::<A>::SIZE), value);
 	array.len += 1;
 }
 
@@ -153,7 +159,7 @@ where
 			array.start - 1
 		};
 	};
-	builtin::init_place(array.data->[buffer_slot](array.start), value);
+	builtin::init_place(array.data->[buffer_slot](array.start, Value::<A>::SIZE), value);
 	array.len += 1;
 }
 
@@ -168,7 +174,7 @@ where
 	} else {
 		let index = array_physical_offset_unchecked(array, len - 1);
 		array.len -= 1;
-		Some(buffer_take(array.data, index))
+		Some(buffer_take(array.data, index, Value::<A>::SIZE))
 	}
 }
 
@@ -191,7 +197,7 @@ where
 				array.start = 0;
 			};
 		};
-		Some(buffer_take(array.data, index))
+		Some(buffer_take(array.data, index, Value::<A>::SIZE))
 	}
 }
 
@@ -213,14 +219,15 @@ where
 	let len = array_len(array);
 	let start = array_slice_bound(len, start);
 	let end = array_slice_bound(len, end);
+	let element_size = Value::<A>::SIZE;
 	let mut result = array_with_capacity(end - start);
 	if end > start {
 		let mut i = start;
 		loop {
 			if i < end {
 				builtin::init_place(
-					result.data->[buffer_slot](result.len),
-					array.data->[buffer_slot](array_physical_offset_unchecked(array, i)),
+					result.data->[buffer_slot](result.len, element_size),
+					array.data->[buffer_slot](array_physical_offset_unchecked(array, i), element_size),
 				);
 				result.len += 1;
 				i += 1;
@@ -232,17 +239,18 @@ where
 	result
 }
 
-impl Concat {
+impl<A> Concat for [A] {
 	fn concat(left, right) {
 		let left_len = array_len(left);
 		let right_len = array_len(right);
+		let element_size = Value::<A>::SIZE;
 		let mut result = array_with_capacity(left_len + right_len);
 		let mut i = 0;
 		loop {
 			if i < left_len {
 				builtin::init_place(
-					result.data->[buffer_slot](result.len),
-					left.data->[buffer_slot](array_physical_offset_unchecked(left, i)),
+					result.data->[buffer_slot](result.len, element_size),
+					left.data->[buffer_slot](array_physical_offset_unchecked(left, i), element_size),
 				);
 				result.len += 1;
 				i += 1;
@@ -254,8 +262,8 @@ impl Concat {
 		loop {
 			if i < right_len {
 				builtin::init_place(
-					result.data->[buffer_slot](result.len),
-					right.data->[buffer_slot](array_physical_offset_unchecked(right, i)),
+					result.data->[buffer_slot](result.len, element_size),
+					right.data->[buffer_slot](array_physical_offset_unchecked(right, i), element_size),
 				);
 				result.len += 1;
 				i += 1;

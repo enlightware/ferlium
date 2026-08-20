@@ -442,6 +442,11 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
             let data_value_ty = data_value_type();
             let array_ty = array_type(data_value_ty);
             let value_trait_id = solver.std_trait_id(VALUE_TRAIT_NAME);
+            let data_value_dictionary =
+                solver.solve_impl(value_trait_id, &[data_value_ty], span, arena)?;
+            let data_value_dictionary_ty = solver
+                .trait_def(value_trait_id)
+                .get_dictionary_type_for_tys(&[data_value_ty], &[], &[]);
             let data_value_clone =
                 PendingLocalClone::Resolved(ResolvedLocalClone::Static(solver.solve_impl_method(
                     value_trait_id,
@@ -500,13 +505,20 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                     let arguments =
                         CallArgument::from_values_and_passing(arguments, prepared.argument_passing);
                     assert!(prepared.temp_stores.is_empty());
+                    let data_value_dictionary_node = n(
+                        arena,
+                        hir::NodeKind::GetDictionary(hir::GetDictionary {
+                            dictionary: data_value_dictionary,
+                        }),
+                        data_value_dictionary_ty,
+                    );
                     let index_place = n(
                         arena,
                         hir::NodeKind::StaticApply(b(hir::StaticApplication {
                             function: array_index,
                             function_path: None,
                             function_span: span,
-                            extra_arguments: vec![],
+                            extra_arguments: vec![data_value_dictionary_node],
                             arguments,
                             argument_names: vec![ustr("array"), ustr("index")],
                             argument_name_hint_policy: UnnamedArg::All,

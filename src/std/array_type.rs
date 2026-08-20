@@ -77,8 +77,13 @@ pub fn array_type_generic() -> Type {
 
 #[cfg(test)]
 mod tests {
+    use std::mem::size_of;
+
     use super::*;
-    use crate::{CompilerSession, std::buffer::buffer_type};
+    use crate::{
+        CompilerSession, Location,
+        std::{buffer::buffer_type, value::value_layout_associated_const_values},
+    };
     use ustr::ustr;
 
     /// `BuildArray`, HIR array lowering and interpreter values all rely on this compiler-known
@@ -100,6 +105,17 @@ mod tests {
                 (ustr("len"), int),
                 (ustr("start"), int),
             ]
+        );
+
+        let pointer_size = size_of::<usize>() as isize;
+        let span = Location::new_synthesized();
+        assert_eq!(
+            value_layout_associated_const_values(buffer_type(int), span, &env).unwrap(),
+            [pointer_size, pointer_size]
+        );
+        assert_eq!(
+            value_layout_associated_const_values(array_type(int), span, &env).unwrap(),
+            [4 * pointer_size, pointer_size]
         );
 
         let value = array_value_from_vec(vec![Value::native(10isize), Value::native(20isize)]);

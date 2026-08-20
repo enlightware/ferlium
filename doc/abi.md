@@ -314,6 +314,35 @@ This leads to:
 * alignment = 4 (32 bit targets) or 8 (64 bit targets)
 * size = 16 (32 bit targets) or 32 (64 bit targets)
 
+The source prelude represents `data_ptr` with its private `Buffer<T>` native type while keeping
+`head`, `len`, and `cap` in the surrounding array value. The compiled representation of
+`Buffer<T>` is therefore exactly one owning pointer: its size and alignment are the target pointer
+size and alignment. Its interpreter representation as a Rust `Vec<Value>` is not part of the ABI.
+
+Buffer allocation receives `Value::<T>::SIZE` and `Value::<T>::ALIGN` explicitly. Slot-addressing
+and element-move intrinsics receive only `Value::<T>::SIZE`: the aligned allocation base and the ABI
+rule that type sizes include tail padding already guarantee that each slot is aligned. The boxed
+interpreter accepts and ignores this physical layout evidence. Compiled lowering uses it to allocate
+aligned storage and calculate slot addresses.
+
+Every layout has a positive alignment and a size divisible by that alignment. For non-zero-sized
+types, alignment is therefore no greater than size. Zero-sized types are the exception to that last
+inequality—for example, `()` has size 0 and alignment 1—and require no backing allocation.
+
+A buffer allocated with capacity 0 is the one case where the layout arguments are not the element's
+own: an empty array literal passes size 0 and alignment 1 whatever `T` is, because a capacity-0
+buffer has no slot to address and no storage to align. Lowering must therefore treat a zero-byte
+allocation as valid and reclaimable rather than reading the element layout back out of it. Buffers
+that later grow are reallocated by `array_ensure_capacity`, which passes the true `Value::<T>`
+layout, so no slot is ever addressed with the placeholder.
+
+The interpreter's native `buffer_drop` remains a no-op because the subsequent interpreter storage
+discard drops the Rust `Vec`. Compiled lowering replaces that semantic Buffer drop with
+`dealloc(buffer.ptr)` followed by clearing the pointer. The runtime exposes pointer-only
+deallocation and retains any allocator-specific layout metadata internally; a capacity-0 buffer is
+deallocated by the same path as any other. Whole-buffer moves must use the same cleanup when
+replacing an existing target, so every allocation is reclaimed exactly once.
+
 # Strings
 
 Strings in Ferlium are UTF-8 encoded byte arrays with capacity:

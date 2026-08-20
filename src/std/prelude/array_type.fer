@@ -54,7 +54,10 @@ fn array_physical_offset_unchecked<A>(array: [A], offset: int) -> int {
 subscript array_offset_unchecked<A>(array: [A], offset: int) -> A {
 	ref mut {
 		return effects_unsafe {
-			array.data->[buffer_slot](array_wrap_index(array.capacity, array.start + offset))
+			array.data->[buffer_slot](
+				array_wrap_index(array.capacity, array.start + offset),
+				Value::<A>::SIZE,
+			)
 		};
 	}
 }
@@ -63,14 +66,19 @@ subscript array_index<A>(array: [A], index: int) -> A {
 	ref mut {
 		let len = array_len(array);
 		let resolved = array_resolve_index(index, len);
-		return effects_unsafe { array.data->[buffer_slot](array_wrap_index(array.capacity, array.start + resolved)) };
+		return effects_unsafe {
+			array.data->[buffer_slot](
+				array_wrap_index(array.capacity, array.start + resolved),
+				Value::<A>::SIZE,
+			)
+		};
 	}
 }
 
 fn array_with_capacity<A>(capacity: int) -> [A] {
 	let capacity = if capacity < 0 { 0 } else { capacity };
 	array {
-		data: buffer_with_capacity(capacity),
+		data: buffer_with_capacity(capacity, Value::<A>::SIZE, Value::<A>::ALIGN),
 		capacity: capacity,
 		len: 0,
 		start: 0,
@@ -92,11 +100,18 @@ fn array_ensure_capacity<A>(array: &mut [A], len: int)
 	} else {
 		new_capacity
 	};
-	let mut new_data = buffer_with_capacity(new_capacity);
+	let element_size = Value::<A>::SIZE;
+	let mut new_data = buffer_with_capacity(new_capacity, element_size, Value::<A>::ALIGN);
 	let mut i = 0;
 	loop {
 		if i < array.len {
-			buffer_move_into(array.data, array_physical_offset_unchecked(array, i), new_data, i);
+			buffer_move_into(
+				array.data,
+				array_physical_offset_unchecked(array, i),
+				new_data,
+				i,
+				element_size,
+			);
 			i += 1;
 		} else {
 			break;

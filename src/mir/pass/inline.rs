@@ -813,8 +813,10 @@ mod tests {
     /// inliner substitutes the types itself rather than waiting for a specialization, which for a
     /// callee about to be spliced into one site would be a body created only to be erased.
     ///
-    /// `array_index` is the case that matters — generic, dictionary-free, so `worth_specializing`
-    /// refuses it and without this every array access would stay a call forever.
+    /// A generic accessor that carries no dictionary is the case that matters: `worth_specializing`
+    /// returns early on an empty evidence list, so nothing else would ever make the callee
+    /// concrete, and without this the access would stay a call forever. `at` below is exactly that
+    /// shape — it projects a field and needs no `Value` witness to do it.
     #[test]
     fn a_generic_callee_is_inlined_at_a_concrete_call_site() {
         let module = optimized_experimental(

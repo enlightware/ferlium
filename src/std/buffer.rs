@@ -12,6 +12,7 @@ use ustr::ustr;
 
 use crate::{
     compiler::error::SourceFailureKind,
+    containers::b,
     eval::{
         EvalControlFlowResult, EvalCtx, Place, PlaceResult, RuntimeError, ValOrMut, ValOrMutArgs,
         cont,
@@ -28,7 +29,10 @@ use crate::{
     std::core_traits_names::{INSPECT_TRAIT_NAME, VALUE_TRAIT_NAME},
     types::{
         effects::no_effects,
-        r#type::{CallResultConvention, FnArgType, FnType, Type, bare_native_type},
+        r#type::{
+            BareNativeType, BareNativeTypeB, CallResultConvention, FnArgType, FnType, NativeType,
+            Type,
+        },
         type_scheme::{PubTypeConstraint, TypeScheme},
     },
 };
@@ -45,6 +49,38 @@ pub struct Buffer {
 }
 
 impl NativeValueType for Buffer {}
+
+/// The compiled representation of a `Buffer<T>`: one owning pointer to the element storage.
+///
+/// This is the single source of truth for the compiled Buffer layout. Both the ABI identity
+/// ([`BufferBareNativeType`]) and the `Value` associated constants installed in [`add_to_module`]
+/// derive their size and alignment from it, so the two cannot drift apart.
+type BufferRepr = usize;
+
+/// The compiler ABI identity of Buffer is deliberately separate from its boxed interpreter
+/// representation. Compiled Buffer values contain one owning target pointer.
+#[derive(Clone, PartialEq, Eq)]
+struct BufferBareNativeType;
+
+impl BareNativeType for BufferBareNativeType {
+    /// Reported where no module alias is in scope, so it names Buffer itself rather than the
+    /// Rust type carrying its ABI identity.
+    fn type_name(&self) -> &'static str {
+        "ferlium::std::buffer::Buffer"
+    }
+
+    fn value_size(&self) -> usize {
+        mem::size_of::<BufferRepr>()
+    }
+
+    fn value_align(&self) -> usize {
+        mem::align_of::<BufferRepr>()
+    }
+}
+
+pub(crate) fn buffer_bare_native_type() -> BareNativeTypeB {
+    b(BufferBareNativeType)
+}
 
 impl Buffer {
     pub fn with_capacity(capacity: usize) -> Self {
@@ -88,7 +124,10 @@ impl Buffer {
 }
 
 pub(crate) fn buffer_type(element_ty: Type) -> Type {
-    Type::native::<Buffer>([element_ty])
+    Type::native_type(NativeType {
+        bare_ty: buffer_bare_native_type(),
+        arguments: vec![element_ty],
+    })
 }
 
 fn buffer_eq(_: &Buffer, _: &Buffer) -> bool {
@@ -160,6 +199,11 @@ fn buffer_slot(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalControlFlowResu
         ctx,
         "buffer slot index should be an int",
     );
+    let _element_size = int_from_arg(
+        args.next().unwrap(),
+        ctx,
+        "buffer element size should be an int",
+    );
     cont(Value::native(PlaceResult::new(buffer_slot_place(
         buffer, index,
     )?)))
@@ -171,6 +215,7 @@ fn buffer_slot_descr() -> ModuleFunction {
         vec![
             FnArgType::new_by_val(buffer_type(gen0)),
             FnArgType::new_by_val(super::math::int_type()),
+            FnArgType::new_by_val(super::math::int_type()),
         ],
         gen0,
         no_effects(),
@@ -180,7 +225,7 @@ fn buffer_slot_descr() -> ModuleFunction {
             TypeScheme::new_infer_quantifiers(ty),
             Vec::new(),
             Vec::new(),
-            vec![ustr("buffer"), ustr("index")],
+            vec![ustr("buffer"), ustr("index"), ustr("element_size")],
             Some(String::from("Returns the place for a buffer slot.")),
             Vec::new(),
         )
@@ -192,7 +237,7 @@ fn buffer_slot_descr() -> ModuleFunction {
         Box::new(ContextNativeFn::new(
             "buffer_slot",
             &[],
-            &[MUTABLE_REF, LET],
+            &[MUTABLE_REF, LET, LET],
             buffer_slot,
         )),
         None,
@@ -207,19 +252,37 @@ fn buffer_with_capacity(capacity: isize) -> Buffer {
 fn buffer_with_capacity_descr() -> ModuleFunction {
     let gen0 = Type::variable_id(0);
     native_function(
-        FnType::new_by_val([super::math::int_type()], buffer_type(gen0), no_effects()),
+        FnType::new_by_val(
+            [
+                super::math::int_type(),
+                super::math::int_type(),
+                super::math::int_type(),
+            ],
+            buffer_type(gen0),
+            no_effects(),
+        ),
         [],
-        ["capacity"],
+        ["capacity", "element_size", "element_align"],
         "Creates fixed-size uninitialized storage.",
         ContextNativeFn::new(
             "buffer_with_capacity",
             &[],
-            &[LET],
+            &[LET, LET, LET],
             |mut args: ValOrMutArgs, ctx: &mut EvalCtx| {
                 let capacity = int_from_arg(
                     args.next().unwrap(),
                     ctx,
                     "buffer capacity should be an int",
+                );
+                let _element_size = int_from_arg(
+                    args.next().unwrap(),
+                    ctx,
+                    "buffer element size should be an int",
+                );
+                let _element_align = int_from_arg(
+                    args.next().unwrap(),
+                    ctx,
+                    "buffer element alignment should be an int",
                 );
                 cont(Value::native(buffer_with_capacity(capacity)))
             },
@@ -239,6 +302,11 @@ fn buffer_move_into(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalControlFlo
         args.next().unwrap(),
         ctx,
         "buffer target index should be an int",
+    );
+    let _element_size = int_from_arg(
+        args.next().unwrap(),
+        ctx,
+        "buffer element size should be an int",
     );
     source.path.push(source_index);
     target.path.push(target_index);
@@ -261,17 +329,24 @@ fn buffer_move_into_descr() -> ModuleFunction {
                 (super::math::int_type(), false),
                 (buffer_type(gen0), true),
                 (super::math::int_type(), false),
+                (super::math::int_type(), false),
             ],
             Type::unit(),
             no_effects(),
         ),
         [],
-        ["source", "source_index", "target", "target_index"],
+        [
+            "source",
+            "source_index",
+            "target",
+            "target_index",
+            "element_size",
+        ],
         "Moves a buffer slot into another buffer slot.",
         ContextNativeFn::new(
             "buffer_move_into",
             &[],
-            &[MUTABLE_REF, LET, MUTABLE_REF, LET],
+            &[MUTABLE_REF, LET, MUTABLE_REF, LET, LET],
             buffer_move_into,
         ),
     )
@@ -308,6 +383,11 @@ fn buffer_move_descr() -> ModuleFunction {
 fn buffer_take(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalControlFlowResult {
     let mut source = place_from_arg(args.next().unwrap())?;
     let index = int_from_arg(args.next().unwrap(), ctx, "buffer index should be an int");
+    let _element_size = int_from_arg(
+        args.next().unwrap(),
+        ctx,
+        "buffer element size should be an int",
+    );
     source.path.push(index);
     let value = {
         let source = source.target_mut(ctx).map_err(RuntimeError::new_native)?;
@@ -320,21 +400,25 @@ fn buffer_take_descr() -> ModuleFunction {
     let gen0 = Type::variable_id(0);
     native_function(
         FnType::new_mut_resolved(
-            [(buffer_type(gen0), true), (super::math::int_type(), false)],
+            [
+                (buffer_type(gen0), true),
+                (super::math::int_type(), false),
+                (super::math::int_type(), false),
+            ],
             gen0,
             no_effects(),
         ),
         [],
-        ["source", "index"],
+        ["source", "index", "element_size"],
         "Moves a value out of a buffer slot.",
-        ContextNativeFn::new("buffer_take", &[], &[MUTABLE_REF, LET], buffer_take),
+        ContextNativeFn::new("buffer_take", &[], &[MUTABLE_REF, LET, LET], buffer_take),
     )
 }
 
 pub fn add_to_module(to: &mut Module) {
     let value_trait_id = to.expect_std_trait_id_in_current_module(VALUE_TRAIT_NAME);
     let inspect_trait_id = to.expect_std_trait_id_in_current_module(INSPECT_TRAIT_NAME);
-    to.add_unsafe_bare_native_type_alias_str("Buffer", bare_native_type::<Buffer>());
+    to.add_unsafe_bare_native_type_alias_str("Buffer", buffer_bare_native_type());
     let gen0 = Type::variable_id(0);
     to.add_blanket_impl_no_locals(
         value_trait_id,
@@ -345,7 +429,10 @@ pub fn add_to_module(to: &mut Module) {
             constraints: vec![],
         },
         [],
-        native_layout_associated_consts::<Buffer>(),
+        // Compiled `Buffer<A>` is one owning pointer. Keep its Ferlium layout independent of the
+        // interpreter's `Vec<Value>` representation, and derived from the same `BufferRepr` as the
+        // ABI identity so the two agree by construction.
+        native_layout_associated_consts::<BufferRepr>(),
         [
             Box::new(BinaryNativeFnRRN::new(buffer_eq)) as Function,
             Box::new(UnaryNativeFnRN::new(buffer_to_string)) as Function,

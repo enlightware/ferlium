@@ -29,7 +29,6 @@ use ferlium::{
 };
 
 use ferlium::std::array::array_type;
-use ferlium::std::buffer::Buffer;
 use ferlium::std::data_value::{data_value_type, data_value_type_def};
 use ferlium::std::logic::bool_type;
 use ferlium::std::math::{Int, float_type, int_type};
@@ -266,7 +265,7 @@ fn blanket_value_impls_materialize_layout_associated_consts() {
 
     let array_layout = ExpectedLayout::product([
         ExpectedLayout::native::<Int>(),
-        ExpectedLayout::native::<Buffer>(),
+        ExpectedLayout::native::<usize>(),
         ExpectedLayout::native::<Int>(),
         ExpectedLayout::native::<Int>(),
     ]);

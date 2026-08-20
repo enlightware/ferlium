@@ -1859,6 +1859,17 @@ impl TypeInference {
                         for (ty, expr) in types.into_iter().skip(1).zip(exprs.iter().skip(1)) {
                             self.add_sub_type_constraint(ty, sp(*expr), element_ty, sp(exprs[0]));
                         }
+                        // A non-empty array literal allocates physical Buffer slots. Keep the
+                        // obligation inferred rather than exposing a source-level `where` clause;
+                        // MIR uses the resulting witness to pass the element ABI layout to the
+                        // Buffer primitives.
+                        self.add_pub_constraint(PubTypeConstraint::new_have_trait(
+                            value_trait_id(env),
+                            vec![element_ty],
+                            vec![],
+                            vec![],
+                            expr_span,
+                        ));
                         // Build the array node and return it
                         let element_nodes = SVec2::from_vec(nodes);
                         let ty = env.array_type(element_ty);

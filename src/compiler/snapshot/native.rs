@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    std::{buffer::Buffer, hash, math, string},
+    std::{buffer::buffer_bare_native_type, hash, math, string},
     types::r#type::{BareNativeTypeB, bare_native_type},
 };
 
@@ -42,7 +42,7 @@ impl NativeTypeCatalog {
             "std::string_split_iterator",
             bare_native_type::<string::StringSplitIterator>(),
         );
-        catalog.register("std::Buffer", bare_native_type::<Buffer>());
+        catalog.register("std::Buffer", buffer_bare_native_type());
         catalog.register("std::StaticStr", bare_native_type::<string::StaticStr>());
         catalog
     }

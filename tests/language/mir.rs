@@ -30,6 +30,23 @@ fn prepare_mir(session: &mut TestSession, module_id: ferlium::module::ModuleId) 
         .prepare_execution_target(ExecutionTarget::Mir, module_id);
 }
 
+/// Keeps a place-lowering snapshot focused on the functions the test wrote.
+///
+/// Indexing an array of a composite element type needs a concrete `Value` dictionary for that
+/// element, and materializing it also emits the transitive std implementation bodies it is built
+/// from. Those bodies are what `std` tests cover, not what these tests are about, so everything
+/// from the first one onwards is cut.
+///
+/// Truncation is required rather than best-effort: were the marker to stop matching, the helper
+/// would silently become the identity function and every caller's expectation would fail with an
+/// unreadable whole-module diff instead of pointing here.
+fn source_mir(mir: String) -> String {
+    let (source, _) = mir
+        .split_once("\n\nfn std::Value<")
+        .unwrap_or_else(|| panic!("expected materialized std `Value` bodies to truncate:\n{mir}"));
+    format!("{source}\n")
+}
+
 fn run_mir_with_limits(
     session: &mut TestSession,
     source: &str,
@@ -736,12 +753,12 @@ fn place_call_into_alias_local_branch() {
     %r2: *int = alloca int
     store @c1 to %r2
     %r3: **int = alloca_place int
-    invoke call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r2, %r3) -> b5 error b6
+    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(std::Value<std::int>), %p0, %r2, %r3) -> b5 error b6
   b3:
     %r5: *int = alloca int
     store @c2 to %r5
     %r6: **int = alloca_place int
-    invoke call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r5, %r6) -> b7 error b6
+    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(std::Value<std::int>), %p0, %r5, %r6) -> b7 error b6
   b4:
     move %r0 to %p1
     ret
@@ -842,7 +859,7 @@ fn array_index_read() {
     %r1: *int = alloca int
     store @c0 to %r1
     %r2: **bool = alloca_place bool
-    invoke call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r1, %r2) -> b1 error b2
+    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(std::Value<std::bool>), %p0, %r1, %r2) -> b1 error b2
   b1:
     %r3: *bool = load %r2
     memcpy %r3 to %r0
@@ -881,7 +898,7 @@ fn array_index_assign() {
     %r0: *int = alloca int
     store @c0 to %r0
     %r1: **bool = alloca_place bool
-    invoke call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r0, %r1) -> b1 error b2
+    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(std::Value<std::bool>), %p0, %r0, %r1) -> b1 error b2
   b1:
     %r2: *bool = load %r1
     %r3: *bool = alloca bool
@@ -909,7 +926,7 @@ fn place_call_returned_as_value() {
     %r0: *int = alloca int
     store @c0 to %r0
     %r1: **int = alloca_place int
-    invoke call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r0, %r1) -> b1 error b2
+    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(std::Value<std::int>), %p0, %r0, %r1) -> b1 error b2
   b1:
     %r2: *int = load %r1
     memcpy %r2 to %p1
@@ -936,7 +953,7 @@ fn place_call_into_owned_local() {
     %r1: *int = alloca int
     store @c0 to %r1
     %r2: **int = alloca_place int
-    invoke call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r1, %r2) -> b1 error b2
+    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(std::Value<std::int>), %p0, %r1, %r2) -> b1 error b2
   b1:
     %r3: *int = load %r2
     memcpy %r3 to %r0
@@ -970,7 +987,7 @@ fn place_call_discarded() {
     %r1: *int = alloca int
     store @c0 to %r1
     %r2: **int = alloca_place int
-    invoke call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r1, %r2) -> b1 error b2
+    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(std::Value<std::int>), %p0, %r1, %r2) -> b1 error b2
   b1:
     %r3: *int = load %r2
     memcpy %r3 to %r0
@@ -988,7 +1005,7 @@ fn nested_place_call() {
     // place pointers.
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
-        session.emit_mir("fn f(a: [[int]]) -> int { a[0][1] }"),
+        source_mir(session.emit_mir("fn f(a: [[int]]) -> int { a[0][1] }")),
         r#"fn f(%p0: @arg let [[int]], %p1: @ret int):
   @c0: int = 0
   @c1: int = 1
@@ -996,13 +1013,13 @@ fn nested_place_call() {
     %r0: *int = alloca int
     store @c0 to %r0
     %r1: **[int] = alloca_place [int]
-    invoke call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r0, %r1) -> b1 error b2
+    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(<test>::std::Value<[std::int]>), %p0, %r0, %r1) -> b1 error b2
   b1:
     %r2: *[int] = load %r1
     %r3: *int = alloca int
     store @c1 to %r3
     %r4: **int = alloca_place int
-    invoke call std::array_index::ref_mut#subscript:cb69b6f4(%r2, %r3, %r4) -> b3 error b2
+    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(std::Value<std::int>), %r2, %r3, %r4) -> b3 error b2
   b2:
     propagate_error
   b3:
@@ -1019,14 +1036,14 @@ fn place_call_as_let_argument() {
     // pointer directly, with no copy.
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
-        session.emit_mir("fn g(s: [int]) { } fn f(a: [[int]]) { g(a[0]) }"),
+        source_mir(session.emit_mir("fn g(s: [int]) { } fn f(a: [[int]]) { g(a[0]) }")),
         r#"fn f(%p0: @arg let [[int]], %p1: @ret ()):
   @c0: int = 0
   b0:
     %r0: *int = alloca int
     store @c0 to %r0
     %r1: **[int] = alloca_place [int]
-    invoke call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r0, %r1) -> b1 error b2
+    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(<test>::std::Value<[std::int]>), %p0, %r0, %r1) -> b1 error b2
   b1:
     %r2: *[int] = load %r1
     call <test>::g(%r2, %p1)
@@ -1049,14 +1066,14 @@ fn place_call_as_mutable_ref_argument() {
     // pointer directly, with no copy.
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
-        session.emit_mir("fn g(s: &mut [int]) { } fn f(a: &mut [[int]]) { g(a[0]) }"),
+        source_mir(session.emit_mir("fn g(s: &mut [int]) { } fn f(a: &mut [[int]]) { g(a[0]) }")),
         r#"fn f(%p0: @arg &mut [[int]], %p1: @ret ()):
   @c0: int = 0
   b0:
     %r0: *int = alloca int
     store @c0 to %r0
     %r1: **[int] = alloca_place [int]
-    invoke call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r0, %r1) -> b1 error b2
+    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(<test>::std::Value<[std::int]>), %p0, %r0, %r1) -> b1 error b2
   b1:
     %r2: *[int] = load %r1
     call <test>::g(%r2, %p1)
@@ -1078,7 +1095,7 @@ fn projection_of_place_call() {
     // A projection rooted in a place-returning call projects out of the loaded place pointer.
     let mut session = TestSession::new();
     assert_eq_sans_flake!(
-        session.emit_mir("fn f(a: [(int, bool)]) -> bool { a[0].1 }"),
+        source_mir(session.emit_mir("fn f(a: [(int, bool)]) -> bool { a[0].1 }")),
         r#"fn f(%p0: @arg let [(int, bool)], %p1: @ret bool):
   @c0: int = 0
   @c1: int = 1
@@ -1086,7 +1103,7 @@ fn projection_of_place_call() {
     %r0: *int = alloca int
     store @c0 to %r0
     %r1: **(int, bool) = alloca_place (int, bool)
-    invoke call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r0, %r1) -> b1 error b2
+    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(<test>::std::Value<(std::int, std::bool)>), %p0, %r0, %r1) -> b1 error b2
   b1:
     %r2: *(int, bool) = load %r1
     %r3: *bool = subfield @c1 from %r2
@@ -1116,12 +1133,12 @@ fn place_call_value_in_branches() {
     %r1: *int = alloca int
     store @c0 to %r1
     %r2: **int = alloca_place int
-    invoke call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r1, %r2) -> b5 error b6
+    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(std::Value<std::int>), %p0, %r1, %r2) -> b5 error b6
   b3:
     %r4: *int = alloca int
     store @c1 to %r4
     %r5: **int = alloca_place int
-    invoke call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r4, %r5) -> b7 error b6
+    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(std::Value<std::int>), %p0, %r4, %r5) -> b7 error b6
   b4:
     ret
   b5:
@@ -1153,7 +1170,7 @@ fn place_call_into_alias_local() {
     %r1: *int = alloca int
     store @c0 to %r1
     %r2: **int = alloca_place int
-    invoke call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r1, %r2) -> b1 error b2
+    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(std::Value<std::int>), %p0, %r1, %r2) -> b1 error b2
   b1:
     %r3: *int = load %r2
     memcpy %r3 to %r0
@@ -2297,7 +2314,7 @@ fn reassign_array_element_from_param() {
     %r0: *int = alloca int
     store @c0 to %r0
     %r1: **int = alloca_place int
-    invoke call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r0, %r1) -> b1 error b2
+    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(std::Value<std::int>), %p0, %r0, %r1) -> b1 error b2
   b1:
     %r2: *int = load %r1
     %r3: *int = alloca int
@@ -2573,7 +2590,7 @@ fn first::ref_mut#subscript:19d196cf(%p0: @arg &mut [int], %p1: @ret int):
     %r0: *int = alloca int
     store @c0 to %r0
     %r1: **int = alloca_place int
-    invoke call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r0, %r1) -> b1 error b2
+    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(std::Value<std::int>), %p0, %r0, %r1) -> b1 error b2
   b1:
     %r2: *int = load %r1
     store %r2 to %p1
@@ -2613,7 +2630,7 @@ fn first::ref_mut#subscript:19d196cf(%p0: @arg &mut [int], %p1: @ret int):
     %r0: *int = alloca int
     store @c0 to %r0
     %r1: **int = alloca_place int
-    invoke call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r0, %r1) -> b1 error b2
+    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(std::Value<std::int>), %p0, %r0, %r1) -> b1 error b2
   b1:
     %r2: *int = load %r1
     store %r2 to %p1
@@ -2653,7 +2670,7 @@ fn first::ref_mut#subscript:19d196cf(%p0: @arg &mut [int], %p1: @ret int):
     %r0: *int = alloca int
     store @c0 to %r0
     %r1: **int = alloca_place int
-    invoke call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r0, %r1) -> b1 error b2
+    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(std::Value<std::int>), %p0, %r0, %r1) -> b1 error b2
   b1:
     %r2: *int = load %r1
     store %r2 to %p1
@@ -2694,7 +2711,7 @@ fn addressor_subscript_member_returns_place() {
     %r0: *int = alloca int
     store @c0 to %r0
     %r1: **int = alloca_place int
-    invoke call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %r0, %r1) -> b1 error b2
+    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(std::Value<std::int>), %p0, %r0, %r1) -> b1 error b2
   b1:
     %r2: *int = load %r1
     store %r2 to %p1
@@ -3134,7 +3151,7 @@ fn role_annotation_distinguishes_a_place_slot_from_a_value_slot() {
         r#"fn a0(%p0: @arg let [int], %p1: @arg let int, %p2: @ret int):
   b0:
     %r0: **int = alloca_place int
-    invoke call std::array_index::ref_mut#subscript:cb69b6f4(%p0, %p1, %r0) -> b1 error b2
+    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(std::Value<std::int>), %p0, %p1, %r0) -> b1 error b2
   b1:
     %r1: *int = load %r0
     memcpy %r1 to %p2

@@ -19,7 +19,9 @@ use crate::mir::{
 use crate::module::{
     ExtraParameterId, ResolvedLocalClone, ResolvedLocalDrop, ResolvedTakeLocalValueMode,
 };
-use crate::types::r#trait::{TraitDictionaryEntryIndex, TraitMethodIndex};
+use crate::types::r#trait::{
+    TraitAssociatedConstIndex, TraitDictionaryEntryIndex, TraitMethodIndex,
+};
 use crate::types::r#type::{CallImplType, CallResultConvention, FnType, SubscriptResultConvention};
 use crate::{
     Location, Modules, containers,
@@ -36,7 +38,11 @@ use crate::{
     std::{
         STD_MODULE_ID,
         core_traits_names::VALUE_TRAIT_NAME,
-        value::{VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX, type_has_static_layout},
+        value::{
+            VALUE_ALIGN_ASSOC_CONST_INDEX, VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX,
+            VALUE_SIZE_ASSOC_CONST_INDEX, type_has_static_layout,
+            value_layout_associated_const_values,
+        },
     },
     types::{effects::no_effects, r#type::Type, type_properties::concrete_type_is_trivial_copy},
 };
@@ -1067,12 +1073,33 @@ impl<'a> Emitter<'a> {
             .unwrap();
         let with_capacity = mir::Value::Function(self.demand_std_function("buffer_with_capacity"));
         let capacity_arg = self.int_constant_place(span, len as isize);
+        // An empty Buffer allocates no backing storage, so its element layout is unobserved. Avoid
+        // demanding a synthesized witness for composite generic element types solely to construct
+        // `[]`; later growth goes through `array_ensure_capacity`, which passes its `Value<A>`
+        // layout evidence normally.
+        let (element_size, element_align) = if len == 0 {
+            (
+                self.int_constant_place(span, 0),
+                self.int_constant_place(span, 1),
+            )
+        } else {
+            self.value_layout_argument_places(span, element_ty)
+        };
         self.insert(Operation::call(
             span,
             with_capacity,
-            [capacity_arg, data_place.clone()],
+            [
+                capacity_arg,
+                element_size.clone(),
+                element_align,
+                data_place.clone(),
+            ],
             CallImplType::value(FnType::new_by_val(
-                [crate::std::math::int_type()],
+                [
+                    crate::std::math::int_type(),
+                    crate::std::math::int_type(),
+                    crate::std::math::int_type(),
+                ],
                 fields[data_index].1,
                 no_effects(),
             )),
@@ -1091,11 +1118,17 @@ impl<'a> Emitter<'a> {
                 self.insert(Operation::call(
                     span,
                     buffer_slot.clone(),
-                    [data_place.clone(), index_arg, slot_out.clone()],
+                    [
+                        data_place.clone(),
+                        index_arg,
+                        element_size.clone(),
+                        slot_out.clone(),
+                    ],
                     CallImplType::new(
                         FnType::new_mut_resolved(
                             [
                                 (fields[data_index].1, true),
+                                (crate::std::math::int_type(), false),
                                 (crate::std::math::int_type(), false),
                             ],
                             element_ty,
@@ -1163,6 +1196,78 @@ impl<'a> Emitter<'a> {
         let value = self.int_constant(value);
         self.insert(Operation::store(span, value, place.clone()));
         place
+    }
+
+    /// Materializes the physical `Value` layout arguments used by Buffer intrinsics.
+    ///
+    /// Concrete layouts become ordinary integer constants. A bare generic element type obtains the
+    /// same values by calling the `SIZE` and `ALIGN` getters in its forwarded `Value` dictionary.
+    fn value_layout_argument_places(
+        &mut self,
+        span: Location,
+        ty: Type,
+    ) -> (mir::Value, mir::Value) {
+        if self.is_statically_sized(ty) {
+            let [size, align] = value_layout_associated_const_values(ty, span, &self.env)
+                .expect("a statically sized type must have a resolvable Value layout");
+            return (
+                self.int_constant_place(span, size),
+                self.int_constant_place(span, align),
+            );
+        }
+
+        let dictionary = self.value_dictionary(ty).unwrap_or_else(|| {
+            panic!(
+                "no Value dictionary witnesses the layout of generic Buffer elements of type {}",
+                self.show(ty)
+            )
+        });
+        (
+            self.value_layout_argument_via_dictionary(
+                span,
+                dictionary.clone(),
+                VALUE_SIZE_ASSOC_CONST_INDEX,
+            ),
+            self.value_layout_argument_via_dictionary(
+                span,
+                dictionary,
+                VALUE_ALIGN_ASSOC_CONST_INDEX,
+            ),
+        )
+    }
+
+    /// Calls one zero-argument `Value` associated-constant getter through `dictionary` and returns
+    /// the place containing its `int` result.
+    fn value_layout_argument_via_dictionary(
+        &mut self,
+        span: Location,
+        dictionary: mir::Value,
+        associated_const_index: TraitAssociatedConstIndex,
+    ) -> mir::Value {
+        let value_trait_id = self.env.expect_std_trait_id(VALUE_TRAIT_NAME);
+        let entry_index = self
+            .env
+            .trait_def(value_trait_id)
+            .dictionary_associated_const_index(associated_const_index);
+        let getter_fn_ty = FnType::new_by_val([], crate::std::math::int_type(), no_effects());
+        let getter_place = self
+            .insert(Operation::dict_entry(
+                span,
+                dictionary,
+                entry_index,
+                Type::function_type(getter_fn_ty.clone()),
+            ))
+            .unwrap();
+        let result = self
+            .insert(Operation::alloca(span, crate::std::math::int_type()))
+            .unwrap();
+        self.insert(Operation::call(
+            span,
+            getter_place,
+            [result.clone()],
+            CallImplType::value(getter_fn_ty),
+        ));
+        result
     }
 
     /// Interns a typed Ferlium `int` in the function-local constant pool.
