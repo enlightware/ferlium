@@ -22,7 +22,7 @@ use crate::{
         function::{
             CallableDefinition, Function, PendingScriptFunction, UnaryNativeFnMN, UnaryNativeFnRN,
         },
-        value::{FunctionValue, LiteralValue, NativeValue, SubscriptValue, VariantPayloadStorage},
+        value::{LiteralValue, NativeValue, SubscriptValue, VariantPayloadStorage},
         value_dispatch::{
             materialize_static_string, prepare_generated_call_arguments_with_locals,
             static_apply_generated_with_locals, wrap_generated_call_with_temp_cleanup,
@@ -107,6 +107,14 @@ impl ValueLayout {
 
     fn native<T>() -> Self {
         Self::new(mem::size_of::<T>(), mem::align_of::<T>())
+    }
+
+    /// Canonical compiled representation of a first-class function: one target word identifying
+    /// the closure entry and one owning environment pointer. The interpreter's `FunctionValue`
+    /// structure is deliberately unrelated to this layout.
+    fn function() -> Self {
+        let word = Self::native::<usize>();
+        Self::product([word, word])
     }
 
     fn associated_const_values(
@@ -375,7 +383,7 @@ fn layout_for_value_type(
             active.remove(&ty);
             return Ok(layout);
         }
-        Function(_) => ValueLayout::native::<FunctionValue>(),
+        Function(_) => ValueLayout::function(),
         Subscript(_) => ValueLayout::native::<SubscriptValue>(),
         Never => ValueLayout::product([]),
         Variable(_) => {
@@ -2555,6 +2563,36 @@ mod tests {
         assert_eq!(
             value_layout_for_type(bool_payload, Location::new_synthesized(), &env).unwrap(),
             ResolvedValueLayout { size: 8, align: 4 }
+        );
+    }
+
+    #[test]
+    fn function_layout_uses_two_target_words() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let word_size = u32::try_from(mem::size_of::<usize>()).unwrap();
+        let word_align = u32::try_from(mem::align_of::<usize>()).unwrap();
+        let expected = ResolvedValueLayout {
+            size: 2 * word_size,
+            align: word_align,
+        };
+
+        let concrete = Type::nullary_function_by_val(Type::unit());
+        let generic = Type::function_by_val([Type::variable_id(0)], Type::variable_id(1));
+        for ty in [concrete, generic] {
+            assert_eq!(
+                value_layout_for_type(ty, Location::new_synthesized(), &env).unwrap(),
+                expected
+            );
+        }
+
+        let containing_tuple = Type::tuple([bool_type(), generic]);
+        assert_eq!(
+            value_layout_for_type(containing_tuple, Location::new_synthesized(), &env).unwrap(),
+            ResolvedValueLayout {
+                size: 3 * word_size,
+                align: word_align,
+            }
         );
     }
 }

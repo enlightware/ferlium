@@ -442,10 +442,9 @@ replacing an existing target, so every allocation is reclaimed exactly once.
 
 # Closures
 
-## Wasm32
+Ferlium represents all first-class functions uniformly as closures. A closure has two target
+words. On Wasm32 it is:
 
-Ferlium represents all first-class functions uniformly as closures.
-A closure is a two-word record:
 ```
 {
    code_index: u32,
@@ -453,29 +452,54 @@ A closure is a two-word record:
 }
 ```
 
-where `code_index` refers to an entry in the module’s function table and `env_ptr` points into linear memory to the closure’s environment.
+Its size is 8 and its alignment is 4. On ABI-64 the two target words give size 16 and alignment 8.
+`Value<F>::SIZE` and `Value<F>::ALIGN` report these values for every function type `F`; neither the
+function signature nor its captured environment changes the closure value's own layout.
 
-The environment is a compiler-generated tuple containing the runtime representations of all variables captured by the function (including dictionaries for typeclass operations).
-Each closure’s compiled code always takes the environment pointer as its first argument, followed by the function’s user-level arguments, and returns values using the standard ABI.
+`code_index` is one closure-implementation identity. On Wasm it selects the closure-compatible
+entry used by `call_indirect`. The generated module also associates that same identity with the
+operations needed to clone and drop this implementation's environment. This association does not
+put several pointers into `code_index`: a backend can, for example, use `code_index` to index the
+call table and a parallel metadata table, or dispatch clone/drop through compiler-generated helper
+code. The observable contract is only that a closure value provides one identity from which all
+three operations can be selected:
 
-The environment’s layout is fully determined at the closure’s definition site and is opaque to callers; invoking a closure is always performed via `call_indirect` using `code_index` and passing `env_ptr` as the first parameter.
-An empty environment is represented by setting `env_ptr` to zero.
-Hence, when compiling a lambda that is a closure, the compiled code first extracts the values out of the environment, before executing the actual user-written code.
-If the lambda is not a closure, the first argument is simply ignored.
+- invoke the closure;
+- clone its owned environment; and
+- drop and deallocate its owned environment.
 
-Closures may be represented and passed as a single 64-bit word (`i64`), with `code_index` and `env_ptr` packed into the low and high 32 bits respectively, in order to treat closures as scalar values for parameter and return conventions.
+`env_ptr` is the owning pointer to the closure environment in linear memory. The environment
+contains the runtime representations of captured hidden evidence and owned source values. Its
+ordered shape is known at the closure construction site, but a generic capture tuple `B` may have
+witness-derived size, alignment and field offsets. The environment therefore retains any dynamic
+`Value<B>` evidence needed by the closure entry and its clone/drop operations. Statically known
+evidence may instead be compiled into those operations.
 
-In wasm modules, all exported named functions must have two versions:
+`env_ptr` is zero exactly when the closure captures neither hidden evidence nor source values. A
+non-zero environment pointer owns one allocation:
 
-- a `direct` version, that corresponds to the normal Ferlium function.
-- a `closure`-compatible version, that drops their environment pointer argument, and calls the direct version internally.
+- construction moves the already-owned source captures into it;
+- moving the closure transfers the pointer and clears the source;
+- cloning the closure allocates a new environment, copies non-owning hidden evidence and clones the
+  owned capture tuple through `Value<B>`;
+- dropping the closure drops the owned capture tuple and deallocates the environment exactly once.
 
-When using a first-class function locally, if that function does not capture any variables, the compiler may optimise away the environment pointer argument.
-When private functions will be added, espace analysis will be used to decide whether they too need the closure-compatible version.
+Invoking a closure borrows the closure value. It clones the owned capture tuple into a per-call
+temporary, passes the temporary captures and stored hidden evidence to the function body, and
+drops the temporary after both normal return and language failure. Consequently mutations of
+captured values during one invocation do not persist into later invocations. A poisoning sandbox
+violation follows the general non-semantic cleanup rules described above.
+
+Every closure-compatible entry accepts `env_ptr` as its first closure-specific parameter, followed
+by the parameters required by the standard function ABI. A function that can be materialized as a
+first-class value needs such an entry; an ordinary direct-only function does not. A captureless
+entry ignores its zero environment pointer. The environment argument can be eliminated only when
+the compiler devirtualizes the complete indirect call into a direct call.
 
 ## Native
 
-To be defined later, possibly per platform.
+The code-identity representation and dispatch mechanism are target-specific. The closure value
+still occupies two target words and follows the ownership contract above.
 
 # Rust structural interoperability
 
