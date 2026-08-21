@@ -399,7 +399,36 @@ impl Operation {
             result_id: None,
             span,
             operands: Box::new([source, index]),
-            kind: OperationKind::Subfield { ty },
+            kind: OperationKind::Subfield {
+                ty,
+                variant_payload: false,
+                has_layout_witness: false,
+            },
+        }
+    }
+
+    /// Creates a place projection for the complete payload `ty` of an already established variant
+    /// case. The stored tag supplies inline/indirect classification. `layout_witness` is present
+    /// exactly when `ty` has a run-time-dependent layout and supplies `Value<ty>`.
+    pub fn variant_payload(
+        span: Location,
+        source: mir::Value,
+        index: mir::Value,
+        ty: Type,
+        layout_witness: Option<mir::Value>,
+    ) -> Self {
+        let has_layout_witness = layout_witness.is_some();
+        let mut operands = vec![source, index];
+        operands.extend(layout_witness);
+        Operation {
+            result_id: None,
+            span,
+            operands: operands.into_boxed_slice(),
+            kind: OperationKind::Subfield {
+                ty,
+                variant_payload: true,
+                has_layout_witness,
+            },
         }
     }
 
@@ -471,24 +500,31 @@ impl Operation {
     /// result is a register holding `Value::Variant { tag, <uninitialized payload> }`. The
     /// constructing site stores the shell into the variant's destination and then fills the payload
     /// in place through a projection of that destination (variant payload index `0`), so the
-    /// payload aggregate — which may be generic and thus have no `Value` layout witness — is never
-    /// materialized into a temporary.
+    /// payload aggregate is never materialized into a temporary. A generic payload nevertheless
+    /// carries its `Value` layout witness so physical lowering can calculate its case-specific
+    /// offset and allocate indirect storage.
     pub fn variant(
         span: Location,
         tag: Ustr,
         t: Type,
+        payload_ty: Type,
         storage: Option<VariantPayloadStorage>,
-        evidence: Option<mir::Value>,
+        storage_evidence: Option<mir::Value>,
+        layout_witness: Option<mir::Value>,
     ) -> Self {
-        assert_eq!(storage.is_none(), evidence.is_some());
+        assert_eq!(storage.is_none(), storage_evidence.is_some());
+        let has_layout_witness = layout_witness.is_some();
+        let mut operands = storage_evidence.into_iter().collect::<Vec<_>>();
+        operands.extend(layout_witness);
         Operation {
             result_id: None,
             span,
-            operands: evidence.into_iter().collect(),
+            operands: operands.into_boxed_slice(),
             kind: OperationKind::Variant {
                 tag,
-                ty: t,
+                metadata: b(VariantMetadata { ty: t, payload_ty }),
                 storage,
+                has_layout_witness,
             },
         }
     }
@@ -804,6 +840,16 @@ pub struct CallMetadata {
     pub(crate) owned_arguments: DenseBitSet,
 }
 
+/// Static types needed to lower a variant shell and its selected payload.
+///
+/// This is boxed in [`OperationKind::Variant`] so the uncommon pair does not enlarge every MIR
+/// operation.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct VariantMetadata {
+    pub(crate) ty: Type,
+    pub(crate) payload_ty: Type,
+}
+
 impl Instantiation {
     /// Builds the substitution taking the callee's quantifiers to what this call site instantiated
     /// them at, in the callee's own variable numbering.
@@ -869,7 +915,13 @@ pub enum OperationKind {
     /// Read a representation-copyable value from a place without consuming it.
     Load,
     /// Project a field place from an aggregate place.
-    Subfield { ty: Type },
+    Subfield {
+        ty: Type,
+        /// True when this selects a variant's complete case payload rather than a product field.
+        variant_payload: bool,
+        /// True when operand 2 carries `Value<ty>` layout evidence.
+        has_layout_witness: bool,
+    },
     /// Project a function entry place from a symbolic dictionary.
     DictEntry {
         entry_index: TraitDictionaryEntryIndex,
@@ -882,9 +934,11 @@ pub enum OperationKind {
     /// Construct a tagged variant shell whose payload is initialized separately.
     Variant {
         tag: Ustr,
-        ty: Type,
+        metadata: B<VariantMetadata>,
         /// `None` means operand 0 carries forwarded generic storage evidence.
         storage: Option<VariantPayloadStorage>,
+        /// When true, the last operand carries `Value<payload_ty>` layout evidence.
+        has_layout_witness: bool,
     },
     /// Construct a fresh array from `TrivialCopy` elements into a trailing destination place.
     BuildArray { element_ty: Type },
@@ -1063,17 +1117,17 @@ impl OperationKind {
                 OperationResult::pointer_to(OperationResult::Lowered(*pointing_to)),
             ),
             Project { yielded: ty, .. }
-            | Subfield { ty }
+            | Subfield { ty, .. }
             | DictEntry { ty, .. }
             | SubscriptMember { ty, .. } => {
                 OperationResult::pointer_to(OperationResult::Lowered(*ty))
             }
             CompareEqual => OperationResult::Lowered(cached_primitive_ty!(bool)),
             Load => OperationResult::pointee_of(OperationResult::Same(whole.operands[0].clone())),
-            BuildSubscript { ty }
-            | Variant { ty, .. }
-            | BuildClosure { ty, .. }
-            | CloneClosureEnv { ty } => OperationResult::Lowered(*ty),
+            BuildSubscript { ty } | BuildClosure { ty, .. } | CloneClosureEnv { ty } => {
+                OperationResult::Lowered(*ty)
+            }
+            Variant { metadata, .. } => OperationResult::Lowered(metadata.ty),
             ExtractTag => OperationResult::VariantTag,
             StackSave => OperationResult::StackMarker,
             Call { .. }
@@ -1126,10 +1180,12 @@ impl OperationKind {
                 1,
                 "load takes exactly the source place"
             ),
-            Subfield { .. } => assert_eq!(
+            Subfield {
+                has_layout_witness, ..
+            } => assert_eq!(
                 whole.operands.len(),
-                2,
-                "subfield takes the aggregate place and the int field-index value"
+                2 + usize::from(*has_layout_witness),
+                "subfield takes the aggregate place, the int field-index value, and optional layout evidence"
             ),
             DictEntry { .. } => assert_eq!(
                 whole.operands.len(),
@@ -1145,10 +1201,14 @@ impl OperationKind {
                 !whole.operands.is_empty(),
                 "build_subscript takes the symbolic subscript operand plus its evidence captures"
             ),
-            Variant { storage, .. } => assert_eq!(
+            Variant {
+                storage,
+                has_layout_witness,
+                ..
+            } => assert_eq!(
                 whole.operands.len(),
-                usize::from(storage.is_none()),
-                "variant takes one evidence operand exactly when its storage mode is dynamic"
+                usize::from(storage.is_none()) + usize::from(*has_layout_witness),
+                "variant takes storage evidence when dynamic and payload layout evidence when required"
             ),
             BuildArray { .. } => assert!(
                 !whole.operands.is_empty(),
@@ -1262,12 +1322,30 @@ impl OperationKind {
                 whole.operands[1].format_with(env)
             ),
             Load => write!(f, "load {}", whole.operands[0].format_with(env)),
-            Subfield { .. } => write!(
-                f,
-                "subfield {} from {}",
-                whole.operands[1].format_with(env),
-                whole.operands[0].format_with(env)
-            ),
+            Subfield {
+                variant_payload,
+                has_layout_witness,
+                ..
+            } => {
+                if *variant_payload {
+                    write!(
+                        f,
+                        "variant_payload from {}",
+                        whole.operands[0].format_with(env)
+                    )?;
+                } else {
+                    write!(
+                        f,
+                        "subfield {} from {}",
+                        whole.operands[1].format_with(env),
+                        whole.operands[0].format_with(env)
+                    )?;
+                }
+                if *has_layout_witness {
+                    write!(f, " via {}", whole.operands[2].format_with(env))?;
+                }
+                Ok(())
+            }
             DictEntry { entry_index, .. } => write!(
                 f,
                 "dict_entry {} from {}",
@@ -1294,7 +1372,23 @@ impl OperationKind {
                 }
                 Ok(())
             }
-            Variant { tag, .. } => write!(f, "variant {tag}"),
+            Variant {
+                tag,
+                storage,
+                has_layout_witness,
+                ..
+            } => {
+                write!(f, "variant {tag}")?;
+                let mut index = 0;
+                if storage.is_none() {
+                    write!(f, " storage via {}", whole.operands[index].format_with(env))?;
+                    index += 1;
+                }
+                if *has_layout_witness {
+                    write!(f, " layout via {}", whole.operands[index].format_with(env))?;
+                }
+                Ok(())
+            }
             BuildArray { element_ty } => {
                 write!(f, "build_array<{}> [", element_ty.format_with(env))?;
                 let (destination, elements) = whole
@@ -1442,7 +1536,9 @@ mod tests {
             Location::new_synthesized(),
             tag,
             Type::variant([(tag, Type::unit())]),
+            Type::unit(),
             Some(VariantPayloadStorage::Inline),
+            None,
             None,
         );
 

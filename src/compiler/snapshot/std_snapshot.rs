@@ -276,10 +276,13 @@ mod tests {
             format!("{:?}", expected.def_table),
             "definition table differs after restoration"
         );
+        // Hash-map debug order is not semantic and can change when source compilation causes a
+        // table to resize. Compare the ordered implementation data here; the lookup maps are
+        // compared structurally below.
         assert_eq!(
-            format!("{:?}", restored.impls),
-            format!("{:?}", expected.impls),
-            "trait implementation tables differ after restoration"
+            format!("{:?}", restored.impls.data),
+            format!("{:?}", expected.impls.data),
+            "trait implementation data differs after restoration"
         );
         for (index, (restored, expected)) in restored
             .functions
@@ -338,6 +341,14 @@ mod tests {
         assert_eq!(
             restored.impls.blanket_key_to_id,
             expected.impls.blanket_key_to_id
+        );
+        assert_eq!(
+            restored.impls.generated_value_key_to_id,
+            expected.impls.generated_value_key_to_id
+        );
+        assert_eq!(
+            restored.impls.unconstrained_application_key_to_id,
+            expected.impls.unconstrained_application_key_to_id
         );
     }
 

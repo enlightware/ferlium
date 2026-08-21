@@ -360,11 +360,22 @@ storage evidence together with `Value<B>`:
 - indirect storage uses the target pointer alignment for the case offset and `Value<B>::SIZE` and
   `Value<B>::ALIGN` to allocate the separate payload block.
 
+When the case remains open in unspecialized generic code, construction receives the indirection
+decision as a transient boolean evidence argument and combines it into the tag it writes. This is
+not a separate field in the constructed value. Once a variant value has been constructed, payload
+projection obtains the same classification from the high bit of the stored tag; it does not need a
+second boolean argument. MIR payload construction and projection retain `Value<B>` as an explicit
+operand whenever `B` has a run-time-dependent layout.
+
 A payloadless case writes only its tag and requires no payload layout witness.
 
 No `Value<V>` witness is needed merely to address a known case payload inside an existing `V`
 place. Allocating or moving the complete variant remains a whole-value operation and uses `Value<V>`
 when `V` has no static layout at the lowering site.
+
+The case-qualified `(V, tag, B)` obligation is compile-time provenance for an ordinary
+`Value<B>` hidden parameter, not a distinct runtime dictionary kind. Multiple cases with the same
+payload type and ordinary operations on `B` share that parameter.
 
 Every case whose payload representation reaches the same recursive representation component as
 `V` stores an owning pointer to its complete payload `B_i`; other case payloads are inline.

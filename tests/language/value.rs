@@ -2525,6 +2525,90 @@ fn open_generic_variant_match_accepts_recursive_payload_storage() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn variant_layout_and_ordinary_value_requirement_share_dictionary() {
+    // Spell out `Value<(T,)>` so this exercises an ordinary dictionary obligation and the
+    // case-qualified layout obligation for exactly the same physical evidence slot.
+    let source = r#"
+        enum Option<T> { None, Some(T) }
+        fn wrap<T>(x: T) -> Option<T> where T: Value, (T,): Value {
+            let mut payload = (x,);
+            let copied = payload;
+            Option::Some(copied.0)
+        }
+        match wrap(42) { Some(value) => value, _ => 0 }
+    "#;
+    let mut inspect = TestSession::new();
+    let mir = inspect.emit_mir(source);
+    let wrap_signature = mir
+        .lines()
+        .find(|line| line.starts_with("fn wrap("))
+        .unwrap_or_else(|| panic!("no `wrap` MIR signature:\n{mir}"));
+    assert_eq!(
+        wrap_signature.matches("@extra").count(),
+        2,
+        "expected one Value<T> and one shared Value<(T,)> parameter:\n{wrap_signature}"
+    );
+    for mode in RunMode::ALL {
+        let mut session = TestSession::new();
+        session.run_modes([mode]);
+        assert_val_eq!(session.run(source), int(42));
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn variant_cases_with_the_same_payload_share_layout_dictionary() {
+    let source = r#"
+        enum Either<T> { Left(T), Right(T) }
+        fn choose<T>(left: bool, x: T) -> Either<T> where T: Value {
+            if left { Either::Left(x) } else { Either::Right(x) }
+        }
+        match choose(false, 42) { Right(value) => value, _ => 0 }
+    "#;
+    let mut inspect = TestSession::new();
+    let mir = inspect.emit_mir(source);
+    let choose_signature = mir
+        .lines()
+        .find(|line| line.starts_with("fn choose("))
+        .unwrap_or_else(|| panic!("no `choose` MIR signature:\n{mir}"));
+    assert_eq!(
+        choose_signature.matches("@extra").count(),
+        2,
+        "expected one Value<T> and one Value<(T,)> shared by both cases:\n{choose_signature}"
+    );
+    for mode in RunMode::ALL {
+        let mut session = TestSession::new();
+        session.run_modes([mode]);
+        assert_val_eq!(session.run(source), int(42));
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn variant_layout_binding_tracks_effect_polymorphic_function_members() {
+    let source = r#"
+        enum Callback<T ! E> { None, Some(T, () -> () ! E) }
+        fn wrap<T ! E>(x: T, callback: () -> () ! E) -> Callback<T ! E>
+        where T: Value {
+            Callback::Some(x, callback)
+        }
+        fn run() -> int {
+            match wrap(42, || ()) {
+                Some(value, callback) => { callback(); value },
+                _ => 0,
+            }
+        }
+        run()
+    "#;
+    for mode in RunMode::ALL {
+        let mut session = TestSession::new();
+        session.run_modes([mode]);
+        assert_val_eq!(session.run(source), int(42));
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn recursive_generic_call_keeps_distinct_same_tag_storage_evidence() {
     let source = r#"
         fn inspect(n, left, right) {

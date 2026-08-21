@@ -720,12 +720,13 @@ fn elide_trivial_ownership_operations(edit: &mut FunctionEdit, env: ModuleEnv<'_
 
 /// Drops a `Value` dictionary layout witness that substitution made redundant.
 ///
-/// `alloca` and `move` carry one when the value's size is only known at run time — a type that is,
-/// or embeds, a bare type variable. Substituting a concrete instantiation is precisely what makes
-/// such a type statically sized, so the witness the generic body needed is dead weight here: for
-/// this type the emitter would have chosen the static form. Left in place it is a live use of the
-/// dictionary, and a backend would honour it and emit a dynamically-sized allocation for a value
-/// whose size it knows. The MIR interpreter ignores it, so this changes no behaviour today.
+/// `alloca`, `move`, variant construction, and variant-payload projection carry one when the
+/// relevant value's size is only known at run time — a type that is, or embeds, a bare type
+/// variable. Substituting a concrete instantiation is precisely what makes such a type statically
+/// sized, so the witness the generic body needed is dead weight here: for this type the emitter
+/// would have chosen the static form. Left in place it is a live use of the dictionary, and a
+/// backend would honour it and emit dynamic layout code for a value whose layout it knows. The MIR
+/// interpreter ignores it, so this changes no behaviour today.
 fn drop_redundant_layout_witnesses(edit: &mut FunctionEdit, env: ModuleEnv<'_>) {
     for block_id in edit.blocks().collect::<Vec<_>>() {
         let block = edit.block_mut(block_id);
@@ -738,7 +739,7 @@ fn drop_redundant_layout_witnesses(edit: &mut FunctionEdit, env: ModuleEnv<'_>) 
             });
         for operation in operations {
             let span = operation.span;
-            match &operation.kind {
+            match &mut operation.kind {
                 // The operand is present exactly in the dynamic form; the type it describes is the
                 // operation's own.
                 OperationKind::Alloca { ty } => {
@@ -757,6 +758,28 @@ fn drop_redundant_layout_witnesses(edit: &mut FunctionEdit, env: ModuleEnv<'_>) 
                         let destination = operation.operands[1].clone();
                         operation.operands = Box::new([source, destination]);
                     }
+                }
+                OperationKind::Subfield {
+                    ty,
+                    variant_payload: true,
+                    has_layout_witness,
+                } => {
+                    if *has_layout_witness && type_has_static_layout(*ty, span, &env) {
+                        debug_assert_eq!(operation.operands.len(), 3);
+                        operation.operands = operation.operands[..2].into();
+                        *has_layout_witness = false;
+                    }
+                }
+                OperationKind::Variant {
+                    metadata,
+                    has_layout_witness,
+                    ..
+                } if *has_layout_witness
+                    && type_has_static_layout(metadata.payload_ty, span, &env) =>
+                {
+                    let new_len = operation.operands.len() - 1;
+                    operation.operands = operation.operands[..new_len].into();
+                    *has_layout_witness = false;
                 }
                 _ => {}
             }
@@ -940,13 +963,16 @@ fn bind_dictionaries(edit: &mut FunctionEdit, dictionaries: &[TraitDictionaryId]
 fn substitute_in_operation(operation: &mut Operation, mapper: &mut impl TypeMapper) {
     match &mut operation.kind {
         OperationKind::Alloca { ty }
-        | OperationKind::Subfield { ty }
+        | OperationKind::Subfield { ty, .. }
         | OperationKind::DictEntry { ty, .. }
         | OperationKind::SubscriptMember { ty, .. }
         | OperationKind::BuildSubscript { ty }
-        | OperationKind::Variant { ty, .. }
         | OperationKind::BuildClosure { ty, .. }
         | OperationKind::CloneClosureEnv { ty } => *ty = ty.map(mapper),
+        OperationKind::Variant { metadata, .. } => {
+            metadata.ty = metadata.ty.map(mapper);
+            metadata.payload_ty = metadata.payload_ty.map(mapper);
+        }
         OperationKind::BuildArray { element_ty } => *element_ty = element_ty.map(mapper),
         OperationKind::AllocaPlace { pointing_to } => *pointing_to = pointing_to.map(mapper),
         OperationKind::Call { ty, metadata } => {
@@ -1289,6 +1315,30 @@ fn worth_specializing<Ty: TypeLike>(
                                 |ty| type_has_static_layout(ty, operation.span, &env),
                             )
                         }) =>
+                {
+                    return true;
+                }
+                OperationKind::Subfield {
+                    ty,
+                    variant_payload: true,
+                    has_layout_witness: true,
+                } if operation.operands.get(2).is_some_and(|witness| {
+                    matches!(witness, mir::Value::Parameter(id) if bound.contains_key(id))
+                }) && type_has_static_layout(ty.map(&mut mapper), operation.span, &env) =>
+                {
+                    return true;
+                }
+                OperationKind::Variant {
+                    metadata,
+                    has_layout_witness: true,
+                    ..
+                } if operation.operands.last().is_some_and(|witness| {
+                    matches!(witness, mir::Value::Parameter(id) if bound.contains_key(id))
+                }) && type_has_static_layout(
+                    metadata.payload_ty.map(&mut mapper),
+                    operation.span,
+                    &env,
+                ) =>
                 {
                     return true;
                 }
@@ -1868,6 +1918,65 @@ mod tests {
                  {specialized}"
             );
         }
+    }
+
+    #[test]
+    fn substitution_drops_variant_layout_witnesses_it_makes_redundant() {
+        let mut session = CompilerSession::new();
+        let module = compile(
+            &mut session,
+            "enum Boxed<T> { Empty, Item(T) }\n\
+             fn wrap<T>(x: T) -> Boxed<T> where T: Value { Boxed::Item(x) }\n\
+             fn unwrap_or<T>(x: Boxed<T>, fallback: T) -> T where T: Value {\n\
+                 match x { Boxed::Item(value) => value, Boxed::Empty => fallback }\n\
+             }\n\
+             fn wrap_int(x: int) -> Boxed<int> { wrap(x) }\n\
+             fn unwrap_int(x: Boxed<int>, fallback: int) -> int { unwrap_or(x, fallback) }",
+        );
+
+        let construction =
+            site(&session, module, "wrap_int", "wrap").specialize(session.module_env());
+        let mut saw_construction = false;
+        let mut saw_construction_projection = false;
+        for block in construction.blocks() {
+            for operation in construction.block(block).operations() {
+                match &operation.kind {
+                    OperationKind::Variant {
+                        has_layout_witness, ..
+                    } => {
+                        saw_construction = true;
+                        assert!(!has_layout_witness);
+                    }
+                    OperationKind::Subfield {
+                        variant_payload: true,
+                        has_layout_witness,
+                        ..
+                    } => {
+                        saw_construction_projection = true;
+                        assert!(!has_layout_witness);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert!(saw_construction && saw_construction_projection);
+
+        let projection =
+            site(&session, module, "unwrap_int", "unwrap_or").specialize(session.module_env());
+        let projections = projection
+            .blocks()
+            .flat_map(|block| projection.block(block).operations())
+            .filter_map(|operation| match operation.kind {
+                OperationKind::Subfield {
+                    variant_payload: true,
+                    has_layout_witness,
+                    ..
+                } => Some(has_layout_witness),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(!projections.is_empty());
+        assert!(projections.iter().all(|witness| !witness));
     }
 
     /// A generic body copies and releases through `Value::clone` and `Value::drop`, because it

@@ -41,7 +41,7 @@ use crate::{
         value::{
             is_function_surface_only_value_trait_application, is_value_trait,
             is_value_trait_for_function_type, value_layout_associated_const_values,
-            value_layout_for_type,
+            value_layout_for_type, variant_payload_storage_for_type,
         },
     },
     types::effects::{EffType, Effect, EffectVar},
@@ -1075,6 +1075,20 @@ impl<'a> TraitSolver<'a> {
     /// This is used by trait improvement to probe whether a partially known
     /// trait application already has a unique matching impl.
     fn improvement_candidates(&self, trait_id: TraitId) -> Vec<TraitImprovementCandidate> {
+        fn semantic_constraints(constraints: &[PubTypeConstraint]) -> Vec<PubTypeConstraint> {
+            constraints
+                .iter()
+                // Payload layout is code-generation evidence. It has no outputs and cannot make
+                // an implementation applicable or inapplicable, so speculative improvement must
+                // not pay to instantiate and solve it for every candidate. The full constraint
+                // list is still used when the selected blanket implementation is materialized.
+                .filter(|constraint| {
+                    !matches!(constraint, PubTypeConstraint::VariantPayloadLayout { .. })
+                })
+                .cloned()
+                .collect()
+        }
+
         let mut candidates = Vec::new();
 
         for (key, id) in &self.impls.concrete_key_to_id {
@@ -1100,7 +1114,7 @@ impl<'a> TraitSolver<'a> {
                     output_effs: imp.output_effs.clone(),
                     ty_var_count: sub_key.ty_var_count,
                     eff_var_count: sub_key.eff_var_count,
-                    constraints: sub_key.constraints.clone(),
+                    constraints: semantic_constraints(&sub_key.constraints),
                 });
             }
         }
@@ -1133,7 +1147,7 @@ impl<'a> TraitSolver<'a> {
                             output_effs: imp.output_effs.clone(),
                             ty_var_count: sub_key.ty_var_count,
                             eff_var_count: sub_key.eff_var_count,
-                            constraints: sub_key.constraints.clone(),
+                            constraints: semantic_constraints(&sub_key.constraints),
                         });
                     }
                 }
@@ -1234,6 +1248,7 @@ impl<'a> TraitSolver<'a> {
                     assumptions,
                     fn_span,
                     arena,
+                    None,
                     BlanketConstraintMode::AllowUnknown,
                 )? {
                     BlanketImplMatch::No => TraitImprovementMatch::No,
@@ -1795,6 +1810,7 @@ impl<'a> TraitSolver<'a> {
         assumptions: ConstraintAssumptions<'_>,
         fn_span: Location,
         arena: &mut NodeArena,
+        value_trait_id: Option<TraitId>,
         mode: BlanketConstraintMode,
     ) -> Result<BlanketImplMatch, InternalCompilationError> {
         // First instantiate the blanket-local type and effect variables with
@@ -1876,6 +1892,33 @@ impl<'a> TraitSolver<'a> {
                             *field,
                             subscript_ty.clone(),
                         )),
+                        PubTypeConstraint::TypeHasVariant {
+                            variant_ty,
+                            tag,
+                            payload_ty,
+                            ..
+                        } => Some(DictionaryReq::new_variant_payload_indirection(
+                            *variant_ty,
+                            *tag,
+                            *payload_ty,
+                        )),
+                        PubTypeConstraint::VariantPayloadLayout { payload_ty, .. } => {
+                            // The case provenance is needed when elaborating the blanket method,
+                            // but its runtime argument is the ordinary `Value<payload_ty>`
+                            // dictionary.
+                            runtime_requirements.push(ResolvedRuntimeRequirement {
+                                index: *constraint_index,
+                                req: DictionaryReq::new_trait_impl(
+                                    value_trait_id.expect(
+                                        "layout obligations are excluded from improvement probes",
+                                    ),
+                                    vec![*payload_ty],
+                                    Vec::new(),
+                                    Vec::new(),
+                                ),
+                            });
+                            continue;
+                        }
                         _ => None,
                     };
                     if let Some(unresolved) = query.unify_non_trait_constraint_query(
@@ -2075,7 +2118,7 @@ impl<'a> TraitSolver<'a> {
                 DictionaryReq::ProjectionSubscript { subscript_ty, .. } => {
                     ty_inf.substitute_in_subscript_type_in_place(subscript_ty);
                 }
-                DictionaryReq::VariantPayloadStorage {
+                DictionaryReq::VariantPayloadIndirection {
                     variant_ty,
                     payload_ty,
                     ..
@@ -2621,6 +2664,33 @@ impl<'a> TraitSolver<'a> {
         input_tys: &[Type],
         span: Location,
     ) -> Result<(NodeKind, Type), InternalCompilationError> {
+        // Look through the concrete generated-Value cache before deriving method bodies. The
+        // lower-level materializer also checks this key, but by then
+        // `generic_value_methods_for_type` has already recursively generated every method. Layout
+        // evidence asks for the same ground payload dictionaries frequently, and reserved concrete
+        // entries deliberately make this fast path safe for recursive `Value` derivation as well.
+        let cached_local_id = if input_tys.iter().all(Type::is_constant) {
+            let key = ConcreteTraitImplKey::new(trait_id, input_tys.to_vec());
+            self.impls.concrete_key_to_id.get(&key).copied()
+        } else {
+            // Open dictionaries are alpha-canonical caches whose derivation can still contribute
+            // constraints in the caller's inference world. Keep their existing lower-level cache
+            // check after method derivation; only ground dictionaries are context-free here.
+            None
+        };
+        if let Some(local_id) = cached_local_id {
+            let dictionary_ty =
+                self.trait_def(trait_id)
+                    .get_dictionary_type_for_tys(input_tys, &[], &[]);
+            return Ok((
+                get_dictionary(TraitImplId::new(
+                    self.current_type_items.module.id,
+                    local_id,
+                )),
+                dictionary_ty,
+            ));
+        }
+
         let trait_def = self.trait_def(trait_id);
         let methods = if is_value_trait_for_function_type(trait_id, trait_def, input_tys, &[]) {
             let method_count = trait_def.methods.len();
@@ -2639,12 +2709,51 @@ impl<'a> TraitSolver<'a> {
     fn runtime_requirements_from_resolved(
         &self,
         resolved_requirements: &[ResolvedRuntimeRequirement],
+        source_constraints: &[PubTypeConstraint],
     ) -> Vec<DictionaryReq> {
-        resolved_requirements
-            .iter()
-            .filter_map(|resolved| match &resolved.req {
+        let value_trait_id = self.std_trait_id(VALUE_TRAIT_NAME);
+        let mut source_slots = Vec::new();
+        let mut requirements = Vec::new();
+        for resolved in resolved_requirements {
+            let source_constraint = &source_constraints[resolved.index];
+            let source_requirement = match source_constraint {
+                PubTypeConstraint::HaveTrait {
+                    trait_id,
+                    input_tys,
+                    output_tys,
+                    ..
+                } if !self.trait_def(*trait_id).has_runtime_dictionary_entries()
+                    || is_value_trait_for_function_type(
+                        *trait_id,
+                        self.trait_def(*trait_id),
+                        input_tys,
+                        output_tys,
+                    )
+                    || is_function_surface_only_value_trait_application(
+                        *trait_id,
+                        self.trait_def(*trait_id),
+                        input_tys,
+                        output_tys,
+                    ) =>
+                {
+                    None
+                }
+                _ => source_constraint.dictionary_requirement_key(value_trait_id),
+            };
+            let Some(source_requirement) = source_requirement else {
+                continue;
+            };
+
+            // Slot sharing is determined by the generic callee's ABI. Two different source slots
+            // may resolve to equal requirements at this instantiation; in that case the same
+            // dictionary value is passed twice, once in each original position.
+            if source_slots.contains(&source_requirement) {
+                continue;
+            }
+
+            let requirement = match &resolved.req {
                 DictionaryReq::ProjectionSubscript { .. } => Some(resolved.req.clone()),
-                DictionaryReq::VariantPayloadStorage { .. } => Some(resolved.req.clone()),
+                DictionaryReq::VariantPayloadIndirection { .. } => Some(resolved.req.clone()),
                 DictionaryReq::TraitImpl {
                     trait_id,
                     input_tys,
@@ -2663,8 +2772,13 @@ impl<'a> TraitSolver<'a> {
                         ))
                     }
                 }
-            })
-            .collect()
+            };
+            if let Some(requirement) = requirement {
+                source_slots.push(source_requirement);
+                requirements.push(requirement);
+            }
+        }
+        requirements
     }
 
     fn validate_runtime_requirements(
@@ -2735,6 +2849,17 @@ impl<'a> TraitSolver<'a> {
     ) -> Result<Option<Vec<(NodeKind, Type)>>, InternalCompilationError> {
         let mut infos = Vec::new();
         for requirement in runtime_requirements {
+            if let DictionaryReq::VariantPayloadIndirection {
+                variant_ty, tag, ..
+            } = requirement
+            {
+                let storage = variant_payload_storage_for_type(*variant_ty, *tag, fn_span, self)?;
+                infos.push((
+                    NodeKind::Immediate(LiteralValue::new_native(storage.is_indirect())),
+                    Type::primitive::<bool>(),
+                ));
+                continue;
+            }
             let DictionaryReq::TraitImpl {
                 trait_id,
                 input_tys,
@@ -3023,6 +3148,7 @@ impl<'a> TraitSolver<'a> {
                     ConstraintAssumptions::all(&[]),
                     fn_span,
                     arena,
+                    Some(value_trait_id),
                     blanket_constraint_mode,
                 )?;
                 let BlanketImplMatch::Yes {
@@ -3046,8 +3172,10 @@ impl<'a> TraitSolver<'a> {
 
                 // Non-Value blanket impls can materialize all constraint dictionaries up front.
                 if trait_id != value_trait_id {
-                    let runtime_requirements =
-                        self.runtime_requirements_from_resolved(&resolved_runtime_requirements);
+                    let runtime_requirements = self.runtime_requirements_from_resolved(
+                        &resolved_runtime_requirements,
+                        imp_constraints,
+                    );
                     let has_projection_requirement =
                         runtime_requirements.iter().any(|requirement| {
                             matches!(requirement, DictionaryReq::ProjectionSubscript { .. })
@@ -3292,8 +3420,10 @@ impl<'a> TraitSolver<'a> {
 
                 // Now that recursive self-references can resolve to the reserved impl,
                 // materialize the deferred constraint dictionaries.
-                let runtime_requirements =
-                    self.runtime_requirements_from_resolved(&resolved_runtime_requirements);
+                let runtime_requirements = self.runtime_requirements_from_resolved(
+                    &resolved_runtime_requirements,
+                    imp_constraints,
+                );
                 let has_projection_requirement = runtime_requirements.iter().any(|requirement| {
                     matches!(requirement, DictionaryReq::ProjectionSubscript { .. })
                 });

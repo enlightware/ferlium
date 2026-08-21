@@ -986,7 +986,11 @@ fn forget_root(state: &mut AvailableCalls, root: Root) {
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Computation {
     /// A field address *derived* from its operand: the base's root and path with an index appended.
-    Subfield { ty: Type },
+    Subfield {
+        ty: Type,
+        variant_payload: bool,
+        has_layout_witness: bool,
+    },
     /// A function place *materialized* from evidence into a freshly allocated cell.
     DictEntry {
         entry_index: TraitDictionaryEntryIndex,
@@ -997,7 +1001,15 @@ enum Computation {
 impl Computation {
     fn of(kind: &OperationKind) -> Option<Self> {
         match kind {
-            OperationKind::Subfield { ty } => Some(Self::Subfield { ty: *ty }),
+            OperationKind::Subfield {
+                ty,
+                variant_payload,
+                has_layout_witness,
+            } => Some(Self::Subfield {
+                ty: *ty,
+                variant_payload: *variant_payload,
+                has_layout_witness: *has_layout_witness,
+            }),
             OperationKind::DictEntry { entry_index, ty } => Some(Self::DictEntry {
                 entry_index: *entry_index,
                 ty: *ty,

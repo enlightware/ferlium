@@ -270,7 +270,7 @@ impl UnifiedTypeInference {
                 DictionaryReq::ProjectionSubscript { subscript_ty, .. } => {
                     self.substitute_in_subscript_type_in_place(subscript_ty);
                 }
-                DictionaryReq::VariantPayloadStorage {
+                DictionaryReq::VariantPayloadIndirection {
                     variant_ty,
                     payload_ty,
                     ..
@@ -320,6 +320,11 @@ impl UnifiedTypeInference {
                 self.substitute_in_subscript_type_in_place(subscript_ty);
             }
             TypeHasVariant {
+                variant_ty,
+                payload_ty,
+                ..
+            }
+            | VariantPayloadLayout {
                 variant_ty,
                 payload_ty,
                 ..

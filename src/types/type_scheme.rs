@@ -36,8 +36,10 @@ use ustr::Ustr;
 
 use crate::{
     hir::FnInstData,
-    hir::dictionary::{DictionaryReq, instantiate_dictionary_requirements},
-    module::{ModuleEnv, TraitId},
+    hir::dictionary::{
+        DictionaryReq, VariantPayloadLayoutBinding, instantiate_dictionary_requirements,
+    },
+    module::{ExtraParameterId, ModuleEnv, TraitId, id::Id},
     types::effects::{EffType, EffectVar, EffectsInstSubst, no_effects},
     types::r#type::{
         FnArgType, SubscriptMemberType, SubscriptResultConvention, SubscriptType, Type,
@@ -101,6 +103,17 @@ pub enum PubTypeConstraint {
         payload_ty: Type,
         payload_span: InstantiableLocation,
     },
+    /// The complete `Value<B>` dictionary needed to address one variant case payload.
+    ///
+    /// This is an ABI evidence obligation, not a trait query: it has no outputs and cannot improve
+    /// inference. Keeping it separate also avoids enlarging every ordinary `HaveTrait` constraint
+    /// with case-provenance storage.
+    VariantPayloadLayout {
+        variant_ty: Type,
+        tag: Ustr,
+        payload_ty: Type,
+        payload_span: InstantiableLocation,
+    },
     /// Types have trait
     HaveTrait {
         trait_id: TraitId,
@@ -116,6 +129,56 @@ pub enum PubTypeConstraint {
 }
 
 impl PubTypeConstraint {
+    /// Return the canonical dictionary key represented by this constraint before filtering marker
+    /// traits or compiler-provided evidence. Variant layout provenance deliberately maps to the
+    /// ordinary `Value<payload_ty>` key used by the physical ABI.
+    pub(crate) fn dictionary_requirement_key(
+        &self,
+        value_trait_id: TraitId,
+    ) -> Option<DictionaryReq> {
+        match self {
+            Self::ProjectionSubscriptIs {
+                requirement,
+                field,
+                subscript_ty,
+                ..
+            } => Some(DictionaryReq::new_projection_subscript(
+                *requirement,
+                *field,
+                subscript_ty.clone(),
+            )),
+            Self::TypeHasVariant {
+                variant_ty,
+                tag,
+                payload_ty,
+                ..
+            } => Some(DictionaryReq::new_variant_payload_indirection(
+                *variant_ty,
+                *tag,
+                *payload_ty,
+            )),
+            Self::VariantPayloadLayout { payload_ty, .. } => Some(DictionaryReq::new_trait_impl(
+                value_trait_id,
+                vec![*payload_ty],
+                Vec::new(),
+                Vec::new(),
+            )),
+            Self::HaveTrait {
+                trait_id,
+                input_tys,
+                output_tys,
+                output_effs,
+                ..
+            } => Some(DictionaryReq::new_trait_impl(
+                *trait_id,
+                input_tys.clone(),
+                output_tys.clone(),
+                output_effs.clone(),
+            )),
+            Self::TupleAtIndexIs { .. } => None,
+        }
+    }
+
     pub fn new_tuple_at_index_is(
         tuple_ty: Type,
         tuple_span: Location,
@@ -203,12 +266,27 @@ impl PubTypeConstraint {
         }
     }
 
+    pub fn new_variant_payload_layout(
+        variant_ty: Type,
+        tag: Ustr,
+        payload_ty: Type,
+        payload_span: Location,
+    ) -> Self {
+        Self::VariantPayloadLayout {
+            variant_ty,
+            tag,
+            payload_ty,
+            payload_span: InstantiableLocation::new(payload_span),
+        }
+    }
+
     pub fn use_site(&self) -> Location {
         use PubTypeConstraint::*;
         match self {
             TupleAtIndexIs { tuple_span, .. } => tuple_span.use_site,
             ProjectionSubscriptIs { receiver_span, .. } => receiver_span.use_site,
             TypeHasVariant { variant_span, .. } => variant_span.use_site,
+            VariantPayloadLayout { payload_span, .. } => payload_span.use_site,
             HaveTrait { span, .. } => span.use_site,
         }
     }
@@ -233,6 +311,9 @@ impl PubTypeConstraint {
                 field_span.instantiate(use_site);
             }
             TypeHasVariant {
+                payload_span: span, ..
+            }
+            | VariantPayloadLayout {
                 payload_span: span, ..
             } => {
                 span.instantiate(use_site);
@@ -289,12 +370,14 @@ impl PubTypeConstraint {
                     Some(constraint)
                 }
             }
+            VariantPayloadLayout { .. } => Some(constraint),
             HaveTrait {
                 trait_id,
                 input_tys,
                 output_tys,
                 output_effs,
                 span,
+                ..
             } => {
                 let trait_def = trait_solver.trait_def(*trait_id);
                 // Function-related `Value` constraints are compiler-provided, so they
@@ -409,6 +492,17 @@ impl TypeLike for PubTypeConstraint {
                 payload_ty: payload_ty.map(f),
                 payload_span: payload_span.clone(),
             },
+            VariantPayloadLayout {
+                variant_ty,
+                tag,
+                payload_ty,
+                payload_span,
+            } => VariantPayloadLayout {
+                variant_ty: variant_ty.map(f),
+                tag: *tag,
+                payload_ty: payload_ty.map(f),
+                payload_span: payload_span.clone(),
+            },
             HaveTrait {
                 trait_id,
                 input_tys,
@@ -448,6 +542,13 @@ impl TypeLike for PubTypeConstraint {
                 ..
             } => {
                 variant_ty.data().visit(visitor);
+                payload_ty.data().visit(visitor);
+            }
+            VariantPayloadLayout { payload_ty, .. } => {
+                // The enclosing variant is provenance, not another semantic type obligation. Its
+                // graph is mapped above to keep evidence identity current, while only `payload_ty`
+                // determines accessibility and quantification, exactly like the `Value<B>` this
+                // requirement supplies at runtime.
                 payload_ty.data().visit(visitor);
             }
             HaveTrait {
@@ -529,6 +630,20 @@ impl PartialEq for PubTypeConstraint {
                 },
             ) => v_ty1 == v_ty2 && tag1 == tag2 && p_ty1 == p_ty2,
             (
+                VariantPayloadLayout {
+                    variant_ty: v_ty1,
+                    tag: tag1,
+                    payload_ty: p_ty1,
+                    ..
+                },
+                VariantPayloadLayout {
+                    variant_ty: v_ty2,
+                    tag: tag2,
+                    payload_ty: p_ty2,
+                    ..
+                },
+            ) => v_ty1 == v_ty2 && tag1 == tag2 && p_ty1 == p_ty2,
+            (
                 HaveTrait {
                     trait_id: t1,
                     input_tys: i1,
@@ -574,6 +689,16 @@ impl Hash for PubTypeConstraint {
                 subscript_ty.hash(state);
             }
             TypeHasVariant {
+                variant_ty,
+                tag,
+                payload_ty,
+                ..
+            } => {
+                variant_ty.hash(state);
+                tag.hash(state);
+                payload_ty.hash(state);
+            }
+            VariantPayloadLayout {
                 variant_ty,
                 tag,
                 payload_ty,
@@ -1052,35 +1177,48 @@ pub(crate) fn extra_parameters_from_constraints(
         repr_map.insert(*in_var, next);
     }
 
-    // Process other constraints needing dictionaries.
-    let requirements = constraints
-        .iter()
-        .filter_map(|constraint| match constraint {
-            ProjectionSubscriptIs {
-                requirement,
-                field,
-                subscript_ty,
-                ..
-            } => Some(DictionaryReq::new_projection_subscript(
-                *requirement,
-                *field,
-                subscript_ty.clone(),
-            )),
-            TypeHasVariant {
+    // Process other constraints needing runtime evidence. Variant payload layout obligations are
+    // case-qualified uses of ordinary `Value<B>` evidence, not additional runtime parameters.
+    let value_trait_id = env.expect_std_trait_id(crate::std::core_traits_names::VALUE_TRAIT_NAME);
+    let mut requirements = Vec::new();
+    let mut variant_payload_layouts = Vec::new();
+    for constraint in constraints {
+        let requirement = match constraint {
+            ProjectionSubscriptIs { .. } | TypeHasVariant { .. } => {
+                constraint.dictionary_requirement_key(value_trait_id)
+            }
+            VariantPayloadLayout {
                 variant_ty,
                 tag,
                 payload_ty,
                 ..
-            } => Some(DictionaryReq::new_variant_payload_storage(
-                *variant_ty,
-                *tag,
-                *payload_ty,
-            )),
+            } => {
+                let value_requirement = constraint
+                    .dictionary_requirement_key(value_trait_id)
+                    .expect("a variant layout obligation always has a dictionary key");
+                let parameter_index = requirements
+                    .iter()
+                    .position(|requirement| requirement == &value_requirement)
+                    .unwrap_or_else(|| {
+                        let index = requirements.len();
+                        requirements.push(value_requirement);
+                        index
+                    });
+                let binding = VariantPayloadLayoutBinding {
+                    variant_ty: *variant_ty,
+                    tag: *tag,
+                    payload_ty: *payload_ty,
+                    parameter: ExtraParameterId::from_index(parameter_index),
+                };
+                if !variant_payload_layouts.contains(&binding) {
+                    variant_payload_layouts.push(binding);
+                }
+                None
+            }
             HaveTrait {
                 trait_id,
                 input_tys,
                 output_tys,
-                output_effs,
                 ..
             } => {
                 let trait_def = env.trait_def(*trait_id);
@@ -1099,20 +1237,24 @@ pub(crate) fn extra_parameters_from_constraints(
                 } else if !trait_def.has_runtime_dictionary_entries() {
                     None // Marker traits have no runtime dictionary entries.
                 } else {
-                    Some(DictionaryReq::new_trait_impl(
-                        *trait_id,
-                        input_tys.clone(),
-                        output_tys.clone(),
-                        output_effs.clone(),
-                    ))
+                    let requirement = constraint
+                        .dictionary_requirement_key(value_trait_id)
+                        .expect("a trait obligation always has a dictionary key");
+                    // A preceding case-qualified layout obligation may already have interned the
+                    // same `Value<B>` parameter.
+                    (!requirements.contains(&requirement)).then_some(requirement)
                 }
             }
             _ => None,
-        })
-        .collect();
+        };
+        if let Some(requirement) = requirement {
+            requirements.push(requirement);
+        }
+    }
 
     ExtraParameters {
         requirements,
+        variant_payload_layouts,
         repr_map,
     }
 }

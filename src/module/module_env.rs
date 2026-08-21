@@ -313,6 +313,17 @@ impl<'m> QualifiedNameEnv<'m> {
                 tag,
                 self.format_type(*payload_ty)
             ),
+            PubTypeConstraint::VariantPayloadLayout {
+                variant_ty,
+                tag,
+                payload_ty,
+                ..
+            } => format!(
+                "variant-payload-layout({}, {}, {})",
+                self.format_type(*variant_ty),
+                tag,
+                self.format_type(*payload_ty)
+            ),
             PubTypeConstraint::HaveTrait {
                 trait_id,
                 input_tys,

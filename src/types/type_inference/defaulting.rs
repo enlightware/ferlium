@@ -354,7 +354,8 @@ impl UnifiedTypeInference {
                             .filter(|var| !variant_subject_vars.contains(var)),
                     );
                 }
-                PubTypeConstraint::HaveTrait { .. } => {}
+                PubTypeConstraint::VariantPayloadLayout { .. }
+                | PubTypeConstraint::HaveTrait { .. } => {}
                 _ => {
                     invalid_ty_vars.extend(constraint.inner_ty_vars());
                 }
@@ -444,7 +445,11 @@ impl UnifiedTypeInference {
                         .flat_map(|ty| ty.inner_ty_vars())
                         .filter(|ty_var| !input_ty_vars.contains(ty_var)),
                 );
-            } else if !constraint.is_type_has_variant() {
+            } else if !matches!(
+                constraint,
+                PubTypeConstraint::TypeHasVariant { .. }
+                    | PubTypeConstraint::VariantPayloadLayout { .. }
+            ) {
                 invalid_ty_vars.extend(constraint.inner_ty_vars());
             }
         }
@@ -520,11 +525,16 @@ impl UnifiedTypeInference {
         let mut candidate_ty_vars = FxHashSet::<TypeVar>::default();
 
         for constraint in &constraints {
-            let PubTypeConstraint::HaveTrait { input_tys, .. } = constraint else {
-                continue;
-            };
-            for input_ty in input_tys {
-                candidate_ty_vars.extend(input_ty.inner_ty_vars());
+            match constraint {
+                PubTypeConstraint::HaveTrait { input_tys, .. } => {
+                    for input_ty in input_tys {
+                        candidate_ty_vars.extend(input_ty.inner_ty_vars());
+                    }
+                }
+                PubTypeConstraint::VariantPayloadLayout { payload_ty, .. } => {
+                    candidate_ty_vars.extend(payload_ty.inner_ty_vars());
+                }
+                _ => {}
             }
         }
 
@@ -546,16 +556,33 @@ impl UnifiedTypeInference {
                     continue;
                 }
 
-                let PubTypeConstraint::HaveTrait {
-                    trait_id,
-                    input_tys,
-                    output_tys,
-                    span,
-                    ..
-                } = constraint
-                else {
-                    all_satisfied = false;
-                    break;
+                let (trait_id, input_tys, output_tys, span) = match constraint {
+                    PubTypeConstraint::HaveTrait {
+                        trait_id,
+                        input_tys,
+                        output_tys,
+                        span,
+                        ..
+                    } => (
+                        *trait_id,
+                        input_tys.as_slice(),
+                        output_tys.as_slice(),
+                        span.use_site,
+                    ),
+                    PubTypeConstraint::VariantPayloadLayout {
+                        payload_ty,
+                        payload_span,
+                        ..
+                    } => (
+                        trait_solver.std_trait_id(crate::std::core_traits_names::VALUE_TRAIT_NAME),
+                        std::slice::from_ref(payload_ty),
+                        &[] as &[Type],
+                        payload_span.use_site,
+                    ),
+                    _ => {
+                        all_satisfied = false;
+                        break;
+                    }
                 };
 
                 let occurs_in_inputs = input_tys
@@ -577,7 +604,7 @@ impl UnifiedTypeInference {
                     .collect::<Vec<_>>();
                 if inst_input_tys.iter().all(Type::is_constant)
                     && trait_solver
-                        .solve_impl(*trait_id, &inst_input_tys, span.use_site, arena)
+                        .solve_impl(trait_id, &inst_input_tys, span, arena)
                         .is_err()
                 {
                     all_satisfied = false;

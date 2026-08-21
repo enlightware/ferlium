@@ -37,7 +37,7 @@ enum SnapshotDictionaryReq {
         field: String,
         subscript_ty: SnapshotSubscriptType,
     },
-    VariantPayloadStorage {
+    VariantPayloadIndirection {
         variant_ty: SnapshotTypeId,
         tag: String,
         payload_ty: SnapshotTypeId,
@@ -110,6 +110,7 @@ enum SnapshotNodeKind {
     Project {
         value: SnapshotNodeId,
         index: ProjectionIndex,
+        variant_payload: bool,
     },
     LoadLocal(LocalDeclId),
     StoreLocal {
@@ -289,11 +290,11 @@ impl SnapshotDictionaryReq {
                 field: field.to_string(),
                 subscript_ty: graph.capture_subscript_type(subscript_ty)?,
             },
-            DictionaryReq::VariantPayloadStorage {
+            DictionaryReq::VariantPayloadIndirection {
                 variant_ty,
                 tag,
                 payload_ty,
-            } => Self::VariantPayloadStorage {
+            } => Self::VariantPayloadIndirection {
                 variant_ty: graph.capture(*variant_ty)?,
                 tag: tag.to_string(),
                 payload_ty: graph.capture(*payload_ty)?,
@@ -323,11 +324,11 @@ impl SnapshotDictionaryReq {
                 field: field.as_str().into(),
                 subscript_ty: subscript_ty.materialize(types)?,
             },
-            Self::VariantPayloadStorage {
+            Self::VariantPayloadIndirection {
                 variant_ty,
                 tag,
                 payload_ty,
-            } => DictionaryReq::VariantPayloadStorage {
+            } => DictionaryReq::VariantPayloadIndirection {
                 variant_ty: live_ty(types, *variant_ty)?,
                 tag: tag.as_str().into(),
                 payload_ty: live_ty(types, *payload_ty)?,
@@ -540,6 +541,7 @@ impl SnapshotNodeKind {
             NodeKind::Project(value) => Self::Project {
                 value: node_id(value.value),
                 index: value.index,
+                variant_payload: value.variant_payload,
             },
             NodeKind::FieldAccess(value) => match *value {},
             NodeKind::LoadLocal(value) => Self::LoadLocal(value.id),
@@ -704,9 +706,15 @@ impl SnapshotNodeKind {
                 captures: ids(captures)?,
                 captures_value_dictionary: captures_value_dictionary.map(id).transpose()?,
             })),
-            Self::Project { value, index } => {
-                NodeKind::Project(hir::Project::new(id(*value)?, *index))
-            }
+            Self::Project {
+                value,
+                index,
+                variant_payload,
+            } => NodeKind::Project(hir::Project {
+                value: id(*value)?,
+                index: *index,
+                variant_payload: *variant_payload,
+            }),
             Self::LoadLocal(local) => NodeKind::LoadLocal(hir::LoadLocal { id: *local }),
             Self::StoreLocal { value, id: local } => NodeKind::StoreLocal(hir::StoreLocal {
                 value: id(*value)?,

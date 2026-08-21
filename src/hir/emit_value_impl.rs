@@ -24,7 +24,7 @@ use crate::{
     std::value::{
         NO_DERIVE_VALUE_ATTRIBUTE, derive_generic_value_code_entries,
         function_value_method_function, function_value_method_name,
-        is_function_surface_only_value_type,
+        is_function_surface_only_value_type, variant_payload_storage_type,
     },
     types::{
         coherence::check_trait_impl,
@@ -145,17 +145,30 @@ fn type_has_any_ty_var(ty: Type, vars: &[TypeVar]) -> bool {
 
 /// Return the fields/payloads whose `Value` impls are called directly by the
 /// generated `Value` impl for `ty`.
-fn auto_value_direct_member_tys(ty: Type, env: &ModuleEnv<'_>) -> Vec<Type> {
+fn auto_value_direct_members(ty: Type, env: &ModuleEnv<'_>) -> Vec<(Option<(Type, Ustr)>, Type)> {
     let ty_data = ty.data();
     match &*ty_data {
-        TypeKind::Tuple(member_tys) => member_tys.clone(),
-        TypeKind::Record(fields) => fields.iter().map(|(_, ty)| *ty).collect(),
-        TypeKind::Variant(variants) => variants.iter().map(|(_, ty)| *ty).collect(),
+        TypeKind::Tuple(member_tys) => member_tys.iter().map(|ty| (None, *ty)).collect(),
+        TypeKind::Record(fields) => fields.iter().map(|(_, ty)| (None, *ty)).collect(),
+        TypeKind::Variant(variants) => variants
+            .iter()
+            .map(|(tag, payload_ty)| (Some((ty, *tag)), *payload_ty))
+            .collect(),
         TypeKind::Named(named) => {
             let named = named.clone();
             drop(ty_data);
             let shape_ty = named.instantiated_shape(env);
-            auto_value_direct_member_tys(shape_ty, env)
+            let shape_data = shape_ty.data();
+            match &*shape_data {
+                TypeKind::Variant(variants) => variants
+                    .iter()
+                    .map(|(tag, payload_ty)| (Some((ty, *tag)), *payload_ty))
+                    .collect(),
+                _ => {
+                    drop(shape_data);
+                    auto_value_direct_members(shape_ty, env)
+                }
+            }
         }
         _ => Vec::new(),
     }
@@ -180,7 +193,7 @@ fn auto_value_constraints(
         constraints.insert(constraint);
     }
 
-    for member_ty in auto_value_direct_member_tys(input_ty, env) {
+    for (variant_case, member_ty) in auto_value_direct_members(input_ty, env) {
         if member_ty == Type::unit()
             || member_ty.is_function()
             || is_function_surface_only_value_type(member_ty)
@@ -196,6 +209,15 @@ fn auto_value_constraints(
             span,
         );
         constraints.insert(constraint);
+        if let Some((variant_ty, tag)) = variant_case {
+            // The layout witness describes the object projected directly from the variant. For
+            // scalar payloads that object is the uniform one-element tuple storage, even though
+            // the generated Value method subsequently projects and operates on the scalar member.
+            let storage_ty = variant_payload_storage_type(member_ty);
+            constraints.insert(PubTypeConstraint::new_variant_payload_layout(
+                variant_ty, tag, storage_ty, span,
+            ));
+        }
     }
 
     constraints.into_iter().collect()

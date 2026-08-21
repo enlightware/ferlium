@@ -308,7 +308,7 @@ fn fill_fn_inst_data_effect_vars(inst_data: &hir::FnInstData, vars: &mut FxHashS
             hir::dictionary::DictionaryReq::ProjectionSubscript { subscript_ty, .. } => {
                 subscript_ty.fill_with_inner_effect_vars(vars);
             }
-            hir::dictionary::DictionaryReq::VariantPayloadStorage {
+            hir::dictionary::DictionaryReq::VariantPayloadIndirection {
                 variant_ty,
                 payload_ty,
                 ..
@@ -1184,6 +1184,7 @@ pub(super) fn is_compiler_provided_value_constraint(
     module_env: ModuleEnv<'_>,
 ) -> bool {
     match c {
+        PubTypeConstraint::VariantPayloadLayout { .. } => true,
         PubTypeConstraint::HaveTrait {
             trait_id,
             input_tys,
@@ -1239,6 +1240,11 @@ pub(super) fn first_unbound_type_in_constraints<'a>(
                 if let Some(unbound) = in_type(*variant_ty, span) {
                     return Some(unbound);
                 }
+                if let Some(unbound) = in_type(*payload_ty, span) {
+                    return Some(unbound);
+                }
+            }
+            PubTypeConstraint::VariantPayloadLayout { payload_ty, .. } => {
                 if let Some(unbound) = in_type(*payload_ty, span) {
                     return Some(unbound);
                 }

@@ -435,13 +435,42 @@ fn variant_match_compares_the_tag_register() {
     call std::Num<std::int>::from_int#impl:25eabc6b(%r2, %p1)
     br b4
   b3:
-    %r3: *(int,) = subfield @c0 from %p0
+    %r3: *(int,) = variant_payload from %p0
     %r4: *int = subfield @c0 from %r3
     memcpy %r4 to %p1
     br b4
   b4:
     ret
 "#
+    );
+}
+
+#[test]
+fn generic_variant_payload_layout_evidence_reaches_mir() {
+    let mut session = TestSession::new();
+    let out = session.emit_mir(
+        r#"
+        fn wrap(x) { Some(x) }
+        fn unwrap_or(x, fallback) {
+            match x {
+                Some(value) => value,
+                _ => fallback,
+            }
+        }
+        (wrap(1), unwrap_or(Some(2), 3))
+        "#,
+    );
+
+    assert!(
+        out.lines().any(|line| {
+            line.contains("variant Some storage via") && line.contains("layout via")
+        }),
+        "generic variant construction lost storage or Value<B> evidence:\n{out}"
+    );
+    assert!(
+        out.lines()
+            .any(|line| line.contains("variant_payload from") && line.contains(" via ")),
+        "generic variant payload projection lost Value<B> evidence:\n{out}"
     );
 }
 

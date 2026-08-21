@@ -928,9 +928,9 @@ mod tests {
         );
     }
 
-    /// Lowering a variant pattern projects both layers of its payload, even when the source-level
-    /// binding is unused. The inner unread `subfield` must make the outer one dead through the
-    /// worklist.
+    /// Lowering a variant pattern projects the case payload and then its tuple field, even when the
+    /// source-level binding is unused. The inner unread `subfield` must make the outer
+    /// `variant_payload` projection dead through the worklist.
     #[test]
     fn an_unread_chain_of_subfields_is_removed() {
         let source = "fn has_value(x: None | Some(int)) -> bool { match x { Some(_n) => true, None => false } }";
@@ -938,7 +938,7 @@ mod tests {
         let raw_body = body_of(&raw_module, "has_value");
         let raw_subfields = raw_body
             .lines()
-            .filter(|line| line.contains("subfield"))
+            .filter(|line| line.contains("subfield") || line.contains("variant_payload"))
             .count();
         assert_eq!(
             raw_subfields, 2,
@@ -949,7 +949,7 @@ mod tests {
         let body = body_of(&module, "has_value");
         let optimized_subfields = body
             .lines()
-            .filter(|line| line.contains("subfield"))
+            .filter(|line| line.contains("subfield") || line.contains("variant_payload"))
             .count();
         assert_eq!(
             optimized_subfields, 0,

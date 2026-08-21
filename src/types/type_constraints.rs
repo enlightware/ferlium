@@ -119,6 +119,11 @@ impl<'a> NamedTypeConstraintCollector<'a> {
                 variant_ty: tuple_ty,
                 payload_ty: element_ty,
                 ..
+            }
+            | VariantPayloadLayout {
+                variant_ty: tuple_ty,
+                payload_ty: element_ty,
+                ..
             } => {
                 self.collect_type(*tuple_ty);
                 self.collect_type(*element_ty);

@@ -74,11 +74,13 @@ fn build_serialize_projection(
 ) -> Result<NodeId, InternalCompilationError> {
     use hir::hir_syn::*;
     let load_node = alloc_synth_node(arena, load_local(self_id), self_ty);
-    let project_node = alloc_synth_node(
-        arena,
-        project(load_node, ProjectionIndex::from_index(index)),
-        member_ty,
-    );
+    let projection = if self_ty.data().is_variant() {
+        debug_assert_eq!(index, 0);
+        hir::NodeKind::Project(hir::Project::variant_payload(load_node))
+    } else {
+        project(load_node, ProjectionIndex::from_index(index))
+    };
+    let project_node = alloc_synth_node(arena, projection, member_ty);
     let function = solver.solve_impl_method(
         trait_id,
         &[member_ty],

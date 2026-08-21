@@ -150,22 +150,16 @@ impl ValueLayout {
         Self::new(align_to(size, align), align)
     }
 
-    fn union(fields: impl IntoIterator<Item = ValueLayout>) -> Self {
-        let mut size = 0;
-        let mut align = 1;
-        for field in fields {
-            size = size.max(field.size);
-            align = align.max(field.align);
-        }
-        Self::new(align_to(size, align), align)
-    }
-
     fn variant(payloads: impl IntoIterator<Item = ValueLayout>) -> Self {
         let tag = Self::native::<u32>();
-        let payload = Self::union(payloads);
-        let align = tag.align.max(payload.align);
-        let payload_offset = align_to(tag.size, payload.align);
-        Self::new(align_to(payload_offset + payload.size, align), align)
+        let mut size = tag.size;
+        let mut align = tag.align;
+        for payload in payloads {
+            let payload_offset = align_to(tag.size, payload.align);
+            size = size.max(payload_offset + payload.size);
+            align = align.max(payload.align);
+        }
+        Self::new(align_to(size, align), align)
     }
 }
 
@@ -796,7 +790,7 @@ fn static_str_node(arena: &mut NodeArena, value: &str, span: Location) -> NodeId
     ))
 }
 
-fn variant_payload_storage_type(payload_ty: Type) -> Type {
+pub(crate) fn variant_payload_storage_type(payload_ty: Type) -> Type {
     if payload_ty == Type::unit() {
         return payload_ty;
     }
@@ -819,7 +813,7 @@ fn variant_payload_project(
     let storage_ty = variant_payload_storage_type(payload_ty);
     let storage = alloc_synth_node(
         arena,
-        hir::hir_syn::project(variant_value, ProjectionIndex::from_index(0)),
+        hir::NodeKind::Project(hir::Project::variant_payload(variant_value)),
         storage_ty,
     );
     if storage_ty == payload_ty {
@@ -2549,7 +2543,7 @@ mod tests {
     use crate::CompilerSession;
 
     #[test]
-    fn variant_layout_uses_a_u32_tag_and_inline_payload_union() {
+    fn variant_layout_uses_a_u32_tag_and_case_specific_payload_offsets() {
         let session = CompilerSession::new();
         let env = session.module_env();
         let no_payload = Type::variant([(ustr("None"), Type::unit())]);
@@ -2564,6 +2558,14 @@ mod tests {
             value_layout_for_type(bool_payload, Location::new_synthesized(), &env).unwrap(),
             ResolvedValueLayout { size: 8, align: 4 }
         );
+
+        // A common union payload offset would make this 24 bytes: the twelve-byte payload would
+        // be placed after padding the tag to the eight-byte alignment required only by `u64`.
+        // Computing each case independently lets both payloads end at byte 16.
+        let smalls = ValueLayout::product([ValueLayout::native::<u8>(); 12]);
+        let layout = ValueLayout::variant([smalls, ValueLayout::native::<u64>()]);
+        assert_eq!(layout.size, 16);
+        assert_eq!(layout.align, 8);
     }
 
     #[test]

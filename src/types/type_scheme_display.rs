@@ -140,6 +140,18 @@ where
                 )
             }
         }
+        VariantPayloadLayout {
+            variant_ty,
+            tag,
+            payload_ty,
+            ..
+        } => write!(
+            f,
+            "{} case {} payload layout Value<{}>",
+            variant_ty.format_with(env),
+            tag,
+            payload_ty.format_with(env)
+        ),
         HaveTrait {
             trait_id,
             input_tys,
@@ -234,7 +246,7 @@ fn collect_aggregated_constraint(
                 .unwrap()
                 .insert(*tag, *payload_ty);
         }
-        HaveTrait { .. } => {}
+        VariantPayloadLayout { .. } | HaveTrait { .. } => {}
     }
 }
 
@@ -448,6 +460,7 @@ impl<'a> DisplayConstraints<'a> {
             | PubTypeConstraint::ProjectionSubscriptIs { .. } => {
                 collect_aggregated_constraint(&mut self.structural_constraints, constraint);
             }
+            PubTypeConstraint::VariantPayloadLayout { .. } => {}
         }
     }
 
@@ -597,18 +610,21 @@ impl ConstraintDisplayItem<'_> {
 }
 
 fn is_hidden_light_constraint(constraint: &PubTypeConstraint, env: &ModuleEnv<'_>) -> bool {
-    matches!(
-        constraint,
+    match constraint {
+        PubTypeConstraint::VariantPayloadLayout { .. } => true,
         PubTypeConstraint::HaveTrait {
             trait_id,
             input_tys,
             output_tys,
             ..
-        } if trait_id.module == crate::std::STD_MODULE_ID
-            && env.trait_def(*trait_id).name == crate::std::core_traits_names::VALUE_TRAIT_NAME
-            && input_tys.len() == 1
-            && output_tys.is_empty()
-    )
+        } => {
+            trait_id.module == crate::std::STD_MODULE_ID
+                && env.trait_def(*trait_id).name == crate::std::core_traits_names::VALUE_TRAIT_NAME
+                && input_tys.len() == 1
+                && output_tys.is_empty()
+        }
+        _ => false,
+    }
 }
 
 fn is_repr_trait(env: &ModuleEnv<'_>, trait_id: TraitId) -> bool {

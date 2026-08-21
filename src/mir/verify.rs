@@ -1659,7 +1659,7 @@ impl<'a> Verifier<'a> {
                 let node = self.value_definition[value_id];
                 let operation = self.operation(node).unwrap();
                 match &operation.kind {
-                    OperationKind::Variant { ty, .. } => !self.is_trivial_copy(*ty),
+                    OperationKind::Variant { metadata, .. } => !self.is_trivial_copy(metadata.ty),
                     OperationKind::CloneClosureEnv { .. } => true,
                     OperationKind::BuildClosure {
                         num_hidden_dicts,
@@ -1887,8 +1887,10 @@ mod tests {
                 span,
                 ustr::ustr("A"),
                 variant_ty,
+                Type::unit(),
                 None,
                 Some(Value::Constant(storage)),
+                None,
             ),
         );
         terminate_return(&mut f, block, span);
@@ -1914,7 +1916,9 @@ mod tests {
                 span,
                 ustr::ustr("A"),
                 variant_ty,
+                string_type(),
                 Some(crate::hir::value::VariantPayloadStorage::Inline),
+                None,
                 None,
             ),
         );
@@ -1926,7 +1930,9 @@ mod tests {
                 span,
                 ustr::ustr("A"),
                 variant_ty,
+                string_type(),
                 Some(crate::hir::value::VariantPayloadStorage::Inline),
+                None,
                 None,
             ),
         );
@@ -1977,7 +1983,9 @@ mod tests {
                 span,
                 ustr::ustr("A"),
                 variant_ty,
+                string_type(),
                 Some(crate::hir::value::VariantPayloadStorage::Inline),
+                None,
                 None,
             ),
         );
@@ -2306,7 +2314,9 @@ mod tests {
                 span,
                 ustr::ustr("A"),
                 managed_variant_ty(),
+                string_type(),
                 Some(crate::hir::value::VariantPayloadStorage::Inline),
+                None,
                 None,
             ),
         );
@@ -2332,7 +2342,9 @@ mod tests {
                 span,
                 ustr::ustr("A"),
                 variant_ty,
+                string_type(),
                 Some(crate::hir::value::VariantPayloadStorage::Inline),
+                None,
                 None,
             ),
         );
@@ -2410,7 +2422,9 @@ mod tests {
                 span,
                 ustr::ustr("A"),
                 variant_ty,
+                string_type(),
                 Some(crate::hir::value::VariantPayloadStorage::Inline),
+                None,
                 None,
             ),
         );

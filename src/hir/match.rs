@@ -422,15 +422,18 @@ impl TypeInference {
 
                         // Generate the variable binding code
                         if !bind_var_names.is_empty() {
+                            self.add_variant_payload_value_constraint(
+                                pattern_ty,
+                                *tag,
+                                *variant_inner_ty,
+                                sp(*expr),
+                            );
                             let mut project_node_ids = Vec::new();
                             for i in 0..inner_tys.len() {
                                 let load_variant_id_inner =
                                     env.ir_arena.alloc(load_variant_node.clone());
                                 let project_variant_inner_id = env.ir_arena.alloc(N::new(
-                                    K::Project(Project::new(
-                                        load_variant_id_inner,
-                                        ProjectionIndex::from_index(0),
-                                    )),
+                                    K::Project(Project::variant_payload(load_variant_id_inner)),
                                     *variant_inner_ty,
                                     no_effects(),
                                     sp(*expr),

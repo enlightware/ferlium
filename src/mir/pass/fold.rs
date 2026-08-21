@@ -454,7 +454,9 @@ fn materialize_call_rewrite(
                 span,
                 ustr(ORDERING_EQUAL),
                 ordering_type(),
+                Type::unit(),
                 Some(VariantPayloadStorage::Inline),
+                None,
                 None,
             );
             let value = edit.new_value();

@@ -549,9 +549,18 @@ pub(crate) fn check_operand_roles(
                 evidence(0);
             }
         }
-        OperationKind::Variant { storage, .. } => {
+        OperationKind::Variant {
+            storage,
+            has_layout_witness,
+            ..
+        } => {
+            let mut index = 0;
             if storage.is_none() {
-                evidence(0);
+                evidence(index);
+                index += 1;
+            }
+            if *has_layout_witness {
+                evidence(index);
             }
         }
         OperationKind::BuildArray { .. } => {
@@ -645,9 +654,14 @@ pub(crate) fn check_operand_roles(
             }
         }
         OperationKind::Load => place(0),
-        OperationKind::Subfield { .. } => {
+        OperationKind::Subfield {
+            has_layout_witness, ..
+        } => {
             place(0);
             value(1);
+            if *has_layout_witness {
+                evidence(2);
+            }
         }
         OperationKind::DictEntry { .. } | OperationKind::SubscriptMember { .. } => evidence(0),
         OperationKind::BuildSubscript { .. } => {

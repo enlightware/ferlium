@@ -578,6 +578,15 @@ fn inline_at(edit: &mut FunctionEdit, body: &Function, site: Site, env: ModuleEn
     edit.block_mut(site.block()).operations.push(marker);
 
     let arguments = call.operands[1..].to_vec();
+    assert_eq!(
+        arguments.len(),
+        body.parameters().len(),
+        "call being inlined passes {} arguments to MIR function {} with {} parameters; operands: {:?}",
+        arguments.len(),
+        body.name,
+        body.parameters().len(),
+        call.operands,
+    );
     let mut copier = Copier {
         body,
         arguments,

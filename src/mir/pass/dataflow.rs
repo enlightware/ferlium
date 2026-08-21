@@ -1100,7 +1100,9 @@ mod tests {
                     span,
                     tag,
                     variant_ty,
+                    Type::unit(),
                     Some(VariantPayloadStorage::Inline),
+                    None,
                     None,
                 ),
             )

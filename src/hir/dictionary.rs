@@ -12,7 +12,10 @@ use ustr::Ustr;
 use crate::{
     FxHashMap,
     format::FormatWith,
-    module::{LocalFunctionId, ModuleEnv, PendingGeneratedStructuralProjectionSubscripts, TraitId},
+    module::{
+        ExtraParameterId, LocalFunctionId, ModuleEnv,
+        PendingGeneratedStructuralProjectionSubscripts, TraitId, id::Id,
+    },
     types::{
         effects::{EffType, EffectVar},
         mutability::MutType,
@@ -33,12 +36,14 @@ pub enum DictionaryReq {
         field: Ustr,
         subscript_ty: SubscriptType,
     },
-    /// Runtime layout evidence for constructing an open generic variant case.
-    VariantPayloadStorage {
+    /// Runtime storage-mode evidence for a specific open variant case.
+    ///
+    /// The runtime parameter is one boolean determined by `variant_ty` and `tag`.
+    /// `payload_ty` is retained as compile-time identity metadata for late recursive-call
+    /// elaboration.
+    VariantPayloadIndirection {
         variant_ty: Type,
         tag: Ustr,
-        /// Compile-time identity metadata for late recursive-call elaboration. The runtime
-        /// evidence remains one boolean determined by `variant_ty` and `tag`.
         payload_ty: Type,
     },
     TraitImpl {
@@ -77,8 +82,8 @@ impl DictionaryReq {
         }
     }
 
-    pub fn new_variant_payload_storage(variant_ty: Type, tag: Ustr, payload_ty: Type) -> Self {
-        Self::VariantPayloadStorage {
+    pub fn new_variant_payload_indirection(variant_ty: Type, tag: Ustr, payload_ty: Type) -> Self {
+        Self::VariantPayloadIndirection {
             variant_ty,
             tag,
             payload_ty,
@@ -99,7 +104,7 @@ impl DictionaryReq {
             ProjectionSubscript { subscript_ty, .. } => {
                 *subscript_ty = subscript_ty.map(mapper);
             }
-            VariantPayloadStorage {
+            VariantPayloadIndirection {
                 variant_ty,
                 payload_ty,
                 ..
@@ -125,7 +130,7 @@ impl DictionaryReq {
             DictionaryReq::ProjectionSubscript { subscript_ty, .. } => {
                 Type::subscript_type(subscript_ty.clone())
             }
-            DictionaryReq::VariantPayloadStorage { .. } => Type::primitive::<bool>(),
+            DictionaryReq::VariantPayloadIndirection { .. } => Type::primitive::<bool>(),
             DictionaryReq::TraitImpl {
                 trait_id,
                 input_tys,
@@ -144,7 +149,7 @@ impl DictionaryReq {
             DictionaryReq::ProjectionSubscript { subscript_ty, .. } => {
                 Type::subscript_type(subscript_ty.clone())
             }
-            DictionaryReq::VariantPayloadStorage { .. } => Type::primitive::<bool>(),
+            DictionaryReq::VariantPayloadIndirection { .. } => Type::primitive::<bool>(),
             DictionaryReq::TraitImpl {
                 trait_id,
                 input_tys,
@@ -188,17 +193,17 @@ impl PartialEq for DictionaryReq {
                 },
             ) => tr1 == tr2 && in1 == in2,
             (
-                VariantPayloadStorage {
+                VariantPayloadIndirection {
                     variant_ty: variant_ty1,
                     tag: tag1,
-                    ..
+                    payload_ty: payload_ty1,
                 },
-                VariantPayloadStorage {
+                VariantPayloadIndirection {
                     variant_ty: variant_ty2,
                     tag: tag2,
-                    ..
+                    payload_ty: payload_ty2,
                 },
-            ) => variant_ty1 == variant_ty2 && tag1 == tag2,
+            ) => variant_ty1 == variant_ty2 && tag1 == tag2 && payload_ty1 == payload_ty2,
             _ => false,
         }
     }
@@ -225,11 +230,11 @@ impl FormatWith<ModuleEnv<'_>> for DictionaryReq {
                 field,
                 Type::subscript_type(subscript_ty.clone()).format_with(env)
             ),
-            VariantPayloadStorage {
+            VariantPayloadIndirection {
                 variant_ty, tag, ..
             } => write!(
                 f,
-                "{} variant {tag} payload storage",
+                "{} variant {tag} payload indirection",
                 variant_ty.format_with(env)
             ),
             TraitImpl {
@@ -244,12 +249,26 @@ impl FormatWith<ModuleEnv<'_>> for DictionaryReq {
 
 pub type DictionariesReq = Vec<DictionaryReq>;
 
+/// Associates a case-qualified payload-layout obligation with the physical `Value<payload_ty>`
+/// dictionary parameter that satisfies it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VariantPayloadLayoutBinding {
+    pub variant_ty: Type,
+    pub tag: Ustr,
+    pub payload_ty: Type,
+    pub parameter: ExtraParameterId,
+}
+
 /// Data structure to hold extra parameters for a function.
 #[derive(Clone, Debug)]
 pub struct ExtraParameters {
     /// The dictionary requirements for the function.
     /// This is a list of dictionaries that will be passed as extra parameters to the function.
     pub requirements: Vec<DictionaryReq>,
+    /// Case-qualified uses of the physical `Value<B>` parameters above.
+    ///
+    /// Several cases, as well as ordinary `Value<B>` operations, may share one parameter.
+    pub variant_payload_layouts: Vec<VariantPayloadLayoutBinding>,
     /// A map from type variables to other type variables containing their representation type.
     /// This is used to resolve type variables when looking up field dict indices.
     pub repr_map: FxHashMap<TypeVar, TypeVar>,
@@ -306,7 +325,7 @@ pub fn find_projection_subscript_dict_index_for_receiver_ty(
     })
 }
 
-pub fn find_variant_payload_storage_index(
+pub fn find_variant_payload_indirection_index(
     dicts: &ExtraParameters,
     variant_ty: Type,
     tag: Ustr,
@@ -314,7 +333,7 @@ pub fn find_variant_payload_storage_index(
     dicts.requirements.iter().position(|dict| {
         matches!(
             dict,
-            DictionaryReq::VariantPayloadStorage {
+            DictionaryReq::VariantPayloadIndirection {
                 variant_ty: requirement_variant_ty,
                 tag: requirement_tag,
                 ..
@@ -322,6 +341,23 @@ pub fn find_variant_payload_storage_index(
                 && *requirement_tag == tag
         )
     })
+}
+
+pub fn find_variant_payload_layout_index(
+    dicts: &ExtraParameters,
+    variant_ty: Type,
+    tag: Ustr,
+    payload_ty: Type,
+) -> Option<usize> {
+    dicts
+        .variant_payload_layouts
+        .iter()
+        .find(|binding| {
+            binding.variant_ty == variant_ty
+                && binding.tag == tag
+                && binding.payload_ty == payload_ty
+        })
+        .map(|binding| binding.parameter.as_index())
 }
 
 pub fn find_trait_impl_dict_index(

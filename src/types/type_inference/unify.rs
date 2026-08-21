@@ -24,6 +24,7 @@ use crate::{
         core_traits_names::{FROM_ITERATOR_TRAIT_NAME, REPR_TRAIT_NAME, VALUE_TRAIT_NAME},
         value::{
             is_function_surface_only_value_trait_application, is_value_trait_for_function_type,
+            type_has_static_layout,
         },
     },
     types::{
@@ -209,6 +210,10 @@ impl UnifiedTypeInference {
         // iterating a hash set here made the diagnostic span and dictionary order depend on the
         // process-local identities assigned by the type interner.
         let mut remaining_constraints = Vec::new();
+        // Case-qualified payload layouts are evidence obligations with no trait outputs, so they
+        // cannot improve inference. Normalize them once after the semantic fixed point instead of
+        // revisiting potentially large recursive `Value<B>` applications on every pass.
+        let mut variant_layout_constraints = Vec::new();
 
         // First, resolve mutability constraints.
         for constraint in mut_constraints {
@@ -297,8 +302,14 @@ impl UnifiedTypeInference {
                     unified_ty_inf.unify_sub_type(current, current_span, expected, expected_span)?
                 }
                 Pub(cst) => {
-                    if !remaining_constraints.contains(&cst) {
-                        remaining_constraints.push(cst);
+                    let destination =
+                        if matches!(cst, PubTypeConstraint::VariantPayloadLayout { .. }) {
+                            &mut variant_layout_constraints
+                        } else {
+                            &mut remaining_constraints
+                        };
+                    if !destination.contains(&cst) {
+                        destination.push(cst);
                     }
                 }
             }
@@ -379,6 +390,23 @@ impl UnifiedTypeInference {
                     break;
                 }
             }
+        }
+
+        if !variant_layout_constraints.is_empty() {
+            unified_ty_inf.substitute_in_constraints_in_place(&mut variant_layout_constraints);
+            variant_layout_constraints.retain(|constraint| {
+                let PubTypeConstraint::VariantPayloadLayout {
+                    payload_ty,
+                    payload_span,
+                    ..
+                } = constraint
+                else {
+                    unreachable!("only variant layout evidence is deferred")
+                };
+                !type_has_static_layout(*payload_ty, payload_span.use_site, trait_solver)
+            });
+            remaining_constraints.extend(variant_layout_constraints);
+            deduplicate_constraints_in_place(&mut remaining_constraints);
         }
 
         // Create minimalist types for orphan variant constraints.
@@ -1449,12 +1477,16 @@ impl UnifiedTypeInference {
                     }
                     aggregation.constraints.push(Cow::Borrowed(constraint));
                 }
+                VariantPayloadLayout { .. } => {
+                    aggregation.constraints.push(Cow::Borrowed(constraint));
+                }
                 HaveTrait {
                     trait_id,
                     input_tys,
                     output_tys,
                     output_effs,
                     span,
+                    ..
                 } => {
                     let input_types = self.normalize_types(input_tys);
                     let output_types = self.normalize_types(output_tys);
@@ -1575,6 +1607,24 @@ impl UnifiedTypeInference {
         trait_solver: &mut TraitSolver<'_>,
         arena: &mut NodeArena,
     ) -> Result<Option<PubTypeConstraint>, InternalCompilationError> {
+        if let PubTypeConstraint::VariantPayloadLayout {
+            variant_ty,
+            tag,
+            payload_ty,
+            payload_span,
+        } = constraint
+        {
+            let payload_ty = self.normalize_type(*payload_ty);
+            if type_has_static_layout(payload_ty, payload_span.use_site, trait_solver) {
+                return Ok(None);
+            }
+            return Ok(Some(PubTypeConstraint::VariantPayloadLayout {
+                variant_ty: self.normalize_type(*variant_ty),
+                tag: *tag,
+                payload_ty,
+                payload_span: payload_span.clone(),
+            }));
+        }
         if let PubTypeConstraint::HaveTrait {
             trait_id,
             input_tys,
@@ -1702,7 +1752,9 @@ impl UnifiedTypeInference {
                     Ok(None)
                 }
             }
-            HaveTrait { .. } => unreachable!("trait constraints are handled by the caller"),
+            VariantPayloadLayout { .. } | HaveTrait { .. } => {
+                unreachable!("evidence and trait constraints are handled by the caller")
+            }
         }
     }
 
@@ -1966,6 +2018,7 @@ fn constraint_solve_priority(constraint: &PubTypeConstraint, trait_solver: &Trai
     match constraint {
         PubTypeConstraint::TupleAtIndexIs { .. } | PubTypeConstraint::TypeHasVariant { .. } => 0,
         PubTypeConstraint::ProjectionSubscriptIs { .. } => 5,
+        PubTypeConstraint::VariantPayloadLayout { .. } => 95,
         PubTypeConstraint::HaveTrait {
             trait_id,
             output_tys,

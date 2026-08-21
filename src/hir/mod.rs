@@ -431,10 +431,32 @@ pub enum VariantPayloadStorageSource {
 // Value access payloads.
 
 /// Project a tuple-like value at a statically known index.
-#[derive(Debug, Clone, Copy, new)]
+#[derive(Debug, Clone, Copy)]
 pub struct Project<P: HirPhase = Unelaborated> {
     pub value: NodeId<P>,
     pub index: ProjectionIndex,
+    /// This projection selects the complete payload of an already established variant case.
+    /// Physical lowering must use the stored tag's payload-storage bit and the payload's `Value`
+    /// layout evidence rather than treating it as an ordinary product-field offset.
+    pub variant_payload: bool,
+}
+
+impl<P: HirPhase> Project<P> {
+    pub fn new(value: NodeId<P>, index: ProjectionIndex) -> Self {
+        Self {
+            value,
+            index,
+            variant_payload: false,
+        }
+    }
+
+    pub fn variant_payload(value: NodeId<P>) -> Self {
+        Self {
+            value,
+            index: ProjectionIndex::from_index(0),
+            variant_payload: true,
+        }
+    }
 }
 
 /// Access a record-like value at a statically known field.

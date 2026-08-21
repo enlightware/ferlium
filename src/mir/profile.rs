@@ -223,15 +223,15 @@ impl MirExecutionProfile {
 
         let ty = match &operation.kind {
             OperationKind::Alloca { ty }
-            | OperationKind::Subfield { ty }
+            | OperationKind::Subfield { ty, .. }
             | OperationKind::DictEntry { ty, .. }
             | OperationKind::SubscriptMember { ty, .. }
             | OperationKind::BuildSubscript { ty }
-            | OperationKind::Variant { ty, .. }
             | OperationKind::Clone { ty }
             | OperationKind::Drop { ty }
             | OperationKind::BuildClosure { ty, .. }
             | OperationKind::CloneClosureEnv { ty } => Some(*ty),
+            OperationKind::Variant { metadata, .. } => Some(metadata.ty),
             OperationKind::AllocaPlace { pointing_to } => Some(*pointing_to),
             _ => None,
         };

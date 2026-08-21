@@ -22,7 +22,9 @@ use crate::module::{
 use crate::types::r#trait::{
     TraitAssociatedConstIndex, TraitDictionaryEntryIndex, TraitMethodIndex,
 };
-use crate::types::r#type::{CallImplType, CallResultConvention, FnType, SubscriptResultConvention};
+use crate::types::r#type::{
+    CallImplType, CallResultConvention, FnType, SubscriptResultConvention, TypeKind,
+};
 use crate::{
     Location, Modules, containers,
     format::FormatWith,
@@ -269,6 +271,7 @@ impl<'a> Emitter<'a> {
                 locals,
                 extra_parameters,
                 value_witnesses,
+                static_layouts: FxHashMap::default(),
                 loops: FxHashMap::default(),
                 return_destination,
                 returns_place: f.definition.returns_place(),
@@ -901,8 +904,31 @@ impl<'a> Emitter<'a> {
     /// representation is a fixed-layout struct whose size is independent of its type arguments. Only
     /// a value *of* a bare type variable — or an aggregate embedding one directly — has a layout that
     /// depends on a run-time witness (see [`type_has_static_layout`]).
-    fn is_statically_sized(&self, ty: Type) -> bool {
-        type_has_static_layout(ty, self.context.span, &self.env)
+    fn is_statically_sized(&mut self, ty: Type) -> bool {
+        if let Some(is_static) = self.context.static_layouts.get(&ty) {
+            return *is_static;
+        }
+        let is_static = type_has_static_layout(ty, self.context.span, &self.env);
+        self.context.static_layouts.insert(ty, is_static);
+        is_static
+    }
+
+    /// Returns `Value<ty>` when physical layout of `ty` depends on run-time evidence.
+    fn dynamic_layout_witness(&mut self, ty: Type) -> Option<mir::Value> {
+        if self.is_statically_sized(ty) {
+            return None;
+        }
+        Some(self.value_dictionary(ty).unwrap_or_else(|| {
+            panic!(
+                "no Value dictionary witnesses the layout of generic type {}; available witnesses: {:?}",
+                self.show(ty),
+                self.context
+                    .value_witnesses
+                    .iter()
+                    .map(|(ty, _)| self.show(*ty).to_string())
+                    .collect::<Vec<_>>()
+            )
+        }))
     }
 
     /// Inserts an allocation of storage for an instance of `ty` and returns its address.
@@ -930,7 +956,7 @@ impl<'a> Emitter<'a> {
     /// A value whose size depends on a bare type variable has no static layout: it must be allocated
     /// with `alloca_dynamic` and moved through its `Value` dictionary witness
     /// (`Value::clone`/`Value::drop`), never with direct `load`/`store`.
-    fn assert_statically_sized(&self, ty: Type) {
+    fn assert_statically_sized(&mut self, ty: Type) {
         assert!(
             self.is_statically_sized(ty),
             "attempted direct load/store of a generic value of type {}; generic values must be moved through their Value dictionary witness",
@@ -1361,6 +1387,15 @@ impl<'a> Emitter<'a> {
 
             K::Project(n) => {
                 let base_node = &self.hir_arena[n.value];
+                debug_assert!(
+                    !is_known_variant_type(base_node.ty, &self.env) || n.variant_payload,
+                    "a projection from the known variant type {} was not marked as a variant payload",
+                    self.show(base_node.ty)
+                );
+                debug_assert!(
+                    !n.variant_payload || n.index.as_index() == 0,
+                    "a variant payload projection must use physical projection index zero"
+                );
                 // A projection whose base is a dictionary extracts a dictionary entry (a method or
                 // associated const — `TraitDictionaryEntry` has no nested-dictionary variant, so a
                 // dictionary base is always a `GetDictionary`/`LoadDictionary` node). It lowers to
@@ -1382,8 +1417,18 @@ impl<'a> Emitter<'a> {
                 } else {
                     let base = self.lower_as_place(base_node);
                     let index = self.int_constant(n.index.as_index() as isize);
-                    self.insert(Operation::subfield(node.span, base, index, node.ty))
-                        .unwrap()
+                    let operation = if n.variant_payload {
+                        Operation::variant_payload(
+                            node.span,
+                            base,
+                            index,
+                            node.ty,
+                            self.dynamic_layout_witness(node.ty),
+                        )
+                    } else {
+                        Operation::subfield(node.span, base, index, node.ty)
+                    };
+                    self.insert(operation).unwrap()
                 }
             }
 
@@ -2524,10 +2569,10 @@ impl<'a> Emitter<'a> {
                 // Build the variant in place: store a tagged shell into the destination, then fill
                 // its payload slot directly. Building in place (rather than materializing the
                 // payload aggregate into a temporary that is then wrapped) means the payload — which
-                // may be generic, e.g. the `(A,)` of `Some(a)` — is never allocated as whole-aggregate
-                // storage, which would require a `Value` layout witness for the payload type the
-                // enclosing function does not carry. Only the payload's leaves are stored, each
-                // through its own (available) witness.
+                // may be generic, e.g. the `(A,)` of `Some(a)` — is initialized directly in its final
+                // location. The shell and payload-place projection still carry `Value<B>` when the
+                // complete payload layout is dynamic, because physical lowering needs its size and
+                // alignment even though MIR never allocates an intermediate `B`.
                 let (storage, evidence) = match n
                     .payload_storage
                     .expect("elaborated variant must have payload-storage metadata")
@@ -2538,9 +2583,16 @@ impl<'a> Emitter<'a> {
                         Some(self.context.extra_parameters[&extra_parameter].clone()),
                     ),
                 };
+                let layout_witness = self.dynamic_layout_witness(payload.ty);
                 let shell = self
                     .insert(Operation::variant(
-                        node.span, n.tag, node.ty, storage, evidence,
+                        node.span,
+                        n.tag,
+                        node.ty,
+                        payload.ty,
+                        storage,
+                        evidence,
+                        layout_witness.clone(),
                     ))
                     .unwrap();
                 self.store(node.span, shell, dest.clone());
@@ -2549,11 +2601,12 @@ impl<'a> Emitter<'a> {
                 if payload.ty != Type::unit() {
                     let payload_index = self.int_constant(0);
                     let payload_place = self
-                        .insert(Operation::subfield(
+                        .insert(Operation::variant_payload(
                             node.span,
                             dest,
                             payload_index,
                             payload.ty,
+                            layout_witness,
                         ))
                         .unwrap();
                     self.lower_value_into(payload, Some(payload_place));
@@ -2777,6 +2830,19 @@ impl<'a> Emitter<'a> {
     }
 }
 
+fn is_known_variant_type(ty: Type, env: &ModuleEnv<'_>) -> bool {
+    let data = ty.data();
+    match &*data {
+        TypeKind::Variant(_) => true,
+        TypeKind::Named(named) => {
+            let named = named.clone();
+            drop(data);
+            is_known_variant_type(named.instantiated_shape(env), env)
+        }
+        _ => false,
+    }
+}
+
 /// Construction state used while operations and terminators are emitted.
 struct InsertionContext {
     /// The function being built.
@@ -2801,6 +2867,10 @@ struct InsertionContext {
     /// The `Value` dictionary parameters witnessing the run-time layout of generic types, used to
     /// allocate storage whose size is known only at run time.
     value_witnesses: Vec<(Type, mir::Value)>,
+
+    /// Per-function cache of layout classification. Product and named types can be recursive, and
+    /// the same types are queried repeatedly while allocating locals and lowering projections.
+    static_layouts: FxHashMap<Type, bool>,
 
     /// The lexically enclosing loops, keyed by `LoopId`, used to lower `break`/`continue`.
     loops: FxHashMap<LoopId, LoopFrame>,

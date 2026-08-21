@@ -19,7 +19,8 @@ use crate::{
             DictElaborationCtx, DictionaryReq, ExtraParameters, LateFunctionInstData,
             find_projection_subscript_dict_index,
             find_projection_subscript_dict_index_for_receiver_ty, find_trait_impl_dict_index,
-            find_variant_payload_storage_index, instantiate_dictionary_requirements,
+            find_variant_payload_indirection_index, find_variant_payload_layout_index,
+            instantiate_dictionary_requirements,
         },
         value_dispatch::{resolve_local_clone, resolve_local_drop},
     },
@@ -46,7 +47,8 @@ use crate::{
     },
     std::value::{
         is_function_surface_only_value_trait_application, is_value_trait_for_function_type,
-        value_layout_associated_const_values, variant_payload_storage_for_type,
+        type_has_static_layout, value_layout_associated_const_values,
+        variant_payload_storage_for_type,
     },
     types::effects::{EffType, Effect, EffectsInstSubst, no_effects},
     types::mutability::MutType,
@@ -132,8 +134,12 @@ fn trait_dictionary_node_kind(
             .solve_impl(trait_id, input_tys, span, arena)?;
         NodeKind::GetDictionary(hir::GetDictionary { dictionary })
     } else {
-        let index = find_trait_impl_dict_index(ctx.dicts, trait_id, input_tys)
-            .expect("Dictionary for trait impl not found, type inference should have failed");
+        let index = find_trait_impl_dict_index(ctx.dicts, trait_id, input_tys).unwrap_or_else(|| {
+            panic!(
+                "dictionary for trait {trait_id:?} with inputs {input_tys:?} was not found in caller requirements {:?}; type inference should have failed",
+                ctx.dicts.requirements
+            )
+        });
         NodeKind::LoadDictionary(hir::LoadDictionary {
             extra_parameter: ExtraParameterId::from_index(index),
         })
@@ -256,14 +262,14 @@ fn extra_arg_kind_from_inst_data(
                     };
                     (node_kind, expected_node_ty)
                 }
-                VariantPayloadStorage {
+                VariantPayloadIndirection {
                     variant_ty,
                     tag,
                     ..
                 } => {
                     let node_ty = Type::primitive::<bool>();
                     if matches!(&*variant_ty.data(), TypeKind::Variable(_)) {
-                        let index = find_variant_payload_storage_index(
+                        let index = find_variant_payload_indirection_index(
                             ctx.dicts,
                             *variant_ty,
                             *tag,
@@ -271,7 +277,7 @@ fn extra_arg_kind_from_inst_data(
                         .ok_or_else(|| {
                             internal_compilation_error!(Internal {
                                 error: format!(
-                                    "variant payload-storage evidence {dict:?} not found in generic caller requirements {:?}",
+                                    "variant payload-indirection evidence {dict:?} not found in generic caller requirements {:?}",
                                     ctx.dicts.requirements
                                 ),
                                 span,
@@ -338,6 +344,10 @@ fn late_module_call_inst_data(
         })
     };
     let mut ty_subst = FxHashMap::default();
+    // Preserve the rooted correspondence between non-variable nodes in the final callee's type
+    // graph and the call-site graph. Recursive graphs can be structurally symmetric even though
+    // their nodes have distinct identities; the variable substitution alone loses that orientation.
+    let mut type_correspondence = FxHashMap::default();
     let mut eff_subst = if call_inst_data.eff_args.len() == callee.effect_quantifiers.len() {
         callee
             .effect_quantifiers
@@ -359,7 +369,13 @@ fn late_module_call_inst_data(
     }
     let mut active = FxHashSet::default();
     for (pattern, actual) in callee.fn_ty.args.iter().zip(&call_ty.args) {
-        if !bind_call_type_instantiation(pattern.ty, actual.ty, &mut ty_subst, &mut active) {
+        if !bind_call_type_instantiation(
+            pattern.ty,
+            actual.ty,
+            &mut ty_subst,
+            &mut type_correspondence,
+            &mut active,
+        ) {
             return Err(error(format!(
                 "late-instantiated call argument type {:?} does not match final callee type {:?}",
                 actual.ty, pattern.ty
@@ -377,7 +393,13 @@ fn late_module_call_inst_data(
             )));
         }
     }
-    if !bind_call_type_instantiation(callee.fn_ty.ret, call_ty.ret, &mut ty_subst, &mut active) {
+    if !bind_call_type_instantiation(
+        callee.fn_ty.ret,
+        call_ty.ret,
+        &mut ty_subst,
+        &mut type_correspondence,
+        &mut active,
+    ) {
         return Err(error(format!(
             "late-instantiated call result type {:?} does not match final callee type {:?}",
             call_ty.ret, callee.fn_ty.ret
@@ -409,10 +431,11 @@ fn late_module_call_inst_data(
             "late call maps one representation variable to two caller types".into(),
         ));
     }
-    bind_constraint_only_variant_types(
-        &callee.requirements.requirements,
+    bind_constraint_only_variant_types_with_correspondence(
+        &callee.requirements,
         caller_requirements,
         &mut ty_subst,
+        &mut type_correspondence,
     )
     .map_err(error)?;
     // Functions and associated lambdas in one recursive group share the final normalized effect
@@ -461,52 +484,84 @@ fn bind_representation_type_instantiation(
 
 /// Extend a late recursive-call substitution through variant constraints.
 ///
-/// The function surface often maps only one node of a mutually recursive type world. A
-/// `TypeHasVariant` requirement retains both its enclosing type and payload type, so matching the
-/// same case requirement propagates that known mapping to the adjacent node. A small backtracking
-/// search finds the unique globally compatible assignment; choosing requirements greedily would
-/// not be confluent. A shared tag alone is never enough: two unrelated `.Some` requirements remain
-/// ambiguous and cause an internal error rather than exchanging evidence.
+/// The function surface often maps only one node of a mutually recursive type world. Variant
+/// storage and layout requirements retain both their enclosing type and payload type, so
+/// matching the same kind of case requirement propagates that known mapping to the adjacent node.
+/// A small backtracking search finds the unique globally compatible assignment; choosing
+/// requirements greedily would not be confluent. A shared tag alone is never enough: two unrelated
+/// `.Some` requirements remain ambiguous and cause an internal error rather than exchanging
+/// evidence.
+#[cfg(test)]
 fn bind_constraint_only_variant_types(
-    callee_requirements: &[DictionaryReq],
+    callee_requirements: &ExtraParameters,
     caller: &ExtraParameters,
     subst: &mut FxHashMap<TypeVar, Type>,
 ) -> Result<(), String> {
-    let requirements = callee_requirements
-        .iter()
-        .filter(|requirement| matches!(requirement, DictionaryReq::VariantPayloadStorage { .. }))
-        .collect::<Vec<_>>();
+    bind_constraint_only_variant_types_with_correspondence(
+        callee_requirements,
+        caller,
+        subst,
+        &mut FxHashMap::default(),
+    )
+}
+
+fn bind_constraint_only_variant_types_with_correspondence(
+    callee_requirements: &ExtraParameters,
+    caller: &ExtraParameters,
+    subst: &mut FxHashMap<TypeVar, Type>,
+    correspondence: &mut FxHashMap<Type, Type>,
+) -> Result<(), String> {
+    let requirements = variant_requirements(callee_requirements);
+    let caller_requirements = variant_requirements(caller);
     let mut remaining = (0..requirements.len()).collect::<Vec<_>>();
     let mut solutions = Vec::new();
     search_variant_requirement_substitutions(
         &requirements,
-        caller,
+        &caller_requirements,
         &mut remaining,
-        subst.clone(),
+        VariantRequirementSubstitution {
+            types: subst.clone(),
+            correspondence: correspondence.clone(),
+            used_caller_requirements: FxHashSet::default(),
+        },
         &mut solutions,
     );
     if solutions.len() != 1 {
         return Err(format!(
-            "late variant-storage requirements have {} globally compatible caller mappings; expected exactly one",
-            solutions.len()
+            "late variant evidence requirements have {} globally compatible caller mappings; expected exactly one ({} callee requirements, {} caller requirements)",
+            solutions.len(),
+            requirements.len(),
+            caller_requirements.len(),
         ));
     }
-    *subst = solutions.pop().unwrap();
+    let solution = solutions.pop().unwrap();
+    *subst = solution.types;
+    *correspondence = solution.correspondence;
     Ok(())
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VariantRequirementSubstitution {
+    types: FxHashMap<TypeVar, Type>,
+    correspondence: FxHashMap<Type, Type>,
+    used_caller_requirements: FxHashSet<usize>,
+}
+
 fn search_variant_requirement_substitutions(
-    requirements: &[&DictionaryReq],
-    caller: &ExtraParameters,
+    requirements: &[VariantRequirement],
+    caller: &[VariantRequirement],
     remaining: &mut Vec<usize>,
-    subst: FxHashMap<TypeVar, Type>,
-    solutions: &mut Vec<FxHashMap<TypeVar, Type>>,
+    subst: VariantRequirementSubstitution,
+    solutions: &mut Vec<VariantRequirementSubstitution>,
 ) {
     if solutions.len() > 1 {
         return;
     }
     if remaining.is_empty() {
-        if !solutions.iter().any(|solution| solution == &subst) {
+        if !solutions
+            .iter()
+            .any(|solution| solution.types == subst.types)
+        {
             solutions.push(subst);
         }
         return;
@@ -541,54 +596,111 @@ fn search_variant_requirement_substitutions(
 }
 
 fn compatible_variant_requirement_substitutions(
-    requirement: &DictionaryReq,
-    caller: &ExtraParameters,
-    subst: &FxHashMap<TypeVar, Type>,
-) -> Vec<FxHashMap<TypeVar, Type>> {
-    let DictionaryReq::VariantPayloadStorage {
+    requirement: VariantRequirement,
+    caller: &[VariantRequirement],
+    subst: &VariantRequirementSubstitution,
+) -> Vec<VariantRequirementSubstitution> {
+    let VariantRequirement {
+        kind,
         variant_ty,
         tag,
         payload_ty,
-    } = requirement
-    else {
-        return Vec::new();
-    };
-    caller
-        .requirements
+    } = requirement;
+    let trials = caller
         .iter()
-        .filter_map(|candidate| {
-            let DictionaryReq::VariantPayloadStorage {
+        .enumerate()
+        .filter_map(|(candidate_index, candidate)| {
+            if subst.used_caller_requirements.contains(&candidate_index) {
+                return None;
+            }
+            let VariantRequirement {
+                kind: candidate_kind,
                 variant_ty: candidate_variant_ty,
                 tag: candidate_tag,
                 payload_ty: candidate_payload_ty,
-            } = candidate
-            else {
-                return None;
-            };
-            if candidate_tag != tag {
+            } = *candidate;
+            if candidate_kind != kind || candidate_tag != tag {
                 return None;
             }
             let mut trial = subst.clone();
             let mut active = FxHashSet::default();
             if !bind_call_type_instantiation(
-                *variant_ty,
-                *candidate_variant_ty,
-                &mut trial,
+                variant_ty,
+                candidate_variant_ty,
+                &mut trial.types,
+                &mut trial.correspondence,
                 &mut active,
             ) {
                 return None;
             }
             if !bind_call_type_instantiation(
-                *payload_ty,
-                *candidate_payload_ty,
-                &mut trial,
+                payload_ty,
+                candidate_payload_ty,
+                &mut trial.types,
+                &mut trial.correspondence,
                 &mut active,
             ) {
                 return None;
             }
-            Some(trial)
+            trial.used_caller_requirements.insert(candidate_index);
+            let exact = variant_ty == candidate_variant_ty && payload_ty == candidate_payload_ty;
+            Some((exact, trial))
         })
+        .collect::<Vec<_>>();
+
+    // An identical finalized requirement is already in the caller's type universe and is the
+    // canonical match. Do not exchange it for an isomorphic recursive requirement that happens to
+    // use the same case name; doing so would invent a mapping between otherwise independent type
+    // worlds. Structural matching remains available when late finalization genuinely changed the
+    // interned identities.
+    let has_exact = trials.iter().any(|(exact, _)| *exact);
+    trials
+        .into_iter()
+        .filter_map(|(exact, trial)| (!has_exact || exact).then_some(trial))
         .collect()
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VariantEvidenceKind {
+    Storage,
+    Layout,
+}
+
+#[derive(Clone, Copy)]
+struct VariantRequirement {
+    kind: VariantEvidenceKind,
+    variant_ty: Type,
+    tag: Ustr,
+    payload_ty: Type,
+}
+
+fn variant_requirements(parameters: &ExtraParameters) -> Vec<VariantRequirement> {
+    let mut requirements = parameters
+        .requirements
+        .iter()
+        .filter_map(|requirement| match requirement {
+            DictionaryReq::VariantPayloadIndirection {
+                variant_ty,
+                tag,
+                payload_ty,
+            } => Some(VariantRequirement {
+                kind: VariantEvidenceKind::Storage,
+                variant_ty: *variant_ty,
+                tag: *tag,
+                payload_ty: *payload_ty,
+            }),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    requirements.extend(parameters.variant_payload_layouts.iter().map(|binding| {
+        VariantRequirement {
+            kind: VariantEvidenceKind::Layout,
+            variant_ty: binding.variant_ty,
+            tag: binding.tag,
+            payload_ty: binding.payload_ty,
+        }
+    }));
+    requirements
 }
 
 /// Reconstruct effect-variable instantiation while walking corresponding type surfaces.
@@ -750,6 +862,7 @@ fn bind_call_type_instantiation(
     pattern: Type,
     actual: Type,
     subst: &mut FxHashMap<TypeVar, Type>,
+    correspondence: &mut FxHashMap<Type, Type>,
     active: &mut FxHashSet<(Type, Type)>,
 ) -> bool {
     let pattern_kind = pattern.data().clone();
@@ -762,6 +875,10 @@ fn bind_call_type_instantiation(
             }
         };
     }
+    if let Some(bound) = correspondence.get(&pattern) {
+        return *bound == actual;
+    }
+    correspondence.insert(pattern, actual);
     if pattern == actual {
         return true;
     }
@@ -773,10 +890,9 @@ fn bind_call_type_instantiation(
     let matches = match (pattern_kind, actual_kind) {
         (TypeKind::Tuple(left), TypeKind::Tuple(right)) => {
             left.len() == right.len()
-                && left
-                    .into_iter()
-                    .zip(right)
-                    .all(|(left, right)| bind_call_type_instantiation(left, right, subst, active))
+                && left.into_iter().zip(right).all(|(left, right)| {
+                    bind_call_type_instantiation(left, right, subst, correspondence, active)
+                })
         }
         (TypeKind::Record(left), TypeKind::Record(right))
         | (TypeKind::Variant(left), TypeKind::Variant(right)) => {
@@ -786,7 +902,13 @@ fn bind_call_type_instantiation(
                     .zip(right)
                     .all(|((left_name, left), (right_name, right))| {
                         left_name == right_name
-                            && bind_call_type_instantiation(left, right, subst, active)
+                            && bind_call_type_instantiation(
+                                left,
+                                right,
+                                subst,
+                                correspondence,
+                                active,
+                            )
                     })
         }
         (TypeKind::Native(left), TypeKind::Native(right)) => {
@@ -796,7 +918,9 @@ fn bind_call_type_instantiation(
                     .arguments
                     .into_iter()
                     .zip(right.arguments)
-                    .all(|(left, right)| bind_call_type_instantiation(left, right, subst, active))
+                    .all(|(left, right)| {
+                        bind_call_type_instantiation(left, right, subst, correspondence, active)
+                    })
         }
         (TypeKind::Named(left), TypeKind::Named(right)) => {
             left.def == right.def
@@ -805,21 +929,23 @@ fn bind_call_type_instantiation(
                     .params
                     .into_iter()
                     .zip(right.params)
-                    .all(|(left, right)| bind_call_type_instantiation(left, right, subst, active))
+                    .all(|(left, right)| {
+                        bind_call_type_instantiation(left, right, subst, correspondence, active)
+                    })
         }
         (TypeKind::Function(left), TypeKind::Function(right)) => {
             left.args.len() == right.args.len()
                 && left.args.iter().zip(&right.args).all(|(left, right)| {
-                    bind_call_type_instantiation(left.ty, right.ty, subst, active)
+                    bind_call_type_instantiation(left.ty, right.ty, subst, correspondence, active)
                 })
-                && bind_call_type_instantiation(left.ret, right.ret, subst, active)
+                && bind_call_type_instantiation(left.ret, right.ret, subst, correspondence, active)
         }
         (TypeKind::Subscript(left), TypeKind::Subscript(right)) => {
             left.args.len() == right.args.len()
                 && left.args.iter().zip(&right.args).all(|(left, right)| {
-                    bind_call_type_instantiation(left.ty, right.ty, subst, active)
+                    bind_call_type_instantiation(left.ty, right.ty, subst, correspondence, active)
                 })
-                && bind_call_type_instantiation(left.ret, right.ret, subst, active)
+                && bind_call_type_instantiation(left.ret, right.ret, subst, correspondence, active)
         }
         (TypeKind::Never, TypeKind::Never) => true,
         _ => false,
@@ -2097,9 +2223,34 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
             Project(project) => {
                 let value = project.value;
                 let index = project.index;
+                if project.variant_payload
+                    && !type_has_static_layout(node_ty, node_span, self.ctx.trait_solver)
+                {
+                    let variant_ty = src[value].ty;
+                    // A projection carries no semantic case tag. That is sufficient here because
+                    // cases with the same payload type use the same Value<B> layout dictionary;
+                    // construction, which must encode the selected tag, performs the exact lookup.
+                    let has_case_layout =
+                        self.ctx
+                            .dicts
+                            .variant_payload_layouts
+                            .iter()
+                            .any(|binding| {
+                                binding.variant_ty == variant_ty && binding.payload_ty == node_ty
+                            });
+                    if !has_case_layout {
+                        return Err(internal_compilation_error!(Internal {
+                            error: format!(
+                                "dynamic variant payload projection from {variant_ty:?} to {node_ty:?} has no case-qualified layout binding"
+                            ),
+                            span: node_span,
+                        }));
+                    }
+                }
                 Project(hir::Project {
                     value: self.elaborate_node(src, value)?,
                     index,
+                    variant_payload: project.variant_payload,
                 })
             }
             Record(nodes) => Record(b(SVec2::from_vec(
@@ -2173,8 +2324,35 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                 }
             }
             Variant(variant) => {
+                let payload_ty = src[variant.payload].ty;
+                if !type_has_static_layout(payload_ty, node_span, self.ctx.trait_solver) {
+                    let index = find_variant_payload_layout_index(
+                        self.ctx.dicts,
+                        node_ty,
+                        variant.tag,
+                        payload_ty,
+                    )
+                    .ok_or_else(|| {
+                        internal_compilation_error!(Internal {
+                            error: format!(
+                                "dynamic payload layout evidence for type {node_ty:?} and case .{}({payload_ty:?}) not found for generic construction",
+                                variant.tag
+                            ),
+                            span: node_span,
+                        })
+                    })?;
+                    let value_trait_id = self
+                        .ctx
+                        .trait_solver
+                        .std_trait_id(crate::std::core_traits_names::VALUE_TRAIT_NAME);
+                    debug_assert!(matches!(
+                        &self.ctx.dicts.requirements[index],
+                        DictionaryReq::TraitImpl { trait_id, input_tys, .. }
+                            if *trait_id == value_trait_id && input_tys.as_slice() == [payload_ty]
+                    ));
+                }
                 let payload_storage = if matches!(&*node_ty.data(), TypeKind::Variable(_)) {
-                    let index = find_variant_payload_storage_index(
+                    let index = find_variant_payload_indirection_index(
                         self.ctx.dicts,
                         node_ty,
                         variant.tag,
@@ -2182,7 +2360,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                     .ok_or_else(|| {
                         internal_compilation_error!(Internal {
                             error: format!(
-                                "variant payload-storage evidence for type {node_ty:?} and case .{} not found for generic construction",
+                                "variant payload-indirection evidence for type {node_ty:?} and case .{} not found for generic construction",
                                 variant.tag
                             ),
                             span: node_span,
@@ -2297,6 +2475,7 @@ mod tests {
     fn extra_parameters(requirements: Vec<DictionaryReq>) -> ExtraParameters {
         ExtraParameters {
             requirements,
+            variant_payload_layouts: Vec::new(),
             repr_map: FxHashMap::default(),
         }
     }
@@ -2309,30 +2488,30 @@ mod tests {
         let matching_payload = TypeVar::new(3);
         let decoy_variant = TypeVar::new(4);
         let decoy_payload = TypeVar::new(5);
-        let callee_requirements = vec![
-            DictionaryReq::new_variant_payload_storage(
+        let callee_requirements = extra_parameters(vec![
+            DictionaryReq::new_variant_payload_indirection(
                 Type::variable(callee_variant),
                 ustr("Shared"),
                 Type::variable(callee_payload),
             ),
-            DictionaryReq::new_variant_payload_storage(
+            DictionaryReq::new_variant_payload_indirection(
                 Type::variable(callee_payload),
                 ustr("Marker"),
                 int_type(),
             ),
-        ];
+        ]);
         let caller = extra_parameters(vec![
-            DictionaryReq::new_variant_payload_storage(
+            DictionaryReq::new_variant_payload_indirection(
                 Type::variable(matching_variant),
                 ustr("Shared"),
                 Type::variable(matching_payload),
             ),
-            DictionaryReq::new_variant_payload_storage(
+            DictionaryReq::new_variant_payload_indirection(
                 Type::variable(decoy_variant),
                 ustr("Shared"),
                 Type::variable(decoy_payload),
             ),
-            DictionaryReq::new_variant_payload_storage(
+            DictionaryReq::new_variant_payload_indirection(
                 Type::variable(matching_payload),
                 ustr("Marker"),
                 int_type(),
@@ -2358,25 +2537,25 @@ mod tests {
         let callee_right = TypeVar::new(1);
         let caller_left = TypeVar::new(2);
         let caller_right = TypeVar::new(3);
-        let callee_requirements = vec![
-            DictionaryReq::new_variant_payload_storage(
+        let callee_requirements = extra_parameters(vec![
+            DictionaryReq::new_variant_payload_indirection(
                 Type::variable(callee_left),
                 ustr("Some"),
                 Type::unit(),
             ),
-            DictionaryReq::new_variant_payload_storage(
+            DictionaryReq::new_variant_payload_indirection(
                 Type::variable(callee_right),
                 ustr("Some"),
                 Type::unit(),
             ),
-        ];
+        ]);
         let caller = extra_parameters(vec![
-            DictionaryReq::new_variant_payload_storage(
+            DictionaryReq::new_variant_payload_indirection(
                 Type::variable(caller_left),
                 ustr("Some"),
                 Type::unit(),
             ),
-            DictionaryReq::new_variant_payload_storage(
+            DictionaryReq::new_variant_payload_indirection(
                 Type::variable(caller_right),
                 ustr("Some"),
                 Type::unit(),
@@ -2393,7 +2572,7 @@ mod tests {
         );
 
         let callee = LateFunctionInstData {
-            requirements: extra_parameters(callee_requirements),
+            requirements: callee_requirements,
             fn_ty: FnType::new_by_val(Vec::<Type>::new(), Type::unit(), EffType::empty()),
             effect_quantifiers: Vec::new(),
         };
@@ -2558,6 +2737,7 @@ mod tests {
         );
         let dicts = ExtraParameters {
             requirements: vec![],
+            variant_payload_layouts: vec![],
             repr_map: FxHashMap::default(),
         };
         let generated_projection_subscripts =
@@ -2666,6 +2846,7 @@ mod tests {
         );
         let dicts = ExtraParameters {
             requirements: vec![],
+            variant_payload_layouts: vec![],
             repr_map: FxHashMap::default(),
         };
         let generated_projection_subscripts =
@@ -2730,6 +2911,7 @@ mod tests {
                 vec![],
                 vec![],
             )],
+            variant_payload_layouts: vec![],
             repr_map: FxHashMap::default(),
         };
         let generated_projection_subscripts =

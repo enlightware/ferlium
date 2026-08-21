@@ -59,6 +59,12 @@ pub(crate) enum SnapshotConstraint {
         payload_ty: SnapshotTypeId,
         payload_span: InstantiableLocation,
     },
+    VariantPayloadLayout {
+        variant_ty: SnapshotTypeId,
+        tag: String,
+        payload_ty: SnapshotTypeId,
+        payload_span: InstantiableLocation,
+    },
     HaveTrait {
         trait_id: TraitId,
         input_tys: Vec<SnapshotTypeId>,
@@ -192,6 +198,17 @@ impl SnapshotConstraint {
                 payload_ty: graph.capture(*payload_ty)?,
                 payload_span: payload_span.clone(),
             },
+            PubTypeConstraint::VariantPayloadLayout {
+                variant_ty,
+                tag,
+                payload_ty,
+                payload_span,
+            } => Self::VariantPayloadLayout {
+                variant_ty: graph.capture(*variant_ty)?,
+                tag: tag.to_string(),
+                payload_ty: graph.capture(*payload_ty)?,
+                payload_span: payload_span.clone(),
+            },
             PubTypeConstraint::HaveTrait {
                 trait_id,
                 input_tys,
@@ -251,6 +268,17 @@ impl SnapshotConstraint {
             } => PubTypeConstraint::TypeHasVariant {
                 variant_ty: ty(types, *variant_ty)?,
                 variant_span: variant_span.clone(),
+                tag: tag.as_str().into(),
+                payload_ty: ty(types, *payload_ty)?,
+                payload_span: payload_span.clone(),
+            },
+            Self::VariantPayloadLayout {
+                variant_ty,
+                tag,
+                payload_ty,
+                payload_span,
+            } => PubTypeConstraint::VariantPayloadLayout {
+                variant_ty: ty(types, *variant_ty)?,
                 tag: tag.as_str().into(),
                 payload_ty: ty(types, *payload_ty)?,
                 payload_span: payload_span.clone(),
