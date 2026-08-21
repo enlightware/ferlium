@@ -19,7 +19,9 @@ This separation allows Ferlium to target:
 - **Wasm64** (64‑bit pointers)
 - **Native** 32‑bit and 64-bit platforms
 
-The ABI presented here is stable across modules and compilation units.
+The language-defined representations in this document are stable across modules and compilation
+units using the same backend profile. Rust-native values are intentionally build-coupled instead:
+generated code and its runtime must use the same native-type layout catalog, as described below.
 
 # Backend Profiles
 
@@ -175,6 +177,45 @@ This section applies once the backend profile is selected.
 - Memory is byte-addressable.
 - Floating-point values are forbidden to be NaN.
 
+# Rust-native values
+
+A Rust-native Ferlium type registered for a compiled target stores an actual value of its Rust type
+`T` in-place. It is not converted to a separately invented Ferlium aggregate or handle
+representation merely because it crosses between generated Ferlium and Rust runtime code.
+
+Its layout is the layout selected by Rust for the matching runtime build and target:
+
+```
+size(native T)  = size_of::<T>()
+align(native T) = align_of::<T>()
+```
+
+The corresponding `Value<T>::SIZE` and `Value<T>::ALIGN` evidence must report that same layout.
+Generated code and the runtime therefore share a native-type catalog identifying the Rust type,
+layout and target glue. A generated artifact is compatible only with a runtime whose catalog and
+layout fingerprint match; Rust-native layouts are not promised to remain compatible across Rust
+compiler versions or independently built runtimes.
+
+On ordinary execution paths, the target glue preserves Rust initialization and RAII rules:
+
+- construction writes a valid `T` into uninitialized, correctly aligned storage;
+- a Ferlium `Let` or `MutableRef` access may be adapted to a temporary Rust `&T` or `&mut T` for the
+  duration of the runtime call, but the reference may not escape that access;
+- cloning invokes the registered Rust clone operation and initializes distinct destination storage;
+- moving relocates the value into uninitialized destination storage and leaves the source absent;
+- replacement destroys an initialized destination before writing its replacement; and
+- final storage destruction invokes the registered Rust drop glue exactly once.
+
+Generated code may allocate, move and pass a native value using its registered layout, but it must
+not inspect private fields or synthesize byte patterns unless the native registration separately
+exposes structural operations that make doing so valid. Internal pointers and allocations owned by
+`T` belong to the matching runtime's memory and resource domain.
+
+Poisoning is deliberately outside the ordinary RAII path because it stops semantic cleanup. Bounded
+reclamation of Rust-native values and revocation of any external resources they own is a general
+runtime-domain requirement, not a type-specific representation rule; see
+[runtime-sandboxing.md](runtime-sandboxing.md).
+
 # Records
 
 Records are laid out linearly in memory without boxing.
@@ -235,7 +276,9 @@ Equivalent to a C struct with fields in positional order.
 
 # Tagged unions
 
-Tagged unions (sum types) box their payloads to allow for recursive types.
+Tagged unions store their payloads inline unless the payload edge belongs to the same recursive
+representation component. Such recursive edges are represented by an owning pointer, making
+recursive layouts finite.
 
 Tagged unions can be named:
 
@@ -270,28 +313,82 @@ For each case:
 
 - No payload is treated as unit: size 0, alignment 1
 - Payload type follows record/tuple rules
+- A tuple payload is the payload value itself. Its fields are laid out directly according to the
+  tuple rules; there is no additional tuple box.
 
 ## Variant representation
 
-The payload is a union of the case payload representations. Every embedded field occurrence whose
-edge stays within the same recursive representation component is indirect; other fields are inline.
+Let `V` be a variant type and `B_i` the logical payload type of case `i`. The stored representation
+`S_i` of that case is:
+
+```
+S_i = B_i                 if the payload is inline
+S_i = owning_pointer<B_i> if the payload is indirect
+```
+
+The case payloads do not share one maximum-aligned C-union offset. Each case has an offset derived
+from its own stored representation:
+
+```
+payload_offset_i = align_up(size(u32), align(S_i))
+```
+
+The complete variant still has one fixed size and alignment, independent of its active case:
+
+```
+align(V) = max(align(u32), max_i(align(S_i)))
+size(V)  = align_up(
+    max(size(u32), max_i(payload_offset_i + size(S_i))),
+    align(V),
+)
+```
+
+Consequently, the tag determines not only which payload type is active but also which payload offset
+applies. Code must establish the case before forming a payload place. This is intentionally not a C
+union representation.
+
+Case-specific offsets avoid padding a small but long payload to the alignment required by an
+unrelated case. For example, with a 4-byte tag, twelve inline `u8` fields end at byte 16, while an
+inline `u64` case starts at byte 8 and also ends at byte 16. The variant therefore occupies 16 bytes
+at alignment 8. A common union offset of 8 would make the twelve-byte payload end at byte 20 and
+round the variant size up to 24 bytes.
+
+For an open generic case with payload type `B`, physical lowering uses the case's inline/indirect
+storage evidence together with `Value<B>`:
+
+- inline storage uses `Value<B>::ALIGN` to calculate the case offset;
+- indirect storage uses the target pointer alignment for the case offset and `Value<B>::SIZE` and
+  `Value<B>::ALIGN` to allocate the separate payload block.
+
+A payloadless case writes only its tag and requires no payload layout witness.
+
+No `Value<V>` witness is needed merely to address a known case payload inside an existing `V`
+place. Allocating or moving the complete variant remains a whole-value operation and uses `Value<V>`
+when `V` has no static layout at the lowering site.
+
+Every case whose payload representation reaches the same recursive representation component as
+`V` stores an owning pointer to its complete payload `B_i`; other case payloads are inline.
 Consequently non-recursive payloads do not acquire a box merely because they belong to a variant.
+A variant is `TrivialCopy` exactly when all its possible payloads are `TrivialCopy`; an indirect
+recursive edge owns storage and therefore prevents that classification.
 
-```
-struct Variant {
-    u32 tag;
-    union {
-        T_a_or_pointer a;
-        T_b_or_pointer b;
-        // ...
-    } payload;
-}
-```
+### Indirect payload ownership
 
-The payload offset is `align_up(4, payload_alignment)`. The variant alignment is
-`max(align(u32), payload_alignment)`, and its size includes the final padding required by that
-alignment. A variant is `TrivialCopy` exactly when all its possible payloads are `TrivialCopy`;
-an indirect recursive edge owns storage and therefore prevents that classification.
+An indirect payload pointer uniquely owns an allocation containing the payload value. Its lifecycle
+is part of the value representation:
+
+- Construction allocates storage using the payload representation's size and alignment, initializes
+  the payload in that storage, and stores the owning pointer in the active case's payload slot.
+- Cloning recursively clones the payload into a new allocation; it never copies the owning pointer
+  as a second owner.
+- Moving transfers the pointer unchanged and leaves the source variant moved out; it does not clone
+  or reallocate the payload.
+- Dropping first runs the payload's semantic drop, then deallocates the payload allocation and clears
+  the pointer. As with Buffer storage, the runtime deallocator accepts only the pointer and recovers
+  any allocator-specific layout metadata internally.
+
+Inline payloads require no allocation or representation-level deallocation. A case without a
+payload likewise allocates nothing.
 
 # Arrays
 
@@ -343,38 +440,6 @@ deallocation and retains any allocator-specific layout metadata internally; a ca
 deallocated by the same path as any other. Whole-buffer moves must use the same cleanup when
 replacing an existing target, so every allocation is reclaimed exactly once.
 
-# Strings
-
-Strings in Ferlium are UTF-8 encoded byte arrays with capacity:
-
-```
-struct String {
-   ptr : *u8,    // pointer to buffer of cap bytes
-   len : usize,  // number of bytes currently used (0 <= len <= cap)
-   cap : usize,  // total capacity in bytes
-}
-```
-
-This leads to:
-
-* alignment = 4 (32 bit targets) or 8 (64 bit targets)
-* size = 12 (32 bit targets) or 24 (64 bit targets)
-
-## Strings invariants
-
-For any valid string value:
-
-- `ptr` is either:
-   - a valid pointer to a buffer of at least `cap` bytes, or
-   - an undefined pointer if `cap` == 0.
-- The inequality `0 <= len <= cap` holds.
-- The first `len` bytes at `ptr` are a well-formed UTF-8 sequence.
-- Bytes in the range `[len, cap)` are unspecified and may be uninitialized.
-- The string is not NUL-terminated by convention; a '\0' byte is allowed and is treated like any other byte.
-- The string is logically mutable:
-   - Operations may modify bytes in `[0, len)` or change `len` (within `cap`).
-   - If an operation needs more space than `cap`, it may allocate a new buffer, copy contents, free the old one, and update `ptr`, `len`, `cap`.
-
 # Closures
 
 ## Wasm32
@@ -412,10 +477,16 @@ When private functions will be added, espace analysis will be used to decide whe
 
 To be defined later, possibly per platform.
 
-# Rust FFI Guidelines
+# Rust structural interoperability
 
-- Use `#[repr(C)]` for structs matching Ferlium records.
-- Declare fields in Ferlium canonical order.
-- Use macros like `#[ferlium_record]` to avoid mistakes.
-- Use only backend-supported scalar sizes/alignments.
-- Variants must use Ferlium tag numbers and payload layout.
+The Rust-native rule above is sufficient when a Rust type is not structurally exposed: Ferlium
+stores the real `T` and uses its registered operations. A Rust type intended to be structurally
+interchangeable with a Ferlium-defined record or tuple additionally needs a representation
+declaration or generated adapter that verifies the Ferlium field order, offsets, size and alignment.
+`#[repr(C)]` with fields in Ferlium's canonical order is one possible implementation for records,
+but the ABI does not prescribe the source annotation used to establish that contract.
+
+Ferlium variants use case-specific payload offsets and are not C unions. A Rust enum is therefore
+not structurally interchangeable merely because its cases have corresponding names and payloads;
+it remains an ordinary non-structurally-exposed Rust-native type unless an adapter explicitly
+implements the Ferlium variant representation.
