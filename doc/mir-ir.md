@@ -238,3 +238,58 @@ Generic descriptor equalities proved by HIR inference are not yet retained as st
 witnesses. The verifier therefore checks call/storage representations whenever both sides are
 independently concrete, while witnessed generic moves and calls retain that inference boundary. A
 serialized standalone MIR format will need explicit normalized-layout/equality metadata to close it.
+
+## Planned physical MIR stage
+
+> Status: planned contract for the unboxed interpreter and machine backends.
+
+Physical lowering maps optimized semantic MIR to MIR with the same function, block, value, `Type`,
+constant, CFG, failure-flow, and ownership structures. It resolves physical addresses,
+representations, callable environments, and target-native implementations.
+
+The lowerer builds candidate `MirArtifacts`. The readiness verifier checks the physical-stage
+invariants and returns `BackendReadyMirArtifacts`. Both stages use the same MIR structures without
+a phase parameter.
+
+Backend-ready MIR may retain symbolic operands, `DictEntry`, variant construction, and
+`extract_tag`. Each executor supplies their target representation. Interpreter-only native calls
+and target-lowered value representations must be resolved.
+
+### Typed byte addressing
+
+Physical MIR adds one representation-level address operation:
+
+```text
+address_offset<A>(base_address, byte_offset: int) -> *A
+```
+
+The base is address-bearing, the offset is a materialized Ferlium `int`, and the result is an
+aligned place of `A` within the base allocation and with its provenance. Byte-offset expressions
+use ordinary calls such as `Num<int>::add` and `Num<int>::mul`.
+
+Semantic MIR retains logical `subfield` operations through its ordinary optimization rounds.
+Physical lowering replaces them with ABI-derived offsets and `address_offset`. Generic product
+projections use their addressor evidence; Buffer intrinsic expansion uses the loaded backing
+pointer and element-size evidence.
+
+### First-class subscript environments
+
+`BuildSubscript` creates an owned environment. Planned `CloneSubscriptEnv` and
+`DropSubscriptEnv` operations clone and release it; moving transfers it. The ABI defines the
+descriptor, environment layout, and clone/drop dispatch.
+
+`SubscriptMember` produces a physical-stage-only `BorrowedCallable`: the selected `ref` or `mut`
+entry and a borrow of the original subscript environment. The verifier accepts it only as the
+callee of `Call` or `Project`. `Call` holds the borrow for one invocation; `Project` holds it until
+the matching `EndProject`.
+
+The callable type determines its visible ABI. The descriptor-specific entry determines its
+environment schema. Invocation borrows stored evidence and clones source-value captures into the
+temporary required by Ferlium's stateless callable semantics.
+
+### Intrinsics and target-native calls
+
+Buffer and other intrinsics remain ordinary calls throughout semantic MIR and its optimization
+rounds. An `IntrinsicId` identifies shared physical lowering. Other native functions are resolved
+through the selected target's catalog. Backend-readiness verification requires a physical
+intrinsic lowering or compatible target implementation for every native call.

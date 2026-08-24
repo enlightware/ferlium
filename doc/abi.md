@@ -451,35 +451,34 @@ deallocation and retains any allocator-specific layout metadata internally; a ca
 deallocated by the same path as any other. Whole-buffer moves must use the same cleanup when
 replacing an existing target, so every allocation is reclaimed exactly once.
 
-# Closures
+# First-class callables
 
-Ferlium represents all first-class functions uniformly as closures. A closure has two target
-words. On Wasm32 it is:
+Every first-class callable has this outer representation:
 
-```
+```text
 {
-   code_index: u32,
-   env_ptr: u32
+   descriptor_index: u32,
+   env_ptr: target_pointer
 }
 ```
 
-Its size is 8 and its alignment is 4. On ABI-64 the two target words give size 16 and alignment 8.
-`Value<F>::SIZE` and `Value<F>::ALIGN` report these values for every function type `F`; neither the
-function signature nor its captured environment changes the closure value's own layout.
+`descriptor_index` is a session-local implementation identity.
 
-`code_index` is one closure-implementation identity. On Wasm it selects the closure-compatible
-entry used by `call_indirect`. The generated module also associates that same identity with the
-operations needed to clone and drop this implementation's environment. This association does not
-put several pointers into `code_index`: a backend can, for example, use `code_index` to index the
-call table and a parallel metadata table, or dispatch clone/drop through compiler-generated helper
-code. The observable contract is only that a closure value provides one identity from which all
-three operations can be selected:
+## Functions and closures
 
-- invoke the closure;
-- clone its owned environment; and
-- drop and deallocate its owned environment.
+Ferlium represents all first-class functions uniformly as closures using the common callable
+layout.
 
-`env_ptr` is the owning pointer to the closure environment in linear memory. The environment
+For a closure, `descriptor_index` selects:
+
+- the call entry;
+- environment cloning; and
+- environment drop and deallocation.
+
+On Wasm, the descriptor selects the closure-compatible `call_indirect` entry and its environment
+metadata.
+
+`env_ptr` is the owning pointer to the closure environment in target memory. The environment
 contains the runtime representations of captured hidden evidence and owned source values. Its
 ordered shape is known at the closure construction site, but a generic capture tuple `B` may have
 witness-derived size, alignment and field offsets. The environment therefore retains any dynamic
@@ -497,20 +496,62 @@ non-zero environment pointer owns one allocation:
 
 Invoking a closure borrows the closure value. It clones the owned capture tuple into a per-call
 temporary, passes the temporary captures and stored hidden evidence to the function body, and
-drops the temporary after both normal return and language failure. Consequently mutations of
-captured values during one invocation do not persist into later invocations. A poisoning sandbox
-violation follows the general non-semantic cleanup rules described above.
+drops the temporary after both normal return and language failure.
 
 Every closure-compatible entry accepts `env_ptr` as its first closure-specific parameter, followed
 by the parameters required by the standard function ABI. A function that can be materialized as a
 first-class value needs such an entry; an ordinary direct-only function does not. A captureless
-entry ignores its zero environment pointer. The environment argument can be eliminated only when
-the compiler devirtualizes the complete indirect call into a direct call.
+entry ignores its zero environment pointer.
 
-## Native
+## First-class subscripts
 
-The code-identity representation and dispatch mechanism are target-specific. The closure value
-still occupies two target words and follows the ownership contract above.
+A first-class subscript uses the common callable layout. Its descriptor selects optional `ref` and
+`mut` entries, environment layout, and clone/drop support. The entry determines the environment
+schema; indirect application passes `env_ptr` and the type-derived visible ABI.
+
+A non-zero `env_ptr` owns one environment allocation. Construction initializes it, moving transfers
+ownership, cloning creates an independent environment, and dropping destroys its captures and
+deallocates it. Invocation borrows stored evidence. Captured source values follow the closure
+invocation rules above.
+
+Selecting `ref` or `mut` borrows the subscript environment. [mir-ir.md](mir-ir.md) specifies the
+resulting ephemeral MIR value and its lifetime.
+
+# Native-function boundary
+
+Compiled native functions resolve through shared intrinsic lowering or the target's native-function
+catalog. A catalog entry associates the semantic identity with a physical implementation and a
+signature following this ABI's argument, result, ownership, and source-failure conventions.
+
+An `export ferlium` implementation exposes the Ferlium compiled convention directly. An `export C`
+implementation uses an explicit wrapper that adapts the platform C ABI to the Ferlium convention;
+the two declarations may have different physical signatures. Source failures use the status-bearing
+return convention. Sandbox violations and lower-level runtime aborts use the non-returning path in
+[runtime-sandboxing.md](runtime-sandboxing.md).
+
+Catalog identities are scoped to a generated artifact and its matching runtime. Independently
+cached artifacts require stable symbols and native-type catalog compatibility.
+
+# Compiled runtime boundary
+
+Generated code obtains allocation services from its runtime. The target interface provides aligned
+allocation and reallocation together with pointer-only deallocation. `dealloc(ptr)` recovers any
+allocator-specific size and alignment metadata.
+
+A zero-byte allocation is valid and reclaimable. Allocation quota exhaustion follows the
+sandbox-violation policy; lower-level allocator exhaustion may abort the runtime. Accounting,
+shared-memory headroom, and reclamation are specified in
+[runtime-memory-limits.md](runtime-memory-limits.md) and
+[runtime-sandboxing.md](runtime-sandboxing.md).
+
+On Wasm, every pointer returned by these services is an offset into the shared linear memory. The
+generated module imports that memory and the runtime functions it calls. It exports only the
+top-level module entrypoints invoked by the host; ordinary Ferlium functions and indirect-call
+table entries remain internal. A host-facing entrypoint wrapper adapts browser, Rust, or C values
+to the core Ferlium ABI and makes ownership transfer explicit.
+
+The exact Wasm import names and allocator function signatures are part of the matching target
+catalog.
 
 # Rust structural interoperability
 

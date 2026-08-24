@@ -2,7 +2,33 @@
 
 Ferlium is designed to be integrated into existing Rust codebases, web apps through WebAssembly, and in the future target static compilation. Therefore, it is designed with minimal runtime requirements. Essentially, the runtime consists of a small standard library. In particular, type information should not be necessary for running code.
 
-The compiler transforms source code into a parsed abstract syntax tree (AST), desugars it into a source-level AST suitable for type inference, resolves symbols, infers and checks types while emitting typed high-level IR (HIR), then elaborates and validates final HIR. Ferlium can execute final HIR directly with its tree-walking interpreter or lower it to MIR and run the MIR reference interpreter. Future machine backends can consume the same MIR form.
+The compiler parses source into an abstract syntax tree (AST), desugars it, and emits typed
+high-level IR (HIR) while resolving symbols and checking types. Ferlium can execute final HIR with
+its tree-walking interpreter or lower it to MIR for the MIR reference interpreter. Future machine
+backends consume the backend-ready physical MIR stage specified in [mir-ir.md](mir-ir.md).
+
+## Compiled runtime topology
+
+Compiled execution uses one generated module for all Ferlium modules in a `CompilerSession`.
+Independent compilation and dynamic linking of Ferlium modules are outside the current design.
+
+In the browser, the Rust runtime and generated Ferlium code are separate Wasm instances sharing
+one linear memory supplied by the runtime:
+
+```text
+Rust runtime                            generated Ferlium module
+------------                            -------------------------
+shared memory  -----------------------> import memory
+allocator      -----------------------> import alloc/realloc/dealloc
+native code    -----------------------> import native wrappers
+diagnostics    -----------------------> import abort/reporting functions
+                                         export module entrypoints
+```
+
+The compiled boundary is specified in [abi.md](abi.md). Memory accounting and reclamation are
+specified in [runtime-memory-limits.md](runtime-memory-limits.md) and
+[runtime-sandboxing.md](runtime-sandboxing.md). Native JIT execution uses the same physical MIR
+lowering with native pointers and runtime wrappers.
 
 ## Source Layout
 
@@ -40,7 +66,8 @@ MIR's structure and invariants are specified in [mir-ir.md](mir-ir.md); the rewr
 order they run in, and the rules deciding where a pass belongs are in
 [mir-optimization.md](mir-optimization.md).
 
-Future backend work may lower MIR to WebAssembly, bytecode, JIT, or native code.
+Future backend work lowers optimized MIR to backend-ready physical MIR before emitting WebAssembly,
+bytecode, JIT, or native code.
 
 Every compilation attempt stores severity-tagged source diagnostics on its module entry. Errors make
 the attempt fail; warnings remain available through `ModuleInfo::diagnostics` on a successful
