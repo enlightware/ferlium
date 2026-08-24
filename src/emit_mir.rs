@@ -1182,8 +1182,8 @@ impl<'a> Emitter<'a> {
     }
 
     /// Returns the `FunctionId` of the std-library function named `name`. Used to synthesize
-    /// calls to std primitives (e.g. the `buffer_*` intrinsics) that the lowered source need not
-    /// itself import.
+    /// calls to std primitives (e.g. the private `buffer_*` operations) that the lowered source
+    /// need not itself import.
     fn demand_std_function(&self, name: &str) -> FunctionId {
         let std_module = self
             .env
@@ -1224,7 +1224,7 @@ impl<'a> Emitter<'a> {
         place
     }
 
-    /// Materializes the physical `Value` layout arguments used by Buffer intrinsics.
+    /// Materializes the physical `Value` layout arguments used by Buffer operations.
     ///
     /// Concrete layouts become ordinary integer constants. A bare generic element type obtains the
     /// same values by calling the `SIZE` and `ALIGN` getters in its forwarded `Value` dictionary.

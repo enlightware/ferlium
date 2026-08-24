@@ -428,7 +428,7 @@ The source prelude represents `data_ptr` with its private `Buffer<T>` native typ
 size and alignment. Its interpreter representation as a Rust `Vec<Value>` is not part of the ABI.
 
 Buffer allocation receives `Value::<T>::SIZE` and `Value::<T>::ALIGN` explicitly. Slot-addressing
-and element-move intrinsics receive only `Value::<T>::SIZE`: the aligned allocation base and the ABI
+and element-move operations receive only `Value::<T>::SIZE`: the aligned allocation base and the ABI
 rule that type sizes include tail padding already guarantee that each slot is aligned. The boxed
 interpreter accepts and ignores this physical layout evidence. Compiled lowering uses it to allocate
 aligned storage and calculate slot addresses.
@@ -519,9 +519,10 @@ resulting ephemeral MIR value and its lifetime.
 
 # Native-function boundary
 
-Compiled native functions resolve through shared intrinsic lowering or the target's native-function
-catalog. A catalog entry associates the semantic identity with a physical implementation and a
-signature following this ABI's argument, result, ownership, and source-failure conventions.
+Compiled native functions resolve through recognized shared physical lowering or the target's
+native-function catalog. A catalog entry associates the semantic identity with a physical
+implementation and a signature following this ABI's argument, result, ownership, and
+source-failure conventions.
 
 An `export ferlium` implementation exposes the Ferlium compiled convention directly. An `export C`
 implementation uses an explicit wrapper that adapts the platform C ABI to the Ferlium convention;

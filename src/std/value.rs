@@ -22,7 +22,7 @@ use crate::{
         function::{
             CallableDefinition, Function, PendingScriptFunction, UnaryNativeFnMN, UnaryNativeFnRN,
         },
-        value::{LiteralValue, NativeValue, SubscriptValue, VariantPayloadStorage},
+        value::{LiteralValue, NativeValue, VariantPayloadStorage},
         value_dispatch::{
             materialize_static_string, prepare_generated_call_arguments_with_locals,
             static_apply_generated_with_locals, wrap_generated_call_with_temp_cleanup,
@@ -109,12 +109,9 @@ impl ValueLayout {
         Self::new(mem::size_of::<T>(), mem::align_of::<T>())
     }
 
-    /// Canonical compiled representation of a first-class function: one target word identifying
-    /// the closure entry and one owning environment pointer. The interpreter's `FunctionValue`
-    /// structure is deliberately unrelated to this layout.
-    fn function() -> Self {
-        let word = Self::native::<usize>();
-        Self::product([word, word])
+    /// Canonical compiled representation shared by first-class functions and subscripts.
+    fn callable() -> Self {
+        Self::product([Self::native::<u32>(), Self::native::<usize>()])
     }
 
     fn associated_const_values(
@@ -377,8 +374,7 @@ fn layout_for_value_type(
             active.remove(&ty);
             return Ok(layout);
         }
-        Function(_) => ValueLayout::function(),
-        Subscript(_) => ValueLayout::native::<SubscriptValue>(),
+        Function(_) | Subscript(_) => ValueLayout::callable(),
         Never => ValueLayout::product([]),
         Variable(_) => {
             drop(ty_data);
@@ -2569,9 +2565,11 @@ mod tests {
     }
 
     #[test]
-    fn function_layout_uses_two_target_words() {
+    fn functions_and_subscripts_use_the_callable_layout() {
         let session = CompilerSession::new();
         let env = session.module_env();
+        use crate::types::r#type::{SubscriptMemberType, SubscriptResultConvention, SubscriptType};
+
         let word_size = u32::try_from(mem::size_of::<usize>()).unwrap();
         let word_align = u32::try_from(mem::align_of::<usize>()).unwrap();
         let expected = ResolvedValueLayout {
@@ -2581,7 +2579,16 @@ mod tests {
 
         let concrete = Type::nullary_function_by_val(Type::unit());
         let generic = Type::function_by_val([Type::variable_id(0)], Type::variable_id(1));
-        for ty in [concrete, generic] {
+        let subscript = Type::subscript_type(SubscriptType::new(
+            vec![FnArgType::new_by_val(Type::variable_id(0))],
+            Type::variable_id(1),
+            Some(SubscriptMemberType::new(
+                EffType::empty(),
+                SubscriptResultConvention::AddressorPlace,
+            )),
+            None,
+        ));
+        for ty in [concrete, generic, subscript] {
             assert_eq!(
                 value_layout_for_type(ty, Location::new_synthesized(), &env).unwrap(),
                 expected

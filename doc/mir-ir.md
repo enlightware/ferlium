@@ -269,7 +269,7 @@ use ordinary calls such as `Num<int>::add` and `Num<int>::mul`.
 
 Semantic MIR retains logical `subfield` operations through its ordinary optimization rounds.
 Physical lowering replaces them with ABI-derived offsets and `address_offset`. Generic product
-projections use their addressor evidence; Buffer intrinsic expansion uses the loaded backing
+projections use their addressor evidence; Buffer call expansion uses the loaded backing
 pointer and element-size evidence.
 
 ### First-class subscript environments
@@ -287,9 +287,10 @@ The callable type determines its visible ABI. The descriptor-specific entry dete
 environment schema. Invocation borrows stored evidence and clones source-value captures into the
 temporary required by Ferlium's stateless callable semantics.
 
-### Intrinsics and target-native calls
+### Known and target-native calls
 
-Buffer and other intrinsics remain ordinary calls throughout semantic MIR and its optimization
-rounds. An `IntrinsicId` identifies shared physical lowering. Other native functions are resolved
-through the selected target's catalog. Backend-readiness verification requires a physical
-intrinsic lowering or compatible target implementation for every native call.
+Calls recognized by shared physical lowering remain ordinary calls throughout semantic MIR and its
+optimization rounds. The lowerer resolves their exact function identities through a session table,
+as existing MIR passes do with `KnownCallees`. Other native functions use the selected target's
+implementation mechanism. Backend-readiness verification requires every native call to have been
+lowered or have a compatible target implementation.
