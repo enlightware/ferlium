@@ -519,19 +519,22 @@ resulting ephemeral MIR value and its lifetime.
 
 # Native-function boundary
 
-Compiled native functions resolve through recognized shared physical lowering or the target's
-native-function catalog. A catalog entry associates the semantic identity with a physical
-implementation and a signature following this ABI's argument, result, ownership, and
-source-failure conventions.
+A Rust native callable used by compiled code is marked `export ferlium`. This promises that the
+matching rustc and target lower its Rust signature to the Ferlium convention defined above. The
+same Rust function implements interpreted and compiled calls; interpreter adapters provide boxed
+arguments, while compiled calls use its lowered entry directly.
 
-An `export ferlium` implementation exposes the Ferlium compiled convention directly. An `export C`
-implementation uses an explicit wrapper that adapts the platform C ABI to the Ferlium convention;
-the two declarations may have different physical signatures. Source failures use the status-bearing
-return convention. Sandbox violations and lower-level runtime aborts use the non-returning path in
+Native callables are resolved by their existing `FunctionId`. No additional compiled-function
+identity or implementation catalog is required. A target-dependent scalar parameter may use a
+transparent Rust adapter whose representation is the value on scalar targets and a reference
+otherwise.
+
+This is a build-coupled contract, like Rust-native value layout. Target tests must link every
+`export ferlium` entry against its derived signature and exercise the argument, result, and
+source-failure conventions. An `export C` entry instead follows the platform C ABI and requires
+explicit adaptation when that differs from the Ferlium convention. Sandbox violations and
+lower-level runtime aborts use the non-returning path in
 [runtime-sandboxing.md](runtime-sandboxing.md).
-
-Catalog identities are scoped to a generated artifact and its matching runtime. Independently
-cached artifacts require stable symbols and native-type catalog compatibility.
 
 # Compiled runtime boundary
 

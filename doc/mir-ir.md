@@ -245,7 +245,7 @@ serialized standalone MIR format will need explicit normalized-layout/equality m
 
 Physical lowering maps optimized semantic MIR to MIR with the same function, block, value, `Type`,
 constant, CFG, failure-flow, and ownership structures. It resolves physical addresses,
-representations, callable environments, and target-native implementations.
+representations, callable environments, and native ABI entries.
 
 The lowerer builds candidate `MirArtifacts`. The readiness verifier checks the physical-stage
 invariants and returns `BackendReadyMirArtifacts`. Both stages use the same MIR structures without
@@ -291,6 +291,6 @@ temporary required by Ferlium's stateless callable semantics.
 
 Calls recognized by shared physical lowering remain ordinary calls throughout semantic MIR and its
 optimization rounds. The lowerer resolves their exact function identities through a session table,
-as existing MIR passes do with `KnownCallees`. Other native functions use the selected target's
-implementation mechanism. Backend-readiness verification requires every native call to have been
-lowered or have a compatible target implementation.
+as existing MIR passes do with `KnownCallees`. Other native calls retain their `FunctionId` and use
+the matching Rust `export ferlium` entry. Backend-readiness verification requires every native call
+to have been lowered or have a compatible entry for the selected target.
