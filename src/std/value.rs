@@ -31,8 +31,8 @@ use crate::{
     internal_compilation_error,
     module::{
         self, ConcreteTraitImplKey, FunctionId, LocalDecl, LocalDeclId, Module, ModuleEnv,
-        PendingFunctionBody, PendingModuleFunction, ProjectionIndex, ResolvedValueLayout, TraitId,
-        TraitImpl, TraitImplId, TraitImpls, TypeDefId, id::Id,
+        PendingFunctionBody, PendingLocalDrop, PendingModuleFunction, ProjectionIndex,
+        ResolvedValueLayout, TraitId, TraitImpl, TraitImplId, TraitImpls, TypeDefId, id::Id,
     },
     std::{
         STD_MODULE_ID,
@@ -1994,7 +1994,7 @@ fn derive_value_clone_body(
 }
 
 fn derive_value_drop_body(
-    trait_id: TraitId,
+    _trait_id: TraitId,
     input_types: &[Type],
     arena: &mut NodeArena,
     ctx: &mut ValueBodyCtx<'_, '_>,
@@ -2007,7 +2007,7 @@ fn derive_value_drop_body(
 
     let n = alloc_synth_node;
     let target_id = LocalDeclId::from_index(0);
-    let mut locals = vec![LocalDecl::new(
+    let locals = vec![LocalDecl::new(
         (crate::ustr("target"), Location::new_synthesized()),
         MutType::mutable(),
         ty,
@@ -2015,6 +2015,16 @@ fn derive_value_drop_body(
         Location::new_synthesized(),
     )];
     let build_unit = |arena: &mut NodeArena| n(arena, native(()), Type::unit());
+    let build_drop = |arena: &mut NodeArena, target| {
+        n(
+            arena,
+            hir::NodeKind::DropValue(hir::DropValue {
+                target,
+                drop: PendingLocalDrop::Unknown,
+            }),
+            Type::unit(),
+        )
+    };
 
     // Match ordinary ownership elaboration: a concrete `TrivialCopy` value has no semantic drop,
     // even when its structural shape contains fields for which a native `Value::drop` function
@@ -2037,18 +2047,7 @@ fn derive_value_drop_body(
                     project(target, ProjectionIndex::from_index(index)),
                     member_ty,
                 );
-                statements.push(value_method_call_node(
-                    ctx,
-                    ValueMethod {
-                        trait_id,
-                        input_ty: member_ty,
-                        method_index: VALUE_DROP_METHOD_INDEX,
-                    },
-                    Location::new_synthesized(),
-                    $arena,
-                    &mut locals,
-                    vec![target_member],
-                )?);
+                statements.push(build_drop($arena, target_member));
             }
             statements.push(n($arena, native(()), Type::unit()));
             n($arena, block(statements), Type::unit())
@@ -2066,18 +2065,7 @@ fn derive_value_drop_body(
                 } else {
                     let target = n($arena, load_local(target_id), ty);
                     let target_payload = variant_payload_project($arena, target, payload_ty);
-                    value_method_call_node(
-                        ctx,
-                        ValueMethod {
-                            trait_id,
-                            input_ty: payload_ty,
-                            method_index: VALUE_DROP_METHOD_INDEX,
-                        },
-                        Location::new_synthesized(),
-                        $arena,
-                        &mut locals,
-                        vec![target_payload],
-                    )?
+                    build_drop($arena, target_payload)
                 };
                 alternatives.push((tag_val, branch));
             }

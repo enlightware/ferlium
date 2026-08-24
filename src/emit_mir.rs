@@ -2225,6 +2225,16 @@ impl<'a> Emitter<'a> {
                 }
             }
 
+            K::DropValue(n) => {
+                let target_node = &self.hir_arena[n.target];
+                let dropped_ty = target_node.ty;
+                let target = self.lower_as_place(target_node);
+                if let Some(spec) = self.resolve_drop(n.drop) {
+                    self.emit_drop(node.span, target, dropped_ty, spec);
+                }
+                self.store_unit_result(node.span, destination);
+            }
+
             K::TakeLocalValue(n) => match n.mode {
                 ResolvedTakeLocalValueMode::MoveOwned => {
                     // Move the owned value out: transfer the place into the destination, skipping the

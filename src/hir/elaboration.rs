@@ -1693,6 +1693,22 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                     clone: clone.into_elaborated(),
                 })
             }
+            DropValue(node) => {
+                let target = node.target;
+                let mut drop = node.drop;
+                if matches!(drop, PendingLocalDrop::Unknown) {
+                    drop = resolve_local_drop(
+                        &mut self.generated,
+                        self.ctx,
+                        src[target].ty,
+                        node_span,
+                    )?;
+                }
+                DropValue(hir::DropValue {
+                    target: self.elaborate_node(src, target)?,
+                    drop: drop.into_elaborated(),
+                })
+            }
             StaticApply(app) => {
                 let function = app.function;
                 let function_path = app.function_path.clone();

@@ -502,6 +502,9 @@ fn node_variable_type_annotations<Env>(
         CloneValue(node) => {
             variable_type_annotations(arena, node.source, result, locals, env);
         }
+        DropValue(node) => {
+            variable_type_annotations(arena, node.target, result, locals, env);
+        }
         StaticApply(app) => {
             let arity = app.argument_names.len();
             let argument_name_hints = app

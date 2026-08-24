@@ -1168,10 +1168,10 @@ impl<'a> Interpreter<'a> {
         // behind by a previous drop of the same storage). This is what makes inline drops run at
         // most once per value.
         let skip = {
-            let v = target
-                .target_ref_allow_uninit(&self.ctx)
-                .expect("drop target must be addressable");
-            is_drop_husk(v)
+            target
+                .target_ref_if_materialized(&self.ctx)
+                .expect("drop target must be addressable")
+                .is_none_or(is_drop_husk)
         };
         if skip {
             return Ok(());

@@ -9,7 +9,7 @@
 
 use ustr::ustr;
 
-use ferlium::compiler::error::{CompilationErrorImpl, MutabilityMustBeWhat};
+use ferlium::compiler::error::{CompilationErrorImpl, MutabilityMustBeWhat, SourceFailureKind};
 use ferlium::hir::value::Value;
 use ferlium::{Compiler, Path, eval::eval_function};
 use test_log::test;
@@ -704,4 +704,26 @@ fn body_local_ambiguous_collect_reports_unbound_type_variable() {
             }
         "# })
         .expect_unbound_ty_var();
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn failed_call_does_not_drop_uninitialized_result() {
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.fail_run(indoc! { r#"
+            fn fail() -> string {
+                invalid_argument("failure")
+            }
+            fn construct() -> Option<string> {
+                Some(fail())
+            }
+            fn caller() -> int {
+                let value = construct();
+                0
+            }
+            caller()
+        "# }),
+        SourceFailureKind::InvalidArgument("failure".into())
+    );
 }

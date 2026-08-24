@@ -1137,6 +1137,64 @@ impl Place {
         Ok(target)
     }
 
+    /// Returns the target when every intermediate projection has materialized storage.
+    /// An uninitialized intermediate or an absent variant payload is an uninitialized place.
+    pub(crate) fn target_ref_if_materialized<'c>(
+        &self,
+        ctx: &'c EvalCtx,
+    ) -> Result<Option<&'c Value>, SourceFailureKind> {
+        let mut path = self.path.iter().copied().collect::<VecDeque<_>>();
+        let mut index = self.root;
+        let mut target = loop {
+            match &ctx.environment[index] {
+                ValOrMut::Val(target) => break target,
+                ValOrMut::Dictionary(_) => {
+                    panic!("cannot read trait dictionary metadata as a Value")
+                }
+                ValOrMut::Ref(target) => {
+                    // SAFETY: the referent outlives this borrow.
+                    break unsafe { &**target };
+                }
+                ValOrMut::Mut(place) => {
+                    index = place.root;
+                    for &index in place.path.iter().rev() {
+                        path.push_front(index);
+                    }
+                }
+            };
+        };
+        for &index in &path {
+            use Value::*;
+            target = match target {
+                Tuple(tuple) => tuple.get(index as usize).unwrap(),
+                Variant {
+                    payload: Some(payload),
+                    ..
+                } if index == 0 => payload,
+                Variant { payload: None, .. } if index == 0 => return Ok(None),
+                Native(primitive) => {
+                    let buffer = NativeValue::as_any(primitive.as_ref())
+                        .downcast_ref::<buffer::Buffer>()
+                        .unwrap();
+                    let len = buffer.capacity();
+                    match buffer.get_signed(index) {
+                        Some(target) => target,
+                        None => return Err(invalid_buffer_index(index, len)),
+                    }
+                }
+                Uninit => return Ok(None),
+                Variant { .. } => {
+                    panic!("Cannot access a variant payload with a non-zero index")
+                }
+                other => panic!(
+                    "Cannot access a non-compound value while following place path: target {:?}, index {}, full place {:?}",
+                    other, index, self
+                ),
+            };
+        }
+        Ok(Some(target))
+    }
+
     /// Get a shared reference to the target value
     pub fn target_ref<'c>(&self, ctx: &'c EvalCtx) -> Result<&'c Value, SourceFailureKind> {
         let target = self.target_ref_allow_uninit(ctx)?;
@@ -1682,6 +1740,7 @@ pub(crate) fn eval_node_with_ctx(
         }
         DropSubscriptValue(node) => eval_drop_subscript_value(arena, node, ctx, locals),
         CloneValue(node) => eval_clone_value(arena, node, arena[node_id].span, ctx, locals),
+        DropValue(node) => eval_drop_value(arena, node, arena[node_id].span, ctx, locals),
         StaticApply(app) => eval_static_apply(arena, app, node.span, ctx, locals),
         SubscriptApply(app) => eval_subscript_apply(arena, app, node.span, ctx, locals),
         GetSubscript(get_subscript) => cont(Value::subscript(get_subscript.subscript)),
@@ -2104,6 +2163,19 @@ fn drop_local_value_at_place(
     }
 }
 
+/// Drops `target` through the resolved `Value::drop` dispatch when its storage is initialized.
+fn drop_value_at_place_if_initialized(
+    ctx: &mut EvalCtx,
+    drop: ResolvedLocalDrop,
+    target: Place,
+    span: Location,
+) -> Result<(), RuntimeError> {
+    if place_contains_uninit(ctx, &target, span)? {
+        return Ok(());
+    }
+    drop_local_value_at_place(ctx, drop, target, span)
+}
+
 fn resolved_local_drop(drop: &ResolvedLocalDrop) -> ResolvedLocalDrop {
     *drop
 }
@@ -2142,10 +2214,7 @@ fn drop_owned_locals_on_error_from(
             continue;
         }
         let target = local_place(ctx, locals, id);
-        if place_contains_uninit(ctx, &target, span)? {
-            continue;
-        }
-        drop_local_value_at_place(ctx, resolved_local_drop(drop), target, span)?;
+        drop_value_at_place_if_initialized(ctx, resolved_local_drop(drop), target, span)?;
     }
     Ok(())
 }
@@ -2273,9 +2342,9 @@ fn place_contains_uninit(
     span: Location,
 ) -> Result<bool, RuntimeError> {
     let target = place
-        .target_ref_allow_uninit(ctx)
+        .target_ref_if_materialized(ctx)
         .map_err(|err| RuntimeError::new(err, Some(span)))?;
-    Ok(matches!(target, Value::Uninit))
+    Ok(target.is_none_or(|target| matches!(target, Value::Uninit)))
 }
 
 fn local_environment_index(ctx: &EvalCtx, locals: &[LocalDecl], id: LocalDeclId) -> usize {
@@ -3530,10 +3599,7 @@ fn drop_cleanup_locals(
             continue;
         }
         let target = local_place(ctx, locals, *id);
-        if place_contains_uninit(ctx, &target, span)? {
-            continue;
-        }
-        drop_local_value_at_place(ctx, resolved_local_drop(drop), target, span)?;
+        drop_value_at_place_if_initialized(ctx, resolved_local_drop(drop), target, span)?;
     }
     Ok(())
 }
@@ -3620,14 +3686,30 @@ fn eval_assign(
     let value = eval_or_return!(eval_node_with_ctx(arena, assignment.value, ctx, locals));
     let span = arena[node_id].span;
     if let Some(drop) = &assignment.drop
-        && !place_contains_uninit(ctx, &place, span)?
-        && let Err(err) =
-            drop_local_value_at_place(ctx, resolved_local_drop(drop), place.clone(), span)
+        && let Err(err) = drop_value_at_place_if_initialized(
+            ctx,
+            resolved_local_drop(drop),
+            place.clone(),
+            span,
+        )
     {
         value.discard_storage();
         return Err(err);
     }
     replace_value_storage_at_place(ctx, &place, value, span)?;
+    cont(Value::unit())
+}
+
+#[inline(never)]
+fn eval_drop_value(
+    arena: &ENodeArena,
+    drop: &hir::DropValue<Elaborated>,
+    span: Location,
+    ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
+) -> EvalControlFlowResult {
+    let target = eval_or_return!(eval_node_as_place(arena, drop.target, ctx, locals));
+    drop_value_at_place_if_initialized(ctx, drop.drop, target, span)?;
     cont(Value::unit())
 }
 

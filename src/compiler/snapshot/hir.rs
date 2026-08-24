@@ -134,6 +134,10 @@ enum SnapshotNodeKind {
         source: SnapshotNodeId,
         clone: ResolvedLocalClone,
     },
+    DropValue {
+        target: SnapshotNodeId,
+        drop: ResolvedLocalDrop,
+    },
     CloneClosureEnv(SnapshotNodeId),
     DropClosureEnv(SnapshotNodeId),
     CloneSubscriptValue(SnapshotNodeId),
@@ -566,6 +570,10 @@ impl SnapshotNodeKind {
                 source: node_id(value.source),
                 clone: value.clone,
             },
+            NodeKind::DropValue(value) => Self::DropValue {
+                target: node_id(value.target),
+                drop: value.drop,
+            },
             NodeKind::CloneClosureEnv(value) => Self::CloneClosureEnv(node_id(value.source)),
             NodeKind::DropClosureEnv(value) => Self::DropClosureEnv(node_id(value.target)),
             NodeKind::CloneSubscriptValue(value) => {
@@ -741,6 +749,10 @@ impl SnapshotNodeKind {
             Self::CloneValue { source, clone } => NodeKind::CloneValue(hir::CloneValue {
                 source: id(*source)?,
                 clone: *clone,
+            }),
+            Self::DropValue { target, drop } => NodeKind::DropValue(hir::DropValue {
+                target: id(*target)?,
+                drop: *drop,
             }),
             Self::CloneClosureEnv(source) => NodeKind::CloneClosureEnv(hir::CloneClosureEnv {
                 source: id(*source)?,

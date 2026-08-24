@@ -191,8 +191,13 @@ Dispatch sites are:
 
 - `StoreLocal` with `LocalDecl::clone`: clone, then store the returned value into the local's storage.
 - `CloneValue`: clone or copy a place into a fresh owned temporary result.
+- `DropValue`: conditionally drop an initialized place. Generated structural `Value::drop` bodies
+  use it for member and variant-payload places that are not block locals.
 - `Block.cleanup` with `LocalDecl::drop`: drop an owned local at scope exit.
 - `Assignment::drop`: drop the overwritten destination value.
+
+`Block.cleanup` schedules local cleanup on block exits; `DropValue` performs one explicit
+place-targeted drop. Both test the target's initialization state before dispatching `Value::drop`.
 
 ## Call Argument Passing
 

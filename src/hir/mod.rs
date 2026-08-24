@@ -69,7 +69,8 @@ pub trait HirPhase: Sized + std::fmt::Debug + Clone {
     type GetTraitDictionary: HirPayload<Self>;
     /// Clone metadata carried by local declarations and clone nodes in this phase.
     type LocalClone: std::fmt::Debug + Clone + Copy + LocalCloneMetadata;
-    /// Drop metadata carried by local declarations and assignment nodes in this phase.
+    /// Drop metadata carried by local declarations, assignment nodes, and explicit value drops in
+    /// this phase.
     type LocalDrop: std::fmt::Debug + Clone + Copy;
     /// Take-local mode carried by `TakeLocalValue` nodes in this phase.
     type TakeLocalValueMode: std::fmt::Debug + Clone + Copy + TakeLocalValueModeMetadata;
@@ -506,6 +507,13 @@ pub struct CloneValue<P: HirPhase = Unelaborated> {
     pub clone: P::LocalClone,
 }
 
+/// Conditionally drop the value stored at `target` if that place is initialized.
+#[derive(Debug, Clone, Copy)]
+pub struct DropValue<P: HirPhase = Unelaborated> {
+    pub target: NodeId<P>,
+    pub drop: P::LocalDrop,
+}
+
 /// Evaluate a sequence of nodes.
 ///
 /// `cleanup` lists the block's cleanup obligations in declaration order.
@@ -821,6 +829,8 @@ pub enum NodeKind<P: HirPhase = Unelaborated> {
     Assign(Assignment<P>),
     /// Materialize a value as an owned result, using the cheapest valid copy mode.
     CloneValue(CloneValue<P>),
+    /// Conditionally drop the value stored at `target`.
+    DropValue(DropValue<P>),
     /// Clone the closure environment of `source` into already allocated `target` storage.
     CloneClosureEnv(CloneClosureEnv<P>),
     /// Drop the owned closure environment stored in `target`.
@@ -941,6 +951,7 @@ impl NodeKind {
             CloneSubscriptValue(node) => smallvec![node.source],
             DropSubscriptValue(node) => smallvec![node.target],
             CloneValue(node) => smallvec![node.source],
+            DropValue(node) => smallvec![node.target],
             StaticApply(app) => app
                 .extra_arguments
                 .iter()
@@ -1343,6 +1354,10 @@ impl<P: HirPhase> Node<P> {
                 )?;
                 format_ind(arena, node.source, f, locals, env, spacing, indent + 1)?;
             }
+            DropValue(node) => {
+                writeln!(f, "{indent_str}drop value")?;
+                format_ind(arena, node.target, f, locals, env, spacing, indent + 1)?;
+            }
             StaticApply(app) => {
                 writeln!(f, "{indent_str}static apply")?;
                 let ty = app.ty.format_with(env);
@@ -1707,6 +1722,11 @@ impl<P: HirPhase> Node<P> {
                     return Some(ty);
                 }
             }
+            DropValue(node) => {
+                if let Some(ty) = type_at(arena, node.target, pos) {
+                    return Some(ty);
+                }
+            }
             StaticApply(app) => {
                 for arg in &app.arguments {
                     if let Some(ty) = type_at(arena, arg.value, pos) {
@@ -1903,6 +1923,7 @@ impl Node {
             CloneSubscriptValue(node) => unbound_ty_vars(arena, node.source, result, ignore),
             DropSubscriptValue(node) => unbound_ty_vars(arena, node.target, result, ignore),
             CloneValue(node) => unbound_ty_vars(arena, node.source, result, ignore),
+            DropValue(node) => unbound_ty_vars(arena, node.target, result, ignore),
             StaticApply(app) => {
                 for arg in &app.arguments {
                     unbound_ty_vars(arena, arg.value, result, ignore);

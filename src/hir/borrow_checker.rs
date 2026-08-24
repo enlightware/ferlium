@@ -868,6 +868,7 @@ fn elaborated_child_node_ids(kind: &NodeKind<Elaborated>) -> SVec4<ENodeId> {
         CloneSubscriptValue(operation) => smallvec![operation.source],
         DropSubscriptValue(operation) => smallvec![operation.target],
         CloneValue(operation) => smallvec![operation.source],
+        DropValue(operation) => smallvec![operation.target],
         GetDictionaryFunction(operation) => smallvec![operation.dictionary],
         StoreLocal(store) => smallvec![store.value],
         Return(value) | Yield(value) => smallvec![*value],
