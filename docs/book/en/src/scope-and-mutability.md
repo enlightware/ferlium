@@ -18,6 +18,8 @@ That means you can read `x`, but you cannot modify the value of `x` later.
 
 ## Raw identifiers
 
+Identifiers start with a Unicode letter or `_`. Later characters may also be Unicode decimal digits; numeric literals themselves use ASCII digits `0`–`9`.
+
 Some words are reserved by the language, such as `type`, `pub`, and `fn`.
 When you need to use one of these words as a user-defined name, write it as a raw identifier with `r#`.
 

@@ -780,7 +780,7 @@ fn resolve_token_names(names: Vec<String>) -> Vec<String> {
     static NAME_MAP: LazyLock<FxHashMap<&'static str, &'static str>> = LazyLock::new(|| {
         let mut m = FxHashMap::default();
         m.insert(r##"r#"[1-9][0-9]*|0"#"##, "natural number");
-        m.insert(r##"r#"[\\p{L}_][\\p{L}\\p{N}_]*"#"##, "identifier");
+        m.insert(r##"r#"[\\p{L}_][\\p{L}\\p{Nd}_]*"#"##, "identifier");
         m.insert(r##"r#"\\\"([^\\\\\\\"]|\\\\.)*\\\""#"##, "string literal");
         m.insert(
             r##"r#"f\\\"([^\\\\\\\"]|\\\\.)*\\\""#"##,

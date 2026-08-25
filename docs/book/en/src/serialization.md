@@ -78,7 +78,10 @@ Data text supports:
 - maps: `map { "a" => 1, "b" => 2 }`
 - comments and trailing commas
 
+Record keys use the same Unicode identifier syntax as Ferlium source; other keys are quoted strings.
+
 It does not support operators, function calls, bindings, control flow, imports, or string interpolation.
+Encoding and parsing accept at most 16 value nodes along a nesting path, including the root.
 The expected target type guides deserialization.
 
 ## What comes next

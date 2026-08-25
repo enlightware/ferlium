@@ -1,22 +1,22 @@
-fn is_data_text_identifier_start(ch: string) -> bool {
-	ch == "_" or ("a" <= ch and ch <= "z") or ("A" <= ch and ch <= "Z")
+fn is_data_text_identifier_start(scalar: int) -> bool {
+	scalar == 0x5f or unicode_scalar_is_letter(scalar)
 }
 
-fn is_data_text_identifier_continue(ch: string) -> bool {
-	is_data_text_identifier_start(ch) or ("0" <= ch and ch <= "9")
+fn is_data_text_identifier_continue(scalar: int) -> bool {
+	is_data_text_identifier_start(scalar) or unicode_scalar_is_decimal_digit(scalar)
 }
 
 fn is_data_text_identifier(value: string) -> bool {
-	let mut chars = iter(value);
-	match next(chars) {
+	let mut scalars = string_unicode_scalar_iter(value);
+	match string_unicode_scalar_iterator_next(scalars) {
 		Some(first) => {
 			if not is_data_text_identifier_start(first) {
 				return false;
 			};
 			loop {
-				match next(chars) {
-					Some(ch) => {
-						if not is_data_text_identifier_continue(ch) {
+				match string_unicode_scalar_iterator_next(scalars) {
+					Some(scalar) => {
+						if not is_data_text_identifier_continue(scalar) {
 							return false;
 						}
 					},
@@ -28,19 +28,103 @@ fn is_data_text_identifier(value: string) -> bool {
 	}
 }
 
-fn data_text_join_sequence(values: [DataValue], open: string, close: string) -> string {
+fn data_text_hex_digit_text(value: int) -> string {
+	match (value) {
+		0 => "0",
+		1 => "1",
+		2 => "2",
+		3 => "3",
+		4 => "4",
+		5 => "5",
+		6 => "6",
+		7 => "7",
+		8 => "8",
+		9 => "9",
+		10 => "a",
+		11 => "b",
+		12 => "c",
+		13 => "d",
+		14 => "e",
+		15 => "f",
+		_ => panic("Hexadecimal digit out of range"),
+	}
+}
+
+fn data_text_hex_text(value: int) -> string {
+	if value == 0 {
+		return "0";
+	};
+	let mut remaining = value;
+	let mut result = "";
+	loop {
+		let digit = data_text_hex_digit_text(bit_and(remaining, 0xf));
+		result = string_concat(digit, result);
+		remaining = shift_right(remaining, 4);
+		if remaining == 0 {
+			return result;
+		}
+	}
+}
+
+fn data_text_push_control_escape(target: &mut string, scalar: int) {
+	string_push_str(target, "\\u{");
+	string_push_str(target, data_text_hex_text(scalar));
+	string_push_str(target, "}")
+}
+
+fn escape_data_text_string(value: string) -> string {
+	let mut result = "\"";
+	let mut scalars = string_unicode_scalar_iter(value);
+	loop {
+		match string_unicode_scalar_iterator_next(scalars) {
+			Some(scalar) => {
+				if scalar == 0x22 {
+					string_push_str(result, "\\\"");
+				} else if scalar == 0x5c {
+					string_push_str(result, "\\\\");
+				} else if scalar == 0x0a {
+					string_push_str(result, "\\n");
+				} else if scalar == 0x0d {
+					string_push_str(result, "\\r");
+				} else if scalar == 0x09 {
+					string_push_str(result, "\\t");
+				} else if (0 <= scalar and scalar <= 0x1f)
+					or (0x7f <= scalar and scalar <= 0x9f)
+				{
+					data_text_push_control_escape(result, scalar);
+				} else {
+					string_push_unicode_scalar(result, scalar);
+				}
+			},
+			None => break,
+		}
+	};
+	string_push_str(result, "\"");
+	result
+}
+
+fn data_text_join_sequence(
+	values: [DataValue],
+	open: string,
+	close: string,
+	child_depth: int,
+) -> string {
 	let mut result = open;
 	for i in 0..array_len(values) {
 		if i > 0 {
 			string_push_str(result, ", ");
 		};
-		string_push_str(result, to_data_text(values[i]));
+		string_push_str(result, data_value_to_text(values[i], child_depth));
 	};
 	string_push_str(result, close);
 	result
 }
 
-fn data_text_join_keyword_sequence(keyword: string, values: [DataValue]) -> string {
+fn data_text_join_keyword_sequence(
+	keyword: string,
+	values: [DataValue],
+	child_depth: int,
+) -> string {
 	let mut result = keyword;
 	string_push_str(result, " {");
 	if array_len(values) > 0 {
@@ -49,7 +133,7 @@ fn data_text_join_keyword_sequence(keyword: string, values: [DataValue]) -> stri
 			if i > 0 {
 				string_push_str(result, ", ");
 			};
-			string_push_str(result, to_data_text(values[i]));
+			string_push_str(result, data_value_to_text(values[i], child_depth));
 		};
 		string_push_str(result, " ");
 	};
@@ -57,13 +141,13 @@ fn data_text_join_keyword_sequence(keyword: string, values: [DataValue]) -> stri
 	result
 }
 
-fn data_value_tuple_to_text(values: [DataValue]) -> string {
+fn data_value_tuple_to_text(values: [DataValue], child_depth: int) -> string {
 	let mut result = "(";
 	for i in 0..array_len(values) {
 		if i > 0 {
 			string_push_str(result, ", ");
 		};
-		string_push_str(result, to_data_text(values[i]));
+		string_push_str(result, data_value_to_text(values[i], child_depth));
 	};
 	if array_len(values) == 1 {
 		string_push_str(result, ",");
@@ -72,8 +156,11 @@ fn data_value_tuple_to_text(values: [DataValue]) -> string {
 	result
 }
 
-/// Convert a DataValue to Ferlium data text.
-pub fn to_data_text(v: DataValue) -> string {
+fn data_value_to_text(v: DataValue, depth: int) -> string {
+	if depth >= 16 {
+		panic("Data text nesting limit exceeded");
+	};
+	let child_depth = depth + 1;
 	match (v) {
 		DataValue::Null => "null",
 		DataValue::Unit => "()",
@@ -81,8 +168,8 @@ pub fn to_data_text(v: DataValue) -> string {
 		DataValue::Int(i) => to_string(i),
 		DataValue::Float(f) => to_string(f),
 		DataValue::String(s) => escape_data_text_string(s),
-		DataValue::Array(a) => data_text_join_sequence(a, "[", "]"),
-		DataValue::Tuple(a) => data_value_tuple_to_text(a),
+		DataValue::Array(a) => data_text_join_sequence(a, "[", "]", child_depth),
+		DataValue::Tuple(a) => data_value_tuple_to_text(a, child_depth),
 		DataValue::Record(o) => {
 			let mut result = "{";
 			if array_len(o) > 0 {
@@ -99,14 +186,14 @@ pub fn to_data_text(v: DataValue) -> string {
 						string_push_str(result, escape_data_text_string(name));
 					};
 					string_push_str(result, ": ");
-					string_push_str(result, to_data_text(entry.1));
+					string_push_str(result, data_value_to_text(entry.1, child_depth));
 				};
 				string_push_str(result, " ");
 			};
 			string_push_str(result, "}");
 			result
 		},
-		DataValue::Set(a) => data_text_join_keyword_sequence("set", a),
+		DataValue::Set(a) => data_text_join_keyword_sequence("set", a, child_depth),
 		DataValue::Map(m) => {
 			let mut result = "map {";
 			if array_len(m) > 0 {
@@ -116,9 +203,9 @@ pub fn to_data_text(v: DataValue) -> string {
 						string_push_str(result, ", ");
 					};
 					let entry = m[i];
-					string_push_str(result, to_data_text(entry.0));
+					string_push_str(result, data_value_to_text(entry.0, child_depth));
 					string_push_str(result, " => ");
-					string_push_str(result, to_data_text(entry.1));
+					string_push_str(result, data_value_to_text(entry.1, child_depth));
 				};
 				string_push_str(result, " ");
 			};
@@ -138,16 +225,542 @@ pub fn to_data_text(v: DataValue) -> string {
 							if i > 0 {
 								string_push_str(result, ", ");
 							};
-							string_push_str(result, to_data_text(values[i]));
+							string_push_str(result, data_value_to_text(values[i], child_depth));
 						}
 					},
-					_ => string_push_str(result, to_data_text(payload)),
+					_ => string_push_str(result, data_value_to_text(payload, child_depth)),
 				};
 				string_push_str(result, ")");
 			};
 			result
 		},
 	}
+}
+
+/// Convert a DataValue to Ferlium data text.
+pub fn to_data_text(v: DataValue) -> string {
+	data_value_to_text(v, 0)
+}
+
+struct DataTextParser {
+	scalars: string_unicode_scalar_iterator,
+	current: Option<int>,
+	next_scalar: Option<int>,
+	byte_position: int,
+	depth: int,
+}
+
+fn data_text_unicode_scalar_byte_len(scalar: int) -> int {
+	if scalar <= 0x7f { 1 }
+	else if scalar <= 0x7ff { 2 }
+	else if scalar <= 0xffff { 3 }
+	else { 4 }
+}
+
+fn data_text_unicode_scalar_text(scalar: int) -> string {
+	let mut result = "";
+	string_push_unicode_scalar(result, scalar);
+	result
+}
+
+fn data_text_parser_bump(parser: &mut DataTextParser) -> Option<int> {
+	match parser.current {
+		Some(scalar) => {
+			parser.byte_position += data_text_unicode_scalar_byte_len(scalar);
+			parser.current = parser.next_scalar;
+			parser.next_scalar = string_unicode_scalar_iterator_next(parser.scalars);
+			Some(scalar)
+		},
+		None => None,
+	}
+}
+
+fn data_text_parser_fail(byte_position: int, message: string) {
+	invalid_argument(f"{message} at byte {byte_position}")
+}
+
+fn data_text_parser_consume(parser: &mut DataTextParser, expected: int) -> bool {
+	match parser.current {
+		Some(scalar) => {
+			if scalar == expected {
+				data_text_parser_bump(parser);
+				true
+			} else {
+				false
+			}
+		},
+		None => false,
+	}
+}
+
+fn data_text_parser_expect(parser: &mut DataTextParser, expected: int) {
+	if not data_text_parser_consume(parser, expected) {
+		data_text_parser_fail(
+			parser.byte_position,
+			f"Expected `{data_text_unicode_scalar_text(expected)}`",
+		)
+	}
+}
+
+fn data_text_parser_starts_with_pair(
+	parser: &mut DataTextParser,
+	first: int,
+	second: int,
+) -> bool {
+	match parser.current {
+		Some(current) => if current == first {
+			match parser.next_scalar {
+				Some(next) => next == second,
+				None => false,
+			}
+		} else { false },
+		None => false,
+	}
+}
+
+fn data_text_parser_skip_ws_and_comments(parser: &mut DataTextParser) {
+	loop {
+		loop {
+			match parser.current {
+				Some(scalar) => {
+					if unicode_scalar_is_whitespace(scalar) {
+						data_text_parser_bump(parser);
+					} else {
+						break;
+					}
+				},
+				None => break,
+			}
+		};
+		if data_text_parser_starts_with_pair(parser, 0x2f, 0x2f) {
+			data_text_parser_bump(parser);
+			data_text_parser_bump(parser);
+			loop {
+				match parser.current {
+					Some(scalar) => {
+						if scalar == 0x0a {
+							break;
+						};
+						data_text_parser_bump(parser);
+					},
+					None => break,
+				}
+			};
+			continue;
+		};
+		if data_text_parser_starts_with_pair(parser, 0x2f, 0x2a) {
+			data_text_parser_bump(parser);
+			data_text_parser_bump(parser);
+			loop {
+				if data_text_parser_starts_with_pair(parser, 0x2a, 0x2f) {
+					data_text_parser_bump(parser);
+					data_text_parser_bump(parser);
+					break;
+				};
+				match data_text_parser_bump(parser) {
+					Some(ignored) => (),
+					None => data_text_parser_fail(parser.byte_position, "Unterminated block comment"),
+				}
+			};
+			continue;
+		};
+		break
+	}
+}
+
+fn data_text_is_ascii_digit(scalar: int) -> bool {
+	0x30 <= scalar and scalar <= 0x39
+}
+
+fn data_text_parser_parse_identifier(parser: &mut DataTextParser) -> string {
+	data_text_parser_skip_ws_and_comments(parser);
+	let mut result = "";
+	match parser.current {
+		Some(first) => {
+			if not is_data_text_identifier_start(first) {
+				data_text_parser_fail(parser.byte_position, "Expected identifier");
+			};
+			string_push_unicode_scalar(result, first);
+			data_text_parser_bump(parser);
+		},
+		None => data_text_parser_fail(parser.byte_position, "Expected identifier"),
+	};
+	loop {
+		match parser.current {
+			Some(scalar) => {
+				if not is_data_text_identifier_continue(scalar) {
+					return result;
+				};
+				string_push_unicode_scalar(result, scalar);
+				data_text_parser_bump(parser);
+			},
+			None => return result,
+		}
+	}
+}
+
+fn data_text_hex_digit(scalar: int) -> int {
+	if 0x30 <= scalar and scalar <= 0x39 {
+		scalar - 0x30
+	} else if 0x61 <= scalar and scalar <= 0x66 {
+		scalar - 0x61 + 10
+	} else if 0x41 <= scalar and scalar <= 0x46 {
+		scalar - 0x41 + 10
+	} else {
+		-1
+	}
+}
+
+fn data_text_parser_parse_unicode_escape(parser: &mut DataTextParser) -> string {
+	data_text_parser_expect(parser, 0x7b);
+	let mut value = 0;
+	let mut has_digit = false;
+	loop {
+		match parser.current {
+			Some(scalar) => {
+				if scalar == 0x7d {
+					data_text_parser_bump(parser);
+					if not has_digit {
+						data_text_parser_fail(parser.byte_position, "Invalid unicode escape");
+					};
+					if (0xD800 <= value and value <= 0xDFFF) or value > 0x10FFFF {
+						data_text_parser_fail(parser.byte_position, "Invalid unicode scalar value");
+					};
+					let mut result = "";
+					string_push_unicode_scalar(result, value);
+					return result;
+				};
+				let digit = data_text_hex_digit(scalar);
+				if digit < 0 {
+					data_text_parser_fail(parser.byte_position, "Invalid unicode escape");
+				};
+				if value > 0x10FFF {
+					data_text_parser_fail(parser.byte_position, "Invalid unicode scalar value");
+				};
+				value = value * 16 + digit;
+				has_digit = true;
+				data_text_parser_bump(parser);
+			},
+			None => data_text_parser_fail(parser.byte_position, "Expected `}`"),
+		}
+	}
+}
+
+fn data_text_parser_parse_escape(parser: &mut DataTextParser) -> string {
+	match data_text_parser_bump(parser) {
+		Some(scalar) => {
+			if scalar == 0x22 { "\"" }
+			else if scalar == 0x5c { "\\" }
+			else if scalar == 0x6e { "\n" }
+			else if scalar == 0x72 { "\r" }
+			else if scalar == 0x74 { "\t" }
+			else if scalar == 0x75 { data_text_parser_parse_unicode_escape(parser) }
+			else { data_text_parser_fail(parser.byte_position, "Invalid escape") }
+		},
+		None => data_text_parser_fail(parser.byte_position, "Unterminated escape"),
+	}
+}
+
+fn data_text_parser_parse_string(parser: &mut DataTextParser) -> string {
+	data_text_parser_expect(parser, 0x22);
+	let mut result = "";
+	loop {
+		match parser.current {
+			Some(scalar) => {
+				data_text_parser_bump(parser);
+				if scalar == 0x22 {
+					return result;
+				} else if scalar == 0x5c {
+					string_push_str(result, data_text_parser_parse_escape(parser));
+				} else {
+					string_push_unicode_scalar(result, scalar);
+				}
+			},
+			None => data_text_parser_fail(parser.byte_position, "Unterminated string"),
+		}
+	}
+}
+
+fn data_text_parser_parse_number(parser: &mut DataTextParser) -> DataValue {
+	let mut text = "";
+	if data_text_parser_consume(parser, 0x2d) {
+		string_push_str(text, "-");
+	};
+	loop {
+		match parser.current {
+			Some(scalar) => {
+				if not data_text_is_ascii_digit(scalar) {
+					break;
+				};
+				string_push_unicode_scalar(text, scalar);
+				data_text_parser_bump(parser);
+			},
+			None => break,
+		}
+	};
+	let mut is_float = false;
+	if data_text_parser_consume(parser, 0x2e) {
+		is_float = true;
+		string_push_str(text, ".");
+		loop {
+			match parser.current {
+				Some(scalar) => {
+					if not data_text_is_ascii_digit(scalar) { break; };
+					string_push_unicode_scalar(text, scalar);
+					data_text_parser_bump(parser);
+				},
+				None => break,
+			}
+		}
+	};
+	match parser.current {
+		Some(scalar) => {
+			if scalar == 0x65 or scalar == 0x45 {
+				is_float = true;
+				string_push_unicode_scalar(text, scalar);
+				data_text_parser_bump(parser);
+				match parser.current {
+					Some(sign) => {
+						if sign == 0x2b or sign == 0x2d {
+							string_push_unicode_scalar(text, sign);
+							data_text_parser_bump(parser);
+						}
+					},
+					None => (),
+				};
+				loop {
+					match parser.current {
+						Some(digit) => {
+							if not data_text_is_ascii_digit(digit) { break; };
+							string_push_unicode_scalar(text, digit);
+							data_text_parser_bump(parser);
+						},
+						None => break,
+					}
+				}
+			}
+		},
+		None => (),
+	};
+	if is_float {
+		match parse_float(text) {
+			Some(value) => DataValue::Float(value),
+			None => data_text_parser_fail(parser.byte_position, "Invalid float literal"),
+		}
+	} else {
+		match parse_int(text) {
+			Some(value) => DataValue::Int(value),
+			None => data_text_parser_fail(parser.byte_position, "Invalid int literal"),
+		}
+	}
+}
+
+fn data_text_parser_parse_sequence(
+	parser: &mut DataTextParser,
+	open: int,
+	close: int,
+) -> [DataValue] {
+	data_text_parser_expect(parser, open);
+	let mut values: [DataValue] = [];
+	loop {
+		data_text_parser_skip_ws_and_comments(parser);
+		if data_text_parser_consume(parser, close) {
+			return values;
+		};
+		array_append(values, data_text_parser_parse_value(parser));
+		data_text_parser_skip_ws_and_comments(parser);
+		if not data_text_parser_consume(parser, 0x2c) {
+			data_text_parser_expect(parser, close);
+			return values;
+		}
+	}
+}
+
+fn data_text_parser_parse_paren_value(parser: &mut DataTextParser) -> DataValue {
+	data_text_parser_expect(parser, 0x28);
+	data_text_parser_skip_ws_and_comments(parser);
+	if data_text_parser_consume(parser, 0x29) {
+		return DataValue::Unit;
+	};
+	let first = data_text_parser_parse_value(parser);
+	data_text_parser_skip_ws_and_comments(parser);
+	if not data_text_parser_consume(parser, 0x2c) {
+		data_text_parser_expect(parser, 0x29);
+		return first;
+	};
+	let mut values = [first];
+	loop {
+		data_text_parser_skip_ws_and_comments(parser);
+		if data_text_parser_consume(parser, 0x29) {
+			return DataValue::Tuple(values);
+		};
+		array_append(values, data_text_parser_parse_value(parser));
+		data_text_parser_skip_ws_and_comments(parser);
+		if not data_text_parser_consume(parser, 0x2c) {
+			data_text_parser_expect(parser, 0x29);
+			return DataValue::Tuple(values);
+		}
+	}
+}
+
+fn data_text_parser_parse_object(parser: &mut DataTextParser) -> DataValue {
+	data_text_parser_expect(parser, 0x7b);
+	let mut entries: [(string, DataValue)] = [];
+	loop {
+		data_text_parser_skip_ws_and_comments(parser);
+		if data_text_parser_consume(parser, 0x7d) {
+			return DataValue::Record(entries);
+		};
+		let name = match parser.current {
+			Some(scalar) => if scalar == 0x22 {
+				data_text_parser_parse_string(parser)
+			} else {
+				data_text_parser_parse_identifier(parser)
+			},
+			None => data_text_parser_fail(parser.byte_position, "Expected identifier"),
+		};
+		data_text_parser_skip_ws_and_comments(parser);
+		data_text_parser_expect(parser, 0x3a);
+		let value = data_text_parser_parse_value(parser);
+		array_append(entries, (name, value));
+		data_text_parser_skip_ws_and_comments(parser);
+		if not data_text_parser_consume(parser, 0x2c) {
+			data_text_parser_expect(parser, 0x7d);
+			return DataValue::Record(entries);
+		}
+	}
+}
+
+fn data_text_parser_parse_map_entries(parser: &mut DataTextParser) -> [(DataValue, DataValue)] {
+	data_text_parser_expect(parser, 0x7b);
+	let mut entries: [(DataValue, DataValue)] = [];
+	loop {
+		data_text_parser_skip_ws_and_comments(parser);
+		if data_text_parser_consume(parser, 0x7d) {
+			return entries;
+		};
+		let key = data_text_parser_parse_value(parser);
+		data_text_parser_skip_ws_and_comments(parser);
+		if not data_text_parser_starts_with_pair(parser, 0x3d, 0x3e) {
+			data_text_parser_fail(parser.byte_position, "Expected `=>`");
+		};
+		data_text_parser_bump(parser);
+		data_text_parser_bump(parser);
+		let value = data_text_parser_parse_value(parser);
+		array_append(entries, (key, value));
+		data_text_parser_skip_ws_and_comments(parser);
+		if not data_text_parser_consume(parser, 0x2c) {
+			data_text_parser_expect(parser, 0x7d);
+			return entries;
+		}
+	}
+}
+
+fn data_text_parser_variant_payload(arguments: [DataValue]) -> DataValue {
+	if array_len(arguments) == 1 {
+		match (arguments[0]) {
+			DataValue::Record(entries) => DataValue::Record(entries),
+			_ => DataValue::Tuple(arguments),
+		}
+	} else {
+		DataValue::Tuple(arguments)
+	}
+}
+
+fn data_text_parser_parse_identifier_value(parser: &mut DataTextParser) -> DataValue {
+	let identifier = data_text_parser_parse_identifier(parser);
+	if identifier == "null" {
+		DataValue::Null
+	} else if identifier == "true" {
+		DataValue::Bool(true)
+	} else if identifier == "false" {
+		DataValue::Bool(false)
+	} else if identifier == "set" {
+		data_text_parser_skip_ws_and_comments(parser);
+		DataValue::Set(data_text_parser_parse_sequence(parser, 0x7b, 0x7d))
+	} else if identifier == "map" {
+		data_text_parser_skip_ws_and_comments(parser);
+		DataValue::Map(data_text_parser_parse_map_entries(parser))
+	} else {
+		data_text_parser_skip_ws_and_comments(parser);
+		if not data_text_parser_consume(parser, 0x28) {
+			return DataValue::Variant { name: identifier, payload: DataValue::Unit };
+		};
+		data_text_parser_skip_ws_and_comments(parser);
+		if data_text_parser_consume(parser, 0x29) {
+			return DataValue::Variant { name: identifier, payload: DataValue::Unit };
+		};
+		let mut arguments: [DataValue] = [];
+		loop {
+			array_append(arguments, data_text_parser_parse_value(parser));
+			data_text_parser_skip_ws_and_comments(parser);
+			if data_text_parser_consume(parser, 0x2c) {
+				data_text_parser_skip_ws_and_comments(parser);
+				if data_text_parser_consume(parser, 0x29) {
+					break;
+				}
+			} else {
+				data_text_parser_expect(parser, 0x29);
+				break;
+			}
+		};
+		DataValue::Variant {
+			name: identifier,
+			payload: data_text_parser_variant_payload(arguments),
+		}
+	}
+}
+
+fn data_text_parser_parse_value(parser: &mut DataTextParser) -> DataValue {
+	// A 16-node limit leaves headroom: 32 nested nodes overflow the boxed debug interpreter.
+	if parser.depth >= 16 {
+		panic("Data text nesting limit exceeded");
+	};
+	parser.depth += 1;
+	data_text_parser_skip_ws_and_comments(parser);
+	let result = match parser.current {
+		Some(scalar) => {
+			if scalar == 0x22 {
+				DataValue::String(data_text_parser_parse_string(parser))
+			} else if scalar == 0x5b {
+				DataValue::Array(data_text_parser_parse_sequence(parser, 0x5b, 0x5d))
+			} else if scalar == 0x28 {
+				data_text_parser_parse_paren_value(parser)
+			} else if scalar == 0x7b {
+				data_text_parser_parse_object(parser)
+			} else if scalar == 0x2d or data_text_is_ascii_digit(scalar) {
+				data_text_parser_parse_number(parser)
+			} else if is_data_text_identifier_start(scalar) {
+				data_text_parser_parse_identifier_value(parser)
+			} else {
+				data_text_parser_fail(parser.byte_position, "Expected data value")
+			}
+		},
+		None => data_text_parser_fail(parser.byte_position, "Expected data value"),
+	};
+	parser.depth -= 1;
+	result
+}
+
+/// Parse Ferlium data text into a data value.
+pub fn parse_data_text(text: string) -> DataValue {
+	let mut scalars = string_unicode_scalar_iter(text);
+	let current = string_unicode_scalar_iterator_next(scalars);
+	let next_scalar = string_unicode_scalar_iterator_next(scalars);
+	let mut parser = DataTextParser {
+		scalars,
+		current,
+		next_scalar,
+		byte_position: 0,
+		depth: 0,
+	};
+	let result = data_text_parser_parse_value(parser);
+	data_text_parser_skip_ws_and_comments(parser);
+	match parser.current {
+		Some(ignored) => data_text_parser_fail(parser.byte_position, "Expected end of input"),
+		None => (),
+	};
+	result
 }
 
 /// Encode a value to Ferlium data text. The value must implement the Serialize trait.

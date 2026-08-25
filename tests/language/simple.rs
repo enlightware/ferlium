@@ -77,6 +77,16 @@ fn raw_identifiers() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn unicode_identifiers() {
+    let mut session = TestSession::new();
+    assert_val_eq!(session.run("let élève٢ = 42; élève٢"), int(42));
+    assert_val_eq!(session.run("let 𐐀𐒢 = 42; 𐐀𐒢"), int(42));
+    assert_val_eq!(session.run("let r#élève٢ = 42; r#élève٢"), int(42));
+    assert_val_eq!(session.run("'boucle٢: loop { break 'boucle٢ 42 }"), int(42));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn non_owning_deferred_local_storage_does_not_leave_value_constraint() {
     let mut session = TestSession::new();
     let module_id = session

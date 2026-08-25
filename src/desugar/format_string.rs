@@ -77,7 +77,7 @@ pub fn emit_format_string_ast(
     arena: &mut DExprArena,
 ) -> Result<ExprKind, InternalCompilationError> {
     static REGEX: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"\{([\p{L}_][\p{L}\p{N}_]*)\}").unwrap());
+        LazyLock::new(|| Regex::new(r"\{([\p{L}_][\p{L}\p{Nd}_]*)\}").unwrap());
 
     // Start with an empty mutable string.
     let empty_string = arena.alloc(Expr::new(

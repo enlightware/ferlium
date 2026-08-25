@@ -1,5 +1,6 @@
 node_modules/
 dist/
 .eslintcache
-test/temp-grammar.js
-test/temp-grammar.terms.js
+src/language/language.grammar.js
+src/language/language.grammar.terms.js
+src/language/unicode-identifiers.js

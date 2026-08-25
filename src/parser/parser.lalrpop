@@ -1460,11 +1460,11 @@ UIdentifier: Ustr = {
     RawIdentifier => ustr(&<>[2..]),
 }
 
-Identifier: &'input str = r"[\p{L}_][\p{L}\p{N}_]*" => <>;
-RawIdentifier: &'input str = r"r#[\p{L}_][\p{L}\p{N}_]*" => <>;
+Identifier: &'input str = r"[\p{L}_][\p{L}\p{Nd}_]*" => <>;
+RawIdentifier: &'input str = r"r#[\p{L}_][\p{L}\p{Nd}_]*" => <>;
 
 LoopLabel: UstrSpan = {
-    <l:@L> <label:r"'[\p{L}_][\p{L}\p{N}_]*"> <r:@R> => (ustr(&label[1..]), span(l + 1, r, source_id)),
+    <l:@L> <label:r"'[\p{L}_][\p{L}\p{Nd}_]*"> <r:@R> => (ustr(&label[1..]), span(l + 1, r, source_id)),
 }
 
 UnitLiteral: (LiteralValue, IrType) = {

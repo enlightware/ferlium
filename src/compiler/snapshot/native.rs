@@ -42,6 +42,10 @@ impl NativeTypeCatalog {
             "std::string_split_iterator",
             bare_native_type::<string::StringSplitIterator>(),
         );
+        catalog.register(
+            "std::string_unicode_scalar_iterator",
+            bare_native_type::<string::StringUnicodeScalarIterator>(),
+        );
         catalog.register("std::Buffer", buffer_bare_native_type());
         catalog.register("std::StaticStr", bare_native_type::<string::StaticStr>());
         catalog

@@ -2676,6 +2676,14 @@ fn string_normalization() {
             .run("let mut s = \"cafe\"; string_push_str(s, \"\\u{0301}\"); s == \"caf\\u{00E9}\""),
         bool(true)
     );
+    // Hangul composition also crosses an append boundary even though both scalars have
+    // canonical combining class zero.
+    assert_val_eq!(
+        session.run(
+            "let mut s = \"\\u{1100}\"; string_push_str(s, \"\\u{1161}\"); s == \"\\u{AC00}\"",
+        ),
+        bool(true)
+    );
     // string_replace: the replacement result is NFC normalized.
     // Replacing "e" with NFD "e\u{0301}" in "hello" yields NFC "h\u{00E9}llo" = 6 bytes.
     assert_val_eq!(

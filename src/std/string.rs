@@ -11,8 +11,10 @@ use std::{
     ops::Deref,
     rc::Rc,
     str::FromStr,
+    sync::LazyLock,
 };
 
+use regex::Regex;
 use unicode_normalization::UnicodeNormalization;
 use unicode_segmentation::UnicodeSegmentation;
 use ustr::{Ustr, ustr};
@@ -22,10 +24,10 @@ use crate::{
     compiler::error::SourceFailureKind,
     containers::b,
     hir::function::{
-        BinaryNativeFnMNN, BinaryNativeFnMRN, BinaryNativeFnRMN, BinaryNativeFnRRFN,
+        BinaryNativeFnMNFN, BinaryNativeFnMRN, BinaryNativeFnRMN, BinaryNativeFnRRFN,
         BinaryNativeFnRRN, BinaryNativeFnRRV, Function, NativeTrivialCopy, NullaryNativeFnN,
-        TernaryNativeFnRNNN, TernaryNativeFnRRRN, UnaryNativeFnMV, UnaryNativeFnNN,
-        UnaryNativeFnRN, UnaryNativeFnRV, trivial_copy_private,
+        TernaryNativeFnRNNN, TernaryNativeFnRRRN, UnaryNativeFnMV, UnaryNativeFnNFN,
+        UnaryNativeFnNN, UnaryNativeFnRN, UnaryNativeFnRV, trivial_copy_private,
     },
     hir::value::{NativeDisplay, NativeValueType, Value},
     module::{Module, ModuleFunction, Visibility},
@@ -53,6 +55,11 @@ use super::option::{none, option_type, some};
 pub(crate) const STRING_FROM_STATIC_FUNCTION_NAME: &str = "string_from_static";
 pub(crate) const STRING_PUSH_STR_FUNCTION_NAME: &str = "string_push_str";
 pub(crate) const STRING_PUSH_STATIC_STR_FUNCTION_NAME: &str = "string_push_static_str";
+
+static SINGLE_UNICODE_LETTER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\A\p{L}\z").expect("valid Unicode letter regex"));
+static SINGLE_UNICODE_DECIMAL_DIGIT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\A\p{Nd}\z").expect("valid Unicode decimal digit regex"));
 
 /// Immutable compiler representation of a source string literal.
 ///
@@ -148,12 +155,17 @@ impl String {
         self.push_normalized(value.0.as_str());
     }
 
-    fn push_unicode_scalar(&mut self, value: isize) {
-        let value = u32::try_from(value)
-            .ok()
-            .and_then(char::from_u32)
-            .expect("caller must validate Unicode scalar values");
-        self.push_normalized(&value.to_string());
+    fn push_unicode_scalar(&mut self, value: isize) -> Result<(), SourceFailureKind> {
+        let value = unicode_scalar(value)?;
+        let mut encoded = [0; 4];
+        let encoded = value.encode_utf8(&mut encoded);
+        if unicode_normalization::is_nfc(encoded) {
+            self.push_normalized(encoded);
+        } else {
+            let normalized = encoded.nfc().collect::<std::string::String>();
+            self.push_normalized(&normalized);
+        }
+        Ok(())
     }
 
     /// Appends a string literal without materializing it as a [`String`] first.
@@ -169,24 +181,46 @@ impl String {
 
     /// Appends already-NFC text, restoring the invariant when the join breaks it.
     ///
-    /// NFC is not closed under concatenation: text beginning with a combining mark composes with
-    /// whatever precedes it, so only that case needs to re-normalize the whole result.
+    /// NFC is not closed under concatenation. Only the suffix beginning at the existing string's
+    /// final starter can interact with the appended text, so normalization retains the stable
+    /// prefix instead of rescanning the whole string.
     fn push_normalized(&mut self, value: &str) {
         debug_assert!(
             unicode_normalization::is_nfc(value),
             "`String::push_normalized` requires NFC-normalized text"
         );
-        let needs_normalization = value
-            .chars()
-            .next()
-            .map(unicode_normalization::char::is_combining_mark)
-            .unwrap_or(false);
-
-        if needs_normalization {
-            self.0 = Rc::new(self.0.chars().chain(value.chars()).nfc().collect());
-        } else {
+        let Some(first) = value.chars().next() else {
+            return;
+        };
+        let Some(last) = self.0.chars().next_back() else {
             Rc::make_mut(&mut self.0).push_str(value);
+            return;
+        };
+
+        let first_class = unicode_normalization::char::canonical_combining_class(first);
+        let last_class = unicode_normalization::char::canonical_combining_class(last);
+        let boundary_can_change = first_class != 0
+            || (last_class == 0 && unicode_normalization::char::compose(last, first).is_some());
+        if !boundary_can_change {
+            Rc::make_mut(&mut self.0).push_str(value);
+            return;
         }
+
+        let string = Rc::make_mut(&mut self.0);
+        let suffix_start = string
+            .char_indices()
+            .rev()
+            .find_map(|(index, ch)| {
+                (unicode_normalization::char::canonical_combining_class(ch) == 0).then_some(index)
+            })
+            .unwrap_or(0);
+        let normalized_suffix = string[suffix_start..]
+            .chars()
+            .chain(value.chars())
+            .nfc()
+            .collect::<std::string::String>();
+        string.truncate(suffix_start);
+        string.push_str(&normalized_suffix);
     }
 
     pub fn concat(l: &Self, r: &Self) -> Self {
@@ -338,6 +372,13 @@ impl String {
         }
     }
 
+    fn unicode_scalar_iter(&self) -> StringUnicodeScalarIterator {
+        StringUnicodeScalarIterator {
+            string: self.0.clone(),
+            byte_position: 0,
+        }
+    }
+
     /// Collect byte offsets of each grapheme cluster
     fn grapheme_indices(&self) -> Vec<usize> {
         self.0.grapheme_indices(true).map(|(idx, _)| idx).collect()
@@ -381,6 +422,17 @@ impl String {
         )
     }
 
+    fn unicode_scalar_iter_descr() -> ModuleFunction {
+        UnaryNativeFnRN::description_with_ty(
+            Self::unicode_scalar_iter,
+            ["string"],
+            "Creates an iterator over the Unicode scalar values of `string`.",
+            string_type(),
+            unicode_scalar_iter_type(),
+            no_effects(),
+        )
+    }
+
     fn split_iter_descr() -> ModuleFunction {
         BinaryNativeFnRRFN::description_with_ty_scheme(
             Self::split_iterator,
@@ -393,6 +445,31 @@ impl String {
             )),
         )
     }
+}
+
+fn unicode_scalar(value: isize) -> Result<char, SourceFailureKind> {
+    u32::try_from(value)
+        .ok()
+        .and_then(char::from_u32)
+        .ok_or_else(|| {
+            SourceFailureKind::InvalidArgument(format!("Invalid Unicode scalar value: {value}"))
+        })
+}
+
+fn unicode_scalar_is_letter(value: isize) -> Result<bool, SourceFailureKind> {
+    let value = unicode_scalar(value)?;
+    let mut encoded = [0; 4];
+    Ok(SINGLE_UNICODE_LETTER.is_match(value.encode_utf8(&mut encoded)))
+}
+
+fn unicode_scalar_is_decimal_digit(value: isize) -> Result<bool, SourceFailureKind> {
+    let value = unicode_scalar(value)?;
+    let mut encoded = [0; 4];
+    Ok(SINGLE_UNICODE_DECIMAL_DIGIT.is_match(value.encode_utf8(&mut encoded)))
+}
+
+fn unicode_scalar_is_whitespace(value: isize) -> Result<bool, SourceFailureKind> {
+    Ok(unicode_scalar(value)?.is_whitespace())
 }
 
 impl FromStr for String {
@@ -439,6 +516,47 @@ impl NativeDisplay for String {
     }
     fn fmt_in_to_string(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+
+/// An iterator over the Unicode scalar values of a string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StringUnicodeScalarIterator {
+    string: Rc<std::string::String>,
+    byte_position: usize,
+}
+
+impl NativeValueType for StringUnicodeScalarIterator {}
+
+impl StringUnicodeScalarIterator {
+    fn next_value(&mut self) -> Value {
+        match self.next() {
+            Some(value) => some(Value::native(value)),
+            None => none(),
+        }
+    }
+
+    fn next_value_descr() -> ModuleFunction {
+        UnaryNativeFnMV::description_with_ty_scheme(
+            Self::next_value,
+            ["iterator"],
+            "Gets the next Unicode scalar value.",
+            TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
+                [(unicode_scalar_iter_type(), true)],
+                option_type(int_type()),
+                no_effects(),
+            )),
+        )
+    }
+}
+
+impl Iterator for StringUnicodeScalarIterator {
+    type Item = isize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let value = self.string[self.byte_position..].chars().next()?;
+        self.byte_position += value.len_utf8();
+        Some(value as isize)
     }
 }
 
@@ -593,6 +711,10 @@ pub fn string_iter_type() -> Type {
     cached_ty!(|| Type::native::<StringIterator>([]))
 }
 
+fn unicode_scalar_iter_type() -> Type {
+    cached_ty!(|| Type::native::<StringUnicodeScalarIterator>([]))
+}
+
 pub fn string_split_iter_type() -> Type {
     cached_ty!(|| Type::native::<StringSplitIterator>([]))
 }
@@ -607,6 +729,25 @@ fn hash_string(value: &String, state: &mut Hasher) {
 
 fn equal_string(lhs: &String, rhs: &String) -> bool {
     lhs == rhs
+}
+
+fn equal_unicode_scalar_iterator(
+    lhs: &StringUnicodeScalarIterator,
+    rhs: &StringUnicodeScalarIterator,
+) -> bool {
+    lhs == rhs
+}
+
+fn unicode_scalar_iterator_to_string(value: &StringUnicodeScalarIterator) -> String {
+    String::new(&format!(
+        "StringUnicodeScalarIterator on \"{}\" @ {}",
+        value.string, value.byte_position
+    ))
+}
+
+fn hash_unicode_scalar_iterator(value: &StringUnicodeScalarIterator, state: &mut Hasher) {
+    state.write_bytes(value.string.as_bytes());
+    state.write_isize(value.byte_position as isize);
 }
 
 fn equal_string_iterator(lhs: &StringIterator, rhs: &StringIterator) -> bool {
@@ -675,6 +816,10 @@ pub fn add_to_module(to: &mut Module) {
     let trivial_copy_trait_id = to.expect_std_trait_id_in_current_module(TRIVIAL_COPY_TRAIT_NAME);
     // Note: string alias is added in core.rs
     to.add_private_bare_native_type_alias_str("StaticStr", bare_native_type::<StaticStr>());
+    to.add_private_bare_native_type_alias_str(
+        "string_unicode_scalar_iterator",
+        bare_native_type::<StringUnicodeScalarIterator>(),
+    );
     to.add_type_alias_str_with_doc(
         "string_iterator",
         string_iter_type(),
@@ -719,6 +864,26 @@ pub fn add_to_module(to: &mut Module) {
         [],
         [],
         [b(UnaryNativeFnRN::new(inspect_string)) as Function],
+    );
+    to.add_concrete_impl_no_locals(
+        value_trait_id,
+        [unicode_scalar_iter_type()],
+        [],
+        native_layout_associated_consts::<StringUnicodeScalarIterator>(),
+        [
+            b(BinaryNativeFnRRN::new(equal_unicode_scalar_iterator)) as Function,
+            b(UnaryNativeFnRN::new(unicode_scalar_iterator_to_string)) as Function,
+            b(BinaryNativeFnRMN::new(hash_unicode_scalar_iterator)) as Function,
+            native_value_clone_function::<StringUnicodeScalarIterator>(),
+            native_value_drop_function::<StringUnicodeScalarIterator>(),
+        ],
+    );
+    to.add_concrete_impl_no_locals(
+        inspect_trait_id,
+        [unicode_scalar_iter_type()],
+        [],
+        [],
+        [b(UnaryNativeFnRN::new(unicode_scalar_iterator_to_string)) as Function],
     );
     to.add_concrete_impl_no_locals(
         value_trait_id,
@@ -792,12 +957,52 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function_with_visibility(
         ustr("string_push_unicode_scalar"),
-        BinaryNativeFnMNN::description_with_default_ty(
+        BinaryNativeFnMNFN::description_with_default_ty(
             String::push_unicode_scalar,
             ["target", "scalar"],
-            "Appends a validated Unicode scalar value to a string.",
-            no_effects(),
+            "Appends a Unicode scalar value to a string.",
+            effect(PrimitiveEffect::Fallible),
         ),
+        Visibility::Module,
+    );
+    to.add_function_with_visibility(
+        ustr("unicode_scalar_is_letter"),
+        UnaryNativeFnNFN::description_with_default_ty(
+            unicode_scalar_is_letter,
+            ["scalar"],
+            "Whether a Unicode scalar belongs to the general Letter category.",
+            effect(PrimitiveEffect::Fallible),
+        ),
+        Visibility::Module,
+    );
+    to.add_function_with_visibility(
+        ustr("unicode_scalar_is_decimal_digit"),
+        UnaryNativeFnNFN::description_with_default_ty(
+            unicode_scalar_is_decimal_digit,
+            ["scalar"],
+            "Whether a Unicode scalar belongs to the Decimal_Number category.",
+            effect(PrimitiveEffect::Fallible),
+        ),
+        Visibility::Module,
+    );
+    to.add_function_with_visibility(
+        ustr("unicode_scalar_is_whitespace"),
+        UnaryNativeFnNFN::description_with_default_ty(
+            unicode_scalar_is_whitespace,
+            ["scalar"],
+            "Whether a Unicode scalar is whitespace.",
+            effect(PrimitiveEffect::Fallible),
+        ),
+        Visibility::Module,
+    );
+    to.add_function_with_visibility(
+        ustr("string_unicode_scalar_iter"),
+        String::unicode_scalar_iter_descr(),
+        Visibility::Module,
+    );
+    to.add_function_with_visibility(
+        ustr("string_unicode_scalar_iterator_next"),
+        StringUnicodeScalarIterator::next_value_descr(),
         Visibility::Module,
     );
     // The f-string desugaring emits this for every literal segment, through ordinary path
@@ -935,4 +1140,26 @@ pub fn add_to_module(to: &mut Module) {
         ustr("string_split_iterator_next"),
         StringSplitIterator::next_value_descr(),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_unicode_scalars_are_source_failures_and_do_not_mutate_strings() {
+        let expected =
+            SourceFailureKind::InvalidArgument("Invalid Unicode scalar value: 55296".to_string());
+        assert_eq!(unicode_scalar(0xd800), Err(expected.clone()));
+        assert_eq!(unicode_scalar_is_letter(0xd800), Err(expected.clone()));
+        assert_eq!(
+            unicode_scalar_is_decimal_digit(0xd800),
+            Err(expected.clone())
+        );
+        assert_eq!(unicode_scalar_is_whitespace(0xd800), Err(expected.clone()));
+
+        let mut value = String::new("unchanged");
+        assert_eq!(value.push_unicode_scalar(0xd800), Err(expected));
+        assert_eq!(value.as_ref(), "unchanged");
+    }
 }

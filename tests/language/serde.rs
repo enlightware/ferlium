@@ -468,6 +468,44 @@ fn data_text_codec_source_like_shapes() {
         string(r#""nul: \u{0}, unit: \u{1f}""#)
     );
     assert_val_eq!(
+        session.run(r#"to_data_text(parse_data_text("\"\\u{1F600}\""))"#),
+        string("\"😀\"")
+    );
+    assert_val_eq!(
+        session.run(r#"parse_data_text("\"\\u{2126}\"") == DataValue::String("Ω")"#),
+        bool(true)
+    );
+    assert_val_eq!(
+        session.run(r#"parse_data_text("\"\\u{1100}\\u{1161}\"") == DataValue::String("가")"#),
+        bool(true)
+    );
+    assert_val_eq!(
+        session.run(r#"to_data_text(parse_data_text("\"👩‍💻\""))"#),
+        string("\"👩‍💻\"")
+    );
+    assert_val_eq!(
+        session.run(
+            r#"parse_data_text(to_data_text(DataValue::String("\"\u{301}\\\u{301}"))) == DataValue::String("\"\u{301}\\\u{301}")"#,
+        ),
+        bool(true)
+    );
+    assert_val_eq!(
+        session.run(r#"to_data_text(parse_data_text("{\"a\\u{338}\": 1}"))"#),
+        string("{ \"a̸\": 1 }")
+    );
+    assert_val_eq!(
+        session.run(r#"to_data_text(parse_data_text("{élève٢: 1}"))"#),
+        string("{ élève٢: 1 }")
+    );
+    assert_val_eq!(
+        session.run(r#"to_data_text(parse_data_text("Some({ value: 1 })"))"#),
+        string("Some({ value: 1 })")
+    );
+    assert_val_eq!(
+        session.run(r#"to_data_text(parse_data_text("/* before */ [1, /* between */ 2]"))"#),
+        string("[1, 2]")
+    );
+    assert_val_eq!(
         session.run(indoc! { r#"
             let decoded: HashSet<int> = data_text_decode("set {}");
             len(decoded)
@@ -480,6 +518,41 @@ fn data_text_codec_source_like_shapes() {
             len(decoded)
         "# }),
         int(0)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn data_text_reports_invalid_input() {
+    let mut session = TestSession::new();
+
+    assert_eq!(
+        session.fail_run(r#"parse_data_text("\"\\u{D800}\"")"#),
+        SourceFailureKind::InvalidArgument("Invalid unicode scalar value at byte 9".into())
+    );
+    assert_eq!(
+        session.fail_run(r#"parse_data_text("999999999999999999999999")"#),
+        SourceFailureKind::InvalidArgument("Invalid int literal at byte 24".into())
+    );
+    assert_eq!(
+        session.fail_run("parse_data_text(\"a\\u{338}\")"),
+        SourceFailureKind::InvalidArgument("Expected end of input at byte 1".into())
+    );
+
+    let nested = format!("{}0{}", "[".repeat(16), "]".repeat(16));
+    assert_eq!(
+        session.fail_run(&format!(r#"parse_data_text("{nested}")"#)),
+        SourceFailureKind::Aborted(Some("Data text nesting limit exceeded".into()))
+    );
+
+    let nested_value = format!(
+        "{}DataValue::Int(0){}",
+        "DataValue::Array([".repeat(16),
+        "])".repeat(16)
+    );
+    assert_eq!(
+        session.fail_run(&format!("to_data_text({nested_value})")),
+        SourceFailureKind::Aborted(Some("Data text nesting limit exceeded".into()))
     );
 }
 

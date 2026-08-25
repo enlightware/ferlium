@@ -26,16 +26,19 @@ lint:
 	./node_modules/.bin/eslint --ignore-pattern "script-api/pkg/*"
 
 validate-grammar: install-npm-deps
-	./node_modules/.bin/lezer-generator src/language/language.grammar -o test/temp-grammar.js
-	cd test && node extract-test-grammar.js ./temp-grammar.js
-	rm -f test/temp-grammar.js test/temp-grammar.terms.js
+	./node_modules/.bin/lezer-generator src/language/language.grammar -o src/language/language.grammar.js
+	./node_modules/.bin/esbuild src/language/unicode-identifiers.ts --bundle --format=esm --external:@lezer/lr --outfile=src/language/unicode-identifiers.js
+	cd test && node extract-test-grammar.js ../src/language/language.grammar.js
+	rm -f src/language/language.grammar.js src/language/language.grammar.terms.js src/language/unicode-identifiers.js
 
 list-grammar-errors: install-npm-deps
-	./node_modules/.bin/lezer-generator src/language/language.grammar -o test/temp-grammar.js
-	cd test && node extract-test-grammar.js ./temp-grammar.js --errors
-	rm -f test/temp-grammar.js test/temp-grammar.terms.js
+	./node_modules/.bin/lezer-generator src/language/language.grammar -o src/language/language.grammar.js
+	./node_modules/.bin/esbuild src/language/unicode-identifiers.ts --bundle --format=esm --external:@lezer/lr --outfile=src/language/unicode-identifiers.js
+	cd test && node extract-test-grammar.js ../src/language/language.grammar.js --errors
+	rm -f src/language/language.grammar.js src/language/language.grammar.terms.js src/language/unicode-identifiers.js
 
 validate-grammar-verbose: install-npm-deps
-	./node_modules/.bin/lezer-generator src/language/language.grammar -o test/temp-grammar.js
-	cd test && node extract-test-grammar.js ./temp-grammar.js --verbose
-	rm -f test/temp-grammar.js test/temp-grammar.terms.js
+	./node_modules/.bin/lezer-generator src/language/language.grammar -o src/language/language.grammar.js
+	./node_modules/.bin/esbuild src/language/unicode-identifiers.ts --bundle --format=esm --external:@lezer/lr --outfile=src/language/unicode-identifiers.js
+	cd test && node extract-test-grammar.js ../src/language/language.grammar.js --verbose
+	rm -f src/language/language.grammar.js src/language/language.grammar.terms.js src/language/unicode-identifiers.js

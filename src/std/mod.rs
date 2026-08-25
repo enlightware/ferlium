@@ -18,7 +18,6 @@ pub mod buffer;
 pub mod cast;
 pub mod core;
 pub mod core_traits_names;
-mod data_text;
 pub mod data_value;
 pub mod default;
 pub mod empty;
@@ -91,7 +90,6 @@ pub(crate) fn build_std(loader: &mut impl StdSourceLoader) -> Module {
     data_value::set_data_value_type_def(data_value::find_data_value_type_def(&module));
     serde::add_to_module(&mut module);
     json::add_to_module(&mut module);
-    data_text::add_to_module(&mut module);
     loader.add_serialization(module)
 }
 
