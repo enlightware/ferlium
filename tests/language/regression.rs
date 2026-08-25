@@ -42,6 +42,17 @@ fn compound_assignment_through_assigning_index_does_not_panic() {
     }
 }
 
+/// Tuple projections use a compact index in HIR, so source indices outside that representation
+/// must be diagnosed before HIR construction. The same digits remain valid after an integer
+/// literal, where the syntax denotes a float rather than a projection.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn oversized_tuple_projection_index_does_not_panic() {
+    let mut session = TestSession::new();
+    assert!(session.try_compile("value.4294967295").is_err());
+    assert_val_eq!(session.run("1.4294967295"), float(1.4294967295));
+}
+
 /// A mutable argument that is not a place at all must be diagnosed rather than asserted on: the
 /// borrow checker's argument-overlap analysis sees it before the mutability check does.
 #[test]

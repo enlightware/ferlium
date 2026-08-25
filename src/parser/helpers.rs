@@ -37,6 +37,7 @@ use crate::compiler::error::LocatedError;
 use crate::containers::SVec2;
 use crate::containers::b;
 use crate::hir::value::{LiteralNativeValue, LiteralValue};
+use crate::module::ProjectionIndex;
 use crate::parser::escapes::apply_string_escapes;
 use crate::std::math::{Float, int_type};
 use crate::std::string::StaticStr;
@@ -371,6 +372,12 @@ pub(crate) fn proj_or_float<L, T>(
         let index = rhs.0;
         let float_value = format!("{value}.{index}");
         return parse_num_literal::<Float, L, T>(&float_value, rhs.1);
+    }
+    if ProjectionIndex::try_from(rhs.0).is_err() {
+        return error(
+            format!("tuple projection index {} is too large", rhs.0),
+            rhs.1,
+        );
     }
     Ok(ExprKind::project(lhs, rhs))
 }
