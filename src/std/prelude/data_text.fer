@@ -72,174 +72,175 @@ fn data_text_push_control_escape(target: &mut string, scalar: int) {
 	string_push_str(target, "}")
 }
 
-fn escape_data_text_string(value: string) -> string {
-	let mut result = "\"";
+fn append_escaped_data_text_string(target: &mut string, value: string) {
+	string_push_str(target, "\"");
 	let mut scalars = string_unicode_scalar_iter(value);
 	loop {
 		match string_unicode_scalar_iterator_next(scalars) {
 			Some(scalar) => {
 				if scalar == 0x22 {
-					string_push_str(result, "\\\"");
+					string_push_str(target, "\\\"");
 				} else if scalar == 0x5c {
-					string_push_str(result, "\\\\");
+					string_push_str(target, "\\\\");
 				} else if scalar == 0x0a {
-					string_push_str(result, "\\n");
+					string_push_str(target, "\\n");
 				} else if scalar == 0x0d {
-					string_push_str(result, "\\r");
+					string_push_str(target, "\\r");
 				} else if scalar == 0x09 {
-					string_push_str(result, "\\t");
+					string_push_str(target, "\\t");
 				} else if (0 <= scalar and scalar <= 0x1f)
 					or (0x7f <= scalar and scalar <= 0x9f)
 				{
-					data_text_push_control_escape(result, scalar);
+					data_text_push_control_escape(target, scalar);
 				} else {
-					string_push_unicode_scalar(result, scalar);
+					string_push_unicode_scalar(target, scalar);
 				}
 			},
 			None => break,
 		}
 	};
-	string_push_str(result, "\"");
-	result
+	string_push_str(target, "\"");
 }
 
-fn data_text_join_sequence(
+fn append_data_text_sequence(
+	target: &mut string,
 	values: [DataValue],
 	open: string,
 	close: string,
 	child_depth: int,
-) -> string {
-	let mut result = open;
+) {
+	string_push_str(target, open);
 	for i in 0..array_len(values) {
 		if i > 0 {
-			string_push_str(result, ", ");
+			string_push_str(target, ", ");
 		};
-		string_push_str(result, data_value_to_text(values[i], child_depth));
+		append_data_value_text(target, values[i], child_depth);
 	};
-	string_push_str(result, close);
-	result
+	string_push_str(target, close);
 }
 
-fn data_text_join_keyword_sequence(
+fn append_data_text_keyword_sequence(
+	target: &mut string,
 	keyword: string,
 	values: [DataValue],
 	child_depth: int,
-) -> string {
-	let mut result = keyword;
-	string_push_str(result, " {");
+) {
+	string_push_str(target, keyword);
+	string_push_str(target, " {");
 	if array_len(values) > 0 {
-		string_push_str(result, " ");
+		string_push_str(target, " ");
 		for i in 0..array_len(values) {
 			if i > 0 {
-				string_push_str(result, ", ");
+				string_push_str(target, ", ");
 			};
-			string_push_str(result, data_value_to_text(values[i], child_depth));
+			append_data_value_text(target, values[i], child_depth);
 		};
-		string_push_str(result, " ");
+		string_push_str(target, " ");
 	};
-	string_push_str(result, "}");
-	result
+	string_push_str(target, "}");
 }
 
-fn data_value_tuple_to_text(values: [DataValue], child_depth: int) -> string {
-	let mut result = "(";
+fn append_data_value_tuple_text(
+	target: &mut string,
+	values: [DataValue],
+	child_depth: int,
+) {
+	string_push_str(target, "(");
 	for i in 0..array_len(values) {
 		if i > 0 {
-			string_push_str(result, ", ");
+			string_push_str(target, ", ");
 		};
-		string_push_str(result, data_value_to_text(values[i], child_depth));
+		append_data_value_text(target, values[i], child_depth);
 	};
 	if array_len(values) == 1 {
-		string_push_str(result, ",");
+		string_push_str(target, ",");
 	};
-	string_push_str(result, ")");
-	result
+	string_push_str(target, ")");
 }
 
-fn data_value_to_text(v: DataValue, depth: int) -> string {
+fn append_data_value_text(target: &mut string, v: DataValue, depth: int) {
 	if depth >= 16 {
 		panic("Data text nesting limit exceeded");
 	};
 	let child_depth = depth + 1;
 	match (v) {
-		DataValue::Null => "null",
-		DataValue::Unit => "()",
-		DataValue::Bool(b) => if b { "true" } else { "false" },
-		DataValue::Int(i) => to_string(i),
-		DataValue::Float(f) => to_string(f),
-		DataValue::String(s) => escape_data_text_string(s),
-		DataValue::Array(a) => data_text_join_sequence(a, "[", "]", child_depth),
-		DataValue::Tuple(a) => data_value_tuple_to_text(a, child_depth),
+		DataValue::Null => string_push_str(target, "null"),
+		DataValue::Unit => string_push_str(target, "()"),
+		DataValue::Bool(b) => string_push_str(target, if b { "true" } else { "false" }),
+		DataValue::Int(i) => string_push_str(target, to_string(i)),
+		DataValue::Float(f) => string_push_str(target, to_string(f)),
+		DataValue::String(s) => append_escaped_data_text_string(target, s),
+		DataValue::Array(a) => append_data_text_sequence(target, a, "[", "]", child_depth),
+		DataValue::Tuple(a) => append_data_value_tuple_text(target, a, child_depth),
 		DataValue::Record(o) => {
-			let mut result = "{";
+			string_push_str(target, "{");
 			if array_len(o) > 0 {
-				string_push_str(result, " ");
+				string_push_str(target, " ");
 				for i in 0..array_len(o) {
 					if i > 0 {
-						string_push_str(result, ", ");
+						string_push_str(target, ", ");
 					};
 					let entry = o[i];
 					let name = entry.0;
 					if is_data_text_identifier(name) {
-						string_push_str(result, name);
+						string_push_str(target, name);
 					} else {
-						string_push_str(result, escape_data_text_string(name));
+						append_escaped_data_text_string(target, name);
 					};
-					string_push_str(result, ": ");
-					string_push_str(result, data_value_to_text(entry.1, child_depth));
+					string_push_str(target, ": ");
+					append_data_value_text(target, entry.1, child_depth);
 				};
-				string_push_str(result, " ");
+				string_push_str(target, " ");
 			};
-			string_push_str(result, "}");
-			result
+			string_push_str(target, "}");
 		},
-		DataValue::Set(a) => data_text_join_keyword_sequence("set", a, child_depth),
+		DataValue::Set(a) => append_data_text_keyword_sequence(target, "set", a, child_depth),
 		DataValue::Map(m) => {
-			let mut result = "map {";
+			string_push_str(target, "map {");
 			if array_len(m) > 0 {
-				string_push_str(result, " ");
+				string_push_str(target, " ");
 				for i in 0..array_len(m) {
 					if i > 0 {
-						string_push_str(result, ", ");
+						string_push_str(target, ", ");
 					};
 					let entry = m[i];
-					string_push_str(result, data_value_to_text(entry.0, child_depth));
-					string_push_str(result, " => ");
-					string_push_str(result, data_value_to_text(entry.1, child_depth));
+					append_data_value_text(target, entry.0, child_depth);
+					string_push_str(target, " => ");
+					append_data_value_text(target, entry.1, child_depth);
 				};
-				string_push_str(result, " ");
+				string_push_str(target, " ");
 			};
-			string_push_str(result, "}");
-			result
+			string_push_str(target, "}");
 		},
 		DataValue::Variant { name, payload } => {
 			if not is_data_text_identifier(name) {
 				panic(f"Cannot render enum variant name `{name}` as data text");
 			};
-			let mut result = name;
+			string_push_str(target, name);
 			if payload != DataValue::Unit {
-				string_push_str(result, "(");
+				string_push_str(target, "(");
 				match (payload) {
 					DataValue::Tuple(values) => {
 						for i in 0..array_len(values) {
 							if i > 0 {
-								string_push_str(result, ", ");
+								string_push_str(target, ", ");
 							};
-							string_push_str(result, data_value_to_text(values[i], child_depth));
+							append_data_value_text(target, values[i], child_depth);
 						}
 					},
-					_ => string_push_str(result, data_value_to_text(payload, child_depth)),
+					_ => append_data_value_text(target, payload, child_depth),
 				};
-				string_push_str(result, ")");
+				string_push_str(target, ")");
 			};
-			result
 		},
 	}
 }
 
 /// Convert a DataValue to Ferlium data text.
 pub fn to_data_text(v: DataValue) -> string {
-	data_value_to_text(v, 0)
+	let mut result = "";
+	append_data_value_text(result, v, 0);
+	result
 }
 
 struct DataTextParser {
