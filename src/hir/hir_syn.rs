@@ -116,7 +116,10 @@ pub fn store_local_to<P: HirPhase>(value: NodeId<P>, id: LocalDeclId) -> NodeKin
 }
 
 pub fn get_dictionary(dictionary: TraitImplId) -> NodeKind {
-    K::GetDictionary(hir::GetDictionary { dictionary })
+    K::GetDictionary(hir::GetDictionary {
+        dictionary,
+        captures: Vec::new(),
+    })
 }
 
 pub fn load_local<P: HirPhase>(id: LocalDeclId) -> NodeKind<P> {
@@ -207,12 +210,14 @@ pub fn call_dictionary_function<P: HirPhase>(
     dictionary: NodeId<P>,
     entry_index: TraitDictionaryEntryIndex,
     arguments: Vec<CallArgument<P>>,
+    argument_names: Vec<Ustr>,
     ty: CallImplType,
 ) -> NodeKind<P> {
     K::CallDictionaryFunction(b(hir::CallDictionaryFunction {
         dictionary,
         entry_index,
         arguments,
+        argument_names,
         ty,
     }))
 }

@@ -17,7 +17,8 @@ use crate::mir::{
     terminator::Terminator,
 };
 use crate::module::{
-    ExtraParameterId, ResolvedLocalClone, ResolvedLocalDrop, ResolvedTakeLocalValueMode,
+    EvidenceBindingId, ExtraParameterId, ResolvedLocalClone, ResolvedLocalDrop,
+    ResolvedTakeLocalValueMode,
 };
 use crate::types::r#trait::{
     TraitAssociatedConstIndex, TraitDictionaryEntryIndex, TraitMethodIndex,
@@ -30,12 +31,13 @@ use crate::{
     format::FormatWith,
     hir::{
         self, CallArgument, Case, ENode, ENodeArena, Elaborated, GetDictionary, LoopId,
-        dictionary::DictionaryReq, value::LiteralValue,
+        dictionary::{DictionaryReq, EvidenceBinding, EvidenceBindingSource, StaticEvidence},
+        value::LiteralValue,
     },
     mir::{self, BlockId},
     module::{
         self, FunctionId, LocalDeclId, LocalFunctionId, Module, ModuleEnv, ModuleId,
-        TraitDictionaryId, TraitImplId, id::Id,
+        TraitDictionaryEntry, TraitDictionaryId, TraitImplId, id::Id,
     },
     std::{
         STD_MODULE_ID,
@@ -66,6 +68,50 @@ pub(crate) struct TextSourceMapEntry {
     pub(crate) from: usize,
     pub(crate) to: usize,
     pub(crate) span: Location,
+}
+
+fn lower_static_evidence(evidence: &StaticEvidence) -> mir::value::StaticEvidence {
+    match evidence {
+        StaticEvidence::Dictionary {
+            definition,
+            captures,
+        } => mir::value::StaticEvidence::Dictionary {
+            definition: *definition,
+            captures: captures
+                .iter()
+                .map(lower_static_evidence)
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        },
+        StaticEvidence::Subscript {
+            definition,
+            captures,
+        } => mir::value::StaticEvidence::Subscript {
+            definition: *definition,
+            captures: captures
+                .iter()
+                .map(lower_static_evidence)
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        },
+        StaticEvidence::VariantPayloadStorage(indirect) => {
+            mir::value::StaticEvidence::VariantPayloadStorage(*indirect)
+        }
+    }
+}
+
+fn static_evidence_value(evidence: mir::value::StaticEvidence) -> mir::Value {
+    match evidence {
+        mir::value::StaticEvidence::Dictionary {
+            definition,
+            ref captures,
+        } if captures.is_empty() => mir::Value::Dictionary(definition),
+        mir::value::StaticEvidence::Subscript {
+            definition,
+            ref captures,
+        } if captures.is_empty() => mir::Value::Subscript(definition),
+        evidence => mir::Value::Evidence(Box::new(evidence)),
+    }
 }
 
 /// Emits textual MIR and records the source span of each rendered operation and terminator.
@@ -270,6 +316,8 @@ impl<'a> Emitter<'a> {
                 span,
                 locals,
                 extra_parameters,
+                evidence_bindings: FxHashMap::default(),
+                static_evidence: FxHashMap::default(),
                 value_witnesses,
                 static_layouts: FxHashMap::default(),
                 loops: FxHashMap::default(),
@@ -283,6 +331,8 @@ impl<'a> Emitter<'a> {
             },
             hir_arena: &module.hir_arena,
         };
+
+        emitter.lower_function_evidence_bindings(&f.evidence_bindings);
 
         // Allocate frame storage for every `Owned` local and bind it to its `alloca` place.
         emitter.allocate_owned_locals();
@@ -350,6 +400,161 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    fn static_evidence_node(&self, node: &ENode) -> Option<mir::value::StaticEvidence> {
+        use hir::NodeKind as K;
+        match &node.kind {
+            K::GetDictionary(dictionary) => Some(mir::value::StaticEvidence::Dictionary {
+                definition: self.dictionary_id(dictionary.dictionary),
+                captures: dictionary
+                    .captures
+                    .iter()
+                    .map(|capture| self.static_evidence_node(&self.hir_arena[*capture]))
+                    .collect::<Option<Vec<_>>>()?
+                    .into_boxed_slice(),
+            }),
+            K::LoadDictionary(binding) => self
+                .context
+                .static_evidence
+                .get(&binding.extra_parameter)
+                .cloned(),
+            K::LoadSubscriptEvidence(binding) => self
+                .context
+                .static_evidence
+                .get(&binding.extra_parameter)
+                .cloned(),
+            K::LoadVariantPayloadStorageEvidence(binding) => self
+                .context
+                .static_evidence
+                .get(&binding.extra_parameter)
+                .cloned(),
+            K::GetSubscript(subscript) => Some(mir::value::StaticEvidence::bare_subscript(
+                subscript.subscript,
+            )),
+            K::BuildSubscriptValue(subscript) => {
+                let base = self.static_evidence_node(&self.hir_arena[subscript.subscript])?;
+                let mir::value::StaticEvidence::Subscript { definition, .. } = base else {
+                    return None;
+                };
+                Some(mir::value::StaticEvidence::Subscript {
+                    definition,
+                    captures: subscript
+                        .evidence_captures
+                        .iter()
+                        .map(|capture| self.static_evidence_node(&self.hir_arena[*capture]))
+                        .collect::<Option<Vec<_>>>()?
+                        .into_boxed_slice(),
+                })
+            }
+            K::Immediate(value) => value
+                .as_primitive_ty::<bool>()
+                .map(|indirect| mir::value::StaticEvidence::VariantPayloadStorage(*indirect)),
+            _ => None,
+        }
+    }
+
+    fn static_dictionary_entry(
+        &self,
+        evidence: &mir::value::StaticEvidence,
+        entry_index: TraitDictionaryEntryIndex,
+    ) -> Option<(FunctionId, Vec<mir::value::StaticEvidence>)> {
+        let mir::value::StaticEvidence::Dictionary {
+            definition,
+            captures,
+        } = evidence
+        else {
+            return None;
+        };
+        let module = self.env.module_by_id(definition.module_id)?;
+        let dictionary = &module.get_impl_data(definition.impl_id)?.dictionary_value;
+        let TraitDictionaryEntry::Function(function) = dictionary.entry(entry_index);
+        let hidden_evidence =
+            dictionary.project_entry_captures(entry_index, captures, || evidence.clone())?;
+        Some((
+            FunctionId::new(definition.module_id, function),
+            hidden_evidence,
+        ))
+    }
+
+    /// Materialize immutable function evidence once in the entry block.
+    fn lower_function_evidence_bindings(&mut self, bindings: &[EvidenceBinding]) {
+        for (index, binding) in bindings.iter().enumerate() {
+            let id = EvidenceBindingId::from_index(index);
+            let mut known_static = None;
+            let value = match &binding.source {
+                EvidenceBindingSource::Parameter(parameter) => {
+                    self.context.extra_parameters[parameter].clone()
+                }
+                EvidenceBindingSource::Static(evidence) => {
+                    let evidence = lower_static_evidence(evidence);
+                    known_static = Some(evidence.clone());
+                    static_evidence_value(evidence)
+                }
+                EvidenceBindingSource::ConstructedDictionary {
+                    definition,
+                    captures,
+                } => {
+                    let static_captures = captures
+                        .iter()
+                        .map(|capture| self.context.static_evidence.get(capture).cloned())
+                        .collect::<Option<Vec<_>>>();
+                    if let Some(captures) = static_captures {
+                        let evidence = mir::value::StaticEvidence::Dictionary {
+                            definition: *definition,
+                            captures: captures.into_boxed_slice(),
+                        };
+                        known_static = Some(evidence.clone());
+                        mir::Value::Evidence(Box::new(evidence))
+                    } else {
+                        let captures = captures
+                            .iter()
+                            .map(|capture| self.context.evidence_bindings[capture].clone())
+                            .collect();
+                        self.insert(Operation::build_dictionary(
+                            self.context.span,
+                            *definition,
+                            captures,
+                            binding.requirement.to_dict_type_in_env(&self.env),
+                        ))
+                        .expect("build_dictionary must produce evidence")
+                    }
+                }
+                EvidenceBindingSource::ConstructedSubscript {
+                    definition,
+                    captures,
+                } => {
+                    let static_captures = captures
+                        .iter()
+                        .map(|capture| self.context.static_evidence.get(capture).cloned())
+                        .collect::<Option<Vec<_>>>();
+                    if let Some(captures) = static_captures {
+                        let evidence = mir::value::StaticEvidence::Subscript {
+                            definition: *definition,
+                            captures: captures.into_boxed_slice(),
+                        };
+                        known_static = Some(evidence.clone());
+                        mir::Value::Evidence(Box::new(evidence))
+                    } else {
+                        let captures = captures
+                            .iter()
+                            .map(|capture| self.context.evidence_bindings[capture].clone())
+                            .collect();
+                        self.insert(Operation::build_subscript(
+                            self.context.span,
+                            mir::Value::Subscript(*definition),
+                            captures,
+                            binding.requirement.to_dict_type_in_env(&self.env),
+                        ))
+                        .expect("build_subscript must produce evidence")
+                    }
+                }
+            };
+            self.context.evidence_bindings.insert(id, value);
+            if let Some(evidence) = known_static {
+                self.context.static_evidence.insert(id, evidence);
+            }
+        }
+    }
+
     /// Lowers an indirect `Value::clone(source, target)` call dispatched through the dictionary
     /// extra parameter `dictionary`.
     ///
@@ -360,22 +565,29 @@ impl<'a> Emitter<'a> {
     fn lower_value_clone_via_dictionary(
         &mut self,
         span: Location,
-        dictionary: ExtraParameterId,
+        dictionary: EvidenceBindingId,
         cloned_ty: Type,
         source: mir::Value,
         target: mir::Value,
     ) {
-        // The dictionary is a forwarded `@extra` parameter — a symbolic dictionary operand.
-        let dictionary = self.context.extra_parameters[&dictionary].clone();
         let (entry_index, method_ty) = self.value_method(VALUE_CLONE_METHOD_INDEX, cloned_ty);
         let method_place = self
-            .insert(Operation::dict_entry(
-                span,
-                dictionary,
-                entry_index,
-                method_ty,
-            ))
-            .unwrap();
+            .context
+            .static_evidence
+            .get(&dictionary)
+            .and_then(|evidence| self.static_dictionary_entry(evidence, entry_index))
+            .and_then(|(function, hidden)| hidden.is_empty().then_some(function))
+            .map(mir::Value::Function)
+            .unwrap_or_else(|| {
+                let dictionary = self.context.evidence_bindings[&dictionary].clone();
+                self.insert(Operation::dict_entry(
+                    span,
+                    dictionary,
+                    entry_index,
+                    method_ty,
+                ))
+                .unwrap()
+            });
         // The callee is the place of the `Value::clone` method entry; the clone reads the function
         // value by reference (never loaded into a register — the same callee contract as `call`).
         self.insert(Operation::clone_value(
@@ -509,19 +721,24 @@ impl<'a> Emitter<'a> {
         let callee = match spec {
             DropSpec::Static(fref) => mir::Value::Function(fref),
             DropSpec::Dictionary(dictionary) => {
-                // The dictionary is a forwarded `@extra` parameter — a symbolic dictionary operand.
-                let dictionary = self.context.extra_parameters[&dictionary].clone();
                 let (entry_index, method_ty) =
                     self.value_method(VALUE_DROP_METHOD_INDEX, dropped_ty);
-                // The callee is the place of the `Value::drop` method entry; the `drop` reads the
-                // function value by reference (never loaded — same callee contract as `call`).
-                self.insert(Operation::dict_entry(
-                    span,
-                    dictionary,
-                    entry_index,
-                    method_ty,
-                ))
-                .unwrap()
+                self.context
+                    .static_evidence
+                    .get(&dictionary)
+                    .and_then(|evidence| self.static_dictionary_entry(evidence, entry_index))
+                    .and_then(|(function, hidden)| hidden.is_empty().then_some(function))
+                    .map(mir::Value::Function)
+                    .unwrap_or_else(|| {
+                        let dictionary = self.context.evidence_bindings[&dictionary].clone();
+                        self.insert(Operation::dict_entry(
+                            span,
+                            dictionary,
+                            entry_index,
+                            method_ty,
+                        ))
+                        .unwrap()
+                    })
             }
         };
         self.insert(Operation::drop(span, place, callee, dropped_ty));
@@ -1370,7 +1587,7 @@ impl<'a> Emitter<'a> {
 
             K::LoadDictionary(n) => {
                 // A dictionary parameter is already a place.
-                self.context.extra_parameters[&n.extra_parameter].clone()
+                self.context.evidence_bindings[&n.extra_parameter].clone()
             }
 
             K::CloneValue(n)
@@ -1728,8 +1945,38 @@ impl<'a> Emitter<'a> {
     /// impl that satisfies it. The dictionary is kept symbolic (not materialized into a witness-table
     /// tuple); the MIR interpreter dispatches through the interned id, and a future
     /// tuple-lowering pass rebuilds the table from the impl arena.
-    fn lower_dictionary(&mut self, n: &GetDictionary) -> mir::Value {
-        mir::Value::Dictionary(self.dictionary_id(n.dictionary))
+    fn lower_dictionary(&mut self, span: Location, n: &GetDictionary<Elaborated>) -> mir::Value {
+        let definition = self.dictionary_id(n.dictionary);
+        if n.captures.is_empty() {
+            return mir::Value::Dictionary(definition);
+        }
+        if let Some(captures) = n
+            .captures
+            .iter()
+            .map(|capture| self.static_evidence_node(&self.hir_arena[*capture]))
+            .collect::<Option<Vec<_>>>()
+        {
+            return mir::Value::Evidence(Box::new(mir::value::StaticEvidence::Dictionary {
+                definition,
+                captures: captures.into_boxed_slice(),
+            }));
+        }
+        let captures = n
+            .captures
+            .iter()
+            .map(|capture| {
+                let node = self.hir_arena[*capture].clone();
+                self.lower_extra_argument(&node)
+            })
+            .collect();
+        let ty = self
+            .env
+            .module_by_id(n.dictionary.module)
+            .and_then(|module| module.get_impl_data(n.dictionary.impl_id))
+            .expect("dictionary definition must be available")
+            .dictionary_ty;
+        self.insert(Operation::build_dictionary(span, definition, captures, ty))
+            .unwrap()
     }
 
     /// Lowers a HIR dictionary node to a symbolic MIR dictionary operand.
@@ -1739,11 +1986,11 @@ impl<'a> Emitter<'a> {
     /// materialized into a witness-table tuple. (Dictionary entries are only methods and associated
     /// consts — `TraitDictionaryEntry` has no nested-dictionary variant — so a dictionary operand is
     /// always one of these two node kinds.)
-    fn lower_dictionary_operand(&self, node: &ENode) -> mir::Value {
+    fn lower_dictionary_operand(&mut self, node: &ENode) -> mir::Value {
         use hir::NodeKind as K;
         match &node.kind {
-            K::GetDictionary(d) => mir::Value::Dictionary(self.dictionary_id(d.dictionary)),
-            K::LoadDictionary(n) => self.context.extra_parameters[&n.extra_parameter].clone(),
+            K::GetDictionary(d) => self.lower_dictionary(node.span, d),
+            K::LoadDictionary(n) => self.context.evidence_bindings[&n.extra_parameter].clone(),
             other => panic!("expected a trait dictionary node, got {:?}", other),
         }
     }
@@ -1760,7 +2007,7 @@ impl<'a> Emitter<'a> {
         match &node.kind {
             K::GetSubscript(n) => mir::Value::Subscript(n.subscript),
             K::LoadSubscriptEvidence(n) => {
-                self.context.extra_parameters[&n.extra_parameter].clone()
+                self.context.evidence_bindings[&n.extra_parameter].clone()
             }
             _ => self.lower_as_place(node),
         }
@@ -1796,7 +2043,7 @@ impl<'a> Emitter<'a> {
             K::GetDictionary(_) | K::LoadDictionary(_) => self.lower_dictionary_operand(node),
             K::GetSubscript(_) | K::LoadSubscriptEvidence(_) => self.lower_subscript_operand(node),
             K::LoadVariantPayloadStorageEvidence(n) => {
-                self.context.extra_parameters[&n.extra_parameter].clone()
+                self.context.evidence_bindings[&n.extra_parameter].clone()
             }
             _ => self.lower_as_place(node),
         }
@@ -1878,6 +2125,21 @@ impl<'a> Emitter<'a> {
         node: &ENode,
         n: &hir::CallDictionaryFunction<Elaborated>,
     ) -> (mir::Value, Vec<mir::Value>) {
+        if let Some(evidence) = self.static_evidence_node(&self.hir_arena[n.dictionary])
+            && let Some((function, hidden_evidence)) =
+                self.static_dictionary_entry(&evidence, n.entry_index)
+        {
+            let arguments = hidden_evidence
+                .into_iter()
+                .map(|evidence| mir::Value::Evidence(Box::new(evidence)))
+                .chain(
+                    n.arguments
+                        .iter()
+                        .map(|argument| self.lower_argument(argument)),
+                )
+                .collect();
+            return (mir::Value::Function(function), arguments);
+        }
         let dictionary = self.lower_dictionary_operand(&self.hir_arena[n.dictionary]);
         let function_ty = Type::function_type(n.ty.fn_ty.clone());
         // The callee is the place of the function entry; the call reads the function value by
@@ -2309,7 +2571,7 @@ impl<'a> Emitter<'a> {
             }
 
             K::GetDictionary(d) => {
-                let dict = self.lower_dictionary(d);
+                let dict = self.lower_dictionary(node.span, d);
                 self.store_into_if_needed(node.span, dict, destination);
             }
 
@@ -2323,6 +2585,14 @@ impl<'a> Emitter<'a> {
             K::BuildSubscriptValue(n) => {
                 // Bundle the base subscript with captured hidden evidence into a first-class
                 // subscript value (mirroring `eval_build_subscript_value`).
+                if let Some(evidence) = self.static_evidence_node(node) {
+                    self.store_into_if_needed(
+                        node.span,
+                        mir::Value::Evidence(Box::new(evidence)),
+                        destination,
+                    );
+                    return;
+                }
                 let base = self.lower_subscript_operand(&self.hir_arena[n.subscript]);
                 let evidence: Vec<mir::Value> = n
                     .evidence_captures
@@ -2590,7 +2860,7 @@ impl<'a> Emitter<'a> {
                     hir::VariantPayloadStorageSource::Static(storage) => (Some(storage), None),
                     hir::VariantPayloadStorageSource::Evidence(extra_parameter) => (
                         None,
-                        Some(self.context.extra_parameters[&extra_parameter].clone()),
+                        Some(self.context.evidence_bindings[&extra_parameter].clone()),
                     ),
                 };
                 let layout_witness = self.dynamic_layout_witness(payload.ty);
@@ -2627,7 +2897,7 @@ impl<'a> Emitter<'a> {
                 // A required dictionary/evidence resolves to its incoming extra parameter, which is a
                 // place. Copy it into the destination if one is requested.
                 if destination.is_some() {
-                    let p = self.context.extra_parameters[&n.extra_parameter].clone();
+                    let p = self.context.evidence_bindings[&n.extra_parameter].clone();
                     self.memcpy_into_if_needed(node.span, p, destination);
                 }
             }
@@ -2637,14 +2907,14 @@ impl<'a> Emitter<'a> {
                 // When it is used as a first-class value rather than only as call metadata, copy
                 // that value into the requested destination.
                 if destination.is_some() {
-                    let p = self.context.extra_parameters[&n.extra_parameter].clone();
+                    let p = self.context.evidence_bindings[&n.extra_parameter].clone();
                     self.memcpy_into_if_needed(node.span, p, destination);
                 }
             }
 
             K::LoadVariantPayloadStorageEvidence(n) => {
                 if destination.is_some() {
-                    let p = self.context.extra_parameters[&n.extra_parameter].clone();
+                    let p = self.context.evidence_bindings[&n.extra_parameter].clone();
                     self.memcpy_into_if_needed(node.span, p, destination);
                 }
             }
@@ -2874,6 +3144,12 @@ struct InsertionContext {
     /// The MIR values bound to extra parameters of the function.
     extra_parameters: FxHashMap<ExtraParameterId, mir::Value>,
 
+    /// Values produced by the function's immutable evidence-binding graph.
+    evidence_bindings: FxHashMap<EvidenceBindingId, mir::Value>,
+
+    /// Recursively static form of evidence bindings, when available.
+    static_evidence: FxHashMap<EvidenceBindingId, mir::value::StaticEvidence>,
+
     /// The `Value` dictionary parameters witnessing the run-time layout of generic types, used to
     /// allocate storage whose size is known only at run time.
     value_witnesses: Vec<(Type, mir::Value)>,
@@ -3048,7 +3324,7 @@ enum DropSpec {
     /// A concrete `Value::drop` implementation.
     Static(FunctionId),
     /// `Value::drop` loaded at run time from this hidden dictionary extra parameter.
-    Dictionary(ExtraParameterId),
+    Dictionary(EvidenceBindingId),
 }
 
 /// Where an operation should be inserted in a basic block.

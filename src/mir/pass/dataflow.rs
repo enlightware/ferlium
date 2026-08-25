@@ -191,6 +191,13 @@ pub(crate) enum Const {
     Function(FunctionId),
     /// A known trait dictionary.
     Dictionary(TraitDictionaryId),
+    /// Recursively static hidden evidence.
+    Evidence(mir::value::StaticEvidence),
+    /// A dictionary entry function together with its closed hidden evidence.
+    ClosedFunction {
+        function: FunctionId,
+        hidden_evidence: Vec<mir::value::StaticEvidence>,
+    },
     /// A symbolic discriminant, kept independent of compilation-session numeric tag ids.
     VariantTag(Ustr),
     /// A fresh array construction whose statically `TrivialCopy` elements are all known.
@@ -639,12 +646,19 @@ fn transfer(
             // The entry of a *constant* dictionary is a statically known function — this is what
             // makes devirtualization fall out of inlining, once inlining has bound a callee's
             // dictionary parameter to a constant.
-            let fact = match &operation.operands[0] {
-                mir::Value::Dictionary(id) => dictionary_entry(*id, *entry_index, env)
-                    .map(|function| Fact::Known(Const::Function(function)))
-                    .unwrap_or_default(),
-                _ => Fact::Unknown,
-            };
+            let fact = static_evidence_operand(&operation.operands[0])
+                .and_then(|evidence| dictionary_entry(&evidence, *entry_index, env))
+                .map(|(function, hidden_evidence)| {
+                    if hidden_evidence.is_empty() {
+                        Fact::Known(Const::Function(function))
+                    } else {
+                        Fact::Known(Const::ClosedFunction {
+                            function,
+                            hidden_evidence,
+                        })
+                    }
+                })
+                .unwrap_or_default();
             let place = place_of(&mir::Value::Register(result))
                 .expect("the structural scan interns every dictionary entry");
             state.forget_within(place, register_places);
@@ -691,19 +705,42 @@ fn transfer(
 /// Resolves one entry of a dictionary, from module metadata alone — exactly as the interpreter
 /// does when it executes a `dict_entry`.
 fn dictionary_entry(
-    dictionary: TraitDictionaryId,
+    dictionary: &mir::value::StaticEvidence,
     entry: TraitDictionaryEntryIndex,
     env: ModuleEnv<'_>,
-) -> Option<FunctionId> {
-    let module = env.module_by_id(dictionary.module_id)?;
-    let TraitDictionaryEntry::Function(function) = module
-        .get_impl_data(dictionary.impl_id)?
-        .dictionary_value
-        .entry(entry);
-    Some(FunctionId {
-        module: dictionary.module_id,
-        function,
-    })
+) -> Option<(FunctionId, Vec<mir::value::StaticEvidence>)> {
+    let mir::value::StaticEvidence::Dictionary {
+        definition,
+        captures,
+    } = dictionary
+    else {
+        return None;
+    };
+    let module = env.module_by_id(definition.module_id)?;
+    let dictionary_definition = &module.get_impl_data(definition.impl_id)?.dictionary_value;
+    let TraitDictionaryEntry::Function(function) = dictionary_definition.entry(entry);
+    let hidden_evidence =
+        dictionary_definition.project_entry_captures(entry, captures, || dictionary.clone())?;
+    Some((
+        FunctionId {
+            module: definition.module_id,
+            function,
+        },
+        hidden_evidence,
+    ))
+}
+
+fn static_evidence_operand(value: &mir::Value) -> Option<mir::value::StaticEvidence> {
+    match value {
+        mir::Value::Dictionary(definition) => {
+            Some(mir::value::StaticEvidence::bare_dictionary(*definition))
+        }
+        mir::Value::Subscript(definition) => {
+            Some(mir::value::StaticEvidence::bare_subscript(*definition))
+        }
+        mir::Value::Evidence(evidence) => Some((**evidence).clone()),
+        _ => None,
+    }
 }
 
 /// The fact for an operand used as a materialized value.
@@ -717,6 +754,7 @@ fn value_operand_fact(operand: &mir::Value, func: &Function, state: &State) -> F
         }
         mir::Value::Function(id) => Fact::Known(Const::Function(*id)),
         mir::Value::Dictionary(id) => Fact::Known(Const::Dictionary(*id)),
+        mir::Value::Evidence(evidence) => Fact::Known(Const::Evidence((**evidence).clone())),
         // Compile-time pattern data belongs to `comp_eq`, and a subscript is evidence rather than
         // data; a parameter naming a materialized value cannot occur, parameters being places.
         mir::Value::Subscript(_) | mir::Value::Pattern(_) | mir::Value::Parameter(_) => {

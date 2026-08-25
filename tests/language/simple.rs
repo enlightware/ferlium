@@ -3295,7 +3295,7 @@ fn type_ascription() {
     assert!(
         arena[root.kind.as_block().unwrap().body[0]]
             .kind
-            .is_static_apply()
+            .is_call_dictionary_function()
     );
     let module_and_expr = session.compile("(1: int)");
     let module = session

@@ -22,7 +22,11 @@ use crate::{
             will_return::{WillReturn, WillReturnSummaries},
         },
     },
-    module::{FunctionId, LocalFunctionId, Module, ModuleEnv, ModuleId, id::Id},
+    module::{
+        FunctionId, LocalFunctionId, LocalImplId, Module, ModuleEnv, ModuleId,
+        TraitDictionaryEntry, TraitKey, id::Id,
+    },
+    types::r#trait::TraitDictionaryEntryIndex,
 };
 
 use ustr::Ustr;
@@ -166,6 +170,47 @@ pub(crate) struct MirArtifacts {
 impl MirArtifacts {
     pub(crate) fn build(module: &Module, modules: &Modules) -> Self {
         let env = ModuleEnv::new(module, modules);
+        for index in 0..module.impl_count() {
+            let impl_id = LocalImplId::from_index(index);
+            // Blanket entries are templates: trait selection first materializes a closed concrete
+            // (or anonymous) dictionary with instantiated capture mappings. They are never runtime
+            // dictionary definitions themselves.
+            if matches!(
+                module.get_impl_trait_key_by_id(impl_id),
+                Some(TraitKey::Blanket(_))
+            ) {
+                continue;
+            }
+            let implementation = module
+                .get_impl_data(impl_id)
+                .expect("implementation table must be dense");
+            for (entry, mapping) in implementation
+                .dictionary_value
+                .entry_capture_mappings()
+                .iter()
+                .enumerate()
+            {
+                let TraitDictionaryEntry::Function(function) = implementation
+                    .dictionary_value
+                    .entry(TraitDictionaryEntryIndex::from_index(entry));
+                let expected = module
+                    .get_function_by_id(function)
+                    .expect("dictionary entry function must exist")
+                    .definition
+                    .ty_scheme
+                    .extra_parameters(env)
+                    .len();
+                assert_eq!(
+                    mapping.len(),
+                    expected,
+                    "dictionary entry mapping for impl {index}, entry {entry}, function {} does not \
+                     satisfy its hidden-parameter schema",
+                    module
+                        .get_function_name_by_id(function)
+                        .unwrap_or_else(|| Ustr::from("<anonymous>")),
+                );
+            }
+        }
         let functions: Vec<Option<mir::Function>> = (0..module.function_count())
             .map(LocalFunctionId::from_index)
             .map(|id| {

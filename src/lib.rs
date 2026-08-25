@@ -63,7 +63,7 @@ macro_rules! call_fn {
         let __session = $session;
         let __module_id = $module_id;
         let ret_ty = $ret_ty;
-        __session.run_fn(__module_id, $name, move |func, current, modules| {
+        __session.run_fn_resolved(__module_id, $name, move |function_id, func, current, modules| {
             let expected_args = vec![
                 $( $crate::types::r#type::FnArgType::new_by_val($ty) ),*
             ];
@@ -88,9 +88,12 @@ macro_rules! call_fn {
             } else {
                 let mut ctx = $crate::eval::EvalCtx::new(__module_id, __session);
                 let args_vec = vec![ $( $crate::eval::ValOrMut::Val($val) ),* ];
-                let ret = func
-                    .code
-                    .call(args_vec, &mut ctx, &func.locals)
+                let ret = ctx
+                    .call_function_id(
+                        function_id,
+                        args_vec,
+                        $crate::Location::new_synthesized(),
+                    )
                     .map_err(|err| format!("Execution error: {}", err.kind()))?
                     .into_value();
                 Ok(ret)

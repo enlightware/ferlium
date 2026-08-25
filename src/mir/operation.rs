@@ -454,6 +454,21 @@ impl Operation {
         }
     }
 
+    /// Closes a dictionary definition over its ordered hidden-evidence captures.
+    pub fn build_dictionary(
+        span: Location,
+        definition: crate::module::TraitDictionaryId,
+        captures: Vec<mir::Value>,
+        ty: Type,
+    ) -> Self {
+        Operation {
+            result_id: None,
+            span,
+            operands: captures.into_boxed_slice(),
+            kind: OperationKind::BuildDictionary { definition, ty },
+        }
+    }
+
     /// Creates a `subscript_member` operation: the member-resolving analog of
     /// [`Operation::dict_entry`] for a first-class subscript.
     ///
@@ -707,6 +722,7 @@ impl Operation {
     /// `callee` follows the same contract as the [`call`](Self::call) callee: it is either a constant
     /// [`mir::Value::Function`] or the **place** of a function value (e.g. the `Value::drop` method
     /// slot `project`ed out of a dictionary), read by reference and never loaded into a register.
+    /// Optimizations may append hidden evidence captured by a resolved dictionary entry after it.
     pub fn drop(span: Location, target: mir::Value, callee: mir::Value, ty: Type) -> Self {
         Operation {
             result_id: None,
@@ -720,7 +736,8 @@ impl Operation {
     ///
     /// Copies the pointee of `source` (a place) into `destination` (an uninitialized place) by
     /// invoking the `Value::clone` implementation named by `callee`, which follows the same contract
-    /// as [`drop`](Self::drop)'s. The destination takes on the drop obligation the copy creates.
+    /// as [`drop`](Self::drop)'s. Optimizations may append hidden evidence captured by a resolved
+    /// dictionary entry after it. The destination takes on the drop obligation the copy creates.
     ///
     /// Source-infallible: `Value::clone` is declared with an empty effect row, and a fallible impl
     /// is rejected at compile time, so a clone never needs an `invoke`.
@@ -927,6 +944,11 @@ pub enum OperationKind {
         entry_index: TraitDictionaryEntryIndex,
         ty: Type,
     },
+    /// Close a trait dictionary definition over hidden evidence operands.
+    BuildDictionary {
+        definition: crate::module::TraitDictionaryId,
+        ty: Type,
+    },
     /// Resolve a member function place from a symbolic subscript.
     SubscriptMember { mut_member: bool, ty: Type },
     /// Bundle a symbolic subscript with its captured evidence.
@@ -1002,6 +1024,7 @@ impl OperationKind {
             | Load
             | Subfield { .. }
             | DictEntry { .. }
+            | BuildDictionary { .. }
             | SubscriptMember { .. }
             | BuildSubscript { .. }
             | Variant { .. }
@@ -1041,6 +1064,7 @@ impl OperationKind {
             | Load
             | Subfield { .. }
             | DictEntry { .. }
+            | BuildDictionary { .. }
             | SubscriptMember { .. }
             | BuildSubscript { .. }
             | Variant { .. }
@@ -1124,9 +1148,10 @@ impl OperationKind {
             }
             CompareEqual => OperationResult::Lowered(cached_primitive_ty!(bool)),
             Load => OperationResult::pointee_of(OperationResult::Same(whole.operands[0].clone())),
-            BuildSubscript { ty } | BuildClosure { ty, .. } | CloneClosureEnv { ty } => {
-                OperationResult::Lowered(*ty)
-            }
+            BuildDictionary { ty, .. }
+            | BuildSubscript { ty }
+            | BuildClosure { ty, .. }
+            | CloneClosureEnv { ty } => OperationResult::Lowered(*ty),
             Variant { metadata, .. } => OperationResult::Lowered(metadata.ty),
             ExtractTag => OperationResult::VariantTag,
             StackSave => OperationResult::StackMarker,
@@ -1192,6 +1217,10 @@ impl OperationKind {
                 1,
                 "dict_entry takes exactly the symbolic dictionary operand"
             ),
+            BuildDictionary { .. } => assert!(
+                !whole.operands.is_empty(),
+                "build_dictionary is only needed for a definition with captures"
+            ),
             SubscriptMember { .. } => assert_eq!(
                 whole.operands.len(),
                 1,
@@ -1249,15 +1278,13 @@ impl OperationKind {
             CheckCallDepth | CheckFuel => {
                 assert!(whole.operands.is_empty(), "runtime checks take no operands")
             }
-            Drop { .. } => assert_eq!(
-                whole.operands.len(),
-                2,
-                "drop takes the target place and the Value::drop callee"
+            Drop { .. } => assert!(
+                whole.operands.len() >= 2,
+                "drop takes the target place, the Value::drop callee, and optional hidden evidence"
             ),
-            Clone { .. } => assert_eq!(
-                whole.operands.len(),
-                3,
-                "clone takes the source and destination places and the Value::clone callee"
+            Clone { .. } => assert!(
+                whole.operands.len() >= 3,
+                "clone takes the source and destination places, the Value::clone callee, and optional hidden evidence"
             ),
             BuildClosure {
                 num_hidden_dicts,
@@ -1352,6 +1379,17 @@ impl OperationKind {
                 entry_index,
                 whole.operands[0].format_with(env)
             ),
+            BuildDictionary { definition, .. } => {
+                write!(
+                    f,
+                    "build_dictionary dict(m{}:i{})",
+                    definition.module_id, definition.impl_id
+                )?;
+                for capture in &whole.operands {
+                    write!(f, " {}", capture.format_with(env))?;
+                }
+                Ok(())
+            }
             SubscriptMember { mut_member, .. } => write!(
                 f,
                 "subscript_member {} from {}",
@@ -1436,21 +1474,27 @@ impl OperationKind {
             // The type is printed bare, as `alloca` prints its own: it is what decides whether the
             // semantic form is still needed after substitution, and for a dictionary-dispatched
             // callee it is not recoverable from the rest of the line.
-            Drop { ty } => write!(
-                f,
-                "drop {} {} via {}",
-                ty.format_with(env),
-                whole.operands[0].format_with(env),
-                whole.operands[1].format_with(env)
-            ),
-            Clone { ty } => write!(
-                f,
-                "clone {} {} to {} via {}",
-                ty.format_with(env),
-                whole.operands[0].format_with(env),
-                whole.operands[1].format_with(env),
-                whole.operands[2].format_with(env)
-            ),
+            Drop { ty } => {
+                write!(
+                    f,
+                    "drop {} {} via {}",
+                    ty.format_with(env),
+                    whole.operands[0].format_with(env),
+                    whole.operands[1].format_with(env)
+                )?;
+                format_hidden_evidence(f, &whole.operands[2..], env)
+            }
+            Clone { ty } => {
+                write!(
+                    f,
+                    "clone {} {} to {} via {}",
+                    ty.format_with(env),
+                    whole.operands[0].format_with(env),
+                    whole.operands[1].format_with(env),
+                    whole.operands[2].format_with(env)
+                )?;
+                format_hidden_evidence(f, &whole.operands[3..], env)
+            }
             BuildClosure { function, .. } => {
                 write!(
                     f,
@@ -1473,6 +1517,24 @@ impl OperationKind {
             DropClosureEnv => write!(f, "drop_closure_env {}", whole.operands[0].format_with(env)),
         }
     }
+}
+
+fn format_hidden_evidence(
+    f: &mut fmt::Formatter<'_>,
+    evidence: &[mir::Value],
+    env: &ModuleEnv<'_>,
+) -> fmt::Result {
+    if evidence.is_empty() {
+        return Ok(());
+    }
+    write!(f, " with (")?;
+    for (index, operand) in evidence.iter().enumerate() {
+        if index != 0 {
+            write!(f, ", ")?;
+        }
+        write!(f, "{}", operand.format_with(env))?;
+    }
+    write!(f, ")")
 }
 
 fn fmt_callee_and_args(

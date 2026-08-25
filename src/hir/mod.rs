@@ -33,7 +33,7 @@ use crate::{
     format::FormatWith,
     hir::function::{ArgConvention, CallArgConventionMetadata},
     module::{
-        ExtraParameterId, FunctionId, LocalCloneMetadata, LocalDecl, LocalDeclId,
+        EvidenceBindingId, FunctionId, LocalCloneMetadata, LocalDecl, LocalDeclId,
         PendingLocalClone, PendingLocalDrop, PendingTakeLocalValueMode, ProjectionIndex,
         ResolvedLocalClone, ResolvedLocalDrop, ResolvedTakeLocalValueMode, SubscriptId,
         SubscriptMemberKind, TakeLocalValueModeMetadata, TraitId, TraitImplId, id::Id,
@@ -426,7 +426,7 @@ impl Variant<Unelaborated> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VariantPayloadStorageSource {
     Static(VariantPayloadStorage),
-    Evidence(ExtraParameterId),
+    Evidence(EvidenceBindingId),
 }
 
 // Value access payloads.
@@ -724,27 +724,28 @@ pub struct GetTraitDictionary {
 }
 
 /// Get a trait dictionary selected by static trait resolution.
-#[derive(Debug, Clone, Copy)]
-pub struct GetDictionary {
+#[derive(Debug, Clone)]
+pub struct GetDictionary<P: HirPhase = Unelaborated> {
     pub dictionary: TraitImplId,
+    pub captures: Vec<NodeId<P>>,
 }
 
 /// Load a trait dictionary from a function hidden argument.
 #[derive(Debug, Clone, Copy)]
 pub struct LoadDictionary {
-    pub extra_parameter: ExtraParameterId,
+    pub extra_parameter: EvidenceBindingId,
 }
 
 /// Load a first-class subscript capability from a function hidden argument.
 #[derive(Debug, Clone, Copy)]
 pub struct LoadSubscriptEvidence {
-    pub extra_parameter: ExtraParameterId,
+    pub extra_parameter: EvidenceBindingId,
 }
 
 /// Load a variant case's payload-storage mode from a function hidden argument.
 #[derive(Debug, Clone, Copy)]
 pub struct LoadVariantPayloadStorageEvidence {
-    pub extra_parameter: ExtraParameterId,
+    pub extra_parameter: EvidenceBindingId,
 }
 
 /// Look up a method function value from a trait dictionary.
@@ -760,6 +761,7 @@ pub struct CallDictionaryFunction<P: HirPhase = Unelaborated> {
     pub dictionary: NodeId<P>,
     pub entry_index: TraitDictionaryEntryIndex,
     pub arguments: Vec<CallArgument<P>>,
+    pub argument_names: Vec<Ustr>,
     pub ty: CallImplType,
 }
 
@@ -862,7 +864,7 @@ pub enum NodeKind<P: HirPhase = Unelaborated> {
     /// Load a trait dictionary before dictionary passing resolves it.
     GetTraitDictionary(P::GetTraitDictionary),
     /// Get a trait dictionary selected by static trait resolution.
-    GetDictionary(GetDictionary),
+    GetDictionary(GetDictionary<P>),
     /// Load a trait dictionary from a function hidden argument.
     LoadDictionary(LoadDictionary),
     /// Load a first-class subscript capability from a function hidden argument.
@@ -913,7 +915,6 @@ impl NodeKind {
             | GetTraitMethod(_)
             | GetTraitAssociatedConst(_)
             | GetTraitDictionary(_)
-            | GetDictionary(_)
             | LoadDictionary(_)
             | LoadSubscriptEvidence(_)
             | LoadVariantPayloadStorageEvidence(_)
@@ -922,6 +923,7 @@ impl NodeKind {
             | CheckCallDepth
             | CheckFuel
             | Continue(_) => smallvec![],
+            GetDictionary(dictionary) => dictionary.captures.iter().copied().collect(),
             BuildClosure(bc) => {
                 let mut v: SVec4<NodeId> = smallvec![bc.function];
                 v.extend_from_slice(&bc.dictionary_captures);
@@ -1467,7 +1469,7 @@ impl<P: HirPhase> Node<P> {
                     writeln!(f, "{indent_str}to ()")?;
                 } else {
                     writeln!(f, "{indent_str}to (")?;
-                    for arg in &call.arguments {
+                    for (index, arg) in call.arguments.iter().enumerate() {
                         format_call_argument(
                             arena,
                             f,
@@ -1476,7 +1478,7 @@ impl<P: HirPhase> Node<P> {
                             spacing,
                             indent,
                             &indent_str,
-                            None,
+                            call.argument_names.get(index).copied(),
                             arg,
                         )?;
                     }

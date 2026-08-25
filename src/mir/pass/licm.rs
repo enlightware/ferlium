@@ -503,6 +503,7 @@ fn record_writes(
         // as changed rather than teaching LICM another operation's ownership contract.
         OperationKind::Project { .. }
         | OperationKind::EndProject
+        | OperationKind::BuildDictionary { .. }
         | OperationKind::BuildSubscript { .. }
         | OperationKind::BuildClosure { .. } => operation.operands.iter().for_each(write),
         OperationKind::Alloca { .. }

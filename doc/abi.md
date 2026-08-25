@@ -367,6 +367,11 @@ projection obtains the same classification from the high bit of the stored tag; 
 second boolean argument. MIR payload construction and projection retain `Value<B>` as an explicit
 operand whenever `B` has a run-time-dependent layout.
 
+Final HIR names that transient choice through an `EvidenceBindingId`, not specifically an ABI
+parameter number. The binding may be a caller parameter, a static boolean, or part of a constructed
+evidence graph, so a generic implementation can close its layout decision together with nested
+trait and projection evidence before physical ABI lowering.
+
 A payloadless case writes only its tag and requires no payload layout witness.
 
 No `Value<V>` witness is needed merely to address a known case payload inside an existing `V`

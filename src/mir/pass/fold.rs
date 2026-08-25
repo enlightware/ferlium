@@ -140,6 +140,13 @@ struct Devirtualization {
     site: Site,
     operand: usize,
     callee: FunctionId,
+    hidden_evidence: Vec<mir::value::StaticEvidence>,
+}
+
+struct ResolvedCallee {
+    operand: usize,
+    callee: FunctionId,
+    hidden_evidence: Vec<mir::value::StaticEvidence>,
 }
 
 /// Where a dispatch sits in its block: an ordinary operation, or the `Invoke` terminator.
@@ -292,10 +299,9 @@ pub(crate) struct Folded {
     /// value: the next round's analysis learns nothing from it. Measured on std, granting rounds
     /// for those cost 0.14% of MIR optimization time and changed no optimized body.
     ///
-    /// **Devirtualization does not either.** Naming a callee directly is progress, but the callees
-    /// a dictionary entry resolves to are overwhelmingly natives, which cannot be inlined and only
-    /// fold with known arguments — so granting a round for one buys a cycle that almost never
-    /// finds anything. Measured, that was +19.2% of compile time for half a percent of run time.
+    /// **Devirtualization does.** Closed-dictionary lowering deliberately makes even concrete trait
+    /// dispatch uniform. Naming the selected entry exposes script callees, their hidden static
+    /// evidence, and known natives to the rest of the optimizer.
     pub warrants_another_round: bool,
 }
 
@@ -315,7 +321,7 @@ pub(crate) fn fold_function(
     if plan.is_empty() && devirtualizations.is_empty() {
         return None;
     }
-    let warrants_another_round = plan.warrants_another_round;
+    let warrants_another_round = plan.warrants_another_round || !devirtualizations.is_empty();
 
     let mut edit = FunctionEdit::new(func.clone());
     // Devirtualization first: it only rewrites a callee operand in place, while a fold below may
@@ -609,7 +615,6 @@ pub(crate) fn plan_folds(
 /// exhausted last round, behind a cheap syntactic pre-filter and before DCE removes the stranded
 /// entry.
 ///
-/// What it must not do is claim a *round*: see [`Folded::warrants_another_round`].
 fn plan_folds_and_devirtualizations(
     func: &Function,
     resources: FoldResources<'_, '_>,
@@ -635,25 +640,27 @@ fn plan_devirtualizations(func: &Function, env: ModuleEnv<'_>) -> Vec<Devirtuali
         let mut state = analysis.entry_state(block);
         let basic_block = func.block(block);
         for (index, operation) in basic_block.operations().iter().enumerate() {
-            if let Some((operand, callee)) = resolved_callee(operation, &state, &analysis) {
+            if let Some(resolved) = resolved_callee(operation, &state, &analysis) {
                 devirtualizations.push(Devirtualization {
                     site: Site::Operation {
                         block,
                         index: OperationIndex::from_index(index),
                     },
-                    operand,
-                    callee,
+                    operand: resolved.operand,
+                    callee: resolved.callee,
+                    hidden_evidence: resolved.hidden_evidence,
                 });
             }
             analysis.step(func, env, operation, &mut state);
         }
         if let TerminatorKind::Invoke { operation, .. } = &basic_block.terminator().kind
-            && let Some((operand, callee)) = resolved_callee(operation, &state, &analysis)
+            && let Some(resolved) = resolved_callee(operation, &state, &analysis)
         {
             devirtualizations.push(Devirtualization {
                 site: Site::Terminator { block },
-                operand,
-                callee,
+                operand: resolved.operand,
+                callee: resolved.callee,
+                hidden_evidence: resolved.hidden_evidence,
             });
         }
     }
@@ -690,10 +697,10 @@ fn is_indirect_callee(callee: &mir::Value) -> bool {
     !matches!(callee, mir::Value::Function(_))
 }
 
-// Naming a resolved callee directly. The operand shape is unchanged — the verifier accepts a
-// function or a function place in a callee position — so this touches nothing but that one operand.
-// The `dict_entry` that produced the place is usually left unread by the rewrite, and `dce.rs`
-// removes it.
+// Naming a resolved callee directly. A closed dictionary entry's captured evidence is inserted
+// immediately after the callee, which is the hidden-evidence prefix used by calls, clones, and
+// drops. The `dict_entry` that produced the place is usually left unread by the rewrite, and
+// `dce.rs` removes it.
 fn apply_devirtualizations(edit: &mut FunctionEdit, devirtualizations: Vec<Devirtualization>) {
     for devirtualized in devirtualizations {
         let callee = mir::Value::Function(devirtualized.callee);
@@ -706,6 +713,17 @@ fn apply_devirtualizations(edit: &mut FunctionEdit, devirtualizations: Vec<Devir
             },
         };
         operation.operands[devirtualized.operand] = callee;
+        if !devirtualized.hidden_evidence.is_empty() {
+            let mut operands = operation.operands.to_vec();
+            operands.splice(
+                devirtualized.operand + 1..devirtualized.operand + 1,
+                devirtualized
+                    .hidden_evidence
+                    .into_iter()
+                    .map(|evidence| mir::Value::Evidence(Box::new(evidence))),
+            );
+            operation.operands = operands.into_boxed_slice();
+        }
     }
 }
 
@@ -783,15 +801,16 @@ fn plan_folds_with(
                 );
             }
             if let Some(devirtualizations) = devirtualizations.as_mut()
-                && let Some((operand, callee)) = resolved_callee(operation, &state, analysis)
+                && let Some(resolved) = resolved_callee(operation, &state, analysis)
             {
                 devirtualizations.push(Devirtualization {
                     site: Site::Operation {
                         block,
                         index: OperationIndex::from_index(index),
                     },
-                    operand,
-                    callee,
+                    operand: resolved.operand,
+                    callee: resolved.callee,
+                    hidden_evidence: resolved.hidden_evidence,
                 });
             }
             if let OperationKind::BuildArray { element_ty } = &operation.kind {
@@ -844,12 +863,13 @@ fn plan_folds_with(
                     );
                 }
                 if let Some(devirtualizations) = devirtualizations.as_mut()
-                    && let Some((operand, callee)) = resolved_callee(operation, &state, analysis)
+                    && let Some(resolved) = resolved_callee(operation, &state, analysis)
                 {
                     devirtualizations.push(Devirtualization {
                         site: Site::Terminator { block },
-                        operand,
-                        callee,
+                        operand: resolved.operand,
+                        callee: resolved.callee,
+                        hidden_evidence: resolved.hidden_evidence,
                     });
                 }
             }
@@ -1074,19 +1094,16 @@ fn callee_operand_index(operation: &Operation) -> Option<usize> {
 /// and is a candidate for folding and inlining on a later round; the population is dispatches
 /// through a `dict_entry`, which specialization and inlining put in front of the analysis.
 ///
-/// **Restricted to a callee read from a [`Root::DictEntry`]**, and the restriction is load-bearing
-/// rather than cautious. Any other place may hold a *closure* — a function together with its
-/// captured environment — and a bare `Value::Function` operand names the function alone, silently
-/// dropping the captures. An earlier version without this restriction was caught by a test
-/// divergence, "expected native value, got function value". A dictionary entry holds a plain
-/// function by construction, which is what makes this rewrite information-preserving there.
+/// Closed dictionary entries may carry hidden evidence just like closures. Known-callee facts keep
+/// that evidence beside the function identity so devirtualization can expose the complete direct
+/// callable, rather than silently dropping its environment.
 fn resolved_callee(
     operation: &Operation,
     state: &State,
     analysis: &Analysis,
-) -> Option<(usize, FunctionId)> {
-    let index = callee_operand_index(operation)?;
-    let callee = operation.operands.get(index)?;
+) -> Option<ResolvedCallee> {
+    let operand = callee_operand_index(operation)?;
+    let callee = operation.operands.get(operand)?;
     if matches!(callee, mir::Value::Function(_)) {
         return None;
     }
@@ -1094,10 +1111,19 @@ fn resolved_callee(
     if !matches!(analysis.root_of_place(place), Root::DictEntry(_)) {
         return None;
     }
-    match state.place(place) {
-        Fact::Known(Const::Function(id)) => Some((index, id)),
-        _ => None,
-    }
+    let (callee, hidden_evidence) = match state.place(place) {
+        Fact::Known(Const::Function(id)) => (id, Vec::new()),
+        Fact::Known(Const::ClosedFunction {
+            function,
+            hidden_evidence,
+        }) => (function, hidden_evidence),
+        _ => return None,
+    };
+    Some(ResolvedCallee {
+        operand,
+        callee,
+        hidden_evidence,
+    })
 }
 
 /// Evaluates a call site, recording the refusal if one was asked for.
@@ -1289,7 +1315,17 @@ fn try_fold_call(
     let mut arguments = Vec::with_capacity(call.extras.len() + call.arguments.len());
     for extra in call.extras {
         match extra {
-            mir::Value::Dictionary(id) => arguments.push(ConstArgument::Dictionary(*id)),
+            mir::Value::Dictionary(id) => arguments.push(ConstArgument::Dictionary(
+                crate::hir::value::ClosedTraitDictionary::bare(*id),
+            )),
+            mir::Value::Evidence(evidence) => {
+                let crate::hir::value::HiddenEvidenceArgValue::TraitDictionary(dictionary) =
+                    crate::mir::interpreter::static_evidence_value(evidence)
+                else {
+                    return discard(arguments, NotFoldable::EvidenceNotKnown);
+                };
+                arguments.push(ConstArgument::Dictionary(dictionary));
+            }
             // A forwarded dictionary parameter is not known here; specialization is a later phase.
             _ => return discard(arguments, NotFoldable::EvidenceNotKnown),
         }
@@ -1485,25 +1521,71 @@ mod tests {
     /// generic code: an iterator pipeline drops its `Option` once per element through a dictionary
     /// entry that specialization has already made constant.
     ///
-    /// Asserted over the whole module rather than one function because the sites are spread across
-    /// the specializations the pipeline creates, none of which is named in the source.
+    /// Asserted over every closed function in the module because the sites are spread across the
+    /// specializations the pipeline creates, none of which is named in the source. Open generated
+    /// thunks deliberately retain dispatch through their evidence parameters.
     #[test]
     fn a_drop_or_clone_through_a_resolved_dictionary_entry_becomes_direct() {
         let mut session = CompilerSession::new();
         session.set_mir_optimization(MirOptimization::Enabled);
         let module = session.emit_mir("fold", "fn main() { [1, 2] |> map(|x| x * x); }");
-        let indirect: Vec<&str> = module
-            .lines()
-            .map(str::trim)
-            .filter(|line| {
-                (line.starts_with("drop ") || line.starts_with("clone "))
-                    && line.contains(" via %r")
-            })
-            .collect();
+        let mut function = "";
+        let mut has_evidence_parameters = false;
+        let mut indirect = Vec::new();
+        for line in module.lines().map(str::trim) {
+            if let Some(name) = line.strip_prefix("fn ") {
+                function = name.split('(').next().unwrap_or(name);
+                has_evidence_parameters = line.contains("@extra");
+            }
+            if !has_evidence_parameters
+                && (line.starts_with("drop ") || line.starts_with("clone "))
+                && line.contains(" via %r")
+            {
+                indirect.push(format!("{function}: {line}"));
+            }
+        }
         assert!(
             indirect.is_empty(),
             "every resolvable drop/clone callee must be named directly, found:\n{}",
             indirect.join("\n")
+        );
+    }
+
+    #[test]
+    fn a_concrete_drop_in_an_open_function_is_still_devirtualized() {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        let module = session.emit_mir(
+            "fold",
+            "fn open<T>(value: T, n: int) -> T where T: Value {\
+                 let mut concrete = [1, 2]; concrete[n] = 3; value\
+             }",
+        );
+        let function = module
+            .split("fn open")
+            .nth(1)
+            .expect("the module defines open")
+            .split("\nfn ")
+            .next()
+            .expect("open has a body");
+        assert!(
+            function
+                .lines()
+                .next()
+                .is_some_and(|header| header.contains("@extra")),
+            "the test must inspect an open function:\n{function}"
+        );
+        let concrete_drops: Vec<_> = function
+            .lines()
+            .filter(|line| line.contains("drop [int]"))
+            .collect();
+        assert!(
+            !concrete_drops.is_empty(),
+            "the test must retain the concrete local's drop:\n{function}"
+        );
+        assert!(
+            concrete_drops.iter().all(|line| !line.contains(" via %r")),
+            "the concrete local's drops must be direct even in an open function:\n{function}"
         );
     }
 

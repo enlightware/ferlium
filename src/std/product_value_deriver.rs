@@ -11,7 +11,7 @@ use crate::{
     Location,
     compiler::error::InternalCompilationError,
     containers::SVec2,
-    hir::{self, NodeArena, NodeId, value_dispatch::static_apply_generated_with_locals},
+    hir::{self, NodeArena, NodeId, value_dispatch::trait_apply_generated_with_locals},
     module::{LocalDecl, PendingFunctionBody, TraitId, TraitImplId},
     types::effects::EffType,
     types::r#trait::{Deriver, TraitMethodIndex},
@@ -67,20 +67,21 @@ impl Deriver for ProductValueDeriver {
 
         let mut build_member_value =
             |arena: &mut NodeArena, locals: &mut Vec<LocalDecl>, member_ty| {
-                let function = solver.solve_impl_method(
+                solver.solve_impl_method(
                     trait_id,
                     &[member_ty],
                     TraitMethodIndex::new(0),
                     span,
                     arena,
                 )?;
-                static_apply_generated_with_locals(
+                trait_apply_generated_with_locals(
                     arena,
                     locals,
                     solver,
-                    function,
+                    trait_id,
+                    vec![member_ty],
+                    TraitMethodIndex::new(0),
                     std::iter::empty(),
-                    member_ty,
                     span,
                 )
             };

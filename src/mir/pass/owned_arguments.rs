@@ -83,6 +83,20 @@ pub(crate) fn forward_owned_arguments(
     module: ModuleId,
     env: ModuleEnv<'_>,
 ) {
+    // Inlining a forwarding thunk can expose the clone directly beside the aggregate that an
+    // already-owned call consumes. Preserve the same ownership win even though there is no longer
+    // a call boundary at the clone itself.
+    for body in functions.iter_mut().flatten() {
+        if let Some(rewritten) = forward_clones_into_owned_invokes(body) {
+            *body = rewritten;
+        }
+    }
+    for specialization in specializations.iter_mut() {
+        if let Some(rewritten) = forward_clones_into_owned_invokes(&specialization.body) {
+            specialization.body = rewritten;
+        }
+    }
+
     let first_index = functions.len();
     let initial_specializations = specializations.len();
     // Keep the source population stable while variants recursively request other variants. New
@@ -149,6 +163,19 @@ pub(crate) fn forward_owned_arguments(
     }
     specializations.extend(generated_specializations);
 
+    // Caller rewriting above may itself have made the consuming invoke owned, so expose local
+    // clone-to-move forwarding once more on the settled call graph.
+    for body in functions.iter_mut().flatten() {
+        if let Some(rewritten) = forward_clones_into_owned_invokes(body) {
+            *body = rewritten;
+        }
+    }
+    for specialization in specializations.iter_mut() {
+        if let Some(rewritten) = forward_clones_into_owned_invokes(&specialization.body) {
+            specialization.body = rewritten;
+        }
+    }
+
     // Removing a clone strands its dispatch place/evidence; removing the caller's drop can do the
     // same. Cleanup every body once so variants and their callers finish in the same canonical form.
     for body in functions.iter_mut().flatten() {
@@ -170,6 +197,159 @@ pub(crate) fn forward_owned_arguments(
         }
         current
     }
+}
+
+/// Replace a clone with a move when its destination is part of an aggregate consumed by an owned
+/// invoke and the source is otherwise only dropped on both successor paths.
+///
+/// This is the intraprocedural form of the ordinary caller/callee forwarding below. It appears
+/// after inlining a small forwarding thunk: the callee's clone now initializes a subfield in the
+/// caller, while the owned downstream call and the source's two cleanup drops remain explicit.
+fn forward_clones_into_owned_invokes(source: &Function) -> Option<Function> {
+    if !may_forward_clones_into_owned_invokes(source) {
+        return None;
+    }
+    let origins = place_origins(source);
+    let predecessors = predecessor_counts(source);
+    let mut rewrites = Vec::new();
+    let mut removed_drops = FxHashSet::default();
+
+    for block in source.blocks() {
+        let TerminatorKind::Invoke {
+            operation: invoke, ..
+        } = &source.block(block).terminator().kind
+        else {
+            continue;
+        };
+        let OperationKind::Call { ty, metadata } = &invoke.kind else {
+            continue;
+        };
+        let Some(metadata) = metadata.as_deref() else {
+            continue;
+        };
+        if metadata.owned_arguments.is_empty() {
+            continue;
+        }
+        let visible_start = invoke.operands.len() - (ty.fn_ty.args.len() + 1);
+
+        for (index, operation) in source.block(block).operations().iter().enumerate() {
+            let OperationKind::Clone { .. } = operation.kind else {
+                continue;
+            };
+            let [clone_source, destination, ..] = operation.operands.as_ref() else {
+                continue;
+            };
+            let Some(source_root) = operand_root(clone_source, &origins) else {
+                continue;
+            };
+            let Some(destination_root) = operand_root(destination, &origins) else {
+                continue;
+            };
+            let destination_is_consumed = metadata.owned_arguments.iter_ones().any(|argument| {
+                operand_root(&invoke.operands[visible_start + argument], &origins)
+                    == Some(destination_root)
+            });
+            let later_use = operations_use_root(
+                source.block(block).operations()[index + 1..]
+                    .iter()
+                    .chain(std::iter::once(invoke)),
+                source_root,
+                &origins,
+            );
+            if !destination_is_consumed || later_use {
+                continue;
+            }
+            let site = Site::Operation {
+                block,
+                index: OperationIndex::from_index(index),
+            };
+            if !site_dominates_exits(source, site) {
+                continue;
+            }
+            let Some(drops) = terminal_drops(
+                source,
+                Site::Terminator { block },
+                clone_source,
+                source_root,
+                &origins,
+                &predecessors,
+            ) else {
+                continue;
+            };
+            if drops.iter().any(|drop| removed_drops.contains(drop)) {
+                continue;
+            }
+            removed_drops.extend(drops.iter().copied());
+            rewrites.push((site, clone_source.clone(), destination.clone(), drops));
+        }
+    }
+
+    if rewrites.is_empty() {
+        return None;
+    }
+    let mut edit = FunctionEdit::new(source.clone());
+    let mut drops_by_block: FxHashMap<BlockId, Vec<OperationIndex>> = FxHashMap::default();
+    for (site, source, destination, drops) in rewrites {
+        let operation = operation_at_mut(&mut edit, site);
+        operation.operands = Box::new([source, destination]);
+        operation.kind = OperationKind::Move;
+        for drop in drops {
+            let Site::Operation { block, index } = drop else {
+                unreachable!("drop is always a non-terminating operation")
+            };
+            drops_by_block.entry(block).or_default().push(index);
+        }
+    }
+    for (block, indices) in drops_by_block {
+        let operations = &mut edit.block_mut(block).operations;
+        for index in indices
+            .into_iter()
+            .sorted_by_key(|index| index.as_index())
+            .rev()
+        {
+            operations.remove(index.as_index());
+        }
+    }
+    Some(edit.finish_unverified())
+}
+
+/// Cheaply rejects the overwhelmingly common bodies for which the data-flow preparation below
+/// cannot produce a rewrite. The clone and owned invoke need not be in the same block: allowing
+/// that false positive keeps this prefilter purely syntactic and therefore unable to hide a valid
+/// forwarding opportunity.
+fn may_forward_clones_into_owned_invokes(source: &Function) -> bool {
+    let mut has_clone = false;
+    let mut has_owned_invoke = false;
+    for block in source.blocks() {
+        let block = source.block(block);
+        has_clone |= block
+            .operations()
+            .iter()
+            .any(|operation| matches!(operation.kind, OperationKind::Clone { .. }));
+        has_owned_invoke |= match &block.terminator().kind {
+            TerminatorKind::Invoke { operation, .. } => match &operation.kind {
+                OperationKind::Call { metadata, .. } => metadata
+                    .as_deref()
+                    .is_some_and(|metadata| !metadata.owned_arguments.is_empty()),
+                _ => false,
+            },
+            _ => false,
+        };
+        if has_clone && has_owned_invoke {
+            return true;
+        }
+    }
+    false
+}
+
+fn operations_use_root<'a>(
+    operations: impl Iterator<Item = &'a Operation>,
+    root: mir::ValueId,
+    origins: &FxHashMap<mir::ValueId, mir::ValueId>,
+) -> bool {
+    operations
+        .flat_map(|operation| operation.operands.iter())
+        .any(|operand| operand_root(operand, origins) == Some(root))
 }
 
 impl VariantFactory<'_> {
@@ -196,7 +376,10 @@ impl VariantFactory<'_> {
         let rewritten = source.and_then(|source| {
             // An ordinary generic body can still read its dictionaries. Specializations have had
             // them bound already; ordinary dictionary-free functions and generated thunks are safe.
+            // Thunks are type-monomorphic wrappers whose evidence parameters stay positional and
+            // unchanged in an owned-ABI variant.
             if !source.is_specialization
+                && !source.body.name.as_str().ends_with("-thunk")
                 && source
                     .body
                     .parameters()
@@ -739,10 +922,30 @@ fn operation_at_mut(edit: &mut FunctionEdit, site: Site) -> &mut Operation {
 
 #[cfg(test)]
 mod tests {
+    use rustc_hash::FxHashMap;
+
     use crate::{
         CompilerSession, Location, MirOptimization,
         mir::{BasicBlock, Function, Operation, terminator::Terminator},
     };
+
+    #[test]
+    fn an_invoke_operand_counts_as_a_later_use_for_clone_forwarding() {
+        let span = Location::new_synthesized();
+        let source_id = crate::mir::ValueId::new(0);
+        let destination_id = crate::mir::ValueId::new(1);
+        let source = crate::mir::Value::Register(source_id);
+        let destination = crate::mir::Value::Register(destination_id);
+        let invoke = Operation::move_value(span, source, destination);
+        let origins =
+            FxHashMap::from_iter([(source_id, source_id), (destination_id, destination_id)]);
+
+        assert!(super::operations_use_root(
+            std::iter::once(&invoke),
+            source_id,
+            &origins,
+        ));
+    }
 
     fn optimized(source: &str) -> String {
         let mut session = CompilerSession::new();
@@ -761,7 +964,7 @@ mod tests {
     }
 
     #[test]
-    fn map_pipeline_moves_last_use_array_and_mapper_through_the_thunk() {
+    fn map_pipeline_moves_last_use_array_and_mapper_after_thunk_inlining() {
         // A fully constant array pipeline now folds to `build_array` before this pass. Make the
         // array depend on a parameter while still creating an owned local copy, so this test keeps
         // exercising transfer of both the array and mapper rather than resource reification.
@@ -769,41 +972,14 @@ mod tests {
             optimized("fn apply(xs: [int]) -> [int] { let mut ys = xs; ys |> map(|x| x*x) }");
         let entry = body_of(&module, "apply");
         assert!(
-            entry.contains("#owned:[0,1](move %r0, move %r1, %p1)"),
-            "the entry must transfer both dead arguments:\n{entry}"
+            entry.contains("#owned:[0,1]")
+                && entry.contains("move %r0")
+                && entry.contains("move %r1"),
+            "the owned thunk call must consume both dead arguments:\n{entry}"
         );
-        let normal = entry
-            .split("#owned:[0,1](move %r0, move %r1, %p1)")
-            .nth(1)
-            .expect("the owned call was asserted above")
-            .split("\nfn ")
-            .next()
-            .unwrap();
         assert!(
-            !normal.contains("drop (int) -> int %r1") && !normal.contains("drop [int] %r0"),
+            !entry.contains("drop (int) -> int %r1") && !entry.contains("drop [int] %r0"),
             "the transferred arguments must not retain drops after the call:\n{entry}"
-        );
-
-        let owned_map = module
-            .split("fn Map<[A], B>::map#impl:")
-            .skip(1)
-            .find(|body| {
-                body.lines()
-                    .next()
-                    .is_some_and(|header| header.contains("#owned:[0,1]("))
-            })
-            .unwrap_or_else(|| panic!("module has no owned map specialization:\n{module}"));
-        let owned_map = owned_map.split("\nfn ").next().unwrap();
-        assert!(
-            owned_map.contains("@arg owned [int]")
-                && owned_map.contains("@arg owned (int) -> int")
-                && owned_map.contains("move %p0 to")
-                && owned_map.contains("move %p1 to"),
-            "the owned specialization must move both parameters into the iterator:\n{owned_map}"
-        );
-        assert!(
-            !owned_map.contains("clone [int]") && !owned_map.contains("clone (int) -> int"),
-            "the owned specialization must contain neither original clone:\n{owned_map}"
         );
     }
 

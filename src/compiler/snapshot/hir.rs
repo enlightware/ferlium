@@ -8,7 +8,7 @@ use crate::{
         dictionary::DictionaryReq, function::ArgConvention,
     },
     module::{
-        ExtraParameterId, FunctionId, LocalDeclId, ProjectionIndex, ResolvedLocalClone,
+        EvidenceBindingId, FunctionId, LocalDeclId, ProjectionIndex, ResolvedLocalClone,
         ResolvedLocalDrop, ResolvedTakeLocalValueMode, SubscriptId, TraitImplId,
     },
     types::{
@@ -23,7 +23,7 @@ use super::{
     type_graph::{SnapshotFnType, SnapshotSubscriptType},
 };
 
-type SnapshotNodeId = u32;
+crate::define_id_type!(SnapshotNodeId);
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,7 +31,7 @@ struct SnapshotPath(Vec<(String, Location)>);
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum SnapshotDictionaryReq {
+pub(crate) enum SnapshotDictionaryReq {
     ProjectionSubscript {
         requirement: ProjectionRequirementKind,
         field: String,
@@ -175,10 +175,13 @@ enum SnapshotNodeKind {
         ty: SnapshotCallImplType,
         inst_data: SnapshotFnInstData,
     },
-    GetDictionary(TraitImplId),
-    LoadDictionary(ExtraParameterId),
-    LoadSubscriptEvidence(ExtraParameterId),
-    LoadVariantPayloadStorageEvidence(ExtraParameterId),
+    GetDictionary {
+        dictionary: TraitImplId,
+        captures: Vec<SnapshotNodeId>,
+    },
+    LoadDictionary(EvidenceBindingId),
+    LoadSubscriptEvidence(EvidenceBindingId),
+    LoadVariantPayloadStorageEvidence(EvidenceBindingId),
     GetDictionaryFunction {
         dictionary: SnapshotNodeId,
         entry_index: crate::types::r#trait::TraitDictionaryEntryIndex,
@@ -187,6 +190,7 @@ enum SnapshotNodeKind {
         dictionary: SnapshotNodeId,
         entry_index: crate::types::r#trait::TraitDictionaryEntryIndex,
         arguments: Vec<SnapshotCallArgument>,
+        argument_names: Vec<String>,
         ty: SnapshotCallImplType,
     },
     CheckCallDepth,
@@ -224,14 +228,14 @@ enum SnapshotNodeKind {
 }
 
 fn node_id(id: ENodeId) -> SnapshotNodeId {
-    id.into_raw().into_u32()
+    SnapshotNodeId::new(id.into_raw().into_u32())
 }
 
 fn live_node_id(id: SnapshotNodeId, node_count: usize) -> Result<ENodeId, SnapshotError> {
-    if id as usize >= node_count {
-        return Err(SnapshotError::InvalidHirNodeReference(id));
+    if id.as_u32() as usize >= node_count {
+        return Err(SnapshotError::InvalidHirNodeReference(id.as_u32()));
     }
-    Ok(Idx::from_raw(RawIdx::from_u32(id)))
+    Ok(Idx::from_raw(RawIdx::from_u32(id.as_u32())))
 }
 
 fn path(path: &ast::Path) -> SnapshotPath {
@@ -280,7 +284,7 @@ fn live_types(values: &[SnapshotTypeId], types: &[Type]) -> Result<Vec<Type>, Sn
 }
 
 impl SnapshotDictionaryReq {
-    fn capture(
+    pub(crate) fn capture(
         value: &DictionaryReq,
         graph: &mut SnapshotTypeGraphBuilder<'_>,
     ) -> Result<Self, SnapshotError> {
@@ -317,7 +321,7 @@ impl SnapshotDictionaryReq {
         })
     }
 
-    fn materialize(&self, types: &[Type]) -> Result<DictionaryReq, SnapshotError> {
+    pub(crate) fn materialize(&self, types: &[Type]) -> Result<DictionaryReq, SnapshotError> {
         Ok(match self {
             Self::ProjectionSubscript {
                 requirement,
@@ -621,7 +625,10 @@ impl SnapshotNodeKind {
             NodeKind::GetTraitMethod(value) => match *value {},
             NodeKind::GetTraitAssociatedConst(value) => match *value {},
             NodeKind::GetTraitDictionary(value) => match *value {},
-            NodeKind::GetDictionary(value) => Self::GetDictionary(value.dictionary),
+            NodeKind::GetDictionary(value) => Self::GetDictionary {
+                dictionary: value.dictionary,
+                captures: value.captures.iter().map(|node| node_id(*node)).collect(),
+            },
             NodeKind::LoadDictionary(value) => Self::LoadDictionary(value.extra_parameter),
             NodeKind::LoadSubscriptEvidence(value) => {
                 Self::LoadSubscriptEvidence(value.extra_parameter)
@@ -637,6 +644,11 @@ impl SnapshotNodeKind {
                 dictionary: node_id(value.dictionary),
                 entry_index: value.entry_index,
                 arguments: capture_args(&value.arguments),
+                argument_names: value
+                    .argument_names
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
                 ty: SnapshotCallImplType::capture(&value.ty, graph)?,
             },
             NodeKind::CheckCallDepth => Self::CheckCallDepth,
@@ -834,8 +846,15 @@ impl SnapshotNodeKind {
                 ty: ty.materialize(types)?,
                 inst_data: inst_data.materialize(types)?,
             })),
-            Self::GetDictionary(dictionary) => NodeKind::GetDictionary(hir::GetDictionary {
+            Self::GetDictionary {
+                dictionary,
+                captures,
+            } => NodeKind::GetDictionary(hir::GetDictionary {
                 dictionary: *dictionary,
+                captures: captures
+                    .iter()
+                    .map(|capture| id(*capture))
+                    .collect::<Result<_, _>>()?,
             }),
             Self::LoadDictionary(extra_parameter) => {
                 NodeKind::LoadDictionary(hir::LoadDictionary {
@@ -865,11 +884,16 @@ impl SnapshotNodeKind {
                 dictionary,
                 entry_index,
                 arguments,
+                argument_names,
                 ty,
             } => NodeKind::CallDictionaryFunction(b(hir::CallDictionaryFunction {
                 dictionary: id(*dictionary)?,
                 entry_index: *entry_index,
                 arguments: live_args(arguments, node_count)?,
+                argument_names: argument_names
+                    .iter()
+                    .map(|name| name.as_str().into())
+                    .collect(),
                 ty: ty.materialize(types)?,
             })),
             Self::CheckCallDepth => NodeKind::CheckCallDepth,

@@ -1,7 +1,7 @@
 use crate::{
     module::{
-        BlanketTraitImplSubKey, ConcreteTraitImplKey, LocalFunctionId, LocalImplId, ModuleId,
-        TraitId, TraitImpl, TraitImpls,
+        BlanketTraitImplSubKey, ConcreteTraitImplKey, DictionaryEntryEvidence, LocalFunctionId,
+        LocalImplId, ModuleId, TraitId, TraitImpl, TraitImpls,
     },
     types::{
         effects::{EffType, Effect},
@@ -11,7 +11,7 @@ use crate::{
 
 use super::{
     SnapshotError, SnapshotLiteral, SnapshotTypeGraphBuilder, SnapshotTypeId,
-    semantic::SnapshotConstraint,
+    hir::SnapshotDictionaryReq, semantic::SnapshotConstraint,
 };
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -38,6 +38,8 @@ struct SnapshotTraitImpl {
     methods: Vec<LocalFunctionId>,
     associated_const_values: Vec<SnapshotLiteral>,
     associated_const_getters: Vec<LocalFunctionId>,
+    capture_schema: Vec<SnapshotDictionaryReq>,
+    entry_capture_mappings: Vec<Vec<DictionaryEntryEvidence>>,
     dictionary_ty: SnapshotTypeId,
     public: bool,
     source_span: Option<crate::Location>,
@@ -148,6 +150,13 @@ impl SnapshotTraitImpl {
                 .map(SnapshotLiteral::capture)
                 .collect::<Result<_, _>>()?,
             associated_const_getters: value.associated_const_getters.clone(),
+            capture_schema: value
+                .dictionary_value
+                .capture_schema()
+                .iter()
+                .map(|requirement| SnapshotDictionaryReq::capture(requirement, graph))
+                .collect::<Result<_, _>>()?,
+            entry_capture_mappings: value.dictionary_value.entry_capture_mappings().to_vec(),
             dictionary_ty: graph.capture(value.dictionary_ty)?,
             public: value.public,
             source_span: value.source_span,
@@ -161,7 +170,14 @@ impl SnapshotTraitImpl {
             .map(SnapshotLiteral::materialize)
             .collect::<Result<Vec<_>, _>>()?;
         let dictionary_value =
-            crate::module::build_dictionary_value(&self.methods, &self.associated_const_getters);
+            crate::module::build_dictionary_value(&self.methods, &self.associated_const_getters)
+                .with_captures(
+                    self.capture_schema
+                        .iter()
+                        .map(|requirement| requirement.materialize(types))
+                        .collect::<Result<_, _>>()?,
+                    self.entry_capture_mappings.clone(),
+                );
         Ok(TraitImpl {
             output_tys: live_types(&self.output_tys, types)?,
             output_effs: self

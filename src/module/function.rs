@@ -255,6 +255,11 @@ define_id_type!(
 );
 
 define_id_type!(
+    /// Immutable hidden-evidence binding within an elaborated function.
+    EvidenceBindingId
+);
+
+define_id_type!(
     /// Known projection index into a tuple-like runtime value.
     ProjectionIndex
 );
@@ -372,8 +377,8 @@ pub enum ResolvedLocalClone {
     TrivialCopy,
     /// Call this concrete `Value` implementation.
     Static(FunctionId),
-    /// Load the `Value` method from this hidden trait dictionary extra parameter.
-    Dictionary(ExtraParameterId),
+    /// Load the `Value` method from this function-scoped evidence binding.
+    Dictionary(EvidenceBindingId),
 }
 
 /// Concrete runtime layout needed to copy a value by representation.
@@ -418,8 +423,8 @@ pub enum ResolvedLocalDrop {
     Skip,
     /// Call this concrete `Value` implementation.
     Static(FunctionId),
-    /// Load the `Value` method from this hidden trait dictionary extra parameter.
-    Dictionary(ExtraParameterId),
+    /// Load the `Value` method from this function-scoped evidence binding.
+    Dictionary(EvidenceBindingId),
 }
 
 define_id_type!(
@@ -490,6 +495,8 @@ pub struct ModuleFunction {
     /// HIR bodies set this during elaboration with the trait solver. Native/interpreter-only
     /// bodies provide it through `Callable::visible_parameter_passing`.
     pub parameter_passing: Vec<ArgConvention>,
+    /// Immutable hidden evidence available throughout this function, in dependency order.
+    pub evidence_bindings: Vec<crate::hir::dictionary::EvidenceBinding>,
     pub spans: Option<ModuleFunctionSpans>,
     /// Local variable declarations for the function body, including arguments and any variables declared within the function.
     pub locals: Vec<ELocalDecl>,
@@ -617,6 +624,8 @@ impl PendingModuleFunction {
         warnings: &mut Vec<crate::compiler::diagnostics::CompilationWarning>,
     ) -> Result<EModuleFunction, InternalCompilationError> {
         let root = self.code.entry_node_id;
+        ctx.set_retained_effect_vars(self.definition.ty_scheme.eff_quantifiers.clone());
+        ctx.reset_evidence_bindings();
         LocalDecl::assign_sequential_slots(&mut self.locals);
         elaborate_local_ownership_and_value_dispatches(
             &mut self.code.arena,
@@ -676,7 +685,8 @@ impl PendingModuleFunction {
         }
         check_elaborated_literal_invariants(dst_arena, elaborated.root, ctx.trait_solver)?;
         check_elaborated_borrows(dst_arena, elaborated.root)?;
-        let function = ModuleFunction::new_elaborated(
+        ctx.assert_evidence_bindings_valid();
+        let mut function = ModuleFunction::new_elaborated(
             self.definition,
             b(ScriptFunction {
                 entry_node_id: elaborated.root,
@@ -687,6 +697,7 @@ impl PendingModuleFunction {
             self.spans,
             elaborated.locals,
         );
+        function.evidence_bindings = ctx.evidence_bindings.clone();
         Ok(function)
     }
 
@@ -713,6 +724,7 @@ impl ModuleFunction {
             code,
             origin: CallableOrigin::Script,
             parameter_passing,
+            evidence_bindings: Vec::new(),
             spans,
             locals,
             debug_info,
@@ -738,6 +750,7 @@ impl ModuleFunction {
                 canonical_name: None,
             },
             parameter_passing,
+            evidence_bindings: Vec::new(),
             spans,
             locals,
             debug_info,
@@ -763,6 +776,7 @@ impl ModuleFunction {
                 canonical_name: None,
             },
             parameter_passing,
+            evidence_bindings: Vec::new(),
             spans,
             locals,
             debug_info: FunctionDebugInfo::default(),
@@ -781,6 +795,7 @@ impl ModuleFunction {
             // Placeholders are transient module slots installed before their
             // pending function body is elaborated and replaced.
             parameter_passing: Vec::new(),
+            evidence_bindings: Vec::new(),
             spans,
             locals: Vec::new(),
             debug_info: FunctionDebugInfo::default(),

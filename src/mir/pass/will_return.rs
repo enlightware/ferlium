@@ -165,6 +165,7 @@ fn operation_returns(operation: &Operation, callee_returns: &impl Fn(FunctionId)
         | OperationKind::Load
         | OperationKind::Subfield { .. }
         | OperationKind::DictEntry { .. }
+        | OperationKind::BuildDictionary { .. }
         | OperationKind::SubscriptMember { .. }
         | OperationKind::BuildSubscript { .. }
         | OperationKind::Variant { .. }

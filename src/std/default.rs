@@ -13,7 +13,7 @@ use crate::{
     containers::b,
     hir::{
         self, NodeArena, NodeId, function::CallableDefinition,
-        value_dispatch::static_apply_generated_with_locals,
+        value_dispatch::trait_apply_generated_with_locals,
     },
     module::{Module, PendingFunctionBody, TraitId, TraitImplId},
     std::product_value_deriver::ProductValueDeriver,
@@ -82,20 +82,21 @@ impl Deriver for EnumDefaultDeriver {
             let payload = n(&mut body_arena, native(()), Type::unit());
             n(&mut body_arena, variant(default_variant, payload), ty)
         } else {
-            let function = solver.solve_impl_method(
+            solver.solve_impl_method(
                 trait_id,
                 &[payload_ty],
                 TraitMethodIndex::new(0),
                 span,
                 &mut body_arena,
             )?;
-            let payload = static_apply_generated_with_locals(
+            let payload = trait_apply_generated_with_locals(
                 &mut body_arena,
                 &mut locals,
                 solver,
-                function,
+                trait_id,
+                vec![payload_ty],
+                TraitMethodIndex::new(0),
                 std::iter::empty(),
-                payload_ty,
                 span,
             )?;
             n(&mut body_arena, variant(default_variant, payload), ty)

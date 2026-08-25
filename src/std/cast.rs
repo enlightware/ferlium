@@ -13,10 +13,8 @@ use crate::{
     hir,
     hir::function::CallableDefinition,
     module::{
-        LocalDeclId, Module, PendingFunctionBody, PendingLocalClone, ResolvedLocalClone, TraitId,
-        TraitImplId, id::Id,
+        LocalDeclId, Module, PendingFunctionBody, PendingLocalClone, TraitId, TraitImplId, id::Id,
     },
-    std::{core_traits_names::VALUE_TRAIT_NAME, value::VALUE_CLONE_METHOD_INDEX},
     types::effects::{EffType, PrimitiveEffect},
     types::r#trait::{Deriver, Trait},
     types::trait_solver::TraitSolver,
@@ -59,17 +57,10 @@ impl Deriver for SelfCastDeriver {
             EffType::empty(),
             span,
         ));
-        let clone = solver.solve_impl_method(
-            solver.std_trait_id(VALUE_TRAIT_NAME),
-            &[from_ty],
-            VALUE_CLONE_METHOD_INDEX,
-            span,
-            &mut body_arena,
-        )?;
         let code_id = body_arena.alloc(hir::Node::new(
             hir::NodeKind::CloneValue(hir::CloneValue {
                 source: source_id,
-                clone: PendingLocalClone::Resolved(ResolvedLocalClone::Static(clone)),
+                clone: PendingLocalClone::Unknown,
             }),
             from_ty,
             EffType::empty(),

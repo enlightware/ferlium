@@ -51,6 +51,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::{
     CompilerSession, Location,
     compiler::MirOptimization,
+    containers::DenseBitSet,
     mir::{
         self, BlockId, Function, Instantiation, Operation, OperationKind,
         edit::FunctionEdit,
@@ -397,8 +398,37 @@ fn concrete_body<'a>(
     specializations: Option<&Specializations>,
     env: ModuleEnv<'_>,
 ) -> Result<Cow<'a, Function>, NotInlinable> {
-    if body.parameters().iter().all(|p| p.ty.is_constant()) {
+    let mut has_open_dictionary = false;
+    let mut has_open_visible_parameter = false;
+    for parameter in body.parameters() {
+        if !parameter.ty.is_constant() {
+            if matches!(parameter.kind, mir::ParameterKind::Dictionary) {
+                has_open_dictionary = true;
+            } else {
+                has_open_visible_parameter = true;
+            }
+        }
+        if has_open_dictionary && has_open_visible_parameter {
+            break;
+        }
+    }
+    if !has_open_dictionary && !has_open_visible_parameter {
         return Ok(Cow::Borrowed(body));
+    }
+    if !has_open_visible_parameter {
+        let used = used_parameters(body);
+        let every_open_dictionary_is_dead =
+            body.parameters()
+                .iter()
+                .enumerate()
+                .all(|(index, parameter)| {
+                    parameter.ty.is_constant()
+                        || (matches!(parameter.kind, mir::ParameterKind::Dictionary)
+                            && !used.contains(index))
+                });
+        if every_open_dictionary_is_dead {
+            return Ok(Cow::Borrowed(body));
+        }
     }
     let Some(instantiation) = instantiation else {
         return Err(NotInlinable::Generic);
@@ -419,6 +449,36 @@ fn concrete_body<'a>(
         // nothing to memoize into and nothing to gain from it.
         None => monomorphize::substitute_body(body, scheme, instantiation, env),
     }))
+}
+
+/// Collects the parameters the executable body still reads in one linear scan.
+///
+/// A closed-evidence specialization deliberately keeps its original dictionary parameters until
+/// whole-module dead-evidence cleanup. Once binding and devirtualization removed every read, their
+/// types may still mention constraint-only effect variables without making the executable body
+/// generic. Treat precisely those dead dictionary parameters as concrete for inlining; every
+/// visible, return, or live evidence parameter retains the ordinary strict check above.
+fn used_parameters(body: &Function) -> DenseBitSet {
+    let mut used = DenseBitSet::with_capacity(body.parameters().len());
+    for block in body.blocks() {
+        let block = body.block(block);
+        for parameter in block
+            .operations()
+            .iter()
+            .chain(match &block.terminator().kind {
+                TerminatorKind::Invoke { operation, .. } => Some(operation),
+                _ => None,
+            })
+            .flat_map(|operation| &operation.operands)
+            .filter_map(|operand| match operand {
+                mir::Value::Parameter(parameter) => Some(parameter.as_index()),
+                _ => None,
+            })
+        {
+            used.insert(parameter);
+        }
+    }
+    used
 }
 
 /// The callee's body, read from the raw stage.
@@ -581,9 +641,10 @@ fn inline_at(edit: &mut FunctionEdit, body: &Function, site: Site, env: ModuleEn
     assert_eq!(
         arguments.len(),
         body.parameters().len(),
-        "call being inlined passes {} arguments to MIR function {} with {} parameters; operands: {:?}",
-        arguments.len(),
+        "MIR function {} calls {} with {} arguments but it has {} parameters; operands: {:?}",
+        edit.name(),
         body.name,
+        arguments.len(),
         body.parameters().len(),
         call.operands,
     );

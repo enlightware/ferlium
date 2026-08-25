@@ -561,7 +561,7 @@ pub(crate) type ValueCodeEntries = Vec<(PendingFunctionBody, Vec<LocalDecl>)>;
 
 struct ValueBodyCtx<'s, 'm> {
     solver: &'s mut TraitSolver<'m>,
-    emit_generic_trait_calls: bool,
+    permits_open_types: bool,
 }
 
 fn is_trivial_copy(ctx: &ValueBodyCtx<'_, '_>, ty: Type) -> bool {
@@ -572,14 +572,14 @@ impl<'s, 'm> ValueBodyCtx<'s, 'm> {
     fn concrete(solver: &'s mut TraitSolver<'m>) -> Self {
         Self {
             solver,
-            emit_generic_trait_calls: false,
+            permits_open_types: false,
         }
     }
 
     pub(crate) fn generic(solver: &'s mut TraitSolver<'m>) -> Self {
         Self {
             solver,
-            emit_generic_trait_calls: true,
+            permits_open_types: true,
         }
     }
 
@@ -657,49 +657,7 @@ impl<'s, 'm> ValueBodyCtx<'s, 'm> {
             ));
         }
 
-        if self.emit_generic_trait_calls && !input_ty.is_constant() {
-            let effects = fn_ty.effects.clone();
-            let prepared = prepare_generated_call_arguments_with_locals(
-                arena,
-                locals,
-                self.solver,
-                &mut arguments,
-                &fn_ty.args,
-                span,
-            )?;
-            let arguments =
-                CallArgument::from_values_and_passing(arguments, prepared.argument_passing);
-            let call = arena.alloc(hir::Node::new(
-                hir::NodeKind::TraitMethodApply(crate::containers::b(
-                    hir::TraitMethodApplication {
-                        trait_id,
-                        method_index,
-                        method_path: Path::single(method_name, span),
-                        method_span: span,
-                        arguments,
-                        arguments_unnamed: UnnamedArg::All,
-                        ty: CallImplType::value(fn_ty),
-                        input_tys: vec![input_ty],
-                        inst_data: hir::FnInstData::none(),
-                    },
-                )),
-                ret_ty,
-                effects,
-                span,
-            ));
-            return Ok(wrap_generated_call_with_temp_cleanup(
-                arena,
-                prepared.temp_stores,
-                prepared.cleanup,
-                call,
-                ret_ty,
-                span,
-            ));
-        }
-
-        let function =
-            self.solver
-                .solve_impl_method(trait_id, &[input_ty], method_index, span, arena)?;
+        let effects = fn_ty.effects.clone();
         let prepared = prepare_generated_call_arguments_with_locals(
             arena,
             locals,
@@ -708,15 +666,19 @@ impl<'s, 'm> ValueBodyCtx<'s, 'm> {
             &fn_ty.args,
             span,
         )?;
-        let effects = fn_ty.effects.clone();
+        let arguments = CallArgument::from_values_and_passing(arguments, prepared.argument_passing);
         let call = arena.alloc(hir::Node::new(
-            hir::hir_syn::static_apply_with_argument_passing(
-                function,
-                fn_ty,
+            hir::NodeKind::TraitMethodApply(crate::containers::b(hir::TraitMethodApplication {
+                trait_id,
+                method_index,
+                method_path: Path::single(method_name, span),
+                method_span: span,
                 arguments,
-                prepared.argument_passing,
-                span,
-            ),
+                arguments_unnamed: UnnamedArg::All,
+                ty: CallImplType::value(fn_ty),
+                input_tys: vec![input_ty],
+                inst_data: hir::FnInstData::none(),
+            })),
             ret_ty,
             effects,
             span,
@@ -1030,7 +992,7 @@ fn derive_structural_text_body(
 
     assert!(input_types.len() == 1);
     let ty = input_types[0];
-    assert!(ctx.emit_generic_trait_calls || ty.is_constant());
+    assert!(ctx.permits_open_types || ty.is_constant());
 
     let n = alloc_synth_node;
 
@@ -1421,6 +1383,7 @@ impl Deriver for InspectDeriver {
             input_types,
             &[],
             &[],
+            &[],
             [(PendingFunctionBody::new(body_arena, root), locals)],
         );
         Ok(Some(TraitImplId::new(
@@ -1441,7 +1404,7 @@ fn derive_value_eq_body(
 
     assert!(input_types.len() == 1);
     let ty = input_types[0];
-    assert!(ctx.emit_generic_trait_calls || ty.is_constant());
+    assert!(ctx.permits_open_types || ty.is_constant());
 
     let n = alloc_synth_node;
 
@@ -1633,7 +1596,7 @@ fn derive_value_hash_body(
 
     assert!(input_types.len() == 1);
     let ty = input_types[0];
-    assert!(ctx.emit_generic_trait_calls || ty.is_constant());
+    assert!(ctx.permits_open_types || ty.is_constant());
 
     let n = alloc_synth_node;
 
@@ -1827,7 +1790,7 @@ fn derive_value_clone_body(
 
     assert!(input_types.len() == 1);
     let ty = input_types[0];
-    assert!(ctx.emit_generic_trait_calls || ty.is_constant());
+    assert!(ctx.permits_open_types || ty.is_constant());
 
     let n = alloc_synth_node;
 
@@ -2003,7 +1966,7 @@ fn derive_value_drop_body(
 
     assert!(input_types.len() == 1);
     let ty = input_types[0];
-    assert!(ctx.emit_generic_trait_calls || ty.is_constant());
+    assert!(ctx.permits_open_types || ty.is_constant());
 
     let n = alloc_synth_node;
     let target_id = LocalDeclId::from_index(0);
@@ -2329,6 +2292,7 @@ fn derive_structural_value_impl(
         impl_id,
         trait_id,
         input_types,
+        &[],
         &[],
         &[],
         [eq, to_string, hash, clone, drop],

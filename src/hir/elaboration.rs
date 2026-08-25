@@ -13,11 +13,11 @@ use ustr::{Ustr, ustr};
 use crate::{
     Location,
     compiler::{diagnostics::CompilationWarning, error::InternalCompilationError},
-    hir::hir_syn::{call_dictionary_function, get_dictionary, static_apply},
+    hir::hir_syn::{call_dictionary_function, get_dictionary},
     hir::{
         dictionary::{
-            DictElaborationCtx, DictionaryReq, ExtraParameters, LateFunctionInstData,
-            find_projection_subscript_dict_index,
+            DictElaborationCtx, DictionaryReq, EvidenceBindingSource, ExtraParameters,
+            LateFunctionInstData, StaticEvidence, find_projection_subscript_dict_index,
             find_projection_subscript_dict_index_for_receiver_ty, find_trait_impl_dict_index,
             find_variant_payload_indirection_index, find_variant_payload_layout_index,
             instantiate_dictionary_requirements,
@@ -26,14 +26,57 @@ use crate::{
     },
     internal_compilation_error,
     module::{
-        ELocalDecl, ExtraParameterId, FunctionId, GeneratedStructuralProjectionSpec, LocalDecl,
+        ELocalDecl, EvidenceBindingId, FunctionId, GeneratedStructuralProjectionSpec, LocalDecl,
         LocalDeclId, LocalFunctionId, Module, ModuleEnv, PendingLocalClone, PendingLocalDrop,
         PendingModuleFunction, PendingTakeLocalValueMode, ProjectionIndex, ProjectionKey,
-        ResolvedLocalClone, ResolvedLocalDrop, SubscriptId, SubscriptMemberKind, TraitId, id::Id,
+        ResolvedLocalClone, ResolvedLocalDrop, SubscriptId, SubscriptMemberKind, TraitDictionaryId,
+        TraitId, id::Id,
     },
     types::r#trait::{TraitDictionaryEntryIndex, TraitMethodIndex},
     types::trait_solver::{TraitSolver, trait_solver_from_module},
 };
+
+struct ElaborationEffectDefaultMapper<'a> {
+    retained: &'a FxHashSet<crate::types::effects::EffectVar>,
+}
+
+impl crate::types::type_mapper::TypeMapper for ElaborationEffectDefaultMapper<'_> {
+    fn map_type(&mut self, ty: Type) -> Type {
+        ty
+    }
+
+    fn map_mut_type(&mut self, mut_ty: MutType) -> MutType {
+        mut_ty
+    }
+
+    fn map_effect_type(&mut self, effects: &EffType) -> EffType {
+        effects
+            .iter()
+            .filter(|effect| match effect {
+                Effect::Variable(variable) => self.retained.contains(variable),
+                Effect::Primitive(_) => true,
+            })
+            .collect()
+    }
+}
+
+fn default_unquantified_trait_application_effects(
+    input_tys: &[Type],
+    output_tys: &[Type],
+    output_effs: &[EffType],
+    retained: &FxHashSet<crate::types::effects::EffectVar>,
+) -> (Vec<Type>, Vec<Type>, Vec<EffType>) {
+    let mut mapper = ElaborationEffectDefaultMapper { retained };
+    (
+        input_tys.iter().map(|ty| ty.map(&mut mapper)).collect(),
+        output_tys.iter().map(|ty| ty.map(&mut mapper)).collect(),
+        output_effs
+            .iter()
+            .map(|effects| mapper.map_effect_type(effects))
+            .collect(),
+    )
+}
+
 use itertools::process_results;
 
 use crate::{
@@ -55,7 +98,10 @@ use crate::{
     types::r#type::{
         CallImplType, CallResultConvention, FnArgType, FnType, Type, TypeKind, TypeVar,
     },
-    types::type_mapper::BitmapInstantiationMapper,
+    types::{
+        type_like::TypeLike,
+        type_mapper::{BitmapInstantiationMapper, TypeMapper},
+    },
 };
 
 /// Build the use-site HIR expression for a generated `Value` dictionary.
@@ -113,38 +159,197 @@ fn trait_dictionary_node_kind(
     ctx: &mut DictElaborationCtx<'_, '_, '_>,
 ) -> Result<(NodeKind, Type), InternalCompilationError> {
     let trait_def = ctx.trait_solver.trait_def(trait_id);
-    if is_value_trait_for_function_type(trait_id, trait_def, input_tys, output_tys) {
-        return function_value_dictionary_node_kind(trait_id, input_tys, span, ctx);
+    if let Some(index) = find_trait_impl_dict_index(ctx.dicts, trait_id, input_tys) {
+        let ty = ctx.dicts.requirements[index].to_dict_type(ctx.trait_solver);
+        return Ok((
+            NodeKind::LoadDictionary(hir::LoadDictionary {
+                extra_parameter: EvidenceBindingId::from_index(index),
+            }),
+            ty,
+        ));
+    }
+
+    let (input_tys, output_tys, _) = default_unquantified_trait_application_effects(
+        input_tys,
+        output_tys,
+        output_effs,
+        &ctx.retained_effect_vars,
+    );
+    if is_value_trait_for_function_type(trait_id, trait_def, &input_tys, &output_tys) {
+        return function_value_dictionary_node_kind(trait_id, &input_tys, span, ctx);
     }
 
     let trait_def = ctx.trait_solver.trait_def(trait_id);
-    if is_function_surface_only_value_trait_application(trait_id, trait_def, input_tys, output_tys)
-    {
-        return generic_derived_value_dictionary_node_kind(arena, trait_id, input_tys, span, ctx);
+    if is_function_surface_only_value_trait_application(
+        trait_id,
+        trait_def,
+        &input_tys,
+        &output_tys,
+    ) {
+        return generic_derived_value_dictionary_node_kind(arena, trait_id, &input_tys, span, ctx);
     }
 
-    let ty = ctx
+    if !input_tys.iter().all(|ty| ty.is_trait_input_resolved()) {
+        panic!(
+            "dictionary for trait {trait_id:?} with inputs {input_tys:?} was not found in caller requirements {:?}; type inference should have failed",
+            ctx.dicts.requirements
+        )
+    }
+    let dictionary = ctx
         .trait_solver
-        .trait_def(trait_id)
-        .get_dictionary_type_for_tys(input_tys, output_tys, output_effs);
+        .solve_impl(trait_id, &input_tys, span, arena)?;
+    let impl_data = ctx.trait_solver.get_impl_data_by_id(dictionary);
+    let ty = impl_data.dictionary_ty;
+    let capture_schema = impl_data.dictionary_value.capture_schema().to_vec();
+    let capture_infos = extra_arg_kind_from_inst_data(
+        &hir::FnInstData::new(capture_schema, Vec::new(), Vec::new()),
+        span,
+        ctx,
+        arena,
+    )?;
+    let captures = capture_infos
+        .into_iter()
+        .map(|(kind, ty, _)| arena.alloc(Node::new(kind, ty, no_effects(), span)))
+        .collect();
+    Ok((
+        NodeKind::GetDictionary(hir::GetDictionary {
+            dictionary,
+            captures,
+        }),
+        ty,
+    ))
+}
 
-    let node_kind = if input_tys.iter().all(|ty| ty.is_trait_input_resolved()) {
-        let dictionary = ctx
-            .trait_solver
-            .solve_impl(trait_id, input_tys, span, arena)?;
-        NodeKind::GetDictionary(hir::GetDictionary { dictionary })
+/// Resolve and intern complete evidence for a selected trait application.
+pub(crate) fn trait_dictionary_evidence_binding(
+    arena: &mut NodeArena,
+    trait_id: TraitId,
+    input_tys: &[Type],
+    output_tys: &[Type],
+    output_effs: &[EffType],
+    span: Location,
+    ctx: &mut DictElaborationCtx<'_, '_, '_>,
+) -> Result<EvidenceBindingId, InternalCompilationError> {
+    if let Some(index) = find_trait_impl_dict_index(ctx.dicts, trait_id, input_tys) {
+        return Ok(EvidenceBindingId::from_index(index));
+    }
+    let (input_tys, output_tys, output_effs) = default_unquantified_trait_application_effects(
+        input_tys,
+        output_tys,
+        output_effs,
+        &ctx.retained_effect_vars,
+    );
+    if !input_tys.iter().all(|ty| ty.is_trait_input_resolved()) {
+        return Err(internal_compilation_error!(Internal {
+            error: format!(
+                "dictionary for trait {trait_id:?} with inputs {input_tys:?} was not found in caller evidence"
+            ),
+            span,
+        }));
+    }
+
+    let selected = ctx
+        .trait_solver
+        .solve_impl(trait_id, &input_tys, span, arena)?;
+    let definition = TraitDictionaryId::new(selected.module, selected.impl_id);
+    let impl_data = ctx.trait_solver.get_impl_data_by_id(selected);
+    let capture_schema = impl_data.dictionary_value.capture_schema().to_vec();
+    let mut captures = Vec::with_capacity(capture_schema.len());
+    for requirement in &capture_schema {
+        captures.push(evidence_binding_for_requirement(
+            arena,
+            requirement,
+            span,
+            ctx,
+        )?);
+    }
+    let requirement = DictionaryReq::new_trait_impl(trait_id, input_tys, output_tys, output_effs);
+    let static_captures = captures
+        .iter()
+        .map(|capture| ctx.static_evidence(*capture))
+        .collect::<Option<Vec<_>>>();
+    let source = if let Some(captures) = static_captures {
+        let evidence = if captures.is_empty() {
+            StaticEvidence::bare_dictionary(definition)
+        } else {
+            StaticEvidence::Dictionary {
+                definition,
+                captures: captures.into_boxed_slice(),
+            }
+        };
+        EvidenceBindingSource::Static(evidence)
     } else {
-        let index = find_trait_impl_dict_index(ctx.dicts, trait_id, input_tys).unwrap_or_else(|| {
-            panic!(
-                "dictionary for trait {trait_id:?} with inputs {input_tys:?} was not found in caller requirements {:?}; type inference should have failed",
-                ctx.dicts.requirements
-            )
-        });
-        NodeKind::LoadDictionary(hir::LoadDictionary {
-            extra_parameter: ExtraParameterId::from_index(index),
-        })
+        EvidenceBindingSource::ConstructedDictionary {
+            definition,
+            captures,
+        }
     };
-    Ok((node_kind, ty))
+    Ok(ctx.intern_evidence_binding(requirement, source))
+}
+
+fn evidence_binding_for_requirement(
+    arena: &mut NodeArena,
+    requirement: &DictionaryReq,
+    span: Location,
+    ctx: &mut DictElaborationCtx<'_, '_, '_>,
+) -> Result<EvidenceBindingId, InternalCompilationError> {
+    if let Some(index) = ctx
+        .dicts
+        .requirements
+        .iter()
+        .position(|available| available == requirement)
+    {
+        return Ok(EvidenceBindingId::from_index(index));
+    }
+
+    match requirement {
+        DictionaryReq::TraitImpl {
+            trait_id,
+            input_tys,
+            output_tys,
+            output_effs,
+        } => trait_dictionary_evidence_binding(
+            arena,
+            *trait_id,
+            input_tys,
+            output_tys,
+            output_effs,
+            span,
+            ctx,
+        ),
+        DictionaryReq::ProjectionSubscript { .. }
+        | DictionaryReq::VariantPayloadIndirection { .. } => {
+            let inst_data = hir::FnInstData::new(vec![requirement.clone()], Vec::new(), Vec::new());
+            let [(kind, _, _)] = extra_arg_kind_from_inst_data(&inst_data, span, ctx, arena)?
+                .try_into()
+                .expect("one evidence requirement must produce one argument");
+            let source = match kind {
+                NodeKind::GetSubscript(subscript) => EvidenceBindingSource::Static(
+                    StaticEvidence::bare_subscript(subscript.subscript),
+                ),
+                NodeKind::Immediate(value) => {
+                    EvidenceBindingSource::Static(StaticEvidence::VariantPayloadStorage(
+                        *value
+                            .as_primitive_ty::<bool>()
+                            .expect("variant layout evidence must be bool"),
+                    ))
+                }
+                NodeKind::LoadSubscriptEvidence(load) => {
+                    return Ok(load.extra_parameter);
+                }
+                NodeKind::LoadVariantPayloadStorageEvidence(load) => {
+                    return Ok(load.extra_parameter);
+                }
+                other => {
+                    return Err(internal_compilation_error!(Internal {
+                        error: format!("unexpected static evidence node {other:?}"),
+                        span,
+                    }));
+                }
+            };
+            Ok(ctx.intern_evidence_binding(requirement.clone(), source))
+        }
+    }
 }
 
 /// Return the method slot and callable type from an already-instantiated dictionary type.
@@ -253,7 +458,7 @@ fn extra_arg_kind_from_inst_data(
                                 || panic!("Projection subscript dictionary for field \"{name}\" in type variable \"{var}\" not found, type inference should have failed"),
                             );
                             K::LoadSubscriptEvidence(hir::LoadSubscriptEvidence {
-                                extra_parameter: ExtraParameterId::from_index(index),
+                                extra_parameter: EvidenceBindingId::from_index(index),
                             })
                         }
                         _ => {
@@ -286,7 +491,7 @@ fn extra_arg_kind_from_inst_data(
                         (
                             K::LoadVariantPayloadStorageEvidence(
                                 hir::LoadVariantPayloadStorageEvidence {
-                                    extra_parameter: ExtraParameterId::from_index(index),
+                                    extra_parameter: EvidenceBindingId::from_index(index),
                                 },
                             ),
                             node_ty,
@@ -1203,7 +1408,17 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
         Ok(match kind {
             Immediate(value) => Immediate(value),
             GetSubscript(get_subscript) => GetSubscript(get_subscript),
-            GetDictionary(get_dict) => GetDictionary(get_dict),
+            GetDictionary(get_dict) => {
+                let captures = get_dict
+                    .captures
+                    .into_iter()
+                    .map(|capture| self.elaborate_generated_evidence_node(capture))
+                    .collect::<Result<_, _>>()?;
+                GetDictionary(hir::GetDictionary {
+                    dictionary: get_dict.dictionary,
+                    captures,
+                })
+            }
             LoadDictionary(load) => LoadDictionary(load),
             LoadSubscriptEvidence(load) => LoadSubscriptEvidence(load),
             LoadVariantPayloadStorageEvidence(load) => LoadVariantPayloadStorageEvidence(load),
@@ -1215,6 +1430,15 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                 }));
             }
         })
+    }
+
+    fn elaborate_generated_evidence_node(
+        &mut self,
+        node: UNodeId,
+    ) -> Result<ENodeId, InternalCompilationError> {
+        let node = self.generated[node].clone();
+        let kind = self.elaborate_synthetic_kind(node.kind, node.span)?;
+        Ok(self.alloc_elaborated_node(kind, node.ty, node.effects, node.span))
     }
 
     fn alloc_elaborated_node(
@@ -1238,7 +1462,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
         node_span: Location,
     ) -> NodeKind<Elaborated> {
         use NodeKind::*;
-        let extra_parameter = ExtraParameterId::from_index(index);
+        let extra_parameter = EvidenceBindingId::from_index(index);
         let DictionaryReq::ProjectionSubscript { subscript_ty, .. } =
             &self.ctx.dicts.requirements[index]
         else {
@@ -1792,7 +2016,9 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                     inst_data.dicts_req.is_empty(),
                     "Instantiation data for trait method is not supported yet."
                 );
-                let resolved = input_tys.iter().all(|ty| ty.is_trait_input_resolved());
+                // Even a concrete selected implementation can be a dictionary constructor.
+                // Uniform dictionary projection preserves its hidden evidence; capture-free
+                // dictionaries remain symbolic constants and optimize back to direct calls.
                 let (is_value_function, is_function_surface_only, argument_names) = {
                     let trait_def = self.ctx.trait_solver.trait_def(trait_id);
                     let definition = &trait_def.method(method_index).1;
@@ -1813,25 +2039,11 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                     ty.returns_place(),
                     node_span,
                 )?;
-                let call = if is_value_function || resolved {
-                    let function = if is_value_function {
-                        FunctionId::new(
-                            self.ctx.trait_solver.current_type_items.module.id,
-                            function_value_method(
-                                self.ctx.trait_solver,
-                                method_index,
-                                method_span,
-                            )?,
-                        )
-                    } else {
-                        self.ctx.trait_solver.solve_impl_method(
-                            trait_id,
-                            &input_tys,
-                            method_index,
-                            method_span,
-                            &mut self.generated,
-                        )?
-                    };
+                let call = if is_value_function {
+                    let function = FunctionId::new(
+                        self.ctx.trait_solver.current_type_items.module.id,
+                        function_value_method(self.ctx.trait_solver, method_index, method_span)?,
+                    );
                     StaticApply(b(hir::StaticApplication {
                         function,
                         function_path: Some(method_path),
@@ -1866,22 +2078,25 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                         no_effects(),
                         method_span,
                     )?;
-                    call_dictionary_function(dictionary, entry_index, arguments.arguments, ty)
+                    call_dictionary_function(
+                        dictionary,
+                        entry_index,
+                        arguments.arguments,
+                        argument_names,
+                        ty,
+                    )
                 } else {
-                    let dict_index = find_trait_impl_dict_index(
-                        self.ctx.dicts,
+                    let (dict_kind, dict_ty) = trait_dictionary_node_kind(
+                        &mut self.generated,
                         trait_id,
                         &input_tys,
-                    )
-                    .expect(
-                        "Dictionary for trait impl not found, type inference should have failed",
-                    );
-                    let dict_ty =
-                        self.ctx.dicts.requirements[dict_index].to_dict_type(self.ctx.trait_solver);
+                        &[],
+                        &[],
+                        method_span,
+                        self.ctx,
+                    )?;
                     let dictionary = self.elaborate_synthetic_node(
-                        NodeKind::LoadDictionary(hir::LoadDictionary {
-                            extra_parameter: ExtraParameterId::from_index(dict_index),
-                        }),
+                        dict_kind,
                         dict_ty,
                         no_effects(),
                         method_span,
@@ -1891,7 +2106,13 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                         dict_ty,
                         method_index,
                     );
-                    call_dictionary_function(dictionary, entry_index, arguments.arguments, ty)
+                    call_dictionary_function(
+                        dictionary,
+                        entry_index,
+                        arguments.arguments,
+                        argument_names,
+                        ty,
+                    )
                 };
                 self.wrap_call_cleanup(call, arguments.cleanup, node_ty, node_effects, node_span)
             }
@@ -1983,30 +2204,15 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                 let input_tys = get_method.input_tys.clone();
                 let output_tys = get_method.output_tys.clone();
                 let output_effs = get_method.output_effs.clone();
-                let resolved = input_tys.iter().all(|ty| ty.is_trait_input_resolved());
                 let is_value_function = {
                     let trait_def = self.ctx.trait_solver.trait_def(trait_id);
                     is_value_trait_for_function_type(trait_id, trait_def, &input_tys, &output_tys)
                 };
-                if is_value_function || resolved {
-                    let function = if is_value_function {
-                        FunctionId::new(
-                            self.ctx.trait_solver.current_type_items.module.id,
-                            function_value_method(
-                                self.ctx.trait_solver,
-                                method_index,
-                                method_span,
-                            )?,
-                        )
-                    } else {
-                        self.ctx.trait_solver.solve_impl_method(
-                            trait_id,
-                            &input_tys,
-                            method_index,
-                            method_span,
-                            &mut self.generated,
-                        )?
-                    };
+                if is_value_function {
+                    let function = FunctionId::new(
+                        self.ctx.trait_solver.current_type_items.module.id,
+                        function_value_method(self.ctx.trait_solver, method_index, method_span)?,
+                    );
                     GetFunction(b(hir::GetFunction {
                         function,
                         function_path: method_path,
@@ -2052,7 +2258,6 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                 let associated_const_span = get_const.associated_const_span;
                 let input_tys = get_const.input_tys.clone();
                 let output_tys = get_const.output_tys.clone();
-                let resolved = input_tys.iter().all(|ty| ty.is_trait_input_resolved());
                 let is_compiler_value_application = {
                     let trait_def = self.ctx.trait_solver.trait_def(trait_id);
                     is_value_trait_for_function_type(trait_id, trait_def, &input_tys, &output_tys)
@@ -2072,35 +2277,18 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                     Immediate(LiteralValue::new_native(
                         values[usize::from(associated_const_index)],
                     ))
-                } else if resolved {
-                    let function = self.ctx.trait_solver.solve_associated_const_getter(
-                        trait_id,
-                        &input_tys,
-                        associated_const_index,
-                        associated_const_span,
-                        &mut self.generated,
-                    )?;
-                    static_apply(
-                        function,
-                        FnType::new_by_val([], node_ty, no_effects()),
-                        Vec::new(),
-                        associated_const_span,
-                    )
                 } else {
-                    let dict_index = find_trait_impl_dict_index(
-                        self.ctx.dicts,
+                    let (dict_kind, dict_ty) = trait_dictionary_node_kind(
+                        &mut self.generated,
                         trait_id,
                         &input_tys,
-                    )
-                    .expect(
-                        "Dictionary for trait impl not found, type inference should have failed",
-                    );
-                    let dict_ty =
-                        self.ctx.dicts.requirements[dict_index].to_dict_type(self.ctx.trait_solver);
+                        &output_tys,
+                        &[],
+                        associated_const_span,
+                        self.ctx,
+                    )?;
                     let dictionary = self.elaborate_synthetic_node(
-                        NodeKind::LoadDictionary(hir::LoadDictionary {
-                            extra_parameter: ExtraParameterId::from_index(dict_index),
-                        }),
+                        dict_kind,
                         dict_ty,
                         no_effects(),
                         associated_const_span,
@@ -2111,6 +2299,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                             .trait_solver
                             .trait_def(trait_id)
                             .dictionary_associated_const_index(associated_const_index),
+                        Vec::new(),
                         Vec::new(),
                         CallImplType::value(FnType::new_by_val([], node_ty, no_effects())),
                     )
@@ -2131,7 +2320,14 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                 )?;
                 self.elaborate_synthetic_kind(node_kind, node_span)?
             }
-            GetDictionary(get_dict) => GetDictionary(*get_dict),
+            GetDictionary(get_dict) => GetDictionary(hir::GetDictionary {
+                dictionary: get_dict.dictionary,
+                captures: get_dict
+                    .captures
+                    .iter()
+                    .map(|capture| self.elaborate_node(src, *capture))
+                    .collect::<Result<_, _>>()?,
+            }),
             LoadDictionary(load) => LoadDictionary(*load),
             LoadSubscriptEvidence(load) => LoadSubscriptEvidence(*load),
             LoadVariantPayloadStorageEvidence(load) => LoadVariantPayloadStorageEvidence(*load),
@@ -2186,6 +2382,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                     dictionary: self.elaborate_node(src, dictionary)?,
                     entry_index,
                     arguments: arguments.arguments,
+                    argument_names: call.argument_names.clone(),
                     ty,
                 }));
                 self.wrap_call_cleanup(call, arguments.cleanup, node_ty, node_effects, node_span)
@@ -2382,7 +2579,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                             span: node_span,
                         })
                     })?;
-                    VariantPayloadStorageSource::Evidence(ExtraParameterId::from_index(index))
+                    VariantPayloadStorageSource::Evidence(EvidenceBindingId::from_index(index))
                 } else {
                     VariantPayloadStorageSource::Static(variant_payload_storage_for_type(
                         node_ty,
@@ -2809,7 +3006,7 @@ mod tests {
     }
 
     #[test]
-    fn concrete_associated_const_elaborates_to_static_getter_call() {
+    fn concrete_associated_const_elaborates_to_closed_dictionary_getter_call() {
         let traits = vec![layout_trait()];
         let trait_def = &traits[0];
         let trait_id = TraitId::new(ModuleId::new(0), LocalTraitId::new(0));
@@ -2878,11 +3075,15 @@ mod tests {
         let elaborated =
             elaborate_hir(&arena, node, &mut elaborated_arena, &mut ctx, Vec::new()).unwrap();
 
-        let NodeKind::StaticApply(call) = &elaborated_arena[elaborated.root].kind else {
-            panic!("expected associated const to elaborate to a static getter call");
+        let NodeKind::CallDictionaryFunction(call) = &elaborated_arena[elaborated.root].kind else {
+            panic!("expected associated const to elaborate to a dictionary getter call");
         };
         assert!(call.arguments.is_empty());
-        assert_eq!(call.function.function.as_index(), 0);
+        assert_eq!(usize::from(call.entry_index), 0);
+        let NodeKind::GetDictionary(dictionary) = &elaborated_arena[call.dictionary].kind else {
+            panic!("expected dictionary getter source to construct a closed dictionary");
+        };
+        assert!(dictionary.captures.is_empty());
     }
 
     #[test]

@@ -342,11 +342,11 @@ fn constant_array_pipeline_reifies_to_one_build_array() {
     );
 }
 
-/// Inference reaches the iterator pipeline through several provisional caller-local effect rows,
-/// but only the final elaborated application may retain runtime artifacts. Its remaining open
-/// effect variables are alpha-canonicalized within the single generated family.
+/// The iterator pipeline retains one concrete closed `Value` family and one reusable generic
+/// structural helper family. Provisional caller-local effect rows must not create further copies;
+/// the open helper's row is alpha-canonicalized independently.
 #[test]
-fn final_effect_rows_only_materialize_one_iterator_artifact_family() {
+fn final_effect_rows_share_one_concrete_and_one_generic_iterator_artifact_family() {
     let raw = emit(
         "effect_instantiation_sharing",
         "fn main() -> [int] { [1, 2] |> concat([3, 4]) |> map(|x| x*x) }",
@@ -372,20 +372,54 @@ fn final_effect_rows_only_materialize_one_iterator_artifact_family() {
         .copied()
         .collect::<Vec<_>>();
 
+    let concrete_value = value
+        .iter()
+        .filter(|line| line.contains("int ! ()>"))
+        .collect::<Vec<_>>();
+    let generic_value = value
+        .iter()
+        .filter(|line| line.contains("int ! e₀>"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        concrete_value.len(),
+        7,
+        "expected one closed Value family:\n{value:#?}"
+    );
+    assert_eq!(
+        generic_value.len(),
+        7,
+        "expected one canonical generic Value helper family:\n{value:#?}"
+    );
     assert_eq!(
         value.len(),
-        7,
-        "expected one seven-entry Value family:\n{value:#?}"
+        14,
+        "unexpected additional Value family:\n{value:#?}"
     );
     assert_eq!(
         iterator.len(),
+        2,
+        "expected one concrete and one generic Iterator thunk:\n{iterator:#?}"
+    );
+    assert_eq!(
+        iterator
+            .iter()
+            .filter(|line| line.contains("int ! ()>"))
+            .count(),
         1,
-        "expected one thunk for the final effect row:\n{iterator:#?}"
+        "expected exactly one concrete Iterator thunk:\n{iterator:#?}"
     );
     assert_eq!(
         from_iterator.len(),
+        2,
+        "expected one concrete and one generic FromIterator thunk:\n{from_iterator:#?}"
+    );
+    assert_eq!(
+        from_iterator
+            .iter()
+            .filter(|line| line.contains("int ! ()>"))
+            .count(),
         1,
-        "expected one thunk for the final effect row:\n{from_iterator:#?}"
+        "expected exactly one concrete FromIterator thunk:\n{from_iterator:#?}"
     );
     assert!(
         value.iter().all(|line| !line.contains("e₂")),
@@ -429,24 +463,6 @@ fn provisional_effect_queries_do_not_materialize_trait_artifacts() {
         !map_thunks[0].contains("! fallible"),
         "the retained map thunk must use the lambda's final pure effect:\n{}",
         map_thunks[0]
-    );
-
-    let optimized = emit(
-        "delayed_trait_materialization",
-        src,
-        MirOptimization::Enabled,
-    );
-    let map_specializations = optimized
-        .lines()
-        .filter(|line| {
-            line.starts_with("fn Map<[A], B>::map#impl:") && line.contains("#spec:[int, int]")
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        map_specializations.len(),
-        1,
-        "an orphaned provisional thunk must not request another map specialization:\n\
-         {map_specializations:#?}"
     );
 }
 

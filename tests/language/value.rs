@@ -1885,7 +1885,7 @@ fn managed_overlap_snapshot_is_owned_and_semantically_dropped() {
     assert!(matches!(snapshot.storage, LocalStorage::Owned { .. }));
     assert!(matches!(
         snapshot.local_drop(),
-        Some(ResolvedLocalDrop::Static(_))
+        Some(ResolvedLocalDrop::Dictionary(_))
     ));
     assert!(hir_has_cleanup(
         &module.hir_arena,
@@ -1894,7 +1894,7 @@ fn managed_overlap_snapshot_is_owned_and_semantically_dropped() {
     assert!(module.hir_arena.iter().any(|(_, node)| matches!(
         node.kind,
         NodeKind::CloneValue(hir::CloneValue {
-            clone: ResolvedLocalClone::Static(_),
+            clone: ResolvedLocalClone::Dictionary(_),
             ..
         })
     )));
@@ -2450,7 +2450,7 @@ fn inline_variants_are_trivial_copy_but_recursive_named_types_are_not() {
         .unwrap();
     assert!(matches!(
         list_copy.clone,
-        Some(ResolvedLocalClone::Static(_))
+        Some(ResolvedLocalClone::Dictionary(_))
     ));
     assert_eq!(
         module
@@ -2505,6 +2505,71 @@ fn variant_values_retain_canonical_inline_or_indirect_payload_storage() {
             value.discard_storage();
         }
     }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn recursive_generic_value_reuses_its_closed_dictionary() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(
+            r#"
+            type List<T> = Nil | Cons(T, List<T>);
+
+            fn duplicate<T>(value: T) -> (T, T)
+            where
+                T: Value
+            {
+                (value, value)
+            }
+
+            let values = Cons("a", Cons("b", Nil));
+            let copies = duplicate(values);
+            (to_string(copies.0), to_string(copies.1), copies.0 == copies.1)
+            "#,
+        ),
+        tuple!(
+            string("Cons (a, Cons (b, Nil))"),
+            string("Cons (a, Cons (b, Nil))"),
+            bool_value(true)
+        )
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_derived_value_dictionary_captures_every_prerequisite_operation() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(
+            r#"
+            struct Wrapper<T>(T)
+
+            fn exercise<T>(left: Wrapper<T>, right: Wrapper<T>)
+            where
+                T: Value
+            {
+                let copied = left;
+                (
+                    copied == right,
+                    to_string(copied),
+                    value_hash(copied) == value_hash(right),
+                    Value::<Wrapper<T>>::SIZE,
+                    Value::<Wrapper<T>>::ALIGN,
+                )
+            }
+
+            exercise(Wrapper(42), Wrapper(42))
+            "#,
+        ),
+        tuple!(
+            bool_value(true),
+            string("Wrapper (42)"),
+            bool_value(true),
+            int(8),
+            int(8)
+        )
+    );
 }
 
 #[test]
@@ -2741,7 +2806,7 @@ fn named_type_with_custom_value_impl_is_not_trivial_copy() {
     assert!(module.hir_arena.iter().any(|(_, node)| matches!(
         node.kind,
         NodeKind::CloneValue(hir::CloneValue {
-            clone: ResolvedLocalClone::Static(_),
+            clone: ResolvedLocalClone::Dictionary(_),
             ..
         })
     )));
@@ -2790,7 +2855,10 @@ fn custom_value_impl_remains_non_trivial_copy_across_modules() {
         .iter()
         .find(|local| local.name.0 == ustr("copy"))
         .unwrap();
-    assert!(matches!(copy.clone, Some(ResolvedLocalClone::Static(_))));
+    assert!(matches!(
+        copy.clone,
+        Some(ResolvedLocalClone::Dictionary(_))
+    ));
     assert!(!module.hir_arena.iter().any(|(_, node)| matches!(
         node.kind,
         NodeKind::CloneValue(hir::CloneValue {
@@ -3067,8 +3135,14 @@ fn mutable_literal_initialized_local_drop_is_resolved_from_its_type() {
             .local_drop()
             .copied()
     };
-    assert!(matches!(drop_of("ok"), Some(ResolvedLocalDrop::Static(_))));
-    assert!(matches!(drop_of("s"), Some(ResolvedLocalDrop::Static(_))));
+    assert!(matches!(
+        drop_of("ok"),
+        Some(ResolvedLocalDrop::Dictionary(_))
+    ));
+    assert!(matches!(
+        drop_of("s"),
+        Some(ResolvedLocalDrop::Dictionary(_))
+    ));
 }
 
 /// An empty `struct` whose `Value::drop` records a side effect. A zero-field aggregate has no

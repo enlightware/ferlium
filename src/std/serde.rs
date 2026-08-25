@@ -21,12 +21,12 @@ use crate::{
         function::CallableDefinition,
         value_dispatch::{
             materialize_static_string, prepare_generated_call_arguments_with_locals,
-            static_apply_generated_with_locals,
+            static_apply_generated_with_locals, trait_apply_generated_with_locals,
         },
     },
     module::{
         self, LocalDecl, LocalDeclId, Module, PendingFunctionBody, PendingLocalClone,
-        ProjectionIndex, ResolvedLocalClone, TraitId, TraitImplId, id::Id,
+        ProjectionIndex, TraitId, TraitImplId, id::Id,
     },
     std::{
         array::array_type,
@@ -34,7 +34,6 @@ use crate::{
         data_value::data_value_record_entry_type,
         math::int_type,
         string::string_type,
-        value::VALUE_CLONE_METHOD_INDEX,
     },
     types::effects::{EffType, PrimitiveEffect},
     types::mutability::MutVal,
@@ -81,20 +80,21 @@ fn build_serialize_projection(
         project(load_node, ProjectionIndex::from_index(index))
     };
     let project_node = alloc_synth_node(arena, projection, member_ty);
-    let function = solver.solve_impl_method(
+    solver.solve_impl_method(
         trait_id,
         &[member_ty],
         TraitMethodIndex::new(0),
         span,
         arena,
     )?;
-    static_apply_generated_with_locals(
+    trait_apply_generated_with_locals(
         arena,
         locals,
         solver,
-        function,
-        [(project_node, member_ty)],
-        data_value_type(),
+        trait_id,
+        vec![member_ty],
+        TraitMethodIndex::new(0),
+        [project_node],
         span,
     )
 }
@@ -341,6 +341,7 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
             input_types,
             &[],
             &[],
+            &[],
             [(PendingFunctionBody::new(body_arena, root), locals)],
         );
         Ok(Some(TraitImplId::new(
@@ -384,15 +385,15 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                                  solver: &mut TraitSolver,
                                  data: NodeId,
                                  ty: Type| {
-            let function =
-                solver.solve_impl_method(trait_id, &[ty], TraitMethodIndex::new(0), span, arena)?;
-            static_apply_generated_with_locals(
+            solver.solve_impl_method(trait_id, &[ty], TraitMethodIndex::new(0), span, arena)?;
+            trait_apply_generated_with_locals(
                 arena,
                 locals,
                 solver,
-                function,
-                [(data, data_value_type())],
-                ty,
+                trait_id,
+                vec![ty],
+                TraitMethodIndex::new(0),
+                [data],
                 Location::new_synthesized(),
             )
         };
@@ -449,14 +450,7 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
             let data_value_dictionary_ty = solver
                 .trait_def(value_trait_id)
                 .get_dictionary_type_for_tys(&[data_value_ty], &[], &[]);
-            let data_value_clone =
-                PendingLocalClone::Resolved(ResolvedLocalClone::Static(solver.solve_impl_method(
-                    value_trait_id,
-                    &[data_value_ty],
-                    VALUE_CLONE_METHOD_INDEX,
-                    span,
-                    arena,
-                )?));
+            let data_value_clone = PendingLocalClone::Unknown;
             // store it at 1
             let (store_array, l_array_id) = store_new_local(
                 get_array,
@@ -511,6 +505,7 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                         arena,
                         hir::NodeKind::GetDictionary(hir::GetDictionary {
                             dictionary: data_value_dictionary,
+                            captures: Vec::new(),
                         }),
                         data_value_dictionary_ty,
                     );
@@ -591,20 +586,21 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                         &name,
                     )?;
                     // deserialize the name-th element
-                    let function = solver.solve_impl_method(
+                    solver.solve_impl_method(
                         trait_id,
                         &[ty],
                         TraitMethodIndex::new(0),
                         span,
                         arena,
                     )?;
-                    static_apply_generated_with_locals(
+                    trait_apply_generated_with_locals(
                         arena,
                         &mut locals,
                         solver,
-                        function,
-                        [(get_entry, data_value_type())],
-                        ty,
+                        trait_id,
+                        vec![ty],
+                        TraitMethodIndex::new(0),
+                        [get_entry],
                         Location::new_synthesized(),
                     )
                 })
@@ -701,6 +697,7 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
             impl_id,
             trait_id,
             input_types,
+            &[],
             &[],
             &[],
             [(PendingFunctionBody::new(body_arena, root), locals)],

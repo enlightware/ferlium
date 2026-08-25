@@ -20,10 +20,13 @@ use crate::{
     containers::b,
     define_id_type,
     format::{FormatWith, write_with_separator_and_format_fn},
-    hir::function::{CallableDefinition, Function, PendingScriptFunction, ScriptFunction},
     hir::hir_syn,
     hir::value::LiteralValue,
     hir::{ENodeArena, NodeArena},
+    hir::{
+        dictionary::DictionaryReq,
+        function::{CallableDefinition, Function, PendingScriptFunction, ScriptFunction},
+    },
     module::{
         LocalDecl, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleId, PendingModuleFunction,
         QualifiedNameEnv, TraitId, Visibility, id::Id, unique_generated_name,
@@ -98,6 +101,7 @@ pub struct TraitImplId {
 }
 
 /// Canonical runtime handle to a trait dictionary body owned by a compiled module.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, new)]
 pub struct TraitDictionaryId {
     pub module_id: ModuleId,
@@ -196,6 +200,15 @@ impl TraitKey {
 #[derive(Debug, Clone)]
 pub struct TraitDictionary {
     functions: Vec<LocalFunctionId>,
+    capture_schema: Vec<DictionaryReq>,
+    entry_capture_mappings: Vec<Vec<DictionaryEntryEvidence>>,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DictionaryEntryEvidence {
+    Capture(usize),
+    SelfDictionary,
 }
 
 /// A projected entry from a runtime trait dictionary.
@@ -206,17 +219,75 @@ pub enum TraitDictionaryEntry {
 
 impl TraitDictionary {
     pub fn new(methods: &[LocalFunctionId], associated_const_getters: &[LocalFunctionId]) -> Self {
+        let entry_count = methods.len() + associated_const_getters.len();
         Self {
             functions: methods
                 .iter()
                 .chain(associated_const_getters)
                 .copied()
                 .collect(),
+            capture_schema: Vec::new(),
+            entry_capture_mappings: vec![Vec::new(); entry_count],
         }
+    }
+
+    pub fn with_captures(
+        mut self,
+        capture_schema: Vec<DictionaryReq>,
+        entry_capture_mappings: Vec<Vec<DictionaryEntryEvidence>>,
+    ) -> Self {
+        assert_eq!(entry_capture_mappings.len(), self.functions.len());
+        assert!(
+            entry_capture_mappings
+                .iter()
+                .flatten()
+                .all(|evidence| match evidence {
+                    DictionaryEntryEvidence::Capture(index) => *index < capture_schema.len(),
+                    DictionaryEntryEvidence::SelfDictionary => true,
+                })
+        );
+        self.capture_schema = capture_schema;
+        self.entry_capture_mappings = entry_capture_mappings;
+        self
+    }
+
+    pub fn capture_schema(&self) -> &[DictionaryReq] {
+        &self.capture_schema
+    }
+
+    pub fn entry_capture_mappings(&self) -> &[Vec<DictionaryEntryEvidence>] {
+        &self.entry_capture_mappings
     }
 
     pub fn entry(&self, index: TraitDictionaryEntryIndex) -> TraitDictionaryEntry {
         TraitDictionaryEntry::Function(self.functions[index.as_index()])
+    }
+
+    pub fn entry_capture_mapping(
+        &self,
+        index: TraitDictionaryEntryIndex,
+    ) -> &[DictionaryEntryEvidence] {
+        &self.entry_capture_mappings[index.as_index()]
+    }
+
+    /// Project one entry's hidden evidence from a closed dictionary's captures.
+    ///
+    /// Keeping this beside the canonical mapping prevents the boxed interpreters, MIR lowering,
+    /// and optimizer from implementing the `SelfDictionary` rule independently. `self_evidence`
+    /// is lazy because almost every mapping contains captures only.
+    pub fn project_entry_captures<E: Clone>(
+        &self,
+        index: TraitDictionaryEntryIndex,
+        captures: &[E],
+        mut self_evidence: impl FnMut() -> E,
+    ) -> Option<Vec<E>> {
+        self.entry_capture_mapping(index)
+            .iter()
+            .map(|mapping| match mapping {
+                DictionaryEntryEvidence::Capture(index) => captures.get(*index).cloned(),
+                DictionaryEntryEvidence::SelfDictionary => Some(self_evidence()),
+            })
+            .collect()
     }
 }
 
@@ -225,6 +296,16 @@ pub fn build_dictionary_value(
     associated_const_getters: &[LocalFunctionId],
 ) -> TraitDictionary {
     TraitDictionary::new(methods, associated_const_getters)
+}
+
+pub fn build_capturing_dictionary_value(
+    methods: &[LocalFunctionId],
+    associated_const_getters: &[LocalFunctionId],
+    capture_schema: Vec<DictionaryReq>,
+    entry_capture_mappings: Vec<Vec<DictionaryEntryEvidence>>,
+) -> TraitDictionary {
+    TraitDictionary::new(methods, associated_const_getters)
+        .with_captures(capture_schema, entry_capture_mappings)
 }
 
 /// An implementation of a trait.

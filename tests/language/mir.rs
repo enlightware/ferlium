@@ -1042,7 +1042,7 @@ fn nested_place_call() {
     %r0: *int = alloca int
     store @c0 to %r0
     %r1: **[int] = alloca_place [int]
-    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(<test>::std::Value<[std::int]>), %p0, %r0, %r1) -> b1 error b2
+    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(<test>::std::Value<[std::int]>; captures: [dict(std::Value<std::int>)]), %p0, %r0, %r1) -> b1 error b2
   b1:
     %r2: *[int] = load %r1
     %r3: *int = alloca int
@@ -1072,7 +1072,7 @@ fn place_call_as_let_argument() {
     %r0: *int = alloca int
     store @c0 to %r0
     %r1: **[int] = alloca_place [int]
-    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(<test>::std::Value<[std::int]>), %p0, %r0, %r1) -> b1 error b2
+    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(<test>::std::Value<[std::int]>; captures: [dict(std::Value<std::int>)]), %p0, %r0, %r1) -> b1 error b2
   b1:
     %r2: *[int] = load %r1
     call <test>::g(%r2, %p1)
@@ -1102,7 +1102,7 @@ fn place_call_as_mutable_ref_argument() {
     %r0: *int = alloca int
     store @c0 to %r0
     %r1: **[int] = alloca_place [int]
-    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(<test>::std::Value<[std::int]>), %p0, %r0, %r1) -> b1 error b2
+    invoke call std::array_index::ref_mut#subscript:c5ecddd5(dict(<test>::std::Value<[std::int]>; captures: [dict(std::Value<std::int>)]), %p0, %r0, %r1) -> b1 error b2
   b1:
     %r2: *[int] = load %r1
     call <test>::g(%r2, %p1)

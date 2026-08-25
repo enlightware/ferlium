@@ -8,11 +8,11 @@
 //
 //! Dropping the dictionary parameters a specialization no longer reads.
 //!
-//! Specializing binds every dictionary parameter to the constant its call site passed, so **a
-//! specialization has no live evidence parameter by construction** — `bind_dictionaries` replaces
-//! every operand naming one, and `monomorphize`'s own tests assert that none survives. This is
-//! therefore not an analysis: the parameters are known dead before the pass looks at anything, and
-//! all that remains is to remove them from the signature and from every call that passes them.
+//! Type/evidence specialization binds every dictionary parameter to the constant its call site
+//! passed, so those parameters are dead by construction. Owned-ABI variants are stored in the same
+//! specialization table and may retain the evidence parameters of a generated thunk, however. This
+//! pass therefore removes a dictionary prefix only when none of it is read, then removes the same
+//! operands from every call that targets the narrowed body.
 //!
 //! **Whole-module and after the fact.** A parameter deletion changes every caller, and running it
 //! once over the finished artifacts is what keeps it from changing anything else: the optimizer
@@ -54,7 +54,7 @@ pub(crate) fn drop_dead_specialization_evidence(
     let first_index = functions.len();
     let dropped: Vec<usize> = specializations
         .iter()
-        .map(|specialization| dictionary_parameters(&specialization.body))
+        .map(|specialization| dead_dictionary_parameters(&specialization.body))
         .collect();
     if dropped.iter().all(|&count| count == 0) {
         return specializations;
@@ -91,12 +91,37 @@ pub(crate) fn drop_dead_specialization_evidence(
         .collect()
 }
 
-/// The number of dictionary parameters in `body`'s signature.
-fn dictionary_parameters(body: &Function) -> usize {
-    body.parameters()
+/// The number of dictionary parameters that may all be removed from `body`'s signature.
+fn dead_dictionary_parameters(body: &Function) -> usize {
+    let dictionaries = body
+        .parameters()
         .iter()
-        .filter(|parameter| matches!(parameter.kind, ParameterKind::Dictionary))
-        .count()
+        .enumerate()
+        .filter(|(_, parameter)| matches!(parameter.kind, ParameterKind::Dictionary))
+        .map(|(index, _)| mir::ParameterId::from_index(index))
+        .collect::<Vec<_>>();
+    if dictionaries.is_empty() {
+        return 0;
+    }
+    let reads_dictionary = body.blocks().any(|block_id| {
+        let block = body.block(block_id);
+        block
+            .operations()
+            .iter()
+            .chain(match &block.terminator().kind {
+                TerminatorKind::Invoke { operation, .. } => Some(operation),
+                _ => None,
+            })
+            .flat_map(|operation| operation.operands.iter())
+            .any(
+                |operand| matches!(operand, mir::Value::Parameter(id) if dictionaries.contains(id)),
+            )
+    });
+    if reads_dictionary {
+        0
+    } else {
+        dictionaries.len()
+    }
 }
 
 /// Narrows one body: its own signature by `own`, and every call it makes to a narrowed callee.
@@ -149,11 +174,16 @@ fn rewrite(
                 count
             );
             assert!(
-                operation.operands[1..visible_start]
-                    .iter()
-                    .all(|operand| matches!(operand, mir::Value::Dictionary(_))),
+                operation.operands[1..visible_start].iter().all(|operand| {
+                    matches!(
+                        operand,
+                        mir::Value::Dictionary(_)
+                            | mir::Value::Subscript(_)
+                            | mir::Value::Evidence(_)
+                    )
+                }),
                 "MIR function `{}`: a call to a specialization passes hidden evidence that is not \
-                 a constant dictionary",
+                 recursively static",
                 name
             );
             let mut operands = std::mem::take(&mut operation.operands).into_vec();
@@ -196,7 +226,7 @@ mod tests {
     /// operands, which is exactly the shape that shifts every argument the callee binds
     /// positionally.
     #[test]
-    fn no_specialization_in_optimized_std_keeps_or_is_passed_evidence() {
+    fn dead_specialization_evidence_is_removed_and_owned_thunk_evidence_is_retained() {
         let mut session = CompilerSession::new();
         session.set_mir_optimization(MirOptimization::Enabled);
         let (std_id, _) = session
@@ -218,18 +248,33 @@ mod tests {
         );
         let mut removed = 0;
         for specialization in optimized.specializations() {
-            assert_eq!(
-                dictionary_parameters(&specialization.body),
-                0,
-                "specialization `{}` keeps a dictionary parameter it cannot read",
-                specialization.name
-            );
+            let retained = specialization
+                .body
+                .parameters()
+                .iter()
+                .filter(|parameter| matches!(parameter.kind, ParameterKind::Dictionary))
+                .count();
+            if retained > 0 {
+                assert!(
+                    specialization.name.as_str().contains("#owned:"),
+                    "only an owned-ABI thunk variant may retain live evidence: {}",
+                    specialization.name
+                );
+                assert_eq!(dead_dictionary_parameters(&specialization.body), 0);
+            }
             let original = specialization.original;
             assert_eq!(
                 original.module, std_id,
                 "a std specialization of another module's function is not expected here"
             );
-            removed += raw.get(original.function).map_or(0, dictionary_parameters);
+            if retained == 0 {
+                removed += raw.get(original.function).map_or(0, |body| {
+                    body.parameters()
+                        .iter()
+                        .filter(|parameter| matches!(parameter.kind, ParameterKind::Dictionary))
+                        .count()
+                });
+            }
         }
         assert!(
             removed > 0,

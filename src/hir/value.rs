@@ -119,9 +119,25 @@ pub enum CompoundValueType {
 /// constraints are represented as first-class subscript capabilities.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HiddenEvidenceArgValue {
-    TraitDictionary(TraitDictionaryId),
+    TraitDictionary(ClosedTraitDictionary),
     Subscript(B<SubscriptValue>),
     VariantPayloadStorage(VariantPayloadStorage),
+}
+
+/// Runtime evidence for one instantiated trait application.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClosedTraitDictionary {
+    pub definition: TraitDictionaryId,
+    pub captures: Vec<HiddenEvidenceArgValue>,
+}
+
+impl ClosedTraitDictionary {
+    pub fn bare(definition: TraitDictionaryId) -> Self {
+        Self {
+            definition,
+            captures: Vec::new(),
+        }
+    }
 }
 
 /// Whether a variant case payload occurs directly in its union slot or through an owning pointer
@@ -191,7 +207,7 @@ pub struct FunctionValue {
     pub closure_env_len: usize,
     /// Runtime `Value` dictionary metadata for cloning/dropping `closure_env`.
     /// `None` means `closure_env_len == 0`.
-    pub closure_env_value_dictionary: Option<TraitDictionaryId>,
+    pub closure_env_value_dictionary: Option<ClosedTraitDictionary>,
 }
 
 impl FunctionValue {
@@ -209,7 +225,7 @@ impl FunctionValue {
         function: FunctionId,
         hidden_args: Vec<HiddenEvidenceArgValue>,
         captures: Vec<Value>,
-        closure_env_value_dictionary: Option<TraitDictionaryId>,
+        closure_env_value_dictionary: Option<ClosedTraitDictionary>,
     ) -> Self {
         let closure_env_len = captures.len();
         debug_assert_eq!(closure_env_value_dictionary.is_some(), closure_env_len > 0);
@@ -894,7 +910,7 @@ mod tests {
                 FunctionId::new(ModuleId::from_index(0), LocalFunctionId::from_index(0)),
                 Vec::new(),
                 vec![Value::native(RustDropTracked)],
-                Some(dictionary),
+                Some(ClosedTraitDictionary::bare(dictionary)),
             )),
             Value::subscript(SubscriptId::new(
                 ModuleId::from_index(0),

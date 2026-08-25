@@ -30,20 +30,26 @@ use crate::{
     hir::{
         function::{ArgConvention, copy_boxed_trivial_copy_native},
         value::{
-            FunctionValue, HiddenEvidenceArgValue, LiteralValue, SubscriptValue, Value,
-            VariantPayloadStorage,
+            ClosedTraitDictionary, FunctionValue, HiddenEvidenceArgValue, LiteralValue,
+            SubscriptValue, Value, VariantPayloadStorage,
         },
     },
     mir::{self, BlockId, Operation, OperationKind, terminator::TerminatorKind},
     module::{
-        FunctionId, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleId, TraitDictionaryId,
-        id::Id, trait_impl::TraitDictionaryEntry,
+        FunctionId, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleId, id::Id,
+        trait_impl::TraitDictionaryEntry,
     },
     std::{array::array_value_from_vec, buffer},
     types::{
         r#trait::TraitDictionaryEntryIndex,
         r#type::{Type, TypeKind},
     },
+};
+
+#[cfg(debug_assertions)]
+use crate::{
+    module::LocalImplId,
+    std::{core_traits_names::VALUE_TRAIT_NAME, value::VALUE_DROP_METHOD_INDEX},
 };
 
 /// A key uniquely identifying a function across modules.
@@ -70,7 +76,7 @@ enum Binding {
     /// A symbolic trait dictionary (an interned id), the binding of a `Dictionary` constant or a
     /// forwarded dictionary `@extra` parameter. Dispatched through the interned id; never
     /// materialized into a tuple.
-    Dictionary(TraitDictionaryId),
+    Dictionary(ClosedTraitDictionary),
     /// A saved top of the stack (the `environment` length), the result of a `stack_save`.
     StackMarker(usize),
     /// An open scoped projection (the result of a `project`): the exposed yielded place — used by the
@@ -88,7 +94,7 @@ pub(crate) enum CallArgument {
     /// An owned value for a visible parameter. The callee receives its place.
     Value(Value),
     /// A symbolic trait dictionary for a hidden evidence parameter.
-    Dictionary(TraitDictionaryId),
+    Dictionary(ClosedTraitDictionary),
 }
 
 /// Owned call arguments, consumed one at a time as they are bound to parameters.
@@ -189,6 +195,9 @@ pub struct Interpreter<'a> {
     /// Present only for explicitly profiled runs; ordinary interpretation pays one predictable
     /// branch per executed MIR instruction and allocates no counter state.
     profile: Option<mir::profile::MirExecutionProfile>,
+    /// Memoized semantic classification used only by debug call-boundary assertions.
+    #[cfg(debug_assertions)]
+    value_drop_functions: FxHashMap<FunctionId, bool>,
 }
 
 impl<'a> Interpreter<'a> {
@@ -227,6 +236,8 @@ impl<'a> Interpreter<'a> {
             session,
             stage,
             profile: None,
+            #[cfg(debug_assertions)]
+            value_drop_functions: FxHashMap::default(),
         }
     }
 
@@ -339,13 +350,13 @@ impl<'a> Interpreter<'a> {
         #[cfg(debug_assertions)]
         let boundary = Self::call_boundary(&parameter_tags, &bindings);
         #[cfg(debug_assertions)]
-        self.check_call_boundary(&boundary, CallPhase::Before);
+        self.check_call_boundary(&boundary, CallPhase::Before, false);
         if let Err(error) = self.run_function(key, bindings) {
             self.reclaim_frame_storage(entry_top);
             return Err(error);
         }
         #[cfg(debug_assertions)]
-        self.check_call_boundary(&boundary, CallPhase::After);
+        self.check_call_boundary(&boundary, CallPhase::After, false);
         let slot = ret
             .target_mut(&mut self.ctx)
             .expect("return cell must be addressable");
@@ -479,6 +490,51 @@ impl<'a> Interpreter<'a> {
             .expect("callee function not found")
     }
 
+    /// Whether this script is a `Value::drop` implementation (or its dictionary-entry thunk).
+    /// Such a call is surface-typed as taking `&mut T`, but its compiler-owned contract ends the
+    /// pointee's lifetime, so the post-call boundary is intentionally a husk.
+    #[cfg(debug_assertions)]
+    fn is_value_drop_function(&mut self, key: FunctionKey) -> bool {
+        let semantic = self.session.hir_identity_of(
+            FunctionId {
+                module: key.module,
+                function: key.identity,
+            },
+            self.stage,
+        );
+        if let Some(is_drop) = self.value_drop_functions.get(&semantic) {
+            return *is_drop;
+        }
+        let module = self.session.expect_fresh_module(semantic.module);
+        let env = ModuleEnv::new(module, self.session.raw_modules());
+        let value_trait = env.expect_std_trait_id(VALUE_TRAIT_NAME);
+        let drop_entry = env
+            .trait_def(value_trait)
+            .dictionary_method_index(VALUE_DROP_METHOD_INDEX);
+        let is_drop = (0..module.impl_count()).any(|index| {
+            let impl_id = LocalImplId::from_index(index);
+            let Some(key) = module.get_impl_trait_key_by_id(impl_id) else {
+                return false;
+            };
+            if key.trait_id() != value_trait {
+                return false;
+            }
+            let implementation = module
+                .get_impl_data(impl_id)
+                .expect("implementation index came from this module");
+            implementation
+                .methods
+                .get(VALUE_DROP_METHOD_INDEX.as_index())
+                .is_some_and(|function| *function == semantic.function)
+                || matches!(
+                    implementation.dictionary_value.entry(drop_entry),
+                    TraitDictionaryEntry::Function(function) if function == semantic.function
+                )
+        });
+        self.value_drop_functions.insert(semantic, is_drop);
+        is_drop
+    }
+
     /// Returns the immutable MIR body stored beside the function's semantic module revision.
     fn function(&self, key: FunctionKey) -> &'a mir::Function {
         self.session
@@ -498,6 +554,16 @@ impl<'a> Interpreter<'a> {
     /// `CheckCallDepth` in recursive functions; lowering preserves that check explicitly, so frame
     /// entry only maintains the counter and does not impose an additional backend-specific limit.
     fn run_function(&mut self, key: FunctionKey, args: Vec<Binding>) -> Result<(), RuntimeError> {
+        let function = self.function(key);
+        assert_eq!(
+            args.len(),
+            function.parameters().len(),
+            "MIR call to {}:{} supplied {} bindings for {} parameters",
+            key.module,
+            key.identity,
+            args.len(),
+            function.parameters().len(),
+        );
         // Parameters point into caller-owned storage. Everything allocated above this marker belongs
         // to the callee and must be reclaimed when its frame completes or unwinds. Addressor-place
         // results are statically required to remain caller-rooted, while yielded accessors use the
@@ -673,6 +739,21 @@ impl<'a> Interpreter<'a> {
             }
             OperationKind::DictEntry { entry_index, .. } => {
                 self.exec_dict_entry(slots, &operation.operands, def.unwrap(), *entry_index, span)?;
+            }
+            OperationKind::BuildDictionary { definition, .. } => {
+                let captures = operation
+                    .operands
+                    .iter()
+                    .map(|operand| self.hidden_evidence_operand(slots, operand))
+                    .collect();
+                Self::bind(
+                    slots,
+                    def.unwrap(),
+                    Binding::Dictionary(ClosedTraitDictionary {
+                        definition: *definition,
+                        captures,
+                    }),
+                );
             }
             OperationKind::SubscriptMember { mut_member, .. } => {
                 self.exec_subscript_member(
@@ -851,13 +932,25 @@ impl<'a> Interpreter<'a> {
         entry_index: TraitDictionaryEntryIndex,
         span: Location,
     ) -> Result<(), RuntimeError> {
-        let id = self.dict_operand(slots, &operands[0]);
-        let entry = self.ctx.dictionary_value(id).entry(entry_index);
+        let dictionary = self.dict_operand(slots, &operands[0]);
+        let dictionary_definition = self.ctx.dictionary_value(&dictionary);
+        let entry = dictionary_definition.entry(entry_index);
         let value = match entry {
-            TraitDictionaryEntry::Function(function) => Value::function(FunctionId {
-                module: id.module_id,
-                function,
-            }),
+            TraitDictionaryEntry::Function(function) => {
+                Value::function_value(FunctionValue::closure(
+                    FunctionId {
+                        module: dictionary.definition.module_id,
+                        function,
+                    },
+                    dictionary_definition
+                        .project_entry_captures(entry_index, &dictionary.captures, || {
+                            HiddenEvidenceArgValue::TraitDictionary(dictionary.clone())
+                        })
+                        .expect("validated dictionary entry capture mapping"),
+                    Vec::new(),
+                    None,
+                ))
+            }
         };
         let place = self.alloc_cell(value, span)?;
         Self::bind(slots, def, Binding::Place(place));
@@ -1132,8 +1225,8 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    /// Executes a `drop` operation `[target, callee]`: if `target`'s pointee is initialized, runs
-    /// the `Value::drop` `callee` on it and leaves the cell uninitialized.
+    /// Executes a `drop` operation `[target, callee, hidden evidence...]`: if `target`'s pointee is
+    /// initialized, runs the `Value::drop` `callee` on it and leaves the cell uninitialized.
     /// Executes a `clone`: a call to `Value::clone` with the source and destination places as its
     /// arguments, which is what it was before it became an operation of its own. The two places sit
     /// contiguously at the front of the operand list, so the call machinery takes them unchanged.
@@ -1144,16 +1237,14 @@ impl<'a> Interpreter<'a> {
         operands: &[mir::Value],
         span: Location,
     ) -> Result<(), RuntimeError> {
-        let (module, identity) = self.callee_target(slots, &operands[2]);
-        self.exec_resolved_call(
-            slots,
-            module,
-            identity,
-            Vec::new(),
-            0,
-            &operands[0..2],
-            span,
-        )
+        let (module, identity, mut hidden_args) = self.callee_target(slots, &operands[2]);
+        hidden_args.extend(
+            operands[3..]
+                .iter()
+                .map(|operand| self.hidden_evidence_operand(slots, operand)),
+        );
+        let leading = self.hidden_evidence_bindings(&hidden_args, span)?;
+        self.exec_resolved_call(slots, module, identity, leading, 0, &operands[0..2], span)
     }
 
     fn exec_drop(
@@ -1176,16 +1267,22 @@ impl<'a> Interpreter<'a> {
         if skip {
             return Ok(());
         }
-        let (module, identity) = self.callee_target(slots, &operands[1]);
+        let (module, identity, mut hidden_args) = self.callee_target(slots, &operands[1]);
+        hidden_args.extend(
+            operands[2..]
+                .iter()
+                .map(|operand| self.hidden_evidence_operand(slots, operand)),
+        );
         let f = self.hir_function(module, identity);
         let drop_result = if f.code.as_script().is_some() {
             // A script `Value::drop(&mut self)` in the uniform by-pointer ABI: `drop(self, ())`. Its
             // `()` out-pointer starts a husk like any `@ret`; the drop body writes it (discarded after).
             match self.alloc_cell(Value::uninit(), span) {
-                Ok(unit_ret) => self.run_function(
-                    FunctionKey { module, identity },
-                    vec![Binding::Place(target.clone()), Binding::Place(unit_ret)],
-                ),
+                Ok(unit_ret) => {
+                    let mut args = self.hidden_evidence_bindings(&hidden_args, span)?;
+                    args.extend([Binding::Place(target.clone()), Binding::Place(unit_ret)]);
+                    self.run_function(FunctionKey { module, identity }, args)
+                }
                 Err(error) => Err(error),
             }
         } else {
@@ -1198,7 +1295,7 @@ impl<'a> Interpreter<'a> {
                         module,
                         function: identity,
                     },
-                    vec![],
+                    hidden_args,
                     vec![ValOrMut::Mut(target.clone())],
                     span,
                 )
@@ -1323,7 +1420,9 @@ impl<'a> Interpreter<'a> {
                 let mut leading: Vec<Binding> = Vec::with_capacity(hidden_args.len());
                 for arg in &hidden_args {
                     leading.push(match arg {
-                        HiddenEvidenceArgValue::TraitDictionary(id) => Binding::Dictionary(*id),
+                        HiddenEvidenceArgValue::TraitDictionary(id) => {
+                            Binding::Dictionary(id.clone())
+                        }
                         HiddenEvidenceArgValue::Subscript(subscript) => {
                             Binding::Place(self.alloc_cell(
                                 Value::subscript_value(subscript.as_ref().clone()),
@@ -1376,6 +1475,8 @@ impl<'a> Interpreter<'a> {
             for op in extra_ops {
                 let arg = if let Some(id) = self.try_dict_operand(slots, op) {
                     ValOrMut::Dictionary(id)
+                } else if let mir::Value::Evidence(evidence) = op {
+                    static_evidence_argument(evidence)
                 } else if let mir::Value::Subscript(id) = op {
                     ValOrMut::Val(Value::subscript(*id))
                 } else {
@@ -1521,7 +1622,12 @@ impl<'a> Interpreter<'a> {
     /// owned argument is live before and moved out after; the return out-pointer is **fresh** before
     /// the call and **fully initialized** when the callee returns normally. Evidence is skipped.
     #[cfg(debug_assertions)]
-    fn check_call_boundary(&self, boundary: &[(mir::ParameterKind, Place)], phase: CallPhase) {
+    fn check_call_boundary(
+        &self,
+        boundary: &[(mir::ParameterKind, Place)],
+        phase: CallPhase,
+        drop_target_may_be_consumed: bool,
+    ) {
         for (tag, place) in boundary {
             // Read the pointee. A place that projects through (or ends at) uninitialized storage has
             // no value to read — `boundary_pointee` returns `None`, which the check treats as a husk
@@ -1530,7 +1636,10 @@ impl<'a> Interpreter<'a> {
             match tag {
                 // A `&mut`/`&`/trivial-copy argument must point at a live value, before and after.
                 mir::ParameterKind::Parameter(passing) => assert!(
-                    !is_husk,
+                    !is_husk
+                        || (drop_target_may_be_consumed
+                            && matches!(phase, CallPhase::After)
+                            && passing == &ArgConvention::MutableRef),
                     "MIR call boundary: an argument passed as {passing:?} is a husk {phase} the \
                      call; a `&mut`/`&`/trivial-copy argument must point at a live value",
                 ),
@@ -1664,12 +1773,14 @@ impl<'a> Interpreter<'a> {
             #[cfg(debug_assertions)]
             let boundary = Self::call_boundary(&param_tags[offset..], &args[offset..]);
             #[cfg(debug_assertions)]
-            self.check_call_boundary(&boundary, CallPhase::Before);
+            self.check_call_boundary(&boundary, CallPhase::Before, false);
             self.run_function(key, args)?;
             // Reached only on a *normal* return — an error `?`-propagated above, so the post-condition
             // (which holds only on normal completion) is not checked on the error path.
             #[cfg(debug_assertions)]
-            self.check_call_boundary(&boundary, CallPhase::After);
+            let is_value_drop = self.is_value_drop_function(key);
+            #[cfg(debug_assertions)]
+            self.check_call_boundary(&boundary, CallPhase::After, is_value_drop);
             return Ok(());
         }
 
@@ -1757,6 +1868,8 @@ impl<'a> Interpreter<'a> {
         for op in extra_ops {
             let arg = if let Some(id) = self.try_dict_operand(slots, op) {
                 ValOrMut::Dictionary(id)
+            } else if let mir::Value::Evidence(evidence) = op {
+                static_evidence_argument(evidence)
             } else if let mir::Value::Subscript(id) = op {
                 ValOrMut::Val(Value::subscript(*id))
             } else {
@@ -1818,7 +1931,7 @@ impl<'a> Interpreter<'a> {
                 fv.function.function,
                 fv.hidden_args.clone(),
                 fv.closure_env_len,
-                fv.closure_env_value_dictionary,
+                fv.closure_env_value_dictionary.clone(),
                 &fv.closure_env as *const Value,
             )
         };
@@ -1836,7 +1949,7 @@ impl<'a> Interpreter<'a> {
         for arg in &hidden_args {
             match arg {
                 HiddenEvidenceArgValue::TraitDictionary(id) => {
-                    leading.push(Binding::Dictionary(*id));
+                    leading.push(Binding::Dictionary(id.clone()));
                 }
                 HiddenEvidenceArgValue::Subscript(subscript) => {
                     let place =
@@ -1855,7 +1968,7 @@ impl<'a> Interpreter<'a> {
         // Check before cloning so a limit failure cannot leave a freshly cloned managed
         // environment requiring semantic cleanup outside MIR's explicit drop path.
         self.check_environment_cell_capacity(span)?;
-        let cloned_env = match env_dict {
+        let cloned_env = match env_dict.clone() {
             // SAFETY: `env_ptr` targets the closure's environment, which lives in its heap box (stable
             // across `environment` growth) at `place`; `call_value_clone_for_temp` borrows `ctx`, and
             // stack discipline keeps `place` from being mutably aliased during the call.
@@ -1994,13 +2107,13 @@ impl<'a> Interpreter<'a> {
                 // carry it through to the cloned closure unchanged.
                 source.hidden_args.clone(),
                 source.closure_env_len,
-                source.closure_env_value_dictionary,
+                source.closure_env_value_dictionary.clone(),
                 &source.closure_env as *const Value,
             )
         };
         // SAFETY: `env_ptr` targets the source closure's environment, which lives in its heap box
         // (stable across `environment` growth); `call_value_clone_for_temp` borrows `ctx` only.
-        let closure_env = match env_dict {
+        let closure_env = match env_dict.clone() {
             Some(dict) => {
                 call_value_clone_for_temp(&mut self.ctx, dict, ValOrMut::Ref(env_ptr), span)?
             }
@@ -2031,7 +2144,7 @@ impl<'a> Interpreter<'a> {
             let function = target
                 .as_function_mut()
                 .expect("drop_closure_env of a non-function value");
-            function.closure_env_value_dictionary.map(|dict| {
+            function.closure_env_value_dictionary.clone().map(|dict| {
                 function.closure_env_len = 0;
                 function.closure_env_value_dictionary = None;
                 (
@@ -2060,9 +2173,9 @@ impl<'a> Interpreter<'a> {
         &mut self,
         slots: &mut FxHashMap<mir::Value, Binding>,
         op: &mir::Value,
-    ) -> (ModuleId, LocalFunctionId) {
+    ) -> (ModuleId, LocalFunctionId, Vec<HiddenEvidenceArgValue>) {
         if let mir::Value::Function(r) = op {
-            return (r.module, r.function);
+            return (r.module, r.function, Vec::new());
         }
         let place = self.place_operand(slots, op);
         let fv = place
@@ -2070,7 +2183,32 @@ impl<'a> Interpreter<'a> {
             .expect("drop callee of an invalid place")
             .as_function()
             .expect("drop callee on a non-function value");
-        (fv.function.module, fv.function.function)
+        (
+            fv.function.module,
+            fv.function.function,
+            fv.hidden_args.clone(),
+        )
+    }
+
+    fn hidden_evidence_bindings(
+        &mut self,
+        hidden_args: &[HiddenEvidenceArgValue],
+        span: Location,
+    ) -> Result<Vec<Binding>, RuntimeError> {
+        hidden_args
+            .iter()
+            .map(|arg| match arg {
+                HiddenEvidenceArgValue::TraitDictionary(dictionary) => {
+                    Ok(Binding::Dictionary(dictionary.clone()))
+                }
+                HiddenEvidenceArgValue::Subscript(subscript) => Ok(Binding::Place(
+                    self.alloc_cell(Value::subscript_value(subscript.as_ref().clone()), span)?,
+                )),
+                HiddenEvidenceArgValue::VariantPayloadStorage(storage) => Ok(Binding::Place(
+                    self.alloc_cell(Value::native(storage.is_indirect()), span)?,
+                )),
+            })
+            .collect()
     }
 
     /// Builds an uninitialized value with the run-time *shape* of `ty`: a tuple/record/named
@@ -2287,11 +2425,15 @@ impl<'a> Interpreter<'a> {
         &self,
         slots: &FxHashMap<mir::Value, Binding>,
         v: &mir::Value,
-    ) -> Option<TraitDictionaryId> {
+    ) -> Option<ClosedTraitDictionary> {
         match v {
-            mir::Value::Dictionary(id) => Some(*id),
+            mir::Value::Dictionary(id) => Some(ClosedTraitDictionary::bare(*id)),
+            mir::Value::Evidence(evidence) => match static_evidence_value(evidence) {
+                HiddenEvidenceArgValue::TraitDictionary(dictionary) => Some(dictionary),
+                _ => None,
+            },
             mir::Value::Register(_) | mir::Value::Parameter(_) => match slots.get(v) {
-                Some(Binding::Dictionary(id)) => Some(*id),
+                Some(Binding::Dictionary(id)) => Some(id.clone()),
                 _ => None,
             },
             _ => None,
@@ -2308,6 +2450,11 @@ impl<'a> Interpreter<'a> {
     ) -> SubscriptValue {
         if let mir::Value::Subscript(id) = v {
             return SubscriptValue::bare(*id);
+        }
+        if let mir::Value::Evidence(evidence) = v
+            && let HiddenEvidenceArgValue::Subscript(subscript) = static_evidence_value(evidence)
+        {
+            return *subscript;
         }
         let place = self.place_operand(slots, v);
         place
@@ -2331,6 +2478,18 @@ impl<'a> Interpreter<'a> {
     ) -> Result<Binding, RuntimeError> {
         if let Some(id) = self.try_dict_operand(slots, op) {
             Ok(Binding::Dictionary(id))
+        } else if let mir::Value::Evidence(evidence) = op {
+            match static_evidence_value(evidence) {
+                HiddenEvidenceArgValue::TraitDictionary(dictionary) => {
+                    Ok(Binding::Dictionary(dictionary))
+                }
+                HiddenEvidenceArgValue::Subscript(subscript) => Ok(Binding::Place(
+                    self.alloc_cell(Value::subscript_value(*subscript), span)?,
+                )),
+                HiddenEvidenceArgValue::VariantPayloadStorage(storage) => Ok(Binding::Place(
+                    self.alloc_cell(Value::native(storage.is_indirect()), span)?,
+                )),
+            }
         } else if let mir::Value::Subscript(id) = op {
             Ok(Binding::Place(
                 self.alloc_cell(Value::subscript(*id), span)?,
@@ -2349,6 +2508,9 @@ impl<'a> Interpreter<'a> {
     ) -> HiddenEvidenceArgValue {
         if let Some(id) = self.try_dict_operand(slots, op) {
             return HiddenEvidenceArgValue::TraitDictionary(id);
+        }
+        if let mir::Value::Evidence(evidence) = op {
+            return static_evidence_value(evidence);
         }
         if let mir::Value::Subscript(id) = op {
             return HiddenEvidenceArgValue::Subscript(crate::containers::b(SubscriptValue::bare(
@@ -2379,7 +2541,7 @@ impl<'a> Interpreter<'a> {
         &self,
         slots: &FxHashMap<mir::Value, Binding>,
         v: &mir::Value,
-    ) -> TraitDictionaryId {
+    ) -> ClosedTraitDictionary {
         self.try_dict_operand(slots, v)
             .unwrap_or_else(|| panic!("operand {v} is not a symbolic dictionary"))
     }
@@ -2467,6 +2629,21 @@ impl<'a> Interpreter<'a> {
                 "a symbolic dictionary is evidence, not a value: it is consumed as a dictionary \
                  operand (see `dict_operand`)/call argument, never read with `value_operand`"
             ),
+            mir::Value::Evidence(evidence) => match &**evidence {
+                mir::value::StaticEvidence::Dictionary { .. } => {
+                    panic!("a static closed dictionary is evidence, not a materialized value")
+                }
+                mir::value::StaticEvidence::Subscript {
+                    definition,
+                    captures,
+                } => Value::subscript_value(SubscriptValue {
+                    subscript: *definition,
+                    hidden_args: captures.iter().map(static_evidence_value).collect(),
+                }),
+                mir::value::StaticEvidence::VariantPayloadStorage(indirect) => {
+                    Value::native(*indirect)
+                }
+            },
             // A bare static subscript materializes as a first-class subscript value (mirroring
             // `eval`'s `GetSubscript`, which yields `Value::subscript`).
             mir::Value::Subscript(id) => Value::subscript(*id),
@@ -2564,6 +2741,44 @@ impl<'a> Interpreter<'a> {
         // Reclaims interpreter-only storage (like a stack-pop); runs no `Value::drop`.
         old.discard_storage();
         Ok(())
+    }
+}
+
+pub(crate) fn static_evidence_value(
+    evidence: &mir::value::StaticEvidence,
+) -> HiddenEvidenceArgValue {
+    match evidence {
+        mir::value::StaticEvidence::Dictionary {
+            definition,
+            captures,
+        } => HiddenEvidenceArgValue::TraitDictionary(ClosedTraitDictionary {
+            definition: *definition,
+            captures: captures.iter().map(static_evidence_value).collect(),
+        }),
+        mir::value::StaticEvidence::Subscript {
+            definition,
+            captures,
+        } => HiddenEvidenceArgValue::Subscript(crate::containers::b(SubscriptValue {
+            subscript: *definition,
+            hidden_args: captures.iter().map(static_evidence_value).collect(),
+        })),
+        mir::value::StaticEvidence::VariantPayloadStorage(indirect) => {
+            HiddenEvidenceArgValue::VariantPayloadStorage(VariantPayloadStorage::from_indirect(
+                *indirect,
+            ))
+        }
+    }
+}
+
+fn static_evidence_argument(evidence: &mir::value::StaticEvidence) -> ValOrMut {
+    match static_evidence_value(evidence) {
+        HiddenEvidenceArgValue::TraitDictionary(dictionary) => ValOrMut::Dictionary(dictionary),
+        HiddenEvidenceArgValue::Subscript(subscript) => {
+            ValOrMut::Val(Value::subscript_value(*subscript))
+        }
+        HiddenEvidenceArgValue::VariantPayloadStorage(storage) => {
+            ValOrMut::Val(Value::native(storage.is_indirect()))
+        }
     }
 }
 

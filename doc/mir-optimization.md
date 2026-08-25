@@ -128,12 +128,12 @@ Four rules, each of which cost a measurement to establish. They apply to any new
 Runs a forward dataflow analysis to fixpoint and replaces calls it can evaluate at compile time.
 Lattice per register and per `(place root, field path)`: `Unknown | Known(Const) | Uninit`, where a
 root is an `alloca`, a parameter, or a `dict_entry`'s cell. `Const` includes scalar/tuple literals,
-symbolic functions, dictionaries and variant tags, plus a constructive array recipe of known
+symbolic functions, recursive static evidence, closed functions and variant tags, plus a constructive array recipe of known
 `TrivialCopy` elements; the latter is not a mutable array stored in the constant pool.
 
 A call folds when the callee is statically known, every visible argument arrives by `Let`, every
 argument place holds a known literal, captureless function or constructive array, every evidence
-operand is a constant dictionary, the effects and result convention permit compile-time evaluation,
+operand is recursively static, the effects and result convention permit compile-time evaluation,
 and the result can be reified as MIR. `call f(a, b, ret)` becomes `store @cN to ret` for an immediate
 result, `store function to ret` for a captureless function, or `build_array` directly into `ret` for
 an array of `TrivialCopy` elements. An owned string becomes a bounded `StaticStr` constant plus the
@@ -190,11 +190,14 @@ may run it at compile time zero, one or many times.
 **Devirtualization** rides along with folding, using its analysis. An indirect dispatch whose callee
 the analysis resolved is rewritten to name that callee directly — restricted to a callee read from a
 `dict_entry`, because any other place may hold a *closure*, whose captured environment a bare
-function operand would silently drop.
+function operand would silently drop. A dictionary-entry fact records both the selected function and
+its hidden evidence, so rewriting exposes the complete direct callable.
 
 This covers `call`, `drop` and `clone`. All three name a callee under the same contract — a constant
 function reference, or the place of a function value read by reference and never consumed — and
-differ only in where that operand sits, so the operand index is selected by operation kind. The
+differ only in where that operand sits, so the operand index is selected by operation kind. Captured
+evidence is inserted immediately after that operand and interpreted as the direct callee's hidden
+argument prefix. The
 `Value` methods are the larger population: generic code drops through a dictionary entry far more
 often than it calls through one.
 
@@ -221,8 +224,9 @@ type. See [generic-instantiation.md](generic-instantiation.md).
 
 ### When a call site is specialized
 
-All of: the callee is statically known and generic and has a body; it is not itself a specialization;
-the recorded instantiation is fully concrete; every evidence operand is a constant dictionary; the
+All of: the callee is statically known, generic or evidence-polymorphic, and has a body; it is not
+itself a specialization; the recorded instantiation is fully concrete (or empty for a callee with
+no quantifiers); every evidence operand is recursively static; the
 linear admission preflight finds a payoff that substitution can expose; and the budget allows
 another specialization unless one is already cached.
 
@@ -289,9 +293,10 @@ duplicated — and no HIR record describes the hidden parameters, which is what 
 later owned-argument pass may create an optimized-only ABI variant with selected visible parameters
 changed to ownership transfer.
 
-**Dead evidence is dropped from the finished module.** Because binding replaces every use, a
-specialization has no live evidence parameter by construction rather than by analysis. A final
-whole-module pass removes those parameters and the operands that pass them, running once after the
+**Dead evidence is dropped from the finished module.** Ordinary type/evidence specialization
+replaces every use, while an owned-ABI variant of a generated thunk may still read its positional
+evidence. A final whole-module pass removes a dictionary prefix only when none of it remains live,
+and removes the operands that pass it, running once after the
 specialization worklist has drained so that every optimization decision above it is taken against
 the signatures the optimizer has always seen. One module suffices: `specialize_call_sites` only ever
 writes a specialization into a `call` callee operand, self-calls are redirected within the same
@@ -311,13 +316,15 @@ Admission is conservative. The caller operand must be a whole local allocation, 
 call, and used afterwards only by its terminal cleanup drop. A fallible call requires equivalent
 drops on its unique normal and error successors. The callee parameter must have exactly one use,
 and ordinary generic bodies with live dictionaries are not copied; their concrete specializations
-are. Variants are cached by `(callee, owned argument set)` and bounded independently.
+are. Type-monomorphic generated thunks may be copied with their evidence prefix unchanged. Variants
+are cached by `(callee, owned argument set)` and bounded independently.
 
 This pass runs once after the specialization worklist, outside the fold/inline loop, because it
 needs the completed local call graph and changes an optimized-only ABI. DCE and stack-marker cleanup
 run on its results before dead-evidence removal and final verification.
 
-The table is keyed by `(callee, instantiation, dictionaries)`, so two call sites that instantiate a
+The table is keyed by `(callee, instantiation, evidence)`, where evidence is a recursive static
+dictionary/subscript/storage tree, so two call sites that instantiate a
 function the same way share one body. Identities index the *owning* module's table, which is not in
 general the callee's module.
 

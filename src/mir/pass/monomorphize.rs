@@ -9,8 +9,10 @@
 //! Specializing a generic MIR body at one call site's instantiation.
 //!
 //! A generic function is compiled once, its type parameters left as quantified variables and its
-//! trait constraints turned into hidden dictionary parameters. Specializing it has two halves —
-//! substituting the types and binding the dictionaries — and **they must be applied together**. A
+//! trait constraints turned into hidden dictionary parameters. Generated impl thunks can likewise
+//! be type-monomorphic while still abstract over captured dictionaries. Specializing either form
+//! has two halves — substituting the types and binding the dictionaries — and **they must be applied
+//! together**. A
 //! body with only its dictionaries bound says `int` in its evidence and `A` in its types; that is
 //! latent while nothing acts on it, but the moment folding uses the now-resolved `dict_entry` it
 //! evaluates a call at the concrete instantiation and has nowhere type-correct to put the result.
@@ -56,8 +58,8 @@ use crate::{
         terminator::{Terminator, TerminatorKind, TerminatorKindDiscriminant},
     },
     module::{
-        FunctionId, LocalFunctionId, ModuleEnv, ModuleId, TraitDictionaryId, id::Id,
-        stable_generated_name_hash, unique_generated_name,
+        FunctionId, LocalFunctionId, ModuleEnv, ModuleId, id::Id, stable_generated_name_hash,
+        unique_generated_name,
     },
     std::value::type_has_static_layout,
     types::effects::{EffType, Effect, PrimitiveEffect},
@@ -259,7 +261,7 @@ pub(super) fn structurally_identical(
 pub(crate) struct SpecializationKey {
     pub(crate) callee: FunctionId,
     pub(crate) instantiation: Instantiation,
-    pub(crate) dictionaries: Vec<TraitDictionaryId>,
+    pub(crate) dictionaries: Vec<mir::value::StaticEvidence>,
 }
 
 /// The specializations one module's optimization has created, and the caches that keep them shared.
@@ -537,8 +539,8 @@ impl Specializations {
         let dictionaries = key
             .dictionaries
             .iter()
-            .map(|id| {
-                mir::Value::Dictionary(*id)
+            .map(|evidence| {
+                mir::Value::Evidence(Box::new(evidence.clone()))
                     .format_with(&env)
                     .to_string()
                     // `dict(std::Num<std::int>)` -> `std::Num<std::int>`: the wrapper is noise
@@ -789,12 +791,30 @@ fn drop_redundant_layout_witnesses(edit: &mut FunctionEdit, env: ModuleEnv<'_>) 
 
 /// The type a `Value<T>` dictionary operand witnesses the layout of.
 fn witnessed_type(witness: &mir::Value, env: ModuleEnv<'_>) -> Option<Type> {
-    let mir::Value::Dictionary(id) = witness else {
-        return None;
+    let id = match witness {
+        mir::Value::Dictionary(id) => *id,
+        mir::Value::Evidence(evidence) => match &**evidence {
+            mir::value::StaticEvidence::Dictionary { definition, .. } => *definition,
+            _ => return None,
+        },
+        _ => return None,
     };
     let module = env.module_by_id(id.module_id)?;
     let key = module.get_impl_trait_key_by_id(id.impl_id)?;
     key.input_tys().first().copied()
+}
+
+fn static_evidence_operand(value: &mir::Value) -> Option<mir::value::StaticEvidence> {
+    match value {
+        mir::Value::Dictionary(definition) => {
+            Some(mir::value::StaticEvidence::bare_dictionary(*definition))
+        }
+        mir::Value::Subscript(definition) => {
+            Some(mir::value::StaticEvidence::bare_subscript(*definition))
+        }
+        mir::Value::Evidence(evidence) => Some((**evidence).clone()),
+        _ => None,
+    }
 }
 
 /// Turns an `invoke` whose operation substitution made source-infallible back into an ordinary
@@ -924,7 +944,7 @@ fn map_types(edit: &mut FunctionEdit, mapper: &mut impl TypeMapper) {
 /// The parameters themselves stay in the signature; see the module documentation. Binding fewer
 /// dictionaries than the body has parameters is a caller bug rather than a partial specialization:
 /// a call site either knows all of its callee's evidence or forwards its own.
-fn bind_dictionaries(edit: &mut FunctionEdit, dictionaries: &[TraitDictionaryId]) {
+fn bind_dictionaries(edit: &mut FunctionEdit, dictionaries: &[mir::value::StaticEvidence]) {
     let parameters: Vec<mir::ParameterId> = edit
         .parameters()
         .iter()
@@ -943,15 +963,15 @@ fn bind_dictionaries(edit: &mut FunctionEdit, dictionaries: &[TraitDictionaryId]
         return;
     }
 
-    let bound: FxHashMap<mir::ParameterId, TraitDictionaryId> = parameters
+    let bound: FxHashMap<mir::ParameterId, mir::value::StaticEvidence> = parameters
         .into_iter()
-        .zip(dictionaries.iter().copied())
+        .zip(dictionaries.iter().cloned())
         .collect();
     edit.visit_operands_mut(|operand| {
         if let mir::Value::Parameter(id) = operand
             && let Some(dictionary) = bound.get(id)
         {
-            *operand = mir::Value::Dictionary(*dictionary);
+            *operand = mir::Value::Evidence(Box::new(dictionary.clone()));
         }
     });
 }
@@ -965,6 +985,7 @@ fn substitute_in_operation(operation: &mut Operation, mapper: &mut impl TypeMapp
         OperationKind::Alloca { ty }
         | OperationKind::Subfield { ty, .. }
         | OperationKind::DictEntry { ty, .. }
+        | OperationKind::BuildDictionary { ty, .. }
         | OperationKind::SubscriptMember { ty, .. }
         | OperationKind::BuildSubscript { ty }
         | OperationKind::BuildClosure { ty, .. }
@@ -1014,10 +1035,10 @@ fn substitute_in_operation(operation: &mut Operation, mapper: &mut impl TypeMapp
 /// is deliberately conservative — a refusal costs an optimization, never correctness:
 ///
 /// - the callee is statically known and is not itself a specialization;
-/// - the callee is generic and has a body to copy;
-/// - the call records an instantiation, and that instantiation is fully concrete. A caller that
-///   forwards its own quantifiers records them here, and specializing *it* is what makes this site
-///   concrete on a later round — the cascade, which needs nothing extra to work;
+/// - the callee is generic or evidence-polymorphic and has a body to copy;
+/// - the call records a fully concrete instantiation, or its callee has no quantifiers and therefore
+///   has the equivalent empty instantiation. A caller that forwards its own quantifiers records
+///   them here, and specializing *it* makes this site concrete on a later round;
 /// - every hidden evidence operand is a constant dictionary;
 /// - specializing would achieve something (see [`worth_specializing`]);
 /// - the budget allows another specialization, unless this one is already cached.
@@ -1109,7 +1130,9 @@ fn specialization_for(
     let OperationKind::Call { ty, metadata } = &operation.kind else {
         return None;
     };
-    let instantiation = metadata.as_deref()?.instantiation.as_ref()?;
+    let recorded_instantiation = metadata
+        .as_deref()
+        .and_then(|metadata| metadata.instantiation.as_ref());
     let mir::Value::Function(callee) = &operation.operands[0] else {
         return None;
     };
@@ -1118,11 +1141,6 @@ fn specialization_for(
     if specializations.is_specialization(*callee) {
         return None;
     }
-    // A caller that still names its own quantifiers here would produce a specialization as generic
-    if instantiation.ty_args.iter().any(Type::is_variable) {
-        return None;
-    }
-
     // The callee's own module, which need not be the one being optimized: a user module calling a
     // generic `std` helper is the case that matters, since otherwise every std generic stays generic
     // and uninlinable in every module but its own. Safe for the same reason cross-module *inlining*
@@ -1132,7 +1150,12 @@ fn specialization_for(
         .get_function_by_id(callee.function)?
         .definition
         .ty_scheme;
-    if scheme.ty_quantifiers.is_empty() && scheme.eff_quantifiers.is_empty() {
+    // Specialization substitutes the callee's complete scheme, including variables that occur only
+    // in hidden-evidence constraints. Never infer those arguments from the visible call type: a
+    // missing instantiation gives this pass no local proof of their values.
+    let instantiation = recorded_instantiation?;
+    // A caller that still names its own quantifiers here would produce a specialization as generic.
+    if instantiation.ty_args.iter().any(Type::is_variable) {
         return None;
     }
     // Raw rather than optimized, like every other body the driver consults, so that what a
@@ -1147,10 +1170,7 @@ fn specialization_for(
         .checked_sub(ty.fn_ty.args.len() + 1)?;
     let dictionaries = operation.operands[1..visible_start]
         .iter()
-        .map(|extra| match extra {
-            mir::Value::Dictionary(id) => Some(*id),
-            _ => None,
-        })
+        .map(static_evidence_operand)
         .collect::<Option<Vec<_>>>()?;
     let key = SpecializationKey {
         callee: *callee,
@@ -1201,7 +1221,7 @@ fn worth_specializing<Ty: TypeLike>(
     body: &Function,
     scheme: &TypeScheme<Ty>,
     instantiation: &Instantiation,
-    dictionaries: &[TraitDictionaryId],
+    dictionaries: &[mir::value::StaticEvidence],
     env: ModuleEnv<'_>,
 ) -> bool {
     if dictionaries.is_empty() {
@@ -1221,7 +1241,7 @@ fn worth_specializing<Ty: TypeLike>(
     }
     let bound: FxHashMap<_, _> = parameters
         .into_iter()
-        .zip(dictionaries.iter().copied())
+        .zip(dictionaries.iter().cloned())
         .collect();
     let subst = instantiation.substitution(scheme);
     let mut mapper = BitmapInstantiationMapper::new(&subst);
@@ -1311,7 +1331,11 @@ fn worth_specializing<Ty: TypeLike>(
                             let Some(dictionary) = bound.get(parameter) else {
                                 return false;
                             };
-                            witnessed_type(&mir::Value::Dictionary(*dictionary), env).is_some_and(
+                            witnessed_type(
+                                &mir::Value::Evidence(Box::new(dictionary.clone())),
+                                env,
+                            )
+                            .is_some_and(
                                 |ty| type_has_static_layout(ty, operation.span, &env),
                             )
                         }) =>
@@ -1395,7 +1419,7 @@ mod tests {
         mir::{Value, terminator::TerminatorKind},
         module::{ModuleId, Path},
         types::{
-            effects::EffType,
+            effects::{EffType, EffectVar},
             mutability::MutType,
             r#type::{Type, TypeVar},
         },
@@ -1541,11 +1565,15 @@ mod tests {
         // Preparing optimized MIR verifies both recorded applications against their actual callee
         // schemes. In particular this catches swapping FromIterator's `[A, B]` to the equally
         // valid as a scheme, but positionally incompatible, `[B, A]`.
+        // Closed dictionaries deliberately keep this concrete thunk open over its prerequisite
+        // evidence. Preparing optimized MIR still verifies the recorded applications against the
+        // original schemes; a caller with entirely static evidence may specialize the thunk, but
+        // the module-owned open definition itself must remain valid for dynamic captures.
         let optimized = session.emit_mir_module(module_id);
         assert!(
-            !optimized.contains("call std::Value<[A]>::clone#impl:"),
-            "specialization must remove the concrete thunk's call to the generic original:\n\
-             {optimized}"
+            optimized.contains("fn std::Value<[std::int]>::clone#impl:")
+                && optimized.contains("call std::Value<[A]>::clone#impl:"),
+            "the open concrete thunk must retain its evidence-forwarding call:\n{optimized}"
         );
     }
 
@@ -1604,10 +1632,7 @@ mod tests {
                 let visible_start = operation.operands.len() - (ty.fn_ty.args.len() + 1);
                 let dictionaries = operation.operands[1..visible_start]
                     .iter()
-                    .map(|extra| match extra {
-                        Value::Dictionary(id) => Some(*id),
-                        _ => None,
-                    })
+                    .map(static_evidence_operand)
                     .collect::<Option<Vec<_>>>()
                     .unwrap_or_default();
                 let scheme = session
@@ -1892,6 +1917,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_call_forwarding_dynamic_evidence_is_not_specialized() {
+        let mut session = CompilerSession::new();
+        session.set_mir_optimization(MirOptimization::Enabled);
+        let module = session.emit_mir(
+            "dynamic",
+            "fn inner<T>(value: T) -> T where T: Value { let copy = value; copy }\n\
+             fn outer<T>(value: T) -> T where T: Value { inner(value) }",
+        );
+        let caller = module
+            .split("fn outer")
+            .nth(1)
+            .expect("the module defines outer")
+            .split("\nfn ")
+            .next()
+            .expect("outer has a body");
+        assert!(
+            caller.contains("call dynamic::inner(%p0"),
+            "the open caller must keep forwarding its dynamic evidence:\n{caller}"
+        );
+        assert!(
+            !module.contains("fn inner#spec:"),
+            "dynamic evidence must not produce a partial specialization:\n{module}"
+        );
+    }
+
     /// A generic body allocates and moves dynamically-sized storage through a `Value` dictionary
     /// witnessing the layout its type variable hides. Substitution is what makes that type
     /// statically sized, so the witness must go with it — otherwise the specialization keeps a live
@@ -1907,9 +1958,20 @@ mod tests {
             "fn swap(a, i, j) { let temp = a[i]; a[i] = a[j]; a[j] = temp }\n\
              fn swap_ints(a: [int], i: int, j: int) { let mut t = a; swap(t, i, j); t }",
         );
+        let caller = module
+            .split("fn swap_ints")
+            .nth(1)
+            .expect("the module defines swap_ints")
+            .split("\nfn ")
+            .next()
+            .expect("swap_ints has a body");
         assert!(
-            module.contains("#spec:"),
-            "the generic callee must specialize, or this test proves nothing:\n{module}"
+            caller.contains("memcpy"),
+            "the generic swap body must be specialized or inlined into its concrete caller:\n{caller}"
+        );
+        assert!(
+            !caller.contains("using dict"),
+            "the concrete caller must carry no dynamic layout witness:\n{caller}"
         );
         for specialized in module.split("// specialization of ").skip(1) {
             assert!(
@@ -1993,14 +2055,17 @@ mod tests {
              fn swap_ints(a: [int], i: int, j: int) { let mut t = a; swap(t, i, j); t }",
         );
         let specialized = module
-            .split("// specialization of ")
+            .split("fn swap_ints")
             .nth(1)
-            .expect("swap must specialize");
+            .expect("the module defines swap_ints")
+            .split("\nfn ")
+            .next()
+            .expect("swap_ints has a body");
         assert!(
             specialized.contains("memcpy"),
             "a clone of a now-trivially-copyable type becomes a representation copy:\n{specialized}"
         );
-        for spelling in ["clone ", "drop ", "dict_entry"] {
+        for spelling in ["clone int ", "drop int ", "dict_entry"] {
             assert!(
                 !specialized.contains(spelling),
                 "no `{spelling}` may survive for a type that owns nothing:\n{specialized}"
@@ -2041,55 +2106,52 @@ mod tests {
         );
     }
 
-    /// Call sites separated only by distinctions that substitution erases share one body.
-    ///
-    /// Each closure passed to `map` contributes its own effect variable, so two pipelines over the
-    /// same element types instantiate `MapIterator::next` at two different keys. A function's own
-    /// effect row is not part of a MIR body, so both keys produce the same residual function, and
-    /// keying alone would keep a copy per closure — four of them here, since `collect` drives a
-    /// second pair of instantiations.
-    ///
-    /// Trait-output inference used to retain one `Map::map` thunk per provisional effect row. Those
-    /// thunks then requested duplicate specializations even though the closure value is an ordinary
-    /// argument and does not belong to the specialized body. Delayed HIR materialization leaves one
-    /// final thunk, so the two pipelines must also share one `Map::map` specialization.
+    /// Distinct keys whose substitutions erase to the same MIR body share one specialization.
     #[test]
     fn call_sites_separated_only_by_erased_effects_share_one_specialization() {
         let mut session = CompilerSession::new();
-        session.set_mir_optimization(MirOptimization::Enabled);
-        let module_id = compile(
-            &mut session,
-            "fn doubled(v: [int]) -> [int] { v |> map(|x| x * 2) |> collect() }\n\
-             fn negated(v: [int]) -> [int] { v |> map(|x| 0 - x) |> collect() }",
-        );
+        let module_id = compile(&mut session, "fn identity(value: int) -> int { value }");
+        let (function, function_count, mut scheme) = {
+            let module = session.expect_fresh_module(module_id);
+            let function = module
+                .get_local_function_id(ustr("identity"))
+                .expect("identity was just compiled");
+            let scheme = module
+                .get_function_by_id(function)
+                .expect("identity was just compiled")
+                .definition
+                .ty_scheme
+                .clone();
+            (function, module.function_count(), scheme)
+        };
         session.prepare_execution_target(ExecutionTarget::Mir, module_id);
-        let specializations = session
-            .mir_artifacts_for(module_id, MirOptimization::Enabled)
-            .expect("optimized artifacts were just prepared")
-            .specializations()
-            .iter()
-            .map(|specialization| specialization.name)
-            .collect::<Vec<_>>();
-
-        let nexts = specializations
-            .iter()
-            .filter(|name| name.contains("MapIterator") && name.contains("::next#"))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            nexts.len(),
-            1,
-            "the two pipelines must share one specialized `next`, but got:\n{nexts:#?}"
+        let body = body(&session, module_id, "identity").clone();
+        scheme.eff_quantifiers.insert(EffectVar::new(0));
+        let callee = FunctionId::new(module_id, function);
+        let key = |effects| SpecializationKey {
+            callee,
+            instantiation: Instantiation {
+                ty_args: Vec::new(),
+                eff_args: vec![effects],
+            },
+            dictionaries: Vec::new(),
+        };
+        let mut specializations = Specializations::new(module_id, function_count, 1);
+        let pure = specializations.get_or_create(
+            key(EffType::empty()),
+            &scheme,
+            &body,
+            session.module_env(),
+        );
+        let reading = specializations.get_or_create(
+            key(EffType::single_primitive(PrimitiveEffect::Read)),
+            &scheme,
+            &body,
+            session.module_env(),
         );
 
-        let mappers = specializations
-            .iter()
-            .filter(|name| name.contains("::map#"))
-            .count();
-        assert_eq!(
-            mappers, 1,
-            "the two pipelines must share one specialized `map`, but got {mappers} in:\n\
-             {specializations:#?}"
-        );
+        assert_eq!(pure, reading);
+        assert_eq!(specializations.len(), 1);
     }
 
     /// A recursive call records no instantiation — inference types a call within the defining group
@@ -2212,10 +2274,7 @@ mod tests {
                     let visible_start = operation.operands.len() - (ty.fn_ty.args.len() + 1);
                     let Some(dictionaries) = operation.operands[1..visible_start]
                         .iter()
-                        .map(|extra| match extra {
-                            Value::Dictionary(id) => Some(*id),
-                            _ => None,
-                        })
+                        .map(static_evidence_operand)
                         .collect::<Option<Vec<_>>>()
                     else {
                         continue; // the caller forwards evidence of its own

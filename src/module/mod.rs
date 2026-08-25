@@ -993,6 +993,26 @@ impl Module {
         .map(|opt| opt.map(|(_, f)| f))
     }
 
+    /// Look up a function together with the module-qualified identity needed to invoke it.
+    pub(crate) fn lookup_function_id<'a>(
+        &'a self,
+        name: &'a str,
+        others: &'a Modules,
+    ) -> Result<Option<(FunctionId, &'a ModuleFunction)>, InternalCompilationError> {
+        self.get_member(name, others, &|name, module| {
+            let function = module.get_local_function_id(ustr(name))?;
+            Some((function, module.get_function_by_id(function)?))
+        })
+        .map(|resolved| {
+            resolved.map(|(module, (function, data))| {
+                (
+                    FunctionId::new(module.unwrap_or_else(|| self.module_id()), function),
+                    data,
+                )
+            })
+        })
+    }
+
     // Type aliases
 
     /// Add a documented non-generic type alias to this module (by &str), returning its ID.

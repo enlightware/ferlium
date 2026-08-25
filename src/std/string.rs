@@ -22,10 +22,10 @@ use crate::{
     compiler::error::SourceFailureKind,
     containers::b,
     hir::function::{
-        BinaryNativeFnMRN, BinaryNativeFnRMN, BinaryNativeFnRRFN, BinaryNativeFnRRN,
-        BinaryNativeFnRRV, Function, NativeTrivialCopy, NullaryNativeFnN, TernaryNativeFnRNNN,
-        TernaryNativeFnRRRN, UnaryNativeFnMV, UnaryNativeFnNN, UnaryNativeFnRN, UnaryNativeFnRV,
-        trivial_copy_private,
+        BinaryNativeFnMNN, BinaryNativeFnMRN, BinaryNativeFnRMN, BinaryNativeFnRRFN,
+        BinaryNativeFnRRN, BinaryNativeFnRRV, Function, NativeTrivialCopy, NullaryNativeFnN,
+        TernaryNativeFnRNNN, TernaryNativeFnRRRN, UnaryNativeFnMV, UnaryNativeFnNN,
+        UnaryNativeFnRN, UnaryNativeFnRV, trivial_copy_private,
     },
     hir::value::{NativeDisplay, NativeValueType, Value},
     module::{Module, ModuleFunction, Visibility},
@@ -146,6 +146,14 @@ impl String {
     /// review that pass and `doc/mir-optimization.md`.
     pub fn push_str(&mut self, value: &Self) {
         self.push_normalized(value.0.as_str());
+    }
+
+    fn push_unicode_scalar(&mut self, value: isize) {
+        let value = u32::try_from(value)
+            .ok()
+            .and_then(char::from_u32)
+            .expect("caller must validate Unicode scalar values");
+        self.push_normalized(&value.to_string());
     }
 
     /// Appends a string literal without materializing it as a [`String`] first.
@@ -781,6 +789,16 @@ pub fn add_to_module(to: &mut Module) {
             "Appends `suffix` to the end of `target`.",
             no_effects(),
         ),
+    );
+    to.add_function_with_visibility(
+        ustr("string_push_unicode_scalar"),
+        BinaryNativeFnMNN::description_with_default_ty(
+            String::push_unicode_scalar,
+            ["target", "scalar"],
+            "Appends a validated Unicode scalar value to a string.",
+            no_effects(),
+        ),
+        Visibility::Module,
     );
     // The f-string desugaring emits this for every literal segment, through ordinary path
     // resolution, so it must be nameable from the module being compiled. Naming it is all a user

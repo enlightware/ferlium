@@ -397,7 +397,7 @@ mod tests {
                 function,
                 vec![],
                 vec![Value::native(1isize)],
-                Some(dictionary),
+                Some(crate::hir::value::ClosedTraitDictionary::bare(dictionary)),
             )),
             int_type(),
         ));
@@ -405,7 +405,9 @@ mod tests {
             "function carrying hidden evidence",
             Value::function_value(FunctionValue::closure(
                 function,
-                vec![HiddenEvidenceArgValue::TraitDictionary(dictionary)],
+                vec![HiddenEvidenceArgValue::TraitDictionary(
+                    crate::hir::value::ClosedTraitDictionary::bare(dictionary),
+                )],
                 vec![],
                 None,
             )),

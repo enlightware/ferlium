@@ -3973,8 +3973,8 @@ impl TypeInference {
             let have_trait_constraint = PubTypeConstraint::new_have_trait(
                 trait_id,
                 input_tys.clone(),
-                output_tys,
-                output_effs,
+                output_tys.clone(),
+                output_effs.clone(),
                 path_span,
             );
 

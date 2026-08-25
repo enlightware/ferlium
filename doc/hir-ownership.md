@@ -147,6 +147,12 @@ For any non-tail node, MIR lowering preserves evaluation order and effects, igno
 
 ## Clone and Drop Dispatch
 
+Final HIR stores hidden evidence in an immutable function-scoped binding graph. A binding is an
+extra parameter, a static dictionary/subscript/storage choice, or a dictionary/subscript definition
+constructed over earlier bindings. Construction is interned by definition identity and ordered
+capture bindings, evaluated once at function entry, and creates no value borrow, liveness use, or
+drop obligation.
+
 Clone and drop dispatch are specialized by site.
 Before dictionary elaboration, `Unknown` means the final type is needed to choose the implementation.
 
@@ -154,13 +160,13 @@ Before dictionary elaboration, `Unknown` means the final type is needed to choos
 
 - `TrivialCopy`, which copies a concrete value representation without `Value::clone`.
 - `Static(FunctionId)`, which calls a concrete generated or user-provided `Value::clone`.
-- `Dictionary(ExtraParameterId)`, which loads `Value::clone` from a hidden dictionary parameter.
+- `Dictionary(EvidenceBindingId)`, which loads `Value::clone` from a closed evidence binding.
 
 `LocalDrop` resolves to one of:
 
 - `Skip`, which reclaims storage without semantic `Value::drop`.
 - `Static(FunctionId)`, which calls a concrete generated or user-provided `Value::drop`.
-- `Dictionary(ExtraParameterId)`, which loads `Value::drop` from a hidden dictionary parameter.
+- `Dictionary(EvidenceBindingId)`, which loads `Value::drop` from a closed evidence binding.
 
 The `Value` method signatures are:
 
@@ -182,8 +188,10 @@ Generated clone and drop bodies use the same concrete `TrivialCopy` predicate as
 elaboration: a qualifying value is cloned by copying its whole representation and needs no semantic
 drop, while generic or managed structure retains member-wise `Value` dispatch.
 
-For `Dictionary(id)`, `id` indexes the function's extra dictionary/evidence parameter list.
-The dictionary entry is selected with `VALUE_TRAIT.dictionary_method_index(...)`.
+For `Dictionary(id)`, `id` indexes the function's evidence-binding graph; it may resolve to a caller
+parameter, static evidence, or a locally constructed closed dictionary. The dictionary entry is
+selected with `VALUE_TRAIT.dictionary_method_index(...)` and carries the hidden captures required by
+the selected implementation.
 Extra dictionary/evidence parameters do not have matching `LocalDecl`s and do not affect source-level local slots.
 MIR lowering may choose a physical ABI layout that packs evidence and values together, but that packing is not part of HIR ownership semantics.
 
@@ -270,13 +278,15 @@ Clone/drop for a function value must call the captured-environment dictionary, n
 
 ## Trait Dictionaries and Associated Constants
 
-Dictionary elaboration rewrites transient `GetTraitMethod`, `GetTraitAssociatedConst`, and `GetTraitDictionary` nodes into explicit dictionary/evidence nodes.
+Dictionary elaboration rewrites transient `GetTraitMethod`, `GetTraitAssociatedConst`, and `GetTraitDictionary` nodes into explicit dictionary/evidence nodes. A closed dictionary combines a module-owned static definition with ordered captured evidence; projecting an entry yields a callable with the trait entry's visible signature and those captures as hidden arguments.
 MIR lowers the elaborated form.
 
 Every runtime dictionary entry is a function: trait methods occupy the first entries, followed by associated constants as zero-argument getter functions.
 The getter owns literal materialization, so each access to a managed associated constant produces a fresh owned value.
 
-For a concrete associated constant, elaboration emits a static zero-argument call to the selected getter; for a generic associated constant, it emits a zero-argument `CallDictionaryFunction` through the hidden dictionary parameter.
+Associated constants use the same dictionary projection as methods: elaboration emits a
+zero-argument `CallDictionaryFunction` through the selected closed dictionary, whether that
+dictionary is static, constructed, or supplied by the caller.
 Compiler-owned `Value::SIZE` and `Value::ALIGN` metadata may still be inspected directly while computing concrete layouts.
 At runtime their getters carry generic layout metadata like any other associated constant, but they are not the source of truth for concrete layouts.
 

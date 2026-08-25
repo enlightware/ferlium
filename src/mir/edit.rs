@@ -72,6 +72,10 @@ pub(crate) struct FunctionEdit {
 }
 
 impl FunctionEdit {
+    pub(crate) fn name(&self) -> Ustr {
+        self.name
+    }
+
     /// Opens `func` for editing.
     pub(crate) fn new(func: Function) -> Self {
         let next_value_index = func

@@ -201,12 +201,7 @@ pub(super) fn instantiate_function_descr_in_place<M: TypeMapper>(
 
 /// Default effect variables that remain only in the pending HIR body after the public scheme is normalized.
 pub(super) fn default_body_only_effects_in_function_descr(descr: &mut UModuleFunction) {
-    let mut retained_effect_vars = descr.definition.ty_scheme.ty.inner_effect_vars();
-    descr
-        .definition
-        .ty_scheme
-        .constraints
-        .fill_with_inner_effect_vars(&mut retained_effect_vars);
+    let retained_effect_vars = &descr.definition.ty_scheme.eff_quantifiers;
 
     let mut body_effect_vars = FxHashSet::default();
     fill_node_effect_vars(
@@ -302,6 +297,157 @@ fn fill_node_effect_vars(
     }
 }
 
+fn fill_elaborated_node_effect_vars(
+    arena: &hir::ENodeArena,
+    node_id: hir::ENodeId,
+    vars: &mut FxHashSet<EffectVar>,
+) {
+    let node = &arena[node_id];
+    node.ty.fill_with_inner_effect_vars(vars);
+    node.effects.fill_with_inner_effect_vars(vars);
+    use hir::ENodeKind;
+    match &node.kind {
+        ENodeKind::FunctionApply(app) => app.ty.fill_with_inner_effect_vars(vars),
+        ENodeKind::StaticApply(app) => {
+            app.ty.fill_with_inner_effect_vars(vars);
+            fill_fn_inst_data_effect_vars(&app.inst_data, vars);
+        }
+        ENodeKind::GetFunction(get_function) => {
+            fill_fn_inst_data_effect_vars(&get_function.inst_data, vars);
+        }
+        ENodeKind::GetSubscript(get_subscript) => {
+            fill_fn_inst_data_effect_vars(&get_subscript.inst_data, vars);
+        }
+        ENodeKind::CallDictionaryFunction(call) => {
+            call.ty.fill_with_inner_effect_vars(vars);
+        }
+        ENodeKind::TraitMethodApply(value) => match *value {},
+        ENodeKind::GetTraitMethod(value) => match *value {},
+        ENodeKind::GetTraitAssociatedConst(value) => match *value {},
+        ENodeKind::GetTraitDictionary(value) => match *value {},
+        _ => {}
+    }
+    for child in hir::borrow_checker::elaborated_child_node_ids(&node.kind) {
+        fill_elaborated_node_effect_vars(arena, child, vars);
+    }
+}
+
+fn instantiate_elaborated_node_effects<M: TypeMapper>(
+    arena: &mut hir::ENodeArena,
+    node_id: hir::ENodeId,
+    mapper: &mut M,
+) {
+    let children = hir::borrow_checker::elaborated_child_node_ids(&arena[node_id].kind);
+    for child in children {
+        instantiate_elaborated_node_effects(arena, child, mapper);
+    }
+    use hir::ENodeKind;
+    match &mut arena[node_id].kind {
+        ENodeKind::FunctionApply(app) => app.ty = app.ty.map(mapper),
+        ENodeKind::StaticApply(app) => {
+            app.ty = app.ty.map(mapper);
+            app.inst_data.instantiate_in_place(mapper);
+        }
+        ENodeKind::GetFunction(get_function) => {
+            get_function.inst_data.instantiate_in_place(mapper);
+        }
+        ENodeKind::GetSubscript(get_subscript) => {
+            get_subscript.inst_data.instantiate_in_place(mapper);
+        }
+        ENodeKind::CallDictionaryFunction(call) => call.ty = call.ty.map(mapper),
+        ENodeKind::TraitMethodApply(value) => match *value {},
+        ENodeKind::GetTraitMethod(value) => match *value {},
+        ENodeKind::GetTraitAssociatedConst(value) => match *value {},
+        ENodeKind::GetTraitDictionary(value) => match *value {},
+        _ => {}
+    }
+    arena[node_id].ty = arena[node_id].ty.map(mapper);
+    arena[node_id].effects = mapper.map_effect_type(&arena[node_id].effects);
+}
+
+/// Default effect rows introduced during dictionary elaboration but absent from the finalized
+/// callable scheme.
+///
+/// Trait selection can materialize prerequisite dictionaries after the pending body has already
+/// gone through its ordinary effect-defaulting pass. Their inferred output rows, and node/local
+/// types unified with them, are implementation details of that selected evidence. Only variables
+/// quantified by the public scheme may escape the function.
+fn default_elaboration_only_effects(function: &mut ModuleFunction, arena: &mut hir::ENodeArena) {
+    let Some(script) = function.code.as_script() else {
+        return;
+    };
+    let root = script.entry_node_id;
+    let yield_root = script.yield_node_id;
+    let retained_effect_vars = &function.definition.ty_scheme.eff_quantifiers;
+    let mut body_effect_vars = FxHashSet::default();
+    fill_elaborated_node_effect_vars(arena, root, &mut body_effect_vars);
+    if let Some(yield_root) = yield_root {
+        fill_elaborated_node_effect_vars(arena, yield_root, &mut body_effect_vars);
+    }
+    for local in &function.locals {
+        local.ty.fill_with_inner_effect_vars(&mut body_effect_vars);
+    }
+    for binding in &function.evidence_bindings {
+        fill_dictionary_req_effect_vars(&binding.requirement, &mut body_effect_vars);
+    }
+
+    let effect_subst = body_effect_vars
+        .into_iter()
+        .filter(|var| !retained_effect_vars.contains(var))
+        .map(|var| (var, EffType::empty()))
+        .collect::<FxHashMap<EffectVar, EffType>>();
+    if effect_subst.is_empty() {
+        return;
+    }
+
+    let subst = (FxHashMap::default(), effect_subst);
+    let mut mapper = BitmapInstantiationMapper::new(&subst);
+    instantiate_elaborated_node_effects(arena, root, &mut mapper);
+    if let Some(yield_root) = yield_root {
+        instantiate_elaborated_node_effects(arena, yield_root, &mut mapper);
+    }
+    for local in &mut function.locals {
+        local.ty = local.ty.map(&mut mapper);
+    }
+    for binding in &mut function.evidence_bindings {
+        binding.requirement.instantiate_in_place(&mut mapper);
+    }
+}
+
+fn fill_dictionary_req_effect_vars(
+    requirement: &hir::dictionary::DictionaryReq,
+    vars: &mut FxHashSet<EffectVar>,
+) {
+    use hir::dictionary::DictionaryReq;
+    match requirement {
+        DictionaryReq::ProjectionSubscript { subscript_ty, .. } => {
+            subscript_ty.fill_with_inner_effect_vars(vars);
+        }
+        DictionaryReq::VariantPayloadIndirection {
+            variant_ty,
+            payload_ty,
+            ..
+        } => {
+            variant_ty.fill_with_inner_effect_vars(vars);
+            payload_ty.fill_with_inner_effect_vars(vars);
+        }
+        DictionaryReq::TraitImpl {
+            input_tys,
+            output_tys,
+            output_effs,
+            ..
+        } => {
+            input_tys
+                .iter()
+                .chain(output_tys)
+                .for_each(|ty| ty.fill_with_inner_effect_vars(vars));
+            output_effs
+                .iter()
+                .for_each(|effect| effect.fill_with_inner_effect_vars(vars));
+        }
+    }
+}
+
 fn fill_fn_inst_data_effect_vars(inst_data: &hir::FnInstData, vars: &mut FxHashSet<EffectVar>) {
     for req in &inst_data.dicts_req {
         match req {
@@ -347,8 +493,9 @@ pub(super) fn borrow_check_and_elaborate_pending_function(
         .expect("expected pending function body");
     function.definition = function_slot.definition.clone();
     function.spans = function_slot.spans.clone();
-    let elaborated =
+    let mut elaborated =
         function.check_borrows_and_elaborate_hir_with_warnings(dst_arena, ctx, warnings)?;
+    default_elaboration_only_effects(&mut elaborated, dst_arena);
     *function_slot = elaborated;
     Ok(())
 }

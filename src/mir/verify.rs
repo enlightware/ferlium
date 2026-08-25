@@ -1653,6 +1653,7 @@ impl<'a> Verifier<'a> {
             | mir::Value::Function(_)
             | mir::Value::Subscript(_)
             | mir::Value::Dictionary(_)
+            | mir::Value::Evidence(_)
             | mir::Value::Pattern(_) => false,
             mir::Value::Parameter(_) => false,
             mir::Value::Register(value_id) => {

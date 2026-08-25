@@ -19,12 +19,14 @@ use crate::{
     containers::b,
     execution::ReferenceInterpreterLimits,
     format::{FormatWith, write_with_separator},
+    hir::dictionary::{EvidenceBinding, EvidenceBindingSource, StaticEvidence},
     hir::function::{ArgConvention, copy_boxed_trivial_copy_native},
     hir::value::{
-        FunctionValue, HiddenEvidenceArgValue, NativeValue, NativeValueType, SubscriptValue, Value,
+        ClosedTraitDictionary, FunctionValue, HiddenEvidenceArgValue, NativeValue, NativeValueType,
+        SubscriptValue, Value,
     },
     module::{
-        ELocalDecl as LocalDecl, ExtraParameterId, FunctionId, LocalDebugVisibility, LocalDeclId,
+        ELocalDecl as LocalDecl, EvidenceBindingId, FunctionId, LocalDebugVisibility, LocalDeclId,
         LocalFunctionId, ModuleFunction, ModuleId, ProjectionIndex, ResolvedLocalClone,
         ResolvedLocalDrop, ResolvedTakeLocalValueMode, ResolvedValueLayout, SubscriptId,
         TraitDictionary, TraitDictionaryEntry, TraitDictionaryId, TraitImplId,
@@ -47,7 +49,7 @@ pub enum ValOrMut {
     /// A value, itself
     Val(Value),
     /// Runtime trait dictionary metadata.
-    Dictionary(TraitDictionaryId),
+    Dictionary(ClosedTraitDictionary),
     /// A shared reference to value storage outside the environment.
     ///
     /// This is used for interpreter-only call setup, for example when cloning a
@@ -555,12 +557,12 @@ impl<'a> EvalCtx<'a> {
         TraitDictionaryId::new(dictionary.module, dictionary.impl_id)
     }
 
-    pub fn dictionary_value(&self, dictionary: TraitDictionaryId) -> &TraitDictionary {
+    pub fn dictionary_value(&self, dictionary: &ClosedTraitDictionary) -> &TraitDictionary {
         let module = self
             .compiler_session
-            .expect_fresh_module(dictionary.module_id);
+            .expect_fresh_module(dictionary.definition.module_id);
         &module
-            .get_impl_data(dictionary.impl_id)
+            .get_impl_data(dictionary.definition.impl_id)
             .unwrap_or_else(|| panic!("trait dictionary impl not found: {:?}", dictionary))
             .dictionary_value
     }
@@ -582,6 +584,7 @@ impl<'a> EvalCtx<'a> {
             None
         } else {
             let dictionary = closure_env_dictionary
+                .clone()
                 .expect("closures with captured values must carry a Value dictionary");
             self.check_environment_cell_limit(self.environment.len(), Some(location))?;
             let closure_env = call_value_clone_for_temp(
@@ -616,8 +619,9 @@ impl<'a> EvalCtx<'a> {
             .map_err(|err| err.with_frame(function_id, location));
 
         if let Some(root) = closure_env_temp {
-            let dictionary =
-                closure_env_dictionary.expect("closure environment dictionary disappeared");
+            let dictionary = closure_env_dictionary
+                .clone()
+                .expect("closure environment dictionary disappeared");
             let place = Place {
                 root,
                 path: Vec::new(),
@@ -735,8 +739,10 @@ impl<'a> EvalCtx<'a> {
         let old_extra_frame_base = self.extra_frame_base;
         let extra_start = self.extra_parameters.len();
         self.extra_frame_base = extra_start;
-        self.extra_parameters
-            .extend(extra_arguments.iter().cloned());
+        self.extra_parameters.extend(materialize_evidence_bindings(
+            &function_data.evidence_bindings,
+            &extra_arguments,
+        ));
 
         let old_frame_base = self.frame_base;
         let frame_base = self.environment.len();
@@ -899,12 +905,28 @@ impl<'a> EvalCtx<'a> {
             function_data.definition.returns_place(),
         );
         let is_script = function_data.code.as_script().is_some();
+        if is_script {
+            let expected_extra_arguments = function_data
+                .evidence_bindings
+                .iter()
+                .take_while(|binding| matches!(binding.source, EvidenceBindingSource::Parameter(_)))
+                .count();
+            assert_eq!(
+                extra_arguments.len(),
+                expected_extra_arguments,
+                "HIR call to {function_id:?} ({:?}) supplied {} hidden evidence arguments for {expected_extra_arguments} parameters",
+                function_data.definition,
+                extra_arguments.len(),
+            );
+        }
         let old_extra_frame_base = is_script.then_some(self.extra_frame_base);
         let extra_start = is_script.then_some(self.extra_parameters.len());
         if let Some(extra_start) = extra_start {
             self.extra_frame_base = extra_start;
-            self.extra_parameters
-                .extend(extra_arguments.iter().cloned());
+            self.extra_parameters.extend(materialize_evidence_bindings(
+                &function_data.evidence_bindings,
+                &extra_arguments,
+            ));
         }
         let arguments = if is_script || extra_arguments.is_empty() {
             arguments
@@ -1914,7 +1936,7 @@ fn eval_dictionary_metadata_node(
     arena: &ENodeArena,
     node: ENodeId,
     ctx: &mut EvalCtx,
-) -> Result<ControlFlow<TraitDictionaryId>, RuntimeError> {
+) -> Result<ControlFlow<ClosedTraitDictionary>, RuntimeError> {
     if let Some(dictionary) = try_dictionary_metadata_node(arena, node, ctx) {
         return Ok(ControlFlow::Continue(dictionary));
     }
@@ -1928,9 +1950,19 @@ fn try_dictionary_metadata_node(
     arena: &ENodeArena,
     node: ENodeId,
     ctx: &EvalCtx,
-) -> Option<TraitDictionaryId> {
+) -> Option<ClosedTraitDictionary> {
     match &arena[node].kind {
-        NodeKind::GetDictionary(get_dict) => Some(ctx.get_dictionary_id(get_dict.dictionary)),
+        NodeKind::GetDictionary(get_dict) => {
+            let captures = get_dict
+                .captures
+                .iter()
+                .map(|capture| eval_static_evidence_node(arena, *capture, ctx))
+                .collect();
+            Some(ClosedTraitDictionary {
+                definition: ctx.get_dictionary_id(get_dict.dictionary),
+                captures,
+            })
+        }
         NodeKind::LoadDictionary(load) => match extra_parameter_value(ctx, load.extra_parameter) {
             HiddenEvidenceArgValue::TraitDictionary(dictionary) => Some(dictionary),
             HiddenEvidenceArgValue::Subscript(_) => {
@@ -1944,13 +1976,53 @@ fn try_dictionary_metadata_node(
     }
 }
 
-pub(crate) fn try_dictionary_from_place(place: &Place, ctx: &EvalCtx) -> Option<TraitDictionaryId> {
+fn eval_static_evidence_node(
+    arena: &ENodeArena,
+    node: ENodeId,
+    ctx: &EvalCtx,
+) -> HiddenEvidenceArgValue {
+    match &arena[node].kind {
+        NodeKind::GetDictionary(_) | NodeKind::LoadDictionary(_) => {
+            HiddenEvidenceArgValue::TraitDictionary(
+                try_dictionary_metadata_node(arena, node, ctx)
+                    .expect("dictionary evidence node must resolve to a closed dictionary"),
+            )
+        }
+        NodeKind::GetSubscript(get) => {
+            HiddenEvidenceArgValue::Subscript(b(SubscriptValue::bare(get.subscript)))
+        }
+        NodeKind::LoadSubscriptEvidence(load) => HiddenEvidenceArgValue::Subscript(b(
+            subscript_from_extra_parameter(ctx, load.extra_parameter),
+        )),
+        NodeKind::LoadVariantPayloadStorageEvidence(load) => {
+            match extra_parameter_value(ctx, load.extra_parameter) {
+                HiddenEvidenceArgValue::VariantPayloadStorage(storage) => {
+                    HiddenEvidenceArgValue::VariantPayloadStorage(storage)
+                }
+                _ => panic!("variant payload-storage evidence has the wrong runtime shape"),
+            }
+        }
+        NodeKind::Immediate(value) => HiddenEvidenceArgValue::VariantPayloadStorage(
+            crate::hir::value::VariantPayloadStorage::from_indirect(
+                *value
+                    .as_primitive_ty::<bool>()
+                    .expect("static evidence immediate must be a payload-storage boolean"),
+            ),
+        ),
+        other => panic!("unsupported static evidence node: {other:?}"),
+    }
+}
+
+pub(crate) fn try_dictionary_from_place(
+    place: &Place,
+    ctx: &EvalCtx,
+) -> Option<ClosedTraitDictionary> {
     let mut path = place.path.iter().copied().collect::<VecDeque<_>>();
     let mut index = place.root;
     loop {
         match &ctx.environment[index] {
             ValOrMut::Dictionary(dictionary) => {
-                return path.is_empty().then_some(*dictionary);
+                return path.is_empty().then_some(dictionary.clone());
             }
             ValOrMut::Mut(place) => {
                 index = place.root;
@@ -1965,8 +2037,8 @@ pub(crate) fn try_dictionary_from_place(place: &Place, ctx: &EvalCtx) -> Option<
 
 fn dictionary_from_extra_parameter(
     ctx: &EvalCtx,
-    extra_parameter: ExtraParameterId,
-) -> TraitDictionaryId {
+    extra_parameter: EvidenceBindingId,
+) -> ClosedTraitDictionary {
     match extra_parameter_value(ctx, extra_parameter) {
         HiddenEvidenceArgValue::TraitDictionary(dictionary) => dictionary,
         HiddenEvidenceArgValue::Subscript(_) | HiddenEvidenceArgValue::VariantPayloadStorage(_) => {
@@ -1980,7 +2052,7 @@ fn dictionary_from_extra_parameter(
 
 fn subscript_from_extra_parameter(
     ctx: &EvalCtx,
-    extra_parameter: ExtraParameterId,
+    extra_parameter: EvidenceBindingId,
 ) -> SubscriptValue {
     match extra_parameter_value(ctx, extra_parameter) {
         HiddenEvidenceArgValue::Subscript(subscript) => *subscript,
@@ -1994,21 +2066,90 @@ fn subscript_from_extra_parameter(
 
 fn extra_parameter_value(
     ctx: &EvalCtx,
-    extra_parameter: ExtraParameterId,
+    extra_parameter: EvidenceBindingId,
 ) -> HiddenEvidenceArgValue {
     ctx.extra_parameters[ctx.extra_frame_base + extra_parameter.as_index()].clone()
 }
 
+fn materialize_evidence_bindings(
+    bindings: &[EvidenceBinding],
+    parameters: &[HiddenEvidenceArgValue],
+) -> Vec<HiddenEvidenceArgValue> {
+    let mut values: Vec<HiddenEvidenceArgValue> = Vec::with_capacity(bindings.len());
+    for binding in bindings {
+        let value = match &binding.source {
+            EvidenceBindingSource::Parameter(parameter) => parameters[parameter.as_index()].clone(),
+            EvidenceBindingSource::Static(evidence) => materialize_static_evidence(evidence),
+            EvidenceBindingSource::ConstructedDictionary {
+                definition,
+                captures,
+            } => HiddenEvidenceArgValue::TraitDictionary(ClosedTraitDictionary {
+                definition: *definition,
+                captures: captures
+                    .iter()
+                    .map(|capture| values[capture.as_index()].clone())
+                    .collect(),
+            }),
+            EvidenceBindingSource::ConstructedSubscript {
+                definition,
+                captures,
+            } => HiddenEvidenceArgValue::Subscript(b(SubscriptValue {
+                subscript: *definition,
+                hidden_args: captures
+                    .iter()
+                    .map(|capture| values[capture.as_index()].clone())
+                    .collect(),
+            })),
+        };
+        values.push(value);
+    }
+    values
+}
+
+fn materialize_static_evidence(evidence: &StaticEvidence) -> HiddenEvidenceArgValue {
+    match evidence {
+        StaticEvidence::Dictionary {
+            definition,
+            captures,
+        } => HiddenEvidenceArgValue::TraitDictionary(ClosedTraitDictionary {
+            definition: *definition,
+            captures: captures.iter().map(materialize_static_evidence).collect(),
+        }),
+        StaticEvidence::Subscript {
+            definition,
+            captures,
+        } => HiddenEvidenceArgValue::Subscript(b(SubscriptValue {
+            subscript: *definition,
+            hidden_args: captures.iter().map(materialize_static_evidence).collect(),
+        })),
+        StaticEvidence::VariantPayloadStorage(indirect) => {
+            HiddenEvidenceArgValue::VariantPayloadStorage(
+                crate::hir::value::VariantPayloadStorage::from_indirect(*indirect),
+            )
+        }
+    }
+}
+
 fn call_dictionary_function(
     ctx: &mut EvalCtx,
-    dictionary: TraitDictionaryId,
+    dictionary: ClosedTraitDictionary,
     entry_index: TraitDictionaryEntryIndex,
     arguments: Vec<ValOrMut>,
     span: Location,
 ) -> EvalControlFlowResult {
-    let TraitDictionaryEntry::Function(function) =
-        ctx.dictionary_value(dictionary).entry(entry_index);
-    let function_value = FunctionValue::bare(FunctionId::new(dictionary.module_id, function));
+    let dictionary_definition = ctx.dictionary_value(&dictionary);
+    let TraitDictionaryEntry::Function(function) = dictionary_definition.entry(entry_index);
+    let hidden_args = dictionary_definition
+        .project_entry_captures(entry_index, &dictionary.captures, || {
+            HiddenEvidenceArgValue::TraitDictionary(dictionary.clone())
+        })
+        .expect("validated dictionary entry capture mapping");
+    let function_value = FunctionValue::closure(
+        FunctionId::new(dictionary.definition.module_id, function),
+        hidden_args,
+        Vec::new(),
+        None,
+    );
     ctx.call_function_value(&function_value, arguments, span)
 }
 
@@ -2018,11 +2159,18 @@ fn eval_get_dictionary_function(
     ctx: &mut EvalCtx,
 ) -> EvalControlFlowResult {
     let dictionary = eval_or_return!(eval_dictionary_metadata_node(arena, node.dictionary, ctx));
-    let TraitDictionaryEntry::Function(function) =
-        ctx.dictionary_value(dictionary).entry(node.entry_index);
-    cont(Value::function(FunctionId::new(
-        dictionary.module_id,
-        function,
+    let dictionary_definition = ctx.dictionary_value(&dictionary);
+    let TraitDictionaryEntry::Function(function) = dictionary_definition.entry(node.entry_index);
+    let hidden_args = dictionary_definition
+        .project_entry_captures(node.entry_index, &dictionary.captures, || {
+            HiddenEvidenceArgValue::TraitDictionary(dictionary.clone())
+        })
+        .expect("validated dictionary entry capture mapping");
+    cont(Value::function_value(FunctionValue::closure(
+        FunctionId::new(dictionary.definition.module_id, function),
+        hidden_args,
+        Vec::new(),
+        None,
     )))
 }
 
@@ -2104,7 +2252,7 @@ fn call_resolved_value_method(
 #[derive(Clone, Copy)]
 enum ResolvedValueMethod {
     Static(FunctionId),
-    Dictionary(ExtraParameterId),
+    Dictionary(EvidenceBindingId),
 }
 
 fn clone_value_method_dispatch(clone: &ResolvedLocalClone) -> Option<ResolvedValueMethod> {
@@ -2230,7 +2378,7 @@ fn call_value_clone_with(
 
 pub(crate) fn call_value_clone_for_temp(
     ctx: &mut EvalCtx,
-    dictionary: TraitDictionaryId,
+    dictionary: ClosedTraitDictionary,
     source: ValOrMut,
     span: Location,
 ) -> Result<Value, RuntimeError> {
@@ -2260,7 +2408,7 @@ fn call_value_clone_dispatch_for_temp(
 
 pub(crate) fn call_value_drop_for_temp(
     ctx: &mut EvalCtx,
-    dictionary: TraitDictionaryId,
+    dictionary: ClosedTraitDictionary,
     target: ValOrMut,
     span: Location,
 ) -> EvalControlFlowResult {
@@ -2386,10 +2534,10 @@ fn eval_clone_closure_env(
             source.hidden_args.clone(),
             &source.closure_env as *const Value,
             source.closure_env_len,
-            source.closure_env_value_dictionary,
+            source.closure_env_value_dictionary.clone(),
         )
     };
-    let closure_env = if let Some(dictionary) = closure_env_value_dictionary {
+    let closure_env = if let Some(dictionary) = closure_env_value_dictionary.clone() {
         call_value_clone_for_temp(ctx, dictionary, ValOrMut::Ref(closure_env_ptr), span)?
     } else {
         Value::unit()
@@ -2418,7 +2566,7 @@ fn eval_drop_closure_env(
             .target_mut(ctx)
             .map_err(|err| RuntimeError::new(err, Some(span)))?;
         let function = target.as_function_mut().unwrap();
-        let dictionary = function.closure_env_value_dictionary;
+        let dictionary = function.closure_env_value_dictionary.clone();
         dictionary.map(|dictionary| {
             function.closure_env_len = 0;
             function.closure_env_value_dictionary = None;
@@ -3686,12 +3834,8 @@ fn eval_assign(
     let value = eval_or_return!(eval_node_with_ctx(arena, assignment.value, ctx, locals));
     let span = arena[node_id].span;
     if let Some(drop) = &assignment.drop
-        && let Err(err) = drop_value_at_place_if_initialized(
-            ctx,
-            resolved_local_drop(drop),
-            place.clone(),
-            span,
-        )
+        && let Err(err) =
+            drop_value_at_place_if_initialized(ctx, resolved_local_drop(drop), place.clone(), span)
     {
         value.discard_storage();
         return Err(err);

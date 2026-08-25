@@ -97,6 +97,12 @@ variables in deterministic first-occurrence order. Concrete types and primitive 
 the key, as does the equality pattern between repeated variables. Thus two independently numbered
 open rows share an artifact, while a row containing `fallible` remains distinct from one without it.
 
+A generated trait dictionary is a static definition plus an ordered capture schema. The schema and
+each entry's mapping from hidden parameters to captures are canonicalized with the open input and
+must agree when a cached definition is reused. A runtime use closes that shared definition over the
+caller's evidence in schema order; its identity is therefore the definition together with the
+recursive captured evidence, not the caller-local type-variable numbers.
+
 This canonicalization is deliberately confined to generated artifacts. It does not alter the
 caller's semantic type or ordinary trait-impl lookup. A reused dictionary expression is typed with
 the caller's actual input; its stored methods remain generic over the canonical variables.

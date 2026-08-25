@@ -39,7 +39,7 @@ use crate::{
     hir::dictionary::{
         DictionaryReq, VariantPayloadLayoutBinding, instantiate_dictionary_requirements,
     },
-    module::{ExtraParameterId, ModuleEnv, TraitId, id::Id},
+    module::{EvidenceBindingId, ModuleEnv, TraitId, id::Id},
     types::effects::{EffType, EffectVar, EffectsInstSubst, no_effects},
     types::r#type::{
         FnArgType, SubscriptMemberType, SubscriptResultConvention, SubscriptType, Type,
@@ -1208,7 +1208,7 @@ pub(crate) fn extra_parameters_from_constraints(
                     variant_ty: *variant_ty,
                     tag: *tag,
                     payload_ty: *payload_ty,
-                    parameter: ExtraParameterId::from_index(parameter_index),
+                    parameter: EvidenceBindingId::from_index(parameter_index),
                 };
                 if !variant_payload_layouts.contains(&binding) {
                     variant_payload_layouts.push(binding);
@@ -1224,18 +1224,15 @@ pub(crate) fn extra_parameters_from_constraints(
                 let trait_def = env.trait_def(*trait_id);
                 // Function-related `Value` dictionaries are synthesized by
                 // dictionary passing instead of being passed as hidden args.
-                if is_value_trait_for_function_type(*trait_id, trait_def, input_tys, output_tys)
+                if !trait_def.has_runtime_dictionary_entries()
+                    || is_value_trait_for_function_type(*trait_id, trait_def, input_tys, output_tys)
                     || is_function_surface_only_value_trait_application(
                         *trait_id, trait_def, input_tys, output_tys,
                     )
                 {
+                    // Marker traits and compiler-provided function `Value` applications have no
+                    // hidden runtime argument.
                     None
-                } else if input_tys.iter().all(|ty| ty.is_trait_input_resolved()) {
-                    panic!(
-                        "Type scheme with trait having only non-variable input types in constraints"
-                    )
-                } else if !trait_def.has_runtime_dictionary_entries() {
-                    None // Marker traits have no runtime dictionary entries.
                 } else {
                     let requirement = constraint
                         .dictionary_requirement_key(value_trait_id)

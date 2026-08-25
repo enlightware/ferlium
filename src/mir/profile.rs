@@ -115,7 +115,11 @@ impl MirInstructionKind {
                 Cost::Storage
             }
             Self::Operation(
-                Op::Subfield | Op::DictEntry | Op::SubscriptMember | Op::BuildSubscript,
+                Op::Subfield
+                | Op::DictEntry
+                | Op::BuildDictionary
+                | Op::SubscriptMember
+                | Op::BuildSubscript,
             ) => Cost::Addressing,
             Self::Operation(Op::CompareEqual | Op::ExtractTag) => Cost::Scalar,
             Self::Operation(

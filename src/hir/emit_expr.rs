@@ -56,6 +56,7 @@ struct PendingExprEntry {
     expr: hir::ENodeId,
     ty: TypeScheme<Type>,
     locals: Vec<ELocalDecl>,
+    evidence_bindings: Vec<hir::dictionary::EvidenceBinding>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -98,13 +99,14 @@ impl PendingExprEntry {
             argument_names,
             None,
         );
-        let function = ModuleFunction::new_elaborated(
+        let mut function = ModuleFunction::new_elaborated(
             definition,
             b(ScriptFunction::new(self.expr, runtime_arg_count)),
             parameter_passing,
             None,
             self.locals,
         );
+        function.evidence_bindings = self.evidence_bindings;
         module.add_function_with_visibility(ustr::ustr("<expr>"), function, Visibility::Module)
     }
 }
@@ -500,6 +502,7 @@ fn emit_expr_unsafe_inner(
         locals,
         warnings,
     )?;
+    let evidence_bindings = ctx.evidence_bindings.clone();
     let expr = elaborated.root;
     check_elaborated_borrows(&module.hir_arena, expr)?;
     for lambda_id in lambda_functions.iter() {
@@ -531,6 +534,7 @@ fn emit_expr_unsafe_inner(
         expr,
         ty: ty_scheme,
         locals: elaborated.locals,
+        evidence_bindings,
     })
 }
 
@@ -597,7 +601,12 @@ fn emit_expr_with_options(
     warnings: &mut Vec<CompilationWarning>,
 ) -> Result<PendingExprEntry, InternalCompilationError> {
     let span = parsed_arena[source].span;
-    let PendingExprEntry { ty, expr, locals } = emit_expr_unsafe_with_options(
+    let PendingExprEntry {
+        ty,
+        expr,
+        locals,
+        evidence_bindings,
+    } = emit_expr_unsafe_with_options(
         source,
         parsed_arena,
         module,
@@ -607,7 +616,12 @@ fn emit_expr_with_options(
         warnings,
     )?;
     validate_safe_expr_type_scheme(&ty, span)?;
-    Ok(PendingExprEntry { ty, expr, locals })
+    Ok(PendingExprEntry {
+        ty,
+        expr,
+        locals,
+        evidence_bindings,
+    })
 }
 
 fn validate_safe_expr_type_scheme(

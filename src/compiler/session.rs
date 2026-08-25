@@ -1438,6 +1438,35 @@ impl CompilerSession {
         }
     }
 
+    /// Run a named function through a runner that also receives its resolved function identity.
+    pub fn run_fn_resolved<R>(
+        &self,
+        module_id: ModuleId,
+        name: &str,
+        runner: impl FnOnce(
+            FunctionId,
+            &ModuleFunction,
+            &Module,
+            ModuleRegistry<'_>,
+        ) -> Result<R, String>,
+    ) -> Result<R, String> {
+        let entry = self
+            .raw_modules()
+            .get(module_id)
+            .ok_or_else(|| format!("Module {module_id} not found"))?;
+        if entry.stale {
+            return Err(format!(
+                "Module {module_id} is stale due to failed compilation, cannot run function {name}"
+            ));
+        }
+        let module = entry.module().unwrap();
+        match module.lookup_function_id(name, &self.modules) {
+            Ok(Some((function, data))) => runner(function, data, module, self.modules()),
+            Ok(None) => Err(format!("Function {name} not found in module {module_id}")),
+            Err(e) => Err(format!("Lookup error for function {name}: {e:?}")),
+        }
+    }
+
     fn add_or_reuse_module_source(
         &mut self,
         current: Option<&ModuleSrcInfo>,

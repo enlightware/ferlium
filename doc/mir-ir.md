@@ -40,16 +40,17 @@ verifier at this boundary.
 **A `FunctionId` names a function in a context, and the context is `(module, artifact stage)`.** A
 module's MIR bodies line up one-for-one with its HIR function table — except in the *optimized*
 stage, which the optimizer may extend past the end with **specializations**: private copies of a
-generic function with one call site's types substituted and its trait dictionaries bound to
-constants. The raw stage is always exactly the HIR table, which is also what lets the two stages be
+generic function with one call site's types substituted and its recursively static evidence bound
+to constants, plus optimized-only ABI variants. The raw stage is always exactly the HIR table, which is also what lets the two stages be
 told apart without a flag.
 
 A specialization has no HIR entry, since nothing in the source declared it. Whether it is script or
 native and its source return convention come from the function it was specialized from, through one
 indirection. An ordinary monomorphization keeps that original's visible signature. A later
 optimized-only variant may change selected parameters to ownership transfer, recorded directly in
-its MIR body and call sites. Hidden evidence parameters need no HIR metadata either: binding a
-dictionary replaces its uses, and the optimizer removes the now-dead parameters and call operands.
+its MIR body and call sites. Hidden evidence parameters need no HIR metadata either: binding
+evidence replaces its uses, and the optimizer removes the now-dead parameters and call operands.
+An owned-ABI variant of an evidence-parameterized generated thunk retains that live evidence.
 
 ## Values and roles
 
@@ -92,7 +93,7 @@ across passes. The role is instead a property of the *defining* operation, deriv
 | place | Pointer to addressable storage. |
 | materialized value | A value available without dereferencing a place. Owned materialized values have exactly one consuming use on each feasible path. |
 | variant tag | An opaque semantic tag identity, comparable only with symbolic variant-tag pattern data. |
-| evidence | A dictionary or subscript used for generic dispatch. |
+| evidence | A dictionary, subscript, or variant-storage choice used for generic dispatch/layout. Compile-time evidence may recursively close a definition over other evidence. |
 | stack marker | A saved allocation frontier consumed by `stack_restore`. |
 | open projection | A yielded place plus the accessor contract whose slide must be ended exactly once. |
 
@@ -162,7 +163,7 @@ The operation kind fixes operand arity, roles, and result shape. The main groups
 |---|---|---|
 | storage | `alloca`, `alloca_place`, `load`, `store`, `clear`, `memcpy`, `move` | `store` never drops; `memcpy` requires a concrete `TrivialCopy` pointee; `move` leaves its source absent. Dynamic allocation/move carries a layout witness. |
 | aggregates | `subfield`, `variant`, `extract_tag`, `build_array` | Aggregate construction and ownership remain field-addressable. A variant operation first builds an uninitialized payload shell. Generic variant construction and payload-marked `subfield` operations carry the selected payload's `Value<B>` layout witness; projection reads inline/indirect classification from the stored tag. `extract_tag` yields an opaque semantic tag, not the raw ABI word. `build_array` initializes fresh canonical array storage from borrowed `TrivialCopy` elements. |
-| evidence | `dict_entry`, `subscript_member`, `build_subscript` | Evidence remains symbolic and dictionary entries are function places. |
+| evidence | `dict_entry`, `build_dictionary`, `subscript_member`, `build_subscript` | Evidence remains symbolic. Construction closes a definition over evidence operands; dictionary entries are closed function places. |
 | calls/projections | `call`, `project`, `end_project` | Proven source-infallible forms are ordinary operations. Potentially source-fallible forms occur only inside `invoke`. |
 | ownership | `clone`, `drop`, `build_closure`, `clone_closure_env`, `drop_closure_env` | Semantic ownership actions are explicit. `Value::clone` and `Value::drop` are source-infallible by contract. |
 | matching | `comp_eq` | Compares a borrowed/materialized runtime value with compile-time pattern data. |
@@ -182,6 +183,14 @@ otherwise. `clone` and `drop` each carry the type they act on, so a pass that ch
 still needed without recovering the type from the dictionary behind the callee. Their callee follows
 the same contract as a `call`'s: a constant function, or the place of a function value read by
 reference. A `clone` initializes its destination and gives it the drop obligation the copy creates.
+
+When devirtualization resolves a closed dictionary entry, `call`, `clone`, and `drop` name the
+function directly and place its recursively static hidden evidence immediately after the callee.
+
+`build_dictionary<Definition> [capture0, ...]` is pure, effect-free and idempotent. Its operands all
+have the evidence role and follow the definition's canonical capture schema. A capture-free
+dictionary remains a symbolic constant; an entirely static construction folds to recursive static
+evidence.
 
 `build_array<A> [e0, ...] to destination` representation-copies each borrowed element and
 initializes `destination: [A]` with a fresh logical array of exactly that length. `A` must be

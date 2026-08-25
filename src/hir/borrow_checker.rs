@@ -824,14 +824,13 @@ fn elaborated_addressor_base_origin(
         .map(|origin| PlaceOrigin::Addressor(origin.local()))
 }
 
-fn elaborated_child_node_ids(kind: &NodeKind<Elaborated>) -> SVec4<ENodeId> {
+pub(super) fn elaborated_child_node_ids(kind: &NodeKind<Elaborated>) -> SVec4<ENodeId> {
     use NodeKind::*;
     match kind {
         Immediate(_)
         | Uninit
         | GetFunction(_)
         | GetSubscript(_)
-        | GetDictionary(_)
         | LoadDictionary(_)
         | LoadSubscriptEvidence(_)
         | LoadVariantPayloadStorageEvidence(_)
@@ -840,6 +839,7 @@ fn elaborated_child_node_ids(kind: &NodeKind<Elaborated>) -> SVec4<ENodeId> {
         | CheckCallDepth
         | CheckFuel
         | Continue(_) => smallvec![],
+        GetDictionary(dictionary) => dictionary.captures.iter().copied().collect(),
         BuildClosure(build) => std::iter::once(build.function)
             .chain(build.dictionary_captures.iter().copied())
             .chain(build.captures.iter().copied())
@@ -903,6 +903,7 @@ mod tests {
         containers::b,
         hir::{Case, ENode, value::LiteralValue},
         module::{CurrentTypeItems, PendingFunctionCollector},
+        module::{LocalImplId, ModuleId, TraitImplId},
         std::string::{StaticStr, string_type},
         types::{
             effects::EffType,
@@ -910,6 +911,23 @@ mod tests {
             r#type::Type,
         },
     };
+
+    #[test]
+    fn elaborated_dictionary_captures_are_child_nodes() {
+        let mut arena = ENodeArena::default();
+        let capture = arena.alloc(ENode::new(
+            NodeKind::Uninit,
+            Type::unit(),
+            EffType::empty(),
+            Location::new_synthesized(),
+        ));
+        let kind = NodeKind::GetDictionary(crate::hir::GetDictionary {
+            dictionary: TraitImplId::new(ModuleId::new(0), LocalImplId::new(0)),
+            captures: vec![capture],
+        });
+
+        assert_eq!(elaborated_child_node_ids(&kind).as_slice(), &[capture]);
+    }
 
     fn with_std_solver(result: impl FnOnce(&TraitSolver<'_>)) {
         let session = CompilerSession::new();

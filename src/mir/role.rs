@@ -108,6 +108,8 @@ pub(crate) enum ValueRole {
     VariantTag,
     Dictionary,
     Subscript,
+    /// Opaque evidence selecting the inline or indirect representation of a variant payload.
+    VariantPayloadStorage,
     Function,
     Pattern,
     StackMarker,
@@ -128,6 +130,7 @@ impl ValueRole {
             Self::VariantTag => "tag".to_string(),
             Self::Dictionary => "dict".to_string(),
             Self::Subscript => "subscript".to_string(),
+            Self::VariantPayloadStorage => "layout".to_string(),
             Self::Function => "fn".to_string(),
             Self::Pattern => "pattern".to_string(),
             Self::StackMarker => "stack".to_string(),
@@ -181,7 +184,10 @@ impl ValueRole {
     }
 
     pub(crate) fn is_evidence(&self) -> bool {
-        matches!(self, Self::Dictionary | Self::Subscript | Self::Place(_))
+        matches!(
+            self,
+            Self::Dictionary | Self::Subscript | Self::VariantPayloadStorage | Self::Place(_)
+        )
     }
 
     /// The type this role exposes, if it has one.
@@ -374,6 +380,9 @@ impl ValueRoles {
                 accessor: ty.clone(),
             });
         }
+        if matches!(operation.kind, OperationKind::BuildDictionary { .. }) {
+            return Some(ValueRole::Dictionary);
+        }
         self.resolve_result(result, constants)
     }
 
@@ -440,6 +449,13 @@ impl ValueRoles {
             ))),
             mir::Value::Dictionary(_) => Cow::Owned(ValueRole::Dictionary),
             mir::Value::Subscript(_) => Cow::Owned(ValueRole::Subscript),
+            mir::Value::Evidence(evidence) => Cow::Owned(match &**evidence {
+                mir::value::StaticEvidence::Dictionary { .. } => ValueRole::Dictionary,
+                mir::value::StaticEvidence::Subscript { .. } => ValueRole::Subscript,
+                mir::value::StaticEvidence::VariantPayloadStorage(_) => {
+                    ValueRole::VariantPayloadStorage
+                }
+            }),
             mir::Value::Function(_) => Cow::Owned(ValueRole::Function),
             mir::Value::Pattern(_) => Cow::Owned(ValueRole::Pattern),
             mir::Value::Parameter(id) => Cow::Borrowed(self.parameters.get(id.as_index())?),
@@ -664,6 +680,11 @@ pub(crate) fn check_operand_roles(
             }
         }
         OperationKind::DictEntry { .. } | OperationKind::SubscriptMember { .. } => evidence(0),
+        OperationKind::BuildDictionary { .. } => {
+            for index in 0..operands.len() {
+                evidence(index);
+            }
+        }
         OperationKind::BuildSubscript { .. } => {
             for index in 0..operands.len() {
                 evidence(index);
@@ -702,6 +723,9 @@ pub(crate) fn check_operand_roles(
                 "MIR function `{func_name}` {at}: drop callee must be a function or function \
                  place, got {callee:?}"
             );
+            for index in 2..operands.len() {
+                evidence(index);
+            }
         }
         OperationKind::Clone { .. } => {
             place(0);
@@ -712,6 +736,9 @@ pub(crate) fn check_operand_roles(
                 "MIR function `{func_name}` {at}: clone callee must be a function or function \
                  place, got {callee:?}"
             );
+            for index in 3..operands.len() {
+                evidence(index);
+            }
         }
         OperationKind::BuildClosure {
             num_hidden_dicts,
@@ -810,10 +837,26 @@ mod tests {
 
     use crate::{
         Location,
-        mir::{Operation, builder::FunctionBuilder},
+        mir::{Operation, builder::FunctionBuilder, value::StaticEvidence},
+        module::{LocalImplId, ModuleId, TraitDictionaryId},
         std::math::int_type,
         types::r#type::Type,
     };
+
+    #[test]
+    fn variant_payload_storage_constant_is_valid_dictionary_capture_evidence() {
+        let span = Location::new_synthesized();
+        let mut builder = FunctionBuilder::new("layout_capture".into(), Default::default());
+        let block = builder.add_block();
+        let definition = TraitDictionaryId::new(ModuleId::new(0), LocalImplId::new(0));
+        let capture =
+            crate::mir::Value::Evidence(Box::new(StaticEvidence::VariantPayloadStorage(true)));
+
+        builder.append_operation(
+            block,
+            Operation::build_dictionary(span, definition, vec![capture], int_type()),
+        );
+    }
 
     #[test]
     #[should_panic(expected = "stored operand must be a value or place pointer, got VariantTag")]

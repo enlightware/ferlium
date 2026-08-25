@@ -428,6 +428,7 @@ pub(super) fn may_leave_frame_storage(operation: &mir::Operation) -> bool {
         OperationKind::CompareEqual
         | OperationKind::Load
         | OperationKind::Subfield { .. }
+        | OperationKind::BuildDictionary { .. }
         | OperationKind::BuildSubscript { .. }
         | OperationKind::Variant { .. }
         | OperationKind::BuildArray { .. }

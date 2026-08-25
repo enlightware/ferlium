@@ -1,6 +1,9 @@
 use crate::{
     Location,
-    hir::function::ArgConvention,
+    hir::{
+        dictionary::{EvidenceBinding, EvidenceBindingSource},
+        function::ArgConvention,
+    },
     module::{
         DebugLocationRange, ELocalDecl, FunctionDebugInfo, LocalAssignmentMode, LocalDebugInfo,
         LocalDebugOrigin, LocalFrameSlot, LocalStorage, ModuleFunction, ModuleFunctionSpans,
@@ -11,7 +14,7 @@ use crate::{
 
 use super::{
     NativeCallableCatalog, SnapshotCallableDefinition, SnapshotError, SnapshotFunctionBody,
-    SnapshotTypeGraphBuilder, SnapshotTypeId,
+    SnapshotTypeGraphBuilder, SnapshotTypeId, hir::SnapshotDictionaryReq,
 };
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -61,6 +64,13 @@ struct SnapshotFunctionDebugInfo {
     locals: Vec<SnapshotLocalDebugInfo>,
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SnapshotEvidenceBinding {
+    requirement: SnapshotDictionaryReq,
+    source: EvidenceBindingSource,
+}
+
 /// Finalized function metadata plus a reconstructible script/native/structural body reference.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +78,7 @@ pub(crate) struct SnapshotModuleFunction {
     definition: SnapshotCallableDefinition,
     body: SnapshotFunctionBody,
     parameter_passing: Vec<ArgConvention>,
+    evidence_bindings: Vec<SnapshotEvidenceBinding>,
     spans: Option<SnapshotFunctionSpans>,
     locals: Vec<SnapshotLocalDecl>,
     debug_info: SnapshotFunctionDebugInfo,
@@ -193,6 +204,16 @@ impl SnapshotModuleFunction {
             definition: SnapshotCallableDefinition::capture(&value.definition, graph)?,
             body: SnapshotFunctionBody::capture(value)?,
             parameter_passing: value.parameter_passing.clone(),
+            evidence_bindings: value
+                .evidence_bindings
+                .iter()
+                .map(|binding| {
+                    Ok(SnapshotEvidenceBinding {
+                        requirement: SnapshotDictionaryReq::capture(&binding.requirement, graph)?,
+                        source: binding.source.clone(),
+                    })
+                })
+                .collect::<Result<_, SnapshotError>>()?,
             spans: value.spans.as_ref().map(SnapshotFunctionSpans::capture),
             locals: value
                 .locals
@@ -215,6 +236,16 @@ impl SnapshotModuleFunction {
             code,
             origin,
             parameter_passing: self.parameter_passing.clone(),
+            evidence_bindings: self
+                .evidence_bindings
+                .iter()
+                .map(|binding| {
+                    Ok(EvidenceBinding {
+                        requirement: binding.requirement.materialize(types)?,
+                        source: binding.source.clone(),
+                    })
+                })
+                .collect::<Result<_, SnapshotError>>()?,
             spans: self.spans.as_ref().map(SnapshotFunctionSpans::materialize),
             locals: self
                 .locals
@@ -261,6 +292,18 @@ mod tests {
                 expected.definition.signature()
             );
             assert_eq!(restored.parameter_passing, expected.parameter_passing);
+            assert_eq!(
+                restored.evidence_bindings.len(),
+                expected.evidence_bindings.len()
+            );
+            for (restored, expected) in restored
+                .evidence_bindings
+                .iter()
+                .zip(&expected.evidence_bindings)
+            {
+                assert_eq!(restored.requirement, expected.requirement);
+                assert_eq!(restored.source, expected.source);
+            }
             assert_eq!(restored.locals.len(), expected.locals.len());
             assert_eq!(restored.debug_info, expected.debug_info);
         }

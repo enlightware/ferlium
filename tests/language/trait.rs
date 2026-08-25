@@ -321,6 +321,183 @@ fn generic_trait_method_function_argument_keeps_source_place_passing() {
     );
 }
 
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn blanket_impl_dictionary_closes_over_prerequisite_evidence() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! {r#"
+            trait Describe<Self> {
+                fn describe(value: Self) -> int;
+            }
+
+            impl Describe for int {
+                fn describe(value: int) -> int { value }
+            }
+
+            struct Wrapper<T>(T)
+
+            impl<T> Describe for Wrapper<T>
+            where
+                T: Describe,
+                T: Value
+            {
+                fn describe(value: Wrapper<T>) -> int {
+                    describe(value.0) + 1
+                }
+            }
+
+            fn forward<T>(value: T) -> int
+            where
+                T: Describe,
+                T: Value
+            {
+                describe(value)
+            }
+
+            fn invoke<T>(function: (T) -> int, value: T) -> int
+            where
+                T: Value
+            {
+                function(value)
+            }
+
+            describe(Wrapper(40))
+                + forward(Wrapper(1))
+                + invoke(describe, Wrapper(1))
+        "#}),
+        int(45)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn closed_dictionary_clones_and_drops_a_closure_environment() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! {r#"
+            trait Describe<Self> {
+                fn describe(value: Self) -> int;
+            }
+
+            impl Describe for int {
+                fn describe(value: int) -> int { value }
+            }
+
+            struct Wrapper<T>(T)
+
+            impl<T> Describe for Wrapper<T>
+            where
+                T: Describe,
+                T: Value
+            {
+                fn describe(value: Wrapper<T>) -> int {
+                    describe(value.0) + 1
+                }
+            }
+
+            fn duplicate<T>(value: T) -> (T, T)
+            where
+                T: Value
+            {
+                (value, value)
+            }
+
+            let wrapped = Wrapper(40);
+            let functions = duplicate(|offset| describe(wrapped) + offset);
+            functions.0(1) + functions.1(2)
+        "#}),
+        int(85)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn capturing_blanket_dictionary_is_selected_across_modules() {
+    let mut session = TestSession::new();
+    session
+        .try_compile_module(
+            "base",
+            indoc! {r#"
+                pub trait Describe<Self> {
+                    fn describe(value: Self) -> int;
+                }
+
+                impl Describe for int {
+                    fn describe(value: int) -> int { value }
+                }
+
+                pub struct Wrapper<T>(T)
+
+                impl<T> Describe for Wrapper<T>
+                where
+                    T: Describe,
+                    T: Value
+                {
+                    fn describe(value: Wrapper<T>) -> int {
+                        describe(value.0) + 1
+                    }
+                }
+
+                pub fn forward<T>(value: T) -> int
+                where
+                    T: Describe,
+                    T: Value
+                {
+                    describe(Wrapper(value))
+                }
+            "#},
+        )
+        .unwrap();
+    session
+        .try_compile_module(
+            "user",
+            "pub fn result() -> int { base::Describe::describe(base::Wrapper(40))\
+                 + base::forward(1) }",
+        )
+        .unwrap();
+
+    assert_val_eq!(session.run("user::result()"), int(43));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_callers_with_different_evidence_prefixes_clone_closed_functions() {
+    let mut session = TestSession::new();
+    let source = indoc! {r#"
+        trait Mark<Self> {
+            fn mark(value: Self) -> int;
+        }
+
+        impl Mark for int {
+            fn mark(value: int) -> int { value }
+        }
+
+        fn first<T>(value: T) -> ((int) -> T, (int) -> T)
+        where
+            T: Value
+        {
+            let function = |ignored| value;
+            (function, function)
+        }
+
+        fn second<T>(value: T) -> ((int) -> T, (int) -> T)
+        where
+            T: Mark,
+            T: Value
+        {
+            mark(value);
+            let function = |ignored| value;
+            (function, function)
+        }
+
+        let a = first(20);
+        let b = second(21);
+        a.0(0) + a.1(0) + b.0(0) + b.1(0)
+    "#};
+    assert_val_eq!(session.run(source), int(82));
+}
+
 fn store_value_materializes_dictionary_method(arena: &ENodeArena, value: ENodeId) -> bool {
     match &arena[value].kind {
         NodeKind::GetDictionaryFunction(_) => true,

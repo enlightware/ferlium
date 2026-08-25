@@ -555,6 +555,7 @@ fn operand_storage(
         mir::Value::Function(_)
         | mir::Value::Dictionary(_)
         | mir::Value::Subscript(_)
+        | mir::Value::Evidence(_)
         | mir::Value::Pattern(_) => OperandStorage::None,
     }
 }
@@ -638,7 +639,11 @@ fn note_operation(operation: &Operation, site: Site, uses: &mut FxHashMap<ValueI
         OperationKind::Clone { .. } => {
             read(&operation.operands[0], uses);
             write(&operation.operands[1], uses);
-            unsafe_use(&operation.operands[2], uses);
+            operation
+                .operands
+                .iter()
+                .skip(2)
+                .for_each(|operand| unsafe_use(operand, uses));
         }
         OperationKind::Drop { .. } => {
             write(&operation.operands[0], uses);
@@ -654,6 +659,7 @@ fn note_operation(operation: &Operation, site: Site, uses: &mut FxHashMap<ValueI
         | OperationKind::EndProject
         | OperationKind::Subfield { .. }
         | OperationKind::DictEntry { .. }
+        | OperationKind::BuildDictionary { .. }
         | OperationKind::SubscriptMember { .. }
         | OperationKind::BuildSubscript { .. }
         | OperationKind::Variant { .. }

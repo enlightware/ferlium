@@ -25,9 +25,9 @@ use crate::{
     compiler::MirOptimization,
     eval::RuntimeError,
     execution::{ExecutionLimits, ReferenceInterpreterLimits},
-    hir::value::Value,
+    hir::value::{ClosedTraitDictionary, Value},
     mir::interpreter::{CallArgument, Interpreter},
-    module::{FunctionId, ModuleId, TraitDictionaryId},
+    module::{FunctionId, ModuleId},
     types::{
         effects::{EffType, Effect, PrimitiveEffect},
         r#type::{CallResultConvention, Type},
@@ -215,7 +215,7 @@ pub(crate) enum ConstArgument {
     /// A known value for a visible parameter.
     Value(Value),
     /// A symbolic trait dictionary for a hidden evidence parameter.
-    Dictionary(TraitDictionaryId),
+    Dictionary(ClosedTraitDictionary),
 }
 
 impl ConstArgument {
@@ -278,7 +278,7 @@ impl<'a> ConstEvaluator<'a> {
             .into_iter()
             .map(|argument| match argument {
                 ConstArgument::Value(value) => CallArgument::Value(value),
-                ConstArgument::Dictionary(id) => CallArgument::Dictionary(id),
+                ConstArgument::Dictionary(dictionary) => CallArgument::Dictionary(dictionary),
             })
             .collect();
         interpreter

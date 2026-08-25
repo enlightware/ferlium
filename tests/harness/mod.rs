@@ -117,6 +117,10 @@ pub fn hir_child_nodes(arena: &ENodeArena, node: ENodeId) -> Vec<ENodeId> {
             .copied()
             .chain(app.arguments.iter().map(|arg| arg.value))
             .collect(),
+        NodeKind::CallDictionaryFunction(app) => std::iter::once(app.dictionary)
+            .chain(app.arguments.iter().map(|arg| arg.value))
+            .collect(),
+        NodeKind::GetDictionary(dictionary) => dictionary.captures.clone(),
         NodeKind::WithPlace(with_place) => vec![with_place.place, with_place.body],
         NodeKind::WithYielded(with_yielded) => vec![with_yielded.accessor, with_yielded.body],
         NodeKind::CloneValue(clone) => vec![clone.source],

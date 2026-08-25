@@ -10,11 +10,12 @@
 use ustr::Ustr;
 
 use crate::{
-    FxHashMap,
+    FxHashMap, FxHashSet,
     format::FormatWith,
     module::{
-        ExtraParameterId, LocalFunctionId, ModuleEnv,
-        PendingGeneratedStructuralProjectionSubscripts, TraitId, id::Id,
+        EvidenceBindingId, ExtraParameterId, LocalFunctionId, ModuleEnv,
+        PendingGeneratedStructuralProjectionSubscripts, SubscriptId, TraitDictionaryId, TraitId,
+        id::Id,
     },
     types::{
         effects::{EffType, EffectVar},
@@ -65,6 +66,66 @@ impl DictionaryReq {
             requirement,
             field,
             subscript_ty,
+        }
+    }
+
+    /// Equality for dictionary-construction schemas, including trait outputs and output effects.
+    ///
+    /// [`PartialEq`] intentionally ignores those outputs for requirement lookup and must not be
+    /// used to verify the ABI of a selected dictionary definition.
+    pub(crate) fn same_capture_schema_entry(&self, other: &Self) -> bool {
+        use DictionaryReq::*;
+        match (self, other) {
+            (
+                ProjectionSubscript {
+                    requirement,
+                    field,
+                    subscript_ty,
+                },
+                ProjectionSubscript {
+                    requirement: other_requirement,
+                    field: other_field,
+                    subscript_ty: other_subscript_ty,
+                },
+            ) => {
+                requirement == other_requirement
+                    && field == other_field
+                    && subscript_ty == other_subscript_ty
+            }
+            (
+                VariantPayloadIndirection {
+                    variant_ty,
+                    tag,
+                    payload_ty,
+                },
+                VariantPayloadIndirection {
+                    variant_ty: other_variant_ty,
+                    tag: other_tag,
+                    payload_ty: other_payload_ty,
+                },
+            ) => {
+                variant_ty == other_variant_ty && tag == other_tag && payload_ty == other_payload_ty
+            }
+            (
+                TraitImpl {
+                    trait_id,
+                    input_tys,
+                    output_tys,
+                    output_effs,
+                },
+                TraitImpl {
+                    trait_id: other_trait_id,
+                    input_tys: other_input_tys,
+                    output_tys: other_output_tys,
+                    output_effs: other_output_effs,
+                },
+            ) => {
+                trait_id == other_trait_id
+                    && input_tys == other_input_tys
+                    && output_tys == other_output_tys
+                    && output_effs == other_output_effs
+            }
+            _ => false,
         }
     }
 
@@ -249,6 +310,60 @@ impl FormatWith<ModuleEnv<'_>> for DictionaryReq {
 
 pub type DictionariesReq = Vec<DictionaryReq>;
 
+/// Compile-time evidence embedded directly in a function evidence graph.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StaticEvidence {
+    Dictionary {
+        definition: TraitDictionaryId,
+        captures: Box<[StaticEvidence]>,
+    },
+    Subscript {
+        definition: SubscriptId,
+        captures: Box<[StaticEvidence]>,
+    },
+    VariantPayloadStorage(bool),
+}
+
+impl StaticEvidence {
+    pub(crate) fn bare_dictionary(definition: TraitDictionaryId) -> Self {
+        Self::Dictionary {
+            definition,
+            captures: Box::new([]),
+        }
+    }
+
+    pub(crate) fn bare_subscript(definition: SubscriptId) -> Self {
+        Self::Subscript {
+            definition,
+            captures: Box::new([]),
+        }
+    }
+}
+
+/// Origin of an immutable hidden-evidence binding.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EvidenceBindingSource {
+    Parameter(ExtraParameterId),
+    Static(StaticEvidence),
+    ConstructedDictionary {
+        definition: TraitDictionaryId,
+        captures: Vec<EvidenceBindingId>,
+    },
+    ConstructedSubscript {
+        definition: SubscriptId,
+        captures: Vec<EvidenceBindingId>,
+    },
+}
+
+/// One node in a function-scoped, dependency-ordered evidence graph.
+#[derive(Clone, Debug)]
+pub struct EvidenceBinding {
+    pub requirement: DictionaryReq,
+    pub source: EvidenceBindingSource,
+}
+
 /// Associates a case-qualified payload-layout obligation with the physical `Value<payload_ty>`
 /// dictionary parameter that satisfies it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -256,7 +371,7 @@ pub struct VariantPayloadLayoutBinding {
     pub variant_ty: Type,
     pub tag: Ustr,
     pub payload_ty: Type,
-    pub parameter: ExtraParameterId,
+    pub parameter: EvidenceBindingId,
 }
 
 /// Data structure to hold extra parameters for a function.
@@ -459,6 +574,10 @@ pub struct DictElaborationCtx<'d, 'sr, 'sm> {
     /// Generated structural projection subscripts needed while elaborating this function.
     pub(crate) generated_projection_subscripts:
         Option<PendingGeneratedStructuralProjectionSubscripts>,
+    /// Function-scoped hidden evidence, in dependency order.
+    pub evidence_bindings: Vec<EvidenceBinding>,
+    /// Effect variables quantified by the callable currently being elaborated.
+    pub(crate) retained_effect_vars: FxHashSet<EffectVar>,
 }
 
 impl<'d, 'sr, 'sm> DictElaborationCtx<'d, 'sr, 'sm> {
@@ -468,12 +587,127 @@ impl<'d, 'sr, 'sm> DictElaborationCtx<'d, 'sr, 'sm> {
         trait_solver: &'sr mut TraitSolver<'sm>,
         generated_projection_subscripts: PendingGeneratedStructuralProjectionSubscripts,
     ) -> Self {
-        Self {
+        let mut this = Self {
             dicts,
             module_inst_data,
             trait_solver,
             generated_projection_subscripts: Some(generated_projection_subscripts),
+            evidence_bindings: Vec::new(),
+            retained_effect_vars: FxHashSet::default(),
+        };
+        this.reset_evidence_bindings();
+        this
+    }
+
+    /// Start an evidence graph with one parameter binding per inferred requirement.
+    pub(crate) fn reset_evidence_bindings(&mut self) {
+        self.evidence_bindings = self
+            .dicts
+            .requirements
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, requirement)| EvidenceBinding {
+                requirement,
+                source: EvidenceBindingSource::Parameter(ExtraParameterId::from_index(index)),
+            })
+            .collect();
+    }
+
+    pub(crate) fn set_retained_effect_vars(&mut self, variables: FxHashSet<EffectVar>) {
+        self.retained_effect_vars = variables;
+    }
+
+    pub(crate) fn static_evidence(&self, binding: EvidenceBindingId) -> Option<StaticEvidence> {
+        match &self.evidence_bindings[binding.as_index()].source {
+            EvidenceBindingSource::Static(evidence) => Some(evidence.clone()),
+            EvidenceBindingSource::Parameter(_)
+            | EvidenceBindingSource::ConstructedDictionary { .. }
+            | EvidenceBindingSource::ConstructedSubscript { .. } => None,
         }
+    }
+
+    /// Verify the function-scoped evidence graph and selected dictionary ABIs.
+    pub(crate) fn assert_evidence_bindings_valid(&self) {
+        let mut saw_non_parameter = false;
+        for (index, binding) in self.evidence_bindings.iter().enumerate() {
+            if let EvidenceBindingSource::Parameter(parameter) = &binding.source {
+                assert!(
+                    !saw_non_parameter && parameter.as_index() == index,
+                    "evidence parameters must form an identity-indexed graph prefix"
+                );
+            } else {
+                saw_non_parameter = true;
+            }
+            let captures = match &binding.source {
+                EvidenceBindingSource::ConstructedDictionary { captures, .. }
+                | EvidenceBindingSource::ConstructedSubscript { captures, .. } => captures,
+                EvidenceBindingSource::Parameter(_) | EvidenceBindingSource::Static(_) => {
+                    continue;
+                }
+            };
+            assert!(
+                captures.iter().all(|capture| capture.as_index() < index),
+                "evidence binding {index} must refer only to earlier bindings"
+            );
+
+            let EvidenceBindingSource::ConstructedDictionary {
+                definition,
+                captures,
+            } = &binding.source
+            else {
+                continue;
+            };
+            let expected = self
+                .trait_solver
+                .get_impl_data_by_id(crate::module::TraitImplId::new(
+                    definition.module_id,
+                    definition.impl_id,
+                ))
+                .dictionary_value
+                .capture_schema();
+            assert_eq!(
+                captures.len(),
+                expected.len(),
+                "constructed dictionary capture count does not match its definition"
+            );
+            assert!(
+                captures
+                    .iter()
+                    .zip(expected)
+                    .all(
+                        |(capture, expected)| self.evidence_bindings[capture.as_index()]
+                            .requirement
+                            .same_capture_schema_entry(expected)
+                    ),
+                "constructed dictionary captures do not match its definition's canonical schema"
+            );
+        }
+    }
+
+    /// Reuse an identical selected artifact and ordered capture list within this function.
+    ///
+    /// Construction identity is entirely described by `source`. The requirement retained on the
+    /// first binding is descriptive type information for later lowering/defaulting; every caller
+    /// interning the same source must therefore describe the same evidence type.
+    pub(crate) fn intern_evidence_binding(
+        &mut self,
+        requirement: DictionaryReq,
+        source: EvidenceBindingSource,
+    ) -> EvidenceBindingId {
+        if let Some(index) = self
+            .evidence_bindings
+            .iter()
+            .position(|binding| binding.source == source)
+        {
+            return EvidenceBindingId::from_index(index);
+        }
+        let id = EvidenceBindingId::from_index(self.evidence_bindings.len());
+        self.evidence_bindings.push(EvidenceBinding {
+            requirement,
+            source,
+        });
+        id
     }
 
     pub(crate) fn take_generated_projection_subscripts(
