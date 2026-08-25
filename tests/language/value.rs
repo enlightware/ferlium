@@ -2566,8 +2566,8 @@ fn generic_derived_value_dictionary_captures_every_prerequisite_operation() {
             bool_value(true),
             string("Wrapper (42)"),
             bool_value(true),
-            int(8),
-            int(8)
+            int(std::mem::size_of::<usize>() as isize),
+            int(std::mem::align_of::<usize>() as isize)
         )
     );
 }
