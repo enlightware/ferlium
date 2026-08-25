@@ -1,7 +1,8 @@
 # Compiled standard-library cache
 
-Ferlium caches the expensive Ferlium-source portion of the compiled standard library across
-compiler processes. This is enabled by the default `std-cache` Cargo feature. Set
+Ferlium caches the standard library's semantic HIR, raw MIR, and optimized MIR across compiler
+processes. Each stage is a separate artifact and is loaded only when requested. This is enabled by
+the default `std-cache` Cargo feature. Set
 `FERLIUM_STD_CACHE_DISABLE` to any value to force the old compile-on-startup path, or set
 `FERLIUM_STD_CACHE_DIR` to choose a cache directory. By default the cache lives in
 the platform-standard per-user Ferlium cache directory, under `compiled-std` (for example,
@@ -23,6 +24,20 @@ type/callable, or detected invalid type/HIR reference is treated as a cache miss
 compilation. The format is trusted compiler-owned cache data rather than a hardened untrusted-input
 format. Both hashes are part of the filename, allowing worktrees and branches to coexist in the
 shared directory.
+
+Raw MIR records the checksum of the semantic-HIR snapshot installed in the session. Optimized MIR
+records the checksum of the installed raw-MIR snapshot. A stage built without a published parent is
+not used to load or publish dependent stages. If a stage is missing or invalid, its dependent
+stages are discarded: semantic HIR invalidates both MIR stages, while raw MIR invalidates optimized
+MIR.
+An optimized-MIR failure does not invalidate raw MIR. Fresh snapshots are type-reinterned and
+verified before atomic publication. Later loads trust checksum-matching compiler-owned bytes and
+repeat structural restoration, not whole-corpus MIR verification.
+
+Std optimization is module-local. Its result may depend on std, compiler and target configuration,
+all covered by the cache fingerprints, but not on unrelated modules later registered in a session.
+Loading cached MIR does not reproduce per-pass std MIR tracing; disable the std cache when tracing
+the construction of those artifacts.
 
 ## Native/source loading order
 

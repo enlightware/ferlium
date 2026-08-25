@@ -52,8 +52,21 @@ pub enum MirOptimization {
 /// of a session stay valid and artifact reuse remains observable by pointer identity.
 #[derive(Default)]
 pub(crate) struct ModuleArtifacts {
+    /// Checksum of the semantic std snapshot this revision was restored from.
+    #[cfg(all(
+        feature = "std-cache",
+        not(all(target_arch = "wasm32", target_os = "unknown"))
+    ))]
+    semantic_cache_checksum: Option<[u8; 32]>,
     /// MIR as lowered from final HIR by `emit_mir`.
     raw_mir: OnceCell<MirArtifacts>,
+    /// Checksum of the raw-MIR snapshot that produced `raw_mir`, or `None` when it was built
+    /// without a published snapshot.
+    #[cfg(all(
+        feature = "std-cache",
+        not(all(target_arch = "wasm32", target_os = "unknown"))
+    ))]
+    raw_mir_cache_checksum: OnceCell<Option<[u8; 32]>>,
     /// MIR after the optimization passes, installed at most once and only when some session
     /// requested [`MirOptimization::Enabled`].
     optimized_mir: OnceCell<MirArtifacts>,
@@ -72,12 +85,31 @@ impl std::fmt::Debug for ModuleArtifacts {
 }
 
 impl ModuleArtifacts {
+    #[cfg(all(
+        feature = "std-cache",
+        not(all(target_arch = "wasm32", target_os = "unknown"))
+    ))]
+    pub(crate) fn with_semantic_cache_checksum(checksum: Option<[u8; 32]>) -> Self {
+        Self {
+            semantic_cache_checksum: checksum,
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn with_mir(module: &Module, modules: &Modules) -> Self {
         let artifacts = Self::default();
         artifacts
             .raw_mir
             .set(MirArtifacts::build(module, modules))
             .unwrap_or_else(|_| unreachable!("a new artifact set cannot already contain MIR"));
+        #[cfg(all(
+            feature = "std-cache",
+            not(all(target_arch = "wasm32", target_os = "unknown"))
+        ))]
+        artifacts
+            .raw_mir_cache_checksum
+            .set(None)
+            .unwrap_or_else(|_| unreachable!("a new artifact set has no cache lineage"));
         artifacts
     }
 
@@ -88,6 +120,22 @@ impl ModuleArtifacts {
     /// The MIR the emitter produced, before optimization.
     pub(crate) fn raw_mir(&self) -> Option<&MirArtifacts> {
         self.raw_mir.get()
+    }
+
+    #[cfg(all(
+        feature = "std-cache",
+        not(all(target_arch = "wasm32", target_os = "unknown"))
+    ))]
+    pub(crate) fn semantic_cache_checksum(&self) -> Option<[u8; 32]> {
+        self.semantic_cache_checksum
+    }
+
+    #[cfg(all(
+        feature = "std-cache",
+        not(all(target_arch = "wasm32", target_os = "unknown"))
+    ))]
+    pub(crate) fn raw_mir_cache_checksum(&self) -> Option<[u8; 32]> {
+        self.raw_mir_cache_checksum.get().copied().flatten()
     }
 
     /// The MIR to execute under `optimization`.
@@ -101,10 +149,27 @@ impl ModuleArtifacts {
         }
     }
 
+    #[cfg(not(all(
+        feature = "std-cache",
+        not(all(target_arch = "wasm32", target_os = "unknown"))
+    )))]
     pub(crate) fn set_mir(&self, mir: MirArtifacts) {
         self.raw_mir
             .set(mir)
             .unwrap_or_else(|_| panic!("MIR artifacts may only be installed once per revision"));
+    }
+
+    #[cfg(all(
+        feature = "std-cache",
+        not(all(target_arch = "wasm32", target_os = "unknown"))
+    ))]
+    fn set_mir_with_cache_checksum(&self, mir: MirArtifacts, checksum: Option<[u8; 32]>) {
+        self.raw_mir
+            .set(mir)
+            .unwrap_or_else(|_| panic!("MIR artifacts may only be installed once per revision"));
+        self.raw_mir_cache_checksum
+            .set(checksum)
+            .unwrap_or_else(|_| panic!("raw MIR cache lineage may only be installed once"));
     }
 
     fn set_optimized_mir(&self, mir: MirArtifacts) {
@@ -426,6 +491,63 @@ impl MirArtifacts {
         }
     }
 
+    /// Reconstruct raw artifacts from portable function bodies.
+    #[cfg(feature = "std-snapshot")]
+    pub(crate) fn from_snapshot_raw(
+        functions: Vec<Option<mir::Function>>,
+        module: &Module,
+        modules: &Modules,
+    ) -> Self {
+        let env = ModuleEnv::new(module, modules);
+        let external = |callee: FunctionId| {
+            modules
+                .get(callee.module)
+                .and_then(|entry| entry.raw_mir())
+                .map_or(AddressorSummary::UNKNOWN, |artifacts| {
+                    artifacts.addressor_summary(callee.module, callee.function)
+                })
+        };
+        let addressor_summaries =
+            AddressorSummaries::of_module(&functions, module.module_id(), env, &external);
+        let external_will_return = |callee: FunctionId| {
+            modules
+                .get(callee.module)
+                .and_then(|entry| entry.raw_mir())
+                .map_or(WillReturn::Unknown, |artifacts| {
+                    artifacts.will_return(callee.module, callee.function)
+                })
+        };
+        let will_return_summaries =
+            WillReturnSummaries::of_module(&functions, module.module_id(), &external_will_return);
+        Self {
+            functions,
+            specializations: Vec::new(),
+            pruned_specializations: 0,
+            optimization_stats: OptimizationStats::default(),
+            addressor_summaries,
+            will_return_summaries,
+        }
+    }
+
+    /// Reconstruct optimized artifacts, retaining semantic summaries from their raw prerequisite.
+    #[cfg(feature = "std-snapshot")]
+    pub(crate) fn from_snapshot_optimized(
+        functions: Vec<Option<mir::Function>>,
+        specializations: Vec<Specialization>,
+        pruned_specializations: usize,
+        optimization_stats: OptimizationStats,
+        raw: &MirArtifacts,
+    ) -> Self {
+        Self {
+            functions,
+            specializations,
+            pruned_specializations,
+            optimization_stats,
+            addressor_summaries: raw.addressor_summaries.clone(),
+            will_return_summaries: raw.will_return_summaries.clone(),
+        }
+    }
+
     pub(crate) fn get(&self, id: LocalFunctionId) -> Option<&mir::Function> {
         match self.specialization(id) {
             Some(specialization) => Some(&specialization.body),
@@ -490,15 +612,40 @@ pub(crate) fn ensure_mir_artifacts(modules: &Modules, module_id: ModuleId) {
         ensure_mir_artifacts(modules, dependency);
     }
 
-    let mir = {
-        let module = modules
-            .get(module_id)
-            .unwrap()
-            .module()
-            .expect("a fresh module entry must contain its module");
-        MirArtifacts::build(module, modules)
+    let entry = modules.get(module_id).unwrap();
+    let module = entry
+        .module()
+        .expect("a fresh module entry must contain its module");
+    #[cfg(all(
+        feature = "std-cache",
+        not(all(target_arch = "wasm32", target_os = "unknown"))
+    ))]
+    let (mir, cache_checksum) = if module_id == crate::std::STD_MODULE_ID {
+        crate::compiler::snapshot::load_or_build_raw_std_mir(
+            module,
+            modules,
+            entry.artifacts().semantic_cache_checksum(),
+        )
+    } else {
+        (MirArtifacts::build(module, modules), None)
     };
-    modules.get(module_id).unwrap().artifacts().set_mir(mir);
+    #[cfg(not(all(
+        feature = "std-cache",
+        not(all(target_arch = "wasm32", target_os = "unknown"))
+    )))]
+    let mir = MirArtifacts::build(module, modules);
+    #[cfg(all(
+        feature = "std-cache",
+        not(all(target_arch = "wasm32", target_os = "unknown"))
+    ))]
+    entry
+        .artifacts()
+        .set_mir_with_cache_checksum(mir, cache_checksum);
+    #[cfg(not(all(
+        feature = "std-cache",
+        not(all(target_arch = "wasm32", target_os = "unknown"))
+    )))]
+    entry.artifacts().set_mir(mir);
 }
 
 /// Install optimized MIR artifacts for a fresh module and all of its dependencies.
@@ -534,6 +681,24 @@ pub(crate) fn ensure_optimized_mir_artifacts(session: &CompilerSession, module_i
     let raw = entry
         .raw_mir()
         .expect("raw MIR artifacts were just ensured for this module");
+    #[cfg(all(
+        feature = "std-cache",
+        not(all(target_arch = "wasm32", target_os = "unknown"))
+    ))]
+    let optimized = if module_id == crate::std::STD_MODULE_ID {
+        crate::compiler::snapshot::load_or_build_optimized_std_mir(
+            raw,
+            entry.artifacts().raw_mir_cache_checksum(),
+            module,
+            session,
+        )
+    } else {
+        MirArtifacts::optimize(raw, module, session)
+    };
+    #[cfg(not(all(
+        feature = "std-cache",
+        not(all(target_arch = "wasm32", target_os = "unknown"))
+    )))]
     let optimized = MirArtifacts::optimize(raw, module, session);
     entry.artifacts().set_optimized_mir(optimized);
 }

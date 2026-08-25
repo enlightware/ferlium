@@ -14,6 +14,7 @@ mod envelope;
 mod function;
 mod hir;
 mod literal;
+mod mir;
 mod native;
 mod semantic;
 mod source;
@@ -27,7 +28,9 @@ mod types;
     feature = "std-cache",
     not(all(target_arch = "wasm32", target_os = "unknown"))
 ))]
-pub(crate) use cache::load_or_build_std;
+pub(crate) use cache::{
+    load_or_build_optimized_std_mir, load_or_build_raw_std_mir, load_or_build_std,
+};
 pub(crate) use callable::{NativeCallableCatalog, SnapshotFunctionBody};
 pub(crate) use checkpoint::{ModuleCheckpointShape, SnapshotModuleCheckpoint};
 #[cfg(all(
@@ -39,6 +42,11 @@ pub(crate) use envelope::{StdSnapshot, StdSnapshotHeader};
 pub(crate) use function::SnapshotModuleFunction;
 pub(crate) use hir::SnapshotHirArena;
 pub(crate) use literal::SnapshotLiteral;
+#[cfg(all(
+    feature = "std-cache",
+    not(all(target_arch = "wasm32", target_os = "unknown"))
+))]
+pub(crate) use mir::{CompiledStdMirSnapshot, MirSnapshotStage};
 pub(crate) use native::NativeTypeCatalog;
 pub(crate) use semantic::{SnapshotCallableDefinition, SnapshotTypeScheme};
 pub(crate) use source::SnapshotSourceTable;
@@ -49,7 +57,9 @@ pub(crate) use source::SnapshotSourceTable;
 pub(crate) use std_snapshot::CompiledStdSnapshot;
 pub(crate) use subscript::{SnapshotProjection, SnapshotSubscript};
 pub(crate) use trait_impl::SnapshotTraitImpls;
-pub(crate) use type_graph::{SnapshotTypeGraph, SnapshotTypeGraphBuilder, SnapshotTypeId};
+pub(crate) use type_graph::{
+    SnapshotFnType, SnapshotTypeGraph, SnapshotTypeGraphBuilder, SnapshotTypeId,
+};
 pub(crate) use types::{SnapshotTrait, SnapshotTypeAlias, SnapshotTypeDefSlot};
 
 use std::fmt;
@@ -70,6 +80,7 @@ pub(crate) enum SnapshotError {
     UnknownNativeLiteral(String),
     InvalidNativeLiteral(String),
     InvalidHirNodeReference(u32),
+    InvalidMir(String),
     NativeDeriverInSourceCheckpoint(String),
     PendingSubscriptInSnapshot,
     CheckpointShapeMismatch(String),
@@ -122,6 +133,7 @@ impl fmt::Display for SnapshotError {
             Self::InvalidHirNodeReference(index) => {
                 write!(f, "snapshot contains invalid HIR node reference {index}")
             }
+            Self::InvalidMir(message) => write!(f, "snapshot contains invalid MIR: {message}"),
             Self::NativeDeriverInSourceCheckpoint(name) => {
                 write!(
                     f,

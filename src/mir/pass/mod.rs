@@ -98,6 +98,9 @@ pub(crate) struct OptimizationContext {
 
 impl OptimizationContext {
     pub(crate) fn new(modules: &Modules, env: ModuleEnv<'_>) -> Self {
+        // Std's optimized MIR is persisted across sessions. Resolved identities may depend on std
+        // and its target profile, but must not depend on unrelated modules in this registry; see
+        // `doc/compiled-std-cache.md`.
         let string_functions = string_accumulate::StringFunctions::resolve(env);
         Self {
             known_callees: known_callee::KnownCallees::new(modules),

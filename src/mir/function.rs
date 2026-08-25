@@ -143,6 +143,12 @@ impl Function {
         &self.constants
     }
 
+    /// The canonical blocks in storage order.
+    #[cfg(feature = "std-snapshot")]
+    pub(crate) fn block_slice(&self) -> &[BasicBlock] {
+        &self.blocks
+    }
+
     pub fn blocks(&self) -> impl Iterator<Item = BlockId> + '_ {
         (0..self.blocks.len()).map(BlockId::from_index)
     }

@@ -111,6 +111,17 @@ impl ModuleRevision {
     fn with_artifacts(module: Module, artifacts: ModuleArtifacts) -> Self {
         Self { module, artifacts }
     }
+
+    #[cfg(all(
+        feature = "std-cache",
+        not(all(target_arch = "wasm32", target_os = "unknown"))
+    ))]
+    fn with_semantic_cache_checksum(module: Module, checksum: Option<[u8; 32]>) -> Self {
+        Self {
+            module,
+            artifacts: ModuleArtifacts::with_semantic_cache_checksum(checksum),
+        }
+    }
 }
 
 /// A module that has been attempted to be compiled at least once.
@@ -519,19 +530,28 @@ impl InitialSessionState {
             feature = "std-cache",
             not(all(target_arch = "wasm32", target_os = "unknown"))
         ))]
-        let (source_table, std_module) = crate::compiler::snapshot::load_or_build_std();
+        let (source_table, std_module, semantic_cache_checksum) =
+            crate::compiler::snapshot::load_or_build_std();
+        #[cfg(all(
+            feature = "std-cache",
+            not(all(target_arch = "wasm32", target_os = "unknown"))
+        ))]
+        let std_revision = Rc::new(ModuleRevision::with_semantic_cache_checksum(
+            std_module,
+            semantic_cache_checksum,
+        ));
         #[cfg(any(
             not(feature = "std-cache"),
             all(target_arch = "wasm32", target_os = "unknown")
         ))]
-        let (source_table, std_module) = {
+        let (source_table, std_revision) = {
             let mut source_table = SourceTable::default();
             let std_module = crate::std::std_module(&mut source_table);
-            (source_table, std_module)
+            (source_table, Rc::new(ModuleRevision::new(std_module)))
         };
         Self {
             source_table,
-            std_revision: Rc::new(ModuleRevision::new(std_module)),
+            std_revision,
         }
     }
 
