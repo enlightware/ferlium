@@ -1,0 +1,3 @@
+fn data_text_roundtrip(text: string) -> string {
+	to_data_text(parse_data_text(text))
+}

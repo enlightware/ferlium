@@ -70,10 +70,11 @@ pub enum RuntimeWorkload {
     LinalgTransform,
     LinalgGrid,
     IterPipeline,
+    DataTextRoundtrip,
 }
 
 impl RuntimeWorkload {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Quicksort,
         Self::Fibonacci,
         Self::Sieve,
@@ -85,6 +86,7 @@ impl RuntimeWorkload {
         Self::LinalgTransform,
         Self::LinalgGrid,
         Self::IterPipeline,
+        Self::DataTextRoundtrip,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -100,6 +102,7 @@ impl RuntimeWorkload {
             Self::LinalgTransform => "linalg_transform",
             Self::LinalgGrid => "linalg_grid",
             Self::IterPipeline => "iter_pipeline",
+            Self::DataTextRoundtrip => "data_text_roundtrip",
         }
     }
 
@@ -168,9 +171,45 @@ impl RuntimeWorkload {
             Self::LinalgGrid => {
                 prepare_linalg(target, "grid_simulation", RuntimeArguments::IntPair(8, 2))
             }
+            Self::DataTextRoundtrip => prepare_single_module(
+                target,
+                "data_text",
+                include_str!("../tests/modules/data_text.fer"),
+                "data_text_roundtrip",
+                RuntimeArguments::String(Str::new(DATA_TEXT_INPUT)),
+            ),
         }
     }
 }
+
+const DATA_TEXT_INPUT: &str = r#"
+/* A representative configuration document. */
+{
+    title: "Ferlium Ω",
+    version: 3,
+    enabled: true,
+    optional: Some("Candli"),
+    missing: None,
+    numbers: [0, -17, 42, 3.14159, 1.25e3,],
+    tags: set { "compiler", "wasm", "unicode", },
+    aliases: map {
+        "main" => "candli",
+        "legacy" => "ferlium-interpreter",
+    },
+    items: [
+        { id: 1, name: "alpha", active: true },
+        { id: 2, name: "béta", active: false },
+        { id: 3, name: "γ", active: true },
+        { id: 4, name: "한글", active: true },
+    ],
+    nested: {
+        owner: { name: "Enlightware", location: "Zürich" },
+        coordinates: (47.3769, 8.5417),
+        élève٢: "Unicode identifier",
+    },
+    message: "line one\nline two: \u{2126} \u{1f680}",
+}
+"#;
 
 /// One fully compiled workload. Arguments are owned because MIR entry execution consumes them.
 pub struct PreparedRuntimeWorkload {

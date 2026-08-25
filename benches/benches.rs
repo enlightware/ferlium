@@ -234,6 +234,10 @@ fn setup_linalg_grid(target: BenchTarget) -> PreparedRuntimeWorkload {
     RuntimeWorkload::LinalgGrid.prepare(target)
 }
 
+fn setup_data_text_roundtrip(target: BenchTarget) -> PreparedRuntimeWorkload {
+    RuntimeWorkload::DataTextRoundtrip.prepare(target)
+}
+
 macro_rules! runtime_benchmark {
     ($benchmark:ident, $setup:ident, $output:ty, $run:ident) => {
         #[library_benchmark(teardown = teardown_benchmark)]
@@ -263,6 +267,12 @@ runtime_benchmark!(
     run_int
 );
 runtime_benchmark!(bench_linalg_grid, setup_linalg_grid, Float, run_float);
+runtime_benchmark!(
+    bench_data_text_roundtrip,
+    setup_data_text_roundtrip,
+    Str,
+    run_string
+);
 
 // --- Gungraun setup ---
 
@@ -290,7 +300,8 @@ library_benchmark_group!(
         bench_sudoku_run,
         bench_calculator_run,
         bench_linalg_transform,
-        bench_linalg_grid
+        bench_linalg_grid,
+        bench_data_text_roundtrip
     ]
 );
 
