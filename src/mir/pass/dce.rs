@@ -29,6 +29,9 @@
 //!
 //! Unread `dict_entry` and `subfield` place derivations are also removed. They neither own a value
 //! nor have side effects, and a linear use-count worklist handles nested `subfield` chains.
+//! After inlining, an unread concrete `TrivialCopy` result place and its complete write-only
+//! subfield tree are removed together. Any observing use rejects the root, and an owned producer
+//! is removed only when its declared consuming-use contract and representation make that safe.
 //! A compiler-known `build_array`, bare function store, or semantic `clone` used only by its
 //! matching drops is removed as one lifetime: deleting construction and cleanup together neither
 //! leaks nor drops uninitialized storage. An exact same-block clone/drop pair is also removed when
@@ -277,6 +280,227 @@ pub(crate) fn remove_dead_proven_calls(
     // The shared use census is the more expensive part and starts only after the semantic scan
     // above found an eligible call whose result is local storage.
     remove_dead_results(func, candidates, 1)
+}
+
+#[derive(Clone)]
+struct DiscardedTrivialAllocation {
+    definition: DeadResultCandidate,
+    removable_uses: FxHashMap<BlockId, FxHashSet<OperationIndex>>,
+    invalid: bool,
+}
+
+#[derive(Clone, Copy)]
+struct ConsumingDefinition {
+    definition: DeadResultCandidate,
+    removable: bool,
+}
+
+/// Removes an unread `TrivialCopy` result place together with the writes which initialize it.
+///
+/// Inlining substitutes a discarded call's throwaway result allocation for the callee's `@ret`.
+/// A variant result then survives as a shell store followed by payload-place projections and
+/// writes, even though the caller never reads it. This extends the ordinary storage cleanup with
+/// one linear place-tree proof: an eligible allocation and every place derived from it may only be
+/// used as a `store`/`memcpy` destination, be cleared, or derive another subfield. Those operations
+/// can all disappear while the computations which produced their inputs remain.
+///
+/// The complete root type must be concrete `TrivialCopy`. That is what makes deleting a variant
+/// shell store ownership-safe; variant producers whose every use disappears are removed in the
+/// same edit. A read, call result, move, drop, terminator use, or any unknown role rejects the
+/// complete root rather than approximating its lifetime.
+pub(crate) fn remove_discarded_trivial_copy_results(
+    func: &Function,
+    env: ModuleEnv<'_>,
+) -> Option<Function> {
+    let mut candidates = FxHashMap::<ValueId, DiscardedTrivialAllocation>::default();
+    let mut derived_bases = FxHashMap::<ValueId, ValueId>::default();
+    let mut consuming_definitions = FxHashMap::<ValueId, ConsumingDefinition>::default();
+
+    for block in func.blocks() {
+        for (index, operation) in func.block(block).operations().iter().enumerate() {
+            let site = DeadResultCandidate {
+                block,
+                operation: OperationIndex::from_index(index),
+            };
+            let Some(result) = operation.result_id() else {
+                continue;
+            };
+            if operation.result_requires_consuming_use() {
+                let removable = matches!(
+                    &operation.kind,
+                    OperationKind::Variant { metadata, .. }
+                        if concrete_type_is_trivial_copy(metadata.ty, &env)
+                );
+                consuming_definitions.insert(
+                    result,
+                    ConsumingDefinition {
+                        definition: site,
+                        removable,
+                    },
+                );
+            }
+            match &operation.kind {
+                OperationKind::Alloca { ty } if concrete_type_is_trivial_copy(*ty, &env) => {
+                    candidates.insert(
+                        result,
+                        DiscardedTrivialAllocation {
+                            definition: site,
+                            removable_uses: FxHashMap::default(),
+                            invalid: false,
+                        },
+                    );
+                }
+                OperationKind::Subfield { .. } => {
+                    if let Some(mir::Value::Register(base)) = operation.operands.first() {
+                        derived_bases.insert(result, *base);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let root_of = |mut place: ValueId| {
+        // MIR definitions are acyclic. The bound is a defensive refusal if malformed, unverified
+        // input ever reaches this optimization entry point.
+        for _ in 0..=derived_bases.len() {
+            if candidates.contains_key(&place) {
+                return Some(place);
+            }
+            place = *derived_bases.get(&place)?;
+        }
+        None
+    };
+    let derived_roots: FxHashMap<ValueId, ValueId> = derived_bases
+        .keys()
+        .filter_map(|derived| root_of(*derived).map(|root| (*derived, root)))
+        .collect();
+
+    let mut uses = FxHashMap::<ValueId, usize>::default();
+    for block in func.blocks() {
+        let basic = func.block(block);
+        for (index, operation) in basic.operations().iter().enumerate() {
+            let site = OperationIndex::from_index(index);
+            for (position, operand) in operation.operands.iter().enumerate() {
+                let mir::Value::Register(id) = operand else {
+                    continue;
+                };
+                *uses.entry(*id).or_default() += 1;
+                let root = candidates
+                    .contains_key(id)
+                    .then_some(*id)
+                    .or_else(|| derived_roots.get(id).copied());
+                let Some(root) = root else {
+                    continue;
+                };
+                let removable = match operation.kind {
+                    OperationKind::Subfield { .. } => position == 0,
+                    OperationKind::Store | OperationKind::Memcpy => position == 1,
+                    OperationKind::Clear => position == 0,
+                    _ => false,
+                };
+                let candidate = candidates
+                    .get_mut(&root)
+                    .expect("a derived place root is a candidate allocation");
+                let consumes_unremovable_result = removable
+                    && operation.operands.iter().any(|operand| {
+                        let mir::Value::Register(result) = operand else {
+                            return false;
+                        };
+                        consuming_definitions
+                            .get(result)
+                            .is_some_and(|definition| !definition.removable)
+                    });
+                if removable && !consumes_unremovable_result {
+                    candidate
+                        .removable_uses
+                        .entry(block)
+                        .or_default()
+                        .insert(site);
+                } else {
+                    candidate.invalid = true;
+                }
+            }
+        }
+        for operand in basic.terminator().operands() {
+            let mir::Value::Register(id) = operand else {
+                continue;
+            };
+            *uses.entry(*id).or_default() += 1;
+            if let Some(root) = candidates
+                .contains_key(id)
+                .then_some(*id)
+                .or_else(|| derived_roots.get(id).copied())
+            {
+                candidates
+                    .get_mut(&root)
+                    .expect("a derived place root is a candidate allocation")
+                    .invalid = true;
+            }
+        }
+    }
+
+    let mut removed = FxHashMap::<BlockId, FxHashSet<OperationIndex>>::default();
+    for candidate in candidates
+        .values()
+        .filter(|candidate| !candidate.invalid && !candidate.removable_uses.is_empty())
+    {
+        removed
+            .entry(candidate.definition.block)
+            .or_default()
+            .insert(candidate.definition.operation);
+        for (block, operations) in &candidate.removable_uses {
+            removed
+                .entry(*block)
+                .or_default()
+                .extend(operations.iter().copied());
+        }
+    }
+    if removed.is_empty() {
+        return None;
+    }
+
+    // Delete an owned producer exactly when its operation declares that the result needs a
+    // consuming use, its representation permits removal, and every such use is already selected.
+    // The earlier candidate scan rejects any write fed by another kind of owned producer; retain a
+    // defensive whole-pass refusal here so a new MIR operation cannot orphan one silently.
+    let mut removed_uses = FxHashMap::<ValueId, usize>::default();
+    for (block, indices) in &removed {
+        for index in indices {
+            for operand in &func.block(*block).operations()[index.as_index()].operands {
+                if let mir::Value::Register(id) = operand {
+                    *removed_uses.entry(*id).or_default() += 1;
+                }
+            }
+        }
+    }
+    for (result, definition) in consuming_definitions {
+        let removed_count = removed_uses.get(&result).copied().unwrap_or(0);
+        if removed_count != 0 && uses.get(&result).copied().unwrap_or(0) == removed_count {
+            if !definition.removable {
+                return None;
+            }
+            removed
+                .entry(definition.definition.block)
+                .or_default()
+                .insert(definition.definition.operation);
+        }
+    }
+
+    let mut edit = FunctionEdit::new(func.clone());
+    for (block, indices) in removed {
+        let mut index = 0usize;
+        edit.block_mut(block).operations.retain(|_| {
+            let keep = !indices.contains(&OperationIndex::from_index(index));
+            index += 1;
+            keep
+        });
+    }
+    edit.prune_constants();
+    Some(edit.finish_unverified())
 }
 
 /// Removes dead storage scaffolding, returning a rewritten function if anything was removed.
@@ -955,6 +1179,66 @@ mod tests {
         assert_eq!(
             optimized_subfields, 0,
             "both unread payload projections must be gone:\n{body}"
+        );
+    }
+
+    /// Inlining a call whose result is discarded substitutes the caller's throwaway allocation for
+    /// the callee's return place. The mutation in the `Some` arm remains observable, but neither
+    /// arm needs to construct the unread `Option<int>` result.
+    #[test]
+    fn an_inlined_discarded_trivial_variant_result_is_not_constructed() {
+        let source = "fn bump(current: Option<int>, count: &mut int) -> Option<int> {\
+                 match current {\
+                     Some(value) => { count += 1; Some(value) },\
+                     None => None,\
+                 }\
+             }\
+             fn discard(current: Option<int>, count: &mut int) { bump(current, count); }";
+        let raw_module = raw(source);
+        let raw_body = body_of(&raw_module, "discard");
+        assert!(
+            raw_body.contains("alloca Option<int>") && raw_body.contains("call dce::bump"),
+            "the test needs a discarded call result before inlining:\n{raw_body}"
+        );
+
+        let module = optimized(source);
+        let body = body_of(&module, "discard");
+        assert!(
+            !body.contains("call dce::bump"),
+            "the result construction is exposed only after inlining:\n{body}"
+        );
+        assert!(
+            !body.contains("alloca Option<int>")
+                && !body.contains("variant Some")
+                && !body.contains("variant None"),
+            "the unread result place and its shells must be removed:\n{body}"
+        );
+        assert!(
+            body.contains("call std::Num<std::int>::add"),
+            "discarding the result must retain the conditional mutation:\n{body}"
+        );
+    }
+
+    /// Reading any place in the inlined result tree rejects the complete root, even when the
+    /// result representation itself is `TrivialCopy`.
+    #[test]
+    fn an_observed_inlined_trivial_variant_result_is_retained() {
+        let source = "fn bump(current: Option<int>, count: &mut int) -> Option<int> {\
+                 match current {\
+                     Some(value) => { count += 1; Some(value) },\
+                     None => None,\
+                 }\
+             }\
+             fn has_value(current: Option<int>, count: &mut int) -> bool {\
+                 let result = bump(current, count);\
+                 match result { Some(ignored) => true, None => false }\
+             }";
+        let module = optimized(source);
+        let body = body_of(&module, "has_value");
+        assert!(
+            body.contains("alloca Option<int>")
+                && (body.contains("variant Some") || body.contains("variant None")),
+            "observing the result must retain its allocation and construction:\n{body}"
         );
     }
 

@@ -53,6 +53,28 @@ fn oversized_tuple_projection_index_does_not_panic() {
     assert_val_eq!(session.run("1.4294967295"), float(1.4294967295));
 }
 
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn discarding_an_inlined_trivial_variant_result_preserves_effects() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            fn bump(current: Option<int>, count: &mut int) -> Option<int> {
+                match current {
+                    Some(value) => { count += 1; Some(value) },
+                    None => None,
+                }
+            }
+            fn discard(current: Option<int>, count: &mut int) { bump(current, count); }
+            let mut count = 0;
+            discard(Some(4), count);
+            discard(None, count);
+            count
+        "# }),
+        int(1),
+    );
+}
+
 /// A mutable argument that is not a place at all must be diagnosed rather than asserted on: the
 /// borrow checker's argument-overlap analysis sees it before the mutability check does.
 #[test]

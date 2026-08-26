@@ -171,6 +171,7 @@ pub(crate) fn optimize_function(
     let original_size = function.operation_count();
     let mut current: Option<Function> = None;
     let mut rounds_exhausted = true;
+    let mut inlined_any = false;
     for _round in 0..budget::MAX_ROUNDS {
         // Fold first: it is cheap and it is what makes arguments known. Most folds shrink before
         // the inliner measures the body; constructive folds reserve their setup against the same
@@ -254,6 +255,7 @@ pub(crate) fn optimize_function(
         ) {
             current = Some(inlined);
             changed = true;
+            inlined_any = true;
         }
         if !changed {
             rounds_exhausted = false;
@@ -359,6 +361,22 @@ pub(crate) fn optimize_function(
     let source = current.as_ref().unwrap_or(function);
     if let Some(hoisted) = licm::hoist_loop_invariant_calls(source, env, &will_return) {
         current = Some(hoisted);
+    }
+    // Inlining substitutes the caller's throwaway result allocation for the callee's `@ret`. For
+    // an unread `TrivialCopy` result, remove that complete write-only place tree while retaining
+    // the inlined body's effects. Representation cleanup then collects the variant shells, loads
+    // and other pure producers which only fed the discarded result.
+    if inlined_any {
+        let source = current.as_ref().unwrap_or(function);
+        if let Some(cleaned) = dce::remove_discarded_trivial_copy_results(source, env) {
+            current = Some(cleanup_dead_representation_chains(
+                cleaned,
+                env,
+                context,
+                specializations,
+                &will_return,
+            ));
+        }
     }
     // Purity does not imply termination, so general dead-call elimination would be unsound. Remove
     // an unused direct call only under either the known native total/speculatable contract or a

@@ -47,6 +47,7 @@ string rewrites   // fuse static construction into appends; forward self-prefixe
 devirtualize      // final dictionary-entry callees exposed too late for a fold round
 bounds checks     // prove array indices in range and remove checked access/failure edges
 LICM              // hoist invariant pure direct calls with passive inputs and copyable results
+discarded results // remove unread TrivialCopy result places exposed by inlining
 dead proven calls // remove unused chains of known-total numeric or proved-returning script calls
 dead stores       // remove unread initialization overwritten on every following path
 dce               // on every body, not only a changed one
@@ -103,6 +104,20 @@ first pass; the error edge and cleanup would need their own proof. DS has its ow
 scan rather than reusing the broader escape analysis: that analysis admits `Let` call arguments,
 while DS permits only direct reads and whole-place writes of the local root. Any unmodelled use
 rejects the candidate, so a future MIR operation cannot silently broaden the rewrite.
+
+## Discarded `TrivialCopy` results
+
+Inlining exposes the callee's writes into a discarded call's throwaway result allocation. DCE
+removes a concrete `TrivialCopy` root, its subfield place derivations, and its `store`, `memcpy` and
+`clear` uses when nothing reads or otherwise observes any place in that tree. Computations feeding
+those writes remain, so mutations, failures and termination are preserved. The driver skips this
+scan unless the inliner changed the function.
+
+A trivial variant shell is removed with its stores when no other use survives. A read, move, call
+result, drop, terminator operand or unknown role rejects the complete root. Managed results and
+non-inlined calls remain unchanged. On the runtime workload suite this removes 3,009 optimized
+operations (0.12%); `data_text_roundtrip` activates almost all of it, falling from 139,164 to
+136,183 operations (2.14%) with unchanged peak cells.
 
 ## Placement rules
 
