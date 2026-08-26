@@ -27,23 +27,28 @@ struct BoolStore {
 struct BooleanMaterialization {
     block: BlockId,
     condition: mir::Value,
-    stored_when_true: bool,
+    /// Pattern whose match selects the first arm. Absent for an ordinary boolean condition.
+    pattern: Option<LiteralValue>,
+    stored_when_selected: bool,
     destination: mir::Value,
     join: BlockId,
 }
 
 /// Rewrites boolean materialization diamonds into one value computation and store.
 ///
-/// The matched shape is deliberately strict:
+/// The matched shape is deliberately strict. Its head is either a boolean `condbr` or a
+/// one-case `switch_variant`:
 ///
 /// ```text
 /// condbr condition, left, right
+/// // or: switch_variant tag [Case => left] default right
 /// left:  store true-or-false to dst; br join
 /// right: store opposite      to dst; br join
 /// ```
 ///
-/// The replacement stores `condition` directly when the true arm stores `true`, or stores
-/// `comp_eq condition false` for inverse polarity, then jumps to `join`.
+/// The replacement stores a boolean condition directly. A variant switch first compares the
+/// opaque tag with its symbolic case; inverse polarity adds a comparison with `false`. It then
+/// jumps to `join`.
 pub(crate) fn materialize_boolean_results(func: &Function) -> Option<Function> {
     let rewrites: Vec<_> = func
         .blocks()
@@ -56,19 +61,26 @@ pub(crate) fn materialize_boolean_results(func: &Function) -> Option<Function> {
     let mut edit = FunctionEdit::new(func.clone());
     for rewrite in rewrites {
         let span = edit.block(rewrite.block).terminator.span;
-        let stored_value = if rewrite.stored_when_true {
-            rewrite.condition
-        } else {
+        let mut stored_value = rewrite.condition;
+        if let Some(pattern) = rewrite.pattern {
+            let mut comparison =
+                Operation::compare_eq(span, stored_value, mir::Value::Pattern(b(pattern)));
+            let result = edit.new_value();
+            comparison.assign_result_id(Some(result));
+            edit.block_mut(rewrite.block).operations.push(comparison);
+            stored_value = mir::Value::Register(result);
+        }
+        if !rewrite.stored_when_selected {
             let mut comparison = Operation::compare_eq(
                 span,
-                rewrite.condition,
+                stored_value,
                 mir::Value::Pattern(b(LiteralValue::new_native(false))),
             );
             let result = edit.new_value();
             comparison.assign_result_id(Some(result));
             edit.block_mut(rewrite.block).operations.push(comparison);
-            mir::Value::Register(result)
-        };
+            stored_value = mir::Value::Register(result);
+        }
 
         let block = edit.block_mut(rewrite.block);
         block
@@ -82,33 +94,48 @@ pub(crate) fn materialize_boolean_results(func: &Function) -> Option<Function> {
 }
 
 fn plan_boolean_materialization(func: &Function, block: BlockId) -> Option<BooleanMaterialization> {
-    let TerminatorKind::CondBr {
-        condition,
-        then_target,
-        else_target,
-    } = &func.block(block).terminator().kind
-    else {
-        return None;
-    };
-    if then_target == else_target {
+    let (condition, pattern, selected_target, other_target) =
+        match &func.block(block).terminator().kind {
+            TerminatorKind::CondBr {
+                condition,
+                then_target,
+                else_target,
+            } => (condition.clone(), None, *then_target, *else_target),
+            // A multi-case tail would require redirecting only the two materializing edges while
+            // retaining the switch for the other cases. Leave that CFG rewrite to evidence from a
+            // real workload rather than growing this local diamond rule speculatively.
+            TerminatorKind::SwitchVariant {
+                tag,
+                cases,
+                default,
+            } if cases.len() == 1 => (
+                tag.clone(),
+                Some(LiteralValue::new_variant_tag(cases[0].0)),
+                cases[0].1,
+                *default,
+            ),
+            _ => return None,
+        };
+    if selected_target == other_target {
         return None;
     }
 
-    let then_store = single_bool_store(func, *then_target)?;
-    let else_store = single_bool_store(func, *else_target)?;
-    if then_store.join != else_store.join
-        || then_store.destination != else_store.destination
-        || then_store.value == else_store.value
+    let selected_store = single_bool_store(func, selected_target)?;
+    let other_store = single_bool_store(func, other_target)?;
+    if selected_store.join != other_store.join
+        || selected_store.destination != other_store.destination
+        || selected_store.value == other_store.value
     {
         return None;
     }
 
     Some(BooleanMaterialization {
         block,
-        condition: condition.clone(),
-        stored_when_true: then_store.value,
-        destination: then_store.destination,
-        join: then_store.join,
+        condition,
+        pattern,
+        stored_when_selected: selected_store.value,
+        destination: selected_store.destination,
+        join: selected_store.join,
     })
 }
 
@@ -154,7 +181,7 @@ mod tests {
             terminator::{Terminator, TerminatorKind},
         },
         module::id::Id,
-        std::logic::bool_type,
+        std::{logic::bool_type, math::int_type, option::option_type},
     };
 
     fn boolean_materialization(value_when_true: bool) -> crate::mir::Function {
@@ -209,6 +236,48 @@ mod tests {
             ),
         );
         builder.set_terminator(right, Terminator::goto(span, join));
+        builder.set_terminator(join, Terminator::ret(span));
+        builder.finish(env)
+    }
+
+    fn variant_boolean_materialization() -> crate::mir::Function {
+        let span = Location::new_synthesized();
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let bool_ty = bool_type();
+        let mut builder = FunctionBuilder::new("materialize_variant".into(), Default::default());
+        let variant = builder.add_parameter(
+            option_type(int_type()),
+            ParameterKind::Parameter(ArgConvention::Let),
+        );
+        let result = builder.add_parameter(bool_ty, ParameterKind::Return);
+        let true_value = builder.add_constant(bool_ty, LiteralValue::new_native(true), &env);
+        let false_value = builder.add_constant(bool_ty, LiteralValue::new_native(false), &env);
+        let entry = builder.add_block();
+        let some = builder.add_block();
+        let other = builder.add_block();
+        let join = builder.add_block();
+        let tag = builder
+            .append_operation(
+                entry,
+                Operation::extract_tag(span, mir::Value::Parameter(variant)),
+            )
+            .expect("extract_tag produces an opaque tag");
+        builder.set_terminator(
+            entry,
+            Terminator::switch_variant(span, tag, vec![("Some".into(), some)], other),
+        );
+        for (block, value) in [(some, true_value), (other, false_value)] {
+            builder.append_operation(
+                block,
+                Operation::store(
+                    span,
+                    mir::Value::Constant(value),
+                    mir::Value::Parameter(result),
+                ),
+            );
+            builder.set_terminator(block, Terminator::goto(span, join));
+        }
         builder.set_terminator(join, Terminator::ret(span));
         builder.finish(env)
     }
@@ -280,6 +349,21 @@ mod tests {
             rendered.contains("comp_eq %r0 false"),
             "inverse polarity should compare the original condition with false:\n{rendered}"
         );
+    }
+
+    #[test]
+    fn variant_boolean_materialization_compares_the_symbolic_case() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let source = variant_boolean_materialization();
+        let optimized = super::materialize_boolean_results(&source)
+            .expect("the variant materialization diamond should be rewritten");
+        let rendered = optimized.format_with(&env).to_string();
+
+        assert_eq!(optimized.blocks().count(), 1, "{rendered}");
+        assert!(!rendered.contains("switch_variant"), "{rendered}");
+        assert_eq!(rendered.matches("comp_eq").count(), 1, "{rendered}");
+        assert!(rendered.contains("comp_eq %r0 Some"), "{rendered}");
     }
 
     #[test]

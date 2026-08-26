@@ -25,7 +25,7 @@ BasicBlock {
 
 Operations never carry intra-function successors. The terminators are:
 
-- `goto` and `condbr`;
+- `goto`, `condbr`, and `switch_variant tag [Case => bN, ...] default bM`;
 - `invoke <operation> -> bN error bM`, for a source-fallible operation;
 - `yield place -> resume`, which suspends a scoped accessor;
 - `return`;
@@ -124,8 +124,11 @@ Variant tags are not Ferlium integers. HIR cases branch directly on a variant va
 introduces `extract_tag` only at the storage/CFG boundary, yielding an opaque `tag` register. The
 reference interpreter retains its symbolic name. A machine backend resolves that name to the
 session-local 31-bit identity and masks the payload-storage bit when reading the ABI's raw `u32`
-field. A tag cannot be stored in Ferlium storage, passed through a Ferlium call, used as a branch
-condition, or consumed by arithmetic.
+field. A tag can only be compared with symbolic variant patterns or consumed by `switch_variant`;
+it cannot enter Ferlium storage, calls, boolean branches, or arithmetic.
+
+Variant `Case` nodes lower directly to one `switch_variant`. Other literal matches remain
+`comp_eq`/`condbr` chains.
 
 ## Function boundaries
 

@@ -337,6 +337,11 @@ enum SnapshotTerminatorKind {
         then_target: mir::BlockId,
         else_target: mir::BlockId,
     },
+    SwitchVariant {
+        tag: SnapshotValue,
+        cases: Vec<(String, mir::BlockId)>,
+        default: mir::BlockId,
+    },
     Invoke {
         operation: SnapshotOperation,
         normal: mir::BlockId,
@@ -1050,6 +1055,18 @@ impl SnapshotTerminator {
                     then_target: *then_target,
                     else_target: *else_target,
                 },
+                Source::SwitchVariant {
+                    tag,
+                    cases,
+                    default,
+                } => Stored::SwitchVariant {
+                    tag: SnapshotValue::capture(tag)?,
+                    cases: cases
+                        .iter()
+                        .map(|(name, target)| (name.to_string(), *target))
+                        .collect(),
+                    default: *default,
+                },
                 Source::Invoke {
                     operation,
                     normal,
@@ -1086,6 +1103,18 @@ impl SnapshotTerminator {
                     condition: condition.materialize()?,
                     then_target: *then_target,
                     else_target: *else_target,
+                },
+                Stored::SwitchVariant {
+                    tag,
+                    cases,
+                    default,
+                } => Runtime::SwitchVariant {
+                    tag: tag.materialize()?,
+                    cases: cases
+                        .iter()
+                        .map(|(name, target)| (name.as_str().into(), *target))
+                        .collect(),
+                    default: *default,
                 },
                 Stored::Invoke {
                     operation,

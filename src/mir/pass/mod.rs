@@ -519,7 +519,7 @@ mod tests {
         );
         let caller = body_of(&module, "use_it");
         assert!(
-            caller.contains("condbr"),
+            caller.contains("switch_variant"),
             "the branch must survive an unknown condition:\n{caller}"
         );
         assert!(

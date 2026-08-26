@@ -131,6 +131,7 @@ impl MirInstructionKind {
             Self::Terminator(
                 Term::Goto
                 | Term::CondBr
+                | Term::SwitchVariant
                 | Term::Invoke
                 | Term::Yield
                 | Term::Return

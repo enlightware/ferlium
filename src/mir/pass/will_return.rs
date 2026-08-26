@@ -138,6 +138,7 @@ fn derive(
             TerminatorKind::Yield { .. } => return WillReturn::Unknown,
             TerminatorKind::Goto { .. }
             | TerminatorKind::CondBr { .. }
+            | TerminatorKind::SwitchVariant { .. }
             | TerminatorKind::Return
             | TerminatorKind::PropagateError
             | TerminatorKind::FailureDuringCleanup => {}

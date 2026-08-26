@@ -155,26 +155,8 @@ pub(crate) fn forward_boolean_branches(func: &Function) -> Option<Function> {
 fn incoming_predecessors(func: &Function) -> Vec<Vec<BlockId>> {
     let mut incoming = vec![Vec::new(); func.blocks().count()];
     for predecessor in func.blocks() {
-        match &func.block(predecessor).terminator().kind {
-            TerminatorKind::Goto { target } => incoming[target.as_index()].push(predecessor),
-            TerminatorKind::CondBr {
-                then_target,
-                else_target,
-                ..
-            } => {
-                incoming[then_target.as_index()].push(predecessor);
-                incoming[else_target.as_index()].push(predecessor);
-            }
-            TerminatorKind::Invoke { normal, error, .. } => {
-                incoming[normal.as_index()].push(predecessor);
-                incoming[error.as_index()].push(predecessor);
-            }
-            TerminatorKind::Yield { resume, .. } => {
-                incoming[resume.as_index()].push(predecessor);
-            }
-            TerminatorKind::Return
-            | TerminatorKind::PropagateError
-            | TerminatorKind::FailureDuringCleanup => {}
+        for target in func.block(predecessor).terminator().successors() {
+            incoming[target.as_index()].push(predecessor);
         }
     }
     incoming
@@ -431,22 +413,22 @@ mod tests {
             .unwrap()
     }
 
-    /// Integer ordering lowers through an `Ordering` tag, materializes a boolean in two arms, then
-    /// the source `if` immediately branches on that boolean. The optimized body should retain only
-    /// the first branch and must keep the inlined comparison's stack restoration on both paths.
+    /// An integer comparison used only for control flow remains a semantic variant switch.
+    /// Inlining and cleanup must retain that switch and restore the inlined frame on both paths
+    /// without materializing an intermediate boolean.
     #[test]
-    fn an_ordering_boolean_is_forwarded_to_its_consumers() {
+    fn an_ordering_switch_needs_no_materialized_boolean() {
         let module = optimized("fn choose(x: int) -> int { if x < 10 { 1 } else { 2 } }");
         let body = body_of(&module, "choose");
 
         assert_eq!(
-            body.matches("condbr").count(),
+            body.matches("switch_variant").count(),
             1,
-            "the boolean must not be stored and branched on a second time:\n{body}"
+            "the ordering must dispatch exactly once:\n{body}"
         );
         assert!(
             !body.contains("alloca bool"),
-            "the materialized boolean storage must be removed by DCE:\n{body}"
+            "control-only comparison needs no boolean storage:\n{body}"
         );
         assert!(
             body.matches("stack_restore").count() >= 2,
@@ -454,18 +436,17 @@ mod tests {
         );
     }
 
-    /// A short-circuit `or` stores its flag from three arms, two of which reach the join through a
-    /// block that only restores the stack. The stores are still all constant, so the whole boolean
-    /// must disappear rather than only the arms that happen to sit next to the join.
+    /// A short-circuit `or` over two integer comparisons needs only their two ordering switches.
+    /// The composed boolean remains control flow rather than becoming a stored flag.
     #[test]
-    fn a_short_circuit_boolean_is_forwarded_through_its_join_path() {
+    fn short_circuit_ordering_switches_need_no_materialized_boolean() {
         let module = optimized("fn f(i: int, n: int) { if i < 0 or i >= n { 1 } else { 2 } }");
         let body = body_of(&module, "f");
 
         assert_eq!(
-            body.matches("condbr").count(),
+            body.matches("switch_variant").count(),
             2,
-            "only the two operand tests must remain, not the branch on the stored flag:\n{body}"
+            "only the two ordering dispatches must remain:\n{body}"
         );
         assert!(
             !body.contains("alloca bool"),
@@ -473,8 +454,8 @@ mod tests {
         );
         assert_eq!(
             body.matches("comp_eq").count(),
-            2,
-            "each operand is compared once, and the flag not at all:\n{body}"
+            0,
+            "ordering tags must not be lowered back into equality comparisons:\n{body}"
         );
         assert!(
             body.matches("stack_restore").count() >= 3,

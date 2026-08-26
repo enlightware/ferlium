@@ -242,6 +242,7 @@ pub(crate) fn forward_redundant_storage(func: &Function, env: ModuleEnv<'_>) -> 
         }
         match &basic_block.terminator().kind {
             TerminatorKind::CondBr { condition, .. } => note_unsafe(condition, &mut uses),
+            TerminatorKind::SwitchVariant { tag, .. } => note_unsafe(tag, &mut uses),
             TerminatorKind::Yield { place, .. } => note_unsafe(place, &mut uses),
             TerminatorKind::Goto { .. }
             | TerminatorKind::Invoke { .. }

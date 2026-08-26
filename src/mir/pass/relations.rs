@@ -51,6 +51,7 @@
 use std::{borrow::Cow, cmp::Reverse, collections::BinaryHeap};
 
 use rustc_hash::{FxHashMap, FxHashSet};
+use ustr::Ustr;
 
 use crate::{
     hir::function::ArgConvention,
@@ -1407,13 +1408,16 @@ fn writes_into(operation: &Operation, root: Root, register_places: &PlaceBinding
 
 /// The state reaching one successor, which is not in general the state the block left off in.
 ///
-/// Two terminators say something their block did not.
+/// Control-flow terminators can say something their block did not.
 ///
 /// A `condbr` arm is taken exactly when the condition holds, so the taken edge carries the predicate
 /// and the other carries its negation. This is the whole reason the comparison idiom is reassembled
 /// into a [`Predicate`] earlier — a boolean nobody can read says nothing about either arm. A `condbr`
 /// whose two arms are the same block refines neither: the block is reached whichever way the
 /// condition went.
+///
+/// A `switch_variant` carries the same fact directly on a symbolic tag edge. Its default edge
+/// carries the negation of every named truth predicate.
 ///
 /// An `invoke` of a bounds check refines its normal edge with what returning proved, which is
 /// [`resolved_index_bounds`].
@@ -1443,6 +1447,37 @@ fn refine<'a>(
                 }],
                 Some(Fact::Implies(predicates)) if successor == *then_target => predicates,
                 _ => return Cow::Borrowed(state),
+            }
+        }
+        TerminatorKind::SwitchVariant {
+            tag,
+            cases,
+            default,
+        } => {
+            let Some(scrutinee) = condition_fact(state, tag, interner) else {
+                return Cow::Borrowed(state);
+            };
+            let matching: Vec<_> = cases
+                .iter()
+                .filter(|(_, target)| *target == successor)
+                .collect();
+            if *default != successor && matching.len() == 1 {
+                match variant_case_fact(&scrutinee, matching[0].0) {
+                    Some(Fact::Truth(predicate)) => vec![predicate],
+                    Some(Fact::Implies(predicates)) => predicates,
+                    _ => return Cow::Borrowed(state),
+                }
+            } else if *default == successor && matching.is_empty() && !cases.is_empty() {
+                let mut predicates = Vec::with_capacity(cases.len());
+                for (case, _) in cases {
+                    match variant_case_fact(&scrutinee, *case) {
+                        Some(Fact::Truth(predicate)) => predicates.push(predicate.negated()),
+                        _ => return Cow::Borrowed(state),
+                    }
+                }
+                predicates
+            } else {
+                return Cow::Borrowed(state);
             }
         }
         TerminatorKind::Invoke {
@@ -2068,12 +2103,17 @@ fn comparison_fact(
         return None;
     };
     let tag = pattern.as_variant_tag()?;
+    variant_case_fact(&scrutinee, *tag)
+}
+
+/// The fact established by selecting one symbolic case of a variant-like semantic value.
+fn variant_case_fact(scrutinee: &Fact, tag: Ustr) -> Option<Fact> {
     match scrutinee {
         Fact::Ordering { left, right } => {
             let predicate = match tag.as_str() {
-                "Less" => Predicate::between(&left, Comparison::Less, &right)?,
-                "Greater" => Predicate::between(&right, Comparison::Less, &left)?,
-                "Equal" => Predicate::between(&left, Comparison::Equal, &right)?,
+                "Less" => Predicate::between(left, Comparison::Less, right)?,
+                "Greater" => Predicate::between(right, Comparison::Less, left)?,
+                "Equal" => Predicate::between(left, Comparison::Equal, right)?,
                 _ => return None,
             };
             Some(Fact::Truth(predicate))
@@ -2081,7 +2121,7 @@ fn comparison_fact(
         // One direction only: the payload is in range when the option is `Some`, and a `None`
         // says nothing about a value that is not there.
         Fact::Yield { present_when, .. } if tag.as_str() == "Some" => {
-            Some(Fact::Implies(present_when))
+            Some(Fact::Implies(present_when.clone()))
         }
         _ => None,
     }
@@ -2160,20 +2200,19 @@ mod tests {
         );
     }
 
-    /// A comparison must survive the three operations lowering spreads it over — a call producing
-    /// an `Ordering`, a tag extraction and an equality test — and arrive as one predicate.
+    /// A comparison must survive the call producing an `Ordering`, tag extraction and semantic
+    /// switch, and arrive on the selected edge as one predicate.
     #[test]
     fn a_comparison_becomes_a_predicate_on_the_difference() {
         with_analysis(
-            "fn below(i: int, n: int) -> bool { i < n }",
+            "fn below(i: int, n: int) -> int { if i < n { 1 } else { 0 } }",
             "below",
             |function, analysis, _| {
-                let predicates: Vec<_> = facts(function, analysis)
-                    .into_iter()
-                    .filter_map(|fact| match fact {
-                        Fact::Truth(predicate) => Some(predicate),
-                        _ => None,
-                    })
+                let predicates: Vec<_> = function
+                    .blocks()
+                    .filter_map(|block| analysis.entry_state(block))
+                    .flat_map(State::known)
+                    .cloned()
                     .collect();
                 assert!(
                     predicates
@@ -2181,6 +2220,36 @@ mod tests {
                         .any(|predicate| predicate.comparison == Comparison::Less
                             && predicate.difference.terms().len() == 2),
                     "`i < n` must become `i - n < 0`, got {predicates:?}"
+                );
+            },
+        );
+    }
+
+    /// The default of a multiway switch excludes every named case.
+    #[test]
+    fn a_multiway_switch_default_negates_every_named_case() {
+        with_analysis(
+            "fn classify(i: int, n: int) -> int {\
+                match cmp(i, n) { Less => 0, Equal => 1, _ => 2 }\
+            }",
+            "classify",
+            |function, analysis, _| {
+                let default_state = function
+                    .blocks()
+                    .filter_map(|block| analysis.entry_state(block))
+                    .find(|state| {
+                        state
+                            .known()
+                            .iter()
+                            .any(|predicate| predicate.comparison == Comparison::LessOrEqual)
+                            && state
+                                .known()
+                                .iter()
+                                .any(|predicate| predicate.comparison == Comparison::NotEqual)
+                    });
+                assert!(
+                    default_state.is_some(),
+                    "the default arm must exclude both `Less` and `Equal`"
                 );
             },
         );

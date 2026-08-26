@@ -547,6 +547,7 @@ fn visit_terminator_operands(terminator: &Terminator, visit: &mut impl FnMut(&mi
     match &terminator.kind {
         TerminatorKind::Invoke { operation, .. } => operation.operands.iter().for_each(visit),
         TerminatorKind::CondBr { condition, .. } => visit(condition),
+        TerminatorKind::SwitchVariant { tag, .. } => visit(tag),
         TerminatorKind::Yield { place, .. } => visit(place),
         TerminatorKind::Goto { .. }
         | TerminatorKind::Return
@@ -562,6 +563,7 @@ fn visit_terminator_operands_mut(
     match &mut terminator.kind {
         TerminatorKind::Invoke { operation, .. } => operation.operands.iter_mut().for_each(visit),
         TerminatorKind::CondBr { condition, .. } => visit(condition),
+        TerminatorKind::SwitchVariant { tag, .. } => visit(tag),
         TerminatorKind::Yield { place, .. } => visit(place),
         TerminatorKind::Goto { .. }
         | TerminatorKind::Return
@@ -578,6 +580,11 @@ fn successors_mut(terminator: &mut Terminator) -> Vec<&mut BlockId> {
             else_target,
             ..
         } => vec![then_target, else_target],
+        TerminatorKind::SwitchVariant { cases, default, .. } => cases
+            .iter_mut()
+            .map(|(_, target)| target)
+            .chain(std::iter::once(default))
+            .collect(),
         TerminatorKind::Invoke { normal, error, .. } => vec![normal, error],
         TerminatorKind::Yield { resume, .. } => vec![resume],
         TerminatorKind::Return

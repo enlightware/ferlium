@@ -814,23 +814,7 @@ fn operand_root(
 fn predecessor_counts(function: &Function) -> Vec<usize> {
     let mut predecessors = vec![0; function.blocks().count()];
     for block in function.blocks() {
-        let successors: Box<dyn Iterator<Item = BlockId>> =
-            match &function.block(block).terminator().kind {
-                TerminatorKind::Goto { target } => Box::new(std::iter::once(*target)),
-                TerminatorKind::CondBr {
-                    then_target,
-                    else_target,
-                    ..
-                } => Box::new([*then_target, *else_target].into_iter()),
-                TerminatorKind::Invoke { normal, error, .. } => {
-                    Box::new([*normal, *error].into_iter())
-                }
-                TerminatorKind::Yield { resume, .. } => Box::new(std::iter::once(*resume)),
-                TerminatorKind::Return
-                | TerminatorKind::PropagateError
-                | TerminatorKind::FailureDuringCleanup => Box::new(std::iter::empty()),
-            };
-        for successor in successors {
+        for successor in function.block(block).terminator().successors() {
             predecessors[successor.as_index()] += 1;
         }
     }
@@ -863,6 +847,10 @@ fn site_dominates_exits(function: &Function, site: Site) -> bool {
             } => {
                 pending.push(*then_target);
                 pending.push(*else_target);
+            }
+            TerminatorKind::SwitchVariant { cases, default, .. } => {
+                pending.extend(cases.iter().map(|(_, target)| *target));
+                pending.push(*default);
             }
             TerminatorKind::Invoke { normal, error, .. } => {
                 pending.push(*normal);

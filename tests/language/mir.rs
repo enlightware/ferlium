@@ -412,10 +412,10 @@ fn match_case_functions() {
     );
 }
 
-/// A variant scrutinee becomes the opaque `tag` that `extract_tag` produces, and `comp_eq` reads
-/// that register directly: no slot is allocated to hold a value each head would only read back.
+/// A variant scrutinee becomes the opaque `tag` that `extract_tag` produces, and one semantic
+/// switch dispatches on its symbolic cases without allocating tag storage or comparison heads.
 #[test]
-fn variant_match_compares_the_tag_register() {
+fn variant_match_switches_on_the_tag_register() {
     let mut session = TestSession::new();
 
     assert_eq_sans_flake!(
@@ -425,21 +425,18 @@ fn variant_match_compares_the_tag_register() {
   @c0: int = 0
   b0:
     %r0: tag = extract_tag %p0
-    br b1
+    switch_variant %r0 [None => b1] default b2
   b1:
-    %r1: bool = comp_eq %r0 None
-    condbr %r1, b2, b3
+    %r1: *int = alloca int
+    store @c0 to %r1
+    call std::Num<std::int>::from_int#impl:25eabc6b(%r1, %p1)
+    br b3
   b2:
-    %r2: *int = alloca int
-    store @c0 to %r2
-    call std::Num<std::int>::from_int#impl:25eabc6b(%r2, %p1)
-    br b4
+    %r2: *(int,) = variant_payload from %p0
+    %r3: *int = subfield @c0 from %r2
+    memcpy %r3 to %p1
+    br b3
   b3:
-    %r3: *(int,) = variant_payload from %p0
-    %r4: *int = subfield @c0 from %r3
-    memcpy %r4 to %p1
-    br b4
-  b4:
     ret
 "#
     );

@@ -962,6 +962,7 @@ pub(crate) fn escaping_roots(
             TerminatorKind::CondBr { condition, .. } => {
                 escape_operand(condition, &mut escaped);
             }
+            TerminatorKind::SwitchVariant { tag, .. } => escape_operand(tag, &mut escaped),
             TerminatorKind::Yield { place, .. } => escape_operand(place, &mut escaped),
             TerminatorKind::Goto { .. }
             | TerminatorKind::Return

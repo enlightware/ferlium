@@ -792,6 +792,19 @@ impl Copier<'_> {
                     self.blocks[else_target],
                 )
             }
+            TerminatorKind::SwitchVariant {
+                tag,
+                cases,
+                default,
+            } => Terminator::switch_variant(
+                span,
+                self.operand(edit, tag, env),
+                cases
+                    .iter()
+                    .map(|(case, target)| (*case, self.blocks[target]))
+                    .collect(),
+                self.blocks[default],
+            ),
             TerminatorKind::Invoke {
                 operation,
                 normal,
@@ -927,7 +940,7 @@ mod tests {
             "the branching callee must be inlined:\n{caller}"
         );
         assert!(
-            caller.contains("condbr"),
+            caller.contains("switch_variant"),
             "its branch must arrive in the caller:\n{caller}"
         );
     }

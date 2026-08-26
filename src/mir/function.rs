@@ -290,6 +290,7 @@ impl Function {
                     operation.operands.iter().for_each(&mut visit_operand)
                 }
                 TerminatorKind::CondBr { condition, .. } => visit_operand(condition),
+                TerminatorKind::SwitchVariant { tag, .. } => visit_operand(tag),
                 TerminatorKind::Yield { place, .. } => visit_operand(place),
                 TerminatorKind::Goto { .. }
                 | TerminatorKind::Return

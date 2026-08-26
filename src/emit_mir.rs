@@ -189,7 +189,7 @@ fn append_rendered_function(
 
 /// The MIR blocks involved in the lowering of a case in a match expression.
 struct CaseBlocks {
-    /// The head blocks for the conditions.
+    /// The condition blocks for value comparisons; empty when the case uses a tag switch.
     heads: Vec<BlockId>,
 
     /// The body blocks for the conditions.
@@ -200,6 +200,12 @@ struct CaseBlocks {
 
     /// The tail block of the case.
     tail: BlockId,
+}
+
+fn case_dispatches_on_tag(case: &Case<Elaborated>) -> bool {
+    case.alternatives
+        .first()
+        .is_some_and(|(pattern, _)| pattern.as_variant_tag().is_some())
 }
 
 /// Lowers elaborated HIR into MIR.
@@ -1873,7 +1879,7 @@ impl<'a> Emitter<'a> {
         self.context.locals.insert(n.binding, place);
     }
 
-    /// Lowers a `Case` scrutinee to an operand `comp_eq` reads *non-consumingly*, and reports
+    /// Lowers a `Case` scrutinee to the operand its dispatch reads *non-consumingly*, and reports
     /// whether that operand is a place.
     ///
     /// An immediate stays a typed opaque constant. A variant-tag case reads its variant through a
@@ -1883,19 +1889,14 @@ impl<'a> Emitter<'a> {
     /// and for the arm body (so a non-trivial scrutinee — string/tuple — is not consumed), and a
     /// bare-generic scrutinee needs no static-layout assertion because it is only borrowed.
     ///
-    /// A tag needs none of that. `comp_eq` reads the opaque value that `extract_tag` computes while
-    /// the variant itself stays live through its place. Taking the tag as a place would allocate a
-    /// slot and store the register into it only for each head to read it straight back.
+    /// A tag needs none of that. `switch_variant` reads the opaque value that `extract_tag`
+    /// computes while the variant itself stays live through its place.
     ///
     /// The place flag is what lets a boolean alternative head read the scrutinee instead of
     /// comparing it; see the `Case` lowering. An opaque tag's heads are variant-tag patterns, never
     /// booleans.
-    fn lower_case_scrutinee(
-        &mut self,
-        node: &ENode,
-        compare_variant_tags: bool,
-    ) -> (mir::Value, bool) {
-        if compare_variant_tags {
+    fn lower_case_scrutinee(&mut self, node: &ENode, variant_tag_case: bool) -> (mir::Value, bool) {
+        if variant_tag_case {
             let place = self.lower_as_place(node);
             let tag = self
                 .insert(Operation::extract_tag(node.span, place))
@@ -1925,10 +1926,13 @@ impl<'a> Emitter<'a> {
 
     /// Returns the blocks created for `n`.
     fn create_case_blocks(&mut self, n: &Case<Elaborated>) -> CaseBlocks {
+        let uses_tag_switch = case_dispatches_on_tag(n);
         let mut heads: Vec<BlockId> = vec![];
         let mut bodies: Vec<BlockId> = vec![];
         for _ in n.alternatives.iter() {
-            heads.push(self.context.function.add_block());
+            if !uses_tag_switch {
+                heads.push(self.context.function.add_block());
+            }
             bodies.push(self.context.function.add_block());
         }
         let default: BlockId = self.context.function.add_block();
@@ -2224,89 +2228,108 @@ impl<'a> Emitter<'a> {
             }
 
             K::Case(n) => {
-                let blocks = self.create_case_blocks(n);
-
-                // Mirror the HIR interpreter's `eval_case`: read the scrutinee once and compare its
-                // whole value against each whole pattern (`comp_eq` does `LiteralValue` equality,
-                // non-consuming). The scrutinee is taken as a borrowable place — never loaded/moved —
-                // so a string/tuple stays live across alternatives and into the arm body; an
-                // immediate scrutinee stays a primitive constant. Variant patterns compare an
-                // opaque tag extracted here, rather than exposing a numeric discriminant in HIR.
+                // Mirror the HIR interpreter's `eval_case`: read the scrutinee once. Variant cases
+                // switch on an opaque tag; other cases compare the whole value against each whole
+                // pattern (`comp_eq` does non-consuming `LiteralValue` equality). The scrutinee is
+                // taken as a borrowable place — never loaded/moved — so a string/tuple stays live
+                // across alternatives and into the arm body; an immediate stays a primitive
+                // constant.
                 // (We do *not* decompose composite patterns: the HIR compares the whole tuple
                 // structurally, so the MIR does the same.)
-                let compare_variant_tags = n
-                    .alternatives
-                    .first()
-                    .is_some_and(|(pattern, _)| pattern.as_variant_tag().is_some());
+                let variant_tag_case = case_dispatches_on_tag(n);
                 debug_assert!(
                     n.alternatives
                         .iter()
-                        .all(|(pattern, _)| pattern.as_variant_tag().is_some()
-                            == compare_variant_tags)
+                        .all(|(pattern, _)| pattern.as_variant_tag().is_some() == variant_tag_case)
                 );
+                let blocks = self.create_case_blocks(n);
                 let (scrutinee, scrutinee_is_place) =
-                    self.lower_case_scrutinee(&self.hir_arena[n.value], compare_variant_tags);
+                    self.lower_case_scrutinee(&self.hir_arena[n.value], variant_tag_case);
 
-                // With no alternatives (e.g. a single irrefutable arm), there are no condition
-                // heads to test, so branch straight to the default block.
-                let entry = blocks.heads.first().copied().unwrap_or(blocks.default);
-                self.terminate(Terminator::goto(node.span, entry));
+                if variant_tag_case {
+                    let cases = n
+                        .alternatives
+                        .iter()
+                        .zip(&blocks.bodies)
+                        .map(|((pattern, _), target)| {
+                            (
+                                *pattern
+                                    .as_variant_tag()
+                                    .expect("variant case checked above"),
+                                *target,
+                            )
+                        })
+                        .collect();
+                    self.terminate(Terminator::switch_variant(
+                        node.span,
+                        scrutinee.clone(),
+                        cases,
+                        blocks.default,
+                    ));
+                } else {
+                    // With no alternatives (e.g. a single irrefutable arm), there are no condition
+                    // heads to test, so branch straight to the default block.
+                    let entry = blocks.heads.first().copied().unwrap_or(blocks.default);
+                    self.terminate(Terminator::goto(node.span, entry));
+                }
 
                 // Lower the alternatives. Each alternative stores its value directly into `dest`.
                 for (i, (c, a)) in n.alternatives.iter().enumerate() {
-                    // Load the next alternative's condition if there's one. Otherwise, we've reached the
-                    // default case.
-                    let next = if i < n.alternatives.len() - 1 {
-                        blocks.heads[i + 1]
-                    } else {
-                        blocks.default
-                    };
-
-                    // Transfer control flow to the head of the match. Compare the whole scrutinee
-                    // against this alternative's whole pattern and branch to its body on a match or to
-                    // `next` otherwise.
-                    self.context.point = InsertionPoint::End(blocks.heads[i]);
                     let body = blocks.bodies[i];
-                    // `if`, and a `match` on a `bool`, both arrive here, and their head would compare
-                    // a boolean against a boolean pattern — a test whose answer is the scrutinee
-                    // itself. Read the slot instead and let the branch carry the polarity. `condbr`
-                    // takes a materialized value, so the read remains; the comparison does not.
-                    // Only a place-form scrutinee qualifies: an immediate one is already a constant,
-                    // which the comparison folds against and `load` cannot take. A `false` pattern
-                    // matches when the loaded value is *false*, which is the `condbr`'s else edge.
-                    let (condition, then_target, else_target) = match c.as_primitive_ty::<bool>() {
-                        Some(&expects_true) if scrutinee_is_place => {
-                            let loaded = self
-                                .insert(Operation::load(node.span, scrutinee.clone()))
-                                .unwrap();
-                            if expects_true {
-                                (loaded, body, next)
-                            } else {
-                                (loaded, next, body)
-                            }
-                        }
-                        _ => {
-                            let pattern = self.lower_case_pattern(c);
-                            let eq = self
-                                .insert(Operation::compare_eq(
-                                    node.span,
-                                    scrutinee.clone(),
-                                    pattern,
-                                ))
-                                .unwrap();
-                            (eq, body, next)
-                        }
-                    };
-                    self.terminate(Terminator::cond_br(
-                        node.span,
-                        condition,
-                        then_target,
-                        else_target,
-                    ));
+                    if !variant_tag_case {
+                        // Load the next alternative's condition if there's one. Otherwise, we've
+                        // reached the default case.
+                        let next = if i < n.alternatives.len() - 1 {
+                            blocks.heads[i + 1]
+                        } else {
+                            blocks.default
+                        };
 
-                    // Lower the body of the alternative into the destination. A `break`/`continue`/
-                    // `return` arm terminates its own block, so it needs no branch to the tail.
-                    self.context.point = InsertionPoint::End(blocks.bodies[i]);
+                        // Transfer control flow to the head of the match. Compare the whole
+                        // scrutinee against this alternative's whole pattern and branch to its body
+                        // on a match or to `next` otherwise.
+                        self.context.point = InsertionPoint::End(blocks.heads[i]);
+                        // `if`, and a `match` on a `bool`, both arrive here, and their head would
+                        // compare a boolean against a boolean pattern — a test whose answer is the
+                        // scrutinee itself. Read the slot instead and let the branch carry the
+                        // polarity. `condbr` takes a materialized value, so the read remains; the
+                        // comparison does not.
+                        let (condition, then_target, else_target) =
+                            match c.as_primitive_ty::<bool>() {
+                                Some(&expects_true) if scrutinee_is_place => {
+                                    let loaded = self
+                                        .insert(Operation::load(node.span, scrutinee.clone()))
+                                        .unwrap();
+                                    if expects_true {
+                                        (loaded, body, next)
+                                    } else {
+                                        (loaded, next, body)
+                                    }
+                                }
+                                _ => {
+                                    let pattern = self.lower_case_pattern(c);
+                                    let eq = self
+                                        .insert(Operation::compare_eq(
+                                            node.span,
+                                            scrutinee.clone(),
+                                            pattern,
+                                        ))
+                                        .unwrap();
+                                    (eq, body, next)
+                                }
+                            };
+                        self.terminate(Terminator::cond_br(
+                            node.span,
+                            condition,
+                            then_target,
+                            else_target,
+                        ));
+                    }
+
+                    // Lower the body of the alternative into the destination. A
+                    // `break`/`continue`/`return` arm terminates its own block, so it needs no
+                    // branch to the tail.
+                    self.context.point = InsertionPoint::End(body);
                     self.lower_value_into(&self.hir_arena[*a], destination.clone());
                     if !self.current_block_is_terminated() {
                         self.terminate(Terminator::goto(node.span, blocks.tail));

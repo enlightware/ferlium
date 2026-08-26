@@ -644,6 +644,21 @@ impl<'a> Interpreter<'a> {
                     });
                     block = if taken { *then_target } else { *else_target };
                 }
+                TerminatorKind::SwitchVariant {
+                    tag,
+                    cases,
+                    default,
+                } => {
+                    let actual = match slots.get(tag) {
+                        Some(Binding::VariantTag(actual)) => *actual,
+                        Some(_) => panic!("switch_variant expected an opaque tag binding"),
+                        None => panic!("unbound switch_variant operand {tag}"),
+                    };
+                    block = cases
+                        .iter()
+                        .find_map(|(case, target)| (*case == actual).then_some(*target))
+                        .unwrap_or(*default);
+                }
                 TerminatorKind::Invoke {
                     operation,
                     normal,

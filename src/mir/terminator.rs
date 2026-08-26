@@ -10,6 +10,8 @@
 
 use std::fmt;
 
+use ustr::Ustr;
+
 use crate::{
     Location,
     format::FormatWith,
@@ -47,6 +49,23 @@ impl Terminator {
                 condition,
                 then_target,
                 else_target,
+            },
+        }
+    }
+
+    /// Branches on an opaque semantic variant tag.
+    pub fn switch_variant(
+        span: Location,
+        tag: mir::Value,
+        cases: Vec<(Ustr, mir::BlockId)>,
+        default: mir::BlockId,
+    ) -> Self {
+        Self {
+            span,
+            kind: TerminatorKind::SwitchVariant {
+                tag,
+                cases,
+                default,
             },
         }
     }
@@ -136,6 +155,7 @@ impl Terminator {
     pub fn operands(&self) -> &[mir::Value] {
         match &self.kind {
             TerminatorKind::CondBr { condition, .. } => std::slice::from_ref(condition),
+            TerminatorKind::SwitchVariant { tag, .. } => std::slice::from_ref(tag),
             TerminatorKind::Invoke { operation, .. } => &operation.operands,
             TerminatorKind::Yield { place, .. } => std::slice::from_ref(place),
             TerminatorKind::Goto { .. }
@@ -167,6 +187,12 @@ pub enum TerminatorKind {
         then_target: mir::BlockId,
         else_target: mir::BlockId,
     },
+    /// Branch on an opaque tag using symbolic variant names.
+    SwitchVariant {
+        tag: mir::Value,
+        cases: Vec<(Ustr, mir::BlockId)>,
+        default: mir::BlockId,
+    },
     /// Execute one source-fallible operation and select its normal or source-error successor.
     Invoke {
         operation: Operation,
@@ -188,18 +214,22 @@ pub enum TerminatorKind {
 impl TerminatorKind {
     /// Basic blocks this terminator form may transfer control to.
     pub(crate) fn successors(&self) -> impl Iterator<Item = mir::BlockId> {
-        let targets = match self {
-            Self::Goto { target } => [Some(*target), None],
+        let (cases, targets): (&[(Ustr, mir::BlockId)], [_; 2]) = match self {
+            Self::Goto { target } => (&[], [Some(*target), None]),
             Self::CondBr {
                 then_target,
                 else_target,
                 ..
-            } => [Some(*then_target), Some(*else_target)],
-            Self::Invoke { normal, error, .. } => [Some(*normal), Some(*error)],
-            Self::Yield { resume, .. } => [Some(*resume), None],
-            Self::Return | Self::PropagateError | Self::FailureDuringCleanup => [None, None],
+            } => (&[], [Some(*then_target), Some(*else_target)]),
+            Self::SwitchVariant { cases, default, .. } => (cases, [Some(*default), None]),
+            Self::Invoke { normal, error, .. } => (&[], [Some(*normal), Some(*error)]),
+            Self::Yield { resume, .. } => (&[], [Some(*resume), None]),
+            Self::Return | Self::PropagateError | Self::FailureDuringCleanup => (&[], [None, None]),
         };
-        targets.into_iter().flatten()
+        cases
+            .iter()
+            .map(|(_, target)| *target)
+            .chain(targets.into_iter().flatten())
     }
 }
 
@@ -218,6 +248,20 @@ impl FormatWith<ModuleEnv<'_>> for Terminator {
                 then_target.as_u32(),
                 else_target.as_u32()
             ),
+            TerminatorKind::SwitchVariant {
+                tag,
+                cases,
+                default,
+            } => {
+                write!(f, "switch_variant {} [", tag.format_with(env))?;
+                for (index, (case, target)) in cases.iter().enumerate() {
+                    if index > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{case} => b{}", target.as_u32())?;
+                }
+                write!(f, "] default b{}", default.as_u32())
+            }
             TerminatorKind::Invoke {
                 operation,
                 normal,

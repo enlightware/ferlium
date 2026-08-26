@@ -762,9 +762,9 @@ invoked result begins its valid scope only on the normal edge and would require 
 renaming. Unreachable blocks are excluded too: they have no useful dominance relationship with a
 reachable candidate and therefore cannot safely serve as its representative.
 
-Every edge to a duplicate is redirected to the representative. A `condbr` whose targets thereby
-become equal becomes a `goto`, after which unreachable-block and single-predecessor cleanup remove
-the duplicate structure.
+Every edge to a duplicate is redirected to the representative. A `condbr` or `switch_variant`
+whose targets thereby all become equal becomes a `goto`, after which unreachable-block and
+single-predecessor cleanup remove the duplicate structure.
 
 Independently, an empty block holds nothing to execute, so its terminator folds into the edges
 reaching it — without copying an operation, since there is none. How far that goes depends on the
@@ -776,7 +776,7 @@ only replace a predecessor's own `goto`: a `condbr` or `invoke` edge must name a
 nowhere to put a terminal instead. That is why an `invoke`'s continuation survives as a block even
 when it does nothing but return.
 
-Merging a tail or collapsing a branch can make its predicate dead. Only in that case does the
+Merging a tail or collapsing a branch can make its predicate or tag dead. Only in that case does the
 driver run a small cleanup fixed point: unread `comp_eq`, `load`, and `extract_tag` results;
 explicitly total/speculatable calls; and their local storage lifetimes. Folding only an empty exit
 cannot make a value dead and does not buy that cleanup. Unchanged bodies pay neither the fixed point

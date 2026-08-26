@@ -113,15 +113,29 @@ fn block_fingerprint(
             canonical_target(*then_target, replacement).hash(&mut state);
             canonical_target(*else_target, replacement).hash(&mut state);
         }
+        TerminatorKind::SwitchVariant {
+            tag,
+            cases,
+            default,
+        } => {
+            2u8.hash(&mut state);
+            hash_value(tag, local_results, &mut state);
+            cases.len().hash(&mut state);
+            for (case, target) in cases {
+                case.hash(&mut state);
+                canonical_target(*target, replacement).hash(&mut state);
+            }
+            canonical_target(*default, replacement).hash(&mut state);
+        }
         TerminatorKind::Invoke { .. } => return None,
         TerminatorKind::Yield { place, resume } => {
-            2u8.hash(&mut state);
+            3u8.hash(&mut state);
             hash_value(place, local_results, &mut state);
             canonical_target(*resume, replacement).hash(&mut state);
         }
-        TerminatorKind::Return => 3u8.hash(&mut state),
-        TerminatorKind::PropagateError => 4u8.hash(&mut state),
-        TerminatorKind::FailureDuringCleanup => 5u8.hash(&mut state),
+        TerminatorKind::Return => 4u8.hash(&mut state),
+        TerminatorKind::PropagateError => 5u8.hash(&mut state),
+        TerminatorKind::FailureDuringCleanup => 6u8.hash(&mut state),
     }
     Some(state.finish())
 }
@@ -210,6 +224,30 @@ fn blocks_alpha_equivalent(
                 == canonical_target(*right_then, replacement)
                 && canonical_target(*left_else, replacement)
                     == canonical_target(*right_else, replacement)
+        }
+        (
+            TerminatorKind::SwitchVariant {
+                tag: left_tag,
+                cases: left_cases,
+                default: left_default,
+            },
+            TerminatorKind::SwitchVariant {
+                tag: right_tag,
+                cases: right_cases,
+                default: right_default,
+            },
+        ) => {
+            values_alpha_equivalent(left_tag, right_tag, &left_results, &right_results)
+                && left_cases.len() == right_cases.len()
+                && left_cases.iter().zip(right_cases).all(
+                    |((left_case, left_target), (right_case, right_target))| {
+                        left_case == right_case
+                            && canonical_target(*left_target, replacement)
+                                == canonical_target(*right_target, replacement)
+                    },
+                )
+                && canonical_target(*left_default, replacement)
+                    == canonical_target(*right_default, replacement)
         }
         (TerminatorKind::Invoke { .. }, _) | (_, TerminatorKind::Invoke { .. }) => false,
         (
@@ -333,6 +371,12 @@ fn fold_empty_forwarding_blocks(edit: &mut FunctionEdit) -> bool {
                 *then_target = next();
                 *else_target = next();
             }
+            TerminatorKind::SwitchVariant { cases, default, .. } => {
+                for (_, target) in cases {
+                    *target = next();
+                }
+                *default = next();
+            }
             TerminatorKind::Invoke { normal, error, .. } => {
                 *normal = next();
                 *error = next();
@@ -352,6 +396,12 @@ fn fold_empty_forwarding_blocks(edit: &mut FunctionEdit) -> bool {
             *terminator = TerminatorKind::Goto {
                 target: then_target,
             };
+            collapsed = true;
+        }
+        if let TerminatorKind::SwitchVariant { cases, default, .. } = terminator
+            && cases.iter().all(|(_, target)| target == default)
+        {
+            *terminator = TerminatorKind::Goto { target: *default };
             collapsed = true;
         }
     }
@@ -433,15 +483,16 @@ pub(crate) fn simplify_tails(function: &Function) -> Option<SimplifiedTails> {
     let has_equal_target_branch = function
         .blocks()
         .filter(|block| reachable.contains(block.as_index()))
-        .any(|block| {
-            matches!(
-                function.block(block).terminator().kind,
-                TerminatorKind::CondBr {
-                    then_target,
-                    else_target,
-                    ..
-                } if then_target == else_target
-            )
+        .any(|block| match &function.block(block).terminator().kind {
+            TerminatorKind::CondBr {
+                then_target,
+                else_target,
+                ..
+            } => then_target == else_target,
+            TerminatorKind::SwitchVariant { cases, default, .. } => {
+                cases.iter().all(|(_, target)| target == default)
+            }
+            _ => false,
         });
     let has_empty_forwarding_block = function
         .blocks()
@@ -475,6 +526,12 @@ pub(crate) fn simplify_tails(function: &Function) -> Option<SimplifiedTails> {
                     .copied()
                     .unwrap_or(*else_target);
             }
+            TerminatorKind::SwitchVariant { cases, default, .. } => {
+                for (_, target) in cases {
+                    *target = replacement.get(target).copied().unwrap_or(*target);
+                }
+                *default = replacement.get(default).copied().unwrap_or(*default);
+            }
             TerminatorKind::Invoke { normal, error, .. } => {
                 *normal = replacement.get(normal).copied().unwrap_or(*normal);
                 *error = replacement.get(error).copied().unwrap_or(*error);
@@ -496,6 +553,11 @@ pub(crate) fn simplify_tails(function: &Function) -> Option<SimplifiedTails> {
             terminator.kind = TerminatorKind::Goto {
                 target: then_target,
             };
+        }
+        if let TerminatorKind::SwitchVariant { cases, default, .. } = &terminator.kind
+            && cases.iter().all(|(_, target)| target == default)
+        {
+            terminator.kind = TerminatorKind::Goto { target: *default };
         }
     }
 
@@ -537,7 +599,7 @@ mod tests {
     fn alpha_equivalent_branch_arms_are_merged() {
         let body = optimized_body("fn f(x: int) -> int { if x > 0 { x + 1 } else { x + 1 } }");
         assert!(
-            !body.contains("condbr"),
+            !body.contains("condbr") && !body.contains("switch_variant"),
             "the equivalent arms make the predicate dead:\n{body}"
         );
         assert_eq!(
@@ -555,7 +617,7 @@ mod tests {
     fn different_branch_arms_are_not_merged() {
         let body = optimized_body("fn f(x: int) -> int { if x > 0 { x + 1 } else { x + 2 } }");
         assert!(
-            body.contains("condbr"),
+            body.contains("switch_variant"),
             "different computations must retain their branch:\n{body}"
         );
         assert_eq!(

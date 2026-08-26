@@ -487,6 +487,11 @@ impl<'a> Verifier<'a> {
                     else_target,
                     ..
                 } => vec![(*then_target, state), (*else_target, state)],
+                TerminatorKind::SwitchVariant { cases, default, .. } => cases
+                    .iter()
+                    .map(|(_, target)| (*target, state))
+                    .chain(std::iter::once((*default, state)))
+                    .collect(),
                 TerminatorKind::Invoke { normal, error, .. } => {
                     let error_state = match state {
                         FailureState::Normal => FailureState::Propagating,
@@ -617,6 +622,21 @@ impl<'a> Verifier<'a> {
                     self.func.name,
                     block.as_u32()
                 ),
+                TerminatorKind::SwitchVariant { cases, default, .. } => {
+                    assert!(
+                        cases.iter().all(|(_, target)| target_ok(*target)) && target_ok(*default),
+                        "MIR function `{}` block {}: switch_variant targets a missing block",
+                        self.func.name,
+                        block.as_u32()
+                    );
+                    let mut tags = FxHashSet::default();
+                    assert!(
+                        cases.iter().all(|(tag, _)| tags.insert(*tag)),
+                        "MIR function `{}` block {}: switch_variant has a duplicate case",
+                        self.func.name,
+                        block.as_u32()
+                    );
+                }
                 TerminatorKind::Goto { target } => assert!(
                     target_ok(*target),
                     "MIR function `{}` block {}: branch targets a missing block",
@@ -1793,6 +1813,14 @@ impl<'a> Verifier<'a> {
             }) => {
                 result.push((first(then_target), EdgeKind::Normal));
                 result.push((first(else_target), EdgeKind::Normal));
+            }
+            Some(TerminatorKind::SwitchVariant { cases, default, .. }) => {
+                result.extend(
+                    cases
+                        .iter()
+                        .map(|(_, target)| (first(target), EdgeKind::Normal)),
+                );
+                result.push((first(default), EdgeKind::Normal));
             }
             Some(TerminatorKind::Goto { target }) => {
                 result.push((first(target), EdgeKind::Normal));

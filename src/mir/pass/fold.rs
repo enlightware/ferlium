@@ -36,7 +36,7 @@
 #![allow(dead_code)]
 
 use rustc_hash::FxHashSet;
-use ustr::ustr;
+use ustr::{Ustr, ustr};
 
 use crate::{
     CompilerSession, Location,
@@ -885,6 +885,20 @@ fn plan_folds_with(
                         .push((block, if taken { *then_target } else { *else_target }));
                 }
             }
+            TerminatorKind::SwitchVariant {
+                tag,
+                cases,
+                default,
+            } => {
+                if let Some(actual) = known_variant_tag(tag, &state) {
+                    let target = cases
+                        .iter()
+                        .find_map(|(case, target)| (*case == actual).then_some(*target))
+                        .unwrap_or(*default);
+                    plan.warrants_another_round = true;
+                    plan.branches.push((block, target));
+                }
+            }
             TerminatorKind::Goto { .. }
             | TerminatorKind::Yield { .. }
             | TerminatorKind::Return
@@ -1280,6 +1294,17 @@ fn known_condition(condition: &mir::Value, state: &State) -> Option<bool> {
     }
 }
 
+/// The symbolic identity of a variant tag, when dataflow knows it.
+fn known_variant_tag(tag: &mir::Value, state: &State) -> Option<Ustr> {
+    let mir::Value::Register(id) = tag else {
+        return None;
+    };
+    match state.register(*id)? {
+        Fact::Known(Const::VariantTag(tag)) => Some(*tag),
+        _ => None,
+    }
+}
+
 /// Evaluates one call site at compile time and expresses the result as a constant, or explains why
 /// it cannot be.
 fn try_fold_call(
@@ -1480,6 +1505,22 @@ mod tests {
             body.matches("alloca").count(),
             1,
             "only the unknown element keeps a slot:\n{body}"
+        );
+    }
+
+    /// A locally constructed variant has a symbolic tag fact, so its semantic switch reduces to
+    /// the selected edge without turning that tag into a session-local integer constant.
+    #[test]
+    fn a_known_switch_variant_becomes_a_jump() {
+        let body =
+            optimized_main("fn main() -> int { match Some(3) { Some(value) => value, _ => 0 } }");
+        assert!(
+            !body.contains("switch_variant"),
+            "the known constructor must select its arm:\n{body}"
+        );
+        assert!(
+            !body.contains("comp_eq"),
+            "selecting a known switch case needs no tag comparison:\n{body}"
         );
     }
 

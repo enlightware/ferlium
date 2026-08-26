@@ -775,6 +775,14 @@ pub(crate) fn check_terminator_operand_roles(
                  got {role:?}"
             );
         }
+        TerminatorKind::SwitchVariant { tag, .. } => {
+            let role = roles.expect(func_name, tag, constants);
+            assert!(
+                matches!(*role, ValueRole::VariantTag),
+                "MIR function `{func_name}` {at}: switch_variant operand must be an opaque tag, \
+                 got {role:?}"
+            );
+        }
         TerminatorKind::Yield { place, .. } => {
             let role = roles.expect(func_name, place, constants);
             assert!(

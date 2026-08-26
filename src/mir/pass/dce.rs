@@ -942,6 +942,7 @@ impl DceCensus {
                 operation.operands.iter().for_each(&mut note);
             }
             TerminatorKind::CondBr { condition, .. } => note(condition),
+            TerminatorKind::SwitchVariant { tag, .. } => note(tag),
             TerminatorKind::Yield { place, .. } => note(place),
             TerminatorKind::Goto { .. }
             | TerminatorKind::Return
