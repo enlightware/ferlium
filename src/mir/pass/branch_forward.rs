@@ -6,7 +6,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 
-//! Forwarding of booleans that control flow materializes only to branch on again.
+//! Forwarding of local values materialized only to select control flow.
 //!
 //! Lowering and inlining can turn one predicate into this diamond:
 //!
@@ -18,15 +18,18 @@
 //! ```
 //!
 //! The second read and branch recover information the incoming edge already carries. This pass
-//! redirects each storing block to `yes` or `no`, retaining on that edge the `stack_restore`s it
-//! used to reach on the way. The join then becomes unreachable, and ordinary DCE removes the
-//! boolean allocation and stores.
+//! redirects each storing block to `yes` or `no`, retaining the intervening `stack_restore`s on
+//! that edge. The join then becomes unreachable, and ordinary DCE removes the boolean allocation
+//! and stores.
 //!
-//! Both forms of that read are recognized. A boolean alternative head lowers to `load flag`, and
-//! that is what this pass now sees in practice; a `comp_eq flag <bool>` is the older shape, kept
-//! accepted because it is equally provable and costs one match arm. Each names the flag and
-//! carries a polarity: a `load` takes the *then* edge when the arm stored `true`, a `comp_eq` when
-//! the arm stored the pattern it compares against.
+//! Both forms of that read are recognized. Each names the flag and carries a polarity: a `load`
+//! takes the *then* edge when the arm stored `true`, while a `comp_eq` takes it when the arm stored
+//! the pattern being compared.
+//!
+//! A concrete `TrivialCopy` variant follows the same control shape. Each incoming path stores a
+//! statically tagged shell, and the join extracts that tag only to feed `switch_variant`. The pass
+//! redirects each construction path to the selected consumer while retaining payload storage for
+//! projections in that consumer. Escaping storage and managed payloads are outside this rule.
 //!
 //! A store need not sit in an immediate predecessor of the join. A short-circuit `or` or `and` with
 //! three or more arms lowers to a *tree* of stores, whose deeper arms reach the join through a
@@ -55,6 +58,7 @@
 //! as a literal — is a separate optimization with a larger dataflow proof.
 
 use rustc_hash::{FxHashMap, FxHashSet};
+use ustr::Ustr;
 
 use crate::{
     mir::{
@@ -64,21 +68,32 @@ use crate::{
         terminator::{Terminator, TerminatorKind},
         value::ValueId,
     },
-    module::id::Id,
+    module::{ModuleEnv, id::Id},
     std::logic::bool_type,
+    types::type_properties::concrete_type_is_trivial_copy,
 };
 
-use super::site::{OperationIndex, OperationSite};
+use super::{
+    dataflow::{self, Root},
+    site::{OperationIndex, OperationSite},
+};
 
 #[derive(Clone, Copy)]
-struct Store {
+struct Stored<T> {
     block: BlockId,
-    value: bool,
+    value: T,
 }
 
 #[derive(Default)]
 struct Uses {
-    stores: Vec<Store>,
+    stores: Vec<Stored<bool>>,
+    reads: Vec<OperationSite>,
+    other: bool,
+}
+
+#[derive(Default)]
+struct VariantUses {
+    stores: Vec<Stored<Ustr>>,
     reads: Vec<OperationSite>,
     other: bool,
 }
@@ -152,6 +167,237 @@ pub(crate) fn forward_boolean_branches(func: &Function) -> Option<Function> {
     Some(edit.finish_unverified())
 }
 
+/// Forwards a tag switch through the local variant constructions that select its result.
+///
+/// The variant storage must be a concrete `TrivialCopy` local whose address does not escape. Every
+/// whole-place definition must store a statically tagged variant shell, and the one tag read must
+/// feed the switch directly. Payload projections remain in place, so selected arms can keep using
+/// their initialized payload without introducing phi values or changing ownership.
+pub(crate) fn forward_variant_branches(func: &Function, env: ModuleEnv<'_>) -> Option<Function> {
+    if !func.blocks().any(|block| {
+        matches!(
+            func.block(block).terminator().kind,
+            TerminatorKind::SwitchVariant { .. }
+        )
+    }) {
+        return None;
+    }
+
+    let mut variant_tags = FxHashMap::default();
+    let mut extract_results = FxHashSet::default();
+    for operation in func
+        .blocks()
+        .flat_map(|block| func.block(block).operations())
+    {
+        let Some(result) = operation.result_id() else {
+            continue;
+        };
+        match operation.kind {
+            OperationKind::Variant { tag, .. } => {
+                variant_tags.insert(result, tag);
+            }
+            OperationKind::ExtractTag => {
+                extract_results.insert(result);
+            }
+            _ => {}
+        }
+    }
+    if variant_tags.len() < 2 || extract_results.is_empty() {
+        return None;
+    }
+
+    let mut variant_store_counts = FxHashMap::<ValueId, usize>::default();
+    for operation in func
+        .blocks()
+        .flat_map(|block| func.block(block).operations())
+    {
+        if matches!(operation.kind, OperationKind::Store)
+            && let [
+                mir::Value::Register(source),
+                mir::Value::Register(destination),
+            ] = operation.operands.as_ref()
+            && variant_tags.contains_key(source)
+        {
+            *variant_store_counts.entry(*destination).or_default() += 1;
+        }
+    }
+    variant_store_counts.retain(|_, count| *count >= 2);
+    if variant_store_counts.is_empty() {
+        return None;
+    }
+
+    // Type-property queries are more expensive than the structural gates above. Restrict them to
+    // storage that already receives at least two statically tagged shells.
+    let mut uses: FxHashMap<ValueId, VariantUses> = FxHashMap::default();
+    for block in func.blocks() {
+        for operation in func.block(block).operations() {
+            if let OperationKind::Alloca { ty } = operation.kind
+                && let Some(result) = operation.result_id()
+                && variant_store_counts.contains_key(&result)
+                && concrete_type_is_trivial_copy(ty, &env)
+            {
+                uses.insert(result, VariantUses::default());
+            }
+        }
+    }
+    if uses.is_empty() {
+        return None;
+    }
+
+    let mut extract_uses = FxHashMap::<ValueId, usize>::default();
+    for block in func.blocks() {
+        let basic_block = func.block(block);
+        for (index, operation) in basic_block.operations().iter().enumerate() {
+            let site = OperationSite {
+                block,
+                index: OperationIndex::from_index(index),
+            };
+            for (operand_index, operand) in operation.operands.iter().enumerate() {
+                let mir::Value::Register(id) = operand else {
+                    continue;
+                };
+                if extract_results.contains(id) {
+                    *extract_uses.entry(*id).or_default() += 1;
+                }
+                let Some(summary) = uses.get_mut(id) else {
+                    continue;
+                };
+                match &operation.kind {
+                    OperationKind::Store if operand_index == 1 => {
+                        let Some(mir::Value::Register(source)) = operation.operands.first() else {
+                            summary.other = true;
+                            continue;
+                        };
+                        if let Some(tag) = variant_tags.get(source) {
+                            summary.stores.push(Stored { block, value: *tag });
+                        } else {
+                            summary.other = true;
+                        }
+                    }
+                    OperationKind::ExtractTag if operand_index == 0 => summary.reads.push(site),
+                    OperationKind::Subfield {
+                        variant_payload: true,
+                        ..
+                    } if operand_index == 0 => {}
+                    _ => summary.other = true,
+                }
+            }
+        }
+        for operand in basic_block.terminator().operands() {
+            if let mir::Value::Register(id) = operand {
+                if extract_results.contains(id) {
+                    *extract_uses.entry(*id).or_default() += 1;
+                }
+                if let Some(summary) = uses.get_mut(id) {
+                    summary.other = true;
+                }
+            }
+        }
+    }
+    uses.retain(|_, summary| {
+        !summary.other && summary.reads.len() == 1 && summary.stores.len() >= 2
+    });
+    if uses.is_empty() {
+        return None;
+    }
+
+    // Address escape is the boundary between this local control-flow rewrite and general variant
+    // scalar replacement. The shared place analysis recognizes payload projections and passive
+    // call arguments without treating them as aliases.
+    let (escaped, _) = dataflow::escaping_roots(func, &|_| false);
+    uses.retain(|id, _| !escaped.contains(&Root::Alloca(*id)));
+    if uses.is_empty() {
+        return None;
+    }
+
+    let incoming = incoming_predecessors(func);
+    let forwards: Vec<_> = func
+        .blocks()
+        .filter_map(|join| plan_variant_join(func, join, &incoming, &uses, &extract_uses))
+        .collect();
+    if forwards.is_empty() {
+        return None;
+    }
+
+    let mut edit = FunctionEdit::new(func.clone());
+    for forward in forwards {
+        for arm in forward.arms {
+            let block = edit.block_mut(arm.source);
+            block.operations.extend(arm.replay);
+            let span = block.terminator.span;
+            block.terminator = Terminator::goto(span, arm.target);
+        }
+    }
+    edit.remove_unreachable_blocks();
+    edit.merge_blocks_into_predecessors();
+    Some(edit.finish_unverified())
+}
+
+fn plan_variant_join(
+    func: &Function,
+    join: BlockId,
+    incoming: &[Vec<BlockId>],
+    uses: &FxHashMap<ValueId, VariantUses>,
+    extract_uses: &FxHashMap<ValueId, usize>,
+) -> Option<Forward> {
+    let block = func.block(join);
+    let read_index = block.operations().len().checked_sub(1)?;
+    let read = &block.operations()[read_index];
+    if !matches!(read.kind, OperationKind::ExtractTag) {
+        return None;
+    }
+    let result = read.result_id()?;
+    let TerminatorKind::SwitchVariant {
+        tag: mir::Value::Register(condition),
+        cases,
+        default,
+    } = &block.terminator().kind
+    else {
+        return None;
+    };
+    if *condition != result || extract_uses.get(&result) != Some(&1) {
+        return None;
+    }
+    if cases.iter().any(|(_, target)| *target == join) || *default == join {
+        // This rewrite removes the dispatch block. A self-edge would keep it reachable and run
+        // copied stack restorations on both the predecessor and the dispatch block.
+        return None;
+    }
+
+    let [mir::Value::Register(storage)] = read.operands.as_ref() else {
+        return None;
+    };
+    let summary = uses.get(storage)?;
+    let read_site = OperationSite {
+        block: join,
+        index: OperationIndex::from_index(read_index),
+    };
+    if summary.reads.as_slice() != [read_site]
+        || !block.operations()[..read_index]
+            .iter()
+            .all(|operation| matches!(operation.kind, OperationKind::StackRestore))
+    {
+        return None;
+    }
+
+    let join_prefix = &block.operations()[..read_index];
+    let mut arms = Vec::with_capacity(summary.stores.len());
+    for reaching in reaching_stores(func, join, &summary.stores, incoming)? {
+        let target = cases
+            .iter()
+            .find_map(|(case, target)| (*case == reaching.value).then_some(*target))
+            .unwrap_or(*default);
+        let mut replay = reaching.replay;
+        replay.extend(join_prefix.iter().cloned());
+        arms.push(Arm {
+            source: reaching.source,
+            target,
+            replay,
+        });
+    }
+    Some(Forward { arms })
+}
+
 fn incoming_predecessors(func: &Function) -> Vec<Vec<BlockId>> {
     let mut incoming = vec![Vec::new(); func.blocks().count()];
     for predecessor in func.blocks() {
@@ -182,7 +428,7 @@ fn census_uses(func: &Function, uses: &mut FxHashMap<ValueId, Uses>) -> FxHashMa
                 match operation.kind {
                     OperationKind::Store if operand_index == 1 => {
                         if let Some(value) = bool_value(func, &operation.operands[0]) {
-                            summary.stores.push(Store { block, value });
+                            summary.stores.push(Stored { block, value });
                         } else {
                             summary.other = true;
                         }
@@ -257,7 +503,7 @@ fn plan_join(
     // The join's own cleanup runs after whatever the path already replayed, exactly as it did when
     // control still passed through these blocks in order.
     let join_prefix = &block.operations()[..read_index];
-    let arms = reaching_stores(func, join, summary, incoming)?
+    let arms = reaching_stores(func, join, &summary.stores, incoming)?
         .into_iter()
         .map(|reaching| {
             let mut replay = reaching.replay;
@@ -278,9 +524,9 @@ fn plan_join(
 }
 
 /// One store found by the backward walk, with the cleanup between it and the join.
-struct Reaching {
+struct Reaching<T> {
     source: BlockId,
-    value: bool,
+    value: T,
     replay: Vec<Operation>,
 }
 
@@ -289,13 +535,13 @@ struct Reaching {
 /// Returns `None` unless the stores found are exactly those the use census recorded for the flag:
 /// that equality is what proves the walk saw every definition reaching the join, and so that
 /// redirecting these blocks cannot drop one.
-fn reaching_stores(
+fn reaching_stores<T: Copy>(
     func: &Function,
     join: BlockId,
-    summary: &Uses,
+    stores: &[Stored<T>],
     incoming: &[Vec<BlockId>],
-) -> Option<Vec<Reaching>> {
-    let mut found: Vec<Reaching> = Vec::new();
+) -> Option<Vec<Reaching<T>>> {
+    let mut found: Vec<Reaching<T>> = Vec::new();
     let mut visited: FxHashSet<BlockId> = FxHashSet::default();
     let mut pending: Vec<(BlockId, Vec<Operation>)> = incoming[join.as_index()]
         .iter()
@@ -316,9 +562,9 @@ fn reaching_stores(
             return None;
         }
 
-        let mut stores = summary.stores.iter().filter(|store| store.block == block);
-        if let Some(store) = stores.next() {
-            if stores.next().is_some() {
+        let mut block_stores = stores.iter().filter(|store| store.block == block);
+        if let Some(store) = block_stores.next() {
+            if block_stores.next().is_some() {
                 return None;
             }
             found.push(Reaching {
@@ -352,7 +598,7 @@ fn reaching_stores(
         }
     }
 
-    (found.len() == summary.stores.len()).then_some(found)
+    (found.len() == stores.len()).then_some(found)
 }
 
 /// The flag `operation` reads, and the stored value that sends control to the `condbr`'s *then*
@@ -392,9 +638,16 @@ mod tests {
     use crate::{
         CompilerSession, Location, MirOptimization,
         containers::b,
-        hir::value::LiteralValue,
-        mir::{Operation, OperationKind, Value, builder::FunctionBuilder, terminator::Terminator},
-        types::r#type::Type,
+        hir::{function::ArgConvention, value::LiteralValue},
+        mir::{
+            Operation, OperationKind, ParameterKind, Value, builder::FunctionBuilder,
+            terminator::Terminator,
+        },
+        std::math::int_type,
+        types::{
+            effects::EffType,
+            r#type::{CallImplType, FnType, Type},
+        },
     };
 
     fn optimized(src: &str) -> String {
@@ -461,6 +714,196 @@ mod tests {
             body.matches("stack_restore").count() >= 3,
             "every redirected arm must still restore the frames it passed:\n{body}"
         );
+    }
+
+    #[test]
+    fn a_local_trivial_variant_dispatch_is_forwarded() {
+        let module = optimized(
+            "fn choose(flag: bool, value: int) {\
+                 if flag { Some(value) } else { None }\
+             }\
+             fn consume(flag: bool, value: int) -> int {\
+                 match choose(flag, value) { Some(v) => v + 1, _ => 0 }\
+             }",
+        );
+        let body = body_of(&module, "consume");
+
+        assert!(
+            !body.contains("switch_variant") && !body.contains("extract_tag"),
+            "the constructor paths must select their consumers directly:\n{body}"
+        );
+    }
+
+    #[test]
+    fn a_nested_multiway_variant_dispatch_is_forwarded() {
+        let module = optimized(
+            "fn choose(first: bool, second: bool, value: int) {\
+                 if first { First(value) } else if second { Second(value + 1) } else { None }\
+             }\
+             fn consume(first: bool, second: bool, value: int) -> int {\
+                 match choose(first, second, value) {\
+                     First(v) => v, Second(v) => v * 2, _ => 0\
+                 }\
+             }",
+        );
+        let body = body_of(&module, "consume");
+
+        assert!(
+            !body.contains("switch_variant") && !body.contains("extract_tag"),
+            "every constructor path must select its consumer directly:\n{body}"
+        );
+        assert!(
+            body.contains("Num<std::int>::add") && body.contains("Num<std::int>::mul"),
+            "the nested constructor and selected consumers must remain:\n{body}"
+        );
+        assert!(
+            body.contains("stack_restore"),
+            "cleanup between a nested constructor and the join must be replayed:\n{body}"
+        );
+    }
+
+    #[test]
+    fn a_managed_variant_dispatch_is_not_forwarded() {
+        let module = optimized(
+            "fn choose(flag: bool, value: string) {\
+                 if flag { Some(value) } else { None }\
+             }\
+             fn consume(flag: bool, value: string) -> int {\
+                 match choose(flag, value) { Some(v) => string_byte_len(v), _ => 0 }\
+             }",
+        );
+        let body = body_of(&module, "consume");
+
+        assert_eq!(
+            body.matches("switch_variant").count(),
+            1,
+            "managed storage retains its explicit tag dispatch:\n{body}"
+        );
+    }
+
+    #[test]
+    fn a_variant_payload_that_escapes_is_not_forwarded() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let span = Location::new_synthesized();
+        let some = crate::ustr("Some");
+        let none = crate::ustr("None");
+        let payload_ty = Type::tuple([int_type()]);
+        let variant_ty = Type::variant([(none, Type::unit()), (some, payload_ty)]);
+        let mutator_ty =
+            FnType::new_mut_resolved([(int_type(), true)], Type::unit(), EffType::empty());
+        let mut builder = FunctionBuilder::new("escaped_variant".into(), Default::default());
+        let mutator = builder.add_parameter(
+            Type::function_type(mutator_ty.clone()),
+            ParameterKind::Parameter(ArgConvention::Let),
+        );
+        let condition = builder.add_constant(
+            Type::primitive::<bool>(),
+            LiteralValue::new_native(true),
+            &env,
+        );
+        let zero = builder.add_constant(int_type(), LiteralValue::new_native(0isize), &env);
+        let entry = builder.add_block();
+        let some_source = builder.add_block();
+        let none_source = builder.add_block();
+        let join = builder.add_block();
+        let some_target = builder.add_block();
+        let none_target = builder.add_block();
+
+        let storage = builder
+            .append_operation(entry, Operation::alloca(span, variant_ty))
+            .unwrap();
+        builder.set_terminator(
+            entry,
+            Terminator::cond_br(span, Value::Constant(condition), some_source, none_source),
+        );
+
+        let some_shell = builder
+            .append_operation(
+                some_source,
+                Operation::variant(
+                    span,
+                    some,
+                    variant_ty,
+                    payload_ty,
+                    Some(crate::hir::value::VariantPayloadStorage::Inline),
+                    None,
+                    None,
+                ),
+            )
+            .unwrap();
+        builder.append_operation(
+            some_source,
+            Operation::store(span, some_shell, storage.clone()),
+        );
+        let payload = builder
+            .append_operation(
+                some_source,
+                Operation::variant_payload(
+                    span,
+                    storage.clone(),
+                    Value::Constant(zero),
+                    payload_ty,
+                    None,
+                ),
+            )
+            .unwrap();
+        let element = builder
+            .append_operation(
+                some_source,
+                Operation::subfield(span, payload, Value::Constant(zero), int_type()),
+            )
+            .unwrap();
+        builder.append_operation(
+            some_source,
+            Operation::store(span, Value::Constant(zero), element.clone()),
+        );
+        let call_result = builder
+            .append_operation(some_source, Operation::alloca(span, Type::unit()))
+            .unwrap();
+        builder.append_operation(
+            some_source,
+            Operation::call(
+                span,
+                Value::Parameter(mutator),
+                [element, call_result],
+                CallImplType::value(mutator_ty),
+            ),
+        );
+        builder.set_terminator(some_source, Terminator::goto(span, join));
+
+        let none_shell = builder
+            .append_operation(
+                none_source,
+                Operation::variant(
+                    span,
+                    none,
+                    variant_ty,
+                    Type::unit(),
+                    Some(crate::hir::value::VariantPayloadStorage::Inline),
+                    None,
+                    None,
+                ),
+            )
+            .unwrap();
+        builder.append_operation(
+            none_source,
+            Operation::store(span, none_shell, storage.clone()),
+        );
+        builder.set_terminator(none_source, Terminator::goto(span, join));
+
+        let tag = builder
+            .append_operation(join, Operation::extract_tag(span, storage))
+            .unwrap();
+        builder.set_terminator(
+            join,
+            Terminator::switch_variant(span, tag, vec![(some, some_target)], none_target),
+        );
+        builder.set_terminator(some_target, Terminator::ret(span));
+        builder.set_terminator(none_target, Terminator::ret(span));
+
+        let function = builder.finish(env);
+        assert!(super::forward_variant_branches(&function, env).is_none());
     }
 
     /// A boolean alternative head lowers to `load`, so nothing in the emitter produces the

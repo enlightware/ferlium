@@ -537,7 +537,7 @@ profile from 3,517,325 to 3,423,626 events (-2.66%), including moves from 59,248
 allocations from 812,240 to 767,872. `iter_pipeline` falls from 603,589 to 576,801 events (-4.44%),
 with moves from 14,039 to 645, allocations from 136,187 to 122,793, and peak cells from 59 to 58.
 
-## Boolean branch forwarding
+## Local branch forwarding
 
 `mir::pass::branch_forward` removes a boolean storage round-trip created when one control-flow
 diamond materializes `true` or `false` and its join immediately reads that slot to control a second
@@ -546,18 +546,31 @@ successor. Any `stack_restore`s preceding the read are copied onto every redirec
 now-unreachable join disappears, and final DCE removes the local boolean allocation and its
 constant stores.
 
-Both forms of that read are recognized. A boolean alternative head lowers to `load`, and that is
-the shape the pass sees in practice; a `comp_eq` against a boolean literal is the older shape, kept
-accepted because it is equally provable and costs one match arm. Each names the slot and carries a
-polarity: a `load` takes the *then* edge when the arm stored `true`, a `comp_eq` when the arm
+Both forms of that read are recognized. A boolean alternative head lowers to `load`; a `comp_eq`
+against a boolean literal carries the same information. Each names the slot and a polarity: a
+`load` takes the *then* edge when the arm stored `true`, while a `comp_eq` takes it when the arm
 stored the pattern it compares against.
 
 The proof is a linear use and predecessor census and deliberately narrower than general jump
 threading. The slot must be a local boolean `alloca`; its only uses must be one known-boolean store
 per incoming predecessor and the final read; every predecessor must jump unconditionally to the
 join; and the join may contain only `stack_restore`s before that read. Other operations, additional
-uses, unknown stores and self-edges all refuse the rewrite. Supporting integer values or variant
-tags would require evidence for a broader predicate-propagation analysis.
+uses, unknown stores and self-edges all refuse the rewrite.
+
+The same pass forwards a concrete `TrivialCopy` variant when every whole-place definition stores a
+statically tagged shell and its sole tag read feeds `switch_variant`. Each constructor path jumps
+directly to the selected case, retaining payload storage and replaying intervening stack restores.
+The variant place must not escape; managed variants, other whole-place uses and general aggregate
+scalar replacement remain outside the rule. Place CSE runs after a successful rewrite so identical
+payload projections share one address calculation.
+
+Across the runtime corpus, this variant rule removes 62 dispatches and 302 executed MIR events
+(0.013%): `iter_pipeline` falls from 82,712 to 82,425 and `data_text_roundtrip` from 121,339 to
+121,324, while the other workloads are unchanged. The small result supports keeping the local
+linear proof without extending it into a general scalar-replacement analysis. Structural gates
+restrict type-property queries to allocations that receive at least two tagged shells and count
+uses only for tag-extraction results; the complete rule adds 0.07% to standard-library
+MIR-optimization instructions.
 
 ## Boolean condition forwarding
 

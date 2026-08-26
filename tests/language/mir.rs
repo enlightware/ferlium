@@ -443,6 +443,40 @@ fn variant_match_switches_on_the_tag_register() {
 }
 
 #[test]
+fn forwarded_local_variant_dispatch_agrees_across_execution_modes() {
+    let mut session = TestSession::new();
+    session.assert_run_value_eq(
+        r#"
+            fn choose(flag: bool, value: int) {
+                if flag { Some(value) } else { None }
+            }
+            fn consume(flag: bool, value: int) -> int {
+                match choose(flag, value) { Some(v) => v + 1, _ => 0 }
+            }
+            (consume(true, 41), consume(false, 41))
+        "#,
+        expected_tuple([int(42), int(0)]),
+    );
+}
+
+#[test]
+fn retained_managed_variant_dispatch_agrees_across_execution_modes() {
+    let mut session = TestSession::new();
+    session.assert_run_value_eq(
+        r#"
+            fn choose(flag: bool, value: string) {
+                if flag { Some(value) } else { None }
+            }
+            fn consume(flag: bool, value: string) -> int {
+                match choose(flag, value) { Some(v) => string_byte_len(v), _ => 0 }
+            }
+            (consume(true, "abc"), consume(false, "abc"))
+        "#,
+        expected_tuple([int(3), int(0)]),
+    );
+}
+
+#[test]
 fn generic_variant_payload_layout_evidence_reaches_mir() {
     let mut session = TestSession::new();
     let out = session.emit_mir(

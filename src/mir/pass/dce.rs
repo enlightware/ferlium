@@ -1095,7 +1095,7 @@ fn is_exact_clone_lifetime_role(operation: &mir::Operation, position: usize) -> 
 
 #[cfg(test)]
 mod tests {
-    use crate::{CompilerSession, MirOptimization};
+    use crate::{CompilerSession, ExecutionTarget, MirOptimization, Path, format::FormatWith};
 
     fn optimized(src: &str) -> String {
         let mut session = CompilerSession::new();
@@ -1220,26 +1220,41 @@ mod tests {
         );
     }
 
-    /// Reading any place in the inlined result tree rejects the complete root, even when the
-    /// result representation itself is `TrivialCopy`.
+    /// Reading the tag of a result tree rejects the complete root, even when the result
+    /// representation itself is `TrivialCopy`.
     #[test]
-    fn an_observed_inlined_trivial_variant_result_is_retained() {
-        let source = "fn bump(current: Option<int>, count: &mut int) -> Option<int> {\
-                 match current {\
-                     Some(value) => { count += 1; Some(value) },\
-                     None => None,\
-                 }\
-             }\
-             fn has_value(current: Option<int>, count: &mut int) -> bool {\
-                 let result = bump(current, count);\
-                 match result { Some(ignored) => true, None => false }\
-             }";
-        let module = optimized(source);
-        let body = body_of(&module, "has_value");
+    fn an_observed_trivial_variant_result_is_retained_by_discarded_result_dce() {
+        let mut session = CompilerSession::new();
+        let module_id = session
+            .compile_for(
+                ExecutionTarget::Mir,
+                "fn has_value(flag: bool, value: int) -> bool {\
+                     let result = if flag { Some(value) } else { None };\
+                     match result { Some(ignored) => true, None => false }\
+                 }",
+                "dce_observed_variant",
+                Path::single_str("dce_observed_variant"),
+            )
+            .unwrap()
+            .module_id;
+        let module = session.expect_fresh_module(module_id);
+        let function_id = module
+            .get_local_function_id(crate::ustr("has_value"))
+            .unwrap();
+        let env = session.modules().env_for(module);
+        let raw = session
+            .mir_artifacts_for(module_id, MirOptimization::Disabled)
+            .unwrap()
+            .get(function_id)
+            .unwrap()
+            .clone();
+        let retained = super::remove_discarded_trivial_copy_results(&raw, env).unwrap_or(raw);
+        let body = retained.format_with(&env).to_string();
+
         assert!(
             body.contains("alloca Option<int>")
                 && (body.contains("variant Some") || body.contains("variant None")),
-            "observing the result must retain its allocation and construction:\n{body}"
+            "the discarded-result pass must retain observed storage:\n{body}"
         );
     }
 

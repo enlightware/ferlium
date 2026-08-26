@@ -295,6 +295,24 @@ pub(crate) fn optimize_function(
     if let Some(forwarded) = branch_forward::forward_boolean_branches(source) {
         current = Some(forwarded);
     }
+    // Some local variant results converge only to have their tag read and dispatched. Redirect
+    // each statically tagged construction path to the selected consumer while retaining payload
+    // storage for that consumer's projections.
+    let source = current.as_ref().unwrap_or(function);
+    if let Some(forwarded) = branch_forward::forward_variant_branches(source, env) {
+        current = Some(forwarded);
+        // Redirecting the constructor paths puts payload initialization and consumption on one
+        // straight-line path. Reuse place CSE for their address calculations and let ordinary
+        // storage forwarding reconsider any other temporary the changed CFG exposes.
+        let source = current.as_ref().unwrap();
+        if let Some(merged) = cse::eliminate_common_subexpressions(source) {
+            current = Some(merged);
+        }
+        let source = current.as_ref().unwrap();
+        if let Some(forwarded) = copy_forward::forward_redundant_storage(source, env) {
+            current = Some(forwarded);
+        }
+    }
     // A predicate returned as a value often lowers to a tiny diamond whose arms only store opposite
     // boolean constants to the same destination. Collapse that materialization before DCE cleans up
     // any now-unused boolean storage and stranded blocks.
