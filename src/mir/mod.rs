@@ -20,7 +20,7 @@ pub(crate) mod role;
 pub(crate) mod site;
 pub mod terminator;
 pub mod value;
-#[cfg(any(debug_assertions, test))]
+#[cfg(any(debug_assertions, test, feature = "std-snapshot"))]
 pub(crate) mod verify;
 
 pub use function::{BasicBlock, BlockId, Function, Parameter, ParameterKind};

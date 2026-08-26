@@ -875,10 +875,12 @@ if its most useful result would otherwise disappear without a count.
 
 ## Invariants
 
-- `verify_function` passes on raw lowering and generated optimizer inputs before another pass
-  consumes them, then on every final declared and specialized optimized body after whole-module
-  cleanup, under debug/test gating. Intermediate pass results never escape the optimizer. This is
-  the primary safety net for every rewrite without repeating whole-function dataflow at every pass.
+- Under debug/test gating, `verify_function` checks raw lowering and generated optimizer inputs
+  before another pass consumes them, then every final declared and specialized optimized body
+  after whole-module cleanup. Verified snapshot restoration uses the same check under
+  `std-snapshot`, including default release builds. Intermediate pass results never escape the
+  optimizer. This is the primary safety net for every rewrite without repeating whole-function
+  dataflow at every pass.
 - **Block order is not a definition order.** A value may be defined in a higher-numbered block than
   its uses; the only requirement is dominance, which is a property of the CFG rather than of block
   numbering. `emit_mir` produces such bodies already — a `Case` whose scrutinee is itself
