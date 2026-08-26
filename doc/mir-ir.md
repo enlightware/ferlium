@@ -255,9 +255,16 @@ serialized standalone MIR format will need explicit normalized-layout/equality m
 
 > Status: planned contract for the unboxed interpreter and machine backends.
 
-Physical lowering maps optimized semantic MIR to MIR with the same function, block, value, `Type`,
-constant, CFG, failure-flow, and ownership structures. It resolves physical addresses,
-representations, callable environments, and native ABI entries.
+Physical lowering consumes the complete optimized `MirArtifacts`, including declared bodies and
+retained specializations. It resolves physical addresses, representations, callable environments,
+and native ABI entries while preserving the semantic CFG, failure flow, ownership operations,
+types, and constants where their representation does not require expansion.
+
+The result need not correspond one-to-one with semantic function artifacts. Lowering may introduce
+adapters and helpers, merge physically equivalent artifacts, or remove unreachable internal
+artifacts. It maintains a resolution from every retained semantic callable and specialization to
+its physical entry and convention, and rewrites calls consistently. Top-level module entries retain
+their externally visible identity.
 
 The lowerer builds candidate `MirArtifacts`. The readiness verifier checks the physical-stage
 invariants and returns `BackendReadyMirArtifacts`. Both stages use the same MIR structures without
@@ -266,6 +273,20 @@ a phase parameter.
 Backend-ready MIR may retain symbolic operands, `DictEntry`, variant construction, and
 `extract_tag`. Each executor supplies their target representation. Interpreter-only native calls
 and target-lowered value representations must be resolved.
+
+### Physical call results
+
+Semantic MIR gives every call a result place, including calls returning `()`. Physical lowering
+assigns a result convention to each lowered function artifact after specialization. A direct
+artifact returning exactly canonical unit may use `NoValue`, omitting both its `@ret` parameter and
+the corresponding call operand. Other zero-sized and named types retain a value result. A shared
+generic artifact retains `Value`; a specialization whose concrete result is `()` may independently
+use `NoValue`.
+
+The convention belongs to the artifact rather than an individual call site, and every direct call
+must match it. First-class callables always expose `Value`. When a `NoValue` implementation is used
+first-class, physical lowering supplies an adapter entry that invokes it and produces the logical
+unit result.
 
 ### Typed byte addressing
 
