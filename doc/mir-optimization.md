@@ -90,6 +90,7 @@ and ownership transfers *into* the candidate reject the local. It runs immediate
 storage DCE, which can then remove any allocation or literal made wholly unread.
 Stores that consume a freshly constructed owned value are retained, even when their destination is
 `TrivialCopy`, because removing them would orphan that value's required consuming use.
+Removing a dead store also prunes constants which it leaves unreferenced.
 
 Managed storage remains outside this store-liveness proof, but final DCE handles the ownership-safe
 subset separately. A semantic clone whose destination is never observed is removed together with

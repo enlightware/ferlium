@@ -145,6 +145,7 @@ pub(crate) fn remove_overwritten_trivial_copy_stores(
             keep
         });
     }
+    edit.prune_constants();
     Some(edit.finish_unverified())
 }
 
