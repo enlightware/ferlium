@@ -234,8 +234,8 @@ Type equality ignores field order.
 
 Fields are canonicalised to produce a stable layout:
 
-> Status: this is the intended long-term ABI layout optimization.
-> The current interpreter representation does not yet reorder record fields this way.
+> The compiled layout uses this order. The boxed interpreter does not expose a byte-level field
+> order.
 
 1. Compute each field’s alignment (per backend profile).
 2. Sort fields by:
@@ -565,12 +565,9 @@ catalog.
 
 # Rust structural interoperability
 
-The Rust-native rule above is sufficient when a Rust type is not structurally exposed: Ferlium
-stores the real `T` and uses its registered operations. A Rust type intended to be structurally
-interchangeable with a Ferlium-defined record or tuple additionally needs a representation
-declaration or generated adapter that verifies the Ferlium field order, offsets, size and alignment.
-`#[repr(C)]` with fields in Ferlium's canonical order is one possible implementation for records,
-but the ABI does not prescribe the source annotation used to establish that contract.
+Rust-native types are opaque leaves: Ferlium stores the real `T` and uses its registered
+operations without computing member offsets. A native member can be exposed through an explicit
+addressor or adapter, which follows the Rust type's own layout.
 
 Ferlium variants use case-specific payload offsets and are not C unions. A Rust enum is therefore
 not structurally interchangeable merely because its cases have corresponding names and payloads;

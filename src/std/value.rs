@@ -123,6 +123,11 @@ impl ValueLayout {
             align.is_power_of_two(),
             "type alignment must be a non-zero power of two"
         );
+        assert_eq!(
+            size % align,
+            0,
+            "type size must be divisible by its alignment"
+        );
         Self { size, align }
     }
 
@@ -168,6 +173,13 @@ impl ValueLayout {
         Self::new(align_to(size, align), align)
     }
 
+    fn compact_record(mut fields: Vec<(Ustr, ValueLayout)>) -> Self {
+        fields.sort_by(|(left_name, left), (right_name, right)| {
+            compact_record_member_order(*left_name, left.align, *right_name, right.align)
+        });
+        Self::product(fields.into_iter().map(|(_, layout)| layout))
+    }
+
     fn variant(payloads: impl IntoIterator<Item = ValueLayout>) -> Self {
         let tag = Self::native::<u32>();
         let mut size = tag.size;
@@ -194,6 +206,8 @@ fn align_to(offset: usize, align: usize) -> usize {
 /// One direct member in the host-matched product layout recipe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ProductMemberLayout {
+    /// Present for records and absent for positional tuple members.
+    pub(crate) name: Option<Ustr>,
     pub(crate) ty: Type,
     pub(crate) storage: ProductMemberStorage,
     /// Absent exactly when the member's inline layout comes from its run-time `Value` evidence.
@@ -206,35 +220,113 @@ pub(crate) enum ProductMemberStorage {
     Indirect,
 }
 
-/// Logical member order plus every statically known part of a product's physical layout.
-///
-/// Member indices are currently also physical-order indices. Compact record layout must add an
-/// explicit logical-to-physical permutation rather than changing that interpretation implicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProductLayoutOrder {
+    Positional,
+    CompactRecord,
+}
+
+/// Logical members plus the canonical rule that maps them into physical order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProductLayoutSpec {
+    pub(crate) order: ProductLayoutOrder,
     pub(crate) members: Vec<ProductMemberLayout>,
 }
 
 impl ProductLayoutSpec {
-    /// Computes a field offset when every member up to and including it has a static layout.
+    /// Whether `candidate` precedes `target` in compact-record order, given the ordering of
+    /// their alignments.
+    pub(crate) fn compact_member_precedes(
+        &self,
+        candidate: ProjectionIndex,
+        target: ProjectionIndex,
+        alignment_order: std::cmp::Ordering,
+    ) -> bool {
+        assert_eq!(self.order, ProductLayoutOrder::CompactRecord);
+        compact_record_member_precedes(
+            self.members[candidate.as_index()]
+                .name
+                .expect("record member has a name"),
+            self.members[target.as_index()]
+                .name
+                .expect("record member has a name"),
+            alignment_order,
+        )
+    }
+
+    /// Computes a field offset when the necessary member layouts are static.
     pub(crate) fn static_field_offset(&self, index: ProjectionIndex) -> Option<usize> {
         let index = index.as_index();
         if index >= self.members.len() {
             return None;
         }
-        if index == 0 {
+        if self.order == ProductLayoutOrder::Positional && index == 0 {
             return Some(0);
         }
-        let mut offset = 0;
-        for (member_index, member) in self.members.get(..=index)?.iter().enumerate() {
-            let layout = member.static_layout?;
-            offset = align_to(offset, layout.align as usize);
-            if member_index == index {
+        match self.order {
+            ProductLayoutOrder::Positional => {
+                let mut offset = 0;
+                for (member_index, member) in self.members[..=index].iter().enumerate() {
+                    let layout = member.static_layout?;
+                    offset = align_to(offset, layout.align as usize);
+                    if member_index == index {
+                        return Some(offset);
+                    }
+                    offset += layout.size as usize;
+                }
+            }
+            ProductLayoutOrder::CompactRecord => {
+                if self.members.len() == 1 {
+                    return Some(0);
+                }
+                let target_layout = self.members[index].static_layout?;
+                let target = ProjectionIndex::from_index(index);
+                let mut offset = 0;
+                for (candidate_index, candidate) in self.members.iter().enumerate() {
+                    if candidate_index == index {
+                        continue;
+                    }
+                    let candidate_layout = candidate.static_layout?;
+                    if self.compact_member_precedes(
+                        ProjectionIndex::from_index(candidate_index),
+                        target,
+                        candidate_layout.align.cmp(&target_layout.align),
+                    ) {
+                        offset += candidate_layout.size as usize;
+                    }
+                }
                 return Some(offset);
             }
-            offset += layout.size as usize;
         }
-        unreachable!("the selected member is included in the prefix")
+        unreachable!("the selected member is included in the physical order")
+    }
+}
+
+fn compact_record_member_order(
+    left_name: Ustr,
+    left_align: usize,
+    right_name: Ustr,
+    right_align: usize,
+) -> std::cmp::Ordering {
+    let alignment_order = left_align.cmp(&right_align);
+    if alignment_order == std::cmp::Ordering::Equal && left_name == right_name {
+        std::cmp::Ordering::Equal
+    } else if compact_record_member_precedes(left_name, right_name, alignment_order) {
+        std::cmp::Ordering::Less
+    } else {
+        std::cmp::Ordering::Greater
+    }
+}
+
+fn compact_record_member_precedes(
+    candidate_name: Ustr,
+    target_name: Ustr,
+    alignment_order: std::cmp::Ordering,
+) -> bool {
+    match alignment_order {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Less => false,
+        std::cmp::Ordering::Equal => candidate_name < target_name,
     }
 }
 
@@ -395,23 +487,24 @@ fn layout_for_value_type(
             return Ok(ValueLayout::product(fields));
         }
         Record(fields) => {
-            let field_tys = fields
+            let named_field_tys = fields
                 .iter()
-                .map(|(_, field_ty)| *field_ty)
+                .map(|(name, field_ty)| (*name, *field_ty))
                 .collect::<Vec<_>>();
             drop(ty_data);
-            let fields = field_tys
+            let fields = named_field_tys
                 .into_iter()
-                .map(|field_ty| {
-                    if field_payload_storage(ty, field_ty, env).is_indirect() {
+                .map(|(name, field_ty)| {
+                    let layout = if field_payload_storage(ty, field_ty, env).is_indirect() {
                         Ok(ValueLayout::native::<usize>())
                     } else {
                         layout_for_value_type(field_ty, span, env, active)
-                    }
+                    }?;
+                    Ok((name, layout))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             active.remove(&ty);
-            return Ok(ValueLayout::product(fields));
+            return Ok(ValueLayout::compact_record(fields));
         }
         Variant(variants) => {
             let payload_tys = variants
@@ -515,16 +608,23 @@ pub(crate) fn dynamic_product_member_layouts(
     env: &impl TypeLayoutEnv,
 ) -> Vec<Type> {
     product_members(ty, env)
+        .map(|product| product.members)
         .unwrap_or_default()
         .into_iter()
-        .filter(|member| {
-            !field_payload_storage(ty, *member, env).is_indirect()
-                && !type_has_static_layout(*member, span, env)
+        .filter_map(|(_, member)| {
+            (!field_payload_storage(ty, member, env).is_indirect()
+                && !type_has_static_layout(member, span, env))
+            .then_some(member)
         })
         .collect()
 }
 
-fn product_members(ty: Type, env: &impl TypeLayoutEnv) -> Option<Vec<Type>> {
+struct DirectProductMembers {
+    order: ProductLayoutOrder,
+    members: Vec<(Option<Ustr>, Type)>,
+}
+
+fn product_members(ty: Type, env: &impl TypeLayoutEnv) -> Option<DirectProductMembers> {
     let mut structural = ty;
     let mut seen = FxHashSet::default();
     loop {
@@ -537,9 +637,20 @@ fn product_members(ty: Type, env: &impl TypeLayoutEnv) -> Option<Vec<Type>> {
         let data = (*type_data).clone();
         drop(type_data);
         match data {
-            TypeKind::Tuple(members) => return Some(members),
+            TypeKind::Tuple(members) => {
+                return Some(DirectProductMembers {
+                    order: ProductLayoutOrder::Positional,
+                    members: members.into_iter().map(|ty| (None, ty)).collect(),
+                });
+            }
             TypeKind::Record(fields) => {
-                return Some(fields.into_iter().map(|(_, field)| field).collect());
+                return Some(DirectProductMembers {
+                    order: ProductLayoutOrder::CompactRecord,
+                    members: fields
+                        .into_iter()
+                        .map(|(name, ty)| (Some(name), ty))
+                        .collect(),
+                });
             }
             TypeKind::Named(named) => {
                 structural = env
@@ -557,9 +668,11 @@ pub(crate) fn product_layout_spec(
     span: Location,
     env: &impl TypeLayoutEnv,
 ) -> Option<ProductLayoutSpec> {
-    let members = product_members(ty, env)?
+    let product = product_members(ty, env)?;
+    let members = product
+        .members
         .into_iter()
-        .map(|member_ty| {
+        .map(|(name, member_ty)| {
             let (storage, static_layout) =
                 if field_payload_storage(ty, member_ty, env).is_indirect() {
                     (
@@ -573,13 +686,17 @@ pub(crate) fn product_layout_spec(
                     )
                 };
             ProductMemberLayout {
+                name,
                 ty: member_ty,
                 storage,
                 static_layout,
             }
         })
         .collect();
-    Some(ProductLayoutSpec { members })
+    Some(ProductLayoutSpec {
+        order: product.order,
+        members,
+    })
 }
 
 /// Return whether all unresolved variables in `ty` appear only in function types.
@@ -2700,6 +2817,37 @@ mod tests {
                 size: 3 * word_size,
                 align: word_align,
             }
+        );
+    }
+
+    #[test]
+    fn records_use_compact_alignment_then_name_order() {
+        let session = CompilerSession::new();
+        let env = session.module_env();
+        let record = Type::record(vec![
+            (ustr("a"), bool_type()),
+            (ustr("b"), Type::primitive::<isize>()),
+            (ustr("c"), bool_type()),
+        ]);
+        let word_size = u32::try_from(mem::size_of::<isize>()).unwrap();
+        let word_align = u32::try_from(mem::align_of::<isize>()).unwrap();
+
+        assert_eq!(
+            value_layout_for_type(record, Location::new_synthesized(), &env).unwrap(),
+            ResolvedValueLayout {
+                size: 2 * word_size,
+                align: word_align,
+            }
+        );
+        let spec = product_layout_spec(record, Location::new_synthesized(), &env).unwrap();
+        assert_eq!(
+            spec.static_field_offset(ProjectionIndex::new(0)),
+            Some(word_size as usize)
+        );
+        assert_eq!(spec.static_field_offset(ProjectionIndex::new(1)), Some(0));
+        assert_eq!(
+            spec.static_field_offset(ProjectionIndex::new(2)),
+            Some(word_size as usize + 1)
         );
     }
 }

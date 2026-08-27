@@ -253,8 +253,8 @@ serialized standalone MIR format will need explicit normalized-layout/equality m
 
 ## Physical MIR stage
 
-> Status: inline product byte-address lowering is implemented; indirect product ownership, the
-> remaining representations, and the unboxed interpreter are planned.
+> Status: canonical compact inline-product byte-address lowering is implemented; indirect product
+> ownership, the remaining representations, and the unboxed interpreter are planned.
 
 Physical lowering consumes the complete optimized `MirArtifacts`, including declared bodies and
 retained specializations. It resolves physical addresses, representations, callable environments,

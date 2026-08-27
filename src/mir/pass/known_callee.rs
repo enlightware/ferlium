@@ -213,6 +213,8 @@ pub(crate) struct KnownCallees {
     int_neg_ty: CallImplType,
     int_bit_and: FunctionId,
     int_bit_and_ty: CallImplType,
+    int_cmp: FunctionId,
+    int_cmp_ty: CallImplType,
     array_offset_unchecked: FunctionId,
     array_offset_unchecked_effects: EffType,
     layouts: Layouts,
@@ -244,6 +246,7 @@ impl KnownCallees {
         let int_sub = resolver.method(NUM_TRAIT_NAME, int_type(), "sub");
         let int_neg = resolver.method(NUM_TRAIT_NAME, int_type(), "neg");
         let int_bit_and = resolver.method(BITS_TRAIT_NAME, int_type(), "bit_and");
+        let int_cmp = resolver.method(ORD_TRAIT_NAME, int_type(), "cmp");
         let array_index = resolver.subscript_mut_member("array_index");
         let array_offset_unchecked = resolver.subscript_mut_member("array_offset_unchecked");
         resolver.assert_retargetable(array_index, array_offset_unchecked);
@@ -259,10 +262,7 @@ impl KnownCallees {
                 resolver.method(NUM_TRAIT_NAME, int_type(), "from_int"),
                 KnownCallee::IntFromInt,
             ),
-            (
-                resolver.method(ORD_TRAIT_NAME, int_type(), "cmp"),
-                KnownCallee::IntCmp,
-            ),
+            (int_cmp, KnownCallee::IntCmp),
             (
                 resolver.method(NUM_TRAIT_NAME, float_type(), "add"),
                 KnownCallee::FloatAdd,
@@ -314,6 +314,8 @@ impl KnownCallees {
             int_neg_ty: resolver.call_impl_type(int_neg),
             int_bit_and,
             int_bit_and_ty: resolver.call_impl_type(int_bit_and),
+            int_cmp,
+            int_cmp_ty: resolver.call_impl_type(int_cmp),
             array_offset_unchecked,
             array_offset_unchecked_effects: resolver.effects(array_offset_unchecked),
             layouts: Layouts {
@@ -348,6 +350,10 @@ impl KnownCallees {
 
     pub(crate) fn int_bit_and(&self) -> (FunctionId, &CallImplType) {
         (self.int_bit_and, &self.int_bit_and_ty)
+    }
+
+    pub(crate) fn int_cmp(&self) -> (FunctionId, &CallImplType) {
+        (self.int_cmp, &self.int_cmp_ty)
     }
 
     /// The unchecked array accessor and the effects its call-site type must carry.

@@ -28,9 +28,11 @@ use crate::{
     std::{
         core_traits_names::VALUE_TRAIT_NAME,
         math::int_type,
+        ordering::{ORDERING_EQUAL, ORDERING_GREATER},
         value::{
-            ProductLayoutSpec, ProductMemberStorage, VALUE_ALIGN_ASSOC_CONST_INDEX,
-            VALUE_SIZE_ASSOC_CONST_INDEX, product_layout_spec, value_layout_getter_entry,
+            ProductLayoutOrder, ProductLayoutSpec, ProductMemberLayout, ProductMemberStorage,
+            VALUE_ALIGN_ASSOC_CONST_INDEX, VALUE_SIZE_ASSOC_CONST_INDEX, product_layout_spec,
+            value_layout_getter_entry,
         },
     },
     types::{
@@ -357,20 +359,18 @@ fn build_product_addressor(
     let name = Ustr::from(&format!("#physical:product_addressor:{helper_index}"));
     let mut builder = FunctionBuilder::new(name, CallResultConvention::ADDRESSOR_PLACE);
     let value_trait = env.expect_std_trait_id(VALUE_TRAIT_NAME);
-    let witness_tys = spec
+    let member_witnesses = spec
         .members
         .iter()
-        .filter(|member| member.static_layout.is_none())
-        .map(|member| member.ty)
-        .collect::<Vec<_>>();
-    let witnesses = witness_tys
-        .iter()
-        .map(|ty| {
-            let requirement = DictionaryReq::new_trait_impl(value_trait, vec![*ty], vec![], vec![]);
-            Value::Parameter(builder.add_parameter(
-                requirement.to_dict_type_in_env(&env),
-                ParameterKind::Dictionary,
-            ))
+        .map(|member| {
+            member.static_layout.is_none().then(|| {
+                let requirement =
+                    DictionaryReq::new_trait_impl(value_trait, vec![member.ty], vec![], vec![]);
+                Value::Parameter(builder.add_parameter(
+                    requirement.to_dict_type_in_env(&env),
+                    ParameterKind::Dictionary,
+                ))
+            })
         })
         .collect::<Vec<_>>();
     let base = Value::Parameter(builder.add_parameter(
@@ -379,78 +379,226 @@ fn build_product_addressor(
     ));
     let field = spec.members[key.field_index.as_index()];
     let destination = Value::Parameter(builder.add_parameter(field.ty, ParameterKind::Return));
-    let block = builder.add_block();
+    let entry = builder.add_block();
 
+    match spec.order {
+        ProductLayoutOrder::Positional => build_positional_product_addressor(
+            builder,
+            entry,
+            key,
+            spec,
+            &member_witnesses,
+            base,
+            destination,
+            known,
+            span,
+            env,
+        ),
+        ProductLayoutOrder::CompactRecord => build_compact_record_addressor(
+            builder,
+            entry,
+            key,
+            spec,
+            &member_witnesses,
+            base,
+            destination,
+            known,
+            span,
+            env,
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_positional_product_addressor(
+    mut builder: FunctionBuilder,
+    block: mir::BlockId,
+    key: &ProductAddressorKey,
+    spec: &ProductLayoutSpec,
+    member_witnesses: &[Option<Value>],
+    base: Value,
+    destination: Value,
+    known: &KnownCallees,
+    span: Location,
+    env: ModuleEnv<'_>,
+) -> Function {
     let mut offset = int_constant_place(&mut builder, block, 0, span, env);
-    let mut next_witness = 0;
     for (index, member) in spec.members.iter().enumerate() {
-        let (size, align) = if let Some(layout) = member.static_layout {
-            (
-                int_constant_place(
-                    &mut builder,
-                    block,
-                    layout.size.try_into().expect("Value size fits in int"),
-                    span,
-                    env,
-                ),
-                int_constant_place(
-                    &mut builder,
-                    block,
-                    layout
-                        .align
-                        .try_into()
-                        .expect("Value alignment fits in int"),
-                    span,
-                    env,
-                ),
-            )
-        } else {
-            let dictionary = witnesses[next_witness].clone();
-            next_witness += 1;
-            (
-                value_layout_place(
-                    &mut builder,
-                    block,
-                    dictionary.clone(),
-                    VALUE_SIZE_ASSOC_CONST_INDEX,
-                    span,
-                    env,
-                ),
-                value_layout_place(
-                    &mut builder,
-                    block,
-                    dictionary,
-                    VALUE_ALIGN_ASSOC_CONST_INDEX,
-                    span,
-                    env,
-                ),
-            )
-        };
+        let align = member_layout_place(
+            &mut builder,
+            block,
+            *member,
+            member_witnesses[index].as_ref(),
+            VALUE_ALIGN_ASSOC_CONST_INDEX,
+            span,
+            env,
+        );
         offset = align_up_place(&mut builder, block, offset, align, known, span, env);
         if index == key.field_index.as_index() {
-            let byte_offset = append_result(&mut builder, block, Operation::load(span, offset));
-            let address = match member.storage {
-                ProductMemberStorage::Inline => append_result(
-                    &mut builder,
-                    block,
-                    Operation::address_offset(span, base, byte_offset, field.ty),
-                ),
-                ProductMemberStorage::Indirect => {
-                    let slot = append_result(
-                        &mut builder,
-                        block,
-                        Operation::address_offset_place(span, base, byte_offset, field.ty),
-                    );
-                    append_result(&mut builder, block, Operation::load(span, slot))
-                }
-            };
-            builder.append_operation(block, Operation::store(span, address, destination));
-            builder.set_terminator(block, Terminator::ret(span));
-            return builder.finish_unverified();
+            return finish_product_addressor(
+                builder,
+                block,
+                *member,
+                base,
+                destination,
+                offset,
+                span,
+            );
         }
+        let size = member_layout_place(
+            &mut builder,
+            block,
+            *member,
+            member_witnesses[index].as_ref(),
+            VALUE_SIZE_ASSOC_CONST_INDEX,
+            span,
+            env,
+        );
         offset = int_binary(&mut builder, block, known.int_add(), offset, size, span);
     }
     unreachable!("the product addressor field was validated against the layout recipe")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_compact_record_addressor(
+    mut builder: FunctionBuilder,
+    mut block: mir::BlockId,
+    key: &ProductAddressorKey,
+    spec: &ProductLayoutSpec,
+    member_witnesses: &[Option<Value>],
+    base: Value,
+    destination: Value,
+    known: &KnownCallees,
+    span: Location,
+    env: ModuleEnv<'_>,
+) -> Function {
+    let target = key.field_index.as_index();
+    let target_static_layout = spec.members[target].static_layout;
+    let mut static_offset = 0isize;
+    if let Some(target_layout) = target_static_layout {
+        for (candidate, member) in spec.members.iter().enumerate() {
+            if candidate == target {
+                continue;
+            }
+            let Some(candidate_layout) = member.static_layout else {
+                continue;
+            };
+            if spec.compact_member_precedes(
+                ProjectionIndex::from_index(candidate),
+                key.field_index,
+                candidate_layout.align.cmp(&target_layout.align),
+            ) {
+                static_offset = static_offset
+                    .checked_add(
+                        candidate_layout
+                            .size
+                            .try_into()
+                            .expect("Value size fits in int"),
+                    )
+                    .expect("product offset fits in int");
+            }
+        }
+    }
+    let offset = int_constant_place(&mut builder, block, static_offset, span, env);
+    let target_align = member_layout_place(
+        &mut builder,
+        block,
+        spec.members[target],
+        member_witnesses[target].as_ref(),
+        VALUE_ALIGN_ASSOC_CONST_INDEX,
+        span,
+        env,
+    );
+    // Compact order is decreasing alignment. Every preceding member's power-of-two alignment is
+    // therefore a multiple of the target alignment, and its size is a multiple of that alignment;
+    // summing preceding sizes already produces an aligned target offset without padding.
+    for (candidate, member) in spec.members.iter().enumerate() {
+        if candidate == target {
+            continue;
+        }
+        let candidate_index = ProjectionIndex::from_index(candidate);
+        if member.static_layout.is_some() && target_static_layout.is_some() {
+            continue;
+        }
+        let candidate_align = member_layout_place(
+            &mut builder,
+            block,
+            *member,
+            member_witnesses[candidate].as_ref(),
+            VALUE_ALIGN_ASSOC_CONST_INDEX,
+            span,
+            env,
+        );
+        let add = builder.add_block();
+        let next = builder.add_block();
+        let ordering = binary_call(
+            &mut builder,
+            block,
+            known.int_cmp(),
+            candidate_align,
+            target_align.clone(),
+            span,
+        );
+        let tag = append_result(&mut builder, block, Operation::extract_tag(span, ordering));
+        let mut cases = vec![(Ustr::from(ORDERING_GREATER), add)];
+        if spec.compact_member_precedes(candidate_index, key.field_index, std::cmp::Ordering::Equal)
+        {
+            cases.push((Ustr::from(ORDERING_EQUAL), add));
+        }
+        builder.set_terminator(block, Terminator::switch_variant(span, tag, cases, next));
+
+        add_member_size_to_offset(
+            &mut builder,
+            add,
+            *member,
+            member_witnesses[candidate].as_ref(),
+            &offset,
+            known,
+            span,
+            env,
+        );
+        builder.set_terminator(add, Terminator::goto(span, next));
+        block = next;
+    }
+    finish_product_addressor(
+        builder,
+        block,
+        spec.members[target],
+        base,
+        destination,
+        offset,
+        span,
+    )
+}
+
+fn finish_product_addressor(
+    mut builder: FunctionBuilder,
+    block: mir::BlockId,
+    member: ProductMemberLayout,
+    base: Value,
+    destination: Value,
+    offset: Value,
+    span: Location,
+) -> Function {
+    let byte_offset = append_result(&mut builder, block, Operation::load(span, offset));
+    let address = match member.storage {
+        ProductMemberStorage::Inline => append_result(
+            &mut builder,
+            block,
+            Operation::address_offset(span, base, byte_offset, member.ty),
+        ),
+        ProductMemberStorage::Indirect => {
+            let slot = append_result(
+                &mut builder,
+                block,
+                Operation::address_offset_place(span, base, byte_offset, member.ty),
+            );
+            append_result(&mut builder, block, Operation::load(span, slot))
+        }
+    };
+    builder.append_operation(block, Operation::store(span, address, destination));
+    builder.set_terminator(block, Terminator::ret(span));
+    builder.finish_unverified()
 }
 
 fn append_result(
@@ -511,6 +659,67 @@ fn value_layout_place(
     result
 }
 
+fn member_layout_place(
+    builder: &mut FunctionBuilder,
+    block: mir::BlockId,
+    member: ProductMemberLayout,
+    witness: Option<&Value>,
+    associated_const: TraitAssociatedConstIndex,
+    span: Location,
+    env: ModuleEnv<'_>,
+) -> Value {
+    if let Some(layout) = member.static_layout {
+        let value = if associated_const == VALUE_SIZE_ASSOC_CONST_INDEX {
+            layout.size
+        } else {
+            debug_assert_eq!(associated_const, VALUE_ALIGN_ASSOC_CONST_INDEX);
+            layout.align
+        };
+        return int_constant_place(
+            builder,
+            block,
+            value.try_into().expect("Value layout fits in int"),
+            span,
+            env,
+        );
+    }
+    value_layout_place(
+        builder,
+        block,
+        witness
+            .expect("an open member has Value layout evidence")
+            .clone(),
+        associated_const,
+        span,
+        env,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_member_size_to_offset(
+    builder: &mut FunctionBuilder,
+    block: mir::BlockId,
+    member: ProductMemberLayout,
+    witness: Option<&Value>,
+    offset: &Value,
+    known: &KnownCallees,
+    span: Location,
+    env: ModuleEnv<'_>,
+) {
+    let size = member_layout_place(
+        builder,
+        block,
+        member,
+        witness,
+        VALUE_SIZE_ASSOC_CONST_INDEX,
+        span,
+        env,
+    );
+    let sum = int_binary(builder, block, known.int_add(), offset.clone(), size, span);
+    let sum = append_result(builder, block, Operation::load(span, sum));
+    builder.append_operation(block, Operation::store(span, sum, offset.clone()));
+}
+
 fn align_up_place(
     builder: &mut FunctionBuilder,
     block: mir::BlockId,
@@ -549,7 +758,19 @@ fn int_binary(
     right: Value,
     span: Location,
 ) -> Value {
-    let result = append_result(builder, block, Operation::alloca(span, int_type()));
+    debug_assert_eq!(callee.1.ret(), int_type());
+    binary_call(builder, block, callee, left, right, span)
+}
+
+fn binary_call(
+    builder: &mut FunctionBuilder,
+    block: mir::BlockId,
+    callee: (FunctionId, &CallImplType),
+    left: Value,
+    right: Value,
+    span: Location,
+) -> Value {
+    let result = append_result(builder, block, Operation::alloca(span, callee.1.ret()));
     builder.append_operation(
         block,
         Operation::call(
@@ -712,6 +933,7 @@ mod tests {
         CompilerSession, ExecutionTarget,
         compiler::MirOptimization,
         module::{ModuleEnv, Path},
+        std::ordering::ordering_type,
     };
 
     use super::*;
@@ -821,6 +1043,124 @@ mod tests {
                 .iter()
                 .any(|operation| matches!(operation.kind, OperationKind::AddressOffset { .. }))
         }));
+    }
+
+    #[test]
+    fn an_open_record_addressor_orders_members_by_runtime_alignment() {
+        let mut session = CompilerSession::new();
+        let module = compile(
+            &mut session,
+            "fn field_a<A>(value: { a: A, b: int }) -> A { value.a }\n\
+             fn field_b<A>(value: { a: A, b: int }) -> int { value.b }",
+            "generic_record_subfield",
+        );
+        let (physical, first_helper) = lower(&mut session, module).unwrap();
+        assert_eq!(physical.entry_count() - first_helper.as_index(), 2);
+        let mut case_counts = (first_helper.as_index()..physical.entry_count())
+            .flat_map(|index| {
+                let helper = physical.get(LocalFunctionId::from_index(index)).unwrap();
+                helper.blocks().filter_map(|block| {
+                    let TerminatorKind::SwitchVariant { cases, .. } =
+                        &helper.block(block).terminator().kind
+                    else {
+                        return None;
+                    };
+                    Some(cases.len())
+                })
+            })
+            .collect::<Vec<_>>();
+        case_counts.sort_unstable();
+        assert_eq!(case_counts, [1, 2]);
+
+        let mut checked_comparisons = 0;
+        for index in first_helper.as_index()..physical.entry_count() {
+            let helper = physical.get(LocalFunctionId::from_index(index)).unwrap();
+            let comparison_result = helper
+                .blocks()
+                .flat_map(|block| helper.block(block).operations())
+                .find_map(|operation| {
+                    let OperationKind::Call { ty, .. } = &operation.kind else {
+                        return None;
+                    };
+                    (ty.ret() == ordering_type())
+                        .then(|| operation.operands.last().cloned())
+                        .flatten()
+                });
+            let Some(Value::Register(comparison_result)) = comparison_result else {
+                continue;
+            };
+            checked_comparisons += 1;
+            let comparison_slot_ty = helper
+                .blocks()
+                .flat_map(|block| helper.block(block).operations())
+                .find_map(|operation| {
+                    (operation.result_id() == Some(comparison_result)).then_some(&operation.kind)
+                })
+                .and_then(|kind| match kind {
+                    OperationKind::Alloca { ty } => Some(*ty),
+                    _ => None,
+                });
+            assert_eq!(comparison_slot_ty, Some(ordering_type()));
+        }
+        assert_eq!(checked_comparisons, 2);
+    }
+
+    #[test]
+    fn positional_addressors_only_materialize_layouts_through_the_target() {
+        let mut session = CompilerSession::new();
+        let module = compile(
+            &mut session,
+            "fn middle<A, B>(value: (int, A, B)) -> A { value.1 }",
+            "generic_positional_subfield",
+        );
+        let (physical, first_helper) = lower(&mut session, module).unwrap();
+        assert_eq!(physical.entry_count() - first_helper.as_index(), 1);
+        let helper = physical.get(first_helper).unwrap();
+        let layout_getters = helper
+            .blocks()
+            .flat_map(|block| helper.block(block).operations())
+            .filter(|operation| matches!(operation.kind, OperationKind::DictEntry { .. }))
+            .count();
+        assert_eq!(
+            layout_getters, 1,
+            "only the target alignment is needed; its size and B's layout are unused"
+        );
+    }
+
+    #[test]
+    fn compact_addressors_fold_static_member_ordering() {
+        let mut session = CompilerSession::new();
+        let module = compile(
+            &mut session,
+            "fn field_d<A>(value: { a: A, b: int, c: int, d: int }) -> int { value.d }",
+            "partially_static_record_subfield",
+        );
+        let (physical, first_helper) = lower(&mut session, module).unwrap();
+        let int_add = session.known_callees().int_add().0;
+        assert_eq!(physical.entry_count() - first_helper.as_index(), 1);
+        let helper = physical.get(first_helper).unwrap();
+        let switches = helper
+            .blocks()
+            .filter(|block| {
+                matches!(
+                    helper.block(*block).terminator().kind,
+                    TerminatorKind::SwitchVariant { .. }
+                )
+            })
+            .count();
+        assert_eq!(
+            switches, 1,
+            "the static b/c ordering does not require a run-time comparison"
+        );
+        let additions = helper
+            .blocks()
+            .flat_map(|block| helper.block(block).operations())
+            .filter(|operation| operation.operands.first() == Some(&Value::Function(int_add)))
+            .count();
+        assert_eq!(
+            additions, 1,
+            "the sizes of b and c are folded into the initial offset; only A is added conditionally"
+        );
     }
 
     #[test]
