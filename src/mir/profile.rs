@@ -116,6 +116,8 @@ impl MirInstructionKind {
             }
             Self::Operation(
                 Op::Subfield
+                | Op::AddressOffset
+                | Op::AddressOffsetPlace
                 | Op::DictEntry
                 | Op::BuildDictionary
                 | Op::SubscriptMember
@@ -229,6 +231,7 @@ impl MirExecutionProfile {
         let ty = match &operation.kind {
             OperationKind::Alloca { ty }
             | OperationKind::Subfield { ty, .. }
+            | OperationKind::AddressOffset { ty }
             | OperationKind::DictEntry { ty, .. }
             | OperationKind::SubscriptMember { ty, .. }
             | OperationKind::BuildSubscript { ty }
@@ -237,7 +240,8 @@ impl MirExecutionProfile {
             | OperationKind::BuildClosure { ty, .. }
             | OperationKind::CloneClosureEnv { ty } => Some(*ty),
             OperationKind::Variant { metadata, .. } => Some(metadata.ty),
-            OperationKind::AllocaPlace { pointing_to } => Some(*pointing_to),
+            OperationKind::AllocaPlace { pointing_to }
+            | OperationKind::AddressOffsetPlace { pointing_to } => Some(*pointing_to),
             _ => None,
         };
         if let Some(ty) = ty {

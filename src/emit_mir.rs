@@ -45,7 +45,7 @@ use crate::{
         value::{
             VALUE_ALIGN_ASSOC_CONST_INDEX, VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX,
             VALUE_SIZE_ASSOC_CONST_INDEX, dynamic_product_member_layouts, type_has_static_layout,
-            value_layout_associated_const_values,
+            value_layout_associated_const_values, value_layout_getter_entry,
         },
     },
     types::{effects::no_effects, r#type::Type, type_properties::concrete_type_is_trivial_copy},
@@ -1543,12 +1543,8 @@ impl<'a> Emitter<'a> {
         dictionary: mir::Value,
         associated_const_index: TraitAssociatedConstIndex,
     ) -> mir::Value {
-        let value_trait_id = self.env.expect_std_trait_id(VALUE_TRAIT_NAME);
-        let entry_index = self
-            .env
-            .trait_def(value_trait_id)
-            .dictionary_associated_const_index(associated_const_index);
-        let getter_fn_ty = FnType::new_by_val([], crate::std::math::int_type(), no_effects());
+        let (entry_index, getter_fn_ty) =
+            value_layout_getter_entry(&self.env, associated_const_index);
         let getter_place = self
             .insert(Operation::dict_entry(
                 span,

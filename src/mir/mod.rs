@@ -14,6 +14,8 @@ pub mod function;
 pub mod interpreter;
 pub mod operation;
 pub mod pass;
+#[allow(dead_code)] // The physical lowering boundary precedes its first executor.
+pub(crate) mod physical;
 pub mod profile;
 pub(crate) mod reify;
 pub(crate) mod role;

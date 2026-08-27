@@ -177,6 +177,10 @@ impl FunctionEdit {
         &mut self.constants
     }
 
+    pub(crate) fn constant(&self, id: ConstantId) -> &Constant {
+        &self.constants[id.as_index()]
+    }
+
     pub(crate) fn result_convention(&self) -> CallResultConvention {
         self.result_convention
     }
@@ -216,6 +220,27 @@ impl FunctionEdit {
         let id = mir::ValueId::from_index(self.next_value_index);
         self.next_value_index += 1;
         id
+    }
+
+    /// Assign a fresh identity to a newly inserted result-producing operation.
+    pub(crate) fn assign_new_result(&mut self, operation: &mut Operation) -> Option<mir::Value> {
+        (operation.result() != OperationResult::Nothing).then(|| {
+            let id = self.new_value();
+            operation.assign_result_id(Some(id));
+            mir::Value::Register(id)
+        })
+    }
+
+    /// Replace one operation with an already-linked operation sequence.
+    pub(crate) fn replace_operation_sequence(
+        &mut self,
+        block: BlockId,
+        index: usize,
+        operations: impl IntoIterator<Item = Operation>,
+    ) {
+        self.blocks[block.as_index()]
+            .operations
+            .splice(index..=index, operations);
     }
 
     /// Interns a constant, reusing an identical existing entry. Mirrors the builder's pool, so a

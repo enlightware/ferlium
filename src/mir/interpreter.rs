@@ -752,6 +752,9 @@ impl<'a> Interpreter<'a> {
             OperationKind::Subfield { .. } => {
                 self.exec_subfield(func, slots, &operation.operands, def.unwrap());
             }
+            OperationKind::AddressOffset { .. } | OperationKind::AddressOffsetPlace { .. } => {
+                panic!("byte-address operations require the physical MIR interpreter")
+            }
             OperationKind::DictEntry { entry_index, .. } => {
                 self.exec_dict_entry(slots, &operation.operands, def.unwrap(), *entry_index, span)?;
             }

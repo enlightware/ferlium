@@ -508,7 +508,7 @@ pub struct ModuleFunction {
 pub(crate) enum CallableOrigin {
     Script,
     Native { canonical_name: Option<Ustr> },
-    StructuralFieldAddressor { field_index: usize },
+    StructuralFieldAddressor { field_index: ProjectionIndex },
     Transient,
 }
 
@@ -805,7 +805,7 @@ impl ModuleFunction {
     /// Construct a compiler-generated structural field addressor.
     pub(crate) fn new_structural_field_addressor(
         definition: CallableDefinition,
-        field_index: usize,
+        field_index: ProjectionIndex,
         hidden_argument_count: usize,
     ) -> Self {
         let code = b(crate::hir::function::StructuralFieldAddressor::new(

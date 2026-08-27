@@ -659,6 +659,8 @@ fn note_operation(operation: &Operation, site: Site, uses: &mut FxHashMap<ValueI
         | OperationKind::Project { .. }
         | OperationKind::EndProject
         | OperationKind::Subfield { .. }
+        | OperationKind::AddressOffset { .. }
+        | OperationKind::AddressOffsetPlace { .. }
         | OperationKind::DictEntry { .. }
         | OperationKind::BuildDictionary { .. }
         | OperationKind::SubscriptMember { .. }

@@ -218,7 +218,9 @@ fn derive_provenance(
             };
             match &operation.kind {
                 // A field's address is rooted wherever its base is.
-                OperationKind::Subfield { .. } => {
+                OperationKind::Subfield { .. }
+                | OperationKind::AddressOffset { .. }
+                | OperationKind::AddressOffsetPlace { .. } => {
                     if let (Some(id), Some(root)) = (
                         operation.result_id(),
                         root_of(&operation.operands[0], &roots),
@@ -359,7 +361,9 @@ fn derive_repeatable(
                 _ => None,
             };
             match &operation.kind {
-                OperationKind::Subfield { .. } => {
+                OperationKind::Subfield { .. }
+                | OperationKind::AddressOffset { .. }
+                | OperationKind::AddressOffsetPlace { .. } => {
                     if let (Some(id), Some(root)) = (
                         operation.result_id(),
                         root_of(&operation.operands[0], &roots),

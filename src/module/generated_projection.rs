@@ -14,9 +14,10 @@ use crate::{
     hir::dictionary::DictionaryReq,
     hir::function::CallableDefinition,
     module::{
-        LocalSubscriptId, Module, ModuleEnv, ModuleFunction, ProjectionOrigin, QualifiedNameEnv,
-        SubscriptDefinition, SubscriptId, SubscriptMember, SubscriptMemberFunctionKind,
-        SubscriptSignature, TypeDefId, Visibility, YieldProvenance, id::Id,
+        LocalSubscriptId, Module, ModuleEnv, ModuleFunction, ProjectionIndex, ProjectionOrigin,
+        QualifiedNameEnv, SubscriptDefinition, SubscriptId, SubscriptMember,
+        SubscriptMemberFunctionKind, SubscriptSignature, TypeDefId, Visibility, YieldProvenance,
+        id::Id,
     },
     std::value::{TypeLayoutEnv, dynamic_product_member_layouts},
     types::{
@@ -80,7 +81,7 @@ impl ProjectionKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GeneratedStructuralProjectionSpec {
     pub key: ProjectionKey,
-    pub index: usize,
+    pub index: ProjectionIndex,
     pub field_ty: Type,
 }
 

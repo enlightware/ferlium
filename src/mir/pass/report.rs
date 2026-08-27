@@ -42,7 +42,7 @@ use crate::{
     module::{FunctionId, ModuleEnv, ModuleId, id::Id},
 };
 
-use super::{fold, inline, inline::NotInlinable, known_callee::KnownCallees};
+use super::{fold, inline, inline::NotInlinable};
 
 /// The pass a remark came from.
 ///
@@ -229,7 +229,7 @@ pub(crate) fn build(
     let mut call_sites_before = 0usize;
     let mut call_sites_after = 0usize;
     let mut remarks = Vec::new();
-    let known_callees = KnownCallees::new(session.raw_modules());
+    let known_callees = session.known_callees();
     let string_functions = super::string_accumulate::StringFunctions::resolve(env);
     let string_materializer =
         fold::StringMaterializer::resolve(env, string_functions.static_constructor());
@@ -272,7 +272,7 @@ pub(crate) fn build(
                 &string_materializer,
             ),
             session,
-            fold::KnownCallSemantics::new(&known_callees, &original_of),
+            fold::KnownCallSemantics::new(known_callees, &original_of),
             &mut Some(&mut refusals),
         );
         remarks.extend(refusals.into_iter().map(|refusal| Remark {

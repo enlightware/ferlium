@@ -51,7 +51,7 @@ use crate::{
     },
     std::{
         STD_MODULE_ID,
-        core_traits_names::{ITERATOR_TRAIT_NAME, NUM_TRAIT_NAME, ORD_TRAIT_NAME},
+        core_traits_names::{BITS_TRAIT_NAME, ITERATOR_TRAIT_NAME, NUM_TRAIT_NAME, ORD_TRAIT_NAME},
         math::{float_type, int_type},
     },
     types::{
@@ -202,10 +202,17 @@ pub(crate) struct Layouts {
 ///
 /// Built once against a session's std module. Nothing here depends on the module being optimized,
 /// so one table serves every module of a session.
+#[derive(Debug)]
 pub(crate) struct KnownCallees {
     by_id: FxHashMap<FunctionId, KnownCallee>,
     int_add: FunctionId,
     int_add_ty: CallImplType,
+    int_sub: FunctionId,
+    int_sub_ty: CallImplType,
+    int_neg: FunctionId,
+    int_neg_ty: CallImplType,
+    int_bit_and: FunctionId,
+    int_bit_and_ty: CallImplType,
     array_offset_unchecked: FunctionId,
     array_offset_unchecked_effects: EffType,
     layouts: Layouts,
@@ -234,23 +241,20 @@ impl KnownCallees {
         let range_iterator = resolver.named_type("RangeIterator");
         let range_inclusive_iterator = resolver.named_type("RangeInclusiveIterator");
         let int_add = resolver.method(NUM_TRAIT_NAME, int_type(), "add");
+        let int_sub = resolver.method(NUM_TRAIT_NAME, int_type(), "sub");
+        let int_neg = resolver.method(NUM_TRAIT_NAME, int_type(), "neg");
+        let int_bit_and = resolver.method(BITS_TRAIT_NAME, int_type(), "bit_and");
         let array_index = resolver.subscript_mut_member("array_index");
         let array_offset_unchecked = resolver.subscript_mut_member("array_offset_unchecked");
         resolver.assert_retargetable(array_index, array_offset_unchecked);
         let entries = [
             (int_add, KnownCallee::IntAdd),
-            (
-                resolver.method(NUM_TRAIT_NAME, int_type(), "sub"),
-                KnownCallee::IntSub,
-            ),
+            (int_sub, KnownCallee::IntSub),
             (
                 resolver.method(NUM_TRAIT_NAME, int_type(), "mul"),
                 KnownCallee::IntMul,
             ),
-            (
-                resolver.method(NUM_TRAIT_NAME, int_type(), "neg"),
-                KnownCallee::IntNeg,
-            ),
+            (int_neg, KnownCallee::IntNeg),
             (
                 resolver.method(NUM_TRAIT_NAME, int_type(), "from_int"),
                 KnownCallee::IntFromInt,
@@ -304,6 +308,12 @@ impl KnownCallees {
             by_id: entries.into_iter().collect(),
             int_add,
             int_add_ty: resolver.call_impl_type(int_add),
+            int_sub,
+            int_sub_ty: resolver.call_impl_type(int_sub),
+            int_neg,
+            int_neg_ty: resolver.call_impl_type(int_neg),
+            int_bit_and,
+            int_bit_and_ty: resolver.call_impl_type(int_bit_and),
             array_offset_unchecked,
             array_offset_unchecked_effects: resolver.effects(array_offset_unchecked),
             layouts: Layouts {
@@ -326,6 +336,18 @@ impl KnownCallees {
     /// operation whose wrapping semantics [`KnownCallee::IntAdd`] describes.
     pub(crate) fn int_add(&self) -> (FunctionId, &CallImplType) {
         (self.int_add, &self.int_add_ty)
+    }
+
+    pub(crate) fn int_sub(&self) -> (FunctionId, &CallImplType) {
+        (self.int_sub, &self.int_sub_ty)
+    }
+
+    pub(crate) fn int_neg(&self) -> (FunctionId, &CallImplType) {
+        (self.int_neg, &self.int_neg_ty)
+    }
+
+    pub(crate) fn int_bit_and(&self) -> (FunctionId, &CallImplType) {
+        (self.int_bit_and, &self.int_bit_and_ty)
     }
 
     /// The unchecked array accessor and the effects its call-site type must carry.
@@ -526,8 +548,8 @@ mod tests {
     use super::*;
     use crate::{CompilerSession, module::Path, module::id::Id};
 
-    fn known_callees(session: &CompilerSession) -> KnownCallees {
-        KnownCallees::new(session.raw_modules())
+    fn known_callees(session: &CompilerSession) -> &KnownCallees {
+        session.known_callees()
     }
 
     /// Every entry must resolve to a function of its own. Two lookups landing on one id would

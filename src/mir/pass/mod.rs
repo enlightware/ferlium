@@ -68,7 +68,7 @@ pub(crate) mod will_return;
 pub(crate) use monomorphize::Specializations;
 
 use crate::{
-    compiler::{CompilerSession, MirOptimization, Modules},
+    compiler::{CompilerSession, MirOptimization},
     mir::Function,
     module::{FunctionId, ModuleEnv, ModuleId},
 };
@@ -90,20 +90,17 @@ pub(crate) struct OptimizationStats {
 /// [`known_callee::KnownCallees`] remains the shared semantic model used by dataflow analyses;
 /// pass-specific identity bundles live beside it rather than broadening that model with operations
 /// only one exact rewrite understands.
-pub(crate) struct OptimizationContext {
-    known_callees: known_callee::KnownCallees,
+pub(crate) struct OptimizationContext<'a> {
+    known_callees: &'a known_callee::KnownCallees,
     string_functions: string_accumulate::StringFunctions,
     string_materializer: fold::StringMaterializer,
 }
 
-impl OptimizationContext {
-    pub(crate) fn new(modules: &Modules, env: ModuleEnv<'_>) -> Self {
-        // Std's optimized MIR is persisted across sessions. Resolved identities may depend on std
-        // and its target profile, but must not depend on unrelated modules in this registry; see
-        // `doc/compiled-std-cache.md`.
+impl<'a> OptimizationContext<'a> {
+    pub(crate) fn new(session: &'a CompilerSession, env: ModuleEnv<'_>) -> Self {
         let string_functions = string_accumulate::StringFunctions::resolve(env);
         Self {
-            known_callees: known_callee::KnownCallees::new(modules),
+            known_callees: session.known_callees(),
             string_functions,
             string_materializer: fold::StringMaterializer::resolve(
                 env,
@@ -136,7 +133,7 @@ fn cleanup_dead_representation_chains(
         if let Some(cleaned) = dce::remove_dead_proven_calls(
             &current,
             env,
-            &context.known_callees,
+            context.known_callees,
             &|callee| specializations.original(callee),
             will_return,
         ) {
@@ -185,7 +182,7 @@ pub(crate) fn optimize_function(
             env,
             session,
             module_id,
-            fold::KnownCallSemantics::new(&context.known_callees, &|callee| {
+            fold::KnownCallSemantics::new(context.known_callees, &|callee| {
                 specializations.original(callee)
             }),
             &context.string_materializer,
@@ -365,7 +362,7 @@ pub(crate) fn optimize_function(
     // resolve at all, and before DCE, which removes the cleanup blocks a removed check strands.
     let source = current.as_ref().unwrap_or(function);
     if let Some((rewritten, removed)) =
-        bounds_check::eliminate_bounds_checks(source, env, &context.known_callees, &|callee| {
+        bounds_check::eliminate_bounds_checks(source, env, context.known_callees, &|callee| {
             specializations.original(callee)
         })
     {
@@ -404,7 +401,7 @@ pub(crate) fn optimize_function(
     if let Some(cleaned) = dce::remove_dead_proven_calls(
         source,
         env,
-        &context.known_callees,
+        context.known_callees,
         &|callee| specializations.original(callee),
         &will_return,
     ) {

@@ -437,13 +437,16 @@ fn structural_projection_field_index(
     ty: Type,
     field: Ustr,
     solver: &TraitSolver<'_>,
-) -> Option<usize> {
+) -> Option<ProjectionIndex> {
     let ty_data = ty.data();
     let ty_kind = ty_data.clone();
     drop(ty_data);
     let structural = match ty_kind {
         TypeKind::Record(fields) => {
-            return fields.iter().position(|candidate| candidate.0 == field);
+            return fields
+                .iter()
+                .position(|candidate| candidate.0 == field)
+                .map(ProjectionIndex::from_index);
         }
         TypeKind::Named(named) => solver
             .type_def(named.def)
@@ -455,7 +458,7 @@ fn structural_projection_field_index(
         .as_record()
         .and_then(|fields| fields.iter().position(|candidate| candidate.0 == field));
     drop(structural_data);
-    index
+    index.map(ProjectionIndex::from_index)
 }
 
 fn extra_arg_kind_from_inst_data(

@@ -780,7 +780,9 @@ fn place_origins(function: &Function) -> FxHashMap<mir::ValueId, mir::ValueId> {
                 OperationKind::Alloca { .. } => {
                     origins.insert(result, result);
                 }
-                OperationKind::Subfield { .. } => {
+                OperationKind::Subfield { .. }
+                | OperationKind::AddressOffset { .. }
+                | OperationKind::AddressOffsetPlace { .. } => {
                     if let Some(root) = operand_root(&operation.operands[0], &origins) {
                         origins.insert(result, root);
                     }

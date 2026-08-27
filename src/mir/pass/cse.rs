@@ -457,7 +457,9 @@ impl PlaceOrigins {
                 root: Root::Alloca(result),
                 structural: true,
             }),
-            OperationKind::Subfield { .. } => self.origin_of(&operation.operands[0]),
+            OperationKind::Subfield { .. }
+            | OperationKind::AddressOffset { .. }
+            | OperationKind::AddressOffsetPlace { .. } => self.origin_of(&operation.operands[0]),
             OperationKind::Load => match &operation.operands[0] {
                 mir::Value::Register(slot) => {
                     self.returned.get(slot).copied().map(|origin| PlaceOrigin {
@@ -992,6 +994,10 @@ enum Computation {
         has_layout_witness: bool,
         aggregate_ty: Option<Type>,
     },
+    /// A byte-address projection derived from its base allocation.
+    AddressOffset { ty: Type },
+    /// A byte-address projection to a slot containing a place.
+    AddressOffsetPlace { pointing_to: Type },
     /// A function place *materialized* from evidence into a freshly allocated cell.
     DictEntry {
         entry_index: TraitDictionaryEntryIndex,
@@ -1013,6 +1019,10 @@ impl Computation {
                 has_layout_witness: *has_layout_witness,
                 aggregate_ty: product.as_deref().map(|product| product.aggregate_ty),
             }),
+            OperationKind::AddressOffset { ty } => Some(Self::AddressOffset { ty: *ty }),
+            OperationKind::AddressOffsetPlace { pointing_to } => Some(Self::AddressOffsetPlace {
+                pointing_to: *pointing_to,
+            }),
             OperationKind::DictEntry { entry_index, ty } => Some(Self::DictEntry {
                 entry_index: *entry_index,
                 ty: *ty,
@@ -1025,7 +1035,9 @@ impl Computation {
     /// storage, and so dies when that region is popped.
     fn is_materialized(&self) -> bool {
         match self {
-            Self::Subfield { .. } => false,
+            Self::Subfield { .. }
+            | Self::AddressOffset { .. }
+            | Self::AddressOffsetPlace { .. } => false,
             Self::DictEntry { .. } => true,
         }
     }

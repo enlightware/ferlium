@@ -198,6 +198,16 @@ impl FunctionBuilder {
 
     /// Finalizes the function and verifies every canonical MIR invariant in debug and test builds.
     pub(crate) fn finish(self, env: ModuleEnv<'_>) -> Function {
+        let function = self.finish_unverified();
+        #[cfg(any(debug_assertions, test))]
+        super::verify::verify_function(&function, env);
+        #[cfg(not(any(debug_assertions, test)))]
+        let _ = env;
+        function
+    }
+
+    /// Finalizes a function for a later phase-specific verifier.
+    pub(in crate::mir) fn finish_unverified(self) -> Function {
         assert!(
             !self.blocks.is_empty(),
             "a lowered function has no entry block"
@@ -215,18 +225,13 @@ impl FunctionBuilder {
                 )
             })
             .collect();
-        let function = Function::new(
+        Function::new(
             self.name,
             self.result_convention,
             self.parameters,
             self.constants,
             blocks,
-        );
-        #[cfg(any(debug_assertions, test))]
-        super::verify::verify_function(&function, env);
-        #[cfg(not(any(debug_assertions, test)))]
-        let _ = env;
-        function
+        )
     }
 }
 

@@ -45,7 +45,8 @@ use crate::{
         effects::{EffType, PrimitiveEffect},
         mutability::{MutType, MutVal},
         r#trait::{
-            Deriver, Trait, TraitAssociatedConst, TraitAssociatedConstIndex, TraitMethodIndex,
+            Deriver, Trait, TraitAssociatedConst, TraitAssociatedConstIndex,
+            TraitDictionaryEntryIndex, TraitMethodIndex,
         },
         trait_solver::TraitSolver,
         r#type::{CallImplType, FnArgType, FnType, Type, TypeDef, TypeKind, tuple_type},
@@ -71,6 +72,23 @@ pub(crate) const VALUE_ALIGN_ASSOC_CONST_INDEX: TraitAssociatedConstIndex =
     TraitAssociatedConstIndex::new(1);
 pub(crate) const INSPECT_METHOD_INDEX: TraitMethodIndex = TraitMethodIndex::new(0);
 pub(crate) const NO_DERIVE_VALUE_ATTRIBUTE: &str = "no_derive_value";
+
+/// Dictionary entry and callable surface of one `Value` layout getter.
+pub(crate) fn value_layout_getter_entry(
+    env: &ModuleEnv<'_>,
+    associated_const: TraitAssociatedConstIndex,
+) -> (TraitDictionaryEntryIndex, FnType) {
+    let value_trait = env.expect_std_trait_id(VALUE_TRAIT_NAME);
+    let entry = env
+        .trait_def(value_trait)
+        .dictionary_associated_const_index(associated_const);
+    let ty = FnType::new_by_val(
+        [],
+        crate::std::math::int_type(),
+        crate::types::effects::no_effects(),
+    );
+    (entry, ty)
+}
 
 pub(crate) fn native_layout_associated_consts<T>() -> Vec<LiteralValue> {
     let mut values = [0; 2];
@@ -101,7 +119,10 @@ struct ValueLayout {
 
 impl ValueLayout {
     fn new(size: usize, align: usize) -> Self {
-        assert!(align > 0, "type alignment must be non-zero");
+        assert!(
+            align.is_power_of_two(),
+            "type alignment must be a non-zero power of two"
+        );
         Self { size, align }
     }
 
@@ -167,6 +188,53 @@ fn align_to(offset: usize, align: usize) -> usize {
         offset
     } else {
         offset + (align - rem)
+    }
+}
+
+/// One direct member in the host-matched product layout recipe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProductMemberLayout {
+    pub(crate) ty: Type,
+    pub(crate) storage: ProductMemberStorage,
+    /// Absent exactly when the member's inline layout comes from its run-time `Value` evidence.
+    pub(crate) static_layout: Option<ResolvedValueLayout>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProductMemberStorage {
+    Inline,
+    Indirect,
+}
+
+/// Logical member order plus every statically known part of a product's physical layout.
+///
+/// Member indices are currently also physical-order indices. Compact record layout must add an
+/// explicit logical-to-physical permutation rather than changing that interpretation implicitly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProductLayoutSpec {
+    pub(crate) members: Vec<ProductMemberLayout>,
+}
+
+impl ProductLayoutSpec {
+    /// Computes a field offset when every member up to and including it has a static layout.
+    pub(crate) fn static_field_offset(&self, index: ProjectionIndex) -> Option<usize> {
+        let index = index.as_index();
+        if index >= self.members.len() {
+            return None;
+        }
+        if index == 0 {
+            return Some(0);
+        }
+        let mut offset = 0;
+        for (member_index, member) in self.members.get(..=index)?.iter().enumerate() {
+            let layout = member.static_layout?;
+            offset = align_to(offset, layout.align as usize);
+            if member_index == index {
+                return Some(offset);
+            }
+            offset += layout.size as usize;
+        }
+        unreachable!("the selected member is included in the prefix")
     }
 }
 
@@ -446,33 +514,72 @@ pub(crate) fn dynamic_product_member_layouts(
     span: Location,
     env: &impl TypeLayoutEnv,
 ) -> Vec<Type> {
-    let owner = ty;
+    product_members(ty, env)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|member| {
+            !field_payload_storage(ty, *member, env).is_indirect()
+                && !type_has_static_layout(*member, span, env)
+        })
+        .collect()
+}
+
+fn product_members(ty: Type, env: &impl TypeLayoutEnv) -> Option<Vec<Type>> {
     let mut structural = ty;
     let mut seen = FxHashSet::default();
-    let members = loop {
+    loop {
         if !seen.insert(structural) {
-            return Vec::new();
+            return None;
         }
-        let data = structural.data().clone();
+        // Release the type-store read guard before resolving a named type through `env`, which may
+        // need to enter the type store again.
+        let type_data = structural.data();
+        let data = (*type_data).clone();
+        drop(type_data);
         match data {
-            TypeKind::Tuple(members) => break members,
-            TypeKind::Record(fields) => break fields.into_iter().map(|(_, field)| field).collect(),
+            TypeKind::Tuple(members) => return Some(members),
+            TypeKind::Record(fields) => {
+                return Some(fields.into_iter().map(|(_, field)| field).collect());
+            }
             TypeKind::Named(named) => {
                 structural = env
                     .type_def(named.def)
                     .instantiated_shape_with_effects(&named.params, &named.effect_params);
             }
-            _ => return Vec::new(),
+            _ => return None,
         }
-    };
+    }
+}
 
-    members
+/// Build the product layout recipe consumed by physical aggregate lowering.
+pub(crate) fn product_layout_spec(
+    ty: Type,
+    span: Location,
+    env: &impl TypeLayoutEnv,
+) -> Option<ProductLayoutSpec> {
+    let members = product_members(ty, env)?
         .into_iter()
-        .filter(|member| {
-            !field_payload_storage(owner, *member, env).is_indirect()
-                && !type_has_static_layout(*member, span, env)
+        .map(|member_ty| {
+            let (storage, static_layout) =
+                if field_payload_storage(ty, member_ty, env).is_indirect() {
+                    (
+                        ProductMemberStorage::Indirect,
+                        Some(ResolvedValueLayout::native::<usize>()),
+                    )
+                } else {
+                    (
+                        ProductMemberStorage::Inline,
+                        value_layout_for_type(member_ty, span, env).ok(),
+                    )
+                };
+            ProductMemberLayout {
+                ty: member_ty,
+                storage,
+                static_layout,
+            }
         })
-        .collect()
+        .collect();
+    Some(ProductLayoutSpec { members })
 }
 
 /// Return whether all unresolved variables in `ty` appear only in function types.

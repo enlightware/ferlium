@@ -30,7 +30,7 @@ use crate::{
     format::{FormatWith, escape_identifier, format_generic_param_list, write_identifier},
     hir::value::{LiteralNativeValue, LiteralValue, NativeValue, Value},
     hir::{self, ENodeId, UNodeArena, UNodeId},
-    module::{ELocalDecl, ModuleEnv, ModuleFunction, ULocalDecl},
+    module::{ELocalDecl, ModuleEnv, ModuleFunction, ProjectionIndex, ULocalDecl},
     types::effects::EffType,
     types::r#type::{
         CallImplType, CallResultConvention, FnArgType, FnType, Type,
@@ -751,16 +751,16 @@ impl Callable for ContextNativeFn {
 /// Compiler-generated addressor for a structural projection with a fixed field index.
 #[derive(Debug, Clone)]
 pub struct StructuralFieldAddressor {
-    index: isize,
+    index: ProjectionIndex,
     runtime_argument_passing: Vec<ArgConvention>,
 }
 
 impl StructuralFieldAddressor {
-    pub fn new(index: usize, hidden_argument_count: usize) -> Self {
+    pub fn new(index: ProjectionIndex, hidden_argument_count: usize) -> Self {
         let mut runtime_argument_passing = vec![ArgConvention::Let; hidden_argument_count];
         runtime_argument_passing.push(ArgConvention::MutableRef);
         Self {
-            index: index as isize,
+            index,
             runtime_argument_passing,
         }
     }
@@ -794,7 +794,10 @@ impl Callable for StructuralFieldAddressor {
                 ));
             }
         };
-        place.path.push(self.index);
+        place.path.push(
+            isize::try_from(self.index.as_u32())
+                .expect("structural projection index fits the interpreter place path"),
+        );
         cont(Value::native(PlaceResult::new(place)))
     }
 

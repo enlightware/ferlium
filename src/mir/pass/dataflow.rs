@@ -582,8 +582,10 @@ fn transfer(
             };
             state.registers.insert(result, fact);
         }
-        // A subfield's immutable register-to-place binding was discovered before the fixpoint.
-        OperationKind::Subfield { .. } => {}
+        // Derived immutable register-to-place bindings were discovered before the fixpoint.
+        OperationKind::Subfield { .. }
+        | OperationKind::AddressOffset { .. }
+        | OperationKind::AddressOffsetPlace { .. } => {}
         OperationKind::Memcpy | OperationKind::Move => {
             let source = place_of(&operation.operands[0]);
             let destination = place_of(&operation.operands[1]);
@@ -834,6 +836,17 @@ pub(crate) fn escaping_roots(
                         place_builder.bindings.registers.insert(result, binding);
                     }
                 }
+                (
+                    OperationKind::AddressOffset { .. } | OperationKind::AddressOffsetPlace { .. },
+                    Some(result),
+                ) => {
+                    if let Some(root) = place_builder.bindings.root_of(&operation.operands[0]) {
+                        place_builder
+                            .bindings
+                            .registers
+                            .insert(result, PlaceBinding::Root(root));
+                    }
+                }
                 _ => {}
             }
         }
@@ -894,6 +907,12 @@ pub(crate) fn escaping_roots(
                 if field_index(&operation.operands[1], func).is_none() {
                     escape_operand(&operation.operands[0], escaped);
                 }
+            }
+            // A byte offset has no semantic field identity. Stop tracking the complete allocation
+            // rather than treating writes through the derived address as writes to an unrelated
+            // logical field.
+            OperationKind::AddressOffset { .. } | OperationKind::AddressOffsetPlace { .. } => {
+                escape_operand(&operation.operands[0], escaped);
             }
             OperationKind::Store => {
                 // The destination is modelled, but storing a *pointer* lets it reach anywhere.

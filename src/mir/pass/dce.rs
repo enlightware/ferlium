@@ -350,7 +350,9 @@ pub(crate) fn remove_discarded_trivial_copy_results(
                         },
                     );
                 }
-                OperationKind::Subfield { .. } => {
+                OperationKind::Subfield { .. }
+                | OperationKind::AddressOffset { .. }
+                | OperationKind::AddressOffsetPlace { .. } => {
                     if let Some(mir::Value::Register(base)) = operation.operands.first() {
                         derived_bases.insert(result, *base);
                     }
@@ -397,7 +399,9 @@ pub(crate) fn remove_discarded_trivial_copy_results(
                     continue;
                 };
                 let removable = match operation.kind {
-                    OperationKind::Subfield { .. } => position == 0,
+                    OperationKind::Subfield { .. }
+                    | OperationKind::AddressOffset { .. }
+                    | OperationKind::AddressOffsetPlace { .. } => position == 0,
                     OperationKind::Store | OperationKind::Memcpy => position == 1,
                     OperationKind::Clear => position == 0,
                     _ => false,
@@ -652,6 +656,8 @@ pub(super) fn may_leave_frame_storage(operation: &mir::Operation) -> bool {
         OperationKind::CompareEqual
         | OperationKind::Load
         | OperationKind::Subfield { .. }
+        | OperationKind::AddressOffset { .. }
+        | OperationKind::AddressOffsetPlace { .. }
         | OperationKind::BuildDictionary { .. }
         | OperationKind::BuildSubscript { .. }
         | OperationKind::Variant { .. }
@@ -752,7 +758,10 @@ impl DceCensus {
                     );
                 } else if matches!(
                     operation.kind,
-                    OperationKind::DictEntry { .. } | OperationKind::Subfield { .. }
+                    OperationKind::DictEntry { .. }
+                        | OperationKind::Subfield { .. }
+                        | OperationKind::AddressOffset { .. }
+                        | OperationKind::AddressOffsetPlace { .. }
                 ) {
                     census.derived_definitions.insert(result, (block, index));
                 }

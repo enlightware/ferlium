@@ -511,6 +511,8 @@ fn record_writes(
         | OperationKind::CompareEqual
         | OperationKind::Load
         | OperationKind::Subfield { .. }
+        | OperationKind::AddressOffset { .. }
+        | OperationKind::AddressOffsetPlace { .. }
         | OperationKind::DictEntry { .. }
         | OperationKind::SubscriptMember { .. }
         | OperationKind::Variant { .. }

@@ -419,6 +419,41 @@ impl Operation {
         }
     }
 
+    /// Creates a physical byte-address projection from `base` to a place of `ty`.
+    ///
+    /// `base` is an address-bearing place and `byte_offset` is a materialized Ferlium `int`.
+    /// Physical lowering guarantees that the resulting address is within the same allocation and
+    /// aligned for `ty`.
+    pub fn address_offset(
+        span: Location,
+        base: mir::Value,
+        byte_offset: mir::Value,
+        ty: Type,
+    ) -> Self {
+        Operation {
+            result_id: None,
+            span,
+            operands: Box::new([base, byte_offset]),
+            kind: OperationKind::AddressOffset { ty },
+        }
+    }
+
+    /// Creates a physical byte-address projection to a slot containing a place of `pointing_to`.
+    /// Loading the result yields the stored place rather than the pointee value.
+    pub fn address_offset_place(
+        span: Location,
+        base: mir::Value,
+        byte_offset: mir::Value,
+        pointing_to: Type,
+    ) -> Self {
+        Operation {
+            result_id: None,
+            span,
+            operands: Box::new([base, byte_offset]),
+            kind: OperationKind::AddressOffsetPlace { pointing_to },
+        }
+    }
+
     /// Creates a place projection for the complete payload `ty` of an already established variant
     /// case. The stored tag supplies inline/indirect classification. `layout_witness` is present
     /// exactly when `ty` has a run-time-dependent layout and supplies `Value<ty>`.
@@ -965,6 +1000,10 @@ pub enum OperationKind {
         /// Product identity and layout-evidence schema, when physical product layout applies.
         product: Option<B<ProductProjectionMetadata>>,
     },
+    /// Project a place by a physical byte offset while retaining its allocation provenance.
+    AddressOffset { ty: Type },
+    /// Project a slot containing a place by a physical byte offset.
+    AddressOffsetPlace { pointing_to: Type },
     /// Project a function entry place from a symbolic dictionary.
     DictEntry {
         entry_index: TraitDictionaryEntryIndex,
@@ -1049,6 +1088,8 @@ impl OperationKind {
             | CompareEqual
             | Load
             | Subfield { .. }
+            | AddressOffset { .. }
+            | AddressOffsetPlace { .. }
             | DictEntry { .. }
             | BuildDictionary { .. }
             | SubscriptMember { .. }
@@ -1089,6 +1130,8 @@ impl OperationKind {
             | CompareEqual
             | Load
             | Subfield { .. }
+            | AddressOffset { .. }
+            | AddressOffsetPlace { .. }
             | DictEntry { .. }
             | BuildDictionary { .. }
             | SubscriptMember { .. }
@@ -1168,10 +1211,14 @@ impl OperationKind {
             ),
             Project { yielded: ty, .. }
             | Subfield { ty, .. }
+            | AddressOffset { ty }
             | DictEntry { ty, .. }
             | SubscriptMember { ty, .. } => {
                 OperationResult::pointer_to(OperationResult::Lowered(*ty))
             }
+            AddressOffsetPlace { pointing_to } => OperationResult::pointer_to(
+                OperationResult::pointer_to(OperationResult::Lowered(*pointing_to)),
+            ),
             CompareEqual => OperationResult::Lowered(cached_primitive_ty!(bool)),
             Load => OperationResult::pointee_of(OperationResult::Same(whole.operands[0].clone())),
             BuildDictionary { ty, .. }
@@ -1255,6 +1302,16 @@ impl OperationKind {
                     "subfield takes the aggregate place, the int field-index value, and optional layout evidence"
                 );
             }
+            AddressOffset { .. } => assert_eq!(
+                whole.operands.len(),
+                2,
+                "address_offset takes a base place and a materialized byte offset"
+            ),
+            AddressOffsetPlace { .. } => assert_eq!(
+                whole.operands.len(),
+                2,
+                "address_offset_place takes a base place and a materialized byte offset"
+            ),
             DictEntry { .. } => assert_eq!(
                 whole.operands.len(),
                 1,
@@ -1422,6 +1479,18 @@ impl OperationKind {
                 }
                 Ok(())
             }
+            AddressOffset { .. } => write!(
+                f,
+                "address_offset {} by {}",
+                whole.operands[0].format_with(env),
+                whole.operands[1].format_with(env)
+            ),
+            AddressOffsetPlace { .. } => write!(
+                f,
+                "address_offset_place {} by {}",
+                whole.operands[0].format_with(env),
+                whole.operands[1].format_with(env)
+            ),
             DictEntry { entry_index, .. } => write!(
                 f,
                 "dict_entry {} from {}",

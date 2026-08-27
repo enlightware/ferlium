@@ -684,6 +684,10 @@ pub(crate) fn check_operand_roles(
                 }
             }
         }
+        OperationKind::AddressOffset { .. } | OperationKind::AddressOffsetPlace { .. } => {
+            place(0);
+            value(1);
+        }
         OperationKind::DictEntry { .. } | OperationKind::SubscriptMember { .. } => evidence(0),
         OperationKind::BuildDictionary { .. } => {
             for index in 0..operands.len() {

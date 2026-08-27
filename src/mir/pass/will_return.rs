@@ -165,6 +165,8 @@ fn operation_returns(operation: &Operation, callee_returns: &impl Fn(FunctionId)
         | OperationKind::CompareEqual
         | OperationKind::Load
         | OperationKind::Subfield { .. }
+        | OperationKind::AddressOffset { .. }
+        | OperationKind::AddressOffsetPlace { .. }
         | OperationKind::DictEntry { .. }
         | OperationKind::BuildDictionary { .. }
         | OperationKind::SubscriptMember { .. }

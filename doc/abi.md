@@ -438,9 +438,10 @@ rule that type sizes include tail padding already guarantee that each slot is al
 interpreter accepts and ignores this physical layout evidence. Compiled lowering uses it to allocate
 aligned storage and calculate slot addresses.
 
-Every layout has a positive alignment and a size divisible by that alignment. For non-zero-sized
-types, alignment is therefore no greater than size. Zero-sized types are the exception to that last
-inequality—for example, `()` has size 0 and alignment 1—and require no backing allocation.
+Every layout has a positive power-of-two alignment and a size divisible by that alignment. For
+non-zero-sized types, alignment is therefore no greater than size. Zero-sized types are the
+exception to that last inequality—for example, `()` has size 0 and alignment 1—and require no
+backing allocation.
 
 A buffer allocated with capacity 0 is the one case where the layout arguments are not the element's
 own: an empty array literal passes size 0 and alignment 1 whatever `T` is, because a capacity-0

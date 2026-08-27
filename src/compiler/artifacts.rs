@@ -375,9 +375,9 @@ impl MirArtifacts {
         let declared_body_count = raw.functions.iter().flatten().count();
         let mut specializations =
             Specializations::new(module_id, raw.functions.len(), declared_body_count);
-        // Resolved once per module: these walk std's trait and function tables to key operations by
-        // identity, which is the same answer for every body below.
-        let context = OptimizationContext::new(modules, env);
+        // Build the module-specific optimization helpers once; std callable identities are shared
+        // by the complete session.
+        let context = OptimizationContext::new(session, env);
         let mut optimization_stats = OptimizationStats::default();
 
         let mut functions: Vec<Option<mir::Function>> = raw
@@ -587,6 +587,23 @@ impl MirArtifacts {
 
     pub(crate) fn len(&self) -> usize {
         self.functions.len()
+    }
+
+    /// Number of local callable slots in this artifact stage, including private specializations.
+    pub(crate) fn entry_count(&self) -> usize {
+        self.functions.len() + self.specializations.len()
+    }
+
+    /// Clone the dense callable table consumed by physical lowering.
+    pub(crate) fn cloned_entries(&self) -> Vec<Option<mir::Function>> {
+        let mut entries = Vec::with_capacity(self.entry_count());
+        entries.extend(self.functions.iter().cloned());
+        entries.extend(
+            self.specializations
+                .iter()
+                .map(|specialization| Some(specialization.body.clone())),
+        );
+        entries
     }
 }
 

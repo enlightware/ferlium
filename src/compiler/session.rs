@@ -7,7 +7,12 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use ::std::{cell::RefCell, fmt, rc::Rc, sync::LazyLock};
+use ::std::{
+    cell::{OnceCell, RefCell},
+    fmt,
+    rc::Rc,
+    sync::LazyLock,
+};
 use derive_new::new;
 use itertools::Itertools;
 use ustr::Ustr;
@@ -32,7 +37,7 @@ use crate::{
     execution::{DEFAULT_INTERACTIVE_FUEL_LIMIT, ExecutionTarget, ReferenceInterpreterLimits},
     format::FormatWith,
     hir::{self, emit_expr::emit_expr_entry_with_private_impls, hir_syn::local, value::Value},
-    mir::pass::report::OptimizationReport,
+    mir::pass::{known_callee::KnownCallees, report::OptimizationReport},
     module::{
         self, FunctionId, LocalFunctionId, Module, ModuleEnv, ModuleFunction, ModuleId, Path,
         ResolvedValueLayout, Uses,
@@ -479,6 +484,8 @@ pub struct CompilerSession {
     pub(crate) capabilities: CompilationCapabilities,
     /// Whether execution through this session runs optimized MIR.
     pub(crate) mir_optimization: MirOptimization,
+    /// Standard-library callable identities shared by every MIR stage in this session.
+    known_callees: OnceCell<KnownCallees>,
     /// Compact, session-local discriminants for symbolic variant tags.
     ///
     /// Compiled artifacts retain `Ustr` tags so the cached standard library can be shared between
@@ -586,12 +593,23 @@ impl InitialSessionState {
             initial_source_table_size,
             capabilities: CompilationCapabilities::default(),
             mir_optimization: MirOptimization::default(),
+            known_callees: OnceCell::new(),
             variant_tags: RefCell::default(),
         }
     }
 }
 
 impl CompilerSession {
+    /// Resolve the standard-library callable catalog once for this session.
+    ///
+    /// Its identities depend only on std and the target profile, never on subsequently registered
+    /// modules. This is also required by the persisted std MIR cache; see
+    /// `doc/compiled-std-cache.md`.
+    pub(crate) fn known_callees(&self) -> &KnownCallees {
+        self.known_callees
+            .get_or_init(|| KnownCallees::new(&self.modules))
+    }
+
     /// Resolve a symbolic variant tag to this compilation session's compact discriminant.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn variant_tag_id(&self, tag: Ustr) -> u32 {
@@ -934,6 +952,7 @@ impl CompilerSession {
         // We only keep std, $empty_std_user, and $scratch and drop the rest.
         self.modules.truncate(FIRST_USER_MODULE_ID.as_index());
         self.source_table.truncate(self.initial_source_table_size);
+        // Std survives the truncation, so an initialized known-callee catalog remains valid.
         *self.variant_tags.borrow_mut() = VariantTags::default();
     }
 

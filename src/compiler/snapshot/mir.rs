@@ -269,6 +269,12 @@ enum SnapshotOperationKind {
         product_ty: Option<SnapshotTypeId>,
         product_layout_witness_tys: Vec<SnapshotTypeId>,
     },
+    AddressOffset {
+        ty: SnapshotTypeId,
+    },
+    AddressOffsetPlace {
+        pointing_to: SnapshotTypeId,
+    },
     DictEntry {
         entry_index: TraitDictionaryEntryIndex,
         ty: SnapshotTypeId,
@@ -804,6 +810,12 @@ impl SnapshotOperationKind {
                         .collect()
                 })?,
             },
+            Source::AddressOffset { ty } => Stored::AddressOffset {
+                ty: graph.capture(*ty)?,
+            },
+            Source::AddressOffsetPlace { pointing_to } => Stored::AddressOffsetPlace {
+                pointing_to: graph.capture(*pointing_to)?,
+            },
             Source::DictEntry { entry_index, ty } => Stored::DictEntry {
                 entry_index: *entry_index,
                 ty: graph.capture(*ty)?,
@@ -914,6 +926,12 @@ impl SnapshotOperationKind {
                         }))
                     })
                     .transpose()?,
+            },
+            Stored::AddressOffset { ty } => Runtime::AddressOffset {
+                ty: resolve_type(types, *ty)?,
+            },
+            Stored::AddressOffsetPlace { pointing_to } => Runtime::AddressOffsetPlace {
+                pointing_to: resolve_type(types, *pointing_to)?,
             },
             Stored::DictEntry { entry_index, ty } => Runtime::DictEntry {
                 entry_index: *entry_index,

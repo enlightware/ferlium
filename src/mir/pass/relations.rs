@@ -1386,6 +1386,8 @@ fn writes_into(operation: &Operation, root: Root, register_places: &PlaceBinding
         | OperationKind::CompareEqual
         | OperationKind::ExtractTag
         | OperationKind::Subfield { .. }
+        | OperationKind::AddressOffset { .. }
+        | OperationKind::AddressOffsetPlace { .. }
         | OperationKind::DictEntry { .. } => false,
         OperationKind::Store => rooted(&operation.operands[1]),
         OperationKind::Memcpy | OperationKind::Move => {
@@ -1743,6 +1745,7 @@ fn transfer(
                 interner.bind_register_place(result, field);
             }
         }
+        OperationKind::AddressOffset { .. } | OperationKind::AddressOffsetPlace { .. } => {}
         OperationKind::Memcpy | OperationKind::Move => {
             let source = tracked_place(state, &operation.operands[0], escaped, interner);
             let fact = source.map(|place| {
@@ -2153,7 +2156,7 @@ mod tests {
             .expect("the test source compiles")
             .module_id;
         session.prepare_execution_target(ExecutionTarget::Mir, module_id);
-        let known = KnownCallees::new(session.raw_modules());
+        let known = session.known_callees();
         let artifacts = session
             .mir_artifacts_for(module_id, MirOptimization::Enabled)
             .expect("optimized artifacts were just built");
@@ -2163,8 +2166,8 @@ mod tests {
             .flatten()
             .find(|body| body.name.as_str() == name)
             .expect("the function was declared");
-        let mut analysis = analyze(function, &known, &|_| None);
-        check(function, &mut analysis, &known);
+        let mut analysis = analyze(function, known, &|_| None);
+        check(function, &mut analysis, known);
     }
 
     /// Every fact the final state holds, so that a test can look for one without knowing which

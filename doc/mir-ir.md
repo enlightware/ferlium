@@ -251,9 +251,10 @@ witnesses. The verifier therefore checks call/storage representations whenever b
 independently concrete, while witnessed generic moves and calls retain that inference boundary. A
 serialized standalone MIR format will need explicit normalized-layout/equality metadata to close it.
 
-## Planned physical MIR stage
+## Physical MIR stage
 
-> Status: planned contract for the unboxed interpreter and machine backends.
+> Status: inline product byte-address lowering is implemented; indirect product ownership, the
+> remaining representations, and the unboxed interpreter are planned.
 
 Physical lowering consumes the complete optimized `MirArtifacts`, including declared bodies and
 retained specializations. It resolves physical addresses, representations, callable environments,
@@ -264,11 +265,10 @@ The result need not correspond one-to-one with semantic function artifacts. Lowe
 adapters and helpers, merge physically equivalent artifacts, or remove unreachable internal
 artifacts. It maintains a resolution from every retained semantic callable and specialization to
 its physical entry and convention, and rewrites calls consistently. Top-level module entries retain
-their externally visible identity.
+their externally visible identity. Generated helpers are ordinary entries in the physical artifact.
 
-The lowerer builds candidate `MirArtifacts`. The readiness verifier checks the physical-stage
-invariants and returns `BackendReadyMirArtifacts`. Both stages use the same MIR structures without
-a phase parameter.
+The lowerer builds a physical function table. The readiness verifier checks it and returns
+`BackendReadyMirArtifacts`. Both stages use the same MIR structures without a phase parameter.
 
 Backend-ready MIR may retain symbolic operands, `DictEntry`, variant construction, and
 `extract_tag`. Each executor supplies their target representation. Interpreter-only native calls
@@ -290,21 +290,26 @@ unit result.
 
 ### Typed byte addressing
 
-Physical MIR adds one representation-level address operation:
+Physical MIR adds two representation-level address operations:
 
 ```text
 address_offset<A>(base_address, byte_offset: int) -> *A
+address_offset_place<A>(base_address, byte_offset: int) -> **A
 ```
 
-The base is address-bearing, the offset is a materialized Ferlium `int`, and the result is an
-aligned place of `A` within the base allocation and with its provenance. Byte-offset expressions
-use ordinary calls such as `Num<int>::add` and `Num<int>::mul`.
+The base is address-bearing and the offset is a materialized Ferlium `int`. `address_offset` yields
+an aligned inline place of `A`; `address_offset_place` yields a slot containing an indirect place of
+`A`, which `load` dereferences. Both retain the base allocation's provenance. Byte-offset
+expressions use ordinary calls such as `Num<int>::add` and `Num<int>::mul`.
 
 Semantic MIR retains logical `subfield` operations through its ordinary optimization rounds. A
 product projection names the aggregate and carries the direct member `Value` witnesses required
-when its physical offset is still open. Physical lowering replaces it with an ABI-derived offset
-and `address_offset`, emitting a closed addressor helper over those witnesses when needed. Buffer
-call expansion uses the loaded backing pointer and element-size evidence.
+when its physical offset is still open. Physical lowering replaces inline projections with an
+ABI-derived offset and `address_offset`, emitting a closed addressor helper over those witnesses
+when needed. Owning indirect members retain their logical projection until their lifecycle is
+expanded, so the readiness verifier rejects such a projection until that pass is implemented.
+Remaining borrows can then use `address_offset_place` and `load`. Buffer call expansion uses the
+loaded backing pointer and element-size evidence.
 
 ### First-class subscript environments
 

@@ -73,7 +73,7 @@ pub(crate) enum SnapshotFunctionBody {
         canonical_name: String,
     },
     StructuralFieldAddressor {
-        field_index: usize,
+        field_index: u32,
         hidden_argument_count: usize,
     },
 }
@@ -106,7 +106,7 @@ impl SnapshotFunctionBody {
                     .checked_sub(function.parameter_passing.len())
                     .expect("structural addressor runtime arguments include visible arguments");
                 Self::StructuralFieldAddressor {
-                    field_index,
+                    field_index: field_index.as_u32(),
                     hidden_argument_count,
                 }
             }
@@ -152,11 +152,11 @@ impl SnapshotFunctionBody {
                 hidden_argument_count,
             } => (
                 b(crate::hir::function::StructuralFieldAddressor::new(
-                    *field_index,
+                    crate::module::ProjectionIndex::new(*field_index),
                     *hidden_argument_count,
                 )) as Function,
                 CallableOrigin::StructuralFieldAddressor {
-                    field_index: *field_index,
+                    field_index: crate::module::ProjectionIndex::new(*field_index),
                 },
             ),
         })

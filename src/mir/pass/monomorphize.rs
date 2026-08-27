@@ -1050,6 +1050,8 @@ fn substitute_in_operation(operation: &mut Operation, mapper: &mut impl TypeMapp
                 }
             }
         }
+        OperationKind::AddressOffset { ty } => *ty = ty.map(mapper),
+        OperationKind::AddressOffsetPlace { pointing_to } => *pointing_to = pointing_to.map(mapper),
         OperationKind::Variant { metadata, .. } => {
             metadata.ty = metadata.ty.map(mapper);
             metadata.payload_ty = metadata.payload_ty.map(mapper);
