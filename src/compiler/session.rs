@@ -487,9 +487,6 @@ pub struct CompilerSession {
     /// Standard-library callable identities shared by every MIR stage in this session.
     known_callees: OnceCell<KnownCallees>,
     /// Compact, session-local discriminants for symbolic variant tags.
-    ///
-    /// Compiled artifacts retain `Ustr` tags so the cached standard library can be shared between
-    /// sessions. A concrete backend interns those symbols here when it materializes a tag.
     variant_tags: RefCell<VariantTags>,
 }
 
