@@ -30,7 +30,7 @@ use crate::{
         LocalDeclId, LocalFunctionId, Module, ModuleEnv, PendingLocalClone, PendingLocalDrop,
         PendingModuleFunction, PendingTakeLocalValueMode, ProjectionIndex, ProjectionKey,
         ResolvedLocalClone, ResolvedLocalDrop, SubscriptId, SubscriptMemberKind, TraitDictionaryId,
-        TraitId, id::Id,
+        TraitId, generated_structural_projection_definition, id::Id,
     },
     types::r#trait::{TraitDictionaryEntryIndex, TraitMethodIndex},
     types::trait_solver::{TraitSolver, trait_solver_from_module},
@@ -77,7 +77,7 @@ fn default_unquantified_trait_application_effects(
     )
 }
 
-use itertools::process_results;
+use itertools::{Itertools, process_results};
 
 use crate::{
     containers::{SVec2, b},
@@ -324,9 +324,31 @@ fn evidence_binding_for_requirement(
                 .try_into()
                 .expect("one evidence requirement must produce one argument");
             let source = match kind {
-                NodeKind::GetSubscript(subscript) => EvidenceBindingSource::Static(
-                    StaticEvidence::bare_subscript(subscript.subscript),
-                ),
+                NodeKind::GetSubscript(subscript) => {
+                    let captures = subscript
+                        .inst_data
+                        .dicts_req
+                        .iter()
+                        .map(|requirement| {
+                            evidence_binding_for_requirement(arena, requirement, span, ctx)
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let static_captures = captures
+                        .iter()
+                        .map(|capture| ctx.static_evidence(*capture))
+                        .collect::<Option<Vec<_>>>();
+                    if let Some(captures) = static_captures {
+                        EvidenceBindingSource::Static(StaticEvidence::Subscript {
+                            definition: subscript.subscript,
+                            captures: captures.into_boxed_slice(),
+                        })
+                    } else {
+                        EvidenceBindingSource::ConstructedSubscript {
+                            definition: subscript.subscript,
+                            captures,
+                        }
+                    }
+                }
                 NodeKind::Immediate(value) => {
                     EvidenceBindingSource::Static(StaticEvidence::VariantPayloadStorage(
                         *value
@@ -370,12 +392,70 @@ fn get_projection_subscript_node_kind(
     subscript: SubscriptId,
     name: Ustr,
     span: Location,
+    inst_data: hir::FnInstData,
 ) -> NodeKind {
     NodeKind::GetSubscript(b(hir::GetSubscript {
         subscript,
         subscript_path: crate::ast::Path::new(vec![(name, span)]),
-        inst_data: hir::FnInstData::none(),
+        inst_data,
     }))
+}
+
+fn generated_projection_subscript_node_kind(
+    subscript: SubscriptId,
+    spec: GeneratedStructuralProjectionSpec,
+    name: Ustr,
+    span: Location,
+    solver: &TraitSolver<'_>,
+) -> NodeKind {
+    let value_trait_id = solver.std_trait_id(crate::std::core_traits_names::VALUE_TRAIT_NAME);
+    let (definition, requirements) =
+        generated_structural_projection_definition(spec, value_trait_id, solver);
+    let ty_args = definition
+        .ty_scheme
+        .ty_quantifiers
+        .iter()
+        .map(|quantifier| Type::variable(*quantifier))
+        .collect();
+    // Effect quantifiers are stored as a set, so their positional instantiation is stabilized.
+    let eff_args = definition
+        .ty_scheme
+        .eff_quantifiers
+        .iter()
+        .sorted()
+        .map(|quantifier| EffType::single_variable(*quantifier))
+        .collect();
+    get_projection_subscript_node_kind(
+        subscript,
+        name,
+        span,
+        hir::FnInstData::new(requirements, ty_args, eff_args),
+    )
+}
+
+fn structural_projection_field_index(
+    ty: Type,
+    field: Ustr,
+    solver: &TraitSolver<'_>,
+) -> Option<usize> {
+    let ty_data = ty.data();
+    let ty_kind = ty_data.clone();
+    drop(ty_data);
+    let structural = match ty_kind {
+        TypeKind::Record(fields) => {
+            return fields.iter().position(|candidate| candidate.0 == field);
+        }
+        TypeKind::Named(named) => solver
+            .type_def(named.def)
+            .instantiated_shape_with_effects(&named.params, &named.effect_params),
+        _ => return None,
+    };
+    let structural_data = structural.data();
+    let index = structural_data
+        .as_record()
+        .and_then(|fields| fields.iter().position(|candidate| candidate.0 == field));
+    drop(structural_data);
+    index
 }
 
 fn extra_arg_kind_from_inst_data(
@@ -405,53 +485,60 @@ fn extra_arg_kind_from_inst_data(
                         .as_mut()
                         .expect("projection evidence generation requires module elaboration");
                     let structural_key = ProjectionKey::structural(ty, *name);
-                    if let Some(subscript) = generated.get_existing(structural_key) {
-                        let node_kind = get_projection_subscript_node_kind(subscript, *name, span);
-                        return Ok((node_kind, expected_node_ty, expected_arg_ty));
-                    }
-                    if requirement.accepts_user_defined_projection()
+                    let existing_structural = generated.get_existing(structural_key);
+                    if existing_structural.is_none()
+                        && requirement.accepts_user_defined_projection()
                         && let Some(key) = ProjectionKey::nominal_for_receiver_ty(ty, *name)
                         && let Some(subscript) = ctx.trait_solver.projection_subscript_id(key)
                     {
-                        let node_kind = get_projection_subscript_node_kind(subscript, *name, span);
-                        return Ok((node_kind, expected_node_ty, expected_arg_ty));
+                        return Ok((
+                            get_projection_subscript_node_kind(
+                                subscript,
+                                *name,
+                                span,
+                                hir::FnInstData::none(),
+                            ),
+                            expected_node_ty,
+                            expected_arg_ty,
+                        ));
                     }
-                    let ty_kind = ty.data().clone();
+                    let ty_data = ty.data();
+                    let ty_kind = ty_data.clone();
+                    drop(ty_data);
                     let node_kind = match ty_kind {
-                        Record(record) => {
-                            let index = record.iter().position(|field| field.0 == *name).expect(
-                                "Field not found in type, type inference should have failed"
-                            );
-                            let subscript =
-                                generated.get_or_create(GeneratedStructuralProjectionSpec {
-                                    key: structural_key,
-                                    index,
-                                    field_ty: subscript_ty.ret,
-                                });
-                            get_projection_subscript_node_kind(subscript, *name, span)
-                        }
-                        Named(named) => {
-                            let shape = ctx
-                                .trait_solver
-                                .type_def(named.def)
-                                .instantiated_shape_with_effects(
-                                    &named.params,
-                                    &named.effect_params,
-                                );
-                            let shape_data = shape.data();
-                            let record = shape_data
-                                .as_record()
-                                .expect("ProjectionSubscript named receiver should have a record representation or explicit projection");
-                            let index = record.iter().position(|field| field.0 == *name).expect(
-                                "Field not found in type, type inference should have failed"
-                            );
-                            let subscript =
-                                generated.get_or_create(GeneratedStructuralProjectionSpec {
-                                    key: structural_key,
-                                    index,
-                                    field_ty: subscript_ty.ret,
-                                });
-                            get_projection_subscript_node_kind(subscript, *name, span)
+                        Record(_) | Named(_) => {
+                            let index = structural_projection_field_index(
+                                ty,
+                                *name,
+                                ctx.trait_solver,
+                            )
+                            .expect("field not found in structural projection receiver");
+                            let spec = GeneratedStructuralProjectionSpec {
+                                key: structural_key,
+                                index,
+                                field_ty: subscript_ty.ret,
+                            };
+                            if let Some(subscript) = existing_structural {
+                                return Ok((
+                                    generated_projection_subscript_node_kind(
+                                        subscript,
+                                        spec,
+                                        *name,
+                                        span,
+                                        ctx.trait_solver,
+                                    ),
+                                    expected_node_ty,
+                                    expected_arg_ty,
+                                ));
+                            }
+                            let subscript = generated.get_or_create(spec);
+                            generated_projection_subscript_node_kind(
+                                subscript,
+                                spec,
+                                *name,
+                                span,
+                                ctx.trait_solver,
+                            )
                         }
                         Variable(var) => {
                             let index = find_projection_subscript_dict_index(ctx.dicts, var, name).unwrap_or_else(
@@ -1395,19 +1482,54 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
         effects: EffType,
         span: Location,
     ) -> Result<ENodeId, InternalCompilationError> {
-        let kind = self.elaborate_synthetic_kind(kind, span)?;
+        let kind = self.elaborate_synthetic_kind(kind, ty, &effects, span)?;
         Ok(self.alloc_elaborated_node(kind, ty, effects, span))
+    }
+
+    fn elaborate_get_subscript(
+        &mut self,
+        mut get_subscript: hir::GetSubscript,
+        node_ty: Type,
+        node_effects: &EffType,
+        node_span: Location,
+    ) -> Result<NodeKind<Elaborated>, InternalCompilationError> {
+        let captures = if get_subscript.inst_data.dicts_req.is_empty() {
+            Vec::new()
+        } else {
+            let (captures, _) =
+                self.elaborate_extra_args_from_inst_data(&get_subscript.inst_data, node_span)?;
+            get_subscript.inst_data.dicts_req.clear();
+            captures
+        };
+        if captures.is_empty() {
+            Ok(NodeKind::GetSubscript(b(get_subscript)))
+        } else {
+            let subscript = self.alloc_elaborated_node(
+                NodeKind::GetSubscript(b(get_subscript)),
+                node_ty,
+                node_effects.clone(),
+                node_span,
+            );
+            Ok(NodeKind::BuildSubscriptValue(b(hir::BuildSubscriptValue {
+                subscript,
+                evidence_captures: captures,
+            })))
+        }
     }
 
     fn elaborate_synthetic_kind(
         &mut self,
         kind: NodeKind<Unelaborated>,
+        ty: Type,
+        effects: &EffType,
         span: Location,
     ) -> Result<NodeKind<Elaborated>, InternalCompilationError> {
         use NodeKind::*;
         Ok(match kind {
             Immediate(value) => Immediate(value),
-            GetSubscript(get_subscript) => GetSubscript(get_subscript),
+            GetSubscript(get_subscript) => {
+                return self.elaborate_get_subscript(*get_subscript, ty, effects, span);
+            }
             GetDictionary(get_dict) => {
                 let captures = get_dict
                     .captures
@@ -1437,7 +1559,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
         node: UNodeId,
     ) -> Result<ENodeId, InternalCompilationError> {
         let node = self.generated[node].clone();
-        let kind = self.elaborate_synthetic_kind(node.kind, node.span)?;
+        let kind = self.elaborate_synthetic_kind(node.kind, node.ty, &node.effects, node.span)?;
         Ok(self.alloc_elaborated_node(kind, node.ty, node.effects, node.span))
     }
 
@@ -2167,31 +2289,12 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                     }))
                 }
             }
-            GetSubscript(get_subscript) => {
-                let mut get_subscript = (**get_subscript).clone();
-                let captures = if !get_subscript.inst_data.dicts_req.is_empty() {
-                    let (captures, _) = self
-                        .elaborate_extra_args_from_inst_data(&get_subscript.inst_data, node_span)?;
-                    get_subscript.inst_data.dicts_req.clear();
-                    captures
-                } else {
-                    Vec::new()
-                };
-                if captures.is_empty() {
-                    GetSubscript(b(get_subscript))
-                } else {
-                    let subscript = self.alloc_elaborated_node(
-                        GetSubscript(b(get_subscript)),
-                        node_ty,
-                        node_effects.clone(),
-                        node_span,
-                    );
-                    BuildSubscriptValue(b(hir::BuildSubscriptValue {
-                        subscript,
-                        evidence_captures: captures,
-                    }))
-                }
-            }
+            GetSubscript(get_subscript) => self.elaborate_get_subscript(
+                (**get_subscript).clone(),
+                node_ty,
+                node_effects,
+                node_span,
+            )?,
             GetTraitMethod(get_method) => {
                 let trait_id = get_method.trait_id;
                 let method_index = get_method.method_index;
@@ -2318,7 +2421,7 @@ impl<'a, 'w, 'd, 'sr, 'sm> HirElaboration<'a, 'w, 'd, 'sr, 'sm> {
                     node_span,
                     self.ctx,
                 )?;
-                self.elaborate_synthetic_kind(node_kind, node_span)?
+                self.elaborate_synthetic_kind(node_kind, node_ty, node_effects, node_span)?
             }
             GetDictionary(get_dict) => GetDictionary(hir::GetDictionary {
                 dictionary: get_dict.dictionary,

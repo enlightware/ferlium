@@ -806,9 +806,11 @@ impl ModuleFunction {
     pub(crate) fn new_structural_field_addressor(
         definition: CallableDefinition,
         field_index: usize,
+        hidden_argument_count: usize,
     ) -> Self {
         let code = b(crate::hir::function::StructuralFieldAddressor::new(
             field_index,
+            hidden_argument_count,
         )) as Function;
         let mut function = Self::new(definition, code, None, Vec::new());
         function.origin = CallableOrigin::StructuralFieldAddressor { field_index };

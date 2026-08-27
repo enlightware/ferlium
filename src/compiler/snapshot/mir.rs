@@ -266,6 +266,8 @@ enum SnapshotOperationKind {
         ty: SnapshotTypeId,
         variant_payload: bool,
         has_layout_witness: bool,
+        product_ty: Option<SnapshotTypeId>,
+        product_layout_witness_tys: Vec<SnapshotTypeId>,
     },
     DictEntry {
         entry_index: TraitDictionaryEntryIndex,
@@ -785,10 +787,22 @@ impl SnapshotOperationKind {
                 ty,
                 variant_payload,
                 has_layout_witness,
+                product,
             } => Stored::Subfield {
                 ty: graph.capture(*ty)?,
                 variant_payload: *variant_payload,
                 has_layout_witness: *has_layout_witness,
+                product_ty: product
+                    .as_ref()
+                    .map(|product| graph.capture(product.aggregate_ty))
+                    .transpose()?,
+                product_layout_witness_tys: product.as_ref().map_or(Ok(Vec::new()), |product| {
+                    product
+                        .layout_witness_tys
+                        .iter()
+                        .map(|ty| graph.capture(*ty))
+                        .collect()
+                })?,
             },
             Source::DictEntry { entry_index, ty } => Stored::DictEntry {
                 entry_index: *entry_index,
@@ -882,10 +896,24 @@ impl SnapshotOperationKind {
                 ty,
                 variant_payload,
                 has_layout_witness,
+                product_ty,
+                product_layout_witness_tys,
             } => Runtime::Subfield {
                 ty: resolve_type(types, *ty)?,
                 variant_payload: *variant_payload,
                 has_layout_witness: *has_layout_witness,
+                product: product_ty
+                    .map(|product_ty| {
+                        Ok(Box::new(crate::mir::operation::ProductProjectionMetadata {
+                            aggregate_ty: resolve_type(types, product_ty)?,
+                            layout_witness_tys: product_layout_witness_tys
+                                .iter()
+                                .map(|ty| resolve_type(types, *ty))
+                                .collect::<Result<Vec<_>, _>>()?
+                                .into_boxed_slice(),
+                        }))
+                    })
+                    .transpose()?,
             },
             Stored::DictEntry { entry_index, ty } => Runtime::DictEntry {
                 entry_index: *entry_index,

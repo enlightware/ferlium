@@ -669,12 +669,19 @@ pub(crate) fn check_operand_roles(
         }
         OperationKind::Load => place(0),
         OperationKind::Subfield {
-            has_layout_witness, ..
+            has_layout_witness,
+            product,
+            ..
         } => {
             place(0);
             value(1);
             if *has_layout_witness {
                 evidence(2);
+            }
+            if let Some(product) = product {
+                for index in 2..2 + product.layout_witness_tys.len() {
+                    evidence(index);
+                }
             }
         }
         OperationKind::DictEntry { .. } | OperationKind::SubscriptMember { .. } => evidence(0),

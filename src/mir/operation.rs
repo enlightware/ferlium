@@ -383,26 +383,38 @@ impl Operation {
         }
     }
 
-    /// Creates a `subfield` operation yielding the **place** of the field (of type `ty`) of the
-    /// aggregate place `source` (operand `0`) at the field index given by the `int` value `index`
-    /// (operand `1`).
+    /// Creates a product-field projection with the direct member-layout evidence required to
+    /// compute its physical byte offset. The boxed interpreters use the logical index and ignore
+    /// the evidence; physical lowering consumes it when the aggregate layout remains open.
     ///
-    /// `source` must be a place whose pointee is an aggregate with more than `index` fields (or
-    /// generic storage that grows to that shape on the first field store); the result is a place,
-    /// computed without reading or moving the aggregate. `index` is an ordinary `int` value operand —
-    /// usually a typed [`mir::Value::Constant`] from the containing function's pool (a tuple/record
-    /// field at a known position), but a register when the offset is only known at run time.
-    /// Keeping the index a value operand — rather than splitting static and dynamic forms — matches
-    /// how a backend (LLVM `getelementptr`) takes the index as an IR value regardless.
-    pub fn subfield(span: Location, source: mir::Value, index: mir::Value, ty: Type) -> Self {
+    /// `source` is an aggregate place containing `index`, or generic storage which takes that
+    /// aggregate shape on its first field store. The ordinary Ferlium `int` index yields the field
+    /// place without reading or moving the aggregate and lets static and run-time indices share one
+    /// operation through physical lowering.
+    pub fn product_subfield(
+        span: Location,
+        source: mir::Value,
+        index: mir::Value,
+        ty: Type,
+        aggregate_ty: Type,
+        layout_witnesses: impl IntoIterator<Item = (Type, mir::Value)>,
+    ) -> Self {
+        let (layout_witness_tys, witnesses): (Vec<_>, Vec<_>) =
+            layout_witnesses.into_iter().unzip();
+        let mut operands = vec![source, index];
+        operands.extend(witnesses);
         Operation {
             result_id: None,
             span,
-            operands: Box::new([source, index]),
+            operands: operands.into_boxed_slice(),
             kind: OperationKind::Subfield {
                 ty,
                 variant_payload: false,
                 has_layout_witness: false,
+                product: Some(Box::new(ProductProjectionMetadata {
+                    aggregate_ty,
+                    layout_witness_tys: layout_witness_tys.into_boxed_slice(),
+                })),
             },
         }
     }
@@ -428,6 +440,7 @@ impl Operation {
                 ty,
                 variant_payload: true,
                 has_layout_witness,
+                product: None,
             },
         }
     }
@@ -867,6 +880,17 @@ pub struct VariantMetadata {
     pub(crate) payload_ty: Type,
 }
 
+/// Static product identity and the run-time member layouts carried by a `subfield` operation.
+///
+/// `layout_witness_tys` is positional against the evidence operands following the aggregate and
+/// logical field index. It contains only direct inline members whose layouts are not static in the
+/// containing function.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct ProductProjectionMetadata {
+    pub(crate) aggregate_ty: Type,
+    pub(crate) layout_witness_tys: Box<[Type]>,
+}
+
 impl Instantiation {
     /// Builds the substitution taking the callee's quantifiers to what this call site instantiated
     /// them at, in the callee's own variable numbering.
@@ -938,6 +962,8 @@ pub enum OperationKind {
         variant_payload: bool,
         /// True when operand 2 carries `Value<ty>` layout evidence.
         has_layout_witness: bool,
+        /// Product identity and layout-evidence schema, when physical product layout applies.
+        product: Option<B<ProductProjectionMetadata>>,
     },
     /// Project a function entry place from a symbolic dictionary.
     DictEntry {
@@ -1206,12 +1232,29 @@ impl OperationKind {
                 "load takes exactly the source place"
             ),
             Subfield {
-                has_layout_witness, ..
-            } => assert_eq!(
-                whole.operands.len(),
-                2 + usize::from(*has_layout_witness),
-                "subfield takes the aggregate place, the int field-index value, and optional layout evidence"
-            ),
+                variant_payload,
+                has_layout_witness,
+                product,
+                ..
+            } => {
+                assert!(
+                    product.is_none() || (!*variant_payload && !*has_layout_witness),
+                    "product and variant subfield metadata are mutually exclusive"
+                );
+                assert_eq!(
+                    product.is_some(),
+                    !*variant_payload,
+                    "a product subfield names its aggregate, while a variant-payload subfield does not"
+                );
+                assert_eq!(
+                    whole.operands.len(),
+                    2 + usize::from(*has_layout_witness)
+                        + product
+                            .as_ref()
+                            .map_or(0, |product| product.layout_witness_tys.len()),
+                    "subfield takes the aggregate place, the int field-index value, and optional layout evidence"
+                );
+            }
             DictEntry { .. } => assert_eq!(
                 whole.operands.len(),
                 1,
@@ -1352,6 +1395,7 @@ impl OperationKind {
             Subfield {
                 variant_payload,
                 has_layout_witness,
+                product,
                 ..
             } => {
                 if *variant_payload {
@@ -1370,6 +1414,11 @@ impl OperationKind {
                 }
                 if *has_layout_witness {
                     write!(f, " via {}", whole.operands[2].format_with(env))?;
+                }
+                if let Some(product) = product {
+                    for witness in &whole.operands[2..2 + product.layout_witness_tys.len()] {
+                        write!(f, " via {}", witness.format_with(env))?;
+                    }
                 }
                 Ok(())
             }

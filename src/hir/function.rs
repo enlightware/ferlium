@@ -756,10 +756,12 @@ pub struct StructuralFieldAddressor {
 }
 
 impl StructuralFieldAddressor {
-    pub fn new(index: usize) -> Self {
+    pub fn new(index: usize, hidden_argument_count: usize) -> Self {
+        let mut runtime_argument_passing = vec![ArgConvention::Let; hidden_argument_count];
+        runtime_argument_passing.push(ArgConvention::MutableRef);
         Self {
             index: index as isize,
-            runtime_argument_passing: vec![ArgConvention::MutableRef],
+            runtime_argument_passing,
         }
     }
 }
@@ -771,8 +773,13 @@ impl Callable for StructuralFieldAddressor {
         _ctx: &mut CallCtx,
         _locals: &[ELocalDecl],
     ) -> EvalControlFlowResult {
-        debug_assert_eq!(args.len(), 1);
+        debug_assert_eq!(args.len(), self.runtime_argument_passing.len());
         let receiver = args.pop().expect("structural field receiver should exist");
+        debug_assert!(
+            args.iter()
+                .all(|argument| matches!(argument, ValOrMut::Dictionary(_))),
+            "structural layout evidence must consist of Value dictionaries"
+        );
         let mut place = match receiver {
             ValOrMut::Mut(place) => place,
             ValOrMut::Val(value) => {
@@ -796,7 +803,7 @@ impl Callable for StructuralFieldAddressor {
     }
 
     fn visible_parameter_passing(&self) -> Option<&[ArgConvention]> {
-        Some(&self.runtime_argument_passing)
+        Some(&self.runtime_argument_passing[self.runtime_argument_passing.len() - 1..])
     }
 
     fn format_ind(

@@ -165,7 +165,7 @@ The operation kind fixes operand arity, roles, and result shape. The main groups
 | Group | Operations | Contract |
 |---|---|---|
 | storage | `alloca`, `alloca_place`, `load`, `store`, `clear`, `memcpy`, `move` | `store` never drops; `memcpy` requires a concrete `TrivialCopy` pointee; `move` leaves its source absent. Dynamic allocation/move carries a layout witness. |
-| aggregates | `subfield`, `variant`, `extract_tag`, `build_array` | Aggregate construction and ownership remain field-addressable. A variant operation first builds an uninitialized payload shell. Generic variant construction and payload-marked `subfield` operations carry the selected payload's `Value<B>` layout witness; projection reads inline/indirect classification from the stored tag. `extract_tag` yields an opaque semantic tag, not the raw ABI word. `build_array` initializes fresh canonical array storage from borrowed `TrivialCopy` elements. |
+| aggregates | `subfield`, `variant`, `extract_tag`, `build_array` | Aggregate construction and ownership remain field-addressable. Product `subfield` records its aggregate type and carries `Value` witnesses for direct inline members with open layouts. A variant operation first builds an uninitialized payload shell. Generic variant construction and payload-marked `subfield` operations carry the selected payload's `Value<B>` layout witness; projection reads inline/indirect classification from the stored tag. `extract_tag` yields an opaque semantic tag, not the raw ABI word. `build_array` initializes fresh canonical array storage from borrowed `TrivialCopy` elements. |
 | evidence | `dict_entry`, `build_dictionary`, `subscript_member`, `build_subscript` | Evidence remains symbolic. Construction closes a definition over evidence operands; dictionary entries are closed function places. |
 | calls/projections | `call`, `project`, `end_project` | Proven source-infallible forms are ordinary operations. Potentially source-fallible forms occur only inside `invoke`. |
 | ownership | `clone`, `drop`, `build_closure`, `clone_closure_env`, `drop_closure_env` | Semantic ownership actions are explicit. `Value::clone` and `Value::drop` are source-infallible by contract. |
@@ -300,10 +300,11 @@ The base is address-bearing, the offset is a materialized Ferlium `int`, and the
 aligned place of `A` within the base allocation and with its provenance. Byte-offset expressions
 use ordinary calls such as `Num<int>::add` and `Num<int>::mul`.
 
-Semantic MIR retains logical `subfield` operations through its ordinary optimization rounds.
-Physical lowering replaces them with ABI-derived offsets and `address_offset`. Generic product
-projections use their addressor evidence; Buffer call expansion uses the loaded backing
-pointer and element-size evidence.
+Semantic MIR retains logical `subfield` operations through its ordinary optimization rounds. A
+product projection names the aggregate and carries the direct member `Value` witnesses required
+when its physical offset is still open. Physical lowering replaces it with an ABI-derived offset
+and `address_offset`, emitting a closed addressor helper over those witnesses when needed. Buffer
+call expansion uses the loaded backing pointer and element-size evidence.
 
 ### First-class subscript environments
 

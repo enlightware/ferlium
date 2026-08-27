@@ -332,13 +332,6 @@ impl StaticEvidence {
             captures: Box::new([]),
         }
     }
-
-    pub(crate) fn bare_subscript(definition: SubscriptId) -> Self {
-        Self::Subscript {
-            definition,
-            captures: Box::new([]),
-        }
-    }
 }
 
 /// Origin of an immutable hidden-evidence binding.

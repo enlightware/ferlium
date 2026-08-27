@@ -261,6 +261,7 @@ fn emit_expr_unsafe_inner(
             descr.code.entry_node_id,
             &mut descr.locals,
             value_trait_id,
+            module_env,
         );
     }
     ty_inf.resolve_local_storage_and_activate_value_constraints(
@@ -268,6 +269,7 @@ fn emit_expr_unsafe_inner(
         node_id,
         &mut locals,
         value_trait_id,
+        module_env,
     );
 
     // Default constraints into the unification tables (pre-substitution).

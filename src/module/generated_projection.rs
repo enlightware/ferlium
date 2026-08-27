@@ -7,20 +7,22 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use ustr::{Ustr, ustr};
+use ustr::Ustr;
 
 use crate::{
-    FxHashMap, Modules,
+    FxHashMap, Location, Modules,
+    hir::dictionary::DictionaryReq,
     hir::function::CallableDefinition,
     module::{
-        LocalSubscriptId, Module, ModuleFunction, ProjectionOrigin, QualifiedNameEnv,
+        LocalSubscriptId, Module, ModuleEnv, ModuleFunction, ProjectionOrigin, QualifiedNameEnv,
         SubscriptDefinition, SubscriptId, SubscriptMember, SubscriptMemberFunctionKind,
         SubscriptSignature, TypeDefId, Visibility, YieldProvenance, id::Id,
     },
+    std::value::{TypeLayoutEnv, dynamic_product_member_layouts},
     types::{
-        effects::no_effects,
+        effects::EffType,
         r#type::{CallResultConvention, FnArgType, FnType, Type, TypeKind},
-        type_scheme::TypeScheme,
+        type_scheme::PubTypeConstraint,
     },
 };
 
@@ -80,6 +82,49 @@ pub struct GeneratedStructuralProjectionSpec {
     pub key: ProjectionKey,
     pub index: usize,
     pub field_ty: Type,
+}
+
+/// Build the callable surface and hidden layout requirements shared by a generated structural
+/// addressor's module definition and every use-site closure over it.
+pub(crate) fn generated_structural_projection_definition(
+    spec: GeneratedStructuralProjectionSpec,
+    value_trait_id: crate::module::TraitId,
+    env: &impl TypeLayoutEnv,
+) -> (CallableDefinition, Vec<DictionaryReq>) {
+    let receiver_ty = spec.key.structural_receiver_ty();
+    let span = Location::new_synthesized();
+    let member_tys = dynamic_product_member_layouts(receiver_ty, span, env);
+    let requirements = member_tys
+        .iter()
+        .copied()
+        .map(|member_ty| {
+            DictionaryReq::new_trait_impl(value_trait_id, vec![member_ty], vec![], vec![])
+        })
+        .collect::<Vec<_>>();
+    let constraints = member_tys
+        .iter()
+        .map(|member_ty| {
+            PubTypeConstraint::new_have_trait(
+                value_trait_id,
+                vec![*member_ty],
+                vec![],
+                vec![],
+                span,
+            )
+        })
+        .collect::<Vec<_>>();
+    let definition = CallableDefinition::new_infer_quantifiers_with_constraints(
+        FnType::new(
+            vec![FnArgType::new_by_val(receiver_ty)],
+            spec.field_ty,
+            EffType::empty(),
+        ),
+        constraints,
+        ["receiver"],
+        "Compiler-generated structural field addressor.",
+    )
+    .with_result_convention(CallResultConvention::ADDRESSOR_PLACE);
+    (definition, requirements)
 }
 
 /// Pending generated structural projection subscripts for one elaboration pass.
@@ -146,24 +191,19 @@ impl Module {
         modules: &Modules,
     ) -> LocalSubscriptId {
         let key = spec.key;
-        let receiver_ty = key.structural_receiver_ty();
         if let Some(entry) = self.get_projection_subscript(key) {
             return entry.subscript;
         }
 
-        let definition = CallableDefinition::new(
-            TypeScheme::new_just_type(FnType::new(
-                vec![FnArgType::new_by_val(receiver_ty)],
-                spec.field_ty,
-                no_effects(),
-            )),
-            vec![ustr("receiver")],
-            Some(format!(
-                "Compiler-generated projection subscript for field {}.",
-                key.field
-            )),
-        )
-        .with_result_convention(CallResultConvention::ADDRESSOR_PLACE);
+        let env = ModuleEnv::new(self, modules);
+        let value_trait_id =
+            env.expect_std_trait_id(crate::std::core_traits_names::VALUE_TRAIT_NAME);
+        let (mut definition, requirements) =
+            generated_structural_projection_definition(spec, value_trait_id, &env);
+        definition.doc = Some(format!(
+            "Compiler-generated projection subscript for field {}.",
+            key.field
+        ));
         let signature = SubscriptSignature::from_callable_definition(&definition);
         let function_name = {
             let qualified_name_env = QualifiedNameEnv::new_from_module(self, modules);
@@ -177,7 +217,9 @@ impl Module {
             )
         };
         let function = self.add_function_anonymous(ModuleFunction::new_structural_field_addressor(
-            definition, spec.index,
+            definition,
+            spec.index,
+            requirements.len(),
         ));
         self.name_function_with_visibility(function, function_name.into(), Visibility::Module);
         let member = SubscriptMember {

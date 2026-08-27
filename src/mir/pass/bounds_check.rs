@@ -43,7 +43,7 @@ use crate::{
         terminator::{Terminator, TerminatorKind},
     },
     module::{FunctionId, ModuleEnv, id::Id},
-    std::math::int_type,
+    std::{math::int_type, value::dynamic_product_member_layouts},
 };
 
 use super::{
@@ -317,17 +317,33 @@ pub(crate) fn eliminate_bounds_checks(
                     vec![unchecked_array_index(&operation, known, None)]
                 }
                 Normalization::Negative => {
+                    let array_ty = match &operation.kind {
+                        OperationKind::Call { ty, .. } => {
+                            ty.fn_ty
+                                .args
+                                .first()
+                                .expect("array_index must receive the array")
+                                .ty
+                        }
+                        _ => unreachable!("an array-index candidate is a call"),
+                    };
                     let field = edit.add_constant(
                         int_type(),
                         LiteralValue::new_native(known.layouts().array_len.as_index() as isize),
                         &env,
                     );
+                    debug_assert!(
+                        dynamic_product_member_layouts(array_ty, check.span, &env).is_empty(),
+                        "array header projection requires a statically known product layout"
+                    );
                     let length_id = edit.new_value();
-                    let mut length_operation = Operation::subfield(
+                    let mut length_operation = Operation::product_subfield(
                         check.span,
                         array,
                         mir::Value::Constant(field),
                         int_type(),
+                        array_ty,
+                        [],
                     );
                     length_operation.assign_result_id(Some(length_id));
 

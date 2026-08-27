@@ -1474,19 +1474,38 @@ impl<'a> Interpreter<'a> {
                 convention.returns_place(),
                 "a native member reached through `project` must return a place"
             );
-            assert!(
-                leading.is_empty(),
-                "a native subscript member takes no captured evidence"
-            );
             let passing = f.parameter_passing.clone();
             let n_vis = passing.len();
             let arg_ops = &operands[1..];
-            let extra_count = arg_ops
+            let operand_extra_count = arg_ops
                 .len()
                 .checked_sub(n_vis)
                 .expect("a native member call must pass its visible arguments");
-            let (extra_ops, visible_ops) = arg_ops.split_at(extra_count);
+            let extra_count = leading.len() + operand_extra_count;
+            if let Some(runtime_passing) = f.code.runtime_argument_passing() {
+                let expected_extra_count = runtime_passing
+                    .len()
+                    .checked_sub(n_vis)
+                    .expect("native runtime argument passing must include all visible arguments");
+                assert_eq!(
+                    extra_count, expected_extra_count,
+                    "native member hidden arguments do not match its runtime argument passing"
+                );
+            }
+            let (extra_ops, visible_ops) = arg_ops.split_at(operand_extra_count);
             let mut args: Vec<ValOrMut> = Vec::with_capacity(extra_count + n_vis);
+            for binding in leading {
+                args.push(match binding {
+                    Binding::Dictionary(id) => ValOrMut::Dictionary(id),
+                    Binding::Place(place) => ValOrMut::Mut(place),
+                    Binding::Value(_)
+                    | Binding::VariantTag(_)
+                    | Binding::StackMarker(_)
+                    | Binding::Projected { .. } => {
+                        panic!("a native subscript captures invalid hidden evidence")
+                    }
+                });
+            }
             for op in extra_ops {
                 let arg = if let Some(id) = self.try_dict_operand(slots, op) {
                     ValOrMut::Dictionary(id)

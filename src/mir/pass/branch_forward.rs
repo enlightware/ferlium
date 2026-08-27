@@ -851,7 +851,14 @@ mod tests {
         let element = builder
             .append_operation(
                 some_source,
-                Operation::subfield(span, payload, Value::Constant(zero), int_type()),
+                Operation::product_subfield(
+                    span,
+                    payload,
+                    Value::Constant(zero),
+                    int_type(),
+                    payload_ty,
+                    [],
+                ),
             )
             .unwrap();
         builder.append_operation(

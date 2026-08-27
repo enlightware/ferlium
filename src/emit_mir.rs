@@ -44,7 +44,7 @@ use crate::{
         core_traits_names::VALUE_TRAIT_NAME,
         value::{
             VALUE_ALIGN_ASSOC_CONST_INDEX, VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX,
-            VALUE_SIZE_ASSOC_CONST_INDEX, type_has_static_layout,
+            VALUE_SIZE_ASSOC_CONST_INDEX, dynamic_product_member_layouts, type_has_static_layout,
             value_layout_associated_const_values,
         },
     },
@@ -554,6 +554,16 @@ impl<'a> Emitter<'a> {
                     }
                 }
             };
+            if let DictionaryReq::TraitImpl {
+                trait_id,
+                input_tys,
+                ..
+            } = &binding.requirement
+                && *trait_id == self.env.expect_std_trait_id(VALUE_TRAIT_NAME)
+                && let [ty] = input_tys[..]
+            {
+                self.context.value_witnesses.push((ty, value.clone()));
+            }
             self.context.evidence_bindings.insert(id, value);
             if let Some(evidence) = known_static {
                 self.context.static_evidence.insert(id, evidence);
@@ -1154,6 +1164,39 @@ impl<'a> Emitter<'a> {
         }))
     }
 
+    /// Return the direct member-layout dictionaries needed to compute a product field offset.
+    fn product_layout_witnesses(
+        &self,
+        aggregate_ty: Type,
+        span: Location,
+    ) -> Vec<(Type, mir::Value)> {
+        dynamic_product_member_layouts(aggregate_ty, span, &self.env)
+            .into_iter()
+            .map(|member_ty| {
+                let witness = self.value_dictionary(member_ty).unwrap_or_else(|| {
+                    panic!(
+                        "no Value dictionary witnesses member layout {} of aggregate {}",
+                        self.show(member_ty),
+                        self.show(aggregate_ty),
+                    )
+                });
+                (member_ty, witness)
+            })
+            .collect()
+    }
+
+    fn product_subfield(
+        &mut self,
+        span: Location,
+        source: mir::Value,
+        index: mir::Value,
+        field_ty: Type,
+        aggregate_ty: Type,
+    ) -> Operation {
+        let witnesses = self.product_layout_witnesses(aggregate_ty, span);
+        Operation::product_subfield(span, source, index, field_ty, aggregate_ty, witnesses)
+    }
+
     /// Inserts an allocation of storage for an instance of `ty` and returns its address.
     ///
     /// Statically sized storage is allocated directly; storage whose size depends on a generic type
@@ -1236,9 +1279,8 @@ impl<'a> Emitter<'a> {
         for (i, n) in fields.iter().enumerate() {
             let field = &self.hir_arena[*n];
             let index = self.int_constant(i as isize);
-            let f = self
-                .insert(Operation::subfield(field.span, d.clone(), index, field.ty))
-                .unwrap();
+            let projection = self.product_subfield(field.span, d.clone(), index, field.ty, node.ty);
+            let f = self.insert(projection).unwrap();
             self.lower_value_into(field, Some(f));
         }
     }
@@ -1312,14 +1354,14 @@ impl<'a> Emitter<'a> {
         // `data = buffer_with_capacity(N)` (the returned `Buffer<A>` is written through the call's
         // out-pointer).
         let data_index_value = self.int_constant(data_index as isize);
-        let data_place = self
-            .insert(Operation::subfield(
-                span,
-                dest.clone(),
-                data_index_value,
-                fields[data_index].1,
-            ))
-            .unwrap();
+        let data_projection = self.product_subfield(
+            span,
+            dest.clone(),
+            data_index_value,
+            fields[data_index].1,
+            node.ty,
+        );
+        let data_place = self.insert(data_projection).unwrap();
         let with_capacity = mir::Value::Function(self.demand_std_function("buffer_with_capacity"));
         let capacity_arg = self.int_constant_place(span, len as isize);
         // An empty Buffer allocates no backing storage, so its element layout is unobserved. Avoid
@@ -1398,10 +1440,18 @@ impl<'a> Emitter<'a> {
             &dest,
             capacity_index,
             fields[capacity_index].1,
+            node.ty,
             len as isize,
         );
-        self.store_int_field(span, &dest, len_index, fields[len_index].1, len as isize);
-        self.store_int_field(span, &dest, start_index, fields[start_index].1, 0);
+        self.store_int_field(
+            span,
+            &dest,
+            len_index,
+            fields[len_index].1,
+            node.ty,
+            len as isize,
+        );
+        self.store_int_field(span, &dest, start_index, fields[start_index].1, node.ty, 0);
     }
 
     /// Returns the `FunctionId` of the std-library function named `name`. Used to synthesize
@@ -1535,12 +1585,12 @@ impl<'a> Emitter<'a> {
         dest: &mir::Value,
         index: usize,
         ty: Type,
+        aggregate_ty: Type,
         value: isize,
     ) {
         let index = self.int_constant(index as isize);
-        let place = self
-            .insert(Operation::subfield(span, dest.clone(), index, ty))
-            .unwrap();
+        let projection = self.product_subfield(span, dest.clone(), index, ty, aggregate_ty);
+        let place = self.insert(projection).unwrap();
         let value = self.int_constant(value);
         self.insert(Operation::store(span, value, place));
     }
@@ -1649,7 +1699,7 @@ impl<'a> Emitter<'a> {
                             self.dynamic_layout_witness(node.ty),
                         )
                     } else {
-                        Operation::subfield(node.span, base, index, node.ty)
+                        self.product_subfield(node.span, base, index, node.ty, base_node.ty)
                     };
                     self.insert(operation).unwrap()
                 }

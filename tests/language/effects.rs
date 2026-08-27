@@ -281,7 +281,7 @@ fn effects_unsafe_is_rejected_in_user_code() {
 fn effects_unsafe_erases_effects_in_std_context() {
     let session = TestSession::new();
     let source_id = session.source_table().next_id();
-    let mod_src = "effects_unsafe { [1][0] }";
+    let mod_src = "effects_unsafe { 1 / 0 }";
     let (_module, expr, arena) = parse_module_and_expr(mod_src, source_id, true)
         .expect("std-context expression should parse");
     let mut module = new_module_using_std(

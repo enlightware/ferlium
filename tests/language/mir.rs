@@ -2196,6 +2196,81 @@ fn clone_value_generic_branch() {
 }
 
 #[test]
+fn generic_product_subfields_carry_direct_member_layout_evidence() {
+    let mut session = TestSession::new();
+    let mir = session.emit_mir(
+        "fn record<A, B>(a: A, b: B) -> { a: A, b: B } { { a: a, b: b } } \
+         fn tuple<A, B>(a: A, b: B) -> (A, B) { (a, b) } \
+         fn project_record<A, B>(value: { a: A, b: B }) -> B { value.b } \
+         fn project_tuple<A, B>(value: (A, B)) -> B { value.1 } \
+         fn project_unknown<T>(value: T) { value.item } \
+         fn forward_projection<A>(value: { item: A }) -> A { project_unknown(value) } \
+         struct Wrapper<A> { item: A } \
+         fn forward_named_projection<A>(value: Wrapper<A>) -> A { project_unknown(value) }",
+    );
+
+    let record = mir
+        .split_once("fn record(")
+        .and_then(|(_, rest)| {
+            rest.split_once("\n\nfn ")
+                .map_or(Some(rest), |(body, _)| Some(body))
+        })
+        .expect("record MIR should be present");
+    assert!(
+        record.contains("subfield @c0 from %p4 via %p0 via %p1")
+            && record.contains("subfield @c1 from %p4 via %p0 via %p1"),
+        "each generic record field offset needs both member layouts:\n{record}"
+    );
+
+    let tuple = mir
+        .split_once("fn tuple(")
+        .and_then(|(_, rest)| {
+            rest.split_once("\n\nfn ")
+                .map_or(Some(rest), |(body, _)| Some(body))
+        })
+        .expect("tuple MIR should be present");
+    assert!(
+        tuple.contains("subfield @c0 from %p4 via %p0 via %p1")
+            && tuple.contains("subfield @c1 from %p4 via %p0 via %p1"),
+        "each generic tuple field offset needs both member layouts:\n{tuple}"
+    );
+
+    assert!(
+        mir.contains("fn project_record(%p0: @extra")
+            && mir.contains("subfield @c0 from %p2 via %p1 via %p0"),
+        "generic record projection needs every member layout:\n{mir}"
+    );
+    assert!(
+        mir.contains("fn project_tuple(%p0: @extra")
+            && mir.contains("subfield @c0 from %p2 via %p1 via %p0"),
+        "generic tuple projection needs every member layout:\n{mir}"
+    );
+    assert!(
+        mir.contains("build_subscript subscript(<test>::{ item: A }.item) capturing (%p0)"),
+        "a forwarded structural addressor must retain its open member layout:\n{mir}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_product_construction_and_projection_agree_across_execution_modes() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(
+            "fn make<A, B>(a: A, b: B) -> { a: A, b: B } { { a: a, b: b } } \
+             fn get_b<A, B>(value: { a: A, b: B }) -> B { value.b } \
+             fn project_unknown<T>(value: T) { value.item } \
+             fn forward_projection<A>(value: { item: A }) -> A { project_unknown(value) } \
+             struct Wrapper<A> { item: A } \
+             fn forward_named_projection<A>(value: Wrapper<A>) -> A { project_unknown(value) } \
+             (get_b(make(false, 42)), forward_projection({ item: 43 }), \
+              forward_named_projection(Wrapper { item: 44 }))"
+        ),
+        expected_tuple([int(42), int(43), int(44)])
+    );
+}
+
+#[test]
 fn store_local_generic_clone_dictionary() {
     // Initializing an owned mutable local from a generic parameter clones through the
     // Value dictionary into dynamically-allocated storage (alloca_dynamic via the dictionary

@@ -990,6 +990,7 @@ enum Computation {
         ty: Type,
         variant_payload: bool,
         has_layout_witness: bool,
+        aggregate_ty: Option<Type>,
     },
     /// A function place *materialized* from evidence into a freshly allocated cell.
     DictEntry {
@@ -1005,10 +1006,12 @@ impl Computation {
                 ty,
                 variant_payload,
                 has_layout_witness,
+                product,
             } => Some(Self::Subfield {
                 ty: *ty,
                 variant_payload: *variant_payload,
                 has_layout_witness: *has_layout_witness,
+                aggregate_ty: product.as_deref().map(|product| product.aggregate_ty),
             }),
             OperationKind::DictEntry { entry_index, ty } => Some(Self::DictEntry {
                 entry_index: *entry_index,

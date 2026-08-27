@@ -3718,6 +3718,52 @@ fn first_class_subscript_value_hir_captures_hidden_evidence() {
 }
 
 #[test]
+fn generated_structural_projection_hir_captures_open_member_layout() {
+    fn inspect_subscripts(arena: &ENodeArena, node: ENodeId, found: &mut Vec<String>) -> bool {
+        match &arena[node].kind {
+            NodeKind::BuildSubscriptValue(build) if !build.evidence_captures.is_empty() => true,
+            NodeKind::BuildSubscriptValue(build) => {
+                found.push(format!(
+                    "build with {} captures",
+                    build.evidence_captures.len()
+                ));
+                false
+            }
+            NodeKind::GetSubscript(get) => {
+                found.push(format!(
+                    "get with {} requirements",
+                    get.inst_data.dicts_req.len()
+                ));
+                false
+            }
+            _ => crate::harness::hir_child_nodes(arena, node)
+                .into_iter()
+                .any(|child| inspect_subscripts(arena, child, found)),
+        }
+    }
+
+    let mut session = TestSession::new();
+    let module_id = session
+        .compile(indoc! { r#"
+            fn get_x<T>(record: T) { record.x }
+            fn forward<A>(record: { x: A }) -> A { get_x(record) }
+        "# })
+        .module_id;
+    let module = session.session().expect_fresh_module(module_id);
+    let function = module
+        .get_function(ustr("forward"))
+        .expect("forward should be compiled");
+    let entry = function.get_code_entry().expect("forward should have HIR");
+
+    let mut found = Vec::new();
+    assert!(
+        inspect_subscripts(&module.hir_arena, entry, &mut found),
+        "an open structural addressor should close over its member layout evidence: {found:?}; bindings: {:#?}",
+        function.evidence_bindings,
+    );
+}
+
+#[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn named_subscript_body_error_runs_epilogue_before_propagating() {
     let mut session = experimental_session();

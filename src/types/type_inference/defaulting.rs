@@ -12,9 +12,12 @@ use crate::{
     FxHashMap, FxHashSet,
     compiler::error::InternalCompilationError,
     hir::{self, NodeArena, NodeId, NodeKind},
-    module::{LocalDecl, TraitId, id::Id},
+    module::{LocalDecl, ModuleEnv, TraitId, id::Id},
     parser::location::Location,
-    std::{core_traits_names::NUM_TRAIT_NAME, value::value_type_needs_layout_witness},
+    std::{
+        core_traits_names::NUM_TRAIT_NAME,
+        value::{dynamic_product_member_layouts, value_type_needs_layout_witness},
+    },
     types::{
         trait_solver::TraitSolver,
         r#type::{Type, TypeVar},
@@ -202,6 +205,7 @@ impl UnifiedTypeInference {
         root: NodeId,
         locals: &mut [LocalDecl],
         value_trait_id: TraitId,
+        env: ModuleEnv<'_>,
     ) {
         self.substitute_in_local_decls_in_place(locals);
         for local in &mut *locals {
@@ -222,6 +226,63 @@ impl UnifiedTypeInference {
             }
         }
         self.activate_take_local_value_constraints(arena, root, locals, value_trait_id);
+        self.activate_product_layout_constraints(arena, root, value_trait_id, env);
+    }
+
+    /// Activate the direct member-layout evidence needed by generic product construction and
+    /// projection. This runs after unification so products which became concrete add no evidence.
+    fn activate_product_layout_constraints(
+        &mut self,
+        arena: &NodeArena,
+        node_id: NodeId,
+        value_trait_id: TraitId,
+        env: ModuleEnv<'_>,
+    ) {
+        let node = &arena[node_id];
+        let product_ty = match &node.kind {
+            NodeKind::Tuple(_) | NodeKind::Record(_) | NodeKind::Array(_) => Some(node.ty),
+            NodeKind::Project(project)
+                if !project.variant_payload
+                    && !matches!(
+                        arena[project.value].kind,
+                        NodeKind::GetDictionary(_) | NodeKind::LoadDictionary(_)
+                    ) =>
+            {
+                Some(arena[project.value].ty)
+            }
+            NodeKind::FieldAccess(access) => Some(arena[access.value].ty),
+            _ => None,
+        };
+        if let Some(product_ty) = product_ty {
+            let product_ty = self.substitute_in_type(product_ty);
+            for member_ty in dynamic_product_member_layouts(product_ty, node.span, &env) {
+                self.add_activated_value_constraint(value_trait_id, member_ty, node.span);
+            }
+        }
+        let inst_data = match &node.kind {
+            NodeKind::GetFunction(get) => Some(&get.inst_data),
+            NodeKind::GetSubscript(get) => Some(&get.inst_data),
+            NodeKind::StaticApply(apply) => Some(&apply.inst_data),
+            NodeKind::TraitMethodApply(apply) => Some(&apply.inst_data),
+            NodeKind::GetTraitMethod(get) => Some(&get.inst_data),
+            _ => None,
+        };
+        if let Some(inst_data) = inst_data {
+            for requirement in &inst_data.dicts_req {
+                if let hir::dictionary::DictionaryReq::ProjectionSubscript {
+                    subscript_ty, ..
+                } = requirement
+                {
+                    let receiver_ty = self.substitute_in_type(subscript_ty.receiver_ty());
+                    for member_ty in dynamic_product_member_layouts(receiver_ty, node.span, &env) {
+                        self.add_activated_value_constraint(value_trait_id, member_ty, node.span);
+                    }
+                }
+            }
+        }
+        for child in node.kind.child_node_ids() {
+            self.activate_product_layout_constraints(arena, child, value_trait_id, env);
+        }
     }
 
     fn activate_take_local_value_constraints(

@@ -1208,6 +1208,7 @@ where
                 descr.code.entry_node_id,
                 &mut descr.locals,
                 value_trait_id,
+                module_env,
             );
         }
     }

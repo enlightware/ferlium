@@ -74,6 +74,7 @@ pub(crate) enum SnapshotFunctionBody {
     },
     StructuralFieldAddressor {
         field_index: usize,
+        hidden_argument_count: usize,
     },
 }
 
@@ -97,7 +98,17 @@ impl SnapshotFunctionBody {
                     .to_string(),
             },
             CallableOrigin::StructuralFieldAddressor { field_index } => {
-                Self::StructuralFieldAddressor { field_index }
+                let hidden_argument_count = function
+                    .code
+                    .runtime_argument_passing()
+                    .expect("structural addressor exposes its runtime arguments")
+                    .len()
+                    .checked_sub(function.parameter_passing.len())
+                    .expect("structural addressor runtime arguments include visible arguments");
+                Self::StructuralFieldAddressor {
+                    field_index,
+                    hidden_argument_count,
+                }
             }
             CallableOrigin::Transient => return Err(SnapshotError::TransientCallable),
         })
@@ -136,9 +147,13 @@ impl SnapshotFunctionBody {
                     canonical_name: Some(canonical_name.as_str().into()),
                 },
             ),
-            Self::StructuralFieldAddressor { field_index } => (
+            Self::StructuralFieldAddressor {
+                field_index,
+                hidden_argument_count,
+            } => (
                 b(crate::hir::function::StructuralFieldAddressor::new(
                     *field_index,
+                    *hidden_argument_count,
                 )) as Function,
                 CallableOrigin::StructuralFieldAddressor {
                     field_index: *field_index,
@@ -173,6 +188,10 @@ mod tests {
             assert_eq!(
                 restored.visible_parameter_passing(),
                 function.code.visible_parameter_passing()
+            );
+            assert_eq!(
+                restored.runtime_argument_passing(),
+                function.code.runtime_argument_passing()
             );
         }
     }

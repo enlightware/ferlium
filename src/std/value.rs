@@ -436,6 +436,45 @@ pub(crate) fn type_has_static_layout(ty: Type, span: Location, env: &impl TypeLa
     layout_for_value_type(ty, span, env, &mut FxHashSet::default()).is_ok()
 }
 
+/// Return the direct inline product members whose layouts require run-time `Value` evidence.
+///
+/// The returned order is the logical tuple/record order. Recursive representation edges are
+/// pointers and therefore need no member witness. Named products are inspected through their
+/// instantiated structural shape while retaining the named owner for recursive-edge detection.
+pub(crate) fn dynamic_product_member_layouts(
+    ty: Type,
+    span: Location,
+    env: &impl TypeLayoutEnv,
+) -> Vec<Type> {
+    let owner = ty;
+    let mut structural = ty;
+    let mut seen = FxHashSet::default();
+    let members = loop {
+        if !seen.insert(structural) {
+            return Vec::new();
+        }
+        let data = structural.data().clone();
+        match data {
+            TypeKind::Tuple(members) => break members,
+            TypeKind::Record(fields) => break fields.into_iter().map(|(_, field)| field).collect(),
+            TypeKind::Named(named) => {
+                structural = env
+                    .type_def(named.def)
+                    .instantiated_shape_with_effects(&named.params, &named.effect_params);
+            }
+            _ => return Vec::new(),
+        }
+    };
+
+    members
+        .into_iter()
+        .filter(|member| {
+            !field_payload_storage(owner, *member, env).is_indirect()
+                && !type_has_static_layout(*member, span, env)
+        })
+        .collect()
+}
+
 /// Return whether all unresolved variables in `ty` appear only in function types.
 /// `active` is the current recursion stack used to stop on recursive types.
 fn value_type_is_resolved_ignoring_function_surface(
